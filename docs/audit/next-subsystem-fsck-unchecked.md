@@ -64,6 +64,42 @@ reached: if the guard were off by one, or the counter reset in the wrong
 place, or the class reported the wrong block, nothing in this tree would
 say so.
 
+## A live instance, found while writing this
+
+While this report sat in review, aarch64 CI failed
+`cosmofs-orphan-reserved` twice on a **documentation-only** branch:
+
+```
+[ERROR] cosmofs: block 104: bad metadata header or checksum
+[ WARN] cosmofs: check: 0 leaked, 39 free-in-use, 0 cross-linked, 0 bad nlink,
+                        13 orphan, 0 dangling, 0 bad entries, 1 counters, 0 cycles, 1 unreadable
+```
+
+A metadata block failing its checksum after an orphan replay, leaving 39
+blocks that a file holds with their allocation bits clear. It did not
+reproduce in three local boots of the same tree; it is an inventory row
+now, undiagnosed, and it is **not** this unit's to fix.
+
+It is this unit's to learn from, in two ways.
+
+**The checker did its job.** It is the thing that noticed, and the
+finding is exactly the kind the three unchecked invariants would extend
+the reach of.
+
+**And the test made the finding harder to read than it had to be.** The
+first failure was `CHECK(r.clean)` — a boolean. `report_clean` is ten
+counts and the checker *logs all ten* on the way out, but the assertion
+discards that, so the first run said only "not clean" and the class had
+to be recovered from a `kwarn` in the serial log. The second run
+happened to fail one assertion earlier, on `seen_not_alloc`, which is
+why the class is known at all.
+
+So this unit adds one thing the two inventory rows did not ask for: **a
+test that asserts a clean report says which class was not clean.** A
+helper that prints the non-zero counts on failure, used by every test
+that asserts `r.clean`, costs a few lines and is the difference between
+a finding and a mystery.
+
 ## Why it matters
 
 - **A clean `fsck` is the basis for trusting a repair.** Four of the ten
@@ -227,6 +263,7 @@ touches a fuzzer's target.
 | `cosmofs-check-two-parents` | a directory named from two directories is `dir_bad` | remove the second-parent test: a cycle in the directory graph is called sound |
 | `cosmofs-check-snap-members` | a snapshot member count too large for its block is `dir_bad` | remove the fit test: the pass reads past the block |
 | `cosmofs-replay` (existing) | unchanged, now also checking the three new invariants over 410 images | — |
+| every test asserting `r.clean` (existing) | on failure, reports **which** classes were non-zero rather than only that the report was not clean | assert the boolean alone: a failure says "not clean" and the class has to be recovered from the serial log, which is what happened to the live instance above |
 
 **Vacuity, named in advance.** `cosmofs-check-extent-overlap` is the one
 at risk: the existing `block_seen` map already catches an overlap *that
