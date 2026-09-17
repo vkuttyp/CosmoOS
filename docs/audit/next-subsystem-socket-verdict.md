@@ -16,9 +16,15 @@ row is advanced, not closed — its next step, written into PR #169's
 report as "read the socket's pending error rather than inferring it from
 a machine-wide counter", is a thing no caller in this tree can do.
 
-**Built as PR #171.** What follows is the report as written plus this
-section, which records what the building changed. Nothing in the design
-was abandoned; four things were learned.
+**Built as PR #171.** This section records what the building changed.
+Everything after it is **the report as written, in the present tense of
+2026-09-17 before the unit existed** — the Problem section's five facts
+were all true of `main` at c47d353 and none of them is true now, which is
+what the unit did. Where a section would mislead a reader who missed that
+framing it says so in place: *What was there, and what is there now*
+carries both columns, and Design §1 shows the code as built rather than
+as first proposed. Nothing in the design was abandoned; three review
+rounds sharpened one function.
 
 ### As built
 
@@ -52,11 +58,13 @@ macro's* loop and the check passes by doing nothing. Every assertion in
 all four tests would have been vacuous. It is `if (...) { ...; break; }
 else (void)0`, and the comment says why.
 
-### And three the review found
+### And five the review found
 
-Greptile's first round on the built unit, all three valid and all three
-about the same thing the report is about — a rule that holds in the place
-you are looking and not in the place you are not.
+Four review rounds on the built unit, five findings, every one valid and
+every one about the thing the report is about — a rule that holds in the
+place you are looking and not in the place you are not. Four paragraphs
+rather than five, because the first two findings are the same question
+asked twice and read better together.
 
 **The verdict could still be lost, and the first fix for it was the
 wrong shape.** The report was pleased with itself for settling every
@@ -579,21 +587,25 @@ succeed, the way to get there is to implement address reuse.
   row's next step a way to be taken. PR #169's report learned not to
   promise more, and PR #167's learned it before that.
 
-## Current implementation
+## What was there, and what is there now
 
-| what | where | state |
+The survey the report was written from, in the **left** column — the tree
+at `main` c47d353, and the reason the unit existed. The right column is
+what this unit left, so the table is one place rather than two.
+
+| what | before (c47d353) | after |
 | --- | --- | --- |
-| `struct socket::error` | `kernel/include/kernel/socket.h:38` | declared, commented, never written |
-| `sock_set_error` | `kernel-services/network/socket.c:138` | defined, zero callers |
-| `take_error` | `socket.c:144` | read-and-clear; called twice in one expression at `:224` |
-| `pcb->error` | `tcp.c:964`, `:1030`, `:1074`, `:2010` | written on firewall refusal, timeout, reset |
-| `COSMO_IO_ERROR` | `tcp_ready`, `tcp.c:1403`, `:1411` | raised from `pcb->error`; honest, and says nothing about which error |
-| `icmp_input` | `ipv4.c:374` | needfrag, echo, echo-reply; everything else dropped |
-| `icmp_needfrag` | `ipv4.c:341` | the quoted-header parse this unit reuses |
-| `udp.c:290` | `icmp_send_unreach` | this host sends them and cannot receive them |
-| `lx_setsockopt` | `compat/linux/syscalls.c:1885` | returns 0 for every `SOL_SOCKET` option, does nothing |
-| `lx_getsockopt` | `compat/linux/syscalls.c:1894` | `-ENOPROTOOPT` for everything |
-| native sockopt | — | no syscall exists |
+| `struct socket::error` | `int`, declared, commented, **never written** | one 64-bit word (errno + generation), written by `sock_set_error`, read by `ksock_error` or the peek/commit pair |
+| `sock_set_error` | defined, **zero callers** | called by `udp_error_notify` and by the self-tests; bumps the generation |
+| `take_error` | read-and-clear; **called twice in one expression** at `:224` | gone: it is `ksock_error`'s body, and the call site binds the value |
+| `pcb->error` | written plainly under `pcb->lock`, read unlocked by `output_result` — a data race | written with `__atomic_store_n` under the lock, unlocked reads atomic; the rule is at the field in `tcp.h` |
+| `COSMO_IO_ERROR` | raised from `pcb->error`; honest, and says nothing about *which* error | unchanged, and now has an answer beside it: `SO_ERROR` |
+| `icmp_input` (`ipv4.c`) | needfrag, echo, echo-reply; everything else dropped | plus a destination-unreachable branch, after `M_FW_QUIET` |
+| `icmp_needfrag` | its own copy of the quoted-header parse | calls the shared `icmp_quoted_flow`, as the new consumer does |
+| `udp.c`, `icmp_send_unreach` | this host **sends** them and cannot receive one | `udp_error_notify` receives one, for a connected four-tuple only |
+| `lx_setsockopt` | returns **0** for every `SOL_SOCKET` option and does nothing | `-ENOPROTOOPT`, as Linux returns for an option a protocol lacks |
+| `lx_getsockopt` | `-ENOPROTOOPT` for everything | forwards `SO_ERROR` to the same kernel path the native call uses |
+| native sockopt | no syscall exists | `SYS_getsockopt` (92), `SYS_COUNT` → 93 |
 
 ## Affected files
 
@@ -709,12 +721,17 @@ handle lookup and a load.
   nothing.
 - **`SYS_COUNT` 92 → 93 is an ABI addition**, and the syscall-count
   assertions and the filter's table sizes move with it. PR #87 did the
-  same for `SYS_fsync` and is the shape to follow.
+  same for `SYS_fsync` and is the shape to follow. As built: the
+  syscall-count assertions in `init --selftest` needed no change beyond
+  the number, and `make test` passes on both architectures.
 - **The `net-harness` failure may not recur while this unit is open.**
   It is one boot in twenty-one locally (`docs/testing/flakes.md`, "The
   count") and it appeared on two of PR #169's own CI jobs, so it is not
   unlikely — but step 4 is an instrument, not a proof, and nothing in
-  the test table depends on it firing.
+  the test table depends on it firing. **As built: it recurred twice on
+  this unit's own CI**, and both times the moved window showed a SYN
+  retransmitted at the one-second timer, which no earlier sighting could
+  have shown.
 
 ## Alternatives considered
 
