@@ -47,6 +47,45 @@ would be worse than leaving it alone.
 - **The inventory row is not struck.** Per the plan's condition, which
   the build did not meet.
 
+### And then the instrumentation answered it, on the first failing run
+
+Within an hour of this unit being pushed, its own x86-64 CI job failed
+`net-harness` and printed:
+
+```
+network harness: ready at 90.9s, back-connection accepted at 92.0s,
+budget 150.0s, listener closed at 102.0s
+  - network harness: guest-initiated connection failed (TimeoutError('timed out'))
+    — listening on 127.0.0.1:55835, gave up 102.0s after the harness started,
+    guest reported ready at 90.9s
+```
+
+**The accept succeeded.** At 92.0 seconds, one second after the guest
+reported ready and well inside the budget. The `TimeoutError` at 102.0
+is `accept + 10`, and `conn.settimeout(10)` is on line 66: it came from
+`conn.recv()`, not from `accept()`.
+
+So the deadline this unit fixed was never the cause, which is what the
+report declined to claim and is why the row stayed open. The real shape,
+for the first time in seven sightings:
+
+| | |
+| --- | --- |
+| the TCP connection | **established** — accepted host-side, `ksock_connect` returned 0 guest-side |
+| the guest's `cosmo hello\n` | **never arrived**, in ten seconds |
+| everything else on the wire | **fine** — `NETTEST: done tcp_conns=2 udp_pkts=20 quit=1` |
+| the guest | spent 11.6 s (budget 8 s), consistent with sending and then blocking in `ksock_recvfrom` |
+
+Twelve bytes, guest to host, on an established connection, while a
+256 KiB TCP echo and twenty UDP datagrams crossed the same interface in
+the same run. That is a far smaller and far stranger target than "the
+network harness is flaky", and it is what the next unit should take.
+
+Worth stating about this report: its first draft named a cause, its
+retraction named none, and the thing that actually produced an answer
+was making the harness record four numbers. The measurement was the
+unit; the deadline was a real defect found on the way to it.
+
 ## Problem
 
 `net-harness` has failed **seven times in about two weeks**, on both

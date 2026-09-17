@@ -299,8 +299,33 @@ budget 150.0s, listener closed at 81.0s
 ```
 
 The next sighting will say whether the deadline was ever the problem.
-Until one happens with that line in the log, the paragraphs above stand:
-the observations are right, and the cause is still not established.
+
+**It did, within the hour** — on the x86-64 job of the pull request that
+added the timings:
+
+```
+network harness: ready at 90.9s, back-connection accepted at 92.0s,
+budget 150.0s, listener closed at 102.0s
+  guest-initiated connection failed (TimeoutError('timed out')) —
+  gave up 102.0s after the harness started, guest reported ready at 90.9s
+```
+
+**The accept succeeded**, at 92.0 s, one second after the guest reported
+ready. The timeout ten seconds later is `conn.settimeout(10)` on the
+*accepted* connection: the `TimeoutError` came from `recv`, not from
+`accept`. So the deadline was never the cause — which is why the unit
+did not claim it was.
+
+What is left is much sharper than anything the paragraphs above could
+reach. The TCP connection is established in both directions
+(`ksock_connect` returns 0, the host accepts). The guest's twelve bytes
+never arrive. And everything else on the same interface in the same run
+is fine: `NETTEST: done tcp_conns=2 udp_pkts=20 quit=1`, a 256 KiB TCP
+echo and twenty UDP datagrams.
+
+Twelve bytes, guest to host, on a connection both ends agree exists.
+That is the thing to chase, and it took four recorded numbers to see it
+after a fortnight of re-runs.
 
 **The standing advice does not change.** A re-run still distinguishes a
 flake from a regression, and what discharges "until shown otherwise" is
