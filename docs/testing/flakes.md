@@ -443,8 +443,8 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Eleven, to 2026-09-17**, across CI and this developer's machine, on
-both architectures. Counted rather than asserted, because the first version
+**Thirteen, to 2026-09-17**, across CI and this developer's machine,
+on both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
 | sighting | source |
@@ -456,18 +456,59 @@ of this section said eight and then listed nine:
 | two documentation-only commits | the inventory row's history |
 | PR #167's own CI run | observed, with timings |
 | PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
+| PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
 
-Seven entries, eleven occurrences. The first five rows are inherited
+Eight entries, thirteen occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
-here. The last two were watched as they happened: PR #167's carries the
-host's `accepted at 92.0s, 0 of 12 bytes`, and PR #169's two carry the
-guest's `sent -104` with the send buffer untouched, which is what said
-the bytes were never written. PR #169's aarch64 job carries one field
-more — `rsts_in +1`, an inbound reset accepted in sequence — and its
-x86-64 job shows `+0` for the same failure, which is the instrument's
-window starting after the connect rather than a run without a reset.
+here. The last three were watched as they happened: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the four instrumented
+ones carry the guest's side.
 
-At least four were on trees that cannot have caused them.
+**And the fourth instrumented sighting broke the pattern the first three
+set.** PR #170's x86-64 job, on a branch that changes one Markdown file:
+
+```
+NETTEST: client failed: connect 0, sent 12, recv -104,
+  sndbuf free 65536 before, 65524 after send, 65524 after read
+  (outstanding 12 then 12), state 0,
+  segs_out +1 retransmits +0 refused +0 rsts_in +1
+```
+
+`sent 12`. The send buffer went 65536 → 65524 and **stayed** there.
+`segs_out +1`. So this time the guest queued the twelve bytes, put a
+segment on the wire, and they were never acknowledged — while the host
+had accepted the connection and read nothing. The three sightings before
+it all said `sent -104, segs_out +0`: the bytes never written because
+the connection was already reset.
+
+| run | `sent` | `segs_out` | outstanding after the read | `rsts_in` |
+| --- | --- | --- | --- | --- |
+| PR #169, x86-64 | `-104` | `+0` | 0 | `+0` |
+| PR #169, aarch64 | `-104` | `+0` | 0 | `+1` |
+| PR #170, x86-64 | **`12`** | **`+1`** | **12** | `+1` |
+| PR #170, aarch64 | `-104` | `+0` | 0 | `+1` |
+
+Two things this does and does not say. It **does** rule out the send
+path as the defect: in one instance `ksock_sendto` returned 12, a
+segment went out, and the host still saw nothing — so "the twelve bytes
+were never written" describes three sightings and not the fourth. It
+does **not** establish a retransmission bug, although `retransmits +0`
+with twelve bytes outstanding is row three of the four-outcome table in
+`docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
+Here `rsts_in +1` says one arrived, and a reset that kills the pcb
+before the retransmission timer fires leaves the count flat with nothing
+wrong in the timer. Distinguishing the two needs the pcb's own pending
+error and a timestamp, which is what
+`docs/audit/next-subsystem-socket-verdict.md` is for.
+
+`rsts_in +1` in three of the four. The locus is now: **an established
+connection to slirp is reset — sometimes before the guest writes and
+sometimes after a segment is already on the wire — and the payload never
+reaches the host's accepted socket.**
+
+At least four were on trees that cannot have caused them, and PR #170's
+two are the clearest of them: that branch adds one Markdown file and
+changes no code at all.
 
 **One in twenty-one** local x86-64 boots reproduce it, measured after
 PR #169's instrumentation landed; six of those boots ran under CPU load
