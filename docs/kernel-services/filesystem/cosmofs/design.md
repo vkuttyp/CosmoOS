@@ -447,10 +447,10 @@ verify, and panicked x86\_64 in `list_remove` under a writeback commit
 that ran while the mount was still replaying. The same window let a
 *failed* mount reach `cfs_destroy`, which frees every buffer and the
 filesystem, with that thread still running.
-`cosmofs-mount-no-early-writeback` holds the rule: it counts the dirty
-marks the replay makes (which must not be zero, or the test asks
-nothing) and how many of them found a writeback thread already running
-(which must be). The loss window after
+`cosmofs-mount-no-early-writeback` holds the rule by reading two counts.
+The dirty marks the replay makes **must not be zero**, or the test is
+asking nothing. How many of those found a writeback thread already
+running **must be zero**, which is the rule itself. The loss window after
 a crash is bounded by the interval; the transaction's memory by the
 buffer and page thresholds. Three test hooks exist:
 `cosmofs_test_set_writeback(mnt, on)` turns the thread's commits off
