@@ -4,6 +4,24 @@ Date: 2026-09-17. Tree: `main` at 9a7a27e (after PR #160, the writeback
 thread inside a mount's replay). Chosen from
 `docs/audit/2026-09-deferred-work-inventory.md` §3.
 
+**Built as PR #162.** The plan below is as-built, with one departure and
+one addition, both recorded here rather than left for a reader to
+notice:
+
+- The report proposed **four** `_Static_assert`s together after both
+  blocks. `struct cosmo_vm_exit` is declared *after* that point, so its
+  assertion sits immediately after its own definition instead. Three
+  assertions after the VMState blocks, one after the VMExit.
+- The report said `test_hv.c:75` would be deleted. The two lines below
+  it — `cosmo_vm_exit == 64` and `cosmo_vcpu_seg == 16` — were part of
+  the same UAPI layout check and went with it, for the same reason.
+  `struct vmcb == 4096` stays: that is AMD's layout, not the UAPI's, and
+  the host test is the right place for it.
+
+Everything else landed as written, including the measurement the report
+relied on: `make host-test` passes on an arm64 host, and the fourteen
+suites ordered after `test_hv` run and pass.
+
 **Subsystem: the UAPI's VMState layout rule — stated truthfully for
 each architecture, and checked where it cannot be evaded.**
 

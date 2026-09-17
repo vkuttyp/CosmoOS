@@ -2306,6 +2306,36 @@ See [docs/development.md](docs/development.md).
   along. 331 self-tests on both
   architectures, debug and release (PR #160).
 
+- **An invariant written down thirteen times, checked once, and false in
+  half the tree** (`docs/audit/next-subsystem-vcpu-regs-size.md`).
+  `struct cosmo_vcpu_regs` is the VMState, and its size was stated in
+  thirteen lines across eight files, all of which said 448 bytes. It is
+  448 on x86-64 and **496 on AArch64**, and has been since the EL2
+  backend landed. The one check lived in a host test that compiles
+  whichever block the *build host* matches, so on the x86-64 CI runner
+  it passed and could not fail: the invariant's own check never
+  compiled the block that violated it. The first plan was to resize both
+  blocks to a shared 512. Review asked what protects a caller built from
+  the older header, and the answer was nothing -- `SYS_vcpu_regs` takes
+  no size and no version and copies `sizeof` both ways -- which led three
+  lines above the struct, to the header's own preamble: *"This is user
+  ABI: numbers and structures here are stable."* x86-64's 448 is correct
+  and stable; the AArch64 ABI is 496. **The documentation was what was
+  wrong**, so the unit resizes nothing: it asserts each real size with
+  `_Static_assert` in the UAPI header, where the check runs in every
+  translation unit on every architecture instead of in one host binary,
+  and corrects the twelve lines that were wrong. The cross-architecture
+  equality rule is gone and bought nothing -- every caller and copy uses
+  `sizeof`. Deleting the stale host assertion had a second effect worth
+  more than the first: `test_hv` is ninth of twenty-three in
+  `HOST_TESTS` and the target stopped there, so **fourteen host suites
+  had never run on an arm64 machine**; they run now, and all pass.
+  `hv-vcpu-regs-roundtrip` is new, because nothing had ever checked that
+  a register file survives a set and a get: it asserts every field back,
+  and asserts the four the backends normalise against their documented
+  rules, so removing the `rflags` masking fails the test that documents
+  it. 332 self-tests on both architectures, debug and release (PR #162).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
