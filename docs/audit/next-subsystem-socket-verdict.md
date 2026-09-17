@@ -32,7 +32,7 @@ for the same purpose:
 int error;                  /* pending asynchronous error, consumed by the next call */
 ```
 
-Four facts about that field and that verdict, each checkable in a
+Five facts about that field and that verdict, each checkable in a
 minute, and together they are this unit:
 
 ### 1. `struct socket::error` is never set
@@ -173,6 +173,45 @@ CHECKV(sc6(LX_setsockopt, s, LX_SOL_SOCKET, 2, &one, 4, 0) == 0, 0);   /* SO_REU
 — so changing it is an ABI decision this report has to argue, not a
 typo to fix quietly. The argument is in Design §4.
 
+### 5. And the field has no locking rule
+
+The first draft of this report proposed that the new accessor take
+`s->lock`. Greptile's review of that draft caught it, and the reason is
+worth keeping, because it is a fifth finding rather than a slip in the
+fourth.
+
+`take_error` is called five times, and the mutex state differs:
+
+| call site | `s->lock` |
+| --- | --- |
+| `ksock_accept`, `socket.c:224` | **not held** — `ksock_accept` never takes it |
+| `ksock_connect`, `socket.c:267`, `:282`, `:299` | **held** — all three completion paths run inside `mutex_lock(&s->lock)` at `:248` |
+| `ksock_recvfrom` (UDP), `socket.c:372` | **not held** |
+
+And the writer holds nothing at all:
+
+```c
+/* kernel-services/network/socket.c:138-142 */
+void sock_set_error(struct socket *s, int err)
+{
+    s->error = err;
+    sock_wake(s);
+}
+```
+
+which is deliberate — the header groups it under *"Protocol side: wake
+every waiter on the socket (**any context**)"* (`socket.h:68-70`). A
+protocol writes this field from packet-receive context, where `s->lock`
+is a **mutex** and cannot be taken at all.
+
+So an accessor that takes the mutex is wrong twice: it would recurse on
+a non-recursive mutex in the three `ksock_connect` paths, and it could
+never be paired with the writer this unit adds, which runs in
+`icmp_input`. The field is currently safe only because nothing writes
+it. Design §1 settles the rule before the writer exists rather than
+after, which is the lesson three earlier units in this repository paid
+for one site at a time.
+
 ## Why it matters
 
 - **It is one rule broken in four places, and the rule is this
@@ -210,10 +249,35 @@ typo to fix quietly. The argument is in Design §4.
 int ksock_error(struct socket *s);
 ```
 
-`take_error` becomes its body, taking `s->lock`, and every present
-caller calls the new function. The double-call at `socket.c:224`
-disappears by construction — there is no expression in which calling it
-twice is spellable once the value is bound:
+**The access rule comes first** (Problem §5): the field is written from
+packet-receive context and read with the socket mutex held at three of
+five sites and not held at the other two. A mutex cannot serve both, so
+the field takes no lock — it becomes an atomic word, and the read-once
+semantic *is* the atomic operation:
+
+```c
+/* kernel-services/network/socket.c */
+int ksock_error(struct socket *s)
+{
+    int e = __atomic_exchange_n(&s->error, 0, __ATOMIC_ACQ_REL);
+    if (e == 0 && s->tcp)
+        e = __atomic_load_n(&s->tcp->error, __ATOMIC_RELAXED);
+    return e;
+}
+```
+
+`sock_set_error` stores with `__ATOMIC_RELEASE` and keeps its "any
+context" contract. The exchange makes read-and-clear indivisible, so two
+readers cannot both be told the same error — a property the present
+`take_error` does not have and that no amount of mutex at the call sites
+would give it, since two of the five do not hold one. `tcp.c:956`
+already reads `pcb->error` this way, so the convention exists.
+
+`take_error` becomes this function's body and every present caller calls
+it, with or without the mutex — the point of taking none. The
+double-call at `socket.c:224` disappears by construction: there is no
+expression in which calling it twice is spellable once the value is
+bound:
 
 ```c
 if (s->error || (s->shut & 1)) {
@@ -360,7 +424,7 @@ succeed, the way to get there is to implement address reuse.
 
 | file | change |
 | --- | --- |
-| `kernel/include/kernel/socket.h` | `ksock_error`; `sock_set_error`'s comment gains its caller |
+| `kernel/include/kernel/socket.h` | `ksock_error`; `error` becomes an atomic word with the access rule in its comment; `sock_set_error`'s comment gains its caller |
 | `kernel-services/network/socket.c` | `take_error` → `ksock_error` (exported, locked); the `:224` double call bound to a variable; `ksock_ready`'s `s->error` branch now reachable |
 | `kernel/include/kernel/net/udp.h` | `udp_error_notify` |
 | `kernel-services/network/udp.c` | the four-tuple walk over `g_pcbs`, connected-only, `sock_set_error` |
@@ -379,7 +443,7 @@ succeed, the way to get there is to implement address reuse.
 
 ## New APIs
 
-- `int ksock_error(struct socket *)` — kernel. Read-and-clear.
+- `int ksock_error(struct socket *)` — kernel. Atomic read-and-clear; safe with or without `s->lock`, and safe against a writer in packet context.
 - `bool udp_error_notify(const struct netaddr *local, const struct netaddr *remote, int err)` — kernel. True if a connected socket owned the flow.
 - `SYS_getsockopt` (92) — native ABI. `SYS_COUNT` 92 → 93.
 - `COSMO_SOL_SOCKET`, `COSMO_SO_ERROR` — uapi.
@@ -390,21 +454,32 @@ one compatibility break and is argued in Design §4.
 ## Invariant
 
 **N21. A socket's pending error is delivered once, to one reader, and is
-never invented.** `s->error` is set only by `sock_set_error`, read only
-by `ksock_error`, and cleared by that read; `s->tcp->error` is reported
-without clearing, because a dead connection must keep failing. An ICMP
-message sets an error only when it quotes a four-tuple a **connected**
-socket of this host owns, so a caller that is told `ECONNREFUSED` was
-told so by a message about its own flow. Check: `net-sockerr-udp`,
-`net-sockerr-spoof`, `net-sockerr-accept`, `net-sockerr-once`. Gap: TCP
-takes no ICMP hard error at all, by decision (Design §5), so an errno
-that only ICMP could supply never reaches a stream socket.
+never invented.** `s->error` is written only by `sock_set_error` and
+read only by `ksock_error`, both with atomic operations and **neither
+holding `s->lock`** — the writer runs in packet-receive context where
+that mutex cannot be taken, and two of the five readers do not hold it
+(Problem §5). The read is an exchange, so a verdict is delivered to
+exactly one caller; `s->tcp->error` is reported without clearing,
+because a dead connection must keep failing. An ICMP message sets an
+error only when it quotes a four-tuple a **connected** socket of this
+host owns, so a caller that is told `ECONNREFUSED` was told so by a
+message about its own flow. Check: `net-sockerr-udp`,
+`net-sockerr-spoof`, `net-sockerr-accept`, `net-sockerr-once`, and
+`net-sockerr-locking`, which calls the accessor from a path holding the
+mutex and a path that does not — the one property a `lockdep_assert_*`
+cannot state, because both ways are correct here and the assertion would
+have to be absent in either direction. Gap: TCP takes no ICMP hard error at all, by decision
+(Design §5), so an errno that only ICMP could supply never reaches a
+stream socket.
 
 ## Migration plan
 
-1. `ksock_error`, the `:224` fix, and `net-sockerr-accept` — the bug
-   first, with the writer stubbed by the test calling `sock_set_error`
-   directly, so the fix is proved before anything depends on it.
+1. `ksock_error` with the atomic access rule, the `:224` fix, and
+   `net-sockerr-accept` — the bug first, with the writer stubbed by the
+   test calling `sock_set_error` directly, so the fix is proved before
+   anything depends on it. The test exercises `ksock_error` from a
+   caller holding `s->lock` and one that does not, because that split is
+   the reason the field takes no lock.
 2. `udp_error_notify` and the `icmp_input` branch, with
    `net-sockerr-udp` and `net-sockerr-spoof`.
 3. `SYS_getsockopt`, the uapi constants, `native.c`, and the Linux
@@ -422,7 +497,8 @@ that only ICMP could supply never reaches a stream socket.
 | `net-sockerr-accept` | a listening socket with a pending error makes `accept` return that error, not 0 | reverted to `take_error(s) ? take_error(s) : -EINVAL`, it returns **0** with `*out` unassigned — the test checks the return *and* that no socket was produced, because a bug that returns success is not caught by checking the errno |
 | `net-sockerr-udp` | a connected UDP socket that sends to a closed loopback port learns `ECONNREFUSED` | without the `icmp_input` branch the socket blocks and the datagram is dropped; the test sends, waits for `COSMO_IO_ERROR` on `ksock_ready`, then reads the errno |
 | `net-sockerr-spoof` | an ICMP unreachable quoting a flow this host does not own, or quoting the right ports with the wrong peer, changes nothing | without the four-tuple check the error lands on a live socket; the test builds both messages (`nettest.c:3455-3462` already builds exactly this message — an ICMP port-unreachable quoting a UDP flow — for the NAT tests) and checks the socket is untouched |
-| `net-sockerr-once` | the error is read once: a second `ksock_error` is 0, while a TCP `send` on a reset connection keeps failing | without read-and-clear the first assertion fails; without the sticky `pcb->error` the second does |
+| `net-sockerr-once` | the error is read once: a second `ksock_error` is 0, while a TCP `send` on a reset connection keeps failing | without the atomic exchange the first assertion fails; without the sticky `pcb->error` the second does |
+| `net-sockerr-locking` | `ksock_error` answers the same from a caller holding `s->lock` and one that does not | with the accessor taking the mutex, the held-lock case recurses on a non-recursive mutex and the kernel stops — which is what the first draft of this report proposed |
 | `usertest` (`init --selftest`) | the native `SYS_getsockopt` reports a refused connect's errno as a **positive** number | reverted, `-ENOSYS`; with the sign wrong, `104` vs `-104` is the assertion |
 | `lxtest` | `setsockopt` of an unimplemented option is `-ENOPROTOOPT`; `getsockopt(SO_ERROR)` works | reverted, `setsockopt` returns 0 for an option that does nothing |
 
