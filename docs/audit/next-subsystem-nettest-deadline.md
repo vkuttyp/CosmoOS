@@ -25,7 +25,107 @@ because two documents drew a confident conclusion from good
 observations, and replacing their wrong cause with another wrong cause
 would be worse than leaving it alone.
 
+**Built as PR #167.** As-built, with what the building changed:
+
+- **The margin is thinner than the corrected report said.** Step 1's
+  measurement is above: the back-connection lands at ~72 % of the boot,
+  not the 43 % an earlier draft computed by dividing by a `make test`
+  wall clock. That moves the projected CI margin from "roughly 60
+  seconds, nowhere near" to **15-19 seconds**. The deadline is a far
+  more plausible suspect than the retraction concluded — and still not a
+  proven one, because boots of equal length pass and fail.
+- **The test found a fourth property worth holding.** The plan named
+  three; the built test also asserts that *an expired deadline leaves
+  nothing listening*, which is the step from "late" to "fatal" and the
+  reason a guest saw `ksock_connect` return 0 with no echo.
+- **`flakes.md` is corrected without being given a new cause.** The plan
+  said its paragraphs would be corrected; what they say now is that the
+  deadline was fixed, that it was not shown to be the cause, and that
+  the next sighting will carry the timings that settle it. Replacing one
+  unproven cause with another was the failure mode this whole row exists
+  to illustrate.
+- **The inventory row is not struck.** Per the plan's condition, which
+  the build did not meet.
+
+### And then the instrumentation answered it, on the first failing run
+
+Within an hour of this unit being pushed, its own x86-64 CI job failed
+`net-harness` and printed:
+
+```
+network harness: ready at 90.9s, back-connection accepted at 92.0s,
+budget 150.0s, listener closed at 102.0s
+  - network harness: guest-initiated connection failed (TimeoutError('timed out'))
+    — listening on 127.0.0.1:55835, gave up 102.0s after the harness started,
+    guest reported ready at 90.9s
+```
+
+**The accept succeeded.** At 92.0 seconds, one second after the guest
+reported ready and well inside the budget. The `TimeoutError` at 102.0
+is `accept + 10`, and `conn.settimeout(10)` is on line 66: it came from
+`conn.recv()`, not from `accept()`.
+
+So the deadline this unit fixed was never the cause, which is what the
+report declined to claim and is why the row stayed open. The real shape,
+for the first time in seven sightings:
+
+| | |
+| --- | --- |
+| the TCP connection | **established** — accepted host-side, `ksock_connect` returned 0 guest-side |
+| the guest's `cosmo hello\n` | **never arrived**, in ten seconds |
+| everything else on the wire | **fine** — `NETTEST: done tcp_conns=2 udp_pkts=20 quit=1` |
+| the guest | spent 11.6 s (budget 8 s), consistent with sending and then blocking in `ksock_recvfrom` |
+
+Twelve bytes, guest to host, on an established connection, while a
+256 KiB TCP echo and twenty UDP datagrams crossed the same interface in
+the same run. That is a far smaller and far stranger target than "the
+network harness is flaky", and it is what the next unit should take.
+
+**And it reproduces here**, which nothing in a fortnight of trying had
+managed. One failure in three x86-64 runs on this machine, with the
+signature identical to CI's:
+
+```
+run 2: ready at 75.3s, back-connection accepted at 76.1s, listener closed at 86.1s
+  connection accepted at 76.1s, then 0 of 12 bytes: b''; gave up at 86.1s,
+  guest reported ready at 75.3s, accept budget 78.7s, recv budget 10.0s
+```
+
+Accepted 0.8 seconds after readiness, with **78.7 seconds of accept
+budget unspent** — so the deadline is not merely unproven as the cause,
+it is excluded. The failure is ten seconds later, in the read.
+
+Two things follow for whoever takes this next.
+
+**The bug is on both architectures; only the local reproduction is not.**
+CI failed it on x86-64 and on aarch64 within the hour, with the same
+signature each time:
+
+```
+x86-64   accepted at 92.0s, 0 of 12 bytes, gave up at 102.0s, 59.1s of accept budget unspent
+aarch64  accepted at 92.6s, 0 of 12 bytes, gave up at 102.6s, 65.3s unspent
+local    accepted at 76.1s, 0 of 12 bytes, gave up at 86.1s,  78.7s unspent
+```
+
+Every local attempt during this unit was on aarch64, where it did not
+reproduce in eleven runs, and it appeared on the first x86-64 attempt --
+which says where to run the loop, not what the bug is.
+
+**And the loop is two minutes rather than a twenty-minute CI round
+trip**, which is the difference between chasing this and waiting for
+it.
+
+Worth stating about this report: its first draft named a cause, its
+retraction named none, and the thing that actually produced an answer
+was making the harness record four numbers. The measurement was the
+unit; the deadline was a real defect found on the way to it.
+
 ## Problem
+
+**As the tree stood before PR #167.** The defect described here was
+fixed; it was *not* the cause of the failures, which the as-built
+section above records and the paragraphs below reach by reasoning that
+the numbers later contradicted.
 
 `net-harness` has failed **seven times in about two weeks**, on both
 architectures, on CI and on this machine, and at least three of those
@@ -124,12 +224,34 @@ duration does not predict the outcome.
 **What that does and does not show.** It does not exonerate the
 deadline: the boot-test's total duration is a poor proxy for the thing
 the deadline actually spans, which is `NetTest()` construction to the
-guest's back-connection. `net-harness` runs partway through the suite,
-and on this machine the ready line came at t+82 s of a 189-second boot —
-about 43 % through — so a 140-second CI boot reaching it at the same
-fraction would be at roughly 60 seconds, comfortably inside 120. On that
-arithmetic the deadline is *not* being crossed at all, and the mechanism
-is not the cause.
+guest's back-connection. `net-harness` runs partway through the suite.
+
+**Measured, as step 1 of the plan below** (the harness now records it on
+every run):
+
+| run | back-connection accepted | boot-test total | fraction |
+| --- | --- | --- | --- |
+| 1 | 82.8 s | 116.7 s | 71 % |
+| 2 | 79.6 s | 109.5 s | 73 % |
+| 3 | 76.4 s | 105.8 s | 72 % |
+
+So the back-connection lands at about **72 %** of the boot, and the
+margin on this machine is 37–44 seconds.
+
+An earlier draft of this section put the fraction at 43 %, from dividing
+t+82 s by a 189-second figure that was the whole `make test` wall clock
+rather than the boot. On that arithmetic a 140-second CI boot reached
+the back-connection near 60 seconds and the deadline was nowhere near
+being crossed. **The corrected fraction says otherwise**: 0.72 × 140–146
+seconds puts it at **101–105 seconds against a 120-second deadline — a
+margin of 15 to 19 seconds.**
+
+That does not make the deadline the cause, and the absent correlation
+above still stands: boots of the same length pass and fail. But it moves
+the deadline from "not remotely crossed" to "crossed by anything that
+costs the tail another fifteen seconds", which is a different suspect
+altogether and a far thinner margin than a reader of this report was
+previously told.
 
 It does show that the earlier draft's confidence was unearned. The
 structural defect is verified by reading the code; its *sufficiency* as
@@ -143,22 +265,28 @@ defect that is not this bug — which is still worth fixing, and is still
 worth knowing, because it removes the most plausible suspect and points
 the next investigation elsewhere.
 
-### Why the recorded symptoms are consistent with it
+### Why the recorded symptoms were consistent with it
+
+**Superseded — see the as-built section at the top.** The measurement
+that this unit added showed the accept succeeding and the read timing
+out, so the readings below, which were how the deadline looked like a
+sufficient explanation, are kept as the reasoning that was available
+before the numbers were and not as an account of the failure.
 
 - **`ksock_connect` returns 0 and the echo never comes.** The row
   records exactly this (`NETTEST: client failed (0)`,
   `nettest.c:907,914`), and reads it as "the guest reached slirp and
-  slirp never delivered the connection". True, and the reason is that
-  the listener had already closed: QEMU's user networking completes the
-  guest's handshake locally and only then connects to
-  `127.0.0.1:back_port`, so a guest connect succeeds whether or not
-  anything is listening.
-- **The host harness reports `TimeoutError`.** It is in the failing CI
-  logs today — `network harness: guest-initiated connection failed
-  (TimeoutError('timed out'))` — and it is `accept()` giving up, not the
-  network misbehaving. The row asks for "the host side instrumented ...
-  on a run that fails"; the instrument is already there and already
-  answering.
+  slirp never delivered the connection". QEMU's user networking does
+  complete the guest's handshake locally, so a guest connect succeeds
+  whether or not anything is listening — which is why a closed listener
+  *could* have produced it. What actually happened is that the listener
+  was open and accepted the connection, and the twelve bytes never came.
+- **The host harness reports `TimeoutError`.** In the failing CI logs it
+  is the *read* giving up ten seconds after a successful accept, not
+  `accept()` — which nothing could tell until the timings were printed,
+  and which is the whole point of the unit. The row asks for "the host
+  side instrumented on a run that fails"; the error was already there,
+  and the timing was not.
 - **It struck documentation-only branches and `main`**, and four times
   in a row on a branch about a lock in cosmofs, after which the identical
   commit passed. Those rule out the *tree*, which is what they have
@@ -188,13 +316,17 @@ The harness already knows the right pattern — derive the budget from the
 run's own timeout, start it with the run — and uses it in one of the two
 places.
 
-## Current implementation
+## The implementation this unit changed
 
-`NetTest` does four things in `__init__`: picks three ports, binds and
-listens on the back-connection port, sets a 120-second timeout, and
-starts a thread that blocks in `accept()`. Only the first two need to
-happen that early: the ports go into QEMU's environment, and binding
-reserves the back port before QEMU is told about it.
+**Past tense as of PR #167**: what follows describes the harness before
+the unit, which is what the rest of the plan below is written against.
+
+`NetTest` did four things in `__init__`: picked three ports, bound and
+listened on the back-connection port, set a 120-second timeout, and
+started a thread that blocked in `accept()`. Only the first two needed
+to happen that early: the ports go into QEMU's environment, and binding
+reserves the back port before QEMU is told about it. The last two are
+what moved.
 
 The guest's side, for the record, prints readiness **before** it
 connects (`nettest.c:899` then `:907`), so a harness that waits for the

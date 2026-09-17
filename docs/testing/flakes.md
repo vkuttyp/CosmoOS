@@ -269,6 +269,100 @@ same as fixing it, and this file is not where the fix would go -- it is
 where the price is written down, and the price is now large enough to be
 worth a unit of its own.
 
+**That unit was done** (`docs/audit/next-subsystem-nettest-deadline.md`).
+What it found, and what it did not, both matter to this file.
+
+**It did not find the cause, and then its own instrumentation did.** The
+candidate it went after was a real defect and not this bug: the harness
+armed a 120-second `accept()` deadline in `NetTest.__init__`, which runs
+before QEMU is launched, and closed the listener when it expired. That
+is fixed, and the mechanism it suggested is superseded by the paragraph
+two below.
+
+The arithmetic, for the record, because it was close enough to be
+persuasive. The guest's back-connection lands at about 72 % of the boot
+-- 76 to 83 seconds here -- which projects onto CI's 140-to-146 second
+boots at 101 to 105 seconds: a margin of fifteen to nineteen seconds
+against the old deadline. Thin, and never shown to be crossed. Across
+sixteen aarch64 jobs a 145.6-second boot passed and a 145.8-second one
+failed, so boot length does not predict the outcome — and the run that
+settled it had **78.7 seconds of that budget unspent**.
+
+What it did find is why nobody could tell. **The harness recorded none
+of those numbers.** Seven sightings produced `TimeoutError('timed out')`
+and nothing about when the guest connected, how much budget was left, or
+whether the port was still open. Every paragraph above this one is an
+attempt to reason about a failure from a log that omitted the one
+measurement that would have settled it.
+
+So the deadline is fixed -- bound early, accepted after the guest
+reports ready, with one budget derived from the run's `--timeout` -- and
+**the harness now prints its timings on every run, pass or fail**:
+
+```
+network harness: ready at 80.8s, back-connection accepted at 80.8s,
+budget 150.0s, listener closed at 81.0s
+```
+
+The next sighting will say whether the deadline was ever the problem.
+
+**It did, within the hour** — on the x86-64 job of the pull request that
+added the timings:
+
+```
+network harness: ready at 90.9s, back-connection accepted at 92.0s,
+budget 150.0s, listener closed at 102.0s
+  guest-initiated connection failed (TimeoutError('timed out')) —
+  gave up 102.0s after the harness started, guest reported ready at 90.9s
+```
+
+**The accept succeeded**, at 92.0 s, one second after the guest reported
+ready. The timeout ten seconds later is `conn.settimeout(10)` on the
+*accepted* connection: the `TimeoutError` came from `recv`, not from
+`accept`. So the deadline was never the cause — which is why the unit
+did not claim it was.
+
+What is left is much sharper than anything the paragraphs above could
+reach. The TCP connection is established in both directions
+(`ksock_connect` returns 0, the host accepts). The guest's twelve bytes
+never arrive. And everything else on the same interface in the same run
+is fine: `NETTEST: done tcp_conns=2 udp_pkts=20 quit=1`, a 256 KiB TCP
+echo and twenty UDP datagrams.
+
+Twelve bytes, guest to host, on a connection both ends agree exists.
+That is the thing to chase, and it took four recorded numbers to see it
+after a fortnight of re-runs.
+
+**And it reproduces locally on x86-64**, one run in three, with the same
+signature — accepted 0.8 s after readiness, `0 of 12 bytes`, gave up ten
+seconds later with 78.7 s of accept budget unspent. Every earlier local
+attempt in this file and in the inventory was on **aarch64**, where it
+did not reproduce in eleven runs. It appeared on the first x86-64 try.
+
+That is worth more than the diagnosis to anyone reading this file later:
+"does not reproduce locally" had been recorded for weeks, and what it
+meant was "does not reproduce on the architecture we kept trying".
+
+**Not that the defect is x86-only** -- it is not, and the distinction
+matters. CI has now failed it on both architectures with the same
+signature within the hour:
+
+```
+x86-64   accepted at 92.0s, 0 of 12 bytes, gave up at 102.0s, accept budget 59.1s unspent
+aarch64  accepted at 92.6s, 0 of 12 bytes, gave up at 102.6s, accept budget 65.3s unspent
+local    accepted at 76.1s, 0 of 12 bytes, gave up at 86.1s,  accept budget 78.7s unspent
+```
+
+Three machines, two architectures, one mechanism, and in every case the
+accept succeeded with a minute or more of its budget to spare. What is
+architecture-dependent is only whether *this* developer's machine
+reproduces it, which is a fact about where to run the loop, not about
+the bug.
+
+**The standing advice does not change.** A re-run still distinguishes a
+flake from a regression, and what discharges "until shown otherwise" is
+still the diff rather than the count.
+
 **`lockup-sample` (x86-64), the first sighting, and not previously in
 this file.** `lockuptest.c:157`:
 
