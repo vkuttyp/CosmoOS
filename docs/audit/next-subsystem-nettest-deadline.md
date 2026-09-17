@@ -43,14 +43,25 @@ self.back_thread.start()        # _back_server: self.listener.accept()
 ```
 
 `tests/boot/run_boot_test.py` constructs it at **`:536`** and launches
-QEMU at **`:598`**:
+QEMU at **`:589`** (and again at `:598` if the firmware handover has to
+be retried):
 
 ```python
 nettest = NetTest()             # :536  -- accept() starts counting here
 env.update(nettest.env())
 ...
-proc = launch(log)              # :598  -- QEMU starts here
+proc = launch(log)              # :589  -- QEMU starts here
+...
+    proc = launch(log)          # :598  -- and again, if the firmware
+                                #          handover needed a retry
 ```
+
+That second launch matters. `FIRMWARE_HANDOVER_S` is 30 seconds, and a
+run that does not see the handover in time kills QEMU and boots again
+from `:598`, resetting `start` — the *run's* clock — but not the
+harness's, which has been counting since `:536`. A boot that retries
+therefore spends up to thirty seconds of an accept budget it does not
+know it has.
 
 So the accept deadline begins **before the guest exists**. The guest
 must boot, run every self-test, reach `selftest_net_harness`, and open
@@ -63,13 +74,28 @@ port goes away.
 
 | | |
 | --- | --- |
-| guest reaches `NETTEST: ready` on this machine | **t+82 s** |
-| the accept deadline | **120 s**, from before QEMU |
-| margin on a machine that passes 5 of 5 | **~38 s, about 46 %** |
+| guest prints `NETTEST: ready` on this machine | **t+82 s**, where t=0 is `make test` starting |
+| the back-connection | immediately after that line: the guest prints readiness at `nettest.c:899` and connects at `:907` |
+| the accept deadline | **120 s**, started at `NetTest()` construction |
+| margin on a machine that passes 5 of 5 | **~38 s**, and a little more: the harness's clock starts a second or two after `make`'s |
 | the failing CI boots | **132 s, 142 s, 146 s** total |
 
-A runner half again slower than this one puts the back-connection at
-about 123 seconds. That is the whole phenomenon.
+**What was measured, exactly**: the appearance of the `NETTEST: ready`
+line in the boot log, timed from the start of `make test`. That is not
+the back-connection, it is the line the guest prints immediately before
+making it — near enough to stand in for it, and named precisely here
+because this is a report about a clock started against the wrong event
+and it should not contain one.
+
+The zero is also not quite the harness's zero: `make` spends a second or
+two on dependency checks before `run_boot_test.py` constructs `NetTest`,
+so the true margin is a little *more* than 38 seconds. A runner half
+again slower than this one still crosses it, and a runner that also hits
+the firmware-handover retry crosses it by thirty seconds more.
+
+**This is one measurement, and the plan's first step replaces it with a
+distribution** before any code changes. It is enough to identify the
+mechanism and not enough to quote as the margin.
 
 ### Why every recorded symptom follows
 
