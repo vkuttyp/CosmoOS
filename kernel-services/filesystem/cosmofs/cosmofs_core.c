@@ -2608,8 +2608,19 @@ static int cosmofs_sync_counted(struct mount *mnt, bool writeback)
     if (rc)
         return rc;
     mutex_lock(&fs->lock);
+    uint64_t published = fs->sb.generation;
     rc = cfs_commit(fs);
-    if (rc == 0 && writeback) {
+    /*
+     * Counted only when this call actually published a generation.
+     * cfs_commit returns 0 for "there was nothing to commit" as well as
+     * for "committed", and the writeback thread can reach it that way: it
+     * decides with wb_due and then takes the sync lock, and a foreground
+     * file_sync -- which does not take that lock -- can commit the
+     * transaction in between. Counting the empty case would attribute a
+     * generation to this thread that it did not publish, and the pair
+     * cosmofs_stats reports would move apart in the other direction.
+     */
+    if (rc == 0 && writeback && fs->sb.generation != published) {
         /* Published with the generation, not after it. */
         lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX);
         fs->wb_commits++;

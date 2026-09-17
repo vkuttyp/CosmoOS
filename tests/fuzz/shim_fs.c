@@ -197,15 +197,21 @@ uint64_t clock_since_ns(uint64_t stamp)
  * than an inline, so this shim has to supply one; the kernel's version
  * lives in kernel/core/lockdep.c, which the fuzzers do not link.
  *
- * True, because the fuzzers are single-threaded and take no locks: the
- * assertion is asking "is this caller holding it", and here every caller
- * trivially is the only one there could be. A stub that answered false
- * would fail an assertion about a property the fuzzer does not have.
+ * It answers from the state this shim already keeps rather than saying
+ * yes. The mutexes above track `owner`, and with one thread an owner is
+ * this caller by construction, so the answer is exact -- which keeps
+ * `lockdep_assert_held` a real check here and, more to the point, keeps
+ * `lockdep_assert_not_held` from failing on a lock that is genuinely
+ * free. A stub that returned true for everything would do both wrongly.
+ *
+ * Spinlocks keep no state here (the shim has no contention to model and
+ * takes none), so a question about one is answered yes: no caller can be
+ * anywhere but inside it.
  */
 bool lockdep_is_held(const void *lock, unsigned kind)
 {
-    (void)lock;
-    (void)kind;
+    if (kind == LOCKDEP_KIND_MUTEX)
+        return lock != NULL && ((const struct mutex *)lock)->owner != NULL;
     return true;
 }
 
