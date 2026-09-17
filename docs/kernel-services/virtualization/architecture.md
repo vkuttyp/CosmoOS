@@ -130,8 +130,9 @@ guest entries, and keeps every host CPU responsive.
 
 - **UAPI** (`kernel/include/uapi/cosmo/syscall.h`): seven system calls
   43–49 (`vm_create`, `vm_mem`, `vm_mem_rw`, `vcpu_create`, `vcpu_regs`,
-  `vcpu_run`, `vcpu_irq`), `struct cosmo_vcpu_regs` (the VMState, 448
-  bytes), `struct cosmo_vm_exit` (the VMExit, 64 bytes) and the
+  `vcpu_run`, `vcpu_irq`), `struct cosmo_vcpu_regs` (the VMState; 496
+  bytes on AArch64, 448 on x86-64), `struct cosmo_vm_exit` (the VMExit,
+  64 bytes) and the
   `COSMO_VM_EXIT_*` kinds. The native `SYS_COUNT` becomes 50.
 - **/dev/vmm**: a character node. `read` returns one line describing the
   backend (`svm npt asids=N vms=M`). Its open file, held for writing, is

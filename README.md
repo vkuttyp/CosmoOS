@@ -474,8 +474,8 @@ See [docs/development.md](docs/development.md).
 - **The AArch64 EL2 hypervisor backend (done):** guests now run
   on the EL2 the previous unit kept. A vendor-neutral seam came first —
   `struct cosmo_vcpu_regs` is per architecture (x86's registers on
-  x86-64, `x0`–`x30` with the EL1 system state on AArch64, both 448
-  bytes) and two exits joined the set (`WFI`, `SYSREG`). Then stage-2
+  x86-64, `x0`–`x30` with the EL1 system state on AArch64; 448 and 496
+  bytes respectively) and two exits joined the set (`WFI`, `SYSREG`). Then stage-2
   translation (a third page-table builder beside NPT and EPT, with
   `VTCR_EL2` derived from `PARange`), and the world switch itself: EL2
   vectors installed through the loader's stub, host and guest EL1 state
