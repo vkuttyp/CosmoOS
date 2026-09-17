@@ -56,13 +56,14 @@ reported and no test has ever produced one**:
 | `dir_bad` (`:402`) | a snapshot member table whose count does not fit its block | **no** |
 | `dir_bad` (`:498`) | an over-long `namelen` | **no** |
 | `dir_bad` (`:524`) | a directory reached from two parents | **no** |
-| `chain_cycle` (five sites) | a chain that returns to itself, bounded by `CFS_CHECK_MAX_CHAIN` (4096) or `CFS_CHECK_MAX_DEPTH` (64) | **no** |
+| `chain_cycle` (five sites) | a chain that returns to itself. **Two different guards**: the extent chain at `:247` is bounded by `CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2` (about 18); `:364`, `:413` and `:451` use `CFS_CHECK_MAX_CHAIN` (4096) and `:477` uses `CFS_CHECK_MAX_DEPTH` (64) | **no** |
 
-A reporting path with no test is a path that has never executed. The
-`CFS_CHECK_MAX_CHAIN` bound in particular is a number nothing has ever
-reached: if the guard were off by one, or the counter reset in the wrong
+A reporting path with no test is a path that has never executed. These bounds are numbers nothing has ever
+reached: if a guard were off by one, or its counter reset in the wrong
 place, or the class reported the wrong block, nothing in this tree would
-say so.
+say so. This unit tests the **extent** walker's guard, which is the
+cheapest to reach; the other four sites stay untested, and the report
+says so rather than implying one test covers five walkers.
 
 ## A live instance, found while writing this
 
@@ -137,11 +138,23 @@ this unit adds gets a kind, which is what makes each one provable.
 Both invariants are about the runs of a single inode, and the checker
 already reads every extent of every inode. Neither needs a new map:
 
-- **Ordering** is a comparison with the previous run: `lblk` must be
-  strictly greater than the previous run's `lblk`, and — since runs may
-  not overlap — not less than `prev->lblk + prev->count`.
-- **Overlap** is the same comparison. Two runs sorted by `lblk` overlap
-  exactly when the second starts before the first ends.
+- **Ordering first**: `lblk` must be strictly greater than the previous
+  run's `lblk`.
+- **Overlap second, and only on a pair already known to ascend**:
+  `this->lblk < prev->lblk + prev->count`.
+
+**The order of those two tests is not a detail.** Tested on an unordered
+pair, every descending pair also looks like an overlap — and the test
+below requires an ordering fault *not* to be reported as one. So a pair
+that fails the ordering test is reported as `extent_order` and the
+overlap test is skipped for it: there is nothing useful to say about the
+extent of an overlap between runs that are not in order.
+
+**And the end calculation is 64-bit.** `lblk` and `count` are both
+32-bit in `struct cfs_extent`, so `lblk + count` overflows in 32-bit
+arithmetic for a run near the 2^32-block file bound — wrapping small and
+making a real overlap invisible. The production mapper already promotes
+this sum; a checker that did not would carry the bug it is looking for.
 
 So one `prev` per inode, checked as the extents stream past, closes both.
 The cost is a comparison per extent and no allocation, which is the point:
@@ -188,14 +201,17 @@ the way to fire a class:
 | `COSMOFS_CORRUPT_EXTENT_OVERLAP` | a second run in one inode covering an `lblk` the first already covers, pointing at a different pool block |
 | `COSMOFS_CORRUPT_EXTENT_ORDER` | two runs swapped, so `lblk` descends |
 | `COSMOFS_CORRUPT_DUP_NAME` | a directory entry whose name copies another entry's, pointing at a different inode |
-| `COSMOFS_CORRUPT_CHAIN_CYCLE` | a chain block whose next pointer names an earlier block of the same chain |
+| `COSMOFS_CORRUPT_CHAIN_CYCLE` | an **extent**-chain block whose next pointer names an earlier block of the same chain |
 | `COSMOFS_CORRUPT_BAD_PTR` | a block pointer past the end of the pool |
 | `COSMOFS_CORRUPT_NAMELEN` | an entry whose `namelen` exceeds what its slot can hold |
 | `COSMOFS_CORRUPT_TWO_PARENTS` | a directory named by an entry in a second directory |
 | `COSMOFS_CORRUPT_SNAP_MEMBERS` | a snapshot member count larger than its block can hold |
 
-Seven kinds for five reporting paths, because three of them are the new
-checks above and two `dir_bad` sites need different writes.
+**Eight kinds**: three for the new checks above, four for the unfired
+`dir_bad` sites, one for the cycle. (An earlier draft said "seven" here
+while the section heading says "five". The heading counts *reporting
+paths*, which is five; the kinds are eight. Both were right about
+different things and neither said which.)
 
 ### What it does not do
 
@@ -220,7 +236,7 @@ checks above and two `dir_bad` sites need different writes.
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the ordering and overlap comparisons; the duplicate-name bitmap and re-scan; three new classes in the report |
 | `kernel/include/kernel/cosmofs.h` | `extent_order`, `extent_overlap`, `dir_dup_name` in `struct cosmofs_check_report`; seven `COSMOFS_CORRUPT_*` kinds |
 | `kernel-services/filesystem/cosmofs/cosmofs_core.c` | `cosmofs_test_corrupt` writes the seven new corruptions |
-| `kernel-services/filesystem/cosmofs/cosmofstest.c` | a test per class |
+| `kernel-services/filesystem/cosmofs/cosmofstest.c` | a test per class; **a helper that prints a report's non-zero counts**, and every existing `CHECK(r.clean)` swept to use it |
 | `userland/bin/fsctl.c` (or wherever the report is printed) | the three new counts |
 | `docs/kernel-services/filesystem/cosmofs/design.md` | "What it does not check" shrinks to `next_ino`, with the reason it stays |
 | `docs/kernel-services/filesystem/cosmofs/testing.md` | the new tests |
@@ -242,7 +258,12 @@ checks above and two `dir_bad` sites need different writes.
    and if any replayed image trips one, that is a finding about the
    filesystem rather than about this unit — and the most valuable
    possible outcome.
-5. Docs, README Status, the two inventory rows struck, as-built/as-run.
+5. **The `r.clean` diagnostic helper**, and a sweep of every existing
+   assertion that a report is clean, so each says *which* class was not.
+   This is what the live instance above added to the unit, and it is
+   last because it is the one step that touches tests this unit did not
+   write.
+6. Docs, README Status, the two inventory rows struck, as-built/as-run.
 
 Each step boots both architectures; step 3 runs `make BUILD=release`;
 the whole CI step list (`host-test`, `fuzz`, `analyze`, `reproducible`,
@@ -257,7 +278,7 @@ touches a fuzzer's target.
 | `cosmofs-check-extent-overlap` | two runs in one inode covering the same `lblk`, pointing at *different* pool blocks, are reported as `extent_overlap` | remove the comparison: the pass calls the filesystem sound, which is today's behaviour |
 | `cosmofs-check-extent-order` | two runs whose `lblk` descends are reported as `extent_order`, and **not** as an overlap | swap the comparison for `>=`: an ordering fault is reported as an overlap, and the two classes stop meaning different things |
 | `cosmofs-check-dup-name` | the same name twice in one directory, pointing at two inodes, is reported once as `dir_dup_name` | drop the re-scan and trust the bitmap hit: a *collision* between two different names is reported as a duplicate, which is a false positive on a sound filesystem |
-| `cosmofs-check-chain-cycle` | a chain block pointing back into its own chain is reported as `chain_cycle` and the pass terminates | raise `CFS_CHECK_MAX_CHAIN` above the pool size: the pass runs until it exhausts the chain rather than bounding it, which is the hang the guard exists to prevent |
+| `cosmofs-check-chain-cycle` | an inode's **extent chain** whose last block points back at an earlier block of the same chain is reported as `chain_cycle`, and the pass terminates | **remove the guard at `cosmofs_check.c:247`**: the walk does not terminate and the boot times out at 180 s, which is what that guard prevents. Raising `CFS_CHECK_MAX_CHAIN` proves nothing — the chain is still cyclic, the guard still fires after more iterations, and that constant does not govern this walker at all |
 | `cosmofs-check-bad-ptr` | a block pointer past the pool's end is `dir_bad` | remove the range test: the pass reads outside the pool |
 | `cosmofs-check-namelen` | an over-long `namelen` is `dir_bad` | remove the length test: the pass reads past the entry |
 | `cosmofs-check-two-parents` | a directory named from two directories is `dir_bad` | remove the second-parent test: a cycle in the directory graph is called sound |
