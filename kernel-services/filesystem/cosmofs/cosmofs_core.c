@@ -202,9 +202,10 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
      * from another copy and put the bad one right (design.md, "A mirror
      * is only as good as its verifier"). */
     struct mhdr_want want = { .dva = blkno, .kind = kind };
-    int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL);
+    bool read_ok = false;
+    int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL, &read_ok);
     if (rc) {
-        if (rc == -EIO) {
+        if (rc == -EIO && read_ok) {
             /* Say which of the four checks failed and what it found:
              * "bad header or checksum" covers four different faults with
              * four different causes. */
@@ -217,7 +218,9 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
                    (unsigned long long)h->blkno, h->crc, kind, (unsigned long long)blkno,
                    block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
         } else {
-            kerror("cosmofs: block %llu: read error", (unsigned long long)blkno);
+            /* Nothing was read, so b->data describes nothing: saying
+             * which header field is wrong would be inventing one. */
+            kerror("cosmofs: block %llu: read error (%d)", (unsigned long long)blkno, rc);
         }
         list_remove(&b->link);
         fs->nr_bufs--;

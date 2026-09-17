@@ -651,7 +651,7 @@ static int read_encrypted(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, u
     /* Reading the ciphertext needs no key: the CRC beside the tag is
      * what a mirror repairs against (design.md, "Integrity"). */
     struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .crc = e.crc, .have_crc = true };
-    rc = cfs_read_repair(fs, dva, buf, cipher_crc_ok, &w, NULL);
+    rc = cfs_read_repair(fs, dva, buf, cipher_crc_ok, &w, NULL, NULL);
     if (rc) {
         kerror("cosmofs: inode %llu block %llu: no copy matches its checksum", (unsigned long long)in->ino,
                (unsigned long long)lblk);
@@ -693,7 +693,7 @@ int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, 
     }
     if (!cfs_dva_valid(fs, dva))
         return -EIO;
-    int rc = cfs_read_repair(fs, dva, buf, data_ok, &w, NULL);
+    int rc = cfs_read_repair(fs, dva, buf, data_ok, &w, NULL, NULL);
     if (rc && w.have_crc) {
         kerror("cosmofs: inode %llu block %llu: no copy matches its checksum", (unsigned long long)in->ino,
                (unsigned long long)lblk);

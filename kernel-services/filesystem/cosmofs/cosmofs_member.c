@@ -504,10 +504,12 @@ int cfs_labels_update(struct cfs *fs)
  * chance of returning something wrong.
  */
 int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
-                    bool *repaired)
+                    bool *repaired, bool *read_ok)
 {
     if (repaired)
         *repaired = false;
+    if (read_ok)
+        *read_ok = false;
     unsigned copies = pool_copies(fs->pool, dva);
     if (copies == 0)
         return -EINVAL;
@@ -515,6 +517,11 @@ int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(cons
     int first_err = 0;
     for (unsigned c = 0; c < copies; c++) {
         int rc = pool_read_copy(fs->pool, dva, c, buf);
+        /* Read and rejected is not read and failed: the failure below is
+         * -EIO either way, and a caller that reports on the contents of
+         * `buf` must know whether anything was put there. */
+        if (rc == 0 && read_ok)
+            *read_ok = true;
         if (rc == 0 && verify(buf, arg)) {
             if (c == 0)
                 return 0;   /* the common case: nothing to repair */
