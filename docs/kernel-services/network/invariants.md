@@ -279,9 +279,9 @@ packet-receive context, where that mutex cannot be taken, and of the five
 readers three run inside `mutex_lock(&s->lock)` (`ksock_connect`'s
 completion paths, `socket.c:267`, `:282`, `:299`) while two do not
 (`ksock_accept`, `:224`; UDP's `ksock_recvfrom`, `:372`) — so the mutex
-cannot be the field's rule, and it is not. The read is an
-`__atomic_exchange_n`, which is what makes "once" true against two
-readers rather than merely likely; `ksock_ready`'s `COSMO_IO_ERROR` and
+cannot be the field's rule, and it is not. `ksock_error`'s read clears by
+compare-exchange, which is what makes "once" true against two readers
+rather than merely likely; `ksock_ready`'s `COSMO_IO_ERROR` and
 the wait conditions *test* the field without clearing it. A stream
 socket's `pcb->error` is reported without clearing, because a dead
 connection must keep failing — the two halves have different rules on

@@ -2484,8 +2484,8 @@ See [docs/development.md](docs/development.md).
   for every `SOL_SOCKET` option and did nothing** — so a program setting
   `SO_RCVTIMEO` was told it worked and then blocked forever. This unit
   makes the verdict a thing you can ask for: `ksock_error` reads it once
-  (an atomic exchange, so two readers cannot both be told the same error)
-  and takes **no lock**, because three of its five callers hold `s->lock`
+  (clearing by compare-exchange, so two readers cannot both be told the
+  same error) and takes **no lock**, because three of its five callers hold `s->lock`
   and two do not and the writer runs in packet-receive context where a
   mutex cannot be taken — which is a rule the field never had and the
   reason the first draft of the design would have recursed on a
@@ -2503,7 +2503,9 @@ See [docs/development.md](docs/development.md).
   another flow's error, giving the accessor the mutex stops the kernel,
   and a delivery that commits by errno alone destroys a second verdict of
   the same value that nobody had been told — which is why the pending
-  error is one word carrying a generation as well as an errno. `net-harness` now prints the pending error and samples its
+  error is one 64-bit word carrying a generation as well as an errno, and
+  why a syscall peeks, copies, and only then commits the clear rather
+  than taking the verdict and putting it back. `net-harness` now prints the pending error and samples its
   counters *before* the connect, which is what PR #169's window was too
   late for. 337 self-tests on both architectures, debug and release
   (PR #171).
