@@ -4,8 +4,8 @@ Date: 2026-09-17. Tree: `main` at 9a7a27e (after PR #160, the writeback
 thread inside a mount's replay). Chosen from
 `docs/audit/2026-09-deferred-work-inventory.md` §3.
 
-**Subsystem: the UAPI's fixed-layout rule — made true on both
-architectures, and checked where it cannot be evaded.**
+**Subsystem: the UAPI's VMState layout rule — stated truthfully for
+each architecture, and checked where it cannot be evaded.**
 
 This report closes the inventory's §3 row that reads "`struct
 cosmo_vcpu_regs` is **496 bytes on AArch64 and 448 on x86-64**, while
@@ -62,10 +62,11 @@ nine in documentation, four in code. Twelve of them are wrong today:
 with a named check. The check does not hold it.
 
 The thirteenth line is worth separating out. `syscall.h:681` says 448
-over the x86-64 block and is right; it is in the list because the rule
-is about the *pair*, so a fix that changes the shared size has to move
-it too. Any option below that leaves x86-64 at 448 touches twelve
-lines; option (c) touches all thirteen.
+over the x86-64 block and is **right**; it is in the list because the
+rule is about the *pair*, so any fix that changes the shared size would
+have to move it too. The recommended fix does not: it touches the twelve
+that are wrong and leaves that one alone. Which line is already correct
+turns out to decide the whole unit — see *Design*.
 
 ### And the check cannot fire where it is false
 
@@ -170,120 +171,162 @@ invariant that is left to a comment and a host test.
 
 ## Design
 
-Three decisions, in order.
+Two decisions, and the first one is not the one this report first
+reached for.
 
-### 1. Which number
+### 1. Which size — and the answer is "both, as they are"
 
-The rule is worth keeping — one size across architectures is what lets
-the syscall, the copies and the tests not branch — so the question is
-which size both blocks should be.
+The obvious unit is to make the rule true by resizing a block. **That is
+the wrong unit**, and the reason is three lines above the struct, in the
+header's own preamble:
 
-| option | AArch64 | x86-64 | headroom after (a64 / x86) | cost |
-| --- | --- | --- | --- | --- |
-| **(a) 448**, shrink AArch64 | `reserved[8]` → `reserved[2]` | unchanged | 2 / 9 slots | every document stays correct as written; AArch64 headroom drops to two fields |
-| **(b) 496**, grow x86-64 | unchanged | `reserved[9]` → `reserved[15]` | 8 / 15 | thirteen lines to update; 48 more bytes per `SYS_vcpu_regs` copy |
-| **(c) 512**, grow both | `reserved[8]` → `reserved[10]` | `reserved[9]` → `reserved[17]` | 10 / 17 | thirteen lines to update; a power of two; most headroom |
-| **(d) drop the rule** | — | — | — | per-arch assertions; the syscall and tests grow an arch branch |
+```
+ * Shared verbatim between the kernel and user space. This is user ABI:
+ * numbers and structures here are stable; add, never renumber.
+```
 
-**Recommendation: (c), 512.** (a) is the smallest diff and the one the
-documentation already describes, and that is exactly what makes it the
-wrong choice: it buys correctness by spending the AArch64 register
-file's expansion room down to two slots, on an architecture whose EL1
-system-register set is the one likely to grow: the block carries **20**
-named EL1 system registers, and it has been extended once already
-(`f8b88b2`, the AArch64 EL2 backend) since it was introduced
-(`2c5117d`). (b) fixes the number without choosing it. (c) picks a round size
-with room on both sides, and 512 is a size a reader recognises as
-deliberate — which is the property the current 448 was supposed to have
-and never had.
+So the tree already promises that these structures are stable. Measure
+the two blocks against that promise rather than against the comment:
 
-(d) is the honest fallback if review prefers not to touch the ABI at
-all, and it is not absurd: a register file genuinely *is* per
-architecture, and the rule's benefit ("the system call, the copies and
-the tests do not vary") is small because every one of those uses
-`sizeof` already. But it trades a checkable cross-arch invariant for two
-arch-specific ones, and the tests are then the only thing tying them
-together. It is listed under Alternatives with what would change.
+| | actual size | documented | which one is wrong |
+| --- | --- | --- | --- |
+| x86-64 | 448 | 448 | **nothing** — correct and stable |
+| AArch64 | **496** | 448 | the **documentation** |
+
+The AArch64 ABI is 496 and has been since `f8b88b2` introduced the EL2
+backend. Nothing is broken in it; what is broken is every sentence that
+describes it. And x86-64's block is correct today, so any option that
+moves both to a shared number **breaks a correct, stable ABI in order to
+make a comment true**.
+
+`SYS_vcpu_regs` has no room to absorb that. It takes no buffer size and
+no version, and copies `sizeof(struct cosmo_vcpu_regs)` in both
+directions (`kernel-services/virtualization/hvsys.c:171-194`); the only
+bound is `user_range_ok(ptr, sizeof(...))`, which checks that the range
+is user memory, not that the caller allocated that much. A kernel built
+with a larger struct writes past a smaller caller's buffer on get and
+reads past it on set. Adding a size or version argument to make a
+resize safe is a bigger unit than this finding justifies, and it would
+be spending an ABI change to fix prose.
+
+**So: change neither block.** Fix the twelve lines that are wrong, keep
+the thirteenth (`syscall.h:681`) that is right, and drop the cross-arch
+equality rule, which was never true and never bought anything — every
+consumer already says `sizeof`, so "the system call, the copies and the
+tests do not vary with the architecture" describes code that would not
+have varied either way.
+
+> This reverses what the first draft of this report recommended (512 for
+> both blocks, with a compatibility discussion deferred). Review was
+> right and the draft was wrong: it had noticed that the documentation
+> disagreed with the code and concluded that the code should move. The
+> preamble is what settles it, and it was three lines above the struct
+> the whole time. The four options are kept under *Alternatives* with
+> what each would cost, because the choice is the substance of this unit
+> and a reader should see it made rather than asserted.
 
 ### 2. Where the rule is enforced
 
-In the header that states it, not in a host test:
+This part is unchanged, and it is the substance. The invariant moves out
+of a comment and a host test into the header that states it:
 
 ```c
 /* kernel/include/uapi/cosmo/syscall.h, after both blocks */
-_Static_assert(sizeof(struct cosmo_vcpu_regs) == 512,
-               "the VMState is one size on every architecture");
+#if defined(__aarch64__)
+_Static_assert(sizeof(struct cosmo_vcpu_regs) == 496, "AArch64 VMState layout");
+#else
+_Static_assert(sizeof(struct cosmo_vcpu_regs) == 448, "x86-64 VMState layout");
+#endif
 _Static_assert(sizeof(struct cosmo_vm_exit) == 64, "VMExit layout");
 _Static_assert(sizeof(struct cosmo_vcpu_seg) == 16, "segment layout");
 ```
 
-This is the substance of the unit. An assertion in the UAPI header fires
-in **every** translation unit that includes it — kernel, libc, guest
-tools, host tests, both architectures, every build type — so the rule
-can no longer be true only where someone happens to compile. It cannot
-be skipped, and it cannot be satisfied vacuously.
+An assertion in the UAPI header fires in **every** translation unit that
+includes it — kernel, libc, guest tools, host tests, both
+architectures, every build type. The rule can no longer be true only
+where someone happens to compile, and it cannot be satisfied vacuously.
+That is what invariant V8 always claimed and never had.
 
-The header is UAPI, so the assertion must be C11-and-later only and must
-not depend on kernel headers: `_Static_assert` directly, not
-`STATIC_ASSERT` from `kernel/include/kernel/compiler.h`, which UAPI
-consumers do not have. (C++ consumers get `static_assert`; there are
-none in this tree, and the guard is one `#if defined(__cplusplus)` if
-that changes.)
+Two constants instead of one is a real cost and worth naming: the pair
+is no longer tied together by a single number, so nothing stops the two
+blocks drifting to unrelated sizes. That is acceptable because nothing
+in the tree wants them equal — and it is now *stated* rather than
+assumed, which is the opposite of the situation today.
+
+The header is UAPI, so this must be C11-and-later and must not depend on
+kernel headers: `_Static_assert` directly, not `STATIC_ASSERT` from
+`kernel/include/kernel/compiler.h`, which UAPI consumers do not have.
+(C++ consumers get `static_assert`; there are none in this tree, and the
+guard is one `#if defined(__cplusplus)` if that changes.)
 
 ### 3. What happens to the host test
 
-`test_hv.c:75` keeps its assertion — a redundant check is not a problem
-— but it stops being *the* check, and V8's "*checked by*" changes to
-name the header. The deeper flaw stays worth naming in the docs: which
-architecture's UAPI that file sees is decided by the build host. With
-the static assertion in the header that flaw is harmless for this rule
-(both arms now assert the same size, so either arm passing means the
-rule holds for that arm, and every build asserts its own arm). It is
-recorded in `testing.md` as a known property of the host suite rather
-than fixed here, because pinning the host tests' arch is a different
-unit with a much larger blast radius.
+`test_hv.c:75` becomes correct on both hosts by asserting the same pair
+the header does — or, better, by deleting the line, since the header it
+includes now asserts it unconditionally and a duplicate check that can
+drift is worse than none. The report recommends **deleting it** and
+having `testing.md` say where the rule now lives.
+
+The deeper flaw stays worth recording: which architecture's UAPI that
+file sees is decided by the build host, not the code under test. With
+the assertion in the header it is harmless for this rule, because every
+build asserts its own arm correctly. It is noted in `testing.md` as a
+known property of the host suite rather than fixed here; pinning the
+host tests' architecture is a different unit with a much larger blast
+radius.
 
 ## Affected files
 
 | file | change |
 | --- | --- |
-| `kernel/include/uapi/cosmo/syscall.h` | `reserved[8]`→`reserved[10]` (AArch64), `reserved[9]`→`reserved[17]` (x86-64); the comment's number; **the three `_Static_assert`s** |
-| `tests/host/test_hv.c` | `448` → `512`; the assertion demoted from sole check to a redundant one |
-| `docs/kernel-services/virtualization/invariants.md` | V8: the number, and *checked by* now the header, in every build |
-| `docs/kernel-services/virtualization/design.md` | `:23` the annotated layout and its total; `:1275` the rule and its reason; `:1464` the quoted assertion |
-| `docs/kernel-services/virtualization/api.md` | `:27`, `:30` |
+| `kernel/include/uapi/cosmo/syscall.h` | the rule at `:664` restated per architecture; `/* 448 bytes */` at `:668` → `/* 496 bytes */`; `:681` **unchanged**; **the four `_Static_assert`s** |
+| `tests/host/test_hv.c` | `:75` deleted; the header it includes now asserts this in every build |
+| `docs/kernel-services/virtualization/invariants.md` | V8: two sizes, and *checked by* the header, in every translation unit |
+| `docs/kernel-services/virtualization/design.md` | `:23` the annotated layout's total; `:1275` the rule and its stated reason; `:1464` the quoted assertion |
+| `docs/kernel-services/virtualization/api.md` | `:27`, `:30` — **and an `ABI stability:` line, which this file lacks** though `docs/README.md:66` requires one |
 | `docs/kernel-services/virtualization/architecture.md` | `:133` |
 | `docs/kernel-services/virtualization/testing.md` | `:54`; plus the note that the host suite's UAPI arch follows the build host |
 | `README.md` | `:477`, and the Status entry |
 | `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row, struck |
 
-No kernel or libc source changes are expected: every user of the struct
-uses `sizeof`. **If any file needs editing beyond the list above, that
-is a finding** — it means something had hard-coded the size, which is
-the hazard the rule exists to prevent, and it goes in the report as
-built.
+**No structure changes and no kernel or libc source changes.** Every
+user of the struct uses `sizeof`, and nothing resizes. If any file needs
+editing beyond the list above, that is a finding — it means something
+hard-coded the size, which is precisely the hazard, and it goes in the
+report as built.
+
+The missing `ABI stability:` line in `api.md` was found while checking
+this and is folded in rather than left: `docs/README.md:66` requires
+every `api.md` to state it, `docs/compat/linux/api.md` does so six
+times, and the virtualization one — which documents a UAPI the header
+calls stable — states it nowhere.
 
 ## New APIs
 
-None. Three compile-time assertions and a different constant.
+None. Four compile-time assertions, one corrected comment, and a rule
+restated as two.
 
 ## Migration plan
 
-1. **The assertion first, against the current sizes**, one commit that
-   fails to build on AArch64. This is the proof the check is real: with
-   `== 448` asserted in the header, an AArch64 kernel build stops. It is
-   not pushed as a state of the tree; it is step 1 of the branch so the
-   review can see the failure and the diff that resolves it.
-2. **Resize both blocks to 512** and set the assertion to 512. Both
-   architectures build; `make host-test` passes on an arm64 host for the
-   first time.
-3. **The nine documentation lines**, in one commit, swept by
-   `grep -rn 448` rather than by memory — the table above is the
-   checklist, and the sweep must end with no line outside
-   `docs/audit/` still saying 448.
-4. **Tests** (below), then README Status and the inventory row struck.
+1. **The assertions first, at the sizes the tree actually has** — 496
+   and 448. Both architectures build immediately, because both
+   assertions are already true. This is the whole safety argument for
+   the unit: it adds a check and changes nothing.
+2. **Prove the check is real**: temporarily assert 448 on AArch64 and
+   watch the build fail; temporarily assert 496 on x86-64 and watch it
+   fail there. Recorded in the commit message, not pushed as a state of
+   the tree. This is the bug-proof — see Tests.
+3. **Delete `test_hv.c:75`.** `make host-test` now passes on an arm64
+   host for the first time, and the fourteen suites behind it run.
+4. **The twelve wrong lines**, in one commit, swept by `grep -rn 448`
+   rather than by memory — the table in *Problem* is the checklist. The
+   sweep ends when the only surviving `448` outside `docs/audit/` is
+   `syscall.h:681` and the x86-64 halves of the restated sentences.
+5. **The `ABI stability:` line** in `api.md`.
+6. `hv-vcpu-regs-roundtrip` (below), then README Status and the
+   inventory row struck.
 
-Each step builds both architectures. Step 2 runs the full gate list
+Each step builds both architectures. Step 3 runs the full gate list
 including `make host-test` on this arm64 machine *and* the x86-64 host
 path, since the point of the unit is that those differ.
 
@@ -291,73 +334,97 @@ path, since the point of the unit is that those differ.
 
 | test | claim | how it fails if the fix is reverted |
 | --- | --- | --- |
-| the header's `_Static_assert` | the VMState is one size on every architecture | revert the resize: the **build** fails, on whichever architecture is wrong. This is the bug-proof and it is compile-time, so it cannot be skipped, mis-run or flake |
-| `test_hv.c:75` (existing, retargeted) | the same, at 512 | fails on an arm64 host today; passes after |
-| `hv-vcpu-regs-roundtrip` (new, both arches) | a `SYS_vcpu_regs` set-then-get returns every field, and the bytes in `reserved[]` come back zero | drop a field from the copy: the round-trip reports which offset differs. This is the test the size rule is *for* — it is what would catch a resize that silently truncated the copy |
+| the header's `_Static_assert`s | each architecture's VMState is the size the documentation says | change either constant, or a field, and the **build** fails on that architecture. Compile-time, so it cannot be skipped, mis-run or flake |
+| `make host-test` on an arm64 host | the host suite runs to completion | measured already: it does, once `test_hv.c:75` stops asserting a falsehood |
+| `hv-vcpu-regs-roundtrip` (new, both arches) | a `SYS_vcpu_regs` set-then-get returns every field the backend does not document as normalised, and `reserved[]` reads back zero | drop a field from the copy: the round-trip names the offset that differs |
 
-The first is unusual as a bug-proof and worth stating plainly: a
-compile-time assertion's "test run" is the build, on both
-architectures, which every CI step already does. That is a stronger
-guarantee than a runtime check and a weaker demonstration, so the
-round-trip test is there to show the struct still carries what it
-claims to.
+On the bug-proof: a compile-time assertion's "test run" is the build, on
+both architectures, which every CI step already does. That is a stronger
+guarantee than a runtime check and a weaker demonstration, which is why
+step 2 of the plan deliberately breaks the build both ways and records
+what it said.
 
-`hv-vcpu-regs-roundtrip` is the one piece of new runtime test surface.
-It is small and it is the thing V8 protects; the tree has no test today
-that a vCPU's register file survives a set/get at all.
+**The round-trip test cannot assert that every field survives**, and
+this is checked rather than assumed. The backends normalise on purpose:
+
+| field | what happens | where |
+| --- | --- | --- |
+| `pending_irq` | ignored on set | the header says so |
+| `rflags` | `(in \| 0x2) & ~(1<<3 \| 1<<5 \| 1<<15)` — the architecturally fixed bits | `kernel/arch/x86_64/svm.c:479` |
+| `efer` | `in & ~EFER_SVME & ~EFER_LMA` | `svm.c:488` |
+| `cr8` | read back as `vmcb->control.v_tpr & 0xF`, four bits | `svm.c:436` |
+
+So the test asserts the *documented* behaviour: every other field
+round-trips byte for byte, `reserved[]` reads back zero, and each
+normalised field comes back as the rule above says it should — which
+makes the test a check of that documentation too, rather than a hole in
+it. A VMX backend that rejects unsupported `EFER` bits gets the same
+treatment when it exists; today it is never executed
+(`README.md:452`).
+
+`hv-vcpu-regs-roundtrip` is the one piece of new runtime test surface,
+and it is the thing V8 protects: the tree has no test today that a
+vCPU's register file survives a set/get at all.
 
 ## Benchmarks
 
-None required. The copy grows by 64 bytes on AArch64 and 16 on x86-64
-per `SYS_vcpu_regs`, a call made at vCPU setup and on exits the owner
-inspects — not in any hot loop. If review wants a number, `el2-vcpu` and
-the hv host tests already time vCPU entry and exit.
+None, and nothing to measure: **no structure changes size**, so no copy
+changes, in `SYS_vcpu_regs` or anywhere else. The unit adds compile-time
+assertions and edits prose.
 
 ## Risks
 
-- **It is an ABI change.** Mitigated by everything in the tree being
-  built together and every consumer using `sizeof`; the affected-files
-  list above says what to check, and an edit needed outside it is a
-  finding rather than a nuisance.
-- **The reserved area shrinks as a fraction of the struct.** It grows in
-  absolute terms on both architectures (8→10 and 9→17 slots), so this
-  is a presentational risk, not a real one.
-- **A static assertion in a UAPI header reaches consumers we do not
-  compile.** There are none outside this tree today. The C++ guard is
-  named in Design §2 and costs one line if that changes.
-- **Choosing 512 makes the documentation wrong in nine lines until step
-  3 lands**, which is why step 3 is a single sweeping commit driven by
-  grep, and why the exact count is written down here to check against.
-  It also makes `syscall.h:681` wrong, which is the one line currently
-  right — worth saying, because a reviewer who checks only that the
-  numbers changed will not notice a line that changed *from* correct.
+- **Two constants can drift apart.** Real, and the cost of keeping both
+  ABIs. Mitigated by both being asserted in the header in every build,
+  which is strictly more checking than the single number had; and the
+  pair being unequal is now stated rather than assumed.
+- **Deleting `test_hv.c:75` removes a visible check.** It removes a
+  *duplicate* one, and the replacement runs in every translation unit
+  instead of one host binary. `testing.md` says where it went so a
+  reader looking for it finds it.
+- **The documentation churns in twelve lines**, which is why step 4 is a
+  single sweeping commit driven by grep, with the exact count written
+  down here to check against, and with the one line that must **not**
+  change (`syscall.h:681`) named.
+- **The cross-architecture rule is gone.** If a future unit wants the
+  blocks the same size, it now has to add a size or version to
+  `SYS_vcpu_regs` first, and this report should be read as saying that
+  is the correct order — not as closing the door.
 - **The deeper flaw is not fixed**: the host suite still compiles
   whichever UAPI arm matches the build host. This unit makes that
-  harmless for this rule and records it; it does not pin the host tests'
-  architecture. If review wants that instead, it is a bigger unit and
-  this one should not pretend to it.
+  harmless for this rule and records it; it does not pin the host
+  tests' architecture.
 
 ## Alternatives considered
 
-- **(a) Shrink AArch64 to 448.** Smallest diff, no documentation churn.
-  Rejected: it spends the AArch64 expansion room down to two slots to
-  preserve a number nobody chose, on the architecture whose system
-  register set is the one that has been growing.
-- **(b) Grow x86-64 to 496.** Fixes the number without choosing it; 496
-  is as arbitrary as 448 and reads like a mistake rather than a size.
-- **(d) Drop the rule; assert per-architecture sizes.** Defensible — a
-  register file really is per architecture, and every user already says
-  `sizeof`. It would mean: V8 restated as two invariants, the header
-  asserting two constants, `test_hv.c` branching, and the documentation
-  saying "448 on x86-64, 496 on AArch64" in nine lines. It is strictly
-  less checkable across the pair, and it is the option to take only if
-  review judges the cross-arch rule to have been a mistake from the
-  start. Worth a sentence in review either way, because if the rule is
-  not worth keeping then the right unit is smaller than this one.
-- **Do nothing; fix only the comment and the test to say 496/448.**
-  This is (d) done cheaply and is what the two previous sightings
-  effectively proposed by recording the discrepancy and moving on. It
-  leaves `make host-test` red on arm64 unless the test branches too, and
-  it leaves V8 as an invariant whose check still cannot run where it
-  matters. The unit exists because the third sighting should cost more
-  than the first two.
+The first draft of this report recommended **(c)**. Review pointed out
+that `SYS_vcpu_regs` carries no size or version, so a resize is
+unguarded against a caller built from the older header — and following
+that led to the header preamble, which says these structures are stable.
+That is what moved the recommendation to (d). The rejected options, with
+what each would actually cost:
+
+- **(a) Shrink AArch64 to 448** (`reserved[8]` → `reserved[2]`). The
+  smallest diff and the one the documentation already describes.
+  Rejected twice over: it breaks the AArch64 ABI that has shipped since
+  `f8b88b2`, and it spends that register file's expansion room down to
+  two slots on the architecture whose EL1 register set is the one that
+  has grown — the block already carries **20** named EL1 system
+  registers.
+- **(b) Grow x86-64 to 496** (`reserved[9]` → `reserved[15]`). Breaks
+  the ABI that is currently correct, to match one that is not
+  documented, and fixes the number without choosing it.
+- **(c) Grow both to 512** (`reserved[8]` → `[10]`, `reserved[9]` →
+  `[17]`). What the first draft recommended: a round size with headroom
+  on both. It breaks **both** ABIs, and on x86-64 it breaks a block that
+  every document describes correctly today. A `SYS_vcpu_regs` copy would
+  grow by 16 bytes on AArch64 and 64 on x86-64 — worth stating in the
+  right order, because the draft had it backwards, and the larger growth
+  falls on the architecture that needed no change at all.
+- **Fix only the comment and the test to say 496/448, and stop.** This
+  is (d) without the header assertions, and it is what the two previous
+  sightings effectively proposed by recording the discrepancy and moving
+  on. It leaves V8 an invariant whose check still cannot run where it
+  matters, and leaves the next person to find the same thing a third
+  time. The assertions are the unit; the corrected prose is the tidying
+  that comes with them.
