@@ -219,3 +219,96 @@ Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever
 measuring the host.
+
+## `lockup-sample`, and a failure that was not a flake at all
+
+Three CI runs of one branch, 2026-09-17, failed three *different* tests.
+The branch was the VMState-layout unit: a compile-time assertion in a
+UAPI header, one self-test that runs in 7 ms, and documentation. It
+touched nothing in the network stack, the filesystem or the lockup
+detector. Recorded together because the three needed three different
+answers, and telling them apart is the whole skill this file is about.
+
+**`net-harness` (aarch64), a fourth sighting.** The same
+`nettest.c:929` (`client_ok`) as the three above, on a branch that
+cannot have caused it, and it failed on a `main` run in the same hour.
+Nothing new; it is here to say the count is four and that one of them
+was on `main`.
+
+**A fifth and a sixth, both on the pull request that added this
+paragraph, on consecutive runs.** Same assertion, same architecture, on
+a branch whose subject is a lock and a counter in cosmofs. Neither is a
+new fact about the cause. Together they are two facts about the *rate*,
+which nothing here had recorded:
+
+- **six sightings in about two weeks**, at least three of them on trees
+  that cannot have caused them (a documentation-only branch, a `main`
+  run, and this one);
+- and **twice in a row on one branch**, which needs care, because this
+  file says near the top that *a listed test that fails twice in a row
+  is a regression until shown otherwise*.
+
+That rule stands and this does not weaken it. Two things discharge the
+"until shown otherwise" here, and neither of them is the count:
+`net-harness` is deliberately **not** on that list (the paragraphs above
+say why -- a host-dependent exchange is not a bound this project can
+widen), and the branch it failed on twice changes a lock and a counter
+in cosmofs, with no path to a TCP exchange against a process on the
+host. The same assertion has already failed on `main` and on a
+documentation-only branch.
+
+The general form is worth stating, because the count is the tempting
+thing to reason from and it is the wrong thing: **what discharges "until
+shown otherwise" is the diff, not the number of failures.** A second
+failure on a branch that cannot reach the code is not twice the evidence
+of a regression; it is the same zero evidence, twice.
+
+A test that fails this often on unrelated work is a cost paid by every
+unit that follows, and the re-runs are the toll. Naming that is not the
+same as fixing it, and this file is not where the fix would go -- it is
+where the price is written down, and the price is now large enough to be
+worth a unit of its own.
+
+**`lockup-sample` (x86-64), the first sighting, and not previously in
+this file.** `lockuptest.c:157`:
+
+```c
+CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND));
+```
+
+The test starts a spinner pinned to another CPU, samples every CPU
+through the NMI path, and asserts that CPU's sampled program counter
+lies inside `spin_here`. It passed on a re-run of the same commit.
+
+What is *not* the explanation: a naive startup race. `start_spinner`
+waits for `s->running` before it returns, so the spinner is confirmed
+alive before the sample is taken. What remains is that `running` is set
+at the top of `spinner_main`, a little before it enters `spin_here`, and
+that under TCG a guest CPU is a host thread the host may have
+descheduled -- so the sample can land while that CPU is somewhere else,
+or is not executing at all.
+
+**That is a mechanism, not a cause.** Nothing here establishes which of
+them produced this failure, and one observation cannot. It is not added
+to the bounds list, because the bound is not a duration this project can
+widen: it is "the sampled PC is in the function the thread is spinning
+in", which is the assertion's whole content. A re-run is what
+distinguishes it from a regression.
+
+**And the third was not a flake.** `cosmofs-writeback` failed on the
+same branch and looked exactly like the other two -- a timing-ish test,
+in a subsystem the branch does not touch, on one run of three. It was a
+race in the code, and what said so was the log rather than the count:
+the test failed after **80 ms**, not at its 2-second deadline, with
+`committed generation 2` printed above the failure. So the commit had
+happened and the assertion about it had still failed, which no amount of
+host load explains. `cfs_writeback_thread` was incrementing
+`fs->wb_commits` after `cosmofs_sync` had dropped `fs->lock`, while
+`cosmofs_stats` reads that counter and the generation together under it.
+
+The lesson for this file is its own warning run backwards. It warns
+against a confident wrong *cause*; this is a confident wrong
+*category*. Three failures on a branch that cannot have caused any of
+them is good evidence for "not this branch" and no evidence at all for
+"not the repository", and the cheapest thing that separated them was
+reading how long the test took before it failed.

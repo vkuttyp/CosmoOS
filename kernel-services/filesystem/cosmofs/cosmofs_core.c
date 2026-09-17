@@ -14,6 +14,7 @@
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/lockdep.h>
 #include <kernel/vfs.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -1490,8 +1491,21 @@ static int orphan_replay(struct cfs *fs)
     return 0;
 }
 
-int cfs_commit(struct cfs *fs)
+/*
+ * `published` (optional) says whether *this call* put a new root on
+ * disk. It is not derivable from the generation number: a commit that
+ * fails after `fs->sb.generation = fs->gen` -- at the label update, the
+ * flush or the superblock write, all three below -- leaves the number
+ * advanced and `fs->gen` where it was, because only success reaches the
+ * `fs->gen++` at the end. A later retry then republishes the same
+ * number, and a caller comparing before against after would see no
+ * change and conclude nothing was published. Nor is `rc == 0` enough:
+ * the early return below is "there was nothing to commit".
+ */
+static int cfs_commit_ex(struct cfs *fs, bool *published)
 {
+    if (published)
+        *published = false;
     if (fs->failed)
         return fs->failed;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
@@ -1732,7 +1746,14 @@ int cfs_commit(struct cfs *fs)
     fs->first_dirty_ns = 0;
     kdebug("cosmofs: committed generation %llu (%llu free blocks)", (unsigned long long)fs->sb.generation,
            (unsigned long long)fs->free_blocks);
+    if (published)
+        *published = true;
     return 0;
+}
+
+int cfs_commit(struct cfs *fs)
+{
+    return cfs_commit_ex(fs, NULL);
 }
 
 /* Write back every dirty page of every cached regular file. Called with
@@ -2478,6 +2499,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
 }
 
 static int cosmofs_sync(struct mount *mnt);
+static int cosmofs_sync_counted(struct mount *mnt, bool writeback);
 
 /*
  * The writeback thread (design.md): commits when the open transaction
@@ -2508,10 +2530,8 @@ static void cfs_writeback_thread(void *arg)
         if (!mutex_trylock(&mnt->sync_lock))
             continue;   /* an unmount or vfs_sync is at it: they commit */
         if (!mnt->unmounted && !__atomic_load_n(&fs->wb_stop, __ATOMIC_ACQUIRE)) {
-            int rc = cosmofs_sync(mnt);
-            if (rc == 0)
-                fs->wb_commits++;
-            else
+            int rc = cosmofs_sync_counted(mnt, true);
+            if (rc)
                 kwarn("cosmofs: writeback commit failed (%d)", rc);
         }
         mutex_unlock(&mnt->sync_lock);
@@ -2584,7 +2604,20 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     return 0;
 }
 
-static int cosmofs_sync(struct mount *mnt)
+/*
+ * A commit, and whether it counts as the writeback thread's.
+ *
+ * The count is taken inside the same hold of fs->lock that publishes the
+ * generation, because cosmofs_stats reads the two together under that
+ * lock and a reader that sees one without the other sees a filesystem
+ * that never existed. It used to be taken after cosmofs_sync returned,
+ * which is after the lock was dropped: a window of a few instructions in
+ * which sb.generation had advanced and wb_commits had not, and
+ * cosmofs-writeback asserts exactly that pair
+ * (docs/audit/2026-09-deferred-work-inventory.md). The increment was
+ * also an unlocked read-modify-write on a field read under the lock.
+ */
+static int cosmofs_sync_counted(struct mount *mnt, bool writeback)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
@@ -2595,9 +2628,33 @@ static int cosmofs_sync(struct mount *mnt)
     if (rc)
         return rc;
     mutex_lock(&fs->lock);
-    rc = cfs_commit(fs);
+    /*
+     * Counted only when this call actually published a root, which
+     * cfs_commit_ex reports rather than leaving to be inferred.
+     *
+     * `rc == 0` is not the question: the early return means "there was
+     * nothing to commit", and the writeback thread reaches it that way
+     * whenever a foreground file_sync -- which does not take
+     * mnt->sync_lock -- commits between wb_due and this call. Comparing
+     * the generation before and after is not the question either: a
+     * commit that failed after publishing the number leaves it advanced
+     * and fs->gen where it was, so the retry that finally succeeds
+     * republishes the same number and would go uncounted.
+     */
+    bool published = false;
+    rc = cfs_commit_ex(fs, &published);
+    if (rc == 0 && writeback && published) {
+        /* Published with the generation, not after it. */
+        lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX);
+        fs->wb_commits++;
+    }
     mutex_unlock(&fs->lock);
     return rc;
+}
+
+static int cosmofs_sync(struct mount *mnt)
+{
+    return cosmofs_sync_counted(mnt, false);
 }
 
 /* The VFS committed through cosmofs_sync before calling this; what is
