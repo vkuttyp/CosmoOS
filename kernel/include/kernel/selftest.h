@@ -237,6 +237,7 @@ bool selftest_cosmofs_orphan_dir(const char **reason);
 bool selftest_cosmofs_orphan_rename(const char **reason);
 bool selftest_cosmofs_orphan_idempotent(const char **reason);
 bool selftest_cosmofs_orphan_reserved(const char **reason);
+bool selftest_cosmofs_mount_no_early_wb(const char **reason);
 bool selftest_cosmofs_orphan_supersede(const char **reason);
 bool selftest_cosmofs_orphan_rollback(const char **reason);
 bool selftest_cosmofs_orphan_suspect(const char **reason);

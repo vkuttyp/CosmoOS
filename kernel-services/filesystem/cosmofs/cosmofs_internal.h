@@ -130,6 +130,9 @@ struct cfs {
     unsigned wb_interval_ms;
     uint64_t first_dirty_ns; /* when the open transaction first became non-empty; 0 when empty */
     uint64_t wb_commits;
+    bool mount_done;          /* the mount finished: before this there is no autonomous committer */
+    uint64_t mount_dirty_notes; /* dirty marks the mount's own replay made */
+    uint64_t wb_early;          /* how many of those found a committer already running */
 };
 
 #define CFS_WB_POLL_MS       50u
