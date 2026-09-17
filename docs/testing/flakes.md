@@ -416,11 +416,25 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Eight, to 2026-09-17**, across CI and this developer's machine, on
-both architectures: PR #140 (twice), #142, #144 (twice), #146, two on
-documentation-only commits, and the run of PR #167 that first carried
-the harness timings. At least four were on trees that cannot have caused
-them.
+**Nine, to 2026-09-17**, across CI and this developer's machine, on both
+architectures. Counted rather than asserted, because the first version
+of this section said eight and then listed nine:
+
+| sighting | source |
+| --- | --- |
+| PR #140, twice | the inventory row's history |
+| PR #142 | the inventory row's history |
+| PR #144, twice | the inventory row's history |
+| PR #146 | the inventory row's history |
+| two documentation-only commits | the inventory row's history |
+| PR #167's own CI run | observed, with timings |
+
+Six entries, nine occurrences. The first five rows are inherited from
+the row that recorded them and are not independently re-verified here;
+the last was watched as it happened and is the one that carries
+`accepted at 92.0s, 0 of 12 bytes`.
+
+At least four were on trees that cannot have caused them.
 
 **One in twenty-one** local x86-64 boots reproduce it, measured after
 PR #169's instrumentation landed; six of those boots ran under CPU load

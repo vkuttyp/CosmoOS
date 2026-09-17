@@ -2411,7 +2411,7 @@ See [docs/development.md](docs/development.md).
   aarch64 jobs a 145.6-second boot passed and a 145.8-second one failed,
   so boot length does not predict the outcome. What the unit *did* find
   is why nobody could tell: **the harness recorded none of those
-  numbers.** Seven sightings produced `TimeoutError('timed out')` and
+  numbers.** Every sighting produced `TimeoutError('timed out')` and
   nothing about when the guest connected, how much budget remained, or
   whether the port was open. So the deadline is fixed — bound early,
   accepted after the guest reports ready, one budget derived from the

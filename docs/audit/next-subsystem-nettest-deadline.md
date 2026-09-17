@@ -67,7 +67,7 @@ is `accept + 10`, and `conn.settimeout(10)` is on line 66: it came from
 
 So the deadline this unit fixed was never the cause, which is what the
 report declined to claim and is why the row stayed open. The real shape,
-for the first time in seven sightings:
+for the first time in any sighting (`docs/testing/flakes.md`, "The count"):
 
 | | |
 | --- | --- |
