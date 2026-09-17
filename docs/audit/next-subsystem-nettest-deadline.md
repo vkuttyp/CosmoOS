@@ -95,11 +95,25 @@ Accepted 0.8 seconds after readiness, with **78.7 seconds of accept
 budget unspent** — so the deadline is not merely unproven as the cause,
 it is excluded. The failure is ten seconds later, in the read.
 
-Two things follow for whoever takes this next. The architecture matters:
-every local attempt during this unit was on aarch64, where it did not
-reproduce in eleven runs, and it appeared on the first x86-64 attempt.
-And the loop is now two minutes rather than a twenty-minute CI round
-trip, which is the difference between chasing this and waiting for it.
+Two things follow for whoever takes this next.
+
+**The bug is on both architectures; only the local reproduction is not.**
+CI failed it on x86-64 and on aarch64 within the hour, with the same
+signature each time:
+
+```
+x86-64   accepted at 92.0s, 0 of 12 bytes, gave up at 102.0s, 59.1s of accept budget unspent
+aarch64  accepted at 92.6s, 0 of 12 bytes, gave up at 102.6s, 65.3s unspent
+local    accepted at 76.1s, 0 of 12 bytes, gave up at 86.1s,  78.7s unspent
+```
+
+Every local attempt during this unit was on aarch64, where it did not
+reproduce in eleven runs, and it appeared on the first x86-64 attempt --
+which says where to run the loop, not what the bug is.
+
+**And the loop is two minutes rather than a twenty-minute CI round
+trip**, which is the difference between chasing this and waiting for
+it.
 
 Worth stating about this report: its first draft named a cause, its
 retraction named none, and the thing that actually produced an answer

@@ -343,6 +343,22 @@ That is worth more than the diagnosis to anyone reading this file later:
 "does not reproduce locally" had been recorded for weeks, and what it
 meant was "does not reproduce on the architecture we kept trying".
 
+**Not that the defect is x86-only** -- it is not, and the distinction
+matters. CI has now failed it on both architectures with the same
+signature within the hour:
+
+```
+x86-64   accepted at 92.0s, 0 of 12 bytes, gave up at 102.0s, accept budget 59.1s unspent
+aarch64  accepted at 92.6s, 0 of 12 bytes, gave up at 102.6s, accept budget 65.3s unspent
+local    accepted at 76.1s, 0 of 12 bytes, gave up at 86.1s,  accept budget 78.7s unspent
+```
+
+Three machines, two architectures, one mechanism, and in every case the
+accept succeeded with a minute or more of its budget to spare. What is
+architecture-dependent is only whether *this* developer's machine
+reproduces it, which is a fact about where to run the loop, not about
+the bug.
+
 **The standing advice does not change.** A re-run still distinguishes a
 flake from a regression, and what discharges "until shown otherwise" is
 still the diff rather than the count.
