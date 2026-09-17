@@ -245,7 +245,9 @@ for one site at a time.
 ```c
 /* kernel/include/kernel/socket.h */
 /* The pending asynchronous error, read once: returns it and clears it,
- * as SO_ERROR does. 0 when there is none. */
+ * as SO_ERROR does. 0 when there is none. Takes no lock -- see N21 --
+ * so it is safe with or without s->lock held, and against a writer in
+ * packet context. */
 int ksock_error(struct socket *s);
 ```
 
@@ -425,7 +427,7 @@ succeed, the way to get there is to implement address reuse.
 | file | change |
 | --- | --- |
 | `kernel/include/kernel/socket.h` | `ksock_error`; `error` becomes an atomic word with the access rule in its comment; `sock_set_error`'s comment gains its caller |
-| `kernel-services/network/socket.c` | `take_error` → `ksock_error` (exported, locked); the `:224` double call bound to a variable; `ksock_ready`'s `s->error` branch now reachable |
+| `kernel-services/network/socket.c` | `take_error` → `ksock_error` (exported, **lock-free**: an atomic exchange, callable with or without `s->lock`); `sock_set_error` stores with release; the `:224` double call bound to a variable; `ksock_ready`'s `s->error` branch now reachable |
 | `kernel/include/kernel/net/udp.h` | `udp_error_notify` |
 | `kernel-services/network/udp.c` | the four-tuple walk over `g_pcbs`, connected-only, `sock_set_error` |
 | `kernel-services/network/ipv4.c` | `icmp_input`: the dest-unreach branch, after `M_FW_QUIET`, sharing `icmp_needfrag`'s parse |
@@ -508,8 +510,10 @@ testable whether or not the defect it was motivated by appears.
 
 ## Benchmarks
 
-None. `ksock_error` is a mutex and two loads on paths that already take
-that mutex. The `icmp_input` branch runs only for ICMP type 3, which
+None. `ksock_error` is one atomic exchange and, at most, one relaxed
+load — no lock, so it adds no contention to the paths that call it and
+none to the packet-receive path that writes the field. The
+`icmp_input` branch runs only for ICMP type 3, which
 this host currently receives at a rate of zero. `SYS_getsockopt` is a
 handle lookup and a load.
 
