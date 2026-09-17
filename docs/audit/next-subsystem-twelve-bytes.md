@@ -13,6 +13,28 @@ the unit lands, and — as with #167 — not necessarily then: this is a
 defect nobody has yet explained, and a report that promises to close it
 would be promising something its predecessor learned not to.
 
+**Built as PR #169 — step 1 only, deliberately.** The instrument is in;
+the numbers are not, because the failure did not come.
+
+**The rate is lower than this report said, and load does not raise it.**
+Twenty-one x86-64 boots on this machine: **one failure, and it was the
+one that prompted the report.** Six of those twenty-one ran with four
+CPU spinners alongside, on the reasoning that every observed failure —
+three in CI, one here — had coincided with a loaded machine. All six
+passed. Not enough to call load irrelevant; enough to stop treating it
+as the lever.
+
+At roughly one boot in twenty and two minutes a boot, hunting locally is
+forty minutes per expected failure with wide variance. CI's rate looked
+higher earlier the same day, so the instrument ships and the next failure
+reports itself — which is exactly how PR #167's four numbers produced an
+answer within the hour of being pushed.
+
+**Step 2 remains "read the numbers", and this pull request does not
+contain them.** Saying so is the point: a unit that shipped an
+instrument and then guessed what it would have shown would be the error
+this row has already cost two retractions for.
+
 ## What is established
 
 Not "flaky". The failure has one signature, seen on three machines and
@@ -42,11 +64,18 @@ So: **twelve bytes, guest to host, on a connection both ends agree
 exists, while a quarter-megabyte crosses the same interface in the same
 run.**
 
-**It reproduces**: about one run in three, `make ARCH=x86_64 test`, on
-this developer's machine. Every earlier attempt for weeks was on
-aarch64, where it did not appear in eleven runs — which is a fact about
-where to run the loop, not about the bug, since CI has failed it on both
-architectures. The loop is two minutes.
+**It reproduces on x86-64 here, and rarely.** This report first said
+"about one run in three", which was one failure in three runs stated as
+a rate. Fifteen runs in, it is **one in fifteen** — and even that is a
+handful of observations, not a measurement. Getting twelve consecutive
+passes if the rate were really a third has a probability of about
+0.8 %, so the original figure was not merely imprecise, it was wrong.
+
+Every earlier attempt for weeks was on aarch64, where it did not appear
+in eleven runs, which is a fact about where to run the loop rather than
+about the bug — CI has failed it on both architectures. Each boot is
+about two minutes, so a hunt is tens of minutes rather than the handful
+of boots an earlier draft of the plan assumed.
 
 ## What nothing can currently say
 
@@ -209,8 +238,13 @@ None. `tcp_send_space`, `tcp_state_of` and `tcp_get_stats` all exist; the first 
 
 ## Migration plan
 
-1. **The instrumentation**, and a local run loop until it fails — about
-   one in three on x86-64, so a handful of boots.
+1. **The instrumentation**, and a local run loop until it fails. At
+   roughly one boot in fifteen that is tens of minutes, not a handful —
+   see the rate note above, which corrects this report's own first
+   estimate. Worth considering before brute force: the harness accepts
+   exactly one back-connection (`listen(1)`, one `accept`), so repeating
+   the exchange within a boot would need the host side changed too, and
+   that is a larger change than it sounds.
 2. **Read the numbers.** One failing run selects a row of the table in
    §2, which selects what step 3 is.
 3. **Step 3 depends on step 2** and the report deliberately does not

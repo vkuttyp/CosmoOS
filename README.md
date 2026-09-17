@@ -2424,6 +2424,32 @@ See [docs/development.md](docs/development.md).
   it is struck when a sighting with the new timings shows the deadline
   was the cause and the fix ended it, and not before (PR #167).
 
+- **Twelve bytes that never arrive** (`docs/audit/next-subsystem-twelve-bytes.md`).
+  The guest half of the instrumentation the previous unit added to the
+  host. `net-harness` prints `client failed (%d)` with the **connect's**
+  result, so every one of its failures has reported that the step which
+  worked, worked — the same defect PR #167 removed from the other side
+  of the same wire. It now says what `ksock_sendto` and `ksock_recvfrom`
+  returned, and asks the connection rather than the global counters:
+  `tcp_send_space` before the send, after it and after the read, because
+  data sits in the send buffer until it is **acknowledged**, and that is
+  per-connection where `tcp_get_stats` counts this connect's own SYN and
+  every other socket's traffic. Four outcomes, and they are exclusive:
+  never queued; queued and never acknowledged with retransmissions
+  climbing; queued and never acknowledged with retransmissions **flat**,
+  which would be a defect here whatever else is true; or the send buffer
+  **drains** — the data was acknowledged and the host still saw nothing,
+  which is what QEMU's user-mode networking being a *proxy rather than a
+  wire* makes possible, since it acknowledges into its own buffer before
+  writing onward. **This unit is step 1 and stops there.** Twenty-one
+  local boots produced one failure — the rate is about one in twenty,
+  not the one in three an earlier draft claimed from a single
+  observation, and six boots under CPU load did not raise it. So the
+  instrument ships and the next failure reports itself, as #167's did
+  within the hour. The inventory row stays open and the numbers are not
+  guessed at. 333 self-tests on both architectures, debug and release
+  (PR #169).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
