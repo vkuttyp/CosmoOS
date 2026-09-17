@@ -2372,6 +2372,26 @@ See [docs/development.md](docs/development.md).
   hung boot. New invariant V32. 333 self-tests on both architectures,
   debug and release (PR #164).
 
+- **A count published after the thing it counts.** Not a unit: an
+  inventory row this session's VMState work turned up, fixed on request.
+  `cfs_writeback_thread` incremented `fs->wb_commits` after
+  `cosmofs_sync` returned — after that function had dropped `fs->lock` —
+  while `cosmofs_stats` reads the counter and `sb.generation` together
+  under it. For the few instructions in between, a reader saw a
+  filesystem that never existed: the new generation with the old count,
+  which is exactly the pair `cosmofs-writeback` asserts. It failed once
+  on aarch64 CI and looked like the two genuine flakes beside it; the
+  log is what separated them, because it failed after **80 ms** rather
+  than at its 2-second deadline with `committed generation 2` printed
+  above it, so the commit had happened and host load explains nothing.
+  The count is now taken inside the same hold of `fs->lock` that
+  publishes the generation, and the field has exactly two accesses in
+  the tree with both under that lock. The race is not deterministic and
+  the proof is: `lockdep_assert_held` at the increment means publishing
+  it outside the lock panics on the first writeback commit of the boot
+  rather than on the one run in a hundred that catches it. 333
+  self-tests on both architectures, debug and release (PR #165).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

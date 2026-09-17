@@ -191,6 +191,24 @@ uint64_t clock_since_ns(uint64_t stamp)
     return now > stamp ? now - stamp : 0;
 }
 
+/*
+ * cosmofs asserts that the writeback count is published under fs->lock
+ * (cosmofs_sync_counted), and lockdep_assert_held is a real call rather
+ * than an inline, so this shim has to supply one; the kernel's version
+ * lives in kernel/core/lockdep.c, which the fuzzers do not link.
+ *
+ * True, because the fuzzers are single-threaded and take no locks: the
+ * assertion is asking "is this caller holding it", and here every caller
+ * trivially is the only one there could be. A stub that answered false
+ * would fail an assertion about a property the fuzzer does not have.
+ */
+bool lockdep_is_held(const void *lock, unsigned kind)
+{
+    (void)lock;
+    (void)kind;
+    return true;
+}
+
 int pool_flush(struct spool *p)
 {
     p->flushes++;
