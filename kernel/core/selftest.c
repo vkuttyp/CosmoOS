@@ -501,6 +501,7 @@ static const struct selftest tests[] = {
     { "cosmofs-orphan-rename", selftest_cosmofs_orphan_rename },
     { "cosmofs-orphan-idempotent", selftest_cosmofs_orphan_idempotent },
     { "cosmofs-orphan-reserved", selftest_cosmofs_orphan_reserved },
+    { "cosmofs-mount-no-early-writeback", selftest_cosmofs_mount_no_early_wb },
     { "cosmofs-orphan-supersede", selftest_cosmofs_orphan_supersede },
     { "cosmofs-orphan-rollback", selftest_cosmofs_orphan_rollback },
     { "cosmofs-orphan-suspect", selftest_cosmofs_orphan_suspect },

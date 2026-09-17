@@ -2190,6 +2190,65 @@ bool selftest_cosmofs_orphan_reserved(const char **reason)
 }
 
 /*
+ * A mount replays with fs->lock unheld, which is sound only while the
+ * filesystem has no other thread in it. The writeback thread used to
+ * start on the replay's first dirty buffer, from inside the replay: it
+ * takes the mount's sync lock, which the mount path does not hold, sees
+ * a mount that is not unmounted, and commits a half-built filesystem
+ * across an unlocked fs->bufs. That is what made cosmofs-orphan-reserved
+ * fail on CI with a metadata block that would not verify, and what
+ * panicked x86_64 in list_remove under a writeback commit.
+ *
+ * Whether that second thread wins the race is timing; whether it exists
+ * during the replay is not, so that is the claim here. The first count
+ * is the test's own guard: a mount whose replay dirtied nothing would
+ * satisfy the second for no reason.
+ */
+bool selftest_cosmofs_mount_no_early_wb(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 4096, reason))
+        return false;
+    /* An open transaction big enough that the force-unmount strands it
+     * and the next mount has a long replay to do. */
+    const unsigned many = CFS_ORPHANS_PER_BLOCK + 20u;
+    struct file **held = kmalloc(many * sizeof(*held), KMEM_ZERO);
+    CHECK(held != NULL);
+    char path[64];
+    bool ok = true;
+    for (unsigned i = 0; i < many && ok; i++) {
+        ksnprintf(path, sizeof(path), ENG "/w%u", i);
+        ok = write_file(path, "x", 1) && vfs_open(NULL, path, COSMO_O_RDONLY, 0, &held[i]) == 0 &&
+             vfs_unlink(NULL, path) == 0;
+    }
+    if (!ok) {
+        for (unsigned i = 0; i < many; i++)
+            if (held[i])
+                file_put(held[i]);
+        kfree(held);
+        *reason = "could not build the orphan set";
+        return false;
+    }
+    CHECK(vfs_sync() == 0);
+    for (unsigned i = 0; i < many; i++)
+        file_put(held[i]);
+    kfree(held);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    uint64_t notes = 0, early = 0;
+    cosmofs_test_mount_writeback(mount_of(ENG), &notes, &early);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(notes > 0);    /* the guard: the replay really did dirty the filesystem */
+    CHECK(early == 0);   /* the claim: and no writeback thread was in it */
+
+    kinfo("selftest: cosmofs-mount-no-early-writeback: the replay made %llu dirty marks, "
+          "%llu of them with a writeback thread running",
+          (unsigned long long)notes, (unsigned long long)early);
+    return engine_unmount(bd, reason);
+}
+
+/*
  * A hundred commits with a handle held leave one chain and no residue:
  * each writes its own record and releases its predecessor's. Not
  * releasing it would cost a block a commit, which no single-commit test

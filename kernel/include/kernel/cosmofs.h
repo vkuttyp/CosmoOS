@@ -186,6 +186,7 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
 int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva);
 /* Test hook: free blocks on one member, or UINT64_MAX past the last. */
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev);
+void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint64_t *early);
 
 /*
  * Entries on every snapshot's deadlist: all of them when `of` is 0, or

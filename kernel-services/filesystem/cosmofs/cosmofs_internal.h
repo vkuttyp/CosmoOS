@@ -130,6 +130,9 @@ struct cfs {
     unsigned wb_interval_ms;
     uint64_t first_dirty_ns; /* when the open transaction first became non-empty; 0 when empty */
     uint64_t wb_commits;
+    bool mount_done;          /* the mount finished: before this there is no autonomous committer */
+    uint64_t mount_dirty_notes; /* dirty marks the mount's own replay made */
+    uint64_t wb_early;          /* how many of those found a committer already running */
 };
 
 #define CFS_WB_POLL_MS       50u
@@ -265,8 +268,13 @@ int cfs_labels_update(struct cfs *fs);
 /* Read `dva` into `buf` and check it with `verify`, trying the member's
  * copies in turn and writing the first good one back over the copies
  * that failed. -EIO when no copy satisfies `verify`. */
+/* `read_ok` (optional) describes the bytes left in `buf`, not the call's
+ * history: true when they came from a copy that read cleanly and the
+ * verifier then rejected them, false when the last copy attempted failed
+ * to read and what is in the buffer is whatever it managed to transfer.
+ * Both return -EIO, and only the first is worth describing. */
 int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
-                    bool *repaired);
+                    bool *repaired, bool *read_ok);
 /* Read *every* copy and check each one, writing a good copy back over
  * the bad ones. This is what a scrub needs and a read does not: a read
  * stops at the first copy that verifies, so rot on any other copy stays

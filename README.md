@@ -2272,6 +2272,40 @@ See [docs/development.md](docs/development.md).
   only while threads could not move. 330 self-tests on both
   architectures, debug and release (PR #158).
 
+- **A writeback thread inside a mount that was still replaying.** Not a
+  unit: the deferred-work inventory's one open defect, chased on
+  request. `cosmofs-orphan-reserved` failed on three of three CI runs
+  and none of three local ones, on a documentation-only branch, always
+  as one metadata block that would not verify, at a different address
+  each time. What opened it was the other architecture: the same test
+  panicked x86\_64 with a kernel write at zero in `list_remove` <-
+  `cfs_buf_get` <- `freelog_release_previous` <- `cosmofs_sync`, running
+  on `cfs-wb`. cosmofs starts its writeback thread lazily, on the first
+  dirty buffer, so that a read-only mount has none to join -- and a
+  mount's own replay dirties buffers, so the thread was being started
+  from inside the replay. It then takes only `mount.sync_lock`, which
+  the mount path does not hold, finds `mnt->unmounted` false, and
+  commits a half-built filesystem across an `fs->bufs` that the mount
+  walks with `fs->lock` unheld, because until `cosmofs_mount` returns
+  nothing else is supposed to be in the filesystem. Two threads on one
+  intrusive list: an unverifiable metadata block on one architecture, a
+  null dereference on the other. The same window let a *failed* mount
+  reach `cfs_destroy`, which frees every buffer and the filesystem, with
+  that thread still running. The rule is now that no autonomous
+  committer exists before the mount is live: the spawn is gated on
+  `mount_done` and `cosmofs_mount` starts the thread at the end if the
+  replay left anything dirty, and `cfs_destroy` stops and joins for
+  itself rather than trusting its caller. Whether that thread wins the
+  race is timing and whether it exists during the replay is not, so
+  `cosmofs-mount-no-early-writeback` claims the second: it counts the
+  replay's dirty marks, which must not be zero or the test is asking
+  nothing, and how many of those found a thread already running, which
+  must be zero -- that count is the rule. With the gate reverted it
+  fails on exactly that count, while `cosmofs-orphan-reserved` still
+  passes here -- which is what the three local runs had been saying all
+  along. 331 self-tests on both
+  architectures, debug and release (PR #160).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

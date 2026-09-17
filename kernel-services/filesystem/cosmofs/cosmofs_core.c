@@ -50,14 +50,36 @@ static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t bl
     h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
 }
 
-static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
+/*
+ * Why a metadata block did not verify, for the message below.
+ *
+ * The four are very different findings and the error said only "bad
+ * metadata header or checksum" for all of them: a wrong magic is a block
+ * that was never sealed as metadata, a wrong `blkno` is one block's
+ * content sitting at another's address, a wrong kind is the right block
+ * misused, and a bad CRC is content that changed after it was sealed.
+ * Chasing the writeback thread that committed during a mount needed to
+ * know which; the message is kept because the next one will too.
+ */
+enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_CRC };
+
+static enum mhdr_fault mhdr_fault_of(const uint8_t *block, uint64_t blkno, uint32_t kind)
 {
     const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
-    if (h->magic != CFS_MHDR_MAGIC || h->blkno != blkno || (kind && h->kind != kind))
-        return -EIO;
+    if (h->magic != CFS_MHDR_MAGIC)
+        return MHDR_MAGIC;
+    if (h->blkno != blkno)
+        return MHDR_BLKNO;
+    if (kind && h->kind != kind)
+        return MHDR_KIND;
     if (block_crc(block, offsetof(struct cfs_mhdr, crc)) != h->crc)
-        return -EIO;
-    return 0;
+        return MHDR_CRC;
+    return MHDR_OK;
+}
+
+static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
+{
+    return mhdr_fault_of(block, blkno, kind) == MHDR_OK ? 0 : -EIO;
 }
 
 struct mhdr_want {
@@ -180,10 +202,26 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
      * from another copy and put the bad one right (design.md, "A mirror
      * is only as good as its verifier"). */
     struct mhdr_want want = { .dva = blkno, .kind = kind };
-    int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL);
+    bool read_ok = false;
+    int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL, &read_ok);
     if (rc) {
-        kerror("cosmofs: block %llu: %s", (unsigned long long)blkno,
-               rc == -EIO ? "bad metadata header or checksum" : "read error");
+        if (rc == -EIO && read_ok) {
+            /* Say which of the four checks failed and what it found:
+             * "bad header or checksum" covers four different faults with
+             * four different causes. */
+            const struct cfs_mhdr *h = (const struct cfs_mhdr *)b->data;
+            static const char *const why[] = { "ok", "magic", "blkno", "kind", "crc" };
+            enum mhdr_fault f = mhdr_fault_of(b->data, blkno, kind);
+            kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu crc 0x%08x "
+                   "(wanted kind %u at blkno %llu, computed crc 0x%08x)",
+                   (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
+                   (unsigned long long)h->blkno, h->crc, kind, (unsigned long long)blkno,
+                   block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
+        } else {
+            /* Nothing was read, so b->data describes nothing: saying
+             * which header field is wrong would be inventing one. */
+            kerror("cosmofs: block %llu: read error (%d)", (unsigned long long)blkno, rc);
+        }
         list_remove(&b->link);
         fs->nr_bufs--;
         kfree(b->data);
@@ -364,20 +402,47 @@ static inline void bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t
 
 static void cfs_writeback_thread(void *arg);
 
-/* The open transaction just became (or stayed) non-empty. The writeback
+/*
+ * The open transaction just became (or stayed) non-empty. The writeback
  * thread starts here, on the first change, so a mount that only reads
  * (the replay harness mounts hundreds of prefix images) never has one to
- * join at unmount. */
+ * join at unmount.
+ *
+ * Not before the mount is live, though. A mount's replay dirties buffers
+ * (the freelog reclaim and the orphan replay both do) and it does that
+ * with fs->lock unheld, because until cosmofs_mount returns nobody else
+ * has the filesystem. A thread started here would falsify that: it takes
+ * only the mount's sync lock, which the mount path does not hold, finds
+ * mnt->unmounted false, and commits a half-built mount from the other
+ * side of an unlocked fs->bufs. That is a second writer on an intrusive
+ * list, and it showed up as a metadata block that would not verify and,
+ * on x86_64, as a null dereference in list_remove under a commit the
+ * writeback thread ran while the mount was still replaying. The same
+ * window is why a failed mount could reach cfs_destroy, which frees
+ * every buffer and fs itself, with that thread still running.
+ *
+ * So the rule is: no autonomous committer before the mount is live.
+ * cosmofs_mount sets mount_done and calls back here, which starts the
+ * thread then if the replay left anything dirty.
+ */
 static void note_dirty(struct cfs *fs)
 {
     if (fs->first_dirty_ns == 0)
         fs->first_dirty_ns = clock_now_ns();
-    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt) {
+    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt && fs->mount_done) {
         fs->wb_thread = thread_create(cfs_writeback_thread, fs, "cfs-wb", SCHED_PRIO_DEFAULT);
         if (fs->wb_thread == NULL) {
             fs->wb_enabled = false;
             kwarn("cosmofs: no writeback thread; commits happen on sync, fsync and unmount only");
         }
+    }
+    /* The invariant, counted rather than asserted: whether such a thread
+     * wins the race is timing, but whether it exists at all is not, and
+     * that is what cosmofs-mount-no-early-writeback reads. */
+    if (!fs->mount_done) {
+        fs->mount_dirty_notes++;
+        if (fs->wb_thread != NULL)
+            fs->wb_early++;
     }
 }
 
@@ -2300,6 +2365,14 @@ static int load_bitmap(struct cfs *fs)
 
 static void cfs_destroy(struct cfs *fs)
 {
+    /* Nothing may still be committing while this frees the buffers and
+     * fs. cosmofs_unmount has already stopped the thread; a mount that
+     * failed has none to stop, and this says so rather than trusting it. */
+    if (fs->wb_thread) {
+        __atomic_store_n(&fs->wb_stop, true, __ATOMIC_RELEASE);
+        thread_join(fs->wb_thread);
+        fs->wb_thread = NULL;
+    }
     struct cfs_buf *b, *tmp;
     list_for_each_entry_safe(b, tmp, &fs->bufs, link) {
         list_remove(&b->link);
@@ -2503,6 +2576,11 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
           (unsigned long long)fs->sb.generation, (unsigned long long)fs->free_blocks,
           (unsigned long long)fs->sb.total_blocks, (unsigned long long)fs->reserve,
           (unsigned long long)fs->sb.inode_count);
+    /* Live now, so the writeback thread may exist. If the replay left an
+     * open transaction, this is where its committer starts. */
+    fs->mount_done = true;
+    if (fs->first_dirty_ns != 0)
+        note_dirty(fs);
     return 0;
 }
 
@@ -2727,6 +2805,21 @@ uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev)
     uint64_t n = fs->mem[vdev].free_blocks;
     mutex_unlock(&fs->lock);
     return n;
+}
+
+/*
+ * What the mount's own replay did: how many dirty marks it made, and how
+ * many of those happened with a writeback thread already running. The
+ * second must be zero (no autonomous committer before the mount is
+ * live); the first must not be, or the test asking is asking nothing.
+ */
+void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint64_t *early)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (dirty_notes)
+        *dirty_notes = fs ? fs->mount_dirty_notes : 0;
+    if (early)
+        *early = fs ? fs->wb_early : 0;
 }
 
 void cosmofs_test_set_writeback(struct mount *mnt, bool on)
