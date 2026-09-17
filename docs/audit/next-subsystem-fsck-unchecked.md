@@ -191,7 +191,7 @@ so rather than pretending the choice is obvious.
 
 The class is `dir_dup_name`, reported once per duplicate name.
 
-### The five unfired classes: five corruption kinds
+### The five unfired classes, and eight corruption kinds in all
 
 Each gets a `COSMOFS_CORRUPT_*` kind, because the tree already made that
 the way to fire a class:
@@ -207,11 +207,13 @@ the way to fire a class:
 | `COSMOFS_CORRUPT_TWO_PARENTS` | a directory named by an entry in a second directory |
 | `COSMOFS_CORRUPT_SNAP_MEMBERS` | a snapshot member count larger than its block can hold |
 
-**Eight kinds**: three for the new checks above, four for the unfired
-`dir_bad` sites, one for the cycle. (An earlier draft said "seven" here
-while the section heading says "five". The heading counts *reporting
-paths*, which is five; the kinds are eight. Both were right about
-different things and neither said which.)
+**Eight kinds**, and the arithmetic, because an earlier draft of this
+report gave three different numbers for it: three kinds for the new
+checks above (overlap, order, duplicate name), four for the unfired
+`dir_bad` sites (bad pointer, snapshot members, namelen, two parents),
+and one for the cycle. Eight. The **five** elsewhere in this section
+counts *reporting paths*, which is a different thing and is now labelled
+as one everywhere it appears.
 
 ### What it does not do
 
@@ -234,8 +236,8 @@ different things and neither said which.)
 | file | change |
 | --- | --- |
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the ordering and overlap comparisons; the duplicate-name bitmap and re-scan; three new classes in the report |
-| `kernel/include/kernel/cosmofs.h` | `extent_order`, `extent_overlap`, `dir_dup_name` in `struct cosmofs_check_report`; seven `COSMOFS_CORRUPT_*` kinds |
-| `kernel-services/filesystem/cosmofs/cosmofs_core.c` | `cosmofs_test_corrupt` writes the seven new corruptions |
+| `kernel/include/kernel/cosmofs.h` | `extent_order`, `extent_overlap`, `dir_dup_name` in `struct cosmofs_check_report`; **eight** `COSMOFS_CORRUPT_*` kinds |
+| `kernel-services/filesystem/cosmofs/cosmofs_core.c` | `cosmofs_test_corrupt` writes the **eight** new corruptions |
 | `kernel-services/filesystem/cosmofs/cosmofstest.c` | a test per class; **a helper that prints a report's non-zero counts**, and every existing `CHECK(r.clean)` swept to use it |
 | `userland/bin/fsctl.c` (or wherever the report is printed) | the three new counts |
 | `docs/kernel-services/filesystem/cosmofs/design.md` | "What it does not check" shrinks to `next_ino`, with the reason it stays |
