@@ -905,13 +905,70 @@ bool selftest_net_harness(const char **reason)
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
     int rc = ksock_connect(c, &host);
-    if (rc == 0 && ksock_sendto(c, "cosmo hello\n", 12, NULL) == 12) {
-        char buf[32];
-        int64_t n = ksock_recvfrom(c, buf, sizeof(buf), NULL);
-        client_ok = n == 12 && memcmp(buf, "cosmo world\n", 12) == 0;
+
+    /*
+     * This exchange has failed repeatedly, on both architectures and on
+     * CI and locally (the tally is kept in docs/testing/flakes.md, "The
+     * count", and deliberately nowhere else), and until now said only
+     * "client failed (0)" -- the
+     * *connect's* result, printed for a failure in a later step
+     * (docs/audit/next-subsystem-twelve-bytes.md).
+     *
+     * What is asked instead is the connection itself. Data sits in the
+     * send buffer until it is acknowledged, so `space` before the send,
+     * after it and after the read says whether the twelve bytes were
+     * queued and whether they were ever acknowledged -- for this
+     * connection, which the global counters below cannot be, since they
+     * count this connect's own SYN and every other socket's traffic.
+     *
+     * The distinction matters because QEMU's user-mode networking is a
+     * proxy rather than a wire: it terminates the guest's TCP in its own
+     * stack and writes onward to a separate host socket, so it
+     * acknowledges these bytes into its own buffer before the host has
+     * seen them. A drained send buffer with nothing at the far end is
+     * therefore a real and expected outcome, and it is the one that says
+     * this kernel is not at fault.
+     */
+    int64_t sent = -1, got = -1;
+    uint32_t space0 = 0, space1 = 0, space2 = 0;
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    if (rc == 0) {
+        space0 = tcp_send_space(c->tcp);
+        sent = ksock_sendto(c, "cosmo hello\n", 12, NULL);
+        space1 = tcp_send_space(c->tcp);
+        if (sent == 12) {
+            char buf[32];
+            got = ksock_recvfrom(c, buf, sizeof(buf), NULL);
+            client_ok = got == 12 && memcmp(buf, "cosmo world\n", 12) == 0;
+        }
+        space2 = tcp_send_space(c->tcp);
     }
+    tcp_get_stats(&t1);
+    enum tcp_state st = tcp_state_of(c->tcp);
     ksock_put(c);
-    kprintf(client_ok ? "NETTEST: client ok\n" : "NETTEST: client failed (%d)\n", rc);
+    if (client_ok) {
+        kprintf("NETTEST: client ok\n");
+    } else {
+        /* The three samples are labelled by *when*, not by what they are
+         * taken to mean. space1 is read after ksock_sendto has released
+         * the pcb lock, so an acknowledgement can already have drained
+         * the buffer -- "outstanding after the send" is 0 in that case
+         * and nothing is wrong, whereas calling it "queued" would print
+         * `sent 12, queued 0` and contradict itself. The discriminator
+         * is the third: still outstanding after the read gave up means
+         * the twelve bytes were never acknowledged. */
+        kprintf("NETTEST: client failed: connect %d, sent %lld, recv %lld, "
+                "sndbuf free %u before, %u after send, %u after read "
+                "(outstanding %d then %d), state %d, "
+                "segs_out +%llu retransmits +%llu refused +%llu rsts_in +%llu\n",
+                rc, (long long)sent, (long long)got, space0, space1, space2,
+                (int)(space0 - space1), (int)(space0 - space2), (int)st,
+                (unsigned long long)(t1.segs_out - t0.segs_out),
+                (unsigned long long)(t1.retransmits - t0.retransmits),
+                (unsigned long long)(t1.out_refused - t0.out_refused),
+                (unsigned long long)(t1.rsts_in - t0.rsts_in));
+    }
 
     /* Serve echo until the harness sends QUIT (60 s budget). */
     for (unsigned i = 0; i < 6000 && !g_h_quit; i++) {

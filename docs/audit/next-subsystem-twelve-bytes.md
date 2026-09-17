@@ -13,17 +13,121 @@ the unit lands, and — as with #167 — not necessarily then: this is a
 defect nobody has yet explained, and a report that promises to close it
 would be promising something its predecessor learned not to.
 
+**Built as PR #169 — step 1 only, deliberately.** The instrument is in;
+the numbers are not, because the failure did not come.
+
+**The rate is lower than this report said, and load does not raise it.**
+Twenty-one x86-64 boots on this machine: **one failure, and it was the
+one that prompted the report.** Six of those twenty-one ran with four
+CPU spinners alongside, on the reasoning that every observed failure —
+three in CI, one here — had coincided with a loaded machine. All six
+passed. Not enough to call load irrelevant; enough to stop treating it
+as the lever.
+
+At one failure in twenty-one boots and two minutes a boot, hunting
+locally is forty minutes per expected failure with wide variance. CI's rate looked
+higher earlier the same day, so the instrument ships and the next failure
+reports itself — which is exactly how PR #167's four numbers produced an
+answer within the hour of being pushed.
+
+**Step 2 was "read the numbers", and this pull request was pushed
+without them** — deliberately, because a unit that shipped an instrument
+and then guessed what it would have shown would be the error this row
+has already cost two retractions for.
+
+Then the numbers arrived, on **two** of this pull request's own CI jobs
+— one per architecture — before it merged. They are below, and the
+migration plan's step 2 is done rather than pending.
+
+### And then it read them, on two of this pull request's own CI jobs
+
+x86-64, the debug boot test, run 35224254057:
+
+```
+NETTEST: client failed: connect 0, sent -104, recv -1,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +0 retransmits +0 refused +0 rsts_in +0
+```
+
+aarch64, the protection-capable boot test, run 35223648110 — identical
+in every field but the last, which is the one that matters:
+
+```
+NETTEST: client failed: connect 0, sent -104, recv -1,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +0 retransmits +0 refused +0 rsts_in +1
+```
+
+`-104` is **`ECONNRESET`** (`errno.h:47`) and state `0` is
+**`TCP_CLOSED`** (`tcp.h:38`). So:
+
+- **`ksock_sendto` failed.** The twelve bytes were never queued — the
+  send buffer is untouched across all three samples — and never
+  transmitted: `segs_out +0`.
+- **The connection was already reset** by the time the guest wrote to
+  it, and the pcb was closed.
+- Meanwhile the host had **accepted** that connection — at 75.9 s on
+  x86-64 and 93.0 s on aarch64, each about a second after the guest
+  reported ready.
+
+**This is row one of the four-outcome table in Design §2 (`:267`), and
+none of the four says what it means.** The bytes did not vanish on the wire, were not refused, and
+were not lost by slirp: *the socket was dead before they were written.*
+Every framing in this report up to here — "twelve bytes that never
+arrive" included, and it is the title — describes a symptom of
+something that had already happened.
+
+The question is now exact: **what resets this connection between
+`ksock_connect` returning `ESTABLISHED` and the next statement?**
+
+**The aarch64 job says the reset came in off the wire.** `rsts_in`
+counts inbound RST segments this stack *accepted*, and acceptance is
+narrow: RFC 5961 §3 is implemented (`tcp.c:2000-2011`), so a reset
+anywhere but exactly `rcv_nxt` earns a challenge ACK and is never
+counted, while the accepted one sets `pcb->error = -ECONNRESET` and ends
+the pcb — which is exactly the state the other fields report. So on
+aarch64 **a reset arrived from the peer**, in sequence, inside the
+sampled window. The guest's stack did not invent it.
+
+That is short of naming the sender, and two things are why — both of
+them work for the next unit rather than settled facts here:
+
+- `tcp_get_stats` is machine-wide and per boot. `+1` says one accepted
+  reset happened somewhere in that window, not that it happened to
+  *this* pcb. The pcb's own `error` field would say that outright, and
+  this instrument never reads it.
+- On x86-64 the same failure shows `rsts_in +0`, and that does **not**
+  mean no reset arrived: the first `tcp_get_stats` is taken *after*
+  `ksock_connect` returns, so a reset arriving during the connect or
+  before the sample falls outside the window. A defect in this
+  instrument, found by using it.
+
+Both are fixed the same way, and it is the first thing the next unit
+does: sample before the connect, and read the socket's pending error
+instead of inferring it from a global counter.
+
+It is also worth noting what did *not* happen: slirp's own connect to
+`127.0.0.1` succeeded, because the host accepted. So this is not the
+"slirp swallowed the bytes" outcome the report expected to be most
+likely.
+
 ## What is established
 
-Not "flaky". The failure has one signature, seen on three machines and
-two architectures within an hour of the harness being taught to record
-its timings:
+Not "flaky". The failure has one signature, on both architectures and
+on more than one machine. The first three rows were recorded within an
+hour of the harness being taught to record its timings; the last two are
+this pull request's own CI jobs, which is where the guest's half of the
+line comes from:
 
-| | accept | data | gave up | accept budget unspent |
-| --- | --- | --- | --- | --- |
-| x86-64 CI | 92.0 s | 0 of 12 | 102.0 s | 59.1 s |
-| aarch64 CI | 92.6 s | 0 of 12 | 102.6 s | 65.3 s |
-| local x86-64 | 76.1 s | 0 of 12 | 86.1 s | 78.7 s |
+| run | accept | data | gave up | accept budget unspent | the guest's return |
+| --- | --- | --- | --- | --- | --- |
+| x86-64 CI, PR #167 | 92.0 s | 0 of 12 | 102.0 s | 59.1 s | not yet recorded |
+| aarch64 CI, PR #167 | 92.6 s | 0 of 12 | 102.6 s | 65.3 s | not yet recorded |
+| local x86-64 | 76.1 s | 0 of 12 | 86.1 s | 78.7 s | not yet recorded |
+| x86-64 CI, PR #169 | 75.9 s | 0 of 12 | 85.9 s | 78.5 s | `sent -104`, `rsts_in +0` |
+| aarch64 CI, PR #169 | 93.0 s | 0 of 12 | 103.0 s | 64.5 s | `sent -104`, `rsts_in +1` |
 
 In every case:
 
@@ -42,11 +146,18 @@ So: **twelve bytes, guest to host, on a connection both ends agree
 exists, while a quarter-megabyte crosses the same interface in the same
 run.**
 
-**It reproduces**: about one run in three, `make ARCH=x86_64 test`, on
-this developer's machine. Every earlier attempt for weeks was on
-aarch64, where it did not appear in eleven runs — which is a fact about
-where to run the loop, not about the bug, since CI has failed it on both
-architectures. The loop is two minutes.
+**It reproduces on x86-64 here, and rarely.** This report first said
+"about one run in three", which was one failure in three runs stated as
+a rate. **Twenty-one runs in, it is one in twenty-one** — and even that
+is a handful of observations, not a measurement. Twenty consecutive
+passes at a true one-third rate has a probability under 0.1 %, so the
+original figure was not merely imprecise, it was wrong.
+
+Every earlier attempt for weeks was on aarch64, where it did not appear
+in eleven runs, which is a fact about where to run the loop rather than
+about the bug — CI has failed it on both architectures. Each boot is
+about two minutes, so a hunt is tens of minutes rather than the handful
+of boots an earlier draft of the plan assumed.
 
 ## What nothing can currently say
 
@@ -94,7 +205,10 @@ traffic. Design §1 says why that matters and what to use instead.
   real hypervisor backend and a real host stack all appear, so it is
   where a defect in any of them surfaces — and it is currently the least
   instrumented.
-- **It costs every unit.** Eight sightings; three separate
+- **It costs every unit.** The tally of record is
+  `docs/testing/flakes.md`, "The count" — deliberately not repeated
+  here, because six figures for this one number appeared across four
+  files in a day. Three separate
   investigations in this session alone; a re-run each time, and each
   re-run a decision about whether the branch is at fault.
 - **Something is losing data on an established TCP connection**, which
@@ -180,7 +294,7 @@ self-tests, after every test that installs rules, and those call
 `:5107` are each three lines into a `selftest_*` function), so the last
 one to install anything leaves it installed. The intermittency argues
 against it being the whole story — a statically leaked rule would refuse
-the segment on every run, and this fails about one in three.
+the segment on every run, and this fails one boot in twenty-one.
 
 ### 4. What this unit does not do
 
@@ -196,6 +310,7 @@ thing that has produced progress on this defect.
 | --- | --- |
 | `kernel-services/network/nettest.c` | `selftest_net_harness`: keep `sent` and `got`; sample `tcp_send_space` before the send, after it and after the failed read; `tcp_state_of` at the end; the global counters beside them as corroboration |
 | `docs/kernel-services/network/testing.md` | what the guest's line now says, beside what the host's says |
+| `docs/testing/flakes.md` | "The count": the two sightings this pull request's own CI produced, and what the guest's line said |
 | `docs/audit/2026-09-deferred-work-inventory.md` | the row: the locus narrowed by whatever the run shows |
 | `README.md` | the Status entry |
 
@@ -209,13 +324,25 @@ None. `tcp_send_space`, `tcp_state_of` and `tcp_get_stats` all exist; the first 
 
 ## Migration plan
 
-1. **The instrumentation**, and a local run loop until it fails — about
-   one in three on x86-64, so a handful of boots.
-2. **Read the numbers.** One failing run selects a row of the table in
-   §2, which selects what step 3 is.
-3. **Step 3 depends on step 2** and the report deliberately does not
-   pre-write it.
-4. Docs, the inventory row narrowed, the README entry.
+1. **The instrumentation**, and a local run loop until it fails. At
+   one in twenty-one that is tens of minutes, not a handful —
+   see the rate note above, which corrects this report's own first
+   estimate. Worth considering before brute force: the harness accepts
+   exactly one back-connection (`listen(1)`, one `accept`), so repeating
+   the exchange within a boot would need the host side changed too, and
+   that is a larger change than it sounds.
+2. **Read the numbers.** ✔ Done — two of this pull request's own CI
+   jobs failed and printed them, one per architecture (see *And then it
+   read them* above). The answer was row one, "never queued", by way of
+   an `ECONNRESET` none of the four rows anticipated, and the aarch64
+   job added `rsts_in +1`: an inbound reset, accepted in sequence.
+3. **Step 3 depends on step 2** and the report deliberately did not
+   pre-write it. It is now writable and belongs to the next unit: sample
+   the counters *before* the connect and read the socket's *pending
+   error*, because a machine-wide counter cannot say the reset was this
+   pcb's and this instrument's window starts too late to see one that
+   arrives during the connect.
+4. Docs, the inventory row narrowed, the README entry. ✔ Done.
 
 ## Tests
 
@@ -242,10 +369,10 @@ is not a cost worth a number.
 ## Risks
 
 - **The failure may not reproduce with the instrumentation in.** It is
-  about one in three and the change is three send-buffer reads, a state
-  read and a counter pair, so this is
-  unlikely; if it happens, that is itself information and the report as
-  built should say so rather than quietly running more boots.
+  one boot in twenty-one and the change is three send-buffer reads, a
+  state read and a counter pair, so this was
+  unlikely — and it did not happen: the failure reproduced twice on this
+  pull request's own CI, once per architecture, with the instrument in.
 - **The numbers may point outside this repository** — at QEMU's user
   networking. That is a real possible outcome, and the honest form of it
   is a row in the inventory naming what was eliminated, not a shrug. The
@@ -272,7 +399,7 @@ is not a cost worth a number.
 - **Widen the host's ten-second read budget.** Treats the symptom, and
   the evidence says the data is absent rather than late — the host
   waited ten seconds for twelve bytes on an idle connection.
-- **Leave it.** Eight sightings, three investigations, a re-run per
+- **Leave it.** The sightings (`flakes.md`, "The count"), three investigations, a re-run per
   occurrence on both architectures, and an unexplained loss of data on
   an established TCP connection. The last unit made it legible; stopping
   now would waste that.

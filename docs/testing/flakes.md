@@ -241,9 +241,9 @@ a branch whose subject is a lock and a counter in cosmofs. Neither is a
 new fact about the cause. Together they are two facts about the *rate*,
 which nothing here had recorded:
 
-- **six sightings in about two weeks**, at least three of them on trees
-  that cannot have caused them (a documentation-only branch, a `main`
-  run, and this one);
+- **the tally is kept here and nowhere else** (see *The count*, below),
+  at least three of them on trees that cannot have caused them — a
+  documentation-only branch, a `main` run, and this one;
 - and **twice in a row on one branch**, which needs care, because this
   file says near the top that *a listed test that fails twice in a row
   is a regression until shown otherwise*.
@@ -289,7 +289,7 @@ failed, so boot length does not predict the outcome — and the run that
 settled it had **78.7 seconds of that budget unspent**.
 
 What it did find is why nobody could tell. **The harness recorded none
-of those numbers.** Seven sightings produced `TimeoutError('timed out')`
+of those numbers.** Every sighting produced `TimeoutError('timed out')`
 and nothing about when the guest connected, how much budget was left, or
 whether the port was still open. Every paragraph above this one is an
 attempt to reason about a failure from a log that omitted the one
@@ -332,6 +332,33 @@ echo and twenty UDP datagrams.
 Twelve bytes, guest to host, on a connection both ends agree exists.
 That is the thing to chase, and it took four recorded numbers to see it
 after a fortnight of re-runs.
+
+**And then the guest's half of the instrumentation answered it, on the
+pull request that added it** (PR #169) — twice, once per architecture.
+The x86-64 job:
+
+```
+NETTEST: client failed: connect 0, sent -104, recv -1,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0, segs_out +0 retransmits +0 rsts_in +0
+```
+
+and the aarch64 job, the same in every field but the last:
+
+```
+  ... segs_out +0 retransmits +0 refused +0 rsts_in +1
+```
+
+`-104` is `ECONNRESET`; state `0` is `TCP_CLOSED`. **`ksock_sendto`
+failed.** The bytes were never queued and never transmitted: the
+connection had already been reset when the guest wrote to it, while the
+host had accepted it a second earlier.
+
+So nothing was ever lost on the wire. The twelve bytes are a symptom;
+the defect is that **an established connection is reset immediately
+after `ksock_connect` returns**. Who sends that reset is not yet known —
+the counters' window starts after the connect, so it cannot see one that
+arrives during it, which is the next instrument to fix.
 
 **And it reproduces locally on x86-64**, one run in three, with the same
 signature — accepted 0.8 s after readiness, `0 of 12 bytes`, gave up ten
@@ -406,3 +433,46 @@ against a confident wrong *cause*; this is a confident wrong
 them is good evidence for "not this branch" and no evidence at all for
 "not the repository", and the cheapest thing that separated them was
 reading how long the test took before it failed.
+
+## The count
+
+`net-harness` sightings live here, in one place, because six different
+figures for one number appeared across four files in a single day —
+the reports, the inventory row, this file twice, and a comment in
+`nettest.c` — each correct when written and none of them corrected
+together. Anything that needs the number refers to this section rather
+than repeating it.
+
+**Eleven, to 2026-09-17**, across CI and this developer's machine, on
+both architectures. Counted rather than asserted, because the first version
+of this section said eight and then listed nine:
+
+| sighting | source |
+| --- | --- |
+| PR #140, twice | the inventory row's history |
+| PR #142 | the inventory row's history |
+| PR #144, twice | the inventory row's history |
+| PR #146 | the inventory row's history |
+| two documentation-only commits | the inventory row's history |
+| PR #167's own CI run | observed, with timings |
+| PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
+
+Seven entries, eleven occurrences. The first five rows are inherited
+from the row that recorded them and are not independently re-verified
+here. The last two were watched as they happened: PR #167's carries the
+host's `accepted at 92.0s, 0 of 12 bytes`, and PR #169's two carry the
+guest's `sent -104` with the send buffer untouched, which is what said
+the bytes were never written. PR #169's aarch64 job carries one field
+more — `rsts_in +1`, an inbound reset accepted in sequence — and its
+x86-64 job shows `+0` for the same failure, which is the instrument's
+window starting after the connect rather than a run without a reset.
+
+At least four were on trees that cannot have caused them.
+
+**One in twenty-one** local x86-64 boots reproduce it, measured after
+PR #169's instrumentation landed; six of those boots ran under CPU load
+without raising the rate. Every earlier local attempt was on aarch64,
+where it did not appear in eleven runs — the architecture decides where
+the loop runs, not what the defect is.
+
+Update this section and leave the rest alone.
