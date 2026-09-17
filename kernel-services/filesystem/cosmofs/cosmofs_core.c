@@ -1491,8 +1491,21 @@ static int orphan_replay(struct cfs *fs)
     return 0;
 }
 
-int cfs_commit(struct cfs *fs)
+/*
+ * `published` (optional) says whether *this call* put a new root on
+ * disk. It is not derivable from the generation number: a commit that
+ * fails after `fs->sb.generation = fs->gen` -- at the label update, the
+ * flush or the superblock write, all three below -- leaves the number
+ * advanced and `fs->gen` where it was, because only success reaches the
+ * `fs->gen++` at the end. A later retry then republishes the same
+ * number, and a caller comparing before against after would see no
+ * change and conclude nothing was published. Nor is `rc == 0` enough:
+ * the early return below is "there was nothing to commit".
+ */
+static int cfs_commit_ex(struct cfs *fs, bool *published)
 {
+    if (published)
+        *published = false;
     if (fs->failed)
         return fs->failed;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
@@ -1733,7 +1746,14 @@ int cfs_commit(struct cfs *fs)
     fs->first_dirty_ns = 0;
     kdebug("cosmofs: committed generation %llu (%llu free blocks)", (unsigned long long)fs->sb.generation,
            (unsigned long long)fs->free_blocks);
+    if (published)
+        *published = true;
     return 0;
+}
+
+int cfs_commit(struct cfs *fs)
+{
+    return cfs_commit_ex(fs, NULL);
 }
 
 /* Write back every dirty page of every cached regular file. Called with
@@ -2608,19 +2628,22 @@ static int cosmofs_sync_counted(struct mount *mnt, bool writeback)
     if (rc)
         return rc;
     mutex_lock(&fs->lock);
-    uint64_t published = fs->sb.generation;
-    rc = cfs_commit(fs);
     /*
-     * Counted only when this call actually published a generation.
-     * cfs_commit returns 0 for "there was nothing to commit" as well as
-     * for "committed", and the writeback thread can reach it that way: it
-     * decides with wb_due and then takes the sync lock, and a foreground
-     * file_sync -- which does not take that lock -- can commit the
-     * transaction in between. Counting the empty case would attribute a
-     * generation to this thread that it did not publish, and the pair
-     * cosmofs_stats reports would move apart in the other direction.
+     * Counted only when this call actually published a root, which
+     * cfs_commit_ex reports rather than leaving to be inferred.
+     *
+     * `rc == 0` is not the question: the early return means "there was
+     * nothing to commit", and the writeback thread reaches it that way
+     * whenever a foreground file_sync -- which does not take
+     * mnt->sync_lock -- commits between wb_due and this call. Comparing
+     * the generation before and after is not the question either: a
+     * commit that failed after publishing the number leaves it advanced
+     * and fs->gen where it was, so the retry that finally succeeds
+     * republishes the same number and would go uncounted.
      */
-    if (rc == 0 && writeback && fs->sb.generation != published) {
+    bool published = false;
+    rc = cfs_commit_ex(fs, &published);
+    if (rc == 0 && writeback && published) {
         /* Published with the generation, not after it. */
         lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX);
         fs->wb_commits++;

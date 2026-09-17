@@ -235,6 +235,17 @@ cannot have caused it, and it failed on a `main` run in the same hour.
 Nothing new; it is here to say the count is four and that one of them
 was on `main`.
 
+**A fifth, an hour later, on the pull request that added this
+paragraph.** Same assertion, same architecture, on a branch whose
+subject is a lock and a counter in cosmofs. That is not a new fact about
+the cause -- it is a fact about the *rate*, which nothing here had
+recorded: five sightings in about two weeks, at least two of them on
+trees that cannot have caused them. A test that fails this often on
+unrelated work is a cost paid by every unit that follows, and the
+re-run that clears it is the toll. Naming that is not the same as
+fixing it, and this file is not the place the fix would go; it is the
+place the price is written down.
+
 **`lockup-sample` (x86-64), the first sighting, and not previously in
 this file.** `lockuptest.c:157`:
 
