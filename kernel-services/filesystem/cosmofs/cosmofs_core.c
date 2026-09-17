@@ -50,14 +50,36 @@ static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t bl
     h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
 }
 
-static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
+/*
+ * Why a metadata block did not verify, for the message below.
+ *
+ * The four are very different findings and the error said only "bad
+ * metadata header or checksum" for all of them: a wrong magic is a block
+ * that was never sealed as metadata, a wrong `blkno` is one block's
+ * content sitting at another's address, a wrong kind is the right block
+ * misused, and a bad CRC is content that changed after it was sealed.
+ * Chasing `cosmofs-orphan-reserved` on aarch64 CI needed to know which
+ * (docs/audit/2026-09-deferred-work-inventory.md).
+ */
+enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_CRC };
+
+static enum mhdr_fault mhdr_fault_of(const uint8_t *block, uint64_t blkno, uint32_t kind)
 {
     const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
-    if (h->magic != CFS_MHDR_MAGIC || h->blkno != blkno || (kind && h->kind != kind))
-        return -EIO;
+    if (h->magic != CFS_MHDR_MAGIC)
+        return MHDR_MAGIC;
+    if (h->blkno != blkno)
+        return MHDR_BLKNO;
+    if (kind && h->kind != kind)
+        return MHDR_KIND;
     if (block_crc(block, offsetof(struct cfs_mhdr, crc)) != h->crc)
-        return -EIO;
-    return 0;
+        return MHDR_CRC;
+    return MHDR_OK;
+}
+
+static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
+{
+    return mhdr_fault_of(block, blkno, kind) == MHDR_OK ? 0 : -EIO;
 }
 
 struct mhdr_want {
@@ -182,8 +204,21 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
     struct mhdr_want want = { .dva = blkno, .kind = kind };
     int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL);
     if (rc) {
-        kerror("cosmofs: block %llu: %s", (unsigned long long)blkno,
-               rc == -EIO ? "bad metadata header or checksum" : "read error");
+        if (rc == -EIO) {
+            /* Say which of the four checks failed and what it found:
+             * "bad header or checksum" covers four different faults with
+             * four different causes. */
+            const struct cfs_mhdr *h = (const struct cfs_mhdr *)b->data;
+            static const char *const why[] = { "ok", "magic", "blkno", "kind", "crc" };
+            enum mhdr_fault f = mhdr_fault_of(b->data, blkno, kind);
+            kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu crc 0x%08x "
+                   "(wanted kind %u at blkno %llu, computed crc 0x%08x)",
+                   (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
+                   (unsigned long long)h->blkno, h->crc, kind, (unsigned long long)blkno,
+                   block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
+        } else {
+            kerror("cosmofs: block %llu: read error", (unsigned long long)blkno);
+        }
         list_remove(&b->link);
         fs->nr_bufs--;
         kfree(b->data);
