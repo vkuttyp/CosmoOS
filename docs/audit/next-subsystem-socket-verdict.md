@@ -16,6 +16,57 @@ row is advanced, not closed — its next step, written into PR #169's
 report as "read the socket's pending error rather than inferring it from
 a machine-wide counter", is a thing no caller in this tree can do.
 
+**Built as PR #171.** What follows is the report as written plus this
+section, which records what the building changed. Nothing in the design
+was abandoned; four things were learned.
+
+### As built
+
+**The §1.1 row is closed and the §3 row is not**, which is what the
+report promised and is worth stating because only one of the two moved.
+
+**`ECONNABORTED` had to be invented.** `errno.h` had no 103, and the
+error a listening socket carries is exactly that. Added to both the
+kernel header and the uapi mirror, with `ENOPROTOOPT` joining the uapi
+list for the same reason: `SYS_getsockopt`'s refusal has to be nameable
+by the programs that receive it.
+
+**The refusal is settled before the read, not after.** A first cut read
+`ksock_error` and then copied it out, which loses the verdict when the
+copy faults — the one delivery it gets, spent on a call that failed.
+Both ABI entry points now validate the length word, the size and the
+user range *first*, and consume only once nothing can refuse. Linux has
+the losing behaviour; this is a case where matching it would have been
+the easier answer and the wrong one.
+
+**`icmp_needfrag` was refactored, not copied.** The report said the new
+consumer would share the quoted-header parse. It does: that parse is now
+`icmp_quoted_flow`, and the path-MTU path calls it too, so the two
+consumers cannot drift. The behaviour is unchanged — the proto check
+moves ahead of the MTU arithmetic, which only ever ran for TCP.
+
+**`CHECK_BREAK` nearly shipped as a no-op.** The tests need a check that
+leaves a `do/while(0)` with cleanup after it. Written the obvious way —
+wrapped in its own `do/while(0)`, like `CHECK` — the `break` leaves *the
+macro's* loop and the check passes by doing nothing. Every assertion in
+all four tests would have been vacuous. It is `if (...) { ...; break; }
+else (void)0`, and the comment says why.
+
+### The four bug-proofs, each run
+
+| revert | what failed, and where |
+| --- | --- |
+| `ksock_accept` back to `take_error(s) ? take_error(s) : -EINVAL` | `net-sockerr-accept`: `check failed: rc == -ECONNABORTED` |
+| the delivery cut out of `icmp_unreach` | `net-sockerr-udp` **and** `net-sockerr-spoof`: both time out waiting for `COSMO_IO_ERROR` |
+| `udp_error_notify`'s connected-only dropped | `net-sockerr-spoof`: `check failed: (ksock_ready(unconn) & COSMO_IO_ERROR) == 0` — an unconnected socket takes another flow's error |
+| `ksock_error` given `s->lock`, as the first draft proposed | **`KERNEL PANIC: mutex_lock('socket'): recursive lock by 'tv-connw'`** |
+
+The last one is worth reading twice: the thread named is
+`net-tcpverdict`'s connect worker, not the test written for this
+property. The recursion fires in an ordinary `ksock_connect` before the
+locking test runs at all — Greptile's P1 finding on this report, exactly
+as filed, reproduced by the machine.
+
 ## Problem
 
 The stack knows exactly why a connection died. `tcp_input` sets

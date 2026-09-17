@@ -443,8 +443,8 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirteen, to 2026-09-17**, across CI and this developer's machine,
-on both architectures. Counted rather than asserted, because the first version
+**Fifteen, to 2026-09-17**, across CI and this developer's machine, on
+both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
 | sighting | source |
@@ -457,15 +457,16 @@ of this section said eight and then listed nine:
 | PR #167's own CI run | observed, with timings |
 | PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
 | PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
+| `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
 
-Eight entries, thirteen occurrences. The first five rows are inherited
+Nine entries, fifteen occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
-here. The last three were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the four instrumented
+here. The last four were watched as they happened: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the six instrumented
 ones carry the guest's side.
 
-**And the fourth instrumented sighting broke the pattern the first three
-set.** PR #170's x86-64 job, on a branch that changes one Markdown file:
+**And one of them broke the pattern the others set** — PR #170's x86-64
+job, on a branch that changes one Markdown file:
 
 ```
 NETTEST: client failed: connect 0, sent 12, recv -104,
@@ -487,11 +488,13 @@ the connection was already reset.
 | PR #169, aarch64 | `-104` | `+0` | 0 | `+1` |
 | PR #170, x86-64 | **`12`** | **`+1`** | **12** | `+1` |
 | PR #170, aarch64 | `-104` | `+0` | 0 | `+1` |
+| `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
+| `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
 segment went out, and the host still saw nothing — so "the twelve bytes
-were never written" describes three sightings and not the fourth. It
+were never written" describes five of the six and not that one. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
@@ -501,10 +504,18 @@ wrong in the timer. Distinguishing the two needs the pcb's own pending
 error and a timestamp, which is what
 `docs/audit/next-subsystem-socket-verdict.md` is for.
 
-`rsts_in +1` in three of the four. The locus is now: **an established
-connection to slirp is reset — sometimes before the guest writes and
-sometimes after a segment is already on the wire — and the payload never
-reaches the host's accepted socket.**
+`rsts_in +1` in five of the six instrumented sightings. The locus is
+now: **an established connection to slirp is reset — sometimes before the
+guest writes and sometimes after a segment is already on the wire — and
+the payload never reaches the host's accepted socket.**
+
+**The CI rate rose sharply on 2026-09-17.** Six instrumented failures
+inside about two hours — two on PR #169, two on PR #170, two on `main` —
+against one local boot in twenty-one. Nothing here explains the jump and
+this file does not guess at one; it is recorded because "one in
+twenty-one locally" is the only rate this file has measured, and CI is
+plainly not that. What it does mean practically: the instrument no longer
+has to be waited for. It reports several times a day.
 
 At least four were on trees that cannot have caused them, and PR #170's
 two are the clearest of them: that branch adds one Markdown file and

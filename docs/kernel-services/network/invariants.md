@@ -270,3 +270,35 @@ are reviewed, not tested.
 **N-L4. A socket woken outside a protocol lock is referenced with
 `kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:
 review; `net-lo-udp`, `net-lo-tcp` exercise both.
+
+**N21. A socket's pending error is delivered once, to one reader, and is
+never invented.** `struct socket::error` is written only by
+`sock_set_error` and read only by `ksock_error`, both with atomic
+operations and **neither holding `s->lock`**: the writer runs in
+packet-receive context, where that mutex cannot be taken, and of the five
+readers three run inside `mutex_lock(&s->lock)` (`ksock_connect`'s
+completion paths, `socket.c:267`, `:282`, `:299`) while two do not
+(`ksock_accept`, `:224`; UDP's `ksock_recvfrom`, `:372`) — so the mutex
+cannot be the field's rule, and it is not. The read is an
+`__atomic_exchange_n`, which is what makes "once" true against two
+readers rather than merely likely; `ksock_ready`'s `COSMO_IO_ERROR` and
+the wait conditions *test* the field without clearing it. A stream
+socket's `pcb->error` is reported without clearing, because a dead
+connection must keep failing — the two halves have different rules on
+purpose and a reader should not assume one. An ICMP message sets an error
+only when its quoted four-tuple belongs to a **connected** socket of this
+host's: an unconnected socket has no flow for a message to be about, and
+admitting one would let anything on the path kill a socket by quoting a
+plausible port (RFC 5927 — the bar N16 sets for a reset and N18 for a
+path-MTU message). Check: `net-sockerr-udp` (`ECONNREFUSED` and
+`EHOSTUNREACH` arrive, each delivered once, `COSMO_IO_ERROR` raised and
+then cleared), `net-sockerr-spoof` (six messages differing from the
+delivering one in a single field of the quoted four-tuple change
+nothing), `net-sockerr-accept` (a pending error reaches `accept` as an
+errno, and `accept` never reports success without a socket),
+`net-sockerr-locking` (the same answer with the mutex held and without
+it), `lxtest` and `usertest` (`SO_ERROR` through both ABI doors, positive
+as POSIX asks). Gap: TCP takes no ICMP hard error at all, by decision —
+RFC 1122 §4.2.3.9 forbids aborting a connection on a soft one and
+`pcb->error` already carries the verdict the segments themselves give —
+so an errno only ICMP could supply never reaches a stream socket.

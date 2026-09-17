@@ -741,8 +741,20 @@ ring entry as non-blocking (`io_nonblocking`, milestone 9).
 socket, or NULL when `obj` has another type (`sock_of` in `native.c`
 uses it to answer `-EBADF` for a file or console handle).
 
+**`int ksock_error(s)`** The pending asynchronous error, read once: the
+value and 0 thereafter, so two readers cannot both be told the same
+verdict. A stream socket's `pcb->error` is reported *without* clearing,
+because a dead connection must keep failing — the two halves differ on
+purpose (invariant N21). Takes no lock: safe with `s->lock` held or not,
+and against `sock_set_error` running in packet-receive context, where
+that mutex cannot be taken. The one thing behind `SYS_getsockopt`'s
+`COSMO_SO_ERROR`, and what `COSMO_IO_ERROR` could never say — that bit
+reports *that* a socket is broken and never which way.
+
 **`void sock_wake(s)`, `void sock_set_error(s, err)`** Protocol side,
-any context: wake all waiters (and record `err`). **`unsigned
+any context: wake all waiters (and record `err`, atomically — see
+`ksock_error` and N21). `sock_set_error`'s callers today are
+`udp_error_notify`'s ICMP path and the self-tests. **`unsigned
 socket_count(void)`** live sockets (tests check for leaks).
 
 ## System calls (`kernel/include/uapi/cosmo/syscall.h`, `kernel/syscall/native.c`)
