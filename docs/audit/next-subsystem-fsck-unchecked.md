@@ -93,9 +93,11 @@ buffer, and a mount's own replay dirties buffers, so the thread was
 being started from inside the replay -- where it takes only the mount's
 sync lock, which the mount path does not hold, and commits a half-built
 filesystem across an `fs->bufs` the mount walks with `fs->lock` unheld.
-Two threads on one intrusive list. It is **not** this unit's to fix, and
-it is not this unit's row to carry either: PR #160 owns the inventory
-entry.
+Two threads on one intrusive list. It is **not** this unit's to fix: the
+diagnosis and the fix are #160's, and so is the struck row that will
+replace the inventory's. Until that lands the defect is still in the
+tree, so the row stays here marked *taken up*, which is what the two
+rows below it do for work this unit has planned and not yet built.
 
 It is this unit's to learn from, in three ways.
 
