@@ -4,9 +4,10 @@ Date: 2026-09-17. Tree: `main` at 98c1314 (after PR #171, the socket's
 verdict). Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §3.
 
 **Subsystem: the asynchronous hardware error. An SError on AArch64 and a
-machine check on x86-64 both end in `panic` today — including the
-contained, attributable ones, where the architecture has told us exactly
-which process to blame and that the rest of the machine is fine.**
+machine check on x86-64 both end in `panic` today — including the ones
+the hardware has already **corrected**, and including the ones it
+describes precisely, under a panic line that names the wrong exception
+class.**
 
 Takes up the correctness clause of §3's AArch64-hardening row, *"a
 user-triggerable SError panics the kernel"*. That row also names UAO,
@@ -74,8 +75,8 @@ the CPU implements FEAT_RAS, `AET` (bits 12:10) and `EA` (bit 9). The
 | --- | --- | --- | --- |
 | 0b000 | UC | **Uncontainable** | panic: the machine's state is not trustworthy |
 | 0b001 | UEU | Unrecoverable, **uncontained** | panic |
-| 0b010 | UEO | Restartable | the error is contained; the interrupted context may continue |
-| 0b011 | UER | **Recoverable** | contained and attributable: kill the process, keep the machine |
+| 0b010 | UEO | Restartable | the error is contained — but see Design §3: *contained* is not *attributable* |
+| 0b011 | UER | **Recoverable** | the same; this unit panics on both and says why |
 | 0b110 | CE | Corrected | log it and continue; nothing is wrong yet |
 
 x86-64's `MCG_STATUS` says the same thing in two bits: `RIPV` (the
@@ -97,20 +98,23 @@ reads a page whose backing memory has decayed, can produce one. The
 inventory's phrasing is *"a user-triggerable SError panics the kernel"*,
 and the consequence is the ordinary one for this class: an unprivileged
 program can end the machine, and every other process on it, without any
-privilege. That is a denial of service with no defence in the tree.
+privilege.
+
+**This unit does not close that**, and the first draft of this report
+claimed it would. Ending the machine is the *correct* response to an
+uncontained error, and telling a contained one apart from an attributable
+one needs the RAS error records this unit excludes (Design §3). What it
+closes is the case next to it: an error the hardware **corrected** —
+where nothing is wrong and the machine dies anyway.
 
 ## Why it matters
 
 - **It is a correctness gap reachable today**, which §6 puts ahead of
   feature work. The machine dies for something one process caused, and
   the hardware said so.
-- **The policy already exists and this is the one class that escapes
-  it.** `user_exception_handler` is the contract: *a user program that
-  divides by zero, executes an invalid opcode, violates protection or is
-  single stepping dies with `COSMO_EXIT_FAULT`; the same exception from
-  kernel mode is a kernel bug and panics* (`process.c:141-149`). A
-  contained SError from EL0 is that sentence's own case, and it is not in
-  the list — not by decision, but because nothing dispatches it there.
+- **A corrected error kills the machine.** The hardware found a fault,
+  repaired it, and reported it for the record; this kernel panics. There
+  is no reading of that which is right, and it needs only the classifier.
 - **The panic lies about itself.** Relabelling the frame
   `ARCH_TRAP_GENERAL_PROTECTION` means the one diagnostic a rare hardware
   fault leaves behind names the wrong exception class. Whoever reads that
@@ -122,17 +126,22 @@ privilege. That is a denial of service with no defence in the tree.
 
 ## Design
 
-### 1. A trap kind, so the existing contract can reach it
+### 1. A trap kind, and a dispatch point of its own
 
 `enum arch_trap_kind` (`kernel/include/arch/trap.h:21-27`) gains
-`ARCH_TRAP_ASYNC_ERROR`, and `ARCH_TRAP_KIND_COUNT` moves with it. That
-is the whole integration: the kind gets a vector number through
-`arch_trap_vector`, `interrupt_dispatch` routes it, and
-`user_exception_handler` gains one line mapping it to **`SIGBUS`**
-(`signal.h:32`), which is the signal this class has always meant. The
-kill is queued, not taken in the handler — which is already what that
-function does, and matters more here than anywhere else, because an
-SError can arrive in any context including one holding a run-queue lock.
+`ARCH_TRAP_ASYNC_ERROR`, and `ARCH_TRAP_KIND_COUNT` moves with it, so the
+kind gets a vector number through `arch_trap_vector` and
+`interrupt_dispatch` can route it.
+
+**It does not reuse `user_exception_handler`,** and the first draft of
+this report said it would. That function maps a vector to a signal
+unconditionally and sends every kernel-mode frame to
+`arch_trap_unhandled`; it has no way to ask what class of error this is,
+so routing the new kind through it would kill a process for a *corrected*
+error and continue past an uncontained one. Review caught that, and the
+fix is a handler of the async kind's own, registered like any other, that
+consults the classifier **first** and then decides. The generic mapping
+stays exactly as it is for the five kinds it already serves.
 
 ### 2. One classifier, arch-shaped in and arch-free out
 
@@ -140,7 +149,7 @@ SError can arrive in any context including one holding a run-queue lock.
 /* kernel/include/arch/trap.h */
 enum arch_async_error {
     ARCH_ASYNC_CORRECTED,     /* nothing is wrong yet: count it and continue */
-    ARCH_ASYNC_CONTAINED,     /* attributable: kill the process, keep the machine */
+    ARCH_ASYNC_CONTAINED,     /* the machine is intact -- but see §3: not attributable, so this unit still panics */
     ARCH_ASYNC_UNCONTAINED,   /* the machine's state is not trustworthy: panic */
 };
 enum arch_async_error arch_async_error_class(const struct arch_trap_frame *);
@@ -152,9 +161,30 @@ safe answer. `IDS == 0` reads `AET` by the table above. A CPU without
 FEAT_RAS reports no `AET`, so every SError on it is uncontained, which is
 correct and is the only answer available.
 
-x86-64 reads `MCG_STATUS`: `RIPV == 0` is uncontained; `RIPV == 1` with
-`EIPV == 1` is contained; the corrected case comes from the bank's
-`MCi_STATUS.UC == 0`.
+x86-64 reads more than the draft of this report did. `MCG_STATUS`'s
+`RIPV` alone is not a conservative test, and review said why: it says
+nothing about whether the processor's context is corrupt, whether a
+record is even valid, or what the *other* banks reported. The classifier
+walks them:
+
+- **`MCG_CAP.Count`** gives the number of banks, and every one of them is
+  read. An uncontained error recorded in a bank this classifier did not
+  look at is the failure mode that makes "check `RIPV`" unsafe.
+- **`MCi_STATUS.VAL == 0`** — no record; that bank says nothing.
+- **`MCi_STATUS.PCC`** — *processor context corrupt*. Uncontained,
+  whatever `RIPV` says. This is the bit whose absence made the draft's
+  test wrong rather than merely incomplete.
+- **`MCi_STATUS.OVER`** — a record was overwritten, so what is there is
+  not the whole story. Uncontained.
+- **`MCi_STATUS.UC`** — uncorrected. With `MCG_STATUS.RIPV == 0`,
+  uncontained; the aggregate rule below covers the rest.
+- **`MCG_STATUS.RIPV`/`EIPV`** — read last, and only able to make an
+  error *less* severe, never more.
+
+The aggregate is the conservative one: **corrected** only when every
+valid bank has `UC == 0`, no bank has `PCC` or `OVER`, and `RIPV == 1`;
+**uncontained** otherwise. One bank's silence never outvotes another's
+report.
 
 **The rule the classifier obeys, and the reason it is a separate
 function: anything not positively known to be contained is uncontained.**
@@ -162,21 +192,48 @@ A missing feature, an unknown encoding and a reserved value all end in
 panic. The failure this unit must not introduce is a machine that
 continues after an error it did not understand.
 
-### 3. Where the decision is taken
+### 3. What the syndrome does **not** say, and what that costs
 
-| from | class | what happens |
-| --- | --- | --- |
-| EL0 / user | corrected | counted, logged at `kdebug`, return |
-| EL0 / user | contained | `SIGBUS`, `COSMO_EXIT_FAULT`, the machine continues |
-| EL0 / user | uncontained | panic |
-| EL1 / kernel | corrected | counted, logged, return |
-| EL1 / kernel | contained | **panic** — a contained error in kernel state is still kernel state, and `user_exception_handler` already panics for a kernel-mode exception of any other class |
-| EL1 / kernel | uncontained | panic |
+The first draft of this report had a six-row table in which a *contained*
+SError taken while EL0 ran killed that process with `SIGBUS`. Review
+refused it, correctly, and the reason is the word in the middle of the
+subsystem's own name: **asynchronous**.
 
-The asymmetry in row five is deliberate and is the conservative choice:
-"contained" says the *machine* is intact, not that the kernel's own data
-structures are. A kernel that continues past a corrupted page of its own
-is the failure mode this table exists to avoid.
+`AET = UER` says the error is *recoverable*. It does not say **who
+caused it**. The frame identifies the context that was interrupted when
+the abort was *delivered*, which for an imprecise or deferred error need
+not be the context that provoked it — a DMA from a device, or an
+uncorrected line written long ago and read now by the memory controller,
+lands on whoever happens to be running. Killing that process would
+punish a bystander *and* leave the real source untouched, which is worse
+than the panic it replaced: the machine would continue, quietly wrong,
+having blamed the wrong program.
+
+The architecture does supply attribution, and it is not in `ESR_EL1`: it
+is in the RAS error records (`ERR<n>_STATUS`, `ERR<n>_ADDR`), which this
+report has already excluded as a subsystem of their own. So the honest
+policy is shorter than the draft's:
+
+| class | what happens, at either exception level |
+| --- | --- |
+| corrected (`CE`) | counted, logged at `kdebug`, **execution continues** — the hardware fixed it and nothing is wrong yet |
+| everything else | **panic**, named as an asynchronous abort and printing the syndrome |
+
+**No process is killed by this unit**, because nothing in the frame
+entitles it to choose one. That is a smaller unit than the draft claimed
+and it is the one the evidence supports.
+
+What remains worth doing, and is not small:
+
+- **A corrected error currently kills the machine.** The hardware
+  detected a fault, *repaired it*, reported it for the record — and this
+  kernel panics. That is the clearest defect in the row and it is fixed
+  by the classifier alone.
+- **The panic names the wrong thing** (Problem §1), so the one artefact a
+  rare hardware fault leaves behind sends its reader to the wrong place.
+- **The seam exists afterwards.** The classifier and the dispatch point
+  are what an attribution unit would need, and it can be written when
+  there are error records to read.
 
 ### 4. The panic stops lying
 
@@ -207,10 +264,11 @@ The honest split, because this is hardware the test host does not have:
 
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
-| `trap-async-class` (host or kernel unit) | the classifier maps every `AET` encoding, `IDS = 1`, and every reserved value to the right class | a table test over the encodings from the ARM ARM; revert it and the reserved values stop being uncontained |
-| `trap-async-el0` (aarch64) | a virtual SError injected while EL0 runs kills **that process** and the machine survives | without the dispatch it panics, and the boot test fails on the panic rather than on an assertion |
-| `trap-async-el1` (aarch64) | the same injected with EL1 running panics | without the EL1 arm the kernel continues past a kernel-state error |
-| `trap-async-x86` | vector 18 through the paranoid path reaches the policy with a frame, and a kernel-mode frame panics | `int $18` drives the vector exactly as `arch_test_paranoid_entry` drives `int $2` today (`x86_64/trap.c:156`) |
+| `trap-async-class` (table test) | every `AET` encoding, `IDS = 1` and every reserved value map to the right class | revert the default and the reserved values stop being uncontained — the assertion is on the *reserved* rows, which is where a table test earns its keep |
+| `trap-async-class-x86` (table test) | over synthetic `MCG_STATUS`/`MCi_STATUS`/`MCG_CAP` values: `PCC`, `OVER`, an invalid record, and an uncontained bank *after* a clean one each give uncontained | drop any one of `PCC`, `OVER`, `VAL` or the multi-bank walk and exactly one row fails — one row per bit, so the test says which |
+| `trap-async-corrected` (aarch64) | a virtual SError classified corrected is counted, logged, and **execution continues** | without the dispatch it panics, and the boot test fails on the panic rather than an assertion |
+| `trap-async-panic` (aarch64) | an SError that is not positively corrected panics, and the panic names an asynchronous abort | without the classifier's default a machine continues past an error it did not understand — the test asserts the *name*, since the defect it replaces was a panic that said "general protection" |
+| `trap-async-x86` | vector 18 through the paranoid path reaches the new handler with a frame | `int $18` drives the vector exactly as `arch_test_paranoid_entry` drives `int $2` today (`x86_64/trap.c:156`) |
 
 **The injection.** `HCR_EL2.VSE` makes the hypervisor deliver a virtual
 SError to EL1, and this kernel has an EL2 stub with a small call ABI
@@ -222,10 +280,10 @@ the trigger deterministic rather than a wait for hardware.
 models are `cortex-a72` (default) and `cortex-a76` (`make test-guard`),
 and `cortex-a72` is ARMv8.0 with no FEAT_RAS — so on the default boot an
 injected SError carries no `AET` and classifies as uncontained, which
-exercises the *panic* arm and not the *contained* one. Whether QEMU's
+exercises the *panic* arm and not the *corrected* one. Whether QEMU's
 `cortex-a76` implements FEAT_RAS well enough to set `VSESR_EL2` is
 **checked in step 1 of the plan and not assumed here**; if it does not,
-the contained arm is reached only by the classifier's table test and the
+the corrected arm is reached only by the classifier's table test and the
 report as built must say so plainly rather than claim a coverage it does
 not have. x86-64's `int $18` drives the vector and the policy but sets no
 MCE banks, so its classifier input is stubbed: the policy is tested, the
@@ -244,7 +302,7 @@ which the behaviour is untested *and* wrong.
 | `kernel/arch/aarch64/vectors.S` | the preamble's claim about SError stops being true and says what is true |
 | `kernel/arch/aarch64/hv_el2.c`, `hv_el2_switch.S`, `kernel/include/arch/el2.h` | one EL2 call that sets `HCR_EL2.VSE`, for the test |
 | `kernel/arch/x86_64/trap.c` | `#MC` registered; `MCG_STATUS` classification |
-| `kernel/process/process.c` | `user_exception_handler`: the new kind maps to `SIGBUS` |
+| `kernel/core/` (the async handler's home) | a handler for the new kind that consults the classifier before deciding; `user_exception_handler` is **not** touched |
 | `kernel/core/selftest.c`, the arch test files | the four tests |
 | `docs/kernel/arch/aarch64/design.md`, `docs/kernel/arch/*/invariants.md` | the classification and the policy table |
 | `docs/audit/2026-09-deferred-work-inventory.md` | §3's row: the SError clause struck, the rest left |
@@ -258,39 +316,49 @@ No syscall, no uapi change.
 
 ## Invariant
 
-**A1. An asynchronous hardware error ends the machine only when the
-hardware says the machine is unsound.** The classifier returns
-*uncontained* for everything it does not positively recognise —
-`IDS = 1`, a reserved `AET`, a CPU without FEAT_RAS, `RIPV = 0` — and
-*contained* only for the encodings the architecture defines as
-attributable. A contained error taken from EL0 kills that process with
-`SIGBUS`; taken from EL1 it panics, because "the machine is intact" is
-not "the kernel's state is intact". Check: `trap-async-class` over the
-encodings, `trap-async-el0` and `trap-async-el1` by injection,
-`trap-async-x86` for the policy. Gap: no CI CPU model is known to
-implement FEAT_RAS, so the contained arm may be reachable only in the
+**A1. An asynchronous hardware error lets the machine continue only when
+the hardware says it corrected the error, and is never blamed on a
+process.** The classifier returns *corrected* only for a syndrome that
+positively says so — `AET = CE` with `IDS = 0` on AArch64; on x86-64
+every valid bank `UC == 0` with no `PCC`, no `OVER` and `RIPV == 1`,
+across all `MCG_CAP.Count` banks. Everything else is uncontained and
+panics: `IDS = 1`, a reserved `AET`, a CPU without FEAT_RAS, an invalid
+record, a bank this classifier has not read. **No process is killed**,
+at either exception level, because an asynchronous abort's frame names
+the context that was interrupted and not the one that caused it —
+attribution needs the RAS error records, and the unit that reads them is
+the one that may kill. Check: `trap-async-class` and
+`trap-async-class-x86` over the encodings and the bank combinations,
+`trap-async-corrected` and `trap-async-panic` by injection,
+`trap-async-x86` for the dispatch. Gap: no CI CPU model is known to
+implement FEAT_RAS, so the *corrected* arm may be reachable only in the
 table test — the unit as built must say which.
 
 ## Migration plan
 
 1. **Find out what the CI CPUs implement.** Read `ID_AA64PFR0_EL1.RAS`
-   on both boots and print it. Everything below is shaped by the answer,
-   and guessing it is how this report would go wrong.
+   on both boots and print it, and `MCG_CAP` on x86-64. Everything below
+   is shaped by the answer, and guessing it is how this report would go
+   wrong.
 2. The classifier and its table test — pure, arch-shaped in, arch-free
    out, and testable before anything is dispatched anywhere.
-3. The AArch64 dispatch, the trap kind, the `SIGBUS` mapping, and the
+3. The AArch64 dispatch, the trap kind, the async handler of its own
+   (not `user_exception_handler`), and the
    EL2 injection call; the two injection tests.
-4. x86-64: register `#MC`, classify from `MCG_STATUS`, the policy test.
+4. x86-64: register `#MC`, classify by walking every `MCG_CAP.Count`
+   bank for `VAL`/`PCC`/`OVER`/`UC` before reading `MCG_STATUS`, and the
+   dispatch test.
 5. Docs: invariant A1, the arch design documents, the inventory clause,
    the README entry.
 
 ## Risks
 
-- **A wrong "contained" is worse than the present panic.** A machine
+- **A wrong "corrected" is worse than the present panic.** A machine
   continuing past an error it misread can corrupt a filesystem, and the
   crash suite would not necessarily catch it. The mitigation is the
   classifier's default and nothing else, which is why it is a separate
-  function with a table test rather than a condition inside a dispatcher.
+  function with a table test rather than a condition inside a dispatcher,
+  and why the x86 side reads every bank rather than one status register.
 - **The hardware is not in CI.** No test host produces a real SError or a
   real machine check, so the unit is tested by injection and by table,
   and the report as built must state what remains reviewed rather than
@@ -305,12 +373,18 @@ table test — the unit as built must say which.
 
 ## Alternatives considered
 
-- **Leave it.** The row has been open since the audit. The cost is that
-  an unprivileged program can end the machine, and the fix is small and
-  bounded.
-- **Panic with a better message and stop there.** Half the value for most
-  of the work: the panic's label is wrong today and fixing that alone
-  leaves the denial of service.
+- **Leave it.** The row has been open since the audit, and a corrected
+  error — one the hardware repaired — still ends the machine.
+- **Kill the interrupted process on a contained error.** This was the
+  first draft and review refused it: an asynchronous abort's frame names
+  the context interrupted at delivery, not the one that caused the error,
+  so the kill would land on a bystander and leave the source running. It
+  is the right behaviour once there is attribution, and attribution is
+  the next unit, not this one.
+- **Panic with a better message and stop there.** That is most of what
+  this unit does and it would be a defensible smaller one; the classifier
+  is what makes the message right, and once it exists the corrected case
+  costs one arm of a switch.
 - **A full RAS subsystem** — error records, ACPI, corrected-error
-  polling. That is where this leads and it is not one unit. This one
-  reads the syndrome already in the frame.
+  polling. That is where this leads, it is where attribution lives, and
+  it is not one unit. This one reads the syndrome already in the frame.
