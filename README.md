@@ -2446,9 +2446,19 @@ See [docs/development.md](docs/development.md).
   not the one in three an earlier draft claimed from a single
   observation, and six boots under CPU load did not raise it. So the
   instrument ships and the next failure reports itself, as #167's did
-  within the hour. The inventory row stays open and the numbers are not
-  guessed at. 333 self-tests on both architectures, debug and release
-  (PR #169).
+  within the hour — **and it did, on this unit's own CI job**:
+  `sent -104`, which is `ECONNRESET`, with the send buffer untouched
+  across all three samples, `segs_out +0` and the pcb `TCP_CLOSED`. So
+  `ksock_sendto` failed and the twelve bytes were never written: the
+  connection had already been reset, while the host had accepted it a
+  second earlier. Every framing of this defect so far, this unit's own
+  title included, describes a symptom of something that had already
+  happened, and the question is now what resets an established
+  connection between `ksock_connect` returning and the next statement.
+  Who sends that reset is not yet known, and the instrument says so:
+  its counter window starts after the connect and cannot see one
+  arriving during it. The inventory row stays open, narrowed. 333
+  self-tests on both architectures, debug and release (PR #169).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

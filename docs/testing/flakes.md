@@ -333,6 +333,26 @@ Twelve bytes, guest to host, on a connection both ends agree exists.
 That is the thing to chase, and it took four recorded numbers to see it
 after a fortnight of re-runs.
 
+**And then the guest's half of the instrumentation answered it, on the
+pull request that added it** (PR #169):
+
+```
+NETTEST: client failed: connect 0, sent -104, recv -1,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0, segs_out +0 retransmits +0
+```
+
+`-104` is `ECONNRESET`; state `0` is `TCP_CLOSED`. **`ksock_sendto`
+failed.** The bytes were never queued and never transmitted: the
+connection had already been reset when the guest wrote to it, while the
+host had accepted it a second earlier.
+
+So nothing was ever lost on the wire. The twelve bytes are a symptom;
+the defect is that **an established connection is reset immediately
+after `ksock_connect` returns**. Who sends that reset is not yet known —
+the counters' window starts after the connect, so it cannot see one that
+arrives during it, which is the next instrument to fix.
+
 **And it reproduces locally on x86-64**, one run in three, with the same
 signature — accepted 0.8 s after readiness, `0 of 12 bytes`, gave up ten
 seconds later with 78.7 s of accept budget unspent. Every earlier local
@@ -416,7 +436,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Nine, to 2026-09-17**, across CI and this developer's machine, on both
+**Ten, to 2026-09-17**, across CI and this developer's machine, on both
 architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -428,8 +448,9 @@ of this section said eight and then listed nine:
 | PR #146 | the inventory row's history |
 | two documentation-only commits | the inventory row's history |
 | PR #167's own CI run | observed, with timings |
+| PR #169's own CI run | observed, with the guest's returns: `sent -104` |
 
-Six entries, nine occurrences. The first five rows are inherited from
+Seven entries, ten occurrences. The first five rows are inherited from
 the row that recorded them and are not independently re-verified here;
 the last was watched as it happened and is the one that carries
 `accepted at 92.0s, 0 of 12 bytes`.

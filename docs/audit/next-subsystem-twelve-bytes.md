@@ -35,6 +35,50 @@ contain them.** Saying so is the point: a unit that shipped an
 instrument and then guessed what it would have shown would be the error
 this row has already cost two retractions for.
 
+### And then it read them, on this pull request's own CI job
+
+```
+NETTEST: client failed: connect 0, sent -104, recv -1,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +0 retransmits +0 refused +0 rsts_in +0
+```
+
+`-104` is **`ECONNRESET`** (`errno.h:47`) and state `0` is
+**`TCP_CLOSED`** (`tcp.h:38`). So:
+
+- **`ksock_sendto` failed.** The twelve bytes were never queued — the
+  send buffer is untouched across all three samples — and never
+  transmitted: `segs_out +0`.
+- **The connection was already reset** by the time the guest wrote to
+  it, and the pcb was closed.
+- Meanwhile the host had **accepted** that connection at 75.9 s, one
+  second after the guest reported ready.
+
+**This is row one of the table below, and none of the four says what it
+means.** The bytes did not vanish on the wire, were not refused, and
+were not lost by slirp: *the socket was dead before they were written.*
+Every framing in this report up to here — "twelve bytes that never
+arrive" included, and it is the title — describes a symptom of
+something that had already happened.
+
+The question is now exact: **what resets this connection between
+`ksock_connect` returning `ESTABLISHED` and the next statement?**
+
+What is *not* established, and the instrument cannot yet say: who sent
+the reset. `rsts_in +0` looks like "no RST arrived", and it is not: the
+first `tcp_get_stats` is taken *after* `ksock_connect` returns, so a
+reset that arrives during the connect or between its return and the
+sample is outside the window. That is a defect in this instrument,
+found by using it, and it is the first thing the next unit fixes —
+sample before the connect, and read the socket's pending error rather
+than inferring it.
+
+It is also worth noting what did *not* happen: slirp's own connect to
+`127.0.0.1` succeeded, because the host accepted. So this is not the
+"slirp swallowed the bytes" outcome the report expected to be most
+likely.
+
 ## What is established
 
 Not "flaky". The failure has one signature, seen on three machines and
