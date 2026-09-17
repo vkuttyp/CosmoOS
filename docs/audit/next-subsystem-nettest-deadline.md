@@ -1,20 +1,29 @@
-# NEXT SUBSYSTEM — the flake that was a stopwatch started before the race
+# NEXT SUBSYSTEM — a harness that cannot say why its own exchange failed
 
 Date: 2026-09-17. Tree: `main` at b729a03 (after PR #165, the writeback
 count). Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §3.
 
 **Subsystem: the network harness's deadlines — measured from the event
-they are about, and derived rather than guessed.**
+they are about, derived rather than guessed, and reported when they
+expire.**
 
 This report **takes up** the inventory's §3 row that begins
 "`net-harness` fails intermittently, on both architectures, and **not
 only in CI**". The row is not struck until the unit lands; striking it
 is the last step of the migration plan.
 
-It also **corrects** that row and
-`docs/testing/flakes.md`, both of which record this as host-dependent
-and unbounded. It is neither. It is a hard-coded 120-second timer
-started before QEMU launches.
+It reports a **verified structural defect** in the harness — a
+hard-coded 120-second `accept()` deadline started before QEMU launches,
+shorter than the harness's own sibling deadline for the same event, and
+closing the listener when it expires — and it proposes fixing that.
+
+**It does not establish that this defect causes the observed
+failures, and an earlier draft of this report said it did.** The
+correction is in *The measurement that did not confirm it* below. The
+distinction matters more here than almost anywhere: this row exists
+because two documents drew a confident conclusion from good
+observations, and replacing their wrong cause with another wrong cause
+would be worse than leaving it alone.
 
 ## Problem
 
@@ -97,7 +106,44 @@ the firmware-handover retry crosses it by thirty seconds more.
 distribution** before any code changes. It is enough to identify the
 mechanism and not enough to quote as the margin.
 
-### Why every recorded symptom follows
+### The measurement that did not confirm it
+
+The mechanism above predicts something checkable: runs whose boot is
+slow enough to push the back-connection past 120 seconds should fail,
+and faster ones should pass. **Measured across sixteen recent aarch64
+CI jobs, that correlation is not there.**
+
+| outcome | boot-test duration |
+| --- | --- |
+| PASS | 145.6 s, 143.7 s, 143.6 s, 141.6 s, 141.4 s, 140.3 s, 140.0 s, 140.0 s, 139.4 s, 137.2 s, 102.9 s |
+| FAIL | 145.8 s, 142.3 s |
+
+A **145.6-second boot passed** and a **145.8-second boot failed**. Boot
+duration does not predict the outcome.
+
+**What that does and does not show.** It does not exonerate the
+deadline: the boot-test's total duration is a poor proxy for the thing
+the deadline actually spans, which is `NetTest()` construction to the
+guest's back-connection. `net-harness` runs partway through the suite,
+and on this machine the ready line came at t+82 s of a 189-second boot —
+about 43 % through — so a 140-second CI boot reaching it at the same
+fraction would be at roughly 60 seconds, comfortably inside 120. On that
+arithmetic the deadline is *not* being crossed at all, and the mechanism
+is not the cause.
+
+It does show that the earlier draft's confidence was unearned. The
+structural defect is verified by reading the code; its *sufficiency* as
+an explanation rested on a correlation that, once measured, is absent.
+
+**So the unit's first job is the measurement that settles it**: the
+elapsed time from `NetTest()` to the back-connection, recorded on runs
+that pass and on a run that fails. If it is under the deadline on a
+failing run, the deadline is innocent and this report has found a real
+defect that is not this bug — which is still worth fixing, and is still
+worth knowing, because it removes the most plausible suspect and points
+the next investigation elsewhere.
+
+### Why the recorded symptoms are consistent with it
 
 - **`ksock_connect` returns 0 and the echo never comes.** The row
   records exactly this (`NETTEST: client failed (0)`,
@@ -113,11 +159,16 @@ mechanism and not enough to quote as the margin.
   network misbehaving. The row asks for "the host side instrumented ...
   on a run that fails"; the instrument is already there and already
   answering.
-- **It strikes loaded CI and not this machine.** It is a function of
-  boot *speed*, not of anything in the tree.
-- **It struck documentation-only branches and `main`.** Same reason.
-- **Four in a row, then the same commit passing.** A slow window, not a
-  property of the commit.
+- **It struck documentation-only branches and `main`**, and four times
+  in a row on a branch about a lock in cosmofs, after which the identical
+  commit passed. Those rule out the *tree*, which is what they have
+  always shown; they do not choose between the deadline and anything else
+  that varies from run to run.
+- **It has never reproduced here** in any deliberate attempt — five of
+  five on the branch where CI failed four times.
+
+None of these distinguishes the deadline from another run-to-run
+variable, which is the point of the section above.
 
 ### The defect in one sentence
 
@@ -152,14 +203,21 @@ queues it in the listen backlog, which `listen(1)` already provides.
 
 ## Why it matters
 
-- **It is a tax on every unit.** Six failures in two weeks, each one
-  costing a re-run and — worse — a decision about whether the branch is
-  at fault. This session spent three separate investigations on it.
-- **It has been teaching the wrong lesson.** `flakes.md` says a
-  host-dependent exchange "is not a bound this project can widen", and
-  the inventory says the same. Both are wrong, and both are *documents
-  this project wrote to stop itself chasing ghosts*. A wrong entry in
-  the anti-ghost file is worse than no entry.
+- **It is a tax on every unit.** Seven failures in two weeks — the
+  latest on *this report's own pull request*, which adds one Markdown
+  file — each costing a re-run and, worse, a decision about whether the
+  branch is at fault. This session spent three separate investigations
+  on it.
+- **The harness cannot answer the question, and that is the finding
+  that survives the measurement above.** When the exchange fails the log
+  says `TimeoutError('timed out')` and nothing about *when* the guest
+  connected, whether it connected at all, or how much budget was left.
+  Two weeks of sightings produced no way to tell the deadline apart from
+  its alternatives. That is a defect in the harness whichever suspect is
+  right.
+- **The deadline is wrong whether or not it is the cause.** Started
+  before QEMU, shorter than its own sibling for the same event, and
+  closing the listener on expiry: each is indefensible on its own terms.
 - **It will get worse.** The margin shrinks every time a self-test is
   added, because the deadline is measured from before the boot and the
   boot keeps growing. This session alone added three self-tests.
@@ -254,10 +312,10 @@ longer fail because it started timing before the thing it was timing.**
 | --- | --- |
 | `tests/boot/nettest.py` | `__init__` binds and listens, no timeout and no accept thread; `run_when_ready` accepts after readiness with the remaining budget; `failures()` gains the port and the elapsed time |
 | `tests/boot/run_boot_test.py` | nothing expected — the construction/launch order stays; **if this needs editing, the design is wrong and it goes in the report as built** |
-| `docs/testing/flakes.md` | the `net-harness` paragraphs corrected: not host-dependent-and-unbounded, a deadline started before QEMU. The standing rule about re-runs stays, with this as the case where a re-run was the wrong instrument |
+| `docs/testing/flakes.md` | the `net-harness` paragraphs gain the structural defect and the measurement that failed to confirm it as the cause. **They are not rewritten to name a new cause**: the old conclusion is marked unproven, not replaced by a second unproven one |
 | `docs/kernel-services/network/testing.md` | the harness's two deadlines, and which event each is measured from |
 | `README.md` | the Status entry |
-| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row struck, and its "needs the host side instrumented" corrected — the instrument was already reporting |
+| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row: struck **only if** the measurement in step 1 shows the deadline was the cause and the fix ends the failures. Otherwise the row stays open with the deadline eliminated as a suspect, which is progress and is not closure. Its "needs the host side instrumented" is corrected either way — `failures()` already prints the `TimeoutError`; what is missing is the *timing*, not the error |
 
 No kernel change. `nettest.c` is not touched: the guest's side is
 correct, including printing readiness before connecting.
