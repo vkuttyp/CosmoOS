@@ -27,7 +27,7 @@ would be worse than leaving it alone.
 
 ## Problem
 
-`net-harness` has failed **six times in about two weeks**, on both
+`net-harness` has failed **seven times in about two weeks**, on both
 architectures, on CI and on this machine, and at least three of those
 were on trees that cannot have caused it — a documentation-only branch,
 a `main` run, and a branch whose subject is a lock and a counter in
@@ -340,7 +340,11 @@ None. One socket timeout moved and derived.
 4. **Re-measure**: the margin after the fix is the run's whole budget
    minus the boot, rather than 120 seconds minus the boot.
 5. Docs — including the corrections to `flakes.md` and the row — then
-   the README Status entry and the row struck.
+   the README Status entry, and the inventory row struck **only if**
+   step 1 showed the deadline was the cause and step 4 shows the
+   failures have stopped. If they have not, the row stays open with one
+   suspect eliminated and the harness able to answer the question next
+   time, which is what this unit is really buying.
 
 Step 2 before step 3, and step 1 before both: this is a unit about a
 number being measured from the wrong place, so measuring it from the
@@ -408,6 +412,11 @@ worth recording is the margin, which is the subject.
   the harness rather than fixing the harness, and buys a margin that the
   next self-test spends.
 - **Accept that it is host-dependent.** What the tree currently
-  believes. It is refuted by the numbers above: the failing runs are not
-  runs where loopback was slow, they are runs where the boot was slower
-  than a timer that started too early.
+  believes, and this report does **not** refute it. An earlier draft
+  said the numbers did; they do not, and the section above says so. What
+  can be said is narrower: the tree believes it *without having been
+  able to check*, because the harness does not record the one thing that
+  would distinguish host-dependence from a deadline — when the guest
+  connected relative to when the harness started waiting. Accepting a
+  conclusion that nothing can test is the position this unit ends, and
+  it ends it whichever way the measurement falls.
