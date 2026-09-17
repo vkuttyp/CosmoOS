@@ -235,16 +235,39 @@ cannot have caused it, and it failed on a `main` run in the same hour.
 Nothing new; it is here to say the count is four and that one of them
 was on `main`.
 
-**A fifth, an hour later, on the pull request that added this
-paragraph.** Same assertion, same architecture, on a branch whose
-subject is a lock and a counter in cosmofs. That is not a new fact about
-the cause -- it is a fact about the *rate*, which nothing here had
-recorded: five sightings in about two weeks, at least two of them on
-trees that cannot have caused them. A test that fails this often on
-unrelated work is a cost paid by every unit that follows, and the
-re-run that clears it is the toll. Naming that is not the same as
-fixing it, and this file is not the place the fix would go; it is the
-place the price is written down.
+**A fifth and a sixth, both on the pull request that added this
+paragraph, on consecutive runs.** Same assertion, same architecture, on
+a branch whose subject is a lock and a counter in cosmofs. Neither is a
+new fact about the cause. Together they are two facts about the *rate*,
+which nothing here had recorded:
+
+- **six sightings in about two weeks**, at least three of them on trees
+  that cannot have caused them (a documentation-only branch, a `main`
+  run, and this one);
+- and **twice in a row on one branch**, which needs care, because this
+  file says near the top that *a listed test that fails twice in a row
+  is a regression until shown otherwise*.
+
+That rule stands and this does not weaken it. Two things discharge the
+"until shown otherwise" here, and neither of them is the count:
+`net-harness` is deliberately **not** on that list (the paragraphs above
+say why -- a host-dependent exchange is not a bound this project can
+widen), and the branch it failed on twice changes a lock and a counter
+in cosmofs, with no path to a TCP exchange against a process on the
+host. The same assertion has already failed on `main` and on a
+documentation-only branch.
+
+The general form is worth stating, because the count is the tempting
+thing to reason from and it is the wrong thing: **what discharges "until
+shown otherwise" is the diff, not the number of failures.** A second
+failure on a branch that cannot reach the code is not twice the evidence
+of a regression; it is the same zero evidence, twice.
+
+A test that fails this often on unrelated work is a cost paid by every
+unit that follows, and the re-runs are the toll. Naming that is not the
+same as fixing it, and this file is not where the fix would go -- it is
+where the price is written down, and the price is now large enough to be
+worth a unit of its own.
 
 **`lockup-sample` (x86-64), the first sighting, and not previously in
 this file.** `lockuptest.c:157`:
