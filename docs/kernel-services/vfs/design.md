@@ -554,7 +554,9 @@ in three parts:
    caller's locking matters: `vnode_release` holds nothing, cosmofs's
    `sync` (which `vfs_sync` reaches through `mnt->fs->sync`) holds
    `vn->lock` per vnode, `file_sync` and `file_flush` hold `f->lock`
-   then `vn->lock`. `pagecache_error_since(pc, seen, &err, &now)` reads
+   then `vn->lock`. (`file_pread` and `file_pwrite` hold `vn->lock` for
+   the regular-file path only: the character-device path runs with no
+   filesystem lock, invariant V32.) `pagecache_error_since(pc, seen, &err, &now)` reads
    the pair under the same lock.
 2. **Each open file hears once.** `file.wb_seq_seen` is set at open to
    the current sequence (a failure before the open is not this file's).

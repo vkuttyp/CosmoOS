@@ -18,6 +18,22 @@ The row is marked *taken up* and is **not struck until the unit lands**,
 which is the convention the rows beside it use. The unit proposed here
 is what closes it; striking it is step 4 of the migration plan below.
 
+**Built as PR #164.** As-built, with one thing the plan did not
+anticipate and one it got right for a reason worth recording:
+
+- **The failing test disturbed three others.** In the unfixed tree
+  `vfs-chr-write-during-blocked-read` really does stall for its deadline,
+  and that shifted the network harness's schedule: `net-hostinput`,
+  `net-hoststate` and `net-output` failed with it. An unmodified `main`
+  worktree passing 332 clean is what established those were the stall
+  rather than the test, and they pass with the fix, where both waits
+  return at once (17 ms against 511 ms). A reader of the bug-proof
+  should expect four failures, not one.
+- **Releasing the reader before asserting was load-bearing.** The plan
+  called for it so a revert would report rather than hang. It did
+  exactly that, and without it the three failures above would have been
+  a stopped boot instead of a readable log.
+
 ## Problem
 
 `file_pread` and `file_pwrite` take the vnode's mutex and then dispatch

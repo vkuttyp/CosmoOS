@@ -91,6 +91,7 @@ bool selftest_lockdep_contention(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
 bool selftest_vfs_put_race(const char **reason);
 bool selftest_vfs_chrdev_open(const char **reason);
+bool selftest_vfs_chr_write_during_blocked_read(const char **reason);
 bool selftest_vfs_mount_id(const char **reason);
 bool selftest_vfs_mount_pin(const char **reason);
 bool selftest_fsctl_list(const char **reason);
