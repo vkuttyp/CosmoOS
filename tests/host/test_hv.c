@@ -71,10 +71,12 @@ int main(void)
 {
     host_arena_init(64u << 20);
 
-    /* layouts */
-    CHECK(sizeof(struct cosmo_vcpu_regs) == 448);
-    CHECK(sizeof(struct cosmo_vm_exit) == 64);
-    CHECK(sizeof(struct cosmo_vcpu_seg) == 16);
+    /* layouts. The UAPI ones are asserted by uapi/cosmo/syscall.h itself,
+     * in every translation unit that includes it, so they are not
+     * repeated here: this file used to be their only check, and it
+     * compiles whichever block the *build host* matches, which is why
+     * it could not fail where the claim was false. `struct vmcb` is
+     * AMD's and belongs here. */
     CHECK(sizeof(struct vmcb) == 4096);
     CHECK(offsetof(struct vmcb, control.exitcode) == 0x70);
     CHECK(offsetof(struct vmcb, save.rip) == 0x578);
