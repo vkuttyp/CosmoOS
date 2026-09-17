@@ -181,10 +181,25 @@ walks them:
 - **`MCG_STATUS.RIPV`/`EIPV`** — read last, and only able to make an
   error *less* severe, never more.
 
-The aggregate is the conservative one: **corrected** only when every
-valid bank has `UC == 0`, no bank has `PCC` or `OVER`, and `RIPV == 1`;
-**uncontained** otherwise. One bank's silence never outvotes another's
-report.
+The aggregate is the conservative one, and it is stated as a positive
+requirement rather than as "every valid bank is clean" — because that
+phrasing is **vacuously true when no bank is valid**, which would
+classify a machine check carrying no record at all as corrected and let
+execution continue past an error nothing described. Review caught that
+in the first revision of this section, and it is the same shape as a
+test that passes by asserting nothing.
+
+**Corrected** requires all four, positively:
+
+1. **at least one bank with `VAL == 1`** — something has to have been
+   reported, or there is nothing to have understood;
+2. every valid bank has `UC == 0`;
+3. no bank has `PCC` or `OVER`;
+4. `MCG_STATUS.RIPV == 1`.
+
+**Uncontained** otherwise — including the empty case, where no bank is
+valid. One bank's silence never outvotes another's report, and the
+silence of all of them is not a clean bill of health.
 
 **The rule the classifier obeys, and the reason it is a separate
 function: anything not positively known to be contained is uncontained.**
@@ -255,8 +270,11 @@ happened.
 - **No `ESB` / `DISR_EL1` synchronization.** Deferring an SError across a
   critical section is a real technique and a separate unit; without
   FEAT_RAS there is nothing to defer into.
-- **No recovery of the faulting page.** "Contained" here means the
-  process dies, not that the kernel repairs anything.
+- **No recovery of anything.** A corrected error is logged and counted;
+  the kernel repairs nothing and reclaims nothing. The page a corrected
+  error touched is left exactly as it was.
+- **No process is killed** — Design §3. That is not a simplification to
+  be lifted later by this unit; it is the attribution unit's to lift.
 
 ## Tests
 
@@ -265,7 +283,7 @@ The honest split, because this is hardware the test host does not have:
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
 | `trap-async-class` (table test) | every `AET` encoding, `IDS = 1` and every reserved value map to the right class | revert the default and the reserved values stop being uncontained — the assertion is on the *reserved* rows, which is where a table test earns its keep |
-| `trap-async-class-x86` (table test) | over synthetic `MCG_STATUS`/`MCi_STATUS`/`MCG_CAP` values: `PCC`, `OVER`, an invalid record, and an uncontained bank *after* a clean one each give uncontained | drop any one of `PCC`, `OVER`, `VAL` or the multi-bank walk and exactly one row fails — one row per bit, so the test says which |
+| `trap-async-class-x86` (table test) | over synthetic `MCG_STATUS`/`MCi_STATUS`/`MCG_CAP` values: `PCC`, `OVER`, an uncontained bank *after* a clean one, and **no valid bank at all** each give uncontained; a single valid clean bank with `RIPV` gives corrected | drop any one of `PCC`, `OVER`, the multi-bank walk or the at-least-one-valid requirement and exactly one row fails — one row per bit, so the test says which. The no-valid-bank row is the one a "every valid bank is clean" rule passes vacuously |
 | `trap-async-corrected` (aarch64) | a virtual SError classified corrected is counted, logged, and **execution continues** | without the dispatch it panics, and the boot test fails on the panic rather than an assertion |
 | `trap-async-panic` (aarch64) | an SError that is not positively corrected panics, and the panic names an asynchronous abort | without the classifier's default a machine continues past an error it did not understand — the test asserts the *name*, since the defect it replaces was a panic that said "general protection" |
 | `trap-async-x86` | vector 18 through the paranoid path reaches the new handler with a frame | `int $18` drives the vector exactly as `arch_test_paranoid_entry` drives `int $2` today (`x86_64/trap.c:156`) |
@@ -320,10 +338,13 @@ No syscall, no uapi change.
 the hardware says it corrected the error, and is never blamed on a
 process.** The classifier returns *corrected* only for a syndrome that
 positively says so — `AET = CE` with `IDS = 0` on AArch64; on x86-64
-every valid bank `UC == 0` with no `PCC`, no `OVER` and `RIPV == 1`,
-across all `MCG_CAP.Count` banks. Everything else is uncontained and
-panics: `IDS = 1`, a reserved `AET`, a CPU without FEAT_RAS, an invalid
-record, a bank this classifier has not read. **No process is killed**,
+**at least one valid bank**, every valid bank `UC == 0`, no `PCC`, no
+`OVER` and `RIPV == 1`, across all `MCG_CAP.Count` banks. The first of
+those four is not redundant: without it "every valid bank is clean" is
+true of *no banks at all*, and a machine check carrying no record would
+classify as corrected. Everything else is uncontained and panics:
+`IDS = 1`, a reserved `AET`, a CPU without FEAT_RAS, an invalid record,
+no record, a bank this classifier has not read. **No process is killed**,
 at either exception level, because an asynchronous abort's frame names
 the context that was interrupted and not the one that caused it —
 attribution needs the RAS error records, and the unit that reads them is
@@ -365,11 +386,14 @@ table test — the unit as built must say which.
   tested. This is the same shape as the pointer-auth mask, which shipped
   wrong twice for exactly this reason
   (`docs/audit/next-subsystem-*`, the feature-register work).
-- **An SError can arrive anywhere**, including inside the scheduler. The
-  kill is queued through the existing deferred path, which the current
-  code already relies on for `#DB`; if that path turns out not to be safe
-  from this context, that is the finding and the unit reports it rather
-  than working around it.
+- **An SError can arrive anywhere**, including inside the scheduler, and
+  the handler runs in that context. Since no process is killed there is
+  no deferred signal to queue — but the corrected path still logs, and
+  `kdebug` from an arbitrary context is the risk that replaces it. The
+  unit must establish that the logging path is safe from there, or count
+  without printing and leave the printing to a reader; if neither is
+  safe, that is the finding and the unit reports it rather than working
+  around it.
 
 ## Alternatives considered
 
