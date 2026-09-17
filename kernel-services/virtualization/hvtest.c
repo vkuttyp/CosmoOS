@@ -162,6 +162,30 @@ bool selftest_hv_vcpu_regs_roundtrip(const char **reason)
     in.cr8 = 0xAB;                         /* only the low nibble is kept */
     in.efer = 0;
     PUT(in.dr6); PUT(in.dr7);
+    /* The ten segment registers. `selector`, `limit` and `base` are
+     * copied straight through; `attrib` is packed into the backend's own
+     * access-rights word and unpacked again, so it is given descriptor
+     * values that really occur (a code and a data descriptor) rather
+     * than a counter. gdtr and idtr carry no selector or attrib at all
+     * -- the UAPI says so -- so only their base and limit are set. */
+    struct cosmo_vcpu_seg *code[] = { &in.cs };
+    struct cosmo_vcpu_seg *data[] = { &in.ds, &in.es, &in.fs, &in.gs, &in.ss, &in.ldtr, &in.tr };
+    for (unsigned i = 0; i < sizeof(code) / sizeof(code[0]); i++) {
+        code[i]->selector = (uint16_t)(0x08 + i * 8);
+        code[i]->attrib = 0xC09B;          /* present, code, read/execute, 32-bit, G */
+        code[i]->limit = (uint32_t)++n;
+        code[i]->base = ++n;
+    }
+    for (unsigned i = 0; i < sizeof(data) / sizeof(data[0]); i++) {
+        data[i]->selector = (uint16_t)(0x10 + i * 8);
+        data[i]->attrib = 0xC093;          /* present, data, read/write, 32-bit, G */
+        data[i]->limit = (uint32_t)++n;
+        data[i]->base = ++n;
+    }
+    in.gdtr.selector = 0; in.gdtr.attrib = 0;
+    in.gdtr.limit = (uint32_t)++n; in.gdtr.base = ++n;
+    in.idtr.selector = 0; in.idtr.attrib = 0;
+    in.idtr.limit = (uint32_t)++n; in.idtr.base = ++n;
 #endif
     in.pending_irq = 0x99;                 /* ignored on set */
     CHECK(vcpu_set_regs(v, &in) == 0);
@@ -188,10 +212,38 @@ bool selftest_hv_vcpu_regs_roundtrip(const char **reason)
     SAME(rbp); SAME(rsp); SAME(r8); SAME(r9); SAME(r10); SAME(r11);
     SAME(r12); SAME(r13); SAME(r14); SAME(r15); SAME(rip);
     SAME(cr0); SAME(cr2); SAME(cr3); SAME(cr4); SAME(dr6); SAME(dr7);
-    /* The three the backend normalises, each against its stated rule. */
-    CHECK(out.rflags == ((in.rflags | 0x2) & ~(uint64_t)(1ull << 3 | 1ull << 5 | 1ull << 15)));
-    CHECK(out.cr8 == (in.cr8 & 0xF));
-    CHECK(out.efer == 0);                  /* SVME and LMA are the host's */
+#define SEG_SAME(f) do { \
+        CHECK(out.f.selector == in.f.selector); \
+        CHECK(out.f.attrib == in.f.attrib); \
+        CHECK(out.f.limit == in.f.limit); \
+        CHECK(out.f.base == in.f.base); \
+    } while (0)
+    SEG_SAME(cs); SEG_SAME(ds); SEG_SAME(es); SEG_SAME(fs); SEG_SAME(gs);
+    SEG_SAME(ss); SEG_SAME(ldtr); SEG_SAME(tr);
+    /* gdtr and idtr carry base and limit only. */
+    CHECK(out.gdtr.limit == in.gdtr.limit && out.gdtr.base == in.gdtr.base);
+    CHECK(out.idtr.limit == in.idtr.limit && out.idtr.base == in.idtr.base);
+#undef SEG_SAME
+    /*
+     * The fields the backend normalises. These rules are the backend's,
+     * not the architecture's, so they are asserted per backend: SVM's
+     * exactly, because that is the one this runs on and the one whose
+     * code says so; VMX only as far as its own source goes, and no
+     * further, because that backend has never been executed
+     * (README.md:452) and a test should not encode a rule nobody has
+     * ever seen hold.
+     */
+    if (strcmp(hv_caps()->name, "svm") == 0) {
+        CHECK(out.rflags == ((in.rflags | 0x2) & ~(uint64_t)(1ull << 3 | 1ull << 5 | 1ull << 15)));  /* svm.c:479 */
+        CHECK(out.cr8 == (in.cr8 & 0xF));  /* the four-bit V_TPR, svm.c:436 */
+        CHECK(out.efer == 0);              /* SVME and LMA are the host's, svm.c:488 */
+    } else {
+        /* vmx.c:636 forces bit 1 and nothing else; it stores efer
+         * unchanged and does not take cr8 from the input at all, so
+         * neither is claimed here. */
+        CHECK((out.rflags & 0x2) != 0);
+        CHECK(out.rflags == (in.rflags | 0x2));
+    }
 #endif
     /* Ignored on set, and the reset state offers nothing. */
     CHECK(out.pending_irq == ~0ull);
