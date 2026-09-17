@@ -269,6 +269,43 @@ same as fixing it, and this file is not where the fix would go -- it is
 where the price is written down, and the price is now large enough to be
 worth a unit of its own.
 
+**That unit was done** (`docs/audit/next-subsystem-nettest-deadline.md`).
+What it found, and what it did not, both matter to this file.
+
+It did **not** find the cause. The obvious candidate was a real defect:
+the harness armed a 120-second `accept()` deadline in `NetTest.__init__`,
+which runs before QEMU is launched, and closed the listener when it
+expired. Measured, the guest's back-connection lands at about 72 % of
+the boot -- 76 to 83 seconds here -- which projects onto CI's 140-to-146
+second boots at 101 to 105 seconds, a margin of fifteen to nineteen
+seconds. Thin, and not obviously crossed: across sixteen aarch64 jobs a
+145.6-second boot passed and a 145.8-second one failed, so boot length
+does not predict the outcome.
+
+What it did find is why nobody could tell. **The harness recorded none
+of those numbers.** Seven sightings produced `TimeoutError('timed out')`
+and nothing about when the guest connected, how much budget was left, or
+whether the port was still open. Every paragraph above this one is an
+attempt to reason about a failure from a log that omitted the one
+measurement that would have settled it.
+
+So the deadline is fixed -- bound early, accepted after the guest
+reports ready, with one budget derived from the run's `--timeout` -- and
+**the harness now prints its timings on every run, pass or fail**:
+
+```
+network harness: ready at 80.8s, back-connection accepted at 80.8s,
+budget 150.0s, listener closed at 81.0s
+```
+
+The next sighting will say whether the deadline was ever the problem.
+Until one happens with that line in the log, the paragraphs above stand:
+the observations are right, and the cause is still not established.
+
+**The standing advice does not change.** A re-run still distinguishes a
+flake from a regression, and what discharges "until shown otherwise" is
+still the diff rather than the count.
+
 **`lockup-sample` (x86-64), the first sighting, and not previously in
 this file.** `lockuptest.c:157`:
 

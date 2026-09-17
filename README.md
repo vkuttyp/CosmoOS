@@ -2392,6 +2392,38 @@ See [docs/development.md](docs/development.md).
   rather than on the one run in a hundred that catches it. 333
   self-tests on both architectures, debug and release (PR #165).
 
+- **A harness that could not say why its own exchange failed**
+  (`docs/audit/next-subsystem-nettest-deadline.md`). `net-harness`
+  failed seven times in a fortnight, on both architectures, on CI and
+  locally, including on branches that add a single Markdown file — and
+  two documents had concluded it was host-dependent and unbounded. It is
+  neither, but **this unit does not claim to have found the cause, and
+  an earlier draft of its report did**. The obvious candidate was a real
+  defect: the harness armed a 120-second `accept()` deadline in
+  `NetTest.__init__`, which runs *before QEMU is launched*, and closed
+  the listener when it expired — so a guest connecting later had its
+  connection completed by QEMU's user networking and answered by
+  nothing, which is exactly the `ksock_connect` returning 0 with no echo
+  that every sighting recorded. Measured, the back-connection lands at
+  **72 %** of the boot, which projects onto CI's 140–146 second boots at
+  101–105 seconds against a 120-second deadline: a margin of fifteen to
+  nineteen seconds. Thin, and not shown to be crossed — across sixteen
+  aarch64 jobs a 145.6-second boot passed and a 145.8-second one failed,
+  so boot length does not predict the outcome. What the unit *did* find
+  is why nobody could tell: **the harness recorded none of those
+  numbers.** Seven sightings produced `TimeoutError('timed out')` and
+  nothing about when the guest connected, how much budget remained, or
+  whether the port was open. So the deadline is fixed — bound early,
+  accepted after the guest reports ready, one budget derived from the
+  run's `--timeout` — and every run now prints its timings whether it
+  passes or fails. `tests/boot/test_nettest_deadline.py` (in `make
+  host-test`) holds four properties in under a second, including that an
+  expired deadline leaves nothing listening, which is why expiry was
+  fatal rather than late; restoring the deadline to the constructor
+  fails it by name with `got 120.0`. **The inventory row stays open**:
+  it is struck when a sighting with the new timings shows the deadline
+  was the cause and the fix ended it, and not before (PR #167).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

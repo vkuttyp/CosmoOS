@@ -835,9 +835,13 @@ is `docs/testing/flakes.md`; one of this file's tests is on it,
 host ports and exports `QEMU_NET_HOSTFWD=tcp:127.0.0.1:P1-:7,udp:127.0.0.1:P2-:7`
 and `QEMU_FWCFG_NETTEST=tcp=P3` for `scripts/qemu-run.sh`, which turns
 them into `-netdev user,id=n0,ipv4=on,ipv6=on,hostfwd=...` and
-`-fw_cfg name=opt/cosmo/nettest,string=tcp=P3`. A thread listens on
-P3 and answers the guest's `cosmo hello\n` with `cosmo world\n`;
-another polls the serial log for `NETTEST: ready`, then: opens a TCP
+`-fw_cfg name=opt/cosmo/nettest,string=tcp=P3`. P3 is **bound and
+listening from construction** — the port must be held before QEMU is
+told about it — but nothing accepts on it yet. A thread polls the
+serial log for `NETTEST: ready`, and then, in order: accepts the
+guest's back-connection on P3 and answers its `cosmo hello\n` with
+`cosmo world\n` (the guest connects immediately after printing
+readiness and waits for that reply before serving anything); opens a TCP
 connection to P1, writes 256 KiB of seeded random bytes in chunks of 1
 to 9000 bytes while a reader collects the echo and compares it;
 sends 20 UDP datagrams to P2 and counts echoes (18 or more pass, QEMU's
@@ -847,6 +851,43 @@ no ready line, TCP mismatch, fewer than 18 UDP echoes, the
 guest-initiated connection not received, QUIT not sent, or the
 `NETTEST: client ok` / `NETTEST: done .*quit=1` markers missing. The
 default timeout is 180 s (the harness gets timeout minus 30 s).
+
+### The deadlines, and which event each is measured from
+
+**One budget for the whole exchange**, `--timeout` minus 30 s, and it
+starts when the run starts. Waiting for the ready line and accepting the
+back-connection draw on it in turn; the accept takes whatever is left.
+
+This is worth stating because it used to be two, and they disagreed. The
+accept had a hard-coded 120 seconds armed in `NetTest.__init__`, which
+runs **before QEMU is launched**, so it counted through the whole boot;
+when it expired the handler closed the listener, and a guest connecting
+after that had its connection completed by QEMU's user networking and
+then answered by nothing. That is a deadline measured from an event it
+was not about, and it is the shape to avoid when adding another
+(`docs/audit/next-subsystem-nettest-deadline.md`).
+
+**Every run prints its timings, passing or failing:**
+
+```
+network harness: ready at 80.8s, back-connection accepted at 80.8s,
+budget 150.0s, listener closed at 81.0s
+```
+
+and a failure says where it got to rather than only that it stopped:
+
+```
+network harness: guest-initiated connection failed (TimeoutError(...)) —
+listening on 127.0.0.1:54321, gave up 120.0s after the harness started,
+guest reported ready at 131.7s
+```
+
+The measurement exists because seven `net-harness` failures in a
+fortnight could not be told apart without it. `tests/boot/test_nettest_deadline.py`
+(run by `make host-test`) holds the properties: no deadline armed before
+the guest exists, a late connection still accepted, the budget taken
+from the caller, and an expired deadline leaving nothing listening —
+which is why expiry was fatal rather than merely late.
 
 Release builds (`make BUILD=release test`) have no self-tests, so the
 harness is created but its results are not evaluated; the two boot

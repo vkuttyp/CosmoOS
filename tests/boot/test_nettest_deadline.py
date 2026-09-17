@@ -120,10 +120,39 @@ def test_the_budget_is_derived_not_fixed():
             pass
 
 
+def test_an_expired_deadline_leaves_nothing_listening():
+    """Why an expired deadline was fatal rather than merely late.
+
+    The handler closes the listener on its way out, which is right: the
+    exchange is over. It is also why a guest that connected after the
+    old deadline expired saw its connection completed by QEMU's user
+    networking and then nothing at all -- `ksock_connect` returning 0
+    with no echo, which is what every sighting recorded.
+
+    Simulated here with a deadline that expires immediately, because the
+    shape is the point and 120 seconds is not.
+    """
+    nt = NetTest()
+    port = nt.back_port
+    t = threading.Thread(target=nt._back_server,
+                         args=(time.monotonic() + 0.3,), daemon=True)
+    t.start()
+    t.join(5)
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+        gone = False
+    except OSError:
+        gone = True
+    check(gone, "an expired deadline leaves nothing listening on the port")
+    check(isinstance(nt.results.get("back_gaveup_s"), float),
+          "and the harness records when it gave up, not just that it did")
+
+
 def main():
     for fn in (test_no_deadline_before_the_guest_exists,
                test_a_late_connection_is_still_accepted,
-               test_the_budget_is_derived_not_fixed):
+               test_the_budget_is_derived_not_fixed,
+               test_an_expired_deadline_leaves_nothing_listening):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")

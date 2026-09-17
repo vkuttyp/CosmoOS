@@ -25,6 +25,28 @@ because two documents drew a confident conclusion from good
 observations, and replacing their wrong cause with another wrong cause
 would be worse than leaving it alone.
 
+**Built as PR #167.** As-built, with what the building changed:
+
+- **The margin is thinner than the corrected report said.** Step 1's
+  measurement is above: the back-connection lands at ~72 % of the boot,
+  not the 43 % an earlier draft computed by dividing by a `make test`
+  wall clock. That moves the projected CI margin from "roughly 60
+  seconds, nowhere near" to **15-19 seconds**. The deadline is a far
+  more plausible suspect than the retraction concluded — and still not a
+  proven one, because boots of equal length pass and fail.
+- **The test found a fourth property worth holding.** The plan named
+  three; the built test also asserts that *an expired deadline leaves
+  nothing listening*, which is the step from "late" to "fatal" and the
+  reason a guest saw `ksock_connect` return 0 with no echo.
+- **`flakes.md` is corrected without being given a new cause.** The plan
+  said its paragraphs would be corrected; what they say now is that the
+  deadline was fixed, that it was not shown to be the cause, and that
+  the next sighting will carry the timings that settle it. Replacing one
+  unproven cause with another was the failure mode this whole row exists
+  to illustrate.
+- **The inventory row is not struck.** Per the plan's condition, which
+  the build did not meet.
+
 ## Problem
 
 `net-harness` has failed **seven times in about two weeks**, on both
