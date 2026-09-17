@@ -908,8 +908,9 @@ never acknowledged. The global `tcp_get_stats` deltas are corroboration
 only, since they count this connect's own SYN and every other socket's
 traffic (`docs/audit/next-subsystem-twelve-bytes.md`).
 
-The measurement exists because seven `net-harness` failures in a
-fortnight could not be told apart without it. `tests/boot/test_nettest_deadline.py`
+The measurement exists because a fortnight of `net-harness` failures
+could not be told apart without it (`docs/testing/flakes.md`, "The
+count", holds the tally). `tests/boot/test_nettest_deadline.py`
 (run by `make host-test`) holds the properties: no deadline armed before
 the guest exists, a late connection still accepted, the budget taken
 from the caller, and an expired deadline leaving nothing listening —

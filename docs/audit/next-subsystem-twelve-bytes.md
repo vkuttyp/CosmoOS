@@ -123,7 +123,9 @@ traffic. Design §1 says why that matters and what to use instead.
   real hypervisor backend and a real host stack all appear, so it is
   where a defect in any of them surfaces — and it is currently the least
   instrumented.
-- **It costs every unit.** Eight sightings; three separate
+- **It costs every unit.** Eight sightings to the date above
+  (`docs/testing/flakes.md`, "The count", is the tally of record and
+  the only place it is maintained); three separate
   investigations in this session alone; a re-run each time, and each
   re-run a decision about whether the branch is at fault.
 - **Something is losing data on an established TCP connection**, which
@@ -306,7 +308,7 @@ is not a cost worth a number.
 - **Widen the host's ten-second read budget.** Treats the symptom, and
   the evidence says the data is absent rather than late — the host
   waited ten seconds for twelve bytes on an idle connection.
-- **Leave it.** Eight sightings, three investigations, a re-run per
+- **Leave it.** Eight sightings to the date above, three investigations, a re-run per
   occurrence on both architectures, and an unexplained loss of data on
   an established TCP connection. The last unit made it legible; stopping
   now would waste that.

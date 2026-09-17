@@ -907,8 +907,10 @@ bool selftest_net_harness(const char **reason)
     int rc = ksock_connect(c, &host);
 
     /*
-     * This exchange has failed eight times in a fortnight, on both
-     * architectures, and until now said only "client failed (0)" -- the
+     * This exchange has failed repeatedly, on both architectures and on
+     * CI and locally (the tally is kept in docs/testing/flakes.md, "The
+     * count", and deliberately nowhere else), and until now said only
+     * "client failed (0)" -- the
      * *connect's* result, printed for a failure in a later step
      * (docs/audit/next-subsystem-twelve-bytes.md).
      *

@@ -241,9 +241,9 @@ a branch whose subject is a lock and a counter in cosmofs. Neither is a
 new fact about the cause. Together they are two facts about the *rate*,
 which nothing here had recorded:
 
-- **six sightings in about two weeks**, at least three of them on trees
-  that cannot have caused them (a documentation-only branch, a `main`
-  run, and this one);
+- **the tally is kept here and nowhere else** (see *The count*, below),
+  at least three of them on trees that cannot have caused them — a
+  documentation-only branch, a `main` run, and this one;
 - and **twice in a row on one branch**, which needs care, because this
   file says near the top that *a listed test that fails twice in a row
   is a regression until shown otherwise*.
@@ -289,7 +289,7 @@ failed, so boot length does not predict the outcome — and the run that
 settled it had **78.7 seconds of that budget unspent**.
 
 What it did find is why nobody could tell. **The harness recorded none
-of those numbers.** Seven sightings produced `TimeoutError('timed out')`
+of those numbers.** Every sighting produced `TimeoutError('timed out')`
 and nothing about when the guest connected, how much budget was left, or
 whether the port was still open. Every paragraph above this one is an
 attempt to reason about a failure from a log that omitted the one
@@ -406,3 +406,26 @@ against a confident wrong *cause*; this is a confident wrong
 them is good evidence for "not this branch" and no evidence at all for
 "not the repository", and the cheapest thing that separated them was
 reading how long the test took before it failed.
+
+## The count
+
+`net-harness` sightings live here, in one place, because six different
+figures for one number appeared across four files in a single day —
+the reports, the inventory row, this file twice, and a comment in
+`nettest.c` — each correct when written and none of them corrected
+together. Anything that needs the number refers to this section rather
+than repeating it.
+
+**Eight, to 2026-09-17**, across CI and this developer's machine, on
+both architectures: PR #140 (twice), #142, #144 (twice), #146, two on
+documentation-only commits, and the run of PR #167 that first carried
+the harness timings. At least four were on trees that cannot have caused
+them.
+
+**One in twenty-one** local x86-64 boots reproduce it, measured after
+PR #169's instrumentation landed; six of those boots ran under CPU load
+without raising the rate. Every earlier local attempt was on aarch64,
+where it did not appear in eleven runs — the architecture decides where
+the loop runs, not what the defect is.
+
+Update this section and leave the rest alone.
