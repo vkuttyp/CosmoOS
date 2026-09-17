@@ -741,14 +741,17 @@ ring entry as non-blocking (`io_nonblocking`, milestone 9).
 socket, or NULL when `obj` has another type (`sock_of` in `native.c`
 uses it to answer `-EBADF` for a file or console handle).
 
-**`int ksock_error_peek(s)`, `void ksock_error_delivered(s, err)`** The
-pair a caller uses when its delivery can fail — a syscall copying the
-verdict into user memory, where a range check is not a promise the copy
-succeeds. `peek` reports without clearing; `delivered` commits the clear
-afterwards, by compare-exchange on the value delivered, so a newer
-verdict that arrived during the copy survives. Never take-and-restore:
-between the take and the restore a concurrent asker is told 0 while a
-verdict is pending and undelivered (invariant N21).
+**`int ksock_error_peek(s, uint64_t *token)`, `void
+ksock_error_delivered(s, uint64_t token)`** The pair a caller uses when
+its delivery can fail — a syscall copying the verdict into user memory,
+where a range check is not a promise the copy succeeds. `peek` reports
+without clearing and hands back an opaque token; `delivered` commits the
+clear afterwards, by compare-exchange against that token, so a verdict
+stored during the copy survives *even when its errno is the same one*.
+The token is the field's whole word — errno and generation — and is not
+to be built or read by callers. Never take-and-restore: between the take
+and the restore a concurrent asker is told 0 while a verdict is pending
+and undelivered (invariant N21).
 
 **`int ksock_error(s)`** The pending asynchronous error, read once: the
 value and 0 thereafter, so two readers cannot both be told the same

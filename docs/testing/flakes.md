@@ -457,8 +457,8 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Sixteen, to 2026-09-17**, across CI and this developer's machine, on
-both architectures. Counted rather than asserted, because the first version
+**Seventeen, to 2026-09-17**, across CI and this developer's machine,
+on both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
 | sighting | source |
@@ -472,9 +472,9 @@ of this section said eight and then listed nine:
 | PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
 | PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
 | `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
-| PR #171's own CI run | observed, aarch64, and the **first with the counters sampled before the connect**: `connect -104` |
+| PR #171's own CI runs, twice | observed, aarch64 both times, and the **first two with the counters sampled before the connect**: `connect -104`, then `connect 0 in 1270 ms` with the bytes sent and never acknowledged |
 
-Ten entries, sixteen occurrences. The first five rows are inherited
+Ten entries, seventeen occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last four were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the six instrumented
@@ -548,7 +548,7 @@ a reset accepted **on a synchronized connection** (`tcp.c`, the RFC 5961
 again. `retransmits +1` and 1381 ms are one SYN retransmission at the
 one-second timer, so the handshake was slow as well as short-lived.
 
-**That unifies the shapes.** Seven instrumented sightings, and the
+**That unifies the shapes.** Eight instrumented sightings, and the
 guest's progress when the reset lands is the only thing that differs:
 
 | run | how far the guest got | `rsts_in` |
@@ -559,6 +559,7 @@ guest's progress when the reset lands is the only thing that differs:
 | PR #170, aarch64 | connected, then `sendto` refused | `+1` |
 | `main` ×2, aarch64 | connected, then `sendto` refused | `+0`, `+1` |
 | PR #171, aarch64 | **the connect itself reset** | `+1` |
+| PR #171, aarch64 again | connected, **sent 12**, never acknowledged | `+1` |
 
 The constant is not the twelve bytes and never was: it is **an inbound
 reset on an established connection to slirp, arriving at whatever point
@@ -571,9 +572,25 @@ What is still not established is why slirp resets it. That is outside
 this kernel, and saying so with evidence was named as a possible result
 from the beginning (`docs/audit/next-subsystem-twelve-bytes.md`, Risks).
 
-`rsts_in +1` in five of the seven; the two `+0`s are the instrument's
-own window, which opened after the connect until this pull request moved
-it. The locus is
+`rsts_in +1` in six of the eight; the two `+0`s are the instrument's own
+window, which opened after the connect until PR #171 moved it.
+
+**And the two sightings with the window moved have something the other
+six could not show.** Both took over a second to connect, and both
+carried `retransmits +1`:
+
+```
+connect -104 in 1381 ms ... segs_out +3 retransmits +1 rsts_in +1
+connect   0 in 1270 ms  ... segs_out +4 retransmits +1 rsts_in +1
+```
+
+A SYN retransmitted at the one-second timer means **the first SYN went
+unanswered**, so the handshake was already going wrong before anything
+this row has previously recorded. Two observations are a correlation and
+not a cause, and this file will not call it one — but it is the first
+thing in this chase that looks like a *beginning* rather than an ending,
+and the next unit to touch `net-harness` should start there. Both
+sightings before the window moved would have shown it and could not. The locus is
 now: **an established connection to slirp is reset — sometimes before the
 guest writes and sometimes after a segment is already on the wire — and
 the payload never reaches the host's accepted socket.**

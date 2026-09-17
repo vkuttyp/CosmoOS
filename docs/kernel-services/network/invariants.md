@@ -295,9 +295,15 @@ may read it plainly.
 A verdict that could not be delivered was not delivered. Both ABI entry
 points settle every refusal — the length word, the size, the user range —
 before reading, and then do **not** clear until the value has reached the
-caller: `ksock_error_peek` reports without clearing and
-`ksock_error_delivered` commits afterwards, because a range check is not
-a promise that a page is writable or that it stays mapped. Taking the
+caller: `ksock_error_peek` reports without clearing and hands back an opaque
+token, and `ksock_error_delivered` commits afterwards only if that token
+still names what is there — because a range check is not a promise that
+a page is writable or that it stays mapped. The field is therefore one
+64-bit word: the low half an errno, the high half a generation every
+write bumps. A commit that compared the errno alone would clear a
+*second* verdict of the same value that arrived during the copy and had
+been told to nobody, and two ICMP messages about one flow carry the same
+errno readily. Taking the
 value and putting it back on failure would be wrong in a way that is
 worth writing down, since it is what this unit did first: between the
 take and the restore, a concurrent asker is told **0** while a verdict is

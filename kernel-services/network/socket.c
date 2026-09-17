@@ -135,9 +135,26 @@ void sock_wake(struct socket *s)
     waitqueue_wake_all(&s->wait);
 }
 
+/* s->error packs an errno and a generation into one word: the low 32 bits
+ * are the errno, the high 32 a counter every write bumps. The generation
+ * exists for one case -- a delivery that must commit its clear after the
+ * fact has to tell the verdict it carried from an identical errno stored
+ * while it was in flight, and two ICMP messages about one flow can carry
+ * the same errno. Comparing the value alone would clear a verdict nobody
+ * had been told. */
+static inline uint64_t err_pack(int e, uint32_t gen)
+{
+    return ((uint64_t)gen << 32) | (uint32_t)e;
+}
+static inline int err_val(uint64_t w) { return (int)(uint32_t)w; }
+static inline uint32_t err_gen(uint64_t w) { return (uint32_t)(w >> 32); }
+
 void sock_set_error(struct socket *s, int err)
 {
-    __atomic_store_n(&s->error, err, __ATOMIC_RELEASE);
+    uint64_t old = __atomic_load_n(&s->error, __ATOMIC_RELAXED);
+    while (!__atomic_compare_exchange_n(&s->error, &old, err_pack(err, err_gen(old) + 1u),
+                                        false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        ;   /* `old` is reloaded by the failed exchange */
     sock_wake(s);
 }
 
@@ -146,16 +163,23 @@ void sock_set_error(struct socket *s, int err)
  * in packet context (invariant N21). */
 static inline bool sock_error_pending(struct socket *s)
 {
-    return __atomic_load_n(&s->error, __ATOMIC_ACQUIRE) != 0;
+    return err_val(__atomic_load_n(&s->error, __ATOMIC_ACQUIRE)) != 0;
 }
 
 /* Invariant N21: no lock. The exchange is what makes "delivered once"
  * true -- two readers racing here cannot both come away with the error,
  * which a plain read-then-write could not promise and which no mutex at
- * the call sites would give, since two of the five hold none. */
+ * the call sites would give, since two of the five hold none. The
+ * generation is carried forward rather than zeroed, so it stays
+ * monotonic and a token from before this call can never match again. */
 int ksock_error(struct socket *s)
 {
-    int e = __atomic_exchange_n(&s->error, 0, __ATOMIC_ACQ_REL);
+    uint64_t old = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
+    while (err_val(old) != 0 &&
+           !__atomic_compare_exchange_n(&s->error, &old, err_pack(0, err_gen(old) + 1u),
+                                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        ;
+    int e = err_val(old);
     /* The pcb's verdict is sticky and read without pcb->lock, which is why
      * tcp.c writes it with __atomic_store_n (tcp.h, `error`). */
     if (e == 0 && s->tcp)
@@ -163,26 +187,26 @@ int ksock_error(struct socket *s)
     return e;
 }
 
-int ksock_error_peek(struct socket *s)
+int ksock_error_peek(struct socket *s, uint64_t *token)
 {
-    int e = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
+    uint64_t w = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
+    *token = w;
+    int e = err_val(w);
     if (e == 0 && s->tcp)
         e = __atomic_load_n(&s->tcp->error, __ATOMIC_ACQUIRE);
     return e;
 }
 
-void ksock_error_delivered(struct socket *s, int err)
+void ksock_error_delivered(struct socket *s, uint64_t token)
 {
-    int expect = err;
-    if (err == 0)
-        return;
-    /* Clears only the value that was delivered. A verdict that arrived
-     * while this one was being copied out is newer, has not been delivered
-     * to anyone, and must survive -- which a plain store of 0 would
-     * destroy. Nothing to clear when the value came from the sticky pcb
-     * error, and the compare-exchange fails harmlessly in that case. */
-    (void)__atomic_compare_exchange_n(&s->error, &expect, 0, false,
-                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+    uint64_t expect = token;
+    if (err_val(token) == 0)
+        return;   /* nothing to clear: the verdict was the sticky pcb one, or none */
+    /* Clears only the exact word that was delivered -- same errno AND same
+     * generation. A verdict stored while this one was being copied out has
+     * a newer generation, has been told to nobody, and survives. */
+    (void)__atomic_compare_exchange_n(&s->error, &expect, err_pack(0, err_gen(token) + 1u),
+                                      false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
 /* A non-blocking connect that finished since connect() returned becomes

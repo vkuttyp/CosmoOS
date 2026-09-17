@@ -2496,12 +2496,14 @@ See [docs/development.md](docs/development.md).
   for a reset). `SYS_getsockopt` (92) carries `SO_ERROR` — one option,
   positive errno, cleared by the read — with the Linux door forwarding to
   the same kernel path rather than growing its own, and `setsockopt`
-  refusing what it does not implement. Invariant N21. Four bug-proofs,
+  refusing what it does not implement. Invariant N21. Five bug-proofs,
   each shown to fail for its stated reason: the double call makes
   `accept` return the wrong thing, cutting the delivery makes the UDP
   socket wait, dropping connected-only lets an unconnected socket take
-  another flow's error, and giving the accessor the mutex stops the
-  kernel. `net-harness` now prints the pending error and samples its
+  another flow's error, giving the accessor the mutex stops the kernel,
+  and a delivery that commits by errno alone destroys a second verdict of
+  the same value that nobody had been told — which is why the pending
+  error is one word carrying a generation as well as an errno. `net-harness` now prints the pending error and samples its
   counters *before* the connect, which is what PR #169's window was too
   late for. 337 self-tests on both architectures, debug and release
   (PR #171).

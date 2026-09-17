@@ -1925,13 +1925,14 @@ static int64_t lx_getsockopt(struct syscall_args *a)
         } else {
             /* Read, copy, then commit the clear: see sys_getsockopt in
              * native.c for why it is not taken and put back. */
-            int e = ksock_error_peek(s);
+            uint64_t token = 0;
+            int e = ksock_error_peek(s, &token);
             val = e < 0 ? -e : e;
             uint32_t len = sizeof(val);
             rc = copy_to_user(a->a[3], &val, sizeof(val)) ? -EFAULT
                : (a->a[4] && copy_to_user(a->a[4], &len, sizeof(len))) ? -EFAULT : 0;
             if (rc == 0)
-                ksock_error_delivered(s, e);
+                ksock_error_delivered(s, token);
         }
     }
     ksock_put(s);

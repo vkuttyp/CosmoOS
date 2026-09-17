@@ -226,10 +226,14 @@ way. It also covers the pair a syscall uses, whose delivery can fail:
 `ksock_error_peek` twice returns the same verdict (it does not clear),
 `ksock_error_delivered` then clears it — and, the case that makes two
 concurrent askers safe, a *newer* verdict written between the peek and
-the commit survives the commit. That last one is deterministic because
-the "concurrent" write is simply made between the two calls; a commit
-that stored 0 rather than comparing would destroy a verdict nobody had
-been told. That split is why the field takes no lock at all: three of the five
+the commit survives the commit. Twice: once where the two verdicts
+differ, and once where they are **equal**, which is the case a commit
+comparing only the errno cannot see and which two ICMP messages about
+one flow produce readily. Both are deterministic because the
+"concurrent" write is simply made between the two calls. A commit that
+stored 0 rather than comparing fails the first; one that compared the
+errno without the generation fails the second, with
+`ksock_error` returning 0 for a verdict that was told to nobody. That split is why the field takes no lock at all: three of the five
 readers hold the mutex and two do not, and the writer runs where a mutex
 cannot be taken. An accessor that took `s->lock` would recurse on a
 non-recursive mutex in `ksock_connect`'s three completion paths.

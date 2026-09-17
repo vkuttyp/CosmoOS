@@ -3225,11 +3225,12 @@ bool selftest_net_sockerr_locking(const char **reason)
          * copy faults leaves the verdict for the next asker, and no
          * concurrent asker is ever told 0 while one is pending.
          */
+        uint64_t tok = 0, tok2 = 0;
         sock_set_error(s, -ECONNREFUSED);
-        CHECK_BREAK(ksock_error_peek(s) == -ECONNREFUSED);
-        CHECK_BREAK(ksock_error_peek(s) == -ECONNREFUSED);   /* twice: it did not clear */
-        ksock_error_delivered(s, -ECONNREFUSED);
-        CHECK_BREAK(ksock_error_peek(s) == 0);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s, &tok2) == -ECONNREFUSED);   /* twice: it did not clear */
+        ksock_error_delivered(s, tok);
+        CHECK_BREAK(ksock_error_peek(s, &tok2) == 0);
 
         /*
          * And the commit clears only what it delivered. This is the case
@@ -3240,10 +3241,25 @@ bool selftest_net_sockerr_locking(const char **reason)
          * simply made between the peek and the commit.
          */
         sock_set_error(s, -EHOSTUNREACH);
-        int stale = ksock_error_peek(s);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -EHOSTUNREACH);
         sock_set_error(s, -ENETUNREACH);          /* newer, undelivered */
-        ksock_error_delivered(s, stale);          /* commits the older one */
+        ksock_error_delivered(s, tok);            /* commits the older one */
         CHECK_BREAK(ksock_error(s) == -ENETUNREACH);   /* the newer one survived */
+
+        /*
+         * The same, with the two verdicts EQUAL -- which is the case a
+         * commit comparing only the errno cannot see, and two ICMP
+         * messages about one flow carry the same errno readily. The token
+         * carries a generation for exactly this: without it the second
+         * ECONNREFUSED, told to nobody, is cleared by the first one's
+         * commit and the socket reports no error at all.
+         */
+        sock_set_error(s, -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -ECONNREFUSED);
+        sock_set_error(s, -ECONNREFUSED);         /* a second, undelivered */
+        ksock_error_delivered(s, tok);            /* must not match it */
+        CHECK_BREAK(ksock_error(s) == -ECONNREFUSED);
+        CHECK_BREAK(ksock_error(s) == 0);
         pass = true;
     } while (0);
     if (s)

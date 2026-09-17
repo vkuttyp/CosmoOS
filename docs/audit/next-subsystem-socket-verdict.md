@@ -99,6 +99,17 @@ loop counts now, and the count is checked after it. The comment records
 that review caught this, because writing the warning was evidently not
 enough to obey it.
 
+**And then the shape itself had a hole, which is the third answer to the
+same question.** `ksock_error_delivered` first compared the *value*: if
+the word still held the errno that was delivered, clear it. Review found
+the ABA — a second ICMP message for the same flow carries the same
+errno, so a commit could clear a verdict that had arrived during the copy
+and been told to nobody, and the socket would then report no error at
+all. The field is one 64-bit word now, an errno and a generation every
+write bumps, and the commit compares both. Three rounds on one small
+function, each round finding the previous answer's edge: lose it on a
+fault, tell a concurrent asker zero, clear an identical twin.
+
 ### And then the instrument answered, on this unit's own CI
 
 The point of moving `tcp_get_stats` in front of the connect and printing
@@ -127,7 +138,7 @@ and then reading nothing. Why slirp resets it is not established and is
 outside this kernel; `docs/testing/flakes.md`, "The count", holds the
 table.
 
-### The four bug-proofs, each run
+### The five bug-proofs, each run
 
 | revert | what failed, and where |
 | --- | --- |
@@ -135,6 +146,7 @@ table.
 | the delivery cut out of `icmp_unreach` | `net-sockerr-udp` **and** `net-sockerr-spoof`: both time out waiting for `COSMO_IO_ERROR` |
 | `udp_error_notify`'s connected-only dropped | `net-sockerr-spoof`: `check failed: (ksock_ready(unconn) & COSMO_IO_ERROR) == 0` — an unconnected socket takes another flow's error |
 | `ksock_error` given `s->lock`, as the first draft proposed | **`KERNEL PANIC: mutex_lock('socket'): recursive lock by 'tv-connw'`** |
+| `ksock_error_delivered` comparing the errno without the generation | `net-sockerr-locking`: `check failed: ksock_error(s) == -ECONNREFUSED` — the second, undelivered verdict was cleared by the first one's commit |
 
 The last one is worth reading twice: the thread named is
 `net-tcpverdict`'s connect worker, not the test written for this
