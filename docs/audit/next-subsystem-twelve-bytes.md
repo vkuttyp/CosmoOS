@@ -71,16 +71,20 @@ This is precisely the defect PR #167 removed from the host side of the
 same exchange, on the other side of the wire, and it is why a fortnight
 of sightings could not say whether the guest had even tried to send.
 
-### The stack has the counters and the test ignores them
+### And the connection is never asked anything
 
-`struct tcp_stats` (`kernel/include/kernel/net/tcp.h:218`) already
-carries, per boot: `segs_out`, `retransmits`, `rsts_in`, `rsts_out`,
-`timeouts`, `out_refused` ("segments the chain refused"), `out_aborted`,
-`out_recorded`, `dropped_no_pcb`. `tcp_get_stats()` reads them, and two
-neighbouring tests already use it — `net-lo-tcp` and `net-lo-tcp-loss`
-sample it around their exchanges and print the deltas.
+The socket layer can be interrogated about *this* connection —
+`tcp_send_space(pcb)`, `tcp_recv_avail(pcb)`, `tcp_state_of(pcb)` — and
+`net-harness` asks none of them. It calls `ksock_sendto`, discards the
+return, and prints a variable that holds the result of a different call.
 
-`net-harness` samples none of it.
+There are also global counters (`struct tcp_stats`,
+`kernel/include/kernel/net/tcp.h:218` — `segs_out`, `retransmits`,
+`out_refused` and more), which `net-lo-tcp` and `net-lo-tcp-loss` sample
+two tests away. They are worth printing beside the per-connection
+answers and they cannot substitute for them: they are per boot, so they
+include this connection's own handshake and every other socket's
+traffic. Design §1 says why that matters and what to use instead.
 
 ## Why it matters
 
@@ -101,65 +105,82 @@ sample it around their exchanges and print the deltas.
 
 ## Design
 
-### 1. Make both ends say what happened
+### 1. Ask the connection, not the counters
 
-The guest's message becomes the analogue of the host's:
+An earlier draft of this section proposed sampling `tcp_get_stats()`
+across the exchange and reading `segs_out`. **That does not work, and
+the reason is worth keeping**: those counters are global and per boot.
+`segs_out` counts the SYN and the ACK that `ksock_connect` itself sends,
+so a zero delta is impossible after a handshake the evidence says
+completed; a positive delta says nothing about the twelve bytes; and
+`out_refused` may belong to another connection entirely. A table of
+"mutually exclusive outcomes" built on them was not exclusive and not
+about this payload.
+
+The connection can be asked directly. `tcp_send_space(pcb)` is
+`netbuf_space(&pcb->sndbuf)` (`tcp.c:1354`), and **data stays in the
+send buffer until it is acknowledged**. So:
 
 ```c
-kprintf("NETTEST: client %s (connect %d, sent %lld, recv %lld, %llu segs out, "
-        "%llu retransmits, %llu refused)\n",
-        client_ok ? "ok" : "failed", rc, (long long)sent, (long long)got,
-        d.segs_out, d.retransmits, d.out_refused);
+uint32_t space0 = tcp_send_space(c->tcp);         /* before */
+int64_t sent = ksock_sendto(c, "cosmo hello\n", 12, NULL);
+uint32_t space1 = tcp_send_space(c->tcp);         /* queued */
+... the recv, which fails ...
+uint32_t space2 = tcp_send_space(c->tcp);         /* drained, or not */
+enum tcp_state st = tcp_state_of(c->tcp);
 ```
 
-with `sent` and `got` the actual returns of `ksock_sendto` and
-`ksock_recvfrom`, and `d` the `tcp_get_stats()` delta across the
-exchange — sampled exactly as `net-lo-tcp` already does it, which is why
-this is a small change rather than a new facility.
+`space0 - space1` says the bytes were queued. `space2` says whether they
+were ever acknowledged. Both are this connection's, which is what the
+global counters could not be.
 
-### 2. What one failing run then tells you
+### 2. And then the paradox resolves one way or the other
 
-The candidates are mutually exclusive on those numbers, which is the
-point of choosing them:
+QEMU's user-mode networking is **a proxy, not a wire**. It terminates
+the guest's TCP connection in its own stack and opens a *separate*
+socket to `127.0.0.1:back_port`; that is what `hostfwd` and outbound
+connections are. So slirp acknowledges the guest's data as soon as it
+takes it into its own buffer, and only then writes it to the host
+socket.
 
-| observation | what it means |
+That is how "both ends agree the connection exists and is healthy" can
+coexist with twelve bytes vanishing, which is otherwise close to
+impossible for TCP. It also means the answer is one of two shapes, and
+`space2` separates them:
+
+| observation | meaning |
 | --- | --- |
-| `sent` < 12 or negative | the guest never queued the data; the defect is in `ksock_sendto` or above, and the network is innocent |
-| `sent` = 12, `segs_out` delta 0 | queued and never transmitted: the defect is between the socket and the device |
-| `segs_out` ≥ 1, `out_refused` > 0 | **the firewall refused the guest's own segment** — see below |
-| `segs_out` ≥ 1, `retransmits` climbing | it left the guest repeatedly and the host never saw it: slirp, the NIC, or the host |
-| `segs_out` = 1, no retransmits, nothing else | it left once, was lost, and the guest never noticed — which would itself be a bug, because TCP must retransmit unacknowledged data |
+| `sent` < 12 or negative | never queued: the defect is in `ksock_sendto` or above, and the network is innocent |
+| `space2` still short by 12, `retransmits` climbing | the guest sent and was never acknowledged — the loss is between the guest and slirp: the transmit path, virtio, the NIC model |
+| `space2` still short by 12, `retransmits` flat | the guest queued it, was never acknowledged, and **never retried** — a bug in its own retransmission timer, and nothing to do with the wire |
+| `space2` recovered — the data was **acknowledged** — and the host still saw nothing | slirp took the bytes, acknowledged them, and did not deliver them. That is outside this kernel, and saying so with evidence is a result |
 
-That last row is worth stating in advance. The host never sent an ACK
-for data it never received, so a guest that transmitted and saw no ACK
-**must** retransmit. If the counters show one segment out and no
-retransmissions across ten seconds, the defect is in the guest's
-retransmission timer and not in the wire at all.
+The third row is the one worth naming in advance, as the previous unit
+named its own: an unacknowledged segment *must* be retransmitted, so
+flat retransmits with undrained send buffer is a defect in this
+repository regardless of what slirp does.
 
-### 3. The suspect the counters exist to test
+The fourth is the one a reader should expect to be most likely, given
+what slirp is — and it is also the one that would have been invisible to
+the global counters, because the guest's stack would look perfect in
+every one of them.
 
-`out_refused` is in `tcp_stats` because the firewall's OUTPUT chain can
-refuse a connection's own segments
-(`docs/kernel-services/network/design.md`, "A refused segment is the
-connection's business"). And `net-harness` runs **last** of the
-thirty-seven network self-tests, after `net-firewall`, `net-tcpverdict`,
-`net-nat`, `net-dnat`, `net-forward` and the rest — every test that
-installs rules, NAT entries or routes. Those tests call `fw_flush()` on
-**entry**, not on exit (`nettest.c:4349`, `:4643`, `:5107` are all three
-lines into a `selftest_*` function), so the last one to install anything
-leaves it installed.
+### 3. The firewall suspect, demoted
 
-**The intermittency argues against this being the whole story**, and the
-report says so rather than leading with the tidy version: a statically
-leaked rule would refuse the segment on *every* run, and this fails
-about one in three. If `out_refused` moves, the next question is what
-makes the refusal intermittent — a conntrack entry that has expired by
-the time `net-harness` reaches the end of a thirty-seven-test suite is
-the obvious candidate, and it is timing-dependent in exactly the way the
-observations are.
+`out_refused` is global and cannot be attributed to this connection, so
+it is corroboration and not a discriminator. It also does not need to
+be: a refused segment is never acknowledged, so it lands in the second
+or third row above by the same measurement. The counter is worth
+printing beside them, and worth nothing on its own.
 
-If `out_refused` does not move, this suspect is eliminated in one run
-and the unit follows whichever row above did move.
+The circumstance that made it interesting stands and is still worth
+recording: `net-harness` runs **last** of the thirty-seven network
+self-tests, after every test that installs rules, and those call
+`fw_flush()` on **entry** rather than exit (`nettest.c:4349`, `:4643`,
+`:5107` are each three lines into a `selftest_*` function), so the last
+one to install anything leaves it installed. The intermittency argues
+against it being the whole story — a statically leaked rule would refuse
+the segment on every run, and this fails about one in three.
 
 ### 4. What this unit does not do
 
@@ -173,7 +194,7 @@ thing that has produced progress on this defect.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/nettest.c` | `selftest_net_harness`: keep `sent` and `got`, sample `tcp_get_stats()` across the exchange, print all of it |
+| `kernel-services/network/nettest.c` | `selftest_net_harness`: keep `sent` and `got`; sample `tcp_send_space` before the send, after it and after the failed read; `tcp_state_of` at the end; the global counters beside them as corroboration |
 | `docs/kernel-services/network/testing.md` | what the guest's line now says, beside what the host's says |
 | `docs/audit/2026-09-deferred-work-inventory.md` | the row: the locus narrowed by whatever the run shows |
 | `README.md` | the Status entry |
@@ -184,7 +205,7 @@ built says which row of the table above sent it there.
 
 ## New APIs
 
-None. `tcp_get_stats()` exists and is already used by two tests.
+None. `tcp_send_space`, `tcp_state_of` and `tcp_get_stats` all exist; the first two are already declared in `tcp.h` and the third is used by two neighbouring tests.
 
 ## Migration plan
 
