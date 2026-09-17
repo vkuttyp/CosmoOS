@@ -201,6 +201,25 @@ static struct udp_pcb *lookup(uint16_t family, const struct netaddr *dst, const 
     return best;
 }
 
+bool udp_error_notify(const struct netaddr *local, const struct netaddr *remote, int err)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    /* connected_only: the four-tuple must be a flow, not a listener. */
+    struct udp_pcb *pcb = lookup(local->family, local, remote, true);
+    struct socket *sock = NULL;
+    /* Held across the unlock, and a tryget for the same reason udp_input
+     * gives: a release clears pcb->sock under g_lock but starts at count
+     * zero (design.md, "UDP"). */
+    if (pcb && pcb->sock && kobject_tryget(&pcb->sock->obj))
+        sock = pcb->sock;
+    spin_unlock_irqrestore(&g_lock, s);
+    if (sock == NULL)
+        return false;
+    sock_set_error(sock, err);   /* wakes; invariant N21 */
+    ksock_put(sock);
+    return true;
+}
+
 void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6)
 {
     (void)nif;

@@ -365,6 +365,23 @@ static inline long cosmo_setnonblock(int h, int on)
     return cosmo_syscall2(SYS_setnonblock, h, on);
 }
 
+/* A socket's own answer about itself. The one option is
+ * COSMO_SOL_SOCKET/COSMO_SO_ERROR: the pending error as a *positive*
+ * errno, 0 for none, and cleared by the read -- which is what
+ * cosmo_ioready's COSMO_IO_ERROR cannot say, that bit reporting only that
+ * a socket is broken (docs/kernel-services/network/invariants.md, N21). */
+static inline long cosmo_getsockopt(int h, int level, int opt, void *val, size_t *len)
+{
+    return cosmo_syscall5(SYS_getsockopt, h, level, opt, val, len);
+}
+static inline int cosmo_sock_error(int h)
+{
+    int e = 0;
+    size_t len = sizeof(e);
+    long rc = cosmo_getsockopt(h, COSMO_SOL_SOCKET, COSMO_SO_ERROR, &e, &len);
+    return rc < 0 ? (int)rc : e;
+}
+
 /* The asynchronous I/O ring (docs/kernel/io/api.md). */
 static inline long cosmo_aio_create(unsigned entries, unsigned flags)
 {

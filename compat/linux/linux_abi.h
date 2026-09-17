@@ -225,6 +225,7 @@ struct lx_winsize {
 #define LX_SOCK_NONBLOCK 04000
 #define LX_SOCK_CLOEXEC 02000000
 #define LX_SOL_SOCKET 1
+#define LX_SO_ERROR   4   /* Linux's SO_ERROR; this stack's COSMO_SO_ERROR behind the same kernel call */
 
 /* --- auxiliary vector --- */
 #define LX_AT_NULL 0

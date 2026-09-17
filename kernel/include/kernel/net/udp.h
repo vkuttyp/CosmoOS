@@ -43,6 +43,13 @@ void udp_unbind(struct udp_pcb *pcb);
 int udp_sendto(struct udp_pcb *pcb, const void *data, size_t len, const struct netaddr *to);
 /* Dequeue one datagram (or NULL). The mbuf's pkt.src is the sender. */
 struct mbuf *udp_recv(struct udp_pcb *pcb);
+/* An ICMP error quoting one of this host's flows: set it as the pending
+ * error of the socket that owns the flow, and wake it. Only a *connected*
+ * pcb matching the whole four-tuple qualifies -- an unconnected socket has
+ * no flow for the message to be about, and admitting one would let anything
+ * on the path kill a socket by quoting a plausible port (RFC 5927; the same
+ * bar N16 sets for a reset). True if a socket took it. */
+bool udp_error_notify(const struct netaddr *local, const struct netaddr *remote, int err);
 void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6);
 struct udp_stats {
     uint64_t rx, rx_bad_len, rx_bad_cksum, rx_no_port, rx_queue_full, tx;

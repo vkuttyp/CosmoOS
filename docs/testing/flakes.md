@@ -43,6 +43,20 @@ is deliberate: the list going silently empty is the failure it guards.
 | `net-icmp-limit` | `kernel-services/network/nettest.c`, `selftest_net_icmp_limit` | the 300-echo flood is decided within the one-second limiter window the test saw begin | at most `ICMP_RATE_PER_SEC` replies to a burst, exactly one window's worth | the window's phase is now observed (an echo refused, then one replied), but that the flood's ~20 ms fits in the window's remaining second is time; a host holding the vCPU for most of a second inside the flood fails it. A 50× margin, the largest here |
 | `el2-guest-timer-ontime` | `kernel-services/virtualization/hvtest.c`, `selftest_el2_guest_timer_ontime` (runs under `make test-gic`) | the guest's timer is late by less than four times the ~15 ms it asked for | the WFI park wakes on the guest's deadline in 1 ms slices, not by sleeping the whole interval or in coarse slices | a wake-reason counter would say "the deadline passed", which a coarse park also satisfies; only the lateness distinguishes them, and lateness is time |
 
+**Observed once, not yet on the list: the TLB shootdown deadline.**
+`kernel/arch/x86_64/mmu.c:324` gives every other CPU one second to
+acknowledge an IPI and panics otherwise. On 2026-09-17 a debug boot
+panicked with `TLB shootdown ... acknowledged by 2 of 3 CPUs` on a
+developer machine running several QEMU boots and a build at once; the
+next boot passed and no CI run has shown it. It is recorded here rather
+than added to the list because one observation on a deliberately
+overloaded host is not evidence about the bound — but it is the same
+family as the rows above ("a host holding the vCPU"), and if it recurs
+this is where it starts. It is not a test bound: a shootdown that really
+never completes is a kernel defect, so widening it would hide the thing
+it exists to catch. A re-run distinguishes the two, as everywhere else
+here.
+
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
 timer at "less than what it asked for"); both bounds still sit an order
@@ -443,8 +457,8 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirteen, to 2026-09-17**, across CI and this developer's machine,
-on both architectures. Counted rather than asserted, because the first version
+**Eighteen, to 2026-09-17**, across CI and this developer's machine, on
+both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
 | sighting | source |
@@ -457,15 +471,17 @@ of this section said eight and then listed nine:
 | PR #167's own CI run | observed, with timings |
 | PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
 | PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
+| `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
+| PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
 
-Eight entries, thirteen occurrences. The first five rows are inherited
+Ten entries, eighteen occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
-here. The last three were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the four instrumented
+here. The last four were watched as they happened: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the six instrumented
 ones carry the guest's side.
 
-**And the fourth instrumented sighting broke the pattern the first three
-set.** PR #170's x86-64 job, on a branch that changes one Markdown file:
+**And one of them broke the pattern the others set** — PR #170's x86-64
+job, on a branch that changes one Markdown file:
 
 ```
 NETTEST: client failed: connect 0, sent 12, recv -104,
@@ -487,11 +503,13 @@ the connection was already reset.
 | PR #169, aarch64 | `-104` | `+0` | 0 | `+1` |
 | PR #170, x86-64 | **`12`** | **`+1`** | **12** | `+1` |
 | PR #170, aarch64 | `-104` | `+0` | 0 | `+1` |
+| `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
+| `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
 segment went out, and the host still saw nothing — so "the twelve bytes
-were never written" describes three sightings and not the fourth. It
+were never written" describes five of the six and not that one. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
@@ -501,10 +519,101 @@ wrong in the timer. Distinguishing the two needs the pcb's own pending
 error and a timestamp, which is what
 `docs/audit/next-subsystem-socket-verdict.md` is for.
 
-`rsts_in +1` in three of the four. The locus is now: **an established
-connection to slirp is reset — sometimes before the guest writes and
-sometimes after a segment is already on the wire — and the payload never
-reaches the host's accepted socket.**
+**And then the instrument built to answer this printed its first
+failure**, on PR #171's own aarch64 CI — the pull request that added the
+socket's pending error and moved the counters to *before* the connect:
+
+```
+NETTEST: client failed: connect -104 in 1381 ms, sent -1 in 0 ms,
+  recv -1 in 0 ms, pending error -104,
+  sndbuf free 0 before, 0 after send, 0 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+  (counters from before the connect)
+```
+
+**`ksock_connect` itself failed**, with `ECONNRESET`, after 1381 ms.
+Every instrumented sighting before this one said `connect 0`. And
+`pending error -104` is the first time the *socket's own* verdict has
+been read rather than inferred: `ECONNRESET` for this pcb, not a
+machine-wide counter that might have belonged to anything.
+
+Read with `tcp.c`, it says where the reset lands. `ksock_connect` waits
+for the pcb to leave `SYN_SENT`/`SYN_RCVD` and then reports
+`ksock_error` if the state is not `ESTABLISHED` or `CLOSE_WAIT`
+(`socket.c`); and `ECONNRESET` rather than `ECONNREFUSED` is set only by
+a reset accepted **on a synchronized connection** (`tcp.c`, the RFC 5961
+§3 path — a reset in `SYN_SENT` gives `ECONNREFUSED`). So the handshake
+*completed*, and the reset arrived before the connecting thread ran
+again. `retransmits +1` and 1381 ms are one SYN retransmission at the
+one-second timer, so the handshake was slow as well as short-lived.
+
+**That unifies the shapes.** Nine instrumented sightings, and the
+guest's progress when the reset lands is the only thing that differs:
+
+| run | how far the guest got | `rsts_in` |
+| --- | --- | --- |
+| PR #169, x86-64 | connected, then `sendto` refused | `+0` |
+| PR #169, aarch64 | connected, then `sendto` refused | `+1` |
+| PR #170, x86-64 | connected, **sent 12**, never acknowledged | `+1` |
+| PR #170, aarch64 | connected, then `sendto` refused | `+1` |
+| `main` ×2, aarch64 | connected, then `sendto` refused | `+0`, `+1` |
+| PR #171, aarch64 | **the connect itself reset** | `+1` |
+| PR #171, aarch64 again | connected, **sent 12**, never acknowledged | `+1` |
+| PR #171, aarch64, third | **the connect reset, with no retransmission** | `+1` |
+
+The constant is not the twelve bytes and never was: it is **an inbound
+reset on an established connection to slirp, arriving at whatever point
+the guest has reached** — while slirp's own host-side socket connects
+successfully, which is why the host's `accept` keeps succeeding and then
+reading nothing. QEMU user-mode networking being a proxy rather than a
+wire is what makes those two facts consistent.
+
+What is still not established is why slirp resets it. That is outside
+this kernel, and saying so with evidence was named as a possible result
+from the beginning (`docs/audit/next-subsystem-twelve-bytes.md`, Risks).
+
+`rsts_in +1` in seven of the nine; the two `+0`s are the instrument's own
+window, which opened after the connect until PR #171 moved it.
+
+**The sightings with the window moved show the handshake, which the
+other six could not.** The first two suggested a pattern and the third
+refuted it, inside a day:
+
+```
+connect -104 in 1381 ms ... segs_out +3 retransmits +1 rsts_in +1
+connect   0 in 1270 ms  ... segs_out +4 retransmits +1 rsts_in +1
+connect -104 in  569 ms ... segs_out +2 retransmits +0 rsts_in +1
+```
+
+The first two both took over a second and both retransmitted a SYN,
+which was written down here as "the first SYN went unanswered — the
+first thing in this chase that looks like a beginning". **The third has
+no retransmission at all**: two segments out, 569 ms, and the same
+reset. So a lost SYN is not the mechanism, or not the only one, and the
+claim is withdrawn rather than left standing with a caveat. It was two
+observations, and this file has a history of two observations becoming a
+rate that the next run halves.
+
+What survives all three, and all nine instrumented sightings, is
+narrower and duller: **an inbound reset arrives on a connection to
+slirp, at whatever point the guest has reached** — during the handshake,
+after it, or after a segment is already on the wire — while slirp's own
+host-side socket connects fine, which is why the host's `accept` keeps
+succeeding and then reading nothing. Nothing observed so far
+distinguishes *why*, and the next thing to measure is on the host side
+of slirp rather than in this kernel. The locus is
+now: **an established connection to slirp is reset — sometimes before the
+guest writes and sometimes after a segment is already on the wire — and
+the payload never reaches the host's accepted socket.**
+
+**The CI rate rose sharply on 2026-09-17.** Six instrumented failures
+inside about two hours — two on PR #169, two on PR #170, two on `main` —
+against one local boot in twenty-one. Nothing here explains the jump and
+this file does not guess at one; it is recorded because "one in
+twenty-one locally" is the only rate this file has measured, and CI is
+plainly not that. What it does mean practically: the instrument no longer
+has to be waited for. It reports several times a day.
 
 At least four were on trees that cannot have caused them, and PR #170's
 two are the clearest of them: that branch adds one Markdown file and

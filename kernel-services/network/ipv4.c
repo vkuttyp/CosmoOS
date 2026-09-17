@@ -338,37 +338,83 @@ void icmp_send_timxceed(struct mbuf *orig, const struct ipv4_hdr *iph)
  * is one of ours still in flight (RFC 5927). Quotes of other protocols
  * are counted and ignored (no consumer of the cache exists for them).
  */
-static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
+/* The flow an ICMP error quotes, as this host's own four-tuple: the quoted
+ * packet is one *we* sent, so its source is our local end and its
+ * destination the peer. False unless the quote is a well-formed IPv4 header
+ * this host could have sent and the transport's first 8 bytes are there --
+ * which is all RFC 792 guarantees a sender quotes. `proto` and `seq` are
+ * the caller's to interpret. */
+static bool icmp_quoted_flow(struct mbuf *m, const struct icmp_hdr *ic,
+                             struct netaddr *local, struct netaddr *remote,
+                             uint8_t *proto, uint32_t *seq, uint16_t *quoted_len)
 {
-    STAT(icmp_needfrag_rcvd);
     uint8_t quote[sizeof(struct ipv4_hdr) + 8];
     if (!m_copydata(m, sizeof(*ic), sizeof(quote), quote))
-        return;
+        return false;
     const struct ipv4_hdr *q = (const struct ipv4_hdr *)quote;
     unsigned ihl = IPV4_HDR_LEN(q);
     if ((q->vhl >> 4) != 4 || ihl < 20 || !netif_owns_ipv4(q->src))
+        return false;
+    uint8_t th[8];
+    if (!m_copydata(m, sizeof(*ic) + ihl, sizeof(th), th))
+        return false;
+    memset(local, 0, sizeof(*local));
+    memset(remote, 0, sizeof(*remote));
+    local->family = remote->family = COSMO_AF_INET;
+    local->v4 = q->src;
+    remote->v4 = q->dst;
+    local->port = (uint16_t)(th[0] << 8 | th[1]);
+    remote->port = (uint16_t)(th[2] << 8 | th[3]);
+    *proto = q->proto;
+    *seq = (uint32_t)th[4] << 24 | (uint32_t)th[5] << 16 | (uint32_t)th[6] << 8 | th[7];
+    *quoted_len = ntohs(q->len);
+    return true;
+}
+
+/* A destination-unreachable for a flow of this host's. Only a connected UDP
+ * socket takes one: TCP keeps its verdict from the segments themselves,
+ * where RFC 1122 §4.2.3.9 forbids aborting a connection on a soft error and
+ * RFC 5927 is the reason an unconfirmed message must change nothing. */
+static void icmp_unreach(struct mbuf *m, const struct icmp_hdr *ic)
+{
+    struct netaddr local, remote;
+    uint8_t proto;
+    uint32_t seq;
+    uint16_t qlen;
+    if (!icmp_quoted_flow(m, ic, &local, &remote, &proto, &seq, &qlen))
+        return;
+    if (proto != IPPROTO_UDP)
+        return;
+    int err;
+    switch (ic->code) {
+    case ICMP_UNREACH_NET:   err = -ENETUNREACH; break;
+    case ICMP_UNREACH_HOST:  err = -EHOSTUNREACH; break;
+    case ICMP_UNREACH_PROTO: /* nothing speaks UDP there: as refused as a port */
+    case ICMP_UNREACH_PORT:  err = -ECONNREFUSED; break;
+    default: return;
+    }
+    if (udp_error_notify(&local, &remote, err))
+        STAT(icmp_unreach_delivered);
+}
+
+static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
+{
+    STAT(icmp_needfrag_rcvd);
+    struct netaddr local, remote;
+    uint8_t proto;
+    uint32_t seq;
+    uint16_t qlen;
+    if (!icmp_quoted_flow(m, ic, &local, &remote, &proto, &seq, &qlen))
+        return;
+    if (proto != IPPROTO_TCP)
         return;
     uint32_t mtu = ntohs(ic->seq);   /* the header's last 16 bits */
     if (mtu == 0)
-        mtu = pmtu_plateau_below(ntohs(q->len));
+        mtu = pmtu_plateau_below(qlen);
     if (mtu < IPV4_PMTU_MIN)
         mtu = IPV4_PMTU_MIN;
-    if (q->proto != IPPROTO_TCP)
-        return;
-    uint8_t th[8];
-    if (!m_copydata(m, sizeof(*ic) + ihl, sizeof(th), th))
-        return;
-    struct netaddr local, remote;
-    memset(&local, 0, sizeof(local));
-    memset(&remote, 0, sizeof(remote));
-    local.family = remote.family = COSMO_AF_INET;
-    local.v4 = q->src;
-    remote.v4 = q->dst;
-    local.port = (uint16_t)(th[0] << 8 | th[1]);
-    remote.port = (uint16_t)(th[2] << 8 | th[3]);
-    uint32_t seq = (uint32_t)th[4] << 24 | (uint32_t)th[5] << 16 | (uint32_t)th[6] << 8 | th[7];
     if (tcp_pmtu_notify(&local, &remote, seq, (uint16_t)(mtu > 65535 ? 65535 : mtu)))
-        ipv4_pmtu_update(q->dst, mtu);   /* confirmed by a live connection: remember it for the next ones */
+        ipv4_pmtu_update(remote.v4, mtu);   /* confirmed by a live connection: remember it for the next ones */
 }
 
 void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
@@ -400,6 +446,11 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
      * reply hook. */
     if (m->flags & M_FW_QUIET) {
         STAT(icmp_quiet_dropped);
+        m_freem(m);
+        return;
+    }
+    if (ic->type == ICMP_DEST_UNREACH) {
+        icmp_unreach(m, ic);   /* a connected UDP flow's, or nothing */
         m_freem(m);
         return;
     }

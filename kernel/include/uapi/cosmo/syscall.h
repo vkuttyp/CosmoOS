@@ -138,7 +138,10 @@
 #define SYS_symlink   89  /* (const char *target, const char *path) -> 0 */
 #define SYS_readlink  90  /* (const char *path, char *buf, size_t len) -> bytes copied */
 #define SYS_lstat     91  /* (const char *path, struct cosmo_stat *st) -> 0, not following a link */
-#define SYS_COUNT     92
+/* A socket's own answer about itself. One option so far -- the pending
+ * error -- because a door with one thing behind it beats one that lies. */
+#define SYS_getsockopt 92 /* (int h, int level, int opt, void *val, size_t *len) -> 0 */
+#define SYS_COUNT     93
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -442,6 +445,14 @@ struct cosmo_procinfo {
 #define COSMO_SOCK_DGRAM  2
 #define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: the socket starts non-blocking */
 
+/* Socket options (SYS_getsockopt). */
+#define COSMO_SOL_SOCKET 1
+/* The pending asynchronous error, as an int, and POSIX's sign: a *positive*
+ * errno, 0 when there is none. Reading it clears it, so it is delivered to
+ * exactly one caller -- the answer SYS_ioready's COSMO_IO_ERROR cannot give,
+ * since that bit says a socket is broken and never which way. */
+#define COSMO_SO_ERROR   1
+
 /* Clocks (SYS_clock_ns). */
 #define COSMO_CLOCK_MONOTONIC 0
 #define COSMO_CLOCK_REALTIME  1
@@ -596,7 +607,9 @@ struct cosmo_dirent {
 #define COSMO_EAFNOSUPPORT 97
 #define COSMO_EADDRINUSE 98
 #define COSMO_EADDRNOTAVAIL 99
+#define COSMO_ECONNABORTED 103
 #define COSMO_ECONNRESET 104
+#define COSMO_ENOPROTOOPT 92   /* SYS_getsockopt: this stack has no such option */
 #define COSMO_EISCONN 106
 #define COSMO_ENOTCONN 107
 #define COSMO_ETIMEDOUT 110

@@ -51,6 +51,7 @@ struct icmp_hdr {
 #define ICMP_UNREACH_PORT 3
 #define ICMP_UNREACH_PROTO 2
 #define ICMP_UNREACH_NET 0        /* net unreachable: no route to forward */
+#define ICMP_UNREACH_HOST 1       /* host unreachable */
 #define ICMP_TIME_EXCEEDED 11      /* TTL exceeded in transit (RFC 792) */
 #define ICMP_TIMXCEED_INTRANS 0
 #define ICMP_UNREACH_NEEDFRAG 4   /* fragmentation needed and DF set: next-hop MTU in the header's last 16 bits */
@@ -110,6 +111,7 @@ void nd_flush(struct netif *nif);   /* drop every entry that names the interface
 struct ip_stats {
     uint64_t rx, rx_bad_header, rx_bad_cksum, rx_not_for_us, rx_fragments, rx_unknown_proto, tx, tx_no_route;
     uint64_t icmp_echo_rcvd, icmp_echo_replied, icmp_unreach_sent, icmp_ratelimited, icmp_needfrag_rcvd, pmtu_updates;
+    uint64_t icmp_unreach_delivered;   /* destination-unreachables a connected socket owned (invariant N21) */
     uint64_t fwd, fwd_ttl_exceeded, fwd_no_route, fwd_hairpin, fwd_disabled, fwd_nat_drop, fwd_spoofed;
     uint64_t fwd_filtered;             /* dropped by the firewall's FORWARD verdict */
     uint64_t in_filtered;              /* dropped by the firewall's INPUT verdict (a guest tap -> the host) */

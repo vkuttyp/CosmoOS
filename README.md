@@ -2465,6 +2465,51 @@ See [docs/development.md](docs/development.md).
   inventory row stays open, narrowed. 333
   self-tests on both architectures, debug and release (PR #169).
 
+- **A socket can be asked what went wrong.** The stack has always known:
+  `pcb->error` is set at six sites with four errnos — reset, refused,
+  timed out, refused by the firewall — and `struct socket` carries a
+  second field, commented *"pending asynchronous error"*, that **nothing
+  ever wrote**. `sock_set_error` had zero callers while five sites tested
+  the field, and behind that dead setter sat a real bug: `ksock_accept`
+  read `return take_error(s) ? take_error(s) : -EINVAL`, and `take_error`
+  clears as it reads, so the second call answered 0 — `accept` returning
+  **success** with its out-parameter unassigned, live the moment anyone
+  called the setter. Meanwhile `icmp_input` consumed only
+  fragmentation-needed and echo, so this host **sent** ICMP
+  port-unreachables and had never **received** one, and a connected UDP
+  socket talking to a closed port waited forever. And no caller could ask
+  for a verdict at all: `SYS_ioready` says *that* a socket is broken and
+  never which way, the native ABI had no socket-option call, and the
+  Linux door refused every `getsockopt` while `setsockopt` returned **0
+  for every `SOL_SOCKET` option and did nothing** — so a program setting
+  `SO_RCVTIMEO` was told it worked and then blocked forever. This unit
+  makes the verdict a thing you can ask for: `ksock_error` reads it once
+  (clearing by compare-exchange, so two readers cannot both be told the
+  same error) and takes **no lock**, because three of its five callers hold `s->lock`
+  and two do not and the writer runs in packet-receive context where a
+  mutex cannot be taken — which is a rule the field never had and the
+  reason the first draft of the design would have recursed on a
+  non-recursive mutex. `udp_error_notify` gives the field its first
+  writer, from an `icmp_input` branch that reuses the quoted-header parse
+  `icmp_needfrag` already had and delivers only to a **connected** socket
+  whose whole four-tuple the message quotes (RFC 5927: the bar N16 sets
+  for a reset). `SYS_getsockopt` (92) carries `SO_ERROR` — one option,
+  positive errno, cleared by the read — with the Linux door forwarding to
+  the same kernel path rather than growing its own, and `setsockopt`
+  refusing what it does not implement. Invariant N21. Five bug-proofs,
+  each shown to fail for its stated reason: the double call makes
+  `accept` return the wrong thing, cutting the delivery makes the UDP
+  socket wait, dropping connected-only lets an unconnected socket take
+  another flow's error, giving the accessor the mutex stops the kernel,
+  and a delivery that commits by errno alone destroys a second verdict of
+  the same value that nobody had been told — which is why the pending
+  error is one 64-bit word carrying a generation as well as an errno, and
+  why a syscall peeks, copies, and only then commits the clear rather
+  than taking the verdict and putting it back. `net-harness` now prints the pending error and samples its
+  counters *before* the connect, which is what PR #169's window was too
+  late for. 337 self-tests on both architectures, debug and release
+  (PR #171).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

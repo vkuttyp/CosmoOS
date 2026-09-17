@@ -35,7 +35,16 @@ struct socket {
     struct udp_pcb udp;         /* SOCK_DGRAM */
     struct tcp_pcb *tcp;        /* SOCK_STREAM */
     struct waitqueue wait;
-    int error;                  /* pending asynchronous error, consumed by the next call */
+    /* Pending asynchronous error, delivered once (invariant N21). Written
+     * by sock_set_error from any context -- including packet receive,
+     * where s->lock cannot be taken -- and read by ksock_error, which
+     * exchanges it for 0. Neither holds s->lock: three of the five
+     * readers hold that mutex and two do not, so it cannot serve as this
+     * field's rule. Atomic accessors only, and never by hand: the low 32
+     * bits are the errno and the high 32 a generation bumped by every
+     * write, so a delivery can tell the verdict it carried from an
+     * identical errno that arrived while it was being copied out. */
+    uint64_t error;
     unsigned shut;              /* 1 = RD, 2 = WR */
     bool nonblock;              /* a property of the object, shared by every handle to it */
     struct mutex lock;
@@ -68,6 +77,26 @@ struct socket *socket_from_kobject(struct kobject *obj);
 /* Protocol side: wake every waiter on the socket (any context). */
 void sock_wake(struct socket *s);
 void sock_set_error(struct socket *s, int err);   /* and wake */
+/* The pending asynchronous error, read once: returns it and clears it, as
+ * SO_ERROR does, so two readers cannot both be told the same verdict. A
+ * stream socket's own pcb error is reported *without* clearing, because a
+ * dead connection must keep failing. 0 when there is none. Takes no lock
+ * (invariant N21): safe with or without s->lock held, and against a
+ * writer in packet context. */
+int ksock_error(struct socket *s);
+/* For a caller whose delivery can fail -- a syscall copying the verdict to
+ * user memory, where a range check is not a promise the copy succeeds.
+ * `peek` reports without clearing and hands back an opaque `token`;
+ * `delivered` commits the clear only once the value has reached the
+ * caller, and only if the token still names what is there. Taking first
+ * and putting it back on failure would leave a window in which a
+ * concurrent asker sees 0 while a verdict is pending and undelivered,
+ * which is a worse answer than the one this pair can give: if two askers
+ * race, both are told the truth and one of them clears it. The token
+ * carries a generation rather than only the errno, because two ICMP
+ * messages for one flow can carry the same one. */
+int ksock_error_peek(struct socket *s, uint64_t *token);
+void ksock_error_delivered(struct socket *s, uint64_t token);
 
 unsigned socket_count(void);
 

@@ -461,7 +461,7 @@ static void conn_reset_locked(struct tcp_pcb *pcb)
     netbuf_clear(&pcb->rcvbuf);
     ooo_flush(pcb);
     pcb->rcv_wnd = TCP_RCVBUF;
-    pcb->error = 0;
+    __atomic_store_n(&pcb->error, 0, __ATOMIC_RELEASE);
     pcb->fin_queued = pcb->fin_sent = pcb->fin_rcvd = pcb->delack_pending = false;
     pcb->rexmit_count = pcb->dupacks = pcb->keep_probes = 0;
     pcb->srtt_ns = pcb->rttvar_ns = 0;
@@ -961,7 +961,7 @@ static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, boo
         case TCP_SYN_SENT:
         case TCP_SYN_RCVD:
             STAT(out_aborted);
-            pcb->error = -EPERM;
+            __atomic_store_n(&pcb->error, -EPERM, __ATOMIC_RELEASE);
             *wake = *wake ? *wake : sock_ref(pcb);
             *killed = pcb_end_locked(pcb);
             break;
@@ -984,7 +984,7 @@ static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, boo
              * rule. */
             if (pcb->error == 0) {
                 STAT(out_recorded);
-                pcb->error = -EPERM;
+                __atomic_store_n(&pcb->error, -EPERM, __ATOMIC_RELEASE);
                 *wake = *wake ? *wake : sock_ref(pcb);
             }
             break;
@@ -998,7 +998,7 @@ static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, boo
          * cleared here; every other error the state machine sets comes with
          * a connection that has ended. */
         STAT(out_cleared);
-        pcb->error = 0;
+        __atomic_store_n(&pcb->error, 0, __ATOMIC_RELEASE);
         *wake = *wake ? *wake : sock_ref(pcb);
     }
     spin_unlock_irqrestore(&pcb->lock, s);
@@ -1027,7 +1027,7 @@ static void keep_fire(struct tcp_pcb *pcb, struct tcp_batch *b, struct socket **
     }
     if (pcb->keep_probes >= g_keep_cnt) {
         STAT(timeouts);
-        pcb->error = -ETIMEDOUT;
+        __atomic_store_n(&pcb->error, -ETIMEDOUT, __ATOMIC_RELEASE);
         *wake = sock_ref(pcb);
         *killed = pcb_end_locked(pcb);
         return;
@@ -1071,7 +1071,7 @@ static void pcb_work(void *arg)
             STAT(retransmits);
             if (pcb->rexmit_count > TCP_MAX_REXMIT) {
                 STAT(timeouts);
-                pcb->error = -ETIMEDOUT;
+                __atomic_store_n(&pcb->error, -ETIMEDOUT, __ATOMIC_RELEASE);
                 wake = sock_ref(pcb);
                 killed = pcb_end_locked(pcb);
                 goto out;
@@ -1917,7 +1917,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             if (flags & TH_ACK) {
                 b.quiet = false;   /* accepted: a valid reset of the host's own open (emits nothing) */
                 STAT(rsts_in);
-                pcb->error = -ECONNREFUSED;
+                __atomic_store_n(&pcb->error, -ECONNREFUSED, __ATOMIC_RELEASE);
                 wake = sock_ref(pcb);
                 killed = pcb_end_locked(pcb);
             }
@@ -2007,7 +2007,9 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         b.quiet = false;   /* accepted: a valid reset of an existing connection (emits nothing) */
         STAT(rsts_in);
-        pcb->error = pcb->state == TCP_SYN_RCVD ? -ECONNREFUSED : -ECONNRESET;
+        __atomic_store_n(&pcb->error,
+                         pcb->state == TCP_SYN_RCVD ? -ECONNREFUSED : -ECONNRESET,
+                         __ATOMIC_RELEASE);
         wake = sock_ref(pcb);
         killed = pcb_end_locked(pcb);
         goto out;

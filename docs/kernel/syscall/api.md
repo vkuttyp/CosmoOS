@@ -119,7 +119,7 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 92, the last three being the symbolic-link calls. A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 93: 89–91 are the symbolic-link calls and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every

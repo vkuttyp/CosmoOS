@@ -486,6 +486,43 @@ received IP header (options included) from the saved copy, closing the
 uninitialised-bytes leak of §9.2 (`ipv4.c` unknown protocol, `udp.c`
 port unreachable).
 
+### An ICMP error that reaches the socket it is about
+
+This host has always *sent* destination-unreachables (`udp.c`, the port
+case) and, until the socket-verdict unit, consumed none: `icmp_input`
+handled fragmentation-needed, echo and echo-reply, and dropped the rest.
+The consequence was small and total — a connected UDP socket talking to a
+closed port waited forever, because nothing turned the refusal into an
+errno anyone could see.
+
+The missing piece was never the parse. `icmp_needfrag` already rebuilt
+the quoted flow, and that code is now `icmp_quoted_flow`, shared: it
+copies the quoted IP header and the first 8 bytes of its transport (all
+RFC 792 promises a sender quotes), refuses anything but a well-formed
+IPv4 header whose source is an address `netif_owns_ipv4` confirms, and
+returns the four-tuple the *other* way round — the quoted packet is one
+this host sent, so its source is our local end.
+
+`icmp_unreach` then maps the code (net → `ENETUNREACH`, host →
+`EHOSTUNREACH`, protocol and port → `ECONNREFUSED`; needfrag is handled
+before it and anything else is dropped) and calls `udp_error_notify`,
+which finds a pcb matching the whole four-tuple **and connected**, and
+sets the socket's pending error. Connected-only is the entire safety
+argument: an unconnected socket has no flow for the message to be about,
+so admitting one would let anything on the path kill a socket by quoting
+a plausible local port. With the four-tuple required, an off-path sender
+must guess both addresses and both ports — the bar invariant N16 sets for
+a reset, and the reason N18 exists for path MTU. The branch also runs
+*after* the `M_FW_QUIET` check, so a message the host firewall refused
+still changes nothing.
+
+TCP takes none of this, deliberately. RFC 1122 §4.2.3.9 forbids aborting
+a connection on a soft error, RFC 5927 is about what an off-path sender
+can do with one, and `pcb->error` already carries the verdict the
+segments themselves give. The path-MTU case is the exception that proves
+the shape: it changes nothing unless `tcp_pmtu_notify` confirms a live
+connection.
+
 ### Path MTU discovery
 
 Every IPv4 datagram carries DF already. An incoming *Fragmentation

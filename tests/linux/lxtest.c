@@ -906,8 +906,40 @@ int main(int argc, char **argv)
     CHECKV(sc3(LX_getsockname, s, &box.a, &short_len) == 0 && short_len == 16 && box.canary == 0xdeadbeef, short_len);
     CHECKV(sc2(LX_fstat, s, &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFSOCK, 0);
     int one = 1;
-    CHECKV(sc6(LX_setsockopt, s, LX_SOL_SOCKET, 2, &one, 4, 0) == 0, 0);   /* SO_REUSEADDR: accepted */
+    /* setsockopt used to return 0 for every SOL_SOCKET option while doing
+     * nothing, and this line asserted it. A program that set SO_RCVTIMEO
+     * was told it worked and then blocked forever
+     * (docs/audit/next-subsystem-socket-verdict.md, Design 4). Nothing is
+     * settable here yet, so every option is refused the way Linux refuses
+     * one a protocol does not implement, and a program's existing error
+     * path sees it. */
+    CHECKV(sc6(LX_setsockopt, s, LX_SOL_SOCKET, 2, &one, 4, 0) == -92, 0);   /* SO_REUSEADDR: ENOPROTOOPT */
+    CHECKV(sc6(LX_setsockopt, s, 6 /* SOL_TCP */, 1, &one, 4, 0) == -92, 0);
+    /* getsockopt answers one question, through the same kernel path the
+     * native SYS_getsockopt takes: the pending error, positive as POSIX
+     * asks, and cleared by the read. This socket has none. */
+    int err = 0x5a5a5a;
+    int32_t elen = sizeof(err);
+    CHECKV(sc6(LX_getsockopt, s, LX_SOL_SOCKET, LX_SO_ERROR, &err, &elen, 0) == 0, 0);
+    CHECKV(err == 0 && elen == 4, err);
+    CHECKV(sc6(LX_getsockopt, s, LX_SOL_SOCKET, 2, &err, &elen, 0) == -92, 0);   /* every other option */
+    int32_t narrow = 2;
+    CHECKV(sc6(LX_getsockopt, s, LX_SOL_SOCKET, LX_SO_ERROR, &err, &narrow, 0) == -22, 0);   /* EINVAL, not a truncated verdict */
     CHECKV(sc1(LX_close, s) == 0, 0);
+
+    /* A connect to a closed loopback port fails, and the socket can be
+     * asked which way afterwards rather than only that it did. */
+    long ce = sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, 0);
+    CHECKV(ce >= 3, ce);
+    struct lx_sockaddr_in shut = { .sin_family = LX_AF_INET,
+                                   .sin_port = (uint16_t)((40199 >> 8) | (40199 << 8)),
+                                   .sin_addr = 0x0100007f };
+    CHECKV(sc3(LX_connect, ce, &shut, sizeof(shut)) == -111, 0);   /* ECONNREFUSED */
+    err = 0x5a5a5a;
+    elen = sizeof(err);
+    CHECKV(sc6(LX_getsockopt, ce, LX_SOL_SOCKET, LX_SO_ERROR, &err, &elen, 0) == 0, 0);
+    CHECKV(err == 111, err);                                        /* positive, as POSIX asks */
+    CHECKV(sc1(LX_close, ce) == 0, 0);
     CHECKV(sc3(LX_socket, 1, LX_SOCK_STREAM, 0) == -97, 0);   /* AF_UNIX: EAFNOSUPPORT */
 
     /* --- non-blocking sockets: SOCK_NONBLOCK, accept4, EINPROGRESS --- */

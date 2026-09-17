@@ -270,3 +270,72 @@ are reviewed, not tested.
 **N-L4. A socket woken outside a protocol lock is referenced with
 `kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:
 review; `net-lo-udp`, `net-lo-tcp` exercise both.
+
+**N21. A socket's pending error is never lost, never invented, and
+cleared exactly once — by the reader it reached.** Two of those are
+absolute; the third is what "once" means here, and it is worth stating
+plainly because the two accessors differ. `ksock_error`, which every
+in-kernel caller uses, hands the verdict to **exactly one** caller: the
+clear is part of the read. The syscall pair is deliberately *at least*
+once — a delivery that can fail must not clear before it has succeeded,
+so two callers racing may both be told the same true verdict and only
+the one whose token matches clears it. Being told the truth twice is not
+a failure mode worth excluding at the price of the two that are: losing
+a verdict nobody was told, and telling a caller there is no error while
+one is pending. `struct socket::error` is written only by
+`sock_set_error` and read only by `ksock_error`, both with atomic
+operations and **neither holding `s->lock`**: the writer runs in
+packet-receive context, where that mutex cannot be taken, and of the five
+readers three run inside `mutex_lock(&s->lock)` (`ksock_connect`'s
+completion paths, `socket.c:267`, `:282`, `:299`) while two do not
+(`ksock_accept`, `:224`; UDP's `ksock_recvfrom`, `:372`) — so the mutex
+cannot be the field's rule, and it is not. `ksock_error`'s read clears by
+compare-exchange, which is what makes "once" true against two readers
+rather than merely likely; `ksock_ready`'s `COSMO_IO_ERROR` and
+the wait conditions *test* the field without clearing it. A stream
+socket's `pcb->error` is reported without clearing, because a dead
+connection must keep failing — the two halves have different rules on
+purpose and a reader should not assume one. That sticky half has a rule
+of its own, for the same reason: two of its readers run without
+`pcb->lock` (`ksock_error`, and `output_result`'s fast path), so every
+write to it is an `__atomic_store_n` under that lock and every unlocked
+read an atomic load (`tcp.h`, `error`). A reader that *holds* the lock
+may read it plainly.
+
+A verdict that could not be delivered was not delivered. Both ABI entry
+points settle every refusal — the length word, the size, the user range —
+before reading, and then do **not** clear until the value has reached the
+caller: `ksock_error_peek` reports without clearing and hands back an opaque
+token, and `ksock_error_delivered` commits afterwards only if that token
+still names what is there — because a range check is not a promise that
+a page is writable or that it stays mapped. The field is therefore one
+64-bit word: the low half an errno, the high half a generation every
+write bumps. A commit that compared the errno alone would clear a
+*second* verdict of the same value that arrived during the copy and had
+been told to nobody, and two ICMP messages about one flow carry the same
+errno readily. Taking the
+value and putting it back on failure would be wrong in a way that is
+worth writing down, since it is what this unit did first: between the
+take and the restore, a concurrent asker is told **0** while a verdict is
+pending and undelivered, which is a worse answer than any this pair can
+give. Two askers racing here are both told the truth and one of them
+clears it, which is the *at least once* half of the rule above. The commit
+is a compare-exchange on the delivered value, so a newer verdict that
+arrived during the copy is not destroyed by it. An ICMP message sets an error
+only when its quoted four-tuple belongs to a **connected** socket of this
+host's: an unconnected socket has no flow for a message to be about, and
+admitting one would let anything on the path kill a socket by quoting a
+plausible port (RFC 5927 — the bar N16 sets for a reset and N18 for a
+path-MTU message). Check: `net-sockerr-udp` (`ECONNREFUSED` and
+`EHOSTUNREACH` arrive, each delivered exactly once through `ksock_error`,
+`COSMO_IO_ERROR` raised and then cleared), `net-sockerr-spoof` (six messages differing from the
+delivering one in a single field of the quoted four-tuple change
+nothing — counted, so a frame that was never injected fails the test
+rather than quietly reducing six cases to five), `net-sockerr-accept` (a pending error reaches `accept` as an
+errno, and `accept` never reports success without a socket),
+`net-sockerr-locking` (the same answer with the mutex held and without
+it), `lxtest` and `usertest` (`SO_ERROR` through both ABI doors, positive
+as POSIX asks). Gap: TCP takes no ICMP hard error at all, by decision —
+RFC 1122 §4.2.3.9 forbids aborting a connection on a soft one and
+`pcb->error` already carries the verdict the segments themselves give —
+so an errno only ICMP could supply never reaches a stream socket.

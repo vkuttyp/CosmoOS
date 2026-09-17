@@ -186,6 +186,73 @@ read end is `READABLE`, and after the write end is released `HANGUP`
 with the rest of the bytes then 0; the console is `WRITABLE` and
 refuses `set_nonblock` with `-EOPNOTSUPP`.
 
+**The socket's pending error** (invariant N21,
+`docs/audit/next-subsystem-socket-verdict.md`). Four tests, because four
+things had to be true together and none of them was.
+
+**`net-sockerr-udp`**: a connected UDP socket takes an inbound ICMP
+destination-unreachable as `ECONNREFUSED`, and a host-unreachable as
+`EHOSTUNREACH`. The frame is built by hand and fed to the loopback with
+`netif_rx`, which is exactly what the spoof cases below do — they differ
+from this one only in the quoted four-tuple. `COSMO_IO_ERROR` rises, the
+errno is read through `ksock_error`, and both the second read and the
+readiness bit are then empty: the **exactly once** half of N21 is
+asserted rather than assumed. Before this unit the
+stack **sent** port-unreachables (`udp.c:290`) and consumed none, so this
+socket waited forever. Revert the delivery and the test fails at its wait.
+
+**`net-sockerr-spoof`**: six unreachables, each differing from the
+delivering one in a single field — the peer port, the local port, the
+peer address, a quoted source this host does not own, the protocol, and
+one naming an *unconnected* socket — change nothing. A seventh, which
+matches, is delivered, which is what makes the six a negative result
+rather than six messages that arrived too late to see; the
+`icmp_unreach_delivered` counter moves exactly once across all seven.
+This is the whole of the RFC 5927 argument, so it is the whole of the
+test: drop the connected-only requirement and the unconnected socket
+takes an error meant for a flow it is not part of.
+
+**`net-sockerr-accept`**: a listening socket with a pending error makes
+`accept` return that errno — and, separately, makes it not write `*out`.
+Both halves are checked, with the out-parameter pre-set to a poison
+value, because the defect this proves returned **0** and a caller that
+trusts the return reads the pointer: an errno-only assertion passes
+against `return 0` with `*out` written. `ksock_accept` used to read
+`return take_error(s) ? take_error(s) : -EINVAL`, and `take_error`
+clears as it reads, so the second call answered 0.
+
+**`net-sockerr-locking`**: `ksock_error` gives the same answer from a
+caller holding `s->lock` and one that does not, and delivers once either
+way. It also covers the pair a syscall uses, whose delivery can fail:
+`ksock_error_peek` twice returns the same verdict (it does not clear),
+`ksock_error_delivered` then clears it — and, the case that makes two
+concurrent askers safe, a *newer* verdict written between the peek and
+the commit survives the commit. Twice: once where the two verdicts
+differ, and once where they are **equal**, which is the case a commit
+comparing only the errno cannot see and which two ICMP messages about
+one flow produce readily. Both are deterministic because the
+"concurrent" write is simply made between the two calls. A commit that
+stored 0 rather than comparing fails the first; one that compared the
+errno without the generation fails the second, with
+`ksock_error` returning 0 for a verdict that was told to nobody. That split is why the field takes no lock at all: three of the five
+readers hold the mutex and two do not, and the writer runs where a mutex
+cannot be taken. An accessor that took `s->lock` would recurse on a
+non-recursive mutex in `ksock_connect`'s three completion paths.
+
+`lxtest` and `usertest` cover the two ABI doors: `SO_ERROR` reports a
+refused connect as a **positive** `111`, an undersized buffer is
+`-EINVAL` rather than a truncated verdict, a bad handle is `-EBADF`, and
+every other option — in both directions — is `-ENOPROTOOPT`.
+
+`usertest` also asserts the half of N21 that is easy to get backwards,
+and which the first draft of this test got backwards: a *stream* socket
+answers `SO_ERROR` the same way twice. That verdict is the pcb's and
+stays, so every later call on a dead connection keeps failing; clearing
+it would make the next read return end-of-file instead of `ECONNRESET`,
+which is a worse answer than a repeated one. The read-*once* half is the
+socket-level error an ICMP message writes, and `net-sockerr-udp` proves
+it on a datagram socket, where there is no pcb to fall back to.
+
 `tcp_transfer` ends by waiting, bounded, until the port it used binds
 again: the server's child leaves `LAST_ACK` only when the `netrx` worker
 processes the client's final ACK, and the test thread (higher priority)

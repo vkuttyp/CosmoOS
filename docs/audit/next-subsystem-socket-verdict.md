@@ -16,6 +16,153 @@ row is advanced, not closed — its next step, written into PR #169's
 report as "read the socket's pending error rather than inferring it from
 a machine-wide counter", is a thing no caller in this tree can do.
 
+**Built as PR #171.** This section records what the building changed.
+Everything after it is **the report as written, in the present tense of
+2026-09-17 before the unit existed** — the Problem section's five facts
+were all true of `main` at c47d353 and none of them is true now, which is
+what the unit did. Where a section would mislead a reader who missed that
+framing it says so in place: *What was there, and what is there now*
+carries both columns, and Design §1 shows the code as built rather than
+as first proposed. Nothing in the design was abandoned; three review
+rounds sharpened one function.
+
+### As built
+
+**The §1.1 row is closed and the §3 row is not**, which is what the
+report promised and is worth stating because only one of the two moved.
+
+**`ECONNABORTED` had to be invented.** `errno.h` had no 103, and the
+error a listening socket carries is exactly that. Added to both the
+kernel header and the uapi mirror, with `ENOPROTOOPT` joining the uapi
+list for the same reason: `SYS_getsockopt`'s refusal has to be nameable
+by the programs that receive it.
+
+**The refusal is settled before the read, not after.** A first cut read
+`ksock_error` and then copied it out, which loses the verdict when the
+copy faults — the one delivery it gets, spent on a call that failed.
+Both ABI entry points now validate the length word, the size and the
+user range *first*, and consume only once nothing can refuse. Linux has
+the losing behaviour; this is a case where matching it would have been
+the easier answer and the wrong one.
+
+**`icmp_needfrag` was refactored, not copied.** The report said the new
+consumer would share the quoted-header parse. It does: that parse is now
+`icmp_quoted_flow`, and the path-MTU path calls it too, so the two
+consumers cannot drift. The behaviour is unchanged — the proto check
+moves ahead of the MTU arithmetic, which only ever ran for TCP.
+
+**`CHECK_BREAK` nearly shipped as a no-op.** The tests need a check that
+leaves a `do/while(0)` with cleanup after it. Written the obvious way —
+wrapped in its own `do/while(0)`, like `CHECK` — the `break` leaves *the
+macro's* loop and the check passes by doing nothing. Every assertion in
+all four tests would have been vacuous. It is `if (...) { ...; break; }
+else (void)0`, and the comment says why.
+
+### And five the review found
+
+Four review rounds on the built unit, five findings, every one valid and
+every one about the thing the report is about — a rule that holds in the
+place you are looking and not in the place you are not. Four paragraphs
+rather than five, because the first two findings are the same question
+asked twice and read better together.
+
+**The verdict could still be lost, and the first fix for it was the
+wrong shape.** The report was pleased with itself for settling every
+refusal before reading the error. Not enough: `user_range_ok` checks a
+*range*, not that the page is writable or that it stays mapped, so
+`copy_to_user` can fail after every check passed — and the verdict is
+gone, because reading took it.
+
+The first fix took the value and put it back on failure. Review found
+the hole in that within the hour: between the take and the restore a
+concurrent asker reads **0** and is told there is no error, while one is
+pending and has been delivered to nobody. A false "no error" is worse
+than anything the alternative can produce, so the alternative is what
+shipped — `ksock_error_peek` reports without clearing, the copy happens,
+and `ksock_error_delivered` commits the clear only afterwards. Two askers
+racing are then both told the truth and one of them clears it, which is
+the right trade, and N21 states it rather than calling it an exception:
+the syscall path is *at least* once, `ksock_error` is exactly once, and
+what is absolute is that a verdict is never lost and never invented. The commit is a
+compare-exchange on the delivered value, so a newer verdict arriving
+during the copy survives it — and that is the case the bug-proof makes
+deterministic, by simply writing the newer verdict between the peek and
+the commit.
+
+**`pcb->error` had the same defect the socket field had.** N21 gave
+`s->error` one rule and left the sticky half with none: `ksock_error`
+read it atomically while `tcp.c` wrote it with plain assignments under
+`pcb->lock`, which is a data race whatever the reader does. It predates
+this unit — `output_result` has read it unlocked since it was written —
+but documenting a second reader is what made it this unit's to fix. Every
+write is an `__atomic_store_n` under the lock now, every unlocked read an
+atomic load, and `tcp.h` says so at the field.
+
+**`CHECK_BREAK` was misused three lines after its own warning.** The
+macro's comment says a `break` leaves the nearest loop, which is why it
+must not be wrapped in a `do/while(0)`. In `net-sockerr-spoof` it sits
+inside a `for` over the six spoof cases — so an allocation failure leaves
+*the for*, and the test goes on to pass having injected fewer than six.
+Six frames that were never sent cannot show that six change nothing. The
+loop counts now, and the count is checked after it. The comment records
+that review caught this, because writing the warning was evidently not
+enough to obey it.
+
+**And then the shape itself had a hole, which is the third answer to the
+same question.** `ksock_error_delivered` first compared the *value*: if
+the word still held the errno that was delivered, clear it. Review found
+the ABA — a second ICMP message for the same flow carries the same
+errno, so a commit could clear a verdict that had arrived during the copy
+and been told to nobody, and the socket would then report no error at
+all. The field is one 64-bit word now, an errno and a generation every
+write bumps, and the commit compares both. Three rounds on one small
+function, each round finding the previous answer's edge: lose it on a
+fault, tell a concurrent asker zero, clear an identical twin.
+
+### And then the instrument answered, on this unit's own CI
+
+The point of moving `tcp_get_stats` in front of the connect and printing
+`ksock_error`'s answer was that the next `net-harness` failure would say
+more than the last. It did, on this pull request's own aarch64 job:
+
+```
+NETTEST: client failed: connect -104 in 1381 ms, sent -1 in 0 ms,
+  recv -1 in 0 ms, pending error -104, ...
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+  (counters from before the connect)
+```
+
+**The connect itself was reset.** Every instrumented sighting before
+this said `connect 0`. `pending error -104` is the first per-pcb verdict
+this tree has ever read rather than inferred from a machine-wide
+counter — and `ECONNRESET` rather than `ECONNREFUSED` is set only by a
+reset accepted on a *synchronized* connection, so the handshake
+completed and the reset arrived before the connecting thread ran again.
+
+Across seven instrumented sightings the only thing that differs is how
+far the guest got before the reset landed. The constant is an inbound
+reset on an established connection to slirp, while slirp's own host-side
+socket connects fine — which is why the host's `accept` keeps succeeding
+and then reading nothing. Why slirp resets it is not established and is
+outside this kernel; `docs/testing/flakes.md`, "The count", holds the
+table.
+
+### The five bug-proofs, each run
+
+| revert | what failed, and where |
+| --- | --- |
+| `ksock_accept` back to `take_error(s) ? take_error(s) : -EINVAL` | `net-sockerr-accept`: `check failed: rc == -ECONNABORTED` |
+| the delivery cut out of `icmp_unreach` | `net-sockerr-udp` **and** `net-sockerr-spoof`: both time out waiting for `COSMO_IO_ERROR` |
+| `udp_error_notify`'s connected-only dropped | `net-sockerr-spoof`: `check failed: (ksock_ready(unconn) & COSMO_IO_ERROR) == 0` — an unconnected socket takes another flow's error |
+| `ksock_error` given `s->lock`, as the first draft proposed | **`KERNEL PANIC: mutex_lock('socket'): recursive lock by 'tv-connw'`** |
+| `ksock_error_delivered` comparing the errno without the generation | `net-sockerr-locking`: `check failed: ksock_error(s) == -ECONNREFUSED` — the second, undelivered verdict was cleared by the first one's commit |
+
+The last one is worth reading twice: the thread named is
+`net-tcpverdict`'s connect worker, not the test written for this
+property. The recursion fires in an ordinary `ksock_connect` before the
+locking test runs at all — Greptile's P1 finding on this report, exactly
+as filed, reproduced by the machine.
+
 ## Problem
 
 The stack knows exactly why a connection died. `tcp_input` sets
@@ -249,40 +396,68 @@ for one site at a time.
 
 ### 1. One reader: `ksock_error`
 
+*(As built. This section planned a single accessor; review found three
+edges in it and the shape below is the third answer. The as-built
+section above tells that story — here is what the code does.)*
+
 ```c
 /* kernel/include/kernel/socket.h */
-/* The pending asynchronous error, read once: returns it and clears it,
- * as SO_ERROR does. 0 when there is none. Takes no lock -- see N21 --
- * so it is safe with or without s->lock held, and against a writer in
- * packet context. */
+/* Read once: returns the pending error and clears it, as SO_ERROR does.
+ * Takes no lock -- see N21. */
 int ksock_error(struct socket *s);
+/* For a caller whose delivery can fail: peek reports without clearing
+ * and hands back an opaque token; delivered commits the clear only once
+ * the value has reached the caller, and only if the token still names
+ * what is there. */
+int ksock_error_peek(struct socket *s, uint64_t *token);
+void ksock_error_delivered(struct socket *s, uint64_t token);
 ```
 
 **The access rule comes first** (Problem §5): the field is written from
 packet-receive context and read with the socket mutex held at three of
 five sites and not held at the other two. A mutex cannot serve both, so
-the field takes no lock — it becomes an atomic word, and the read-once
-semantic *is* the atomic operation:
+the field takes no lock. It is one 64-bit word — the low half an errno,
+the high half a generation every write bumps — and every access is
+atomic:
 
 ```c
 /* kernel-services/network/socket.c */
-int ksock_error(struct socket *s)
+static inline uint64_t err_pack(int e, uint32_t gen) { return ((uint64_t)gen << 32) | (uint32_t)e; }
+
+int ksock_error(struct socket *s)          /* read once, for callers that cannot fail */
 {
-    int e = __atomic_exchange_n(&s->error, 0, __ATOMIC_ACQ_REL);
+    uint64_t old = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
+    while (err_val(old) != 0 &&
+           !__atomic_compare_exchange_n(&s->error, &old, err_pack(0, err_gen(old) + 1u),
+                                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        ;
+    int e = err_val(old);
     if (e == 0 && s->tcp)
-        e = __atomic_load_n(&s->tcp->error, __ATOMIC_RELAXED);
+        e = __atomic_load_n(&s->tcp->error, __ATOMIC_ACQUIRE);
     return e;
 }
 ```
 
-`sock_set_error` stores with `__ATOMIC_RELEASE` and keeps its "any
-context" contract. The exchange makes read-and-clear indivisible, so two
-readers cannot both be told the same error — a property the present
-`take_error` does not have and that no amount of mutex at the call sites
-would give it, since two of the five do not hold one. `tcp.c:956`
-already reads `pcb->error` this way, so the convention exists.
+The exchange makes read-and-clear indivisible, so two readers cannot both
+be told the same error — a property `take_error` does not have and that
+no amount of mutex at the call sites would give it, since two of the five
+hold none. `sock_set_error` keeps its "any context" contract.
 
-`take_error` becomes this function's body and every present caller calls
+**The generation is not decoration**, and neither is the second accessor.
+A syscall cannot use the read-once form: its delivery is a
+`copy_to_user` that can fail after every check has passed, and a verdict
+read and then not delivered is lost. Taking it and putting it back is
+worse — a concurrent asker reads 0 in between. So a syscall peeks, copies,
+and commits, and the commit compares the whole word: an *identical* errno
+stored during the copy has a newer generation and survives, where a
+compare on the value alone would clear a verdict told to nobody. All
+three of those were review findings on this unit, in that order.
+
+`tcp.c` writes `pcb->error` with `__atomic_store_n` under `pcb->lock` for
+the same reason the socket field is atomic: two of its readers, this one
+and `output_result`, run without that lock.
+
+`take_error` becomes `ksock_error`'s body and every present caller calls
 it, with or without the mutex — the point of taking none. The
 double-call at `socket.c:224` disappears by construction: there is no
 expression in which calling it twice is spellable once the value is
@@ -413,33 +588,37 @@ succeed, the way to get there is to implement address reuse.
   row's next step a way to be taken. PR #169's report learned not to
   promise more, and PR #167's learned it before that.
 
-## Current implementation
+## What was there, and what is there now
 
-| what | where | state |
+The survey the report was written from, in the **left** column — the tree
+at `main` c47d353, and the reason the unit existed. The right column is
+what this unit left, so the table is one place rather than two.
+
+| what | before (c47d353) | after |
 | --- | --- | --- |
-| `struct socket::error` | `kernel/include/kernel/socket.h:38` | declared, commented, never written |
-| `sock_set_error` | `kernel-services/network/socket.c:138` | defined, zero callers |
-| `take_error` | `socket.c:144` | read-and-clear; called twice in one expression at `:224` |
-| `pcb->error` | `tcp.c:964`, `:1030`, `:1074`, `:2010` | written on firewall refusal, timeout, reset |
-| `COSMO_IO_ERROR` | `tcp_ready`, `tcp.c:1403`, `:1411` | raised from `pcb->error`; honest, and says nothing about which error |
-| `icmp_input` | `ipv4.c:374` | needfrag, echo, echo-reply; everything else dropped |
-| `icmp_needfrag` | `ipv4.c:341` | the quoted-header parse this unit reuses |
-| `udp.c:290` | `icmp_send_unreach` | this host sends them and cannot receive them |
-| `lx_setsockopt` | `compat/linux/syscalls.c:1885` | returns 0 for every `SOL_SOCKET` option, does nothing |
-| `lx_getsockopt` | `compat/linux/syscalls.c:1894` | `-ENOPROTOOPT` for everything |
-| native sockopt | — | no syscall exists |
+| `struct socket::error` | `int`, declared, commented, **never written** | one 64-bit word (errno + generation), written by `sock_set_error`, read by `ksock_error` or the peek/commit pair |
+| `sock_set_error` | defined, **zero callers** | called by `udp_error_notify` and by the self-tests; bumps the generation |
+| `take_error` | read-and-clear; **called twice in one expression** at `:224` | gone: it is `ksock_error`'s body, and the call site binds the value |
+| `pcb->error` | written plainly under `pcb->lock`, read unlocked by `output_result` — a data race | written with `__atomic_store_n` under the lock, unlocked reads atomic; the rule is at the field in `tcp.h` |
+| `COSMO_IO_ERROR` | raised from `pcb->error`; honest, and says nothing about *which* error | unchanged, and now has an answer beside it: `SO_ERROR` |
+| `icmp_input` (`ipv4.c`) | needfrag, echo, echo-reply; everything else dropped | plus a destination-unreachable branch, after `M_FW_QUIET` |
+| `icmp_needfrag` | its own copy of the quoted-header parse | calls the shared `icmp_quoted_flow`, as the new consumer does |
+| `udp.c`, `icmp_send_unreach` | this host **sends** them and cannot receive one | `udp_error_notify` receives one, for a connected four-tuple only |
+| `lx_setsockopt` | returns **0** for every `SOL_SOCKET` option and does nothing | `-ENOPROTOOPT`, as Linux returns for an option a protocol lacks |
+| `lx_getsockopt` | `-ENOPROTOOPT` for everything | forwards `SO_ERROR` to the same kernel path the native call uses |
+| native sockopt | no syscall exists | `SYS_getsockopt` (92), `SYS_COUNT` → 93 |
 
 ## Affected files
 
 | file | change |
 | --- | --- |
-| `kernel/include/kernel/socket.h` | `ksock_error`; `error` becomes an atomic word with the access rule in its comment; `sock_set_error`'s comment gains its caller |
-| `kernel-services/network/socket.c` | `take_error` → `ksock_error` (exported, **lock-free**: an atomic exchange, callable with or without `s->lock`); `sock_set_error` stores with release; the `:224` double call bound to a variable; `ksock_ready`'s `s->error` branch now reachable |
+| `kernel/include/kernel/socket.h` | `ksock_error`, `ksock_error_peek`, `ksock_error_delivered`; `error` becomes one 64-bit atomic word (errno + generation) with the access rule in its comment; `sock_set_error`'s comment gains its caller |
+| `kernel-services/network/socket.c` | `take_error` → `ksock_error` (exported, **lock-free**, callable with or without `s->lock`), plus the peek/commit pair and the pack/unpack helpers; `sock_set_error` bumps the generation; the `:224` double call bound to a variable; `ksock_ready`'s `s->error` branch now reachable |
 | `kernel/include/kernel/net/udp.h` | `udp_error_notify` |
 | `kernel-services/network/udp.c` | the four-tuple walk over `g_pcbs`, connected-only, `sock_set_error` |
-| `kernel-services/network/ipv4.c` | `icmp_input`: the dest-unreach branch, after `M_FW_QUIET`, sharing `icmp_needfrag`'s parse |
+| `kernel-services/network/ipv4.c` | `icmp_input`: the dest-unreach branch, after `M_FW_QUIET`, sharing `icmp_needfrag`'s parse (extracted as `icmp_quoted_flow`) |
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_getsockopt` 92, `SYS_COUNT` 93, `COSMO_SOL_SOCKET`, `COSMO_SO_ERROR` |
-| `kernel/syscall/native.c` | the entry: handle, rights, `ksock_error`, positive errno out |
+| `kernel/syscall/native.c` | the entry: handle, rights, every refusal settled before the read, `ksock_error_peek` then `ksock_error_delivered`, positive errno out |
 | `compat/linux/syscalls.c` | `lx_getsockopt` forwards `SO_ERROR`; `lx_setsockopt` stops returning 0 for what it does not implement |
 | `kernel-services/network/nettest.c` | the new tests; and `net-harness` reads the pending error, with `tcp_get_stats` sampled **before** the connect |
 | `userland/init/init.c` | `net_selftest`: the UDP and non-blocking-connect cases through the native syscall |
@@ -453,6 +632,8 @@ succeed, the way to get there is to implement address reuse.
 ## New APIs
 
 - `int ksock_error(struct socket *)` — kernel. Atomic read-and-clear; safe with or without `s->lock`, and safe against a writer in packet context.
+- `int ksock_error_peek(struct socket *, uint64_t *token)` and `void ksock_error_delivered(struct socket *, uint64_t token)` — kernel. The pair for a caller whose delivery can fail; the token is the field's whole word and is opaque.
+- `struct socket::error` widens from `int` to `uint64_t` — an errno and a generation — which is internal and named here because the invariant depends on it.
 - `bool udp_error_notify(const struct netaddr *local, const struct netaddr *remote, int err)` — kernel. True if a connected socket owned the flow.
 - `SYS_getsockopt` (92) — native ABI. `SYS_COUNT` 92 → 93.
 - `COSMO_SOL_SOCKET`, `COSMO_SO_ERROR` — uapi.
@@ -462,9 +643,19 @@ one compatibility break and is argued in Design §4.
 
 ## Invariant
 
-**N21. A socket's pending error is delivered once, to one reader, and is
-never invented.** `s->error` is written only by `sock_set_error` and
-read only by `ksock_error`, both with atomic operations and **neither
+**N21. A socket's pending error is never lost, never invented, and
+cleared exactly once — by the reader it reached.** Two of those are
+absolute; the third is what "once" means here, and it is worth stating
+plainly because the two accessors differ. `ksock_error`, which every
+in-kernel caller uses, hands the verdict to **exactly one** caller: the
+clear is part of the read. The syscall pair is deliberately *at least*
+once — a delivery that can fail must not clear before it has succeeded,
+so two callers racing may both be told the same true verdict and only
+the one whose token matches clears it. Being told the truth twice is not
+a failure mode worth excluding at the price of the two that are: losing
+a verdict nobody was told, and telling a caller there is no error while
+one is pending. `s->error` is written only by `sock_set_error` and
+read only by `ksock_error` or the `ksock_error_peek`/`_delivered` pair, both with atomic operations and **neither
 holding `s->lock`** — the writer runs in packet-receive context where
 that mutex cannot be taken, and two of the five readers do not hold it
 (Problem §5). The read is an exchange, so a verdict is delivered to
@@ -473,7 +664,7 @@ because a dead connection must keep failing. An ICMP message sets an
 error only when it quotes a four-tuple a **connected** socket of this
 host owns, so a caller that is told `ECONNREFUSED` was told so by a
 message about its own flow. Check: `net-sockerr-udp`,
-`net-sockerr-spoof`, `net-sockerr-accept`, `net-sockerr-once`, and
+`net-sockerr-spoof`, `net-sockerr-accept`, and
 `net-sockerr-locking`, which calls the accessor from a path holding the
 mutex and a path that does not — the one property a `lockdep_assert_*`
 cannot state, because both ways are correct here and the assertion would
@@ -483,7 +674,9 @@ stream socket.
 
 ## Migration plan
 
-1. `ksock_error` with the atomic access rule, the `:224` fix, and
+1. `ksock_error` with the atomic access rule (as built: one word, errno
+   and generation, plus the peek/commit pair a syscall needs), the
+   `:224` fix, and
    `net-sockerr-accept` — the bug first, with the writer stubbed by the
    test calling `sock_set_error` directly, so the fix is proved before
    anything depends on it. The test exercises `ksock_error` from a
@@ -506,8 +699,8 @@ stream socket.
 | `net-sockerr-accept` | a listening socket with a pending error makes `accept` return that error, not 0 | reverted to `take_error(s) ? take_error(s) : -EINVAL`, it returns **0** with `*out` unassigned — the test checks the return *and* that no socket was produced, because a bug that returns success is not caught by checking the errno |
 | `net-sockerr-udp` | a connected UDP socket that sends to a closed loopback port learns `ECONNREFUSED` | without the `icmp_input` branch the socket blocks and the datagram is dropped; the test sends, waits for `COSMO_IO_ERROR` on `ksock_ready`, then reads the errno |
 | `net-sockerr-spoof` | an ICMP unreachable quoting a flow this host does not own, or quoting the right ports with the wrong peer, changes nothing | without the four-tuple check the error lands on a live socket; the test builds both messages (`nettest.c:3455-3462` already builds exactly this message — an ICMP port-unreachable quoting a UDP flow — for the NAT tests) and checks the socket is untouched |
-| `net-sockerr-once` | the error is read once: a second `ksock_error` is 0, while a TCP `send` on a reset connection keeps failing | without the atomic exchange the first assertion fails; without the sticky `pcb->error` the second does |
-| `net-sockerr-locking` | `ksock_error` answers the same from a caller holding `s->lock` and one that does not | with the accessor taking the mutex, the held-lock case recurses on a non-recursive mutex and the kernel stops — which is what the first draft of this report proposed |
+| `net-sockerr-locking` | `ksock_error` answers the same from a caller holding `s->lock` and one that does not, and delivers once either way | with the accessor taking the mutex, the held-lock case recurses on a non-recursive mutex and the kernel stops — which is what the first draft of this report proposed |
+| `net-sockerr-locking`, the peek/commit half | a peek does not clear; a commit clears what it delivered; a verdict written between the two survives, **including one with the same errno** | a commit that stores 0 loses the unequal case; one that compares the errno without the generation loses the equal case, and `ksock_error` returns 0 for a verdict told to nobody |
 | `usertest` (`init --selftest`) | the native `SYS_getsockopt` reports a refused connect's errno as a **positive** number | reverted, `-ENOSYS`; with the sign wrong, `104` vs `-104` is the assertion |
 | `lxtest` | `setsockopt` of an unimplemented option is `-ENOPROTOOPT`; `getsockopt(SO_ERROR)` works | reverted, `setsockopt` returns 0 for an option that does nothing |
 
@@ -517,9 +710,11 @@ testable whether or not the defect it was motivated by appears.
 
 ## Benchmarks
 
-None. `ksock_error` is one atomic exchange and, at most, one relaxed
-load — no lock, so it adds no contention to the paths that call it and
-none to the packet-receive path that writes the field. The
+None. `ksock_error` is a compare-exchange on an uncontended word — the
+loop retries only against a concurrent writer — and at most one further
+atomic load; `peek` is a load and `delivered` one compare-exchange. No
+lock, so nothing is added to the paths that call them or to the
+packet-receive path that writes the field. The
 `icmp_input` branch runs only for ICMP type 3, which
 this host currently receives at a rate of zero. `SYS_getsockopt` is a
 handle lookup and a load.
@@ -537,12 +732,20 @@ handle lookup and a load.
   nothing.
 - **`SYS_COUNT` 92 → 93 is an ABI addition**, and the syscall-count
   assertions and the filter's table sizes move with it. PR #87 did the
-  same for `SYS_fsync` and is the shape to follow.
+  same for `SYS_fsync` and is the shape to follow. As built: the
+  syscall-count assertions in `init --selftest` needed no change beyond
+  the number, and `make test` passes on both architectures.
 - **The `net-harness` failure may not recur while this unit is open.**
   It is one boot in twenty-one locally (`docs/testing/flakes.md`, "The
   count") and it appeared on two of PR #169's own CI jobs, so it is not
   unlikely — but step 4 is an instrument, not a proof, and nothing in
-  the test table depends on it firing.
+  the test table depends on it firing. **As built: it recurred three
+  times on this unit's own CI**, and the moved window showed the
+  handshake for the first time. The first two runs both retransmitted a
+  SYN and that was briefly written down as the finding; the third had no
+  retransmission and withdrew it the same day
+  (`docs/testing/flakes.md`, "The count"). What survives is narrower: a
+  reset arrives at whatever point the guest has reached.
 
 ## Alternatives considered
 

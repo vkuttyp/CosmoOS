@@ -741,8 +741,32 @@ ring entry as non-blocking (`io_nonblocking`, milestone 9).
 socket, or NULL when `obj` has another type (`sock_of` in `native.c`
 uses it to answer `-EBADF` for a file or console handle).
 
+**`int ksock_error_peek(s, uint64_t *token)`, `void
+ksock_error_delivered(s, uint64_t token)`** The pair a caller uses when
+its delivery can fail — a syscall copying the verdict into user memory,
+where a range check is not a promise the copy succeeds. `peek` reports
+without clearing and hands back an opaque token; `delivered` commits the
+clear afterwards, by compare-exchange against that token, so a verdict
+stored during the copy survives *even when its errno is the same one*.
+The token is the field's whole word — errno and generation — and is not
+to be built or read by callers. Never take-and-restore: between the take
+and the restore a concurrent asker is told 0 while a verdict is pending
+and undelivered (invariant N21).
+
+**`int ksock_error(s)`** The pending asynchronous error, read once: the
+value and 0 thereafter, so two readers cannot both be told the same
+verdict. A stream socket's `pcb->error` is reported *without* clearing,
+because a dead connection must keep failing — the two halves differ on
+purpose (invariant N21). Takes no lock: safe with `s->lock` held or not,
+and against `sock_set_error` running in packet-receive context, where
+that mutex cannot be taken. The one thing behind `SYS_getsockopt`'s
+`COSMO_SO_ERROR`, and what `COSMO_IO_ERROR` could never say — that bit
+reports *that* a socket is broken and never which way.
+
 **`void sock_wake(s)`, `void sock_set_error(s, err)`** Protocol side,
-any context: wake all waiters (and record `err`). **`unsigned
+any context: wake all waiters (and record `err`, atomically — see
+`ksock_error` and N21). `sock_set_error`'s callers today are
+`udp_error_notify`'s ICMP path and the self-tests. **`unsigned
 socket_count(void)`** live sockets (tests check for leaks).
 
 ## System calls (`kernel/include/uapi/cosmo/syscall.h`, `kernel/syscall/native.c`)

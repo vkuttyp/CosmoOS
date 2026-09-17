@@ -44,6 +44,7 @@
 #define EADDRINUSE 98 /* address already in use */
 #define EADDRNOTAVAIL 99 /* cannot assign requested address */
 #define ENETUNREACH 101 /* network unreachable */
+#define ECONNABORTED 103 /* connection aborted before it was accepted */
 #define ECONNRESET 104 /* connection reset by peer */
 #define ENOBUFS   105 /* no buffer space */
 #define EISCONN   106 /* already connected */

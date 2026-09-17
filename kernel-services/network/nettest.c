@@ -43,6 +43,22 @@
             return false;                                                      \
         }                                                                      \
     } while (0)
+/* The same, for a test whose cleanup follows a do/while(0): records the
+ * reason and leaves *that* block. Deliberately not wrapped in a
+ * do/while(0) of its own -- the break would leave the wrapper and the
+ * check would pass by doing nothing. The `else (void)0` is what makes the
+ * trailing semicolon and any enclosing if/else safe.
+ *
+ * The same reasoning is why this must not be used inside a loop: there
+ * the break leaves the loop, and the test continues and can pass with
+ * the remaining iterations never run. Review caught exactly that in
+ * net-sockerr-spoof, three lines after this comment was written. Inside
+ * a loop, count what happened and check the count after it. */
+#define CHECK_BREAK(cond)                                                      \
+    if (!(cond)) {                                                             \
+        *reason = "check failed: " #cond " at line " STR(__LINE__);            \
+        break;                                                                 \
+    } else (void)0
 
 static struct netaddr v4addr(uint32_t ip, uint16_t port)
 {
@@ -904,7 +920,15 @@ bool selftest_net_harness(const char **reason)
     struct socket *c;
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
+    /* Sampled BEFORE the connect. PR #169's window opened after it
+     * returned, so a reset arriving during the handshake or before the
+     * first sample fell outside it -- which is why one failure showed
+     * `rsts_in +0` and another `+1` for the same defect. */
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    uint64_t ns0 = clock_now_ns();
     int rc = ksock_connect(c, &host);
+    uint64_t connect_ms = (clock_now_ns() - ns0) / 1000000ull;
 
     /*
      * This exchange has failed repeatedly, on both architectures and on
@@ -931,21 +955,28 @@ bool selftest_net_harness(const char **reason)
      */
     int64_t sent = -1, got = -1;
     uint32_t space0 = 0, space1 = 0, space2 = 0;
-    struct tcp_stats t0, t1;
-    tcp_get_stats(&t0);
+    uint64_t send_ms = 0, recv_ms = 0;
     if (rc == 0) {
         space0 = tcp_send_space(c->tcp);
+        uint64_t ns1 = clock_now_ns();
         sent = ksock_sendto(c, "cosmo hello\n", 12, NULL);
+        send_ms = (clock_now_ns() - ns1) / 1000000ull;
         space1 = tcp_send_space(c->tcp);
         if (sent == 12) {
             char buf[32];
+            uint64_t ns2 = clock_now_ns();
             got = ksock_recvfrom(c, buf, sizeof(buf), NULL);
+            recv_ms = (clock_now_ns() - ns2) / 1000000ull;
             client_ok = got == 12 && memcmp(buf, "cosmo world\n", 12) == 0;
         }
         space2 = tcp_send_space(c->tcp);
     }
     tcp_get_stats(&t1);
     enum tcp_state st = tcp_state_of(c->tcp);
+    /* The socket's own verdict, which no caller could ask for until this
+     * unit: `rsts_in` is machine-wide and says a reset happened somewhere,
+     * where this names the errno THIS connection died of. */
+    int pending = ksock_error(c);
     ksock_put(c);
     if (client_ok) {
         kprintf("NETTEST: client ok\n");
@@ -958,11 +989,16 @@ bool selftest_net_harness(const char **reason)
          * `sent 12, queued 0` and contradict itself. The discriminator
          * is the third: still outstanding after the read gave up means
          * the twelve bytes were never acknowledged. */
-        kprintf("NETTEST: client failed: connect %d, sent %lld, recv %lld, "
+        kprintf("NETTEST: client failed: connect %d in %llu ms, sent %lld in %llu ms, "
+                "recv %lld in %llu ms, pending error %d, "
                 "sndbuf free %u before, %u after send, %u after read "
                 "(outstanding %d then %d), state %d, "
-                "segs_out +%llu retransmits +%llu refused +%llu rsts_in +%llu\n",
-                rc, (long long)sent, (long long)got, space0, space1, space2,
+                "segs_out +%llu retransmits +%llu refused +%llu rsts_in +%llu "
+                "(counters from before the connect)\n",
+                rc, (unsigned long long)connect_ms,
+                (long long)sent, (unsigned long long)send_ms,
+                (long long)got, (unsigned long long)recv_ms, pending,
+                space0, space1, space2,
                 (int)(space0 - space1), (int)(space0 - space2), (int)st,
                 (unsigned long long)(t1.segs_out - t0.segs_out),
                 (unsigned long long)(t1.retransmits - t0.retransmits),
@@ -2934,6 +2970,305 @@ static bool rxhook_grace_hook(struct netif *nif, struct mbuf *m, void *arg)
     m_freem(m);
     __atomic_store_n(&st->exited, 1u, __ATOMIC_RELEASE);
     return false;
+}
+
+static bool sock_error_ready(void *arg)
+{
+    return (ksock_ready((struct socket *)arg) & COSMO_IO_ERROR) != 0;
+}
+
+/* --- the socket's pending error (invariant N21) -------------------------------
+ *
+ * docs/audit/next-subsystem-socket-verdict.md. Four things had to be true
+ * together and none of them was: the field is written by somebody, the
+ * accessor delivers it once, an ICMP error reaches the socket it is about
+ * and only that socket, and a caller can ask.
+ */
+
+/* An inbound ICMP destination-unreachable over the loopback, quoting a UDP
+ * datagram this host sent from `local` to `remote`. Built by hand because
+ * that is what an attacker would do: the test's spoof cases differ from
+ * this one only in the quoted four-tuple. */
+static struct mbuf *icmp_unreach_frame(uint8_t code, uint32_t qsrc, uint16_t qsport,
+                                       uint32_t qdst, uint16_t qdport, uint8_t qproto)
+{
+    struct mbuf *m = m_getcl();
+    if (m == NULL)
+        return NULL;
+    uint8_t *ic = m->data;
+    memset(ic, 0, 8 + 20 + 8);
+    ic[0] = ICMP_DEST_UNREACH;
+    ic[1] = code;
+    struct ipv4_hdr *q = (struct ipv4_hdr *)(ic + 8);
+    q->vhl = 0x45;
+    q->len = htons(20 + 8);
+    q->ttl = 63;
+    q->proto = qproto;
+    q->src = qsrc;
+    q->dst = qdst;
+    q->cksum = in_cksum(q, 20);
+    uint8_t *qh = ic + 8 + 20;
+    qh[0] = (uint8_t)(qsport >> 8); qh[1] = (uint8_t)qsport;
+    qh[2] = (uint8_t)(qdport >> 8); qh[3] = (uint8_t)qdport;
+    uint32_t iclen = 8 + 20 + 8;
+    m->len = m->pkt.len = iclen;
+    ((struct icmp_hdr *)ic)->cksum = 0;
+    ((struct icmp_hdr *)ic)->cksum = cksum_fold(m_cksum_partial(m, 0, iclen, 0));
+    m = m_prepend(m, sizeof(struct ipv4_hdr));
+    if (m == NULL)
+        return NULL;
+    struct ipv4_hdr *ip = (struct ipv4_hdr *)m->data;
+    memset(ip, 0, sizeof(*ip));
+    ip->vhl = 0x45;
+    ip->len = htons((uint16_t)(20 + iclen));
+    ip->ttl = 64;
+    ip->proto = IPPROTO_ICMP;
+    ip->src = INADDR_LOOPBACK_N;
+    ip->dst = INADDR_LOOPBACK_N;
+    ip->cksum = in_cksum(ip, sizeof(*ip));
+    m->pkt.proto = ETH_P_IP;
+    return m;
+}
+
+/* A connected UDP socket learns that the port it is talking to is closed.
+ * Before this unit the stack SENT port-unreachables and consumed none, so
+ * this socket waited forever. */
+bool selftest_net_sockerr_udp(const char **reason)
+{
+    struct netif *lo = netif_loopback();
+    CHECK(lo != NULL);
+    struct socket *s = NULL;
+    bool pass = false;
+    struct ip_stats i0, i1;
+    ipv4_get_stats(&i0);
+    do {
+        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
+        struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40410);
+        struct netaddr peer = v4addr(INADDR_LOOPBACK_N, 40411);
+        CHECK_BREAK(ksock_bind(s, &me) == 0);
+        /* Connected: the flow the ICMP error will be about. */
+        CHECK_BREAK(ksock_connect(s, &peer) == 0);
+        CHECK_BREAK((ksock_ready(s) & COSMO_IO_ERROR) == 0);
+
+        struct mbuf *m = icmp_unreach_frame(ICMP_UNREACH_PORT, INADDR_LOOPBACK_N, 40410,
+                                            INADDR_LOOPBACK_N, 40411, IPPROTO_UDP);
+        CHECK_BREAK(m != NULL);
+        netif_rx(lo, m);
+        CHECK_BREAK(wait_until(sock_error_ready, s, 2000));
+
+        /* Readiness says *that*; the accessor says *which*. */
+        CHECK_BREAK((ksock_ready(s) & COSMO_IO_ERROR) != 0);
+        CHECK_BREAK(ksock_error(s) == -ECONNREFUSED);
+        /* Delivered once: the second ask is empty, and the readiness bit
+         * with it. */
+        CHECK_BREAK(ksock_error(s) == 0);
+        CHECK_BREAK((ksock_ready(s) & COSMO_IO_ERROR) == 0);
+
+        /* Host- and net-unreachable carry their own errnos. */
+        m = icmp_unreach_frame(ICMP_UNREACH_HOST, INADDR_LOOPBACK_N, 40410,
+                               INADDR_LOOPBACK_N, 40411, IPPROTO_UDP);
+        CHECK_BREAK(m != NULL);
+        netif_rx(lo, m);
+        CHECK_BREAK(wait_until(sock_error_ready, s, 2000));
+        CHECK_BREAK(ksock_error(s) == -EHOSTUNREACH);
+        pass = true;
+    } while (0);
+    if (s)
+        ksock_put(s);
+    netif_put(lo);
+    if (!pass)
+        return false;
+    ipv4_get_stats(&i1);
+    CHECK(i1.icmp_unreach_delivered == i0.icmp_unreach_delivered + 2);
+    kinfo("selftest: net-sockerr-udp: a connected UDP socket takes ECONNREFUSED and EHOSTUNREACH "
+          "from an ICMP unreachable, and each verdict is delivered once");
+    return true;
+}
+
+/* And only the socket the message is about. Every case here differs from
+ * the delivering one in a single field of the quoted four-tuple -- which is
+ * the whole of the RFC 5927 argument, so it is the whole of the test. */
+bool selftest_net_sockerr_spoof(const char **reason)
+{
+    struct netif *lo = netif_loopback();
+    CHECK(lo != NULL);
+    struct socket *conn = NULL, *unconn = NULL;
+    bool pass = false;
+    struct ip_stats i0, i1;
+    ipv4_get_stats(&i0);
+    do {
+        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &conn) == 0);
+        struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40420);
+        struct netaddr peer = v4addr(INADDR_LOOPBACK_N, 40421);
+        CHECK_BREAK(ksock_bind(conn, &me) == 0);
+        CHECK_BREAK(ksock_connect(conn, &peer) == 0);
+
+        /* An UNCONNECTED socket on its own port: it has no flow, so no
+         * message can be about it. */
+        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &unconn) == 0);
+        struct netaddr other = v4addr(INADDR_LOOPBACK_N, 40422);
+        CHECK_BREAK(ksock_bind(unconn, &other) == 0);
+
+        struct { const char *what; uint32_t qsrc; uint16_t qsport; uint32_t qdst; uint16_t qdport; uint8_t proto; } bad[] = {
+            { "the wrong peer port",   INADDR_LOOPBACK_N, 40420, INADDR_LOOPBACK_N, 40499, IPPROTO_UDP },
+            { "the wrong local port",  INADDR_LOOPBACK_N, 40498, INADDR_LOOPBACK_N, 40421, IPPROTO_UDP },
+            { "the wrong peer address", INADDR_LOOPBACK_N, 40420, htonl(0x0a000201u), 40421, IPPROTO_UDP },
+            { "a source this host does not own", htonl(0x0a000202u), 40420, INADDR_LOOPBACK_N, 40421, IPPROTO_UDP },
+            { "the wrong protocol",    INADDR_LOOPBACK_N, 40420, INADDR_LOOPBACK_N, 40421, IPPROTO_TCP },
+            { "an unconnected socket", INADDR_LOOPBACK_N, 40422, INADDR_LOOPBACK_N, 40421, IPPROTO_UDP },
+        };
+        unsigned injected = 0;
+        for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            struct mbuf *m = icmp_unreach_frame(ICMP_UNREACH_PORT, bad[i].qsrc, bad[i].qsport,
+                                                bad[i].qdst, bad[i].qdport, bad[i].proto);
+            if (m == NULL)
+                break;   /* leaves the loop; the count below is what fails the test */
+            netif_rx(lo, m);
+            injected++;
+        }
+        /* Counted rather than checked inside the loop: a CHECK_BREAK there
+         * would leave the *for*, not this block, and the test would go on to
+         * pass having injected fewer than six negative cases. Six that were
+         * never sent cannot show that six change nothing. */
+        CHECK_BREAK(injected == sizeof(bad) / sizeof(bad[0]));
+        /* Nothing to wait *for*, so wait for something that would have
+         * been ordered behind it: one message that does deliver. */
+        struct mbuf *good = icmp_unreach_frame(ICMP_UNREACH_PORT, INADDR_LOOPBACK_N, 40420,
+                                               INADDR_LOOPBACK_N, 40421, IPPROTO_UDP);
+        CHECK_BREAK(good != NULL);
+        netif_rx(lo, good);
+        CHECK_BREAK(wait_until(sock_error_ready, conn, 2000));
+        CHECK_BREAK(ksock_error(conn) == -ECONNREFUSED);   /* the good one, once */
+        CHECK_BREAK(ksock_error(conn) == 0);               /* and none of the six */
+        CHECK_BREAK((ksock_ready(unconn) & COSMO_IO_ERROR) == 0);
+        pass = true;
+    } while (0);
+    if (conn)
+        ksock_put(conn);
+    if (unconn)
+        ksock_put(unconn);
+    netif_put(lo);
+    if (!pass)
+        return false;
+    ipv4_get_stats(&i1);
+    CHECK(i1.icmp_unreach_delivered == i0.icmp_unreach_delivered + 1);   /* one of seven */
+    kinfo("selftest: net-sockerr-spoof: six unreachables differing in one field of the quoted "
+          "four-tuple change nothing; the seventh, which matches, is delivered");
+    return true;
+}
+
+/* The accept path. A listening socket with a pending error must report it,
+ * and before this unit it reported success with *out unassigned -- because
+ * take_error clears as it reads and the expression called it twice. */
+bool selftest_net_sockerr_accept(const char **reason)
+{
+    struct socket *ls = NULL;
+    bool pass = false;
+    do {
+        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+        struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40430);
+        CHECK_BREAK(ksock_bind(ls, &me) == 0);
+        CHECK_BREAK(ksock_listen(ls, 1) == 0);
+        ksock_set_nonblock(ls, true);
+        /* Nothing pending: the ordinary answer. */
+        struct socket *c = (struct socket *)(uintptr_t)0xdeadbeefu;
+        CHECK_BREAK(ksock_accept(ls, &c, NULL) == -EAGAIN);
+        CHECK_BREAK(c == (struct socket *)(uintptr_t)0xdeadbeefu);   /* untouched */
+
+        /* The writer this unit gave the field. */
+        sock_set_error(ls, -ECONNABORTED);
+        int rc = ksock_accept(ls, &c, NULL);
+        /* The bug returned 0 here. Both halves are checked, because a
+         * caller that trusts the return reads the pointer: an errno-only
+         * assertion would pass against `return 0` with *out written. */
+        CHECK_BREAK(rc == -ECONNABORTED);
+        CHECK_BREAK(c == (struct socket *)(uintptr_t)0xdeadbeefu);
+        CHECK_BREAK(ksock_error(ls) == 0);                 /* consumed by the accept */
+        pass = true;
+    } while (0);
+    if (ls)
+        ksock_put(ls);
+    if (!pass)
+        return false;
+    kinfo("selftest: net-sockerr-accept: a pending error reaches accept as an errno, "
+          "and accept never reports success without a socket");
+    return true;
+}
+
+/* Read once, and the same answer either way round the socket mutex. The
+ * accessor takes no lock precisely because its five callers disagree about
+ * holding one and its writer runs where a mutex cannot be taken. */
+bool selftest_net_sockerr_locking(const char **reason)
+{
+    struct socket *s = NULL;
+    bool pass = false;
+    do {
+        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
+        /* Without the mutex. */
+        sock_set_error(s, -EHOSTUNREACH);
+        CHECK_BREAK(ksock_error(s) == -EHOSTUNREACH);
+        CHECK_BREAK(ksock_error(s) == 0);
+        /* And with it held, which is how ksock_connect's three completion
+         * paths call it. An accessor that took s->lock would stop the
+         * kernel here rather than answer. */
+        sock_set_error(s, -ENETUNREACH);
+        mutex_lock(&s->lock);
+        int held = ksock_error(s);
+        int again = ksock_error(s);
+        mutex_unlock(&s->lock);
+        CHECK_BREAK(held == -ENETUNREACH);
+        CHECK_BREAK(again == 0);
+
+        /*
+         * The pair a syscall uses, because its delivery can fail after
+         * every check has passed. Peek does not clear -- so a caller whose
+         * copy faults leaves the verdict for the next asker, and no
+         * concurrent asker is ever told 0 while one is pending.
+         */
+        uint64_t tok = 0, tok2 = 0;
+        sock_set_error(s, -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s, &tok2) == -ECONNREFUSED);   /* twice: it did not clear */
+        ksock_error_delivered(s, tok);
+        CHECK_BREAK(ksock_error_peek(s, &tok2) == 0);
+
+        /*
+         * And the commit clears only what it delivered. This is the case
+         * that makes two concurrent askers safe: one reads a verdict, a
+         * newer one arrives while it is being copied out, and the commit
+         * must not destroy the newer one -- which a plain store of 0
+         * would. Deterministic here because the "concurrent" write is
+         * simply made between the peek and the commit.
+         */
+        sock_set_error(s, -EHOSTUNREACH);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -EHOSTUNREACH);
+        sock_set_error(s, -ENETUNREACH);          /* newer, undelivered */
+        ksock_error_delivered(s, tok);            /* commits the older one */
+        CHECK_BREAK(ksock_error(s) == -ENETUNREACH);   /* the newer one survived */
+
+        /*
+         * The same, with the two verdicts EQUAL -- which is the case a
+         * commit comparing only the errno cannot see, and two ICMP
+         * messages about one flow carry the same errno readily. The token
+         * carries a generation for exactly this: without it the second
+         * ECONNREFUSED, told to nobody, is cleared by the first one's
+         * commit and the socket reports no error at all.
+         */
+        sock_set_error(s, -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s, &tok) == -ECONNREFUSED);
+        sock_set_error(s, -ECONNREFUSED);         /* a second, undelivered */
+        ksock_error_delivered(s, tok);            /* must not match it */
+        CHECK_BREAK(ksock_error(s) == -ECONNREFUSED);
+        CHECK_BREAK(ksock_error(s) == 0);
+        pass = true;
+    } while (0);
+    if (s)
+        ksock_put(s);
+    if (!pass)
+        return false;
+    kinfo("selftest: net-sockerr-locking: the pending error reads the same with s->lock held "
+          "and without it, and is delivered once either way");
+    return true;
 }
 
 bool selftest_net_rxhook_grace(const char **reason)
