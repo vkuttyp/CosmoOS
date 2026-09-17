@@ -47,7 +47,13 @@
  * reason and leaves *that* block. Deliberately not wrapped in a
  * do/while(0) of its own -- the break would leave the wrapper and the
  * check would pass by doing nothing. The `else (void)0` is what makes the
- * trailing semicolon and any enclosing if/else safe. */
+ * trailing semicolon and any enclosing if/else safe.
+ *
+ * The same reasoning is why this must not be used inside a loop: there
+ * the break leaves the loop, and the test continues and can pass with
+ * the remaining iterations never run. Review caught exactly that in
+ * net-sockerr-spoof, three lines after this comment was written. Inside
+ * a loop, count what happened and check the count after it. */
 #define CHECK_BREAK(cond)                                                      \
     if (!(cond)) {                                                             \
         *reason = "check failed: " #cond " at line " STR(__LINE__);            \
@@ -3111,12 +3117,20 @@ bool selftest_net_sockerr_spoof(const char **reason)
             { "the wrong protocol",    INADDR_LOOPBACK_N, 40420, INADDR_LOOPBACK_N, 40421, IPPROTO_TCP },
             { "an unconnected socket", INADDR_LOOPBACK_N, 40422, INADDR_LOOPBACK_N, 40421, IPPROTO_UDP },
         };
+        unsigned injected = 0;
         for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             struct mbuf *m = icmp_unreach_frame(ICMP_UNREACH_PORT, bad[i].qsrc, bad[i].qsport,
                                                 bad[i].qdst, bad[i].qdport, bad[i].proto);
-            CHECK_BREAK(m != NULL);
+            if (m == NULL)
+                break;   /* leaves the loop; the count below is what fails the test */
             netif_rx(lo, m);
+            injected++;
         }
+        /* Counted rather than checked inside the loop: a CHECK_BREAK there
+         * would leave the *for*, not this block, and the test would go on to
+         * pass having injected fewer than six negative cases. Six that were
+         * never sent cannot show that six change nothing. */
+        CHECK_BREAK(injected == sizeof(bad) / sizeof(bad[0]));
         /* Nothing to wait *for*, so wait for something that would have
          * been ordered behind it: one message that does deliver. */
         struct mbuf *good = icmp_unreach_frame(ICMP_UNREACH_PORT, INADDR_LOOPBACK_N, 40420,

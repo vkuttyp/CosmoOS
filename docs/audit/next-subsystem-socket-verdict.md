@@ -52,6 +52,41 @@ macro's* loop and the check passes by doing nothing. Every assertion in
 all four tests would have been vacuous. It is `if (...) { ...; break; }
 else (void)0`, and the comment says why.
 
+### And three the review found
+
+Greptile's first round on the built unit, all three valid and all three
+about the same thing the report is about — a rule that holds in the place
+you are looking and not in the place you are not.
+
+**The verdict could still be lost.** The report was pleased with itself
+for settling every refusal before reading the error. It is not enough:
+`user_range_ok` checks a *range*, not that the page is writable or that
+it stays mapped, so `copy_to_user` can still fail after every check
+passed — and the verdict is gone, because reading took it. Both doors now
+put it back, through `ksock_error_take(s, &consumed)` and
+`ksock_error_restore`. `consumed` is what makes the restore honest: only
+the socket-level half clears, so only that half is restored, and the
+restore is a compare-exchange against 0 so a newer verdict outranks it.
+
+**`pcb->error` had the same defect the socket field had.** N21 gave
+`s->error` one rule and left the sticky half with none: `ksock_error`
+read it atomically while `tcp.c` wrote it with plain assignments under
+`pcb->lock`, which is a data race whatever the reader does. It predates
+this unit — `output_result` has read it unlocked since it was written —
+but documenting a second reader is what made it this unit's to fix. Every
+write is an `__atomic_store_n` under the lock now, every unlocked read an
+atomic load, and `tcp.h` says so at the field.
+
+**`CHECK_BREAK` was misused three lines after its own warning.** The
+macro's comment says a `break` leaves the nearest loop, which is why it
+must not be wrapped in a `do/while(0)`. In `net-sockerr-spoof` it sits
+inside a `for` over the six spoof cases — so an allocation failure leaves
+*the for*, and the test goes on to pass having injected fewer than six.
+Six frames that were never sent cannot show that six change nothing. The
+loop counts now, and the count is checked after it. The comment records
+that review caught this, because writing the warning was evidently not
+enough to obey it.
+
 ### The four bug-proofs, each run
 
 | revert | what failed, and where |

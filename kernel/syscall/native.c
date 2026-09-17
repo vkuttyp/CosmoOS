@@ -998,11 +998,18 @@ static int64_t sys_getsockopt(struct syscall_args *a)
                (a->a[4] && !user_range_ok(a->a[4], sizeof(room)))) {
         rc = -EFAULT;
     } else {
-        int e = ksock_error(s);   /* consumed here, and not before */
+        /* The range checks above cannot promise the copy: the page may be
+         * read-only, or unmapped by another thread between the check and
+         * the write. So a failed copy puts the verdict back -- undelivered
+         * is not delivered, and this is the one delivery it gets. */
+        bool consumed = false;
+        int e = ksock_error_take(s, &consumed);
         val = e < 0 ? -e : e;     /* POSIX's sign: a positive errno, 0 for none */
         size_t len = sizeof(val);
         rc = copy_to_user(a->a[3], &val, sizeof(val)) ? -EFAULT
            : (a->a[4] && copy_to_user(a->a[4], &len, sizeof(len))) ? -EFAULT : 0;
+        if (rc != 0 && consumed)
+            ksock_error_restore(s, e);
     }
     ksock_put(s);
     return rc;

@@ -81,6 +81,13 @@ void sock_set_error(struct socket *s, int err);   /* and wake */
  * (invariant N21): safe with or without s->lock held, and against a
  * writer in packet context. */
 int ksock_error(struct socket *s);
+/* The same, for a caller that must be able to put it back: `consumed` says
+ * whether the socket-level field was the source, which is the half that
+ * clears. A stream socket's pcb error is sticky and needs no restoring. */
+int ksock_error_take(struct socket *s, bool *consumed);
+/* Undelivered is not delivered. Puts `err` back unless a newer verdict has
+ * arrived since -- that one outranks it and is not overwritten. */
+void ksock_error_restore(struct socket *s, int err);
 
 unsigned socket_count(void);
 

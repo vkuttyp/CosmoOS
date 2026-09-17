@@ -285,7 +285,20 @@ readers rather than merely likely; `ksock_ready`'s `COSMO_IO_ERROR` and
 the wait conditions *test* the field without clearing it. A stream
 socket's `pcb->error` is reported without clearing, because a dead
 connection must keep failing — the two halves have different rules on
-purpose and a reader should not assume one. An ICMP message sets an error
+purpose and a reader should not assume one. That sticky half has a rule
+of its own, for the same reason: two of its readers run without
+`pcb->lock` (`ksock_error`, and `output_result`'s fast path), so every
+write to it is an `__atomic_store_n` under that lock and every unlocked
+read an atomic load (`tcp.h`, `error`). A reader that *holds* the lock
+may read it plainly.
+
+A verdict that could not be delivered was not delivered: both ABI entry
+points settle every refusal — the length word, the size, the user range —
+before reading, and put the value back with `ksock_error_restore` if the
+copy out still fails, which it can, because a range check is not a
+promise that a page is writable. The restore is a compare-exchange
+against 0, so a verdict that arrived while the first was in flight is
+newer and stands. An ICMP message sets an error
 only when its quoted four-tuple belongs to a **connected** socket of this
 host's: an unconnected socket has no flow for a message to be about, and
 admitting one would let anything on the path kill a socket by quoting a
@@ -294,7 +307,8 @@ path-MTU message). Check: `net-sockerr-udp` (`ECONNREFUSED` and
 `EHOSTUNREACH` arrive, each delivered once, `COSMO_IO_ERROR` raised and
 then cleared), `net-sockerr-spoof` (six messages differing from the
 delivering one in a single field of the quoted four-tuple change
-nothing), `net-sockerr-accept` (a pending error reaches `accept` as an
+nothing — counted, so a frame that was never injected fails the test
+rather than quietly reducing six cases to five), `net-sockerr-accept` (a pending error reaches `accept` as an
 errno, and `accept` never reports success without a socket),
 `net-sockerr-locking` (the same answer with the mutex held and without
 it), `lxtest` and `usertest` (`SO_ERROR` through both ABI doors, positive

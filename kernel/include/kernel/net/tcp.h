@@ -148,7 +148,14 @@ struct tcp_pcb {
     /* bookkeeping */
     struct socket *sock;
     struct list_node hash_link;    /* the table bucket for local.port; empty when not in the table */
-    int error;                     /* reported by send/recv/poll. Every state-machine error ends the
+    /* Reported by send/recv/poll, and by SO_ERROR through ksock_error.
+     * Written only under pcb->lock and only with __atomic_store_n, because
+     * two readers run without that lock -- output_result's fast path and
+     * ksock_error, which must not take it (invariant N21). Readers holding
+     * the lock may read it plainly; readers without it use an atomic load.
+     * Sticky: never cleared on being read, so every later call on a dead
+     * connection keeps failing rather than reporting end-of-file. */
+    int error;                     /* Every state-machine error ends the
                                       pcb; the firewall's OUTPUT verdict is the one a *live*
                                       synchronized connection can carry, and the only one that is
                                       cleared again (tcp.c, output_result) */
