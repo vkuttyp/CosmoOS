@@ -81,6 +81,26 @@ Twelve bytes, guest to host, on an established connection, while a
 the same run. That is a far smaller and far stranger target than "the
 network harness is flaky", and it is what the next unit should take.
 
+**And it reproduces here**, which nothing in a fortnight of trying had
+managed. One failure in three x86-64 runs on this machine, with the
+signature identical to CI's:
+
+```
+run 2: ready at 75.3s, back-connection accepted at 76.1s, listener closed at 86.1s
+  connection accepted at 76.1s, then 0 of 12 bytes: b''; gave up at 86.1s,
+  guest reported ready at 75.3s, accept budget 78.7s, recv budget 10.0s
+```
+
+Accepted 0.8 seconds after readiness, with **78.7 seconds of accept
+budget unspent** — so the deadline is not merely unproven as the cause,
+it is excluded. The failure is ten seconds later, in the read.
+
+Two things follow for whoever takes this next. The architecture matters:
+every local attempt during this unit was on aarch64, where it did not
+reproduce in eleven runs, and it appeared on the first x86-64 attempt.
+And the loop is now two minutes rather than a twenty-minute CI round
+trip, which is the difference between chasing this and waiting for it.
+
 Worth stating about this report: its first draft named a cause, its
 retraction named none, and the thing that actually produced an answer
 was making the harness record four numbers. The measurement was the
@@ -226,22 +246,28 @@ defect that is not this bug — which is still worth fixing, and is still
 worth knowing, because it removes the most plausible suspect and points
 the next investigation elsewhere.
 
-### Why the recorded symptoms are consistent with it
+### Why the recorded symptoms were consistent with it
+
+**Superseded — see the as-built section at the top.** The measurement
+that this unit added showed the accept succeeding and the read timing
+out, so the readings below, which were how the deadline looked like a
+sufficient explanation, are kept as the reasoning that was available
+before the numbers were and not as an account of the failure.
 
 - **`ksock_connect` returns 0 and the echo never comes.** The row
   records exactly this (`NETTEST: client failed (0)`,
   `nettest.c:907,914`), and reads it as "the guest reached slirp and
-  slirp never delivered the connection". True, and the reason is that
-  the listener had already closed: QEMU's user networking completes the
-  guest's handshake locally and only then connects to
-  `127.0.0.1:back_port`, so a guest connect succeeds whether or not
-  anything is listening.
-- **The host harness reports `TimeoutError`.** It is in the failing CI
-  logs today — `network harness: guest-initiated connection failed
-  (TimeoutError('timed out'))` — and it is `accept()` giving up, not the
-  network misbehaving. The row asks for "the host side instrumented ...
-  on a run that fails"; the instrument is already there and already
-  answering.
+  slirp never delivered the connection". QEMU's user networking does
+  complete the guest's handshake locally, so a guest connect succeeds
+  whether or not anything is listening — which is why a closed listener
+  *could* have produced it. What actually happened is that the listener
+  was open and accepted the connection, and the twelve bytes never came.
+- **The host harness reports `TimeoutError`.** In the failing CI logs it
+  is the *read* giving up ten seconds after a successful accept, not
+  `accept()` — which nothing could tell until the timings were printed,
+  and which is the whole point of the unit. The row asks for "the host
+  side instrumented on a run that fails"; the error was already there,
+  and the timing was not.
 - **It struck documentation-only branches and `main`**, and four times
   in a row on a branch about a lock in cosmofs, after which the identical
   commit passed. Those rule out the *tree*, which is what they have

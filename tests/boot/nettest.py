@@ -14,6 +14,13 @@ import threading
 import time
 
 
+# How long the accepted connection has to deliver the guest's twelve
+# bytes. Separate from the accept deadline, and named because the two
+# are different questions: whether the guest connected, and whether what
+# it sent arrived (docs/audit/next-subsystem-nettest-deadline.md).
+BACK_RECV_S = 10
+
+
 def free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -60,15 +67,19 @@ class NetTest:
         remaining = max(1.0, deadline - time.monotonic())
         self.listener.settimeout(remaining)
         self.results["back_wait_s"] = remaining
+        data = b""
         try:
             conn, _ = self.listener.accept()
             self.results["back_accept_s"] = time.monotonic() - self.t0
-            conn.settimeout(10)
-            data = b""
+            # The read has its own, shorter clock. Worth knowing it is a
+            # separate one: the first failure this instrumentation caught
+            # timed out here, ten seconds after an accept that succeeded,
+            # and the old message said only "TimeoutError".
+            conn.settimeout(BACK_RECV_S)
             while not data.endswith(b"\n") and len(data) < 64:
                 chunk = conn.recv(64)
                 if not chunk:
-                    break
+                    break       # the peer closed: not an exception, still a failure
                 data += chunk
             self.results["back_request"] = data == b"cosmo hello\n"
             conn.sendall(b"cosmo world\n")
@@ -76,8 +87,14 @@ class NetTest:
             conn.close()
         except Exception as e:  # noqa: BLE001
             self.results["back_error"] = repr(e)
-            self.results["back_gaveup_s"] = time.monotonic() - self.t0
         finally:
+            # On every path, including the one that ends without an
+            # exception: a peer that connects and closes without sending
+            # leaves the loop by `break`, and an instrument that records
+            # nothing there cannot tell silence from a wrong answer.
+            self.results["back_done_s"] = time.monotonic() - self.t0
+            self.results["back_bytes"] = len(data)
+            self.results["back_data"] = repr(data[:32])
             self.listener.close()
             self.results["back_closed_s"] = time.monotonic() - self.t0
 
@@ -196,12 +213,19 @@ class NetTest:
         if not r.get("udp_ok"):
             f.append(f"network harness: UDP echo returned {r.get('udp_echo', 0)}/20 ({r.get('udp_error', '')})")
         if not r.get("back_request"):
+            def t(k):
+                v = r.get(k)
+                return f"{v:.1f}s" if isinstance(v, float) else "never"
+            accepted = r.get("back_accept_s")
+            where = ("no connection arrived" if not isinstance(accepted, float)
+                     else f"connection accepted at {accepted:.1f}s, then "
+                          f"{r.get('back_bytes', 0)} of 12 bytes: {r.get('back_data', '-')}")
             f.append(
                 "network harness: guest-initiated connection failed "
-                f"({r.get('back_error', 'bad request')}) — "
-                f"listening on 127.0.0.1:{self.back_port}, gave up "
-                f"{r.get('back_gaveup_s', float('nan')):.1f}s after the harness started, "
-                f"guest reported ready at {r.get('ready_s', float('nan')):.1f}s"
+                f"({r.get('back_error', 'no error, the request was wrong or absent')}) — "
+                f"listening on 127.0.0.1:{self.back_port}; {where}; "
+                f"gave up at {t('back_done_s')}, guest reported ready at {t('ready_s')}, "
+                f"accept budget {t('back_wait_s')}, recv budget {BACK_RECV_S}.0s"
             )
         if not r.get("quit_sent"):
             f.append("network harness: could not send QUIT")

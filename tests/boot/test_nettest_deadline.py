@@ -144,15 +144,51 @@ def test_an_expired_deadline_leaves_nothing_listening():
     except OSError:
         gone = True
     check(gone, "an expired deadline leaves nothing listening on the port")
-    check(isinstance(nt.results.get("back_gaveup_s"), float),
+    check(isinstance(nt.results.get("back_done_s"), float),
           "and the harness records when it gave up, not just that it did")
+
+
+def test_a_silent_peer_is_recorded_too():
+    """The path that raises nothing and still fails.
+
+    A peer that connects and closes without sending leaves the read loop
+    by `break`, not by an exception. An instrument that records a time
+    only in the `except` prints "gave up nan s" here and discards what
+    did arrive -- so it cannot tell silence from a partial write from a
+    wrong answer, which is exactly the distinction the open `net-harness`
+    defect now turns on.
+    """
+    nt = NetTest()
+    try:
+        t = threading.Thread(target=nt._back_server,
+                             args=(time.monotonic() + 10.0,), daemon=True)
+        t.start()
+        time.sleep(0.05)
+        s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        s.close()               # connect, say nothing, go away
+        t.join(5)
+
+        check(nt.results.get("back_request") is False,
+              "a silent peer is a failed request")
+        check(isinstance(nt.results.get("back_done_s"), float),
+              "and it still records when the exchange ended")
+        check(nt.results.get("back_bytes") == 0,
+              f"and how much arrived (got {nt.results.get('back_bytes')!r})")
+        check(isinstance(nt.results.get("back_accept_s"), float),
+              "and that the connection had been accepted")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
 
 
 def main():
     for fn in (test_no_deadline_before_the_guest_exists,
                test_a_late_connection_is_still_accepted,
                test_the_budget_is_derived_not_fixed,
-               test_an_expired_deadline_leaves_nothing_listening):
+               test_an_expired_deadline_leaves_nothing_listening,
+               test_a_silent_peer_is_recorded_too):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")

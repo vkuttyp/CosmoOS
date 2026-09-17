@@ -272,10 +272,11 @@ worth a unit of its own.
 **That unit was done** (`docs/audit/next-subsystem-nettest-deadline.md`).
 What it found, and what it did not, both matter to this file.
 
-It did **not** find the cause. The obvious candidate was a real defect:
-the harness armed a 120-second `accept()` deadline in `NetTest.__init__`,
-which runs before QEMU is launched, and closed the listener when it
-expired. Measured, the guest's back-connection lands at about 72 % of
+It did **not** find the cause, and then its own instrumentation did --
+see the paragraph below, which supersedes this one on the mechanism. The
+obvious candidate was a real defect: the harness armed a 120-second
+`accept()` deadline in `NetTest.__init__`, which runs before QEMU is
+launched, and closed the listener when it expired. It was not this bug. Measured, the guest's back-connection lands at about 72 % of
 the boot -- 76 to 83 seconds here -- which projects onto CI's 140-to-146
 second boots at 101 to 105 seconds, a margin of fifteen to nineteen
 seconds. Thin, and not obviously crossed: across sixteen aarch64 jobs a
@@ -326,6 +327,16 @@ echo and twenty UDP datagrams.
 Twelve bytes, guest to host, on a connection both ends agree exists.
 That is the thing to chase, and it took four recorded numbers to see it
 after a fortnight of re-runs.
+
+**And it reproduces locally on x86-64**, one run in three, with the same
+signature — accepted 0.8 s after readiness, `0 of 12 bytes`, gave up ten
+seconds later with 78.7 s of accept budget unspent. Every earlier local
+attempt in this file and in the inventory was on **aarch64**, where it
+did not reproduce in eleven runs. It appeared on the first x86-64 try.
+
+That is worth more than the diagnosis to anyone reading this file later:
+"does not reproduce locally" had been recorded for weeks, and what it
+meant was "does not reproduce on the architecture we kept trying".
 
 **The standing advice does not change.** A re-run still distinguishes a
 flake from a regression, and what discharges "until shown otherwise" is

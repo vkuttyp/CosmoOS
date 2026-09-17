@@ -877,10 +877,16 @@ budget 150.0s, listener closed at 81.0s
 and a failure says where it got to rather than only that it stopped:
 
 ```
-network harness: guest-initiated connection failed (TimeoutError(...)) —
-listening on 127.0.0.1:54321, gave up 120.0s after the harness started,
-guest reported ready at 131.7s
+network harness: guest-initiated connection failed (TimeoutError('timed out')) —
+listening on 127.0.0.1:55835; connection accepted at 92.0s, then 0 of 12 bytes: b'';
+gave up at 102.0s, guest reported ready at 90.9s, accept budget 59.1s, recv budget 10.0s
 ```
+
+That is a real one, from the run that first carried these numbers. It
+says what a fortnight of `TimeoutError` could not: the connection was
+accepted, and the guest's twelve bytes never arrived. The accept
+deadline and the read deadline are separate, and the failure was the
+second.
 
 The measurement exists because seven `net-harness` failures in a
 fortnight could not be told apart without it. `tests/boot/test_nettest_deadline.py`
