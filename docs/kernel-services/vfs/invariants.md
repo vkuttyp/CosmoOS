@@ -461,6 +461,25 @@ safety. **Checked by** `fsctl-list`: a mount this namespace drops leaves
 the listing while `vfs_mount_count` still counts it, because another
 namespace holds it.
 
+**V32. No filesystem lock is held across a device operation.** The VFS
+takes a vnode's lock to inspect or change *its own* state; it releases
+it before calling a driver and does not hold it again until the driver
+has returned. `file_pread` and `file_pwrite` therefore run the
+`VNODE_CHR` arm outside `vn->lock`, which guards nothing there -- that
+arm touches no vnode field -- and a device's other entry points already
+ran outside it: `vn->ops->open` from `file_run_open`, `vn->ops->release`
+from `file_release`. The rule exists because a device may sleep for an
+unbounded time (`tty_read` waits for a line with no timeout) and because
+`ramfs_lookup` hands out one vnode per device node, so a blocked reader
+holding that lock stops every other opener. **Checked by**
+`lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX)` at both
+dispatches, which runs in every translation unit's debug build for every
+character device including ones not written yet; and behaviourally by
+`vfs-chr-write-during-blocked-read`, which writes to a device while
+another thread is blocked reading the same node. Gap: the assertion is
+`((void)0)` in release builds, as every `KASSERT` here is; the
+behavioural test runs in both.
+
 **V29. A symbolic link is bounded by the resolution that expands it.**
 One resolution expands at most `VFS_MAX_SYMLINKS` (8) links and walks at
 most `VFS_MAX_COMPONENTS` components, both answering `-ELOOP`; an

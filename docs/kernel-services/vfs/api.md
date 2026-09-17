@@ -245,6 +245,14 @@ count is possible only on `-ENOMEM` mid-way.
 **`file_pread` / `file_pwrite`** The same at an explicit offset without
 touching `pos`.
 
+**Concurrency**: on a regular file these hold the vnode's lock, so
+readers and writers of one file serialise. On a **character device they
+hold no filesystem lock at all** (invariant V32): the driver may sleep
+for as long as it likes -- a terminal read waits for a line -- and one
+opener blocked in a driver must not stop the others, since every open of
+a device node shares one vnode. A character driver therefore does its
+own locking and must not assume the VFS serialises its callers.
+
 **`int64_t file_seek(struct file *f, int64_t off, int whence)`**
 `COSMO_SEEK_SET/CUR/END`; returns the new position. `-EINVAL` for a
 negative result or overflow, `-ESPIPE` for a character device.

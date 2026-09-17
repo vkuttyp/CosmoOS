@@ -2336,6 +2336,42 @@ See [docs/development.md](docs/development.md).
   rules, so removing the `rflags` masking fails the test that documents
   it. 332 self-tests on both architectures, debug and release (PR #162).
 
+- **A filesystem lock held across a device that sleeps**
+  (`docs/audit/next-subsystem-chrdev-vnode-lock.md`). `file_pread` and
+  `file_pwrite` took the vnode's mutex and dispatched to the character
+  device inside it. The inventory row called that a lock-order problem
+  and it was one; the larger half is that one of those devices sleeps.
+  `tty_read` waits for a line with no timeout, and `ramfs_lookup` hands
+  out **one vnode per device node**, so a process blocked at a terminal
+  held the lock every other opener of that terminal needs — not slower,
+  stopped, until somebody typed. Nothing had ever failed, and the reason
+  is worth stating: kernel messages never touch the VFS, the shell
+  harness has one reader whose background jobs print nothing while it
+  waits, and no other character device sleeps. The one that does is the
+  one nothing writes to concurrently, which stops being true the moment
+  there is a second session. The `VNODE_CHR` arm now runs with **no
+  filesystem lock** — it guards nothing there, and a device's other
+  entry points already ran outside it (`ops->open` from `file_run_open`,
+  `ops->release` from `file_release`), so this is read and write being
+  brought into line with open and release rather than a new rule. It is
+  **checked rather than stated**: `lockdep_assert_not_held` sits at both
+  dispatches and fires for every character device in every debug build,
+  including ones not written yet — a macro that was defined in the tree
+  and called from nowhere, which is most of why the row survived. The
+  `vnode-chr` lockdep class split, added after `/dev/fsctl` panicked on
+  its first boot, is **removed rather than layered over**: it was sound
+  and answered the wrong question, since what made a mount-table lookup
+  an ordering at all was the lock being held across the device. Three
+  proofs: the new `vfs-chr-write-during-blocked-read` fails at
+  `writer_returned` in 511 ms before and passes in 17 ms after;
+  reverting the fix with the split gone reproduces the original
+  `mounts -> vnode` panic, which is what says the two were coupled; and
+  with both in place lockdep reports only the six its own suite asks
+  for. The test releases its blocked reader on every path before
+  asserting, because a test that proves a deadlock by deadlocking is a
+  hung boot. New invariant V32. 333 self-tests on both architectures,
+  debug and release (PR #164).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
