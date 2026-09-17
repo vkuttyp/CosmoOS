@@ -476,9 +476,21 @@ holding that lock stops every other opener. **Checked by**
 dispatches, which runs in every translation unit's debug build for every
 character device including ones not written yet; and behaviourally by
 `vfs-chr-write-during-blocked-read`, which writes to a device while
-another thread is blocked reading the same node. Gap: the assertion is
-`((void)0)` in release builds, as every `KASSERT` here is; the
-behavioural test runs in both.
+another thread is blocked reading the same node. The rule has a second half, and it is asserted too: a character device's
+callbacks run with **`f->lock`**, the open file's own, so two users of
+one handle are serialised while two handles on one device are not. Every
+path into `file_pread`/`file_pwrite` holds it — `file_read` and
+`file_write` take it, and the AIO ring's `PREAD`/`PWRITE` now does as
+well. It did not, and got away with it only because `vn->lock` was
+serialising two rings on one device by accident.
+
+Gaps: the assertions are `((void)0)` in release builds, as every
+`KASSERT` here is, and the behavioural test runs in both. And **no test
+drives the AIO ring against a character device** — the tree has no
+in-kernel AIO test at all — so that caller's serialisation rests on the
+assertion and on being consistent with every other caller, not on a test
+that walks it. Both assertions do execute on every character-device read
+and write the suite performs.
 
 **V29. A symbolic link is bounded by the resolution that expands it.**
 One resolution expands at most `VFS_MAX_SYMLINKS` (8) links and walks at

@@ -175,6 +175,16 @@ static int64_t run(struct aio_req *q)
         char tmp[1024];
         size_t done = 0, len = (size_t)e->len;
         rc = 0;
+        /* The file's own lock, which every other path into file_pread and
+         * file_pwrite holds (file_read and file_write take it; the READ
+         * and WRITE opcodes above reach those). This one used to be the
+         * exception and got away with it because file_pread took the
+         * vnode's lock on the way past, which serialised two rings on one
+         * character device by accident. That lock is gone from the device
+         * path (VFS invariant V32), so the serialisation is taken here,
+         * where it belongs: per open file rather than per vnode, so two
+         * rings on one handle order and two handles on one device do not. */
+        mutex_lock(&f->lock);
         while (done < len) {
             size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
             if (e->op == COSMO_AIO_PWRITE) {
@@ -194,6 +204,7 @@ static int64_t run(struct aio_req *q)
             if ((size_t)rc < n)
                 break;
         }
+        mutex_unlock(&f->lock);
         if (done > 0)
             rc = (int64_t)done;
         break;

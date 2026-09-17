@@ -1410,8 +1410,15 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
          * ramfs_lookup hands out one vnode per device node. The VFS
          * already calls a device's other entry points outside it,
          * ops->open from file_run_open and ops->release from
-         * file_release (docs/audit/next-subsystem-chrdev-vnode-lock.md). */
+         * file_release (docs/audit/next-subsystem-chrdev-vnode-lock.md).
+         *
+         * What the driver does get is f->lock, the open file's own: two
+         * users of one handle are serialised, two handles on one device
+         * are not. Asserted rather than assumed, because the vnode lock
+         * had been standing in for it and one caller (the AIO ring's
+         * PREAD/PWRITE) was relying on that without knowing. */
         lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+        lockdep_assert_held(&f->lock, LOCKDEP_KIND_MUTEX);
         return vn->ops->read_file ? vn->ops->read_file(vn, f, off, buf, len)
              : vn->ops->read      ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
     }
@@ -1435,6 +1442,7 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
     if (vn->type == VNODE_CHR) {
         /* As in file_pread: the driver runs with no filesystem lock. */
         lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+        lockdep_assert_held(&f->lock, LOCKDEP_KIND_MUTEX);
         return vn->ops->write_file ? vn->ops->write_file(vn, f, off, buf, len)
              : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     }

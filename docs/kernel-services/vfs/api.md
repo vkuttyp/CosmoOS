@@ -25,9 +25,13 @@ walked before the last one), `VNODE_HASH` 64 (per-mount vnode buckets).
 - `struct vnode_ops`: the filesystem's per-vnode callbacks (`lookup`,
   `create`, `mkdir`, `unlink`, `rmdir`, `rename`, `readdir`, `readpage`,
   `writepage`, `truncate`, `read`/`write` for `VNODE_CHR`, `sync`,
-  `evict`). All are called with the vnode locks the VFS holds
-  (parent locked for directory operations, the vnode locked for data
-  operations). A NULL callback yields `-ENOTSUP` from the VFS entry.
+  `evict`). They are called with the vnode locks the VFS holds: the
+  parent locked for directory operations, the vnode locked for data
+  operations on a **regular file**. The character-device callbacks
+  (`read`/`write` and their `_file` forms) are the exception and run
+  with **no filesystem lock at all** — invariant V32, because a device
+  may sleep and one vnode serves every opener of the node. A NULL
+  callback yields `-ENOTSUP` from the VFS entry.
 - `struct vnode`: kobject, `mnt`, `ino`, `type`, `mode`, `uid`, `gid`,
   `nlink`, `size`, `mtime_ns`, `ctime_ns`, `ops`, `fs_priv`, page cache
   `pc`, `lock`, `covers` (the mounts whose root replaces this
@@ -302,8 +306,10 @@ after `vfs_init` and `bootarchive_init`.
 parent must exist and be a ramfs directory): `struct chrdev_ops { int64_t
 (*read)(struct vnode *, uint64_t off, void *, size_t); int64_t
 (*write)(struct vnode *, uint64_t off, const void *, size_t); }` receives
-the node's reads and writes with the vnode lock held (a NULL operation is
-`-ENOTSUP`); `priv` is returned by **`void *ramfs_chr_priv(const struct
+the node's reads and writes **with no filesystem lock held** — the
+driver does its own locking (invariant V32); what it does get is the
+open file's own lock, so two users of one handle are serialised and two
+handles on one device are not (a NULL operation is `-ENOTSUP`); `priv` is returned by **`void *ramfs_chr_priv(const struct
 vnode *)`**. `out` may be NULL, else it receives a reference. Errors:
 `-EINVAL` (no name, name too long), `-ENAMETOOLONG`, path errors,
 `-ENOTDIR` (parent not a ramfs directory), `-EEXIST`, `-ENOMEM`. The

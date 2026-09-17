@@ -1461,8 +1461,8 @@ static bool wait_done(struct completion *c, uint64_t ms)
 
 bool selftest_vfs_chr_write_during_blocked_read(const char **reason)
 {
-    struct vnode *node = NULL;
-    CHECK(ramfs_mkchr("/dev/chrblock-test", 0600, &chrblock_ops, NULL, &node) == 0);
+    /* NULL: `out` would hand back a reference this test never drops. */
+    CHECK(ramfs_mkchr("/dev/chrblock-test", 0600, &chrblock_ops, NULL, NULL) == 0);
     completion_init(&g_chrblock_release, "chrblock-release");
     __atomic_store_n(&g_chrblock_in_read, false, __ATOMIC_RELEASE);
 
