@@ -67,25 +67,48 @@ says so rather than implying one test covers five walkers.
 
 ## A live instance, found while writing this
 
-While this report sat in review, aarch64 CI failed
-`cosmofs-orphan-reserved` twice on a **documentation-only** branch:
+While this report sat in review, CI failed `cosmofs-orphan-reserved` on
+**three of three** aarch64 runs of a **documentation-only** branch, and
+on none of three local boots of the same tree. Two of the three
+signatures, the first and the cleanest:
 
 ```
 [ERROR] cosmofs: block 104: bad metadata header or checksum
 [ WARN] cosmofs: check: 0 leaked, 39 free-in-use, 0 cross-linked, 0 bad nlink,
                         13 orphan, 0 dangling, 0 bad entries, 1 counters, 0 cycles, 1 unreadable
+
+[ERROR] cosmofs: block 88: bad metadata header or checksum
+[ WARN] cosmofs: check: 0 leaked, 0 free-in-use, 0 cross-linked, 0 bad nlink,
+                        0 orphan, 0 dangling, 0 bad entries, 0 counters, 0 cycles, 1 unreadable
 ```
 
-A metadata block failing its checksum after an orphan replay, leaving 39
-blocks that a file holds with their allocation bits clear. It did not
-reproduce in three local boots of the same tree; it is an inventory row
-now, undiagnosed, and it is **not** this unit's to fix.
+The second is the defect and the first is the same defect plus its
+consequences: a walk cannot follow a tree through a block it cannot
+read, so the 39 free-in-use and 13 orphan are downstream of the one
+unreadable block, not separate findings.
 
-It is this unit's to learn from, in two ways.
+It was **diagnosed and fixed in PR #160**, and it was not a checksum
+bug. cosmofs starts its writeback thread lazily on the first dirty
+buffer, and a mount's own replay dirties buffers, so the thread was
+being started from inside the replay -- where it takes only the mount's
+sync lock, which the mount path does not hold, and commits a half-built
+filesystem across an `fs->bufs` the mount walks with `fs->lock` unheld.
+Two threads on one intrusive list. It is **not** this unit's to fix, and
+it is not this unit's row to carry either: PR #160 owns the inventory
+entry.
+
+It is this unit's to learn from, in three ways.
 
 **The checker did its job.** It is the thing that noticed, and the
 finding is exactly the kind the three unchecked invariants would extend
 the reach of.
+
+**A different view outranks another instance of the same one.** Three
+aarch64 runs of "one metadata block will not verify" said no more than
+the first had. What named the cause was the *other* architecture in the
+same run: x86_64 was failing too, with a panic whose backtrace named the
+thread and the call chain. The reach this unit is about is reach across
+*classes* of finding, not more of one.
 
 **And the test made the finding harder to read than it had to be.** The
 first failure was `CHECK(r.clean)` — a boolean. `report_clean` is ten
