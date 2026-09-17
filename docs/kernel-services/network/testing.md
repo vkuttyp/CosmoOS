@@ -900,13 +900,23 @@ NETTEST: client failed: connect 0, sent 12, recv -11,
   segs_out +3 retransmits +0 refused +0 rsts_in +0
 ```
 
+A real failure from this harness looks like the same line with
+`sent -104` (`ECONNRESET`), all three `sndbuf` samples at 65536,
+`segs_out +0` and `state 0` (`TCP_CLOSED`): nothing queued, nothing
+transmitted, the connection already reset when the guest wrote to it.
+
 The three `sndbuf` samples are labelled by *when* they were taken, not by
 what they are taken to mean: the one after the send can already be zero
 because an acknowledgement beat it, and that is normal. **The one after
 the read is the discriminator** — bytes still outstanding there were
 never acknowledged. The global `tcp_get_stats` deltas are corroboration
 only, since they count this connect's own SYN and every other socket's
-traffic (`docs/audit/next-subsystem-twelve-bytes.md`).
+traffic (`docs/audit/next-subsystem-twelve-bytes.md`). `rsts_in` is the
+one worth reading closely: it counts inbound RSTs this stack *accepted*,
+and RFC 5961 §3 means a reset anywhere but exactly `rcv_nxt` is a
+challenge ACK and is never counted — so `+1` names an inbound reset,
+while `+0` only says none was counted *inside the window*, which opens
+after `ksock_connect` returns.
 
 The measurement exists because a fortnight of `net-harness` failures
 could not be told apart without it (`docs/testing/flakes.md`, "The

@@ -334,12 +334,19 @@ That is the thing to chase, and it took four recorded numbers to see it
 after a fortnight of re-runs.
 
 **And then the guest's half of the instrumentation answered it, on the
-pull request that added it** (PR #169):
+pull request that added it** (PR #169) — twice, once per architecture.
+The x86-64 job:
 
 ```
 NETTEST: client failed: connect 0, sent -104, recv -1,
   sndbuf free 65536 before, 65536 after send, 65536 after read
-  (outstanding 0 then 0), state 0, segs_out +0 retransmits +0
+  (outstanding 0 then 0), state 0, segs_out +0 retransmits +0 rsts_in +0
+```
+
+and the aarch64 job, the same in every field but the last:
+
+```
+  ... segs_out +0 retransmits +0 refused +0 rsts_in +1
 ```
 
 `-104` is `ECONNRESET`; state `0` is `TCP_CLOSED`. **`ksock_sendto`
@@ -436,8 +443,8 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Ten, to 2026-09-17**, across CI and this developer's machine, on both
-architectures. Counted rather than asserted, because the first version
+**Eleven, to 2026-09-17**, across CI and this developer's machine, on
+both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
 | sighting | source |
@@ -448,14 +455,17 @@ of this section said eight and then listed nine:
 | PR #146 | the inventory row's history |
 | two documentation-only commits | the inventory row's history |
 | PR #167's own CI run | observed, with timings |
-| PR #169's own CI run | observed, with the guest's returns: `sent -104` |
+| PR #169's own CI runs, twice — x86-64 and aarch64 | observed, with the guest's returns: `sent -104` both times, and `rsts_in +1` on aarch64 |
 
-Seven entries, ten occurrences. The first five rows are inherited from
-the row that recorded them and are not independently re-verified here.
-The last two were watched as they happened: PR #167's carries the host's
-`accepted at 92.0s, 0 of 12 bytes`, and PR #169's carries the guest's
-`sent -104` with the send buffer untouched, which is the one that said
-the bytes were never written.
+Seven entries, eleven occurrences. The first five rows are inherited
+from the row that recorded them and are not independently re-verified
+here. The last two were watched as they happened: PR #167's carries the
+host's `accepted at 92.0s, 0 of 12 bytes`, and PR #169's two carry the
+guest's `sent -104` with the send buffer untouched, which is what said
+the bytes were never written. PR #169's aarch64 job carries one field
+more — `rsts_in +1`, an inbound reset accepted in sequence — and its
+x86-64 job shows `+0` for the same failure, which is the instrument's
+window starting after the connect rather than a run without a reset.
 
 At least four were on trees that cannot have caused them.
 

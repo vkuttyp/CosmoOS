@@ -2442,22 +2442,27 @@ See [docs/development.md](docs/development.md).
   which is what QEMU's user-mode networking being a *proxy rather than a
   wire* makes possible, since it acknowledges into its own buffer before
   writing onward. **This unit is step 1 and stops there.** Twenty-one
-  local boots produced one failure — the rate is about one in twenty,
-  not the one in three an earlier draft claimed from a single
-  observation, and six boots under CPU load did not raise it. So the
-  instrument ships and the next failure reports itself, as #167's did
-  within the hour — **and it did, on this unit's own CI job**:
-  `sent -104`, which is `ECONNRESET`, with the send buffer untouched
-  across all three samples, `segs_out +0` and the pcb `TCP_CLOSED`. So
-  `ksock_sendto` failed and the twelve bytes were never written: the
-  connection had already been reset, while the host had accepted it a
-  second earlier. Every framing of this defect so far, this unit's own
-  title included, describes a symptom of something that had already
-  happened, and the question is now what resets an established
-  connection between `ksock_connect` returning and the next statement.
-  Who sends that reset is not yet known, and the instrument says so:
-  its counter window starts after the connect and cannot see one
-  arriving during it. The inventory row stays open, narrowed. 333
+  local boots produced one failure — the rate is one in twenty-one, not
+  the one in three an earlier draft claimed from a single observation,
+  and six boots under CPU load did not raise it. So the instrument ships
+  and the next failure reports itself, as #167's did within the hour —
+  **and it did, on two of this unit's own CI jobs, one per
+  architecture**: `sent -104`, which is `ECONNRESET`, with the send
+  buffer untouched across all three samples, `segs_out +0` and the pcb
+  `TCP_CLOSED`. So `ksock_sendto` failed and the twelve bytes were never
+  written: the connection had already been reset, while the host had
+  accepted it a second earlier. Every framing of this defect so far,
+  this unit's own title included, describes a symptom of something that
+  had already happened, and the question is now what resets an
+  established connection between `ksock_connect` returning and the next
+  statement. The aarch64 job narrows it one step further with
+  `rsts_in +1` — an inbound RST accepted in sequence, so the reset came
+  off the wire rather than from this stack — while the x86-64 job's
+  `+0` for the same failure is the instrument's window starting after
+  the connect, not a run without a reset. Who sent it is still not
+  named, because `tcp_get_stats` is machine-wide and the pcb's own
+  pending error is never read; that is the next unit's first step. The
+  inventory row stays open, narrowed. 333
   self-tests on both architectures, debug and release (PR #169).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
