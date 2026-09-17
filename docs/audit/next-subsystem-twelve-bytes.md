@@ -30,10 +30,14 @@ higher earlier the same day, so the instrument ships and the next failure
 reports itself — which is exactly how PR #167's four numbers produced an
 answer within the hour of being pushed.
 
-**Step 2 remains "read the numbers", and this pull request does not
-contain them.** Saying so is the point: a unit that shipped an
-instrument and then guessed what it would have shown would be the error
-this row has already cost two retractions for.
+**Step 2 was "read the numbers", and this pull request was pushed
+without them** — deliberately, because a unit that shipped an instrument
+and then guessed what it would have shown would be the error this row
+has already cost two retractions for.
+
+Then the numbers arrived, on this pull request's own CI job, before it
+merged. They are below, and the migration plan's step 2 is done rather
+than pending.
 
 ### And then it read them, on this pull request's own CI job
 
@@ -292,11 +296,16 @@ None. `tcp_send_space`, `tcp_state_of` and `tcp_get_stats` all exist; the first 
    exactly one back-connection (`listen(1)`, one `accept`), so repeating
    the exchange within a boot would need the host side changed too, and
    that is a larger change than it sounds.
-2. **Read the numbers.** One failing run selects a row of the table in
-   §2, which selects what step 3 is.
-3. **Step 3 depends on step 2** and the report deliberately does not
-   pre-write it.
-4. Docs, the inventory row narrowed, the README entry.
+2. **Read the numbers.** ✔ Done — this pull request's own x86-64 CI job
+   failed and printed them (see *And then it read them* above). The
+   answer was row one, "never queued", by way of an `ECONNRESET` none of
+   the four rows anticipated.
+3. **Step 3 depends on step 2** and the report deliberately did not
+   pre-write it. It is now writable and belongs to the next unit: sample
+   the counters *before* the connect and read the socket's pending error,
+   because this instrument's window starts too late to say who sent the
+   reset.
+4. Docs, the inventory row narrowed, the README entry. ✔ Done.
 
 ## Tests
 

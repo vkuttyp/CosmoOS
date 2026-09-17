@@ -451,9 +451,11 @@ of this section said eight and then listed nine:
 | PR #169's own CI run | observed, with the guest's returns: `sent -104` |
 
 Seven entries, ten occurrences. The first five rows are inherited from
-the row that recorded them and are not independently re-verified here;
-the last was watched as it happened and is the one that carries
-`accepted at 92.0s, 0 of 12 bytes`.
+the row that recorded them and are not independently re-verified here.
+The last two were watched as they happened: PR #167's carries the host's
+`accepted at 92.0s, 0 of 12 bytes`, and PR #169's carries the guest's
+`sent -104` with the send buffer untouched, which is the one that said
+the bytes were never written.
 
 At least four were on trees that cannot have caused them.
 
