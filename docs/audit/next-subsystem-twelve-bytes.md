@@ -233,13 +233,17 @@ cause it had not established.
 
 ## Benchmarks
 
-None. Two counter reads and a longer `kprintf` on a path that runs once
-per boot.
+None. Three `tcp_send_space` reads, a `tcp_state_of`, one
+`tcp_get_stats` pair and a longer `kprintf`, on a path that runs once
+per boot. `tcp_send_space` takes the pcb's spinlock and returns a word
+(`tcp.c:1354-1360`); measuring it three times around a twelve-byte send
+is not a cost worth a number.
 
 ## Risks
 
 - **The failure may not reproduce with the instrumentation in.** It is
-  about one in three and the change is two counter samples, so this is
+  about one in three and the change is three send-buffer reads, a state
+  read and a counter pair, so this is
   unlikely; if it happens, that is itself information and the report as
   built should say so rather than quietly running more boots.
 - **The numbers may point outside this repository** — at QEMU's user
