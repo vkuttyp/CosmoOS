@@ -24,17 +24,28 @@ def free_port():
 
 class NetTest:
     def __init__(self):
+        # When the harness started waiting. Every deadline below is
+        # reported against this, because the question two weeks of
+        # `net-harness` sightings could not answer was *when* the guest
+        # connected relative to when the host began listening
+        # (docs/audit/next-subsystem-nettest-deadline.md).
+        self.t0 = time.monotonic()
         self.tcp_port = free_port()
         self.udp_port = free_port()
         self.back_port = free_port()
         self.results = {}
-        self.back_thread = threading.Thread(target=self._back_server, daemon=True)
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", self.back_port))
         self.listener.listen(1)
-        self.listener.settimeout(120)
-        self.back_thread.start()
+        # Bound and listening now, because the port number goes to QEMU
+        # and must be held before QEMU is told about it. *Not* accepting
+        # now, and no deadline yet: the guest does not exist. This used
+        # to start a thread here with a hard-coded 120-second timeout,
+        # which meant the clock ran through the whole boot and the
+        # listener closed underneath a guest that connected late
+        # (docs/audit/next-subsystem-nettest-deadline.md). The backlog
+        # holds the connection until run_when_ready accepts it.
 
     def env(self):
         return {
@@ -42,9 +53,16 @@ class NetTest:
             "QEMU_FWCFG_NETTEST": f"tcp={self.back_port}",
         }
 
-    def _back_server(self):
+    def _back_server(self, deadline):
+        # Whatever is left of the run's budget, which is the same budget
+        # the readiness wait drew on: one deadline for the exchange,
+        # derived from --timeout, started when the run started.
+        remaining = max(1.0, deadline - time.monotonic())
+        self.listener.settimeout(remaining)
+        self.results["back_wait_s"] = remaining
         try:
             conn, _ = self.listener.accept()
+            self.results["back_accept_s"] = time.monotonic() - self.t0
             conn.settimeout(10)
             data = b""
             while not data.endswith(b"\n") and len(data) < 64:
@@ -58,11 +76,14 @@ class NetTest:
             conn.close()
         except Exception as e:  # noqa: BLE001
             self.results["back_error"] = repr(e)
+            self.results["back_gaveup_s"] = time.monotonic() - self.t0
         finally:
             self.listener.close()
+            self.results["back_closed_s"] = time.monotonic() - self.t0
 
     def run_when_ready(self, log_path, proc, timeout):
         """Wait for the guest's ready line, then run the exchange."""
+        self.results["budget_s"] = timeout
         deadline = time.monotonic() + timeout
         ready = False
         while time.monotonic() < deadline and proc.poll() is None:
@@ -75,8 +96,13 @@ class NetTest:
                 pass
             time.sleep(0.2)
         self.results["ready"] = ready
+        self.results["ready_s"] = time.monotonic() - self.t0
         if not ready:
             return
+        # The guest prints readiness and *then* connects back, waiting
+        # for the reply before it serves anything, so this must come
+        # before the echo exchanges below.
+        self._back_server(deadline)
         time.sleep(0.3)
         self._tcp_echo()
         self._udp_echo()
@@ -143,6 +169,22 @@ class NetTest:
             self.results["quit_sent"] = False
             self.results["quit_error"] = repr(e)
 
+    def timing(self):
+        """One line about the deadlines, printed whether or not it failed.
+
+        The margin is the subject: `net-harness` has been re-run for a
+        fortnight without anyone being able to say how close the guest's
+        back-connection came to the deadline, because nothing recorded
+        it (docs/audit/next-subsystem-nettest-deadline.md).
+        """
+        r = self.results
+        def t(k):
+            v = r.get(k)
+            return f"{v:.1f}s" if isinstance(v, float) else "-"
+        return ("network harness: ready at %s, back-connection accepted at %s, "
+                "budget %s, listener closed at %s"
+                % (t("ready_s"), t("back_accept_s"), t("budget_s"), t("back_closed_s")))
+
     def failures(self):
         f = []
         r = self.results
@@ -154,7 +196,13 @@ class NetTest:
         if not r.get("udp_ok"):
             f.append(f"network harness: UDP echo returned {r.get('udp_echo', 0)}/20 ({r.get('udp_error', '')})")
         if not r.get("back_request"):
-            f.append(f"network harness: guest-initiated connection failed ({r.get('back_error', 'bad request')})")
+            f.append(
+                "network harness: guest-initiated connection failed "
+                f"({r.get('back_error', 'bad request')}) — "
+                f"listening on 127.0.0.1:{self.back_port}, gave up "
+                f"{r.get('back_gaveup_s', float('nan')):.1f}s after the harness started, "
+                f"guest reported ready at {r.get('ready_s', float('nan')):.1f}s"
+            )
         if not r.get("quit_sent"):
             f.append("network harness: could not send QUIT")
         return f

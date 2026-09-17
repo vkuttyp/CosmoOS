@@ -124,12 +124,34 @@ duration does not predict the outcome.
 **What that does and does not show.** It does not exonerate the
 deadline: the boot-test's total duration is a poor proxy for the thing
 the deadline actually spans, which is `NetTest()` construction to the
-guest's back-connection. `net-harness` runs partway through the suite,
-and on this machine the ready line came at t+82 s of a 189-second boot —
-about 43 % through — so a 140-second CI boot reaching it at the same
-fraction would be at roughly 60 seconds, comfortably inside 120. On that
-arithmetic the deadline is *not* being crossed at all, and the mechanism
-is not the cause.
+guest's back-connection. `net-harness` runs partway through the suite.
+
+**Measured, as step 1 of the plan below** (the harness now records it on
+every run):
+
+| run | back-connection accepted | boot-test total | fraction |
+| --- | --- | --- | --- |
+| 1 | 82.8 s | 116.7 s | 71 % |
+| 2 | 79.6 s | 109.5 s | 73 % |
+| 3 | 76.4 s | 105.8 s | 72 % |
+
+So the back-connection lands at about **72 %** of the boot, and the
+margin on this machine is 37–44 seconds.
+
+An earlier draft of this section put the fraction at 43 %, from dividing
+t+82 s by a 189-second figure that was the whole `make test` wall clock
+rather than the boot. On that arithmetic a 140-second CI boot reached
+the back-connection near 60 seconds and the deadline was nowhere near
+being crossed. **The corrected fraction says otherwise**: 0.72 × 140–146
+seconds puts it at **101–105 seconds against a 120-second deadline — a
+margin of 15 to 19 seconds.**
+
+That does not make the deadline the cause, and the absent correlation
+above still stands: boots of the same length pass and fail. But it moves
+the deadline from "not remotely crossed" to "crossed by anything that
+costs the tail another fifteen seconds", which is a different suspect
+altogether and a far thinner margin than a reader of this report was
+previously told.
 
 It does show that the earlier draft's confidence was unearned. The
 structural defect is verified by reading the code; its *sufficiency* as

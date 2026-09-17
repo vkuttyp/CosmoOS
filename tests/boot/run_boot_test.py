@@ -718,6 +718,7 @@ def main():
     if nettest is not None and want_selftest:
         if net_thread is not None:
             net_thread.join(5)
+        print(nettest.timing(), flush=True)
         failures.extend(nettest.failures())
         for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1"):
             if not any(re.search(pat, ln) for ln in lines):
