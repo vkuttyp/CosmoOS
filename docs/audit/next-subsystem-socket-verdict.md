@@ -134,7 +134,14 @@ matter it is not:
   error and could not have it, so it printed `rsts_in`, a machine-wide
   per-boot counter, and the report had to spend two paragraphs on why
   `+1` does not bind the reset to that pcb and `+0` does not mean no
-  reset arrived.
+  reset arrived. **This pull request's own CI made that concrete**: on
+  this documentation-only branch the x86-64 job printed `sent 12,
+  recv -104 ... (outstanding 12 then 12), segs_out +1, retransmits +0,
+  rsts_in +1` — the first sighting where the guest got the bytes onto
+  the wire. Whether `retransmits +0` means a retransmission bug or
+  simply a reset that arrived before the timer fired is exactly the
+  question `pcb->error` and a timestamp would answer and a machine-wide
+  counter cannot (`docs/testing/flakes.md`, "The count").
 
 Neither ABI offers it. The native syscall table has no socket-option
 call at all (`SYS_socket` 23 through `SYS_getsockname` 31,
