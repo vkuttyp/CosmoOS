@@ -1402,13 +1402,21 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
         return -EISDIR;
     if (len == 0)
         return 0;
-    int64_t n;
+    if (vn->type == VNODE_CHR) {
+        /* No vn->lock across a driver. It guards nothing on this path --
+         * the arm below touches no vnode field -- and a device may sleep
+         * for an unbounded time inside it (tty_read waits for a line),
+         * while this is the lock every other opener of the node needs:
+         * ramfs_lookup hands out one vnode per device node. The VFS
+         * already calls a device's other entry points outside it,
+         * ops->open from file_run_open and ops->release from
+         * file_release (docs/audit/next-subsystem-chrdev-vnode-lock.md). */
+        lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+        return vn->ops->read_file ? vn->ops->read_file(vn, f, off, buf, len)
+             : vn->ops->read      ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
+    }
     mutex_lock(&vn->lock);
-    if (vn->type == VNODE_CHR)
-        n = vn->ops->read_file ? vn->ops->read_file(vn, f, off, buf, len)
-          : vn->ops->read      ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
-    else
-        n = pagecache_read(vn, off, buf, len);
+    int64_t n = pagecache_read(vn, off, buf, len);
     mutex_unlock(&vn->lock);
     return n;
 }
@@ -1424,16 +1432,16 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
         return -EROFS;
     if (len == 0)
         return 0;
-    int64_t n;
-    mutex_lock(&vn->lock);
     if (vn->type == VNODE_CHR) {
-        n = vn->ops->write_file ? vn->ops->write_file(vn, f, off, buf, len)
-          : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
-    } else {
-        n = pagecache_write(vn, off, buf, len);
-        if (n > 0)
-            vn->mtime_ns = vfs_now_ns();
+        /* As in file_pread: the driver runs with no filesystem lock. */
+        lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+        return vn->ops->write_file ? vn->ops->write_file(vn, f, off, buf, len)
+             : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     }
+    mutex_lock(&vn->lock);
+    int64_t n = pagecache_write(vn, off, buf, len);
+    if (n > 0)
+        vn->mtime_ns = vfs_now_ns();   /* vnode state, so it stays inside */
     mutex_unlock(&vn->lock);
     return n;
 }

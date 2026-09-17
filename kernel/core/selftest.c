@@ -464,6 +464,7 @@ static const struct selftest tests[] = {
     { "vfs-concurrency", selftest_vfs_concurrency },
     { "vfs-put-race",    selftest_vfs_put_race },
     { "vfs-chrdev-open", selftest_vfs_chrdev_open },
+    { "vfs-chr-write-during-blocked-read", selftest_vfs_chr_write_during_blocked_read },
     { "vfs-mount-id",    selftest_vfs_mount_id },
     { "vfs-mount-pin",   selftest_vfs_mount_pin },
     { "fsctl-list",      selftest_fsctl_list },

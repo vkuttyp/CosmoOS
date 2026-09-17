@@ -3,6 +3,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/completion.h>
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
 #include <kernel/faultinject.h>
@@ -1380,6 +1381,127 @@ bool selftest_fsctl_result_per_open(const char **reason)
     file_put(a);
     file_put(b);
     kinfo("selftest: fsctl-result-per-open: two open files, two results, neither the other's");
+    return true;
+}
+
+/* --- a filesystem lock is not held across a device operation ------------- */
+
+/*
+ * The claim: a write to a character device completes while another
+ * thread is blocked reading the same node.
+ *
+ * It did not. `file_pread` took the vnode's mutex and dispatched inside
+ * it, and every open of a device node shares one vnode (`ramfs_lookup`
+ * returns the directory entry's child), so a reader blocked in a driver
+ * held the lock every other opener needs. `tty_read` waits for a line
+ * with no timeout, so "blocked" meant "until somebody types"
+ * (docs/audit/next-subsystem-chrdev-vnode-lock.md).
+ *
+ * The device here blocks on a completion the test owns, which is the
+ * mechanism a terminal has and none of the timing. And the test releases
+ * the reader on every path before it asserts anything: a test that
+ * proves a deadlock by deadlocking is not a test, it is a hung boot.
+ */
+static struct completion g_chrblock_release;
+static volatile bool g_chrblock_in_read;
+
+static int64_t chrblock_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
+{
+    (void)vn; (void)f; (void)off; (void)buf; (void)len;
+    __atomic_store_n(&g_chrblock_in_read, true, __ATOMIC_RELEASE);
+    wait_for_completion(&g_chrblock_release);   /* a terminal nobody is typing at */
+    return 0;
+}
+
+static int64_t chrblock_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
+{
+    (void)vn; (void)f; (void)off; (void)buf;
+    return (int64_t)len;
+}
+
+static const struct chrdev_ops chrblock_ops = {
+    .read_file = chrblock_read_file, .write_file = chrblock_write_file,
+};
+
+struct chrblock_arg {
+    struct file *f;
+    struct completion done;
+};
+
+static void chrblock_reader(void *p)
+{
+    struct chrblock_arg *a = p;
+    char b[4];
+    (void)file_read(a->f, b, sizeof(b));
+    complete(&a->done);
+}
+
+static void chrblock_writer(void *p)
+{
+    struct chrblock_arg *a = p;
+    (void)file_write(a->f, "x", 1);
+    complete(&a->done);
+}
+
+static bool wait_flag(const volatile bool *flag, uint64_t ms)
+{
+    uint64_t deadline = clock_now_ns() + ms * 1000000ull;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE) && clock_now_ns() < deadline)
+        thread_sleep_ms(2);
+    return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
+}
+
+static bool wait_done(struct completion *c, uint64_t ms)
+{
+    uint64_t deadline = clock_now_ns() + ms * 1000000ull;
+    while (!completion_done(c) && clock_now_ns() < deadline)
+        thread_sleep_ms(2);
+    return completion_done(c);
+}
+
+bool selftest_vfs_chr_write_during_blocked_read(const char **reason)
+{
+    struct vnode *node = NULL;
+    CHECK(ramfs_mkchr("/dev/chrblock-test", 0600, &chrblock_ops, NULL, &node) == 0);
+    completion_init(&g_chrblock_release, "chrblock-release");
+    __atomic_store_n(&g_chrblock_in_read, false, __ATOMIC_RELEASE);
+
+    struct file *rf = NULL, *wf = NULL;
+    CHECK(vfs_open(NULL, "/dev/chrblock-test", COSMO_O_RDWR, 0, &rf) == 0 && rf != NULL);
+    CHECK(vfs_open(NULL, "/dev/chrblock-test", COSMO_O_RDWR, 0, &wf) == 0 && wf != NULL);
+
+    struct chrblock_arg ra = { .f = rf }, wa = { .f = wf };
+    completion_init(&ra.done, "chrblock-reader");
+    completion_init(&wa.done, "chrblock-writer");
+
+    struct thread *rt = thread_create(chrblock_reader, &ra, "chrblock-r", SCHED_PRIO_DEFAULT);
+    struct thread *wt = NULL;
+    bool reader_blocked = false, writer_returned = false;
+    if (rt != NULL) {
+        /* The reader is inside the driver: whatever the VFS holds, it holds now. */
+        reader_blocked = wait_flag(&g_chrblock_in_read, 1000);
+        if (reader_blocked) {
+            wt = thread_create(chrblock_writer, &wa, "chrblock-w", SCHED_PRIO_DEFAULT);
+            if (wt != NULL)
+                writer_returned = wait_done(&wa.done, 500);
+        }
+    }
+
+    /* Unconditionally, before any assertion: let the reader go, so a
+     * failure below is a failed test rather than a boot that stops. */
+    complete(&g_chrblock_release);
+    if (wt != NULL)
+        thread_join(wt);
+    if (rt != NULL)
+        thread_join(rt);
+    file_put(rf);
+    file_put(wf);
+
+    CHECK(rt != NULL && wt != NULL);
+    CHECK(reader_blocked);      /* the setup: the reader really did block in the driver */
+    CHECK(writer_returned);     /* the claim */
+
+    kinfo("selftest: vfs-chr-write-during-blocked-read: the write completed with a reader blocked in the driver");
     return true;
 }
 

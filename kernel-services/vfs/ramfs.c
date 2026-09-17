@@ -436,20 +436,21 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
         n->chr_priv = priv;
         vn->ops = &ramfs_chr_ops;
         /*
-         * A device node's lock is its own lockdep class, and the reason
-         * is a fact about mounts rather than a convenience: nothing ever
-         * mounts onto a character device, so this lock is never the one
-         * vfs_mount takes after g_mounts_lock. Without the split, a
-         * device whose operations consult the mount table -- /dev/fsctl
-         * does, by definition -- reads as the inversion of
-         * `mounts -> vnode`, against a directory lock it can never
-         * contend for. Still tracked, just not conflated
-         * (docs/audit/next-subsystem-fsctl.md).
+         * This lock used to be given its own lockdep class here, because
+         * a device whose operations consult the mount table -- /dev/fsctl
+         * does, by definition -- read as an inversion of
+         * `mounts -> vnode` and panicked on its first boot. The split was
+         * sound (nothing mounts onto a character device) and it answered
+         * the wrong question: the lock was being held across the device's
+         * operations at all, which is what made a mount-table lookup
+         * inside one an ordering at all.
          *
-         * Safe here: the node is fresh and not yet reachable by anyone
-         * but this caller.
+         * file_pread and file_pwrite no longer hold it across a driver
+         * (docs/audit/next-subsystem-chrdev-vnode-lock.md), so there is
+         * no inversion to excuse and no reason to tell lockdep to look
+         * away from this class. A device node's lock is an ordinary
+         * vnode lock again.
          */
-        mutex_init(&vn->lock, "vnode-chr");
     }
     mutex_unlock(&dir->lock);
     vnode_put(dir);
