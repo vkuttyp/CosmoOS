@@ -14,6 +14,7 @@
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/lockdep.h>
 #include <kernel/vfs.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -2478,6 +2479,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
 }
 
 static int cosmofs_sync(struct mount *mnt);
+static int cosmofs_sync_counted(struct mount *mnt, bool writeback);
 
 /*
  * The writeback thread (design.md): commits when the open transaction
@@ -2508,10 +2510,8 @@ static void cfs_writeback_thread(void *arg)
         if (!mutex_trylock(&mnt->sync_lock))
             continue;   /* an unmount or vfs_sync is at it: they commit */
         if (!mnt->unmounted && !__atomic_load_n(&fs->wb_stop, __ATOMIC_ACQUIRE)) {
-            int rc = cosmofs_sync(mnt);
-            if (rc == 0)
-                fs->wb_commits++;
-            else
+            int rc = cosmofs_sync_counted(mnt, true);
+            if (rc)
                 kwarn("cosmofs: writeback commit failed (%d)", rc);
         }
         mutex_unlock(&mnt->sync_lock);
@@ -2584,7 +2584,20 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     return 0;
 }
 
-static int cosmofs_sync(struct mount *mnt)
+/*
+ * A commit, and whether it counts as the writeback thread's.
+ *
+ * The count is taken inside the same hold of fs->lock that publishes the
+ * generation, because cosmofs_stats reads the two together under that
+ * lock and a reader that sees one without the other sees a filesystem
+ * that never existed. It used to be taken after cosmofs_sync returned,
+ * which is after the lock was dropped: a window of a few instructions in
+ * which sb.generation had advanced and wb_commits had not, and
+ * cosmofs-writeback asserts exactly that pair
+ * (docs/audit/2026-09-deferred-work-inventory.md). The increment was
+ * also an unlocked read-modify-write on a field read under the lock.
+ */
+static int cosmofs_sync_counted(struct mount *mnt, bool writeback)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
@@ -2596,8 +2609,18 @@ static int cosmofs_sync(struct mount *mnt)
         return rc;
     mutex_lock(&fs->lock);
     rc = cfs_commit(fs);
+    if (rc == 0 && writeback) {
+        /* Published with the generation, not after it. */
+        lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX);
+        fs->wb_commits++;
+    }
     mutex_unlock(&fs->lock);
     return rc;
+}
+
+static int cosmofs_sync(struct mount *mnt)
+{
+    return cosmofs_sync_counted(mnt, false);
 }
 
 /* The VFS committed through cosmofs_sync before calling this; what is
