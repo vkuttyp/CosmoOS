@@ -739,10 +739,13 @@ handle lookup and a load.
   It is one boot in twenty-one locally (`docs/testing/flakes.md`, "The
   count") and it appeared on two of PR #169's own CI jobs, so it is not
   unlikely — but step 4 is an instrument, not a proof, and nothing in
-  the test table depends on it firing. **As built: it recurred twice on
-  this unit's own CI**, and both times the moved window showed a SYN
-  retransmitted at the one-second timer, which no earlier sighting could
-  have shown.
+  the test table depends on it firing. **As built: it recurred three
+  times on this unit's own CI**, and the moved window showed the
+  handshake for the first time. The first two runs both retransmitted a
+  SYN and that was briefly written down as the finding; the third had no
+  retransmission and withdrew it the same day
+  (`docs/testing/flakes.md`, "The count"). What survives is narrower: a
+  reset arrives at whatever point the guest has reached.
 
 ## Alternatives considered
 
