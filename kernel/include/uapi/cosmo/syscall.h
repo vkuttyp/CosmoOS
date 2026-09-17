@@ -660,12 +660,21 @@ struct cosmo_vcpu_seg {          /* 16 bytes */
 /* VMState: the whole architectural register file of a virtual CPU.
  *
  * Per architecture, because a register file is: `rax` and `cs` mean
- * nothing on AArch64 and `x0`/`sctlr_el1` mean nothing on x86-64. Both
- * blocks are 448 bytes so the system call, the copies and the tests do
- * not vary with the architecture
- * (docs/kernel-services/virtualization/design.md). */
+ * nothing on AArch64 and `x0`/`sctlr_el1` mean nothing on x86-64. The
+ * two blocks are **different sizes** -- 496 on AArch64, 448 on x86-64 --
+ * and each is fixed: this is user ABI, so a block grows only by spending
+ * its own `reserved[]`, never by changing size. Nothing needs them
+ * equal; every caller and every copy uses `sizeof`
+ * (docs/kernel-services/virtualization/design.md).
+ *
+ * The sizes are asserted below rather than described. They used to be
+ * described, in thirteen lines across eight files, all of which said
+ * 448; the AArch64 block has been 496 since the EL2 backend landed, and
+ * the only check lived in a host test that compiles whichever block the
+ * *build host* matches, so it could not fail where the claim was false
+ * (docs/audit/next-subsystem-vcpu-regs-size.md). */
 #if defined(__aarch64__)
-struct cosmo_vcpu_regs {         /* 448 bytes */
+struct cosmo_vcpu_regs {         /* 496 bytes */
     uint64_t x[31];              /* x0..x30 (x30 = LR) */
     uint64_t sp_el1, sp_el0;
     uint64_t pc, pstate;         /* ELR_EL1 and SPSR of the guest */
@@ -691,6 +700,24 @@ struct cosmo_vcpu_regs {         /* 448 bytes */
 };
 #endif
 
+/*
+ * The layouts, checked in every translation unit that includes this
+ * header -- kernel, libc, guest tools, host tests, both architectures,
+ * every build type. An invariant a comment states and one host binary
+ * checks is an invariant that holds where someone happened to compile;
+ * these hold everywhere or nothing builds.
+ *
+ * `_Static_assert` directly and not kernel/include/kernel/compiler.h's
+ * STATIC_ASSERT: this is UAPI, and its consumers do not have that
+ * header.
+ */
+#if defined(__aarch64__)
+_Static_assert(sizeof(struct cosmo_vcpu_regs) == 496, "AArch64 VMState layout");
+#else
+_Static_assert(sizeof(struct cosmo_vcpu_regs) == 448, "x86-64 VMState layout");
+#endif
+_Static_assert(sizeof(struct cosmo_vcpu_seg) == 16, "VMState segment layout");
+
 /* VMExit: why vcpu_run returned. */
 struct cosmo_vm_exit {           /* 64 bytes */
     uint32_t kind;               /* COSMO_VM_EXIT_* */
@@ -711,6 +738,7 @@ struct cosmo_vm_exit {           /* 64 bytes */
         uint64_t raw[6];
     };
 };
+_Static_assert(sizeof(struct cosmo_vm_exit) == 64, "VMExit layout");
 
 #define COSMO_VM_EXIT_HLT       1u  /* halted; inject a vector and run again */
 #define COSMO_VM_EXIT_IO        2u  /* port I/O no device claimed; a read completes on the next run */
