@@ -415,9 +415,9 @@ protocol above (finding #22). `vfs_sync` is unchanged.
 
 ### The writeback thread and dirty thresholds
 
-Every mount starts one kernel thread (`cfs-wb/<dev>`) that wakes every
-`CFS_WB_POLL_MS` (100 ms) and commits when any of these holds and the
-open transaction is non-empty:
+A mount that changes something starts one kernel thread (`cfs-wb`) that
+wakes every `CFS_WB_POLL_MS` (50 ms) and commits when any of these holds
+and the open transaction is non-empty:
 
 | Trigger | Threshold |
 |---|---|
@@ -429,13 +429,35 @@ open transaction is non-empty:
 It commits through `cosmofs_sync` under `mount.sync_lock`, taken with
 `mutex_trylock` so it never waits on an unmount or a `vfs_sync` in
 progress (it retries on the next poll). Unmount sets `fs->wb_stop` and
-joins the thread before destroying the filesystem. The loss window after
+joins the thread before destroying the filesystem, and `cfs_destroy`
+does the same for itself rather than trusting its caller to have.
+
+**The thread starts on the first dirty buffer, but never before the
+mount is live.** It is started lazily so that a mount which only reads
+(the replay harness mounts hundreds of prefix images) has none to join,
+and `cosmofs_mount` starts it at the end if the replay left anything
+dirty. The second half of that rule is the load-bearing one: a mount
+replays with `fs->lock` unheld, which is sound only while no other
+thread is in the filesystem. A writeback thread started from inside the
+replay breaks it — it takes only `mount.sync_lock`, which the mount path
+does not hold, finds `mnt->unmounted` false, and commits a half-built
+mount across an unlocked `fs->bufs`. That was a live defect: it failed
+`cosmofs-orphan-reserved` on CI with a metadata block that would not
+verify, and panicked x86\_64 in `list_remove` under a writeback commit
+that ran while the mount was still replaying. The same window let a
+*failed* mount reach `cfs_destroy`, which frees every buffer and the
+filesystem, with that thread still running.
+`cosmofs-mount-no-early-writeback` holds the rule: it counts the dirty
+marks the replay makes (which must not be zero, or the test asks
+nothing) and how many of them found a writeback thread already running
+(which must be). The loss window after
 a crash is bounded by the interval; the transaction's memory by the
-buffer and page thresholds. Two test hooks exist:
+buffer and page thresholds. Three test hooks exist:
 `cosmofs_test_set_writeback(mnt, on)` turns the thread's commits off
 (the replay harness needs every superblock write to be one it asked
 for) and `cosmofs_test_set_writeback_interval(mnt, ms)` shortens the
-age trigger.
+age trigger. A third, `cosmofs_test_mount_writeback(mnt, &notes,
+&early)`, reports what the mount's own replay did.
 
 ### Older-slot fallback at mount
 
