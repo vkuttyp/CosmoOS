@@ -2300,10 +2300,10 @@ See [docs/development.md](docs/development.md).
   `cosmofs-mount-no-early-writeback` claims the second: it counts the
   replay's dirty marks, which must not be zero or the test is asking
   nothing, and how many of those found a thread already running, which
-  must be zero -- that count is the rule. With the
-  gate reverted it fails on exactly that count, while
-  `cosmofs-orphan-reserved` still passes here -- which is what the three
-  local runs had been saying all along. 331 self-tests on both
+  must be zero -- that count is the rule. With the gate reverted it
+  fails on exactly that count, while `cosmofs-orphan-reserved` still
+  passes here -- which is what the three local runs had been saying all
+  along. 331 self-tests on both
   architectures, debug and release (PR #160).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
