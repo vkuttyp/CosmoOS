@@ -35,7 +35,13 @@ struct socket {
     struct udp_pcb udp;         /* SOCK_DGRAM */
     struct tcp_pcb *tcp;        /* SOCK_STREAM */
     struct waitqueue wait;
-    int error;                  /* pending asynchronous error, consumed by the next call */
+    /* Pending asynchronous error, delivered once (invariant N21). Written
+     * by sock_set_error from any context -- including packet receive,
+     * where s->lock cannot be taken -- and read by ksock_error, which
+     * exchanges it for 0. Neither holds s->lock: three of the five
+     * readers hold that mutex and two do not, so it cannot serve as this
+     * field's rule. Atomic accessors only. */
+    int error;
     unsigned shut;              /* 1 = RD, 2 = WR */
     bool nonblock;              /* a property of the object, shared by every handle to it */
     struct mutex lock;
@@ -68,6 +74,13 @@ struct socket *socket_from_kobject(struct kobject *obj);
 /* Protocol side: wake every waiter on the socket (any context). */
 void sock_wake(struct socket *s);
 void sock_set_error(struct socket *s, int err);   /* and wake */
+/* The pending asynchronous error, read once: returns it and clears it, as
+ * SO_ERROR does, so two readers cannot both be told the same verdict. A
+ * stream socket's own pcb error is reported *without* clearing, because a
+ * dead connection must keep failing. 0 when there is none. Takes no lock
+ * (invariant N21): safe with or without s->lock held, and against a
+ * writer in packet context. */
+int ksock_error(struct socket *s);
 
 unsigned socket_count(void);
 

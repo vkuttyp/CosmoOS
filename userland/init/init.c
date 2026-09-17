@@ -438,6 +438,29 @@ static void net_selftest(void)
         CHECK(rc < 0 && (errno == EINPROGRESS || errno == ECONNREFUSED));
         for (int i = 0; i < 200 && !(cosmo_ioready(refused) & COSMO_IO_ERROR); i++)
             cosmo_sleep_ns(1000000);
+        /*
+         * The canonical idiom, and until the socket-verdict unit this
+         * kernel could not complete it: poll says the connect finished
+         * badly, getsockopt(SO_ERROR) says *how*. Positive, as POSIX
+         * asks. Re-calling connect still works and is what a caller had
+         * to do before.
+         *
+         * It answers the same a second time, and that is the contract
+         * rather than a missing clear (invariant N21): this verdict is
+         * the *pcb's*, which stays set so that every later call on a dead
+         * connection keeps failing -- clearing it would turn a reset into
+         * an end-of-file for the next reader, which is a worse answer
+         * than a repeated one. The socket-level error, the half an ICMP
+         * message writes, is the half that clears; net-sockerr-udp proves
+         * that with a datagram socket, where there is no pcb to fall back
+         * to.
+         */
+        CHECK(cosmo_sock_error(refused) == ECONNREFUSED);
+        CHECK(cosmo_sock_error(refused) == ECONNREFUSED);
+        CHECK(cosmo_getsockopt(refused, COSMO_SOL_SOCKET, 999, buf, 0) == -COSMO_ENOPROTOOPT);
+        size_t narrow = 2;
+        CHECK(cosmo_getsockopt(refused, COSMO_SOL_SOCKET, COSMO_SO_ERROR, buf, &narrow) == -COSMO_EINVAL);
+        CHECK(cosmo_getsockopt(999, COSMO_SOL_SOCKET, COSMO_SO_ERROR, buf, 0) == -COSMO_EBADF);
         CHECK(connect(refused, &me, sizeof(me)) < 0 && errno == ECONNREFUSED);
         CHECK(close(refused) == 0);
         CHECK(cosmo_ioready(0) & COSMO_IO_WRITABLE);           /* the console */

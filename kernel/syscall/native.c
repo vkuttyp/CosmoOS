@@ -970,6 +970,44 @@ static int64_t sys_getsockname(struct syscall_args *a)
     return rc ? rc : addr_to_user(a->a[1], a->a[2], &addr);
 }
 
+/* A socket's own answer about itself. One option: the pending error, which
+ * SYS_ioready can say exists and cannot name. Reading it clears it (invariant
+ * N21), so it is asked for rather than stumbled on -- no right beyond holding
+ * the handle, because this reads a verdict rather than changing anything. */
+static int64_t sys_getsockopt(struct syscall_args *a)
+{
+    struct socket *s = sock_of((int)a->a[0], 0);
+    if (s == NULL)
+        return -EBADF;
+    int64_t rc;
+    if ((int)a->a[1] != COSMO_SOL_SOCKET || (int)a->a[2] != COSMO_SO_ERROR) {
+        rc = -ENOPROTOOPT;   /* true of every other option this stack has */
+        ksock_put(s);
+        return rc;
+    }
+    /* Everything that can refuse this call is settled BEFORE the error is
+     * read, because reading clears it: a call that fails must not be the
+     * one delivery the verdict gets. */
+    int val = 0;
+    size_t room = sizeof(val);
+    if (a->a[4] && copy_from_user(&room, a->a[4], sizeof(room))) {
+        rc = -EFAULT;
+    } else if (room < sizeof(val)) {
+        rc = -EINVAL;   /* an int does not fit: say so rather than truncate a verdict */
+    } else if (!user_range_ok(a->a[3], sizeof(val)) ||
+               (a->a[4] && !user_range_ok(a->a[4], sizeof(room)))) {
+        rc = -EFAULT;
+    } else {
+        int e = ksock_error(s);   /* consumed here, and not before */
+        val = e < 0 ? -e : e;     /* POSIX's sign: a positive errno, 0 for none */
+        size_t len = sizeof(val);
+        rc = copy_to_user(a->a[3], &val, sizeof(val)) ? -EFAULT
+           : (a->a[4] && copy_to_user(a->a[4], &len, sizeof(len))) ? -EFAULT : 0;
+    }
+    ksock_put(s);
+    return rc;
+}
+
 /* --- Phase 9: processes, pipes, cwd, introspection ---------------------------- */
 
 struct spawn_copy {
@@ -1807,6 +1845,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_recvfrom] = sys_recvfrom,
     [SYS_shutdown] = sys_shutdown,
     [SYS_getsockname] = sys_getsockname,
+    [SYS_getsockopt] = sys_getsockopt,
     [SYS_spawn] = sys_spawn,
     [SYS_wait] = sys_wait,
     [SYS_kill] = sys_kill,

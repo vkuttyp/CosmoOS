@@ -1881,23 +1881,57 @@ static int64_t lx_getsockname(struct syscall_args *a) { return name_call(a, fals
 static int64_t lx_getpeername(struct syscall_args *a) { return name_call(a, true); }
 
 /* Changing how a socket behaves is what MANAGE means, and it was asking
- * for nothing (docs/kernel/object/architecture.md, "Rights"). */
+ * for nothing (docs/kernel/object/architecture.md, "Rights").
+ *
+ * This used to return 0 for every SOL_SOCKET option while doing nothing,
+ * which is worse than refusing: a program that sets SO_RCVTIMEO was told it
+ * took effect and then blocked forever, and one that sets SO_REUSEADDR
+ * believed in an address reuse this stack does not implement -- failing its
+ * next bind with -EADDRINUSE and no way to connect the two. -ENOPROTOOPT is
+ * what Linux itself returns for an option a protocol does not implement, so
+ * a program's existing error path handles it
+ * (docs/audit/next-subsystem-socket-verdict.md, Design 4). Nothing about a
+ * socket is settable here yet, so the implemented set is empty. */
 static int64_t lx_setsockopt(struct syscall_args *a)
 {
     struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_MANAGE);
     if (s == NULL)
         return -EBADF;
     ksock_put(s);
-    return (int)a->a[1] == LX_SOL_SOCKET ? 0 : -ENOPROTOOPT;
+    return -ENOPROTOOPT;
 }
 
+/* The same kernel path the native SYS_getsockopt takes, so the capability is
+ * not one personality's: a rule or a power in compat/linux alone is half of
+ * one, because both doors reach the same objects. */
 static int64_t lx_getsockopt(struct syscall_args *a)
 {
     struct socket *s = sock_of((int)a->a[0], 0);
     if (s == NULL)
         return -EBADF;
+    int64_t rc;
+    if ((int)a->a[1] != LX_SOL_SOCKET || (int)a->a[2] != LX_SO_ERROR) {
+        rc = -ENOPROTOOPT;
+    } else {
+        int val = 0;
+        uint32_t room = sizeof(val);   /* Linux's socklen_t is 32 bits */
+        if (a->a[4] && copy_from_user(&room, a->a[4], sizeof(room))) {
+            rc = -EFAULT;
+        } else if (room < sizeof(val)) {
+            rc = -EINVAL;
+        } else if (!user_range_ok(a->a[3], sizeof(val)) ||
+                   (a->a[4] && !user_range_ok(a->a[4], sizeof(room)))) {
+            rc = -EFAULT;
+        } else {
+            int e = ksock_error(s);   /* consumed here, and not before */
+            val = e < 0 ? -e : e;
+            uint32_t len = sizeof(val);
+            rc = copy_to_user(a->a[3], &val, sizeof(val)) ? -EFAULT
+               : (a->a[4] && copy_to_user(a->a[4], &len, sizeof(len))) ? -EFAULT : 0;
+        }
+    }
     ksock_put(s);
-    return -ENOPROTOOPT;
+    return rc;
 }
 
 /* --- the table ------------------------------------------------------------------------ */
