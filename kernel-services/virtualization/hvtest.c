@@ -95,6 +95,171 @@ static __maybe_unused void drop_guest(struct vm *vm, struct vcpu *v)
     kobject_put(&vm->obj);
 }
 
+/* --- the VMState carries what it says it carries -------------------------- */
+
+/*
+ * V8 fixes the *size* of `struct cosmo_vcpu_regs`, and the header now
+ * asserts it in every translation unit. Nothing checked what those bytes
+ * carry: the tree had no test that a vCPU's register file survives a
+ * set followed by a get at all, so a field dropped from a backend's copy
+ * would have been silent.
+ *
+ * Not every field may be demanded back. The backends normalise on
+ * purpose, and this test asserts the documented rule for each rather
+ * than skipping them, which makes it a check of that documentation too:
+ *
+ *   pending_irq  ignored on set; get reports what is offered (the UAPI
+ *                header says so)
+ *   rflags       (in | 0x2) & ~(1<<3 | 1<<5 | 1<<15) -- the
+ *                architecturally fixed bits (x86_64/svm.c)
+ *   cr8          kept as the four-bit V_TPR, so only the low nibble
+ *                survives (x86_64/svm.c)
+ *   efer         SVME and LMA are the host's to set (x86_64/svm.c)
+ *   pstate       validated, not rewritten: AArch64 EL0t/EL1t/EL1h only
+ *                (aarch64/hv_el2.c)
+ */
+bool selftest_hv_vcpu_regs_roundtrip(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    CHECK(vm_create(0, HV_VM_MEM_MAX, &vm) == 0);
+    struct vcpu *v = NULL;
+    int rc = vm_mem_add(vm, 0, MEM_LEN);
+    if (rc == 0)
+        rc = vcpu_create(vm, 0, &v);
+    CHECK(rc == 0);
+
+    struct cosmo_vcpu_regs in, out;
+    CHECK(vcpu_get_regs(v, &in) == 0);
+
+    /* The reset state leaves no reserved byte set. */
+    for (unsigned i = 0; i < sizeof(in.reserved) / sizeof(in.reserved[0]); i++)
+        CHECK(in.reserved[i] == 0);
+
+    /* A distinct value per field, so a copy that crosses two of them is
+     * caught as well as one that drops a field. */
+    uint64_t n = 0x1000;
+#define PUT(f) do { (f) = ++n; } while (0)
+#if defined(ARCH_AARCH64)
+    for (unsigned i = 0; i < 31; i++)
+        in.x[i] = ++n;
+    PUT(in.sp_el1); PUT(in.sp_el0); PUT(in.pc);
+    in.pstate = 0x5;                       /* EL1h, the only kind a guest may resume at */
+    PUT(in.sctlr_el1); PUT(in.ttbr0_el1); PUT(in.ttbr1_el1); PUT(in.tcr_el1);
+    PUT(in.mair_el1); PUT(in.amair_el1); PUT(in.vbar_el1); PUT(in.esr_el1);
+    PUT(in.far_el1); PUT(in.elr_el1); PUT(in.spsr_el1); PUT(in.tpidr_el0);
+    PUT(in.tpidrro_el0); PUT(in.tpidr_el1); PUT(in.contextidr_el1);
+    PUT(in.cpacr_el1); PUT(in.par_el1); PUT(in.mdscr_el1);
+#else
+    PUT(in.rax); PUT(in.rbx); PUT(in.rcx); PUT(in.rdx); PUT(in.rsi); PUT(in.rdi);
+    PUT(in.rbp); PUT(in.rsp); PUT(in.r8); PUT(in.r9); PUT(in.r10); PUT(in.r11);
+    PUT(in.r12); PUT(in.r13); PUT(in.r14); PUT(in.r15); PUT(in.rip);
+    in.rflags = 0x1234;                    /* normalised: see below */
+    in.cr0 = 0x11;                         /* PE | ET: a state the hardware accepts */
+    PUT(in.cr2); PUT(in.cr3);
+    in.cr4 = 0;
+    in.cr8 = 0xAB;                         /* only the low nibble is kept */
+    in.efer = 0;
+    PUT(in.dr6); PUT(in.dr7);
+    /* The ten segment registers. `selector`, `limit` and `base` are
+     * copied straight through; `attrib` is packed into the backend's own
+     * access-rights word and unpacked again, so it is given descriptor
+     * values that really occur (a code and a data descriptor) rather
+     * than a counter. gdtr and idtr carry no selector or attrib at all
+     * -- the UAPI says so -- so only their base and limit are set. */
+    struct cosmo_vcpu_seg *code[] = { &in.cs };
+    struct cosmo_vcpu_seg *data[] = { &in.ds, &in.es, &in.fs, &in.gs, &in.ss, &in.ldtr, &in.tr };
+    for (unsigned i = 0; i < sizeof(code) / sizeof(code[0]); i++) {
+        code[i]->selector = (uint16_t)(0x08 + i * 8);
+        code[i]->attrib = 0xC09B;          /* present, code, read/execute, 32-bit, G */
+        code[i]->limit = (uint32_t)++n;
+        code[i]->base = ++n;
+    }
+    for (unsigned i = 0; i < sizeof(data) / sizeof(data[0]); i++) {
+        data[i]->selector = (uint16_t)(0x10 + i * 8);
+        data[i]->attrib = 0xC093;          /* present, data, read/write, 32-bit, G */
+        data[i]->limit = (uint32_t)++n;
+        data[i]->base = ++n;
+    }
+    in.gdtr.selector = 0; in.gdtr.attrib = 0;
+    in.gdtr.limit = (uint32_t)++n; in.gdtr.base = ++n;
+    in.idtr.selector = 0; in.idtr.attrib = 0;
+    in.idtr.limit = (uint32_t)++n; in.idtr.base = ++n;
+#endif
+    in.pending_irq = 0x99;                 /* ignored on set */
+    CHECK(vcpu_set_regs(v, &in) == 0);
+    CHECK(vcpu_get_regs(v, &out) == 0);
+
+#define SAME(f) CHECK(out.f == in.f)
+#if defined(ARCH_AARCH64)
+    for (unsigned i = 0; i < 31; i++)
+        CHECK(out.x[i] == in.x[i]);
+    SAME(sp_el1); SAME(sp_el0); SAME(pc); SAME(pstate);
+    SAME(sctlr_el1); SAME(ttbr0_el1); SAME(ttbr1_el1); SAME(tcr_el1);
+    SAME(mair_el1); SAME(amair_el1); SAME(vbar_el1); SAME(esr_el1);
+    SAME(far_el1); SAME(elr_el1); SAME(spsr_el1); SAME(tpidr_el0);
+    SAME(tpidrro_el0); SAME(tpidr_el1); SAME(contextidr_el1);
+    SAME(cpacr_el1); SAME(par_el1); SAME(mdscr_el1);
+    /* And the one this architecture refuses rather than rewrites. */
+    struct cosmo_vcpu_regs bad = in;
+    bad.pstate = 0x8;                      /* EL2t: not a guest's to ask for */
+    CHECK(vcpu_set_regs(v, &bad) == -EINVAL);
+    bad.pstate = 0x5 | (1ull << 4);        /* M[4]: AArch32 */
+    CHECK(vcpu_set_regs(v, &bad) == -EINVAL);
+#else
+    SAME(rax); SAME(rbx); SAME(rcx); SAME(rdx); SAME(rsi); SAME(rdi);
+    SAME(rbp); SAME(rsp); SAME(r8); SAME(r9); SAME(r10); SAME(r11);
+    SAME(r12); SAME(r13); SAME(r14); SAME(r15); SAME(rip);
+    SAME(cr0); SAME(cr2); SAME(cr3); SAME(cr4); SAME(dr6); SAME(dr7);
+#define SEG_SAME(f) do { \
+        CHECK(out.f.selector == in.f.selector); \
+        CHECK(out.f.attrib == in.f.attrib); \
+        CHECK(out.f.limit == in.f.limit); \
+        CHECK(out.f.base == in.f.base); \
+    } while (0)
+    SEG_SAME(cs); SEG_SAME(ds); SEG_SAME(es); SEG_SAME(fs); SEG_SAME(gs);
+    SEG_SAME(ss); SEG_SAME(ldtr); SEG_SAME(tr);
+    /* gdtr and idtr carry base and limit only. */
+    CHECK(out.gdtr.limit == in.gdtr.limit && out.gdtr.base == in.gdtr.base);
+    CHECK(out.idtr.limit == in.idtr.limit && out.idtr.base == in.idtr.base);
+#undef SEG_SAME
+    /*
+     * The fields the backend normalises. These rules are the backend's,
+     * not the architecture's, so they are asserted per backend: SVM's
+     * exactly, because that is the one this runs on and the one whose
+     * code says so; VMX only as far as its own source goes, and no
+     * further, because that backend has never been executed
+     * (README.md:452) and a test should not encode a rule nobody has
+     * ever seen hold.
+     */
+    if (strcmp(hv_caps()->name, "svm") == 0) {
+        CHECK(out.rflags == ((in.rflags | 0x2) & ~(uint64_t)(1ull << 3 | 1ull << 5 | 1ull << 15)));  /* svm.c:479 */
+        CHECK(out.cr8 == (in.cr8 & 0xF));  /* the four-bit V_TPR, svm.c:436 */
+        CHECK(out.efer == 0);              /* SVME and LMA are the host's, svm.c:488 */
+    } else {
+        /* vmx.c:636 forces bit 1 and nothing else; it stores efer
+         * unchanged and does not take cr8 from the input at all, so
+         * neither is claimed here. */
+        CHECK((out.rflags & 0x2) != 0);
+        CHECK(out.rflags == (in.rflags | 0x2));
+    }
+#endif
+    /* Ignored on set, and the reset state offers nothing. */
+    CHECK(out.pending_irq == ~0ull);
+    /* Still no reserved byte set: the get path zeroes the block, so a
+     * field added outside reserved[] without a copy shows up here. */
+    for (unsigned i = 0; i < sizeof(out.reserved) / sizeof(out.reserved[0]); i++)
+        CHECK(out.reserved[i] == 0);
+#undef PUT
+#undef SAME
+
+    drop_guest(vm, v);
+    kinfo("selftest: hv-vcpu-regs-roundtrip: %zu bytes of VMState, every field checked",
+          sizeof(struct cosmo_vcpu_regs));
+    return true;
+}
+
 /* --- the guest rule: no vector register crosses the guest boundary ------ */
 
 bool selftest_hv_guest_fpu(const char **reason)

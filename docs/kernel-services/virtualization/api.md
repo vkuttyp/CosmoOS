@@ -24,12 +24,16 @@ translates both ways. Real-mode code is `0x009B`, real-mode data
 `0x0093`, a flat 32-bit code segment `0xC09B`, flat 32-bit data
 `0xC093`, a 64-bit code segment `0xA09B`.
 
-### `struct cosmo_vcpu_regs` (448 bytes, the VMState)
+### `struct cosmo_vcpu_regs` (the VMState; 496 bytes on AArch64, 448 on x86-64)
+
+**ABI stability: stable.** Each block's size is fixed and asserted in
+`uapi/cosmo/syscall.h`; a field is added only by spending that block's
+own `reserved[]`.
 
 **Per architecture.** A register file is architecture-specific by
-nature, so the UAPI defines one block per architecture — both 448 bytes,
-so the system call, the copies and the tests do not vary. The AArch64
-block is:
+nature, so the UAPI defines one block per architecture. They are
+**different sizes**, and nothing needs them equal: the system call and
+every copy use `sizeof`. The AArch64 block is:
 
 | field | meaning |
 |---|---|

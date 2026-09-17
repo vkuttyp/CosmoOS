@@ -51,10 +51,19 @@ Compiled natively with ASan/UBSan against `kernel/arch/x86_64/svm_npt.c`
 and `x86/svm.h`, over the harness arena (`tests/host/harness.c`
 provides `pmm_alloc_pages` and an identity direct map):
 
-- **Layouts**: `sizeof(struct cosmo_vcpu_regs) == 448`, `struct
-  cosmo_vm_exit == 64`, `struct cosmo_vcpu_seg == 16`, `struct vmcb ==
-  4096`, `EXITCODE` at 0x70, `save.rip` at 0x578 (the header's own
-  `STATIC_ASSERT`s pin the rest).
+- **Layouts**: `struct vmcb == 4096`, `EXITCODE` at 0x70, `save.rip` at
+  0x578 (the header's own `STATIC_ASSERT`s pin the rest). The **UAPI**
+  layouts — `cosmo_vcpu_regs` (496 on AArch64, 448 on x86-64),
+  `cosmo_vm_exit == 64`, `cosmo_vcpu_seg == 16` — are asserted by
+  `uapi/cosmo/syscall.h` itself and so are not repeated here.
+
+  **A property of this suite worth knowing**: the host tests build for
+  the *build host* with no `-arch`, so a file that includes a UAPI
+  header with a `#if defined(__aarch64__)` sees whichever block the
+  build host matches, not the one belonging to the code under test.
+  `test_hv` exercises the x86-64 SVM backend and on an arm64 machine
+  compiles the AArch64 UAPI block. That is why the UAPI layout checks
+  belong in the header and not here.
 - **IOIO decoder**: port, size 1/2/4, IN/OUT, string and REP bits from
   EXITINFO1.
 - **Nested page tables**: a fresh root is one page; mapping three pages

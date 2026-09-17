@@ -86,9 +86,24 @@ none automated yet.)
 
 ### V8. The UAPI layouts are fixed
 
-`sizeof(struct cosmo_vcpu_regs) == 448`, `sizeof(struct cosmo_vm_exit)
-== 64`, `sizeof(struct cosmo_vcpu_seg) == 16`; fields are added only in
-`reserved[]`. *Checked by*: the host test.
+`sizeof(struct cosmo_vcpu_regs)` is **496 on AArch64 and 448 on
+x86-64** — a register file is per architecture and so is its size;
+nothing requires the two to match, and every caller and copy uses
+`sizeof`. `sizeof(struct cosmo_vm_exit) == 64`,
+`sizeof(struct cosmo_vcpu_seg) == 16`. Each is fixed: this is user ABI,
+so fields are added only by spending that block's own `reserved[]`,
+never by changing its size.
+
+*Checked by*: `_Static_assert` in `uapi/cosmo/syscall.h` itself, so the
+check runs in every translation unit that includes the header — kernel,
+libc, guest tools, host tests, both architectures, every build type.
+
+*Previously*: a comment and one host test, which compiled whichever
+block the **build host** matched. The comment said both blocks were 448;
+the AArch64 block has been 496 since the EL2 backend landed, and the
+test could not fail on the CI runner because that runner never compiles
+the block that violated it
+(`docs/audit/next-subsystem-vcpu-regs-size.md`).
 
 ### V9. Skipping an instruction ends the interrupt shadow
 

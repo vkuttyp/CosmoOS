@@ -20,7 +20,7 @@ struct cosmo_vcpu_regs {
     uint64_t dr6, dr7;                                                                       /*  16 */
     uint64_t pending_irq;    /* read: lowest pending vector or -1; write: ignored */          /*   8 */
     uint64_t reserved[9];                                                                    /*  72 */
-};                                                                                           /* 448 */
+};                                                                                           /* 448 on x86-64; the AArch64 block is 496 */
 ```
 
 `attrib` is the SVM/VMX-neutral "access rights" word: type (4 bits), S,
@@ -1272,9 +1272,13 @@ file is x86's, and three of the exit kinds describe x86 instructions.
   already splits by architecture where it must (`nr_x86_64.h` /
   `nr_aarch64.h`), and a vCPU's register file is the clearest such case:
   `rax`/`cs`/`cr0` have no AArch64 meaning and `x0`–`x30`/`sctlr_el1`
-  have no x86 one. Both blocks stay 448 bytes so the system-call shape,
-  the copy sizes and the host-test assertions do not vary by
-  architecture. The AArch64 block is
+  have no x86 one. The two blocks are **different sizes** — 496 on
+  AArch64, 448 on x86-64 — and each is fixed, because this is user ABI:
+  a block grows by spending its own `reserved[]`, never by changing
+  size. Nothing needs them equal; the system-call shape and every copy
+  use `sizeof`. `uapi/cosmo/syscall.h` asserts both with
+  `_Static_assert`, so the sizes are checked in every translation unit
+  rather than described. The AArch64 block is
   `x[31]`, `sp_el1`, `sp_el0`, `pc`, `pstate`, then the EL1 system state
   a guest owns — `sctlr_el1`, `ttbr0_el1`, `ttbr1_el1`, `tcr_el1`,
   `mair_el1`, `vbar_el1`, `esr_el1`, `far_el1`, `elr_el1`, `spsr_el1`,
@@ -1461,9 +1465,10 @@ Specified in full in `testing.md`; in outline:
   the harness arena (mapping, query, refusals, rollback of a partially
   failing map, unmap, the User bit on every level, every table page
   returned by destroy), the IOIO EXITINFO1 decoder, and the layout
-  assertions (`sizeof(struct cosmo_vcpu_regs) == 448`,
-  `sizeof(struct cosmo_vm_exit) == 64`, VMCB field offsets) under
-  ASan/UBSan.
+  VMCB field offsets under ASan/UBSan. (The UAPI layout assertions moved
+  into `uapi/cosmo/syscall.h`, where they run in every translation unit;
+  the host test used to be their only check and compiled whichever block
+  the build host matched.)
 - **Kernel self-tests** (`hvtest.c`, eight of the 70): `hv-probe`,
   `hv-npt`, and six guest programs from `tests/hv/` (`guest_pio`: debug
   console, an owner-visible OUT, an IN completion; `guest_irq`: virtual

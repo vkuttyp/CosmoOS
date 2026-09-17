@@ -325,6 +325,7 @@ bool selftest_ahci_reset(const char **reason);    /* COMRESET with a command in 
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);
+bool selftest_hv_vcpu_regs_roundtrip(const char **reason);
 bool selftest_hv_caps(const char **reason);
 bool selftest_el2_stub(const char **reason);
 bool selftest_hv_disabled(const char **reason);   /* a disabled backend hands the hardware back */

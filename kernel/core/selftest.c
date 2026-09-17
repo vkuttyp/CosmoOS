@@ -637,6 +637,7 @@ static const struct selftest tests[] = {
     { "el2-tap-host", selftest_el2_tap_host },
     { "el2-guest-spin",  selftest_el2_guest_spin },
     { "hv-probe",        selftest_hv_probe },
+    { "hv-vcpu-regs-roundtrip", selftest_hv_vcpu_regs_roundtrip },
     { "hv-caps",         selftest_hv_caps },
     { "hv-npt",          selftest_hv_npt },
     { "hv-guest-pio",    selftest_hv_guest_pio },
