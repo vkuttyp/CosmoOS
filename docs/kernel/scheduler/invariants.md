@@ -52,6 +52,23 @@ restores the caller's saved state with `arch_irq_restore(s)` after
 Check: test `breakpoint-trap` and every blocking test (a thread that
 returned with interrupts off would never take the next tick).
 
+**S24 (reserved, for a balancer that does not exist yet).** Nothing in
+this kernel holds two run-queue locks today. The first thing that does --
+moving a ready thread from one CPU's queue to another's -- will need a
+rule, because two CPUs balancing towards each other is the textbook
+deadlock, and the rule should be **increasing CPU-id order, always**.
+
+Two things were learned by building that and taking it out again
+(`docs/audit/next-subsystem-thread-migration.md`), recorded here because
+the next attempt meets them on its first boot:
+
+- Both locks are the `runqueue` **class**, so the second acquisition
+  needs `spin_lock_nested` with a subclass, or lockdep reports a
+  same-class recursion and panics.
+- That annotation says only "this second acquisition is deliberate".
+  **lockdep cannot check the order**, because to it the two locks look
+  alike. Review and this invariant are the only enforcement.
+
 ## Entry conditions
 
 **S6. `schedule()` is never called from interrupt context or with

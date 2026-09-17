@@ -39,6 +39,7 @@ struct sched_policy {
 
 extern const struct sched_policy sched_policy_rr;
 
+
 /* Boot CPU: turn the boot context into thread 0, create the idle
  * thread, register the tick hook. Requires timer_init. */
 void sched_init(void);

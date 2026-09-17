@@ -71,6 +71,15 @@ uint64_t clock_now_ns(void);
  * diagnostic that sends its reader somewhere. Use this wherever the
  * stamp's CPU is not certainly this one; it costs a compare.
  *
+ * **Which stamps those are is about to widen.** A stamp in shared state
+ * is foreign today. A `t0` in a local variable is not, because a thread
+ * is assigned a CPU once and never moves, so it wakes from a sleep where
+ * it slept -- and the sweep that converted those sites did so on a rule
+ * that describes the kernel this is becoming
+ * (`docs/audit/next-subsystem-thread-migration.md`). Once threads
+ * migrate they are all foreign, which is what that unit's step 6 exists
+ * to re-check.
+ *
  * **This is for time already spent, not for a moment to wait until.** A
  * deadline is a different problem with a different answer: saturating
  * cannot help there, because the comparison is an ordering rather than a

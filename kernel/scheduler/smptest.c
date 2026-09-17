@@ -7,6 +7,7 @@
  * stays meaningful in both configurations.
  */
 
+#include <kernel/completion.h>
 #include <kernel/ipi.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
@@ -17,6 +18,7 @@
 #include <kernel/selftest.h>
 #include <kernel/semaphore.h>
 #include <kernel/smp.h>
+#include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
@@ -504,5 +506,143 @@ bool selftest_smp_mutex(const char **reason)
     CHECK(!pm.violated);
     CHECK(!mutex_is_locked(&pm.m));
     CHECK(threads_settle(before));
+    return true;
+}
+
+/* --- placement: where a new thread goes ---------------------------------- */
+
+/*
+ * A worker that reports the CPU it landed on and then blocks until told
+ * to leave, so that its runqueue entry is gone by the time the next
+ * thread is created. Blocking is the point: see selftest_sched_spread.
+ */
+struct placed {
+    struct completion started;
+    struct completion release;   /* a real block, not a poll: see below */
+    volatile unsigned cpu;
+};
+
+/*
+ * Report the CPU, then block until released -- on a completion, not a
+ * sleep loop.
+ *
+ * The difference is the test. A worker that polls with
+ * `thread_sleep_ms(2)` is runnable every 2 ms, so `nr_running` on its
+ * CPU is not reliably zero when the next `thread_create` samples it --
+ * and a non-zero count is exactly what makes the *old* CPU-0-preferring
+ * scan spread threads. The bug-proof would then pass or fail on timing.
+ * Blocking on a completion makes the worker stay out of its run queue
+ * until cleanup, which is the condition this test needs to be about
+ * placement at all.
+ */
+static void placed_main(void *arg)
+{
+    struct placed *p = arg;
+    p->cpu = arch_cpu_id();
+    complete(&p->started);
+    wait_for_completion(&p->release);
+    thread_exit(0);
+}
+
+/*
+ * Threads created on an idle machine must not all land on one CPU.
+ *
+ * The shape of this test is the finding. Threads created back-to-back
+ * *already* spread before this unit, because each one raises its
+ * target's `nr_running` and the next scan sees it -- so a test that
+ * created four spinners would have passed on the broken code and proved
+ * nothing. What does not spread is threads that **block**: a kernel
+ * thread waits on a queue almost all of its life, `nr_running` drains
+ * back to zero between creations, every CPU ties, and a scan that keeps
+ * its first winner hands every one of them to CPU 0.
+ *
+ * So each worker here signals and then blocks, and the next is created
+ * only once the previous has stopped being runnable. That is the
+ * condition this kernel is actually in, and the one the measurement in
+ * the report came from: 8 of 14 threads on CPU 0.
+ */
+bool selftest_sched_spread(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 2) {
+        kinfo("selftest: sched-spread: one CPU; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    enum { N = 8 };
+    static struct placed p[N];
+    struct thread *t[N];
+
+    unsigned made = 0;
+    bool ok = true;
+    for (unsigned i = 0; i < N && ok; i++) {
+        memset(&p[i], 0, sizeof(p[i]));
+        completion_init(&p[i].started, "spread");
+        completion_init(&p[i].release, "spread-rel");
+        t[i] = thread_create(placed_main, &p[i], "spread", SCHED_PRIO_DEFAULT);
+        if (t[i] == NULL) {
+            ok = false;
+            break;
+        }
+        made++;
+        wait_for_completion(&p[i].started);
+        /*
+         * And then until it is *observably* out of its run queue. The
+         * completion above is signalled before the worker blocks, so it
+         * says "running", not "blocked" -- and a fixed sleep here would
+         * be the "N things after a settle" shape this tree has a whole
+         * file about (docs/testing/flakes.md). Wait for the state.
+         */
+        for (unsigned w = 0; w < 2000 && __atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED; w++)
+            thread_sleep_ms(1);
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED)
+            ok = false;
+    }
+
+    cpumask_t used = 0;
+    unsigned on_cpu[CONFIG_MAX_CPUS] = {0};
+    for (unsigned i = 0; i < made; i++) {
+        used |= CPUMASK_OF(p[i].cpu);
+        if (p[i].cpu < CONFIG_MAX_CPUS)
+            on_cpu[p[i].cpu]++;
+    }
+    /* Release and join everything that was created, on every path: a
+     * worker left blocked here is a kernel thread leaked into whatever
+     * test runs next. */
+    for (unsigned i = 0; i < made; i++)
+        complete(&p[i].release);
+    for (unsigned i = 0; i < made; i++)
+        thread_join(t[i]);
+    if (!ok) {
+        *reason = "a worker could not be created, or never reached THREAD_BLOCKED";
+        return false;
+    }
+
+    unsigned distinct = 0, worst = 0, worst_cpu = 0;
+    for (unsigned c = 0; c < n; c++) {
+        if (used & CPUMASK_OF(c))
+            distinct++;
+        if (on_cpu[c] > worst) {
+            worst = on_cpu[c];
+            worst_cpu = c;   /* the CPU that actually holds the pile */
+        }
+    }
+    /*
+     * Deliberately not `distinct == n`. Other threads in the suite may
+     * be runnable while this runs, and the rule is still "least loaded
+     * first" -- the rotation only decides ties -- so a CPU that happens
+     * to be busy can legitimately be skipped. What the defect looked
+     * like is unmissable against either bound: every one of the eight on
+     * a single CPU.
+     */
+    if (distinct < 2 || worst > N / 2) {
+        kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u",
+               made, distinct, n, worst, worst_cpu);
+        *reason = "threads created on an idle machine piled onto one CPU";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, at most %u on any one",
+          (unsigned)N, distinct, n, worst);
     return true;
 }

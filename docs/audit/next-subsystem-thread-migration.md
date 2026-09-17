@@ -17,6 +17,11 @@ implementation lands; step 7 of the plan is what strikes it.
 **A thread is assigned a CPU once, by a rule that prefers CPU 0, and
 then stays there for the rest of its life.**
 
+> As of this unit the first half is fixed and the second is not: ties
+> rotate, so a thread is no longer *born* on CPU 0 by default, but
+> nothing moves it afterwards. The measurements below are the state
+> before either change.
+
 Two facts, each small, and together a machine that uses one of its four
 CPUs.
 
@@ -155,6 +160,19 @@ is what moving a thread between them requires.
   is nowhere for such a thread to go.
 
 ## Design
+
+> **Reverted, except where marked.** Everything from here to "As built"
+> is the plan as written before implementation. **Only the placement
+> change (the tie-break, "1. Spread at creation" below) shipped.** The
+> balancer, `sched_balance`, `policy->pick_migratable`, the
+> `SCHED_BALANCE_*` tunables, the two-lock rule as *implemented*, and
+> the `sched-balance-*` and `sched-affinity-survives` tests were built,
+> measured, and removed — see "As built" for the measurement that
+> removed them. The affected-files table, the New APIs block, the
+> migration plan and the test table below describe what was attempted,
+> not what is in the tree.
+
+
 
 ### Two changes, and the small one comes first
 
@@ -381,10 +399,124 @@ and the suite has other threads in it.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+**Half of this unit shipped. The half it is named for did not, and that
+is the result rather than an excuse.**
+
+#### What shipped: placement
+
+`pick_cpu` rotates its ties. The scan is still least-loaded-first; only
+the tie changes, and the tie is what mattered — `nr_running` counts what
+is runnable *now*, a kernel thread is blocked almost all of its life, so
+between any two creations the queues have drained to zero, every CPU
+ties, and a scan that keeps its first winner gives every thread to
+CPU 0.
+
+The test for it had to be designed around a surprise: threads created
+back-to-back **already** spread before this unit, because each one
+raises its target's count and the next scan sees it. A test that created
+four spinners would have passed on the broken code. `sched-spread`
+therefore creates each worker, waits for it to signal *and block*, and
+only then creates the next — the one shape that distinguishes the
+rotation from what was there before. With it: 4 of 4 CPUs. Without it:
+7 of 8 threads on CPU 0.
+
+#### What did not ship: migration
+
+The balancer was built, it worked, and it was removed before this branch
+shipped.
+
+It worked in the sense the report asked for. Over a self-test boot on
+four CPUs, threads on CPU 0 went from 8 of 14 to **6 of 14** and context
+switches from 22197/986/256/294 to **20678/1569/2543/1194** — CPU 2
+doing ten times the work it had.
+
+And it destabilised the kernel. Four aarch64 boots of the same tree:
+
+| run | failing tests |
+| --- | --- |
+| 1 | `smp-wake`, `lockup-soft`, `quiesce-straggler`, `quiesce-grace`, `irq-sync`, `timer-cancel-sync`, `lockdep-contention` |
+| 2 | `lockdep-contention` |
+| 3 | `iommu` |
+| 4 | none |
+
+Three of four, and **seven concurrency tests failing together is not
+timing sensitivity** — something is being corrupted. With the balancer
+removed, four of four boots pass. That is the whole argument: the same
+tree, one variable, 3/4 against 0/4.
+
+**What was ruled out**, so the next attempt starts past it:
+
+- `sched_wake` reads `t->cpu` before taking that CPU's run-queue lock,
+  which looks like the race — but a thread it can wake is `THREAD_BLOCKED`
+  and therefore not in any ready list, so the balancer cannot have been
+  holding it.
+- `list_remove` self-links, so `dequeue` followed by `enqueue` leaves the
+  node genuinely empty and `rr_enqueue`'s assertion is not being skirted.
+- Fault accounting in `iommu_note_fault` is global and lock-protected,
+  with no per-CPU state.
+- The SMMU event interrupt is bound to one CPU at request time
+  (`IRQ_CPU_ANY` resolves round-robin *once*), so it does not follow the
+  test thread.
+
+**What was found**, and it is the reason this is worth writing down:
+
+- **lockdep cannot check the two-lock order.** Both run-queue locks are
+  the `runqueue` class, so the second acquisition reads as recursion and
+  panics until annotated with `spin_lock_nested`; and the annotation says
+  only "deliberate". S24 first claimed lockdep would catch a reversed
+  order. It cannot. S24 now says so and is marked reserved.
+- **`rq->current` can be in a ready list.** The report and two comments
+  claimed refusing the running thread was structural, because `schedule`
+  dequeues what it runs. A thread woken between blocking and stopping
+  stays queued until `sched_set_running_current` removes it, and in that
+  window it is both current and a list entry. An assertion caught it on
+  the first boot; it was kept only because the property lived in another
+  file.
+- **The tree has per-CPU assumptions nothing declares.** `el2` asserts
+  the hypervisor backend owns EL2 "on this CPU" from an unpinned thread,
+  and `g_el2_ready[]` is filled lazily per CPU. That test was correct
+  only because threads could not move. It is very unlikely to be the only
+  one.
+
+#### What this cost, in method
+
+Four separate times I concluded from a single run: that the balancer
+broke `lockup-soft`; that `el2`/`iommu` were environmental; that a
+one-run bisect was "decisive"; and that a control had exonerated the
+change. A change that alters scheduling timing needs a *rate*, not a
+run, and this tree's own notes say so about other people's tests. The
+measurement above is four runs per arm and is the only evidence here
+worth anything.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**330 self-tests PASS on x86-64 and aarch64, debug and release.** 329 at
+the branch point, so one new: `sched-spread`.
+
+Four consecutive aarch64 boots pass with no failures, against three of
+four failing with the balancer in place.
+
+| bug-proof | what fails |
+| --- | --- |
+| ties keep the lowest-numbered CPU | `sched-spread`: 8 threads used **1 of 4** CPUs, all 8 on CPU 0 |
+
+That proof got sharper after review, and the way it did is worth
+keeping. The workers first *polled* — `thread_sleep_ms(2)` in a loop —
+so they woke every 2 ms and were often runnable when the next
+`thread_create` sampled `nr_running`. A non-zero count is exactly what
+makes the old CPU-0-preferring scan spread threads, so the proof
+reported "2 of 4 CPUs, 7 on CPU 0" instead of the defect in its pure
+form, and **could have passed on the broken code** on a different run.
+The workers block on a completion now and the test waits for
+`THREAD_BLOCKED` rather than a fixed settle: the defect shows as 8 of 8,
+and the healthy case tightened from "at most 3 on any CPU" to "at most
+2".
+
+The balancer's own bug-proofs ran and passed before it was removed — the
+balancer disabled made `sched-balance-pull` report "not one of the 6
+workers left where it was placed", and removing the affinity check
+panicked the kernel outright rather than merely moving a pinned thread.
+Both are in the history; neither ships, because the code they proved
+does not.
+
+

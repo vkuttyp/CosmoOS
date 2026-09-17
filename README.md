@@ -2194,7 +2194,10 @@ See [docs/development.md](docs/development.md).
   fresh-read form. The classification rule is not the one the report
   implied either: a thread that sleeps between two clock reads wakes on a
   different CPU, so a plain `t0` in a local variable is a foreign stamp,
-  and that is nearly every timing assertion in the suite -- 42 such
+  and that is nearly every timing assertion in the suite (**that premise
+  was itself wrong, and the thread-migration unit below says so: this
+  kernel pins a thread to one CPU for life, so those stamps were
+  same-CPU when they were swept**) -- 42 such
   sites, 20 shared-state ones, 4 in userland the report had not noticed,
   1 deliberately left plain (the tick cost, where saturating would hide a
   counter going backwards on one CPU) and 4 that are not elapsed times at
@@ -2236,6 +2239,38 @@ See [docs/development.md](docs/development.md).
   since no machine here both has a per-CPU counter and advertises it as
   invariant.
   329 self-tests on both architectures, debug and release (PR #156).
+
+- **A thread that could never move, on a CPU chosen once**
+  (`docs/audit/next-subsystem-thread-migration.md`). Half of this unit
+  shipped and the half it is named for did not, which is the result
+  rather than an excuse. `pick_cpu` compared with a strict `<`, so ties
+  went to the lowest-numbered CPU — and because `nr_running` counts only
+  what is runnable *now*, and a kernel thread is blocked almost all of
+  its life, the queues had usually drained to zero between creations and
+  every CPU tied. **So every thread created on an idle machine went to
+  CPU 0, and nothing ever moved it.** Measured: 8 of 14 threads and 94%
+  of context switches there. Ties rotate now, which fixes the placement
+  half; the test had to be built around a surprise, since threads created
+  back-to-back already spread (each raises its target's count) and only
+  threads that *block* pile up. **The balancer was built, worked, and was
+  removed.** It moved threads correctly — CPU 0 to 6 of 14, CPU 2 doing
+  ten times the switches — and made three of four aarch64 boots fail,
+  once with seven concurrency tests at once, against four of four passing
+  without it. Seven together is corruption, not timing, and it was not
+  found; what was ruled out is written down so the next attempt starts
+  past it. Removed rather than left behind a flag, because a balancer
+  switched on only by its own test closes nothing and reintroduces the
+  instability wherever it is switched on. **The failure was worth more
+  than the feature.** lockdep cannot check a two-run-queue lock order,
+  because both are one class and the nesting annotation only says
+  "deliberate" — an invariant claimed otherwise and is corrected.
+  `rq->current` *can* be in a ready list, which the report and two
+  comments called structurally impossible, caught by an assertion kept
+  only because the property lived in another file. And the tree holds
+  per-CPU assumptions nothing declares: `el2` asserts the hypervisor
+  backend owns EL2 "on this CPU" from an unpinned thread, and was correct
+  only while threads could not move. 330 self-tests on both
+  architectures, debug and release (PR #158).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
