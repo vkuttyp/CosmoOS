@@ -81,13 +81,16 @@ void sock_set_error(struct socket *s, int err);   /* and wake */
  * (invariant N21): safe with or without s->lock held, and against a
  * writer in packet context. */
 int ksock_error(struct socket *s);
-/* The same, for a caller that must be able to put it back: `consumed` says
- * whether the socket-level field was the source, which is the half that
- * clears. A stream socket's pcb error is sticky and needs no restoring. */
-int ksock_error_take(struct socket *s, bool *consumed);
-/* Undelivered is not delivered. Puts `err` back unless a newer verdict has
- * arrived since -- that one outranks it and is not overwritten. */
-void ksock_error_restore(struct socket *s, int err);
+/* For a caller whose delivery can fail -- a syscall copying the verdict to
+ * user memory, where a range check is not a promise the copy succeeds.
+ * `peek` reports without clearing, and `delivered` commits the clear only
+ * once the value has actually reached the caller. Taking first and putting
+ * it back on failure would leave a window in which a concurrent asker sees
+ * 0 while a verdict is pending and undelivered, which is a worse answer
+ * than the one this pair can give: if two askers race, both are told the
+ * truth and one of them clears it. */
+int ksock_error_peek(struct socket *s);
+void ksock_error_delivered(struct socket *s, int err);
 
 unsigned socket_count(void);
 

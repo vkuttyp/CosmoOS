@@ -58,15 +58,27 @@ Greptile's first round on the built unit, all three valid and all three
 about the same thing the report is about — a rule that holds in the place
 you are looking and not in the place you are not.
 
-**The verdict could still be lost.** The report was pleased with itself
-for settling every refusal before reading the error. It is not enough:
-`user_range_ok` checks a *range*, not that the page is writable or that
-it stays mapped, so `copy_to_user` can still fail after every check
-passed — and the verdict is gone, because reading took it. Both doors now
-put it back, through `ksock_error_take(s, &consumed)` and
-`ksock_error_restore`. `consumed` is what makes the restore honest: only
-the socket-level half clears, so only that half is restored, and the
-restore is a compare-exchange against 0 so a newer verdict outranks it.
+**The verdict could still be lost, and the first fix for it was the
+wrong shape.** The report was pleased with itself for settling every
+refusal before reading the error. Not enough: `user_range_ok` checks a
+*range*, not that the page is writable or that it stays mapped, so
+`copy_to_user` can fail after every check passed — and the verdict is
+gone, because reading took it.
+
+The first fix took the value and put it back on failure. Review found
+the hole in that within the hour: between the take and the restore a
+concurrent asker reads **0** and is told there is no error, while one is
+pending and has been delivered to nobody. A false "no error" is worse
+than anything the alternative can produce, so the alternative is what
+shipped — `ksock_error_peek` reports without clearing, the copy happens,
+and `ksock_error_delivered` commits the clear only afterwards. Two askers
+racing are then both told the truth and one of them clears it, which is
+the right trade: "delivered once" is about the clear, not about how many
+callers may see a verdict none of them has consumed. The commit is a
+compare-exchange on the delivered value, so a newer verdict arriving
+during the copy survives it — and that is the case the bug-proof makes
+deterministic, by simply writing the newer verdict between the peek and
+the commit.
 
 **`pcb->error` had the same defect the socket field had.** N21 gave
 `s->error` one rule and left the sticky half with none: `ksock_error`
@@ -86,6 +98,34 @@ Six frames that were never sent cannot show that six change nothing. The
 loop counts now, and the count is checked after it. The comment records
 that review caught this, because writing the warning was evidently not
 enough to obey it.
+
+### And then the instrument answered, on this unit's own CI
+
+The point of moving `tcp_get_stats` in front of the connect and printing
+`ksock_error`'s answer was that the next `net-harness` failure would say
+more than the last. It did, on this pull request's own aarch64 job:
+
+```
+NETTEST: client failed: connect -104 in 1381 ms, sent -1 in 0 ms,
+  recv -1 in 0 ms, pending error -104, ...
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+  (counters from before the connect)
+```
+
+**The connect itself was reset.** Every instrumented sighting before
+this said `connect 0`. `pending error -104` is the first per-pcb verdict
+this tree has ever read rather than inferred from a machine-wide
+counter — and `ECONNRESET` rather than `ECONNREFUSED` is set only by a
+reset accepted on a *synchronized* connection, so the handshake
+completed and the reset arrived before the connecting thread ran again.
+
+Across seven instrumented sightings the only thing that differs is how
+far the guest got before the reset landed. The constant is an inbound
+reset on an established connection to slirp, while slirp's own host-side
+socket connects fine — which is why the host's `accept` keeps succeeding
+and then reading nothing. Why slirp resets it is not established and is
+outside this kernel; `docs/testing/flakes.md`, "The count", holds the
+table.
 
 ### The four bug-proofs, each run
 

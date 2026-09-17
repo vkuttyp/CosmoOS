@@ -3218,6 +3218,32 @@ bool selftest_net_sockerr_locking(const char **reason)
         mutex_unlock(&s->lock);
         CHECK_BREAK(held == -ENETUNREACH);
         CHECK_BREAK(again == 0);
+
+        /*
+         * The pair a syscall uses, because its delivery can fail after
+         * every check has passed. Peek does not clear -- so a caller whose
+         * copy faults leaves the verdict for the next asker, and no
+         * concurrent asker is ever told 0 while one is pending.
+         */
+        sock_set_error(s, -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s) == -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s) == -ECONNREFUSED);   /* twice: it did not clear */
+        ksock_error_delivered(s, -ECONNREFUSED);
+        CHECK_BREAK(ksock_error_peek(s) == 0);
+
+        /*
+         * And the commit clears only what it delivered. This is the case
+         * that makes two concurrent askers safe: one reads a verdict, a
+         * newer one arrives while it is being copied out, and the commit
+         * must not destroy the newer one -- which a plain store of 0
+         * would. Deterministic here because the "concurrent" write is
+         * simply made between the peek and the commit.
+         */
+        sock_set_error(s, -EHOSTUNREACH);
+        int stale = ksock_error_peek(s);
+        sock_set_error(s, -ENETUNREACH);          /* newer, undelivered */
+        ksock_error_delivered(s, stale);          /* commits the older one */
+        CHECK_BREAK(ksock_error(s) == -ENETUNREACH);   /* the newer one survived */
         pass = true;
     } while (0);
     if (s)

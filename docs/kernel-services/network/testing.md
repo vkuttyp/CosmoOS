@@ -222,7 +222,14 @@ clears as it reads, so the second call answered 0.
 
 **`net-sockerr-locking`**: `ksock_error` gives the same answer from a
 caller holding `s->lock` and one that does not, and delivers once either
-way. That split is why the field takes no lock at all: three of the five
+way. It also covers the pair a syscall uses, whose delivery can fail:
+`ksock_error_peek` twice returns the same verdict (it does not clear),
+`ksock_error_delivered` then clears it — and, the case that makes two
+concurrent askers safe, a *newer* verdict written between the peek and
+the commit survives the commit. That last one is deterministic because
+the "concurrent" write is simply made between the two calls; a commit
+that stored 0 rather than comparing would destroy a verdict nobody had
+been told. That split is why the field takes no lock at all: three of the five
 readers hold the mutex and two do not, and the writer runs where a mutex
 cannot be taken. An accessor that took `s->lock` would recurse on a
 non-recursive mutex in `ksock_connect`'s three completion paths.

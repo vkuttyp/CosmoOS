@@ -1000,16 +1000,17 @@ static int64_t sys_getsockopt(struct syscall_args *a)
     } else {
         /* The range checks above cannot promise the copy: the page may be
          * read-only, or unmapped by another thread between the check and
-         * the write. So a failed copy puts the verdict back -- undelivered
-         * is not delivered, and this is the one delivery it gets. */
-        bool consumed = false;
-        int e = ksock_error_take(s, &consumed);
+         * the write. So the verdict is read WITHOUT clearing and the clear
+         * is committed only once it has reached the caller -- never taken
+         * and put back, which would leave a window in which a concurrent
+         * asker is told 0 while a verdict is pending and undelivered. */
+        int e = ksock_error_peek(s);
         val = e < 0 ? -e : e;     /* POSIX's sign: a positive errno, 0 for none */
         size_t len = sizeof(val);
         rc = copy_to_user(a->a[3], &val, sizeof(val)) ? -EFAULT
            : (a->a[4] && copy_to_user(a->a[4], &len, sizeof(len))) ? -EFAULT : 0;
-        if (rc != 0 && consumed)
-            ksock_error_restore(s, e);
+        if (rc == 0)
+            ksock_error_delivered(s, e);
     }
     ksock_put(s);
     return rc;

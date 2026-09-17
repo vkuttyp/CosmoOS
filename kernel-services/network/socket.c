@@ -153,11 +153,9 @@ static inline bool sock_error_pending(struct socket *s)
  * true -- two readers racing here cannot both come away with the error,
  * which a plain read-then-write could not promise and which no mutex at
  * the call sites would give, since two of the five hold none. */
-int ksock_error_take(struct socket *s, bool *consumed)
+int ksock_error(struct socket *s)
 {
     int e = __atomic_exchange_n(&s->error, 0, __ATOMIC_ACQ_REL);
-    if (consumed)
-        *consumed = e != 0;
     /* The pcb's verdict is sticky and read without pcb->lock, which is why
      * tcp.c writes it with __atomic_store_n (tcp.h, `error`). */
     if (e == 0 && s->tcp)
@@ -165,20 +163,26 @@ int ksock_error_take(struct socket *s, bool *consumed)
     return e;
 }
 
-int ksock_error(struct socket *s)
+int ksock_error_peek(struct socket *s)
 {
-    return ksock_error_take(s, NULL);
+    int e = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
+    if (e == 0 && s->tcp)
+        e = __atomic_load_n(&s->tcp->error, __ATOMIC_ACQUIRE);
+    return e;
 }
 
-void ksock_error_restore(struct socket *s, int err)
+void ksock_error_delivered(struct socket *s, int err)
 {
-    int zero = 0;
+    int expect = err;
     if (err == 0)
         return;
-    /* Only into an empty field: a verdict that arrived while this one was
-     * in flight is newer and stands. */
-    (void)__atomic_compare_exchange_n(&s->error, &zero, err, false,
-                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    /* Clears only the value that was delivered. A verdict that arrived
+     * while this one was being copied out is newer, has not been delivered
+     * to anyone, and must survive -- which a plain store of 0 would
+     * destroy. Nothing to clear when the value came from the sticky pcb
+     * error, and the compare-exchange fails harmlessly in that case. */
+    (void)__atomic_compare_exchange_n(&s->error, &expect, 0, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
 /* A non-blocking connect that finished since connect() returned becomes
