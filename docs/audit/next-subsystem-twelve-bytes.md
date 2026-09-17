@@ -66,10 +66,10 @@ run.**
 
 **It reproduces on x86-64 here, and rarely.** This report first said
 "about one run in three", which was one failure in three runs stated as
-a rate. Fifteen runs in, it is **one in fifteen** — and even that is a
-handful of observations, not a measurement. Getting twelve consecutive
-passes if the rate were really a third has a probability of about
-0.8 %, so the original figure was not merely imprecise, it was wrong.
+a rate. **Twenty-one runs in, it is one in twenty-one** — and even that
+is a handful of observations, not a measurement. Twenty consecutive
+passes at a true one-third rate has a probability under 0.1 %, so the
+original figure was not merely imprecise, it was wrong.
 
 Every earlier attempt for weeks was on aarch64, where it did not appear
 in eleven runs, which is a fact about where to run the loop rather than
@@ -209,7 +209,7 @@ self-tests, after every test that installs rules, and those call
 `:5107` are each three lines into a `selftest_*` function), so the last
 one to install anything leaves it installed. The intermittency argues
 against it being the whole story — a statically leaked rule would refuse
-the segment on every run, and this fails about one in three.
+the segment on every run, and this fails about one boot in twenty.
 
 ### 4. What this unit does not do
 
@@ -239,7 +239,7 @@ None. `tcp_send_space`, `tcp_state_of` and `tcp_get_stats` all exist; the first 
 ## Migration plan
 
 1. **The instrumentation**, and a local run loop until it fails. At
-   roughly one boot in fifteen that is tens of minutes, not a handful —
+   roughly one boot in twenty that is tens of minutes, not a handful —
    see the rate note above, which corrects this report's own first
    estimate. Worth considering before brute force: the harness accepts
    exactly one back-connection (`listen(1)`, one `accept`), so repeating
@@ -276,8 +276,8 @@ is not a cost worth a number.
 ## Risks
 
 - **The failure may not reproduce with the instrumentation in.** It is
-  about one in three and the change is three send-buffer reads, a state
-  read and a counter pair, so this is
+  about one boot in twenty and the change is three send-buffer reads, a
+  state read and a counter pair, so this is
   unlikely; if it happens, that is itself information and the report as
   built should say so rather than quietly running more boots.
 - **The numbers may point outside this repository** — at QEMU's user

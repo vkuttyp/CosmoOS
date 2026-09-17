@@ -948,11 +948,20 @@ bool selftest_net_harness(const char **reason)
     if (client_ok) {
         kprintf("NETTEST: client ok\n");
     } else {
+        /* The three samples are labelled by *when*, not by what they are
+         * taken to mean. space1 is read after ksock_sendto has released
+         * the pcb lock, so an acknowledgement can already have drained
+         * the buffer -- "outstanding after the send" is 0 in that case
+         * and nothing is wrong, whereas calling it "queued" would print
+         * `sent 12, queued 0` and contradict itself. The discriminator
+         * is the third: still outstanding after the read gave up means
+         * the twelve bytes were never acknowledged. */
         kprintf("NETTEST: client failed: connect %d, sent %lld, recv %lld, "
-                "sndbuf %u->%u->%u (queued %d, drained %d), state %d, "
+                "sndbuf free %u before, %u after send, %u after read "
+                "(outstanding %d then %d), state %d, "
                 "segs_out +%llu retransmits +%llu refused +%llu rsts_in +%llu\n",
                 rc, (long long)sent, (long long)got, space0, space1, space2,
-                (int)(space0 - space1), (int)(space2 == space0), (int)st,
+                (int)(space0 - space1), (int)(space0 - space2), (int)st,
                 (unsigned long long)(t1.segs_out - t0.segs_out),
                 (unsigned long long)(t1.retransmits - t0.retransmits),
                 (unsigned long long)(t1.out_refused - t0.out_refused),

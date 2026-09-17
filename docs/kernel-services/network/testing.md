@@ -888,6 +888,26 @@ accepted, and the guest's twelve bytes never arrived. The accept
 deadline and the read deadline are separate, and the failure was the
 second.
 
+**The guest reports its half the same way.** `net-harness` used to print
+`client failed (%d)` with the *connect's* result, so every failure named
+the step that worked; it now says what each step returned and what the
+connection thought:
+
+```
+NETTEST: client failed: connect 0, sent 12, recv -11,
+  sndbuf free 65536 before, 65524 after send, 65536 after read
+  (outstanding 12 then 0), state 4,
+  segs_out +3 retransmits +0 refused +0 rsts_in +0
+```
+
+The three `sndbuf` samples are labelled by *when* they were taken, not by
+what they are taken to mean: the one after the send can already be zero
+because an acknowledgement beat it, and that is normal. **The one after
+the read is the discriminator** — bytes still outstanding there were
+never acknowledged. The global `tcp_get_stats` deltas are corroboration
+only, since they count this connect's own SYN and every other socket's
+traffic (`docs/audit/next-subsystem-twelve-bytes.md`).
+
 The measurement exists because seven `net-harness` failures in a
 fortnight could not be told apart without it. `tests/boot/test_nettest_deadline.py`
 (run by `make host-test`) holds the properties: no deadline armed before
