@@ -271,8 +271,18 @@ are reviewed, not tested.
 `kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:
 review; `net-lo-udp`, `net-lo-tcp` exercise both.
 
-**N21. A socket's pending error is delivered once, to one reader, and is
-never invented.** `struct socket::error` is written only by
+**N21. A socket's pending error is never lost, never invented, and
+cleared exactly once — by the reader it reached.** Two of those are
+absolute; the third is what "once" means here, and it is worth stating
+plainly because the two accessors differ. `ksock_error`, which every
+in-kernel caller uses, hands the verdict to **exactly one** caller: the
+clear is part of the read. The syscall pair is deliberately *at least*
+once — a delivery that can fail must not clear before it has succeeded,
+so two callers racing may both be told the same true verdict and only
+the one whose token matches clears it. Being told the truth twice is not
+a failure mode worth excluding at the price of the two that are: losing
+a verdict nobody was told, and telling a caller there is no error while
+one is pending. `struct socket::error` is written only by
 `sock_set_error` and read only by `ksock_error`, both with atomic
 operations and **neither holding `s->lock`**: the writer runs in
 packet-receive context, where that mutex cannot be taken, and of the five
@@ -309,8 +319,7 @@ worth writing down, since it is what this unit did first: between the
 take and the restore, a concurrent asker is told **0** while a verdict is
 pending and undelivered, which is a worse answer than any this pair can
 give. Two askers racing here are both told the truth and one of them
-clears it — "delivered once" is about the *clear*, not about how many
-callers may see a verdict that none of them has consumed yet. The commit
+clears it, which is the *at least once* half of the rule above. The commit
 is a compare-exchange on the delivered value, so a newer verdict that
 arrived during the copy is not destroyed by it. An ICMP message sets an error
 only when its quoted four-tuple belongs to a **connected** socket of this
@@ -318,8 +327,8 @@ host's: an unconnected socket has no flow for a message to be about, and
 admitting one would let anything on the path kill a socket by quoting a
 plausible port (RFC 5927 — the bar N16 sets for a reset and N18 for a
 path-MTU message). Check: `net-sockerr-udp` (`ECONNREFUSED` and
-`EHOSTUNREACH` arrive, each delivered once, `COSMO_IO_ERROR` raised and
-then cleared), `net-sockerr-spoof` (six messages differing from the
+`EHOSTUNREACH` arrive, each delivered exactly once through `ksock_error`,
+`COSMO_IO_ERROR` raised and then cleared), `net-sockerr-spoof` (six messages differing from the
 delivering one in a single field of the quoted four-tuple change
 nothing — counted, so a frame that was never injected fails the test
 rather than quietly reducing six cases to five), `net-sockerr-accept` (a pending error reaches `accept` as an

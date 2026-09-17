@@ -195,8 +195,9 @@ destination-unreachable as `ECONNREFUSED`, and a host-unreachable as
 `EHOSTUNREACH`. The frame is built by hand and fed to the loopback with
 `netif_rx`, which is exactly what the spoof cases below do — they differ
 from this one only in the quoted four-tuple. `COSMO_IO_ERROR` rises, the
-errno is read, and both the second read and the readiness bit are then
-empty: *delivered once* is asserted, not assumed. Before this unit the
+errno is read through `ksock_error`, and both the second read and the
+readiness bit are then empty: the **exactly once** half of N21 is
+asserted rather than assumed. Before this unit the
 stack **sent** port-unreachables (`udp.c:290`) and consumed none, so this
 socket waited forever. Revert the delivery and the test fails at its wait.
 

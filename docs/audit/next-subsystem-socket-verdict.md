@@ -81,8 +81,9 @@ than anything the alternative can produce, so the alternative is what
 shipped — `ksock_error_peek` reports without clearing, the copy happens,
 and `ksock_error_delivered` commits the clear only afterwards. Two askers
 racing are then both told the truth and one of them clears it, which is
-the right trade: "delivered once" is about the clear, not about how many
-callers may see a verdict none of them has consumed. The commit is a
+the right trade, and N21 states it rather than calling it an exception:
+the syscall path is *at least* once, `ksock_error` is exactly once, and
+what is absolute is that a verdict is never lost and never invented. The commit is a
 compare-exchange on the delivered value, so a newer verdict arriving
 during the copy survives it — and that is the case the bug-proof makes
 deterministic, by simply writing the newer verdict between the peek and
@@ -642,8 +643,18 @@ one compatibility break and is argued in Design §4.
 
 ## Invariant
 
-**N21. A socket's pending error is delivered once, to one reader, and is
-never invented.** `s->error` is written only by `sock_set_error` and
+**N21. A socket's pending error is never lost, never invented, and
+cleared exactly once — by the reader it reached.** Two of those are
+absolute; the third is what "once" means here, and it is worth stating
+plainly because the two accessors differ. `ksock_error`, which every
+in-kernel caller uses, hands the verdict to **exactly one** caller: the
+clear is part of the read. The syscall pair is deliberately *at least*
+once — a delivery that can fail must not clear before it has succeeded,
+so two callers racing may both be told the same true verdict and only
+the one whose token matches clears it. Being told the truth twice is not
+a failure mode worth excluding at the price of the two that are: losing
+a verdict nobody was told, and telling a caller there is no error while
+one is pending. `s->error` is written only by `sock_set_error` and
 read only by `ksock_error` or the `ksock_error_peek`/`_delivered` pair, both with atomic operations and **neither
 holding `s->lock`** — the writer runs in packet-receive context where
 that mutex cannot be taken, and two of the five readers do not hold it
