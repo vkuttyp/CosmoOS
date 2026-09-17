@@ -7,12 +7,16 @@ layout rule). Chosen from
 **Subsystem: no filesystem lock is held across a device operation — the
 rule, and the one place that breaks it.**
 
-This report closes the inventory's §3 row that reads "A character
+This report **takes up** the inventory's §3 row that reads "A character
 device's operations run with the vnode lock held (`file_pwrite` takes it
 before dispatching), so any device that consults the mount table inverts
 `mounts -> vnode`", and specifically its last clause: *"the deeper
 answer is that a filesystem lock should not be held across device I/O at
 all, which no other device needed enough to argue for"*.
+
+The row is marked *taken up* and is **not struck until the unit lands**,
+which is the convention the rows beside it use. The unit proposed here
+is what closes it; striking it is step 4 of the migration plan below.
 
 ## Problem
 
@@ -95,16 +99,41 @@ never the reason it was silenced, so it survived untouched.
 
 ## Current implementation
 
-`vn->lock` is taken in ten places in `vfs.c`. Nine are filesystem
-operations on filesystem state — `truncate` (`:1355`, `:1778`), `sync`
-(`:1516`), `writepage` (`:1535`), `readdir` (`:1584`), `stat`
-(`:1904`) — where holding it is the point.
+`vn->lock` is taken in **ten** places in `vfs.c`. **Two** dispatch to a
+driver under it; the other **eight** are filesystem operations on
+filesystem state, where holding it is the point:
 
-**Two dispatch to a driver under it**: `file_pread` and `file_pwrite`,
-and only on the `VNODE_CHR` branch. There is no `ioctl` path to check —
-this kernel gives the terminal its own system calls rather than a
-multiplexer — so the rule has exactly one violation site with two
-halves.
+| line | function | dispatches to a driver? |
+| --- | --- | --- |
+| `:1355` | `vfs_open` (the `O_TRUNC` truncate) | no |
+| **`:1406`** | **`file_pread`** | **yes, on the `VNODE_CHR` arm** |
+| **`:1428`** | **`file_pwrite`** | **yes, on the `VNODE_CHR` arm** |
+| `:1516` | `file_sync` | no |
+| `:1535` | `file_flush` | no |
+| `:1584` | `file_readdir` | no |
+| `:1778` | `vfs_truncate` | no |
+| `:1904` | `vfs_stat` | no |
+| `:1917` | `vfs_lstat` | no |
+| `:1936` | `vfs_readlink` | no |
+
+`file_sync` and `file_flush` call `vn->ops->sync` and
+`vn->ops->writepage`, which *would* be driver entry points if a
+character device supplied them. `ramfs_chr_ops` supplies neither
+(`ramfs.c:385`) — it has only `read`, `write`, `open`, `release`,
+`read_file`, `write_file` and `evict` — so those two cannot dispatch for
+a `VNODE_CHR` vnode. There is no `ioctl` path either: this kernel gives
+the terminal its own system calls rather than a multiplexer.
+
+So the rule has exactly one violation site with two halves.
+
+**And the tree already keeps the rule everywhere else it matters.** A
+character device's other two driver entry points are called *outside*
+the lock, deliberately: `vn->ops->open` from `file_run_open`
+(`vfs.c:1190`), which takes no vnode lock at all, and `vn->ops->release`
+from `file_release` (`vfs.c:1145`), which runs before the page-cache
+flush takes it three lines later. So this is not a new policy being
+introduced — it is `read` and `write` being brought into line with
+`open` and `release`.
 
 And for a `VNODE_CHR` vnode that lock guards **nothing**. Read both
 branches again: the character-device arm touches no vnode field at all.
@@ -241,7 +270,7 @@ the workaround is removed, not layered over.
 | `docs/kernel-services/vfs/design.md` | the locking section: what `vn->lock` covers and what it explicitly does not |
 | `docs/kernel-services/vfs/api.md` | `file_pread`/`file_pwrite`: the concurrency note |
 | `README.md` | the Status entry |
-| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row, struck |
+| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row, struck — **when the unit lands**, per migration step 4; this report only marks it taken up |
 
 No driver changes are expected: no character device reads `vn->lock`,
 because no character device can reach it. **If one turns out to need it,
