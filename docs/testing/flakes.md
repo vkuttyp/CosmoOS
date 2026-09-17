@@ -272,16 +272,21 @@ worth a unit of its own.
 **That unit was done** (`docs/audit/next-subsystem-nettest-deadline.md`).
 What it found, and what it did not, both matter to this file.
 
-It did **not** find the cause, and then its own instrumentation did --
-see the paragraph below, which supersedes this one on the mechanism. The
-obvious candidate was a real defect: the harness armed a 120-second
-`accept()` deadline in `NetTest.__init__`, which runs before QEMU is
-launched, and closed the listener when it expired. It was not this bug. Measured, the guest's back-connection lands at about 72 % of
-the boot -- 76 to 83 seconds here -- which projects onto CI's 140-to-146
-second boots at 101 to 105 seconds, a margin of fifteen to nineteen
-seconds. Thin, and not obviously crossed: across sixteen aarch64 jobs a
-145.6-second boot passed and a 145.8-second one failed, so boot length
-does not predict the outcome.
+**It did not find the cause, and then its own instrumentation did.** The
+candidate it went after was a real defect and not this bug: the harness
+armed a 120-second `accept()` deadline in `NetTest.__init__`, which runs
+before QEMU is launched, and closed the listener when it expired. That
+is fixed, and the mechanism it suggested is superseded by the paragraph
+two below.
+
+The arithmetic, for the record, because it was close enough to be
+persuasive. The guest's back-connection lands at about 72 % of the boot
+-- 76 to 83 seconds here -- which projects onto CI's 140-to-146 second
+boots at 101 to 105 seconds: a margin of fifteen to nineteen seconds
+against the old deadline. Thin, and never shown to be crossed. Across
+sixteen aarch64 jobs a 145.6-second boot passed and a 145.8-second one
+failed, so boot length does not predict the outcome — and the run that
+settled it had **78.7 seconds of that budget unspent**.
 
 What it did find is why nobody could tell. **The harness recorded none
 of those numbers.** Seven sightings produced `TimeoutError('timed out')`

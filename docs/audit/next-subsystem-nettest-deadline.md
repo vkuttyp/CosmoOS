@@ -108,6 +108,11 @@ unit; the deadline was a real defect found on the way to it.
 
 ## Problem
 
+**As the tree stood before PR #167.** The defect described here was
+fixed; it was *not* the cause of the failures, which the as-built
+section above records and the paragraphs below reach by reasoning that
+the numbers later contradicted.
+
 `net-harness` has failed **seven times in about two weeks**, on both
 architectures, on CI and on this machine, and at least three of those
 were on trees that cannot have caused it — a documentation-only branch,
@@ -297,13 +302,17 @@ The harness already knows the right pattern — derive the budget from the
 run's own timeout, start it with the run — and uses it in one of the two
 places.
 
-## Current implementation
+## The implementation this unit changed
 
-`NetTest` does four things in `__init__`: picks three ports, binds and
-listens on the back-connection port, sets a 120-second timeout, and
-starts a thread that blocks in `accept()`. Only the first two need to
-happen that early: the ports go into QEMU's environment, and binding
-reserves the back port before QEMU is told about it.
+**Past tense as of PR #167**: what follows describes the harness before
+the unit, which is what the rest of the plan below is written against.
+
+`NetTest` did four things in `__init__`: picked three ports, bound and
+listened on the back-connection port, set a 120-second timeout, and
+started a thread that blocked in `accept()`. Only the first two needed
+to happen that early: the ports go into QEMU's environment, and binding
+reserves the back port before QEMU is told about it. The last two are
+what moved.
 
 The guest's side, for the record, prints readiness **before** it
 connects (`nettest.c:899` then `:907`), so a harness that waits for the
