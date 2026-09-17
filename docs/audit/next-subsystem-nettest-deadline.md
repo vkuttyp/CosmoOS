@@ -205,8 +205,24 @@ def _accept_back(self, deadline):
     self.listener.settimeout(remaining)
 ```
 
-That makes the accept deadline **later** than the readiness deadline by
-construction, which is the relationship the two need and do not have.
+That does not make the accept deadline *later* than the readiness one —
+it makes it **the same deadline**, which is the point. There is one
+absolute budget for the whole exchange, derived from the run's timeout
+and started when the run starts; waiting for readiness and accepting the
+connection draw from it in turn.
+
+Sharing is the correct shape rather than a compromise. An accept given
+its own fresh budget *after* readiness could outlast the run's own
+180-second timeout, and a harness deadline that outlives the run it
+belongs to is the same class of mistake as one that starts before it.
+
+What the change removes is the **inversion**: today the accept deadline
+expires *before* the readiness deadline it should outlast — 120 seconds
+counted from before QEMU against 150 counted from after it — so the
+thing waiting to accept can give up before the harness has even decided
+the guest is ready. After, that cannot happen, because there is nothing
+left to disagree.
+
 It also removes the second hard-coded number: a run given a longer
 `--timeout` now gives the exchange more room, as a reader would expect.
 
