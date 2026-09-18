@@ -6,8 +6,10 @@ an as-built.
 
 **Subsystem: the state of slirp's own host-side connection at the moment
 the exchange fails.** The accept unit (PR #177) answered *which*
-connection the harness got. It has now answered the same way six times
-running: **one connection, carrying nothing**. That is the only thing
+connection the harness got. It has now answered the same way **every
+time it has been asked**: *one connection, carrying nothing*
+(`docs/testing/flakes.md`, *The count*, which owns the number so this
+does not repeat it). That is the only thing
 about this defect that has never varied, and it is where every remaining
 question now points. What the harness still cannot say is anything at
 all about that connection — whether slirp was holding it open and simply
@@ -16,22 +18,22 @@ responsive at that moment at all.
 
 ## What is established
 
-Twenty-eight sightings (`docs/testing/flakes.md`, *The count*). The
-guest's side is **fully accounted for** and this kernel is not at fault:
+The tally is `docs/testing/flakes.md`, *The count*. The guest's side is
+**fully accounted for** and this kernel is not at fault:
 
 - The guest's `ksock_connect` returns 0 after **597 ms to 1510 ms**,
   against a captured healthy baseline of **150 microseconds**.
 - A reset then arrives (`rsts_in +1`), sometimes before the guest can
   write and sometimes after twelve bytes are on the wire unacknowledged.
 - The host accepts exactly **one** connection and reads **zero** bytes
-  from it, six times out of six.
+  from it, **every instrumented sighting since the roster existed**.
 
 Two hypotheses are dead. A foreign or stale connection is not the
 trigger — that is what "one connection" rules out, and the deliberate
 stale-slot reproduction reproduced the *symptom* without being the
 cause. And a SYN-retransmission mechanism has been proposed and
-withdrawn **twice**, most recently when two of six sightings came back
-`retransmits +0` and the connect times spread from 597 ms to 1510 ms.
+withdrawn **twice**, and sightings keep arriving with `retransmits +0`
+while the connect times spread from 597 ms to 1510 ms.
 
 ## The problem
 
@@ -208,8 +210,9 @@ distinguish is worse than no counter, because it reads like evidence.
 - **Patch or rebuild QEMU with slirp tracing.** Decisive and far out of
   proportion: it changes the thing under test, and the defect is already
   known to be outside this kernel.
-- **Keep re-running and collect more sightings.** Twenty-eight have not
-  answered it, and six consecutive rosters have now said the same thing.
+- **Keep re-running and collect more sightings.** The whole tally has
+  not answered it, and every roster since the accept unit landed has
+  said the same thing.
   Another sighting of the same shape adds nothing; an instrument that
   asks a new question does.
 - **Give up and mark it expected.** Rejected for the same reason as
