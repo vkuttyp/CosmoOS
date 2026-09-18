@@ -18,7 +18,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nettest import NetTest  # noqa: E402
+from nettest import NetTest, BACK_PREVIEW, BACK_BACKLOG  # noqa: E402
 
 FAILURES = []
 CHECKS = 0
@@ -151,22 +151,28 @@ def test_an_expired_deadline_leaves_nothing_listening():
 def test_a_silent_peer_is_recorded_too():
     """The path that raises nothing and still fails.
 
-    A peer that connects and closes without sending leaves the read loop
-    by `break`, not by an exception. An instrument that records a time
-    only in the `except` prints "gave up nan s" here and discards what
-    did arrive -- so it cannot tell silence from a partial write from a
-    wrong answer, which is exactly the distinction the open `net-harness`
-    defect now turns on.
+    A peer that connects and closes without sending leaves no exception
+    behind. An instrument that records a time only in the `except`
+    prints "gave up nan s" here and discards what did arrive -- so it
+    cannot tell silence from a partial write from a wrong answer.
+
+    **What changed with the accept unit**: a silent peer no longer *ends*
+    the exchange. Ending on it is the defect -- it is how a connection
+    that was never the guest's came to be reported as the guest's
+    failure. The harness now records it and keeps waiting for a
+    connection that delivers the request, so this test runs to its
+    deadline on purpose, and the deadline is short for that reason
+    (docs/audit/next-subsystem-nettest-accept.md).
     """
     nt = NetTest()
     try:
         t = threading.Thread(target=nt._back_server,
-                             args=(time.monotonic() + 10.0,), daemon=True)
+                             args=(time.monotonic() + 1.5,), daemon=True)
         t.start()
         time.sleep(0.05)
         s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
         s.close()               # connect, say nothing, go away
-        t.join(5)
+        t.join(15)
 
         check(nt.results.get("back_request") is False,
               "a silent peer is a failed request")
@@ -176,7 +182,301 @@ def test_a_silent_peer_is_recorded_too():
               f"and how much arrived (got {nt.results.get('back_bytes')!r})")
         check(isinstance(nt.results.get("back_accept_s"), float),
               "and that the connection had been accepted")
+        check("1 connection(s)" in (nt.results.get("back_roster") or ""),
+              f"and it is named in the roster (got {nt.results.get('back_roster')!r})")
     finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def _serve(nt, budget):
+    t = threading.Thread(target=nt._back_server,
+                         args=(time.monotonic() + budget,), daemon=True)
+    t.start()
+    time.sleep(0.05)
+    return t
+
+
+def test_a_stale_connection_does_not_win_the_accept():
+    """The reproduction, as a test that runs in a second.
+
+    Occupying the single backlog slot before the guest connects
+    reproduced `net-harness` on the first boot: the harness accepted the
+    intruder, read nothing from it for ten seconds, and reported
+    `TimeoutError` while the guest's own connection was reset
+    (docs/audit/next-subsystem-nettest-accept.md). The guest's
+    connection is the one that delivers the request, so an intruder
+    ahead of it must not win.
+    """
+    nt = NetTest()
+    stale = socket.socket()
+    try:
+        stale.connect(("127.0.0.1", nt.back_port))   # occupies the queue
+        t = _serve(nt, 10.0)
+        g = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        g.sendall(b"cosmo hello\n")
+        reply = g.recv(64)
+        g.close()
+        t.join(15)
+
+        check(nt.results.get("back_request") is True,
+              "a stale connection ahead of the guest does not win the accept")
+        check(reply == b"cosmo world\n",
+              f"and the reply goes to the guest's connection (got {reply!r})")
+    finally:
+        for sk in (stale,):
+            try:
+                sk.close()
+            except OSError:
+                pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_the_intruder_is_named():
+    """And it is recorded, which is the sentence 22 sightings needed.
+
+    The old failure line said "connection accepted at 90.9s" -- a time
+    without an identity. Whatever else happens, the harness must be able
+    to say *which* connections reached the port and what each sent.
+    """
+    nt = NetTest()
+    stale = socket.socket()
+    try:
+        stale.connect(("127.0.0.1", nt.back_port))
+        t = _serve(nt, 10.0)
+        g = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        g.sendall(b"cosmo hello\n")
+        g.recv(64)
+        g.close()
+        t.join(15)
+
+        roster = nt.results.get("back_roster") or ""
+        check(len(nt.back_conns) == 2,
+              f"both connections are recorded (got {len(nt.back_conns)})")
+        check("2 connection(s)" in roster,
+              f"and the roster counts them (got {roster!r})")
+        check("[the request]" in roster,
+              "and marks which one carried the request")
+        check(sum(1 for c in nt.back_conns if c["delivered"]) == 1,
+              "exactly one connection is the guest's")
+    finally:
+        try:
+            stale.close()
+        except OSError:
+            pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_wrong_data_is_not_the_guest():
+    """A connection that answers, but not with the request.
+
+    Silence is not the only way to be the wrong connection.
+    """
+    nt = NetTest()
+    try:
+        t = _serve(nt, 1.5)
+        s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        s.sendall(b"not the request\n")
+        t.join(15)
+        s.close()
+
+        check(nt.results.get("back_request") is False,
+              "a connection sending the wrong thing is not the guest's")
+        check(any(c["bytes"] > 0 and not c["delivered"] for c in nt.back_conns),
+              "and it is recorded with what it sent")
+        check("not the request" in (nt.results.get("back_roster") or ""),
+              "and the roster shows the payload")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_the_request_may_arrive_on_the_second_connection():
+    """The guest need not be first, and the reply must follow the request."""
+    nt = NetTest()
+    junk = socket.socket()
+    try:
+        t = _serve(nt, 10.0)
+        junk.connect(("127.0.0.1", nt.back_port))
+        junk.sendall(b"junk\n")
+        time.sleep(0.1)
+        g = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        g.sendall(b"cosmo hello\n")
+        reply = g.recv(64)
+        g.close()
+        t.join(15)
+
+        check(nt.results.get("back_request") is True,
+              "the request is found on the second connection")
+        check(reply == b"cosmo world\n",
+              f"and the reply goes out on that one (got {reply!r})")
+        check(nt.results.get("back_bytes") == len(b"cosmo hello\n"),
+              f"and the recorded bytes are the guest's "
+              f"(got {nt.results.get('back_bytes')!r})")
+    finally:
+        try:
+            junk.close()
+        except OSError:
+            pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_each_connection_gets_its_own_receive_budget():
+    """Design point 5: the guest is not charged for the intruder's time.
+
+    The accept budget and a connection's receive budget are different
+    questions. A guest accepted near the end of the accept budget still
+    has its own BACK_RECV_S to deliver, measured from *its* accept --
+    otherwise an intruder early in the run silently shortens the
+    guest's window.
+
+    Kept fast deliberately: the accept budget is one second and the
+    guest sends after it has expired, which is the property, without
+    waiting out the ten-second receive budget.
+    """
+    nt = NetTest()
+    idler = socket.socket()
+    try:
+        idler.connect(("127.0.0.1", nt.back_port))   # burns the run's budget
+        t = _serve(nt, 1.0)
+        g = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        time.sleep(1.3)          # the accept budget is gone by now
+        g.sendall(b"cosmo hello\n")
+        reply = g.recv(64)
+        g.close()
+        t.join(20)
+
+        check(nt.results.get("back_request") is True,
+              "a connection accepted inside the budget may deliver after it")
+        check(reply == b"cosmo world\n",
+              f"and is still answered (got {reply!r})")
+    finally:
+        try:
+            idler.close()
+        except OSError:
+            pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_the_preview_is_bounded():
+    """A foreign connection may send megabytes; the line must not.
+
+    The full count of what was read is recorded, but the preview is
+    capped at BACK_PREVIEW so the roster stays a line. The cap matches
+    what the harness already kept for the guest's own connection.
+    """
+    nt = NetTest()
+    payload = bytes(range(65, 91)) * 4 + b"\n"       # 105 bytes, not the request
+    try:
+        t = _serve(nt, 1.5)
+        s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        s.sendall(payload)
+        t.join(15)
+        s.close()
+
+        rec = nt.back_conns[0] if nt.back_conns else None
+        check(rec is not None, "the connection is recorded")
+        if rec is not None:
+            check(len(rec["preview"]) == BACK_PREVIEW,
+                  f"the preview is exactly {BACK_PREVIEW} bytes "
+                  f"(got {len(rec['preview'])})")
+            check(rec["preview"] == payload[:BACK_PREVIEW],
+                  "and it is the first bytes, not a tail or a hash")
+            check(rec["bytes"] >= BACK_PREVIEW,
+                  f"and the byte count is what was read, not the preview "
+                  f"length (got {rec['bytes']})")
+            roster = nt.results.get("back_roster") or ""
+            check(len(roster) < 400,
+                  f"and the roster stays a line (got {len(roster)} chars)")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_arrivals_without_the_request_still_fail():
+    """Design point 6: a deeper backlog must not turn a fault into a pass.
+
+    The pass condition is that the guest's request arrived -- not that
+    some connection did.
+    """
+    nt = NetTest()
+    a, b = socket.socket(), socket.socket()
+    try:
+        t = _serve(nt, 1.5)
+        a.connect(("127.0.0.1", nt.back_port))
+        b.connect(("127.0.0.1", nt.back_port))
+        b.sendall(b"nope\n")
+        t.join(15)
+
+        check(nt.results.get("back_request") is False,
+              "connections that never deliver the request are still a failure")
+        nt.results["ready"] = True
+        nt.results["tcp_echo"] = True
+        nt.results["udp_ok"] = True
+        nt.results["quit_sent"] = True
+        msgs = nt.failures()
+        check(len(msgs) == 1, f"and it is reported once (got {len(msgs)})")
+        check("connection(s)" in msgs[0],
+              f"and the failure line carries the roster (got {msgs[0]!r})")
+        check("per connection from its own accept" in msgs[0],
+              "and says the receive budget is per connection")
+    finally:
+        for sk in (a, b):
+            try:
+                sk.close()
+            except OSError:
+                pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_the_backlog_is_deeper_than_one():
+    """The measured precondition, pinned.
+
+    A backlog of one made the *next* connect stall silently -- the SYN
+    dropped, no refusal -- so a stale connection both won the accept and
+    blocked the guest's. The depth is the fix's floor, and a regression
+    to one would restore the defect without failing anything else.
+    """
+    nt = NetTest()
+    socks = []
+    try:
+        check(BACK_BACKLOG > 1, f"the backlog is deeper than one (got {BACK_BACKLOG})")
+        # Two connections queue without the harness accepting anything.
+        for _ in range(2):
+            sk = socket.socket()
+            sk.settimeout(2.0)
+            sk.connect(("127.0.0.1", nt.back_port))
+            socks.append(sk)
+        check(True, "two connections queue with nothing accepting them")
+    except OSError as e:
+        check(False, f"two connections queue with nothing accepting them ({e!r})")
+    finally:
+        for sk in socks:
+            try:
+                sk.close()
+            except OSError:
+                pass
         try:
             nt.listener.close()
         except OSError:
@@ -188,7 +488,15 @@ def main():
                test_a_late_connection_is_still_accepted,
                test_the_budget_is_derived_not_fixed,
                test_an_expired_deadline_leaves_nothing_listening,
-               test_a_silent_peer_is_recorded_too):
+               test_a_silent_peer_is_recorded_too,
+               test_a_stale_connection_does_not_win_the_accept,
+               test_the_intruder_is_named,
+               test_wrong_data_is_not_the_guest,
+               test_the_request_may_arrive_on_the_second_connection,
+               test_each_connection_gets_its_own_receive_budget,
+               test_the_preview_is_bounded,
+               test_arrivals_without_the_request_still_fail,
+               test_the_backlog_is_deeper_than_one):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")

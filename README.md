@@ -2586,6 +2586,45 @@ See [docs/development.md](docs/development.md).
   which only promises the callback will not *start*. 341 self-tests on
   both architectures, debug and release (PR #175).
 
+- **The harness can say which connection it accepted.** `net-harness`
+  failed twenty-two times in a fortnight, on both architectures, on CI
+  and locally, several times on branches that change no code — and said
+  only `TimeoutError`. The cause was on the *host* side, where three
+  earlier units had not looked: `nettest.py` listened with a backlog of
+  one and accepted exactly once, blindly, treating whatever it dequeued
+  first as the guest's. It never checked. **The failure was reproduced
+  deterministically**: occupying that single backlog slot before QEMU
+  starts reproduced the signature on the first boot, and the packet
+  capture shows slirp acknowledging the guest's twelve bytes into its
+  own buffer, never delivering them, and resetting the guest ten seconds
+  later — the guest correct from first SYN to final reset, which is the
+  outcome `nettest.c`'s own comment predicted before it was ever
+  observed. The rule now: **the guest's connection is the one that
+  delivers `cosmo hello\n`, and every other connection is evidence that
+  gets reported.** A backlog of eight, a select loop over every
+  connection that arrives, a per-connection receive budget measured from
+  its own accept, and a failure line carrying a roster — each peer, when
+  it was accepted, bytes read, a thirty-two-byte preview — in place of
+  "connection accepted at 90.9s", which was a time without an identity.
+  A connection that arrives and never delivers the request is still a
+  failure, so the deeper backlog cannot turn a real guest fault into a
+  pass.
+  Two side facts closed by measurement: a backlog of one makes a second
+  connect **hang silently** on this host — the SYN dropped, no refusal —
+  so a stale connection both won the accept and stalled the real one;
+  and `free_port` is clean, zero collisions in three thousand triples.
+  A baseline the thread never had: a healthy back-connection is
+  SYN-ACKed in **150 µs** and completes in **52 ms**, which is what made
+  sighting twenty-two's `connect 0 in 1031 ms` readable at all.
+  **What is still not established is the wild trigger** — the adversary
+  was injected, so this names a mechanism the harness could not report,
+  not the cause on CI. Host-side only: no kernel change, no new API, no
+  self-test registry entry. Eight host tests that run in about six
+  seconds without booting anything, and the bug-proof is that the
+  stale-slot case fails against the old harness with exactly the wild
+  symptom — `back_error: timeout('timed out')`, zero of twelve bytes,
+  9.9 s (PR #177).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

@@ -783,6 +783,18 @@ instrument reports a time without an identity. That is exactly the gap
 is the reason this sighting is recorded here rather than argued from:
 the roster the unit adds would have said whose connection that was.
 
+**The instrument was rebuilt, PR #177.** The harness no longer assumes
+the first connection to arrive is the guest's: it listens with a backlog
+of eight, accepts every connection until one delivers `cosmo hello\n`,
+gives each its own receive budget from its own accept, and reports a
+roster -- every peer, when it was accepted, bytes read, a thirty-two
+byte preview -- in place of `TimeoutError`. **Sighting twenty-three,
+whenever it comes, should say which connection was accepted and what it
+sent.** If it names exactly one connection, carrying nothing, then the
+wild trigger is not a foreign connection and the next place to look is
+slirp's host-side connect. That is the question this file has not been
+able to ask.
+
 **And one hour spent for nothing, recorded so it is not spent twice.**
 A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
 no failure. That is consistent with the paragraph above — aarch64 did

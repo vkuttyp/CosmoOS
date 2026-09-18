@@ -1,8 +1,37 @@
 # NEXT SUBSYSTEM — the connection the harness accepted
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #177), and the banner below records where the build differed from
+it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **`bytes` is what the harness *read*, not what the peer sent.** The
+   design said "how many bytes it sent". The read loop stops at the
+   first newline or sixty-four bytes -- it always did, and draining a
+   foreign connection to count it would be unbounded work on a
+   connection the harness has already decided is not the guest's. So the
+   record says bytes read, the preview is the first thirty-two of them,
+   and `test_the_preview_is_bounded` asserts exactly that rather than a
+   number the harness cannot know.
+2. **A silent peer no longer ends the exchange, and that changed an
+   existing test.** The design's point 6 says silence is still a
+   failure, which it is. But the earlier unit's
+   `test_a_silent_peer_is_recorded_too` also relied on a silent peer
+   *ending* the exchange -- which is the defect itself, in miniature:
+   ending on a connection that was never the guest's is how an intruder
+   came to be reported as the guest's failure. The test now runs to a
+   short deadline on purpose and additionally asserts the roster names
+   the silent peer. The report's claim that the existing cases were
+   "unchanged" was wrong; this one changed, and its assertions are
+   stronger for it.
+3. **An eighth test, for the backlog depth itself.**
+   `test_the_backlog_is_deeper_than_one` pins the measured precondition.
+   A regression to `listen(1)` restores the defect without failing any
+   behavioural test, because with only well-behaved connections the two
+   are indistinguishable -- exactly the "rule enforced nowhere" shape
+   this arc keeps hitting.
 
 **Subsystem: a back-connection the harness can identify, and a failure
 line that names the connection it got instead.** `tests/boot/nettest.py`
@@ -261,7 +290,8 @@ in about a second and needs no boot.
 | `back_budget_per_connection` | a foreign connection accepted first, the guest's arriving later: the guest's receive budget runs from **its own** accept, so it is not charged for time spent on the intruder, and a guest that answers within `BACK_RECV_S` of its own accept passes even when the intruder burned most of the run's budget first |
 | `back_preview_bounded` | a foreign connection that sends **more than thirty-two bytes**: the record keeps the full byte *count* but exactly the first thirty-two as its preview, and the failure line reports that preview rather than the payload |
 | `back_none_delivers` | deadline expires with connections accepted but no request: still a failure, roster reported |
-| existing cases | unchanged and still passing — the deadline semantics from the earlier unit are not altered |
+| `back_backlog_depth` | the backlog is deeper than one, and two connections queue with nothing accepting them (as built: `test_the_backlog_is_deeper_than_one`) |
+| existing cases | still passing; `test_a_silent_peer_is_recorded_too` changed as the banner records, because a silent peer no longer ends the exchange |
 
 **Every design point above has a test, and the mapping is written down
 so the next reader can check it rather than re-derive it:** 1 (deeper
