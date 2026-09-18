@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Nineteen, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -490,9 +490,9 @@ of this section said eight and then listed nine:
 | PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
 | `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
 | PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
-| PR #174's own CI run | observed, aarch64, on a **documentation-only** branch: `connect 0 in 1355 ms`, `sent 12`, never acknowledged |
+| PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 
-Eleven entries, nineteen occurrences. The first five rows are inherited
+Eleven entries, twenty occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -570,7 +570,7 @@ a reset accepted **on a synchronized connection** (`tcp.c`, the RFC 5961
 again. `retransmits +1` and 1381 ms are one SYN retransmission at the
 one-second timer, so the handshake was slow as well as short-lived.
 
-**That unifies the shapes.** Ten instrumented sightings, and the
+**That unifies the shapes.** Eleven instrumented sightings, and the
 guest's progress when the reset lands is the only thing that differs:
 
 | run | how far the guest got | `rsts_in` |
@@ -584,6 +584,7 @@ guest's progress when the reset lands is the only thing that differs:
 | PR #171, aarch64 again | connected, **sent 12**, never acknowledged | `+1` |
 | PR #171, aarch64, third | **the connect reset, with no retransmission** | `+1` |
 | PR #174, aarch64 | connected in 1355 ms, **sent 12**, never acknowledged | `+1` |
+| PR #174, aarch64 again | connected in 1063 ms, then `sendto` refused | `+1` |
 
 The constant is not the twelve bytes and never was: it is **an inbound
 reset on an established connection to slirp, arriving at whatever point
@@ -596,8 +597,25 @@ What is still not established is why slirp resets it. That is outside
 this kernel, and saying so with evidence was named as a possible result
 from the beginning (`docs/audit/next-subsystem-twelve-bytes.md`, Risks).
 
-`rsts_in +1` in eight of the ten; the two `+0`s are the instrument's own
+`rsts_in +1` in nine of the eleven; the two `+0`s are the instrument's own
 window, which opened after the connect until PR #171 moved it.
+
+**Twice in a row on one branch, and the rule that covers it.** PR #174
+failed `net-harness` on consecutive aarch64 runs. This file says near the
+top that *a listed test that fails twice in a row is a regression until
+shown otherwise*, and says elsewhere that **what discharges "until shown
+otherwise" is the diff, not the number of failures**. The diff here is
+three Markdown files — this file among them — and no code: `git diff
+--name-only main...HEAD` returns `.md` and nothing else. So the rule is
+discharged the way it was for the earlier pair, by the change rather than
+by the count.
+
+It is worth saying what this costs rather than only that it is explained.
+Two consecutive failures on a documentation branch mean the merge gate
+for a report is now a coin toss on an unrelated defect, and the honest
+options are to re-run until it passes or to stop gating on it. This file
+is not where that is decided; it is where the evidence for deciding it
+lives.
 
 **The withdrawn retransmission claim, with a fourth data point.** PR
 #174's sighting is the fourth with the window moved, and it retransmitted
