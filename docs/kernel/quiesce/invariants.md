@@ -228,7 +228,38 @@ counts kicks sent and `kick_publishes` counts kicks that worked; before
 the second existed, no number in this tree would have changed if the
 kick were replaced by a no-op. Over eight boots, four per architecture:
 **about 220 kick IPIs sent, 1 publish attributed** — once, on AArch64.
-The kick is therefore kept, on thin evidence. **Attribution requires the
+The kick is therefore kept, on thin evidence.
+
+**And a qualification the unit's own test then earned, on CI.** That
+unit said the covered-tick population "publishes anyway, a moment
+later", which is what `quiesce-kick-population` measures: a grace period
+of about three milliseconds against an adversary hiding that CPU's
+ticks. On CI the same test took **8072 ms**, in guest time — not a
+loaded host stretching wall-clock, but that CPU genuinely not publishing
+for most of eight seconds, within two of `synchronize_quiesce`'s
+ten-second debug panic. **And on CI it is not reliable either way, which is the finding.** With
+the cap in place CI has reported both outcomes: a run where the covered
+CPU published while its ticks were still hidden, in an 11 ms grace
+period, and runs on both architectures where it was still pending after
+all twenty-five covers — about a hundred milliseconds, kicks sent
+throughout — plus the 8072 ms run above. Here it is three to eight
+milliseconds every time.
+
+**So that unit's inference is not established.** It used "the population
+publishes anyway" to conclude that the population the kick names is not
+why the kick works. That holds on this machine and holds only sometimes
+on CI, which is not enough to carry the conclusion.
+
+What it does **not** establish is that the population behaves
+differently there. The likelier reading is that the **adversary** is not
+portable: under TCG on a loaded runner its short section around the tick
+overshoots, leaving that CPU closer to a continuous spinner — and a
+spinner cannot be helped, which `quiesce-kick-spinner` proves
+independently. The test cannot tell those apart, so it now **reports**
+the outcome and asserts only what is host-independent: that the
+adversary was hiding ticks, and that the grace period returned at all.
+
+**Attribution requires the
 publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`
 reports it): a publish by a CPU that has already published the target
 epoch is correct and cheap and tells no waiter anything, and counting

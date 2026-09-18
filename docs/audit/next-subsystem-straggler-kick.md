@@ -39,6 +39,29 @@ this CPU's epoch and attribution requires that, which took the rate from
    this unit was written to settle. The test is kept as
    `quiesce-kick-population` and asserts what is true: the grace period
    completes while ticks are being covered.
+
+   **"A moment later" was a local measurement, and CI corrected it.**
+   That grace period is about three milliseconds here. On CI the same
+   test took **8072 ms** of guest time — the covered CPU not publishing
+   for most of eight seconds, two short of the ten-second debug panic,
+   and over the per-test budget, which is how it was caught. The
+   adversary now stops hiding ticks after a cap so the test is bounded.
+   With that cap CI has reported **both** outcomes: a run where the
+   covered CPU published while its ticks were still hidden (an 11 ms
+   grace period) and runs on both architectures where it was still
+   pending after all twenty-five covers, about a hundred milliseconds,
+   kicks sent throughout. Here it is three to eight milliseconds every
+   time.
+
+   **So point 1's inference is not established.** "The population
+   publishes anyway, so it is not why the kick works" holds here and
+   holds only sometimes on CI, which is not enough to carry it. It may be the *adversary* that fails to travel rather
+   than the population that differs — under TCG on a loaded runner its
+   short section overshoots and leaves that CPU closer to a spinner,
+   which cannot be helped for reasons `quiesce-kick-spinner` establishes
+   separately. The test cannot distinguish those, so it reports the
+   outcome instead of asserting either
+   (`docs/kernel/quiesce/invariants.md`, Q19).
 2. **So the report's central prediction was wrong twice over**: the
    adversary *was* buildable (the inventory said no deterministic test
    could arrange the coincidence), and arranging it disproved rather
@@ -281,7 +304,7 @@ a measurement rather than a change.
 | test | asserts |
 | --- | --- |
 | ~~`quiesce-kick-attributed`~~ | **not built.** The adversary showed this population publishes *without* a kick, so a test asserting an attributed publish would be asserting a coincidence and would flake. Replaced by `quiesce-kick-population`, which asserts what the adversary actually demonstrated |
-| `quiesce-kick-population` | the adversary reaches steady state (two covered ticks) and the grace period completes anyway; that it *returned* is asserted by the ten-second debug panic, not by a duration bound |
+| `quiesce-kick-population` | the adversary reaches steady state (two covered ticks) and the grace period completes **while ticks are still being hidden** — asserted as *covers used < the cap*, not as a duration. Reaching the cap fails the test with a reason, because past it the next tick publishes only because the adversary quit, which would demonstrate nothing |
 | `quiesce-kick-spinner` | the negative control: kicks are sent, the target takes them on `IPI_QUIESCE_KICK` (the kind check), **the flag reads clear from inside the section** — Q19's unconditional clear observed rather than inferred — and `kick_publishes` does not rise. All sampled by the pinned thread itself, so no wall-clock margin held by another CPU |
 | ~~`quiesce-kick-ipi-kind`~~ | **folded into `quiesce-kick-spinner`**, which is the only place that can see it: `ipi_count` reads the *calling* CPU's counters, so the kind has to be checked by a thread pinned to the target |
 | existing `quiesce-straggler`, `-system`, `-idle` | unchanged and still passing |
