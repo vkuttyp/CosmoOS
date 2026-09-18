@@ -117,10 +117,23 @@ construction rather than by timing.
 3. **Sweep every holder of a `netif *`.** The two retry lists are what
    this report found; the sweep is part of the unit, not an afterthought,
    because "a rule stated in one place" is how this arrived.
-4. **The silent drop gets a counter.** `arp_flush`/`nd_flush` move
-   `pending_dropped` like the timeout path does, so the tally of packets
-   that vanished because an interface went is visible in
-   `arp_get_stats`.
+4. **The silent drop gets a counter — and ARP and ND do not share
+   one.** `pending_dropped` lives in `struct arp_stats`
+   (`kernel/include/kernel/net/ether.h:43`) and reaches callers through
+   `arp_get_stats`. **ND has no such field**: `ipv6.c` keeps its own
+   `struct ip_stats` instance and exposes it through `ipv6_get_stats`,
+   and that struct has no pending counter at all. So this is two
+   changes, not one:
+
+   - `arp_flush` moves the existing `pending_dropped`, which its own
+     timeout path already moves for the identical event.
+   - `struct ip_stats` gains **`nd_pending_dropped`**, moved by
+     `nd_flush` and by `nd_age`'s give-up path for symmetry, and visible
+     through `ipv6_get_stats`. It is IPv6-only by construction — the
+     IPv4 instance of that struct keeps it at zero — and the field's
+     comment says so, because a counter that is always zero in one of
+     two instances is worth explaining once rather than puzzling over
+     twice.
 
 ## Affected files
 
@@ -131,6 +144,10 @@ construction rather than by timing.
 | `kernel/include/kernel/netif.h` | the rule stated where the reference API is, not only for lookups |
 | `docs/kernel-services/network/design.md` | the ownership rule beside the interface lifetime |
 | `docs/kernel/quiesce/invariants.md` or the network invariants | the rule as an invariant, with what enforces it |
+| `kernel-services/network/nettest.c` | the three tests below, where every other `net-*` self-test lives |
+| `kernel/include/kernel/selftest.h` | their declarations |
+| `kernel/core/selftest.c` | their registry entries |
+| `kernel/include/kernel/net/ip.h` | `nd_pending_dropped` in `struct ip_stats` |
 | `README.md` | the Status entry |
 
 ## New APIs
@@ -143,7 +160,8 @@ this unit is about a rule and its sweep, not new machinery.
 | test | asserts |
 | --- | --- |
 | `net-arp-retry-unregister` | the race, constructed deterministically: a pending entry, an `arp_age` stopped between the unlock and the send, `netif_unregister` run to completion, then the send released. The interface is still alive and the send touches live memory |
-| `net-arp-flush-counts` | a flush with pending packets moves `pending_dropped`, so the drop is visible rather than silent |
+| `net-arp-flush-counts` | an `arp_flush` with pending packets moves `arp_stats.pending_dropped`, so the drop is visible rather than silent |
+| `net-nd-flush-counts` | an `nd_flush` with pending packets moves the **new** `ip_stats.nd_pending_dropped`, read through `ipv6_get_stats` — a separate test because it is a separate counter in a separate struct, which is the part of this design most likely to be half-done |
 | `net-nd-retry-unregister` | the same race on the ND side, because the defect is in both and a fix in one is half a fix |
 
 **The bug-proof.** With the references removed, `net-arp-retry-unregister`
