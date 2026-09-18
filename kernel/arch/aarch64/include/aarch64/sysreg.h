@@ -149,6 +149,19 @@ static inline void yield_hint(void) { __asm__ volatile("yield" ::: "memory"); }
  * defined, and an unknown encoding is read as 8 (the safe half). */
 #define ID_AA64MMFR0_ASIDBITS(v) (((v) >> 4) & 0xF)
 #define ID_AA64PFR0_GIC(v) (((v) >> 24) & 0xF)
+#define ID_AA64PFR0_RAS(v) (((v) >> 28) & 0xF)   /* 0: none; 1: FEAT_RAS; 2: FEAT_RASv1p1 */
+
+/* SError syndrome (ESR_EL1 with EC 0x2F). IDS says the rest is
+ * implementation-defined; with IDS clear and FEAT_RAS, AET carries the
+ * RAS severity. ARM ARM D17.2.37. */
+#define ESR_EC_SERROR    0x2Fu
+#define ESR_SERROR_IDS   (1ull << 24)
+#define ESR_SERROR_AET(esr) ((unsigned)(((esr) >> 10) & 0x7))
+#define ESR_AET_UC   0u   /* uncontainable */
+#define ESR_AET_UEU  1u   /* unrecoverable, uncontained */
+#define ESR_AET_UEO  2u   /* restartable */
+#define ESR_AET_UER  3u   /* recoverable */
+#define ESR_AET_CE   6u   /* corrected: the hardware fixed it */
 
 /* MPIDR affinity fields (Aff0..Aff2 in bits 0-23, Aff3 in 32-39). */
 #define MPIDR_AFFINITY(v) (((v) & 0xFFFFFFull) | (((v) >> 8) & 0xFF000000ull))

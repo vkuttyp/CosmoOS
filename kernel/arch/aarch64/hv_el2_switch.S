@@ -176,7 +176,39 @@ el2_sync:
     mrs x0, ich_vtr_el2
     eret
 
-3:  cmp x0, #HV_EL2_CALL_HANDBACK
+3:  cmp x0, #HV_EL2_CALL_VSE
+    b.ne 32f
+    /* Deliver a virtual SError to EL1. x1 is the syndrome or 0; it is
+     * written to VSESR_EL2 only when non-zero, because that register
+     * exists only with FEAT_RAS and the caller is the one that can read
+     * ID_AA64PFR0_EL1.
+     *
+     * AMO as well as VSE: the host runs with HCR_EL2 = RW and nothing
+     * else, and HCR_EL2.VSE generates a virtual SError only while AMO is
+     * 1. Setting AMO also routes PHYSICAL SErrors to EL2 for as long as
+     * it is set, which is why the clear call exists and why the injector
+     * calls it promptly. */
+    cbz x1, 31f
+    msr S3_4_c5_c2_3, x1             /* VSESR_EL2 */
+31: mrs x2, hcr_el2
+    mov x3, #((1 << 8) | (1 << 5))   /* VSE | AMO */
+    orr x2, x2, x3
+    msr hcr_el2, x2
+    isb
+    mov x0, #0
+    eret
+
+32: cmp x0, #HV_EL2_CALL_VSE_CLEAR
+    b.ne 30f
+    mrs x2, hcr_el2
+    mov x3, #((1 << 8) | (1 << 5))
+    bic x2, x2, x3
+    msr hcr_el2, x2
+    isb
+    mov x0, #0
+    eret
+
+30: cmp x0, #HV_EL2_CALL_HANDBACK
     b.ne 4f
     /* Give EL2 back: from the next exception on, the vectors in x1 (the
      * loader's stub) answer, and this switch is out of the picture until

@@ -132,3 +132,63 @@ review of the (registered) NMI handlers and of `lockup_answer`.
 
 Callers must halt after calling it. **Checked by** `kernel_shutdown` and
 `panic_common`, which both fall through to `arch_cpu_halt_forever`.
+
+## I-ARCH-16: An asynchronous hardware error lets the machine continue only when the hardware corrected it, and is never blamed on a process
+
+An SError (AArch64) and a machine check (x86-64) are the same class: the
+CPU reporting a fault it could not attribute synchronously. Both are
+dispatched as `ARCH_TRAP_ASYNC_ERROR`, and `arch_async_error_class`
+answers **corrected** only for a syndrome that positively says so:
+
+- **AArch64** — `ID_AA64PFR0_EL1.RAS` non-zero, `ESR_EL1.IDS` clear, and
+  `AET = CE`. Without FEAT_RAS there is no `AET` to have read, so every
+  SError is uncontained; `IDS` means the syndrome is implementation
+  defined, so the same; every reserved `AET` encoding falls to the
+  `default` arm.
+- **x86-64** — **at least one bank with `VAL`**, every valid bank
+  `UC == 0`, no bank with `PCC` or `OVER`, and `MCG_STATUS.RIPV`, across
+  all `MCG_CAP.Count` banks. Two of those clauses are load-bearing and
+  easy to lose. Without **at least one valid bank**, "every valid bank is
+  clean" is true of *no banks* and a machine check carrying no record
+  reads as corrected. And **all** means all: a CPU reporting more banks
+  than one frame reads gets an uncontained verdict, not a verdict about
+  the prefix — the record that would have changed the answer is exactly
+  the one not looked at.
+
+Everything else panics, at either exception level, naming the class and
+printing the syndrome — where before this rule every SError reached
+`aarch64_trap_entry`'s `default` arm, was relabelled
+`ARCH_TRAP_GENERAL_PROTECTION`, and stopped the machine even when the
+hardware had already fixed the fault.
+
+**No process is killed.** An asynchronous abort's frame names the context
+that was *interrupted when the error was delivered*, not the one that
+caused it, so nothing here is entitled to choose a victim: a deferred or
+imprecise error lands on whoever is running. Attribution needs the RAS
+error records (`ERR<n>_ADDR`), which this rule does not read, and the
+unit that reads them is the one that may kill.
+
+The corrected path **counts and does not print**: it runs in whatever
+context the error interrupted, which may hold a run-queue lock.
+
+**Checked by** `trap-async-class` — ten SError encodings and ten
+machine-check bank combinations, one row per rule, including the reserved
+`AET`s, a CPU without FEAT_RAS, the empty bank set that a vacuous rule
+calls corrected, and a bank count larger than one frame reads — and
+`trap-async-inject`, which delivers a real corrected SError through
+`HCR_EL2.VSE` and checks execution continued (on `cortex-a76`, which has
+FEAT_RAS; the default `cortex-a72` does not, and the test logs the skip
+rather than passing quietly), and which on x86-64 asserts that vector 18
+has a handler at all.
+
+**Gap, and it is not small.** This kernel runs EL1 with `PSTATE.A` set
+from its first instruction (`entry.S`: `msr daifset, #0xF`; the only
+unmask anywhere is `daifclr, #2`, which is IRQ). So an asynchronous abort
+is **not taken while the kernel runs** — it stays pending until something
+unmasks it. EL0 does not have that property: user mode is entered with
+`SPSR = 0`, DAIF clear, so an SError there is taken immediately, and that
+is the path this rule governs today. Whether EL1 should unmask `A` is a
+separate decision with its own risk — the kernel would then take an abort
+at any instruction — and is not taken here. `trap-async-inject` opens the
+mask deliberately and briefly to deliver its one error, which is why it
+can observe anything at all.

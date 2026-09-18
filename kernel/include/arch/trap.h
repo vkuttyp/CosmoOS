@@ -24,8 +24,43 @@ enum arch_trap_kind {
     ARCH_TRAP_INVALID_OPCODE,
     ARCH_TRAP_GENERAL_PROTECTION,
     ARCH_TRAP_PAGE_FAULT,
+    /* An asynchronous hardware error: SError on AArch64, #MC on x86-64.
+     * Unlike every kind above it, the frame names the context that was
+     * INTERRUPTED, not the one that caused the error -- so no handler of
+     * this kind may blame a process (invariant I-ARCH-16). */
+    ARCH_TRAP_ASYNC_ERROR,
     ARCH_TRAP_KIND_COUNT
 };
+
+/*
+ * What the hardware says about an asynchronous error it reported. The
+ * classifier answers CORRECTED only for a syndrome that positively says
+ * so; everything else -- an unknown encoding, a missing feature, a
+ * missing record -- is UNCONTAINED, because a machine that continues
+ * past an error it did not understand is the failure this exists to
+ * prevent (invariant I-ARCH-16, docs/audit/next-subsystem-async-error.md).
+ *
+ * CONTAINED is defined and never returned by this unit: the syndrome can
+ * say the machine is intact, and cannot say which process to blame, so
+ * there is nothing safe to do with it that differs from UNCONTAINED. It
+ * is here because the classifier's AArch64 side decodes it and the
+ * attribution unit will need it; a caller must treat it as UNCONTAINED.
+ */
+enum arch_async_error {
+    ARCH_ASYNC_CORRECTED,
+    ARCH_ASYNC_CONTAINED,
+    ARCH_ASYNC_UNCONTAINED,
+};
+
+/* The class of the asynchronous error this frame was taken for. */
+enum arch_async_error arch_async_error_class(const struct arch_trap_frame *frame);
+const char *arch_async_error_name(enum arch_async_error c);
+/* Once, after interrupt_init: put the architecture's asynchronous-error
+ * handler in place. Where the error arrives through a registered vector
+ * (x86-64's #MC) this registers it; where the trap entry dispatches it
+ * directly (AArch64's SError slots) there is nothing to register and
+ * this does nothing. */
+void arch_async_error_init(void);
 
 /* Total number of vectors the architecture can dispatch. */
 unsigned arch_trap_vector_count(void);

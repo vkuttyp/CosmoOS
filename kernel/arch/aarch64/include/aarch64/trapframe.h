@@ -36,7 +36,21 @@ _Static_assert(sizeof(struct arch_trap_frame) == 0x130, "trap frame layout");
 #define AARCH64_ENTRY_EL1_IRQ    1u
 #define AARCH64_ENTRY_EL0_SYNC   2u
 #define AARCH64_ENTRY_EL0_IRQ    3u
+/* SError: slot 7 (from EL1) and slot 11 (from EL0). They are dispatched
+ * rather than defaulted, and unlike a bad slot they can RETURN -- a
+ * corrected error leaves the interrupted context running (invariant I-ARCH-16). */
+#define AARCH64_ENTRY_EL1_SERROR 4u
+#define AARCH64_ENTRY_EL0_SERROR 5u
 #define AARCH64_ENTRY_BAD_BASE   8u   /* + slot index 0..15 of the vector table */
+
+#ifndef __ASSEMBLER__
+#include <arch/trap.h>
+/* The SError severity encoded in an ESR, given ID_AA64PFR0_EL1.RAS.
+ * Separate from the register reads so the encodings -- including the ones
+ * no CI CPU produces -- can be table-tested (invariant I-ARCH-16). */
+enum arch_async_error aarch64_async_class(uint64_t esr, unsigned ras);
+uint64_t aarch64_async_corrected_count(void);
+#endif
 
 #ifndef __ASSEMBLER__
 void aarch64_trap_entry(struct arch_trap_frame *frame);

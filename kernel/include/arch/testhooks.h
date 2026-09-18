@@ -17,6 +17,19 @@
  * return that ISA IRQ number (to be mapped with irq_legacy_to_gsi).
  * Returns -1 if the platform has no such source. */
 int arch_test_periodic_irq_start(unsigned hz);
+
+/* Drive the asynchronous-error classifier over the encodings the CI CPUs
+ * never produce: reserved AETs, a missing FEAT_RAS, an empty machine-check
+ * bank set. The table is architecture-shaped, so it lives with the
+ * classifier; this returns false with `why` naming the row that failed
+ * (invariant I-ARCH-16). */
+bool arch_test_async_class(const char **why);
+
+/* Deliver a real asynchronous error of the one class that is survivable
+ * and check the machine carried on. Reports and returns true where the
+ * hardware cannot produce one (no FEAT_RAS, no EL2, no MCA), because a
+ * test that silently does nothing is worse than one that says so. */
+bool arch_test_async_inject(const char **why);
 void arch_test_periodic_irq_stop(void);
 
 /* Exercise the architecture's exception-entry paths that must work from

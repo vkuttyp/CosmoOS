@@ -88,6 +88,15 @@ void arch_hardening_report(void)
      * RAM writable and executable), and this line says whether it was. */
     bool wxn = (READ_SYSREG(sctlr_el1) & SCTLR_WXN) != 0;
     kinfo("hardening: aarch64:%s%s", g_cpu.has_pan ? " pan" : "", wxn ? " wxn" : "");
+    /* Its own line: the hardening line above is a contract the guard
+     * boot's harness matches whole, and RAS is not a hardening feature
+     * anyway -- it decides what an asynchronous abort can be told apart
+     * from. Without it ESR_EL1 carries no AET and every SError is
+     * uncontained (invariant I-ARCH-16). */
+    unsigned ras = (unsigned)ID_AA64PFR0_RAS(READ_SYSREG(id_aa64pfr0_el1));
+    kinfo("async-error: aarch64: FEAT_RAS %s (ID_AA64PFR0_EL1.RAS %u)%s",
+          ras ? "present" : "absent", ras,
+          ras ? "" : " -- every SError classifies as uncontained");
     if (!g_cpu.has_pan || !wxn)
         kwarn("hardening: absent:%s%s%s", g_cpu.has_pan ? "" : " pan", wxn ? "" : " wxn",
               g_cpu.has_pan ? "" : " -- kernel access to user memory is unguarded");
