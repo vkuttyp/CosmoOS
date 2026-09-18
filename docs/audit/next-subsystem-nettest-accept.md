@@ -36,12 +36,15 @@ it.
    retransmits +1` for the second sighting running, the locus is
    **slirp's own host-side connect**. That is a better answer than this
    report expected to get, and it arrived because the roster existed.
-   **Sighting twenty-four confirmed it two hours later** with the same
-   one-empty-connection roster and the *other* guest arm -- `sent 12`
-   with `outstanding 12 then 12`, the bytes on the wire and never
-   acknowledged. Three consecutive connects of 1031, 1116 and 1089 ms,
-   each with exactly one SYN retransmission, against a 150 microsecond
-   baseline.
+   **Sightings twenty-four and twenty-five confirmed it**, the same
+   one-empty-connection roster three times running, and between them
+   both guest arms -- `sent 12` with `outstanding 12 then 12` (bytes on
+   the wire, never acknowledged) and `sent -104` (reset before the
+   write). The connect is slow in every one, 787 ms to 1116 ms against a
+   150 microsecond baseline, but **not by a fixed mechanism**: a
+   retransmission constant read off the first three was withdrawn when
+   twenty-five answered the first SYN with `retransmits +0`
+   (`docs/testing/flakes.md`).
 4. **A failed exchange must not eat the run, which this unit broke
    first.** Waiting for a connection that delivers the request -- rather
    than ending on the first, which is the defect -- also made the loop

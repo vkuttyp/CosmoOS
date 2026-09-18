@@ -2619,15 +2619,16 @@ See [docs/development.md](docs/development.md).
   **And it answered on its own CI, against the hypothesis that built
   it.** Sighting twenty-three landed on this pull request's aarch64 job
   and the roster said `1 connection(s): … 0 byte(s)` — **exactly one
-  connection, carrying nothing** — and sighting twenty-four, two hours
-  later on the same pull request, said it again. So the wild trigger is
-  *not* a foreign connection: the stale-slot reproduction reproduces the symptom without
-  being the cause. With the guest reporting `connect 0 in 1116 ms,
-  segs_out +3 retransmits +1` for the second sighting running — a
-  connect that succeeds in about a second against a 150 µs baseline,
-  with exactly one SYN retransmission — the locus is **slirp's own
-  host-side connect**, and the guest's side is fully accounted for.
-  Still unnamed: why that connect stalls and then fails. Host-side only: no kernel change, no new API, no
+  connection, carrying nothing** — and sightings twenty-four and
+  twenty-five said it again, three times running. So the wild trigger is
+  *not* a foreign connection: the stale-slot reproduction reproduces the
+  symptom without being the cause. The guest's connect succeeds but
+  takes 787 ms to 1116 ms against a 150 µs baseline, and a
+  SYN-retransmission constant read off the first three sightings was
+  **withdrawn** when the fourth answered the first SYN with
+  `retransmits +0`. The locus is **slirp's own host-side connect**, and
+  the guest's side is fully accounted for. Still unnamed: why that
+  connect stalls and then fails. Host-side only: no kernel change, no new API, no
   self-test registry entry. Eight host tests that run in about six
   seconds without booting anything, and the bug-proof is that the
   stale-slot case fails against the old harness with exactly the wild
