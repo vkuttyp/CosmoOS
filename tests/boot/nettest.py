@@ -117,8 +117,10 @@ class NetTest:
         exactly once, blindly, treating whatever it dequeued first as
         the guest's. It never checked, and when that assumption was
         false it reported `TimeoutError` -- which names nothing. That is
-        the whole of what `net-harness` said for two weeks, across
-        twenty-two sightings, several on branches that change no code
+        the whole of what `net-harness` said for three weeks, on both
+        architectures, on CI and locally, several times on branches that
+        change no code. The tally is kept in `docs/testing/flakes.md`,
+        *The count*, and deliberately not repeated here
         (docs/audit/next-subsystem-nettest-accept.md).
 
         The rule here: **the guest's connection is the one that delivers
@@ -280,9 +282,10 @@ class NetTest:
     def roster(self):
         """Every connection that reached the port, as one line.
 
-        This is the sentence twenty-two sightings needed and none had:
-        the old failure said "connection accepted at 90.9s" -- a time
-        without an identity.
+        This is the sentence every sighting needed and none had: the
+        old failure said "connection accepted at 90.9s" -- a time
+        without an identity. How many there were is
+        `docs/testing/flakes.md`, *The count*.
         """
         conns = getattr(self, "back_conns", [])
         if not conns:

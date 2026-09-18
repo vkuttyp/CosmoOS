@@ -72,8 +72,9 @@ backlog of one and then accepted exactly once, blindly. It assumed the
 first connection to arrive was the guest's. It never checked, and when
 the assumption was false it reported `TimeoutError`, which names
 nothing. That was the whole of what
-`net-harness` has said for two weeks: twenty-four sightings across twelve
-entries (`docs/testing/flakes.md`, *The count*), on both architectures,
+`net-harness` has said for three weeks: every sighting in
+`docs/testing/flakes.md`, *The count*, which owns the number so this
+does not repeat it — on both architectures,
 on CI and locally, several of them on branches that change no code at
 all.
 
@@ -391,7 +392,8 @@ accepted.
 - **Raise the backlog and nothing else.** Cheapest, and it would very
   likely have prevented the induced failure. Rejected as the whole unit:
   it leaves the harness unable to say what happened, which is the
-  property that has cost twenty-four sightings. The backlog change is
+  property that has cost every sighting in the tally. The backlog
+  change is
   design point 1 precisely because it is necessary and insufficient.
 - **Verify the peer instead of the payload.** Check that the connection
   comes from QEMU's process. Rejected: every connection arrives from

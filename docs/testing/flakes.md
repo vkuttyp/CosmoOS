@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty-one, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty-four, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -708,8 +708,8 @@ the loop runs, not what the defect is.
 
 **Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
 What follows was induced on purpose and is not counted: the total moved
-to twenty-two for a separate, real failure recorded below, not for
-this. At the time, the harness listened on the back-connection port
+that day for separate, real failures recorded below, not for this. The
+count section above owns the number; this paragraph does not repeat it. At the time, the harness listened on the back-connection port
 with a backlog of one and accepted once, without checking what it
 accepted — PR #177 has since replaced both. Occupying that single slot
 before QEMU

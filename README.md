@@ -2587,7 +2587,7 @@ See [docs/development.md](docs/development.md).
   both architectures, debug and release (PR #175).
 
 - **The harness can say which connection it accepted.** `net-harness`
-  failed twenty-two times in a fortnight, on both architectures, on CI
+  failed repeatedly over three weeks, on both architectures, on CI
   and locally, several times on branches that change no code — and said
   only `TimeoutError`. The cause was on the *host* side, where three
   earlier units had not looked: `nettest.py` listened with a backlog of
@@ -2619,8 +2619,9 @@ See [docs/development.md](docs/development.md).
   **And it answered on its own CI, against the hypothesis that built
   it.** Sighting twenty-three landed on this pull request's aarch64 job
   and the roster said `1 connection(s): … 0 byte(s)` — **exactly one
-  connection, carrying nothing.** So the wild trigger is *not* a foreign
-  connection: the stale-slot reproduction reproduces the symptom without
+  connection, carrying nothing** — and sighting twenty-four, two hours
+  later on the same pull request, said it again. So the wild trigger is
+  *not* a foreign connection: the stale-slot reproduction reproduces the symptom without
   being the cause. With the guest reporting `connect 0 in 1116 ms,
   segs_out +3 retransmits +1` for the second sighting running — a
   connect that succeeds in about a second against a 150 µs baseline,
