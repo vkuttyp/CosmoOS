@@ -493,7 +493,7 @@ of this section said eight and then listed nine:
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
 
-Twelve entries, twenty-one occurrences. The first five rows are inherited
+Twelve entries, twenty-two occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -527,6 +527,7 @@ the connection was already reset.
 | PR #170, aarch64 | `-104` | `+0` | 0 | `+1` |
 | `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
 | `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
+| PR #176, aarch64 (docs-only) | `-104` | `+3` | 0 | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
@@ -702,5 +703,91 @@ PR #169's instrumentation landed; six of those boots ran under CPU load
 without raising the rate. Every earlier local attempt was on aarch64,
 where it did not appear in eleven runs — the architecture decides where
 the loop runs, not what the defect is.
+
+**Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
+What follows was induced on purpose and is not counted: the total moved
+to twenty-two for a separate, real failure recorded below, not for
+this. The harness listens on the back-connection port with a
+backlog of one (`nettest.py:47`) and accepts once, without checking what
+it accepted (`nettest.py:72`). Occupying that single slot before QEMU
+starts — one silent connection, opened behind an environment variable —
+reproduced the `net-harness` signature **on the first boot**: host
+`accept` succeeded at 76.6 s, read `0 of 12 bytes`, and gave up with
+`TimeoutError`, while the guest reported
+`connect 0 in 217 ms, sent 12, recv -104, pending error -104, rsts_in +1`.
+
+The capture taken during that boot is the part worth keeping:
+
+```
+418.239235  10.0.2.15.50546 > 10.0.2.2.51821  [S]                    SYN
+418.456149  10.0.2.2.51821 > 10.0.2.15.50546  [S.]                   SYN-ACK, 217 ms later
+418.456851  10.0.2.15.50546 > 10.0.2.2.51821  [P.] seq 1:13, len 12  the twelve bytes
+418.456873  10.0.2.2.51821 > 10.0.2.15.50546  [.]  ack 13            slirp acknowledges them
+428.422331  10.0.2.2.51821 > 10.0.2.15.50546  [R.]                   RST, ten seconds later
+```
+
+slirp acknowledged the twelve bytes into its own buffer, never delivered
+them, and reset the guest ten seconds later. The guest is correct at
+every step — which is the outcome `nettest.c`'s own comment predicted
+before it was ever observed.
+
+**A baseline, which this file did not have.** From a passing boot's
+capture: slirp answers the guest's SYN in **150 microseconds** and the
+whole exchange — SYN, SYN-ACK, twelve bytes each way, FIN with
+`seq 13, ack 13` — completes in **52 ms**. Every sighting above was read
+without that number. The induced run's `connect 0 in 217 ms` is three
+orders of magnitude off it.
+
+**Two hypotheses closed by measurement.** A backlog of one makes a second
+connect **hang silently** on this host — the SYN is dropped, `connect`
+does not refuse — so a stale connection both wins the `accept` and
+stalls the real one. And `free_port` is clean: **zero collisions in three
+thousand triples**, over the observed ephemeral range 49152–65535, so the
+three-port collision idea is dead.
+
+**What is still not established is the wild trigger.** The adversary was
+injected; nothing here says a foreign connection is what happens on CI.
+This names a mechanism the harness cannot currently report, not a cause.
+Taken up by `docs/audit/next-subsystem-nettest-accept.md`.
+
+**Sighting twenty-two, 2026-09-18, on PR #176's own aarch64 CI** — the
+pull request that proposes the fix, on a branch that changes three
+Markdown files and no code:
+
+```
+NETTEST: client failed: connect 0 in 1031 ms, sent -104 in 0 ms,
+  recv -1 in 0 ms, pending error -104,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+```
+
+with the host reporting `ready at 89.9s, back-connection accepted at
+90.9s`, `0 of 12 bytes: b''`, and `TimeoutError` at 100.9 s.
+
+**`connect 0 in 1031 ms` is the line that matters, and it is only
+readable because of the baseline above.** A healthy back-connection is
+answered in 150 microseconds; this one took four orders of magnitude
+longer and still returned 0. `segs_out +3 retransmits +1` is one SYN
+retransmission: **slirp did not answer the first SYN and answered the
+second**, about a second later. That is the induced reproduction's
+mechanism — a host-side connect that does not complete promptly — at a
+slower speed, and it is the first sighting whose `connect` time can be
+compared against anything.
+
+What this sighting still cannot say is **which connection the host
+accepted**. `accepted at 90.9s` is one second after `ready`, so the
+accept is contemporaneous with slirp finally answering, and the
+instrument reports a time without an identity. That is exactly the gap
+`docs/audit/next-subsystem-nettest-accept.md` proposes to close, and it
+is the reason this sighting is recorded here rather than argued from:
+the roster the unit adds would have said whose connection that was.
+
+**And one hour spent for nothing, recorded so it is not spent twice.**
+A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
+no failure. That is consistent with the paragraph above — aarch64 did
+not reproduce it in eleven earlier runs either — and is evidence about
+nothing. The local rate this file measures is **x86-64's**. Hunt on
+x86-64.
 
 Update this section and leave the rest alone.
