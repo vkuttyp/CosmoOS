@@ -494,9 +494,12 @@ of this section said eight and then listed nine:
 
 Eleven entries, nineteen occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
-here. The last four were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the six instrumented
-ones carry the guest's side.
+here. The last six rows were watched as they happened: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
+instrumented** occurrences behind the other five rows carry the guest's
+side. Rows and occurrences differ because three rows hold more than one
+sighting; the shapes table below is per *sighting* and is the one to
+count from.
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
@@ -527,7 +530,8 @@ the connection was already reset.
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
 segment went out, and the host still saw nothing — so "the twelve bytes
-were never written" describes five of the six and not that one. It
+were never written" describes every instrumented sighting but that
+one. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
@@ -625,7 +629,7 @@ claim is withdrawn rather than left standing with a caveat. It was two
 observations, and this file has a history of two observations becoming a
 rate that the next run halves.
 
-What survives all three, and all nine instrumented sightings, is
+What survives all three, and every instrumented sighting, is
 narrower and duller: **an inbound reset arrives on a connection to
 slirp, at whatever point the guest has reached** — during the handshake,
 after it, or after a segment is already on the wire — while slirp's own
@@ -637,9 +641,11 @@ now: **an established connection to slirp is reset — sometimes before the
 guest writes and sometimes after a segment is already on the wire — and
 the payload never reaches the host's accepted socket.**
 
-**The CI rate rose sharply on 2026-09-17.** Six instrumented failures
-inside about two hours — two on PR #169, two on PR #170, two on `main` —
-against one local boot in twenty-one. Nothing here explains the jump and
+**The CI rate rose sharply on 2026-09-17**, and has not fallen since.
+Six instrumented failures inside about two hours that day — two on PR
+#169, two on PR #170, two on `main` — against one local boot in
+twenty-one; four more have followed on 17-18 September. The count above
+is the running total; this paragraph is about the day the rate changed. Nothing here explains the jump and
 this file does not guess at one; it is recorded because "one in
 twenty-one locally" is the only rate this file has measured, and CI is
 plainly not that. What it does mean practically: the instrument no longer
