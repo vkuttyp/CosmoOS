@@ -94,7 +94,8 @@ usually GSI 2 on QEMU.
 ## 6. IPIs (SMP PR)
 
 ```c
-enum ipi_kind { IPI_RESCHEDULE, IPI_TLB_FLUSH, IPI_HALT, IPI_CALL, IPI_KIND_COUNT };
+enum ipi_kind { IPI_RESCHEDULE, IPI_CALL, IPI_TLB_FLUSH, IPI_HALT, IPI_SAMPLE,
+                IPI_QUIESCE_KICK, IPI_KIND_COUNT };
 void arch_ipi_send(unsigned cpu, enum ipi_kind kind);
 void arch_ipi_broadcast_others(enum ipi_kind kind);
 ```

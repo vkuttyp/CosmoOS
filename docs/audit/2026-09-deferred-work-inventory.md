@@ -344,10 +344,20 @@ tree.
   device dedicated to removal in the test machine -- the machine's
   virtio-blk is the scratch disk the filesystem tests run on, so a
   boot-time suite that removes it destroys the run.
-- **What the straggler kick is worth is an open question**, added by
-  that unit rather than struck by it. **Taken up by
-  `docs/audit/next-subsystem-straggler-kick.md`** (not struck until it
-  lands), which takes the *measurement* rather than any of the three
+- ~~**What the straggler kick is worth is an open question**, added by
+  that unit rather than struck by it.~~ -- **ANSWERED (PR #179): it
+  works, rarely.** 161 kicks sent, 7 publishes attributed over six
+  boots, three per architecture -- about four per cent -- so by the
+  decision rule the report fixed before measuring, the kick stays and
+  deletion is off the table. **The population the kick's own comment
+  named is not the reason**: the adversary was built as designed and
+  showed that a CPU whose tick keeps landing inside a short read-side
+  section publishes *without* a kick, because `schedule()` publishes at
+  entry and the covered tick still sets `need_resched`. The publish was
+  never confined to the trap return. Where the four per cent comes from
+  is the open part now, and it is a question the counter can answer.
+  The report, `docs/audit/next-subsystem-straggler-kick.md`, took the
+  *measurement* rather than any of the three
   outcomes: nothing in the tree counts a kick that **worked**, so no
   counter would change if the kick were replaced by a no-op, and the
   choice between deleting it, bounding it and proving it cannot be made

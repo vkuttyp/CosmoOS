@@ -65,7 +65,8 @@ constitution's section 52 fields.
 ## kernel/ipi.h
 
 ### `enum ipi_kind`
-`IPI_RESCHEDULE`, `IPI_CALL`, `IPI_TLB_FLUSH`, `IPI_HALT`, `IPI_SAMPLE`
+`IPI_RESCHEDULE`, `IPI_CALL`, `IPI_TLB_FLUSH`, `IPI_HALT`, `IPI_SAMPLE`,
+`IPI_QUIESCE_KICK`
 (record this CPU's frame for a lockup report: `lockup_answer`; the
 fallback where the architecture has no NMI-class interrupt),
 `IPI_KIND_COUNT`. Vectors are allocated at `ipi_init` from the dynamic

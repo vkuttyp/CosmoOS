@@ -79,6 +79,8 @@ bool selftest_quiesce_straggler(const char **reason);
 bool selftest_quiesce_wake(const char **reason);
 bool selftest_quiesce_straggler_system(const char **reason);
 bool selftest_quiesce_straggler_idle(const char **reason);
+bool selftest_quiesce_kick_population(const char **reason);
+bool selftest_quiesce_kick_spinner(const char **reason);
 bool selftest_quiesce_grace(const char **reason);
 bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);

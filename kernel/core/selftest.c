@@ -416,6 +416,8 @@ static const struct selftest tests[] = {
     { "quiesce-wake",    selftest_quiesce_wake },
     { "quiesce-straggler-system", selftest_quiesce_straggler_system },
     { "quiesce-straggler-idle", selftest_quiesce_straggler_idle },
+    { "quiesce-kick-population", selftest_quiesce_kick_population },
+    { "quiesce-kick-spinner", selftest_quiesce_kick_spinner },
     { "quiesce-grace",   selftest_quiesce_grace },
     { "quiesce-call",    selftest_quiesce_call },
     { "irq-sync",        selftest_irq_sync },

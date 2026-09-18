@@ -89,8 +89,16 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
          * and it is the preemption point. The switch happens here, on the
          * interrupted thread's stack; the iretq completes when it is
          * switched back. */
+        /* Cleared unconditionally, whether or not this return publishes:
+         * the flag must not outlive the trap that set it, or a later
+         * unrelated return would claim a publish the kick did not cause
+         * (docs/kernel/quiesce/invariants.md, Q19). */
+        bool kicked = pc->quiesce_kicked;
+        pc->quiesce_kicked = false;
         if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->rflags & RFLAGS_IF)) {
             quiesce_note_quiescent_preemptible();
+            if (kicked)
+                quiesce_note_kick_published();
             if (pc->need_resched)
                 sched_preempt();
         }

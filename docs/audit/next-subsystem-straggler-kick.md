@@ -1,8 +1,52 @@
 # NEXT SUBSYSTEM — what the straggler kick is worth
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #179), and the banner below records where the build differed from
+it.
+
+**THE ANSWER: the kick works, rarely — and the report expected the
+opposite.** Over six boots, three per architecture: **161 kicks sent, 7
+publishes attributed, about four per cent.** The decision rule fixed
+below before the measurement says a counter that rises anywhere means
+the kick works and the follow-up bounds it. It rose on both
+architectures, reproducibly, so **deletion is off the table** — which
+this report called "the likely outcome" three times.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The population this report named is not the reason the kick
+   works.** The adversary was built exactly as designed, phase-locking a
+   short read-side section over the target CPU's own tick, and it
+   showed the opposite of what it was built to show: **that population
+   publishes without any kick.** `schedule()` publishes at entry
+   (`sched.c`), and the covered tick still sets `need_resched`, so the
+   `preempt_enable` ending the very section that hid the tick runs
+   `sched_preempt` and publishes a moment later. **The publish is not
+   confined to the trap return**, which is the premise the whole
+   "helpable population" story rested on — including the code comment
+   this unit was written to settle. The test is kept as
+   `quiesce-kick-population` and asserts what is true: the grace period
+   completes while ticks are being covered.
+2. **So the report's central prediction was wrong twice over**: the
+   adversary *was* buildable (the inventory said no deterministic test
+   could arrange the coincidence), and arranging it disproved rather
+   than proved the mechanism. What the four per cent comes from is not
+   identified here: it is some other population, and naming it is not
+   this unit's job now that the counter exists to find it.
+3. **`quiesce-kick-attributed` is not a test in the tree.** The report's
+   test table named it as the positive case. Since the arranged
+   population publishes without a kick, a test asserting an attributed
+   publish would be asserting a coincidence and would flake. The
+   positive evidence is the whole-boot counter on the
+   `quiesce: straggler kicks sent N, publishes attributed M` line
+   instead, and the test that replaced it asserts the mechanism it
+   actually demonstrated.
+4. **Two docs were already stale before this unit touched them.**
+   `docs/kernel/interrupt/controllers.md` and
+   `docs/kernel/smp/architecture.md` both enumerate the IPI kinds and
+   both omitted `IPI_SAMPLE`, which predates this work. Fixed to match
+   the header rather than merely appended to.
 
 **Subsystem: a straggler kick that can be shown to work, or deleted.**
 After eight milliseconds of waiting, `synchronize_quiesce` sends

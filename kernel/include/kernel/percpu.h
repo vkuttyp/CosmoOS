@@ -60,6 +60,11 @@ struct percpu {
     uint64_t stall_ns;          /* soft: time this CPU has run one thread while others waited */
     uint64_t last_switches;
     bool soft_reported;
+    /* Set by the straggler kick's handler, read and cleared by the trap
+     * tail on the way out -- so it is true only inside the one trap the
+     * kick caused, and a publish that sees it set happened in that
+     * return (docs/kernel/quiesce/invariants.md, Q19). */
+    bool quiesce_kicked;
     unsigned watch_target;      /* hard: the CPU this one watches (lockup_watch_target) */
     uint64_t watch_ticks;       /* ... its tick count when last seen to change */
     uint64_t watch_stall_ns;

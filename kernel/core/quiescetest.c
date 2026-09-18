@@ -11,6 +11,7 @@
  */
 
 #include <kernel/interrupt.h>
+#include <kernel/ipi.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/percpu.h>
@@ -89,10 +90,14 @@ static bool threads_settle(unsigned expected)
  * the spinner's side is asserted (it is *not* helped -- the wait
  * outlasts the section), the system's side is asserted (other CPUs keep
  * working), and the idle case is asserted to need no kick at all. What
- * the kick is worth for the one population it could help -- a CPU whose
- * tick keeps colliding with a short disabled region -- is left as a
- * question, because arranging that is a phase coincidence and a test
- * that cannot be made deterministic is not worth having.
+ * the kick is worth for the one population it could help -- a CPU
+ * whose tick keeps colliding with a short disabled region -- WAS left as
+ * a question here, on the grounds that arranging it is a phase
+ * coincidence no deterministic test could manage. That was wrong, and
+ * `quiesce-kick-attributed` below arranges it: the coincidence is only
+ * a coincidence if you wait for it, and the adversary does not wait --
+ * it reads this CPU's last tick and covers the next one on purpose
+ * (docs/audit/next-subsystem-straggler-kick.md).
  */
 
 struct straggler_reader {
@@ -180,6 +185,231 @@ bool selftest_quiesce_straggler(const char **reason)
     kinfo("selftest: quiesce-straggler: %u kick(s) from this waiter over a %llu ms wait, and the spinner was not "
           "helped by any of them",
           kicks, (unsigned long long)(waited_ns / 1000000));
+    return true;
+#endif
+}
+
+
+/* --- quiesce-kick-attributed: the population the kick can help --- */
+
+/*
+ * The adversary, and it is built from the mechanism rather than from a
+ * stopwatch.
+ *
+ * A CPU publishes only at an interrupt return taken while it is outside
+ * every read-side section: `quiesce_read_unlock` is `preempt_enable`
+ * and publishes nothing. So a CPU that cycles through short sections
+ * and whose *periodic tick* keeps landing inside one never publishes,
+ * however quiescent it is between them -- and that is the only
+ * population a straggler kick can help, because a kick at an unrelated
+ * phase lands outside a section and its trap tail publishes.
+ *
+ * Arranged, not waited for: each iteration reads this CPU's last tick,
+ * spins OUTSIDE a section until just before the next one is due, then
+ * covers it with a short section. The tick lands inside every time; the
+ * kick, whose phase has nothing to do with the tick, lands outside.
+ */
+#if CONFIG_DEBUG
+struct kick_adv {
+    volatile unsigned entered;
+    volatile unsigned stop;
+    volatile unsigned covered;   /* sections that spanned an expected tick */
+};
+
+#define KICK_GUARD_NS 250000ull   /* 250 us either side of the expected tick */
+
+static void kick_adversary_main(void *arg)
+{
+    struct kick_adv *a = arg;
+    struct percpu *pc = this_cpu();
+    __atomic_store_n(&a->entered, 1u, __ATOMIC_RELEASE);
+
+    while (!__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
+        uint64_t last = __atomic_load_n(&pc->last_tick_ns, __ATOMIC_RELAXED);
+        uint64_t next = last + TICK_NS;
+        uint64_t now = clock_now_ns();
+        /* Too late to cover this one: stay outside and pick up the next.
+         * Outside is where a kick can publish, so this is not idle time. */
+        if (now + KICK_GUARD_NS >= next) {
+            arch_cpu_relax();
+            continue;
+        }
+        while (clock_now_ns() + KICK_GUARD_NS < next &&
+               !__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE))
+            arch_cpu_relax();
+
+        quiesce_read_lock();
+        uint64_t end = next + KICK_GUARD_NS;
+        while (clock_now_ns() < end)
+            arch_cpu_relax();
+        quiesce_read_unlock();
+        __atomic_fetch_add(&a->covered, 1u, __ATOMIC_RELAXED);
+    }
+}
+#endif /* CONFIG_DEBUG */
+
+bool selftest_quiesce_kick_population(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: quiesce-kick-population: needs the debug kick count; skipping");
+    return true;
+#else
+    unsigned threads0 = thread_count();
+    unsigned cpu = other_cpu();
+    if (cpu == 0) {
+        kinfo("selftest: quiesce-kick-population: one CPU, nothing to kick");
+        return true;
+    }
+
+    struct kick_adv a = { 0 };
+    struct thread *t = thread_create_on(kick_adversary_main, &a, "qkick",
+                                        SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    CHECK(wait_flag(&a.entered, 1000));
+
+    uint64_t pub0 = quiesce_kick_publishes(cpu);
+    unsigned covered0 = __atomic_load_n(&a.covered, __ATOMIC_RELAXED);
+    uint64_t t0 = clock_now_ns();
+    unsigned kicks = quiesce_test_sync_kicks();
+    uint64_t waited_ns = clock_since_ns(t0);
+    uint64_t pub1 = quiesce_kick_publishes(cpu);
+    unsigned covered1 = __atomic_load_n(&a.covered, __ATOMIC_RELAXED);
+
+    __atomic_store_n(&a.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t);
+
+    /*
+     * The claim, and it is the opposite of what this test was written to
+     * find. The adversary arranges the one population the kick's comment
+     * says it can help -- a CPU whose tick keeps landing inside a short
+     * read-side section -- and the grace period completes ANYWAY, while
+     * that is still happening. It has to: `schedule()` publishes at
+     * entry (`sched.c`), and the covered tick still sets `need_resched`,
+     * so the `preempt_enable` at the end of the very section that hid
+     * the tick runs `sched_preempt` and publishes a moment later. The
+     * publish is not confined to the trap return, so hiding ticks from
+     * the trap return does not keep a CPU pending.
+     *
+     * Asserted as "it completed while ticks were being covered", not as
+     * a duration: a wait that completes is proof the CPU published, and
+     * `synchronize_quiesce` would panic at ten seconds if it had not.
+     * The kick and attribution figures are REPORTED, not asserted --
+     * under load a kick can be sent and can coincidentally land outside
+     * a section, and neither outcome changes the finding.
+     */
+    CHECK(covered1 > covered0);          /* ticks were being covered across the wait */
+    CHECK(threads_settle(threads0));
+
+    kinfo("selftest: quiesce-kick-population: %u tick(s) covered across a %llu ms grace period on "
+          "cpu%u; %u kick(s) sent, %llu publish(es) attributed -- the population the kick names "
+          "publishes without it, because schedule() publishes too",
+          covered1 - covered0, (unsigned long long)(waited_ns / 1000000), cpu,
+          kicks, (unsigned long long)(pub1 - pub0));
+    return true;
+#endif
+}
+
+/* --- quiesce-kick-spinner: the negative control, and the IPI kind --- */
+
+/*
+ * A counter that only ever goes up is not attribution. This is the half
+ * that gives `kick_publishes` its meaning: a CPU spinning INSIDE a
+ * read-side section takes every kick and publishes none of them,
+ * because its trap tail sees `preempt_count != 0`.
+ *
+ * Sampled while the section is provably still held -- the grace period
+ * runs on its own thread so this one can look mid-flight -- because
+ * after the section ends a kick may legitimately publish, and that
+ * would be a correct attribution rather than a failure.
+ */
+#if CONFIG_DEBUG
+struct kick_spin {
+    unsigned hold_ms;
+    volatile unsigned entered;
+    volatile unsigned done;
+    volatile uint64_t kick_ipis_before;
+    volatile uint64_t kick_ipis_after;
+};
+
+static void kick_spinner_main(void *arg)
+{
+    struct kick_spin *s = arg;
+    quiesce_read_lock();
+    /* Read on this CPU, which is the only place ipi_count can see it. */
+    s->kick_ipis_before = ipi_count(IPI_QUIESCE_KICK);
+    __atomic_store_n(&s->entered, 1u, __ATOMIC_RELEASE);
+    uint64_t end = clock_now_ns() + MS(s->hold_ms);
+    while (clock_now_ns() < end)
+        arch_cpu_relax();
+    s->kick_ipis_after = ipi_count(IPI_QUIESCE_KICK);
+    __atomic_store_n(&s->done, 1u, __ATOMIC_RELEASE);
+    quiesce_read_unlock();
+}
+
+static void kick_waiter_main(void *arg)
+{
+    unsigned *done = arg;
+    synchronize_quiesce();
+    __atomic_store_n(done, 1u, __ATOMIC_RELEASE);
+}
+#endif /* CONFIG_DEBUG */
+
+bool selftest_quiesce_kick_spinner(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: quiesce-kick-spinner: needs the debug kick count; skipping");
+    return true;
+#else
+    unsigned threads0 = thread_count();
+    unsigned cpu = other_cpu();
+    if (cpu == 0) {
+        kinfo("selftest: quiesce-kick-spinner: one CPU, nothing to straggle");
+        return true;
+    }
+
+    struct kick_spin s = { .hold_ms = 40 };
+    unsigned waiter_done = 0;
+    struct quiesce_stats before, mid;
+
+    struct thread *sp = thread_create_on(kick_spinner_main, &s, "qkspin",
+                                         SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(sp != NULL);
+    CHECK(wait_flag(&s.entered, 1000));
+
+    uint64_t pub0 = quiesce_kick_publishes(cpu);
+    quiesce_get_stats(&before);
+    struct thread *w = thread_create(kick_waiter_main, &waiter_done,
+                                     "qkwait", SCHED_PRIO_DEFAULT);
+    CHECK(w != NULL);
+
+    /* Past the 2 * TICK_NS threshold so kicks have gone out, and short
+     * of the 40 ms section so the spinner is provably still inside. */
+    uint64_t sample_at = clock_now_ns() + MS(25);
+    while (clock_now_ns() < sample_at)
+        sched_yield();
+    bool still_in = __atomic_load_n(&s.done, __ATOMIC_ACQUIRE) == 0;
+    uint64_t pub_mid = quiesce_kick_publishes(cpu);
+    quiesce_get_stats(&mid);
+
+    thread_join(sp);
+    CHECK(wait_flag(&waiter_done, 5000));
+    thread_join(w);
+
+    /* Kicks were sent while it sat there ... */
+    CHECK(still_in);
+    CHECK(mid.straggler_ipis > before.straggler_ipis);
+    CHECK(s.kick_ipis_after > s.kick_ipis_before);   /* and the target took them */
+    /* ... and not one of them published. This is the assertion that
+     * would fail if someone made the trap tail publish without checking
+     * preempt_count, or let the kick flag outlive its own trap. */
+    CHECK(pub_mid == pub0);
+    CHECK(threads_settle(threads0));
+
+    kinfo("selftest: quiesce-kick-spinner: %llu kick(s) taken on cpu%u inside a read-side section, "
+          "0 published -- the kick cannot help a spinner",
+          (unsigned long long)(s.kick_ipis_after - s.kick_ipis_before), cpu);
     return true;
 #endif
 }

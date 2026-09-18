@@ -61,6 +61,12 @@ void quiesce_note_quiescent(void);
  * plain form is what the scheduler's own quiescent points use, because a
  * wake from inside the scheduler re-enters it (invariant Q-W). */
 void quiesce_note_quiescent_preemptible(void);
+/* This CPU published inside a straggler kick's own trap return. Called
+ * from the architecture trap tails only (invariant Q19). */
+void quiesce_note_kick_published(void);
+/* Publishes attributed to a kick on `cpu`. Per-CPU, not per-waiter:
+ * see the definition for why no per-waiter figure is available. */
+uint64_t quiesce_kick_publishes(unsigned cpu);
 
 /* Wait for one grace period over the CPUs online now: every one of them
  * passes a quiescent state after this call began. Sleeps; never with a
@@ -79,7 +85,13 @@ struct quiesce_stats {
     uint64_t synchronizes;       /* synchronize_quiesce calls completed */
     uint64_t callbacks;          /* call_quiesce callbacks run */
     uint64_t max_wait_ns;        /* longest grace period observed */
-    uint64_t straggler_ipis;     /* reschedule IPIs sent to slow CPUs */
+    uint64_t straggler_ipis;     /* straggler kicks sent to slow CPUs */
+    /* Kicks that WORKED, machine-wide: a publish that happened in a
+     * kick's own trap return. `straggler_ipis` counts kicks sent, so
+     * before this counter existed no number in the tree would have
+     * changed if the kick were replaced by a no-op
+     * (docs/audit/next-subsystem-straggler-kick.md). */
+    uint64_t kick_publishes;
     /* How a waiter's block ENDED, not that it happened: on more than one
      * CPU the waiter always blocks, because the epoch it waits for was
      * bumped a moment earlier and nobody has published it yet. With the
