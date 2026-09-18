@@ -96,8 +96,11 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
         bool kicked = pc->quiesce_kicked;
         pc->quiesce_kicked = false;
         if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->rflags & RFLAGS_IF)) {
-            quiesce_note_quiescent_preemptible();
-            if (kicked)
+            /* Attributed only when the publish ADVANCED this CPU's
+             * epoch: a redundant publish tells no waiter anything, so
+             * counting it would say the kick worked when it did not
+             * (Q19). */
+            if (quiesce_note_quiescent_preemptible() && kicked)
                 quiesce_note_kick_published();
             if (pc->need_resched)
                 sched_preempt();

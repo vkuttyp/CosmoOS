@@ -57,7 +57,7 @@ static struct waitqueue g_gp_wq = WAITQUEUE_INIT(g_gp_wq);
 
 void quiesce_note_quiescent(void)
 {
-    quiesce_core_publish(&g_state, arch_cpu_id());
+    (void)quiesce_core_publish(&g_state, arch_cpu_id());
     /* No wake here: see quiesce_note_quiescent_preemptible. This is
      * called from inside the scheduler, including the AP bring-up path
      * that holds a run-queue lock with interrupts off (sched.c), and a
@@ -107,9 +107,14 @@ uint64_t quiesce_kick_publishes(unsigned cpu)
     return __atomic_load_n(&g_kick_publishes[cpu], __ATOMIC_RELAXED);
 }
 
-void quiesce_note_quiescent_preemptible(void)
+bool quiesce_note_quiescent_preemptible(void)
 {
-    quiesce_note_quiescent();
+    /* Published here rather than through quiesce_note_quiescent so the
+     * caller learns whether this publish ADVANCED this CPU's epoch. A
+     * trap tail attributes a straggler kick only to a publish that did:
+     * a redundant one is correct and cheap but tells no waiter anything,
+     * and counting it would say the kick worked when it did not (Q19). */
+    bool advanced = quiesce_core_publish(&g_state, arch_cpu_id());
     if (g_ready && !waitqueue_empty(&g_gp_wq)) {
         /* Atomic: this runs from every CPU's trap return and idle loop at
          * once, so a plain += loses increments -- and the test asserts on
@@ -117,6 +122,7 @@ void quiesce_note_quiescent_preemptible(void)
          * wrong number. */
         __atomic_fetch_add(&g_stats.gp_wakes, waitqueue_wake_all(&g_gp_wq), __ATOMIC_RELAXED);
     }
+    return advanced;
 }
 
 void quiesce_read_lock_debug(void)
@@ -205,12 +211,21 @@ static unsigned sync_quiesce_counting(unsigned *timeouts)
              * meaning (`docs/audit/next-subsystem-straggler-kick.md`,
              * invariant Q19).
              */
+            unsigned sent = 0;
             for (unsigned c = 0; c < cpu_count(); c++) {
-                if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c))
+                if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c)) {
                     ipi_send(c, IPI_QUIESCE_KICK);
+                    sent++;
+                }
             }
-            kicks++;
-            g_stats.straggler_ipis++;
+            if (sent != 0) {
+                kicks++;   /* rounds, which is what the eight-round bound counts */
+                /* IPIs, which is what "kicks sent" has to mean if it is
+                 * ever a denominator: a round can kick several CPUs.
+                 * Atomic because concurrent waiters both reach here and a
+                 * plain ++ loses their updates. */
+                __atomic_fetch_add(&g_stats.straggler_ipis, sent, __ATOMIC_RELAXED);
+            }
         }
         if (waited > NS_PER_SEC && !warned) {
             kwarn("quiesce: grace period %llu waiting %llu ms for CPU mask 0x%llx", (unsigned long long)target,

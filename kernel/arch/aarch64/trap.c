@@ -123,8 +123,10 @@ static void handle_irq(struct arch_trap_frame *frame)
      * interrupted context holds no spinlock, is not an interrupt, and had
      * interrupts enabled. */
     if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->spsr & DAIF_I) == 0) {
-        quiesce_note_quiescent_preemptible();
-        if (kicked)
+        /* Attributed only when the publish ADVANCED this CPU's epoch:
+         * a redundant publish tells no waiter anything, so counting it
+         * would say the kick worked when it did not (Q19). */
+        if (quiesce_note_quiescent_preemptible() && kicked)
             quiesce_note_kick_published();
         if (pc->need_resched)
             sched_preempt();

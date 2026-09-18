@@ -2648,11 +2648,17 @@ See [docs/development.md](docs/development.md).
   clearing it unconditionally** before deciding whether it may publish,
   so the flag cannot outlive the trap that set it and claim a later
   publish. Invariant **Q19**.
-  **The answer: it works, rarely — 161 kicks sent, 7 publishes
-  attributed over six boots, three per architecture, about four per
-  cent.** The decision rule was written down before the measurement, and
-  it says a counter that rises means the kick stays; deletion, which the
-  report called the likely outcome three times, is off the table.
+  **The answer: it works, but barely — one attributed publish in eight
+  boots, about 220 kick IPIs, and that one on AArch64.** The decision
+  rule was written down before the measurement, and it says a counter
+  that rises means the kick stays; deletion, which the report called the
+  likely outcome three times, is off the table — on evidence thin enough
+  that the follow-up should widen the sample first. **A first version of
+  this said four per cent and was wrong**: it counted publishes by a CPU
+  that had *already* published the target epoch, which are correct,
+  cheap, and advance nothing. Attribution now requires the publish to
+  have **moved** this CPU's epoch, which took the rate from 7-in-161 to
+  1-in-220.
   **And the population the kick's own comment named is not the reason.**
   The adversary was built as designed — phase-locking a short read-side
   section over the target CPU's tick — and showed the opposite of what
@@ -2661,8 +2667,8 @@ See [docs/development.md](docs/development.md).
   `need_resched`, so the `preempt_enable` ending the section that hid
   the tick publishes a moment later. The publish was never confined to
   the trap return, which is the premise the story rested on. Where the
-  four per cent comes from is now a question the counter can answer and
-  argument could not.
+  the one attributed publish came from is now a question the counter can
+  answer and argument could not.
   The other half of the measurement is the half that makes it
   attribution rather than a tally: `quiesce-kick-spinner` takes eight
   kicks inside a read-side section and publishes **none** of them. A

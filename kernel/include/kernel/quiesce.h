@@ -60,7 +60,10 @@ void quiesce_note_quiescent(void);
  * context holding no lock and able to schedule -- the trap returns. The
  * plain form is what the scheduler's own quiescent points use, because a
  * wake from inside the scheduler re-enters it (invariant Q-W). */
-void quiesce_note_quiescent_preemptible(void);
+/* Returns true when the publish advanced this CPU's epoch -- i.e. told a
+ * waiter something new. The trap tails use it to attribute a straggler
+ * kick only to a publish that moved something (invariant Q19). */
+bool quiesce_note_quiescent_preemptible(void);
 /* This CPU published inside a straggler kick's own trap return. Called
  * from the architecture trap tails only (invariant Q19). */
 void quiesce_note_kick_published(void);
@@ -85,7 +88,12 @@ struct quiesce_stats {
     uint64_t synchronizes;       /* synchronize_quiesce calls completed */
     uint64_t callbacks;          /* call_quiesce callbacks run */
     uint64_t max_wait_ns;        /* longest grace period observed */
-    uint64_t straggler_ipis;     /* straggler kicks sent to slow CPUs */
+    /* Straggler kick IPIs SENT -- one per pending CPU per round, not one
+     * per round: a round can kick several CPUs, so this is the only one
+     * of the two that can be a denominator. The per-waiter
+     * `quiesce_test_sync_kicks` counts rounds, which is what the
+     * eight-round bound is about. */
+    uint64_t straggler_ipis;
     /* Kicks that WORKED, machine-wide: a publish that happened in a
      * kick's own trap return. `straggler_ipis` counts kicks sent, so
      * before this counter existed no number in the tree would have

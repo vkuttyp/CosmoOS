@@ -346,16 +346,22 @@ tree.
   boot-time suite that removes it destroys the run.
 - ~~**What the straggler kick is worth is an open question**, added by
   that unit rather than struck by it.~~ -- **ANSWERED (PR #179): it
-  works, rarely.** 161 kicks sent, 7 publishes attributed over six
-  boots, three per architecture -- about four per cent -- so by the
-  decision rule the report fixed before measuring, the kick stays and
-  deletion is off the table. **The population the kick's own comment
+  works, but barely.** About 220 kick IPIs sent and **1 publish
+  attributed** over eight boots, four per architecture, the one on
+  AArch64 -- so by the decision rule the report fixed before measuring
+  the kick stays and deletion is off the table, on evidence thin enough
+  that the follow-up should widen the sample first. A first version of
+  the measurement said four per cent and was wrong: it counted publishes
+  by CPUs that had already published the target epoch, which advance
+  nothing. Attribution now requires the publish to have MOVED this CPU's
+  epoch. **The population the kick's own comment
   named is not the reason**: the adversary was built as designed and
   showed that a CPU whose tick keeps landing inside a short read-side
   section publishes *without* a kick, because `schedule()` publishes at
   entry and the covered tick still sets `need_resched`. The publish was
-  never confined to the trap return. Where the four per cent comes from
-  is the open part now, and it is a question the counter can answer.
+  never confined to the trap return. Which population the one attributed
+  publish came from is the open part now, and it is a question the
+  counter can answer and argument could not.
   The report, `docs/audit/next-subsystem-straggler-kick.md`, took the
   *measurement* rather than any of the three
   outcomes: nothing in the tree counts a kick that **worked**, so no

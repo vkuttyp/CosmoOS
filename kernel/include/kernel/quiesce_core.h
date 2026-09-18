@@ -36,11 +36,18 @@ struct quiesce_state {
  * read section sees the unlinks that preceded the epoch advance; release
  * the publication so every access in the read sections before this point
  * is ordered before the value the waiter will acquire. */
-static inline void quiesce_core_publish(struct quiesce_state *st, unsigned cpu)
+/* Returns true when this publish MOVED this CPU's seen epoch, i.e. when
+ * it told a waiter something it did not already know. A publish by a CPU
+ * that has already published the current epoch is correct and cheap, but
+ * it advances nothing -- and attributing one of those to a straggler
+ * kick would count the kick as having worked when it did not
+ * (docs/kernel/quiesce/invariants.md, Q19). */
+static inline bool quiesce_core_publish(struct quiesce_state *st, unsigned cpu)
 {
     uint64_t e = __atomic_load_n(&st->epoch, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&st->cpus[cpu].seen_epoch, e, __ATOMIC_RELEASE);
+    uint64_t prev = __atomic_exchange_n(&st->cpus[cpu].seen_epoch, e, __ATOMIC_ACQ_REL);
     st->cpus[cpu].transitions++;
+    return prev != e;
 }
 
 /* W1: begin a grace period. Sequentially consistent so the caller's

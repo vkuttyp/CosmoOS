@@ -227,8 +227,13 @@ of what the handler did.)
 counts kicks sent and `kick_publishes` counts kicks that worked; before
 the second existed, no number in this tree would have changed if the
 kick were replaced by a no-op. Over six boots, three per architecture:
-**161 kicks sent, 7 publishes attributed — about four per cent.** The
-kick is therefore kept, and `quiesce-kick-population` records why the
+**about 220 kick IPIs sent, 1 publish attributed** — once, on AArch64.
+The kick is therefore kept, on thin evidence. **Attribution requires the
+publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`
+reports it): a publish by a CPU that has already published the target
+epoch is correct and cheap and tells no waiter anything, and counting
+one said the kick worked when it had not. Counting those took the
+apparent rate from 7-in-161 to 1-in-220. And `quiesce-kick-population` records why the
 obvious candidate population is *not* the reason: a CPU whose tick keeps
 landing inside a short read-side section publishes anyway, because
 `schedule()` publishes at entry and the covered tick still sets
