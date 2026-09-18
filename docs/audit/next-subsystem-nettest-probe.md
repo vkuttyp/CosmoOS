@@ -102,14 +102,14 @@ indistinguishable in the log.
    end without sending anything. Those are different defects in
    different parts of slirp. Also recorded: `SO_ERROR`.
 
-2. **How the connection ended, in three classes (the build added a fourth, `wrong-data`; see the banner) — which the harness
+2. **How the connection ended, in four classes — which the harness
    nearly knows already and throws away.** Both outcomes reach the
    roster as `0 byte(s)` today, so no sighting so far can say whether
    slirp closed its end or the harness merely timed out. That is the
    single most valuable bit the roster lacks.
 
-   It must be **three** classes, not two, and this is where the first
-   version of this probe was wrong in the case that matters. The loop
+   It must be **more than two**, and this is where the first version of
+   this probe was wrong in the case that matters. The loop
    reads
 
    ```python
@@ -131,6 +131,11 @@ indistinguishable in the log.
      flattened into one.
    - **`deadline`** — the receive budget expired with the connection
      still open and silent.
+   - **`wrong-data`** — the peer answered with something that is not the
+     request. The design first named only the three above; the loop
+     already had this path, and leaving it unlabelled would have put a
+     connection into the roster as "still open" when it was not (as
+     built; see the banner).
 
    No syscall, works on both platforms, and it is the portable half of
    probe 1.
@@ -139,8 +144,8 @@ indistinguishable in the log.
    the portable fallback and it does not work: a one-byte write to a
    socket in `CLOSE_WAIT` *succeeds*, because the local send buffer
    accepts it and `EPIPE` arrives only on a later write. An open peer
-   and a closed one would both record "write succeeded". The three
-   classes above and probe 1 cover everything it was meant to cover, so
+   and a closed one would both record "write succeeded". The classes
+   above and probe 1 cover everything it was meant to cover, so
    **the implementation does not write to the accepted socket at
    all** — which also keeps the probe from perturbing what it measures.
 
@@ -214,7 +219,7 @@ distinguish is worse than no counter, because it reads like evidence.
 ## Risks
 
 - **A probe can perturb what it measures.** This one does not: nothing
-  is written to the accepted socket, and the three end-classes are
+  is written to the accepted socket, and the four end-classes are
   recorded from reads the loop already performs. The echo probe opens
   its own connection and is taken only on the failure path, after the
   exchange has already failed and the run is lost anyway.
@@ -223,8 +228,9 @@ distinguish is worse than no counter, because it reads like evidence.
   slirp rather than at it — but it names no line of code, and the report
   should not promise one.
 - **`TCP_INFO`'s layout is kernel-specific.** Only byte 0 is read, and
-  only on Linux, with the **three end-classes** as the portable fallback
-  — `closed`, `error` with its errno, `deadline`. Not a write probe,
+  only on Linux, with the **four end-classes** as the portable fallback
+  — `closed`, `error` with its errno, `deadline`, `wrong-data`. Not a
+  write probe,
   which cannot tell an open peer from a closed one. Reading more of that
   struct would be borrowing trouble for no gain.
 

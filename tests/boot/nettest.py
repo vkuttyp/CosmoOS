@@ -84,7 +84,7 @@ def _tcp_state(sock):
     Linux only, and only byte 0 of TCP_INFO -- `tcpi_state`. The rest of
     that struct is kernel-specific and reading it would be borrowing
     trouble for no gain. macOS is where this is developed and Linux is
-    where CI runs, so None here is ordinary and the three end-classes
+    where CI runs, so None here is ordinary and the four end-classes
     carry the diagnosis on their own.
     """
     # Linux only, and enforced rather than assumed. macOS defines a
