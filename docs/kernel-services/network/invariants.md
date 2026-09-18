@@ -339,3 +339,46 @@ as POSIX asks). Gap: TCP takes no ICMP hard error at all, by decision —
 RFC 1122 §4.2.3.9 forbids aborting a connection on a soft one and
 `pcb->error` already carries the verdict the segments themselves give —
 so an errno only ICMP could supply never reaches a stream socket.
+
+**N22. A `struct netif *` that outlives the lock that found it holds a
+reference.** ARP and ND entries store the interface a resolution is for
+(`arp.c`, `ipv6.c`). Their ageing passes copy that pointer into a retry
+array under the table lock, release the lock, and then dereference it —
+`send_arp` reads `nif->mac` and `nif->ip4.addr`, `nd_send` the same. Both
+now take `netif_get` as they copy and `netif_put` after the send.
+
+**Taking the reference under the table lock is what makes it sound**, and
+the order matters: `arp_flush`/`nd_flush` take the same lock, so an entry
+present under it means `netif_unregister` step 5 has not run for that
+interface — and step 6's `kobject_put` is after step 5. The registry's
+reference is therefore still held, so the get cannot resurrect a dying
+object.
+
+**What the reference replaces is not the flush.** Before it, the safety
+of the retry rested on nothing at all: step 4's per-CPU barrier drains an
+`age_work` already queued, but `age_work` re-arms every `ARP_RETRY_NS`,
+so a retry could begin *after* the barrier, copy the pointer, and read it
+after step 6 freed the interface. Its own comment says the barrier is
+for `input_one` — the receive path — and it is. The retry survived by the
+timer not having fired.
+
+**Why entries do not hold a reference each.** The flush already clears
+them, so a per-entry reference would keep an interface alive until the
+next ageing pass rather than fixing anything, and would turn a missing
+flush from a dangling pointer into a leak. The dangling pointer is the
+defect.
+
+**The other holders, from the sweep this invariant is the result of.**
+`tapsvc` keeps a `struct netif *` for its service's lifetime and takes no
+reference; it is safe by explicit ordering — `tapsvc_stop` runs
+immediately before `tap_destroy` in the one teardown path
+(`tap.c`) — and that ordering, not a reference, is what a second teardown
+path would have to preserve. `nettest.c`'s two test fixtures hold one
+within the scope of a test that owns the interface.
+
+**Asserted by** `net-arp-retry-unregister` and `net-nd-retry-unregister`,
+which park a retry in that one-unlock window and run `netif_unregister`
+to completion against it: the driver's release must not have run, and the
+reference count must show the retry's hold. Without the `netif_get` the
+count assertion fails immediately, which is the reference's absence
+stated directly rather than a crash hoped for.

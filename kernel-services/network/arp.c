@@ -2,6 +2,7 @@
  * arp.c - Address resolution (RFC 826) with a fixed table.
  */
 
+#include <arch/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
@@ -226,6 +227,13 @@ void arp_flush(struct netif *nif)
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     for (unsigned i = 0; i < ARP_TABLE_SIZE; i++) {
         if (g_table[i].state != ARP_FREE && g_table[i].nif == nif) {
+            /* Counted, like the timeout path three lines of this file
+             * away already counts the identical event. A packet that
+             * vanishes because its interface went is not less gone than
+             * one that vanishes because resolution timed out
+             * (docs/audit/next-subsystem-arp-netif-ref.md). */
+            if (g_table[i].pending)
+                g_stats.pending_dropped++;
             m_freem(g_table[i].pending);
             memset(&g_table[i], 0, sizeof(g_table[i]));
             g_stats.entries--;
@@ -233,6 +241,44 @@ void arp_flush(struct netif *nif)
     }
     spin_unlock_irqrestore(&g_lock, s);
 }
+
+#if CONFIG_DEBUG
+/*
+ * The window this unit closes, held open on purpose.
+ *
+ * It is exactly one unlock wide -- between `arp_age` releasing `g_lock`
+ * with a netif pointer copied out and the send that dereferences it --
+ * so the test stops the retry *there* rather than racing
+ * `netif_unregister` against `age_work` and hoping. The same shape as
+ * `tcp_test_hold_callback` parking a timer callback inside the object it
+ * is about to use (docs/testing/flakes.md: a proof's adversary is built
+ * from the mechanism, not a stopwatch).
+ */
+static unsigned g_test_hold_retry;     /* park the next retry batch */
+static unsigned g_test_retry_parked;   /* it is parked, references taken */
+static unsigned g_test_retry_release;  /* let it send */
+
+void arp_test_hold_retry(bool on)
+{
+    __atomic_store_n(&g_test_retry_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_retry_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_retry, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool arp_test_retry_parked(void) { return __atomic_load_n(&g_test_retry_parked, __ATOMIC_ACQUIRE) != 0; }
+void arp_test_release_retry(void) { __atomic_store_n(&g_test_retry_release, 1u, __ATOMIC_RELEASE); }
+
+static void arp_test_park_retry(unsigned nr)
+{
+    if (!nr || !__atomic_load_n(&g_test_hold_retry, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_test_hold_retry, 0u, __ATOMIC_RELEASE);   /* one batch */
+    __atomic_store_n(&g_test_retry_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_retry_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+}
+#else
+static inline void arp_test_park_retry(unsigned nr) { (void)nr; }
+#endif
 
 /* Worker thread: retry incomplete entries, expire stale ones. */
 void arp_age(uint64_t now)
@@ -268,16 +314,36 @@ void arp_age(uint64_t now)
         }
         e->tries++;
         e->updated_ns = now;
+        /*
+         * A reference, because this pointer is about to outlive the lock
+         * that makes it safe.
+         *
+         * Taking it here is sound for a reason worth stating: `arp_flush`
+         * takes `g_lock` too, so while an entry is present under this
+         * lock the flush in `netif_unregister` step 5 has not run for
+         * that interface -- and step 6's `kobject_put` is after it. The
+         * registry's reference is therefore still held, and this get
+         * cannot resurrect a dead object.
+         *
+         * Without it the send loop below reads `nif->mac` after the lock
+         * is dropped, and `age_work` re-arms every ARP_RETRY_NS, so a
+         * retry can begin after `netif_unregister`'s per-CPU barrier and
+         * dereference the interface after it is freed (invariant N22).
+         */
+        netif_get(e->nif);
         retry[nr_retry].nif = e->nif;
         retry[nr_retry].ip = e->ip;
         nr_retry++;
     }
     spin_unlock_irqrestore(&g_lock, s);
 
+    arp_test_park_retry(nr_retry);
+
     static const uint8_t zero_mac[ETH_ALEN] = { 0 };
     for (unsigned i = 0; i < nr_retry; i++) {
         __atomic_fetch_add(&g_stats.requests_sent, 1, __ATOMIC_RELAXED);
         send_arp(retry[i].nif, ARP_OP_REQUEST, retry[i].ip, zero_mac, eth_broadcast);
+        netif_put(retry[i].nif);
     }
 }
 

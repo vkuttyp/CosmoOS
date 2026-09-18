@@ -107,6 +107,14 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_age(uint64_t now_ns);
 void nd_flush(struct netif *nif);   /* drop every entry that names the interface */
+#if CONFIG_DEBUG
+/* Park the next ND retry batch between its unlock and its send -- ND's
+ * twin of arp_test_hold_retry, for the window a netif reference closes
+ * (invariant N22). */
+void nd_test_hold_retry(bool on);
+bool nd_test_retry_parked(void);
+void nd_test_release_retry(void);
+#endif
 
 struct ip_stats {
     uint64_t rx, rx_bad_header, rx_bad_cksum, rx_not_for_us, rx_fragments, rx_unknown_proto, tx, tx_no_route;
@@ -117,6 +125,13 @@ struct ip_stats {
     uint64_t in_filtered;              /* dropped by the firewall's INPUT verdict (a guest tap -> the host) */
     uint64_t tx_filtered;              /* dropped by the firewall's OUTPUT verdict (the host's own egress) */
     uint64_t rx_offlink;               /* a locally-addressed datagram not for its ingress link's own address */
+    /* Packets waiting on neighbour discovery that were dropped because
+     * their interface went, plus ND's own give-up path -- the IPv6 twin
+     * of `arp_stats.pending_dropped`, which lives in a different struct
+     * because ARP and ND do not share one. **IPv6 only**: the IPv4
+     * instance of this struct never moves it and it stays zero there
+     * (docs/audit/next-subsystem-arp-netif-ref.md). */
+    uint64_t nd_pending_dropped;
     uint64_t hin_quiet;                /* host-chain DROP on TCP/UDP: delivered under M_FW_QUIET */
     uint64_t hin_filtered;             /* host-chain DROP on anything else: freed */
     uint64_t icmp_quiet_dropped;       /* M_FW_QUIET ICMP no consumer confirmed: freed, nothing answered */

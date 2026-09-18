@@ -1,8 +1,29 @@
 # NEXT SUBSYSTEM — the interface an ARP retry still points at
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #184), and the banner below records where the build differed from
+it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The invariant is N22, not the N24 the first draft's code comments
+   said.** The network invariants run to N21; six comments across five
+   files pointed at a number that did not exist. Swept before it became
+   a stale reference in the tree.
+2. **The bug-proof fails one assertion earlier than the report
+   predicted, and better.** The report expected the driver's release
+   hook to run while the retry held the pointer. With the `netif_get`
+   removed the test fails first at `kobject_refcount(&f.nif.obj) == 3` —
+   the reference's absence stated directly, rather than a consequence of
+   it observed afterwards.
+3. **The release build needed the test helpers guarded.**
+   `struct retry_park`, `arp_retry_main` and `nd_retry_main` are reached
+   only from `#if CONFIG_DEBUG` arms, so a release build failed on
+   `-Wunused-function`. The third time this tree has caught that shape.
+4. **`arp_resolve` returns `-EINPROGRESS`, not `-EAGAIN`**, for a
+   resolution it has queued a packet behind — found by the first run of
+   the test asserting the wrong one.
 
 **Subsystem: a `struct netif *` that outlives the lock protecting it.**
 ARP and ND entries hold a **bare** interface pointer and take no

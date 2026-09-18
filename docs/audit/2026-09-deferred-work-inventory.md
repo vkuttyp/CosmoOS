@@ -401,8 +401,8 @@ tree.
   interface pointers and rely on the flushes in `netif_unregister`.
   (`MODULE_MAX_LIVE`'s fixed 32-slot array and the zombie-module reaping
   below remain small debts and are untouched by the unit.)
-  **Taken up by `docs/audit/next-subsystem-arp-netif-ref.md`** (not
-  struck until it lands), **and the first two are not small**: the retry
+  ~~**Taken up by `docs/audit/next-subsystem-arp-netif-ref.md`**~~
+  **BUILT (PR #184): the first two are closed and were not small**: the retry
   paths in `arp_age` and `nd_age` copy that bare pointer out from under
   the table lock, release the lock, and then dereference it --
   `send_arp` reads `nif->mac` and `nif->ip4.addr`. The flush at

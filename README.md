@@ -2719,6 +2719,34 @@ See [docs/development.md](docs/development.md).
   it names the component and the shape, which thirty sightings had not.
   343 self-tests on both architectures, debug and release (PR #182).
 
+- **An ARP retry can no longer outlive the interface it points at.** ARP
+  and ND entries held a **bare** `struct netif *` and took no reference.
+  Their ageing passes copy that pointer out from under the table lock,
+  release the lock, and then dereference it — `send_arp` reads
+  `nif->mac`. Meanwhile `netif_unregister` flushes those tables and drops
+  what can be the last reference. **Nothing closed that window**: the
+  per-CPU barrier a step earlier is for the receive path, by its own
+  comment, and `age_work` re-arms every second — so a retry could begin
+  *after* the barrier and read the interface after it was freed. The code
+  survived by the timer not having fired.
+  Both retry lists now take `netif_get` as they copy and `netif_put`
+  after the send, which is sound because the flush takes the same lock:
+  an entry present under it means the unregister's flush has not run, so
+  the registry's reference is still held. Invariant **N22**, with the
+  sweep it came from — `tapsvc` holds one too and is safe by explicit
+  ordering, which the invariant now records rather than assumes.
+  Entries deliberately do **not** hold one each: the flush already
+  clears them, so per-entry references would turn a missing flush from a
+  dangling pointer into a leak without fixing the dangling pointer.
+  Flushing now also **counts what it drops** — `pending_dropped` for ARP
+  and a new `nd_pending_dropped` for ND, which keeps its statistics in a
+  different struct, so one fix was invisible to the other.
+  The tests park a retry in that one-unlock window and run
+  `netif_unregister` to completion against it, rather than racing two
+  threads: the driver's release must not have run, and the reference
+  count must show the retry's hold. 347 self-tests on both
+  architectures, debug and release (PR #184).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
