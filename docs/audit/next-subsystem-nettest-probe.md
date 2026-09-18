@@ -73,22 +73,47 @@ indistinguishable in the log.
    end without sending anything. Those are different defects in
    different parts of slirp. Also recorded: `SO_ERROR`.
 
-2. **How the connection ended — which the harness already knows and
-   throws away.** The select loop distinguishes a peer that closed
-   (`recv` returns b"", the `not chunk` branch) from one whose receive
-   deadline expired (the filter above it), and records **neither**: both
-   reach the roster as `0 byte(s)`. One field carries it, costs nothing,
-   needs no syscall and works everywhere. It is also the portable half
-   of probe 1: a graceful close from slirp shows up here as EOF.
+2. **How the connection ended, in three classes — which the harness
+   nearly knows already and throws away.** Both outcomes reach the
+   roster as `0 byte(s)` today, so no sighting so far can say whether
+   slirp closed its end or the harness merely timed out. That is the
+   single most valuable bit the roster lacks.
 
-   **A write probe was the first version of this and it does not
-   work.** A one-byte write to a socket in `CLOSE_WAIT` *succeeds* —
-   the local send buffer accepts it, and `EPIPE` arrives only on a later
-   write, after a reset. So an open peer and a closed one would both
-   record "write succeeded", which is exactly the non-discriminating
-   instrument this report says to avoid. A write is kept only as a
-   secondary, and only its **failure** is evidence; a success is not
-   evidence of liveness and the record must not imply it is.
+   It must be **three** classes, not two, and this is where the first
+   version of this probe was wrong in the case that matters. The loop
+   reads
+
+   ```python
+   try:
+       chunk = sock.recv(64)
+   except OSError:
+       chunk = b""
+   if not chunk:          # treated as "the peer closed"
+   ```
+
+   so a **reset is converted into an empty read and recorded as an
+   orderly close**. The failure under investigation involves a reset,
+   so a two-class probe would confidently give the wrong diagnosis
+   exactly when it is finally asked the question. The classes are:
+
+   - **`closed`** — `recv` returned `b""`: an orderly FIN from slirp.
+   - **`error`** — `recv` raised, and **the errno is recorded**:
+     `ECONNRESET` is a different event from a FIN and must not be
+     flattened into one.
+   - **`deadline`** — the receive budget expired with the connection
+     still open and silent.
+
+   No syscall, works on both platforms, and it is the portable half of
+   probe 1.
+
+   **No write probe.** The first version of this report proposed one as
+   the portable fallback and it does not work: a one-byte write to a
+   socket in `CLOSE_WAIT` *succeeds*, because the local send buffer
+   accepts it and `EPIPE` arrives only on a later write. An open peer
+   and a closed one would both record "write succeeded". The three
+   classes above and probe 1 cover everything it was meant to cover, so
+   **the implementation does not write to the accepted socket at
+   all** — which also keeps the probe from perturbing what it measures.
 
 3. **A timed probe through the same slirp**, to the guest's echo
    service on `127.0.0.1:tcp_port`, recording the connect and the echo
@@ -110,8 +135,9 @@ interpreted after the fact:
 
 | probe 3 | how it ended / state | reading |
 | --- | --- | --- |
-| **fast** | deadline, `ESTABLISHED`, 0 bytes | the path was alive and *this connection's* forwarding failed — a per-connection defect, and the first evidence pointing at one |
-| **fast** | EOF, or `CLOSE_WAIT` | slirp closed its end without forwarding; the question becomes why it gave up |
+| **fast** | `deadline`, `ESTABLISHED`, 0 bytes | the path was alive and *this connection's* forwarding failed — a per-connection defect, and the first evidence pointing at one |
+| **fast** | `closed` (FIN), or `CLOSE_WAIT` | slirp closed its end without forwarding; the question becomes why it gave up |
+| **fast** | `error` with `ECONNRESET` | slirp **reset** the host side too, not just the guest's — which would tie the two halves of the failure together for the first time |
 | **slow** | either | the path stalled — **slirp or the guest**, and this probe cannot say which. Separating them needs the guest's own timestamp for the same window, which is a follow-on and is named here so the reading is not over-claimed |
 
 The fast rows are the ones worth having. The slow row is recorded
@@ -139,34 +165,39 @@ Host tests, driving `NetTest` against fake peers, no boot:
 
 | test | asserts |
 | --- | --- |
-| `probe_open_peer` | a peer that connects, sends nothing and **stays open**: the connection is recorded as ending at the **deadline**, and (on Linux) `ESTABLISHED` |
-| `probe_closed_peer` | a peer that connects and **closes**: recorded as ending at **EOF**, and the reading **differs** from the case above |
+| `probe_open_peer` | a peer that connects, sends nothing and **stays open**: recorded as ending at the **deadline**, and (on Linux) `ESTABLISHED` |
+| `probe_closed_peer` | a peer that connects and **closes**: recorded as **`closed`**, and the reading differs from the case above |
+| `probe_reset_peer` | a peer that **resets** (`SO_LINGER` zero-timeout close): recorded as **`error`** with `ECONNRESET`, and differs from *both* — the case a two-class probe would have flattened into `closed` |
 | `probe_records_on_failure_only` | a successful exchange takes no probes and adds no latency to the healthy path |
 | `probe_survives_no_tcp_info` | with `TCP_INFO` unavailable the probes degrade to **how the connection ended** rather than raising — macOS is where this is developed and Linux is where it runs, and EOF-versus-deadline is available on both |
 
-**The bug-proof.** `probe_open_peer` and `probe_closed_peer` must
-produce *different* recorded readings; a probe that reports the same
-thing for an open peer and a closed one is not a probe. **This is not
-hypothetical**: the write probe this report first proposed fails exactly
-here, because a write into `CLOSE_WAIT` succeeds. That is the
+**The bug-proof.** The three peer cases must produce **three different**
+recorded readings. A probe that reports the same thing for an open peer,
+a closed one and a reset is not a probe. **Neither half of this is
+hypothetical**: the write probe this report first proposed fails it
+because a write into `CLOSE_WAIT` succeeds, and the two-class version
+fails it because `except OSError: chunk = b""` records a reset as an
+orderly close. That is the
 check that this instrument is not the tally's third confidently wrong
 answer — a counter that cannot distinguish the cases it was built to
 distinguish is worse than no counter, because it reads like evidence.
 
 ## Risks
 
-- **The probe can perturb what it measures.** Writing to the accepted
-  socket puts bytes into slirp's buffer. Mitigated by doing it only on
-  the failure path, after the exchange has already failed and the run is
-  lost anyway.
+- **A probe can perturb what it measures.** This one does not: nothing
+  is written to the accepted socket, and the three end-classes are
+  recorded from reads the loop already performs. The echo probe opens
+  its own connection and is taken only on the failure path, after the
+  exchange has already failed and the run is lost anyway.
 - **It may find nothing new.** If probe 3 is fast and the socket is
   ESTABLISHED, that is still a result — the first that points inside
   slirp rather than at it — but it names no line of code, and the report
   should not promise one.
 - **`TCP_INFO`'s layout is kernel-specific.** Only byte 0 is read, and
-  only on Linux, with **EOF-versus-deadline** as the portable fallback —
-  not the write, which cannot tell an open peer from a closed one.
-  Reading more of that struct would be borrowing trouble for no gain.
+  only on Linux, with the **three end-classes** as the portable fallback
+  — `closed`, `error` with its errno, `deadline`. Not a write probe,
+  which cannot tell an open peer from a closed one. Reading more of that
+  struct would be borrowing trouble for no gain.
 
 ## Alternatives considered
 
