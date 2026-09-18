@@ -236,6 +236,23 @@ measuring the host.
 
 ## `lockup-sample`, and a failure that was not a flake at all
 
+**`lockup-sample-busy` itself, three times on 2026-09-17 and 18**, at
+`lockuptest.c:399` (`el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 ms`): once on the
+socket-verdict branch, once on that branch's CI again, and once on a
+`main` run whose commit was a **documentation-only** merge — a report,
+no code at all. That last one is the clearest of the three: a tree that
+changed one Markdown file cannot have slowed a lockup sample.
+
+It is the load-sensitive family this file's list describes, and it is not
+*on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
+milliseconds of slack, and the slack is what a loaded host eats. Adding
+it to the list would mean widening the bound, and that is the trade the
+list exists to refuse when the bound is the property: a lockup sample
+that answers late is a lockup sample that did not work. What is recorded
+instead is the rate — three in two days, at least one on a tree that
+cannot have caused it — because the next unit to hit this should know it
+is not the first, and that re-running is the right first move.
+
 Three CI runs of one branch, 2026-09-17, failed three *different* tests.
 The branch was the VMState-layout unit: a compile-time assertion in a
 UAPI header, one self-test that runs in 7 ms, and documentation. It
