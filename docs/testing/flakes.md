@@ -703,4 +703,57 @@ without raising the rate. Every earlier local attempt was on aarch64,
 where it did not appear in eleven runs — the architecture decides where
 the loop runs, not what the defect is.
 
+**Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
+The count above is unchanged at twenty-one; what follows was induced on
+purpose and must not be tallied with the failures that happened by
+themselves. The harness listens on the back-connection port with a
+backlog of one (`nettest.py:47`) and accepts once, without checking what
+it accepted (`nettest.py:72`). Occupying that single slot before QEMU
+starts — one silent connection, opened behind an environment variable —
+reproduced the `net-harness` signature **on the first boot**: host
+`accept` succeeded at 76.6 s, read `0 of 12 bytes`, and gave up with
+`TimeoutError`, while the guest reported
+`connect 0 in 217 ms, sent 12, recv -104, pending error -104, rsts_in +1`.
+
+The capture taken during that boot is the part worth keeping:
+
+```
+418.239235  10.0.2.15.50546 > 10.0.2.2.51821  [S]                    SYN
+418.456149  10.0.2.2.51821 > 10.0.2.15.50546  [S.]                   SYN-ACK, 217 ms later
+418.456851  10.0.2.15.50546 > 10.0.2.2.51821  [P.] seq 1:13, len 12  the twelve bytes
+418.456873  10.0.2.2.51821 > 10.0.2.15.50546  [.]  ack 13            slirp acknowledges them
+428.422331  10.0.2.2.51821 > 10.0.2.15.50546  [R.]                   RST, ten seconds later
+```
+
+slirp acknowledged the twelve bytes into its own buffer, never delivered
+them, and reset the guest ten seconds later. The guest is correct at
+every step — which is the outcome `nettest.c`'s own comment predicted
+before it was ever observed.
+
+**A baseline, which this file did not have.** From a passing boot's
+capture: slirp answers the guest's SYN in **150 microseconds** and the
+whole exchange — SYN, SYN-ACK, twelve bytes each way, FIN with
+`seq 13, ack 13` — completes in **52 ms**. Every sighting above was read
+without that number. The induced run's `connect 0 in 217 ms` is three
+orders of magnitude off it.
+
+**Two hypotheses closed by measurement.** A backlog of one makes a second
+connect **hang silently** on this host — the SYN is dropped, `connect`
+does not refuse — so a stale connection both wins the `accept` and
+stalls the real one. And `free_port` is clean: **zero collisions in three
+thousand triples**, over the observed ephemeral range 49152–65535, so the
+three-port collision idea is dead.
+
+**What is still not established is the wild trigger.** The adversary was
+injected; nothing here says a foreign connection is what happens on CI.
+This names a mechanism the harness cannot currently report, not a cause.
+Taken up by `docs/audit/next-subsystem-nettest-accept.md`.
+
+**And one hour spent for nothing, recorded so it is not spent twice.**
+A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
+no failure. That is consistent with the paragraph above — aarch64 did
+not reproduce it in eleven earlier runs either — and is evidence about
+nothing. The local rate this file measures is **x86-64's**. Hunt on
+x86-64.
+
 Update this section and leave the rest alone.
