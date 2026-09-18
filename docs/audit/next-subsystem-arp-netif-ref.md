@@ -160,11 +160,11 @@ construction rather than by timing.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/arp.c` | `netif_get`/`netif_put` around the retry list; `pending_dropped` in `arp_flush` |
-| `kernel-services/network/ipv6.c` | the same for `nd_age` and `nd_flush` |
-| `kernel/include/kernel/netif.h` | the rule stated where the reference API is, not only for lookups |
+| `kernel-services/network/arp.c` | `netif_get`/`netif_put` around the retry list; `pending_dropped` in `arp_flush`; the debug park hook |
+| `kernel-services/network/ipv6.c` | the same for `nd_age` and `nd_flush`, plus `nd_pending_dropped` and ND's park hook |
+| ~~`kernel/include/kernel/netif.h`~~ | **not changed as built.** The rule is stated as invariant **N22** instead, where the sweep it came from can be recorded beside it; `netif.h:81`'s lookup sentence is correct as it stands and repeating the rule there would put it in two places |
 | `docs/kernel-services/network/design.md` | the ownership rule beside the interface lifetime |
-| `docs/kernel/quiesce/invariants.md` or the network invariants | the rule as an invariant, with what enforces it |
+| `docs/kernel-services/network/invariants.md` | **N22** — the rule, why taking the reference under the table lock is sound, why entries do not hold one each, and the other holders the sweep found (as built; the report named the quiesce file as an alternative and this is the network one) |
 | `kernel-services/network/nettest.c` | the tests in the table below, where every other `net-*` self-test lives — counted there and not here, because this row has already gone stale once |
 | `kernel/include/kernel/selftest.h` | their declarations |
 | `kernel/core/selftest.c` | their registry entries |

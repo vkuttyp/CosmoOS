@@ -1111,7 +1111,15 @@ bool selftest_net_arp_retry_unregister(const char **reason)
     arp_test_hold_retry(true);
     struct retry_park park = { .done = 0, .at_ns = clock_now_ns() + 2ull * NS_PER_SEC };
     struct thread *t = thread_create(arp_retry_main, &park, "arpretry", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    if (t == NULL) {
+        /* The hook is armed and the interface registered: neither may
+         * outlive a failure here. */
+        arp_test_hold_retry(false);
+        netif_unregister(&f.nif);
+        kobject_put(&f.nif.obj);
+        *reason = "could not create the retry thread";
+        return false;
+    }
     /* Bounded: a retry that never parks is a failure to report, not a
      * boot to hang (docs/testing/flakes.md). */
     uint64_t give_up = clock_now_ns() + 2ull * NS_PER_SEC;
@@ -1129,23 +1137,54 @@ bool selftest_net_arp_retry_unregister(const char **reason)
     }
 
     /* The retry holds a reference: creator + registry + retry. */
-    CHECK(kobject_refcount(&f.nif.obj) == 3);
+    /*
+     * Everything from here runs inside a block whose every exit reaches
+     * the cleanup below, because a retry left parked spins forever in
+     * arp_test_park_retry. A failing assertion that wedges a thread and
+     * leaves an interface registered does not just fail this test -- it
+     * contaminates every test after it, and the failure it reports is
+     * the least of what it did. The bug-proof for this unit takes the
+     * very first of these exits.
+     */
+    bool ok = false;
+    bool unregistered = false;
+    do {
+        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
 
-    /* Now tear the interface down completely while the retry is parked. */
-    netif_unregister(&f.nif);
-    /* THE ASSERTION. The registry's reference is gone and the flush has
-     * run, but the retry still holds the pointer -- so the driver must
-     * not have been released. Without the netif_get this is 1. */
-    CHECK(f.releases == 0);
-    CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + retry */
+        /* Tear the interface down completely while the retry is parked. */
+        netif_unregister(&f.nif);
+        unregistered = true;
+
+        /* THE ASSERTION. The registry's reference is gone and the flush
+         * has run, but the retry still holds the pointer -- so the
+         * driver must not have been released. */
+        CHECK_BREAK(f.releases == 0);
+        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 2);   /* creator + retry */
+        ok = true;
+    } while (0);
 
     arp_test_release_retry();
     thread_join(t);
-    CHECK(__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) == 1);
-    CHECK(kobject_refcount(&f.nif.obj) == 1);   /* the retry put it back */
+    if (!unregistered)
+        netif_unregister(&f.nif);
 
+    if (ok) {
+        if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
+            *reason = "the released retry never finished";
+            ok = false;
+        } else if (kobject_refcount(&f.nif.obj) != 1) {
+            *reason = "the retry did not put its reference back";
+            ok = false;
+        }
+    }
     kobject_put(&f.nif.obj);                    /* the creator's */
-    CHECK(f.releases == 1);
+    if (ok && f.releases != 1) {
+        *reason = "the interface was not released once the last reference went";
+        ok = false;
+    }
+    if (!ok)
+        return false;
+
     kinfo("selftest: net-arp-retry-unregister: a parked ARP retry kept the interface alive "
           "across netif_unregister; released once, after it let go");
     return true;
@@ -1264,7 +1303,15 @@ bool selftest_net_nd_retry_unregister(const char **reason)
     nd_test_hold_retry(true);
     struct retry_park park = { .done = 0, .at_ns = clock_now_ns() + 2ull * NS_PER_SEC };
     struct thread *t = thread_create(nd_retry_main, &park, "ndretry", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    if (t == NULL) {
+        /* The hook is armed and the interface registered: neither may
+         * outlive a failure here. */
+        nd_test_hold_retry(false);
+        netif_unregister(&f.nif);
+        kobject_put(&f.nif.obj);
+        *reason = "could not create the retry thread";
+        return false;
+    }
     uint64_t give_up = clock_now_ns() + 2ull * NS_PER_SEC;
     while (!nd_test_retry_parked()) {
         if (clock_now_ns() > give_up) {
@@ -1279,18 +1326,41 @@ bool selftest_net_nd_retry_unregister(const char **reason)
         sched_yield();
     }
 
-    CHECK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
-    netif_unregister(&f.nif);
-    CHECK(f.releases == 0);                     /* the retry still holds it */
-    CHECK(kobject_refcount(&f.nif.obj) == 2);
+    /* Same cleanup discipline as the ARP twin, for the same reason: a
+     * retry left parked spins forever. */
+    bool ok = false;
+    bool unregistered = false;
+    do {
+        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
+        netif_unregister(&f.nif);
+        unregistered = true;
+        CHECK_BREAK(f.releases == 0);                     /* the retry still holds it */
+        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 2);
+        ok = true;
+    } while (0);
 
     nd_test_release_retry();
     thread_join(t);
-    CHECK(__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) == 1);
-    CHECK(kobject_refcount(&f.nif.obj) == 1);
+    if (!unregistered)
+        netif_unregister(&f.nif);
 
+    if (ok) {
+        if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
+            *reason = "the released retry never finished";
+            ok = false;
+        } else if (kobject_refcount(&f.nif.obj) != 1) {
+            *reason = "the retry did not put its reference back";
+            ok = false;
+        }
+    }
     kobject_put(&f.nif.obj);
-    CHECK(f.releases == 1);
+    if (ok && f.releases != 1) {
+        *reason = "the interface was not released once the last reference went";
+        ok = false;
+    }
+    if (!ok)
+        return false;
+
     kinfo("selftest: net-nd-retry-unregister: a parked ND retry kept the interface alive "
           "across netif_unregister; released once, after it let go");
     return true;
