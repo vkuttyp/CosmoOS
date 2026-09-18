@@ -11,7 +11,7 @@ listens on the back-connection port with a backlog of one
 (`nettest.py:72`). It assumes the first connection to arrive is the
 guest's. It never checks, and when the assumption is false it reports
 `TimeoutError`, which names nothing. That is the whole of what
-`net-harness` has said for two weeks: twenty-one sightings across twelve
+`net-harness` has said for two weeks: twenty-two sightings across twelve
 entries (`docs/testing/flakes.md`, *The count*), on both architectures,
 on CI and locally, several of them on branches that change no code at
 all.
@@ -125,6 +125,21 @@ happens on CI: the adversary was injected. The wild trigger remains
 unnamed, and this report does not guess at one — the last correlation
 recorded on this thread, a SYN-retransmission pattern, had to be
 withdrawn when a fourth run contradicted it.
+
+**Corroborated, unprompted, by this report's own CI.** While PR #176 was
+open, its aarch64 job produced sighting twenty-two on a branch that
+changes three Markdown files and no code:
+`connect 0 in 1031 ms, sent -104, pending error -104, segs_out +3
+retransmits +1 rsts_in +1`, with the host reporting
+`accepted at 90.9s`, `0 of 12 bytes`, `TimeoutError`. Against the 150
+microsecond baseline, `connect 0 in 1031 ms` is four orders of magnitude
+out, and `segs_out +3 retransmits +1` is one SYN retransmission — slirp
+did not answer the first SYN and answered the second. That is the
+induced reproduction's mechanism at a slower speed, arriving by itself,
+and it is the first sighting whose connect time could be compared
+against anything. It also shows the gap precisely: `accepted at 90.9s`
+reports a time without an identity, and nothing in the current harness
+can say whose connection that was.
 
 ## Current implementation
 
@@ -301,7 +316,7 @@ accepted.
 - **Raise the backlog and nothing else.** Cheapest, and it would very
   likely have prevented the induced failure. Rejected as the whole unit:
   it leaves the harness unable to say what happened, which is the
-  property that has cost twenty-one sightings. The backlog change is
+  property that has cost twenty-two sightings. The backlog change is
   design point 1 precisely because it is necessary and insufficient.
 - **Verify the peer instead of the payload.** Check that the connection
   comes from QEMU's process. Rejected: every connection arrives from

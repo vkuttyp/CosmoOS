@@ -493,7 +493,7 @@ of this section said eight and then listed nine:
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
 
-Twelve entries, twenty-one occurrences. The first five rows are inherited
+Twelve entries, twenty-two occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -527,6 +527,7 @@ the connection was already reset.
 | PR #170, aarch64 | `-104` | `+0` | 0 | `+1` |
 | `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
 | `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
+| PR #176, aarch64 (docs-only) | `-104` | `+3` | 0 | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
@@ -704,9 +705,9 @@ where it did not appear in eleven runs — the architecture decides where
 the loop runs, not what the defect is.
 
 **Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
-The count above is unchanged at twenty-one; what follows was induced on
-purpose and must not be tallied with the failures that happened by
-themselves. The harness listens on the back-connection port with a
+What follows was induced on purpose and is not counted: the total moved
+to twenty-two for a separate, real failure recorded below, not for
+this. The harness listens on the back-connection port with a
 backlog of one (`nettest.py:47`) and accepts once, without checking what
 it accepted (`nettest.py:72`). Occupying that single slot before QEMU
 starts — one silent connection, opened behind an environment variable —
@@ -748,6 +749,39 @@ three-port collision idea is dead.
 injected; nothing here says a foreign connection is what happens on CI.
 This names a mechanism the harness cannot currently report, not a cause.
 Taken up by `docs/audit/next-subsystem-nettest-accept.md`.
+
+**Sighting twenty-two, 2026-09-18, on PR #176's own aarch64 CI** — the
+pull request that proposes the fix, on a branch that changes three
+Markdown files and no code:
+
+```
+NETTEST: client failed: connect 0 in 1031 ms, sent -104 in 0 ms,
+  recv -1 in 0 ms, pending error -104,
+  sndbuf free 65536 before, 65536 after send, 65536 after read
+  (outstanding 0 then 0), state 0,
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+```
+
+with the host reporting `ready at 89.9s, back-connection accepted at
+90.9s`, `0 of 12 bytes: b''`, and `TimeoutError` at 100.9 s.
+
+**`connect 0 in 1031 ms` is the line that matters, and it is only
+readable because of the baseline above.** A healthy back-connection is
+answered in 150 microseconds; this one took four orders of magnitude
+longer and still returned 0. `segs_out +3 retransmits +1` is one SYN
+retransmission: **slirp did not answer the first SYN and answered the
+second**, about a second later. That is the induced reproduction's
+mechanism — a host-side connect that does not complete promptly — at a
+slower speed, and it is the first sighting whose `connect` time can be
+compared against anything.
+
+What this sighting still cannot say is **which connection the host
+accepted**. `accepted at 90.9s` is one second after `ready`, so the
+accept is contemporaneous with slirp finally answering, and the
+instrument reports a time without an identity. That is exactly the gap
+`docs/audit/next-subsystem-nettest-accept.md` proposes to close, and it
+is the reason this sighting is recorded here rather than argued from:
+the roster the unit adds would have said whose connection that was.
 
 **And one hour spent for nothing, recorded so it is not spent twice.**
 A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
