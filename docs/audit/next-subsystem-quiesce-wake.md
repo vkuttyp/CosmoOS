@@ -176,7 +176,8 @@ true and never sleeps at all.
   it is, on the same schedule, so this unit changes one thing.
 - **It does not touch `quiesce_core_*`.** The epoch algebra is unchanged;
   this is about when a waiter is told.
-- **It does not lower `TICK_NS`.** The floor is the sleep, not the tick.
+- **It does not lower `TICK_NS`.** The floor is the wait's *deadline*,
+  not the tick.
 
 ## Tests
 
@@ -205,7 +206,7 @@ one measures the thing the unit changes.
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
 | `quiesce-wake` | a grace period on an idle machine ends by being **woken**, not by timing out: `gp_timeouts` is unchanged across a `synchronize_quiesce` | remove the wake and keep the timed wait, and every wait ends at its deadline: the counter moves once per iteration. An observable, not a time |
-| `quiesce-wake-straggler` | a grace period *does* sleep when a CPU is genuinely slow to publish, and the existing straggler escalation still fires | the wake must not make the loop exit early: this is the existing `quiesce-straggler` spinner, asserting the kicks still happen |
+| `quiesce-wake-straggler` | a grace period *does* reach its deadline when a CPU is genuinely slow to publish — `gp_timeouts` moves — and the existing straggler escalation still fires | the wake must not make the loop exit early: this is the existing `quiesce-straggler` spinner, asserting the kicks still happen |
 | `wait-timeout` | `wait_event_timeout` returns true without sleeping when the condition already holds, true when woken, and false at the deadline | the three arms of a new primitive, tested where it lives rather than only through its first caller |
 | the existing suite | `quiesce-straggler`, `-system`, `-idle`, `blk-submit-unregister`, `blk-unregister-drain`, `tcp-pcb-timer-free`, `device-remove-busy` unchanged | they are the correctness of the mechanism this unit speeds up; if any of them moves, the change was not what this report says it is |
 
@@ -247,9 +248,10 @@ over a poll that is still there: `quiesce_core_pending` returning zero
 remains the entire condition, `wait_event_timeout`'s deadline is
 `TICK_NS / 2`, and a missed or spurious wake costs one re-check. So a
 defect in the wake path is a latency regression and cannot be a hang or a
-premature return. Check: `quiesce-wake` (no sleep on an idle machine, by
-counter), `quiesce-wake-straggler` (a real straggler still sleeps and is
-still kicked), and the existing quiesce and lifetime suites unchanged.
+premature return. Check: `quiesce-wake` (on an idle machine the wait
+ends by being **woken**, not at its deadline: `gp_timeouts` unchanged),
+`quiesce-wake-straggler` (a real straggler still reaches the deadline and
+is still kicked), and the existing quiesce and lifetime suites unchanged.
 Gap: the wake fires on every publish while any waiter is queued, so a
 grace period waiting on one slow CPU is woken by every other CPU's
 quiescent points; that is measured rather than assumed to be cheap.
@@ -279,7 +281,8 @@ quiescent points; that is measured rather than assumed to be cheap.
   Design §2 rejected — which would then be rejected on evidence instead
   of on reasoning.
 - **The floor may not be where this report says.** The claim is that an
-  idle-machine grace period is dominated by the sleep. Step 2 measures it
+  idle-machine grace period is dominated by waiting out the deadline
+  rather than by the work. Step 2 measures it
   before the wake exists, so if the sleep is not the cost, the unit says
   so and stops rather than shipping a change that buys nothing.
 
