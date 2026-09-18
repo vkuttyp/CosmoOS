@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty-eight, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty-nine, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -499,14 +499,15 @@ of this section said eight and then listed nine:
 | PR #179's own CI run | observed, aarch64: `connect 0 in **1510 ms**`, `sent -104`, `segs_out +3 retransmits +1` -- one connection carrying nothing a fourth time, and the slowest connect yet |
 | PR #179's own CI run, the very next one | observed, aarch64: `connect 0 in **597 ms**`, `sent -104`, **`segs_out +2 retransmits +0`** -- one connection carrying nothing a fifth time, the FASTEST connect, and the second with no retransmission |
 | PR #179's own CI run, a third in a row | observed, aarch64: one connection carrying nothing a sixth time |
+| PR #180's own CI run | observed, aarch64: `connect 0 in **803 ms**`, `sent 12`, `outstanding 12 then 12`, **`retransmits +0`** -- one connection carrying nothing a seventh time, and the THIRD sighting with no retransmission |
 
-Nineteen entries, twenty-eight occurrences -- and the table is the tally,
+Twenty entries, twenty-nine occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last fourteen rows
+them and are not independently re-verified here. The last fifteen rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **nineteen instrumented** occurrences
-behind the other thirteen rows carry the guest's side. (These three figures
+92.0s, 0 of 12 bytes`, and the **twenty instrumented** occurrences
+behind the other fourteen rows carry the guest's side. (These three figures
 are computed from the table, not carried forward: they were wrong before
 sighting twenty-five, because each update incremented them instead of
 counting the rows.) Rows and occurrences
@@ -885,15 +886,15 @@ nothing.
 
 **Sightings twenty-six and twenty-seven widened the range rather than
 narrowing it**, and they landed on consecutive CI runs of the same pull
-request. The observed connects are now **597, 787, 1031, 1089, 1116 and
-1510 ms** — a spread of two and a half to one — and **two of the six had
-no retransmission at all**. Four of six having exactly one retransmission
-is what a three-sample reader saw as a timer. It is not one.
+request. The observed connects are now **597, 787, 803, 1031, 1089, 1116 and
+1510 ms** — a spread of two and a half to one — and **three of the seven
+had no retransmission at all**. Four of seven having exactly one
+retransmission is what a three-sample reader saw as a timer. It is not
+one, and each new sighting has moved that ratio further from one.
 
-The roster is **six-for-six on one connection carrying nothing** -- a
-third consecutive aarch64 CI run of the same pull request -- and that
-remains the only part of this defect that has never varied. When the
-next theory arrives, that is the line it has to explain.
+The roster is **seven-for-seven on one connection carrying nothing**,
+and that remains the only part of this defect that has never varied.
+When the next theory arrives, that is the line it has to explain.
 
 **And the grace bound held in production.** The harness gave up at
 108.7s -- twenty seconds after the accept, the receive budget plus the
