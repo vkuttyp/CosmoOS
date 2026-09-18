@@ -877,9 +877,17 @@ sightings and withdrawn when the fourth came back `retransmits +0`. The
 lesson is not about retransmissions. It is that **three samples of a
 timing coincidence look like a constant**, and this defect produces
 three-sample runs readily enough to catch a careful reader twice. What
-survives is only what all four sightings share: a connect that succeeds
+survives is only what every sighting shares: a connect that succeeds
 after hundreds of milliseconds, and a host-side connection that carries
 nothing.
+
+**Sighting twenty-six widened the range rather than narrowing it**: PR
+#179's aarch64 job, `connect 0 in 1510 ms` with `retransmits +1`. The
+observed connects are now **787, 1031, 1089, 1116 and 1510 ms**, one of
+them with no retransmission at all. A spread of nearly two to one is not
+a timer, which is further against the withdrawn constant rather than for
+it. The roster is four-for-four on one connection carrying nothing, and
+that remains the only part of this defect that has never varied.
 
 **And the grace bound held in production.** The harness gave up at
 108.7s -- twenty seconds after the accept, the receive budget plus the
