@@ -238,9 +238,24 @@ ticks. On CI the same test took **8072 ms**, in guest time — not a
 loaded host stretching wall-clock, but that CPU genuinely not publishing
 for most of eight seconds, within two of `synchronize_quiesce`'s
 ten-second debug panic. So **"a moment later" is what happens here and
-not what happens there**. The adversary now stops hiding ticks after
-`KICK_COVERS_MAX` covers, which bounds the test rather than the
-phenomenon; what the phenomenon's own upper bound is remains unmeasured.
+not what happens there** — and with the cap in place, CI says it plainly
+on **both** architectures: the covered CPU is still pending after all
+twenty-five covers, about a hundred milliseconds, with straggler kicks
+having been sent throughout.
+
+**So that unit's inference does not hold generally.** It used "the
+population publishes anyway" to conclude that the population the kick
+names is not why the kick works. That is true on this machine and false
+on CI, so the conclusion is local, not general.
+
+What it does **not** establish is that the population behaves
+differently there. The likelier reading is that the **adversary** is not
+portable: under TCG on a loaded runner its short section around the tick
+overshoots, leaving that CPU closer to a continuous spinner — and a
+spinner cannot be helped, which `quiesce-kick-spinner` proves
+independently. The test cannot tell those apart, so it now **reports**
+the outcome and asserts only what is host-independent: that the
+adversary was hiding ticks, and that the grace period returned at all.
 
 **Attribution requires the
 publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`

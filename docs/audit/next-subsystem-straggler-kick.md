@@ -45,9 +45,19 @@ this CPU's epoch and attribution requires that, which took the rate from
    test took **8072 ms** of guest time — the covered CPU not publishing
    for most of eight seconds, two short of the ten-second debug panic,
    and over the per-test budget, which is how it was caught. The
-   adversary now stops hiding ticks after a cap so the test is bounded;
-   the phenomenon is not, and how long that population *can* hold a
-   grace period is an open question this unit did not know it had
+   adversary now stops hiding ticks after a cap so the test is bounded.
+   With that cap, CI reports on **both** architectures that the covered
+   CPU is still pending after all twenty-five covers — about a hundred
+   milliseconds, kicks sent throughout.
+
+   **So point 1's inference is local, not general.** "The population
+   publishes anyway, so it is not why the kick works" is true here and
+   false on CI. It may be the *adversary* that fails to travel rather
+   than the population that differs — under TCG on a loaded runner its
+   short section overshoots and leaves that CPU closer to a spinner,
+   which cannot be helped for reasons `quiesce-kick-spinner` establishes
+   separately. The test cannot distinguish those, so it reports the
+   outcome instead of asserting either
    (`docs/kernel/quiesce/invariants.md`, Q19).
 2. **So the report's central prediction was wrong twice over**: the
    adversary *was* buildable (the inventory said no deterministic test

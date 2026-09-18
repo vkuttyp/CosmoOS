@@ -2666,7 +2666,12 @@ See [docs/development.md](docs/development.md).
   `schedule()` publishes at entry and the covered tick still sets
   `need_resched`, so the `preempt_enable` ending the section that hid
   the tick publishes a moment later. The publish was never confined to
-  the trap return, which is the premise the story rested on. Where the
+  the trap return, which is the premise the story rested on.
+  **That is a local result, and CI says otherwise** — there the covered
+  CPU stays pending for at least a hundred milliseconds on both
+  architectures — so the test now reports the outcome rather than
+  asserting it, and whether the difference is the population or a
+  non-portable adversary is unsettled (invariant **Q19**). Where the
   the one attributed publish came from is now a question the counter can
   answer and argument could not.
   The other half of the measurement is the half that makes it
