@@ -21,11 +21,15 @@ it.
    that is not the request — and leaving it unlabelled would have put a
    connection into the roster with `still open`, which is not what
    happened to it.
-3. **The reset test accepts `closed` as well as `error`.** A reset can
-   arrive as an error or, if a FIN raced it, as EOF. What the test pins
-   is that an `error` keeps its **errno** rather than flattening into a
-   close, and that the three peer kinds do not all read the same — which
-   is the property, not the particular class name.
+3. **The reset test asserts `error`, and the bug-proof checks all three
+   pairs.** A first version hedged — "error or closed, in case a FIN
+   raced the reset" — against a case `SO_LINGER` with a zero timeout
+   cannot produce: it sends an RST and never a FIN, measured as `error`
+   four times out of four. Worse, that hedge let the bug-proof *say*
+   three distinct readings while only checking two pairs, leaving out
+   **closed versus reset** — which is the pair the old loop actually got
+   wrong, since `except OSError: chunk = b""` made them the same
+   reading. Both are asserted now.
 
 **Subsystem: the state of slirp's own host-side connection at the moment
 the exchange fails.** The accept unit (PR #177) answered *which*
@@ -98,7 +102,7 @@ indistinguishable in the log.
    end without sending anything. Those are different defects in
    different parts of slirp. Also recorded: `SO_ERROR`.
 
-2. **How the connection ended, in three classes — which the harness
+2. **How the connection ended, in three classes (the build added a fourth, `wrong-data`; see the banner) — which the harness
    nearly knows already and throws away.** Both outcomes reach the
    roster as `0 byte(s)` today, so no sighting so far can say whether
    slirp closed its end or the harness merely timed out. That is the

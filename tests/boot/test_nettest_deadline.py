@@ -697,14 +697,16 @@ def test_probe_reset_peer():
         rec = _one_peer(nt, 1.5, peer)
         check(rec is not None, "the resetting peer is recorded")
         if rec:
-            # Some stacks deliver the RST as an error, some as EOF if the
-            # FIN raced it; the errno is what distinguishes them when it
-            # is an error, and either way it must not be silently lost.
-            check(rec["ended"] in ("error", "closed"),
-                  f"and ends as error or closed (got {rec['ended']!r})")
-            if rec["ended"] == "error":
-                check(rec["errno"] is not None,
-                      "and an error keeps its errno rather than flattening to a close")
+            # `SO_LINGER` with a zero timeout sends an RST and never a
+            # FIN, so this is not a race: the reading is `error`, and
+            # measured as such four times out of four here. Asserting the
+            # weaker "error or closed" was hedging against a case this
+            # peer cannot produce, and it let the bug-proof below promise
+            # a discrimination it did not check.
+            check(rec["ended"] == "error",
+                  f"and ends as an error, not a close (got {rec['ended']!r})")
+            check(rec["errno"] is not None,
+                  "and keeps its errno rather than flattening to a close")
     finally:
         try:
             nt.listener.close()
@@ -756,6 +758,14 @@ def test_probe_readings_discriminate():
     check(readings["open"] != readings["reset"],
           f"and differently from a reset one "
           f"({readings['open']!r} vs {readings['reset']!r})")
+    # The pair the first version of this test left out, which is the one
+    # the old loop actually got wrong: `except OSError: chunk = b""`
+    # made a reset and an orderly close the same reading.
+    check(readings["closed"] != readings["reset"],
+          f"and a closed peer reads differently from a reset one "
+          f"({readings['closed']!r} vs {readings['reset']!r})")
+    check(len(set(readings.values())) == 3,
+          f"three peers, three readings (got {sorted(readings.values())})")
 
 
 def test_probe_not_taken_on_success():
