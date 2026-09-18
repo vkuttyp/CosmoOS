@@ -43,20 +43,24 @@ almost immediately and the waiter still pays a sleep.
 
 ### 2. Every teardown path in the tree pays it, synchronously
 
-`synchronize_quiesce` has five production callers:
+`synchronize_quiesce` has five callers outside its own tests:
 
 | caller | what is waiting |
 | --- | --- |
 | `interrupt.c:135` | `interrupt_unregister` — proving no CPU is inside the handler being removed |
 | `module.c:511` | module unload |
-| `netif.c:260`, `netif.c:569` | interface unregister, twice |
+| `netif.c:260` | `netif_unregister`, step 3 — no transmit or `netif_rx` still in flight |
+| `netif.c:569` | removing the **receive hook**, so its context may be freed (it can live on the caller's stack) |
+| `quiesce.c:202` | **the `call_quiesce` batch worker**, which waits one grace period for a whole batch |
 
-And the asynchronous alternative is unused: `call_quiesce`, the deferred
-form that would let a caller not block at all, has **no callers outside
-`quiesce.c` and its own tests**. Every reclamation in this tree takes the
-synchronous floor. That is not an accident to fix by converting callers —
-a device unregister genuinely wants to wait — it is the reason the floor
-is worth removing rather than routing around.
+That last row matters and the first draft of this report missed it, along
+with the count. It means the *deferred* path pays the floor too: a caller
+that uses `call_quiesce` to avoid blocking does not block, but the batch
+worker behind it still waits on the same poll before running anyone's
+callback. So the floor is not escapable by converting callers to the
+asynchronous form — which is the argument the first draft made from
+`call_quiesce` having no users outside `quiesce.c`, and this is the
+better version of it.
 
 ### 3. The mechanism to end the wait exactly is already there
 
@@ -179,17 +183,28 @@ true and never sleeps at all.
 The assertion must not be a stopwatch. `docs/testing/flakes.md` is
 explicit that "N things after a fixed settle" is the family that fails on
 a loaded host, and its rule is to wait for a counter instead. So the
-observable is a **count of sleeps**, not a duration:
+observable is a counter — but **not** a count of sleeps, which is what
+the first draft of this report proposed and which cannot work.
 
-`struct quiesce_stats` gains `gp_sleeps` — the number of times a waiter
-actually slept. With wake-on-publish, a grace period on an otherwise
-idle machine completes with **zero** sleeps; without it, every grace
-period sleeps at least once, because the first check is made before any
-CPU can have published.
+Review caught it: `quiesce_core_begin` bumps the epoch, and the very next
+thing the waiter does is check whether every CPU has published *that new
+epoch*. On more than one CPU none has, because none has passed a
+quiescent point since the bump. So the waiter **enters** the wait
+essentially always, and the wake shortens that wait rather than
+preventing it. "Zero sleeps" would have been a test that fails on the
+change it is meant to prove.
+
+What the wake actually changes is **how the wait ends**. So the counter
+is `gp_timeouts`: the number of times the timed wait reached its deadline
+instead of being woken. With wake-on-publish, a grace period on an
+otherwise idle machine ends by **being woken**, so `gp_timeouts` does not
+move; without the wake every wait ends at its deadline and it moves once
+per iteration. Same discipline, a counter rather than a clock, and this
+one measures the thing the unit changes.
 
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
-| `quiesce-wake` | a grace period on an idle machine completes with **no** sleep: `gp_sleeps` is unchanged across a `synchronize_quiesce` | reverted to the poll, the same call sleeps at least once and the counter moves — an observable, not a time |
+| `quiesce-wake` | a grace period on an idle machine ends by being **woken**, not by timing out: `gp_timeouts` is unchanged across a `synchronize_quiesce` | remove the wake and keep the timed wait, and every wait ends at its deadline: the counter moves once per iteration. An observable, not a time |
 | `quiesce-wake-straggler` | a grace period *does* sleep when a CPU is genuinely slow to publish, and the existing straggler escalation still fires | the wake must not make the loop exit early: this is the existing `quiesce-straggler` spinner, asserting the kicks still happen |
 | `wait-timeout` | `wait_event_timeout` returns true without sleeping when the condition already holds, true when woken, and false at the deadline | the three arms of a new primitive, tested where it lives rather than only through its first caller |
 | the existing suite | `quiesce-straggler`, `-system`, `-idle`, `blk-submit-unregister`, `blk-unregister-drain`, `tcp-pcb-timer-free`, `device-remove-busy` unchanged | they are the correctness of the mechanism this unit speeds up; if any of them moves, the change was not what this report says it is |
@@ -204,8 +219,8 @@ is worth having and a number in an assertion is a flake.
 | --- | --- |
 | `kernel/include/kernel/wait.h` | `wait_event_timeout` |
 | `kernel/core/wait.c` (or where the queue lives) | the timed wait's implementation |
-| `kernel/core/quiesce.c` | the grace-period waitqueue; the loop waits on it; `quiesce_note_quiescent` wakes; `gp_sleeps` |
-| `kernel/include/kernel/quiesce.h` | `gp_sleeps` in `struct quiesce_stats` |
+| `kernel/core/quiesce.c` | the grace-period waitqueue; the loop waits on it; `quiesce_note_quiescent` wakes; `gp_timeouts` |
+| `kernel/include/kernel/quiesce.h` | `gp_timeouts` in `struct quiesce_stats` |
 | `kernel/core/quiescetest.c` | `quiesce-wake`, `quiesce-wake-straggler` |
 | the wait test's home | `wait-timeout` |
 | `docs/kernel/quiesce/design.md`, `invariants.md` | the wake, and why the poll stays |
@@ -217,8 +232,10 @@ is worth having and a number in an assertion is a flake.
 
 - `wait_event_timeout(wq, cond, ns)` — kernel, and the first timed wait
   in this tree.
-- `quiesce_stats.gp_sleeps` — a counter, so the property is observable
-  rather than timed.
+- `quiesce_stats.gp_timeouts` — a counter, so the property is observable
+  rather than timed. It counts how the wait *ended*, not that it
+  happened: on more than one CPU the waiter always waits, because the
+  epoch it is waiting for was bumped a moment earlier.
 
 No syscall, no uapi change, no change to `quiesce_core_*`.
 
@@ -235,15 +252,14 @@ counter), `quiesce-wake-straggler` (a real straggler still sleeps and is
 still kicked), and the existing quiesce and lifetime suites unchanged.
 Gap: the wake fires on every publish while any waiter is queued, so a
 grace period waiting on one slow CPU is woken by every other CPU's
-quiescent points; that is measured in `gp_sleeps` rather than assumed to
-be cheap.
+quiescent points; that is measured rather than assumed to be cheap.
 
 ## Migration plan
 
 1. `wait_event_timeout` and its own test, before anything depends on it.
-2. `gp_sleeps`, still polling — so the counter's meaning is established
-   against the current behaviour and the test can be written to fail
-   first.
+2. `gp_timeouts`, on the timed wait but with no wake yet — so the
+   counter's meaning is established against a wait that always times
+   out, and the test can be written to fail first.
 3. The waitqueue, the wake, the loop.
 4. The benchmark line, the docs, the inventory item, the README entry.
 
@@ -258,8 +274,8 @@ be cheap.
   thing to measure.
 - **A spurious-wake storm.** Every publish wakes every waiter while one
   is queued. On an idle machine that is a handful of wakes; on a busy one
-  with a slow CPU it could be many. `gp_sleeps` and a count of wakes make
-  it visible, and if it is bad the answer is the per-generation counter
+  with a slow CPU it could be many. `gp_timeouts` and a count of wakes
+  make it visible, and if it is bad the answer is the per-generation counter
   Design §2 rejected — which would then be rejected on evidence instead
   of on reasoning.
 - **The floor may not be where this report says.** The claim is that an

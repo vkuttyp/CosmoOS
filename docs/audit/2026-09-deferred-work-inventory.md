@@ -302,10 +302,11 @@ tree.
   `docs/audit/next-subsystem-quiesce-wake.md`** (not struck until it
   lands). The poll is `thread_sleep_ns(TICK_NS / 2)` -- 2 ms at
   `CONFIG_HZ` 250 -- so a grace period that is over in microseconds is
-  learned about at the next sleep boundary, and all five production
-  callers (`interrupt_unregister`, module unload, `netif` unregister
-  twice) take it synchronously; `call_quiesce`, the deferred form, has no
-  callers outside `quiesce.c` and its tests.
+  learned about at the next sleep boundary, and all five callers outside
+  its own tests take it synchronously: `interrupt_unregister`, module
+  unload, `netif_unregister`, the receive-hook removal, and **the
+  `call_quiesce` batch worker** -- so the deferred form does not escape
+  the floor either, it just moves who waits.
 - ~~**the network worker runs below default priority**~~ -- **closed by
   the wake-preempt unit (PR #134)**: decided by measurement at the
   default priority (`docs/kernel-services/network/design.md`, "The
