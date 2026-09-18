@@ -11,6 +11,7 @@ import os
 import random
 import select
 import socket
+import sys
 import threading
 import time
 
@@ -61,6 +62,50 @@ BACK_BACKLOG = 8
 # is what the deadline unit established
 # (docs/audit/next-subsystem-nettest-deadline.md).
 BACK_GRACE_S = BACK_RECV_S
+
+# How long the liveness probe gets. Generous: a slow answer is a reading,
+# not a failure, and the exchange has already failed by the time this runs
+# (docs/audit/next-subsystem-nettest-probe.md).
+PROBE_TIMEOUT_S = 5.0
+
+# Linux TCP states, for byte 0 of TCP_INFO. The distinction the probe is
+# for is ESTABLISHED versus CLOSE_WAIT: slirp holding an open socket and
+# never forwarding, against slirp having closed its end without sending.
+TCP_STATES = {
+    1: "ESTABLISHED", 2: "SYN_SENT", 3: "SYN_RECV", 4: "FIN_WAIT1",
+    5: "FIN_WAIT2", 6: "TIME_WAIT", 7: "CLOSE", 8: "CLOSE_WAIT",
+    9: "LAST_ACK", 10: "LISTEN", 11: "CLOSING",
+}
+
+
+def _tcp_state(sock):
+    """This connection's TCP state, or None where it cannot be read.
+
+    Linux only, and only byte 0 of TCP_INFO -- `tcpi_state`. The rest of
+    that struct is kernel-specific and reading it would be borrowing
+    trouble for no gain. macOS is where this is developed and Linux is
+    where CI runs, so None here is ordinary and the four end-classes
+    carry the diagnosis on their own.
+    """
+    # Linux only, and enforced rather than assumed. macOS defines a
+    # TCP_INFO whose struct is not Linux's, so byte 0 is not tcpi_state
+    # there -- it read FIN_WAIT1 for a plainly established connection,
+    # which is the kind of confident wrong answer this unit exists to
+    # avoid producing.
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        raw = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 1)
+    except (AttributeError, OSError):
+        return None
+    return TCP_STATES.get(raw[0], f"state {raw[0]}") if raw else None
+
+
+def _so_error(sock):
+    try:
+        return sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    except OSError:
+        return None
 
 
 def _close(sock):
@@ -165,6 +210,9 @@ class NetTest:
                 accepting = now < accept_deadline
                 for c in live:
                     if now >= c["recv_deadline"]:
+                        # Probed before closing: once it is closed there
+                        # is nothing left to ask.
+                        self._probe_conn(c, "deadline")
                         _close(c["sock"])
                 live = [c for c in live if now < c["recv_deadline"]]
                 # Keep going while there is still something to wait for:
@@ -206,7 +254,9 @@ class NetTest:
                         rec = {"peer": f"{peer[0]}:{peer[1]}",
                                "accept_s": now - self.t0,
                                "bytes": 0, "preview": b"",
-                               "delivered": False}
+                               "delivered": False,
+                               "ended": None, "errno": None,
+                               "state": None, "so_error": None}
                         self.back_conns.append(rec)
                         opened.append(conn)
                         live.append({"sock": conn, "rec": rec, "buf": b"",
@@ -216,13 +266,20 @@ class NetTest:
                     c = next((x for x in live if x["sock"] is sock), None)
                     if c is None:
                         continue
+                    # A reset raises here and an orderly FIN does not.
+                    # Flattening both into b"" -- which this loop used to
+                    # do -- records a reset as a graceful close, and the
+                    # failure under investigation involves a reset
+                    # (docs/audit/next-subsystem-nettest-probe.md).
+                    err = None
                     try:
                         chunk = sock.recv(64)
-                    except OSError:
+                    except OSError as e:
                         chunk = b""
+                        err = e.errno
                     if not chunk:
-                        # Connected, said nothing, went away. Not an
-                        # exception, and recorded rather than dropped.
+                        self._probe_conn(c, "error" if err is not None else "closed",
+                                         errno=err)
                         _close(c["sock"])
                         live.remove(c)
                         continue
@@ -236,6 +293,7 @@ class NetTest:
                             break
                         # Answered, but not with the request. Keep the
                         # record, stop reading it, and let it go.
+                        self._probe_conn(c, "wrong-data")
                         _close(c["sock"])
                         live.remove(c)
 
@@ -252,6 +310,9 @@ class NetTest:
                 # connection's accept time, because "when did something
                 # arrive" is still the question the timing line answers.
                 self.results["back_accept_s"] = self.back_conns[0]["accept_s"]
+                # Failure path only: the exchange is already lost, so a
+                # probe cannot cost a passing run anything.
+                self._probe_slirp()
         except Exception as e:  # noqa: BLE001
             self.results["back_error"] = repr(e)
         finally:
@@ -279,6 +340,69 @@ class NetTest:
                 pass
             self.results["back_closed_s"] = time.monotonic() - self.t0
 
+    def _probe_conn(self, c, ended, errno=None):
+        """Record how one connection ended, and its state while it can be read.
+
+        Called from every path that stops watching a connection, and
+        always *before* the socket is closed. The end class is the
+        portable half: `closed` is an orderly FIN, `error` is a reset or
+        another receive failure with its errno kept, `deadline` is the
+        budget expiring with the connection open and silent, and
+        `wrong-data` is a peer that answered with something else. Those
+        were all `0 byte(s)` in the roster before this unit, so no
+        sighting could say which had happened
+        (docs/audit/next-subsystem-nettest-probe.md).
+
+        Nothing is written to the socket. A one-byte write was the first
+        design and it cannot discriminate: a write into `CLOSE_WAIT`
+        succeeds, so an open peer and a closed one both look alive.
+        """
+        rec = c["rec"]
+        if rec.get("ended") is not None:
+            return                      # first reason wins
+        rec["ended"] = ended
+        rec["errno"] = errno
+        rec["state"] = _tcp_state(c["sock"])
+        rec["so_error"] = _so_error(c["sock"])
+
+    def _probe_slirp(self):
+        """Was the path through slirp answering at all, just now?
+
+        Connect to the guest's echo service through the same slirp
+        instance and time the connect and a one-byte round trip,
+        separately.
+
+        **The reading is asymmetric.** This traverses slirp *and* the
+        guest -- which must accept the forwarded connection, schedule its
+        echo thread and reply -- so a slow answer does not single out
+        QEMU's main loop; guest-side delay looks identical. A *fast*
+        answer is the informative one: it rules out the whole path having
+        stalled, which is the only mechanism still standing after the
+        foreign-connection and retransmission theories died.
+        """
+        t0 = time.monotonic()
+        try:
+            s = socket.create_connection(("127.0.0.1", self.tcp_port),
+                                         timeout=PROBE_TIMEOUT_S)
+        except OSError as e:
+            self.results["probe_slirp"] = f"connect failed after {time.monotonic()-t0:.2f}s: {e!r}"
+            return
+        connect_s = time.monotonic() - t0
+        try:
+            s.settimeout(PROBE_TIMEOUT_S)
+            t1 = time.monotonic()
+            s.sendall(b"p")
+            echoed = s.recv(4)
+            echo_s = time.monotonic() - t1
+            self.results["probe_slirp"] = (
+                f"connect {connect_s*1000:.0f} ms, echo {echo_s*1000:.0f} ms"
+                f"{'' if echoed == b'p' else f' (echoed {echoed!r})'}")
+        except OSError as e:
+            self.results["probe_slirp"] = (
+                f"connect {connect_s*1000:.0f} ms, then echo failed: {e!r}")
+        finally:
+            _close(s)
+
     def roster(self):
         """Every connection that reached the port, as one line.
 
@@ -292,11 +416,20 @@ class NetTest:
             return "no connection arrived"
         parts = []
         for c in conns:
-            parts.append("%s accepted at %.1fs, %d byte(s)%s: %r"
+            how = c.get("ended") or "still open"
+            if c.get("errno") is not None:
+                how += f" errno {c['errno']}"
+            if c.get("state"):
+                how += f", {c['state']}"
+            if c.get("so_error"):
+                how += f", SO_ERROR {c['so_error']}"
+            parts.append("%s accepted at %.1fs, %d byte(s)%s: %r [%s]"
                          % (c["peer"], c["accept_s"], c["bytes"],
                             " [the request]" if c["delivered"] else "",
-                            c["preview"]))
-        return f"{len(conns)} connection(s): " + "; ".join(parts)
+                            c["preview"], how))
+        line = f"{len(conns)} connection(s): " + "; ".join(parts)
+        probe = self.results.get("probe_slirp")
+        return line + (f"; slirp probe: {probe}" if probe else "")
 
     def run_when_ready(self, log_path, proc, timeout):
         """Wait for the guest's ready line, then run the exchange."""

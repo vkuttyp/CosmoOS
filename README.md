@@ -2681,6 +2681,44 @@ See [docs/development.md](docs/development.md).
   counter that only goes up is not attribution. 343 self-tests on both
   architectures, debug and release (PR #179).
 
+- **The harness can say what the connection it accepted was doing.** The
+  accept unit answered *which* connection arrived; it has answered the
+  same way every time since — one connection, carrying nothing — and
+  nothing was recorded about that connection itself, because the harness
+  closed it in a `finally` without asking. Now every connection carries
+  **how it ended**: `closed` (an orderly FIN), `error` **with its
+  errno**, `deadline`, or `wrong-data`. Those were all `0 byte(s)`
+  before, so no sighting could say whether slirp closed its end or the
+  harness merely timed out — the most valuable bit the roster lacked.
+  On Linux it carries the connection's TCP state too, separating slirp
+  holding an open socket and never forwarding from slirp having closed
+  it. On the failure path only, a timed probe through the **same slirp**
+  to the guest's echo service asks whether that path was answering at
+  all; the reading is asymmetric and the line says so, since a slow
+  answer implicates slirp *or* the guest and cannot separate them.
+  **Nothing is written to the accepted socket**: a write into
+  `CLOSE_WAIT` succeeds, so it cannot tell an open peer from a closed
+  one — that was the first design and it could not have discriminated.
+  Neither could the second, which flattened a reset into an orderly
+  close, in the one case this defect is known to involve. The bug-proof
+  is that an open, a closed and a resetting peer must read **three
+  different ways**, asserted rather than assumed.
+  A host-side packet capture would be the better measurement and needs
+  root, so it is left to a human with `sudo` rather than designed into a
+  test.
+  **It answered on its first outing.** Sighting thirty, on this unit's
+  own CI: the guest's half was reset (`sent -104`) while slirp's
+  host-side half was **`ESTABLISHED`, open and silent** — ended by the
+  harness's deadline, not by a FIN or a reset — and a probe through the
+  *same* slirp answered in **1 ms to connect and 1 ms to echo**. So
+  slirp tore down one half of this connection and orphaned the other
+  while remaining perfectly responsive to everything else. That is a
+  **per-connection failure inside slirp**: not a stall, not a foreign
+  connection, and not this kernel, whose side has been fully accounted
+  for since the socket-verdict unit. It does not name a line of code —
+  it names the component and the shape, which thirty sightings had not.
+  343 self-tests on both architectures, debug and release (PR #182).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

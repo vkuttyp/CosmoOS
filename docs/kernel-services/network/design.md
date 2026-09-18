@@ -310,6 +310,23 @@ an earlier connection burned. A connection that arrives and never
 delivers the request is still a failure: the deeper backlog must not
 turn a real guest fault into a pass.
 
+**And what it records when one fails.** For every connection the roster
+also carries **how it ended**, in classes that a single `0 byte(s)` used
+to flatten: `closed` (an orderly FIN), `error` (a receive failure, with
+its **errno** kept — a reset is not a close), `deadline` (the budget
+expiring with the connection open and silent), and `wrong-data`. On
+Linux it carries that connection's TCP state as well, which separates
+slirp holding an open socket and never forwarding (`ESTABLISHED`) from
+slirp having closed its end (`CLOSE_WAIT`).
+
+On the failure path only, the harness also times a probe through the
+**same slirp** to the guest's echo service. That reading is asymmetric
+and the line says so: a *fast* answer rules out the whole path having
+stalled, while a slow one implicates slirp or the guest and cannot
+separate them. Nothing is written to the accepted socket — a write into
+`CLOSE_WAIT` succeeds, so it cannot tell an open peer from a closed one
+(`docs/audit/next-subsystem-nettest-probe.md`).
+
 This replaced a backlog of one and a single blind accept, which assumed
 the first connection to arrive was the guest's, never checked, and
 reported `TimeoutError` when the assumption was false -- the whole of

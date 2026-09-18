@@ -13,6 +13,7 @@ to demonstrate what a socket and a clock show in under one.
 
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -619,6 +620,174 @@ def test_no_connection_at_all_still_waits_the_budget():
             pass
 
 
+def _one_peer(nt, budget, make_peer):
+    """Run the exchange against a single peer and return its record."""
+    t = _serve(nt, budget)
+    sk = make_peer(nt.back_port)
+    t.join(30)
+    try:
+        sk.close()
+    except OSError:
+        pass
+    return nt.back_conns[0] if nt.back_conns else None
+
+
+def test_probe_open_peer():
+    """A peer that connects, says nothing and stays open.
+
+    The connection ends at its own receive deadline, still established.
+    """
+    nt = NetTest()
+    try:
+        def peer(port):
+            sk = socket.create_connection(("127.0.0.1", port), timeout=5)
+            return sk
+        rec = _one_peer(nt, 1.5, peer)
+        check(rec is not None, "the open peer is recorded")
+        if rec:
+            check(rec["ended"] == "deadline",
+                  f"and ends at the deadline (got {rec['ended']!r})")
+            check(rec["errno"] is None, "with no errno")
+            check(rec["state"] in (None, "ESTABLISHED"),
+                  f"and is established where the state can be read (got {rec['state']!r})")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_probe_closed_peer():
+    """A peer that connects and closes: an orderly FIN, not an error."""
+    nt = NetTest()
+    try:
+        def peer(port):
+            sk = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sk.close()
+            return sk
+        rec = _one_peer(nt, 1.5, peer)
+        check(rec is not None, "the closed peer is recorded")
+        if rec:
+            check(rec["ended"] == "closed",
+                  f"and ends as an orderly close (got {rec['ended']!r})")
+            check(rec["errno"] is None, "with no errno")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_probe_reset_peer():
+    """A peer that RESETS, which the old loop recorded as a graceful close.
+
+    `SO_LINGER` with a zero timeout makes close() send an RST. Before
+    this unit the receive loop turned the resulting OSError into b"" and
+    took the `not chunk` branch, so a reset and a FIN were the same
+    reading -- and the failure being investigated involves a reset.
+    """
+    nt = NetTest()
+    try:
+        def peer(port):
+            sk = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                          struct.pack("ii", 1, 0))
+            sk.close()
+            return sk
+        rec = _one_peer(nt, 1.5, peer)
+        check(rec is not None, "the resetting peer is recorded")
+        if rec:
+            # `SO_LINGER` with a zero timeout sends an RST and never a
+            # FIN, so this is not a race: the reading is `error`, and
+            # measured as such four times out of four here. Asserting the
+            # weaker "error or closed" was hedging against a case this
+            # peer cannot produce, and it let the bug-proof below promise
+            # a discrimination it did not check.
+            check(rec["ended"] == "error",
+                  f"and ends as an error, not a close (got {rec['ended']!r})")
+            check(rec["errno"] is not None,
+                  "and keeps its errno rather than flattening to a close")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_probe_readings_discriminate():
+    """THE BUG-PROOF: the peer kinds must not all read the same.
+
+    A probe that reports the same thing for an open peer, a closed one
+    and a reset is not a probe. This unit's first design failed exactly
+    here twice -- a write into CLOSE_WAIT succeeds, and
+    `except OSError: chunk = b""` records a reset as an orderly close --
+    so the discrimination is asserted rather than assumed.
+    """
+    readings = {}
+
+    def run(mk):
+        nt = NetTest()
+        try:
+            return _one_peer(nt, 1.5, mk)
+        finally:
+            try:
+                nt.listener.close()
+            except OSError:
+                pass
+
+    def mk_open(port):
+        return socket.create_connection(("127.0.0.1", port), timeout=5)
+
+    def mk_closed(port):
+        sk = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sk.close()
+        return sk
+
+    def mk_reset(port):
+        sk = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sk.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sk.close()
+        return sk
+
+    for name, mk in (("open", mk_open), ("closed", mk_closed), ("reset", mk_reset)):
+        rec = run(mk)
+        readings[name] = (rec or {}).get("ended")
+    check(readings["open"] != readings["closed"],
+          f"an open peer reads differently from a closed one "
+          f"({readings['open']!r} vs {readings['closed']!r})")
+    check(readings["open"] != readings["reset"],
+          f"and differently from a reset one "
+          f"({readings['open']!r} vs {readings['reset']!r})")
+    # The pair the first version of this test left out, which is the one
+    # the old loop actually got wrong: `except OSError: chunk = b""`
+    # made a reset and an orderly close the same reading.
+    check(readings["closed"] != readings["reset"],
+          f"and a closed peer reads differently from a reset one "
+          f"({readings['closed']!r} vs {readings['reset']!r})")
+    check(len(set(readings.values())) == 3,
+          f"three peers, three readings (got {sorted(readings.values())})")
+
+
+def test_probe_not_taken_on_success():
+    """A healthy exchange takes no liveness probe and pays nothing for it."""
+    nt = NetTest()
+    try:
+        t = _serve(nt, 10.0)
+        g = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        g.sendall(b"cosmo hello\n")
+        g.recv(64)
+        g.close()
+        t.join(15)
+        check(nt.results.get("back_request") is True, "the exchange succeeds")
+        check(nt.results.get("probe_slirp") is None,
+              f"and no slirp probe was taken (got {nt.results.get('probe_slirp')!r})")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
 def main():
     for fn in (test_no_deadline_before_the_guest_exists,
                test_a_late_connection_is_still_accepted,
@@ -635,7 +804,12 @@ def main():
                test_the_backlog_is_deeper_than_one,
                test_foreign_connections_are_closed_not_leaked,
                test_a_failed_exchange_does_not_eat_the_run,
-               test_no_connection_at_all_still_waits_the_budget):
+               test_no_connection_at_all_still_waits_the_budget,
+               test_probe_open_peer,
+               test_probe_closed_peer,
+               test_probe_reset_peer,
+               test_probe_readings_discriminate,
+               test_probe_not_taken_on_success):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")
