@@ -345,7 +345,27 @@ tree.
   virtio-blk is the scratch disk the filesystem tests run on, so a
   boot-time suite that removes it destroys the run.
 - **What the straggler kick is worth is an open question**, added by
-  that unit rather than struck by it. A CPU publishes at interrupt
+  that unit rather than struck by it. **Taken up by
+  `docs/audit/next-subsystem-straggler-kick.md`** (not struck until it
+  lands), which takes the *measurement* rather than any of the three
+  outcomes: nothing in the tree counts a kick that **worked**, so no
+  counter would change if the kick were replaced by a no-op, and the
+  choice between deleting it, bounding it and proving it cannot be made
+  on the evidence that exists. It also names a latent defect found while
+  reading it: the kick sends `IPI_RESCHEDULE`, whose documented contract
+  is "target re-evaluates `need_resched` on interrupt return" and whose
+  handler comment says the sender set `need_resched` under a run-queue
+  lock -- **the quiesce caller does neither**, and wants only the trap
+  return. The hazard is on the **send** side: a handler that returned
+  early on `!need_resched` would not neuter the kick, because the trap
+  tail evaluates the quiescent point independently of the handler. What
+  would is a send **suppressed because the target's `need_resched` is
+  clear** -- "nothing to reschedule there, do not interrupt it", the
+  natural optimisation for an IPI documented as re-evaluating that flag.
+  The quiesce caller never sets it, so every kick would be suppressed
+  with no test to notice. The looser forms do not follow: skipping when
+  the flag is already set would still send, and coalescing preserves the
+  first interrupt. A CPU publishes at interrupt
   return only when `preempt_count == 0`, so the kick cannot help a CPU
   spinning inside a read-side section -- which is the case its own
   comment named until this unit corrected it. It fires only for a CPU

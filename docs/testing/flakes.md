@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty-four, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty-five, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -495,14 +495,18 @@ of this section said eight and then listed nine:
 | PR #176's own CI run | observed, aarch64, documentation-only: `connect 0 in 1031 ms`, `sent -104`, `segs_out +3 retransmits +1` -- the first read against the 150 us baseline |
 | PR #177's own CI run | observed, aarch64: `connect 0 in 1116 ms`, `sent -104` -- **the first with a roster**, which named one connection carrying nothing |
 | PR #177's own CI run, the protection-capable CPU boot | observed, aarch64: `connect 0 in 1089 ms`, `sent 12`, `outstanding 12 then 12` -- one connection carrying nothing again, the other guest arm |
+| PR #178's own CI run | observed, aarch64, documentation-only: `connect 0 in **787 ms**`, `sent -104`, **`segs_out +2 retransmits +0`** -- one connection carrying nothing a third time, and **the run that falsified the retransmission constant** |
 
-Fifteen entries, twenty-four occurrences -- and the table is the tally,
+Sixteen entries, twenty-five occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last nine rows were
-watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **thirteen instrumented** occurrences
-behind the other eight rows carry the guest's side. Rows and occurrences
+them and are not independently re-verified here. The last eleven rows
+were watched as they happened: PR #167's carries the host's `accepted at
+92.0s, 0 of 12 bytes`, and the **sixteen instrumented** occurrences
+behind the other ten rows carry the guest's side. (These three figures
+are computed from the table, not carried forward: they were wrong before
+sighting twenty-five, because each update incremented them instead of
+counting the rows.) Rows and occurrences
 differ because three rows hold more than one sighting; the shapes table
 below is per *sighting* and is the one to count from.
 
@@ -855,11 +859,26 @@ then either takes the bytes and drops them (the induced reproduction) or
 never acknowledges them, and in both cases its host-side socket is
 connected — the harness accepted it — and carries nothing.
 
-**Three consecutive connects: 1031 ms, 1116 ms, 1089 ms, each with
-exactly one SYN retransmission.** Against a 150 microsecond baseline
-that is not a spread, it is a constant: slirp ignores the first SYN and
-answers the second, one retransmission timer later. Whatever stalls it
-lasts about a second and is gone afterwards.
+~~**Three consecutive connects: 1031 ms, 1116 ms, 1089 ms, each with
+exactly one SYN retransmission** ... a constant: slirp ignores the first
+SYN and answers the second, one retransmission timer later.~~
+**WITHDRAWN by sighting twenty-five**, which connected in **787 ms**
+with **`segs_out +2 retransmits +0`** — slirp answered the *first* SYN
+and still took most of a second. The delay is real and large (787 ms to
+1116 ms against a 150 microsecond baseline) but it **does not require a
+retransmission**, so "one retransmission timer" was a coincidence of
+three samples and not the mechanism.
+
+**This file has now made that exact mistake twice.** The first
+SYN-retransmission correlation was recorded and withdrawn when a fourth
+run came back `retransmits +0`; this one was recorded across three
+sightings and withdrawn when the fourth came back `retransmits +0`. The
+lesson is not about retransmissions. It is that **three samples of a
+timing coincidence look like a constant**, and this defect produces
+three-sample runs readily enough to catch a careful reader twice. What
+survives is only what all four sightings share: a connect that succeeds
+after hundreds of milliseconds, and a host-side connection that carries
+nothing.
 
 **And the grace bound held in production.** The harness gave up at
 108.7s -- twenty seconds after the accept, the receive budget plus the
