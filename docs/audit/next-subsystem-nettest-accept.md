@@ -26,7 +26,29 @@ it.
    the silent peer. The report's claim that the existing cases were
    "unchanged" was wrong; this one changed, and its assertions are
    stronger for it.
-3. **An eighth test, for the backlog depth itself.**
+3. **The instrument answered on its own CI, and refuted this report's
+   hypothesis.** Sighting twenty-three landed on PR #177's aarch64 job
+   and the roster said `1 connection(s): 127.0.0.1:46652 accepted at
+   90.8s, 0 byte(s)`. **Exactly one connection, carrying nothing** — so
+   the wild trigger is *not* a foreign connection, and the stale-slot
+   reproduction reproduces the symptom without being the cause. With
+   the guest reporting `connect 0 in 1116 ms, segs_out +3
+   retransmits +1` for the second sighting running, the locus is
+   **slirp's own host-side connect**. That is a better answer than this
+   report expected to get, and it arrived because the roster existed.
+4. **A failed exchange must not eat the run, which this unit broke
+   first.** Waiting for a connection that delivers the request -- rather
+   than ending on the first, which is the defect -- also made the loop
+   wait out the *whole* remaining budget when none ever did. On the same
+   CI job it gave up at 157.0s where the old harness gave up at 100.9s,
+   the run passed its 180 s timeout, and every later marker went
+   missing: one harness failure hid the entire tail of the boot. The
+   guest makes exactly one back-connection attempt and never retries, so
+   once a connection has arrived and resolved without the request more
+   waiting cannot help. Bounded by `BACK_GRACE_S` after that -- and only
+   *after* one has arrived, so a guest that connects late is still found
+   and the deadline unit's property is untouched.
+5. **An eighth test, for the backlog depth itself.**
    `test_the_backlog_is_deeper_than_one` pins the measured precondition.
    A regression to `listen(1)` restores the defect without failing any
    behavioural test, because with only well-behaved connections the two
@@ -40,7 +62,7 @@ backlog of one and then accepted exactly once, blindly. It assumed the
 first connection to arrive was the guest's. It never checked, and when
 the assumption was false it reported `TimeoutError`, which names
 nothing. That was the whole of what
-`net-harness` has said for two weeks: twenty-two sightings across twelve
+`net-harness` has said for two weeks: twenty-three sightings across twelve
 entries (`docs/testing/flakes.md`, *The count*), on both architectures,
 on CI and locally, several of them on branches that change no code at
 all.
@@ -353,7 +375,7 @@ accepted.
 - **Raise the backlog and nothing else.** Cheapest, and it would very
   likely have prevented the induced failure. Rejected as the whole unit:
   it leaves the harness unable to say what happened, which is the
-  property that has cost twenty-two sightings. The backlog change is
+  property that has cost twenty-three sightings. The backlog change is
   design point 1 precisely because it is necessary and insufficient.
 - **Verify the peer instead of the payload.** Check that the connection
   comes from QEMU's process. Rejected: every connection arrives from

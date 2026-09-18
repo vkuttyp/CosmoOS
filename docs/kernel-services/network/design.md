@@ -313,7 +313,7 @@ turn a real guest fault into a pass.
 This replaced a backlog of one and a single blind accept, which assumed
 the first connection to arrive was the guest's, never checked, and
 reported `TimeoutError` when the assumption was false -- the whole of
-what `net-harness` said across twenty-two sightings
+what `net-harness` said across twenty-three sightings
 (`docs/audit/next-subsystem-nettest-accept.md`,
 `docs/testing/flakes.md`).
 

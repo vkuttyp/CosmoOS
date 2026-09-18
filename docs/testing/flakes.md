@@ -493,7 +493,7 @@ of this section said eight and then listed nine:
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
 
-Twelve entries, twenty-two occurrences. The first five rows are inherited
+Twelve entries, twenty-three occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -528,6 +528,7 @@ the connection was already reset.
 | `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
 | `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
 | PR #176, aarch64 (docs-only) | `-104` | `+3` | 0 | `+1` |
+| PR #177, aarch64 (**roster**) | `-104` | `+3` | 0 | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
@@ -783,6 +784,43 @@ instrument reports a time without an identity. That is exactly the gap
 `docs/audit/next-subsystem-nettest-accept.md` proposes to close, and it
 is the reason this sighting is recorded here rather than argued from:
 the roster the unit adds would have said whose connection that was.
+
+**Sighting twenty-three answered the question, on PR #177's own CI —
+the run that installed the instrument.** The roster said:
+
+```
+1 connection(s): 127.0.0.1:46652 accepted at 90.8s, 0 byte(s): b''
+```
+
+**Exactly one connection reached the port, and it carried nothing.**
+This file predicted that case in as many words, one commit earlier: "if
+it names exactly one connection, carrying nothing, then the wild trigger
+is not a foreign connection and the next place to look is slirp's
+host-side connect." So **the foreign-connection hypothesis is dead as
+the wild trigger.** The stale-slot reproduction reproduces the
+*symptom* faithfully and is not what happens on CI.
+
+The guest's side, near-identical to sighting twenty-two:
+
+```
+connect 0 in 1116 ms, sent -104, recv -1, pending error -104,
+  (outstanding 0 then 0), state 0,
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+```
+
+Two consecutive sightings now share one shape, and the 150 us baseline
+is what makes it legible: **a connect that succeeds in about a second**
+against a baseline three orders of magnitude faster, with **exactly one
+SYN retransmission** (`segs_out +3`, `retransmits +1`) — slirp ignoring
+the first SYN and answering the second — then a reset before the guest
+can write. Host-side, slirp's connection is accepted and delivers
+nothing.
+
+**The locus is slirp's own host-side connect**, not anything that
+reaches the port and not this kernel. What is still unnamed is why that
+connect stalls for about a second and then fails, and the next
+measurement is a packet capture of the host's loopback rather than the
+guest's wire — the guest's side is now fully accounted for.
 
 **The instrument was rebuilt, PR #177.** The harness no longer assumes
 the first connection to arrive is the guest's: it listens with a backlog

@@ -2616,9 +2616,17 @@ See [docs/development.md](docs/development.md).
   A baseline the thread never had: a healthy back-connection is
   SYN-ACKed in **150 µs** and completes in **52 ms**, which is what made
   sighting twenty-two's `connect 0 in 1031 ms` readable at all.
-  **What is still not established is the wild trigger** — the adversary
-  was injected, so this names a mechanism the harness could not report,
-  not the cause on CI. Host-side only: no kernel change, no new API, no
+  **And it answered on its own CI, against the hypothesis that built
+  it.** Sighting twenty-three landed on this pull request's aarch64 job
+  and the roster said `1 connection(s): … 0 byte(s)` — **exactly one
+  connection, carrying nothing.** So the wild trigger is *not* a foreign
+  connection: the stale-slot reproduction reproduces the symptom without
+  being the cause. With the guest reporting `connect 0 in 1116 ms,
+  segs_out +3 retransmits +1` for the second sighting running — a
+  connect that succeeds in about a second against a 150 µs baseline,
+  with exactly one SYN retransmission — the locus is **slirp's own
+  host-side connect**, and the guest's side is fully accounted for.
+  Still unnamed: why that connect stalls and then fails. Host-side only: no kernel change, no new API, no
   self-test registry entry. Eight host tests that run in about six
   seconds without booting anything, and the bug-proof is that the
   stale-slot case fails against the old harness with exactly the wild

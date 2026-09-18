@@ -18,7 +18,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nettest import NetTest, BACK_PREVIEW, BACK_BACKLOG  # noqa: E402
+from nettest import (NetTest, BACK_PREVIEW, BACK_BACKLOG,  # noqa: E402
+                     BACK_GRACE_S)
 
 FAILURES = []
 CHECKS = 0
@@ -542,6 +543,82 @@ def test_foreign_connections_are_closed_not_leaked():
             pass
 
 
+def test_a_failed_exchange_does_not_eat_the_run():
+    """A harness failure must not become a run-wide timeout.
+
+    Regression from this unit's own CI. Making the loop wait for a
+    connection that delivers the request -- rather than ending on the
+    first one, which is the defect -- also made it wait out the *whole*
+    remaining budget when none ever did. On PR #177's aarch64 job that
+    meant giving up at 157.0s where the previous harness gave up at
+    100.9s, which left no budget for the rest of the boot: the run
+    exceeded its 180 s timeout and every later marker went missing, so
+    one harness failure hid the entire tail of the boot.
+
+    The guest makes exactly one back-connection attempt and never
+    retries, so once a connection has arrived and resolved without the
+    request, more waiting cannot help. The bound is BACK_GRACE_S after
+    that, not the rest of the run.
+    """
+    nt = NetTest()
+    budget = 60.0                      # a generous run budget
+    try:
+        started = time.monotonic()
+        t = _serve(nt, budget)
+        s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        s.close()                      # arrive, say nothing, go away
+        t.join(budget + 15)
+        elapsed = time.monotonic() - started
+
+        check(nt.results.get("back_request") is False,
+              "the exchange still fails")
+        check(elapsed < budget / 2,
+              f"and gives up on the grace, not the run's budget "
+              f"({elapsed:.1f}s of {budget:.0f}s)")
+        check(elapsed >= BACK_GRACE_S - 1.0,
+              f"but does wait the grace, so a second connection could "
+              f"still arrive (got {elapsed:.1f}s)")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
+def test_no_connection_at_all_still_waits_the_budget():
+    """And the bound must not undo the deadline unit.
+
+    The grace applies only once a connection has *arrived*. While none
+    has, a guest that connects late must still be found -- which is the
+    property `test_a_late_connection_is_still_accepted` buys and the
+    whole point of the earlier unit.
+    """
+    nt = NetTest()
+    try:
+        started = time.monotonic()
+        t = _serve(nt, 3.0)
+        # Nothing connects until well past the grace would have expired
+        # had one arrived at t0.
+        time.sleep(2.0)
+        s = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+        s.sendall(b"cosmo hello\n")
+        reply = s.recv(64)
+        s.close()
+        t.join(20)
+
+        check(nt.results.get("back_request") is True,
+              "a guest that connects late is still found")
+        check(reply == b"cosmo world\n",
+              f"and answered (got {reply!r})")
+        check(time.monotonic() - started >= 2.0,
+              "and the harness really did wait for it")
+    finally:
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
 def main():
     for fn in (test_no_deadline_before_the_guest_exists,
                test_a_late_connection_is_still_accepted,
@@ -556,7 +633,9 @@ def main():
                test_the_preview_is_bounded,
                test_arrivals_without_the_request_still_fail,
                test_the_backlog_is_deeper_than_one,
-               test_foreign_connections_are_closed_not_leaked):
+               test_foreign_connections_are_closed_not_leaked,
+               test_a_failed_exchange_does_not_eat_the_run,
+               test_no_connection_at_all_still_waits_the_budget):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")
