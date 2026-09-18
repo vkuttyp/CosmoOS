@@ -171,11 +171,15 @@ unit that reads them is the one that may kill.
 The corrected path **counts and does not print**: it runs in whatever
 context the error interrupted, which may hold a run-queue lock.
 
-**Checked by** `trap-async-class` — ten SError encodings and nine
+**Checked by** `trap-async-class` — ten SError encodings and ten
 machine-check bank combinations, one row per rule, including the reserved
-`AET`s, a CPU without FEAT_RAS and the empty bank set that a vacuous rule
-calls corrected — and `trap-async-inject`, which delivers a real
-corrected SError through `HCR_EL2.VSE` and checks execution continued.
+`AET`s, a CPU without FEAT_RAS, the empty bank set that a vacuous rule
+calls corrected, and a bank count larger than one frame reads — and
+`trap-async-inject`, which delivers a real corrected SError through
+`HCR_EL2.VSE` and checks execution continued (on `cortex-a76`, which has
+FEAT_RAS; the default `cortex-a72` does not, and the test logs the skip
+rather than passing quietly), and which on x86-64 asserts that vector 18
+has a handler at all.
 
 **Gap, and it is not small.** This kernel runs EL1 with `PSTATE.A` set
 from its first instruction (`entry.S`: `msr daifset, #0xF`; the only
