@@ -178,10 +178,16 @@ before this; every sighting in the tally was read without one.
 connection on that port reproduces `net-harness` exactly, that the
 harness cannot tell the difference, and that the guest kernel is correct
 throughout. It does **not** prove that a foreign connection is what
-happens on CI: the adversary was injected. The wild trigger remains
-unnamed, and this report does not guess at one — the last correlation
-recorded on this thread, a SYN-retransmission pattern, had to be
-withdrawn when a fourth run contradicted it.
+happens on CI: the adversary was injected. **And sighting twenty-three,
+recorded in the as-built banner above, settled that it is not** — the
+roster named exactly one connection, carrying nothing. So this section
+stands as written: the reproduction shows a mechanism the harness could
+not report, and the cause on CI is elsewhere. What remains unnamed is
+narrower than when this was written: **why slirp's host-side connect
+stalls about a second and then fails.** This report still does not guess
+at it — the last correlation recorded on this thread, a
+SYN-retransmission pattern, had to be withdrawn when a fourth run
+contradicted it.
 
 **Corroborated, unprompted, by this report's own CI.** While PR #176 was
 open, its aarch64 job produced sighting twenty-two on a branch that

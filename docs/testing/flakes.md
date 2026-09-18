@@ -747,10 +747,13 @@ stalls the real one. And `free_port` is clean: **zero collisions in three
 thousand triples**, over the observed ephemeral range 49152–65535, so the
 three-port collision idea is dead.
 
-**What is still not established is the wild trigger.** The adversary was
-injected; nothing here says a foreign connection is what happens on CI.
-This names a mechanism the harness cannot currently report, not a cause.
-Taken up by `docs/audit/next-subsystem-nettest-accept.md`.
+**What was not established by the reproduction is the wild trigger.**
+The adversary was injected; nothing in it says a foreign connection is
+what happens on CI. It names a mechanism the harness could not report,
+not a cause. Taken up by
+`docs/audit/next-subsystem-nettest-accept.md` — and **answered below by
+sighting twenty-three**, which found exactly one connection carrying
+nothing and ruled the foreign connection out.
 
 **Sighting twenty-two, 2026-09-18, on PR #176's own aarch64 CI** — the
 pull request that proposes the fix, on a branch that changes three
@@ -827,12 +830,10 @@ the first connection to arrive is the guest's: it listens with a backlog
 of eight, accepts every connection until one delivers `cosmo hello\n`,
 gives each its own receive budget from its own accept, and reports a
 roster -- every peer, when it was accepted, bytes read, a thirty-two
-byte preview -- in place of `TimeoutError`. **Sighting twenty-three,
-whenever it comes, should say which connection was accepted and what it
-sent.** If it names exactly one connection, carrying nothing, then the
-wild trigger is not a foreign connection and the next place to look is
-slirp's host-side connect. That is the question this file has not been
-able to ask.
+byte preview -- in place of `TimeoutError`. **It answered on its first
+outing**, which is the sighting recorded above: the question this file
+could not ask for three weeks was answered by the next failure after
+the instrument landed.
 
 **And one hour spent for nothing, recorded so it is not spent twice.**
 A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
