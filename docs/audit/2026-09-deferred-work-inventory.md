@@ -426,7 +426,25 @@ tree.
   that rule did not reach them and why **N22** now states the one that
   does;
   `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
-  only by a later `module_unload` of the same name.
+  only by a later `module_unload` of the same name. **Taken up by
+  `docs/audit/next-subsystem-module-zombie-reap.md`** (not struck until
+  it lands), **and the zombie half is understated here**: a zombie keeps
+  its whole image AND its dependency pins (`drop_deps` runs at the free,
+  not the unload), so a stuck one permanently blocks unloading every
+  module it depends on. Nothing calls the reaper; a name reused by a
+  replacement hides the zombie, because `module_unload` finds the live
+  module first; and `find_zombie_locked` returns the FIRST name match,
+  which the reap then removes -- so N zombies of one name need N of
+  those calls, and nobody makes even the first. (An earlier version of
+  this row said the second was unreachable by any call. That was wrong:
+  it read the first-match lookup without checking that the reap
+  `list_remove`s what it finds.) It survived because the happy path is
+  tested and passes (`selftest_module_unload_busy`): the mechanism
+  works, and there is no policy that invokes it. The slot array's defect
+  is separately that exhaustion **panics** where `-ENOSPC` exists; it is
+  NOT caused by zombies, which hold no slot (`unpublish` runs at unload
+  step 1, before the zombie is made -- checked, because the report's
+  first draft assumed a connection).
 
 ---
 
