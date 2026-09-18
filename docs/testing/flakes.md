@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty-nine, to 2026-09-18**, across CI and this developer's machine, on
+**Thirty, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -500,14 +500,15 @@ of this section said eight and then listed nine:
 | PR #179's own CI run, the very next one | observed, aarch64: `connect 0 in **597 ms**`, `sent -104`, **`segs_out +2 retransmits +0`** -- one connection carrying nothing a fifth time, the FASTEST connect, and the second with no retransmission |
 | PR #179's own CI run, a third in a row | observed, aarch64: one connection carrying nothing a sixth time |
 | PR #180's own CI run | observed, aarch64: `connect 0 in **803 ms**`, `sent 12`, `outstanding 12 then 12`, **`retransmits +0`** -- one connection carrying nothing a seventh time, and the THIRD sighting with no retransmission |
+| PR #182's own CI run | observed, aarch64, **the first sighting with the probe**: `connect 0 in 894 ms`, `sent -104`; host side `[deadline, ESTABLISHED]` with slirp answering in 1 ms. See below -- this is the one that names where to look |
 
-Twenty entries, twenty-nine occurrences -- and the table is the tally,
+Twenty-one entries, thirty occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last fifteen rows
+them and are not independently re-verified here. The last sixteen rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty instrumented** occurrences
-behind the other fourteen rows carry the guest's side. (These three figures
+92.0s, 0 of 12 bytes`, and the **twenty-one instrumented** occurrences
+behind the other fifteen rows carry the guest's side. (These three figures
 are computed from the table, not carried forward: they were wrong before
 sighting twenty-five, because each update incremented them instead of
 counting the rows.) Rows and occurrences
@@ -903,6 +904,43 @@ grace -- rather than burning the 69.3s that remained. The run failed at
 markers: the five unrelated missing markers that sighting twenty-three's
 run produced are gone. That is the regression fix working on the exact
 failure that exposed it.
+
+**Sighting thirty answered the question the probe was built for, on the
+probe's first outing.** Both halves of the connection, at the same
+moment, for the first time in this file:
+
+```
+guest: connect 0 in 894 ms, sent -104, segs_out +2 retransmits +0 rsts_in +1
+host : 1 connection(s): 127.0.0.1:34378 accepted at 92.0s, 0 byte(s): b''
+       [deadline, ESTABLISHED]; slirp probe: connect 1 ms, echo 1 ms
+```
+
+Read against the table written down **before** the measurement
+(`docs/audit/next-subsystem-nettest-probe.md`), this is row one:
+
+- **slirp was healthy.** A connection through the *same* slirp to the
+  guest's echo service answered in **1 ms to connect and 1 ms to echo**.
+  So QEMU's main loop was being serviced and the guest was responsive.
+  **The starvation hypothesis is dead** -- the only mechanism still
+  standing after the foreign-connection and retransmission theories.
+- **slirp's host-side socket was `ESTABLISHED` and still open**, and the
+  connection ended at *our* deadline rather than by FIN or reset. slirp
+  did not close it, did not reset it, and never wrote a byte to it.
+- **The guest's half was reset** (`sent -104`, `rsts_in +1`) before it
+  could write.
+
+So **slirp tore down the guest's half of this connection and left the
+host's half open, established and silent**, while remaining perfectly
+responsive to everything else. That is a per-connection failure inside
+slirp, not a stall, not a foreign connection, and not this kernel: the
+guest's side has been fully accounted for since the socket-verdict unit,
+and the host's side now says the same.
+
+**What this does not name is the line of code.** It names the component
+and the shape, which is what the unit promised and more than thirty
+sightings had produced. The next measurement is a capture of the host's
+loopback -- root-only, so a human with `sudo` -- or slirp's own source,
+and either is outside this tree.
 
 **The instrument was rebuilt, PR #177.** The harness no longer assumes
 the first connection to arrive is the guest's: it listens with a backlog

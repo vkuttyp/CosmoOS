@@ -2705,8 +2705,19 @@ See [docs/development.md](docs/development.md).
   different ways**, asserted rather than assumed.
   A host-side packet capture would be the better measurement and needs
   root, so it is left to a human with `sudo` rather than designed into a
-  test. 343 self-tests on both architectures, debug and release (PR
-  #182).
+  test.
+  **It answered on its first outing.** Sighting thirty, on this unit's
+  own CI: the guest's half was reset (`sent -104`) while slirp's
+  host-side half was **`ESTABLISHED`, open and silent** — ended by the
+  harness's deadline, not by a FIN or a reset — and a probe through the
+  *same* slirp answered in **1 ms to connect and 1 ms to echo**. So
+  slirp tore down one half of this connection and orphaned the other
+  while remaining perfectly responsive to everything else. That is a
+  **per-connection failure inside slirp**: not a stall, not a foreign
+  connection, and not this kernel, whose side has been fully accounted
+  for since the socket-verdict unit. It does not name a line of code —
+  it names the component and the shape, which thirty sightings had not.
+  343 self-tests on both architectures, debug and release (PR #182).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
