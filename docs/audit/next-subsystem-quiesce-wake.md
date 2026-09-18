@@ -327,7 +327,7 @@ is `gp_wakes`.)*
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
 | `quiesce-wake` | *(as built)* the wake **fires**: `gp_wakes`, wakes delivered to a queued waiter, moves across ten grace periods | remove the wake and the counter is identically zero, because nothing else touches `g_gp_wq`. The duration is logged beside it and not asserted |
-| `quiesce-wake-straggler` | a grace period *does* reach its deadline when a CPU is genuinely slow to publish — `gp_timeouts` moves — and the existing straggler escalation still fires | the wake must not make the loop exit early: this is the existing `quiesce-straggler` spinner, asserting the kicks still happen |
+| ~~`quiesce-wake-straggler`~~ | *(not built)* the existing `quiesce-straggler` already runs a spinner and asserts the kicks; a second test of the same escalation would assert nothing the first does not |
 | `wait-timeout` | `wait_event_timeout` returns true without sleeping when the condition already holds, true when woken, and false at the deadline | the three arms of a new primitive, tested where it lives rather than only through its first caller |
 | the existing suite | `quiesce-straggler`, `-system`, `-idle`, `blk-submit-unregister`, `blk-unregister-drain`, `tcp-pcb-timer-free`, `device-remove-busy` unchanged | they are the correctness of the mechanism this unit speeds up; if any of them moves, the change was not what this report says it is |
 
@@ -340,13 +340,13 @@ is worth having and a number in an assertion is a flake.
 | file | change |
 | --- | --- |
 | `kernel/include/kernel/wait.h` | `wait_event_timeout` |
-| `kernel/core/wait.c` (or where the queue lives) | the timed wait's implementation |
-| `kernel/core/quiesce.c` | the grace-period waitqueue; the loop waits on it; `quiesce_note_quiescent` wakes; `gp_timeouts` |
-| `kernel/include/kernel/quiesce.h` | `gp_timeouts` in `struct quiesce_stats` |
-| `kernel/core/quiescetest.c` | `quiesce-wake`, `quiesce-wake-straggler` |
-| the wait test's home | `wait-timeout` |
-| `docs/kernel/quiesce/design.md`, `invariants.md` | the wake, and why the poll stays |
-| `docs/kernel/scheduler/api.md` (wait queues) | the new primitive |
+| `kernel/scheduler/wait.c` | the timed wait's implementation; `timer_cancel_sync` in `thread_sleep_ns_killable` |
+| `kernel/core/quiesce.c` | the grace-period waitqueue; the loop waits on it; **`quiesce_note_quiescent_preemptible`** wakes (*not* `quiesce_note_quiescent` — as built); `gp_wakes` and `gp_timeouts`, both atomic |
+| `kernel/scheduler/sched.c`, `kernel/arch/*/trap.c` | *(as built)* the three wake sites: the idle loop and both trap returns |
+| `kernel/include/kernel/quiesce.h` | `gp_wakes` and `gp_timeouts` in `struct quiesce_stats` |
+| `kernel/core/quiescetest.c` | `quiesce-wake` (*as built:* one test, asserting on `gp_wakes`) |
+| `kernel/scheduler/schedtest.c` | `wait-timeout` |
+| `docs/kernel/quiesce/design.md`, `invariants.md` | the wake, why the poll stays, and Q18 |
 | `docs/audit/2026-09-deferred-work-inventory.md` | §4's first item struck |
 | `README.md` | the Status entry |
 
@@ -354,10 +354,16 @@ is worth having and a number in an assertion is a flake.
 
 - `wait_event_timeout(wq, cond, ns)` — kernel, and the first timed wait
   in this tree.
-- `quiesce_stats.gp_timeouts` — a counter, so the property is observable
-  rather than timed. It counts how the wait *ended*, not that it
-  happened: on more than one CPU the waiter always waits, because the
-  epoch it is waiting for was bumped a moment earlier.
+- `quiesce_note_quiescent_preemptible()` — kernel. Publish *and* wake,
+  for the three contexts that hold nothing. *(As built: the report
+  expected `quiesce_note_quiescent` itself to wake, which kills the
+  machine — see the as-built section.)*
+- `quiesce_stats.gp_wakes` — **the observable**: wakes delivered to a
+  queued waiter, atomic, identically zero unless the wake path runs.
+- `quiesce_stats.gp_timeouts` — also atomic, and **reported rather than
+  asserted on**. The report intended this to be the observable; as built
+  it records where the other CPUs' ticks fell rather than whether the
+  wake works, in both directions.
 
 No syscall, no uapi change, no change to `quiesce_core_*`.
 
@@ -369,20 +375,33 @@ over a poll that is still there: `quiesce_core_pending` returning zero
 remains the entire condition, `wait_event_timeout`'s deadline is
 `TICK_NS / 2`, and a missed or spurious wake costs one re-check. So a
 defect in the wake path is a latency regression and cannot be a hang or a
-premature return. Check: `quiesce-wake` (on an idle machine the wait
-ends by being **woken**, not at its deadline: `gp_timeouts` unchanged),
-`quiesce-wake-straggler` (a real straggler still reaches the deadline and
-is still kicked), and the existing quiesce and lifetime suites unchanged.
+premature return. Check: `quiesce-wake` and the existing quiesce and
+lifetime suites unchanged.
+
+*(As built, and the shipped rule is **Q18** in
+`docs/kernel/quiesce/invariants.md` — this paragraph is the report's
+version of it. Three things differ: the wake is
+`quiesce_note_quiescent_preemptible` at three sites rather than every
+quiescent point; the assertion is `gp_wakes` moving, not `gp_timeouts`
+staying still, because that counter records tick alignment in both
+directions; and `quiesce-wake-straggler` was not built — the existing
+`quiesce-straggler` already covers the escalation and a second test of it
+would assert nothing new.)*
+
 Gap: the wake fires on every publish while any waiter is queued, so a
 grace period waiting on one slow CPU is woken by every other CPU's
-quiescent points; that is measured rather than assumed to be cheap.
+quiescent points; measured as built at three to six wakes per grace
+period, each costing one re-check.
 
 ## Migration plan
 
 1. `wait_event_timeout` and its own test, before anything depends on it.
 2. `gp_timeouts`, on the timed wait but with no wake yet — so the
    counter's meaning is established against a wait that always times
-   out, and the test can be written to fail first.
+   out, and the test can be written to fail first. *(As built: this step
+   worked and its conclusion did not. The test failed first as intended
+   and then kept failing after the wake was right, because the counter
+   measures tick alignment. `gp_wakes` replaced it in step 3.)*
 3. The waitqueue, the wake, the loop.
 4. The benchmark line, the docs, the inventory item, the README entry.
 
@@ -395,17 +414,31 @@ quiescent points; that is measured rather than assumed to be cheap.
   that gets established rather than assumed. The `waitqueue_empty` guard
   keeps the common path to one load, which is the mitigation and also the
   thing to measure.
+
+  *(As built: it is not safe at every quiescent point, and step 3 is
+  where that was established, exactly as this bullet said. The scheduler
+  publishes while holding a run-queue lock; the machine dies at five
+  seconds. Three wake sites that hold nothing, not every publish.)*
 - **A spurious-wake storm.** Every publish wakes every waiter while one
   is queued. On an idle machine that is a handful of wakes; on a busy one
-  with a slow CPU it could be many. `gp_timeouts` and a count of wakes
-  make it visible, and if it is bad the answer is the per-generation counter
-  Design §2 rejected — which would then be rejected on evidence instead
-  of on reasoning.
+  with a slow CPU it could be many. `gp_wakes` makes it visible, and if it
+  is bad the answer is the per-generation counter Design §2 rejected —
+  which would then be rejected on evidence instead of on reasoning.
+
+  *(As built: three to six wakes per grace period on four idle CPUs — 60
+  and 41 over ten on x86-64, 28 on aarch64. A handful, as expected, and
+  now measured rather than expected.)*
 - **The floor may not be where this report says.** The claim is that an
   idle-machine grace period is dominated by waiting out the deadline
   rather than by the work. Step 2 measures it
   before the wake exists, so if the sleep is not the cost, the unit says
   so and stops rather than shipping a change that buys nothing.
+
+  *(As built: **this risk was real**. The floor is the other CPUs' tick,
+  not the sleep, and ~3.9 ms of a grace period is untouched by this unit.
+  The sleep was not the whole cost but it was a real part of it — the
+  overshoot — so the unit shipped with the claim corrected rather than
+  abandoned. The as-built section leads with this.)*
 
 ## Alternatives considered
 
