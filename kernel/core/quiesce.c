@@ -33,12 +33,54 @@ static spinlock_t g_cb_lock = SPINLOCK_INIT("quiesce-cb");
 static struct quiesce_head *g_cb_head;
 static unsigned g_cb_pending;
 static struct waitqueue g_worker_wq = WAITQUEUE_INIT(g_worker_wq);
+/* Waiters for a grace period. Woken by a quiescent point taken in a
+ * context that holds nothing -- the trap returns and the idle loop, not
+ * the scheduler's own publishes (invariant Q-W). */
+static struct waitqueue g_gp_wq = WAITQUEUE_INIT(g_gp_wq);
 
 /* --- quiescent points ------------------------------------------------------ */
 
 void quiesce_note_quiescent(void)
 {
     quiesce_core_publish(&g_state, arch_cpu_id());
+    /* No wake here: see quiesce_note_quiescent_preemptible. This is
+     * called from inside the scheduler, including the AP bring-up path
+     * that holds a run-queue lock with interrupts off (sched.c), and a
+     * wake from there re-enters the scheduler. */
+}
+
+/*
+ * The same publish, plus the wake -- for callers that hold nothing.
+ *
+ * The wake cannot live in quiesce_note_quiescent, and that is the one
+ * thing the report got wrong about this design. That function is called
+ * from inside the scheduler: sched.c's AP bring-up publishes while
+ * holding a run-queue lock with interrupts disabled, and waking from
+ * there reaches schedule_internal, which asserts it is not called with a
+ * spinlock held. The machine dies five seconds into boot.
+ *
+ * Both trap returns and the idle loop call this one instead. The trap
+ * returns do so from the block guarded by `irq_depth == 0 &&
+ * preempt_count == 0 && interrupts were enabled`, which goes on to call
+ * sched_preempt() two lines later; the idle loop calls schedule() two
+ * lines later. Either can certainly do the lesser thing of waking a
+ * queue.
+ *
+ * g_ready as well: before quiesce_init there is no scheduler to wake
+ * into, and nothing can be queued either, because sync_quiesce_counting
+ * returns without queueing while !g_ready. So skipping the wake then
+ * cannot lose one.
+ */
+void quiesce_note_quiescent_preemptible(void)
+{
+    quiesce_note_quiescent();
+    if (g_ready && !waitqueue_empty(&g_gp_wq)) {
+        /* Atomic: this runs from every CPU's trap return and idle loop at
+         * once, so a plain += loses increments -- and the test asserts on
+         * this counter, so a lost one is a lost assertion, not just a
+         * wrong number. */
+        __atomic_fetch_add(&g_stats.gp_wakes, waitqueue_wake_all(&g_gp_wq), __ATOMIC_RELAXED);
+    }
 }
 
 void quiesce_read_lock_debug(void)
@@ -61,8 +103,15 @@ void quiesce_read_unlock_debug(void)
 /* --- grace periods ------------------------------------------------------- */
 
 /* The wait itself, handing back how many straggler kicks *this* call
- * sent. Nothing stores that number: see quiesce_test_sync_kicks below. */
-static unsigned sync_quiesce_counting(void)
+ * sent and, through `timeouts`, how many of its blocks ended at their
+ * deadline rather than by being woken. Nothing stores either: see
+ * quiesce_test_sync_kicks below.
+ *
+ * Per call, not from the global counter, and the difference matters: a
+ * test that sampled quiesce_stats.gp_timeouts before and after would be
+ * reading every CPU's grace periods, not its own. The first version of
+ * quiesce-wake did exactly that and failed on other threads' work. */
+static unsigned sync_quiesce_counting(unsigned *timeouts)
 {
     struct percpu *pc = this_cpu();
     if (pc->irq_depth != 0)
@@ -130,7 +179,15 @@ static unsigned sync_quiesce_counting(void)
         if (waited > 10 * NS_PER_SEC)
             panic("quiesce: CPU mask 0x%llx has not reached a quiescent state in 10 s", (unsigned long long)pending);
 #endif
-        thread_sleep_ns(TICK_NS / 2);
+        if (!wait_event_timeout(&g_gp_wq, quiesce_core_pending(&g_state, target, online) == 0,
+                                TICK_NS / 2)) {
+            /* Atomic for the same reason as gp_wakes: waiters are
+             * concurrent, so two grace periods can reach a deadline at
+             * once. */
+            __atomic_fetch_add(&g_stats.gp_timeouts, 1u, __ATOMIC_RELAXED);
+            if (timeouts)
+                (*timeouts)++;
+        }
     }
 
     uint64_t waited = clock_since_ns(start);
@@ -142,7 +199,7 @@ static unsigned sync_quiesce_counting(void)
 
 void synchronize_quiesce(void)
 {
-    (void)sync_quiesce_counting();
+    (void)sync_quiesce_counting(NULL);
 }
 
 #if CONFIG_DEBUG
@@ -159,7 +216,16 @@ void synchronize_quiesce(void)
  */
 unsigned quiesce_test_sync_kicks(void)
 {
-    return sync_quiesce_counting();
+    return sync_quiesce_counting(NULL);
+}
+
+/* One grace period, reporting how many of ITS blocks reached a deadline.
+ * Zero is the claim invariant Q-W makes. */
+unsigned quiesce_test_sync_timeouts(void)
+{
+    unsigned timeouts = 0;
+    (void)sync_quiesce_counting(&timeouts);
+    return timeouts;
 }
 #endif
 

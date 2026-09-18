@@ -92,6 +92,30 @@ bool waitqueue_empty(struct waitqueue *wq)
     return empty;
 }
 
+/* --- the timed wait --- */
+
+void wait_timeout_init(struct wait_timeout *wt, struct waitqueue *wq)
+{
+    wt->wq = wq;
+    wt->expired = false;
+}
+
+/* Interrupt context: the timer's callback. Waking is allowed here
+ * (wait.h, "Wakers are interrupt-safe"), and the waiter re-tests its own
+ * condition either way -- this only ends the block, it decides nothing. */
+void wait_timeout_fired(struct timer *t, void *arg)
+{
+    (void)t;
+    struct wait_timeout *wt = arg;
+    __atomic_store_n(&wt->expired, true, __ATOMIC_RELEASE);
+    waitqueue_wake_all(wt->wq);
+}
+
+bool wait_timeout_expired(const struct wait_timeout *wt)
+{
+    return __atomic_load_n(&wt->expired, __ATOMIC_ACQUIRE);
+}
+
 /* --- sleep --- */
 
 struct sleeper {
@@ -132,8 +156,12 @@ int thread_sleep_ns_killable(uint64_t ns)
     timer_start(&t, ns);
     int rc = wait_event_killable(&s.wq, __atomic_load_n(&s.done, __ATOMIC_ACQUIRE));
     if (rc) {
-        /* Woken by a kill: the timer may still be armed on our stack. */
-        timer_cancel(&t);
+        /* Woken by a kill: the timer may still be armed on our stack --
+         * and plain timer_cancel only promises the callback will not
+         * START (timer.h). One already running on another CPU would
+         * touch `s` and `t` after this frame is gone, so the wait is the
+         * synchronous one. */
+        timer_cancel_sync(&t);
     }
     return rc;
 }

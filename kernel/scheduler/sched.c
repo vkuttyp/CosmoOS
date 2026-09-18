@@ -61,8 +61,16 @@ static void idle_main(void *arg)
 
     for (;;) {
         /* Quiescent: no thread work, no read section (docs/kernel/quiesce/).
-         * While halted, the next interrupt's return publishes again. */
-        quiesce_note_quiescent();
+         * While halted, the next interrupt's return publishes again.
+         *
+         * The waking form, because on an idle machine THIS is the publish
+         * that finishes a grace period: the other CPUs are here, and
+         * their next trap return is up to a tick away -- further off than
+         * the waiter's own deadline, so a wake only at trap returns never
+         * arrives in time (invariant Q-W). Safe from here for the same
+         * reason the trap return is: nothing is held, and schedule() is
+         * called two lines down. */
+        quiesce_note_quiescent_preemptible();
         if (this_cpu()->need_resched)
             schedule();
         else

@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty-one, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -491,8 +491,9 @@ of this section said eight and then listed nine:
 | `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
 | PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
+| PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
 
-Eleven entries, twenty occurrences. The first five rows are inherited
+Twelve entries, twenty-one occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -570,7 +571,7 @@ a reset accepted **on a synchronized connection** (`tcp.c`, the RFC 5961
 again. `retransmits +1` and 1381 ms are one SYN retransmission at the
 one-second timer, so the handshake was slow as well as short-lived.
 
-**That unifies the shapes.** Eleven instrumented sightings, and the
+**That unifies the shapes.** Twelve instrumented sightings, and the
 guest's progress when the reset lands is the only thing that differs:
 
 | run | how far the guest got | `rsts_in` |
@@ -585,6 +586,7 @@ guest's progress when the reset lands is the only thing that differs:
 | PR #171, aarch64, third | **the connect reset, with no retransmission** | `+1` |
 | PR #174, aarch64 | connected in 1355 ms, **sent 12**, never acknowledged | `+1` |
 | PR #174, aarch64 again | connected in 1063 ms, then `sendto` refused | `+1` |
+| PR #175, aarch64 | connected in 1460 ms, **sent 12**, never acknowledged | `+1` |
 
 The constant is not the twelve bytes and never was: it is **an inbound
 reset on an established connection to slirp, arriving at whatever point
@@ -597,8 +599,30 @@ What is still not established is why slirp resets it. That is outside
 this kernel, and saying so with evidence was named as a possible result
 from the beginning (`docs/audit/next-subsystem-twelve-bytes.md`, Risks).
 
-`rsts_in +1` in nine of the eleven; the two `+0`s are the instrument's own
+`rsts_in +1` in ten of the twelve; the two `+0`s are the instrument's own
 window, which opened after the connect until PR #171 moved it.
+
+**The first sighting on a branch with code in it, and how that is
+discharged.** PR #175 -- the quiesce-wake unit -- changes
+`kernel/scheduler/`, `kernel/core/quiesce.c` and both architectures' trap
+returns, which are hot paths a network exchange runs through. So "the
+diff is Markdown" is not available here, and the discharge has to be
+narrower:
+
+- the signature is the one this row has recorded twenty times, including
+  on trees with no code at all: an inbound reset (`rsts_in +1`), the
+  guest's twelve bytes unacknowledged, the host's `accept` having
+  succeeded;
+- the failing exchange is a TCP connection to a process on the host
+  through slirp, and the branch touches no network file at all
+  (`git diff --name-only main...HEAD` matches nothing under
+  `kernel-services/network/`);
+- the mechanism the row has established -- slirp resetting an established
+  connection -- has no path to grace-period wake latency.
+
+That is weaker than the documentation-branch discharge and is written
+down as weaker. What would settle it is the row being closed, not another
+re-run.
 
 **Twice in a row on one branch, and the rule that covers it.** PR #174
 failed `net-harness` on consecutive aarch64 runs. This file says near the
