@@ -337,6 +337,23 @@ what `net-harness` said across every sighting in
 
 ## Ownership and lifetime
 
+**Interface pointers held in tables.** ARP and ND entries name the
+interface a resolution belongs to, and their ageing passes carry that
+pointer past the table lock into a send. Those retry lists hold a
+`netif_get` for the duration, released after the send: a pointer that
+outlives the lock that found it holds a reference (**N22**). The entries
+themselves do not, because `netif_unregister` flushes them — a reference
+per entry would keep interfaces alive until the next ageing pass rather
+than fixing the window, and would turn a missing flush from a dangling
+pointer into a leak.
+
+Flushing an interface's entries **counts the packets it drops**:
+`arp_stats.pending_dropped` for ARP, and `ip_stats.nd_pending_dropped`
+for ND, which keeps its statistics in a different struct. A packet that
+vanishes because its interface went is no less gone than one whose
+resolution timed out, and the timeout path always counted.
+
+
 mbufs: as above. netifs: kobjects whose storage is freed by
 `ops->release` after the last reference; the creator and the registry
 each hold one, lookups and routes hand out more, and `netif_unregister`

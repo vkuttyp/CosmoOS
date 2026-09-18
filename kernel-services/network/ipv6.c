@@ -3,6 +3,7 @@
  * and neighbour discovery (RFC 4861) for link-local addresses.
  */
 
+#include <arch/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/net/cksum.h>
@@ -248,11 +249,44 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
         ether_output(nif, pending, nd.opt_mac, ETH_P_IPV6);
 }
 
+#if CONFIG_DEBUG
+/* ND's twin of arp_test_park_retry: the same one-unlock window, parked
+ * the same way, because the defect is in both and a fix proved in one
+ * is half a proof (invariant N22). */
+static unsigned g_test_hold_retry, g_test_retry_parked, g_test_retry_release;
+
+void nd_test_hold_retry(bool on)
+{
+    __atomic_store_n(&g_test_retry_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_retry_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_retry, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool nd_test_retry_parked(void) { return __atomic_load_n(&g_test_retry_parked, __ATOMIC_ACQUIRE) != 0; }
+void nd_test_release_retry(void) { __atomic_store_n(&g_test_retry_release, 1u, __ATOMIC_RELEASE); }
+
+static void nd_test_park_retry(unsigned nr)
+{
+    if (!nr || !__atomic_load_n(&g_test_hold_retry, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_test_hold_retry, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_retry_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_retry_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+}
+#else
+static inline void nd_test_park_retry(unsigned nr) { (void)nr; }
+#endif
+
 void nd_flush(struct netif *nif)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
     for (unsigned i = 0; i < ND_TABLE_SIZE; i++) {
         if (g_nd[i].state != ND_FREE && g_nd[i].nif == nif) {
+            /* Counted, like ARP's flush now counts its own. ND keeps a
+             * different struct, so this is a different field
+             * (docs/audit/next-subsystem-arp-netif-ref.md). */
+            if (g_nd[i].pending)
+                STAT(nd_pending_dropped);
             m_freem(g_nd[i].pending);
             memset(&g_nd[i], 0, sizeof(g_nd[i]));
         }
@@ -280,23 +314,35 @@ void nd_age(uint64_t now)
         if (clock_delta_ns(now, e->updated_ns) < ND_RETRY_NS)
             continue;
         if (e->tries >= ND_MAX_TRIES) {
+            if (e->pending)
+                STAT(nd_pending_dropped);   /* the give-up path, for symmetry */
             m_freem(e->pending);
             memset(e, 0, sizeof(*e));
             continue;
         }
         e->tries++;
         e->updated_ns = now;
+        /* A reference: this pointer outlives the lock, and `nd_send`
+         * below dereferences it. Sound here for the same reason as
+         * ARP's -- `nd_flush` takes `g_nd_lock`, so an entry present
+         * under this lock means `netif_unregister` step 5 has not run
+         * and step 6's put is still to come (invariant N22). */
+        netif_get(e->nif);
         retry[n].nif = e->nif;
         retry[n].ip = e->ip;
         n++;
     }
     spin_unlock_irqrestore(&g_nd_lock, s);
+
+    nd_test_park_retry(n);
+
     for (unsigned i = 0; i < n; i++) {
         struct in6_addr sn = { { 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, retry[i].ip.s6_addr[13],
                                  retry[i].ip.s6_addr[14], retry[i].ip.s6_addr[15] } };
         uint8_t dmac[ETH_ALEN];
         solicited_node_mac(&retry[i].ip, dmac);
         nd_send(retry[i].nif, ICMPV6_NS, &retry[i].ip, &sn, dmac);
+        netif_put(retry[i].nif);
     }
 }
 

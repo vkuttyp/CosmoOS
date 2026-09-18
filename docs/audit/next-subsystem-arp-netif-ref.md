@@ -1,8 +1,29 @@
 # NEXT SUBSYSTEM — the interface an ARP retry still points at
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #184), and the banner below records where the build differed from
+it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The invariant is N22, not the N24 the first draft's code comments
+   said.** The network invariants run to N21; six comments across five
+   files pointed at a number that did not exist. Swept before it became
+   a stale reference in the tree.
+2. **The bug-proof fails one assertion earlier than the report
+   predicted, and better.** The report expected the driver's release
+   hook to run while the retry held the pointer. With the `netif_get`
+   removed the test fails first at `kobject_refcount(&f.nif.obj) == 3` —
+   the reference's absence stated directly, rather than a consequence of
+   it observed afterwards.
+3. **The release build needed the test helpers guarded.**
+   `struct retry_park`, `arp_retry_main` and `nd_retry_main` are reached
+   only from `#if CONFIG_DEBUG` arms, so a release build failed on
+   `-Wunused-function`. The third time this tree has caught that shape.
+4. **`arp_resolve` returns `-EINPROGRESS`, not `-EAGAIN`**, for a
+   resolution it has queued a packet behind — found by the first run of
+   the test asserting the wrong one.
 
 **Subsystem: a `struct netif *` that outlives the lock protecting it.**
 ARP and ND entries hold a **bare** interface pointer and take no
@@ -139,11 +160,11 @@ construction rather than by timing.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/arp.c` | `netif_get`/`netif_put` around the retry list; `pending_dropped` in `arp_flush` |
-| `kernel-services/network/ipv6.c` | the same for `nd_age` and `nd_flush` |
-| `kernel/include/kernel/netif.h` | the rule stated where the reference API is, not only for lookups |
+| `kernel-services/network/arp.c` | `netif_get`/`netif_put` around the retry list; `pending_dropped` in `arp_flush`; the debug park hook |
+| `kernel-services/network/ipv6.c` | the same for `nd_age` and `nd_flush`, plus `nd_pending_dropped` and ND's park hook |
+| ~~`kernel/include/kernel/netif.h`~~ | **not changed as built.** The rule is stated as invariant **N22** instead, where the sweep it came from can be recorded beside it; `netif.h:81`'s lookup sentence is correct as it stands and repeating the rule there would put it in two places |
 | `docs/kernel-services/network/design.md` | the ownership rule beside the interface lifetime |
-| `docs/kernel/quiesce/invariants.md` or the network invariants | the rule as an invariant, with what enforces it |
+| `docs/kernel-services/network/invariants.md` | **N22** — the rule, why taking the reference under the table lock is sound, why entries do not hold one each, and the other holders the sweep found (as built; the report named the quiesce file as an alternative and this is the network one) |
 | `kernel-services/network/nettest.c` | the tests in the table below, where every other `net-*` self-test lives — counted there and not here, because this row has already gone stale once |
 | `kernel/include/kernel/selftest.h` | their declarations |
 | `kernel/core/selftest.c` | their registry entries |
@@ -152,8 +173,28 @@ construction rather than by timing.
 
 ## New APIs
 
-None. `netif_get`/`netif_put` already exist and are what the fix uses;
-this unit is about a rule and its sweep, not new machinery.
+**None in the fix, six for the tests — and the design said none, which
+was true of the fix and not of the unit.** `netif_get`/`netif_put`
+already exist and are what closes the window; no new machinery was
+needed for that.
+
+What the build added, all `#if CONFIG_DEBUG` and all declared in public
+headers because the tests live in another translation unit:
+
+| header | declarations |
+| --- | --- |
+| `kernel/include/kernel/net/ether.h` | `arp_test_hold_retry`, `arp_test_retry_parked`, `arp_test_release_retry` |
+| `kernel/include/kernel/net/ip.h` | `nd_test_hold_retry`, `nd_test_retry_parked`, `nd_test_release_retry` |
+
+They are the park hook the Tests section calls for — the window is one
+unlock wide, so a test that does not stop the retry inside it is racing
+and hoping. `tcp_test_hold_callback` is the same shape and the same
+three-call contract: arm, observe, release. Counting them as "no new
+APIs" because they vanish in a release build would be the kind of
+bookkeeping this report spends a section arguing against.
+
+Also new, and not an API: `ip_stats.nd_pending_dropped`, a field rather
+than a function, IPv6-only, described where the counters are.
 
 ## Tests
 

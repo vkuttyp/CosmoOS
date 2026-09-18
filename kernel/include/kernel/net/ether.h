@@ -45,4 +45,14 @@ struct arp_stats {
 };
 void arp_get_stats(struct arp_stats *out);
 
+#if CONFIG_DEBUG
+/* Park the next ARP retry batch between its unlock and its send -- the
+ * one-unlock window a netif reference closes (invariant N22). The test
+ * stops the retry there rather than racing netif_unregister against
+ * age_work, the way tcp_test_hold_callback parks a timer callback. */
+void arp_test_hold_retry(bool on);
+bool arp_test_retry_parked(void);
+void arp_test_release_retry(void);
+#endif
+
 #endif /* KERNEL_NET_ETHER_H */
