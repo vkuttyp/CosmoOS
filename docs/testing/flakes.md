@@ -493,7 +493,7 @@ of this section said eight and then listed nine:
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
 
-Twelve entries, twenty-three occurrences. The first five rows are inherited
+Twelve entries, twenty-four occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
 here. The last six rows were watched as they happened: PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
@@ -529,6 +529,7 @@ the connection was already reset.
 | `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
 | PR #176, aarch64 (docs-only) | `-104` | `+3` | 0 | `+1` |
 | PR #177, aarch64 (**roster**) | `-104` | `+3` | 0 | `+1` |
+| PR #177, aarch64 (protection CPU) | **`12`** | `+4` | **12** | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
@@ -824,6 +825,45 @@ reaches the port and not this kernel. What is still unnamed is why that
 connect stalls for about a second and then fails, and the next
 measurement is a packet capture of the host's loopback rather than the
 guest's wire — the guest's side is now fully accounted for.
+
+**Sighting twenty-four confirmed it, two hours later, on the same pull
+request** — the "protection-capable CPU" boot of an aarch64 job whose
+first two boots passed. The roster again:
+
+```
+1 connection(s): 127.0.0.1:60860 accepted at 88.7s, 0 byte(s): b''
+```
+
+**One connection, carrying nothing, for the second time running.** The
+guest's side took the other arm of the four-outcome table, which makes
+the pair more informative than either alone:
+
+```
+connect 0 in 1089 ms, sent 12 in 0 ms, recv -104 in 0 ms,
+  pending error -104, (outstanding 12 then 12), state 0,
+  segs_out +4 retransmits +1 refused +0 rsts_in +1
+```
+
+`sent 12` with **`outstanding 12 then 12`**: the twelve bytes went onto
+the wire and were **never acknowledged** — where sighting twenty-three's
+guest never got to write at all. So slirp answers the handshake late,
+then either takes the bytes and drops them (the induced reproduction) or
+never acknowledges them, and in both cases its host-side socket is
+connected — the harness accepted it — and carries nothing.
+
+**Three consecutive connects: 1031 ms, 1116 ms, 1089 ms, each with
+exactly one SYN retransmission.** Against a 150 microsecond baseline
+that is not a spread, it is a constant: slirp ignores the first SYN and
+answers the second, one retransmission timer later. Whatever stalls it
+lasts about a second and is gone afterwards.
+
+**And the grace bound held in production.** The harness gave up at
+108.7s -- twenty seconds after the accept, the receive budget plus the
+grace -- rather than burning the 69.3s that remained. The run failed at
+153.8s, inside its 180 s timeout, and reported *only* the harness
+markers: the five unrelated missing markers that sighting twenty-three's
+run produced are gone. That is the regression fix working on the exact
+failure that exposed it.
 
 **The instrument was rebuilt, PR #177.** The harness no longer assumes
 the first connection to arrive is the guest's: it listens with a backlog
