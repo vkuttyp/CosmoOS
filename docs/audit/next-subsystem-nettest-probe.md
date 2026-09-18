@@ -73,29 +73,51 @@ indistinguishable in the log.
    end without sending anything. Those are different defects in
    different parts of slirp. Also recorded: `SO_ERROR`.
 
-2. **A write to it.** If a write of one byte succeeds, slirp's end is
-   alive and reading; `EPIPE` or `ECONNRESET` says it is gone. This is
-   the cheap confirmation of probe 1 and it does not depend on
-   `TCP_INFO` being available, so the pair degrades gracefully on macOS.
+2. **How the connection ended — which the harness already knows and
+   throws away.** The select loop distinguishes a peer that closed
+   (`recv` returns b"", the `not chunk` branch) from one whose receive
+   deadline expired (the filter above it), and records **neither**: both
+   reach the roster as `0 byte(s)`. One field carries it, costs nothing,
+   needs no syscall and works everywhere. It is also the portable half
+   of probe 1: a graceful close from slirp shows up here as EOF.
 
-3. **A liveness probe through slirp, and this is the one that tests the
-   only mechanism still standing.** Connect to `127.0.0.1:tcp_port` —
-   the guest's echo service, forwarded by the same slirp instance — and
-   time the connect and a one-byte echo. This asks whether **slirp was
-   responsive at the moment of failure at all**, which is what the
-   guest's 597–1510 ms connect and the missing forward would both
-   follow from if QEMU's main loop had stopped servicing slirp for a
-   while.
+   **A write probe was the first version of this and it does not
+   work.** A one-byte write to a socket in `CLOSE_WAIT` *succeeds* —
+   the local send buffer accepts it, and `EPIPE` arrives only on a later
+   write, after a reset. So an open peer and a closed one would both
+   record "write succeeded", which is exactly the non-discriminating
+   instrument this report says to avoid. A write is kept only as a
+   secondary, and only its **failure** is evidence; a success is not
+   evidence of liveness and the record must not imply it is.
+
+3. **A timed probe through the same slirp**, to the guest's echo
+   service on `127.0.0.1:tcp_port`, recording the connect and the echo
+   round-trip **separately**.
+
+   **Its value is asymmetric, and the first version of this report got
+   that wrong.** The echo traverses slirp *and* the guest — which must
+   accept the forwarded connection, schedule its echo thread and reply —
+   so a **slow** reading does not single out QEMU's main loop; guest-side
+   delay produces the same number, and reading it as "slirp was starved"
+   would send the next investigation to the wrong subsystem. A **fast**
+   reading is the informative one: it rules out the whole path having
+   stalled, which is the only mechanism still standing after the
+   foreign-connection and retransmission theories died.
 
 **The predictions, written down before the measurement**, because the
 value of a discriminating instrument is lost if the reading is
 interpreted after the fact:
 
-| probe 3 | accepted socket | reading |
+| probe 3 | how it ended / state | reading |
 | --- | --- | --- |
-| slow or fails | either | slirp was not being serviced; the locus is QEMU's main loop, outside this kernel, and the tally can say so and stop |
-| fast | `ESTABLISHED`, writable, 0 bytes | slirp was healthy and *this connection's* forwarding failed — a per-connection defect, and the first evidence pointing at one |
-| fast | `CLOSE_WAIT` or write fails | slirp closed its end without forwarding; the question becomes why it gave up |
+| **fast** | deadline, `ESTABLISHED`, 0 bytes | the path was alive and *this connection's* forwarding failed — a per-connection defect, and the first evidence pointing at one |
+| **fast** | EOF, or `CLOSE_WAIT` | slirp closed its end without forwarding; the question becomes why it gave up |
+| **slow** | either | the path stalled — **slirp or the guest**, and this probe cannot say which. Separating them needs the guest's own timestamp for the same window, which is a follow-on and is named here so the reading is not over-claimed |
+
+The fast rows are the ones worth having. The slow row is recorded
+honestly as ambiguous rather than dressed up, because a reading that
+points confidently at the wrong subsystem is worse than one that admits
+it points at two.
 
 Any of the three is a better answer than the tally has now, and the
 second and third would be new.
@@ -117,14 +139,16 @@ Host tests, driving `NetTest` against fake peers, no boot:
 
 | test | asserts |
 | --- | --- |
-| `probe_established_peer` | a peer that connects, sends nothing and stays open: the state is recorded as established and the write succeeds |
-| `probe_closed_peer` | a peer that connects and closes: the state or the write records that it is gone, and the two disagree with the case above |
+| `probe_open_peer` | a peer that connects, sends nothing and **stays open**: the connection is recorded as ending at the **deadline**, and (on Linux) `ESTABLISHED` |
+| `probe_closed_peer` | a peer that connects and **closes**: recorded as ending at **EOF**, and the reading **differs** from the case above |
 | `probe_records_on_failure_only` | a successful exchange takes no probes and adds no latency to the healthy path |
-| `probe_survives_no_tcp_info` | with `TCP_INFO` unavailable the probes degrade to the write result rather than raising, because macOS is where this is developed and CI is where it runs |
+| `probe_survives_no_tcp_info` | with `TCP_INFO` unavailable the probes degrade to **how the connection ended** rather than raising — macOS is where this is developed and Linux is where it runs, and EOF-versus-deadline is available on both |
 
-**The bug-proof.** `probe_established_peer` and `probe_closed_peer` must
+**The bug-proof.** `probe_open_peer` and `probe_closed_peer` must
 produce *different* recorded readings; a probe that reports the same
-thing for an open peer and a closed one is not a probe. That is the
+thing for an open peer and a closed one is not a probe. **This is not
+hypothetical**: the write probe this report first proposed fails exactly
+here, because a write into `CLOSE_WAIT` succeeds. That is the
 check that this instrument is not the tally's third confidently wrong
 answer — a counter that cannot distinguish the cases it was built to
 distinguish is worse than no counter, because it reads like evidence.
@@ -140,8 +164,9 @@ distinguish is worse than no counter, because it reads like evidence.
   slirp rather than at it — but it names no line of code, and the report
   should not promise one.
 - **`TCP_INFO`'s layout is kernel-specific.** Only byte 0 is read, and
-  only on Linux, with the write probe as the portable fallback. Reading
-  more of that struct would be borrowing trouble for no gain.
+  only on Linux, with **EOF-versus-deadline** as the portable fallback —
+  not the write, which cannot tell an open peer from a closed one.
+  Reading more of that struct would be borrowing trouble for no gain.
 
 ## Alternatives considered
 
