@@ -355,9 +355,14 @@ tree.
   reading it: the kick sends `IPI_RESCHEDULE`, whose documented contract
   is "target re-evaluates `need_resched` on interrupt return" and whose
   handler comment says the sender set `need_resched` under a run-queue
-  lock -- **the quiesce caller does neither**, so an early exit on
-  `!need_resched`, which that contract permits, would turn every kick
-  into a no-op with no test to notice. A CPU publishes at interrupt
+  lock -- **the quiesce caller does neither**, and wants only the trap
+  return. The hazard is on the **send** side: a handler that returned
+  early on `!need_resched` would not neuter the kick, because the trap
+  tail evaluates the quiescent point independently of the handler, but a
+  sender-side optimisation of the kind a reschedule IPI invites --
+  skipping the send when the target's `need_resched` is already set, or
+  coalescing repeated sends -- would skip the quiesce caller silently,
+  with no test to notice. A CPU publishes at interrupt
   return only when `preempt_count == 0`, so the kick cannot help a CPU
   spinning inside a read-side section -- which is the case its own
   comment named until this unit corrected it. It fires only for a CPU

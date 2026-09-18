@@ -53,10 +53,19 @@ Four things follow, and the fourth is a latent defect rather than a gap:
    our run-queue lock". The scheduler's caller sets the flag before it sends
    (`request_resched`, `kernel/scheduler/sched.c:212-220`). **The quiesce caller sets no
    `need_resched` and holds no run-queue lock** — it wants only the trap
-   return. Today the two coincide because the handler is empty. An
-   early exit when `!need_resched`, which the documented contract would
-   permit, would silently turn every straggler kick into a no-op, and
-   **no test in the tree would notice.**
+   return. Today the two coincide because the handler is empty.
+   **The hazard is on the send side, not in the handler**, and this
+   report said otherwise in its first revision. A handler that returned
+   early on `!need_resched` would *not* neuter the kick: the
+   architecture's trap tail evaluates
+   `quiesce_note_quiescent_preemptible` independently of what the
+   handler did, and the kick needs only delivery and that tail. What
+   would neuter it is a **sender-side** optimisation of the kind a
+   reschedule IPI invites — skipping the IPI when the target's
+   `need_resched` is already set, or coalescing repeated sends — since
+   the quiesce caller never sets that flag and would be silently
+   skipped. **No test in the tree would notice**, and that is the part
+   worth fixing whatever the measurement says.
 
 ## Current implementation
 
@@ -79,7 +88,9 @@ each one an IPI to *every* pending CPU.
 
 `quiesce_test_sync_kicks` already hands a waiter the count of the kicks
 its own call sent, on the stack, because the machine-wide counter cannot
-carry a per-waiter claim — the pattern this unit extends.
+carry a per-waiter claim. That works because the **sender** increments
+it; design point 3 records why a publish, which the *target* increments,
+cannot be attributed the same way.
 
 ## Why it matters
 
@@ -109,17 +120,40 @@ kick's own trap return. Count that, and the question answers itself.**
    cannot silently disable the kick, because the kick no longer uses it.
    Its handler sets a per-CPU flag and counts; like the reschedule
    handler it does no work of its own.
-2. **Attribution in the publish path.** `quiesce_note_quiescent_preemptible`
-   — reached from both trap returns and from `idle_main` — tests and
-   clears the flag. If it was set, the publish is counted as
-   `kick_publishes`. That is the narrowest defensible meaning of "the
-   kick worked", and it costs one per-CPU read on a path that already
-   runs there.
-3. **A per-waiter count.** `quiesce_test_sync_kick_publishes()` mirroring
-   `quiesce_test_sync_kicks()`, returned on the stack for the reason the
-   existing one is: another waiter's kicks land in the machine-wide
-   counter, and the callback worker is unpinned, so neither a global nor
-   a per-CPU slot can carry a per-waiter claim.
+2. **Attribution in the trap tail, not in the publish.** The flag is
+   read **and cleared unconditionally in the architecture trap tail**,
+   beside the three-condition test, and the publish is counted as a
+   `kick_publishes` only when that same return also published.
+
+   Clearing it inside `quiesce_note_quiescent_preemptible` — which this
+   report proposed first — is wrong, and wrong in the direction that
+   destroys the measurement. A kick that arrives while
+   `preempt_count != 0` does not publish, so the flag would **survive
+   its own trap**; the next unrelated interrupt return, or an
+   `idle_main` iteration, would then clear it and count a publish the
+   kick did not cause. That falsely attributes in exactly the case the
+   kick is known *not* to help, so it would corrupt the positive
+   measurement and silently break the negative control, which is the
+   one test that would otherwise catch it. Clearing unconditionally in
+   the tail bounds the flag's life to the single trap that set it.
+3. **A per-CPU count, and no per-waiter claim — because none is
+   available.** `kick_publishes` is per-CPU, indexed by the CPU that
+   published, and a test reads the counter of the CPU it pinned its
+   adversary to.
+
+   The stack-returned count that works for `quiesce_test_sync_kicks`
+   does **not** generalise here, and this report claimed it would. That
+   count is local because the *sender* increments it as it sends. A
+   publish is incremented on the **target** CPU, asynchronously, and the
+   IPI carries no payload identifying the waiter that sent it, so two
+   waiters kicking the same pending CPU are satisfied by one publish and
+   neither can claim it. A per-waiter figure is therefore not
+   implementable as specified, and asserting one would be a claim the
+   mechanism cannot support.
+
+   What replaces it is the *pair*: the adversary's CPU counter rising,
+   and the negative control's not. Neither number alone carries the
+   claim; the difference between them does.
 4. **A deterministic adversary for the positive case.** The helpable
    population is a CPU whose tick keeps landing inside a short disabled
    region, and the inventory calls that "a phase coincidence no
@@ -129,13 +163,20 @@ kick's own trap return. Count that, and the question answers itself.**
    CPU's tick, then phase-locks a short `preempt_disable` region to
    arrive just before each expected tick, so the tick lands inside and
    the kick, at an unrelated phase, lands outside.
-5. **The decision rule, written down before the measurement.** If the
-   adversary can be built and `kick_publishes` rises, the kick is proved
-   and the follow-up unit bounds it. If the adversary cannot be built,
-   or `kick_publishes` is identically zero across the suite on both
-   architectures, the kick is dead weight and the follow-up deletes it.
-   **Both outcomes are a result.** Stating the rule now is what stops
-   the measurement from being read to suit whichever answer arrives.
+5. **The decision rule, written down before the measurement.** The
+   counter decides, and only the counter:
+   - `kick_publishes` rises anywhere — the adversary, or ordinary
+     operation on either architecture — and the kick **works**; the
+     follow-up unit bounds it.
+   - `kick_publishes` is **identically zero** across the whole suite on
+     both architectures, and the kick is dead weight; the follow-up
+     deletes it.
+
+   The adversary's job is to *try to produce* a non-zero, so failing to
+   build it is not a third outcome and not independent evidence — it
+   only leaves the count standing alone. **Both outcomes are a result.**
+   Stating this now is what stops the number being read to suit
+   whichever answer arrives.
 
 ## Affected files
 
@@ -145,16 +186,20 @@ kick's own trap return. Count that, and the question answers itself.**
 | `kernel/interrupt/ipi.c` | handler and table entry; sets the per-CPU flag |
 | `kernel/include/kernel/percpu.h` | the flag |
 | `kernel/core/quiesce.c` | send the new kind; clear-and-count in the preemptible publish; `kick_publishes` in the stats |
-| `kernel/include/kernel/quiesce.h` | `kick_publishes`, `quiesce_test_sync_kick_publishes` |
+| `kernel/include/kernel/quiesce.h` | per-CPU `kick_publishes` and its accessor |
 | `kernel/core/quiescetest.c` | the adversary and the negative control |
-| `docs/kernel/quiesce/invariants.md` | **Q19**: what a kick can and cannot do, and what is counted |
+| `docs/kernel/smp/design.md`, `api.md`, `architecture.md` | each enumerates the IPI kinds; all three gain `IPI_QUIESCE_KICK` and the reason it is not `IPI_RESCHEDULE` |
+| `docs/kernel/interrupt/controllers.md` | names the kinds where vectors are allocated |
+| `docs/kernel/quiesce/invariants.md` | **Q19**: what a kick can and cannot do, what is counted, and that the flag lives for one trap |
 | `README.md` | the Status entry |
 
 ## New APIs
 
-`IPI_QUIESCE_KICK` (internal), `quiesce_test_sync_kick_publishes(void)`
-(debug builds, as `quiesce_test_sync_kicks` is), and one `uint64_t` in
-`struct quiesce_stats`. No syscall, no user-visible change.
+`IPI_QUIESCE_KICK` (internal), a per-CPU `kick_publishes` counter with a
+read accessor taking a CPU id (debug builds, as `quiesce_test_sync_kicks`
+is), and the machine-wide total in `struct quiesce_stats` for the boot
+line. **No per-waiter accessor**, for the reason design point 3 gives.
+No syscall, no user-visible change.
 
 ## Migration plan
 
@@ -168,7 +213,7 @@ a measurement rather than a change.
 
 | test | asserts |
 | --- | --- |
-| `quiesce-kick-attributed` | the adversary: a publish attributed to a kick, `kick_publishes` up by at least one for **this waiter** |
+| `quiesce-kick-attributed` | the adversary: `kick_publishes` for **the CPU the adversary is pinned to** rises by at least one |
 | `quiesce-kick-spinner` | the negative control, on `quiesce-straggler`'s shape: kicks are sent and `kick_publishes` does **not** rise, because a CPU with `preempt_count != 0` cannot publish in a trap return |
 | `quiesce-kick-ipi-kind` | the kick sends `IPI_QUIESCE_KICK` and not `IPI_RESCHEDULE`, so the scheduler's IPI can change without disabling it |
 | existing `quiesce-straggler`, `-system`, `-idle` | unchanged and still passing |
@@ -195,13 +240,18 @@ known to exist.
 ## Risks
 
 - **The adversary may not be buildable.** Phase-locking to another
-  CPU's tick may prove too coarse. That is a result and the report says
-  so up front: it moves the decision to "delete or bound" rather than
-  leaving it open, which is still strictly better than a comment.
+  CPU's tick may prove too coarse. That does not by itself decide
+  anything: failing to *arrange* a benefit is not evidence that none
+  exists, so the decision falls to the counter, exactly as design point
+  5 states it — deletion only if `kick_publishes` is identically zero
+  across the suite on both architectures. An unbuildable adversary
+  leaves that count as the only evidence rather than supplying a second
+  one.
 - **It may be flaky if written as a timing assertion.** Mitigated by
   design point 5 and the Tests section: the assertion is a counter
-  attributable to this waiter, not a duration, and the negative control
-  must stay at zero.
+  for the adversary's own CPU, not a duration, and the negative control
+  must stay at zero — the pair is the claim, since neither number alone
+  can be attributed to one waiter.
 - **Adding an IPI kind touches vector allocation on both
   architectures.** Small, but it is the one place this unit can break
   something that has nothing to do with quiesce; both arches' boots are
