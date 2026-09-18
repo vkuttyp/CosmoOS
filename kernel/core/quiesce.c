@@ -206,7 +206,7 @@ static unsigned sync_quiesce_counting(unsigned *timeouts)
              * it, so what this kick is worth is no longer an open
              * question in a comment: `kick_publishes` counts the
              * publishes that happened in a kick's own trap return, per
-             * CPU, and `quiesce-kick-attributed` and
+             * CPU, and `quiesce-kick-population` and
              * `quiesce-kick-spinner` are the pair that gives the number
              * meaning (`docs/audit/next-subsystem-straggler-kick.md`,
              * invariant Q19).

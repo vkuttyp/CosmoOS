@@ -226,7 +226,7 @@ of what the handler did.)
 **What the counters say, measured rather than argued.** `straggler_ipis`
 counts kicks sent and `kick_publishes` counts kicks that worked; before
 the second existed, no number in this tree would have changed if the
-kick were replaced by a no-op. Over six boots, three per architecture:
+kick were replaced by a no-op. Over eight boots, four per architecture:
 **about 220 kick IPIs sent, 1 publish attributed** — once, on AArch64.
 The kick is therefore kept, on thin evidence. **Attribution requires the
 publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`

@@ -94,7 +94,7 @@ static bool threads_settle(unsigned expected)
  * whose tick keeps colliding with a short disabled region -- WAS left as
  * a question here, on the grounds that arranging it is a phase
  * coincidence no deterministic test could manage. That was wrong, and
- * `quiesce-kick-attributed` below arranges it: the coincidence is only
+ * `quiesce-kick-population` below arranges it: the coincidence is only
  * a coincidence if you wait for it, and the adversary does not wait --
  * it reads this CPU's last tick and covers the next one on purpose
  * (docs/audit/next-subsystem-straggler-kick.md).
@@ -190,7 +190,7 @@ bool selftest_quiesce_straggler(const char **reason)
 }
 
 
-/* --- quiesce-kick-attributed: the population the kick can help --- */
+/* --- quiesce-kick-population: the population the kick was said to help --- */
 
 /*
  * The adversary, and it is built from the mechanism rather than from a
@@ -273,9 +273,25 @@ bool selftest_quiesce_kick_population(const char **reason)
      * rather than against one that has not started yet. A grace period
      * can be shorter than a tick, so "covered one more DURING the wait"
      * is not something to assert; being in the habit before it starts
-     * is. */
-    while (__atomic_load_n(&a.covered, __ATOMIC_RELAXED) < 2)
+     * is.
+     *
+     * BOUNDED, and that is not a formality. This runs BEFORE
+     * synchronize_quiesce, so the ten-second grace-period panic cannot
+     * help here, and the lockup detector only prints. An adversary that
+     * never covers a tick -- a CPU whose tick timestamp stops advancing,
+     * a machine too slow to hit the window -- would hang the boot
+     * instead of failing it, and a hang reports nothing at all. Twenty
+     * tick periods is far past what two covers need. */
+    uint64_t give_up = clock_now_ns() + 20 * TICK_NS;
+    while (__atomic_load_n(&a.covered, __ATOMIC_RELAXED) < 2) {
+        if (clock_now_ns() > give_up) {
+            __atomic_store_n(&a.stop, 1u, __ATOMIC_RELEASE);
+            thread_join(t);
+            *reason = "the adversary never covered two ticks";
+            return false;
+        }
         sched_yield();
+    }
 
     uint64_t pub0 = quiesce_kick_publishes(cpu);
     unsigned covered0 = __atomic_load_n(&a.covered, __ATOMIC_RELAXED);
