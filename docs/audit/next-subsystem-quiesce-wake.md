@@ -106,6 +106,24 @@ Three wrong tests for one property, all three a timing claim wearing a
 counter's clothes. The rule that would have saved them: assert the
 mechanism, report the speedup.
 
+### The counters this unit adds are atomic, and the older ones are not
+
+Review caught `gp_wakes` as a plain `+=` written from every CPU's trap
+return and idle loop at once, which loses increments. `gp_timeouts` has
+the same exposure through concurrent waiters. Both are
+`__atomic_fetch_add` now, and the distinction that made it worth fixing
+rather than noting is that **a test asserts on `gp_wakes`**: a lost
+increment there is a lost assertion, not a cosmetic number.
+
+The five counters beside them — `straggler_ipis`, `synchronizes`,
+`max_wait_ns` (a read-compare-write, the worst of them), `callbacks`,
+`irq_syncs` — are the same shape and predate this unit. They are left
+alone deliberately: nothing asserts on any of them, they are reported and
+not tested, and changing five unrelated lines is not this unit's to do.
+Recorded here so the next reader finds the observation rather than
+re-deriving it, and so "the file is inconsistent" is a known state and
+not a discovery.
+
 ### One thing found next door
 
 `thread_sleep_ns_killable` cancelled its stack timer with `timer_cancel`,

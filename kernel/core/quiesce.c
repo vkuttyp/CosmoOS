@@ -75,7 +75,11 @@ void quiesce_note_quiescent_preemptible(void)
 {
     quiesce_note_quiescent();
     if (g_ready && !waitqueue_empty(&g_gp_wq)) {
-        g_stats.gp_wakes += waitqueue_wake_all(&g_gp_wq);
+        /* Atomic: this runs from every CPU's trap return and idle loop at
+         * once, so a plain += loses increments -- and the test asserts on
+         * this counter, so a lost one is a lost assertion, not just a
+         * wrong number. */
+        __atomic_fetch_add(&g_stats.gp_wakes, waitqueue_wake_all(&g_gp_wq), __ATOMIC_RELAXED);
     }
 }
 
@@ -177,7 +181,10 @@ static unsigned sync_quiesce_counting(unsigned *timeouts)
 #endif
         if (!wait_event_timeout(&g_gp_wq, quiesce_core_pending(&g_state, target, online) == 0,
                                 TICK_NS / 2)) {
-            g_stats.gp_timeouts++;
+            /* Atomic for the same reason as gp_wakes: waiters are
+             * concurrent, so two grace periods can reach a deadline at
+             * once. */
+            __atomic_fetch_add(&g_stats.gp_timeouts, 1u, __ATOMIC_RELAXED);
             if (timeouts)
                 (*timeouts)++;
         }
