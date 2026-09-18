@@ -178,9 +178,14 @@ reported, not discarded silently.**
 
 3. **Record every connection, not just the winner.** For each: its peer
    address and port, when it was accepted relative to `t0`, how many
-   bytes it sent, and the first thirty-two bytes of whatever that was.
-   This is the part that names the wild trigger the next time it
-   happens.
+   bytes it sent, and **the first thirty-two bytes of whatever that
+   was** -- the full count, but a bounded preview, because a foreign
+   connection may send megabytes and a failure line is not a place to
+   put them. Thirty-two is not a new number: it is what the harness
+   already keeps for the guest's own connection
+   (`nettest.py:97`, `repr(data[:32])`), and the roster matching it is
+   what lets the two be read side by side. This is the part that names
+   the wild trigger the next time it happens.
 
 4. **Report them in the failure line.** Today's message ends
    "connection accepted at 76.6s, then 0 of 12 bytes". It should end
@@ -238,8 +243,22 @@ in about a second and needs no boot.
 | `back_stale_named` | that same run records the intruder — peer, accept time, zero bytes — and a failing variant names it in the failure line |
 | `back_wrong_data` | a connection that sends something other than `cosmo hello\n` does not become the guest's, and is recorded |
 | `back_two_connections` | when the request arrives on the *second* connection, the reply goes out on that one and the exchange succeeds |
+| `back_budget_per_connection` | a foreign connection accepted first, the guest's arriving later: the guest's receive budget runs from **its own** accept, so it is not charged for time spent on the intruder, and a guest that answers within `BACK_RECV_S` of its own accept passes even when the intruder burned most of the run's budget first |
+| `back_preview_bounded` | a foreign connection that sends **more than thirty-two bytes**: the record keeps the full byte *count* but exactly the first thirty-two as its preview, and the failure line reports that preview rather than the payload |
 | `back_none_delivers` | deadline expires with connections accepted but no request: still a failure, roster reported |
 | existing cases | unchanged and still passing — the deadline semantics from the earlier unit are not altered |
+
+**Every design point above has a test, and the mapping is written down
+so the next reader can check it rather than re-derive it:** 1 (deeper
+backlog) and 2 (select loop) by `back_stale_slot` and
+`back_two_connections`, 3 (record every connection) by `back_stale_named`
+and `back_preview_bounded`, 4 (the roster in the failure line) by
+`back_stale_named` and `back_none_delivers`, 5 (per-connection budgets)
+by `back_budget_per_connection`, 6 (silence is still a failure) by
+`back_none_delivers`. A rule stated in the design and pinned by nothing
+is the defect this arc has hit in four consecutive units; this table is
+the answer to it, and a design point added later without a row here
+should be treated as unbuilt.
 
 **The bug-proof.** With the fix reverted, `back_stale_slot` must fail
 with exactly today's symptom: `accept` succeeds, zero of twelve bytes,
