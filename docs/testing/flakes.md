@@ -492,15 +492,19 @@ of this section said eight and then listed nine:
 | PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
+| PR #176's own CI run | observed, aarch64, documentation-only: `connect 0 in 1031 ms`, `sent -104`, `segs_out +3 retransmits +1` -- the first read against the 150 us baseline |
+| PR #177's own CI run | observed, aarch64: `connect 0 in 1116 ms`, `sent -104` -- **the first with a roster**, which named one connection carrying nothing |
+| PR #177's own CI run, the protection-capable CPU boot | observed, aarch64: `connect 0 in 1089 ms`, `sent 12`, `outstanding 12 then 12` -- one connection carrying nothing again, the other guest arm |
 
-Twelve entries, twenty-four occurrences. The first five rows are inherited
-from the row that recorded them and are not independently re-verified
-here. The last six rows were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
-instrumented** occurrences behind the other five rows carry the guest's
-side. Rows and occurrences differ because three rows hold more than one
-sighting; the shapes table below is per *sighting* and is the one to
-count from.
+Fifteen entries, twenty-four occurrences -- and the table is the tally,
+so a sighting recorded only in prose below is a sighting this section
+has lost. The first five rows are inherited from the row that recorded
+them and are not independently re-verified here. The last nine rows were
+watched as they happened: PR #167's carries the host's `accepted at
+92.0s, 0 of 12 bytes`, and the **thirteen instrumented** occurrences
+behind the other eight rows carry the guest's side. Rows and occurrences
+differ because three rows hold more than one sighting; the shapes table
+below is per *sighting* and is the one to count from.
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
