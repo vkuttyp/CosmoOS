@@ -60,12 +60,21 @@ Four things follow, and the fourth is a latent defect rather than a gap:
    architecture's trap tail evaluates
    `quiesce_note_quiescent_preemptible` independently of what the
    handler did, and the kick needs only delivery and that tail. What
-   would neuter it is a **sender-side** optimisation of the kind a
-   reschedule IPI invites — skipping the IPI when the target's
-   `need_resched` is already set, or coalescing repeated sends — since
-   the quiesce caller never sets that flag and would be silently
-   skipped. **No test in the tree would notice**, and that is the part
-   worth fixing whatever the measurement says.
+   would neuter it is a **send suppressed because the target's
+   `need_resched` is clear** — a guard of the shape "nothing to
+   reschedule there, do not interrupt it", which is the natural
+   optimisation for an IPI whose documented purpose is re-evaluating
+   that flag. The quiesce caller never sets it, so **every kick would
+   be suppressed** and no test in the tree would notice.
+
+   Stated that precisely because the looser forms do *not* follow, and
+   this report gave two of them in its second revision: skipping when
+   the flag is **already set** would still send for the quiesce caller,
+   which leaves it clear; and coalescing repeated sends preserves the
+   first interrupt, which is the one that matters. The hazard needs the
+   guard pointing the other way — and that is exactly the guard a
+   reader of the enum's contract would think safe to add. Fixing it is
+   worth doing whatever the measurement says.
 
 ## Current implementation
 
