@@ -1,8 +1,31 @@
 # NEXT SUBSYSTEM — what the accepted connection was doing
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #182), and the banner below records where the build differed from
+it.
+
+**What the build changed, found by building rather than reading:**
+
+1. **`TCP_INFO` had to be restricted to Linux explicitly, and the test
+   caught it doing the exact thing this unit exists to prevent.** The
+   design said "Linux only"; the first implementation just tried the
+   option and took whatever came back. macOS defines a `TCP_INFO` whose
+   struct is not Linux's, so byte 0 is not `tcpi_state` there — it read
+   **`FIN_WAIT1` for a plainly established connection**. A confident
+   wrong answer from a probe built to stop confident wrong answers.
+   `test_probe_open_peer` failed on it; the platform check is now
+   explicit rather than implied.
+2. **A fourth end-class, `wrong-data`.** The design named three. The
+   loop already had a fourth path — a peer that answers with something
+   that is not the request — and leaving it unlabelled would have put a
+   connection into the roster with `still open`, which is not what
+   happened to it.
+3. **The reset test accepts `closed` as well as `error`.** A reset can
+   arrive as an error or, if a FIN raced it, as EOF. What the test pins
+   is that an `error` keeps its **errno** rather than flattening into a
+   close, and that the three peer kinds do not all read the same — which
+   is the property, not the particular class name.
 
 **Subsystem: the state of slirp's own host-side connection at the moment
 the exchange fails.** The accept unit (PR #177) answered *which*
