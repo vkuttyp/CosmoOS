@@ -39,6 +39,16 @@ this CPU's epoch and attribution requires that, which took the rate from
    this unit was written to settle. The test is kept as
    `quiesce-kick-population` and asserts what is true: the grace period
    completes while ticks are being covered.
+
+   **"A moment later" was a local measurement, and CI corrected it.**
+   That grace period is about three milliseconds here. On CI the same
+   test took **8072 ms** of guest time — the covered CPU not publishing
+   for most of eight seconds, two short of the ten-second debug panic,
+   and over the per-test budget, which is how it was caught. The
+   adversary now stops hiding ticks after a cap so the test is bounded;
+   the phenomenon is not, and how long that population *can* hold a
+   grace period is an open question this unit did not know it had
+   (`docs/kernel/quiesce/invariants.md`, Q19).
 2. **So the report's central prediction was wrong twice over**: the
    adversary *was* buildable (the inventory said no deterministic test
    could arrange the coincidence), and arranging it disproved rather

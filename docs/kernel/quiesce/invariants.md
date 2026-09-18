@@ -228,7 +228,21 @@ counts kicks sent and `kick_publishes` counts kicks that worked; before
 the second existed, no number in this tree would have changed if the
 kick were replaced by a no-op. Over eight boots, four per architecture:
 **about 220 kick IPIs sent, 1 publish attributed** — once, on AArch64.
-The kick is therefore kept, on thin evidence. **Attribution requires the
+The kick is therefore kept, on thin evidence.
+
+**And a qualification the unit's own test then earned, on CI.** That
+unit said the covered-tick population "publishes anyway, a moment
+later", which is what `quiesce-kick-population` measures: a grace period
+of about three milliseconds against an adversary hiding that CPU's
+ticks. On CI the same test took **8072 ms**, in guest time — not a
+loaded host stretching wall-clock, but that CPU genuinely not publishing
+for most of eight seconds, within two of `synchronize_quiesce`'s
+ten-second debug panic. So **"a moment later" is what happens here and
+not what happens there**. The adversary now stops hiding ticks after
+`KICK_COVERS_MAX` covers, which bounds the test rather than the
+phenomenon; what the phenomenon's own upper bound is remains unmeasured.
+
+**Attribution requires the
 publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`
 reports it): a publish by a CPU that has already published the target
 epoch is correct and cheap and tells no waiter anything, and counting

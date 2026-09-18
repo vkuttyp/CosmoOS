@@ -218,6 +218,29 @@ struct kick_adv {
 
 #define KICK_GUARD_NS 250000ull   /* 250 us either side of the expected tick */
 
+/*
+ * How many ticks the adversary hides before it stops hiding them, and
+ * why there is a cap at all.
+ *
+ * Hiding a CPU's ticks keeps it from publishing at its trap return, so
+ * while this runs the CPU stays pending. On CI it worked better than it
+ * does here: the grace period took about seven seconds of guest time
+ * against three milliseconds locally, which is most of the way to
+ * `synchronize_quiesce`'s ten-second debug panic -- a test that nearly
+ * kills the machine it is measuring. (It also overran the per-test
+ * budget, which is how it was noticed: "quiesce-kick-population took
+ * 8072 ms".)
+ *
+ * The claim needs the CPU to be hiding ticks WHILE a grace period runs,
+ * not for the whole run. Twenty-five covers is about a hundred
+ * milliseconds of that, after which the adversary keeps running and
+ * keeps its CPU busy but stops taking the read-side section, so the
+ * next tick publishes and the wait ends. The assertion is unchanged and
+ * the duration is now bounded by the adversary rather than by how long
+ * the machine feels like taking.
+ */
+#define KICK_COVERS_MAX 25u
+
 static void kick_adversary_main(void *arg)
 {
     struct kick_adv *a = arg;
@@ -225,6 +248,12 @@ static void kick_adversary_main(void *arg)
     __atomic_store_n(&a->entered, 1u, __ATOMIC_RELEASE);
 
     while (!__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
+        /* Past the cap: stay outside every section, so the CPU publishes
+         * at its next tick and no grace period can be held up further. */
+        if (__atomic_load_n(&a->covered, __ATOMIC_RELAXED) >= KICK_COVERS_MAX) {
+            arch_cpu_relax();
+            continue;
+        }
         uint64_t last = __atomic_load_n(&pc->last_tick_ns, __ATOMIC_RELAXED);
         uint64_t next = last + TICK_NS;
         uint64_t now = clock_now_ns();
@@ -324,7 +353,8 @@ bool selftest_quiesce_kick_population(const char **reason)
      * a section, and neither outcome changes the finding.
      */
     CHECK(covered0 >= 2);                /* it was hiding its ticks before the wait */
-    CHECK(covered1 >= covered0);         /* and never stopped */
+    CHECK(covered1 >= covered0);         /* and kept at it while the wait ran */
+    CHECK(covered1 <= KICK_COVERS_MAX);  /* and stopped, so the wait is bounded */
     /* That `quiesce_test_sync_kicks` RETURNED is the rest of the claim,
      * and it is asserted by the machine rather than by a CHECK: if this
      * population could not publish, the grace period would not end and
