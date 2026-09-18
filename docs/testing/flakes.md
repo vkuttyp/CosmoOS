@@ -707,9 +707,10 @@ the loop runs, not what the defect is.
 **Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
 What follows was induced on purpose and is not counted: the total moved
 to twenty-two for a separate, real failure recorded below, not for
-this. The harness listens on the back-connection port with a
-backlog of one (`nettest.py:47`) and accepts once, without checking what
-it accepted (`nettest.py:72`). Occupying that single slot before QEMU
+this. At the time, the harness listened on the back-connection port
+with a backlog of one and accepted once, without checking what it
+accepted — PR #177 has since replaced both. Occupying that single slot
+before QEMU
 starts — one silent connection, opened behind an environment variable —
 reproduced the `net-harness` signature **on the first boot**: host
 `accept` succeeded at 76.6 s, read `0 of 12 bytes`, and gave up with

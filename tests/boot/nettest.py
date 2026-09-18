@@ -44,6 +44,14 @@ BACK_PREVIEW = 32
 BACK_BACKLOG = 8
 
 
+def _close(sock):
+    """Close a socket and never raise. Called on every exit path."""
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 def free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -115,6 +123,13 @@ class NetTest:
         # tell them apart.
         self.back_conns = []
         live = []          # [{sock, rec, buf, recv_deadline}]
+        # Every socket this loop accepts, so that a connection dropped
+        # from `live` -- by its own deadline, by closing, or by sending
+        # the wrong thing -- is still closed. The loop may accept many
+        # foreign connections inside its budget, and leaking a
+        # descriptor for each would eventually break the `select` that
+        # collects the roster.
+        opened = []
         winner = None
         data = b""
 
@@ -123,6 +138,9 @@ class NetTest:
             while winner is None:
                 now = time.monotonic()
                 accepting = now < accept_deadline
+                for c in live:
+                    if now >= c["recv_deadline"]:
+                        _close(c["sock"])
                 live = [c for c in live if now < c["recv_deadline"]]
                 # Keep going while there is still something to wait for:
                 # room in the accept budget, or a connection whose own
@@ -155,6 +173,7 @@ class NetTest:
                                "bytes": 0, "preview": b"",
                                "delivered": False}
                         self.back_conns.append(rec)
+                        opened.append(conn)
                         live.append({"sock": conn, "rec": rec, "buf": b"",
                                      "recv_deadline": now + BACK_RECV_S})
                         continue
@@ -169,6 +188,7 @@ class NetTest:
                     if not chunk:
                         # Connected, said nothing, went away. Not an
                         # exception, and recorded rather than dropped.
+                        _close(c["sock"])
                         live.remove(c)
                         continue
                     c["buf"] += chunk
@@ -180,7 +200,8 @@ class NetTest:
                             winner = c
                             break
                         # Answered, but not with the request. Keep the
-                        # record and stop reading it.
+                        # record, stop reading it, and let it go.
+                        _close(c["sock"])
                         live.remove(c)
 
             if winner is not None:
@@ -199,16 +220,8 @@ class NetTest:
         except Exception as e:  # noqa: BLE001
             self.results["back_error"] = repr(e)
         finally:
-            for c in live:
-                try:
-                    c["sock"].close()
-                except OSError:
-                    pass
-            if winner is not None:
-                try:
-                    winner["sock"].close()
-                except OSError:
-                    pass
+            for sock in opened:
+                _close(sock)
             # On every path, including the one that ends without an
             # exception: a peer that connects and closes without sending
             # leaves no exception behind, and an instrument that records

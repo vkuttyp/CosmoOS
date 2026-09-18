@@ -483,6 +483,65 @@ def test_the_backlog_is_deeper_than_one():
             pass
 
 
+def test_foreign_connections_are_closed_not_leaked():
+    """A connection the harness rejects must not be left open.
+
+    The loop drops a connection from its watch set on three paths: the
+    peer closed, it sent something that is not the request, or its own
+    receive budget expired. Each path now closes the socket explicitly.
+
+    **This is not a bug-proof, and the distinction is worth stating.**
+    Review asked for these closes on the grounds that descriptors would
+    accumulate until `select` failed and truncated the roster. Measured
+    against the version without them, that does not happen: nothing
+    retains a rejected socket -- `back_conns` holds records, not sockets
+    -- so CPython's refcounting closes it as soon as it leaves `live`,
+    and this test passes either way. The closes are kept because
+    resource lifetime should not depend on interpreter internals, not
+    because a leak was observed.
+
+    What the test does guard is the regression that would make the
+    claimed failure real: someone retaining rejected sockets in a list
+    -- for the roster, say -- without closing them. Asserted from the
+    peer's side, because "the harness closed it" is the property and a
+    descriptor count is only a proxy for it.
+    """
+    nt = NetTest()
+    peers = []
+    try:
+        t = _serve(nt, 1.5)
+        for i in range(5):
+            sk = socket.create_connection(("127.0.0.1", nt.back_port), timeout=5)
+            sk.sendall(b"junk %d\n" % i)
+            peers.append(sk)
+        t.join(15)
+
+        closed = 0
+        for sk in peers:
+            sk.settimeout(2.0)
+            try:
+                if sk.recv(16) == b"":
+                    closed += 1
+            except OSError:
+                closed += 1     # reset counts as closed too
+        check(closed == len(peers),
+              f"every rejected connection is closed by the harness "
+              f"({closed} of {len(peers)})")
+        check(len(nt.back_conns) == len(peers),
+              f"and all of them are still in the roster "
+              f"(got {len(nt.back_conns)})")
+    finally:
+        for sk in peers:
+            try:
+                sk.close()
+            except OSError:
+                pass
+        try:
+            nt.listener.close()
+        except OSError:
+            pass
+
+
 def main():
     for fn in (test_no_deadline_before_the_guest_exists,
                test_a_late_connection_is_still_accepted,
@@ -496,7 +555,8 @@ def main():
                test_each_connection_gets_its_own_receive_budget,
                test_the_preview_is_bounded,
                test_arrivals_without_the_request_still_fail,
-               test_the_backlog_is_deeper_than_one):
+               test_the_backlog_is_deeper_than_one,
+               test_foreign_connections_are_closed_not_leaked):
         fn()
     if FAILURES:
         print(f"nettest-deadline: FAIL ({len(FAILURES)} of {CHECKS})")

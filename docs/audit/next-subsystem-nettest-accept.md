@@ -34,12 +34,12 @@ it.
    this arc keeps hitting.
 
 **Subsystem: a back-connection the harness can identify, and a failure
-line that names the connection it got instead.** `tests/boot/nettest.py`
-listens on the back-connection port with a backlog of one
-(`nettest.py:47`) and then accepts exactly once, blindly
-(`nettest.py:72`). It assumes the first connection to arrive is the
-guest's. It never checks, and when the assumption is false it reports
-`TimeoutError`, which names nothing. That is the whole of what
+line that names the connection it got instead.** Before this unit,
+`tests/boot/nettest.py` listened on the back-connection port with a
+backlog of one and then accepted exactly once, blindly. It assumed the
+first connection to arrive was the guest's. It never checked, and when
+the assumption was false it reported `TimeoutError`, which names
+nothing. That was the whole of what
 `net-harness` has said for two weeks: twenty-two sightings across twelve
 entries (`docs/testing/flakes.md`, *The count*), on both architectures,
 on CI and locally, several of them on branches that change no code at
@@ -58,7 +58,12 @@ what that connection did.
 
 ## Problem
 
-The harness owns three host ports and holds the back-connection port for
+**This section describes the harness as it stood before this unit; the
+line numbers are those of the pre-unit file.** What replaced it is in
+*Design* below and in `docs/kernel-services/network/design.md`, "Which
+connection is the guest's".
+
+The harness owned three host ports and held the back-connection port for
 the whole boot:
 
 ```python
@@ -80,20 +85,21 @@ while not data.endswith(b"\n") and len(data) < 64:
     ...
 ```
 
-Two decisions in that code are load-bearing and neither is checked:
+Two decisions in that code were load-bearing and neither was checked:
 
-1. **The backlog is one.** Measured on this host: with one unaccepted
+1. **The backlog was one.** Measured on this host: with one unaccepted
    connection queued, a second connect **hangs silently** — the SYN is
    dropped, `connect` does not refuse, and a client with a two-second
    timeout simply times out. It does not fail fast, so nothing upstream
    learns that the queue was full.
-2. **The accept is blind and single.** Whatever connection is dequeued
-   first becomes "the guest's". If it is not, the guest's own connection
-   is still sitting in the queue — or, with a backlog of one, was never
-   allowed in — and the harness spends its ten-second receive budget
-   reading a socket that will never carry `cosmo hello\n`.
+2. **The accept was blind and single.** Whatever connection was
+   dequeued first became "the guest's". If it was not, the guest's own
+   connection was still sitting in the queue — or, with a backlog of
+   one, was never allowed in — and the harness spent its ten-second
+   receive budget reading a socket that would never carry
+   `cosmo hello\n`.
 
-Together these convert "something else reached this port" into a
+Together these converted "something else reached this port" into a
 ten-second timeout attributed to the guest's network stack.
 
 ## What the reproduction established
@@ -170,7 +176,7 @@ against anything. It also shows the gap precisely: `accepted at 90.9s`
 reports a time without an identity, and nothing in the current harness
 can say whose connection that was.
 
-## Current implementation
+## Current implementation (as it stood before this unit)
 
 `tests/boot/nettest.py` is the host half; `kernel-services/network/nettest.c`
 (the `nettest_client` path, around line 920) is the guest half. The
@@ -180,12 +186,13 @@ connect, times each step, and prints the pcb's own verdict from
 `ksock_error` rather than a machine-wide counter
 (`docs/audit/next-subsystem-socket-verdict.md`).
 
-The host half records its own timings into `self.results` —
-`back_accept_s`, `back_bytes`, `back_data`, `back_done_s` — and prints
-them on failure (`nettest.py`, `failures()`). What it does not record is
+The host half recorded its own timings into `self.results` —
+`back_accept_s`, `back_bytes`, `back_data`, `back_done_s` — and printed
+them on failure (`nettest.py`, `failures()`). What it did not record was
 **anything about the connection it accepted**: not the peer, not whether
 more connections were waiting, not whether any other connection arrived
-during the ten seconds it spent waiting on the wrong one.
+during the ten seconds it spent waiting on the wrong one. The roster
+added by this unit is exactly that missing record.
 
 ## Why it matters
 
