@@ -224,8 +224,8 @@ struct kick_adv {
  *
  * Hiding a CPU's ticks keeps it from publishing at its trap return, so
  * while this runs the CPU stays pending. On CI it worked better than it
- * does here: the grace period took about seven seconds of guest time
- * against three milliseconds locally, which is most of the way to
+ * does here: the grace period took about eight seconds of guest time
+ * (8072 ms) against three milliseconds locally, which is most of the way to
  * `synchronize_quiesce`'s ten-second debug panic -- a test that nearly
  * kills the machine it is measuring. (It also overran the per-test
  * budget, which is how it was noticed: "quiesce-kick-population took
@@ -354,7 +354,21 @@ bool selftest_quiesce_kick_population(const char **reason)
      */
     CHECK(covered0 >= 2);                /* it was hiding its ticks before the wait */
     CHECK(covered1 >= covered0);         /* and kept at it while the wait ran */
-    CHECK(covered1 <= KICK_COVERS_MAX);  /* and stopped, so the wait is bounded */
+    /*
+     * And the grace period ended BEFORE the adversary gave up hiding.
+     * Reaching the cap is a failure, not a pass: past it the next tick
+     * publishes because the adversary stopped, so a run that got there
+     * would be reporting "the population publishes anyway" on the
+     * strength of the adversary having quit -- true of nothing. This is
+     * what CI's 8072 ms run would say now, in one line and in about a
+     * hundred milliseconds, instead of an eight-second budget overrun
+     * two seconds short of the grace-period panic.
+     */
+    if (covered1 >= KICK_COVERS_MAX) {
+        __atomic_store_n(&a.stop, 1u, __ATOMIC_RELEASE);
+        *reason = "the covered CPU did not publish before the adversary stopped hiding ticks";
+        return false;
+    }
     /* That `quiesce_test_sync_kicks` RETURNED is the rest of the claim,
      * and it is asserted by the machine rather than by a CHECK: if this
      * population could not publish, the grace period would not end and

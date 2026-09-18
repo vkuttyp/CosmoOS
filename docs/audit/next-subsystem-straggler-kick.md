@@ -291,7 +291,7 @@ a measurement rather than a change.
 | test | asserts |
 | --- | --- |
 | ~~`quiesce-kick-attributed`~~ | **not built.** The adversary showed this population publishes *without* a kick, so a test asserting an attributed publish would be asserting a coincidence and would flake. Replaced by `quiesce-kick-population`, which asserts what the adversary actually demonstrated |
-| `quiesce-kick-population` | the adversary reaches steady state (two covered ticks) and the grace period completes anyway; that it *returned* is asserted by the ten-second debug panic, not by a duration bound |
+| `quiesce-kick-population` | the adversary reaches steady state (two covered ticks) and the grace period completes **while ticks are still being hidden** — asserted as *covers used < the cap*, not as a duration. Reaching the cap fails the test with a reason, because past it the next tick publishes only because the adversary quit, which would demonstrate nothing |
 | `quiesce-kick-spinner` | the negative control: kicks are sent, the target takes them on `IPI_QUIESCE_KICK` (the kind check), **the flag reads clear from inside the section** — Q19's unconditional clear observed rather than inferred — and `kick_publishes` does not rise. All sampled by the pinned thread itself, so no wall-clock margin held by another CPU |
 | ~~`quiesce-kick-ipi-kind`~~ | **folded into `quiesce-kick-spinner`**, which is the only place that can see it: `ipi_count` reads the *calling* CPU's counters, so the kind has to be checked by a thread pinned to the target |
 | existing `quiesce-straggler`, `-system`, `-idle` | unchanged and still passing |
