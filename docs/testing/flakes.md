@@ -236,6 +236,23 @@ measuring the host.
 
 ## `lockup-sample`, and a failure that was not a flake at all
 
+**`lockup-sample-busy` itself, three times on 2026-09-17 and 18**, at
+`lockuptest.c:399` (`el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 ms`): once on the
+socket-verdict branch, once on that branch's CI again, and once on a
+`main` run whose commit was a **documentation-only** merge — a report,
+no code at all. That last one is the clearest of the three: a tree that
+changed one Markdown file cannot have slowed a lockup sample.
+
+It is the load-sensitive family this file's list describes, and it is not
+*on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
+milliseconds of slack, and the slack is what a loaded host eats. Adding
+it to the list would mean widening the bound, and that is the trade the
+list exists to refuse when the bound is the property: a lockup sample
+that answers late is a lockup sample that did not work. What is recorded
+instead is the rate — three in two days, at least one on a tree that
+cannot have caused it — because the next unit to hit this should know it
+is not the first, and that re-running is the right first move.
+
 Three CI runs of one branch, 2026-09-17, failed three *different* tests.
 The branch was the VMState-layout unit: a compile-time assertion in a
 UAPI header, one self-test that runs in 7 ms, and documentation. It
@@ -457,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Eighteen, to 2026-09-17**, across CI and this developer's machine, on
+**Twenty, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -473,12 +490,16 @@ of this section said eight and then listed nine:
 | PR #170's own CI run, twice in one run — x86-64 and aarch64 | observed, on a **documentation-only** branch; the x86-64 job is the first sighting where the guest **sent** the bytes |
 | `main`, twice — at c47d353 and again at c1e6071 | observed, aarch64 both times, `sent -104` with `rsts_in +0` then `+1` |
 | PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
+| PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 
-Ten entries, eighteen occurrences. The first five rows are inherited
+Eleven entries, twenty occurrences. The first five rows are inherited
 from the row that recorded them and are not independently re-verified
-here. The last four were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the six instrumented
-ones carry the guest's side.
+here. The last six rows were watched as they happened: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
+instrumented** occurrences behind the other five rows carry the guest's
+side. Rows and occurrences differ because three rows hold more than one
+sighting; the shapes table below is per *sighting* and is the one to
+count from.
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
@@ -509,7 +530,8 @@ the connection was already reset.
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
 segment went out, and the host still saw nothing — so "the twelve bytes
-were never written" describes five of the six and not that one. It
+were never written" describes every instrumented sighting but that
+one. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
@@ -548,7 +570,7 @@ a reset accepted **on a synchronized connection** (`tcp.c`, the RFC 5961
 again. `retransmits +1` and 1381 ms are one SYN retransmission at the
 one-second timer, so the handshake was slow as well as short-lived.
 
-**That unifies the shapes.** Nine instrumented sightings, and the
+**That unifies the shapes.** Eleven instrumented sightings, and the
 guest's progress when the reset lands is the only thing that differs:
 
 | run | how far the guest got | `rsts_in` |
@@ -561,6 +583,8 @@ guest's progress when the reset lands is the only thing that differs:
 | PR #171, aarch64 | **the connect itself reset** | `+1` |
 | PR #171, aarch64 again | connected, **sent 12**, never acknowledged | `+1` |
 | PR #171, aarch64, third | **the connect reset, with no retransmission** | `+1` |
+| PR #174, aarch64 | connected in 1355 ms, **sent 12**, never acknowledged | `+1` |
+| PR #174, aarch64 again | connected in 1063 ms, then `sendto` refused | `+1` |
 
 The constant is not the twelve bytes and never was: it is **an inbound
 reset on an established connection to slirp, arriving at whatever point
@@ -573,8 +597,36 @@ What is still not established is why slirp resets it. That is outside
 this kernel, and saying so with evidence was named as a possible result
 from the beginning (`docs/audit/next-subsystem-twelve-bytes.md`, Risks).
 
-`rsts_in +1` in seven of the nine; the two `+0`s are the instrument's own
+`rsts_in +1` in nine of the eleven; the two `+0`s are the instrument's own
 window, which opened after the connect until PR #171 moved it.
+
+**Twice in a row on one branch, and the rule that covers it.** PR #174
+failed `net-harness` on consecutive aarch64 runs. This file says near the
+top that *a listed test that fails twice in a row is a regression until
+shown otherwise*, and says elsewhere that **what discharges "until shown
+otherwise" is the diff, not the number of failures**. The diff here is
+three Markdown files — this file among them — and no code: `git diff
+--name-only main...HEAD` returns `.md` and nothing else. So the rule is
+discharged the way it was for the earlier pair, by the change rather than
+by the count.
+
+It is worth saying what this costs rather than only that it is explained.
+Two consecutive failures on a documentation branch mean the merge gate
+for a report is now a coin toss on an unrelated defect, and the honest
+options are to re-run until it passes or to stop gating on it. This file
+is not where that is decided; it is where the evidence for deciding it
+lives.
+
+**The withdrawn retransmission claim, with a fourth data point.** PR
+#174's sighting is the fourth with the window moved, and it retransmitted
+a SYN and took 1355 ms to connect — so the moved-window runs now stand at
+`+1`, `+1`, `+0`, `+1`. The claim withdrawn above stays withdrawn: one
+counter-example is enough to show a lost SYN is not *necessary*, and
+three of four is not a mechanism. What is worth recording is that it is
+**frequent** rather than incidental, and that it is the only feature of
+these failures the earlier instrument could not see at all. A unit that
+takes this row next should start by asking why the handshake to slirp is
+slow, not by assuming it must be.
 
 **The sightings with the window moved show the handshake, which the
 other six could not.** The first two suggested a pattern and the third
@@ -595,7 +647,7 @@ claim is withdrawn rather than left standing with a caveat. It was two
 observations, and this file has a history of two observations becoming a
 rate that the next run halves.
 
-What survives all three, and all nine instrumented sightings, is
+What survives all three, and every instrumented sighting, is
 narrower and duller: **an inbound reset arrives on a connection to
 slirp, at whatever point the guest has reached** — during the handshake,
 after it, or after a segment is already on the wire — while slirp's own
@@ -607,9 +659,11 @@ now: **an established connection to slirp is reset — sometimes before the
 guest writes and sometimes after a segment is already on the wire — and
 the payload never reaches the host's accepted socket.**
 
-**The CI rate rose sharply on 2026-09-17.** Six instrumented failures
-inside about two hours — two on PR #169, two on PR #170, two on `main` —
-against one local boot in twenty-one. Nothing here explains the jump and
+**The CI rate rose sharply on 2026-09-17**, and has not fallen since.
+Six instrumented failures inside about two hours that day — two on PR
+#169, two on PR #170, two on `main` — against one local boot in
+twenty-one; four more have followed on 17-18 September. The count above
+is the running total; this paragraph is about the day the rate changed. Nothing here explains the jump and
 this file does not guess at one; it is recorded because "one in
 twenty-one locally" is the only rate this file has measured, and CI is
 plainly not that. What it does mean practically: the instrument no longer
