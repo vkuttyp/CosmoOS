@@ -395,9 +395,24 @@ tree.
 - **unexplained**: the AArch64 virtio-console flake seen once in four
   runs on 2026-09-05 (the console file lacked the last line while the
   serial log was complete).
-- **small debts**: `nd_flush`/`arp_flush` drop in-flight resolutions
+- **~~small debts~~ — the first two are not, and this row said so for a
+  fortnight**: `nd_flush`/`arp_flush` drop in-flight resolutions
   silently when an interface goes; ARP and ND entries hold bare
-  interface pointers and rely on the flushes in `netif_unregister`;
+  interface pointers and rely on the flushes in `netif_unregister`.
+  (`MODULE_MAX_LIVE`'s fixed 32-slot array and the zombie-module reaping
+  below remain small debts and are untouched by the unit.)
+  **Taken up by `docs/audit/next-subsystem-arp-netif-ref.md`** (not
+  struck until it lands), **and the first two are not small**: the retry
+  paths in `arp_age` and `nd_age` copy that bare pointer out from under
+  the table lock, release the lock, and then dereference it --
+  `send_arp` reads `nif->mac` and `nif->ip4.addr`. The flush at
+  `netif_unregister` step 5 does not close that window and the `input_one`
+  barrier at step 4 does not either, because `age_work` re-arms on a
+  one-second timer and a fresh one can start after the barrier and
+  before the flush. It is a **use-after-free in a transmit path**
+  reached by every tap teardown. `netif.h:81` states the reference rule
+  only for pointers lookups RETURN, and ARP and ND never looked the
+  interface up -- it arrives as an argument and is kept;
   `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
   only by a later `module_unload` of the same name.
 
