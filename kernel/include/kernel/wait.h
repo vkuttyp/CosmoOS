@@ -17,6 +17,7 @@
 #include <kernel/errno.h>
 #include <kernel/list.h>
 #include <kernel/spinlock.h>
+#include <kernel/timer.h>
 
 struct thread;
 
@@ -89,6 +90,54 @@ bool process_kill_pending(void);
         }                                                                      \
         waitqueue_finish((wq), &__we);                                         \
         __rc;                                                                  \
+    })
+
+/* The timed wait's private state: a timer wakes the caller's own queue,
+ * so a waiter is woken either by whoever makes the condition true or by
+ * the deadline, and re-checks the same condition in both cases. */
+struct wait_timeout {
+    struct waitqueue *wq;
+    bool expired;
+};
+void wait_timeout_init(struct wait_timeout *wt, struct waitqueue *wq);
+void wait_timeout_fired(struct timer *t, void *arg);
+bool wait_timeout_expired(const struct wait_timeout *wt);
+
+/*
+ * wait_event_timeout(wq, cond, ns) -- block until `cond` or until `ns`
+ * has passed. Evaluates to true when the condition became true, false at
+ * the deadline.
+ *
+ * The condition is tested before anything is armed, so a caller whose
+ * condition already holds neither starts a timer nor sleeps.
+ *
+ * The timer is cancelled with timer_cancel_sync, not timer_cancel:
+ * both live on this stack frame, and plain cancel only promises the
+ * callback will not START (timer.h) -- one already running would touch
+ * them after the frame is gone.
+ */
+#define wait_event_timeout(wq, cond, ns)                                       \
+    ({                                                                         \
+        bool __ok = (cond);                                                    \
+        if (!__ok) {                                                           \
+            struct wait_entry __we;                                            \
+            struct wait_timeout __wt;                                          \
+            struct timer __t;                                                  \
+            wait_entry_init(&__we);                                            \
+            wait_timeout_init(&__wt, (wq));                                    \
+            timer_setup(&__t, wait_timeout_fired, &__wt);                      \
+            timer_start(&__t, (ns));                                           \
+            for (;;) {                                                         \
+                waitqueue_prepare((wq), &__we);                                \
+                __ok = (cond);                                                 \
+                if (__ok || wait_timeout_expired(&__wt))                       \
+                    break;                                                     \
+                sched_block_current();                                         \
+            }                                                                  \
+            waitqueue_finish((wq), &__we);                                     \
+            timer_cancel_sync(&__t);                                           \
+        }                                                                      \
+        __ok;                                                                  \
     })
 
 /* Sleep for at least `ns` (granularity: one tick). */

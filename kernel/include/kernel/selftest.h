@@ -50,6 +50,7 @@ bool selftest_irqrestore_bench(const char **reason);
 /* The sysctl-driven probe behind init's preempt-wake-syscall step (debug builds). */
 int sched_preempt_probe_sysctl(char *out, size_t n);
 bool selftest_sleep(const char **reason);
+bool selftest_wait_timeout(const char **reason);
 bool selftest_mutex(const char **reason);
 bool selftest_semaphore(const char **reason);
 bool selftest_completion(const char **reason);
@@ -75,6 +76,7 @@ bool selftest_lockup_hard(const char **reason);          /* the watched CPU stop
 bool selftest_lockup_quiet(const char **reason);         /* a spinner nobody waits on and an idle CPU report nothing */
 bool selftest_lockup_tick_bench(const char **reason);    /* prints the two stores' cost and the tick's; asserts nothing */
 bool selftest_quiesce_straggler(const char **reason);
+bool selftest_quiesce_wake(const char **reason);
 bool selftest_quiesce_straggler_system(const char **reason);
 bool selftest_quiesce_straggler_idle(const char **reason);
 bool selftest_quiesce_grace(const char **reason);

@@ -117,7 +117,7 @@ static void handle_irq(struct arch_trap_frame *frame)
      * interrupted context holds no spinlock, is not an interrupt, and had
      * interrupts enabled. */
     if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->spsr & DAIF_I) == 0) {
-        quiesce_note_quiescent();
+        quiesce_note_quiescent_preemptible();
         if (pc->need_resched)
             sched_preempt();
     }

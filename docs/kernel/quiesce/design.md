@@ -116,8 +116,27 @@ Why each ordering exists:
   later publishes the current epoch before running anything, so it can
   hold no reference from before W1.
 
-The waiter sleeps between polls (`thread_sleep_ns(TICK_NS / 2)`), never
-spins. After two ticks without progress it sends `IPI_RESCHEDULE` to the
+The waiter **blocks on a queue with a deadline** —
+`wait_event_timeout(&g_gp_wq, pending == 0, TICK_NS / 2)` — never spins
+and never sleeps blind. A CPU that publishes from a context holding
+nothing wakes it (`quiesce_note_quiescent_preemptible`: both trap returns
+and the idle loop), so the wait ends when the last CPU publishes rather
+than at the next multiple of the sleep. The deadline is what keeps that
+an optimisation: `pending == 0` is still the whole condition, a missed
+wake costs one re-check, and a defect in the wake path can only make the
+wait longer (invariant Q18).
+
+The publish itself is *not* a wake site. `quiesce_note_quiescent` runs
+inside the scheduler — the AP bring-up path publishes holding a run-queue
+lock with interrupts off — and waking from there re-enters the scheduler,
+which asserts against it.
+
+What this is worth, measured on a four-CPU idle machine: about 3.9 ms
+per grace period against 4.3–7.5 ms polling, with six wakes delivered per
+grace period — the spurious ones the design accepts, each costing the
+waiter one re-check. The remainder is not
+overhead — it is how long the other CPUs take to reach a quiescent point,
+which while they are halted means their next tick. After two ticks without progress it sends `IPI_RESCHEDULE` to the
 straggling CPUs so their interrupt-return path re-evaluates the predicate
 (a CPU running a long preempt-enabled loop with interrupts on will pass
 through the tick anyway; the IPI shortens the wait for a CPU whose tick

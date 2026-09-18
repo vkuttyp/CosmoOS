@@ -90,7 +90,7 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
          * interrupted thread's stack; the iretq completes when it is
          * switched back. */
         if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->rflags & RFLAGS_IF)) {
-            quiesce_note_quiescent();
+            quiesce_note_quiescent_preemptible();
             if (pc->need_resched)
                 sched_preempt();
         }

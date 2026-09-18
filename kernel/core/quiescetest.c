@@ -762,3 +762,67 @@ bool selftest_quiesce_stress(const char **reason)
           nr, reads, syncs, calls);
     return true;
 }
+
+/*
+ * A grace period ends by being woken, not by waiting out a deadline
+ * (invariant Q-W). The observable is how the block ENDED, because on more
+ * than one CPU the waiter always blocks: quiesce_core_begin bumps the
+ * epoch and nobody has published the new one yet. "It did not sleep"
+ * would be a test that fails on the change it exists to prove.
+ *
+ * This call's own timeouts, not the machine's. The first version sampled
+ * quiesce_stats.gp_timeouts before and after, which counts every CPU's
+ * grace periods -- so a concurrent one on another thread failed it, and
+ * the failure looked exactly like the wake not working. Three runs were
+ * spent chasing that before the counter was made per-call.
+ *
+ * Not a duration. A loaded host makes a grace period slower; it does not
+ * make it end at a deadline, because the deadline is only reached when no
+ * CPU published for two milliseconds -- which is what a missing wake
+ * looks like and what a busy machine does not.
+ */
+bool selftest_quiesce_wake(const char **reason)
+{
+    if (cpu_count() < 2) {
+        kinfo("selftest: quiesce-wake: one CPU, so a grace period completes before it can block; "
+              "the wake has nothing to do here and this says so rather than passing quietly");
+        return true;
+    }
+    /*
+     * The observable is whether the wake FIRES, not how long a grace
+     * period takes. Two earlier versions of this test asserted timing in
+     * disguise and both were unsound:
+     *
+     *   - "gp_timeouts did not move" reads a machine-wide counter, so
+     *     another thread's grace period failed it;
+     *   - "ten grace periods cost fewer than ten deadline-ends" looked
+     *     like a counting argument and is not one. With the wake a grace
+     *     period still usually reaches its first deadline -- the other
+     *     CPUs' tick is 4 ms away and the deadline is 2 ms -- and then is
+     *     woken. Without the wake the timer's own wake re-checks the
+     *     condition, which by then is often true, so the wait returns
+     *     "condition met" and counts no timeout at all. The number
+     *     measures where the ticks fell, not whether the wake works.
+     *
+     * gp_wakes counts wakes delivered to a queued waiter. It is
+     * identically zero unless the wake path runs, and non-zero as soon as
+     * any CPU publishes from a preemptible context while a waiter is
+     * blocked -- which, with three other CPUs and a 4 ms tick, happens
+     * inside a grace period of a few milliseconds. The duration is
+     * reported and not asserted, because that is the part a loaded host
+     * changes.
+     */
+    struct quiesce_stats before, after;
+    quiesce_get_stats(&before);
+    uint64_t t0 = clock_now_ns();
+    unsigned n = 10;
+    for (unsigned i = 0; i < n; i++)
+        synchronize_quiesce();
+    uint64_t per = (clock_now_ns() - t0) / n;
+    quiesce_get_stats(&after);
+    CHECK(after.gp_wakes > before.gp_wakes);
+    kinfo("selftest: quiesce-wake: %u grace periods on %u CPUs, %llu wakes delivered to waiters, "
+          "%llu us each (polling measured 4.3-7.5 ms)", n, cpu_count(),
+          (unsigned long long)(after.gp_wakes - before.gp_wakes), (unsigned long long)(per / 1000));
+    return true;
+}

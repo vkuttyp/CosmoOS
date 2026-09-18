@@ -142,3 +142,55 @@ drops references outside it.** Audited unchanged: `handle_lookup`/`handle_get`
 take the reference under `t->lock`; `handle_close` puts after unlocking;
 `handle_install*` take the reference before the lock and give it back on
 failure. Check: review; `process-user` and the pipe tests exercise it.
+
+**Q18. A grace period's waiter is woken when a CPU publishes, and never
+waits past its own deadline to find out.** `synchronize_quiesce` blocks
+on `g_gp_wq` with a `TICK_NS / 2` deadline instead of sleeping blind;
+`quiesce_core_pending` returning zero is still the entire condition, and
+the deadline is what makes the wake an optimisation rather than a
+correctness dependency — a missed or spurious wake costs one re-check of
+the condition the loop was going to re-check anyway. A defect in the wake
+path is therefore a latency regression and cannot be a hang or a
+premature return.
+
+**The wake is not taken at every quiescent point**, and the difference is
+not a detail. `quiesce_note_quiescent` is called from inside the
+scheduler — `sched.c`'s AP bring-up publishes while holding a run-queue
+lock with interrupts disabled — and waking from there reaches
+`schedule_internal`, which asserts it is not called with a spinlock held;
+the machine dies five seconds into boot. So the publish is unchanged and
+`quiesce_note_quiescent_preemptible` is what publishes *and* wakes, from
+the three places that hold nothing and can already schedule: both trap
+returns and the idle loop.
+
+The idle loop matters as much as the trap returns. An idle CPU is halted
+in `arch_cpu_wait_for_interrupt`, so on an otherwise idle machine the
+publish that completes a grace period comes from `idle_main` after an
+interrupt, not from the interrupt's own return.
+
+**Checked by** `quiesce-wake`, whose assertion is that the wake **fires**
+— `quiesce_stats.gp_wakes`, wakes delivered to a queued waiter — and not
+that a grace period was fast. That distinction cost three wrong tests
+before it was got right, and each wrong one was a timing claim wearing a
+counter's clothes:
+
+- *"`gp_timeouts` did not move"* reads a machine-wide counter, so another
+  thread's grace period fails it;
+- *"ten grace periods cost fewer than ten deadline-ends"* looks like a
+  counting argument and is not one. With the wake a grace period usually
+  still reaches its first deadline — the other CPUs' tick is 4 ms away
+  and the deadline is 2 ms — and is then woken; without the wake the
+  timer's own wake re-checks the condition, finds it true, and counts no
+  deadline-end at all. The number records where the ticks fell.
+
+`gp_wakes` is identically zero unless the wake path runs. The duration is
+reported in the same line and not asserted, because that is the part a
+loaded host changes: 10 grace periods, 60 wakes delivered, 3.9 ms each.
+
+**What this does not change**, measured rather than assumed: on a
+four-CPU idle machine a grace period takes about 3.9 ms with the wake and
+4.3–7.5 ms without it. The remaining 3.75 ms is not overhead this
+rule removes — it is how long it takes the other CPUs to reach a
+quiescent point, which on an idle machine means their next tick. The
+wake removes the polling overshoot, roughly halving the latency and
+collapsing its spread; it does not make a grace period cheap.

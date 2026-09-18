@@ -16,6 +16,105 @@ the floor was not built."* The design was named in
 `docs/audit/2026-09-lifetime-quiesce-report.md` and never built. This
 unit builds it.
 
+**Built as PR #175.** Everything after this section is the report as
+written; this section is what the building changed. Three of its claims
+were wrong, and the machine found all three.
+
+### As built
+
+**1. The headline was wrong: the floor is not the sleep.** The report
+says *"a grace period that is over in microseconds is reported as over
+milliseconds later"*. It is not over in microseconds. Measured on a
+four-CPU idle machine, three consecutive grace periods:
+
+| | deadline-ends | duration |
+| --- | --- | --- |
+| polling (before) | 1 / 0 / 1 | 6.82 / 4.29 / 7.55 ms |
+| woken (after) | 0 / 0 / 0 | 3.73 / 3.75 / 3.81 ms |
+
+The ~3.75 ms that remains is not overhead: it is how long the other CPUs
+take to reach a quiescent point, and while they are halted in
+`arch_cpu_wait_for_interrupt` that means their next tick. What the wake
+removes is the polling overshoot — a `TICK_NS / 2` sleep is serviced at
+the next *tick*, so two polls cost up to 8 ms, which is the report's
+"4-8 ms floor" and is real. Roughly half the latency, and the spread
+collapses. That is worth having and it is not what the report promised,
+so the report says both.
+
+Risk 3 said: *"if the sleep is not the cost, the unit says so and stops
+rather than shipping a change that buys nothing."* The sleep was not the
+whole cost; the change does not buy nothing; the claim is corrected
+rather than the unit abandoned.
+
+**2. The wake cannot live in `quiesce_note_quiescent`.** Design §2 put it
+there. That function is called from inside the scheduler — `sched.c`'s AP
+bring-up publishes while holding a run-queue lock with interrupts
+disabled — and a wake from there reaches `schedule_internal`, which
+asserts it is not called with a spinlock held. The machine dies five
+seconds into boot, on CPU 2. The publish is now unchanged and
+`quiesce_note_quiescent_preemptible` publishes *and* wakes, called only
+from contexts that hold nothing and can already schedule.
+
+This is better than the original, not merely safer: the `waitqueue_empty`
+check is paid at trap returns rather than at *every* quiescent point
+including the scheduler's own, which is the hot path the design set out
+to protect.
+
+**3. The trap returns are not enough.** With the wake at the two trap
+returns only, the test still failed — because an idle CPU is *halted*,
+and the publish that completes a grace period on an idle machine comes
+from `idle_main` after an interrupt, not from the interrupt's own return.
+The idle loop is the third wake site, safe for the same reason: it calls
+`schedule()` two lines later.
+
+### And the test was wrong twice, which cost more than the code did
+
+**First it read a machine-wide counter.** `quiesce_stats.gp_timeouts`
+counts every CPU's grace periods, and the test sampled it before and
+after one call — so a concurrent grace period on another thread failed
+it, and the failure looked exactly like the wake not working. Three runs
+went into "fixing" working code. `quiesce.c` already had the answer three
+lines from where I was editing: `sync_quiesce_counting` returns *this
+call's* kick count precisely because the global would not do. It now
+reports this call's deadline-ends the same way.
+
+**Then it asserted something the wake makes likely, not true** — twice.
+
+*"This grace period had no deadline-end"* depends on whether some CPU
+happens to publish inside the first two milliseconds, which on an idle
+machine is luck; it failed, passed, and failed again on identical code.
+
+So it became a counting argument — *"ten grace periods cost fewer than
+ten deadline-ends"* — which looked sound and is not. With the wake a
+grace period usually **still** reaches its first deadline, because the
+other CPUs' tick is 4 ms away and the deadline is 2 ms, and is woken
+after it; ten of those cost ten. And without the wake the timer's own
+wake re-checks the condition, finds it true, and counts **no**
+deadline-end at all — which is why the "before" measurement read 1/0/1
+rather than the 2-4 each the argument assumed. The number records where
+the ticks fell. It passed twice and then failed on working code.
+
+What is actually invariant is whether the wake **fires**.
+`quiesce_stats.gp_wakes` counts wakes delivered to a queued waiter and is
+identically zero unless the wake path runs. Measured: 60 wakes over ten
+grace periods on x86-64, 28 on aarch64 — six and three per grace period,
+which is also the first measurement of the "spurious wake" risk Design §2
+accepted, each costing one re-check. The duration is reported beside it
+and not asserted, because that is the part a loaded host changes.
+
+Three wrong tests for one property, all three a timing claim wearing a
+counter's clothes. The rule that would have saved them: assert the
+mechanism, report the speedup.
+
+### One thing found next door
+
+`thread_sleep_ns_killable` cancelled its stack timer with `timer_cancel`,
+which `timer.h` says only promises the callback will not *start* — one
+already running on another CPU would touch the sleeper's stack after the
+frame is gone. A thread killed while sleeping could hit it. One word to
+`timer_cancel_sync`, which is legal from thread context, and the new
+macro uses the same for the same reason.
+
 ## Problem
 
 ### 1. The wait is a poll
@@ -196,16 +295,20 @@ preventing it. "Zero sleeps" would have been a test that fails on the
 change it is meant to prove.
 
 What the wake actually changes is **how the wait ends**. So the counter
-is `gp_timeouts`: the number of times the timed wait reached its deadline
+was `gp_timeouts`: the number of times the timed wait reached its deadline
 instead of being woken. With wake-on-publish, a grace period on an
 otherwise idle machine ends by **being woken**, so `gp_timeouts` does not
 move; without the wake every wait ends at its deadline and it moves once
 per iteration. Same discipline, a counter rather than a clock, and this
 one measures the thing the unit changes.
 
+*(As built: it does not. See the as-built section — `gp_timeouts` records
+where the other CPUs' ticks fell, in both directions, and the observable
+is `gp_wakes`.)*
+
 | test | claim | how it fails if the change is reverted |
 | --- | --- | --- |
-| `quiesce-wake` | a grace period on an idle machine ends by being **woken**, not by timing out: `gp_timeouts` is unchanged across a `synchronize_quiesce` | remove the wake and keep the timed wait, and every wait ends at its deadline: the counter moves once per iteration. An observable, not a time |
+| `quiesce-wake` | *(as built)* the wake **fires**: `gp_wakes`, wakes delivered to a queued waiter, moves across ten grace periods | remove the wake and the counter is identically zero, because nothing else touches `g_gp_wq`. The duration is logged beside it and not asserted |
 | `quiesce-wake-straggler` | a grace period *does* reach its deadline when a CPU is genuinely slow to publish — `gp_timeouts` moves — and the existing straggler escalation still fires | the wake must not make the loop exit early: this is the existing `quiesce-straggler` spinner, asserting the kicks still happen |
 | `wait-timeout` | `wait_event_timeout` returns true without sleeping when the condition already holds, true when woken, and false at the deadline | the three arms of a new primitive, tested where it lives rather than only through its first caller |
 | the existing suite | `quiesce-straggler`, `-system`, `-idle`, `blk-submit-unregister`, `blk-unregister-drain`, `tcp-pcb-timer-free`, `device-remove-busy` unchanged | they are the correctness of the mechanism this unit speeds up; if any of them moves, the change was not what this report says it is |

@@ -863,3 +863,58 @@ bool selftest_completion_race(const char **reason)
           (unsigned long long)((clock_since_ns(t0)) / 1000000));
     return true;
 }
+
+/*
+ * wait_event_timeout: the three ways it can end (the quiesce-wake unit,
+ * docs/audit/next-subsystem-quiesce-wake.md). Tested here rather than
+ * only through its first caller, because a primitive whose only coverage
+ * is one user's happy path is a primitive nobody can reuse.
+ *
+ * None of the three assertions is a duration. The first two are decided
+ * by what the call returns, and the third by a flag a timer set -- a
+ * loaded host makes them slower, not wrong.
+ */
+struct wt_probe {
+    struct waitqueue wq;
+    bool ready;
+};
+
+static void wt_waker(void *arg)
+{
+    struct wt_probe *p = arg;
+    thread_sleep_ns(TICK_NS);
+    __atomic_store_n(&p->ready, true, __ATOMIC_RELEASE);
+    waitqueue_wake_all(&p->wq);
+}
+
+bool selftest_wait_timeout(const char **reason)
+{
+    struct wt_probe p;
+    waitqueue_init(&p.wq, "wait-timeout-test");
+
+    /* 1. The condition already holds: no timer, no block, true. */
+    p.ready = true;
+    CHECK(wait_event_timeout(&p.wq, __atomic_load_n(&p.ready, __ATOMIC_ACQUIRE), NS_PER_SEC));
+
+    /* 2. The deadline arrives first and nothing ever sets the condition:
+     * false, and the call returns rather than waiting for a waker that
+     * is not coming. A generous deadline would make this test slow; a
+     * short one cannot make it wrong, because the assertion is the
+     * return value and not the elapsed time. */
+    p.ready = false;
+    CHECK(!wait_event_timeout(&p.wq, __atomic_load_n(&p.ready, __ATOMIC_ACQUIRE), TICK_NS));
+
+    /* 3. A waker beats the deadline: true, and from a deadline long
+     * enough that a loaded host cannot turn this into case 2. */
+    p.ready = false;
+    struct thread *t = thread_create(wt_waker, &p, "wt-waker", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    bool woken = wait_event_timeout(&p.wq, __atomic_load_n(&p.ready, __ATOMIC_ACQUIRE), 10 * NS_PER_SEC);
+    thread_join(t);
+    CHECK(woken);
+    CHECK(__atomic_load_n(&p.ready, __ATOMIC_ACQUIRE));
+
+    kinfo("selftest: wait-timeout: a condition already true arms nothing; a deadline with no waker "
+          "returns false; a waker inside a 10 s deadline returns true");
+    return true;
+}

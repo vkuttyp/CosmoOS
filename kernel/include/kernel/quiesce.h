@@ -56,6 +56,11 @@ static inline void quiesce_read_unlock(void)
 /* The calling CPU is quiescent here. Called by the scheduler, the idle
  * loop, the arch interrupt-return tails and CPU bring-up; not by users. */
 void quiesce_note_quiescent(void);
+/* The same, plus waking anyone waiting for a grace period. Only from a
+ * context holding no lock and able to schedule -- the trap returns. The
+ * plain form is what the scheduler's own quiescent points use, because a
+ * wake from inside the scheduler re-enters it (invariant Q-W). */
+void quiesce_note_quiescent_preemptible(void);
 
 /* Wait for one grace period over the CPUs online now: every one of them
  * passes a quiescent state after this call began. Sleeps; never with a
@@ -75,6 +80,18 @@ struct quiesce_stats {
     uint64_t callbacks;          /* call_quiesce callbacks run */
     uint64_t max_wait_ns;        /* longest grace period observed */
     uint64_t straggler_ipis;     /* reschedule IPIs sent to slow CPUs */
+    /* How a waiter's block ENDED, not that it happened: on more than one
+     * CPU the waiter always blocks, because the epoch it waits for was
+     * bumped a moment earlier and nobody has published it yet. With the
+     * wake, an idle machine's grace period ends by being woken and this
+     * does not move; without it, every block ends at its deadline
+     * (invariant Q-W). */
+    uint64_t gp_timeouts;        /* grace-period waits that reached their deadline */
+    /* Wakes actually sent to a queued grace-period waiter. Zero unless
+     * the wake path runs at all, which is what makes it the observable:
+     * how *long* a grace period takes depends on where the other CPUs'
+     * ticks fall, but whether the mechanism fires does not (Q18). */
+    uint64_t gp_wakes;
     uint64_t irq_syncs;          /* synchronize_irq calls */
     uint64_t timer_sync_waits;   /* timer_cancel_sync calls that waited for a running callback */
 };
@@ -87,6 +104,9 @@ void quiesce_get_stats(struct quiesce_stats *out);
  * read. The count comes back on the stack
  * (docs/audit/next-subsystem-lifetime-windows.md). */
 unsigned quiesce_test_sync_kicks(void);
+/* One grace period, returning how many of its own blocks ended at a
+ * deadline rather than by being woken -- this call's, not the machine's. */
+unsigned quiesce_test_sync_timeouts(void);
 #endif
 /* Per-CPU diagnostics (debug builds): read depth and transitions. */
 uint32_t quiesce_cpu_depth(unsigned cpu);

@@ -296,17 +296,25 @@ tree.
 `docs/audit/2026-09-lifetime-quiesce-report.md` §7-8 (2026-09-05). Its
 "NEXT SUBSYSTEM", lockdep, was built as milestone 3. Still standing:
 
-- **grace-period latency is tick-bound** (a 4-8 ms floor);
+- ~~**grace-period latency is tick-bound** (a 4-8 ms floor);
   `synchronize_quiesce` polls; the wake-on-publish design that would
-  remove the floor was not built. **Taken up by
-  `docs/audit/next-subsystem-quiesce-wake.md`** (not struck until it
-  lands). The poll is `thread_sleep_ns(TICK_NS / 2)` -- 2 ms at
-  `CONFIG_HZ` 250 -- so a grace period that is over in microseconds is
-  learned about at the next sleep boundary, and all five callers outside
-  its own tests take it synchronously: `interrupt_unregister`, module
-  unload, `netif_unregister`, the receive-hook removal, and **the
-  `call_quiesce` batch worker** -- so the deferred form does not escape
-  the floor either, it just moves who waits.
+  remove the floor was not built.~~ -- **the poll is gone (the
+  quiesce-wake unit)**: `synchronize_quiesce` blocks on a queue with a
+  `TICK_NS / 2` deadline and is woken by a CPU publishing from a context
+  that holds nothing (invariant Q18). Measured on four idle CPUs:
+  **3.73-3.81 ms a grace period, against 4.29-7.55 ms polling** -- about
+  half, and the spread collapses.
+  **The row's premise was half wrong and the unit says so**: the floor is
+  not the sleep. A grace period is not over in microseconds; it is over
+  when the other CPUs reach a quiescent point, which while they are
+  halted means their next tick, and that ~3.75 ms is untouched. What the
+  poll added on top -- a 2 ms request serviced at the next 4 ms tick,
+  twice -- is what went. The wake could not go where the report put it
+  (inside the scheduler: the machine dies at five seconds) and the trap
+  returns alone were not enough (an idle CPU is halted, so its publish
+  comes from the idle loop). All five synchronous callers benefit:
+  `interrupt_unregister`, module unload, `netif_unregister`, the
+  receive-hook removal, and the `call_quiesce` batch worker.
 - ~~**the network worker runs below default priority**~~ -- **closed by
   the wake-preempt unit (PR #134)**: decided by measurement at the
   default priority (`docs/kernel-services/network/design.md`, "The

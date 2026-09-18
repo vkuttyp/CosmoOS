@@ -2549,6 +2549,43 @@ See [docs/development.md](docs/development.md).
   quietly). 339 self-tests on both architectures, debug and release
   (PR #173).
 
+- **A grace period ends when the last CPU publishes, not at the next
+  sleep boundary.** `synchronize_quiesce` polled — `thread_sleep_ns(TICK_NS
+  / 2)` in a loop — so nothing told the waiter that the last CPU had
+  published one microsecond after it went to sleep, and a 2 ms request is
+  serviced at the next 4 ms tick. It blocks on a queue with a deadline
+  now, woken by a CPU passing a quiescent point: **about 3.9 ms a grace
+  period against 4.3–7.5 ms**, on four idle CPUs, with the spread
+  collapsing as well as the mean. Every synchronous caller gains it —
+  `interrupt_unregister`, module unload, `netif_unregister`, the
+  receive-hook removal, and the `call_quiesce` batch worker, which is why
+  the deferred form never escaped the floor either.
+  **The report's premise was half wrong and the unit says so**: a grace
+  period is *not* over in microseconds. It is over when the other CPUs
+  reach a quiescent point, which while they are halted in
+  `arch_cpu_wait_for_interrupt` means their next tick — and that ~3.75 ms
+  is untouched. What went is the polling overshoot on top of it.
+  Two more of the design's claims died in the building. The wake cannot
+  live in `quiesce_note_quiescent`: that runs inside the scheduler, where
+  the AP bring-up path publishes holding a run-queue lock with interrupts
+  off, and waking from there reaches `schedule_internal`'s assertion —
+  the machine dies five seconds into boot. And the two trap returns are
+  not enough, because an idle CPU is halted, so the publish that finishes
+  a grace period comes from `idle_main`. Three wake sites, all of them
+  contexts that hold nothing and call `schedule()` a line or two later.
+  The deadline stays, and is the correctness argument rather than a
+  hedge: `pending == 0` is still the whole condition, so a missed or
+  spurious wake costs one re-check and a defect in the wake path can only
+  make the wait longer. Invariant **Q18**, and a new `wait_event_timeout`
+  — the tree's first timed wait — with its own three-arm test. The
+  assertion is that the wake **fires** — wakes delivered to a queued
+  waiter, identically zero unless the path runs — and not that a grace
+  period was fast; three earlier versions asserted timing in disguise and
+  none of them was sound. Found next door and fixed: a thread
+  killed while sleeping cancelled its stack timer with `timer_cancel`,
+  which only promises the callback will not *start*. 341 self-tests on
+  both architectures, debug and release (PR #175).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
