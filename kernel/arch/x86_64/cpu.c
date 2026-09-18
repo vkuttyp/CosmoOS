@@ -101,6 +101,17 @@ void arch_hardening_report(void)
     bool smep = (cr4 & CR4_SMEP) != 0, smap = (cr4 & CR4_SMAP) != 0, umip = (cr4 & CR4_UMIP) != 0;
     kinfo("hardening: x86-64:%s%s%s%s", g_cpu.has_nx ? " nx" : "", smep ? " smep" : "", smap ? " smap" : "",
           umip ? " umip" : "");
+    /* Its own line, for the reason the aarch64 side gives: the line above
+     * is matched whole by the guard boot. MCG_CAP's bank count is how
+     * much of a machine check this kernel can read (invariant I-ARCH-16);
+     * CPUID.1:EDX bit 14 is MCA. */
+    unsigned mca_banks = 0;
+    struct cpuid_regs r;
+    cpuid(1, 0, &r);
+    if (r.edx & (1u << 14))
+        mca_banks = (unsigned)(rdmsr(MSR_IA32_MCG_CAP) & 0xFFu);
+    kinfo("async-error: x86-64: %u machine-check bank%s%s", mca_banks, mca_banks == 1 ? "" : "s",
+          mca_banks ? "" : " -- every machine check classifies as uncontained");
     if (!smep || !smap || !umip)
         kwarn("hardening: absent:%s%s%s%s", smep ? "" : " smep", smap ? "" : " smap", umip ? "" : " umip",
               smap ? "" : " -- kernel access to user memory is unguarded");

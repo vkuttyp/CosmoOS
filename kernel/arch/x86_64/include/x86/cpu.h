@@ -77,6 +77,19 @@ struct cpuid_regs {
     uint32_t eax, ebx, ecx, edx;
 };
 
+/* Machine-check architecture (invariant I-ARCH-16). The bank count comes from
+ * MCG_CAP; the cap is this kernel's own, so a CPU reporting more banks
+ * than it reads is bounded rather than trusted. */
+#define MSR_IA32_MCG_CAP     0x179u
+#define MSR_IA32_MCG_STATUS  0x17Au
+#define MSR_IA32_MC0_STATUS  0x401u   /* bank i: + 4*i */
+#define X86_MCA_BANKS_MAX    32u
+
+/* The severity of a machine check, from MCG_STATUS and the bank records.
+ * Separate from the MSR reads so the combinations can be table-tested. */
+enum arch_async_error x86_async_class(uint64_t mcg_status, const uint64_t *banks, unsigned n);
+uint64_t x86_async_corrected_count(void);
+
 static inline void cpuid(uint32_t leaf, uint32_t subleaf, struct cpuid_regs *r)
 {
     __asm__ volatile("cpuid"

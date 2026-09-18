@@ -123,7 +123,11 @@ then `kernel_main(info)`.
 Sixteen 128-byte slots (`VBAR_EL1`, 2 KiB aligned): current EL with SP0
 (unused: the kernel always runs on SP_EL1 — panics), current EL with SPx
 (sync, IRQ, FIQ, SError from the kernel), lower EL AArch64 (from user),
-lower EL AArch32 (panic). Every used slot saves the frame:
+lower EL AArch32 (panic). Slots 7 and 11 — SError from EL1 and from EL0 —
+have entry points that **restore and `eret`** rather than the `wfi` loop
+every other panic slot ends in, because an error the hardware corrected
+leaves the interrupted context running (I-ARCH-16). Every used slot saves
+the frame:
 
 ```c
 struct arch_trap_frame {
@@ -146,8 +150,36 @@ state (0x0E), trapped FP/SIMD (0x07, which no longer happens: FPEN is
 0b11 at every CPU's bring-up, so the instructions are allowed at EL0 and
 EL1; the kernel abstains by its build flag and a build check, and user
 code does not abstain at all) and trapped system-register access
-→ `ARCH_TRAP_INVALID_OPCODE`; everything else (PC/SP alignment, SError)
-→ `ARCH_TRAP_GENERAL_PROTECTION`. There is no divide-error exception on
+→ `ARCH_TRAP_INVALID_OPCODE`; everything else (PC/SP alignment)
+→ `ARCH_TRAP_GENERAL_PROTECTION`. **SError is no longer in that list.**
+It arrives through its own vector slots rather than the synchronous
+path, is classified by `aarch64_async_class` and dispatched as
+`ARCH_TRAP_ASYNC_ERROR` (I-ARCH-16): a syndrome the hardware calls
+corrected is counted and returned from, and every other class panics
+naming the class and the syndrome. Until that rule existed an SError
+fell to `aarch64_trap_entry`'s `default` arm, which relabelled the frame
+`ARCH_TRAP_GENERAL_PROTECTION` — so a machine stopped by an asynchronous
+abort reported a general protection fault, and a *corrected* error, one
+the hardware had already fixed, stopped the machine too.
+
+Two facts shape what that dispatch can observe, and both were found by
+building it rather than by reading:
+
+- **`HCR_EL2.VSE` needs `HCR_EL2.AMO`.** The host runs with
+  `HCR_EL2 = RW` and nothing else (`hv_el2_switch.S`, the return-to-host
+  path), and a virtual SError is generated only while `AMO` is 1. The
+  `HV_EL2_CALL_VSE` injection sets both, and `HV_EL2_CALL_VSE_CLEAR`
+  takes them back — `VSE` is not self-clearing, so while it is set the
+  abort is pending continuously and is re-taken on every return with the
+  mask clear.
+- **EL1 runs with `PSTATE.A` masked for the kernel's whole life.**
+  `entry.S` does `msr daifset, #0xF` and the only unmask anywhere is
+  `daifclr, #2`, which is IRQ. So the kernel does not take an
+  asynchronous abort while it runs; it stays pending. EL0 is entered with
+  `SPSR = 0`, DAIF clear, so an SError there *is* taken immediately, and
+  that is the live path. Whether EL1 should unmask `A` is a separate
+  decision — the kernel would then take an abort at any instruction — and
+  I-ARCH-16 records it as a gap rather than settling it. There is no divide-error exception on
 AArch64; the kind exists for the contract and never fires. BRK is a
 fault-class exception (`ELR` points at the `brk` itself) while x86's
 `int3` is a trap; to keep the contract's semantics `trap.c` advances
@@ -164,9 +196,12 @@ INTID for EOI (`g_cur_intid[cpu]`), map INTID → vector, call
 there), `interrupt_dispatch(vector, frame)`, `arch_irqc_eoi`; an
 unrouted SGI or an INTID ≥ 1020 counts as spurious and is EOI'd without
 dispatch. After the handler, a pending reschedule with interrupts
-enabled in the interrupted context runs `sched_preempt`. FIQ, SError,
-the SP0 and AArch32 slots build a frame, call `aarch64_trap_entry`, which
-panics with it, and never return.
+enabled in the interrupted context runs `sched_preempt`. FIQ and the SP0
+and AArch32 slots build a frame, call `aarch64_trap_entry`, which panics
+with it, and never return. FIQ stays that way deliberately: this kernel
+routes everything through the GIC to IRQ and takes no FIQ, so a FIQ means
+something is wrong with that routing, and saying so loudly is right. The
+SError slots are the ones that left this list (I-ARCH-16).
 
 ### Vector numbering (`arch/trap.h` contract, `gic.c`, `trap.c`)
 

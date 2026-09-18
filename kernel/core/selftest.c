@@ -247,6 +247,31 @@ static bool test_trap_paranoid(const char **reason)
     return true;
 }
 
+/* The asynchronous-error classifier, over encodings no CI CPU produces
+ * (invariant I-ARCH-16). The table is architecture-shaped and lives with the
+ * classifier; the row that fails names itself. */
+static bool test_trap_async_class(const char **reason)
+{
+    const char *why = NULL;
+    if (!arch_test_async_class(&why)) {
+        *reason = why ? why : "async-error classifier check failed";
+        return false;
+    }
+    return true;
+}
+
+/* And one real asynchronous error of the only survivable class, where the
+ * hardware can produce one (invariant I-ARCH-16). */
+static bool test_trap_async_inject(const char **reason)
+{
+    const char *why = NULL;
+    if (!arch_test_async_inject(&why)) {
+        *reason = why ? why : "async-error injection check failed";
+        return false;
+    }
+    return true;
+}
+
 /* Vector/x87 register state stays with the thread that owns it across switches. */
 static bool test_fpu_switch(const char **reason)
 {
@@ -335,6 +360,8 @@ static const struct selftest tests[] = {
     { "irq-state",       test_irq_state },
     { "breakpoint-trap", test_breakpoint_trap },
     { "trap-paranoid",   test_trap_paranoid },
+    { "trap-async-class", test_trap_async_class },
+    { "trap-async-inject", test_trap_async_inject },
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },

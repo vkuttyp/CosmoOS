@@ -2510,6 +2510,43 @@ See [docs/development.md](docs/development.md).
   late for. 337 self-tests on both architectures, debug and release
   (PR #171).
 
+- **A hardware error the CPU corrected no longer kills the machine.** An
+  SError on AArch64 and a machine check on x86-64 are the same class — a
+  fault the CPU could not attribute synchronously — and both ended in
+  `panic`. Every SError reached `aarch64_trap_entry`'s `default` arm,
+  which **relabelled the frame `ARCH_TRAP_GENERAL_PROTECTION`**, so a
+  machine stopped by an asynchronous abort reported a general protection
+  fault; and vector 18 had no handler at all, so a machine check panicked
+  through `arch_trap_unhandled`. Both now classify: `arch_async_error_class`
+  answers *corrected* only for a syndrome that positively says so — on
+  AArch64 `ID_AA64PFR0_EL1.RAS` non-zero with `ESR_EL1.IDS` clear and
+  `AET = CE`; on x86-64 **at least one valid bank**, every valid bank
+  `UC == 0`, no `PCC` or `OVER`, and `RIPV`, across all `MCG_CAP.Count`
+  banks. That first x86 clause is not redundant: without it "every valid
+  bank is clean" is true of *no banks*, and a machine check carrying no
+  record would read as corrected. Everything else panics, naming the
+  class and printing the syndrome. **No process is killed** — an
+  asynchronous abort's frame names the context interrupted when the error
+  was *delivered*, not the one that caused it, so nothing here may choose
+  a victim; attribution needs the RAS error records and is a unit of its
+  own. Invariant **I-ARCH-16**. Four bug-proofs, each shown to fail for
+  its stated reason — the vacuous bank rule, the missing-FEAT_RAS rule,
+  the SError vector back in the panic arm (`KERNEL PANIC: exception in an
+  unsupported vector slot 7 (EC 0x2f)`, dead in 8.8 s) and the
+  unregistered machine-check vector. Two things the building found and
+  the report had not: `HCR_EL2.VSE` is inert without `AMO`, since the
+  host runs `HCR_EL2 = RW` and nothing else; and **EL1 runs with
+  `PSTATE.A` masked for the kernel's entire life** (`daifset #0xF` at
+  boot; the only unmask anywhere is `daifclr, #2`, which is IRQ), so the
+  kernel never takes an asynchronous abort while running — EL0, entered
+  with DAIF clear, is the live path. Whether EL1 should unmask `A` is
+  recorded as I-ARCH-16's gap rather than settled here. A real corrected
+  SError, injected through `HCR_EL2.VSE`, is taken at EL1 and execution
+  continues on the guard boot (`cortex-a76`, which has FEAT_RAS;
+  `cortex-a72` does not, and the test says so rather than passing
+  quietly). 339 self-tests on both architectures, debug and release
+  (PR #173).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

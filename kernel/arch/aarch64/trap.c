@@ -19,6 +19,8 @@
 #include <kernel/syscall.h>
 #include <arch/irq.h>
 #include <arch/irqc.h>
+#include <arch/el2.h>
+#include <arch/testhooks.h>
 #include <arch/trap.h>
 #include <arch/user.h>
 #include <aarch64/platform.h>
@@ -32,7 +34,10 @@ static const char *const kind_names[ARCH_TRAP_KIND_COUNT] = {
     [ARCH_TRAP_INVALID_OPCODE] = "undefined instruction",
     [ARCH_TRAP_GENERAL_PROTECTION] = "synchronous exception",
     [ARCH_TRAP_PAGE_FAULT] = "page fault",
+    [ARCH_TRAP_ASYNC_ERROR] = "SError (asynchronous abort)",
 };
+
+static uint64_t g_async_corrected;
 
 static uint64_t g_unhandled;
 
@@ -119,6 +124,34 @@ static void handle_irq(struct arch_trap_frame *frame)
     return_to_user_check(frame);
 }
 
+/*
+ * An asynchronous abort. The frame names the context that was interrupted
+ * when the error was DELIVERED, not the one that caused it, so nothing
+ * here blames a process -- attribution needs the RAS error records this
+ * unit does not read (invariant I-ARCH-16). The only survivable class is one the
+ * hardware says it corrected; everything else stops the machine, at either
+ * exception level, and says what it was.
+ */
+static void handle_async_error(struct arch_trap_frame *frame)
+{
+    frame->vector = VEC_SYNC_BASE + ARCH_TRAP_ASYNC_ERROR;
+    enum arch_async_error class = arch_async_error_class(frame);
+    if (class == ARCH_ASYNC_CORRECTED) {
+        /* Counted rather than printed: this runs in whatever context the
+         * error interrupted, including one holding a run-queue lock. The
+         * count is read by the self-test and by anyone asking later. */
+        __atomic_fetch_add(&g_async_corrected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    panic_frame(frame, "SError: %s (ESR 0x%llx)", arch_async_error_name(class),
+                (unsigned long long)frame->esr);
+}
+
+uint64_t aarch64_async_corrected_count(void)
+{
+    return __atomic_load_n(&g_async_corrected, __ATOMIC_RELAXED);
+}
+
 void aarch64_trap_entry(struct arch_trap_frame *frame)
 {
     switch (frame->kind) {
@@ -132,6 +165,10 @@ void aarch64_trap_entry(struct arch_trap_frame *frame)
     case AARCH64_ENTRY_EL0_IRQ:
         frame->vector = VEC_SPURIOUS;
         handle_irq(frame);
+        return;
+    case AARCH64_ENTRY_EL1_SERROR:
+    case AARCH64_ENTRY_EL0_SERROR:
+        handle_async_error(frame);
         return;
     default:
         frame->vector = VEC_SYNC_BASE + ARCH_TRAP_GENERAL_PROTECTION;
@@ -251,4 +288,156 @@ unsigned arch_trap_fault_flags(const struct arch_trap_frame *frame)
     else if (!FSC_TRANSLATION(fsc))
         f |= ARCH_FAULT_RESERVED;
     return f;
+}
+
+/* --- asynchronous errors (invariant I-ARCH-16) --------------------------------------
+ *
+ * An SError's syndrome says how bad the error was, never who caused it:
+ * the frame names the context interrupted when the abort was *delivered*.
+ * So this classifier answers severity only, and the handler that uses it
+ * blames nobody (docs/audit/next-subsystem-async-error.md, Design 3).
+ *
+ * Pure and separate from the register reads so the encodings can be
+ * table-tested, including the ones no CI CPU will ever produce.
+ */
+enum arch_async_error aarch64_async_class(uint64_t esr, unsigned ras)
+{
+    /* No FEAT_RAS: ESR carries no AET at all, so nothing is knowable and
+     * the only honest answer is the conservative one. */
+    if (ras == 0)
+        return ARCH_ASYNC_UNCONTAINED;
+    /* IDS: the rest of the syndrome is IMPLEMENTATION DEFINED. Whatever
+     * it means, it does not mean what the AET table below means. */
+    if (esr & ESR_SERROR_IDS)
+        return ARCH_ASYNC_UNCONTAINED;
+    switch (ESR_SERROR_AET(esr)) {
+    case ESR_AET_CE:
+        return ARCH_ASYNC_CORRECTED;
+    case ESR_AET_UEO:
+    case ESR_AET_UER:
+        return ARCH_ASYNC_CONTAINED;   /* the machine is intact; who did it is not said */
+    case ESR_AET_UC:
+    case ESR_AET_UEU:
+    default:
+        return ARCH_ASYNC_UNCONTAINED;   /* including every reserved encoding */
+    }
+}
+
+enum arch_async_error arch_async_error_class(const struct arch_trap_frame *frame)
+{
+    return aarch64_async_class(frame->esr, (unsigned)ID_AA64PFR0_RAS(READ_SYSREG(id_aa64pfr0_el1)));
+}
+
+const char *arch_async_error_name(enum arch_async_error c)
+{
+    switch (c) {
+    case ARCH_ASYNC_CORRECTED:   return "corrected";
+    case ARCH_ASYNC_CONTAINED:   return "contained";
+    default:                     return "uncontained";
+    }
+}
+
+/* --- arch/testhooks.h: the classifier over encodings this CPU never emits --- */
+
+bool arch_test_async_class(const char **why)
+{
+    static const struct {
+        uint64_t esr;
+        unsigned ras;
+        enum arch_async_error want;
+        const char *what;
+    } rows[] = {
+        { (uint64_t)ESR_AET_CE  << 10, 1, ARCH_ASYNC_CORRECTED,   "CE: the hardware fixed it" },
+        { (uint64_t)ESR_AET_UER << 10, 1, ARCH_ASYNC_CONTAINED,   "UER: intact, but unattributable" },
+        { (uint64_t)ESR_AET_UEO << 10, 1, ARCH_ASYNC_CONTAINED,   "UEO: restartable" },
+        { (uint64_t)ESR_AET_UC  << 10, 1, ARCH_ASYNC_UNCONTAINED, "UC" },
+        { (uint64_t)ESR_AET_UEU << 10, 1, ARCH_ASYNC_UNCONTAINED, "UEU" },
+        { 4ull << 10,                  1, ARCH_ASYNC_UNCONTAINED, "reserved AET 4" },
+        { 5ull << 10,                  1, ARCH_ASYNC_UNCONTAINED, "reserved AET 5" },
+        { 7ull << 10,                  1, ARCH_ASYNC_UNCONTAINED, "reserved AET 7" },
+        { ((uint64_t)ESR_AET_CE << 10) | ESR_SERROR_IDS, 1, ARCH_ASYNC_UNCONTAINED,
+          "IDS set: the syndrome is implementation-defined, whatever AET looks like" },
+        { (uint64_t)ESR_AET_CE << 10, 0, ARCH_ASYNC_UNCONTAINED,
+          "no FEAT_RAS: there is no AET to have read" },
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        if (aarch64_async_class(rows[i].esr, rows[i].ras) != rows[i].want) {
+            *why = rows[i].what;
+            return false;
+        }
+    }
+    kinfo("selftest: trap-async-class: %u SError encodings -- three reserved AETs, IDS, and a CPU "
+          "without FEAT_RAS; everything not positively corrected is uncontained",
+          (unsigned)(sizeof(rows) / sizeof(rows[0])));
+    return true;
+}
+
+/*
+ * A virtual SError, delivered through EL2 (invariant I-ARCH-16). The only class
+ * that returns is one the hardware calls corrected, so this test injects
+ * exactly that and asserts the machine carried on -- the panic arm is not
+ * injectable by definition, and is covered by the classifier's table.
+ *
+ * Needs FEAT_RAS: without it VSESR_EL2 does not exist, so the syndrome
+ * cannot be set and the abort would classify as uncontained and stop the
+ * machine. CI's cortex-a72 has no RAS and cortex-a76 (make test-guard)
+ * does, so this runs on the guard boot and skips on the default one --
+ * which is stated rather than hidden, because a test that silently does
+ * nothing is worse than one that says it did nothing.
+ */
+bool arch_test_async_inject(const char **why)
+{
+    unsigned ras = (unsigned)ID_AA64PFR0_RAS(READ_SYSREG(id_aa64pfr0_el1));
+    if (ras == 0 || !el2_available()) {
+        kinfo("selftest: trap-async-inject: %s; the corrected arm is covered by trap-async-class only",
+              ras == 0 ? "no FEAT_RAS on this CPU model" : "no EL2");
+        return true;
+    }
+    uint64_t before = aarch64_async_corrected_count();
+    /* EC 0x2F with IDS clear and AET = CE: the syndrome for an error the
+     * hardware corrected. */
+    uint64_t esr = ((uint64_t)ESR_EC_SERROR << ESR_EC_SHIFT) | ((uint64_t)ESR_AET_CE << 10);
+    if (el2_call_raw(HV_EL2_CALL_VSE, esr) != 0) {
+        *why = "EL2 refused the virtual SError";
+        return false;
+    }
+    /*
+     * And then unmask it, because this kernel runs EL1 with PSTATE.A set
+     * from its first instruction (entry.S: `msr daifset, #0xF`, and only
+     * `daifclr, #2` -- IRQ -- is ever cleared). So an asynchronous abort
+     * is not taken while the kernel runs at all; it stays pending until
+     * something unmasks it. User mode does not have that property: EL0
+     * runs with DAIF clear, so an SError there is taken immediately, and
+     * that is the path this unit's dispatch is for.
+     *
+     * The window is kept short and closed again by hand: while VSE is set
+     * the abort is pending continuously and is re-taken on every return
+     * with A clear, so the count may move by more than one before the
+     * clear call takes it back. More than once is the assertion, not
+     * exactly once.
+     */
+    __asm__ volatile("msr daifclr, #4" ::: "memory");   /* A */
+    for (unsigned i = 0; i < 1000 && aarch64_async_corrected_count() == before; i++)
+        __asm__ volatile("isb" ::: "memory");
+    __asm__ volatile("msr daifset, #4" ::: "memory");
+    (void)el2_call_raw(HV_EL2_CALL_VSE_CLEAR, 0);
+    if (aarch64_async_corrected_count() <= before) {
+        *why = "a corrected SError was not delivered, or did not return";
+        return false;
+    }
+    kinfo("selftest: trap-async-inject: a corrected SError was taken at EL1 and execution continued "
+          "(count %llu); before this unit the same abort stopped the machine",
+          (unsigned long long)aarch64_async_corrected_count());
+    return true;
+}
+
+/*
+ * Nothing to register: an SError arrives through vector slots 7 and 11,
+ * which aarch64_trap_entry dispatches itself, so there is no vector
+ * number for interrupt_register to hold (I-ARCH-16). The function exists
+ * because x86-64's #MC does need registering and main.c should not know
+ * which architecture it is on.
+ */
+void arch_async_error_init(void)
+{
 }

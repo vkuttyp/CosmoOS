@@ -7,8 +7,14 @@
  * own kernel stack. An exception from EL1 pushes onto the current kernel
  * stack. Every used slot builds a struct arch_trap_frame (trapframe.h),
  * calls aarch64_trap_entry(frame) and restores. The slots for SP0 and
- * AArch32 lower EL states, FIQ and SError also build a frame so the panic
- * can print it, then never return.
+ * AArch32 lower EL states and FIQ also build a frame so the panic can
+ * print it, then never return.
+ *
+ * SError (slots 7 and 11) is the exception to that: it builds a frame and
+ * RESTORES, because an error the hardware corrected leaves the interrupted
+ * context running. Every other class of asynchronous error still panics,
+ * from aarch64_trap_entry rather than from here (invariant I-ARCH-16,
+ * docs/audit/next-subsystem-async-error.md).
  */
 
 #include <aarch64/trapframe.h>
@@ -94,12 +100,12 @@ aarch64_vectors:
     ventry el1_sync
     ventry el1_irq
     ventry bad_6
-    ventry bad_7
+    ventry el1_serror
     /* Lower EL, AArch64: from user mode. */
     ventry el0_sync
     ventry el0_irq
     ventry bad_10
-    ventry bad_11
+    ventry el0_serror
     /* Lower EL, AArch32: never configured. */
     ventry bad_12
     ventry bad_13
@@ -147,6 +153,32 @@ el0_irq:
     restore_frame_common
     .size el0_irq, . - el0_irq
 
+    /*
+     * SError. Unlike a bad slot these restore and eret: an error the
+     * hardware corrected leaves the interrupted context running
+     * (invariant I-ARCH-16). aarch64_trap_entry panics for every other class,
+     * so the return path is reached only when returning is right.
+     */
+    .type el1_serror, @function
+el1_serror:
+    save_frame AARCH64_ENTRY_EL1_SERROR
+    save_sp_kernel
+    mov x0, sp
+    bl aarch64_trap_entry
+    restore_frame_common
+    .size el1_serror, . - el1_serror
+
+    .type el0_serror, @function
+el0_serror:
+    save_frame AARCH64_ENTRY_EL0_SERROR
+    save_sp_user
+    mov x0, sp
+    bl aarch64_trap_entry
+    ldr x21, [sp, #FRAME_OFF_SP]
+    msr sp_el0, x21
+    restore_frame_common
+    .size el0_serror, . - el0_serror
+
     .macro bad_slot n
     .type bad_\n, @function
 bad_\n:
@@ -163,9 +195,7 @@ bad_\n:
     bad_slot 2
     bad_slot 3
     bad_slot 6
-    bad_slot 7
     bad_slot 10
-    bad_slot 11
     bad_slot 12
     bad_slot 13
     bad_slot 14

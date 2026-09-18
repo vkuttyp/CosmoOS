@@ -15,6 +15,89 @@ E0PD, BTI, PAC, device-tree parsing and PSCI variations; this unit takes
 **only** the SError clause and strikes only that, because the others are
 feature work and this one is a defect.
 
+**Built as PR #173.** Everything after this section is the report as
+written; this section is what the building changed.
+
+### As built
+
+**Step 1 answered, and it changed the plan for the better.** The report
+refused to assume what the CI CPUs implement. They report:
+
+| boot | |
+| --- | --- |
+| aarch64 `cortex-a72` (default) | `ras:0` — **no FEAT_RAS**, as expected |
+| aarch64 `cortex-a76` (`make test-guard`) | **`ras:1`** — FEAT_RAS present |
+| x86-64, both CPU models | **10** machine-check banks |
+
+So the *corrected* arm is reachable by real injection after all, on the
+guard boot, and not only by a table. The report said it must say which,
+and it is this.
+
+**And the injection then failed, which was the most useful thing that
+happened.** Two reasons, both real and neither in the report:
+
+- **`HCR_EL2.VSE` is inert without `HCR_EL2.AMO`.** The host runs with
+  `HCR_EL2 = RW` and nothing else (`hv_el2_switch.S`, the return-to-host
+  path), and a virtual SError is generated only while `AMO` is 1. The
+  injection call sets both, and a second call takes them back: `VSE` is
+  not self-clearing, so while it is set the abort is pending continuously
+  and is re-taken on every return with the mask clear. The test asserts
+  the count *moved*, not that it moved by one.
+- **EL1 runs with `PSTATE.A` masked for the kernel's entire life.**
+  `entry.S` does `msr daifset, #0xF`; the only unmask anywhere is
+  `daifclr, #2`, which is IRQ. So the kernel does not take an
+  asynchronous abort while it runs — it stays pending. **EL0 does not
+  have that property**: user mode is entered with `SPSR = 0`, DAIF clear,
+  so an SError there is taken immediately, and that is the path this unit
+  governs today.
+
+That second one refines the report's own premise. "Every SError panics"
+is true of EL0 and, at EL1, is true only of an SError that something
+unmasks. Whether EL1 should unmask `A` is a real decision with its own
+risk — the kernel would then take an abort at any instruction — and
+I-ARCH-16 records it as a gap rather than settling it in a unit that was
+not about it.
+
+**The invariant is I-ARCH-16, not A1.** The report named it A1;
+`docs/kernel/arch/aarch64/invariants.md` already uses A1–A24, and the
+rule is cross-arch anyway, so it belongs in the generic document. All
+seventeen code references were swept, not the ones remembered.
+
+**`#MC` was never registered.** Writing the design document found it: the
+classifier and the test hook existed, so every test passed, and vector 18
+was still unregistered — the unit changed nothing on x86-64. The handler
+is registered now, from an arch-neutral `arch_async_error_init` called
+after `interrupt_init`, and **the registration is asserted**, because it
+is the one part of x86's dispatch that software can check. Without that
+assertion this gap would have shipped.
+
+**The corrected path counts and does not print.** The report's Risks
+section asked whether `kdebug` is safe from an arbitrary context; the
+answer taken is not to find out — on x86-64 the handler runs on the
+machine-check IST stack through the paranoid entry, which I-ARCH-7 says
+must not fault.
+
+**A regression of mine, caught where the code warned it would be.** The
+first cut appended the RAS and MCA facts to the `hardening:` line, whose
+comment says *"the guard boot's harness requires it whole"* — and both
+guard boots failed on `missing marker /^\[ INFO\] hardening: x86-64: nx
+smep smap umip$/`. They have their own `async-error:` line now, which is
+better placed anyway: neither is a hardening feature.
+
+### The four bug-proofs, each run
+
+| revert | what failed |
+| --- | --- |
+| x86's at-least-one-valid-bank requirement | `trap-async-class`: *"no valid bank: 'every valid bank is clean' is vacuously true of none"* |
+| the FEAT_RAS requirement | `trap-async-class`: *"no FEAT_RAS: there is no AET to have read"* |
+| the SError vector back in the `default` arm | **`KERNEL PANIC: exception in an unsupported vector slot 7 (EC 0x2f)`** — the original defect, dead in 8.8 s |
+| `arch_async_error_init` not called | `trap-async-inject`: *"no machine-check handler registered: vector 18 still panics through arch_trap_unhandled"* |
+
+The first attempt at proof one is worth recording: it removed the
+requirement in a way that left a variable unused, so `-Werror` rejected
+it and the run produced no failing assertion at all. Read only for the
+assertion, that looks like a proof that did not fire.
+
 ## Problem
 
 ### 1. Every SError panics, whatever it was
@@ -334,7 +417,7 @@ No syscall, no uapi change.
 
 ## Invariant
 
-**A1. An asynchronous hardware error lets the machine continue only when
+**I-ARCH-16. An asynchronous hardware error lets the machine continue only when
 the hardware says it corrected the error, and is never blamed on a
 process.** The classifier returns *corrected* only for a syndrome that
 positively says so — `AET = CE` with `IDS = 0` on AArch64; on x86-64
@@ -369,7 +452,7 @@ table test — the unit as built must say which.
 4. x86-64: register `#MC`, classify by walking every `MCG_CAP.Count`
    bank for `VAL`/`PCC`/`OVER`/`UC` before reading `MCG_STATUS`, and the
    dispatch test.
-5. Docs: invariant A1, the arch design documents, the inventory clause,
+5. Docs: invariant I-ARCH-16, the arch design documents, the inventory clause,
    the README entry.
 
 ## Risks

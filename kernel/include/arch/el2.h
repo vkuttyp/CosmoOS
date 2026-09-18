@@ -69,7 +69,21 @@ int el2_set_stack(uint64_t sp_phys);
  * after which the stub's ABI answers again and a later probe installs
  * the switch afresh. */
 #define HV_EL2_CALL_HANDBACK 0x14
-#define HV_EL2_VERSION       3
+/* x1 = the syndrome to deliver, or 0 for none: set HCR_EL2.VSE so a
+ * virtual SError is taken at EL1, and when x1 is non-zero put it in
+ * VSESR_EL2 first. Only EL2 can do either, which is why a test that
+ * wants a deterministic asynchronous abort needs a call here.
+ *
+ * x1 MUST be 0 on a CPU without FEAT_RAS: VSESR_EL2 does not exist
+ * there and writing it is UNDEFINED. The caller checks
+ * ID_AA64PFR0_EL1.RAS, because EL2 cannot refuse what it cannot read
+ * (invariant I-ARCH-16, docs/audit/next-subsystem-async-error.md). */
+#define HV_EL2_CALL_VSE      0x15
+/* Clear HCR_EL2.{VSE,AMO} again. VSE is not self-clearing: while it is
+ * set the virtual SError is pending and is re-taken every time EL1
+ * returns with it unmasked, so the injector must take it back. */
+#define HV_EL2_CALL_VSE_CLEAR 0x16
+#define HV_EL2_VERSION       4
 
 #ifndef __ASSEMBLER__
 /* For tests: the raw call, including selectors the stub refuses. */

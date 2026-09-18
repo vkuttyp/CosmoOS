@@ -360,3 +360,196 @@ unsigned arch_trap_fault_flags(const struct arch_trap_frame *frame)
         f |= ARCH_FAULT_EXEC;
     return f;
 }
+
+/* --- asynchronous errors (invariant I-ARCH-16) --------------------------------------
+ *
+ * A machine check's severity, from the banks rather than from
+ * MCG_STATUS alone: RIPV says execution can continue, and says nothing
+ * about whether a bank recorded an uncorrected error or whether the
+ * processor's context is corrupt. Reading one register and trusting it
+ * is what made the first draft of this classifier wrong
+ * (docs/audit/next-subsystem-async-error.md, Design 2).
+ *
+ * CORRECTED requires all four, positively:
+ *   1. at least one bank with VAL -- something was reported, or there is
+ *      nothing to have understood. Without this clause "every valid bank
+ *      is clean" is true of NO banks and an empty machine check reads as
+ *      corrected;
+ *   2. every valid bank has UC == 0;
+ *   3. no bank has PCC (processor context corrupt) or OVER (a record was
+ *      overwritten, so what is there is not the whole story);
+ *   4. MCG_STATUS.RIPV.
+ * Anything else is uncontained. One bank's silence never outvotes
+ * another's report.
+ *
+ * Pure, so the combinations can be table-tested without an error.
+ */
+#define MCI_STATUS_VAL  (1ull << 63)
+#define MCI_STATUS_OVER (1ull << 62)
+#define MCI_STATUS_UC   (1ull << 61)
+#define MCI_STATUS_PCC  (1ull << 57)
+#define MCG_STATUS_RIPV (1ull << 0)
+#define MCG_STATUS_EIPV (1ull << 1)
+
+enum arch_async_error x86_async_class(uint64_t mcg_status, const uint64_t *banks, unsigned n)
+{
+    bool any_valid = false, any_uc = false;
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t st = banks[i];
+        if (!(st & MCI_STATUS_VAL))
+            continue;   /* this bank says nothing; it does not say "fine" */
+        any_valid = true;
+        if (st & (MCI_STATUS_PCC | MCI_STATUS_OVER))
+            return ARCH_ASYNC_UNCONTAINED;   /* whatever RIPV claims */
+        if (st & MCI_STATUS_UC)
+            any_uc = true;
+    }
+    if (!any_valid)
+        return ARCH_ASYNC_UNCONTAINED;   /* no record: nothing was understood */
+    if (!(mcg_status & MCG_STATUS_RIPV))
+        return ARCH_ASYNC_UNCONTAINED;   /* execution cannot continue here */
+    if (!any_uc)
+        return ARCH_ASYNC_CORRECTED;
+    /* Uncorrected, but the machine can continue and the error is tied to
+     * the instruction. Decoded for the attribution unit; this one treats
+     * it as uncontained, because nothing here says which process. */
+    return (mcg_status & MCG_STATUS_EIPV) ? ARCH_ASYNC_CONTAINED : ARCH_ASYNC_UNCONTAINED;
+}
+
+enum arch_async_error arch_async_error_class(const struct arch_trap_frame *frame)
+{
+    (void)frame;
+    struct cpuid_regs r;
+    cpuid(1, 0, &r);
+    if (!(r.edx & (1u << 14)))
+        return ARCH_ASYNC_UNCONTAINED;   /* no MCA: nothing to read */
+    unsigned n = (unsigned)(rdmsr(MSR_IA32_MCG_CAP) & 0xFFu);
+    if (n > X86_MCA_BANKS_MAX)
+        n = X86_MCA_BANKS_MAX;
+    uint64_t banks[X86_MCA_BANKS_MAX];
+    for (unsigned i = 0; i < n; i++)
+        banks[i] = rdmsr(MSR_IA32_MC0_STATUS + 4u * i);
+    return x86_async_class(rdmsr(MSR_IA32_MCG_STATUS), banks, n);
+}
+
+const char *arch_async_error_name(enum arch_async_error c)
+{
+    switch (c) {
+    case ARCH_ASYNC_CORRECTED:   return "corrected";
+    case ARCH_ASYNC_CONTAINED:   return "contained";
+    default:                     return "uncontained";
+    }
+}
+
+/*
+ * A machine check (invariant I-ARCH-16). Registered here rather than
+ * through process.c's user-exception loop, which maps a vector to a
+ * signal unconditionally and sends every kernel frame to the unhandled
+ * panic: that cannot express "a corrected error returns". It also cannot
+ * be allowed to, here -- an asynchronous error's frame names the context
+ * interrupted at delivery, not the one that caused it, so no process is
+ * blamed.
+ *
+ * This runs on the machine-check IST stack through the paranoid entry
+ * (I-ARCH-7), which neither preempts nor delivers a kill and whose
+ * handlers must not fault. So the corrected path counts and returns; it
+ * does not print.
+ */
+static uint64_t g_async_corrected;
+
+static void machine_check_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)arg;
+    enum arch_async_error class = arch_async_error_class(frame);
+    if (class == ARCH_ASYNC_CORRECTED) {
+        __atomic_fetch_add(&g_async_corrected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    panic_frame(frame, "machine check: %s (MCG_STATUS 0x%llx)", arch_async_error_name(class),
+                (unsigned long long)rdmsr(MSR_IA32_MCG_STATUS));
+}
+
+void arch_async_error_init(void)
+{
+    int rc = interrupt_register(X86_TRAP_MC, machine_check_handler, NULL, "machine-check");
+    if (rc && rc != -EBUSY)
+        panic("trap: cannot register the machine-check handler (%d)", rc);
+}
+
+uint64_t x86_async_corrected_count(void)
+{
+    return __atomic_load_n(&g_async_corrected, __ATOMIC_RELAXED);
+}
+
+/* --- arch/testhooks.h: the classifier over bank combinations this host never emits --- */
+
+bool arch_test_async_class(const char **why)
+{
+    /* Every row differs from the corrected one in one bit or one bank, so
+     * a dropped rule fails exactly one row and the row names it. */
+    struct row {
+        uint64_t mcg;
+        uint64_t banks[3];
+        unsigned n;
+        enum arch_async_error want;
+        const char *what;
+    };
+    static const struct row rows[] = {
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL }, 1, ARCH_ASYNC_CORRECTED,
+          "one valid clean bank with RIPV" },
+        { MCG_STATUS_RIPV, { 0 }, 1, ARCH_ASYNC_UNCONTAINED,
+          "no valid bank: 'every valid bank is clean' is vacuously true of none" },
+        { MCG_STATUS_RIPV, { 0, 0, 0 }, 3, ARCH_ASYNC_UNCONTAINED,
+          "three banks, none valid" },
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_PCC }, 1, ARCH_ASYNC_UNCONTAINED,
+          "PCC: processor context corrupt, whatever RIPV says" },
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_OVER }, 1, ARCH_ASYNC_UNCONTAINED,
+          "OVER: a record was overwritten, so what is there is not the whole story" },
+        { 0, { MCI_STATUS_VAL }, 1, ARCH_ASYNC_UNCONTAINED,
+          "RIPV clear: execution cannot continue here" },
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_PCC }, 2,
+          ARCH_ASYNC_UNCONTAINED, "a clean bank does not outvote a later PCC: the multi-bank walk" },
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_UC }, 2,
+          ARCH_ASYNC_UNCONTAINED, "uncorrected in a later bank, with no EIPV" },
+        { MCG_STATUS_RIPV | MCG_STATUS_EIPV, { MCI_STATUS_VAL | MCI_STATUS_UC }, 1,
+          ARCH_ASYNC_CONTAINED, "uncorrected, attributable, machine intact" },
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        if (x86_async_class(rows[i].mcg, rows[i].banks, rows[i].n) != rows[i].want) {
+            *why = rows[i].what;
+            return false;
+        }
+    }
+    kinfo("selftest: trap-async-class: %u machine-check combinations, one per rule -- VAL, PCC, OVER, "
+          "RIPV and the multi-bank walk, including the empty bank set a vacuous rule calls corrected",
+          (unsigned)(sizeof(rows) / sizeof(rows[0])));
+    return true;
+}
+
+/*
+ * x86-64 has no way to raise a real machine check from software -- `int
+ * $18` reaches the vector but sets no banks, so the classifier would read
+ * this machine's actual (empty) MCA state and call it uncontained, which
+ * is correct and proves nothing about the policy. So this reports what
+ * the host can and cannot do rather than pretending to inject.
+ */
+bool arch_test_async_inject(const char **why)
+{
+    /* The vector must be OURS. A machine check with no handler reaches
+     * arch_trap_unhandled and panics -- which is what this unit removes,
+     * and which nothing else here would notice, because x86-64 cannot
+     * raise a real machine check from software. Registration is the one
+     * part of the dispatch that IS checkable, so it is checked. */
+    if (interrupt_handler_name(X86_TRAP_MC) == NULL) {
+        *why = "no machine-check handler registered: vector 18 still panics through arch_trap_unhandled";
+        return false;
+    }
+    struct cpuid_regs r;
+    cpuid(1, 0, &r);
+    unsigned banks = (r.edx & (1u << 14)) ? (unsigned)(rdmsr(MSR_IA32_MCG_CAP) & 0xFFu) : 0;
+    kinfo("selftest: trap-async-inject: vector 18 is handled by '%s'; %u MCA banks would be read. "
+          "x86-64 cannot raise a machine check from software, so the policy beyond registration is "
+          "covered by trap-async-class", interrupt_handler_name(X86_TRAP_MC), banks);
+    return true;
+}

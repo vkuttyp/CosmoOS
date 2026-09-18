@@ -133,6 +133,7 @@ void kernel_main(const struct cosmoboot_info *info)
     bootarchive_init();
 
     interrupt_init();
+    arch_async_error_init();   /* a machine check has somewhere to go (I-ARCH-16) */
 
     /* Memory, in dependency order: frames, then a heap on the bootstrap
      * direct map, then kernel-owned page tables (which need the heap for
