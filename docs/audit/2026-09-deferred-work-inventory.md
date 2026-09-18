@@ -395,24 +395,36 @@ tree.
 - **unexplained**: the AArch64 virtio-console flake seen once in four
   runs on 2026-09-05 (the console file lacked the last line while the
   serial log was complete).
-- **~~small debts~~ — the first two are not, and this row said so for a
-  fortnight**: `nd_flush`/`arp_flush` drop in-flight resolutions
-  silently when an interface goes; ARP and ND entries hold bare
-  interface pointers and rely on the flushes in `netif_unregister`.
+- **~~small debts~~ — the first two were not, and are now closed**:
+  ~~`nd_flush`/`arp_flush` drop in-flight resolutions silently when an
+  interface goes; ARP and ND entries hold bare interface pointers and
+  rely on the flushes in `netif_unregister`.~~ **As of PR #184 both
+  flushes count what they drop** (`arp_stats.pending_dropped` and the new
+  `ip_stats.nd_pending_dropped`, which is a different struct — one fix
+  was invisible to the other), **and both retry paths hold a
+  `netif_get` across the send**, taken under the table lock and released
+  after it (invariant **N22**). Entries still hold a bare pointer *by
+  design*, and N22 records why: the flush clears them, so a reference
+  each would turn a missing flush from a dangling pointer into a leak
+  without fixing the dangling pointer. The description of the defect
+  below is kept in the past tense it deserves — it is the record of what
+  was wrong, not a statement about the tree.
   (`MODULE_MAX_LIVE`'s fixed 32-slot array and the zombie-module reaping
   below remain small debts and are untouched by the unit.)
   ~~**Taken up by `docs/audit/next-subsystem-arp-netif-ref.md`**~~
-  **BUILT (PR #184): the first two are closed and were not small**: the retry
-  paths in `arp_age` and `nd_age` copy that bare pointer out from under
-  the table lock, release the lock, and then dereference it --
+  **BUILT (PR #184), and this is what it was**: the retry paths in
+  `arp_age` and `nd_age` **copied** that bare pointer out from under the
+  table lock, released the lock, and then dereferenced it --
   `send_arp` reads `nif->mac` and `nif->ip4.addr`. The flush at
-  `netif_unregister` step 5 does not close that window and the `input_one`
-  barrier at step 4 does not either, because `age_work` re-arms on a
-  one-second timer and a fresh one can start after the barrier and
-  before the flush. It is a **use-after-free in a transmit path**
+  `netif_unregister` step 5 did not close that window and the `input_one`
+  barrier at step 4 did not either, because `age_work` re-arms on a
+  one-second timer and a fresh one could start after the barrier and
+  before the flush. It **was** a **use-after-free in a transmit path**
   reached by every tap teardown. `netif.h:81` states the reference rule
   only for pointers lookups RETURN, and ARP and ND never looked the
-  interface up -- it arrives as an argument and is kept;
+  interface up -- it arrives as an argument and is kept, which is why
+  that rule did not reach them and why **N22** now states the one that
+  does;
   `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
   only by a later `module_unload` of the same name.
 
