@@ -1,8 +1,63 @@
 # NEXT SUBSYSTEM — what the straggler kick is worth
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #179), and the banner below records where the build differed from
+it.
+
+**THE ANSWER: the kick works, but barely — one attributed publish in
+eight boots.** Over eight boots, four per architecture: **about 220 kick
+IPIs sent, 1 publish attributed**, and that one on AArch64. The decision
+rule fixed below before the measurement says a counter that rises
+anywhere means the kick works and the follow-up bounds it. It rose once,
+so **deletion is off the table** — which this report called "the likely
+outcome" three times — but on evidence thin enough that the follow-up
+should widen the sample before it acts.
+
+**A first version of this measurement said four per cent, and it was
+wrong.** It counted every publish that happened in a kick's own trap
+return, including publishes by a CPU that had *already* published the
+target epoch. Those are correct and cheap and they advance nothing, so
+counting them said the kick worked when it had told no waiter anything.
+Review caught it. `quiesce_core_publish` now reports whether it moved
+this CPU's epoch and attribution requires that, which took the rate from
+7-in-161 to 1-in-220 — an order of magnitude, and the difference between
+"works" and "works about eight times less often than it looked".
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The population this report named is not the reason the kick
+   works.** The adversary was built exactly as designed, phase-locking a
+   short read-side section over the target CPU's own tick, and it
+   showed the opposite of what it was built to show: **that population
+   publishes without any kick.** `schedule()` publishes at entry
+   (`sched.c`), and the covered tick still sets `need_resched`, so the
+   `preempt_enable` ending the very section that hid the tick runs
+   `sched_preempt` and publishes a moment later. **The publish is not
+   confined to the trap return**, which is the premise the whole
+   "helpable population" story rested on — including the code comment
+   this unit was written to settle. The test is kept as
+   `quiesce-kick-population` and asserts what is true: the grace period
+   completes while ticks are being covered.
+2. **So the report's central prediction was wrong twice over**: the
+   adversary *was* buildable (the inventory said no deterministic test
+   could arrange the coincidence), and arranging it disproved rather
+   than proved the mechanism. What the one attributed publish came from
+   is not identified here: it is some other population, and naming it is
+   not this unit's job now that the counter exists to find it.
+3. **`quiesce-kick-attributed` is not a test in the tree.** The report's
+   test table named it as the positive case. Since the arranged
+   population publishes without a kick, a test asserting an attributed
+   publish would be asserting a coincidence and would flake. The
+   positive evidence is the whole-boot counter on the
+   `quiesce: straggler kicks sent N, publishes attributed M` line
+   instead, and the test that replaced it asserts the mechanism it
+   actually demonstrated.
+4. **Two docs were already stale before this unit touched them.**
+   `docs/kernel/interrupt/controllers.md` and
+   `docs/kernel/smp/architecture.md` both enumerate the IPI kinds and
+   both omitted `IPI_SAMPLE`, which predates this work. Fixed to match
+   the header rather than merely appended to.
 
 **Subsystem: a straggler kick that can be shown to work, or deleted.**
 After eight milliseconds of waiting, `synchronize_quiesce` sends
@@ -194,7 +249,10 @@ kick's own trap return. Count that, and the question answers itself.**
 | `kernel/include/kernel/ipi.h` | `IPI_QUIESCE_KICK` before `IPI_KIND_COUNT`; the comment says it wants the trap return, not `need_resched` |
 | `kernel/interrupt/ipi.c` | handler and table entry; sets the per-CPU flag |
 | `kernel/include/kernel/percpu.h` | the flag |
-| `kernel/core/quiesce.c` | send the new kind; clear-and-count in the preemptible publish; `kick_publishes` in the stats |
+| `kernel/core/quiesce.c` | send the new kind and count the IPIs sent; `quiesce_note_kick_published`; per-CPU `kick_publishes`; the preemptible publish returns whether it **advanced** |
+| `kernel/include/kernel/quiesce_core.h` | `quiesce_core_publish` returns whether the publish moved this CPU's epoch (as built) |
+| `kernel/arch/x86_64/trap.c`, `kernel/arch/aarch64/trap.c` | **where the clear-and-count lives** — the flag is read and cleared unconditionally in each trap tail, and counted only when that same return published *and* advanced (as built; the report first put this in `quiesce.c`) |
+| `kernel/core/main.c` | the whole-boot `quiesce: straggler kicks sent N, publishes attributed M` line (as built) |
 | `kernel/include/kernel/quiesce.h` | per-CPU `kick_publishes` and its accessor |
 | `kernel/core/quiescetest.c` | the adversary and the negative control |
 | `docs/kernel/smp/design.md`, `api.md`, `architecture.md` | each enumerates the IPI kinds; all three gain `IPI_QUIESCE_KICK` and the reason it is not `IPI_RESCHEDULE` |
@@ -222,13 +280,29 @@ a measurement rather than a change.
 
 | test | asserts |
 | --- | --- |
-| `quiesce-kick-attributed` | the adversary: `kick_publishes` for **the CPU the adversary is pinned to** rises by at least one |
-| `quiesce-kick-spinner` | the negative control, on `quiesce-straggler`'s shape: kicks are sent and `kick_publishes` does **not** rise, because a CPU with `preempt_count != 0` cannot publish in a trap return |
-| `quiesce-kick-ipi-kind` | the kick sends `IPI_QUIESCE_KICK` and not `IPI_RESCHEDULE`, so the scheduler's IPI can change without disabling it |
+| ~~`quiesce-kick-attributed`~~ | **not built.** The adversary showed this population publishes *without* a kick, so a test asserting an attributed publish would be asserting a coincidence and would flake. Replaced by `quiesce-kick-population`, which asserts what the adversary actually demonstrated |
+| `quiesce-kick-population` | the adversary reaches steady state (two covered ticks) and the grace period completes anyway; that it *returned* is asserted by the ten-second debug panic, not by a duration bound |
+| `quiesce-kick-spinner` | the negative control: kicks are sent, the target takes them on `IPI_QUIESCE_KICK` (the kind check), **the flag reads clear from inside the section** — Q19's unconditional clear observed rather than inferred — and `kick_publishes` does not rise. All sampled by the pinned thread itself, so no wall-clock margin held by another CPU |
+| ~~`quiesce-kick-ipi-kind`~~ | **folded into `quiesce-kick-spinner`**, which is the only place that can see it: `ipi_count` reads the *calling* CPU's counters, so the kind has to be checked by a thread pinned to the target |
 | existing `quiesce-straggler`, `-system`, `-idle` | unchanged and still passing |
 
-**The bug-proof.** Attribution wired and the *send* disabled: the
-adversary must then record zero attributed publishes. A version that
+**The bug-proof, run — and what it can and cannot show.** With the
+*send* replaced by a no-op, `quiesce-kick-spinner` failed at
+`kick_ipis_after > kick_ipis_before`: the target took no kick IPIs
+because none were sent, which is the test noticing exactly what was
+broken. The kick's own bookkeeping still ran, so only the IPI was
+suppressed and the variable is isolated.
+
+**The whole-boot counter is not a discriminator at this rate**, and
+saying so is the honest part. It read `publishes attributed 0` with the
+send disabled — but it reads 0 on most boots with the send in place too,
+because the true rate is one in eight boots. The counter proves nothing
+in a single run either way; it is `quiesce-kick-spinner` that fails when
+the mechanism is broken, and the eight-boot sample that gives the
+counter meaning. An earlier draft of this paragraph claimed the counter
+discriminated, on the strength of the pre-correction figures.
+
+The original statement of this proof said: A version that
 counts a publish the kick did not cause would pass the positive test
 and prove nothing, which is the failure mode this project has a name
 for — and the negative control is the second half of it, because a

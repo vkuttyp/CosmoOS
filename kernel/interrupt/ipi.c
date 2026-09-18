@@ -77,6 +77,20 @@ static void ipi_sample(unsigned vector, struct arch_trap_frame *frame, void *arg
     lockup_answer(frame, false);
 }
 
+/*
+ * The straggler kick. The work is in the trap tail, not here: this CPU
+ * publishes only if it is outside every read-side section, which the
+ * tail tests. The flag records that THIS trap was a kick, so a publish
+ * in this same return can be attributed to it; the tail clears it
+ * unconditionally, so it cannot outlive the trap that set it.
+ */
+static void ipi_quiesce_kick(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector; (void)frame; (void)arg;
+    count(IPI_QUIESCE_KICK);
+    this_cpu()->quiesce_kicked = true;
+}
+
 void ipi_init(void)
 {
     static const struct {
@@ -88,6 +102,7 @@ void ipi_init(void)
         [IPI_TLB_FLUSH] = { ipi_tlb_flush, "ipi-tlb-flush" },
         [IPI_HALT] = { ipi_halt, "ipi-halt" },
         [IPI_SAMPLE] = { ipi_sample, "ipi-sample" },
+        [IPI_QUIESCE_KICK] = { ipi_quiesce_kick, "ipi-quiesce-kick" },
     };
 
     for (unsigned k = 0; k < IPI_KIND_COUNT; k++) {

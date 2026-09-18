@@ -276,6 +276,19 @@ void kernel_main(const struct cosmoboot_info *info)
     }
 
 
+    /* The straggler kick's verdict, for the whole boot rather than one
+     * test: `straggler_ipis` counts kicks sent and `kick_publishes`
+     * counts the ones that published in their own trap return. Before
+     * the second counter existed, no number in the tree would have
+     * changed if the kick were replaced by a no-op
+     * (docs/audit/next-subsystem-straggler-kick.md, invariant Q19). */
+    {
+        struct quiesce_stats qs;
+        quiesce_get_stats(&qs);
+        kinfo("quiesce: straggler kicks sent %llu, publishes attributed %llu",
+              (unsigned long long)qs.straggler_ipis,
+              (unsigned long long)qs.kick_publishes);
+    }
     kinfo("boot complete; nothing more to do in this phase");
     kernel_shutdown(failed ? KERNEL_EXIT_FAILURE : KERNEL_EXIT_SUCCESS);
 }

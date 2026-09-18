@@ -74,7 +74,8 @@ CPU-info block is written once.
 ## 2. IPIs (`kernel/interrupt/ipi.c`)
 
 ```c
-enum ipi_kind { IPI_RESCHEDULE, IPI_CALL, IPI_TLB_FLUSH, IPI_HALT, IPI_SAMPLE, IPI_KIND_COUNT };
+enum ipi_kind { IPI_RESCHEDULE, IPI_CALL, IPI_TLB_FLUSH, IPI_HALT, IPI_SAMPLE,
+                IPI_QUIESCE_KICK, IPI_KIND_COUNT };
 ```
 
 `ipi_init()` allocates one vector per kind (`arch_vector_alloc`) and

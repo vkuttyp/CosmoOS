@@ -194,3 +194,48 @@ rule removes — it is how long it takes the other CPUs to reach a
 quiescent point, which on an idle machine means their next tick. The
 wake removes the polling overshoot, roughly halving the latency and
 collapsing its spread; it does not make a grace period cheap.
+
+**Q19. A straggler kick is attributed only by the publish in its own trap
+return, and the flag that carries that cannot outlive the trap.** The
+kick (`quiesce.c`, after `2 * TICK_NS` and at most eight rounds) sends
+`IPI_QUIESCE_KICK`, whose handler sets `pc->quiesce_kicked` and does
+nothing else. Each architecture's interrupt tail reads that flag **and
+clears it unconditionally** — before, and independently of, the
+three-condition test that decides whether this CPU may publish — and
+counts a `kick_publishes` only when the same return also published.
+
+The unconditional clear is the invariant, not an optimisation. A kick
+delivered while `preempt_count != 0` does not publish; if the flag
+survived that trap, the next unrelated interrupt return or idle
+iteration would clear it and count a publish the kick did not cause.
+That would attribute falsely in **exactly** the case the kick is known
+not to help, and would silently break `quiesce-kick-spinner`, which is
+the test that gives the counter its meaning. A nested trap clearing the
+flag without publishing under-counts, which is the safe direction.
+
+**Why it is a kind of its own and not `IPI_RESCHEDULE`.** That kind's
+contract is "target re-evaluates `need_resched` on interrupt return",
+and its sender sets the flag under a run-queue lock. The kick sets no
+flag and holds no lock; it wants the trap tail and nothing else. Sharing
+the kind would leave the kick exposed to a send suppressed *because* the
+target's `need_resched` is clear — the natural "nothing to reschedule
+there" optimisation — which would disable every kick with no test to
+notice. (A handler-side early return would not: the tail runs regardless
+of what the handler did.)
+
+**What the counters say, measured rather than argued.** `straggler_ipis`
+counts kicks sent and `kick_publishes` counts kicks that worked; before
+the second existed, no number in this tree would have changed if the
+kick were replaced by a no-op. Over eight boots, four per architecture:
+**about 220 kick IPIs sent, 1 publish attributed** — once, on AArch64.
+The kick is therefore kept, on thin evidence. **Attribution requires the
+publish to have ADVANCED this CPU's epoch** (`quiesce_core_publish`
+reports it): a publish by a CPU that has already published the target
+epoch is correct and cheap and tells no waiter anything, and counting
+one said the kick worked when it had not. Counting those took the
+apparent rate from 7-in-161 to 1-in-220. And `quiesce-kick-population` records why the
+obvious candidate population is *not* the reason: a CPU whose tick keeps
+landing inside a short read-side section publishes anyway, because
+`schedule()` publishes at entry and the covered tick still sets
+`need_resched`, so the `preempt_enable` ending that section publishes a
+moment later. The publish is not confined to the trap return.

@@ -39,7 +39,8 @@ invalidation, console output, panic, shutdown) correct on many CPUs.
   sequential start of each AP with a timeout; per-AP `struct percpu`,
   bootstrap stack, descriptor tables, double-fault stack.
 - **IPIs** (`kernel/ipi.h`, `kernel/interrupt/ipi.c`): symbolic kinds
-  (`IPI_RESCHEDULE`, `IPI_CALL`, `IPI_TLB_FLUSH`, `IPI_HALT`) mapped to
+  (`IPI_RESCHEDULE`, `IPI_CALL`, `IPI_TLB_FLUSH`, `IPI_HALT`, `IPI_SAMPLE`,
+  `IPI_QUIESCE_KICK`) mapped to
   dynamic vectors at init; `smp_call_function_single()` runs a function
   on another CPU and waits.
 - **Scheduler** (`sched.c`): a wake or new thread on another CPU's queue

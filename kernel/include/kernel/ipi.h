@@ -18,6 +18,17 @@ enum ipi_kind {
     IPI_TLB_FLUSH,   /* invalidate the pending shootdown range */
     IPI_HALT,        /* stop forever (panic, shutdown) */
     IPI_SAMPLE,      /* record this CPU's frame for a lockup report (lockup_answer) */
+    /*
+     * Make the target take an interrupt so its trap tail runs, and
+     * nothing else. It does NOT set need_resched and the sender holds no
+     * run-queue lock, which is why it is not IPI_RESCHEDULE: that kind's
+     * contract is "re-evaluates need_resched on interrupt return", and a
+     * send suppressed because the target's need_resched is clear -- the
+     * natural "nothing to reschedule there" optimisation -- would
+     * silently stop every straggler kick (quiesce.c, and
+     * docs/audit/next-subsystem-straggler-kick.md).
+     */
+    IPI_QUIESCE_KICK,
     IPI_KIND_COUNT
 };
 

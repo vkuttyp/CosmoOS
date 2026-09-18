@@ -27,6 +27,21 @@ STATIC_ASSERT(QUIESCE_MAX_CPUS >= CONFIG_MAX_CPUS, "quiesce state covers every C
 static struct quiesce_state g_state;
 static struct quiesce_stats g_stats;
 static bool g_ready;
+/*
+ * Publishes that happened in a straggler kick's own trap return, per
+ * CPU that published.
+ *
+ * Per-CPU and not per-waiter, because a per-waiter figure is not
+ * available: `quiesce_test_sync_kicks` can be returned on the stack
+ * because the SENDER increments it, but a publish is incremented on the
+ * TARGET, asynchronously, and the IPI carries no payload naming the
+ * waiter -- so two waiters kicking one pending CPU are satisfied by a
+ * single publish and neither can claim it. A test reads the counter of
+ * the CPU it pinned its adversary to, and the claim is carried by the
+ * pair: that counter rising, and the spinner's not
+ * (docs/audit/next-subsystem-straggler-kick.md).
+ */
+static uint64_t g_kick_publishes[CONFIG_MAX_CPUS];
 
 /* Deferred callbacks: one list, one worker. */
 static spinlock_t g_cb_lock = SPINLOCK_INIT("quiesce-cb");
@@ -42,7 +57,7 @@ static struct waitqueue g_gp_wq = WAITQUEUE_INIT(g_gp_wq);
 
 void quiesce_note_quiescent(void)
 {
-    quiesce_core_publish(&g_state, arch_cpu_id());
+    (void)quiesce_core_publish(&g_state, arch_cpu_id());
     /* No wake here: see quiesce_note_quiescent_preemptible. This is
      * called from inside the scheduler, including the AP bring-up path
      * that holds a run-queue lock with interrupts off (sched.c), and a
@@ -71,9 +86,35 @@ void quiesce_note_quiescent(void)
  * returns without queueing while !g_ready. So skipping the wake then
  * cannot lose one.
  */
-void quiesce_note_quiescent_preemptible(void)
+/*
+ * This CPU published inside the trap return of a straggler kick.
+ *
+ * Called from the architecture trap tails, which read and clear the
+ * kick flag unconditionally before testing whether they may publish --
+ * so this runs only for a publish in the kick's own return, never for a
+ * later one (invariant Q19).
+ */
+void quiesce_note_kick_published(void)
 {
-    quiesce_note_quiescent();
+    __atomic_fetch_add(&g_kick_publishes[arch_cpu_id()], 1u, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_stats.kick_publishes, 1u, __ATOMIC_RELAXED);
+}
+
+uint64_t quiesce_kick_publishes(unsigned cpu)
+{
+    if (cpu >= CONFIG_MAX_CPUS)
+        return 0;
+    return __atomic_load_n(&g_kick_publishes[cpu], __ATOMIC_RELAXED);
+}
+
+bool quiesce_note_quiescent_preemptible(void)
+{
+    /* Published here rather than through quiesce_note_quiescent so the
+     * caller learns whether this publish ADVANCED this CPU's epoch. A
+     * trap tail attributes a straggler kick only to a publish that did:
+     * a redundant one is correct and cheap but tells no waiter anything,
+     * and counting it would say the kick worked when it did not (Q19). */
+    bool advanced = quiesce_core_publish(&g_state, arch_cpu_id());
     if (g_ready && !waitqueue_empty(&g_gp_wq)) {
         /* Atomic: this runs from every CPU's trap return and idle loop at
          * once, so a plain += loses increments -- and the test asserts on
@@ -81,6 +122,7 @@ void quiesce_note_quiescent_preemptible(void)
          * wrong number. */
         __atomic_fetch_add(&g_stats.gp_wakes, waitqueue_wake_all(&g_gp_wq), __ATOMIC_RELAXED);
     }
+    return advanced;
 }
 
 void quiesce_read_lock_debug(void)
@@ -160,15 +202,30 @@ static unsigned sync_quiesce_counting(unsigned *timeouts)
              * landing inside a short disabled region: an interrupt at an
              * unrelated phase lands outside one and publishes. That
              * population is real and no test in this tree arranges it,
-             * so what this kick is worth is an open question rather than
-             * a measured fact (`docs/audit/next-subsystem-lifetime-windows.md`).
+             * That population is real and no test in this tree arranges
+             * it, so what this kick is worth is no longer an open
+             * question in a comment: `kick_publishes` counts the
+             * publishes that happened in a kick's own trap return, per
+             * CPU, and `quiesce-kick-population` and
+             * `quiesce-kick-spinner` are the pair that gives the number
+             * meaning (`docs/audit/next-subsystem-straggler-kick.md`,
+             * invariant Q19).
              */
+            unsigned sent = 0;
             for (unsigned c = 0; c < cpu_count(); c++) {
-                if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c))
-                    ipi_send(c, IPI_RESCHEDULE);
+                if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c)) {
+                    ipi_send(c, IPI_QUIESCE_KICK);
+                    sent++;
+                }
             }
-            kicks++;
-            g_stats.straggler_ipis++;
+            if (sent != 0) {
+                kicks++;   /* rounds, which is what the eight-round bound counts */
+                /* IPIs, which is what "kicks sent" has to mean if it is
+                 * ever a denominator: a round can kick several CPUs.
+                 * Atomic because concurrent waiters both reach here and a
+                 * plain ++ loses their updates. */
+                __atomic_fetch_add(&g_stats.straggler_ipis, sent, __ATOMIC_RELAXED);
+            }
         }
         if (waited > NS_PER_SEC && !warned) {
             kwarn("quiesce: grace period %llu waiting %llu ms for CPU mask 0x%llx", (unsigned long long)target,

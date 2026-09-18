@@ -2635,6 +2635,46 @@ See [docs/development.md](docs/development.md).
   symptom — `back_error: timeout('timed out')`, zero of twelve bytes,
   9.9 s (PR #177).
 
+- **The straggler kick is worth something, and now there is a number.**
+  After 8 ms of waiting, `synchronize_quiesce` sends an IPI to every CPU
+  still pending, up to eight times. Nothing counted a kick that
+  *worked*: `straggler_ipis` counts kicks sent, so **no number in the
+  tree would have changed if the kick were replaced by a no-op**, and
+  the code said as much — "an open question rather than a measured
+  fact". A kick that worked is now defined as narrowly as it can be, a
+  publish that happened in that kick's **own trap return**, and counted
+  there: a kind of its own (`IPI_QUIESCE_KICK`), a per-CPU flag its
+  handler sets, and each architecture's interrupt tail reading **and
+  clearing it unconditionally** before deciding whether it may publish,
+  so the flag cannot outlive the trap that set it and claim a later
+  publish. Invariant **Q19**.
+  **The answer: it works, but barely — one attributed publish in eight
+  boots, about 220 kick IPIs, and that one on AArch64.** The decision
+  rule was written down before the measurement, and it says a counter
+  that rises means the kick stays; deletion, which the report called the
+  likely outcome three times, is off the table — on evidence thin enough
+  that the follow-up should widen the sample first. **A first version of
+  this said four per cent and was wrong**: it counted publishes by a CPU
+  that had *already* published the target epoch, which are correct,
+  cheap, and advance nothing. Attribution now requires the publish to
+  have **moved** this CPU's epoch, which took the rate from 7-in-161 to
+  1-in-220.
+  **And the population the kick's own comment named is not the reason.**
+  The adversary was built as designed — phase-locking a short read-side
+  section over the target CPU's tick — and showed the opposite of what
+  it was built to show: that CPU publishes *without* a kick, because
+  `schedule()` publishes at entry and the covered tick still sets
+  `need_resched`, so the `preempt_enable` ending the section that hid
+  the tick publishes a moment later. The publish was never confined to
+  the trap return, which is the premise the story rested on. Where the
+  the one attributed publish came from is now a question the counter can
+  answer and argument could not.
+  The other half of the measurement is the half that makes it
+  attribution rather than a tally: `quiesce-kick-spinner` takes eight
+  kicks inside a read-side section and publishes **none** of them. A
+  counter that only goes up is not attribution. 343 self-tests on both
+  architectures, debug and release (PR #179).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
