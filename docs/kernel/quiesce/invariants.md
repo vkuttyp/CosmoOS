@@ -237,16 +237,18 @@ of about three milliseconds against an adversary hiding that CPU's
 ticks. On CI the same test took **8072 ms**, in guest time — not a
 loaded host stretching wall-clock, but that CPU genuinely not publishing
 for most of eight seconds, within two of `synchronize_quiesce`'s
-ten-second debug panic. So **"a moment later" is what happens here and
-not what happens there** — and with the cap in place, CI says it plainly
-on **both** architectures: the covered CPU is still pending after all
-twenty-five covers, about a hundred milliseconds, with straggler kicks
-having been sent throughout.
+ten-second debug panic. **And on CI it is not reliable either way, which is the finding.** With
+the cap in place CI has reported both outcomes: a run where the covered
+CPU published while its ticks were still hidden, in an 11 ms grace
+period, and runs on both architectures where it was still pending after
+all twenty-five covers — about a hundred milliseconds, kicks sent
+throughout — plus the 8072 ms run above. Here it is three to eight
+milliseconds every time.
 
-**So that unit's inference does not hold generally.** It used "the
-population publishes anyway" to conclude that the population the kick
-names is not why the kick works. That is true on this machine and false
-on CI, so the conclusion is local, not general.
+**So that unit's inference is not established.** It used "the population
+publishes anyway" to conclude that the population the kick names is not
+why the kick works. That holds on this machine and holds only sometimes
+on CI, which is not enough to carry the conclusion.
 
 What it does **not** establish is that the population behaves
 differently there. The likelier reading is that the **adversary** is not

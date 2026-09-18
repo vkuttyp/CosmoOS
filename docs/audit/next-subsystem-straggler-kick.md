@@ -46,13 +46,16 @@ this CPU's epoch and attribution requires that, which took the rate from
    for most of eight seconds, two short of the ten-second debug panic,
    and over the per-test budget, which is how it was caught. The
    adversary now stops hiding ticks after a cap so the test is bounded.
-   With that cap, CI reports on **both** architectures that the covered
-   CPU is still pending after all twenty-five covers — about a hundred
-   milliseconds, kicks sent throughout.
+   With that cap CI has reported **both** outcomes: a run where the
+   covered CPU published while its ticks were still hidden (an 11 ms
+   grace period) and runs on both architectures where it was still
+   pending after all twenty-five covers, about a hundred milliseconds,
+   kicks sent throughout. Here it is three to eight milliseconds every
+   time.
 
-   **So point 1's inference is local, not general.** "The population
-   publishes anyway, so it is not why the kick works" is true here and
-   false on CI. It may be the *adversary* that fails to travel rather
+   **So point 1's inference is not established.** "The population
+   publishes anyway, so it is not why the kick works" holds here and
+   holds only sometimes on CI, which is not enough to carry it. It may be the *adversary* that fails to travel rather
    than the population that differs — under TCG on a loaded runner its
    short section overshoots and leaves that CPU closer to a spinner,
    which cannot be helped for reasons `quiesce-kick-spinner` establishes
