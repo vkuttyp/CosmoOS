@@ -391,10 +391,17 @@ unsigned arch_trap_fault_flags(const struct arch_trap_frame *frame)
 #define MCG_STATUS_RIPV (1ull << 0)
 #define MCG_STATUS_EIPV (1ull << 1)
 
-enum arch_async_error x86_async_class(uint64_t mcg_status, const uint64_t *banks, unsigned n)
+enum arch_async_error x86_async_class(uint64_t mcg_status, const uint64_t *banks, unsigned n_read,
+                                      unsigned n_reported)
 {
+    /* Every bank the CPU reports, or no verdict at all. Reading a prefix
+     * and pronouncing on it is the same error as "every valid bank is
+     * clean" over an empty set: the record that would have changed the
+     * answer is the one not looked at. */
+    if (n_read < n_reported)
+        return ARCH_ASYNC_UNCONTAINED;
     bool any_valid = false, any_uc = false;
-    for (unsigned i = 0; i < n; i++) {
+    for (unsigned i = 0; i < n_read; i++) {
         uint64_t st = banks[i];
         if (!(st & MCI_STATUS_VAL))
             continue;   /* this bank says nothing; it does not say "fine" */
@@ -423,13 +430,15 @@ enum arch_async_error arch_async_error_class(const struct arch_trap_frame *frame
     cpuid(1, 0, &r);
     if (!(r.edx & (1u << 14)))
         return ARCH_ASYNC_UNCONTAINED;   /* no MCA: nothing to read */
-    unsigned n = (unsigned)(rdmsr(MSR_IA32_MCG_CAP) & 0xFFu);
-    if (n > X86_MCA_BANKS_MAX)
-        n = X86_MCA_BANKS_MAX;
+    unsigned reported = (unsigned)(rdmsr(MSR_IA32_MCG_CAP) & 0xFFu);
+    unsigned n = reported > X86_MCA_BANKS_MAX ? X86_MCA_BANKS_MAX : reported;
     uint64_t banks[X86_MCA_BANKS_MAX];
     for (unsigned i = 0; i < n; i++)
         banks[i] = rdmsr(MSR_IA32_MC0_STATUS + 4u * i);
-    return x86_async_class(rdmsr(MSR_IA32_MCG_STATUS), banks, n);
+    /* `reported` goes through, not `n`: a CPU with more banks than this
+     * frame reads gets an uncontained verdict, not a verdict about the
+     * prefix. */
+    return x86_async_class(rdmsr(MSR_IA32_MCG_STATUS), banks, n, reported);
 }
 
 const char *arch_async_error_name(enum arch_async_error c)
@@ -491,38 +500,43 @@ bool arch_test_async_class(const char **why)
     struct row {
         uint64_t mcg;
         uint64_t banks[3];
-        unsigned n;
+        unsigned n;          /* banks read */
+        unsigned reported;   /* banks the CPU claims; 0 means "same as n" */
         enum arch_async_error want;
         const char *what;
     };
     static const struct row rows[] = {
-        { MCG_STATUS_RIPV, { MCI_STATUS_VAL }, 1, ARCH_ASYNC_CORRECTED,
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL }, 1, 0, ARCH_ASYNC_CORRECTED,
           "one valid clean bank with RIPV" },
-        { MCG_STATUS_RIPV, { 0 }, 1, ARCH_ASYNC_UNCONTAINED,
+        { MCG_STATUS_RIPV, { 0 }, 1, 0, ARCH_ASYNC_UNCONTAINED,
           "no valid bank: 'every valid bank is clean' is vacuously true of none" },
-        { MCG_STATUS_RIPV, { 0, 0, 0 }, 3, ARCH_ASYNC_UNCONTAINED,
+        { MCG_STATUS_RIPV, { 0, 0, 0 }, 3, 0, ARCH_ASYNC_UNCONTAINED,
           "three banks, none valid" },
-        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_PCC }, 1, ARCH_ASYNC_UNCONTAINED,
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_PCC }, 1, 0, ARCH_ASYNC_UNCONTAINED,
           "PCC: processor context corrupt, whatever RIPV says" },
-        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_OVER }, 1, ARCH_ASYNC_UNCONTAINED,
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL | MCI_STATUS_OVER }, 1, 0, ARCH_ASYNC_UNCONTAINED,
           "OVER: a record was overwritten, so what is there is not the whole story" },
-        { 0, { MCI_STATUS_VAL }, 1, ARCH_ASYNC_UNCONTAINED,
+        { 0, { MCI_STATUS_VAL }, 1, 0, ARCH_ASYNC_UNCONTAINED,
           "RIPV clear: execution cannot continue here" },
-        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_PCC }, 2,
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_PCC }, 2, 0,
           ARCH_ASYNC_UNCONTAINED, "a clean bank does not outvote a later PCC: the multi-bank walk" },
-        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_UC }, 2,
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL, MCI_STATUS_VAL | MCI_STATUS_UC }, 2, 0,
           ARCH_ASYNC_UNCONTAINED, "uncorrected in a later bank, with no EIPV" },
-        { MCG_STATUS_RIPV | MCG_STATUS_EIPV, { MCI_STATUS_VAL | MCI_STATUS_UC }, 1,
+        { MCG_STATUS_RIPV | MCG_STATUS_EIPV, { MCI_STATUS_VAL | MCI_STATUS_UC }, 1, 0,
           ARCH_ASYNC_CONTAINED, "uncorrected, attributable, machine intact" },
+        { MCG_STATUS_RIPV, { MCI_STATUS_VAL }, 1, 33, ARCH_ASYNC_UNCONTAINED,
+          "a CPU reporting more banks than this frame reads: unread is not clean" },
     };
     for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        if (x86_async_class(rows[i].mcg, rows[i].banks, rows[i].n) != rows[i].want) {
+        unsigned reported = rows[i].reported ? rows[i].reported : rows[i].n;
+        if (x86_async_class(rows[i].mcg, rows[i].banks, rows[i].n, reported) != rows[i].want) {
             *why = rows[i].what;
             return false;
         }
     }
     kinfo("selftest: trap-async-class: %u machine-check combinations, one per rule -- VAL, PCC, OVER, "
-          "RIPV and the multi-bank walk, including the empty bank set a vacuous rule calls corrected",
+          "RIPV, the multi-bank walk and a count larger than one frame reads, including the empty "
+          "bank set a vacuous rule calls corrected",
           (unsigned)(sizeof(rows) / sizeof(rows[0])));
     return true;
 }

@@ -2529,11 +2529,13 @@ See [docs/development.md](docs/development.md).
   asynchronous abort's frame names the context interrupted when the error
   was *delivered*, not the one that caused it, so nothing here may choose
   a victim; attribution needs the RAS error records and is a unit of its
-  own. Invariant **I-ARCH-16**. Four bug-proofs, each shown to fail for
+  own. Invariant **I-ARCH-16**. Five bug-proofs, each shown to fail for
   its stated reason — the vacuous bank rule, the missing-FEAT_RAS rule,
   the SError vector back in the panic arm (`KERNEL PANIC: exception in an
-  unsupported vector slot 7 (EC 0x2f)`, dead in 8.8 s) and the
-  unregistered machine-check vector. Two things the building found and
+  unsupported vector slot 7 (EC 0x2f)`, dead in 8.8 s), the unregistered
+  machine-check vector, and a bank scan that stopped at 32 and pronounced
+  on the prefix — which is the vacuous rule again in a different
+  disguise, a check ranging over less than it claims. Two things the building found and
   the report had not: `HCR_EL2.VSE` is inert without `AMO`, since the
   host runs `HCR_EL2 = RW` and nothing else; and **EL1 runs with
   `PSTATE.A` masked for the kernel's entire life** (`daifset #0xF` at

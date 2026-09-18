@@ -147,9 +147,13 @@ answers **corrected** only for a syndrome that positively says so:
   `default` arm.
 - **x86-64** — **at least one bank with `VAL`**, every valid bank
   `UC == 0`, no bank with `PCC` or `OVER`, and `MCG_STATUS.RIPV`, across
-  all `MCG_CAP.Count` banks. The first clause is not redundant: without
-  it "every valid bank is clean" is true of *no banks*, and a machine
-  check carrying no record would read as corrected.
+  all `MCG_CAP.Count` banks. Two of those clauses are load-bearing and
+  easy to lose. Without **at least one valid bank**, "every valid bank is
+  clean" is true of *no banks* and a machine check carrying no record
+  reads as corrected. And **all** means all: a CPU reporting more banks
+  than one frame reads gets an uncontained verdict, not a verdict about
+  the prefix — the record that would have changed the answer is exactly
+  the one not looked at.
 
 Everything else panics, at either exception level, naming the class and
 printing the syndrome — where before this rule every SError reached

@@ -84,7 +84,24 @@ guard boots failed on `missing marker /^\[ INFO\] hardening: x86-64: nx
 smep smap umip$/`. They have their own `async-error:` line now, which is
 better placed anyway: neither is a hardening feature.
 
-### The four bug-proofs, each run
+**And the safety check covered less than it claimed.** Review found it
+on the built unit: `X86_MCA_BANKS_MAX` clamped the loop to 32 banks, so a
+CPU reporting more would have its *prefix* inspected, found clean, and
+returned **corrected** — while an unread bank held the `UC`, `PCC` or
+`OVER` record that should have stopped the machine. The header comment
+gave it away and I wrote it: a CPU reporting more banks than the frame
+reads was called *"bounded rather than trusted"*, which is backwards.
+Bounding without accounting for the remainder **is** trusting it.
+
+`x86_async_class` now takes `n_read` and `n_reported` and answers
+uncontained when they differ — "I could not see all the evidence" rather
+than a verdict about a prefix. It is the same defect as the vacuous
+empty-bank rule two rounds earlier, in a different disguise: a check that
+ranges over less than it claims. I-ARCH-16 now says *all means all*
+beside the at-least-one-valid clause, because both are load-bearing and
+both are easy to lose.
+
+### The five bug-proofs, each run
 
 | revert | what failed |
 | --- | --- |
@@ -92,6 +109,7 @@ better placed anyway: neither is a hardening feature.
 | the FEAT_RAS requirement | `trap-async-class`: *"no FEAT_RAS: there is no AET to have read"* |
 | the SError vector back in the `default` arm | **`KERNEL PANIC: exception in an unsupported vector slot 7 (EC 0x2f)`** — the original defect, dead in 8.8 s |
 | `arch_async_error_init` not called | `trap-async-inject`: *"no machine-check handler registered: vector 18 still panics through arch_trap_unhandled"* |
+| the all-banks requirement | `trap-async-class`: *"a CPU reporting more banks than this frame reads: unread is not clean"* |
 
 The first attempt at proof one is worth recording: it removed the
 requirement in a way that left a variable unused, so `-Werror` rejected
