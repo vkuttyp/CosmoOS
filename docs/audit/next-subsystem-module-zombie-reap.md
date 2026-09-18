@@ -39,16 +39,23 @@ resolve to *no live module*:
 2. **A reused name hides it.** `module_unload` calls `find_locked(name)`
    first. Load a replacement under the same name and the unload targets
    the replacement; the zombie is never looked for.
-3. **A second zombie of the same name is unreachable.**
-   `find_zombie_locked` returns the **first** match on the list
-   (`module.c:457-465`). Two zombies of one name, and the later one can
-   never be found by any call — not "unlikely to be reaped", *cannot
-   be*.
+3. **N zombies of one name need N of those calls.**
+   `find_zombie_locked` returns the **first** match
+   (`module.c:457-465`), and the reap `list_remove`s it
+   (`module.c:482`), so a later call does reach the next one.
+
+   **An earlier draft of this report said the second one was
+   unreachable by any call. That was wrong** — it read the first-match
+   lookup and did not check that the reap removes what it found. The
+   true statement is weaker and still bad: each zombie needs its own
+   call, and case 1 is that nobody makes even the first.
 
 The inventory records this as "zombie modules are reaped only by a later
 `module_unload` of the same name", which is accurate and reads as an
-inconvenience. Cases 2 and 3 are not inconveniences; they are
-unreachable memory with pins attached.
+inconvenience. It is worse than that — a reused name hides a zombie
+entirely, and the pins it holds are permanent for as long as it is
+unreaped — but the memory is reachable, and this report says so because
+its first draft did not.
 
 ## Why it survived
 
@@ -96,15 +103,34 @@ collected without being asked for.**
    entry whose `live_objects` has reached zero costs one list walk on a
    path that is not hot. This closes case 1 without a timer, a thread or
    a policy knob.
+
+   **Two constraints the sweep must honour, stated here because a sweep
+   is easy to write wrongly.** It frees list entries as it walks, so it
+   needs **removal-safe iteration** — a plain `list_for_each_entry`
+   advances through the node it has just freed. And it must load
+   `live_objects` with **acquire** ordering, as the existing wait does
+   (`module.c:517`): a relaxed zero could unmap module text without
+   synchronising against the final object release, which is a
+   use-after-free in the release code's own text.
 2. **Reap by identity.** The name lookup stays for the explicit
    `module_unload("name")` call, because that is a real request and
    should keep working. But the sweep does not use names, so cases 2 and
    3 stop existing: a second zombie of the same name is just another
    list entry.
-3. **`-ENOSPC`, not `panic`.** The slot array returns an error the
-   loader already knows how to report. Whether 32 should be larger is a
-   separate question this report does not answer — the defect is the
-   panic, not the number.
+3. **`-ENOSPC`, not `panic` — and the slot is reserved *before* the
+   module is committed.** Returning an error at the current panic site
+   would not be enough, and this report's first draft said only
+   "return an error". By the time that loop runs, `m->info->init()` has
+   **already executed**, `m->state` is `MODULE_LIVE`, the module is
+   linked into `g_modules` and `g_count` is incremented
+   (`module.c:384-402`). Failing there without unwinding would leave an
+   initialised, linked, counted module with no slot — a worse state
+   than the panic it replaces.
+
+   So the slot is claimed **before** `init()` runs: find a free index,
+   fail with `-ENOSPC` while failing is still free, and publish into the
+   reserved index afterwards. That keeps the existing failure path
+   correct, because nothing has been committed when it is taken.
 4. **Say what a zombie costs, where a zombie is made.** The `kwarn` at
    `module.c:524` names the module and the live count. It should also
    say what is being held: the image, and which dependencies stay
@@ -128,16 +154,18 @@ collected without being asked for.**
 | --- | --- |
 | `module-zombie-swept` | a zombie whose objects die is freed by the **next unrelated load or unload**, with no unload of its own name |
 | `module-zombie-name-reused` | a replacement loaded under the zombie's name does not hide it: the sweep still collects it, and the replacement is untouched |
-| `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected — the case `find_zombie_locked` cannot reach today |
+| `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected by one sweep — today each needs its own `module_unload` call, and nothing makes any of them |
 | `module-zombie-holds-deps` | unchanged in substance from what `selftest_module_unload_busy` proves, plus: once swept, the dependency pin is **released**, which is the consequence that matters |
 | `module-slots-enospc` | exhausting `MODULE_MAX_LIVE` returns `-ENOSPC` and the machine lives |
 
 **The bug-proof.** `module-zombie-two-of-a-name` must fail against the
-current tree for the stated reason — the second zombie is unreachable by
-name — and not merely because no sweep exists. A test that fails for
-"nothing collected it" would pass the moment a sweep is added even if
-the sweep still keyed on names, which is the half-fix this design is
-most likely to receive.
+current tree because **nothing collects either of them** — one
+unrelated load or unload leaves both in place. That is the whole claim,
+and it is weaker than what this report first wrote: the earlier version
+said the second zombie was unreachable by name and built the bug-proof
+on it, which was false. The test asserts that a single sweep collects
+**both**, which is what distinguishes a sweep from the one-at-a-time
+name lookup that exists today.
 
 **Watch the existing test.** `selftest_module_unload_busy` asserts a
 second unload frees the zombie. A sweep at every load and unload may

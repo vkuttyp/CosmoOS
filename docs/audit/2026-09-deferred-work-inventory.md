@@ -434,8 +434,11 @@ tree.
   module it depends on. Nothing calls the reaper; a name reused by a
   replacement hides the zombie, because `module_unload` finds the live
   module first; and `find_zombie_locked` returns the FIRST name match,
-  so a second zombie of one name **cannot be reached by any call**. Not
-  "rarely reaped" -- unreachable. It survived because the happy path is
+  which the reap then removes -- so N zombies of one name need N of
+  those calls, and nobody makes even the first. (An earlier version of
+  this row said the second was unreachable by any call. That was wrong:
+  it read the first-match lookup without checking that the reap
+  `list_remove`s what it finds.) It survived because the happy path is
   tested and passes (`selftest_module_unload_busy`): the mechanism
   works, and there is no policy that invokes it. The slot array's defect
   is separately that exhaustion **panics** where `-ENOSPC` exists; it is
