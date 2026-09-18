@@ -173,8 +173,28 @@ construction rather than by timing.
 
 ## New APIs
 
-None. `netif_get`/`netif_put` already exist and are what the fix uses;
-this unit is about a rule and its sweep, not new machinery.
+**None in the fix, six for the tests — and the design said none, which
+was true of the fix and not of the unit.** `netif_get`/`netif_put`
+already exist and are what closes the window; no new machinery was
+needed for that.
+
+What the build added, all `#if CONFIG_DEBUG` and all declared in public
+headers because the tests live in another translation unit:
+
+| header | declarations |
+| --- | --- |
+| `kernel/include/kernel/net/ether.h` | `arp_test_hold_retry`, `arp_test_retry_parked`, `arp_test_release_retry` |
+| `kernel/include/kernel/net/ip.h` | `nd_test_hold_retry`, `nd_test_retry_parked`, `nd_test_release_retry` |
+
+They are the park hook the Tests section calls for — the window is one
+unlock wide, so a test that does not stop the retry inside it is racing
+and hoping. `tcp_test_hold_callback` is the same shape and the same
+three-call contract: arm, observe, release. Counting them as "no new
+APIs" because they vanish in a release build would be the kind of
+bookkeeping this report spends a section arguing against.
+
+Also new, and not an API: `ip_stats.nd_pending_dropped`, a field rather
+than a function, IPv6-only, described where the counters are.
 
 ## Tests
 
