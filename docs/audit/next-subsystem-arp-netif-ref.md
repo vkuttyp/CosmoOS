@@ -144,7 +144,7 @@ construction rather than by timing.
 | `kernel/include/kernel/netif.h` | the rule stated where the reference API is, not only for lookups |
 | `docs/kernel-services/network/design.md` | the ownership rule beside the interface lifetime |
 | `docs/kernel/quiesce/invariants.md` or the network invariants | the rule as an invariant, with what enforces it |
-| `kernel-services/network/nettest.c` | the three tests below, where every other `net-*` self-test lives |
+| `kernel-services/network/nettest.c` | the tests in the table below, where every other `net-*` self-test lives — counted there and not here, because this row has already gone stale once |
 | `kernel/include/kernel/selftest.h` | their declarations |
 | `kernel/core/selftest.c` | their registry entries |
 | `kernel/include/kernel/net/ip.h` | `nd_pending_dropped` in `struct ip_stats` |
