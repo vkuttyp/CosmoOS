@@ -271,8 +271,16 @@ a measurement rather than a change.
 | `quiesce-kick-ipi-kind` | the kick sends `IPI_QUIESCE_KICK` and not `IPI_RESCHEDULE`, so the scheduler's IPI can change without disabling it |
 | existing `quiesce-straggler`, `-system`, `-idle` | unchanged and still passing |
 
-**The bug-proof.** Attribution wired and the *send* disabled: the
-adversary must then record zero attributed publishes. A version that
+**The bug-proof, run.** With attribution wired and the *send* replaced
+by a no-op, a whole boot recorded **`straggler kicks sent 27, publishes
+attributed 0`** — against 1 to 2 with the send in place. The kick's
+bookkeeping still ran, so only the IPI was suppressed and the variable
+is isolated. `quiesce-kick-spinner` failed in the same run, at
+`kick_ipis_after > kick_ipis_before`: the target took no kick IPIs
+because none were sent, which is the test noticing exactly what was
+broken. Neither the counter nor the test is vacuous.
+
+The original statement of this proof said: A version that
 counts a publish the kick did not cause would pass the positive test
 and prove nothing, which is the failure mode this project has a name
 for — and the negative control is the second half of it, because a
