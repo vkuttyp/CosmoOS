@@ -9,6 +9,7 @@ QUIT.
 
 import os
 import random
+import select
 import socket
 import threading
 import time
@@ -19,6 +20,55 @@ import time
 # are different questions: whether the guest connected, and whether what
 # it sent arrived (docs/audit/next-subsystem-nettest-deadline.md).
 BACK_RECV_S = 10
+
+# The guest's request, and the only thing that identifies its connection.
+# Nothing else does: every connection to this port arrives from 127.0.0.1
+# through QEMU's own socket, so the peer address cannot tell the guest
+# from anything else that reaches the port
+# (docs/audit/next-subsystem-nettest-accept.md).
+BACK_REQUEST = b"cosmo hello\n"
+BACK_REPLY = b"cosmo world\n"
+
+# How much of a connection's payload is kept for the failure roster. The
+# full byte count is always recorded; this bounds only the preview,
+# because a foreign connection may send megabytes and a failure line is
+# not a place to put them. Thirty-two matches what the harness already
+# kept for the guest's own connection.
+BACK_PREVIEW = 32
+
+# How deep the accept queue is. One meant that a connection the harness
+# had not yet accepted made the *next* connect stall silently -- the SYN
+# dropped, no refusal -- so a stale connection both won the accept and
+# blocked the guest's. Measured, not guessed
+# (docs/audit/next-subsystem-nettest-accept.md).
+BACK_BACKLOG = 8
+
+# How long to keep accepting after every connection that arrived has
+# resolved without delivering the request.
+#
+# The guest makes exactly one back-connection attempt and never retries
+# (kernel-services/network/nettest.c), so once a connection has arrived
+# and died without the request, waiting out the rest of the run's budget
+# cannot help -- and it actively hurts: it leaves no budget for the rest
+# of the boot, turning one harness failure into a run-wide timeout with
+# every later marker missing. Seen on PR #177's own CI, which gave up at
+# 157.0s where the previous harness gave up at 100.9s.
+#
+# The grace still allows a second connection to arrive after a first one
+# closed instantly, which is the case a bare "stop when nothing is live"
+# would lose. While *no* connection has ever arrived the full budget
+# still applies -- a guest that connects late must still be found, which
+# is what the deadline unit established
+# (docs/audit/next-subsystem-nettest-deadline.md).
+BACK_GRACE_S = BACK_RECV_S
+
+
+def _close(sock):
+    """Close a socket and never raise. Called on every exit path."""
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def free_port():
@@ -44,7 +94,7 @@ class NetTest:
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", self.back_port))
-        self.listener.listen(1)
+        self.listener.listen(BACK_BACKLOG)
         # Bound and listening now, because the port number goes to QEMU
         # and must be held before QEMU is told about it. *Not* accepting
         # now, and no deadline yet: the guest does not exist. This used
@@ -61,42 +111,192 @@ class NetTest:
         }
 
     def _back_server(self, deadline):
-        # Whatever is left of the run's budget, which is the same budget
-        # the readiness wait drew on: one deadline for the exchange,
-        # derived from --timeout, started when the run started.
+        """Find the guest's connection among whatever reaches the port.
+
+        The harness used to listen with a backlog of one and accept
+        exactly once, blindly, treating whatever it dequeued first as
+        the guest's. It never checked, and when that assumption was
+        false it reported `TimeoutError` -- which names nothing. That is
+        the whole of what `net-harness` said for three weeks, on both
+        architectures, on CI and locally, several times on branches that
+        change no code. The tally is kept in `docs/testing/flakes.md`,
+        *The count*, and deliberately not repeated here
+        (docs/audit/next-subsystem-nettest-accept.md).
+
+        The rule here: **the guest's connection is the one that delivers
+        `cosmo hello\n`. Every other connection is evidence, and
+        evidence is reported rather than discarded silently.**
+
+        Two deadlines, and they are different questions. The accept
+        budget is what is left of the run's; each connection's receive
+        budget is BACK_RECV_S measured from *its own* accept, so a guest
+        that connects late is not charged for time an earlier intruder
+        burned.
+        """
         remaining = max(1.0, deadline - time.monotonic())
-        self.listener.settimeout(remaining)
         self.results["back_wait_s"] = remaining
+        accept_deadline = time.monotonic() + remaining
+
+        # Every connection that reaches the port, in arrival order. The
+        # roster is the point: a failure where one silent connection
+        # arrived is a different defect from one where two arrived and
+        # the second carried the request, and the old line could not
+        # tell them apart.
+        self.back_conns = []
+        live = []          # [{sock, rec, buf, recv_deadline}]
+        # Every socket this loop accepts, so that a connection dropped
+        # from `live` -- by its own deadline, by closing, or by sending
+        # the wrong thing -- is still closed. The loop may accept many
+        # foreign connections inside its budget, and leaking a
+        # descriptor for each would eventually break the `select` that
+        # collects the roster.
+        opened = []
+        winner = None
         data = b""
+        # When every connection that had arrived last became resolved.
+        # None while something is still live, or while nothing has
+        # arrived at all.
+        settled_at = None
+
         try:
-            conn, _ = self.listener.accept()
-            self.results["back_accept_s"] = time.monotonic() - self.t0
-            # The read has its own, shorter clock. Worth knowing it is a
-            # separate one: the first failure this instrumentation caught
-            # timed out here, ten seconds after an accept that succeeded,
-            # and the old message said only "TimeoutError".
-            conn.settimeout(BACK_RECV_S)
-            while not data.endswith(b"\n") and len(data) < 64:
-                chunk = conn.recv(64)
-                if not chunk:
-                    break       # the peer closed: not an exception, still a failure
-                data += chunk
-            self.results["back_request"] = data == b"cosmo hello\n"
-            conn.sendall(b"cosmo world\n")
-            time.sleep(0.2)
-            conn.close()
+            self.listener.setblocking(False)
+            while winner is None:
+                now = time.monotonic()
+                accepting = now < accept_deadline
+                for c in live:
+                    if now >= c["recv_deadline"]:
+                        _close(c["sock"])
+                live = [c for c in live if now < c["recv_deadline"]]
+                # Keep going while there is still something to wait for:
+                # room in the accept budget, or a connection whose own
+                # receive budget has not run out.
+                if not accepting and not live:
+                    break
+                # Bounded once the guest has had its one attempt.
+                if self.back_conns and not live:
+                    if settled_at is None:
+                        settled_at = now
+                    elif now - settled_at >= BACK_GRACE_S:
+                        break
+                else:
+                    settled_at = None
+
+                watch = [c["sock"] for c in live]
+                wake = accept_deadline if accepting else now + 3600.0
+                for c in live:
+                    wake = min(wake, c["recv_deadline"])
+                if settled_at is not None:
+                    wake = min(wake, settled_at + BACK_GRACE_S)
+                if accepting:
+                    watch.append(self.listener)
+                try:
+                    ready, _, _ = select.select(watch, [], [],
+                                                max(0.0, wake - now))
+                except (OSError, ValueError):
+                    break
+                now = time.monotonic()
+
+                for sock in ready:
+                    if sock is self.listener:
+                        try:
+                            conn, peer = self.listener.accept()
+                        except OSError:
+                            continue
+                        conn.setblocking(False)
+                        rec = {"peer": f"{peer[0]}:{peer[1]}",
+                               "accept_s": now - self.t0,
+                               "bytes": 0, "preview": b"",
+                               "delivered": False}
+                        self.back_conns.append(rec)
+                        opened.append(conn)
+                        live.append({"sock": conn, "rec": rec, "buf": b"",
+                                     "recv_deadline": now + BACK_RECV_S})
+                        continue
+
+                    c = next((x for x in live if x["sock"] is sock), None)
+                    if c is None:
+                        continue
+                    try:
+                        chunk = sock.recv(64)
+                    except OSError:
+                        chunk = b""
+                    if not chunk:
+                        # Connected, said nothing, went away. Not an
+                        # exception, and recorded rather than dropped.
+                        _close(c["sock"])
+                        live.remove(c)
+                        continue
+                    c["buf"] += chunk
+                    c["rec"]["bytes"] = len(c["buf"])
+                    c["rec"]["preview"] = c["buf"][:BACK_PREVIEW]
+                    if c["buf"].endswith(b"\n") or len(c["buf"]) >= 64:
+                        if c["buf"] == BACK_REQUEST:
+                            c["rec"]["delivered"] = True
+                            winner = c
+                            break
+                        # Answered, but not with the request. Keep the
+                        # record, stop reading it, and let it go.
+                        _close(c["sock"])
+                        live.remove(c)
+
+            if winner is not None:
+                data = winner["buf"]
+                self.results["back_accept_s"] = winner["rec"]["accept_s"]
+                sock = winner["sock"]
+                sock.setblocking(True)
+                sock.settimeout(BACK_RECV_S)
+                sock.sendall(BACK_REPLY)
+                time.sleep(0.2)
+            elif self.back_conns:
+                # Nothing delivered the request. Report the first
+                # connection's accept time, because "when did something
+                # arrive" is still the question the timing line answers.
+                self.results["back_accept_s"] = self.back_conns[0]["accept_s"]
         except Exception as e:  # noqa: BLE001
             self.results["back_error"] = repr(e)
         finally:
+            for sock in opened:
+                _close(sock)
             # On every path, including the one that ends without an
             # exception: a peer that connects and closes without sending
-            # leaves the loop by `break`, and an instrument that records
+            # leaves no exception behind, and an instrument that records
             # nothing there cannot tell silence from a wrong answer.
+            self.results["back_request"] = data == BACK_REQUEST
             self.results["back_done_s"] = time.monotonic() - self.t0
-            self.results["back_bytes"] = len(data)
-            self.results["back_data"] = repr(data[:32])
-            self.listener.close()
+            if winner is not None:
+                self.results["back_bytes"] = winner["rec"]["bytes"]
+                self.results["back_data"] = repr(winner["rec"]["preview"])
+            elif self.back_conns:
+                self.results["back_bytes"] = self.back_conns[0]["bytes"]
+                self.results["back_data"] = repr(self.back_conns[0]["preview"])
+            else:
+                self.results["back_bytes"] = 0
+                self.results["back_data"] = repr(b"")
+            self.results["back_roster"] = self.roster()
+            try:
+                self.listener.close()
+            except OSError:
+                pass
             self.results["back_closed_s"] = time.monotonic() - self.t0
+
+    def roster(self):
+        """Every connection that reached the port, as one line.
+
+        This is the sentence every sighting needed and none had: the
+        old failure said "connection accepted at 90.9s" -- a time
+        without an identity. How many there were is
+        `docs/testing/flakes.md`, *The count*.
+        """
+        conns = getattr(self, "back_conns", [])
+        if not conns:
+            return "no connection arrived"
+        parts = []
+        for c in conns:
+            parts.append("%s accepted at %.1fs, %d byte(s)%s: %r"
+                         % (c["peer"], c["accept_s"], c["bytes"],
+                            " [the request]" if c["delivered"] else "",
+                            c["preview"]))
+        return f"{len(conns)} connection(s): " + "; ".join(parts)
 
     def run_when_ready(self, log_path, proc, timeout):
         """Wait for the guest's ready line, then run the exchange."""
@@ -216,16 +416,18 @@ class NetTest:
             def t(k):
                 v = r.get(k)
                 return f"{v:.1f}s" if isinstance(v, float) else "never"
-            accepted = r.get("back_accept_s")
-            where = ("no connection arrived" if not isinstance(accepted, float)
-                     else f"connection accepted at {accepted:.1f}s, then "
-                          f"{r.get('back_bytes', 0)} of 12 bytes: {r.get('back_data', '-')}")
+            # The roster, not a bare accept time. "connection accepted
+            # at 90.9s" was a time without an identity, and answering
+            # *which* connection that was is the whole of this unit
+            # (docs/audit/next-subsystem-nettest-accept.md).
+            where = r.get("back_roster") or self.roster()
             f.append(
                 "network harness: guest-initiated connection failed "
                 f"({r.get('back_error', 'no error, the request was wrong or absent')}) — "
                 f"listening on 127.0.0.1:{self.back_port}; {where}; "
                 f"gave up at {t('back_done_s')}, guest reported ready at {t('ready_s')}, "
-                f"accept budget {t('back_wait_s')}, recv budget {BACK_RECV_S}.0s"
+                f"accept budget {t('back_wait_s')}, "
+                f"recv budget {BACK_RECV_S}.0s per connection from its own accept"
             )
         if not r.get("quit_sent"):
             f.append("network harness: could not send QUIT")

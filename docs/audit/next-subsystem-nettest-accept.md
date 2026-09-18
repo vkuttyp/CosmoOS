@@ -1,18 +1,80 @@
 # NEXT SUBSYSTEM — the connection the harness accepted
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #177), and the banner below records where the build differed from
+it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **`bytes` is what the harness *read*, not what the peer sent.** The
+   design said "how many bytes it sent". The read loop stops at the
+   first newline or sixty-four bytes -- it always did, and draining a
+   foreign connection to count it would be unbounded work on a
+   connection the harness has already decided is not the guest's. So the
+   record says bytes read, the preview is the first thirty-two of them,
+   and `test_the_preview_is_bounded` asserts exactly that rather than a
+   number the harness cannot know.
+2. **A silent peer no longer ends the exchange, and that changed an
+   existing test.** The design's point 6 says silence is still a
+   failure, which it is. But the earlier unit's
+   `test_a_silent_peer_is_recorded_too` also relied on a silent peer
+   *ending* the exchange -- which is the defect itself, in miniature:
+   ending on a connection that was never the guest's is how an intruder
+   came to be reported as the guest's failure. The test now runs to a
+   short deadline on purpose and additionally asserts the roster names
+   the silent peer. The report's claim that the existing cases were
+   "unchanged" was wrong; this one changed, and its assertions are
+   stronger for it.
+3. **The instrument answered on its own CI, and refuted this report's
+   hypothesis.** Sighting twenty-three landed on PR #177's aarch64 job
+   and the roster said `1 connection(s): 127.0.0.1:46652 accepted at
+   90.8s, 0 byte(s)`. **Exactly one connection, carrying nothing** — so
+   the wild trigger is *not* a foreign connection, and the stale-slot
+   reproduction reproduces the symptom without being the cause. With
+   the guest reporting `connect 0 in 1116 ms, segs_out +3
+   retransmits +1` for the second sighting running, the locus is
+   **slirp's own host-side connect**. That is a better answer than this
+   report expected to get, and it arrived because the roster existed.
+   **Sighting twenty-four confirmed it two hours later** with the same
+   one-empty-connection roster and the *other* guest arm -- `sent 12`
+   with `outstanding 12 then 12`, the bytes on the wire and never
+   acknowledged. Three consecutive connects of 1031, 1116 and 1089 ms,
+   each with exactly one SYN retransmission, against a 150 microsecond
+   baseline.
+4. **A failed exchange must not eat the run, which this unit broke
+   first.** Waiting for a connection that delivers the request -- rather
+   than ending on the first, which is the defect -- also made the loop
+   wait out the *whole* remaining budget when none ever did. On the same
+   CI job it gave up at 157.0s where the old harness gave up at 100.9s,
+   the run passed its 180 s timeout, and every later marker went
+   missing: one harness failure hid the entire tail of the boot. The
+   guest makes exactly one back-connection attempt and never retries, so
+   once a connection has arrived and resolved without the request more
+   waiting cannot help. Bounded by `BACK_GRACE_S` after that -- and only
+   *after* one has arrived, so a guest that connects late is still found
+   and the deadline unit's property is untouched. **Confirmed in
+   production on sighting twenty-four**: the harness gave up at 108.7s,
+   twenty seconds after the accept rather than the 69.3s remaining, the
+   run failed inside its timeout at 153.8s, and the five unrelated
+   missing markers of the previous failure were gone.
+5. **An eighth test, for the backlog depth itself.**
+   `test_the_backlog_is_deeper_than_one` pins the measured precondition.
+   A regression to `listen(1)` restores the defect without failing any
+   behavioural test, because with only well-behaved connections the two
+   are indistinguishable -- exactly the "rule enforced nowhere" shape
+   this arc keeps hitting.
 
 **Subsystem: a back-connection the harness can identify, and a failure
-line that names the connection it got instead.** `tests/boot/nettest.py`
-listens on the back-connection port with a backlog of one
-(`nettest.py:47`) and then accepts exactly once, blindly
-(`nettest.py:72`). It assumes the first connection to arrive is the
-guest's. It never checks, and when the assumption is false it reports
-`TimeoutError`, which names nothing. That is the whole of what
-`net-harness` has said for two weeks: twenty-two sightings across twelve
-entries (`docs/testing/flakes.md`, *The count*), on both architectures,
+line that names the connection it got instead.** Before this unit,
+`tests/boot/nettest.py` listened on the back-connection port with a
+backlog of one and then accepted exactly once, blindly. It assumed the
+first connection to arrive was the guest's. It never checked, and when
+the assumption was false it reported `TimeoutError`, which names
+nothing. That was the whole of what
+`net-harness` has said for three weeks: every sighting in
+`docs/testing/flakes.md`, *The count*, which owns the number so this
+does not repeat it — on both architectures,
 on CI and locally, several of them on branches that change no code at
 all.
 
@@ -29,7 +91,12 @@ what that connection did.
 
 ## Problem
 
-The harness owns three host ports and holds the back-connection port for
+**This section describes the harness as it stood before this unit; the
+line numbers are those of the pre-unit file.** What replaced it is in
+*Design* below and in `docs/kernel-services/network/design.md`, "Which
+connection is the guest's".
+
+The harness owned three host ports and held the back-connection port for
 the whole boot:
 
 ```python
@@ -51,20 +118,21 @@ while not data.endswith(b"\n") and len(data) < 64:
     ...
 ```
 
-Two decisions in that code are load-bearing and neither is checked:
+Two decisions in that code were load-bearing and neither was checked:
 
-1. **The backlog is one.** Measured on this host: with one unaccepted
+1. **The backlog was one.** Measured on this host: with one unaccepted
    connection queued, a second connect **hangs silently** — the SYN is
    dropped, `connect` does not refuse, and a client with a two-second
    timeout simply times out. It does not fail fast, so nothing upstream
    learns that the queue was full.
-2. **The accept is blind and single.** Whatever connection is dequeued
-   first becomes "the guest's". If it is not, the guest's own connection
-   is still sitting in the queue — or, with a backlog of one, was never
-   allowed in — and the harness spends its ten-second receive budget
-   reading a socket that will never carry `cosmo hello\n`.
+2. **The accept was blind and single.** Whatever connection was
+   dequeued first became "the guest's". If it was not, the guest's own
+   connection was still sitting in the queue — or, with a backlog of
+   one, was never allowed in — and the harness spent its ten-second
+   receive budget reading a socket that would never carry
+   `cosmo hello\n`.
 
-Together these convert "something else reached this port" into a
+Together these converted "something else reached this port" into a
 ten-second timeout attributed to the guest's network stack.
 
 ## What the reproduction established
@@ -121,10 +189,16 @@ before this; every sighting in the tally was read without one.
 connection on that port reproduces `net-harness` exactly, that the
 harness cannot tell the difference, and that the guest kernel is correct
 throughout. It does **not** prove that a foreign connection is what
-happens on CI: the adversary was injected. The wild trigger remains
-unnamed, and this report does not guess at one — the last correlation
-recorded on this thread, a SYN-retransmission pattern, had to be
-withdrawn when a fourth run contradicted it.
+happens on CI: the adversary was injected. **And sighting twenty-three,
+recorded in the as-built banner above, settled that it is not** — the
+roster named exactly one connection, carrying nothing. So this section
+stands as written: the reproduction shows a mechanism the harness could
+not report, and the cause on CI is elsewhere. What remains unnamed is
+narrower than when this was written: **why slirp's host-side connect
+stalls about a second and then fails.** This report still does not guess
+at it — the last correlation recorded on this thread, a
+SYN-retransmission pattern, had to be withdrawn when a fourth run
+contradicted it.
 
 **Corroborated, unprompted, by this report's own CI.** While PR #176 was
 open, its aarch64 job produced sighting twenty-two on a branch that
@@ -141,7 +215,7 @@ against anything. It also shows the gap precisely: `accepted at 90.9s`
 reports a time without an identity, and nothing in the current harness
 can say whose connection that was.
 
-## Current implementation
+## Current implementation (as it stood before this unit)
 
 `tests/boot/nettest.py` is the host half; `kernel-services/network/nettest.c`
 (the `nettest_client` path, around line 920) is the guest half. The
@@ -151,12 +225,13 @@ connect, times each step, and prints the pcb's own verdict from
 `ksock_error` rather than a machine-wide counter
 (`docs/audit/next-subsystem-socket-verdict.md`).
 
-The host half records its own timings into `self.results` —
-`back_accept_s`, `back_bytes`, `back_data`, `back_done_s` — and prints
-them on failure (`nettest.py`, `failures()`). What it does not record is
+The host half recorded its own timings into `self.results` —
+`back_accept_s`, `back_bytes`, `back_data`, `back_done_s` — and printed
+them on failure (`nettest.py`, `failures()`). What it did not record was
 **anything about the connection it accepted**: not the peer, not whether
 more connections were waiting, not whether any other connection arrived
-during the ten seconds it spent waiting on the wrong one.
+during the ten seconds it spent waiting on the wrong one. The roster
+added by this unit is exactly that missing record.
 
 ## Why it matters
 
@@ -261,7 +336,8 @@ in about a second and needs no boot.
 | `back_budget_per_connection` | a foreign connection accepted first, the guest's arriving later: the guest's receive budget runs from **its own** accept, so it is not charged for time spent on the intruder, and a guest that answers within `BACK_RECV_S` of its own accept passes even when the intruder burned most of the run's budget first |
 | `back_preview_bounded` | a foreign connection that sends **more than thirty-two bytes**: the record keeps the full byte *count* but exactly the first thirty-two as its preview, and the failure line reports that preview rather than the payload |
 | `back_none_delivers` | deadline expires with connections accepted but no request: still a failure, roster reported |
-| existing cases | unchanged and still passing — the deadline semantics from the earlier unit are not altered |
+| `back_backlog_depth` | the backlog is deeper than one, and two connections queue with nothing accepting them (as built: `test_the_backlog_is_deeper_than_one`) |
+| existing cases | still passing; `test_a_silent_peer_is_recorded_too` changed as the banner records, because a silent peer no longer ends the exchange |
 
 **Every design point above has a test, and the mapping is written down
 so the next reader can check it rather than re-derive it:** 1 (deeper
@@ -316,7 +392,8 @@ accepted.
 - **Raise the backlog and nothing else.** Cheapest, and it would very
   likely have prevented the induced failure. Rejected as the whole unit:
   it leaves the harness unable to say what happened, which is the
-  property that has cost twenty-two sightings. The backlog change is
+  property that has cost every sighting in the tally. The backlog
+  change is
   design point 1 precisely because it is necessary and insufficient.
 - **Verify the peer instead of the payload.** Check that the connection
   comes from QEMU's process. Rejected: every connection arrives from

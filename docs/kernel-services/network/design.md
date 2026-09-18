@@ -290,6 +290,34 @@ verification. Without fw_cfg the self-test skips, so `make run` is
 unaffected. The harness timeout is 180 s; release builds create the
 harness but only require the `virtio_net` and `eth0` boot markers.
 
+**Which connection is the guest's.** The harness listens on P3 from
+before QEMU starts, and the guest is not the only thing that can reach
+that port. The rule is that **the guest's connection is the one that
+delivers `cosmo hello\n`**; nothing else identifies it, because every
+connection arrives from `127.0.0.1` through QEMU's own socket, so the
+peer address cannot tell them apart. The harness therefore listens with
+a backlog of eight, accepts every connection that arrives until one
+delivers the request or the budget expires, and replies on that one.
+
+Every other connection is **evidence, and is reported rather than
+discarded**: the failure line carries a roster naming each connection's
+peer, when it was accepted, how many bytes were read from it and a
+thirty-two-byte preview of them. Two deadlines, and they answer
+different questions -- the accept budget is what is left of the run's,
+while each connection's receive budget is `BACK_RECV_S` measured from
+*its own* accept, so a guest that connects late is not charged for time
+an earlier connection burned. A connection that arrives and never
+delivers the request is still a failure: the deeper backlog must not
+turn a real guest fault into a pass.
+
+This replaced a backlog of one and a single blind accept, which assumed
+the first connection to arrive was the guest's, never checked, and
+reported `TimeoutError` when the assumption was false -- the whole of
+what `net-harness` said across every sighting in
+`docs/testing/flakes.md`, *The count*
+(`docs/audit/next-subsystem-nettest-accept.md`,
+`docs/testing/flakes.md`).
+
 ## Ownership and lifetime
 
 mbufs: as above. netifs: kobjects whose storage is freed by

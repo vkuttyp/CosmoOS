@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Twenty-one, to 2026-09-18**, across CI and this developer's machine, on
+**Twenty-four, to 2026-09-18**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -492,15 +492,19 @@ of this section said eight and then listed nine:
 | PR #171's own CI runs, three times | observed, aarch64 each time, and the **first three with the counters sampled before the connect**: `connect -104`, `connect 0 in 1270 ms`, `connect -104 in 569 ms` |
 | PR #174's own CI runs, twice in a row | observed, aarch64 both times, on a branch whose diff is **three Markdown files and no code at all**: `connect 0 in 1355 ms` with the bytes sent, then `connect 0 in 1063 ms` with `sent -104` |
 | PR #175's own CI run | observed, aarch64: `connect 0 in 1460 ms`, `sent 12`, never acknowledged -- the first sighting on a branch that changes code |
+| PR #176's own CI run | observed, aarch64, documentation-only: `connect 0 in 1031 ms`, `sent -104`, `segs_out +3 retransmits +1` -- the first read against the 150 us baseline |
+| PR #177's own CI run | observed, aarch64: `connect 0 in 1116 ms`, `sent -104` -- **the first with a roster**, which named one connection carrying nothing |
+| PR #177's own CI run, the protection-capable CPU boot | observed, aarch64: `connect 0 in 1089 ms`, `sent 12`, `outstanding 12 then 12` -- one connection carrying nothing again, the other guest arm |
 
-Twelve entries, twenty-two occurrences. The first five rows are inherited
-from the row that recorded them and are not independently re-verified
-here. The last six rows were watched as they happened: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **ten
-instrumented** occurrences behind the other five rows carry the guest's
-side. Rows and occurrences differ because three rows hold more than one
-sighting; the shapes table below is per *sighting* and is the one to
-count from.
+Fifteen entries, twenty-four occurrences -- and the table is the tally,
+so a sighting recorded only in prose below is a sighting this section
+has lost. The first five rows are inherited from the row that recorded
+them and are not independently re-verified here. The last nine rows were
+watched as they happened: PR #167's carries the host's `accepted at
+92.0s, 0 of 12 bytes`, and the **thirteen instrumented** occurrences
+behind the other eight rows carry the guest's side. Rows and occurrences
+differ because three rows hold more than one sighting; the shapes table
+below is per *sighting* and is the one to count from.
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
@@ -528,6 +532,8 @@ the connection was already reset.
 | `main` @ c47d353, aarch64 | `-104` | `+0` | 0 | `+0` |
 | `main` @ c1e6071, aarch64 | `-104` | `+0` | 0 | `+1` |
 | PR #176, aarch64 (docs-only) | `-104` | `+3` | 0 | `+1` |
+| PR #177, aarch64 (**roster**) | `-104` | `+3` | 0 | `+1` |
+| PR #177, aarch64 (protection CPU) | **`12`** | `+4` | **12** | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
 path as the defect: in one instance `ksock_sendto` returned 12, a
@@ -706,10 +712,11 @@ the loop runs, not what the defect is.
 
 **Reproduced deliberately, 2026-09-18 — and this is not a sighting.**
 What follows was induced on purpose and is not counted: the total moved
-to twenty-two for a separate, real failure recorded below, not for
-this. The harness listens on the back-connection port with a
-backlog of one (`nettest.py:47`) and accepts once, without checking what
-it accepted (`nettest.py:72`). Occupying that single slot before QEMU
+that day for separate, real failures recorded below, not for this. The
+count section above owns the number; this paragraph does not repeat it. At the time, the harness listened on the back-connection port
+with a backlog of one and accepted once, without checking what it
+accepted — PR #177 has since replaced both. Occupying that single slot
+before QEMU
 starts — one silent connection, opened behind an environment variable —
 reproduced the `net-harness` signature **on the first boot**: host
 `accept` succeeded at 76.6 s, read `0 of 12 bytes`, and gave up with
@@ -745,10 +752,13 @@ stalls the real one. And `free_port` is clean: **zero collisions in three
 thousand triples**, over the observed ephemeral range 49152–65535, so the
 three-port collision idea is dead.
 
-**What is still not established is the wild trigger.** The adversary was
-injected; nothing here says a foreign connection is what happens on CI.
-This names a mechanism the harness cannot currently report, not a cause.
-Taken up by `docs/audit/next-subsystem-nettest-accept.md`.
+**What was not established by the reproduction is the wild trigger.**
+The adversary was injected; nothing in it says a foreign connection is
+what happens on CI. It names a mechanism the harness could not report,
+not a cause. Taken up by
+`docs/audit/next-subsystem-nettest-accept.md` — and **answered below by
+sighting twenty-three**, which found exactly one connection carrying
+nothing and ruled the foreign connection out.
 
 **Sighting twenty-two, 2026-09-18, on PR #176's own aarch64 CI** — the
 pull request that proposes the fix, on a branch that changes three
@@ -782,6 +792,92 @@ instrument reports a time without an identity. That is exactly the gap
 `docs/audit/next-subsystem-nettest-accept.md` proposes to close, and it
 is the reason this sighting is recorded here rather than argued from:
 the roster the unit adds would have said whose connection that was.
+
+**Sighting twenty-three answered the question, on PR #177's own CI —
+the run that installed the instrument.** The roster said:
+
+```
+1 connection(s): 127.0.0.1:46652 accepted at 90.8s, 0 byte(s): b''
+```
+
+**Exactly one connection reached the port, and it carried nothing.**
+This file predicted that case in as many words, one commit earlier: "if
+it names exactly one connection, carrying nothing, then the wild trigger
+is not a foreign connection and the next place to look is slirp's
+host-side connect." So **the foreign-connection hypothesis is dead as
+the wild trigger.** The stale-slot reproduction reproduces the
+*symptom* faithfully and is not what happens on CI.
+
+The guest's side, near-identical to sighting twenty-two:
+
+```
+connect 0 in 1116 ms, sent -104, recv -1, pending error -104,
+  (outstanding 0 then 0), state 0,
+  segs_out +3 retransmits +1 refused +0 rsts_in +1
+```
+
+Two consecutive sightings now share one shape, and the 150 us baseline
+is what makes it legible: **a connect that succeeds in about a second**
+against a baseline three orders of magnitude faster, with **exactly one
+SYN retransmission** (`segs_out +3`, `retransmits +1`) — slirp ignoring
+the first SYN and answering the second — then a reset before the guest
+can write. Host-side, slirp's connection is accepted and delivers
+nothing.
+
+**The locus is slirp's own host-side connect**, not anything that
+reaches the port and not this kernel. What is still unnamed is why that
+connect stalls for about a second and then fails, and the next
+measurement is a packet capture of the host's loopback rather than the
+guest's wire — the guest's side is now fully accounted for.
+
+**Sighting twenty-four confirmed it, two hours later, on the same pull
+request** — the "protection-capable CPU" boot of an aarch64 job whose
+first two boots passed. The roster again:
+
+```
+1 connection(s): 127.0.0.1:60860 accepted at 88.7s, 0 byte(s): b''
+```
+
+**One connection, carrying nothing, for the second time running.** The
+guest's side took the other arm of the four-outcome table, which makes
+the pair more informative than either alone:
+
+```
+connect 0 in 1089 ms, sent 12 in 0 ms, recv -104 in 0 ms,
+  pending error -104, (outstanding 12 then 12), state 0,
+  segs_out +4 retransmits +1 refused +0 rsts_in +1
+```
+
+`sent 12` with **`outstanding 12 then 12`**: the twelve bytes went onto
+the wire and were **never acknowledged** — where sighting twenty-three's
+guest never got to write at all. So slirp answers the handshake late,
+then either takes the bytes and drops them (the induced reproduction) or
+never acknowledges them, and in both cases its host-side socket is
+connected — the harness accepted it — and carries nothing.
+
+**Three consecutive connects: 1031 ms, 1116 ms, 1089 ms, each with
+exactly one SYN retransmission.** Against a 150 microsecond baseline
+that is not a spread, it is a constant: slirp ignores the first SYN and
+answers the second, one retransmission timer later. Whatever stalls it
+lasts about a second and is gone afterwards.
+
+**And the grace bound held in production.** The harness gave up at
+108.7s -- twenty seconds after the accept, the receive budget plus the
+grace -- rather than burning the 69.3s that remained. The run failed at
+153.8s, inside its 180 s timeout, and reported *only* the harness
+markers: the five unrelated missing markers that sighting twenty-three's
+run produced are gone. That is the regression fix working on the exact
+failure that exposed it.
+
+**The instrument was rebuilt, PR #177.** The harness no longer assumes
+the first connection to arrive is the guest's: it listens with a backlog
+of eight, accepts every connection until one delivers `cosmo hello\n`,
+gives each its own receive budget from its own accept, and reports a
+roster -- every peer, when it was accepted, bytes read, a thirty-two
+byte preview -- in place of `TimeoutError`. **It answered on its first
+outing**, which is the sighting recorded above: the question this file
+could not ask for three weeks was answered by the next failure after
+the instrument landed.
 
 **And one hour spent for nothing, recorded so it is not spent twice.**
 A twenty-two-boot aarch64 hunt with packet capture on 2026-09-18 found
