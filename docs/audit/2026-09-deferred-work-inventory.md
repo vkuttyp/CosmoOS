@@ -61,7 +61,7 @@ paragraph (same pull request), and the README now points here.
 | --- | --- |
 | **the VMX backend has never been executed** -- host tests of the pure logic only; needs Intel hardware or KVM | README.md:452 |
 | the Linux-guest demonstrations are not CI gates: the Image is not committed; the root filesystem, the writable root and every network unit's `QEMU_MEM=2G` reproduction are manual runs -- and no run has yet shown a Linux guest reaching the real world through the host's NIC | README.md:992, 1022, 1046 |
-| `atexit`'s table and the environment remain process-global and unsynchronised | README.md:1734; `docs/libc/invariants.md` |
+| `atexit`'s table and the environment remain process-global and unsynchronised. **Taken up by `docs/audit/next-subsystem-libc-shared-tables.md`**, which measured the shape: `setenv` growing the array does `free(environ)` while `getenv` may be walking it (a use-after-free in the allocator the same unit locked), `unsetenv` memmoves under readers, and `atexit`'s `g_natexit++` both loses handlers and can write one past a static array. Invariant **L8** enumerates three safe tables and says "all three are done"; the library has five | README.md:1734; `docs/libc/invariants.md` |
 | the cwd-ref fix is a regression test, not a proof; the seam that would prove it is named and not built | README.md:1637; `docs/audit/next-subsystem-cwd-ref.md` |
 | `net-bench` took 71 s once in a hundred boots (x86-64, throughput normal, time lost between rounds; a retransmit backoff after a receive-queue drop is the likeliest mechanism) | README.md:1804; `docs/testing/flakes.md` history |
 | the userland test programs' own timing assumptions (`thrtest`, `cwdtest`) | `docs/audit/next-subsystem-suite-waits.md`, deferrals |
