@@ -618,13 +618,19 @@ so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
 them and are not independently re-verified here. The last twenty rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-two instrumented** occurrences
-behind the other sixteen rows carry the guest's side. (These three figures
-are computed from the table, not carried forward: they were wrong before
-sighting twenty-five, because each update incremented them instead of
-counting the rows.) Rows and occurrences
-differ because three rows hold more than one sighting; the shapes table
-below is per *sighting* and is the one to count from.
+92.0s, 0 of 12 bytes`, and the **twenty-five instrumented** occurrences
+behind the other nineteen rows carry the guest's side. Rows and
+occurrences differ because **eight** rows hold more than one sighting;
+the shapes table below is per *sighting* and is the one to count from.
+
+(**Every figure in this paragraph is computed from the table, not
+carried forward.** They were wrong before sighting twenty-five because
+each update incremented them instead of counting the rows -- and wrong
+again at sighting thirty-four, when three of them were incremented and
+the instrumented pair and the multi-sighting row count were not. The
+lesson keeps being the same one: a count that appears in prose beside a
+table is a count somebody has to re-derive, so re-derive all of them or
+none.)
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
@@ -736,10 +742,11 @@ returns, which are hot paths a network exchange runs through. So "the
 diff is Markdown" is not available here, and the discharge has to be
 narrower:
 
-- the signature is the one this row has recorded twenty times, including
-  on trees with no code at all: an inbound reset (`rsts_in +1`), the
-  guest's twelve bytes unacknowledged, the host's `accept` having
-  succeeded;
+- the signature is the one this row had recorded twenty times **by
+  then**, and has recorded at every sighting since (*The count* owns
+  the running figure), including on trees with no code at all: an
+  inbound reset (`rsts_in +1`), the guest's twelve bytes
+  unacknowledged, the host's `accept` having succeeded;
 - the failing exchange is a TCP connection to a process on the host
   through slirp, and the branch touches no network file at all
   (`git diff --name-only main...HEAD` matches nothing under
