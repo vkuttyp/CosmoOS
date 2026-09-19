@@ -3,9 +3,13 @@
 Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built**
 (PR #191), and the banner below records where the build differed from
-it — including the part that matters most, which is that **the
-headline defect took two corrections to demonstrate, and an earlier
-version of this line said it could not be demonstrated at all**.
+it — including the part that matters most: **the headline defect IS
+demonstrated.** It took two corrections to get there, and an earlier
+version of this very line said it could not be demonstrated at all.
+Read the next sentence as the current state and the clause after the
+comma as history, not the other way round — review has now twice read
+this line as a live claim that the defect is undemonstrated, which is
+the opposite of what it records.
 
 **What the build changed, each found by building rather than reading:**
 
@@ -269,13 +273,23 @@ accepts the cost and records it in `libc/src/stdlib.c` and
 docs/libc/invariants.md L8 — where the comment used to call it "a
 bounded leak in a start-up path", which was wrong twice over.
 
-### Why it has not bitten
+### Why it had not bitten
 
 **Nothing in the tree uses threads and the environment together.**
 `setenv` and `getenv` are called by `init` and the shell, neither of
-which creates threads; `thrtest` creates threads and does not touch the
-environment. The race is **latent and reachable**, not observed, and
-this report says so rather than implying a failure it cannot point to.
+which creates threads; `thrtest` did not touch the environment when
+this paragraph was written.
+
+That last clause is why the heading is in the past tense now. The race
+**is** observed: `env-grow-under-readers` kills the process (`#GP`,
+signal 11, three runs of three) and this report's banner records what
+the first two attempts got wrong. What the paragraph above still
+explains correctly is why nothing had hit it *before* a test went
+looking — no shipping program combines the two — and that remains the
+answer to "if it is this easy to hit, why has it never happened".
+An earlier version of this paragraph said the race was "latent and
+reachable, not observed", which was true when written and false once
+the test landed; review caught it still standing.
 That is also why it is worth doing now: the cost of closing it is a
 lock, and the cost of finding it later is a use-after-free in a program
 nobody suspects.

@@ -47,8 +47,12 @@ libc/
 - **`getenv`'s result stays valid because `setenv` leaks.** Replacing
   a value installs a new string and does not free the old one, which
   may in any case be the kernel's. That leak is what keeps a pointer
-  `getenv` already returned from dangling; it is deliberate, bounded
-  by the number of overwrites, and must not be tidied away.
+  `getenv` already returned from dangling; it is deliberate, **not
+  bounded**, and must not be tidied away. One retained string per
+  overwrite is not a bound: a program that rewrites a variable in a
+  loop grows without limit, and nothing may reclaim the strings while
+  a pointer from `getenv` has to stay good. See
+  invariants.md L8 for the contract and the reasoning.
 - The library is **not** built `-mgeneral-regs-only` any more: the
   compiler may use the vector registers wherever it likes, which it
   does in the float conversions and wherever it vectorises a loop. The
