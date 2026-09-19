@@ -63,43 +63,60 @@ definitions and only one of each compiles, which is why the per-build
 total is about 540 and not the 546 a naive count of both gives. Line
 counts are brace-matched function bodies, not estimates.
 
-**Half the instrument already exists, which is why this unit is small.**
-Every section already prints a boundary when it finishes, and they all
-reach the log in call order:
+**There is prose in the output, and it is not a boundary.** Each
+section prints one or more `usertest: … ok` lines, and they reach the
+log in call order. `stdout` is **line-buffered** (`libc/src/stdio.c:71`,
+`F_WRITE | F_LINEBUF`), so each leaves the guest when it is printed
+rather than at exit. It is tempting to read the last one as "this
+section finished" — **and that is wrong, in two ways that review caught
+in the first draft of this report.**
 
-```text
-usertest: symbolic links ok              <- fs_selftest
-usertest: fsctl ok                       <- fsctl_selftest
-usertest: sockets ok                     <- net_selftest
-usertest: processes ok                   <- proc_selftest
-usertest: fpu isolation ok               <- fpu_selftest
-usertest: user exceptions ok             <- trap_selftest
-usertest: privilege boundary ok          <- priv_selftest
-usertest: /proc ok                       <- proc_fs_selftest
-usertest: services ok                    <- svc_selftest
-usertest: write ok                       <- the unnamed trailing body
-```
+| section | its `usertest:` lines | where the last one sits |
+| --- | --- | --- |
+| `fs_selftest` (49-255) | `symbolic links ok` (**110**), then `cosmofs mounted and read from user mode` / `no cosmofs to mount` (249/252) | 3 lines from the end |
+| `net_selftest` (258-471) | `sockets ok` (470) | at the end |
+| `proc_selftest` (474-1119) | `a symbolic link stays inside a process root` (**734**), `processes ok` (1118) | at the end |
+| `trap_selftest` (1603-1627) | `user exceptions ok` (**1616**) | **11 lines from the end** — the UMIP check runs after it |
+| `fpu_selftest` | `fpu isolation ok` | at the end |
+| `priv_selftest` (2967-3002) | `privilege boundary ok` (3001) | at the end |
+| `svc_selftest` (3065-3238) | `services ok` (3237) | at the end |
+| `proc_fs_selftest` (3264-3330) | `/proc ok` (3329) | at the end |
+| `fsctl_selftest` (3353-3553) | `fsctl ok` (3552) | at the end |
+| *(the trailing body)* | `write ok` and others | interleaved throughout |
 
-And `stdout` is **line-buffered** (`libc/src/stdio.c:71`,
-`F_WRITE | F_LINEBUF`), so each of those lines leaves the guest when it
-is printed rather than at exit.
+Two of them print **mid-section**: `fs` at line 110 with 145 lines of
+its function still to run, and `proc` at 734 with 385 still to run. A
+hang in either of those stretches leaves a marker as the last thing
+printed, and a reader who takes it for a boundary looks in the wrong
+section. And `trap_selftest`'s *only* marker is followed by the UMIP
+check — visible in the log today, where `usertest: umip: absent` prints
+**after** `usertest: user exceptions ok`.
 
-**Two consequences, and only one of them is a gap.**
+**Nothing makes a marker the last thing a section does.** Eight of the
+nine happen to end with one; that is a convention each section has to
+remember, not a structure, and two have already forgotten it. So:
 
-1. **A hang is already attributable** — the last boundary printed names
-   the section that finished, and the next one is where it stopped. No
-   report has ever said so, and the harness does not use it, but the
-   information is in the log today. This unit should claim only that it
-   makes this explicit and machine-read, not that it invents it.
+1. **A hang is *not* reliably attributable today.** The first draft of
+   this report claimed it was, on the strength of the markers appearing
+   in call order. A hang in `fs_selftest` after line 110, or in
+   `trap_selftest` after 1616, would put the last printed marker at the
+   end of a section that had not finished — and a reader trusting it
+   would look in the *next* section. Closer than nothing and not
+   dependable, which is worse than either.
 2. **A *slow* run is not attributable at all.** Nothing measures a
    section, so there is no duration anywhere for any of the ten rows
-   above. That is the actual gap, and slowness — not hanging — is what
+   above. That is the larger gap, and slowness — not hanging — is what
    has twice forced a budget change.
+
+Both follow from the same thing: the output was written for people to
+read, and nobody has ever made a structural claim about it. That is
+what the design below changes, and it is why the timing line is emitted
+by the driver rather than by each section.
 
 **The harness reads none of it.** `run_boot_test.py` requires exactly
 one line from the suite, `^USERTEST: PASS` (`USERTEST_MARKER`,
 line 328), plus `^usertest: umip: enforced$` on the x86-64 guard boot.
-The nine boundaries are not parsed, not reported and not in the verdict.
+The prose lines are not parsed, not reported and not in the verdict.
 
 **And the cost of a composite that reports nothing about itself shows up
 in the prose about it.** `cosmofs-replay` — the other entry in
@@ -138,20 +155,28 @@ worth building.
 **Each section reports its own duration, from the guest's clock, on a
 line the harness parses.**
 
-1. **Time each section in `selftest()`.** `cosmo_clock_ns()` is already
-   used inside the suite, so there is no new syscall and no new
-   dependency. Each call is bracketed and prints one line in the
-   existing machine channel — `USERTEST:` uppercase, which is what
+1. **`selftest()` times each call and prints the line — the section
+   does not.** This is the whole difference between a boundary and a
+   convention. If a section printed its own timing, the line would be
+   as reliable as the markers are now: correct until someone adds a
+   check after it, which has already happened twice. Bracketing the
+   *call* in the driver means a section cannot be late, cannot forget,
+   and cannot be added without a line, because the driver is the only
+   place that calls it.
+
+   `cosmo_clock_ns()` is already used inside the suite, so there is no
+   new syscall and no new dependency. The line goes in the existing
+   machine channel — `USERTEST:` uppercase, which is what
    `USERTEST: PASS` and `USERTEST: FAIL (n checks)` already use:
 
    ```text
    USERTEST: section fs 812 ms
    ```
 
-   The lowercase `usertest: … ok` prose lines stay exactly as they are.
-   They are read by people, one of them is a required marker, and
-   rewriting them to carry a number would put a parser and a sentence in
-   the same string for no gain.
+   The lowercase `usertest: … ok` prose lines stay exactly as they are,
+   and stay prose. They are read by people, one of them is a required
+   marker, and teaching them to carry a number would make the parser
+   depend on the convention this design exists to stop depending on.
 
 2. **The trailing body becomes a named section.** Those 54 checks belong
    to no section today, so timings would not sum and the blind spot
@@ -236,9 +261,11 @@ of this check, so the two arrangements differ only in the durations.
 
 And one boot assertion, which is the cheap half: the run's own output
 must contain a section line for **every** section `selftest()` calls.
-That is the guard against the failure mode this tree has hit before — a
+Driver-side emission makes that hard to break, and the assertion is
+what says so rather than assuming it — the failure mode it guards is a
 section added later that nobody brackets, invisible again, with the
-summary looking complete.
+summary looking complete. That is exactly how two of the nine prose
+markers stopped being last.
 
 ## Risks
 
@@ -278,8 +305,10 @@ summary looking complete.
   and CI has since put 8284 ms of one line against it with no way to
   say what moved. A third widening buys another few months of not
   knowing.
-- **Do nothing; the hang case is already covered.** True and not
-  sufficient — the last boundary does name a hang, which is why this
-  report says so plainly rather than claiming otherwise. But every
-  actual incident so far has been slowness, not a hang, and slowness is
-  the case with no instrument at all.
+- **Do nothing; the prose markers are close enough.** They are not,
+  and the first draft of this report said they were. Two of the nine
+  print mid-section and one is followed by a further check, so reading
+  the last marker as a boundary names the wrong section — and a
+  diagnostic that is usually right is the kind this file keeps having
+  to retract. Every actual incident so far has been slowness anyway,
+  which the markers say nothing about at all.
