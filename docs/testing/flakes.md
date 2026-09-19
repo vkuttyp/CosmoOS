@@ -581,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-nine, to 2026-09-19**, across CI and this developer's machine, on
+**Forty, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -617,14 +617,15 @@ of this section said eight and then listed nine:
 | PR #189's own CI run, the next one | observed, aarch64 (`a81365c`, documentation-only): `connect 0 in 1382 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a seventh time, and the first retransmission in nine sightings |
 | PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
 | PR #191's own CI run | observed, aarch64 (`f89a240`, documentation-only): **`connect 0 in 493 ms`** -- a new fastest, below the floor set three sightings earlier -- `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a ninth time |
+| PR #191's own CI run, a later one | observed, **x86-64** (`7ca342b`): `connect 0 in 715 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a tenth time, and **only the second x86-64 reading** after sighting thirty-five |
 
-Thirty entries, thirty-nine occurrences -- and the table is the tally,
+Thirty-one entries, forty occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-five rows
+them and are not independently re-verified here. The last twenty-six rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **thirty instrumented** occurrences
-behind the other twenty-four rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty-one instrumented** occurrences
+behind the other twenty-five rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1168,15 +1169,18 @@ row one too. `f446890`, documentation-only again, PR #188's own CI:
 The shape of thirty, thirty-two and thirty-four: reset before the
 write.
 
-**Five readings, five times row one, and now on both architectures** —
-three aarch64 job configurations (default, protection-capable, GICv3)
-and x86-64. The x86-64 reading is the one this file had been careful
-to say was missing, and it changes the claim's scope rather than its
-content: the interpretation has not moved since sighting thirty and is
-now architecture-independent. **slirp holds a host-side connection
-open, established and silent, while remaining responsive to other
-connections through itself.** Where the guest's bytes are lost, when
-there are any, remains unlocated.
+**Ten readings, ten times row one, on both architectures** — two of
+them x86-64 (sightings thirty-five and forty) and the rest aarch64
+across three job configurations (default, protection-capable, GICv3).
+
+This paragraph was written at five readings and its conclusion has not
+needed changing since, which is worth as much as the readings
+themselves: **slirp holds a host-side connection open, established and
+silent, while remaining responsive to other connections through
+itself.** The x86-64 sightings were the ones this file had been
+careful to say were missing; having them changes the claim's scope and
+not its content. Where the guest's bytes are lost, when there are any,
+remains unlocated.
 
 **What this does not name is the line of code.** It names the component
 and the shape, which is what the unit promised and more than thirty
