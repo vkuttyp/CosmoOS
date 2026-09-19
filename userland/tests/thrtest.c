@@ -1135,7 +1135,7 @@ static void env_pointer_survives_overwrite(void)
  * deliberate `setenv` leak load-bearing for a fourth time in this
  * unit: another thread is growing the environment throughout.
  */
-static unsigned spawn_done[3];   /* attempts completed, per variant */
+static unsigned spawn_done[4];   /* attempts completed, per variant */
 
 static void *env_spawner(void *arg)
 {
@@ -1150,14 +1150,36 @@ static void *env_spawner(void *arg)
      * the right trade -- the three exits are what this case covers,
      * and `spawn_done` now says so rather than the loop bound.
      */
-    for (unsigned i = 0; i < 39; i++) {
-        /* absolute, PATH-search hit, PATH-search miss */
-        const char *file = (i % 3 == 0) ? "/bin/true"
-                         : (i % 3 == 1) ? "true"
-                                        : "cosmo-no-such-program";
+    for (unsigned i = 0; i < 40; i++) {
+        /* absolute hit, PATH hit, PATH miss, absolute MISS */
+        const char *file = (i % 4 == 0) ? "/bin/true"
+                         : (i % 4 == 1) ? "true"
+                         : (i % 4 == 2) ? "cosmo-no-such-program"
+                                        : "/bin/cosmo-no-such-program";
         const char *const av[] = { file, NULL };
+        errno = 0;
         pid_t p = spawnvp(file, av, NULL, 0);
-        if (i % 3 == 2) {
+        if (i % 4 == 3) {
+            /*
+             * The absolute path that cannot run: `strchr` succeeds,
+             * `spawn_req` fails, and the exit frees the snapshot on
+             * the way out. The point is the errno -- that arm saves
+             * and restores it around the `free` precisely so a
+             * successful `free` cannot repaint a failed spawn, and
+             * nothing tested that. Review found it.
+             */
+            if (p >= 0) {
+                int junk = 0;
+                bad++;
+                (void)waitpid(p, &junk, 0);
+            } else if (errno != ENOENT) {
+                printf("thrtest: FAIL absolute spawn miss left errno %d, wanted ENOENT\n", errno);
+                bad++;
+            }
+            spawn_done[3]++;
+            continue;
+        }
+        if (i % 4 == 2) {
             /* Must fail after walking every PATH element and freeing
              * the snapshot on the way out. A success here means the
              * name resolved, which would make this a third spawn of a
@@ -1177,7 +1199,7 @@ static void *env_spawner(void *arg)
         int st = 0;
         if (waitpid(p, &st, 0) != p || st != 0)
             bad++;
-        spawn_done[i % 3]++;
+        spawn_done[i % 4]++;
     }
     env_misses += bad;
     return NULL;
@@ -1198,7 +1220,7 @@ static void env_spawn_under_setenv(void)
 
     env_stop = 0;
     env_misses = 0;
-    spawn_done[0] = spawn_done[1] = spawn_done[2] = 0;
+    spawn_done[0] = spawn_done[1] = spawn_done[2] = spawn_done[3] = 0;
     CHECK_START(&churn, env_churn);
     CHECK_START(&sp, env_spawner);
     for (unsigned i = 0; i < 120; i++) {
@@ -1213,11 +1235,12 @@ static void env_spawn_under_setenv(void)
         snprintf(name, sizeof(name), "SPW%u", i);
         CHECK(unsetenv(name) == 0);
     }
-    /* Each of `spawnvp_flags`'s three exits, actually reached. */
-    CHECK(spawn_done[0] == 13 && spawn_done[1] == 13 && spawn_done[2] == 13);
+    /* Each of `spawnvp_flags`'s exits, actually reached. */
+    CHECK(spawn_done[0] == 10 && spawn_done[1] == 10 &&
+          spawn_done[2] == 10 && spawn_done[3] == 10);
     printf("thrtest: env-spawn-under-setenv: %u absolute + %u on PATH + %u unresolvable "
-           "across 120 growths, %u failures\n",
-           spawn_done[0], spawn_done[1], spawn_done[2], env_misses);
+           "+ %u absolute-miss (errno kept across the free) across 120 growths, %u failures\n",
+           spawn_done[0], spawn_done[1], spawn_done[2], spawn_done[3], env_misses);
 }
 
 /*
