@@ -33,11 +33,15 @@ headline defect is not demonstrated by a test**.
    `atexit` passed. With a barrier the eight enter together and the
    unlocked build loses three handlers — **the drain runs 6 of 9** and
    the marker fails. That is the bug-proof of record.
-4. **The acceptance count cannot detect a lost update**, which the
-   first build asserted on. Every thread's `atexit` *returns* 0 even
+4. **The acceptance count cannot detect a lost update, but it does
+   detect the overflow.** Every thread's `atexit` *returns* 0 even
    when its slot is overwritten, so "8 of 8 accepted" is true on a
-   broken build. What detects it is the **drain count**, and that is
-   what the test asserts.
+   broken build and the **drain count** is what catches a lost
+   handler. The same count catches the other defect for free, which
+   the design said it could not: an unlocked build accepts
+   **thirty-three** registrations into a table of thirty-two, so the
+   accounting is the canary the design thought it needed memory
+   inspection for.
 5. **The verdict had to move into the drain.** `main` printed
    `THREADTEST: PASS` and then called `exit`, so a drain that lost a
    handler or deadlocked could not reach the marker. The last handler
@@ -270,14 +274,22 @@ measurements say:
 
 | mutation | result |
 | --- | --- |
-| `atexit` unlocked (its read-modify-write split by a delay) | **the drain runs 6 of 9 and `THREADTEST: FAIL`** — three handlers lost. The bug-proof of record |
+| `atexit` unlocked (its read-modify-write split by a delay) | **`THREADTEST: FAIL 3`**. The flood is accepted **24 of 24** and the table reports holding **33** against an `ATEXIT_MAX` of 32 — the write past the end of a static array, seen from userland — and the drain runs **31 of 33**, two handlers lost. Both defects, countable |
 | `unsetenv` unlocked | passes. Not a proof |
 | `setenv` **and** `getenv` unlocked | passes, **three runs, zero misses**. Not a proof |
 
-**So one of the four is a proof and three are regression tests**, where
+**So two of the five are proofs and three are regression tests**, where
 the report promised three deterministic and one probabilistic. The
-prediction was wrong in the unfavourable direction and this is the
-place to say so rather than in a footnote.
+prediction was wrong in the unfavourable direction for the environment
+and in the favourable direction for `atexit`, and this is the place to
+say both rather than a footnote.
+
+**The bound test sees the overflow without a canary, which I had said
+it could not.** The design assumed a write past `g_atexit[31]` would
+need memory the test cannot inspect. It does not: the test counts what
+`atexit` *accepted*, and an unlocked build accepts thirty-three
+registrations into a table of thirty-two. The accounting is the
+canary.
 
 **Why the `atexit` one works and the others do not.** A lost handler is
 a *count* that survives to the end of the program: the drain reports
