@@ -73,28 +73,33 @@ in the first draft of this report.**
 
 | section | its `usertest:` lines | where the last one sits |
 | --- | --- | --- |
-| `fs_selftest` (49-255) | `symbolic links ok` (**110**), then `cosmofs mounted and read from user mode` / `no cosmofs to mount` (249/252) | 3 lines from the end |
-| `net_selftest` (258-471) | `sockets ok` (470) | at the end |
-| `proc_selftest` (474-1119) | `a symbolic link stays inside a process root` (**734**), `processes ok` (1118) | at the end |
-| `trap_selftest` (1603-1627) | `user exceptions ok` (**1616**) | **11 lines from the end** — the UMIP check runs after it |
-| `fpu_selftest` | `fpu isolation ok` | at the end |
-| `priv_selftest` (2967-3002) | `privilege boundary ok` (3001) | at the end |
-| `svc_selftest` (3065-3238) | `services ok` (3237) | at the end |
-| `proc_fs_selftest` (3264-3330) | `/proc ok` (3329) | at the end |
-| `fsctl_selftest` (3353-3553) | `fsctl ok` (3552) | at the end |
+| `fs_selftest` (49-255) | `symbolic links ok` (**110**), then `cosmofs mounted and read from user mode` / `no cosmofs to mount` (249/252) | **not last** — `CHECK(cosmo_umount("/") == -EBUSY)` runs after it (254) |
+| `net_selftest` (258-471) | `sockets ok` (470) | last |
+| `proc_selftest` (474-1119) | `a symbolic link stays inside a process root` (**734**), `processes ok` (1118) | last |
+| `trap_selftest` | x86-64: `user exceptions ok` (**1616**), then the UMIP check to 1627. **aarch64: the function is empty and prints nothing at all** | **not last on x86-64, absent on aarch64** |
+| `fpu_selftest` | `fpu isolation ok` | last |
+| `priv_selftest` (2967-3002) | `privilege boundary ok` (3001) | last |
+| `svc_selftest` (3065-3238) | `services ok` (3237) | last |
+| `proc_fs_selftest` (3264-3330) | `/proc ok` (3329) | last |
+| `fsctl_selftest` (3353-3553) | `fsctl ok` (3552) | last |
 | *(the trailing body)* | `write ok` and others | interleaved throughout |
 
-Two of them print **mid-section**: `fs` at line 110 with 145 lines of
-its function still to run, and `proc` at 734 with 385 still to run. A
-hang in either of those stretches leaves a marker as the last thing
-printed, and a reader who takes it for a boundary looks in the wrong
-section. And `trap_selftest`'s *only* marker is followed by the UMIP
-check — visible in the log today, where `usertest: umip: absent` prints
-**after** `usertest: user exceptions ok`.
+Two sections print an **early** marker as well: `fs` at line 110 with
+145 lines of its function still to run, and `proc` at 734 with 385
+still to run. So a marker appearing is not even evidence that its
+section is near the end. And `trap_selftest`'s marker being followed by
+the UMIP check is visible in the log today, where `usertest: umip:
+absent` prints **after** `usertest: user exceptions ok`.
 
-**Nothing makes a marker the last thing a section does.** Eight of the
-nine happen to end with one; that is a convention each section has to
-remember, not a structure, and two have already forgotten it. So:
+**Nothing makes a marker the last thing a section does. Seven of the
+nine happen to end with one**, which is a convention each section has
+to remember rather than a structure, and two have already forgotten
+it — `fs_selftest`, which unmounts `/` and checks the errno after
+printing, and `trap_selftest`, which on x86-64 runs the UMIP check
+after printing and **on aarch64 is an empty function that prints
+nothing at all**. The count is also not the same on both
+architectures, which a description of the markers has to say and this
+report's second draft did not. So:
 
 1. **A hang is *not* reliably attributable today.** The first draft of
    this report claimed it was, on the strength of the markers appearing
@@ -155,14 +160,29 @@ worth building.
 **Each section reports its own duration, from the guest's clock, on a
 line the harness parses.**
 
-1. **`selftest()` times each call and prints the line — the section
-   does not.** This is the whole difference between a boundary and a
-   convention. If a section printed its own timing, the line would be
-   as reliable as the markers are now: correct until someone adds a
-   check after it, which has already happened twice. Bracketing the
-   *call* in the driver means a section cannot be late, cannot forget,
-   and cannot be added without a line, because the driver is the only
-   place that calls it.
+1. **`selftest()` drives a table, and the table is what makes the
+   claim true.** The first draft of this design said the driver
+   bracketing each call means "a section cannot be added without a
+   line", and review was right that it does not: the nine are nine
+   plain calls, and a tenth plain call added below them is exactly as
+   invisible as it is today. Bracketing by hand is the same kind of
+   convention as printing a marker last, and this report has just
+   finished documenting two sections that forgot that one.
+
+   So the sections become a table the driver iterates, in the shape
+   `selftest.c` already uses for the kernel's own registry:
+
+   ```c
+   static const struct { const char *name; void (*fn)(void); } sections[] = {
+       { "fs", fs_selftest }, { "fsctl", fsctl_selftest }, /* ... */
+   };
+   ```
+
+   Now there is no way to *call* a section except through the loop that
+   times it, adding one is adding a row, and "cannot be added without a
+   line" is a property of the code rather than a promise about future
+   authors. It also gives the harness the list of expected names for
+   free, which is what the boot assertion below checks against.
 
    `cosmo_clock_ns()` is already used inside the suite, so there is no
    new syscall and no new dependency. The line goes in the existing
@@ -178,11 +198,13 @@ line the harness parses.**
    marker, and teaching them to carry a number would make the parser
    depend on the convention this design exists to stop depending on.
 
-2. **The trailing body becomes a named section.** Those 54 checks belong
-   to no section today, so timings would not sum and the blind spot
-   would survive the unit that exists to remove it. Whether it is
-   extracted into a function or merely bracketed in place is a build
-   decision; that it is *named* is not.
+2. **The trailing body becomes a real section, in the table.** Those 54
+   checks belong to no section today, so timings would not sum and the
+   blind spot would survive the unit that exists to remove it. With a
+   table it is not enough to bracket it in place: it has to be
+   extracted into a function and given a row, or it is the one thing
+   the loop does not cover — which is precisely the hole review found
+   in the first draft. Extracted, and named.
 
 3. **One total line**, so the sum can be reconciled against the kernel's
    `SELFTEST: process-user … (N ms)`. The difference is the process
@@ -247,7 +269,7 @@ boot:
 | `sections_parsed` | ten section lines in, ten rows out, in the order printed |
 | `slowest_named` | the summary names the slowest section, and names a *different* one when a different section is slow |
 | `total_reconciled` | the reported sum and the kernel's `SELFTEST` duration are both shown, and their difference is not silently dropped |
-| `missing_section_tolerated` | a run that ends early (a hang, a section that never printed) parses to the sections that did finish rather than raising — this is the case where the output matters most |
+| `truncated_run_parses` | a run that ends early — a hang, so the later sections never printed — parses to the sections that did finish rather than raising. This is the case where the output matters most, and it is why the parser tolerates a short list; it does **not** mean an unbracketed section can hide, which the table and the assertion below rule out |
 | `no_sections_is_not_an_error` | a release build, which runs no user-mode suite, produces no summary and no failure |
 
 **The bug-proof.** Two runs identical except for *which* section is
@@ -259,13 +281,15 @@ for the stated reason — a parser that names a section because it was
 first in the list, or last, or longest-named, passes a careless version
 of this check, so the two arrangements differ only in the durations.
 
-And one boot assertion, which is the cheap half: the run's own output
-must contain a section line for **every** section `selftest()` calls.
-Driver-side emission makes that hard to break, and the assertion is
-what says so rather than assuming it — the failure mode it guards is a
-section added later that nobody brackets, invisible again, with the
-summary looking complete. That is exactly how two of the nine prose
-markers stopped being last.
+And one boot assertion, which is the cheap half and the other half of
+review's point: a **complete** run must carry a section line for every
+row in the table. The table makes an unbracketed section impossible to
+write; the assertion is what catches the table and the suite drifting
+apart anyway — a row deleted, a function that returns early, a build
+where a section compiles to nothing. `trap_selftest` is already that
+last case on aarch64, so this is not hypothetical. The parser's
+tolerance of a short list (above) is for a truncated run and is why
+the assertion has to be separate from it.
 
 ## Risks
 
@@ -283,10 +307,13 @@ markers stopped being last.
   would mean the suite is simply large, and the honest next step is to
   say so instead of hunting a culprit that does not exist. The report
   should not promise a villain.
-- **The trailing body is the one place the design could be dodged.**
-  Leaving those 54 checks unnamed would make every other number look
-  clean while the gap survives. Named in the design so the build cannot
-  quietly skip it.
+- **The trailing body was the one place the design could be dodged**,
+  and in the first draft it still was: the design said "bracketed in
+  place or extracted, a build decision", which left 54 checks able to
+  sit outside the instrumentation while every other number looked
+  clean. It is a table row now, so the build has nowhere to put it
+  except inside the loop. Recorded rather than quietly amended,
+  because the hole was real and review found it.
 
 ## Alternatives considered
 
