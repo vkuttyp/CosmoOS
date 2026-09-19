@@ -215,6 +215,14 @@ void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint
  */
 uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
 
+#if CONFIG_DEBUG
+/* The checker's duplicate-name hash. Only `cosmofs-check-dup-name`
+ * uses it, to assert that the two names it relies on really do
+ * collide -- otherwise a change to the hash would make that test's
+ * false-positive half vacuous. */
+unsigned cosmofs_test_name_hash(const char *name, unsigned len);
+#endif
+
 /*
  * The invariant a copied deadlist keeps: no block is named by more than
  * one entry, across every snapshot. Returns the entries whose block

@@ -202,6 +202,19 @@ static unsigned name_hash(const char *name, unsigned len)
     return h % CFS_CHECK_NAMEBITS;
 }
 
+#if CONFIG_DEBUG
+/*
+ * The hash, for the one test that needs two names KNOWN to collide.
+ * Without this the test would pick a pair by hand, and a change to
+ * `name_hash` would stop them colliding and quietly turn the
+ * false-positive assertion into a test of nothing.
+ */
+unsigned cosmofs_test_name_hash(const char *name, unsigned len)
+{
+    return name_hash(name, len);
+}
+#endif
+
 static void name_it(struct cosmofs_check_class *cl, uint64_t what)
 {
     cl->count++;

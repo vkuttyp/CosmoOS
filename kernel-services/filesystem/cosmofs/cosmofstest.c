@@ -2083,18 +2083,23 @@ bool selftest_cosmofs_check_dup_name(const char **reason)
     check_teardown(bd);
 
     /*
-     * And the other half, which is the one a bitmap makes easy to get
-     * wrong: a SOUND directory of many distinct names must report
-     * nothing. Sixty-four names is enough to make a 32768-bit map
-     * collide occasionally, so this is the false-positive path and the
-     * re-scan is what keeps it quiet.
+     * The other half, which is the one a bitmap makes easy to get
+     * wrong: two DIFFERENT names that hash to the same bit must report
+     * nothing. Only the re-scan keeps this quiet -- with the bitmap hit
+     * trusted, a sound filesystem is reported as having a duplicate.
+     *
+     * The pair is deterministic rather than "enough names that
+     * something probably collides": sixty-four distinct names collide
+     * in a 32768-bit map only about six per cent of the time, so that
+     * version of this test would have passed against a missing re-scan
+     * nineteen times in twenty. The collision is ASSERTED first, so a
+     * change to the hash fails here loudly instead of quietly making
+     * the rest of this test vacuous.
      */
     CHECK(check_fixture(&bd, reason));
-    for (unsigned i = 0; i < 64; i++) {
-        char path[64];
-        ksnprintf(path, sizeof(path), ENG "/n%u", i);
-        CHECK(write_file(path, "x", 1));
-    }
+    CHECK(cosmofs_test_name_hash("asl", 3) == cosmofs_test_name_hash("bea", 3));
+    CHECK(write_file(ENG "/asl", "x", 1));
+    CHECK(write_file(ENG "/bea", "y", 1));
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dir_dup_name.count == 0);
