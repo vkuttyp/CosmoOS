@@ -1029,6 +1029,69 @@ static void atexit_bound(void)
            at_accepted_flood, (unsigned)AT_FLOOD, at_registered);
 }
 
+/*
+ * (F) The reader of `environ` that lives OUTSIDE stdlib.c.
+ *
+ * `spawnvp` hands the environment array to the kernel. It used to read
+ * the global directly, so a program doing exactly what
+ * `cosmo/thread.h` now permits -- setenv on one thread, spawn on
+ * another -- walked an array `setenv` had freed. The unit locked
+ * `stdlib.c`'s own accessors and left this one, which made invariant
+ * L8's claim false for the case a caller is most likely to hit.
+ * Found by review, not by the unit.
+ */
+static void *env_spawner(void *arg)
+{
+    (void)arg;
+    const char *const av[] = { "/bin/true", NULL };
+    unsigned bad = 0;
+    for (unsigned i = 0; i < 40 && !env_stop; i++) {
+        pid_t p = spawnvp(av[0], av, NULL, 0);
+        if (p < 0) {
+            bad++;
+            continue;
+        }
+        int st = 0;
+        if (waitpid(p, &st, 0) != p || st != 0)
+            bad++;
+    }
+    env_misses += bad;
+    return NULL;
+}
+
+/*
+ * Runs FIRST of the environment cases and cleans up after itself,
+ * because a spawn carries the whole environment to the kernel: with
+ * the hundreds of names the other two leave behind, `spawn` refuses
+ * with E2BIG and the test measures the argument limit instead of the
+ * race. The first build did exactly that -- 7 of 40 spawns failed
+ * with errno 7 against a correct library.
+ */
+static void env_spawn_under_setenv(void)
+{
+    cosmo_thread_t sp, churn;
+    char name[32];
+
+    env_stop = 0;
+    env_misses = 0;
+    CHECK(cosmo_thread_start(&churn, env_churn, NULL, 0) == 0);
+    CHECK(cosmo_thread_start(&sp, env_spawner, NULL, 0) == 0);
+    for (unsigned i = 0; i < 120; i++) {
+        snprintf(name, sizeof(name), "SPW%u", i);
+        CHECK(setenv(name, "v", 1) == 0);   /* frees the array under the spawner */
+    }
+    env_stop = 1;
+    CHECK(cosmo_thread_join(&sp, NULL) == 0);
+    CHECK(cosmo_thread_join(&churn, NULL) == 0);
+    CHECK(env_misses == 0);
+    for (unsigned i = 0; i < 120; i++) {   /* leave the environment as found */
+        snprintf(name, sizeof(name), "SPW%u", i);
+        CHECK(unsetenv(name) == 0);
+    }
+    printf("thrtest: env-spawn-under-setenv: 40 spawns across 120 growths, %u failures\n",
+           env_misses);
+}
+
 /* (E) A handler that calls back into the library must not deadlock --
  * the case exit's take/pop/release/call shape exists for. */
 static volatile int reentrant_ran;
@@ -1877,6 +1940,7 @@ int main(int argc, char **argv)
      * other handler's result. It prints the verdict. */
     CHECK(atexit(atexit_checks_at_exit) == 0);
 
+    env_spawn_under_setenv();   /* first: a spawn carries the whole environment */
     env_grow_under_readers();
     env_unset_under_readers();
     atexit_concurrent();
