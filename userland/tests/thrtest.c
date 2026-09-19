@@ -810,56 +810,55 @@ static void env_grow_under_readers(void)
 }
 
 /*
- * (B) unsetenv shifts the array under a walker. Deterministic, because
- * THE TEST OWNS THE WALK: it runs the same loop getenv runs, stops at a
- * chosen index, lets the other thread remove an earlier name, and
- * resumes. libc has no test seam, and this needs none -- what it proves
- * is that the TABLE is unsafe to walk unlocked, which is the hazard;
- * getenv's own safety is that it takes the lock.
+ * (B) unsetenv shifts the array while readers are inside `getenv`.
+ *
+ * This is PROBABILISTIC, and an earlier design of it claimed to be
+ * deterministic by having the test walk `environ` itself and pause
+ * mid-array. That does not work, and the reason is worth keeping: a
+ * walker the test owns never takes the library's lock, so the lock
+ * the fix adds cannot protect it -- the test fails identically with
+ * and without the fix, which makes it a test of nothing. A
+ * deterministic version needs to pause INSIDE `getenv`, which needs a
+ * test seam libc does not have.
+ *
+ * So the reader here is the real `getenv`, and the window is widened
+ * rather than forced: a long environment to walk, and many removals.
  */
-static volatile int walk_paused, walk_release;
-static volatile int walk_found;
-
-static void *env_walker(void *arg)
+static void *env_unset_reader(void *arg)
 {
     (void)arg;
-    /* getenv's loop, with a pause in the middle. */
-    for (size_t i = 0; environ && environ[i]; i++) {
-        if (i == 2) {
-            walk_paused = 1;
-            while (!walk_release)
-                cosmo_yield();
-        }
-        if (strncmp(environ[i], "TARGET=", 7) == 0) {
-            walk_found = 1;
-            return NULL;
-        }
+    while (!env_stop) {
+        const char *v = getenv("STABLE");
+        if (v == NULL || strcmp(v, "yes") != 0)
+            __atomic_fetch_add(&env_misses, 1, __ATOMIC_RELAXED);
     }
-    walk_found = 0;
     return NULL;
 }
 
 static void env_unset_under_readers(void)
 {
-    cosmo_thread_t w;
+    cosmo_thread_t r[ENV_READERS];
+    char name[32];
 
-    /* TARGET sits late; DOOMED sits before the pause point, so removing
-     * it shifts TARGET back into a slot the walker has already read. */
-    CHECK(setenv("DOOMED", "1", 1) == 0);
-    CHECK(setenv("TARGET", "here", 1) == 0);
-    walk_paused = walk_release = walk_found = -1;
-    walk_paused = 0;
-    walk_release = 0;
-    CHECK(cosmo_thread_start(&w, env_walker, NULL, 0) == 0);
-    while (!walk_paused)
-        cosmo_yield();
-    CHECK(unsetenv("DOOMED") == 0);
-    walk_release = 1;
-    CHECK(cosmo_thread_join(&w, NULL) == 0);
-    /* The walker must still find a name nobody removed. */
-    CHECK(walk_found == 1);
-    printf("thrtest: env-unset-under-readers: the walker %s TARGET across a shift\n",
-           walk_found == 1 ? "found" : "LOST");
+    CHECK(setenv("STABLE", "yes", 1) == 0);
+    for (unsigned i = 0; i < 200; i++) {
+        snprintf(name, sizeof(name), "DEL%u", i);
+        CHECK(setenv(name, "x", 1) == 0);
+    }
+    env_stop = 0;
+    env_misses = 0;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_start(&r[i], env_unset_reader, NULL, 0) == 0);
+    for (unsigned i = 0; i < 200; i++) {
+        snprintf(name, sizeof(name), "DEL%u", i);
+        CHECK(unsetenv(name) == 0);      /* each one shifts the tail */
+    }
+    env_stop = 1;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_join(&r[i], NULL) == 0);
+    CHECK(env_misses == 0);
+    printf("thrtest: env-unset-under-readers: %u readers over 200 removals, %u misses\n",
+           (unsigned)ENV_READERS, env_misses);
 }
 
 /*
@@ -870,9 +869,19 @@ static void env_unset_under_readers(void)
 static volatile unsigned at_ran;
 static void at_handler(void) { __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED); }
 
+static volatile int at_go;
+
+/*
+ * The barrier is the point. Without it the threads are started in a
+ * loop and each finishes before the next exists, so they never
+ * contend and an unlocked `atexit` passes the test -- which is what
+ * the first build measured.
+ */
 static void *at_registrar(void *arg)
 {
     unsigned *ok = arg;
+    while (!at_go)
+        cosmo_yield();
     *ok = (atexit(at_handler) == 0) ? 1u : 0u;
     return NULL;
 }
@@ -884,8 +893,10 @@ static void atexit_concurrent(void)
     cosmo_thread_t t[AT_THREADS];
     unsigned ok[AT_THREADS] = { 0 };
 
+    at_go = 0;
     for (unsigned i = 0; i < AT_THREADS; i++)
         CHECK(cosmo_thread_start(&t[i], at_registrar, &ok[i], 0) == 0);
+    at_go = 1;                       /* all eight enter atexit together */
     for (unsigned i = 0; i < AT_THREADS; i++)
         CHECK(cosmo_thread_join(&t[i], NULL) == 0);
     for (unsigned i = 0; i < AT_THREADS; i++)
