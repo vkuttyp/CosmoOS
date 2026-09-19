@@ -749,6 +749,190 @@ static int filter_child(const char *mode)
     return 3;
 }
 
+
+/* ---- the environment and the atexit list, under threads --------------- *
+ *
+ * docs/audit/next-subsystem-libc-shared-tables.md. These two tables were
+ * the ones the threads unit did not lock, while it locked the allocator
+ * and stdio and made errno per-thread.
+ */
+
+#define ENV_READERS 3
+#define ENV_ROUNDS  400
+
+static volatile int env_stop;
+static volatile unsigned env_misses;
+
+/* A reader that must always find a name nobody ever removes. */
+static void *env_reader(void *arg)
+{
+    (void)arg;
+    while (!env_stop) {
+        const char *v = getenv("STABLE");
+        if (v == NULL || strcmp(v, "yes") != 0)
+            __atomic_fetch_add(&env_misses, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+/*
+ * (A) setenv grows the array while readers walk it. Before the lock
+ * this freed `environ` under them -- a use-after-free in the
+ * allocator. This one is PROBABILISTIC by nature: the only thing that
+ * distinguishes it is a read of freed memory, so the window is made
+ * wide (a long environment, many growths) rather than iterated and
+ * hoped for. The report says so rather than calling it a proof.
+ */
+static void env_grow_under_readers(void)
+{
+    cosmo_thread_t r[ENV_READERS];
+    char name[32];
+
+    CHECK(setenv("STABLE", "yes", 1) == 0);
+    for (unsigned i = 0; i < 60; i++) {      /* a long array to walk */
+        snprintf(name, sizeof(name), "PAD%u", i);
+        CHECK(setenv(name, "x", 1) == 0);
+    }
+    env_stop = 0;
+    env_misses = 0;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_start(&r[i], env_reader, NULL, 0) == 0);
+    for (unsigned i = 0; i < ENV_ROUNDS; i++) {
+        snprintf(name, sizeof(name), "GROW%u", i);
+        CHECK(setenv(name, "v", 1) == 0);    /* each one reallocates */
+    }
+    env_stop = 1;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_join(&r[i], NULL) == 0);
+    CHECK(env_misses == 0);
+    printf("thrtest: env-grow-under-readers: %u readers over %u growths, %u misses\n",
+           (unsigned)ENV_READERS, (unsigned)ENV_ROUNDS, env_misses);
+}
+
+/*
+ * (B) unsetenv shifts the array under a walker. Deterministic, because
+ * THE TEST OWNS THE WALK: it runs the same loop getenv runs, stops at a
+ * chosen index, lets the other thread remove an earlier name, and
+ * resumes. libc has no test seam, and this needs none -- what it proves
+ * is that the TABLE is unsafe to walk unlocked, which is the hazard;
+ * getenv's own safety is that it takes the lock.
+ */
+static volatile int walk_paused, walk_release;
+static volatile int walk_found;
+
+static void *env_walker(void *arg)
+{
+    (void)arg;
+    /* getenv's loop, with a pause in the middle. */
+    for (size_t i = 0; environ && environ[i]; i++) {
+        if (i == 2) {
+            walk_paused = 1;
+            while (!walk_release)
+                cosmo_yield();
+        }
+        if (strncmp(environ[i], "TARGET=", 7) == 0) {
+            walk_found = 1;
+            return NULL;
+        }
+    }
+    walk_found = 0;
+    return NULL;
+}
+
+static void env_unset_under_readers(void)
+{
+    cosmo_thread_t w;
+
+    /* TARGET sits late; DOOMED sits before the pause point, so removing
+     * it shifts TARGET back into a slot the walker has already read. */
+    CHECK(setenv("DOOMED", "1", 1) == 0);
+    CHECK(setenv("TARGET", "here", 1) == 0);
+    walk_paused = walk_release = walk_found = -1;
+    walk_paused = 0;
+    walk_release = 0;
+    CHECK(cosmo_thread_start(&w, env_walker, NULL, 0) == 0);
+    while (!walk_paused)
+        cosmo_yield();
+    CHECK(unsetenv("DOOMED") == 0);
+    walk_release = 1;
+    CHECK(cosmo_thread_join(&w, NULL) == 0);
+    /* The walker must still find a name nobody removed. */
+    CHECK(walk_found == 1);
+    printf("thrtest: env-unset-under-readers: the walker %s TARGET across a shift\n",
+           walk_found == 1 ? "found" : "LOST");
+}
+
+/*
+ * (C) and (D) atexit. Countable: register N from N threads and count
+ * how many run. A lost update is a number, not a timing.
+ */
+#define AT_THREADS 8
+static volatile unsigned at_ran;
+static void at_handler(void) { __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED); }
+
+static void *at_registrar(void *arg)
+{
+    unsigned *ok = arg;
+    *ok = (atexit(at_handler) == 0) ? 1u : 0u;
+    return NULL;
+}
+
+static unsigned at_registered;
+
+static void atexit_concurrent(void)
+{
+    cosmo_thread_t t[AT_THREADS];
+    unsigned ok[AT_THREADS] = { 0 };
+
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        CHECK(cosmo_thread_start(&t[i], at_registrar, &ok[i], 0) == 0);
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        CHECK(cosmo_thread_join(&t[i], NULL) == 0);
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        at_registered += ok[i];
+    /* Every one that said it registered must have been kept: the count
+     * the drain runs is checked at exit, below. */
+    CHECK(at_registered == AT_THREADS);
+    printf("thrtest: atexit-concurrent: %u of %u registrations accepted\n",
+           at_registered, (unsigned)AT_THREADS);
+}
+
+/* (E) A handler that calls back into the library must not deadlock --
+ * the case exit's take/pop/release/call shape exists for. */
+static volatile int reentrant_ran;
+static void reentrant_handler(void)
+{
+    (void)getenv("STABLE");     /* takes the same lock exit was holding */
+    reentrant_ran = 1;
+    __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED);   /* counted with the rest */
+}
+
+/*
+ * Registered FIRST so the LIFO drain runs it LAST, and it prints the
+ * program's verdict -- so a drain that loses a handler or deadlocks
+ * fails the run. Printing `THREADTEST: PASS` from `main` instead would
+ * have published the verdict before the thing under test had run: the
+ * first build did exactly that, and the drain's own failure could not
+ * reach the marker.
+ */
+static void atexit_checks_at_exit(void)
+{
+    if (at_ran != at_registered) {
+        printf("thrtest: FAIL atexit drain ran %u of %u\n", at_ran, at_registered);
+        failures++;
+    } else if (!reentrant_ran) {
+        printf("thrtest: FAIL the re-entrant handler did not run\n");
+        failures++;
+    } else {
+        printf("thrtest: atexit-drain: %u handlers ran, and the re-entrant one returned\n", at_ran);
+    }
+    if (failures == 0)
+        printf("THREADTEST: PASS\n");
+    else
+        printf("THREADTEST: FAIL %d\n", failures);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
     cosmo_thread_t t, t2;
@@ -1551,9 +1735,26 @@ int main(int argc, char **argv)
         printf("thrtest: phdr at 0x%lx, %lu entries, %d PT_TLS\n", at_phdr, at_phnum, nr_tls);
     }
 
-    if (failures == 0)
-        printf("THREADTEST: PASS\n");
-    else
-        printf("THREADTEST: FAIL %d\n", failures);
-    return failures ? 1 : 0;
+    /*
+     * The two tables the threads unit did not lock
+     * (docs/audit/next-subsystem-libc-shared-tables.md). Last, because
+     * the atexit ones leave handlers registered and the drain's own
+     * check runs after main returns.
+     */
+    /* FIRST, so the LIFO drain runs it LAST and it can see every
+     * other handler's result. It prints the verdict. */
+    CHECK(atexit(atexit_checks_at_exit) == 0);
+
+    env_grow_under_readers();
+    env_unset_under_readers();
+    atexit_concurrent();
+    CHECK(atexit(reentrant_handler) == 0);
+    at_registered++;             /* the drain must run this one too */
+
+    /*
+     * `exit`, not `return`: the drain is part of what is under test,
+     * and the verdict is printed from the last handler rather than
+     * from here.
+     */
+    exit(0);
 }
