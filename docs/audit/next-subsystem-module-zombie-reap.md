@@ -226,7 +226,7 @@ collected without being asked for.**
 | --- | --- |
 | `module-zombie-swept` | a zombie whose objects die is freed by the **next unrelated load**, with no unload of its own name |
 | `module-zombie-name-reused` | a replacement loaded under the zombie's name does not hide it: the sweep still collects it, and the replacement is untouched |
-| `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected by one sweep — today each needs its own `module_unload` call, and nothing makes any of them |
+| `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected by one sweep — before this unit each needed its own `module_unload` of that name, and nothing made even the first call |
 | ~~`module-zombie-holds-deps`~~ | **NOT BUILT** (item 4): unchanged in substance from what `selftest_module_unload_busy` proves, plus: once swept, the dependency pin is **released**, which is the consequence that matters |
 | `module-slots-enospc` | exhausting the publish-slot search returns `-ENOSPC`, publishes nothing, and leaves the loader usable. As built it uses `module_set_max_live_for_test` rather than thirty-two fixtures — the same search and the same error, with a smaller bound |
 | `module-zombie-swept-on-every-exit` | **not in the design; added in review.** The two exits where the NAME resolves to a zombie — the `-EBUSY` of one still busy, and the `0` after one is freed — each collect the zombies nobody named. Asserted on the zombie-list length across the one call, since a later unload's return value is satisfied by a sweep on any exit and so cannot tell them apart |

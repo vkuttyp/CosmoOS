@@ -425,9 +425,9 @@ tree.
   interface up -- it arrives as an argument and is kept, which is why
   that rule did not reach them and why **N22** now states the one that
   does;
-  `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
-  only by a later `module_unload` of the same name. ~~**Taken up by
-  `docs/audit/next-subsystem-module-zombie-reap.md`**~~ **BUILT (PR
+  ~~`MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are
+  reaped only by a later `module_unload` of the same name.~~ **~~Taken up by
+  `docs/audit/next-subsystem-module-zombie-reap.md`~~** **BUILT (PR
   #186); §4's small debts are now closed.** Every `module_load` and
   every `module_unload` now sweeps the zombie list by identity
   (invariant **M24**), and exhausting the slot array returns `-ENOSPC`
