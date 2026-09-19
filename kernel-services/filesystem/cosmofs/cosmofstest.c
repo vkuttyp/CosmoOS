@@ -1660,6 +1660,57 @@ static bool check_fixture(struct blkdev **bd, const char **reason)
 
 /* The fixture's file, by number: the corruption hook takes an inode and
  * not a path, so the test does the one name resolution. */
+/*
+ * Which classes were not empty, for a failure message.
+ *
+ * `CHECK_CLEAN(r)` says a report was not clean and nothing else; the
+ * class has to be recovered from the serial log, which is exactly what
+ * happened when CI failed `cosmofs-orphan-reserved` while this unit's
+ * report was in review (docs/audit/next-subsystem-fsck-unchecked.md).
+ * The buffer is static because the CHECK macros take a `const char *`
+ * that outlives the call.
+ */
+static const char *check_why(const struct cosmofs_check_report *r)
+{
+    static char buf[224];
+    unsigned n = 0;
+    buf[0] = '\0';
+    const struct { const char *name; const struct cosmofs_check_class *cl; } cls[] = {
+        { "leaked", &r->alloc_not_seen }, { "free-in-use", &r->seen_not_alloc },
+        { "cross-linked", &r->dup },      { "nlink", &r->nlink_wrong },
+        { "orphan", &r->orphan },         { "dangling", &r->dangling_entry },
+        { "dir-bad", &r->dir_bad },       { "counter", &r->counter_wrong },
+        { "chain-cycle", &r->chain_cycle },
+        { "extent-order", &r->extent_order },
+        { "extent-overlap", &r->extent_overlap },
+        { "dup-name", &r->dir_dup_name },
+        { "unreadable", &r->unreadable },
+    };
+    for (unsigned i = 0; i < sizeof(cls) / sizeof(cls[0]); i++) {
+        if (cls[i].cl->count == 0)
+            continue;
+        n += (unsigned)ksnprintf(buf + n, sizeof(buf) - n, "%s%s=%llu first 0x%llx",
+                                 n ? ", " : "report not clean: ", cls[i].name,
+                                 (unsigned long long)cls[i].cl->count,
+                                 (unsigned long long)(cls[i].cl->named ? cls[i].cl->name[0] : 0));
+        if (n >= sizeof(buf) - 40)
+            break;
+    }
+    if (n == 0)
+        ksnprintf(buf, sizeof(buf), "report not clean, but every class is empty (partial=%d)",
+                  (int)r->partial);
+    return buf;
+}
+
+/* `CHECK_CLEAN(r)` with the reason attached. */
+#define CHECK_CLEAN(r)                                                         \
+    do {                                                                       \
+        if (!(r).clean) {                                                      \
+            *reason = check_why(&(r));                                         \
+            return false;                                                      \
+        }                                                                      \
+    } while (0)
+
 static uint64_t check_file_ino(void)
 {
     struct cosmo_stat st;
@@ -2047,7 +2098,7 @@ bool selftest_cosmofs_check_dup_name(const char **reason)
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dir_dup_name.count == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     check_teardown(bd);
 
     kinfo("selftest: cosmofs-check-dup-name: one name twice at two inodes is reported, and "
@@ -2070,7 +2121,7 @@ bool selftest_cosmofs_check_snapshot(const char **reason)
 
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.snapshots_seen == 1);
-    CHECK(r.clean);                       /* the held blocks are not leaks */
+    CHECK_CLEAN(r);                       /* the held blocks are not leaks */
     CHECK(r.dup.count == 0);              /* nor cross-links: sharing is the point */
     CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
 
@@ -2130,7 +2181,7 @@ bool selftest_cosmofs_orphan_crash(const char **reason)
     CHECK(st.pending_orphans == 1);
     /* What the filesystem looks like with the promise outstanding. */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);                          /* a recorded orphan is not a finding */
+    CHECK_CLEAN(r);                          /* a recorded orphan is not a finding */
     CHECK(r.orphan.count == 0);
     uint64_t free_outstanding = r.counted_free;
 
@@ -2152,7 +2203,7 @@ bool selftest_cosmofs_orphan_crash(const char **reason)
      */
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);                          /* the claim */
+    CHECK_CLEAN(r);                          /* the claim */
     CHECK(r.orphan.count == 0);
     /* The file's sixteen blocks are back, and so is its inode slot. */
     CHECK(r.counted_free >= free_outstanding + 16);
@@ -2267,7 +2318,7 @@ bool selftest_cosmofs_orphan_dir(const char **reason)
     CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
     CHECK(r.nlink_wrong.count == 0);        /* the replay did not touch the parent */
     CHECK(vfs_stat(NULL, ENG "/keep", &pst) == 0);
@@ -2319,7 +2370,7 @@ bool selftest_cosmofs_orphan_rename(const char **reason)
     cosmofs_test_set_writeback(mount_of(ENG), false);
     CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(read_matches(ENG "/victim", "short", 5));   /* the rename itself stood */
     CHECK(r.counted_free >= free_outstanding + 16);   /* the replaced file's blocks came back */
 
@@ -2432,7 +2483,7 @@ bool selftest_cosmofs_orphan_reserved(const char **reason)
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.seen_not_alloc.count == 0);   /* the claim */
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
     CHECK(st.pending_orphans == 0);
 
@@ -2537,7 +2588,7 @@ bool selftest_cosmofs_orphan_supersede(const char **reason)
     CHECK(vfs_sync() == 0);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
 
     kinfo("selftest: cosmofs-orphan-supersede: 100 commits, %llu free blocks lost to them in all",
           (unsigned long long)(first.free_blocks - last.free_blocks));
@@ -2576,7 +2627,7 @@ bool selftest_cosmofs_orphan_rollback(const char **reason)
     CHECK(after.orphan_root == 0);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(read_matches(ENG "/held", "content", 7));   /* the unlink went with it */
 
     kinfo("selftest: cosmofs-orphan-rollback: the failed fill left generation %llu and %llu free blocks",
@@ -2628,7 +2679,7 @@ bool selftest_cosmofs_orphan_suspect(const char **reason)
     CHECK(st.nlink == 1);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
 
     kinfo("selftest: cosmofs-orphan-suspect: a record naming a linked inode was refused and the file survived");
@@ -2680,7 +2731,7 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
     CHECK(vfs_sync() == 0);
     CHECK(vfs_sync() == 0);   /* the deferred frees land on the commit after the repair's */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.counted_free == free_before);   /* every block the inode held came back */
 
     check_teardown(bd);
@@ -2745,7 +2796,7 @@ bool selftest_cosmofs_check_many_orphans(const char **reason)
     /* Nothing left: the point of the test. A repair that worked from the
      * eight names would report eight repaired and leave four behind, and
      * this pass would find them. */
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
     CHECK(r.counted_free > free_with_orphans);   /* and the space came back */
     check_teardown(bd);
