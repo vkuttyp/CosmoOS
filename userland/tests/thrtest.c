@@ -1021,9 +1021,14 @@ static void atexit_bound(void)
     /* Three threads offering eight each against a table of 32 that
      * already holds some: more offered than can be taken. */
     /* The point of the test: more was offered than the table can
-     * hold, so some must have been refused. */
+     * hold, so some must have been refused. The `+ 1` is
+     * `atexit_checks_at_exit`, which occupies a slot but is
+     * deliberately absent from `at_registered` because it does not
+     * increment `at_ran`. Without it this bound permitted 33 entries
+     * in a table of 32 -- one more than the overflow it exists to
+     * catch. Review caught that too. */
     CHECK(at_accepted_flood < (unsigned)AT_FLOOD);
-    CHECK(at_accepted_flood + at_registered <= 32u);
+    CHECK(at_accepted_flood + at_registered + 1u <= 32u);
     at_registered += at_accepted_flood;
     printf("thrtest: atexit-bound: %u of %u offered were accepted, table holds %u\n",
            at_accepted_flood, (unsigned)AT_FLOOD, at_registered);
@@ -1092,12 +1097,35 @@ static void env_spawn_under_setenv(void)
            env_misses);
 }
 
-/* (E) A handler that calls back into the library must not deadlock --
- * the case exit's take/pop/release/call shape exists for. */
-static volatile int reentrant_ran;
+/*
+ * (E) A handler that calls back into the library must not deadlock,
+ * and one that REGISTERS another must have that one run.
+ * `exit`'s take/pop/release/call shape exists for both, and its
+ * comment makes the second claim outright -- "a handler that
+ * registers another gets it run by the next turn of this loop".
+ * The first build of this case called only `getenv`, so the claim
+ * about registration was documented and untested; review caught that.
+ *
+ * `atexit` from inside the drain succeeds however full the table was
+ * when `exit` was called, because the drain pops each entry before
+ * calling it: the flood's 22 slots are already free by the time this
+ * runs. LIFO then makes the new handler the very next one called.
+ */
+static volatile int reentrant_ran, late_ran, late_registered;
+
+static void late_handler(void)
+{
+    late_ran = 1;
+    __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED);
+}
+
 static void reentrant_handler(void)
 {
     (void)getenv("STABLE");     /* takes the same lock exit was holding */
+    if (atexit(late_handler) == 0) {    /* ... and so does this */
+        late_registered = 1;
+        at_registered++;        /* the drain must reach it too */
+    }
     reentrant_ran = 1;
     __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED);   /* counted with the rest */
 }
@@ -1118,14 +1146,34 @@ static void atexit_checks_at_exit(void)
     } else if (!reentrant_ran) {
         printf("thrtest: FAIL the re-entrant handler did not run\n");
         failures++;
+    } else if (!late_registered) {
+        printf("thrtest: FAIL atexit from inside a handler was refused\n");
+        failures++;
+    } else if (!late_ran) {
+        printf("thrtest: FAIL a handler registered during the drain never ran\n");
+        failures++;
     } else {
-        printf("thrtest: atexit-drain: %u handlers ran, and the re-entrant one returned\n", at_ran);
+        printf("thrtest: atexit-drain: %u handlers ran, the re-entrant one returned, "
+               "and the one it registered ran next\n", at_ran);
     }
     if (failures == 0)
         printf("THREADTEST: PASS\n");
     else
         printf("THREADTEST: FAIL %d\n", failures);
     fflush(stdout);
+    /*
+     * The exit STATUS as well as the marker. `main` ends
+     * `exit(failures ? 1 : 0)`, but `failures` can still rise here --
+     * these checks are part of it -- and a status already handed to
+     * `exit` cannot be revised. `_exit` is the last statement of the
+     * last handler, so it skips nothing: stdout is flushed above.
+     * The build that moved the verdict into the drain replaced
+     * main's `return failures ? 1 : 0;` with an unconditional
+     * `exit(0)` and left the marker as the only signal of failure.
+     * Review caught that; keeping the status costs these four lines.
+     */
+    if (failures != 0)
+        _exit(1);
 }
 
 int main(int argc, char **argv)
@@ -1953,7 +2001,8 @@ int main(int argc, char **argv)
     /*
      * `exit`, not `return`: the drain is part of what is under test,
      * and the verdict is printed from the last handler rather than
-     * from here.
+     * from here. The status still travels -- and the drain can raise
+     * it further, see `atexit_checks_at_exit`.
      */
-    exit(0);
+    exit(failures ? 1 : 0);
 }
