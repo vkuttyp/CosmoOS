@@ -788,11 +788,19 @@ static void env_grow_under_readers(void)
     cosmo_thread_t r[ENV_READERS];
     char name[32];
 
-    CHECK(setenv("STABLE", "yes", 1) == 0);
-    for (unsigned i = 0; i < 60; i++) {      /* a long array to walk */
+    /*
+     * The padding goes in FIRST and the observed name LAST, so a
+     * reader has to walk the whole mutated tail to reach it. The
+     * first build had this the other way round: `STABLE` sat at the
+     * front, `getenv` found it immediately, and the reader never
+     * entered the part of the array being reallocated -- so the test
+     * could not have caught a missing lock. Review found it.
+     */
+    for (unsigned i = 0; i < 60; i++) {
         snprintf(name, sizeof(name), "PAD%u", i);
         CHECK(setenv(name, "x", 1) == 0);
     }
+    CHECK(setenv("STABLE", "yes", 1) == 0);
     env_stop = 0;
     env_misses = 0;
     for (unsigned i = 0; i < ENV_READERS; i++)
@@ -840,11 +848,17 @@ static void env_unset_under_readers(void)
     cosmo_thread_t r[ENV_READERS];
     char name[32];
 
-    CHECK(setenv("STABLE", "yes", 1) == 0);
+    /*
+     * The removable entries go BEFORE the observed one, so every
+     * removal shifts `STABLE` down a slot and a reader in the middle
+     * of the array can be stepped over. The first build appended them
+     * after `STABLE`, where no shift could reach it.
+     */
     for (unsigned i = 0; i < 200; i++) {
         snprintf(name, sizeof(name), "DEL%u", i);
         CHECK(setenv(name, "x", 1) == 0);
     }
+    CHECK(setenv("STABLE", "yes", 1) == 0);
     env_stop = 0;
     env_misses = 0;
     for (unsigned i = 0; i < ENV_READERS; i++)
