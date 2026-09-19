@@ -2772,6 +2772,29 @@ See [docs/development.md](docs/development.md).
   returning an error would have been worse than the panic.
   352 self-tests on both architectures, debug and release (PR #186).
 
+- **A slow section is named instead of the whole suite.**
+  `process-user` was one `SELFTEST` line standing for the entire
+  user-mode suite — nine sections, about 540 checks in them and 54 more
+  outside any section — so when it was slow nothing said which part
+  was, and its budget had to be widened twice blind. On CI it reached
+  **8284 ms**, past the 8000 ms every ordinary test is held to,
+  surviving only on its own 20 s composite budget.
+  `init --selftest` now drives a **table** of sections and times each
+  call, printing `USERTEST: section <name> <ms> ms` and a total; the
+  harness parses them and names the slowest beside the per-test
+  summary. The table rather than ten bracketed calls is the point: the
+  driver is the only caller, so a section cannot be added without a
+  line — where the suite's existing `usertest: … ok` prose lines were
+  a convention two of the nine had already stopped honouring. **No
+  per-section budget**, because rationing a section that got more
+  thorough is the defect this replaces; the numbers are for
+  attribution. The first measurement disagrees with the source: `svc`
+  is two fifths of the suite from **34** checks and nine sleeps
+  waiting on service state, while `proc` with 235 checks is smaller —
+  time here is spawning and waiting, not checking. Invariant **F13**,
+  30 host checks in `tests/boot/test_usertest_sections.py`.
+  352 self-tests on both architectures, debug and release (PR #188).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

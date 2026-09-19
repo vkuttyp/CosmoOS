@@ -61,16 +61,15 @@ thread could include the blocking ones.
 
 **F6. Every self-test reports its duration, and none approaches the hang
 watchdog.** Check: `run_boot_test.py` fails a test over
-`SELFTEST_BUDGET_MS` (8000 ms); the slowest *test* today is `net-lo-tcp`
-at about 2.8 s. One line is not a test: `process-user` is the whole
-user-mode suite behind one, grows whenever userland gains a check, and
-has its own budget in the harness's `composite_budget_ms` (20 s) for
-that reason -- it stood at 7129 ms of 8000 on CI before the unit that
-noticed. `cosmofs-replay` has one too: 211 filesystem images mounted and
-checked behind one line, with a CI spread of 4703-8309 ms on identical
-code (`docs/verification/design.md` §6).
-
-## Rules the infrastructure keeps
+`SELFTEST_BUDGET_MS` (8000 ms); the slowest *test* on this developer's
+machine is `net-lo-tcp` at about 2.8 s, and CI's slowest are larger. One
+line is not a test: `process-user` is the whole user-mode suite behind
+one, grows whenever userland gains a check, and has its own budget in
+the harness's `composite_budget_ms` (20 s) for that reason -- it stood
+at 7129 ms of 8000 on CI before the unit that noticed, and reached
+8284 ms afterwards. `cosmofs-replay` has one too: 410 filesystem images
+mounted and checked behind one line, with a CI spread of 4703-8309 ms on
+identical code (`docs/verification/design.md` §6).
 
 **F7. Fuzz runs are reproducible.** The driver's mutation sequence is a
 function of `FUZZ_SEED` and the seeds/corpus; a crashing input is saved
@@ -105,3 +104,22 @@ requires `dropped == 0`. Check: `cosmofs-replay` (`log->dropped == 0`).
 `fault-blk` unmount, remove their mountpoints and destroy their devices;
 the vnode count and (for `fault-kmalloc`) the heap's live objects return to
 their baselines. Check: the tests' own final assertions.
+
+**F13. A composite self-test reports its sections, so a slow one is
+named instead of the whole suite.** `init --selftest` drives a table of
+sections and times each call, printing `USERTEST: section <name> <ms>
+ms` per row and a total; the harness parses them and prints the
+slowest beside the per-test summary. The table is what makes this an
+invariant rather than a convention: the driver is the only caller, so
+a section cannot be added without a line. **No section carries a
+budget** -- the composite 20 s is still the only failure condition,
+because rationing a section that got more thorough is the defect this
+replaced. Check: host test `tests/boot/test_usertest_sections.py` (30
+checks), whose bug-proof hands the formatter two runs with identical
+totals differing only in *which* section is slow and requires
+different summaries naming the right one; plus the harness refusing a
+run whose sections and declared count disagree, or in which a table
+row produced no line. A section that compiles to nothing still reports
+(`trap_selftest` is empty on aarch64 and reads `0 ms`).
+
+## Rules the infrastructure keeps

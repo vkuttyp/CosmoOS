@@ -330,6 +330,11 @@ SELFTEST: thread           ... ok
 ...
 SELFTEST: smp-mutex        ... ok
 ...
+USERTEST: section fs 128 ms
+...
+USERTEST: section svc 1386 ms
+USERTEST: section syscalls 8 ms
+USERTEST: sections 10, total 3610 ms
 USERTEST: PASS
 SELFTEST: process-user     ... ok
 init: crashing on purpose
@@ -358,7 +363,10 @@ init: shell exited with status 0
 ```
 
 Lines starting with `init:`, `USERTEST:` and `SHTEST:` are written by
-user programs through the `write` system call on handle 1; the `cosmo$ `
+user programs through the `write` system call on handle 1 -- the
+`USERTEST: section ...` lines are the user-mode suite timing itself,
+which the harness turns into its `user-mode suite ... slowest: ...`
+line (invariant **F13**); the `cosmo$ `
 prompts come from the shell and the text after them is what the harness
 typed, echoed by the console tty; the self-test run
 (`init --selftest`) and the crash run (`init --crash`) happen inside

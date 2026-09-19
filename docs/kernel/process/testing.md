@@ -55,7 +55,24 @@ exited before the kill.
 Runs the archive's `init` as `init --selftest` and requires exit status 0
 within 5 s, then waits for the process count to return to its baseline
 (the object is released by the reaper). Skipped with a log line when
-the loader found no module. The user program's checks
+the loader found no module.
+
+**One `SELFTEST` line, ten sections, and each reports its own time.**
+`selftest()` drives a table of sections rather than calling them in a
+row, timing each and printing
+
+```text
+USERTEST: section svc 1386 ms
+USERTEST: sections 10, total 3610 ms
+```
+
+so a slow section is named instead of the whole suite (invariant
+**F13**, `docs/audit/next-subsystem-usertest-sections.md`). The table
+is the point: the driver is the only caller, so a section cannot be
+added without a line. The `usertest: ... ok` prose lines the sections
+print are unchanged and are **not** boundaries -- two of them are
+followed by further checks, and `trap_selftest` is an empty function on
+aarch64 that prints none at all while still reporting `0 ms`. The user program's checks
 (`userland/init/init.c`, `selftest()`: `fs_selftest()` for the Phase 7
 filesystem calls (`docs/kernel-services/vfs/testing.md`), `net_selftest()`
 for the Phase 8 sockets (`docs/kernel-services/network/testing.md`),
@@ -351,6 +368,16 @@ AArch64).
 Milestone 10 (2026-09-06): `SELFTEST: PASS (124 tests)` on both
 architectures; `process-user` about 800 ms; the Linux programs add the
 thread, signal and PIE coverage on both machines.
+
+2026-09-19, the first per-section measurement: `process-user` is
+3711 ms (x86-64) and 3938 ms (aarch64), of which the sections account
+for 3610 / 3827 ms and the rest is the spawn and teardown. The order is
+the same on both, and it is not the order the check counts suggest --
+`svc` 1386 / 1489 ms from **34** checks and nine sleeps waiting on
+service state, `proc` 912 / 939 ms from 235, `fpu` 664 / 665 ms from 4
+(it spawns two partners), then `fsctl`, `fs`, `trap`, `priv`, `net`,
+`proc-fs`, `syscalls`. Time here is spawning and waiting, not
+checking.
 
 ## Gaps and planned tests
 

@@ -12,7 +12,10 @@
 
 ## `init --selftest`
 
-Listed in `docs/kernel/process/testing.md` (`process-user`). In short:
+Listed in `docs/kernel/process/testing.md` (`process-user`), which also
+records what each section costs: the suite times every section and
+prints `USERTEST: section <name> <ms> ms` plus a total, so a slow one is
+named rather than the whole run (invariant **F13**). In short:
 the Phase 7 filesystem checks with the libc directory stream and stdio
 on a file; the Phase 8 socket checks through the libc names and
 `inet_pton`/`inet_ntop`; the Phase 9 checks (`proc_selftest`): pipes and

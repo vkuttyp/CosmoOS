@@ -207,7 +207,7 @@ next addition to userland whatever that addition is.
 
 `cosmofs-replay` is the same shape and was added to the list for the
 same reason: it mounts and structurally checks **every prefix** of a
-recorded write stream, 211 complete filesystem images behind one line,
+recorded write stream, 410 complete filesystem images behind one line,
 so it grows whenever a cosmofs transaction writes another block. Its CI
 spread over four runs of code whose local timing is identical to `main`'s
 (4801 ms against 4803) was 4703 to 8309 ms against a budget of 8000
@@ -220,10 +220,70 @@ Such a test gets a budget sized for what it is, in
 `composite_budget_ms` in the harness, beside the default rather than
 instead of it: `process-user` and `cosmofs-replay` have 20 s. It keeps a budget, because a
 suite that hangs must still be caught. The list is deliberately short
-and each entry is an admission that the line reports too little; the
-better answer is for a suite to report its sections' timings so a slow
-section is named instead of the whole suite, and that is an inventory
-row rather than a plan.
+and each entry is an admission that the line reports too little.
+
+**`process-user` now reports its sections** (the better answer this
+section used to name and defer;
+`docs/audit/next-subsystem-usertest-sections.md`). `init --selftest`
+drives a **table** of sections and times each call, printing one line
+per section in the machine channel beside `USERTEST: PASS`:
+
+```text
+USERTEST: section svc 1386 ms
+USERTEST: sections 10, total 3610 ms
+```
+
+and the harness turns them into the summary it already prints for
+tests:
+
+```text
+boot-test: user-mode suite 3610 ms in 10 sections; slowest: svc 1386 ms,
+proc 912 ms, fpu 664 ms, fsctl 377 ms, fs 128 ms (the process-user line
+is 3711 ms; 101 ms is spawn and teardown)
+```
+
+Three things about that design are deliberate.
+
+**The table, not ten calls.** The driver is the only thing that calls a
+section, so a section cannot be timed late, forgotten, or added
+without a line: adding one is adding a row. Bracketing ten plain calls
+by hand would have been a convention, and this suite already had one of
+those — each section printing a `usertest: … ok` line last — which two
+of the nine had quietly stopped honouring. The lowercase lines stay
+prose and stay unchanged.
+
+**No per-section budget.** Only the composite 20 s remains, and it is
+still the only failure condition. A budget on a section would ration
+sections that got more thorough and need widening whenever userland
+grows, which is the trap this unit exists to remove; the numbers are
+for attribution, and under TCG they are attribution *between sections
+of one run*, not a baseline across runs or machines.
+
+**What the harness refuses** is a suite that stopped part-way (section
+lines with no total), a declared count that does not match the lines
+printed, a section it expects that produced no line, and a section
+name it does not know -- the last so that a row added to the table in
+`init.c` and not to `USERTEST_SECTIONS` in the harness is a failure
+rather than a silent extra. A
+zero-millisecond section is a reading, not an absence — `trap_selftest`
+compiles to an empty function on aarch64 and duly reports `0 ms`, which
+is the difference between this and the prose markers it replaces.
+
+**The first measurement, and it is not what the check counts suggest.**
+The *order* is the finding and it is stable — the same on x86-64 and
+aarch64, on the default and protection-capable boots, and with the
+table's rows reversed. `svc` is the slowest, about two fifths of the
+suite, from **34** checks and nine sleeps waiting on service state;
+`proc` with 235 checks is next; `fpu` with **4** is third, because it
+spawns two partner processes. Then `fsctl`, `fs`, `trap`, `priv`,
+`net`, `proc-fs`, `syscalls`. Time in this suite is spawning and
+waiting, not checking, and no reading of the source would have said
+so.
+
+The individual numbers are one run each and move a few per cent
+between runs — 1386 ms for `svc` on x86-64 and 1489 ms on aarch64 in
+the runs quoted above. They are for attribution between sections, not
+a baseline: see the budget paragraph.
 
 A failing self-test is also named against the **load-sensitive list**
 in `docs/testing/flakes.md` (the table under its "The list" heading): the
