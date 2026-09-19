@@ -3,7 +3,11 @@
 Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built**
 (PR #186), and the banner below records where the build differed from
-it — including two tests it named and did not produce.
+it — including **one** test it named and did not produce
+(`module-zombie-holds-deps`, item 4) and **one** it argued against and
+then built (`module-slots-enospc`, item 2). An earlier version of this
+line said two were not produced, which stopped being true when the
+argument in item 2 was overturned.
 
 **What the build changed, each found by building rather than reading:**
 
@@ -220,29 +224,38 @@ collected without being asked for.**
 
 | test | asserts |
 | --- | --- |
-| `module-zombie-swept` | a zombie whose objects die is freed by the **next unrelated load or unload**, with no unload of its own name |
+| `module-zombie-swept` | a zombie whose objects die is freed by the **next unrelated load**, with no unload of its own name |
 | `module-zombie-name-reused` | a replacement loaded under the zombie's name does not hide it: the sweep still collects it, and the replacement is untouched |
 | `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected by one sweep — today each needs its own `module_unload` call, and nothing makes any of them |
-| `module-zombie-holds-deps` | unchanged in substance from what `selftest_module_unload_busy` proves, plus: once swept, the dependency pin is **released**, which is the consequence that matters |
-| `module-slots-enospc` | exhausting `MODULE_MAX_LIVE` returns `-ENOSPC` and the machine lives |
+| ~~`module-zombie-holds-deps`~~ | **NOT BUILT** (item 4): unchanged in substance from what `selftest_module_unload_busy` proves, plus: once swept, the dependency pin is **released**, which is the consequence that matters |
+| `module-slots-enospc` | exhausting the publish-slot search returns `-ENOSPC`, publishes nothing, and leaves the loader usable. As built it uses `module_set_max_live_for_test` rather than thirty-two fixtures — the same search and the same error, with a smaller bound |
 | `module-zombie-swept-on-every-exit` | **not in the design; added in review.** The two exits where the NAME resolves to a zombie — the `-EBUSY` of one still busy, and the `0` after one is freed — each collect the zombies nobody named. Asserted on the zombie-list length across the one call, since a later unload's return value is satisfied by a sweep on any exit and so cannot tell them apart |
 
-**The bug-proof.** `module-zombie-two-of-a-name` must fail against the
-current tree because **nothing collects either of them** — one
-unrelated load or unload leaves both in place. That is the whole claim,
-and it is weaker than what this report first wrote: the earlier version
-said the second zombie was unreachable by name and built the bug-proof
-on it, which was false. The test asserts that a single sweep collects
-**both**, which is what distinguishes a sweep from the one-at-a-time
-name lookup that exists today.
+**The bug-proof.** `module-zombie-two-of-a-name` had to fail against
+the **pre-build** tree because nothing there collected either of them —
+one unrelated load or unload left both in place. That was the whole
+claim, and it is weaker than what this report first wrote: the earlier
+version said the second zombie was unreachable by name and built the
+bug-proof on it, which was false. The test asserts that a single sweep
+collects **both**, which is what distinguishes a sweep from the
+one-at-a-time name lookup it sits beside.
 
-**Watch the existing test.** `selftest_module_unload_busy` asserts a
-second unload frees the zombie. A sweep at every load and unload may
-free it *first*, so that test's second unload could start returning
-`-ENOENT` instead of `0`. Whether that is a break or the new truth is a
-decision the build must make deliberately, and record — this report's
-position is that the explicit call should keep succeeding when there is
-something to free and that the test should say which reaper ran.
+`module-zombie-swept-on-every-exit` was bug-proofed the same way and
+**once per exit**, because removing both sweeps at once proves only the
+first: the failing test leaves its zombies behind and the later module
+tests then fail on the contamination rather than on the mechanism.
+Removing only the first sweep fails it at `module_zombie_count() == 1`;
+removing only the second fails it at `module_zombie_count() == 0`, one
+failure in 352.
+
+**Watch the existing test — and the build did.**
+`selftest_module_unload_busy` asserts a second unload frees the zombie.
+A sweep at every load and unload could have freed it *first*, turning
+that test's `0` into `-ENOENT`. The decision went the way this report
+argued: the explicit call keeps succeeding when there is something to
+free, because in `module_unload` the sweep runs **after** the name is
+resolved, never before it (banner item 1). The test is unchanged and
+still passes.
 
 ## Risks
 
@@ -251,10 +264,12 @@ something to free and that the test should say which reaper ran.
   neither path is hot.
 - **Freeing earlier changes when release code runs.** It does not: the
   sweep frees only zombies whose `live_objects` is already zero, which
-  is exactly the condition the name-based reap uses today.
-- **The existing zombie test may need to change**, as above. A unit that
-  quietly rewrites a passing test's expectation is worse than one that
-  says it is doing so.
+  is exactly the condition the name-based reap already used.
+- ~~**The existing zombie test may need to change**~~ — **it did not**,
+  and that was the point of resolving the name before sweeping. The
+  risk is recorded rather than deleted because a unit that quietly
+  rewrites a passing test's expectation is worse than one that says it
+  is doing so, and this one did not have to.
 
 ## Alternatives considered
 
