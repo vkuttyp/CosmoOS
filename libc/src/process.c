@@ -122,8 +122,29 @@ pid_t spawnve_as(const char *path, const char *const argv[], const char *const e
 static pid_t spawnvp_flags(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh,
                            unsigned extra, pid_t pgid)
 {
-    if (strchr(file, '/'))
-        return spawn_req(file, argv, (const char *const *)environ, h, nh, extra, pgid);
+    /*
+     * A snapshot rather than the global. `setenv` growing the
+     * environment frees the old array under `stdlib.c`'s lock, so
+     * reading `environ` here -- and handing it to the kernel to copy
+     * -- is a use-after-free the moment a program does what
+     * `cosmo/thread.h` now says it may: set the environment from one
+     * thread and spawn from another. The unit that locked the
+     * environment locked `stdlib.c`'s own accessors and left this
+     * one, which made invariant L8 over-promise
+     * (docs/audit/next-subsystem-libc-shared-tables.md).
+     */
+    char **env = __env_snapshot();
+    if (env == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (strchr(file, '/')) {
+        pid_t pid = spawn_req(file, argv, (const char *const *)env, h, nh, extra, pgid);
+        int saved = errno;
+        free(env);
+        errno = saved;      /* `free` must not repaint a failed spawn's errno */
+        return pid;
+    }
     const char *path = getenv("PATH");
     if (path == NULL)
         path = "/bin:/sbin:/usr/bin:/usr/sbin";
@@ -138,9 +159,11 @@ static pid_t spawnvp_flags(const char *file, const char *const argv[], const str
             strcpy(cand + dl + 1, file);
             struct stat st;
             if (stat(cand, &st) == 0 && S_ISREG(st.st_type)) {
-                pid_t pid = spawn_req(cand, argv, (const char *const *)environ, h, nh, extra, pgid);
-                if (pid >= 0)
+                pid_t pid = spawn_req(cand, argv, (const char *const *)env, h, nh, extra, pgid);
+                if (pid >= 0) {
+                    free(env);
                     return pid;
+                }
                 last = errno;
                 if (errno != ENOENT)
                     break;
@@ -150,6 +173,7 @@ static pid_t spawnvp_flags(const char *file, const char *const argv[], const str
             break;
         path = end + 1;
     }
+    free(env);
     errno = last;
     return -1;
 }

@@ -268,6 +268,19 @@ out:
  * shifted into a slot a walker has already passed is missed, and a
  * walker past `i` runs against a stale tail.
  */
+char **__env_snapshot(void)
+{
+    cosmo_mutex_lock(&g_lock);
+    size_t n = env_count();              /* unlocked helper, under this lock */
+    char **copy = malloc((n + 1) * sizeof(char *));
+    if (copy != NULL) {
+        memcpy(copy, environ, n * sizeof(char *));
+        copy[n] = NULL;
+    }
+    cosmo_mutex_unlock(&g_lock);
+    return copy;
+}
+
 int unsetenv(const char *name)
 {
     size_t nl = strlen(name);
