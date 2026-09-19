@@ -1052,6 +1052,53 @@ static void atexit_bound(void)
 }
 
 /*
+ * (G) The contract the leak BUYS, which nothing tested.
+ *
+ * `setenv` leaks the string it replaces so that a pointer `getenv`
+ * already returned stays valid; L8 and design.md now state that as a
+ * contract and `__env_snapshot`'s shallow copy rests on it. Every
+ * other case here exercises concurrent access, so tidying the leak
+ * away would have failed none of them. Review found that.
+ *
+ * The churn is the point, and is the same lesson this unit learned
+ * about the use-after-free: freed memory usually still reads
+ * correctly, so a test that just re-reads the pointer passes whether
+ * or not the string was freed. Reusing and overwriting the block
+ * first is what makes the difference observable.
+ */
+static void env_pointer_survives_overwrite(void)
+{
+    CHECK(setenv("THRLEAK", "old-value", 1) == 0);
+    const char *p = getenv("THRLEAK");
+    CHECK(p != NULL);
+    if (p == NULL)
+        return;
+    CHECK(strcmp(p, "old-value") == 0);
+
+    CHECK(setenv("THRLEAK", "new-value", 1) == 0);
+
+    /* Reuse the heap hard, and write something that is not "old-value". */
+    volatile unsigned sink = 0;
+    for (unsigned i = 0; i < 400; i++) {
+        unsigned char *b = malloc(64);
+        if (b == NULL)
+            continue;
+        memset(b, 0x5a, 64);
+        sink += b[0] + b[63];      /* observable: the stores cannot be dropped */
+        free(b);
+    }
+    (void)sink;
+
+    CHECK(strcmp(p, "old-value") == 0);      /* leaked, not freed */
+    const char *q = getenv("THRLEAK");
+    CHECK(q != NULL && strcmp(q, "new-value") == 0);
+    CHECK(q != p);
+    CHECK(unsetenv("THRLEAK") == 0);
+    printf("thrtest: env-pointer-survives-overwrite: the old pointer still reads its "
+           "own value after an overwrite and 400 reuses of the heap\n");
+}
+
+/*
  * (F) The reader of `environ` that lives OUTSIDE stdlib.c.
  *
  * `spawnvp` hands the environment array to the kernel. It used to read
@@ -1077,11 +1124,22 @@ static void atexit_bound(void)
  * deliberate `setenv` leak load-bearing for a fourth time in this
  * unit: another thread is growing the environment throughout.
  */
+static unsigned spawn_done[3];   /* attempts completed, per variant */
+
 static void *env_spawner(void *arg)
 {
     (void)arg;
     unsigned bad = 0;
-    for (unsigned i = 0; i < 39 && !env_stop; i++) {
+    /*
+     * Every one of the 39, and deliberately NOT `&& !env_stop`: the
+     * writer sets that after its 120 growths, and a spawner that
+     * stopped there could exit having run none of the PATH variants
+     * while the summary still claimed thirteen of each. Review found
+     * that. The cost is that the last spawns race nothing, which is
+     * the right trade -- the three exits are what this case covers,
+     * and `spawn_done` now says so rather than the loop bound.
+     */
+    for (unsigned i = 0; i < 39; i++) {
         /* absolute, PATH-search hit, PATH-search miss */
         const char *file = (i % 3 == 0) ? "/bin/true"
                          : (i % 3 == 1) ? "true"
@@ -1098,6 +1156,7 @@ static void *env_spawner(void *arg)
                 bad++;
                 (void)waitpid(p, &junk, 0);
             }
+            spawn_done[2]++;
             continue;
         }
         if (p < 0) {
@@ -1107,6 +1166,7 @@ static void *env_spawner(void *arg)
         int st = 0;
         if (waitpid(p, &st, 0) != p || st != 0)
             bad++;
+        spawn_done[i % 3]++;
     }
     env_misses += bad;
     return NULL;
@@ -1127,6 +1187,7 @@ static void env_spawn_under_setenv(void)
 
     env_stop = 0;
     env_misses = 0;
+    spawn_done[0] = spawn_done[1] = spawn_done[2] = 0;
     CHECK_START(&churn, env_churn);
     CHECK_START(&sp, env_spawner);
     for (unsigned i = 0; i < 120; i++) {
@@ -1141,9 +1202,11 @@ static void env_spawn_under_setenv(void)
         snprintf(name, sizeof(name), "SPW%u", i);
         CHECK(unsetenv(name) == 0);
     }
-    printf("thrtest: env-spawn-under-setenv: 39 spawns across 120 growths "
-           "(13 absolute, 13 found on PATH, 13 that must not resolve), %u failures\n",
-           env_misses);
+    /* Each of `spawnvp_flags`'s three exits, actually reached. */
+    CHECK(spawn_done[0] == 13 && spawn_done[1] == 13 && spawn_done[2] == 13);
+    printf("thrtest: env-spawn-under-setenv: %u absolute + %u on PATH + %u unresolvable "
+           "across 120 growths, %u failures\n",
+           spawn_done[0], spawn_done[1], spawn_done[2], env_misses);
 }
 
 /*
@@ -2037,7 +2100,8 @@ int main(int argc, char **argv)
      * other handler's result. It prints the verdict. */
     CHECK(atexit(atexit_checks_at_exit) == 0);
 
-    env_spawn_under_setenv();   /* first: a spawn carries the whole environment */
+    env_pointer_survives_overwrite();   /* one name, removed again */
+    env_spawn_under_setenv();   /* first of the racing cases: a spawn carries the whole environment */
     env_grow_under_readers();
     env_unset_under_readers();
     atexit_concurrent();
