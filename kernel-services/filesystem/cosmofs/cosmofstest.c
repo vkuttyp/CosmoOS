@@ -1973,6 +1973,45 @@ bool selftest_cosmofs_check_chain_cycle(const char **reason)
     return true;
 }
 
+/*
+ * The last of the five reporting paths nothing had ever fired. The
+ * comment beside that site says a count past the block is "the table
+ * being wrong, not the snapshot holding nothing" -- so the check must
+ * report the table AND still walk what the block does hold, or every
+ * member's blocks come back as leaks. Both halves are asserted, because
+ * the second is the one the comment is about and the one that had no
+ * evidence behind it.
+ */
+bool selftest_cosmofs_check_snap_members(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/one", 0755) == 0);   /* takes one, and commits */
+
+    int rc = cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_SNAP_MEMBERS, 0, &what);
+    if (rc == -ENOTSUP) {
+        /* A member table is a version-4 shape; before it there is no
+         * count to be wrong. Skipped rather than silently passing. */
+        kinfo("selftest: cosmofs-check-snap-members: needs format v4 or later; skipping");
+        check_teardown(bd);
+        return true;
+    }
+    CHECK(rc == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    /* The walk continued: a bitmap it did not reach would make every
+     * block the snapshot holds look unreferenced. */
+    CHECK(r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-snap-members: a member count past its block is reported as "
+          "the table being wrong, and the walk still reads what the block holds");
+    return true;
+}
+
 bool selftest_cosmofs_check_snapshot(const char **reason)
 {
     struct blkdev *bd = NULL;

@@ -2422,6 +2422,53 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         token = head;
         break;
     }
+    case COSMOFS_CORRUPT_SNAP_MEMBERS: {
+        /*
+         * A snapshot's member table claiming more members than its
+         * block can hold. The checker must say the TABLE is wrong and
+         * still walk what the block does hold -- otherwise every
+         * member's blocks are reported as leaked instead, which is the
+         * comment beside that site and had never been exercised.
+         *
+         * Version 4 and later only: before it, a snapshot's alloc_root
+         * is an index rather than a member table and there is no count
+         * to be wrong.
+         */
+        if (fs->sb.version < 4) {
+            rc = -ENOTSUP;
+            break;
+        }
+        uint64_t list = fs->sb.snap_root, target = 0;
+        unsigned guard = 0;
+        while (list != 0 && target == 0 && guard++ < 64) {
+            struct cfs_buf *b;
+            if (cfs_buf_get(fs, list, CFS_KIND_SNAPLIST, &b) != 0)
+                break;
+            const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
+            for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
+                if (sb->snap[i].id != 0 && sb->snap[i].alloc_root != 0) {
+                    target = sb->snap[i].alloc_root;
+                    break;
+                }
+            }
+            list = sb->next;
+            cfs_buf_put(fs, b);
+        }
+        if (target == 0) {
+            rc = -ENOENT;          /* no snapshot: the caller must take one first */
+            break;
+        }
+        struct cfs_buf *mb;
+        rc = cfs_buf_get(fs, target, CFS_KIND_MEMBERS, &mb);
+        if (rc)
+            break;
+        struct cfs_member_block *t = (struct cfs_member_block *)(mb->data + CFS_MHDR_SIZE);
+        t->count = CFS_MEMBERS_PER_BLOCK + 1;
+        mb->dirty = true;
+        cfs_buf_put(fs, mb);
+        token = target;
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */
