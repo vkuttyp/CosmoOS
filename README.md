@@ -2832,7 +2832,9 @@ See [docs/development.md](docs/development.md).
   Five cases in `thrtest`, and **the use-after-free is reproduced
   rather than argued**: unlocked, with a thread churning the heap so
   the freed array is reused, the process dies with a `#GP` at the
-  same address on three runs of three. Getting there took two
+  same address on three runs of three — a reliable reproduction
+  rather than a deterministic one, since nothing forces the
+  interleaving. Getting there took two
   corrections — the reader had to look up a name placed *after* the
   padding so it actually walks the array being reallocated, and the
   block had to be reused before the stale pointers in it could be

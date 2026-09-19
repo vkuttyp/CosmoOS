@@ -25,9 +25,13 @@ version of this line said it could not be demonstrated at all**.
    A thread churning the heap in the same size class arranges that,
    and then the unlocked build dies: **`#GP` at `0x40a940`, signal
    11, exit status 139, on three runs out of three**, dereferencing a
-   `0x5A5A…` pointer read from the freed array. Deterministic, and it
-   is now the strongest proof in the unit rather than the missing
-   one.
+   `0x5A5A…` pointer read from the freed array. **Reliable rather
+   than deterministic**, and the distinction is the last thing review
+   corrected: nothing forces the interleaving — three readers, a
+   writer and the churn all run uncoordinated — so three-of-three is
+   evidence and not a guarantee, and a different scheduler could let
+   an unlocked build through. It is still the strongest reproduction
+   in the unit rather than the missing one.
 2. **The deterministic construction I proposed in review does not
    work, and the reason is worth more than the construction was.**
    Review round 2 asked how the `unsetenv` window would be forced;
@@ -290,12 +294,15 @@ measurements say:
 | `setenv` and `getenv` unlocked, **without churn** | passes — and the reason is the finding: the stale array's pointers are still correct, because `setenv` frees the array and never a string |
 | `unsetenv` unlocked | passes, and cannot be expected to fail: `unsetenv` frees nothing, so there is no block for the churn to recycle and its hazard is a wrong **answer** rather than a bad pointer. The regression test of the set |
 
-**So three of the five are proofs**, where the report promised three
-deterministic and one probabilistic — right about the count and wrong
-about which. `unsetenv` alone is the regression test, and the
-environment's headline defect went from "argued from the code" to
-"kills the process on demand" once the missing ingredient was
-identified.
+**So two of the five are proofs and one is a reliable reproduction**,
+where the report promised three deterministic and one probabilistic.
+The `atexit` pair are proofs in the strict sense — a lost handler and
+an over-count are numbers that do not depend on when anything
+happened. The environment one reproduces three times out of three and
+is *evidence*, because nothing forces its interleaving. `unsetenv` is
+the regression test. The headline defect went from "argued from the
+code" to "kills the process whenever it has been asked to", which is
+weaker than "on demand" and is what the runs support.
 
 **The bound test sees the overflow without a canary, which I had said
 it could not.** The design assumed a write past `g_atexit[31]` would
@@ -323,8 +330,10 @@ it is now measured rather than asserted.
 **No libc test seam was needed after all.** The design floated a
 debug-only park hook inside `getenv` as the way to force the window,
 and called it disproportionate. It is also unnecessary: churn plus a
-reader that actually walks the array reproduces the fault every time,
-with nothing added to the library.
+reader that actually walks the array reproduced the fault on every
+run it has been given, with nothing added to the library — and a seam
+is still what a *deterministic* version would need, which is the
+honest reason this one is called reliable instead.
 
 ## Risks
 

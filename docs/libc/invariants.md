@@ -183,7 +183,7 @@ use-after-free in the allocator this same file locks, not merely a
 lost update.
 
 **And it is demonstrated, which the unit did not expect.** `thrtest`
-reproduces it deterministically — three runs, a `#GP` at the same
+reproduces it reliably — three runs of three, a `#GP` at the same
 address, exit status 139 — but only with a thread churning the heap
 alongside: `setenv` copies the old array's pointers and frees only the
 array, so a reader on the stale array still reads correct pointers and

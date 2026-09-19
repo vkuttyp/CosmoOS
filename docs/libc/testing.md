@@ -17,7 +17,7 @@ something rather than assuming
 
 | case | what it does | unlocked? |
 | --- | --- | --- |
-| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three |
+| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three — reliable, not forced |
 | `env-unset-under-readers` | three readers against 200 `unsetenv` removals | passes — it removes no array, so it is the regression test of the set |
 | `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |
 | `atexit-bound` | three threads offering 24 registrations at a full-ish table | **accepts 33 into a table of 32** |

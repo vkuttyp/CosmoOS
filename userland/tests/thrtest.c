@@ -821,7 +821,11 @@ static void *env_reader(void *arg)
  * this freed `environ` under them -- a use-after-free in the
  * allocator.
  *
- * DETERMINISTIC, and it took two things to become so. The observed
+ * A RELIABLE STRESS REPRODUCTION -- three runs of three -- and not a
+ * deterministic proof, because nothing here FORCES the interleaving:
+ * the readers, the growth and the churn run uncoordinated, and a
+ * different scheduler or allocator order could let an unlocked build
+ * through. Two things made it reliable. The observed
  * name is added AFTER the padding, so a reader actually walks the
  * part of the array being reallocated instead of finding its answer
  * at the front. And a fourth thread churns the heap in the same size
@@ -831,8 +835,10 @@ static void *env_reader(void *arg)
  * reader gets the right answer out of freed memory.
  *
  * With both, the unlocked build dies: #GP, signal 11, three runs of
- * three. An earlier version of this comment called the test
- * probabilistic, which it was until the churn thread existed.
+ * three. This comment has been wrong in both directions: it first
+ * called the test probabilistic (true before the churn thread), then
+ * deterministic (an overclaim -- reproducing three times is evidence,
+ * not a guarantee). Reliable is the word that fits the measurement.
  */
 static void env_grow_under_readers(void)
 {
