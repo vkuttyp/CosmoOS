@@ -2316,6 +2316,49 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         token = ino;
         break;
     }
+    /*
+     * Two of the four `dir_bad` sites that no test had ever reached
+     * (docs/audit/next-subsystem-fsck-unchecked.md). A reporting path
+     * with no test is a path that has never executed.
+     */
+    case COSMOFS_CORRUPT_BAD_PTR:
+        /* A data pointer past the end of every member: `claim` maps it
+         * to CFS_DVA_NONE and must say so rather than indexing a
+         * bitmap with it. The run keeps count 1, so exactly one bad
+         * pointer is claimed. */
+        if (ino == 0 || cfs_ext_count(&in.direct[0]) == 0) {
+            rc = -EINVAL;
+            break;
+        }
+        in.direct[0].start = CFS_DVA_NONE - 1;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = in.direct[0].start;
+        break;
+    case COSMOFS_CORRUPT_NAMELEN: {
+        /* An entry claiming a name longer than its slot can hold. The
+         * check must refuse it by length before reading the bytes. */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        rc = cfs_dir_read_block_at(fs, &in, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned s2 = 0;
+            while (s2 < CFS_DIRENTS_PER_BLOCK && d[s2].ino == 0)
+                s2++;
+            if (s2 == CFS_DIRENTS_PER_BLOCK)
+                rc = -EINVAL;          /* an empty directory cannot carry this fault */
+            else {
+                d[s2].namelen = CFS_NAME_MAX + 1;
+                rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+                token = ino;
+            }
+        }
+        kfree(blk);
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */

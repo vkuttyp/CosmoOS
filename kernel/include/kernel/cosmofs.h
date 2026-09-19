@@ -187,6 +187,8 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
     COSMOFS_CORRUPT_INO_SLOT,    /* an inode slot whose number is not its position */
     COSMOFS_CORRUPT_EXTENT_ORDER,   /* swap two runs so lblk descends */
+    COSMOFS_CORRUPT_BAD_PTR,        /* a block pointer past the end of the pool */
+    COSMOFS_CORRUPT_NAMELEN,        /* an entry whose namelen exceeds its slot */
     COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
                                      * at a DIFFERENT pool block -- the case block_seen
                                      * cannot see (next-subsystem-fsck-unchecked.md) */

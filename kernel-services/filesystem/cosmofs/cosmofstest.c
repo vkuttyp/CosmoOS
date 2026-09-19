@@ -1867,6 +1867,51 @@ bool selftest_cosmofs_check_extent_overlap(const char **reason)
     return true;
 }
 
+/*
+ * Two of the four `dir_bad` reporting paths that nothing had ever made
+ * fire (docs/audit/next-subsystem-fsck-unchecked.md). Each is one site
+ * in the checker, and until now each was a line of code with no
+ * evidence it worked.
+ */
+bool selftest_cosmofs_check_bad_ptr(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_BAD_PTR, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count == 1 && r.dir_bad.name[0] == what);
+    /* The pass survives it: a pointer it cannot map must not be used to
+     * index the bitmap, which is what the early return is for. */
+    CHECK(r.blocks_seen > 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-bad-ptr: a block pointer past the pool is reported and not "
+          "used to index the seen map");
+    return true;
+}
+
+bool selftest_cosmofs_check_namelen(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    /* The root directory: the fixture put `file` and `sub` in it. */
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_NAMELEN, CFS_ROOT_INO, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-namelen: an entry claiming a name longer than its slot is "
+          "refused by length before its bytes are read");
+    return true;
+}
+
 bool selftest_cosmofs_check_snapshot(const char **reason)
 {
     struct blkdev *bd = NULL;
