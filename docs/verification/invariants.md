@@ -114,13 +114,18 @@ invariant rather than a convention: the driver is the only caller, so
 a section cannot be added without a line. **No section carries a
 budget** -- the composite 20 s is still the only **duration** that
 fails a run, because rationing a section that got more thorough is the
-defect this replaced. The suite's self-consistency is checked
-separately and does fail a run: see the Check below. Check: host test `tests/boot/test_usertest_sections.py` (34
+defect this replaced. The suite's own self-consistency does fail a
+run, and is the other half of the Check.
+
+Check: host test `tests/boot/test_usertest_sections.py` (34
 checks), whose bug-proof hands the formatter two runs with identical
 totals differing only in *which* section is slow and requires
 different summaries naming the right one; plus the harness refusing a
-run whose sections and declared count disagree, or in which a table
-row produced no line. A section that compiles to nothing still reports
-(`trap_selftest` is empty on aarch64 and reads `0 ms`).
+run whose sections and declared count disagree, in which a table row
+produced no line, or which declared sections and printed **none** --
+that last found in review, where the caller had been skipping the
+whole check on an empty list. A section that compiles to nothing
+still reports (`trap_selftest` is empty on aarch64 and reads `0 ms`),
+and a build that runs no suite at all is not a failure.
 
 ## Rules the infrastructure keeps
