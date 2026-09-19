@@ -74,11 +74,17 @@ next `malloc` from any thread can hand that block out.
     memmove(&environ[i], &environ[i + 1], (n - i) * sizeof(char *));
 ```
 
-A concurrent `getenv` can see an entry twice, miss one entirely, or —
-if it read `environ[i]` before the move and dereferences after — read a
-pointer that has since been overwritten. The array shrinks without the
-terminator moving first, so a reader that has already passed `i` runs
-against a stale tail.
+A concurrent `getenv` can see an entry twice or miss one entirely, and
+a reader that has already passed `i` runs against a stale tail because
+the array shrinks without the terminator moving first.
+
+**What `unsetenv` does *not* do is invalidate memory, and an earlier
+draft of this report said it did.** It shifts pointer *values* within
+the array and frees no string, so a `char *` a reader has already
+loaded stays valid. The hazard here is an inconsistent traversal — a
+wrong answer — and saying "use-after-free" about it would have sent an
+implementer looking in the wrong place and blurred the one place the
+use-after-free is real, which is `setenv` freeing the array itself.
 
 ### `atexit` loses handlers, and can write past its array
 
@@ -135,8 +141,23 @@ nobody suspects.
 
 **One lock for `stdlib.c`'s tables, in the shape `malloc.c` and
 `stdio.c` already use.** A file-static `cosmo_mutex_t` with
-`COSMO_MUTEX_INIT`, taken by `setenv`, `unsetenv`, `getenv`,
-`env_count`, `atexit` and `exit`'s drain.
+`COSMO_MUTEX_INIT`, taken by the **public entry points**: `setenv`,
+`unsetenv`, `getenv`, `atexit` and `exit`'s drain.
+
+**`env_count` is an unlocked helper and must stay one.** Both
+mutators call it, so a version that took the lock itself would
+reacquire a non-recursive mutex and every environment mutation would
+deadlock against itself — not occasionally, always. A first draft of
+this design listed `env_count` among the functions that take the
+lock, which is that bug written down; review caught it. This is
+exactly the split `malloc.c` uses and this report quotes two sections
+above — *"the public functions take the lock once and call an
+unlocked core, because `calloc` and `realloc` are written in terms of
+`malloc` and `free` and the mutex is not recursive"* — so the pattern
+was already in front of me. **Any helper added under the lock follows
+the same rule**, and the build should keep the locked and unlocked
+halves visibly separated rather than relying on the reader to know
+which is which.
 
 **Two tables, and the choice of one lock or two is a real one.** The
 environment and the `atexit` list share nothing, so two locks would be
@@ -178,7 +199,7 @@ fix for the leak (it is load-bearing, see above), and no change to
 
 | file | change |
 | --- | --- |
-| `libc/src/stdlib.c` | the lock; `setenv`, `unsetenv`, `getenv`, `env_count`, `atexit` and `exit`'s drain take it; the drain restructured so no handler runs under it |
+| `libc/src/stdlib.c` | the lock, taken by the public entry points `setenv`, `unsetenv`, `getenv`, `atexit` and `exit`'s drain — **`env_count` stays unlocked** and is called under the mutators' lock, or they deadlock against themselves; the drain restructured so no handler runs under it |
 | `docs/libc/invariants.md` | **L8** counts five, not three, and the two new ones get the same "shape is set by its consequence" treatment |
 | `userland/tests/thrtest.c` | the cases below, behind the existing `THREADTEST: PASS` marker |
 | `docs/libc/design.md` | the `getenv` contract and the deliberate leak, beside the allocator's and stdio's locking rules |
@@ -196,14 +217,16 @@ thread, which is why that program exists.
 | test | asserts |
 | --- | --- |
 | `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv`; every reader either finds its name or does not, and none reads a freed pointer |
-| `env-unset-under-readers` | the same against `unsetenv`, where the hazard is a shifted array rather than a freed one |
+| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader looking up a name that is never removed must never fail to find it, while another thread unsets a different name |
 | `atexit-concurrent` | N threads each registering a distinct handler; **exactly** the number registered run at exit, and none runs twice |
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
 | `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
 
 **The bug-proof, and the honest difficulty.** A race test that passes
-on a broken build most of the time is not a proof. Two of these have a
-deterministic answer and two do not:
+on a broken build most of the time is not a proof. **Three of these
+have a countable answer and one does not** — an earlier draft said two
+and two, and correcting `unsetenv`'s hazard from "freed memory" to
+"wrong answer" is what moved the third:
 
 - `atexit-concurrent` is **countable**: register N handlers from N
   threads, count how many run. A lost update is a number, not a
@@ -211,15 +234,21 @@ deterministic answer and two do not:
   count comes back below N.
 - `atexit-bound` is likewise countable: the array has a canary past it
   and the test reads the canary.
-- The two environment tests are **probabilistic** against a use-after-free,
-  and the report will not pretend otherwise. They are made to fail
-  reliably without the lock by making the window wide rather than by
-  iterating and hoping: the reader walks a long environment so it is
+- **`env-unset-under-readers` is countable too**, and this is the
+  useful consequence of getting `unsetenv` right: its failure is a
+  lookup that *fails to find a name that was never removed*, which is
+  a wrong answer a test can assert on directly, with no dependence on
+  catching a freed pointer before it is reused.
+- `env-grow-under-readers` is the one that is **probabilistic**,
+  because the only thing that distinguishes it is a read of freed
+  memory, and the report will not pretend otherwise. It is made to
+  fail reliably without the lock by making the window wide rather than
+  by iterating and hoping: the reader walks a long environment so it is
   inside the array for many instructions, and the writer grows it
   repeatedly so `free` is called often. If that still does not
-  reproduce without the lock, the test is reported as *not* a proof and
-  the countable ones carry the unit — which is the outcome the
-  straggler-kick unit reached, and better than an assertion that
+  reproduce without the lock, that test is reported as *not* a proof
+  and the three countable ones carry the unit — which is the outcome
+  the straggler-kick unit reached, and better than an assertion that
   passes for the wrong reason.
 
 ## Risks
