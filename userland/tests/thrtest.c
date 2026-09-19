@@ -1062,13 +1062,44 @@ static void atexit_bound(void)
  * L8's claim false for the case a caller is most likely to hit.
  * Found by review, not by the unit.
  */
+/*
+ * Three spawns, because `spawnvp_flags` has three exits and the
+ * snapshot is freed at each of them. The first build of this case
+ * only ever spawned "/bin/true", so `strchr(file, '/')` succeeded
+ * every time and the whole PATH-search half -- the loop that holds
+ * the snapshot across repeated stat/spawn attempts, and the frees on
+ * its success and failure exits -- ran in no test at all. Review
+ * found that; a snapshot bug reachable only while walking PATH would
+ * not have failed this file.
+ *
+ * The search path also calls `getenv("PATH")` while holding the
+ * snapshot and then keeps using the returned pointer, which is the
+ * deliberate `setenv` leak load-bearing for a fourth time in this
+ * unit: another thread is growing the environment throughout.
+ */
 static void *env_spawner(void *arg)
 {
     (void)arg;
-    const char *const av[] = { "/bin/true", NULL };
     unsigned bad = 0;
-    for (unsigned i = 0; i < 40 && !env_stop; i++) {
-        pid_t p = spawnvp(av[0], av, NULL, 0);
+    for (unsigned i = 0; i < 39 && !env_stop; i++) {
+        /* absolute, PATH-search hit, PATH-search miss */
+        const char *file = (i % 3 == 0) ? "/bin/true"
+                         : (i % 3 == 1) ? "true"
+                                        : "cosmo-no-such-program";
+        const char *const av[] = { file, NULL };
+        pid_t p = spawnvp(file, av, NULL, 0);
+        if (i % 3 == 2) {
+            /* Must fail after walking every PATH element and freeing
+             * the snapshot on the way out. A success here means the
+             * name resolved, which would make this a third spawn of a
+             * real program rather than the failure exit. */
+            if (p >= 0) {
+                int junk = 0;
+                bad++;
+                (void)waitpid(p, &junk, 0);
+            }
+            continue;
+        }
         if (p < 0) {
             bad++;
             continue;
@@ -1110,7 +1141,8 @@ static void env_spawn_under_setenv(void)
         snprintf(name, sizeof(name), "SPW%u", i);
         CHECK(unsetenv(name) == 0);
     }
-    printf("thrtest: env-spawn-under-setenv: 40 spawns across 120 growths, %u failures\n",
+    printf("thrtest: env-spawn-under-setenv: 39 spawns across 120 growths "
+           "(13 absolute, 13 found on PATH, 13 that must not resolve), %u failures\n",
            env_misses);
 }
 

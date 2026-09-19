@@ -17,7 +17,7 @@ something rather than assuming
 
 | case | what it does | unlocked? |
 | --- | --- | --- |
-| `env-spawn-under-setenv` | a thread looping `spawnvp` while another grows the environment and a third churns the heap — the reader of `environ` that lives outside `stdlib.c` | passes: a regression test, not a proof (the window is a few instructions inside a call that then spends milliseconds creating a process) |
+| `env-spawn-under-setenv` | a thread looping `spawnvp` while another grows the environment and a third churns the heap — the reader of `environ` that lives outside `stdlib.c`. It drives **all three** of `spawnvp_flags`'s exits, which is where the snapshot is freed: an absolute path, a bare name found on `PATH`, and a bare name that resolves nowhere. The first build spawned only `/bin/true`, so the PATH-search half — the loop holding the snapshot across repeated attempts, and its two frees — ran in no test; review found that | passes: a regression test, not a proof (the window is a few instructions inside a call that then spends milliseconds creating a process) |
 | `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three — reliable, not forced |
 | `env-unset-under-readers` | three readers against 200 `unsetenv` removals | passes — it removes no array, so it is the regression test of the set |
 | `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |

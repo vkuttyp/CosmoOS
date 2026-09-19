@@ -13,6 +13,8 @@
 #include "libc.h"
 
 #define STACK_DEFAULT (64u * 1024u)
+/* Attempts at the reserve/punch/fill sequence below; see the race it loses. */
+#define STACK_MAP_ATTEMPTS 16u
 #define PAGE          4096u
 
 /*
@@ -87,19 +89,57 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * large `__thread` array needs room for a copy per thread.
      */
     size_t tcb = (__cosmo_tcb_storage() + PAGE - 1u) & ~(size_t)(PAGE - 1u);
-    char *base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (base == MAP_FAILED)
-        return -errno;                     /* the reservation */
-    if (munmap(base + PAGE, size + tcb) != 0) {
+    /*
+     * Reserve, punch, fill -- and the punch and the fill are two
+     * syscalls with a WINDOW between them. The hole is unmapped
+     * address space for that instant, and any other thread's
+     * `mmap(NULL, ...)` may be handed it: `vm_user_find_free` looks
+     * for exactly such a gap. The fill is `MAP_FIXED`, and this
+     * kernel's `MAP_FIXED` refuses to overwrite rather than
+     * replacing (`space_insert` returns -EEXIST), so the loser of
+     * that race gets **EEXIST from a thread start**.
+     *
+     * That is not hypothetical. CI caught it three times on aarch64
+     * before the diagnosis was good enough to name it: `rc -17` out
+     * of `cosmo_thread_start` while another thread churned the heap.
+     * It surfaced when a test that mallocs continuously started
+     * running beside threads that start continuously, which is a
+     * perfectly ordinary thing for a program to do.
+     *
+     * The window cannot be closed from here: with no `mprotect`,
+     * turning part of a reservation into writable memory takes an
+     * unmap and a map, and only the kernel can make that pair
+     * atomic. POSIX says `MAP_FIXED` replaces, and if it did, the
+     * punch would not be needed at all -- the reservation would hold
+     * the range throughout. That is a kernel change and belongs to
+     * its own unit; it is filed in the deferred-work inventory.
+     *
+     * What is done here is to lose the race harmlessly: the cleanup
+     * below already restores the address space exactly, so the whole
+     * attempt can simply be made again. Each retry races
+     * independently and the window is one syscall wide, so the
+     * chance of losing ATTEMPTS times running is not a number worth
+     * writing down -- but the loop is bounded rather than infinite,
+     * because a caller deserves an error rather than a hang if the
+     * address space really is that contended.
+     */
+    char *base = NULL;
+    for (unsigned attempt = 0; ; attempt++) {
+        base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (base == MAP_FAILED)
+            return -errno;                     /* the reservation */
+        if (munmap(base + PAGE, size + tcb) != 0) {
+            int e = errno;
+            munmap(base, size + PAGE + tcb);
+            return -e;                         /* the hole */
+        }
+        if (mmap(base + PAGE, size + tcb, PROT_READ | PROT_WRITE,
+                 MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) != MAP_FAILED)
+            break;                             /* the fixed map into the hole */
         int e = errno;
-        munmap(base, size + PAGE + tcb);
-        return -e;                         /* the hole */
-    }
-    if (mmap(base + PAGE, size + tcb, PROT_READ | PROT_WRITE,
-             MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
-        int e = errno;
-        munmap(base, PAGE);
-        return -e;                         /* the fixed map into the hole */
+        munmap(base, PAGE);                    /* all that is still ours */
+        if (e != EEXIST || attempt + 1 >= STACK_MAP_ATTEMPTS)
+            return -e;
     }
 
     t->fn = fn;

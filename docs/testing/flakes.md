@@ -645,7 +645,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Forty, to 2026-09-19**, across CI and this developer's machine, on
+**Forty-one, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -682,7 +682,7 @@ of this section said eight and then listed nine:
 | PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
 | PR #191's own CI run | observed, aarch64 (`f89a240`, documentation-only): **`connect 0 in 493 ms`** -- a new fastest, below the floor set three sightings earlier -- `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a ninth time |
 | PR #191's own CI run, a later one | observed, **x86-64** (`7ca342b`): `connect 0 in 715 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a tenth time, and **only the second x86-64 reading** after sighting thirty-five |
-| PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and **only the second retransmission** in twelve sightings. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
+| PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and the **second `retransmits +1` ever recorded**, after sighting thirty-seven -- named rather than counted, because a count of "sightings since" is the figure this section keeps getting wrong. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
 
 Thirty-two entries, forty-one occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
