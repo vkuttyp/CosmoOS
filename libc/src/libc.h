@@ -37,6 +37,22 @@ void __stdio_flush_all(void);
 
 /* stdio's lock, and the unlocked write core, so printf can hold the lock
  * across a whole format rather than per chunk (libc/src/stdio.c). */
+/*
+ * A snapshot of the environment's ARRAY, taken under `stdlib.c`'s lock
+ * and owned by the caller (`free` it). For readers of `environ`
+ * outside that file: `spawnvp` hands the array to the kernel and
+ * cannot hold a libc lock across a system call, and reading the
+ * global directly is the use-after-free `setenv` creates when it
+ * frees the old array (invariant L8;
+ * docs/audit/next-subsystem-libc-shared-tables.md).
+ *
+ * A SHALLOW copy is enough, and only because `setenv` leaks the
+ * strings it replaces rather than freeing them -- the pointers in the
+ * snapshot stay valid for as long as the caller holds it. NULL on
+ * allocation failure.
+ */
+char **__env_snapshot(void);
+
 void __stdio_lock(void);
 void __stdio_unlock(void);
 size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);

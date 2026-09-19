@@ -2815,6 +2815,49 @@ See [docs/development.md](docs/development.md).
   Thirteen classes, every one of which a test can now make fire.
   360 self-tests on both architectures, debug and release (PR #189).
 
+- **The two tables threads left behind are locked.** When native
+  threads arrived, `malloc.c` and `stdio.c` took locks and `errno`
+  became thread-local; `stdlib.c`'s environment and `atexit` list were
+  left as they were, and invariant **L8** enumerated three safe tables
+  and said "all three are done" while the library had five. `setenv`
+  growing the environment calls `free(environ)` while `getenv` may be
+  walking it — **a use-after-free in the allocator that same unit
+  locked**, reached through a table it was locked to protect — and
+  `atexit`'s `g_atexit[g_natexit++]` both lost handlers and could
+  write past a static array, because the bound check and the
+  increment were separate. One lock now covers both tables, `exit`
+  never runs a handler while holding it, and `getenv`'s returned
+  pointer stays valid because `setenv` **leaks** the string it
+  replaces — deliberate, **unbounded** in the number of overwrites,
+  and recorded with its cost so it is not tidied away; a case holds a
+  returned pointer across an overwrite and reads it back after the
+  heap has been reused at that block's size, so tidying the leak away
+  now fails a test rather than nothing.
+  Eight cases in `thrtest`, and **the use-after-free is reproduced
+  rather than argued**: unlocked, with a thread churning the heap so
+  the freed array is reused, the process dies with a `#GP` at the
+  same address on three runs of three — a reliable reproduction
+  rather than a deterministic one, since nothing forces the
+  interleaving. Getting there took two
+  corrections — the reader had to look up a name placed *after* the
+  padding so it actually walks the array being reallocated, and the
+  block had to be reused before the stale pointers in it could be
+  wrong. `setenv` frees the array and never a string, so a reader on
+  the stale copy otherwise reads correct pointers out of freed
+  memory. Unlocked `atexit` separately accepts **33 registrations
+  into a table of 32** and loses two handlers. Two fixes outside
+  `stdlib.c` came out of building it, both recorded where they live:
+  the shell's AND-OR lists were right-associative, so `A && B || C`
+  with a failing `A` ran **neither** branch and `/etc/rc.test` could
+  never print `SHTEST: FAIL n` (`docs/userland/invariants.md` U11);
+  and `cosmo_thread_start` builds a stack by punching a hole in a
+  reservation and re-mapping it `MAP_FIXED`, which another thread's
+  `mmap` can take in between — `EEXIST` out of a thread start, three
+  times on aarch64 CI, now retried while the real repair (a
+  `MAP_FIXED` that replaces, as POSIX says) is filed in the
+  inventory. 360 self-tests on both
+  architectures, debug and release (PR #191).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

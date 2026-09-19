@@ -15,12 +15,16 @@
  * block behind each thread's thread pointer (`cosmo/tcb.h`). A thread this
  * header creates has one before its first instruction.
  *
- * What is still shared: **`atexit`'s table** (`g_atexit`, `g_natexit` --
- * registering is an unsynchronised read-modify-write) and **the
- * environment** (`environ`, and `setenv`/`unsetenv` reallocating it).
- * Both are process-global and neither takes a lock, so call them from one
- * thread -- in practice before the others start, which is where a program
- * registers its exit handlers and sets its environment anyway.
+ * **`atexit`'s table and the environment are safe too**, as of
+ * docs/audit/next-subsystem-libc-shared-tables.md: `stdlib.c` takes one
+ * lock over both. This header used to tell callers to use them from a
+ * single thread because neither took one -- `setenv` growing `environ`
+ * calls `free()` on the array a concurrent `getenv` may be walking, and
+ * `g_atexit[g_natexit++]` is a read-modify-write. Call them from any
+ * thread now, `spawnvp` and `spawnve` included -- those copy the
+ * environment under the lock rather than reading the global. One
+ * contract remains: the pointer `getenv` returns stays valid because
+ * `setenv` leaks the string it replaces rather than freeing it.
  *
  * No longer shared: `strerror`'s buffer is `_Thread_local`, and
  * `getcwd(NULL)` never was -- it `malloc`s per call and hands the buffer

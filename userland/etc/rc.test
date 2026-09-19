@@ -20,6 +20,27 @@ rm -r /tmp/shtest/copy || FAILS=1
 ls /tmp/shtest/copy && FAILS=1
 false && FAILS=1
 true || FAILS=1
+# An AND-OR list is LEFT-associative: `A && B || C` is `(A && B) || C`,
+# so a failing A must still reach C. The verdict line at the bottom of
+# this file is exactly that shape, and while the shell parsed it as
+# `A && (B || C)` a failing run printed no verdict at all -- neither
+# branch ran. Each assertion below is a two-term list, so it means the
+# same thing under either parse.
+# A POSITIVE marker for the three-term shape, required by the boot
+# harness (tests/boot/run_boot_test.py). The assertions below record
+# their result in FAILS, and FAILS is reported by the verdict line at
+# the bottom -- which is itself `A && B || C`, so under the bug it
+# prints nothing and the failure shows up only as a missing marker.
+# Review asked for a signal that does not depend on the broken
+# construct to report itself. This is it: one three-term list whose
+# else-branch prints a unique string the harness demands.
+false && echo "ANDOR: wrong-branch" || echo "ANDOR: ok"
+false && echo x > /tmp/shtest/andor-then || echo x > /tmp/shtest/andor-else
+ls /tmp/shtest/andor-then 2> /tmp/shtest/andor.probe && FAILS=1
+ls /tmp/shtest/andor-else 2> /tmp/shtest/andor.probe || FAILS=1
+true && echo x > /tmp/shtest/andor-then2 || echo x > /tmp/shtest/andor-else2
+ls /tmp/shtest/andor-then2 2> /tmp/shtest/andor.probe || FAILS=1
+ls /tmp/shtest/andor-else2 2> /tmp/shtest/andor.probe && FAILS=1
 false; echo "status $?"
 cat /nonexistent 2> /tmp/shtest/err && FAILS=1
 cat /tmp/shtest/err

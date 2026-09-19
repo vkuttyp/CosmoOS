@@ -243,6 +243,13 @@ socket-verdict branch, once on that branch's CI again, and once on a
 no code at all. That last one is the clearest of the three: a tree that
 changed one Markdown file cannot have slowed a lockup sample.
 
+**A fourth on 2026-09-19**, same assertion, same line, on the libc
+shared-tables branch — in `aarch64 BUILD=debug test-guard`, which
+passed on an immediate re-run of the same tree. That branch is `libc`
+locking, a shell parser fix and documentation; it cannot slow a lockup
+sample either. Four in three days now, and re-running remains the
+right first move.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
@@ -259,6 +266,89 @@ UAPI header, one self-test that runs in 7 ms, and documentation. It
 touched nothing in the network stack, the filesystem or the lockup
 detector. Recorded together because the three needed three different
 answers, and telling them apart is the whole skill this file is about.
+
+## `thrtest` cannot start a thread
+
+**2026-09-19, `aarch64 BUILD=debug test-gic`**, one of three
+`env_reader` starts in `env-grow-under-readers`:
+`thrtest: FAIL cosmo_thread_start(...) == 0 at line 866`, with the join
+of that slot failing after it — two `CHECK`s, one cause. It passed on
+an immediate re-run of the same tree, and `test-guard` on the same
+architecture and the same build ran `thrtest` clean.
+
+**A second, on CI the same day**, in `build, boot, analyze (aarch64)`
+on `096a15d` — a documentation-only commit — in the *protection-capable*
+boot this time rather than the GIC one. Same test, same two `CHECK`s,
+and the same position: the first reader start after
+`env-spawn-under-setenv` has joined its two threads. That job was red
+anyway, because `net-harness` tripped the forbidden-marker rule in the
+same boot.
+
+Two sightings at one instruction is not a coincidence, and the suspect
+is the new case itself: `env-spawn-under-setenv` adds two thread
+create/join cycles immediately before a four-thread test, and
+`cosmo_thread_join` returns from `thread_clear_tid`, which
+`process_thread_exit` calls *immediately before* `thread_exit` — the
+ordering the `lx_join` entry above describes. A joiner can therefore
+start a new thread while the one it just joined is still being torn
+down.
+
+**That hypothesis was wrong, and so was the one after it.** The third
+sighting carried the number, and the number settled it:
+
+```
+thrtest: FAIL env_reader start at line 883: rc -17
+```
+
+`-17` is `EEXIST`. Not the join/teardown race above, and not memory
+pressure — `RLIMIT_AS` defaults to 2 GiB and the kernel-allocation
+theory that replaced it predicted `-12`. Both were reasoning from
+plausibility; one line of instrumentation beat both.
+
+`EEXIST` from a *thread start* points at one place.
+`cosmo_thread_start` builds a stack in three syscalls — reserve the
+range `PROT_NONE`, `munmap` a hole for the stack and TCB page, `mmap`
+that hole back `MAP_FIXED` — and the punch and the fill are two
+syscalls with unmapped address space between them. Another thread's
+`mmap(NULL, …)` can be handed that gap, because `vm_user_find_free`
+looks for exactly such a hole, and this kernel's `MAP_FIXED` refuses
+to overwrite rather than replacing, so `space_insert` returns
+`-EEXIST` and the loser gets it back from `cosmo_thread_start`.
+
+So this was never a flake. It is a real race, and it belongs in the
+section below rather than this file — kept here because this is where
+the three sightings were recorded while it was still thought to be
+one. `env_churn` is why it appeared now: a test that mallocs
+continuously beside threads that start continuously is what the
+window needs, and both arrived in this unit.
+
+Fixed in `libc/src/thread.c` by losing the race harmlessly — the
+cleanup path already restored the address space exactly, so the
+attempt is retried, bounded at 16. The real repair is
+`MAP_FIXED` replacing as POSIX says, which would remove the punch
+entirely; that is a kernel change, filed in the deferred-work
+inventory. The bug-proof forces the loss on *every* attempt rather
+than reproducing the natural race: with the retry the suite passes,
+with one attempt every thread start in the program fails.
+
+(The first guess, written before the number arrived, was that this
+was the `-ENOMEM` thread-stack condition `/etc/rc.test` already
+carries a comment about — the one that moved `thrtest` ahead of the
+hypervisor section. It is not; that condition is real but is not
+this.)
+
+Two things are still worth keeping. The **printf is not honest under
+this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
+started, so the line said "3 readers over 400 growths, 0 misses" on a
+run where one reader never existed. And `0 misses` from two readers is
+a weaker result than the same words from three — the check passed with
+less concurrency than it claims. Neither is repaired here; both belong
+to the test.
+
+The run is also the first recorded instance of `SHTEST: FAIL 1`
+appearing at all — the exit status and the shell's AND-OR
+associativity were both fixed on this branch, and before them this
+same failure would have printed `SHTEST: PASS`.
 
 **`net-harness` (aarch64), a fourth sighting.** The same
 `nettest.c:929` (`client_ok`) as the three above, on a branch that
@@ -563,13 +653,30 @@ resolves by tid, so `tgkill(pid, ctid, 0)` can return 0 where the test
 demands `-ESRCH`. Two intervening checks are all that normally covers
 the window, and on a loaded shared runner they did not.
 
+**A second sighting, 2026-09-19, aarch64 CI** (`1e5b90f`, a
+README-and-docs commit on the libc shared-tables branch), identical
+line and identical consequence: `LINUXTEST: FAIL sc3(LX_tgkill, pid,
+ctid, 0) == -3 (0)`, and with it `SHTEST: PASS` and every `lxsig`
+marker. Two sightings on two architectures in one day, both on
+commits that cannot have caused it.
+
+**The repair named below is now made** (PR #191). The check waits for
+the condition instead of asserting it once: up to 2000 attempts with
+a `sched_yield` between them, because the exiting thread needs the
+CPU the loop is spinning on. It is no weaker — the bound is finite,
+so a kernel that never releases the tid still fails — and it is no
+longer a coin toss on how far `thread_exit` has got. It is the
+Linux ABI test rather than this branch's subsystem, taken because it
+was blocking this branch's aarch64 gate and the repair was already
+written down here.
+
 **The kernel's ordering is the deliberate one; the test's assumption is
 the wrong part** -- "my join returned, therefore that tid is
 unresolvable" was never promised, here or on Linux. The repair is for
 the test to wait for the condition it actually means rather than infer
 it from the join, which is the same shape as `lockup-sample` above: an
 assertion with no allowance for a window the implementation genuinely
-has. Not made here; it belongs to the Linux ABI test.
+has. Made in PR #191, after the second sighting — see above.
 
 
 ## The count
@@ -581,7 +688,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-eight, to 2026-09-19**, across CI and this developer's machine, on
+**Forty-two, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -616,14 +723,18 @@ of this section said eight and then listed nine:
 | PR #189's own CI run | observed, aarch64 (`2559c32`): **`connect 0 in 529 ms`** -- the FASTEST connect recorded, and below the band this file had been quoting -- `sent 12`, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a sixth time |
 | PR #189's own CI run, the next one | observed, aarch64 (`a81365c`, documentation-only): `connect 0 in 1382 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a seventh time, and the first retransmission in nine sightings |
 | PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
+| PR #191's own CI run | observed, aarch64 (`f89a240`, documentation-only): **`connect 0 in 493 ms`** -- a new fastest, below the floor set three sightings earlier -- `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a ninth time |
+| PR #191's own CI run, a later one | observed, **x86-64** (`7ca342b`): `connect 0 in 715 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a tenth time, and **only the second x86-64 reading** after sighting thirty-five |
+| PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and the **second `retransmits +1` ever recorded**, after sighting thirty-seven -- named rather than counted, because a count of "sightings since" is the figure this section keeps getting wrong. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
+| PR #191's own CI run, the same job re-run | observed, aarch64 (`8aff8ad`), on the **re-run of the job above** -- so twice on one commit: `connect 0 in 668 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:53036 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a twelfth time, and the first time a **re-run reproduced it on the same commit** -- which is worth more than another reading, because "re-run it" has been this file's standing advice |
 
-Twenty-nine entries, thirty-eight occurrences -- and the table is the tally,
+Thirty-three entries, forty-two occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-four rows
+them and are not independently re-verified here. The last twenty-seven rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-nine instrumented** occurrences
-behind the other twenty-three rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty-two instrumented** occurrences
+behind the other twenty-six rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1015,15 +1126,17 @@ had no retransmission at all**. Four of seven having exactly one
 retransmission is what a three-sample reader saw as a timer. It is not
 one, and each new sighting has moved that ratio further from one.
 
-**And sighting thirty-six went below the floor.** `529 ms`, against a
-previous fastest of 597. Every statement of a "597 to 1510 ms band"
-in this file and in
-`docs/audit/next-subsystem-nettest-probe.md` was true when written and
-is now wrong at the bottom: the band is **529 to 1510 ms**, and the
-right way to read that is that the range has widened at both ends
-every time it has been tested, which is the opposite of a timer. The
-retransmission ratio moved too — sighting thirty-seven is the first
-`retransmits +1` in nine sightings.
+**And the floor keeps moving.** Sighting thirty-six came in at
+`529 ms` against a previous fastest of 597; sighting thirty-nine at
+**`493 ms`**. Every statement of a band in this file and in
+`docs/audit/next-subsystem-nettest-probe.md` has been true when
+written and wrong at the bottom within a few sightings — 597, then
+529, now **493 to 1510 ms**. Twice in one day is enough to stop
+treating the lower bound as a property: **the range has widened at
+both ends every time it has been tested**, which is the opposite of
+what a timer would do, and the number to quote is the one in this
+paragraph on the day it is read. The retransmission ratio moved too —
+sighting thirty-seven is the first `retransmits +1` in nine sightings.
 
 The roster is **seven-for-seven on one connection carrying nothing**,
 and that remains the only part of this defect that has never varied.
@@ -1088,7 +1201,7 @@ answering a *fresh* connection through itself in 1 ms to connect and
 1 ms to echo while it did so. The only figure that moved is the
 connect: 791 ms against sighting thirty's 894 ms, both inside the
 band this file had recorded to that point (597--1510 ms; sighting
-thirty-six has since taken the floor to 529).
+thirty-six took the floor to 529 and thirty-nine to 493).
 
 **What the second reading buys.** One reading of a new instrument is a
 reading; two independent ones are a finding. The conclusion above no
@@ -1165,15 +1278,18 @@ row one too. `f446890`, documentation-only again, PR #188's own CI:
 The shape of thirty, thirty-two and thirty-four: reset before the
 write.
 
-**Five readings, five times row one, and now on both architectures** —
-three aarch64 job configurations (default, protection-capable, GICv3)
-and x86-64. The x86-64 reading is the one this file had been careful
-to say was missing, and it changes the claim's scope rather than its
-content: the interpretation has not moved since sighting thirty and is
-now architecture-independent. **slirp holds a host-side connection
-open, established and silent, while remaining responsive to other
-connections through itself.** Where the guest's bytes are lost, when
-there are any, remains unlocated.
+**Ten readings, ten times row one, on both architectures** — two of
+them x86-64 (sightings thirty-five and forty) and the rest aarch64
+across three job configurations (default, protection-capable, GICv3).
+
+This paragraph was written at five readings and its conclusion has not
+needed changing since, which is worth as much as the readings
+themselves: **slirp holds a host-side connection open, established and
+silent, while remaining responsive to other connections through
+itself.** The x86-64 sightings were the ones this file had been
+careful to say were missing; having them changes the claim's scope and
+not its content. Where the guest's bytes are lost, when there are any,
+remains unlocated.
 
 **What this does not name is the line of code.** It names the component
 and the shape, which is what the unit promised and more than thirty

@@ -10,8 +10,36 @@
 #include <unistd.h>
 
 #include <cosmo/syscall.h>
+#include <cosmo/thread.h>
 
 #include "libc.h"
+
+/*
+ * One lock over this file's two process-global tables: the environment
+ * and the `atexit` list (invariant L8,
+ * docs/audit/next-subsystem-libc-shared-tables.md).
+ *
+ * The allocator and stdio took locks when native threads arrived --
+ * malloc.c says an unlocked free list is "a way to corrupt a heap
+ * silently ... so it is locked here rather than left to a rule callers
+ * must know" -- and these two tables were left as they were. They have
+ * the same hazard: `setenv` growing the array calls `free(environ)`
+ * while `getenv` may be walking it, which is a use-after-free in that
+ * same allocator.
+ *
+ * One lock rather than two because the contention is theoretical --
+ * these are start-up paths -- and a second lock is a second chance to
+ * take them in the wrong order.
+ *
+ * THE MUTEX IS NOT RECURSIVE, and two rules follow:
+ *   - the public entry points take it and the helpers do not, so
+ *     `env_count` below must stay unlocked: both mutators call it, and
+ *     a version that locked would deadlock against itself on every
+ *     environment change. This is the split malloc.c uses.
+ *   - `exit` must not hold it while running an `atexit` handler, which
+ *     is arbitrary program code and may call `atexit` or `getenv`.
+ */
+static cosmo_mutex_t g_lock = COSMO_MUTEX_INIT;
 
 char **environ;
 static int g_env_owned;   /* environ was reallocated by setenv and is ours */
@@ -82,18 +110,45 @@ void __libc_start(int argc, char **argv, char **envp)
     exit(main(argc, argv, envp));
 }
 
+/*
+ * The bound check and the increment are one critical section. Unlocked
+ * they were two, so two threads could both pass the check at
+ * ATEXIT_MAX - 1 and both write -- one past the end of a static array
+ * -- and `g_natexit++` could lose a handler outright, which for
+ * `atexit` means a file not flushed with nothing to say so.
+ */
 int atexit(void (*fn)(void))
 {
+    int rc = 0;
+    cosmo_mutex_lock(&g_lock);
     if (g_natexit >= ATEXIT_MAX)
-        return -1;
-    g_atexit[g_natexit++] = fn;
-    return 0;
+        rc = -1;
+    else
+        g_atexit[g_natexit++] = fn;
+    cosmo_mutex_unlock(&g_lock);
+    return rc;
 }
 
 void exit(int status)
 {
-    while (g_natexit > 0)
-        g_atexit[--g_natexit]();
+    /*
+     * Take, pop, release, THEN call. A handler is arbitrary program
+     * code and may call `atexit` or `getenv`; running it under a
+     * non-recursive lock deadlocks the program at exit, which is the
+     * worst moment to do it. The list is consistent at every point
+     * between calls, and a handler that registers another gets it run
+     * by the next turn of this loop.
+     */
+    for (;;) {
+        void (*fn)(void) = NULL;
+        cosmo_mutex_lock(&g_lock);
+        if (g_natexit > 0)
+            fn = g_atexit[--g_natexit];
+        cosmo_mutex_unlock(&g_lock);
+        if (fn == NULL)
+            break;
+        fn();
+    }
     __stdio_flush_all();
     _exit(status);
 }
@@ -119,6 +174,7 @@ void __assert_fail(const char *expr, const char *file, int line)
 
 /* --- environment --- */
 
+/* Unlocked: called by the mutators with `g_lock` already held. */
 static size_t env_count(void)
 {
     size_t n = 0;
@@ -127,13 +183,25 @@ static size_t env_count(void)
     return n;
 }
 
+/*
+ * The lock covers the WALK, not the pointer that comes back. A later
+ * `setenv` may replace that slot -- and the string it replaces is
+ * leaked rather than freed (see `setenv`), which is what keeps a
+ * returned pointer valid. POSIX does not promise that; this library
+ * does, by not freeing.
+ */
 char *getenv(const char *name)
 {
     size_t nl = strlen(name);
+    char *found = NULL;
+    cosmo_mutex_lock(&g_lock);
     for (size_t i = 0; environ && environ[i]; i++)
-        if (strncmp(environ[i], name, nl) == 0 && environ[i][nl] == '=')
-            return environ[i] + nl + 1;
-    return NULL;
+        if (strncmp(environ[i], name, nl) == 0 && environ[i][nl] == '=') {
+            found = environ[i] + nl + 1;
+            break;
+        }
+    cosmo_mutex_unlock(&g_lock);
+    return found;
 }
 
 int setenv(const char *name, const char *value, int overwrite)
@@ -143,46 +211,93 @@ int setenv(const char *name, const char *value, int overwrite)
         return -1;
     }
     size_t nl = strlen(name);
-    size_t n = env_count();
+    int rc = 0;
+    cosmo_mutex_lock(&g_lock);
+    size_t n = env_count();      /* unlocked helper, under this lock */
     for (size_t i = 0; i < n; i++) {
         if (strncmp(environ[i], name, nl) == 0 && environ[i][nl] == '=') {
             if (!overwrite)
-                return 0;
+                goto out;
             char *e = malloc(nl + strlen(value) + 2);
-            if (e == NULL)
-                return -1;
+            if (e == NULL) {
+                rc = -1;
+                goto out;
+            }
             sprintf(e, "%s=%s", name, value);
-            environ[i] = e;   /* the old string may be the kernel's: leaked, not freed */
-            return 0;
+            /*
+             * The old string is LEAKED, deliberately: it may be the
+             * kernel's, and a pointer `getenv` already returned still
+             * points into it. Freeing it here would turn every such
+             * pointer into a dangling one. That is the worse bug, but
+             * do not call what is left a bounded one: the leak is
+             * UNBOUNDED in the number of `setenv` calls, not in the
+             * size of the environment, and nothing confines `setenv`
+             * to start-up. A program that rewrites a variable in a
+             * loop grows without limit and should keep its own state
+             * instead. The cost is accepted, not absent --
+             * docs/libc/invariants.md L8 states it as a contract.
+             */
+            environ[i] = e;
+            goto out;
         }
     }
-    char **nenv = malloc((n + 2) * sizeof(char *));
-    if (nenv == NULL)
-        return -1;
-    memcpy(nenv, environ, n * sizeof(char *));
-    nenv[n] = malloc(nl + strlen(value) + 2);
-    if (nenv[n] == NULL) {
-        free(nenv);
-        return -1;
+    {
+        char **nenv = malloc((n + 2) * sizeof(char *));
+        if (nenv == NULL) {
+            rc = -1;
+            goto out;
+        }
+        memcpy(nenv, environ, n * sizeof(char *));
+        nenv[n] = malloc(nl + strlen(value) + 2);
+        if (nenv[n] == NULL) {
+            free(nenv);
+            rc = -1;
+            goto out;
+        }
+        sprintf(nenv[n], "%s=%s", name, value);
+        nenv[n + 1] = NULL;
+        /* The free that made this a use-after-free before the lock: a
+         * reader inside `getenv` was walking this array. */
+        if (g_env_owned)
+            free(environ);
+        environ = nenv;
+        g_env_owned = 1;
     }
-    sprintf(nenv[n], "%s=%s", name, value);
-    nenv[n + 1] = NULL;
-    if (g_env_owned)
-        free(environ);
-    environ = nenv;
-    g_env_owned = 1;
-    return 0;
+out:
+    cosmo_mutex_unlock(&g_lock);
+    return rc;
+}
+
+/*
+ * Frees no string, so no pointer a reader holds is invalidated: the
+ * hazard the lock closes here is an inconsistent TRAVERSAL -- a name
+ * shifted into a slot a walker has already passed is missed, and a
+ * walker past `i` runs against a stale tail.
+ */
+char **__env_snapshot(void)
+{
+    cosmo_mutex_lock(&g_lock);
+    size_t n = env_count();              /* unlocked helper, under this lock */
+    char **copy = malloc((n + 1) * sizeof(char *));
+    if (copy != NULL) {
+        memcpy(copy, environ, n * sizeof(char *));
+        copy[n] = NULL;
+    }
+    cosmo_mutex_unlock(&g_lock);
+    return copy;
 }
 
 int unsetenv(const char *name)
 {
     size_t nl = strlen(name);
-    size_t n = env_count();
+    cosmo_mutex_lock(&g_lock);
+    size_t n = env_count();      /* unlocked helper, under this lock */
     for (size_t i = 0; i < n; i++) {
         if (strncmp(environ[i], name, nl) == 0 && environ[i][nl] == '=') {
             memmove(&environ[i], &environ[i + 1], (n - i) * sizeof(char *));
-            return 0;
+            break;
         }
     }
+    cosmo_mutex_unlock(&g_lock);
     return 0;
 }

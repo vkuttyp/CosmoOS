@@ -39,6 +39,23 @@ static int failures;
         fflush(stdout);                                                      \
     } while (0)
 
+/*
+ * `cosmo_thread_start` returns -errno, and it has three distinct
+ * failure points (the reservation, the hole, the fixed map, all in
+ * libc/src/thread.c). `CHECK(... == 0)` threw that away, which left
+ * two CI failures saying only that a start failed. This keeps the
+ * number, because the file's rule is that a check prints why.
+ */
+#define CHECK_START(t, fn)                                                   \
+    do {                                                                     \
+        int rc_ = cosmo_thread_start((t), (fn), NULL, 0);                    \
+        if (rc_ != 0) {                                                      \
+            printf("thrtest: FAIL %s start at line %d: rc %d\n",             \
+                   #fn, __LINE__, rc_);                                      \
+            failures++;                                                      \
+        }                                                                    \
+    } while (0)
+
 #define CHECK(cond)                                                          \
     do {                                                                     \
         if (!(cond)) {                                                       \
@@ -747,6 +764,576 @@ static int filter_child(const char *mode)
         return 2;
     cosmo_thread_exit(7);                   /* and yet this one works */
     return 3;
+}
+
+
+/* ---- the environment and the atexit list, under threads --------------- *
+ *
+ * docs/audit/next-subsystem-libc-shared-tables.md. These two tables were
+ * the ones the threads unit did not lock, while it locked the allocator
+ * and stdio and made errno per-thread.
+ */
+
+#define ENV_READERS 3
+#define ENV_ROUNDS  400
+
+static volatile int env_stop;
+static volatile unsigned env_misses;
+
+/*
+ * Heap churn, and the reason the environment tests need it.
+ *
+ * `setenv` copies the old array's POINTERS into the new one and frees
+ * only the array; it never frees a string. So a reader still walking
+ * the freed array reads pointers that are all still correct, and gets
+ * the right answer out of freed memory. The defect is real -- it is a
+ * read of a block the allocator has taken back -- but it cannot show
+ * as a wrong answer until something REUSES that block and overwrites
+ * it. This thread is that something: it allocates and frees blocks in
+ * the same size class as the environment array and fills them.
+ */
+static volatile unsigned long env_churn_sink;
+
+static void *env_churn(void *arg)
+{
+    (void)arg;
+    while (!env_stop) {
+        for (unsigned k = 8; k <= 600; k += 8) {
+            unsigned char *p = malloc(k * sizeof(char *));
+            if (p == NULL)
+                continue;
+            memset(p, 0x5A, k * sizeof(char *));
+            /*
+             * Read it back into a volatile. Without this the fill is
+             * a dead store into a block that is freed immediately
+             * after, and the compiler is entitled to delete it -- at
+             * which point the block is reused WITHOUT its stale
+             * pointers being overwritten and this test quietly stops
+             * exposing anything. The fill is the mechanism, so it has
+             * to be observable.
+             */
+            env_churn_sink += p[0] + p[k * sizeof(char *) - 1];
+            free(p);
+            if (env_stop)
+                break;
+        }
+    }
+    return NULL;
+}
+
+/* A reader that must always find a name nobody ever removes. */
+static void *env_reader(void *arg)
+{
+    (void)arg;
+    while (!env_stop) {
+        const char *v = getenv("STABLE");
+        if (v == NULL || strcmp(v, "yes") != 0)
+            __atomic_fetch_add(&env_misses, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+/*
+ * (A) setenv grows the array while readers walk it. Before the lock
+ * this freed `environ` under them -- a use-after-free in the
+ * allocator.
+ *
+ * A RELIABLE STRESS REPRODUCTION -- three runs of three -- and not a
+ * deterministic proof, because nothing here FORCES the interleaving:
+ * the readers, the growth and the churn run uncoordinated, and a
+ * different scheduler or allocator order could let an unlocked build
+ * through. Two things made it reliable. The observed
+ * name is added AFTER the padding, so a reader actually walks the
+ * part of the array being reallocated instead of finding its answer
+ * at the front. And a fourth thread churns the heap in the same size
+ * class, so the freed array is reused and overwritten before a reader
+ * reads it -- without that, `setenv` frees the array and never a
+ * string, so the stale copy's pointers are all still correct and the
+ * reader gets the right answer out of freed memory.
+ *
+ * With both, the unlocked build dies: #GP, signal 11, three runs of
+ * three. This comment has been wrong in both directions: it first
+ * called the test probabilistic (true before the churn thread), then
+ * deterministic (an overclaim -- reproducing three times is evidence,
+ * not a guarantee). Reliable is the word that fits the measurement.
+ */
+static void env_grow_under_readers(void)
+{
+    cosmo_thread_t r[ENV_READERS];
+    char name[32];
+
+    /*
+     * The padding goes in FIRST and the observed name LAST, so a
+     * reader has to walk the whole mutated tail to reach it. The
+     * first build had this the other way round: `STABLE` sat at the
+     * front, `getenv` found it immediately, and the reader never
+     * entered the part of the array being reallocated -- so the test
+     * could not have caught a missing lock. Review found it.
+     */
+    for (unsigned i = 0; i < 60; i++) {
+        snprintf(name, sizeof(name), "PAD%u", i);
+        CHECK(setenv(name, "x", 1) == 0);
+    }
+    CHECK(setenv("STABLE", "yes", 1) == 0);
+    cosmo_thread_t churn;
+    env_stop = 0;
+    env_misses = 0;
+    CHECK_START(&churn, env_churn);
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK_START(&r[i], env_reader);
+    for (unsigned i = 0; i < ENV_ROUNDS; i++) {
+        snprintf(name, sizeof(name), "GROW%u", i);
+        CHECK(setenv(name, "v", 1) == 0);    /* each one reallocates */
+    }
+    env_stop = 1;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_join(&r[i], NULL) == 0);
+    CHECK(cosmo_thread_join(&churn, NULL) == 0);
+    CHECK(env_misses == 0);
+    printf("thrtest: env-grow-under-readers: %u readers over %u growths, %u misses\n",
+           (unsigned)ENV_READERS, (unsigned)ENV_ROUNDS, env_misses);
+}
+
+/*
+ * (B) unsetenv shifts the array while readers are inside `getenv`.
+ *
+ * This one is the REGRESSION TEST of the set, and unlike (A) it does
+ * not reproduce: `unsetenv` frees nothing, so there is no block for
+ * the churn to recycle and its hazard is a wrong ANSWER -- a name
+ * shifted past a walker -- rather than a bad pointer. It asserts that
+ * a reader never misses a name nobody removed while 200 entries
+ * before it are removed under the walk.
+ *
+ * An earlier design forced the window by having the test walk
+ * `environ` itself and pause mid-array. That does not work, and the
+ * reason is worth keeping: a walker the test owns never takes the
+ * library's lock, so the lock the fix adds cannot protect it -- the
+ * test fails identically with and without the fix, which makes it a
+ * test of nothing. The reader here is the real `getenv`.
+ */
+static void *env_unset_reader(void *arg)
+{
+    (void)arg;
+    while (!env_stop) {
+        const char *v = getenv("STABLE");
+        if (v == NULL || strcmp(v, "yes") != 0)
+            __atomic_fetch_add(&env_misses, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static void env_unset_under_readers(void)
+{
+    cosmo_thread_t r[ENV_READERS];
+    char name[32];
+
+    /*
+     * The removable entries go BEFORE the observed one, so every
+     * removal shifts `STABLE` down a slot and a reader in the middle
+     * of the array can be stepped over. The first build appended them
+     * after `STABLE`, where no shift could reach it.
+     */
+    for (unsigned i = 0; i < 200; i++) {
+        snprintf(name, sizeof(name), "DEL%u", i);
+        CHECK(setenv(name, "x", 1) == 0);
+    }
+    CHECK(setenv("STABLE", "yes", 1) == 0);
+    env_stop = 0;
+    env_misses = 0;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK_START(&r[i], env_unset_reader);
+    for (unsigned i = 0; i < 200; i++) {
+        snprintf(name, sizeof(name), "DEL%u", i);
+        CHECK(unsetenv(name) == 0);      /* each one shifts the tail */
+    }
+    env_stop = 1;
+    for (unsigned i = 0; i < ENV_READERS; i++)
+        CHECK(cosmo_thread_join(&r[i], NULL) == 0);
+    CHECK(env_misses == 0);
+    printf("thrtest: env-unset-under-readers: %u readers over 200 removals, %u misses\n",
+           (unsigned)ENV_READERS, env_misses);
+}
+
+/*
+ * (C) and (D) atexit. Countable: register N from N threads and count
+ * how many run. A lost update is a number, not a timing.
+ */
+#define AT_THREADS 8
+static volatile unsigned at_ran;
+static void at_handler(void) { __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED); }
+
+static volatile int at_go;
+
+/*
+ * The barrier is the point. Without it the threads are started in a
+ * loop and each finishes before the next exists, so they never
+ * contend and an unlocked `atexit` passes the test -- which is what
+ * the first build measured.
+ */
+static void *at_registrar(void *arg)
+{
+    unsigned *ok = arg;
+    while (!at_go)
+        cosmo_yield();
+    *ok = (atexit(at_handler) == 0) ? 1u : 0u;
+    return NULL;
+}
+
+static unsigned at_registered;
+
+static void atexit_concurrent(void)
+{
+    cosmo_thread_t t[AT_THREADS];
+    unsigned ok[AT_THREADS] = { 0 };
+
+    at_go = 0;
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        CHECK(cosmo_thread_start(&t[i], at_registrar, &ok[i], 0) == 0);
+    at_go = 1;                       /* all eight enter atexit together */
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        CHECK(cosmo_thread_join(&t[i], NULL) == 0);
+    for (unsigned i = 0; i < AT_THREADS; i++)
+        at_registered += ok[i];
+    /* Every one that said it registered must have been kept: the count
+     * the drain runs is checked at exit, below. */
+    CHECK(at_registered == AT_THREADS);
+    printf("thrtest: atexit-concurrent: %u of %u registrations accepted\n",
+           at_registered, (unsigned)AT_THREADS);
+}
+
+/*
+ * (D) More registrations than ATEXIT_MAX, concurrently. Unlocked, the
+ * bound check and the increment are separate, so two threads can both
+ * pass the check at 31 and both write -- one of them past the end of
+ * a static array. There is no canary to read from userland, so what
+ * this asserts is what userland can see: the surplus is REFUSED with
+ * -1, and the number that run at exit equals the number accepted.
+ * An overwrite past the end would have to corrupt `g_natexit` or its
+ * neighbour to be invisible to both.
+ */
+#define AT_FLOOD 24
+static volatile unsigned at_accepted_flood;
+
+static void *at_flooder(void *arg)
+{
+    (void)arg;
+    while (!at_go)
+        cosmo_yield();
+    for (unsigned i = 0; i < 8; i++)
+        if (atexit(at_handler) == 0)
+            __atomic_fetch_add(&at_accepted_flood, 1, __ATOMIC_RELAXED);
+    return NULL;
+}
+
+static void atexit_bound(void)
+{
+    cosmo_thread_t t[3];
+
+    at_go = 0;
+    for (unsigned i = 0; i < 3; i++)
+        CHECK(cosmo_thread_start(&t[i], at_flooder, NULL, 0) == 0);
+    at_go = 1;
+    for (unsigned i = 0; i < 3; i++)
+        CHECK(cosmo_thread_join(&t[i], NULL) == 0);
+    /* Three threads offering eight each against a table of 32 that
+     * already holds some: more offered than can be taken. */
+    /* The point of the test: more was offered than the table can
+     * hold, so some must have been refused. The `+ 1` is
+     * `atexit_checks_at_exit`, which occupies a slot but is
+     * deliberately absent from `at_registered` because it does not
+     * increment `at_ran`. Without it this bound permitted 33 entries
+     * in a table of 32 -- one more than the overflow it exists to
+     * catch. Review caught that too. */
+    CHECK(at_accepted_flood < (unsigned)AT_FLOOD);
+    CHECK(at_accepted_flood + at_registered + 1u <= 32u);
+    at_registered += at_accepted_flood;
+    printf("thrtest: atexit-bound: %u of %u offered were accepted, table holds %u\n",
+           at_accepted_flood, (unsigned)AT_FLOOD, at_registered);
+}
+
+/*
+ * (G) The contract the leak BUYS, which nothing tested.
+ *
+ * `setenv` leaks the string it replaces so that a pointer `getenv`
+ * already returned stays valid; L8 and design.md now state that as a
+ * contract and `__env_snapshot`'s shallow copy rests on it. Every
+ * other case here exercises concurrent access, so tidying the leak
+ * away would have failed none of them. Review found that.
+ *
+ * The churn is the point, and is the same lesson this unit learned
+ * about the use-after-free: freed memory usually still reads
+ * correctly, so a test that just re-reads the pointer passes whether
+ * or not the string was freed. Reusing and overwriting the block
+ * first is what makes the difference observable.
+ */
+static void env_pointer_survives_overwrite(void)
+{
+    CHECK(setenv("THRLEAK", "old-value", 1) == 0);
+    const char *p = getenv("THRLEAK");
+    CHECK(p != NULL);
+    if (p == NULL)
+        return;
+    CHECK(strcmp(p, "old-value") == 0);
+
+    CHECK(setenv("THRLEAK", "new-value", 1) == 0);
+
+    /*
+     * Reuse the heap, at the SIZE OF THE FREED BLOCK. The first
+     * version of this churn allocated 64 bytes and the test passed
+     * against a `setenv` that freed the string -- vacuous, and its
+     * own bug-proof caught it. The entry is "THRLEAK=old-value",
+     * eighteen bytes with its NUL, and an allocator that segregates
+     * by size will never hand an eighteen-byte hole to a request for
+     * sixty-four. A few neighbouring sizes too, so this does not
+     * depend on the bin boundaries being exactly where they are.
+     */
+    const size_t entry = strlen("THRLEAK") + 1 + strlen("old-value") + 1;   /* 18 */
+    volatile unsigned sink = 0;
+    for (unsigned i = 0; i < 400; i++) {
+        size_t sz = entry + (i % 5) - 2;   /* 16..20 */
+        unsigned char *b = malloc(sz);
+        if (b == NULL)
+            continue;
+        memset(b, 0x5a, sz);
+        sink += b[0] + b[sz - 1];  /* observable: the stores cannot be dropped */
+        free(b);
+    }
+    (void)sink;
+
+    CHECK(strcmp(p, "old-value") == 0);      /* leaked, not freed */
+    const char *q = getenv("THRLEAK");
+    CHECK(q != NULL && strcmp(q, "new-value") == 0);
+    CHECK(q != p);
+    CHECK(unsetenv("THRLEAK") == 0);
+    printf("thrtest: env-pointer-survives-overwrite: the old pointer still reads its "
+           "own value after an overwrite and 400 reuses of the heap\n");
+}
+
+/*
+ * (F) The reader of `environ` that lives OUTSIDE stdlib.c.
+ *
+ * `spawnvp` hands the environment array to the kernel. It used to read
+ * the global directly, so a program doing exactly what
+ * `cosmo/thread.h` now permits -- setenv on one thread, spawn on
+ * another -- walked an array `setenv` had freed. The unit locked
+ * `stdlib.c`'s own accessors and left this one, which made invariant
+ * L8's claim false for the case a caller is most likely to hit.
+ * Found by review, not by the unit.
+ */
+/*
+ * Four variants over `spawnvp_flags`'s THREE freeing exits. Be exact
+ * about that, because two earlier versions of this comment were not:
+ * the function has four returns, and only three of them free the
+ * snapshot --
+ *
+ *   1. `__env_snapshot()` failed: `env` is NULL, nothing to free.
+ *      Untested, and it needs a malloc that can be made to fail;
+ *      recorded as a gap in docs/libc/testing.md.
+ *   2. the absolute arm -- ONE exit serving both a spawn that runs
+ *      and a spawn that cannot, which is why two variants aim at it:
+ *      the second is there for the errno saved across the `free`.
+ *   3. the PATH search finding something.
+ *   4. the PATH search exhausting every element.
+ *
+ * The first build of this case only ever spawned "/bin/true", so
+ * `strchr(file, '/')` succeeded every time and the whole PATH-search
+ * half -- the loop that holds the snapshot across repeated
+ * stat/spawn attempts, and the frees at 3 and 4 -- ran in no test at
+ * all. Review found that; a snapshot bug reachable only while
+ * walking PATH would not have failed this file.
+ *
+ * The search reads PATH out of the snapshot rather than calling
+ * `getenv`, so the path it walks is the one the child will actually
+ * receive -- it used to read the live table, which another thread is
+ * mutating throughout this case, and review found the mismatch. It
+ * points into the snapshot's strings, which is the deliberate
+ * `setenv` leak load-bearing for a fourth time in this unit.
+ */
+static unsigned spawn_done[4];   /* attempts completed, per variant */
+
+static void *env_spawner(void *arg)
+{
+    (void)arg;
+    unsigned bad = 0;
+    /*
+     * Every one of the 39, and deliberately NOT `&& !env_stop`: the
+     * writer sets that after its 120 growths, and a spawner that
+     * stopped there could exit having run none of the PATH variants
+     * while the summary still claimed thirteen of each. Review found
+     * that. The cost is that the last spawns race nothing, which is
+     * the right trade -- the freeing exits are what this case covers,
+     * and `spawn_done` now says so rather than the loop bound.
+     */
+    for (unsigned i = 0; i < 40; i++) {
+        /* absolute hit, PATH hit, PATH miss, absolute MISS */
+        const char *file = (i % 4 == 0) ? "/bin/true"
+                         : (i % 4 == 1) ? "true"
+                         : (i % 4 == 2) ? "cosmo-no-such-program"
+                                        : "/bin/cosmo-no-such-program";
+        const char *const av[] = { file, NULL };
+        errno = 0;
+        pid_t p = spawnvp(file, av, NULL, 0);
+        if (i % 4 == 3) {
+            /*
+             * The absolute path that cannot run: `strchr` succeeds,
+             * `spawn_req` fails, and the exit frees the snapshot on
+             * the way out. The point is the errno -- that arm saves
+             * and restores it around the `free` precisely so a
+             * successful `free` cannot repaint a failed spawn, and
+             * nothing tested that. Review found it.
+             */
+            if (p >= 0) {
+                int junk = 0;
+                bad++;
+                (void)waitpid(p, &junk, 0);
+            } else if (errno != ENOENT) {
+                printf("thrtest: FAIL absolute spawn miss left errno %d, wanted ENOENT\n", errno);
+                bad++;
+            }
+            spawn_done[3]++;
+            continue;
+        }
+        if (i % 4 == 2) {
+            /* Must fail after walking every PATH element and freeing
+             * the snapshot on the way out. A success here means the
+             * name resolved, which would make this a third spawn of a
+             * real program rather than the failure exit. */
+            if (p >= 0) {
+                int junk = 0;
+                bad++;
+                (void)waitpid(p, &junk, 0);
+            }
+            spawn_done[2]++;
+            continue;
+        }
+        if (p < 0) {
+            bad++;
+            continue;
+        }
+        int st = 0;
+        if (waitpid(p, &st, 0) != p || st != 0)
+            bad++;
+        spawn_done[i % 4]++;
+    }
+    env_misses += bad;
+    return NULL;
+}
+
+/*
+ * Runs FIRST of the environment cases and cleans up after itself,
+ * because a spawn carries the whole environment to the kernel: with
+ * the hundreds of names the other two leave behind, `spawn` refuses
+ * with E2BIG and the test measures the argument limit instead of the
+ * race. The first build did exactly that -- 7 of 40 spawns failed
+ * with errno 7 against a correct library.
+ */
+static void env_spawn_under_setenv(void)
+{
+    cosmo_thread_t sp, churn;
+    char name[32];
+
+    env_stop = 0;
+    env_misses = 0;
+    spawn_done[0] = spawn_done[1] = spawn_done[2] = spawn_done[3] = 0;
+    CHECK_START(&churn, env_churn);
+    CHECK_START(&sp, env_spawner);
+    for (unsigned i = 0; i < 120; i++) {
+        snprintf(name, sizeof(name), "SPW%u", i);
+        CHECK(setenv(name, "v", 1) == 0);   /* frees the array under the spawner */
+    }
+    env_stop = 1;
+    CHECK(cosmo_thread_join(&sp, NULL) == 0);
+    CHECK(cosmo_thread_join(&churn, NULL) == 0);
+    CHECK(env_misses == 0);
+    for (unsigned i = 0; i < 120; i++) {   /* leave the environment as found */
+        snprintf(name, sizeof(name), "SPW%u", i);
+        CHECK(unsetenv(name) == 0);
+    }
+    /* Each of `spawnvp_flags`'s exits, actually reached. */
+    CHECK(spawn_done[0] == 10 && spawn_done[1] == 10 &&
+          spawn_done[2] == 10 && spawn_done[3] == 10);
+    printf("thrtest: env-spawn-under-setenv: %u absolute + %u on PATH + %u unresolvable "
+           "+ %u absolute-miss (errno kept across the free) across 120 growths, %u failures\n",
+           spawn_done[0], spawn_done[1], spawn_done[2], spawn_done[3], env_misses);
+}
+
+/*
+ * (E) A handler that calls back into the library must not deadlock,
+ * and one that REGISTERS another must have that one run.
+ * `exit`'s take/pop/release/call shape exists for both, and its
+ * comment makes the second claim outright -- "a handler that
+ * registers another gets it run by the next turn of this loop".
+ * The first build of this case called only `getenv`, so the claim
+ * about registration was documented and untested; review caught that.
+ *
+ * `atexit` from inside the drain succeeds however full the table was
+ * when `exit` was called, because the drain pops each entry before
+ * calling it: the flood's 22 slots are already free by the time this
+ * runs. LIFO then makes the new handler the very next one called.
+ */
+static volatile int reentrant_ran, late_ran, late_registered;
+
+static void late_handler(void)
+{
+    late_ran = 1;
+    __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED);
+}
+
+static void reentrant_handler(void)
+{
+    (void)getenv("STABLE");     /* takes the same lock exit was holding */
+    if (atexit(late_handler) == 0) {    /* ... and so does this */
+        late_registered = 1;
+        at_registered++;        /* the drain must reach it too */
+    }
+    reentrant_ran = 1;
+    __atomic_fetch_add(&at_ran, 1, __ATOMIC_RELAXED);   /* counted with the rest */
+}
+
+/*
+ * Registered FIRST so the LIFO drain runs it LAST, and it prints the
+ * program's verdict -- so a drain that loses a handler or deadlocks
+ * fails the run. Printing `THREADTEST: PASS` from `main` instead would
+ * have published the verdict before the thing under test had run: the
+ * first build did exactly that, and the drain's own failure could not
+ * reach the marker.
+ */
+static void atexit_checks_at_exit(void)
+{
+    if (at_ran != at_registered) {
+        printf("thrtest: FAIL atexit drain ran %u of %u\n", at_ran, at_registered);
+        failures++;
+    } else if (!reentrant_ran) {
+        printf("thrtest: FAIL the re-entrant handler did not run\n");
+        failures++;
+    } else if (!late_registered) {
+        printf("thrtest: FAIL atexit from inside a handler was refused\n");
+        failures++;
+    } else if (!late_ran) {
+        printf("thrtest: FAIL a handler registered during the drain never ran\n");
+        failures++;
+    } else {
+        printf("thrtest: atexit-drain: %u handlers ran, the re-entrant one returned, "
+               "and the one it registered ran next\n", at_ran);
+    }
+    if (failures == 0)
+        printf("THREADTEST: PASS\n");
+    else
+        printf("THREADTEST: FAIL %d\n", failures);
+    fflush(stdout);
+    /*
+     * The exit STATUS as well as the marker. `main` ends
+     * `exit(failures ? 1 : 0)`, but `failures` can still rise here --
+     * these checks are part of it -- and a status already handed to
+     * `exit` cannot be revised. `_exit` is the last statement of the
+     * last handler, so it skips nothing: stdout is flushed above.
+     * The build that moved the verdict into the drain replaced
+     * main's `return failures ? 1 : 0;` with an unconditional
+     * `exit(0)` and left the marker as the only signal of failure.
+     * Review caught that; keeping the status costs these four lines.
+     */
+    if (failures != 0)
+        _exit(1);
 }
 
 int main(int argc, char **argv)
@@ -1551,9 +2138,32 @@ int main(int argc, char **argv)
         printf("thrtest: phdr at 0x%lx, %lu entries, %d PT_TLS\n", at_phdr, at_phnum, nr_tls);
     }
 
-    if (failures == 0)
-        printf("THREADTEST: PASS\n");
-    else
-        printf("THREADTEST: FAIL %d\n", failures);
-    return failures ? 1 : 0;
+    /*
+     * The two tables the threads unit did not lock
+     * (docs/audit/next-subsystem-libc-shared-tables.md). Last, because
+     * the atexit ones leave handlers registered and the drain's own
+     * check runs after main returns.
+     */
+    /* FIRST, so the LIFO drain runs it LAST and it can see every
+     * other handler's result. It prints the verdict. */
+    CHECK(atexit(atexit_checks_at_exit) == 0);
+
+    env_pointer_survives_overwrite();   /* one name, removed again */
+    env_spawn_under_setenv();   /* first of the racing cases: a spawn carries the whole environment */
+    env_grow_under_readers();
+    env_unset_under_readers();
+    atexit_concurrent();
+    /* Before the flood: it fills the table by design, and the
+     * re-entrant handler needs a slot. */
+    CHECK(atexit(reentrant_handler) == 0);
+    at_registered++;             /* the drain must run this one too */
+    atexit_bound();
+
+    /*
+     * `exit`, not `return`: the drain is part of what is under test,
+     * and the verdict is printed from the last handler rather than
+     * from here. The status still travels -- and the drain can raise
+     * it further, see `atexit_checks_at_exit`.
+     */
+    exit(failures ? 1 : 0);
 }

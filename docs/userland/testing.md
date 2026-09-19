@@ -37,6 +37,13 @@ truncation), `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`.
 Straight-line shell (no control flow exists); `FAILS` is set to 1 by
 `||` on a command that must succeed or by `&&` on a command that must
 fail, and the last line runs `sh -c "exit $FAILS"` to print the verdict.
+That line is `A && B || C`, and until the shell's AND-OR lists were made
+left-associative it could print only `SHTEST: PASS`: on a failing run
+neither branch ran, so the `SHTEST: FAIL n` this table promises was
+unreachable and a failure showed up only as a missing marker. The script
+now asserts the shape it depends on -- both branches of `false && … || …`
+and of `true && … || …`, each checked with a two-term list that means the
+same thing under either parse.
 What it covers, in order: `mkdir -p` of a nested path; `>` and `>>`;
 one-, two- and three-stage pipelines through `cat`; `cat` of the
 results (the log shows `hello` and `hello` then `world`); `cp` into a

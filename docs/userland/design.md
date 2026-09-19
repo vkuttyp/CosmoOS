@@ -72,11 +72,31 @@ lex            line → tokens: WORD (quotes and escapes handled per character, 
 expand_dollar  $VAR ${VAR} $? $$ $0-$9 $#; no splitting of results (recorded gap)
 parse_pipeline tokens → struct pipeline { struct command cmds[16] }; command → words + redirs
 run_line       walks the token list: pipelines separated by ; && || with skip logic, -e handling
+               (AND-OR lists are LEFT-associative -- see below)
 run_pipeline   assignments alone → variables; a lone builtin runs in-process (redirected through dup/dup2
                when it has redirections); otherwise spawn each stage with a three-entry handle map
 builtin        cd pwd exit export unset set : true false wait . source
 var_*          shell variables (a flat array of 64); export moves them to the environment
 ```
+
+### AND-OR lists are left-associative
+
+`A && B || C` is `(A && B) || C`, so a failing `A` skips `B` and then
+**runs `C`**. `run_line` keeps one `skip` flag and recomputes it at
+every operator from `g_last_status`, the status of the last pipeline
+actually run -- which is the list's accumulated status, because a
+skipped pipeline does not change it.
+
+Recomputing at *every* operator is the whole of it, and the first
+version guarded the recomputation with `if (!skip)`: once `&&` had set
+the flag, the following `||` never looked at it, and `A && B || C` with
+a failing `A` ran nothing at all. `/etc/rc.test`'s own verdict line is
+that shape, so a failing run printed no verdict -- `SHTEST: FAIL n` was
+unreachable and only the absence of `SHTEST: PASS` reported it. It was
+found while proving that `thrtest` propagates its exit status, which is
+what makes `FAILS` non-zero in the first place. `rc.test` now asserts
+both branches of both shapes, in two-term lists that mean the same
+thing under either parse.
 
 ### Running a pipeline
 
