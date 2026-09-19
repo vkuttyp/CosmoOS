@@ -971,7 +971,18 @@ static bool report_clean(const struct cosmofs_check_report *r)
            r->dir_bad.count == 0 && r->counter_wrong.count == 0 && r->chain_cycle.count == 0 &&
            r->extent_order.count == 0 && r->extent_overlap.count == 0 &&
            r->dir_dup_name.count == 0 &&
-           r->unreadable.count == 0;
+           r->unreadable.count == 0 &&
+           /*
+            * A pass that did not finish cannot call a filesystem
+            * sound. Every other `partial` also fires a class, so this
+            * changed nothing until the duplicate-name confirmation
+            * bound arrived: that one stops looking without finding
+            * anything, and a report of `clean` plus `partial` would
+            * have told an operator "no findings" about a directory
+            * the pass had stopped reading. A checker's output is the
+            * claim `this filesystem is sound`, and it cannot make it.
+            */
+           !r->partial;
 }
 
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)

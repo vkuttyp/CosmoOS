@@ -18,7 +18,17 @@
 
 /* Version 1: LIST, CHECK and SCRUB. Every later version documents itself
  * here, beside the constant, as netctl.h does. */
-#define COSMO_FSCTL_VERSION 1
+/*
+ * Version 2 grows the CHECK result's class array from ten to thirteen
+ * (below). The result is a fixed-size struct the kernel writes whole,
+ * so growing it is NOT prefix-compatible: an old client asking for the
+ * ten-class size would get -ERANGE from a new kernel, part way through
+ * a command that had already passed the version check. Bumping is what
+ * turns that into an early, explicit refusal -- a version-1 client and
+ * a version-2 kernel now disagree at the gate instead of in the middle
+ * (docs/audit/next-subsystem-fsck-unchecked.md).
+ */
+#define COSMO_FSCTL_VERSION 2
 
 #define COSMO_FSCTL_LIST  1   /* the mounts this namespace holds */
 #define COSMO_FSCTL_CHECK 2   /* the structural check, against one id */

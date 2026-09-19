@@ -58,7 +58,25 @@ build differed from it.
    quadratic in a directory's size under `fs->lock`. The buffers are
    preallocated with the maps now, and confirmations are capped with
    `partial` past the cap -- incomplete rather than wrong.
-8. **Thirteen classes, not "ten plus three".** The report counted
+8. **Growing the CHECK result is a protocol version bump, and the
+   first attempt forgot it.** The class array is designed so "a
+   version that adds one grows `nclasses` and moves nothing", and
+   that is true of the *indices* -- but the result is a fixed-size
+   struct the kernel writes whole, so the struct itself got bigger and
+   an old client asking for the ten-class size would have taken
+   `-ERANGE` in the middle of a command that had already passed the
+   version check. `COSMO_FSCTL_VERSION` is 2, so the disagreement
+   happens at the gate instead. Found in review.
+9. **`partial` now implies not `clean`, and it did not.** The
+   confirmation bound (item 7) is the first `partial` that fires no
+   class: every other one -- an unreadable block -- also fills
+   `unreadable`, so `clean` was already false. With the bound, a
+   report could say `clean` AND `partial` about a directory the pass
+   had stopped reading, and `fsctl(8)` prints "clean" and exits zero.
+   A checker's output is the claim *this filesystem is sound*, and a
+   pass that did not finish cannot make it. Found in review, and it
+   is this report's own thesis pointed back at the implementation.
+10. **Thirteen classes, not "ten plus three".** The report counted
    eight new corruption *kinds* and five unfired reporting *paths*
    and was careful to distinguish them; the number that ends up in the
    documentation is the class count, which is ten before and thirteen
