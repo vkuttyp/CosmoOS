@@ -276,6 +276,34 @@ of that slot failing after it — two `CHECK`s, one cause. It passed on
 an immediate re-run of the same tree, and `test-guard` on the same
 architecture and the same build ran `thrtest` clean.
 
+**A second, on CI the same day**, in `build, boot, analyze (aarch64)`
+on `096a15d` — a documentation-only commit — in the *protection-capable*
+boot this time rather than the GIC one. Same test, same two `CHECK`s,
+and the same position: the first reader start after
+`env-spawn-under-setenv` has joined its two threads. That job was red
+anyway, because `net-harness` tripped the forbidden-marker rule in the
+same boot.
+
+Two sightings at one instruction is not a coincidence, and the suspect
+is the new case itself: `env-spawn-under-setenv` adds two thread
+create/join cycles immediately before a four-thread test, and
+`cosmo_thread_join` returns from `thread_clear_tid`, which
+`process_thread_exit` calls *immediately before* `thread_exit` — the
+ordering the `lx_join` entry above describes. A joiner can therefore
+start a new thread while the one it just joined is still being torn
+down.
+
+That is a hypothesis, not a finding. It did not reproduce in fourteen
+local aarch64 boots across both variants, nor in twelve back-to-back
+rounds of spawn-then-grow inside one boot (~60 thread starts). What
+has been fixed is the diagnosis: `cosmo_thread_start` returns `-errno`
+and has three distinct failure points — the reservation, the hole and
+the fixed map (`libc/src/thread.c`) — and `CHECK(... == 0)` threw the
+number away, which is why two failures could say only *that* a start
+failed. `CHECK_START` keeps it, so the third sighting names which
+mapping and why. Note that `RLIMIT_AS` is not the candidate it looks
+like: it defaults to 2 GiB and this process is nowhere near it.
+
 A thread start fails here for memory, and `/etc/rc.test` already
 carries the comment: CI refused this test's second thread stack with
 `-ENOMEM` once before, which is why `thrtest` was moved ahead of the
@@ -283,8 +311,8 @@ hypervisor section that asks for 16 MiB and 256 MiB guests. This is
 that condition, not a new one, and it is load- and layout-sensitive
 rather than deterministic.
 
-Two things are worth keeping. The **printf is not honest under this
-failure**: it reports `3 readers` from `ENV_READERS` whatever actually
+Two things are still worth keeping. The **printf is not honest under
+this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
 started, so the line said "3 readers over 400 growths, 0 misses" on a
 run where one reader never existed. And `0 misses` from two readers is
 a weaker result than the same words from three — the check passed with
@@ -654,14 +682,15 @@ of this section said eight and then listed nine:
 | PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
 | PR #191's own CI run | observed, aarch64 (`f89a240`, documentation-only): **`connect 0 in 493 ms`** -- a new fastest, below the floor set three sightings earlier -- `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a ninth time |
 | PR #191's own CI run, a later one | observed, **x86-64** (`7ca342b`): `connect 0 in 715 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a tenth time, and **only the second x86-64 reading** after sighting thirty-five |
+| PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and **only the second retransmission** in twelve sightings. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
 
-Thirty-one entries, forty occurrences -- and the table is the tally,
+Thirty-two entries, forty-one occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-six rows
+them and are not independently re-verified here. The last twenty-seven rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **thirty-one instrumented** occurrences
-behind the other twenty-five rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty-two instrumented** occurrences
+behind the other twenty-six rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 

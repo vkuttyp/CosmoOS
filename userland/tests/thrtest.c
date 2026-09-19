@@ -39,6 +39,23 @@ static int failures;
         fflush(stdout);                                                      \
     } while (0)
 
+/*
+ * `cosmo_thread_start` returns -errno, and it has three distinct
+ * failure points (the reservation, the hole, the fixed map, all in
+ * libc/src/thread.c). `CHECK(... == 0)` threw that away, which left
+ * two CI failures saying only that a start failed. This keeps the
+ * number, because the file's rule is that a check prints why.
+ */
+#define CHECK_START(t, fn)                                                   \
+    do {                                                                     \
+        int rc_ = cosmo_thread_start((t), (fn), NULL, 0);                    \
+        if (rc_ != 0) {                                                      \
+            printf("thrtest: FAIL %s start at line %d: rc %d\n",             \
+                   #fn, __LINE__, rc_);                                      \
+            failures++;                                                      \
+        }                                                                    \
+    } while (0)
+
 #define CHECK(cond)                                                          \
     do {                                                                     \
         if (!(cond)) {                                                       \
@@ -861,9 +878,9 @@ static void env_grow_under_readers(void)
     cosmo_thread_t churn;
     env_stop = 0;
     env_misses = 0;
-    CHECK(cosmo_thread_start(&churn, env_churn, NULL, 0) == 0);
+    CHECK_START(&churn, env_churn);
     for (unsigned i = 0; i < ENV_READERS; i++)
-        CHECK(cosmo_thread_start(&r[i], env_reader, NULL, 0) == 0);
+        CHECK_START(&r[i], env_reader);
     for (unsigned i = 0; i < ENV_ROUNDS; i++) {
         snprintf(name, sizeof(name), "GROW%u", i);
         CHECK(setenv(name, "v", 1) == 0);    /* each one reallocates */
@@ -924,7 +941,7 @@ static void env_unset_under_readers(void)
     env_stop = 0;
     env_misses = 0;
     for (unsigned i = 0; i < ENV_READERS; i++)
-        CHECK(cosmo_thread_start(&r[i], env_unset_reader, NULL, 0) == 0);
+        CHECK_START(&r[i], env_unset_reader);
     for (unsigned i = 0; i < 200; i++) {
         snprintf(name, sizeof(name), "DEL%u", i);
         CHECK(unsetenv(name) == 0);      /* each one shifts the tail */
@@ -1079,8 +1096,8 @@ static void env_spawn_under_setenv(void)
 
     env_stop = 0;
     env_misses = 0;
-    CHECK(cosmo_thread_start(&churn, env_churn, NULL, 0) == 0);
-    CHECK(cosmo_thread_start(&sp, env_spawner, NULL, 0) == 0);
+    CHECK_START(&churn, env_churn);
+    CHECK_START(&sp, env_spawner);
     for (unsigned i = 0; i < 120; i++) {
         snprintf(name, sizeof(name), "SPW%u", i);
         CHECK(setenv(name, "v", 1) == 0);   /* frees the array under the spawner */
