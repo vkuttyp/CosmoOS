@@ -507,6 +507,71 @@ them is good evidence for "not this branch" and no evidence at all for
 "not the repository", and the cheapest thing that separated them was
 reading how long the test took before it failed.
 
+## `lxtest`'s tgkill-after-join, and why eleven markers went missing
+
+**2026-09-19, x86-64 CI, the protection-capable boot, on a
+documentation-only commit (`83b42cb`).** The run reported **thirteen**
+missing markers -- `SHTEST: PASS`, the musl program, `LINUXTEST: PASS`,
+`lxinterp: ok`, `lxdyn: ok` and all eight `lxsig` lines -- while **all
+352 self-tests passed** and the kernel shut down with status 0. That
+suffix looks like a boot that died early. It was not.
+
+One check failed, and the log says which:
+
+```text
+LINUXTEST: FAIL sc3(LX_tgkill, pid, ctid, 0) == -3 (0)
+LINUXTEST: FAIL (1 checks)
+```
+
+`/etc/rc.linux` runs `lxhello`, then `lxtest || exit 1`, then
+everything else. So the one failure accounts for **all thirteen**:
+
+| marker | why it is missing |
+| --- | --- |
+| `LINUXTEST: PASS` | `lxtest`'s own verdict -- it printed `FAIL` instead |
+| `lxdyn: ok`, `lxinterp: ok` | never ran; `lxinterp` is `lxdyn`'s ELF interpreter, so it goes with it |
+| eight `lxsig` lines | never ran |
+| the musl program | never ran -- it is the last line of `rc.linux` |
+| `SHTEST: PASS` | `rc.test` recorded `FAILS=1`, and its verdict line only prints `PASS` at zero |
+
+**Thirteen missing markers, one failed check, and nothing in the output
+says so** -- the same defect `docs/audit/next-subsystem-usertest-sections.md`
+is about, in a second suite. (The first version of this entry said
+twelve markers and "eleven of the twelve", which was a miscount of a
+list printed in full four lines above it.)
+
+**The check races a window the kernel documents.** `lxtest.c:746-750`:
+
+```c
+CHECKV(lx_join(&g_tidword[0]) == 0, g_tidword[0]);
+CHECKV(g_child_tid == ctid && g_child_fs_ok, g_child_tid);
+CHECKV(sc0(LX_gettid) == pid, 0);
+CHECKV(sc3(LX_tgkill, pid, ctid, 0) == -3, 0);          /* "gone" */
+```
+
+`lx_join` waits for the `CHILD_CLEARTID` word to reach zero. The kernel
+zeroes that word and wakes the joiner in `thread_clear_tid`, which
+`process_thread_exit` calls **immediately before `thread_exit`**
+(`kernel/process/process.c:870-871`) -- and the comment above it
+records that the wake was deliberately moved to that point, after the
+thread stops being counted, so a joiner can immediately create another
+thread.
+
+Not being *counted* is not the same as not being *findable*. Between
+the `futex_wake` and `thread_exit` completing, the exiting thread still
+resolves by tid, so `tgkill(pid, ctid, 0)` can return 0 where the test
+demands `-ESRCH`. Two intervening checks are all that normally covers
+the window, and on a loaded shared runner they did not.
+
+**The kernel's ordering is the deliberate one; the test's assumption is
+the wrong part** -- "my join returned, therefore that tid is
+unresolvable" was never promised, here or on Linux. The repair is for
+the test to wait for the condition it actually means rather than infer
+it from the join, which is the same shape as `lockup-sample` above: an
+assertion with no allowance for a window the implementation genuinely
+has. Not made here; it belongs to the Linux ABI test.
+
+
 ## The count
 
 `net-harness` sightings live here, in one place, because six different
@@ -516,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-two, to 2026-09-19**, across CI and this developer's machine, on
+**Thirty-four, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -545,19 +610,27 @@ of this section said eight and then listed nine:
 | PR #182's own CI run | observed, aarch64, **the first sighting with the probe**: `connect 0 in 894 ms`, `sent -104`; host side `[deadline, ESTABLISHED]` with slirp answering in 1 ms. See below -- this is the one that names where to look |
 | **Local x86-64, 2026-09-19** | observed while verifying an unrelated module unit: `connect 0 in 743 ms`, `sent -104`, `segs_out +2 retransmits +0`, and `tcp_conns=3` -- the probe ran. **Its reading was lost**: the roster goes to the runner's stdout and the run was grepped down to PASS/FAIL. First LOCAL sighting since the probe landed, and the instrument's output was thrown away by the person who built it |
 | PR #186's own CI run | observed, aarch64 (the protection-capable-CPU job), on a **documentation-only commit** (`a0558b6`): `connect 0 in 791 ms`, `sent -104`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:36662 accepted at 91.9s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. **The probe's reading reproduced** -- see below |
+| PR #187's own CI run | observed, aarch64 (the protection-capable-CPU job), on another **documentation-only commit** (`83b42cb`): `connect 0 in 947 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:52290 accepted at 91.8s, **0 byte(s)**`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. Row one a **third** time, and the first where the guest's write succeeded and the host still read nothing -- see below |
+| PR #187's own CI run, the very next one | observed, aarch64, the **GICv3** job this time (`9b5b5f9`, documentation-only): `connect 0 in 755 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:37472 accepted at 82.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a **fourth** time, on a third distinct aarch64 job |
 
-Twenty-three entries, thirty-two occurrences -- and the table is the tally,
+Twenty-five entries, thirty-four occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last eighteen rows
+them and are not independently re-verified here. The last twenty rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-two instrumented** occurrences
-behind the other sixteen rows carry the guest's side. (These three figures
-are computed from the table, not carried forward: they were wrong before
-sighting twenty-five, because each update incremented them instead of
-counting the rows.) Rows and occurrences
-differ because three rows hold more than one sighting; the shapes table
-below is per *sighting* and is the one to count from.
+92.0s, 0 of 12 bytes`, and the **twenty-five instrumented** occurrences
+behind the other nineteen rows carry the guest's side. Rows and
+occurrences differ because **eight** rows hold more than one sighting;
+the shapes table below is per *sighting* and is the one to count from.
+
+(**Every figure in this paragraph is computed from the table, not
+carried forward.** They were wrong before sighting twenty-five because
+each update incremented them instead of counting the rows -- and wrong
+again at sighting thirty-four, when three of them were incremented and
+the instrumented pair and the multi-sighting row count were not. The
+lesson keeps being the same one: a count that appears in prose beside a
+table is a count somebody has to re-derive, so re-derive all of them or
+none.)
 
 **And one of them broke the pattern the others set** — PR #170's x86-64
 job, on a branch that changes one Markdown file:
@@ -669,10 +742,11 @@ returns, which are hot paths a network exchange runs through. So "the
 diff is Markdown" is not available here, and the discharge has to be
 narrower:
 
-- the signature is the one this row has recorded twenty times, including
-  on trees with no code at all: an inbound reset (`rsts_in +1`), the
-  guest's twelve bytes unacknowledged, the host's `accept` having
-  succeeded;
+- the signature is the one this row had recorded twenty times **by
+  then**, and has recorded at every sighting since (*The count* owns
+  the running figure), including on trees with no code at all: an
+  inbound reset (`rsts_in +1`), the guest's twelve bytes
+  unacknowledged, the host's `accept` having succeeded;
 - the failing exchange is a TCP connection to a process on the host
   through slirp, and the branch touches no network file at all
   (`git diff --name-only main...HEAD` matches nothing under
@@ -1008,6 +1082,61 @@ the honest reservation to have about it. Both sightings are aarch64,
 so this is a reproduction and **not** a second architecture; the
 reading has not yet been taken on x86-64, where sighting thirty-one
 occurred and its output was discarded.
+
+**Sighting thirty-three, and the sharpest version of the reading.**
+2026-09-19, aarch64 CI again, on another documentation-only commit
+(`83b42cb`):
+
+```
+guest: connect 0 in 947 ms, sent 12, recv -104, outstanding 12 then 12,
+       segs_out +3 retransmits +0 rsts_in +1
+host : 127.0.0.1:52290 accepted at 91.8s, 0 byte(s): b''
+       [deadline, ESTABLISHED]; slirp probe: connect 1 ms, echo 1 ms
+       gave up at 111.8s
+```
+
+Row one a third time -- and this one rules out something the other two
+could not. In thirty and thirty-two the guest was reset **before** it
+could write (`sent -104`), so "the host read nothing" was trivially
+consistent with nothing having been sent. Here the write **succeeded**:
+the guest's stack accepted twelve bytes, emitted them (`segs_out +3`,
+`retransmits +0`), and they were still unacknowledged at both sample
+points (`outstanding 12 then 12`) when the reset arrived. The host's
+half of that same connection read **zero bytes** while sitting
+`ESTABLISHED` for the full twenty seconds.
+
+**What that establishes, and what it does not.** It establishes that
+the failure is not "the guest never sent": a write was accepted and
+segments were emitted, and nothing arrived. It does **not** establish
+where the bytes stopped. `sent 12` is the guest stack accepting them,
+`outstanding 12` is them going unacknowledged, and neither can
+distinguish a loss in the guest's own transmit path, in virtio-net, at
+slirp's input, or inside slirp between its two halves. The 1 ms probe
+says only that slirp was serving *other* connections at the time.
+
+The first version of this paragraph said the bytes "entered slirp and
+never left it", which is one of those four and was asserted from
+counters that cannot pick between them -- the same over-reading this
+file already records for `straggler_ipis`. Locating the loss still
+needs the host-loopback capture, which is root-only and recorded above
+as blocked.
+
+**Sighting thirty-four, the next run, and the reading is stable.**
+`9b5b5f9`, documentation-only again, aarch64 again -- but the **GICv3**
+job, a third distinct aarch64 configuration after the default and the
+protection-capable boots. `connect 0 in 755 ms`, `sent -104`,
+`outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host
+side `[deadline, ESTABLISHED]` with `slirp probe: connect 1 ms, echo
+1 ms`. Row one a fourth time, in the shape of thirty and thirty-two
+rather than thirty-three: reset before the write.
+
+Four readings, four times row one, across three aarch64 job
+configurations and never yet on x86-64. The reading is not a property
+of one job's timing, and the interpretation has not moved since
+sighting thirty: **slirp holds a host-side connection open, established
+and silent, while remaining responsive to other connections through
+itself.** Where the guest's bytes are lost, when there are any, remains
+unlocated.
 
 **What this does not name is the line of code.** It names the component
 and the shape, which is what the unit promised and more than thirty

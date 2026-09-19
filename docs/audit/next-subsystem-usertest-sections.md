@@ -1,0 +1,341 @@
+# NEXT SUBSYSTEM — the suite behind one line
+
+Constitution §68: after the audit, name the next subsystem in this shape
+and wait for the instruction to build it.
+
+**Subsystem: what `process-user` reports about itself.** One `SELFTEST`
+line stands for the entire user-mode suite — nine sections, about 540
+checks inside them in any one build and 54 more outside any section at
+all, plus a process spawn for each tool it drives. When that line is
+slow, nothing in the tree says which part of it was slow, and the
+harness has twice had to widen a budget it could not aim.
+
+This is the item the verification design already names as the answer it
+did not build. `docs/verification/design.md` §6, after listing the two
+composite tests and their enlarged budgets:
+
+> the better answer is for a suite to report its sections' timings so a
+> slow section is named instead of the whole suite, and that is an
+> inventory item
+
+It is inventory §3, "found by the fsctl unit". This report takes it up.
+
+## What is established
+
+**The line is slow and getting slower, and the numbers are current.**
+
+| where | `process-user` |
+| --- | --- |
+| local x86-64 debug | 3707 ms |
+| local aarch64 debug | 3896 ms |
+| CI x86-64 (`1ec27af`) | 4791 ms |
+| **CI aarch64, protection-capable boot (`a0558b6`)** | **8284 ms** |
+
+The last of those is **over the 8000 ms budget every ordinary test is
+held to**. It passes only because `composite_budget_ms` gives this one
+line 20 s. The historical figure in the design doc — 7129 ms of 8000,
+before the fsctl unit added to it — was not a one-off high-water mark;
+CI has since gone past 8000 on a run where nothing in userland changed
+at all (`a0558b6` is a documentation-only commit).
+
+**The spread is 2.2× between the same code on a laptop and on CI**, and
+no part of the line says whether that is one section or all nine.
+
+**What the suite is, measured rather than described.** `selftest()`
+(`userland/init/init.c:3556-3660`) calls nine sections and then runs 54
+checks of its own:
+
+| section | lines | checks |
+| --- | --- | --- |
+| `proc_selftest` | 645 | 235 |
+| `net_selftest` | 213 | 87 |
+| `fs_selftest` | 206 | 100 |
+| `fsctl_selftest` | 200 | 43 |
+| `svc_selftest` | 173 | 34 |
+| `proc_fs_selftest` | 66 | 24 |
+| `priv_selftest` | 35 | 13 |
+| `trap_selftest` | 24 | 2 |
+| `fpu_selftest` | 12 | 4 |
+| *(the body of `selftest()` itself)* | 105 | 54 |
+
+`trap_selftest` and `fpu_selftest` each have two architecture-conditional
+definitions and only one of each compiles, which is why the per-build
+total is about 540 and not the 546 a naive count of both gives. Line
+counts are brace-matched function bodies, not estimates.
+
+**There is prose in the output, and it is not a boundary.** Each
+section prints one or more `usertest: … ok` lines, and they reach the
+log in call order. `stdout` is **line-buffered** (`libc/src/stdio.c:71`,
+`F_WRITE | F_LINEBUF`), so each leaves the guest when it is printed
+rather than at exit. It is tempting to read the last one as "this
+section finished" — **and that is wrong, in two ways that review caught
+in the first draft of this report.**
+
+| section | its `usertest:` lines | where the last one sits |
+| --- | --- | --- |
+| `fs_selftest` (49-255) | `symbolic links ok` (**110**), then `cosmofs mounted and read from user mode` / `no cosmofs to mount` (249/252) | **not last** — `CHECK(cosmo_umount("/") == -EBUSY)` runs after it (254) |
+| `net_selftest` (258-471) | `sockets ok` (470) | last |
+| `proc_selftest` (474-1119) | `a symbolic link stays inside a process root` (**734**), `processes ok` (1118) | last |
+| `trap_selftest` | x86-64: `user exceptions ok` (**1616**), then the UMIP check to 1627. **aarch64: the function is empty and prints nothing at all** | **not last on x86-64, absent on aarch64** |
+| `fpu_selftest` | `fpu isolation ok` | last |
+| `priv_selftest` (2967-3002) | `privilege boundary ok` (3001) | last |
+| `svc_selftest` (3065-3238) | `services ok` (3237) | last |
+| `proc_fs_selftest` (3264-3330) | `/proc ok` (3329) | last |
+| `fsctl_selftest` (3353-3553) | `fsctl ok` (3552) | last |
+| *(the trailing body)* | `write ok` and others | interleaved throughout |
+
+Two sections print an **early** marker as well: `fs` at line 110 with
+145 lines of its function still to run, and `proc` at 734 with 385
+still to run. So a marker appearing is not even evidence that its
+section is near the end. And `trap_selftest`'s marker being followed by
+the UMIP check is visible in the log today, where `usertest: umip:
+absent` prints **after** `usertest: user exceptions ok`.
+
+**Nothing makes a marker the last thing a section does. Seven of the
+nine happen to end with one**, which is a convention each section has
+to remember rather than a structure, and two have already forgotten
+it — `fs_selftest`, which unmounts `/` and checks the errno after
+printing, and `trap_selftest`, which on x86-64 runs the UMIP check
+after printing and **on aarch64 is an empty function that prints
+nothing at all**. The count is also not the same on both
+architectures, which a description of the markers has to say and this
+report's second draft did not. So:
+
+1. **A hang is *not* reliably attributable today.** The first draft of
+   this report claimed it was, on the strength of the markers appearing
+   in call order. A hang in `fs_selftest` after line 110, or in
+   `trap_selftest` after 1616, would put the last printed marker at the
+   end of a section that had not finished — and a reader trusting it
+   would look in the *next* section. Closer than nothing and not
+   dependable, which is worse than either.
+2. **A *slow* run is not attributable at all.** Nothing measures a
+   section, so there is no duration anywhere for any of the ten rows
+   above. That is the larger gap, and slowness — not hanging — is what
+   has twice forced a budget change.
+
+Both follow from the same thing: the output was written for people to
+read, and nobody has ever made a structural claim about it. That is
+what the design below changes, and it is why the timing line is emitted
+by the driver rather than by each section.
+
+**The harness reads none of it.** `run_boot_test.py` requires exactly
+one line from the suite, `^USERTEST: PASS` (`USERTEST_MARKER`,
+line 328), plus `^usertest: umip: enforced$` on the x86-64 guard boot.
+The prose lines are not parsed, not reported and not in the verdict.
+
+**And the cost of a composite that reports nothing about itself shows up
+in the prose about it.** `cosmofs-replay` — the other entry in
+`composite_budget_ms` — is documented as mounting and checking **211**
+filesystem images in both `docs/verification/design.md:210` and
+`docs/verification/invariants.md:69`. The boot log says **410
+prefixes**. The harness's own comment records the two growths that made
+it stale (211 → 334 → 410). A number nobody can read off a run is a
+number that rots, and this is the same defect one level up.
+
+## The problem
+
+The `SELFTEST` line's duration is the *only* number the harness has, and
+it is the sum of ten things that grow independently. Every question an
+operator actually has about it is unanswerable:
+
+- *Which section got slower between these two runs?*
+- *Is CI's 2.2× uniform, or is one section paying for a shared runner's
+  disk while the rest are unchanged?*
+- *This unit added checks to `svc_selftest`; did the suite grow by what
+  I added, or by that plus something else?*
+- *We raised the budget to 20 s. From what, to what, in which section?*
+
+Each budget change so far has been made blind. The design doc is candid
+about it — "each entry is an admission that the line reports too little"
+— and the admission has been standing since the fsctl unit.
+
+This is a shape this tree keeps meeting: an instrument that cannot
+distinguish the cases it exists to distinguish reads like evidence
+without being any. The nettest roster (PR #177) and the slirp probe
+(PR #182) were the same complaint one subsystem over, and both were
+worth building.
+
+## Design
+
+**Each section reports its own duration, from the guest's clock, on a
+line the harness parses.**
+
+1. **`selftest()` drives a table, and the table is what makes the
+   claim true.** The first draft of this design said the driver
+   bracketing each call means "a section cannot be added without a
+   line", and review was right that it does not: the nine are nine
+   plain calls, and a tenth plain call added below them is exactly as
+   invisible as it is today. Bracketing by hand is the same kind of
+   convention as printing a marker last, and this report has just
+   finished documenting two sections that forgot that one.
+
+   So the sections become a table the driver iterates, in the shape
+   `selftest.c` already uses for the kernel's own registry:
+
+   ```c
+   static const struct { const char *name; void (*fn)(void); } sections[] = {
+       { "fs", fs_selftest }, { "fsctl", fsctl_selftest }, /* ... */
+   };
+   ```
+
+   Now there is no way to *call* a section except through the loop that
+   times it, adding one is adding a row, and "cannot be added without a
+   line" is a property of the code rather than a promise about future
+   authors. It also gives the harness the list of expected names for
+   free, which is what the boot assertion below checks against.
+
+   `cosmo_clock_ns()` is already used inside the suite, so there is no
+   new syscall and no new dependency. The line goes in the existing
+   machine channel — `USERTEST:` uppercase, which is what
+   `USERTEST: PASS` and `USERTEST: FAIL (n checks)` already use:
+
+   ```text
+   USERTEST: section fs 812 ms
+   ```
+
+   The lowercase `usertest: … ok` prose lines stay exactly as they are,
+   and stay prose. They are read by people, one of them is a required
+   marker, and teaching them to carry a number would make the parser
+   depend on the convention this design exists to stop depending on.
+
+2. **The trailing body becomes a real section, in the table.** Those 54
+   checks belong to no section today, so timings would not sum and the
+   blind spot would survive the unit that exists to remove it. With a
+   table it is not enough to bracket it in place: it has to be
+   extracted into a function and given a row, or it is the one thing
+   the loop does not cover — which is precisely the hole review found
+   in the first draft. Extracted, and named.
+
+3. **One total line**, so the sum can be reconciled against the kernel's
+   `SELFTEST: process-user … (N ms)`. The difference is the process
+   spawn, `init`'s own startup and teardown, and it is worth seeing
+   rather than assuming: if the sections sum to 4 s of an 8 s line, the
+   interesting half is the one nobody is measuring.
+
+4. **The harness parses the section lines and reports the slowest**, the
+   way it already does for tests:
+
+   ```text
+   boot-test: user-mode suite 8284 ms in 10 sections; slowest: proc 3960 ms, fs 1204 ms, …
+   ```
+
+5. **Report, don't assert — no per-section budget.** This is the trap
+   the unit exists to remove, and re-introducing it ten times smaller
+   would be worse than leaving it once. A section budget would ration
+   sections that got more thorough, need widening every time userland
+   grows, and fail runs on a shared runner's noise. The composite 20 s
+   budget stays as the only failure condition, because its job is to
+   catch a suite that stopped terminating. The section numbers are for
+   attribution.
+
+   This is the same conclusion the straggler-kick unit reached after
+   three wrong answers (`docs/audit/next-subsystem-straggler-kick.md`):
+   an unbounded wait would hang, a cap would pass vacuously, and
+   failing on the cap asserted something that is not true on CI. What
+   was left was to report the number and let a human read it.
+
+6. **The parse must become a function to be testable.** Today the whole
+   timing block lives inside `main()` (`run_boot_test.py:467` onward),
+   so nothing about it can be unit-tested. `nettest.py` was extracted
+   for exactly this reason and now has 61 host checks behind it. A
+   `summarize_sections(lines)` returning the parsed rows is the smallest
+   thing that makes the cases below writable.
+
+## Affected files
+
+| file | change |
+| --- | --- |
+| `userland/init/init.c` | bracket the nine sections and the trailing body; print `USERTEST: section …` and the total |
+| `tests/boot/run_boot_test.py` | extract the section parse into a function; report the slowest sections; no new failure condition |
+| `tests/boot/test_usertest_sections.py` (new) | the host cases below |
+| `tests/host/host.mk` | run the new host test beside `test_nettest_deadline.py` |
+| `docs/verification/design.md` | §6: the admission is discharged; **and the stale 211 → 410** |
+| `docs/verification/invariants.md` | **F6**: a composite test reports its sections; **and the stale 211 → 410** |
+| `docs/kernel/process/testing.md` | what `process-user` now prints |
+| `docs/userland/testing.md` | the same, from the userland side |
+| `README.md` | the Status entry |
+| `docs/audit/2026-09-deferred-work-inventory.md` | strike the §3 row |
+
+No kernel change. The guest side is userland, the host side is the
+harness — the same division as the nettest units.
+
+## Tests
+
+Host tests, driving the parser against synthetic harness output, no
+boot:
+
+| test | asserts |
+| --- | --- |
+| `sections_parsed` | ten section lines in, ten rows out, in the order printed |
+| `slowest_named` | the summary names the slowest section, and names a *different* one when a different section is slow |
+| `total_reconciled` | the reported sum and the kernel's `SELFTEST` duration are both shown, and their difference is not silently dropped |
+| `truncated_run_parses` | a run that ends early — a hang, so the later sections never printed — parses to the sections that did finish rather than raising. This is the case where the output matters most, and it is why the parser tolerates a short list; it does **not** mean an unbracketed section can hide, which the table and the assertion below rule out |
+| `no_sections_is_not_an_error` | a release build, which runs no user-mode suite, produces no summary and no failure |
+
+**The bug-proof.** Two runs identical except for *which* section is
+slow must produce **different** summaries naming the right section
+each time. Today every arrangement of the same total produces the same
+single line, which is the whole defect: a summary that says the same
+thing whichever section was slow is not a summary. It must also fail
+for the stated reason — a parser that names a section because it was
+first in the list, or last, or longest-named, passes a careless version
+of this check, so the two arrangements differ only in the durations.
+
+And one boot assertion, which is the cheap half and the other half of
+review's point: a **complete** run must carry a section line for every
+row in the table. The table makes an unbracketed section impossible to
+write; the assertion is what catches the table and the suite drifting
+apart anyway — a row deleted, a function that returns early, a build
+where a section compiles to nothing. `trap_selftest` is already that
+last case on aarch64, so this is not hypothetical. The parser's
+tolerance of a short list (above) is for a truncated run and is why
+the assertion has to be separate from it.
+
+## Risks
+
+- **Guest timing under TCG is noisy.** These numbers are for
+  attribution between sections of one run, not for benchmarking across
+  runs or machines. The design carries this by refusing to put a budget
+  on them; the report says so here so that a later unit does not read
+  the numbers as a performance baseline.
+- **More lines on the console cost time in the thing being measured.**
+  Ten extra line-buffered writes, against a suite that already prints
+  thirty-four. Negligible, and it is measurable after the build — if it
+  is not, that belongs in the as-built banner.
+- **It may find that the time is evenly spread**, in which case the
+  budget was right and no section is at fault. That is a result: it
+  would mean the suite is simply large, and the honest next step is to
+  say so instead of hunting a culprit that does not exist. The report
+  should not promise a villain.
+- **The trailing body was the one place the design could be dodged**,
+  and in the first draft it still was: the design said "bracketed in
+  place or extracted, a build decision", which left 54 checks able to
+  sit outside the instrumentation while every other number looked
+  clean. It is a table row now, so the build has nowhere to put it
+  except inside the loop. Recorded rather than quietly amended,
+  because the hole was real and review found it.
+
+## Alternatives considered
+
+- **Timestamp the lines on the host instead.** Requires no guest
+  change, and measures the wrong thing: under TCG a serial write can
+  take longer than the work that produced it, so host arrival times
+  conflate console latency with section cost. The guest's own clock is
+  what the kernel's `SELFTEST` durations already use.
+- **Split `process-user` into nine kernel self-tests.** It would give
+  per-section lines for free from machinery that already exists — and
+  it would cost nine process spawns instead of one, changing the thing
+  under test to measure it, and losing the shared state the sections
+  build up in order. The suite is one program deliberately.
+- **Raise the budget again and move on.** That is what happened twice,
+  and this row is the record of it not working: the budget went to 20 s
+  and CI has since put 8284 ms of one line against it with no way to
+  say what moved. A third widening buys another few months of not
+  knowing.
+- **Do nothing; the prose markers are close enough.** They are not,
+  and the first draft of this report said they were. Two of the nine
+  print mid-section and one is followed by a further check, so reading
+  the last marker as a boundary names the wrong section — and a
+  diagnostic that is usually right is the kind this file keeps having
+  to retract. Every actual incident so far has been slowness anyway,
+  which the markers say nothing about at all.
