@@ -44,7 +44,21 @@ build differed from it.
    exist.** The affected-files table named it; cosmofs documents its
    tests in `design.md`. The same class of mistake as reserving an
    invariant number without checking which are taken.
-6. **Thirteen classes, not "ten plus three".** The report counted
+6. **The operator interface was not in the build until review asked
+   for it**, though the report's affected-files table named it. The
+   three new classes moved `rep.clean` while `/dev/fsctl` still
+   serialised ten, so a filesystem with only one of the new faults
+   told an operator "not clean" and showed ten zeroes. Version 2 of
+   the CHECK result appends indices 10-12. The table also named
+   `userland/bin/fsctl.c`; the file is `userland/system/fsctl.c`.
+7. **Two allocation paths could hide a duplicate, and a bound was
+   missing.** Both are review findings and both were real: a
+   mid-walk `kmalloc` failure returned "no duplicate" into a report
+   that still said `clean`, and an unbounded confirmation re-scan is
+   quadratic in a directory's size under `fs->lock`. The buffers are
+   preallocated with the maps now, and confirmations are capped with
+   `partial` past the cap -- incomplete rather than wrong.
+8. **Thirteen classes, not "ten plus three".** The report counted
    eight new corruption *kinds* and five unfired reporting *paths*
    and was careful to distinguish them; the number that ends up in the
    documentation is the class count, which is ten before and thirteen
@@ -310,9 +324,11 @@ as one everywhere it appears.
 | `kernel/include/kernel/cosmofs.h` | `extent_order`, `extent_overlap`, `dir_dup_name` in `struct cosmofs_check_report`; **eight** `COSMOFS_CORRUPT_*` kinds |
 | `kernel-services/filesystem/cosmofs/cosmofs_core.c` | `cosmofs_test_corrupt` writes the **eight** new corruptions |
 | `kernel-services/filesystem/cosmofs/cosmofstest.c` | a test per class; **a helper that prints a report's non-zero counts**, and every existing `CHECK(r.clean)` swept to use it |
-| `userland/bin/fsctl.c` (or wherever the report is printed) | the three new counts |
+| `kernel/include/uapi/cosmo/fsctl.h` | **as built**: version 2 of the CHECK result — `COSMO_FSCTL_CLASSES` 10 → 13, the three appended at indices 10–12 so nothing moves |
+| `kernel-services/vfs/fsctl.c` | **as built**: the three added to the array the kernel fills |
+| `userland/system/fsctl.c` (**not** `userland/bin/`, which the report guessed) | the three new counts in the printer |
 | `docs/kernel-services/filesystem/cosmofs/design.md` | "What it does not check" shrinks to `next_ino`, with the reason it stays |
-| `docs/kernel-services/filesystem/cosmofs/testing.md` | the new tests |
+| ~~`docs/kernel-services/filesystem/cosmofs/testing.md`~~ | **does not exist** (banner item 5); cosmofs documents its tests in `design.md`, which carries them |
 
 ## Migration plan
 
