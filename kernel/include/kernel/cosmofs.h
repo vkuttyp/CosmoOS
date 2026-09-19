@@ -98,6 +98,13 @@ struct cosmofs_check_report {
     struct cosmofs_check_class orphan;           /* an inode no name reaches */
     struct cosmofs_check_class dangling_entry;   /* an entry naming a free slot */
     struct cosmofs_check_class dir_bad;          /* a malformed entry or a bad pointer */
+    /* The format says runs are sorted by lblk and never overlap
+     * (docs/.../cosmofs/design.md). Two classes, not one, because they
+     * are different repairs: an ordering fault may be repairable by
+     * sorting, an overlap is data loss
+     * (docs/audit/next-subsystem-fsck-unchecked.md). */
+    struct cosmofs_check_class extent_order;     /* an inode whose runs do not ascend by lblk */
+    struct cosmofs_check_class extent_overlap;   /* two runs of one inode covering one lblk */
     struct cosmofs_check_class counter_wrong;    /* a superblock total the walk disagrees with */
     struct cosmofs_check_class chain_cycle;      /* a metadata chain that revisits a block */
     struct cosmofs_check_class unreadable;       /* a metadata block that could not be read */
@@ -179,6 +186,10 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_DIRENT,      /* an entry whose type disagrees with its inode */
     COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
     COSMOFS_CORRUPT_INO_SLOT,    /* an inode slot whose number is not its position */
+    COSMOFS_CORRUPT_EXTENT_ORDER,   /* swap two runs so lblk descends */
+    COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
+                                     * at a DIFFERENT pool block -- the case block_seen
+                                     * cannot see (next-subsystem-fsck-unchecked.md) */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;

@@ -550,6 +550,8 @@ static const struct selftest tests[] = {
     { "cosmofs-check-clean", selftest_cosmofs_check_clean },
     { "cosmofs-check-leak", selftest_cosmofs_check_leak },
     { "cosmofs-check-faults", selftest_cosmofs_check_faults },
+    { "cosmofs-check-extent-order", selftest_cosmofs_check_extent_order },
+    { "cosmofs-check-extent-overlap", selftest_cosmofs_check_extent_overlap },
     { "cosmofs-check-snapshot", selftest_cosmofs_check_snapshot },
     { "cosmofs-check-orphan-crash", selftest_cosmofs_check_orphan_crash },
     { "cosmofs-check-partial", selftest_cosmofs_check_partial },

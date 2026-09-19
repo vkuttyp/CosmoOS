@@ -222,11 +222,66 @@ static void walk_alloc(struct check *ck, uint64_t root, bool live)
     cfs_buf_put(ck->fs, b);
 }
 
+/*
+ * One inode's runs as they stream past, so the format's two ordering
+ * rules can be checked without a map: "runs are sorted by lblk and
+ * never overlap". One `prev` is enough because the walk visits an
+ * inode's runs in their on-disk order -- direct[] then the chain.
+ */
+struct ext_seq {
+    bool have;
+    uint32_t lblk;
+    uint32_t count;
+    uint64_t ino;      /* what the classes name */
+    bool reported;     /* one finding per inode, not one per run after the first */
+};
+
+/*
+ * The two checks, in this order deliberately.
+ *
+ * Tested on an unordered pair, EVERY descending pair also looks like an
+ * overlap -- so a pair that fails ordering is reported as extent_order
+ * and the overlap test is skipped for it. There is nothing useful to
+ * say about the extent of an overlap between runs that are not in
+ * order, and `cosmofs-check-extent-order` requires the two classes to
+ * stay distinct.
+ *
+ * The end is computed in 64 bits. `lblk` and `count` are both uint32_t,
+ * so `lblk + count` wraps for a run near the 2^32-block bound, making a
+ * real overlap invisible -- the production mapper already promotes this
+ * sum (cosmofs_format.h), and a checker that did not would carry the
+ * bug it is looking for.
+ */
+static void check_ext_seq(struct check *ck, struct ext_seq *seq, const struct cfs_extent *e)
+{
+    uint32_t lblk = e->lblk, count = cfs_ext_count(e);
+    if (!seq->have) {
+        seq->have = true;
+        seq->lblk = lblk;
+        seq->count = count;
+        return;
+    }
+    if (!seq->reported) {
+        if (lblk <= seq->lblk) {
+            name_it(&ck->rep->extent_order, seq->ino);
+            seq->reported = true;
+        } else if ((uint64_t)lblk < (uint64_t)seq->lblk + seq->count) {
+            name_it(&ck->rep->extent_overlap, seq->ino);
+            seq->reported = true;
+        }
+    }
+    seq->lblk = lblk;
+    seq->count = count;
+}
+
 /* Every block one extent names. A physical size of zero is a hole. */
-static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live)
+static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live,
+                         struct ext_seq *seq)
 {
     if (cfs_ext_count(e) == 0)
-        return;
+        return;               /* an unused slot is not a run and breaks no order */
+    if (seq != NULL)
+        check_ext_seq(ck, seq, e);
     uint32_t psize = cfs_ext_psize(e);
     for (uint32_t k = 0; k < psize; k++)
         claim(ck, e->start + k, live);
@@ -239,7 +294,8 @@ static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live
  * its extents, which read every extent block twice and left the second
  * read reporting nothing when it failed.
  */
-static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
+static void walk_extent_chain(struct check *ck, uint64_t head, bool live,
+                              struct ext_seq *seq)
 {
     uint64_t next = head;
     unsigned guard = 0;
@@ -254,7 +310,7 @@ static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
             return;
         const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
         for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK; i++)
-            claim_extent(ck, &eb->ext[i], live);
+            claim_extent(ck, &eb->ext[i], live, seq);
         next = eb->next;
         cfs_buf_put(ck->fs, b);
     }
@@ -278,9 +334,12 @@ static void walk_csum_tree(struct check *ck, uint64_t root, bool live)
 /* One inode's trees and every data block its extents name. */
 static void walk_inode_blocks(struct check *ck, const struct cfs_inode *in, bool live)
 {
+    /* One sequence per inode: direct[] then the chain, which is the
+     * order the runs are in on disk. */
+    struct ext_seq seq = { .ino = in->ino };
     for (unsigned i = 0; i < CFS_DIRECT; i++)
-        claim_extent(ck, &in->direct[i], live);
-    walk_extent_chain(ck, in->indirect, live);
+        claim_extent(ck, &in->direct[i], live, &seq);
+    walk_extent_chain(ck, in->indirect, live, &seq);
     walk_csum_tree(ck, in->csum_root, live);
 }
 
@@ -736,6 +795,7 @@ static bool report_clean(const struct cosmofs_check_report *r)
     return r->alloc_not_seen.count == 0 && r->seen_not_alloc.count == 0 && r->dup.count == 0 &&
            r->nlink_wrong.count == 0 && r->orphan.count == 0 && r->dangling_entry.count == 0 &&
            r->dir_bad.count == 0 && r->counter_wrong.count == 0 && r->chain_cycle.count == 0 &&
+           r->extent_order.count == 0 && r->extent_overlap.count == 0 &&
            r->unreadable.count == 0;
 }
 
@@ -848,12 +908,14 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
               (unsigned long long)rep.unreadable.name[0]);
     if (!rep.clean)
         kwarn("cosmofs: check: %llu leaked, %llu free-in-use, %llu cross-linked, %llu bad nlink, %llu orphan, "
-              "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unreadable",
+              "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unordered extents, "
+              "%llu overlapping extents, %llu unreadable",
               (unsigned long long)rep.alloc_not_seen.count, (unsigned long long)rep.seen_not_alloc.count,
               (unsigned long long)rep.dup.count, (unsigned long long)rep.nlink_wrong.count,
               (unsigned long long)rep.orphan.count, (unsigned long long)rep.dangling_entry.count,
               (unsigned long long)rep.dir_bad.count, (unsigned long long)rep.counter_wrong.count,
-              (unsigned long long)rep.chain_cycle.count, (unsigned long long)rep.unreadable.count);
+              (unsigned long long)rep.chain_cycle.count, (unsigned long long)rep.extent_order.count,
+              (unsigned long long)rep.extent_overlap.count, (unsigned long long)rep.unreadable.count);
     return rc;
 }
 

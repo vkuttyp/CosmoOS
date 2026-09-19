@@ -2255,6 +2255,67 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         rc = cfs_inode_write(fs, ino, &in);
         token = ino;
         break;
+    /*
+     * Both of these add runs to a named file rather than editing the
+     * one it has, because the fixture's file is a single block and
+     * neither fault can be expressed in one run. The added runs point
+     * at freshly ALLOCATED blocks, distinct from each other and from
+     * the file's own: a run pointing at the file's block would be a
+     * cross-link and one pointing at a free block would be
+     * seen_not_alloc, and either would make the test pass for the
+     * wrong reason (docs/audit/next-subsystem-fsck-unchecked.md).
+     */
+    case COSMOFS_CORRUPT_EXTENT_ORDER:
+    case COSMOFS_CORRUPT_EXTENT_OVERLAP: {
+        if (ino == 0 || cfs_ext_count(&in.direct[0]) == 0 ||
+            cfs_ext_count(&in.direct[1]) != 0 || cfs_ext_count(&in.direct[2]) != 0) {
+            /* Needs a file of exactly one run with room after it. Refused
+             * rather than silently producing some other fault. */
+            rc = -EINVAL;
+            break;
+        }
+        /*
+         * The overlap case needs its middle run to be TWO blocks wide,
+         * so a third run can begin inside it. A one-block allocation
+         * under a count of two would have the run claim its neighbour,
+         * which the cross-link map catches -- the test would then pass
+         * against the OLD code and prove nothing. (It did, on the
+         * first build: `dup` fired and the vacuity guard caught it.)
+         */
+        uint32_t wide = (kind == COSMOFS_CORRUPT_EXTENT_OVERLAP) ? 2u : 1u;
+        uint64_t a = 0, b = 0, got = 0;
+        rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, wide, &a, &got);
+        if (rc)
+            break;
+        if (got < wide) {
+            rc = -ENOSPC;     /* a short run would mean the same claim-the-neighbour bug */
+            break;
+        }
+        rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, 1, &b, &got);
+        if (rc)
+            break;
+        if (got < 1) {
+            rc = -ENOSPC;
+            break;
+        }
+        uint32_t first = in.direct[0].lblk;      /* count 1: covers [first, first+1) */
+        if (kind == COSMOFS_CORRUPT_EXTENT_ORDER) {
+            /* Ascend, then DESCEND: 0, 5, 3. */
+            in.direct[1].start = a; in.direct[1].count = 1; in.direct[1].lblk = first + 5;
+            in.direct[2].start = b; in.direct[2].count = 1; in.direct[2].lblk = first + 3;
+        } else {
+            /* Ascend throughout, and the third begins inside the
+             * second: 0/[1,3)/2. Strictly ascending, so the ordering
+             * test passes and the overlap test is the one that fires. */
+            in.direct[1].start = a; in.direct[1].count = wide; in.direct[1].lblk = first + 1;
+            in.direct[2].start = b; in.direct[2].count = 1; in.direct[2].lblk = first + 2;
+        }
+        if (in.size < (uint64_t)(first + 8) * CFS_BLOCK)
+            in.size = (uint64_t)(first + 8) * CFS_BLOCK;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */

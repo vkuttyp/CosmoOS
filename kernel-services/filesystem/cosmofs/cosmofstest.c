@@ -1804,6 +1804,69 @@ bool selftest_cosmofs_check_faults(const char **reason)
  * from the live tree. A checker that did not walk snapshots would call
  * every one of them a leak.
  */
+/*
+ * The format says runs are sorted by lblk and never overlap
+ * (docs/kernel-services/filesystem/cosmofs/design.md). Until this unit
+ * the checker verified neither, and said so.
+ *
+ * The two are separate tests because they are separate classes, and the
+ * ordering one exists to keep them separate: a descending pair ALSO
+ * satisfies "this begins inside the previous", so a checker that tested
+ * overlap first would report every ordering fault as an overlap.
+ */
+bool selftest_cosmofs_check_extent_order(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_EXTENT_ORDER, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.extent_order.count == 1 && r.extent_order.name[0] == what);
+    /* And NOT as an overlap: the whole reason there are two classes. */
+    CHECK(r.extent_overlap.count == 0);
+    /* Nothing else fires: the runs the hook added point at allocated
+     * blocks of their own, so this is one finding and not a pile. */
+    CHECK(r.dup.count == 0 && r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-extent-order: runs that descend by lblk are reported as "
+          "extent_order and not as an overlap");
+    return true;
+}
+
+bool selftest_cosmofs_check_extent_overlap(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_EXTENT_OVERLAP, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.extent_overlap.count == 1 && r.extent_overlap.name[0] == what);
+    CHECK(r.extent_order.count == 0);        /* the runs ascend; only the ranges overlap */
+    /*
+     * THE VACUITY GUARD, named in the report before the build. The
+     * existing `block_seen` map already catches an overlap that shares
+     * a POOL block, so a careless fixture would be caught by the old
+     * code and prove nothing about the new comparison. The hook points
+     * the overlapping run at a different, freshly allocated block, so
+     * `dup` must stay empty -- if it fires, this test is measuring the
+     * cross-link checker instead.
+     */
+    CHECK(r.dup.count == 0);
+    CHECK(r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-extent-overlap: two runs of one inode covering one lblk at "
+          "DIFFERENT pool blocks are reported, which the cross-link map cannot see");
+    return true;
+}
+
 bool selftest_cosmofs_check_snapshot(const char **reason)
 {
     struct blkdev *bd = NULL;

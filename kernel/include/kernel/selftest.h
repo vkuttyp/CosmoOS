@@ -254,6 +254,8 @@ bool selftest_cosmofs_freelog_malformed(const char **reason);
 bool selftest_cosmofs_check_clean(const char **reason);
 bool selftest_cosmofs_check_leak(const char **reason);
 bool selftest_cosmofs_check_faults(const char **reason);
+bool selftest_cosmofs_check_extent_order(const char **reason);
+bool selftest_cosmofs_check_extent_overlap(const char **reason);
 bool selftest_cosmofs_check_snapshot(const char **reason);
 bool selftest_cosmofs_check_orphan_crash(const char **reason);
 bool selftest_cosmofs_check_partial(const char **reason);
