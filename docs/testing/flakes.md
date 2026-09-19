@@ -474,7 +474,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty, to 2026-09-18**, across CI and this developer's machine, on
+**Thirty-one, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -500,15 +500,16 @@ of this section said eight and then listed nine:
 | PR #179's own CI run, the very next one | observed, aarch64: `connect 0 in **597 ms**`, `sent -104`, **`segs_out +2 retransmits +0`** -- one connection carrying nothing a fifth time, the FASTEST connect, and the second with no retransmission |
 | PR #179's own CI run, a third in a row | observed, aarch64: one connection carrying nothing a sixth time |
 | PR #180's own CI run | observed, aarch64: `connect 0 in **803 ms**`, `sent 12`, `outstanding 12 then 12`, **`retransmits +0`** -- one connection carrying nothing a seventh time, and the THIRD sighting with no retransmission |
+| **Local x86-64, 2026-09-19** | observed while verifying an unrelated module unit: `connect 0 in 743 ms`, `sent -104`, `segs_out +2 retransmits +0`, and `tcp_conns=3` -- the probe ran. **Its reading was lost**: the roster goes to the runner's stdout and the run was grepped down to PASS/FAIL. First LOCAL sighting since the probe landed, and the instrument's output was thrown away by the person who built it |
 | PR #182's own CI run | observed, aarch64, **the first sighting with the probe**: `connect 0 in 894 ms`, `sent -104`; host side `[deadline, ESTABLISHED]` with slirp answering in 1 ms. See below -- this is the one that names where to look |
 
-Twenty-one entries, thirty occurrences -- and the table is the tally,
+Twenty-two entries, thirty-one occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last sixteen rows
+them and are not independently re-verified here. The last seventeen rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-one instrumented** occurrences
-behind the other fifteen rows carry the guest's side. (These three figures
+92.0s, 0 of 12 bytes`, and the **twenty-two instrumented** occurrences
+behind the other sixteen rows carry the guest's side. (These three figures
 are computed from the table, not carried forward: they were wrong before
 sighting twenty-five, because each update incremented them instead of
 counting the rows.) Rows and occurrences

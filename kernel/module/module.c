@@ -45,6 +45,18 @@ static unsigned g_count;
 static struct module *g_live[MODULE_MAX_LIVE];
 static LIST_HEAD(g_zombies);          /* GOING modules whose objects outlived the unload */
 static unsigned reap_zombies_locked(void);   /* defined below; called from load and unload */
+#if CONFIG_DEBUG
+/* The effective slot bound. Only the publish SEARCH honours it; the
+ * walks that scan for a module still cover the whole array, so nothing
+ * published can become invisible. A test sets it to the current live
+ * count to reach -ENOSPC without thirty-two fixtures -- the same search
+ * and the same error return, with a smaller bound (M24). */
+static unsigned g_live_cap = MODULE_MAX_LIVE;
+void module_set_max_live_for_test(unsigned n) { g_live_cap = n ? n : MODULE_MAX_LIVE; }
+#define LIVE_CAP (g_live_cap)
+#else
+#define LIVE_CAP MODULE_MAX_LIVE
+#endif
 static unsigned g_unload_timeout_ms = 5000;
 
 /* Per-module data the public struct does not expose. */
@@ -401,14 +413,14 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
      * (docs/audit/next-subsystem-module-zombie-reap.md).
      */
     unsigned slot = MODULE_MAX_LIVE;
-    for (unsigned i = 0; i < MODULE_MAX_LIVE; i++) {
+    for (unsigned i = 0; i < LIVE_CAP; i++) {
         if (g_live[i] == NULL) {
             slot = i;
             break;
         }
     }
     if (slot == MODULE_MAX_LIVE) {
-        kerror("module: %s: no free slot (%u live)", origin, MODULE_MAX_LIVE);
+        kerror("module: %s: no free slot (%u live)", origin, LIVE_CAP);
         rc = -ENOSPC;
         goto fail;
     }
@@ -538,6 +550,9 @@ int module_unload(const char *name)
         /* A zombie whose objects have since died is freed now. */
         struct module *z = find_zombie_locked(name);
         if (z == NULL) {
+            /* Nothing of that name, live or dead -- but other zombies
+             * may be collectable, and this is an exit too. */
+            reap_zombies_locked();
             mutex_unlock(&g_lock);
             return -ENOENT;
         }
@@ -552,6 +567,18 @@ int module_unload(const char *name)
         mutex_unlock(&g_lock);
         return 0;
     }
+    /*
+     * From here `m` is LIVE, so a sweep cannot touch it, and every exit
+     * below this point has swept. That matters most for the `-EBUSY`
+     * immediately following: the dependant holding `m` may be a ZOMBIE
+     * that is already collectable, in which case sweeping is exactly
+     * what unblocks this unload -- and before this the early return
+     * skipped the sweep entirely, so the one action a user would take
+     * on discovering a pinned dependency did nothing about it
+     * (invariant M24).
+     */
+    reap_zombies_locked();
+
     if (m->refs != 0) {
         kwarn("module: %s has %u dependant(s), not unloading", name, m->refs);
         mutex_unlock(&g_lock);

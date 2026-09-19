@@ -161,4 +161,10 @@ void module_dump(void);
 
 #endif /* !COSMO_MODULE_BUILD */
 
+#if CONFIG_DEBUG
+/* Cap the publish-slot search so a test can reach -ENOSPC without
+ * thirty-two fixtures. 0 restores the real bound (invariant M24). */
+void module_set_max_live_for_test(unsigned n);
+#endif
+
 #endif /* KERNEL_MODULE_H */

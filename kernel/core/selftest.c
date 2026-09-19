@@ -443,6 +443,7 @@ static const struct selftest tests[] = {
     { "module-zombie-swept", selftest_module_zombie_swept },
     { "module-zombie-name-reused", selftest_module_zombie_name_reused },
     { "module-zombie-two-of-a-name", selftest_module_zombie_two_of_a_name },
+    { "module-slots-enospc", selftest_module_slots_enospc },
     { "device",          selftest_device },
     { "device-remove-busy", selftest_device_remove_busy },
     { "pci",             selftest_pci },

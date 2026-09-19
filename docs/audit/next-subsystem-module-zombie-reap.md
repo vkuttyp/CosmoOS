@@ -15,15 +15,29 @@ it — including two tests it named and did not produce.
    the named paths run first, so an explicit `module_unload("name")`
    still finds its zombie and returns 0. That test is unchanged and
    still passes.
-2. **`module-slots-enospc` was NOT built.** Reaching `MODULE_MAX_LIVE`
-   needs thirty-two *distinct* loadable modules — duplicate names are
-   refused — and the boot archive carries three fixtures. Testing it
-   would mean either thirty-two new fixtures or a hook to shrink the
-   limit, and a hook that changes the bound is not obviously testing the
-   same code. The slot change is covered by a `KASSERT` on the reserved
-   index and by the pre-commit ordering being visible in one function.
-   Saying so here rather than quietly dropping the row.
-3. **`module-zombie-holds-deps` was not built either**, because
+2. **`module-slots-enospc` IS built, after an argument against it that
+   did not hold.** This banner first said it could not be: reaching
+   `MODULE_MAX_LIVE` needs thirty-two distinct modules, the archive has
+   three fixtures, and "a hook that changes the bound is not obviously
+   testing the same code". Review pushed back, and it was right — a cap
+   on the publish *search* exercises the same search, the same
+   `-ENOSPC`, and the same pre-commit ordering, with only the number
+   different. `module_set_max_live_for_test` (debug only) caps it to
+   one, and the test asserts the errno, that nothing was published, and
+   — the part that matters — that **a subsequent load still succeeds**,
+   which a botched unwind would break. The `KASSERT` alone covered only
+   the success path, which was the weakness in the original argument.
+3. **The sweep had to run on every exit from `module_unload`, not just
+   the successful one.** The first implementation swept at the end of
+   the success path only, and review found the hole: a zombie that pins
+   a dependency makes `module_unload("that dependency")` return
+   `-EBUSY` from an early return that never reached the sweep — so the
+   one action a user would take on discovering a pinned dependency did
+   nothing about it, which is the exact scenario this unit exists to
+   fix. The sweep now runs once `m` is known LIVE (where it cannot
+   touch it) and on the `-ENOENT` path, so every exit has swept.
+
+4. **`module-zombie-holds-deps` was not built**, because
    `selftest_module_unload_busy` already proves a zombie keeps its
    dependency pinned. The report wanted the *converse* — that a swept
    zombie releases the pin — which `module-zombie-swept` establishes
@@ -174,7 +188,7 @@ collected without being asked for.**
 | `kernel/module/module.c` | the sweep, called from load and unload; reap by identity; `-ENOSPC` in place of the panic; the warning says what is held |
 | `kernel/module/modtest.c` | the tests in the table below |
 | `kernel/include/kernel/selftest.h`, `kernel/core/selftest.c` | their declarations and registry entries |
-| `docs/kernel/modules/` (design and invariants) | when a zombie is collected, and that it is by identity |
+| `docs/kernel/module/design.md`, `docs/kernel/module/invariants.md` | when a zombie is collected and that it is by identity; **M24** (as built — the report wrote `docs/kernel/modules/`, which does not exist) |
 | `docs/audit/2026-09-deferred-work-inventory.md` | §4's last two small debts struck |
 | `README.md` | the Status entry |
 

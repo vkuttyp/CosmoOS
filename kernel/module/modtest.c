@@ -425,9 +425,13 @@ bool selftest_module_zombie_swept(const char **reason)
     struct kobject *obj = take();
     CHECK(obj != NULL);
 
+    /* Restore the GLOBAL timeout before checking: a CHECK returns
+     * immediately, and leaving 50 ms behind would make every later
+     * test that unloads a module look broken. */
     module_set_unload_timeout_ms(50);
-    CHECK(module_unload("cosmotest") == -EBUSY);   /* a zombie now */
+    int rc = module_unload("cosmotest");
     module_set_unload_timeout_ms(5000);
+    CHECK(rc == -EBUSY);                           /* a zombie now */
     kobject_put(obj);                              /* its last object goes */
 
     /*
@@ -462,8 +466,9 @@ bool selftest_module_zombie_name_reused(const char **reason)
     CHECK(obj != NULL);
 
     module_set_unload_timeout_ms(50);
-    CHECK(module_unload("cosmotest") == -EBUSY);
+    int rc = module_unload("cosmotest");
     module_set_unload_timeout_ms(5000);
+    CHECK(rc == -EBUSY);
 
     /*
      * The name is reused while the zombie is still holding its object.
@@ -508,7 +513,12 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     o1 = take();
     CHECK(o1 != NULL);
     module_set_unload_timeout_ms(50);
-    CHECK(module_unload("cosmotest") == -EBUSY);
+    int rc1 = module_unload("cosmotest");
+    if (rc1 != -EBUSY) {
+        module_set_unload_timeout_ms(5000);
+        *reason = "the first zombie was not created";
+        return false;
+    }
 
     CHECK(module_load(file, size, "tests/cosmotest.ko", &m2) == 0);
     CHECK(m2 != m1);
@@ -516,8 +526,9 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     CHECK(take != NULL);
     o2 = take();
     CHECK(o2 != NULL);
-    CHECK(module_unload("cosmotest") == -EBUSY);
+    int rc2 = module_unload("cosmotest");
     module_set_unload_timeout_ms(5000);
+    CHECK(rc2 == -EBUSY);
 
     /* Both collectable now. */
     kobject_put(o1);
@@ -538,6 +549,51 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     kinfo("selftest: module-zombie-two-of-a-name: two zombies sharing a name were collected "
           "by one sweep, which the name lookup takes two calls to do");
     return true;
+}
+
+bool selftest_module_slots_enospc(const char **reason)
+{
+#if !CONFIG_DEBUG
+    /* The cap that makes -ENOSPC reachable is a debug-only seam. */
+    (void)reason;
+    kinfo("selftest: module-slots-enospc: needs the debug slot cap; skipping");
+    return true;
+#else
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    /*
+     * Reaching MODULE_MAX_LIVE honestly would need thirty-two distinct
+     * modules -- duplicate names are refused -- so the bound is capped
+     * instead. The SEARCH and the error return are the real ones; only
+     * the number changes.
+     *
+     * What this pins is not just the errno. Before the slot was
+     * reserved ahead of `init()`, failing here would have left an
+     * initialised, linked, counted module behind, so the load that
+     * follows is the assertion that matters: the loader is still
+     * usable, which a botched unwind would not leave it.
+     */
+    module_set_max_live_for_test(1);      /* every slot past the first is unreachable */
+    struct module *m = NULL;
+    int rc = module_load(file, size, "tests/cosmotest.ko", &m);
+    module_set_max_live_for_test(0);      /* the real bound back */
+
+    CHECK(rc == -ENOSPC);
+    CHECK(m == NULL);
+    CHECK(module_find("cosmotest") == NULL);   /* nothing was published */
+
+    /* And the loader still works, which is what a bad unwind would break. */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    CHECK(module_unload("cosmotest") == 0);
+
+    kinfo("selftest: module-slots-enospc: a full slot array refuses with -ENOSPC, publishes "
+          "nothing, and leaves the loader usable");
+    return true;
+#endif
 }
 
 bool selftest_module_unload_busy(const char **reason)
