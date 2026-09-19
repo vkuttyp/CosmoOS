@@ -441,6 +441,7 @@ static const struct selftest tests[] = {
     { "module-fail",     selftest_module_fail },
     { "module-unload-busy", selftest_module_unload_busy },
     { "module-zombie-swept", selftest_module_zombie_swept },
+    { "module-zombie-swept-on-every-exit", selftest_module_zombie_swept_on_every_exit },
     { "module-zombie-name-reused", selftest_module_zombie_name_reused },
     { "module-zombie-two-of-a-name", selftest_module_zombie_two_of_a_name },
     { "module-slots-enospc", selftest_module_slots_enospc },

@@ -66,7 +66,14 @@ fixture is absent from the archive.
 | `module-fail` | `cosmotest_fail` returns `-EIO`, the out pointer is untouched, nothing is live, region and page counts are unchanged |
 | `module-unload-busy` | `module_owner_of` of a kernel address is NULL and of `cosmotest_object_take` is the module (count balanced); the fixture hands out a kobject whose release lives in module text; `module_unload` with a 50 ms timeout waits and returns `-EBUSY`, the module is not live and its exports resolve to 0; `kobject_put` runs the release from the zombie (`cosmotest_released == 1`); the second unload frees it (0), the third is `-ENOENT`; the name loads and unloads again; then `cosmotest_dep` is made a zombie with an object whose release calls `cosmotest_answer()`: `cosmotest` stays pinned (`refs == 1`, unload `-EBUSY`), the release runs into the still-mapped dependency (42), reaping the zombie drops the pin and `cosmotest` unloads |
 
-The self-test run is 38 tests; the six above run last. The boot test
+| `module-zombie-swept` | a zombie whose objects have died is freed by the **next unrelated load**, with no unload of its own name |
+| `module-zombie-name-reused` | a replacement loaded under the zombie's name does not hide it; the sweep reaps by identity |
+| `module-zombie-two-of-a-name` | two zombies sharing a name are both collected by **one** sweep, which the name lookup takes two calls to do |
+| `module-zombie-swept-on-every-exit` | the `-EBUSY` of a still-busy named zombie, and the `0` after a named zombie is freed, each collect the zombie nobody named (debug only: uses `module_zombie_count`) |
+| `module-slots-enospc` | exhausting the publish-slot search returns `-ENOSPC`, publishes nothing, and leaves the loader usable (debug only: uses `module_set_max_live_for_test`) |
+
+The module tests run last in the boot self-test run; the run's total is
+reported by the run itself and is not repeated here. The boot test
 also requires, in every build type, the boot-loaded module's lines:
 
 ```text

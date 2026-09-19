@@ -142,8 +142,11 @@ int module_unload(const char *name);
 struct module *module_owner_of(uintptr_t addr);
 void module_object_released(struct module *m);
 
-/* How long module_unload waits for live objects before giving up
- * (default 5000 ms). Self-tests shorten it. */
+/* How long module_unload waits for live objects before giving up.
+ * Self-tests shorten it around a single unload and put it back; the
+ * default is named here so a restore cannot drift from the initial
+ * value it is meant to be restoring. */
+#define MODULE_UNLOAD_TIMEOUT_MS_DEFAULT 5000u
 void module_set_unload_timeout_ms(unsigned ms);
 
 /* Borrowed pointer while the module is live, or NULL. Sleeps (mutex). */
@@ -165,6 +168,12 @@ void module_dump(void);
 /* Cap the publish-slot search so a test can reach -ENOSPC without
  * thirty-two fixtures. 0 restores the real bound (invariant M24). */
 void module_set_max_live_for_test(unsigned n);
+/* How many zombies are on the list right now. A test that asserts a
+ * sweep ran on a particular EXIT needs to see the list shrink on that
+ * exit; every other observable (a later unload's return value) is also
+ * satisfied by a sweep on some other exit, so it cannot tell the two
+ * apart (invariant M24). */
+unsigned module_zombie_count(void);
 #endif
 
 #endif /* KERNEL_MODULE_H */

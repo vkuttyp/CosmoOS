@@ -57,7 +57,7 @@ void module_set_max_live_for_test(unsigned n) { g_live_cap = n ? n : MODULE_MAX_
 #else
 #define LIVE_CAP MODULE_MAX_LIVE
 #endif
-static unsigned g_unload_timeout_ms = 5000;
+static unsigned g_unload_timeout_ms = MODULE_UNLOAD_TIMEOUT_MS_DEFAULT;
 
 /* Per-module data the public struct does not expose. */
 struct module_priv {
@@ -532,6 +532,19 @@ static unsigned reap_zombies_locked(void)
     return freed;
 }
 
+#if CONFIG_DEBUG
+unsigned module_zombie_count(void)
+{
+    struct module *z;
+    unsigned n = 0;
+    mutex_lock(&g_lock);
+    list_for_each_entry(z, &g_zombies, link)
+        n++;
+    mutex_unlock(&g_lock);
+    return n;
+}
+#endif
+
 static struct module *find_zombie_locked(const char *name)
 {
     struct module *m;
@@ -557,6 +570,11 @@ int module_unload(const char *name)
             return -ENOENT;
         }
         if (__atomic_load_n(&z->live_objects, __ATOMIC_ACQUIRE) != 0) {
+            /* `z` is not collectable, so the sweep cannot take it out
+             * from under this call -- and the OTHER zombies may well
+             * be collectable. Asking about one zombie is no reason to
+             * leave the rest. */
+            reap_zombies_locked();
             mutex_unlock(&g_lock);
             return -EBUSY;
         }
@@ -564,6 +582,9 @@ int module_unload(const char *name)
         kinfo("module: freed zombie %s", z->name);
         drop_deps(z);
         free_module((struct module_priv *)z);
+        /* `z` is off the list and freed; the sweep runs after, never
+         * before, so this call's own zombie is the one it named. */
+        reap_zombies_locked();
         mutex_unlock(&g_lock);
         return 0;
     }
@@ -631,11 +652,12 @@ int module_unload(const char *name)
     drop_deps(m);
     free_module((struct module_priv *)m);
     /* And collect anything else that has finished dying. AFTER the
-     * named paths above, deliberately: an explicit
-     * `module_unload("name")` for a zombie must still find it and
-     * return 0, which a sweep at the top of this function would steal
-     * by freeing it first and leaving -ENOENT. The sweep is for the
-     * zombies nobody names. */
+     * named lookup, never before it -- as at every other exit from
+     * this function. An explicit `module_unload("name")` for a zombie
+     * must still find it and return 0, which a sweep at the TOP would
+     * steal by freeing it first and leaving -ENOENT. Ordering is the
+     * whole rule: the name is resolved first, the sweep takes the
+     * zombies nobody named, and no exit skips it. */
     reap_zombies_locked();
     mutex_unlock(&g_lock);
     return 0;

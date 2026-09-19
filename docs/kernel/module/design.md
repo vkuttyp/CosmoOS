@@ -238,11 +238,14 @@ is logged and counted but does not stop the boot.
 outlive its unload keeps its image mapped and its dependencies pinned
 (`drop_deps` runs at the free), so `reap_zombies_locked` frees every
 zombie whose `live_objects` has reached zero — at the top of
-`module_load` and at the **end** of `module_unload`, the latter so an
-explicit `module_unload("name")` still finds its own zombie and returns
-0 rather than having it swept out from under the call. It reaps by
-identity, which is what the first-match name lookup cannot do
-(invariant **M24**).
+`module_load`, and in `module_unload` on **every** exit but always
+*after* the name has been resolved, so an explicit
+`module_unload("name")` still finds its own zombie and returns 0 rather
+than having it swept out from under the call. Sweeping on every exit
+matters most for the `-EBUSY` of a pinned dependency: the dependant
+doing the pinning may itself be a collectable zombie, in which case the
+sweep is what unblocks the unload. It reaps by identity, which is what
+the first-match name lookup cannot do (invariant **M24**).
 
 A load also reserves its publish slot **before** `init()` runs, so
 exhausting `MODULE_MAX_LIVE` is `-ENOSPC` on a path where nothing has
@@ -265,9 +268,11 @@ release in module text. `kobject_init`/`kobject_track_code` record the
 owner (`module_owner_of`) and raise `live_objects`; the release drops it.
 `module_unload` frees nothing while the count is non-zero: after
 `shutdown()` and one grace period it waits up to the unload timeout, then
-keeps the module as a zombie (memory mapped, name free) that a later
-unload reaps. The zombie is the honest outcome when a `blk_find` holder
-or a mounted filesystem still names a device the driver has removed.
+keeps the module as a zombie (memory mapped, name free), which the next
+module load or unload sweeps once the count reaches zero — nobody has to
+ask for it by name (**M24**). The zombie is the honest outcome when a
+`blk_find` holder or a mounted filesystem still names a device the
+driver has removed.
 
 Live modules are also published in a fixed array `g_live[]` for the
 lock-free `module_owner_of` (a release store per slot; readers walk it

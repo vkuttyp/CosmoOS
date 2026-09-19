@@ -7,14 +7,16 @@ it — including two tests it named and did not produce.
 
 **What the build changed, each found by building rather than reading:**
 
-1. **The sweep runs at the *end* of `module_unload`, not the top, and
-   that is what keeps the existing test true.** The report flagged that
-   a sweep might free a zombie before `selftest_module_unload_busy`'s
-   second unload reached it, turning that test's `0` into `-ENOENT`, and
-   said the build must decide deliberately. The decision is ordering:
-   the named paths run first, so an explicit `module_unload("name")`
-   still finds its zombie and returns 0. That test is unchanged and
-   still passes.
+1. **In `module_unload` the sweep runs after the name is resolved, not
+   before, and that is what keeps the existing test true.** The report
+   flagged that a sweep might free a zombie before
+   `selftest_module_unload_busy`'s second unload reached it, turning
+   that test's `0` into `-ENOENT`, and said the build must decide
+   deliberately. The decision is **ordering, not a single placement**:
+   the named lookup goes first on every path, so an explicit
+   `module_unload("name")` still finds its zombie and returns 0. That
+   test is unchanged and still passes. Item 3 below is the same rule
+   applied to the exits the first implementation missed.
 2. **`module-slots-enospc` IS built, after an argument against it that
    did not hold.** This banner first said it could not be: reaching
    `MODULE_MAX_LIVE` needs thirty-two distinct modules, the archive has
@@ -35,8 +37,12 @@ it — including two tests it named and did not produce.
    one action a user would take on discovering a pinned dependency did
    nothing about it, which is the exact scenario this unit exists to
    fix. The sweep now runs once `m` is known LIVE (where it cannot
-   touch it) and on the `-ENOENT` path, so every exit has swept.
-
+   touch it), on the `-ENOENT` path, and — found while checking the
+   claim rather than the anchor — on the two named-zombie exits as
+   well: the `-EBUSY` for a named zombie that is still busy (it is not
+   collectable, so the sweep cannot steal it) and the `0` after a named
+   zombie is freed (it is already off the list). "Every exit" now means
+   every exit.
 4. **`module-zombie-holds-deps` was not built**, because
    `selftest_module_unload_busy` already proves a zombie keeps its
    dependency pinned. The report wanted the *converse* — that a swept
@@ -44,19 +50,34 @@ it — including two tests it named and did not produce.
    implicitly: the sweep calls `drop_deps` on the same path as the named
    reap, and a leaked pin would fail the later clean unload in that
    test. A dedicated test would assert the same code twice.
-4. **The forward declaration.** `module_load` is defined above the
+5. **The forward declaration.** `module_load` is defined above the
    zombie helpers, so the sweep needed one — trivial, and the kind of
    thing a design does not know.
+6. **The tests' short unload timeout is now scoped to one call.** These
+   tests shorten a *global* to 50 ms so an unload gives up quickly.
+   `CHECK` returns immediately, so a test that set the global, checked
+   and restored afterwards left 50 ms behind on the failing path, and
+   the next test to unload anything then failed for a reason that was
+   not its own. Review found one site (`module-zombie-two-of-a-name`)
+   running four checks inside that window. Rather than add a cleanup
+   path per test, `unload_with_timeout()` sets, unloads and restores in
+   one call, so the global is short for the duration of an unload and
+   never across an assertion — and `MODULE_UNLOAD_TIMEOUT_MS_DEFAULT`
+   names the value being restored, which was a literal `5000` copied
+   into five places.
 
-**Subsystem: what module teardown leaves behind, and the request that
-would collect it but nobody makes.** A module whose objects outlive its
-unload becomes a *zombie*: `module_unload` returns `-EBUSY`, the module
-is pushed onto `g_zombies`, and — in the words of its own comment —
-"the memory stays … a later unload of the name reaps it once the count
-reaches zero. The dependencies stay pinned too" (`module.c:518-528`).
+**Subsystem: what module teardown left behind, and the request that
+would have collected it but nobody made.** A module whose objects
+outlive its unload becomes a *zombie*: `module_unload` returns
+`-EBUSY` and the module is pushed onto `g_zombies`. In the words the
+code carried before this unit: "the memory stays … a later unload of
+the name reaps it once the count reaches zero. The dependencies stay
+pinned too" (`module.c:518-528`, pre-build).
 
-That later unload is the only reaper there is. Nothing calls it, and in
-two ordinary cases nothing *can*.
+That later unload **was the only reaper there was**. Nothing called it,
+and in two ordinary cases nothing *could*. Everything from here to the
+Design section describes the tree as it stood before PR #186; the
+sweep described in the Design section is what it does now.
 
 ## What a zombie holds
 
@@ -65,28 +86,30 @@ Not a `struct module`. The whole thing:
 - **Its image** — text, rodata and data stay mapped, because a release
   callback still to run lives in that text.
 - **Its dependency pins** — `drop_deps` runs at the free, not at the
-  unload, so every module it depends on keeps a reference. **A stuck
-  zombie permanently blocks unloading its dependencies**, and that is
-  the part that compounds: one module nobody thinks about pins a chain
-  of others that cannot then be unloaded either.
+  unload, so every module it depends on keeps a reference. **A zombie
+  that was never collected therefore blocked unloading its dependencies
+  for good**, and that was the part that compounded: one module nobody
+  thought about pinned a chain of others that could not then be
+  unloaded either. A zombie still holds all of this — what changed is
+  that it no longer holds it indefinitely.
 
-## Why the reaper does not run
+## Why the reaper did not run
 
-`module_unload(name)` is the only path that frees a zombie
-(`module.c:467-486`), and reaching the zombie requires the name to
+`module_unload(name)` was the only path that freed a zombie
+(`module.c:467-486`), and reaching the zombie required the name to
 resolve to *no live module*:
 
-1. **Nothing calls it.** There is no periodic sweep and no reap at load
-   or unload of anything else. Freeing a zombie requires someone to
-   unload a name that is not loaded — a request with no reason to be
-   made, by anyone who does not already know a zombie is there.
-2. **A reused name hides it.** `module_unload` calls `find_locked(name)`
-   first. Load a replacement under the same name and the unload targets
-   the replacement; the zombie is never looked for.
-3. **N zombies of one name need N of those calls.**
+1. **Nothing called it.** There was no periodic sweep and no reap at
+   load or unload of anything else. Freeing a zombie required someone
+   to unload a name that was not loaded — a request with no reason to
+   be made, by anyone who did not already know a zombie was there.
+2. **A reused name hid it.** `module_unload` calls `find_locked(name)`
+   first. Load a replacement under the same name and the unload
+   targeted the replacement; the zombie was never looked for.
+3. **N zombies of one name needed N of those calls.**
    `find_zombie_locked` returns the **first** match
    (`module.c:457-465`), and the reap `list_remove`s it
-   (`module.c:482`), so a later call does reach the next one.
+   (`module.c:482`), so a later call did reach the next one.
 
    **An earlier draft of this report said the second one was
    unreachable by any call. That was wrong** — it read the first-match
@@ -94,12 +117,12 @@ resolve to *no live module*:
    true statement is weaker and still bad: each zombie needs its own
    call, and case 1 is that nobody makes even the first.
 
-The inventory records this as "zombie modules are reaped only by a later
-`module_unload` of the same name", which is accurate and reads as an
-inconvenience. It is worse than that — a reused name hides a zombie
-entirely, and the pins it holds are permanent for as long as it is
-unreaped — but the memory is reachable, and this report says so because
-its first draft did not.
+The inventory recorded this as "zombie modules are reaped only by a
+later `module_unload` of the same name", which was accurate and read as
+an inconvenience. It was worse than that — a reused name hid a zombie
+entirely, and the pins it held lasted as long as it went unreaped — but
+the memory was reachable, and this report says so because its first
+draft did not.
 
 ## Why it survived
 
@@ -109,30 +132,31 @@ zombie's own text, proves a second unload frees it, and proves a zombie
 keeps its dependencies pinned. It is a good test of the mechanism, and
 everything it asserts is true.
 
-What it does not ask is whether anyone ever makes that second call. The
-mechanism works; the policy is that there isn't one. That is a shape
+What it did not ask is whether anyone ever makes that second call. The
+mechanism worked; the policy was that there wasn't one. That is a shape
 this tree has hit before — a rule stated in one place, enforced nowhere
-— with the twist that here the rule is stated *in a test that passes*.
+— with the twist that here the rule was stated *in a test that passes*.
 
 ## The second item, and it is not connected
 
-`MODULE_MAX_LIVE` is a fixed 32 and exhausting it **panics**:
+`MODULE_MAX_LIVE` is a fixed 32, and exhausting it used to **panic**:
 
 ```c
     if (!published)
         panic("module: more than %u modules live", MODULE_MAX_LIVE);
 ```
 
-The load path has an errno and uses it everywhere else; this one case
-kills the machine instead. Thirteen modules load at boot, so 32 is not
-close — but a limit whose overflow is a panic is a different kind of
-limit from one whose overflow is `-ENOSPC`, and the difference costs
+The load path has an errno and used it everywhere else; this one case
+killed the machine instead. Thirteen modules load at boot, so 32 was
+not close — but a limit whose overflow is a panic is a different kind
+of limit from one whose overflow is `-ENOSPC`, and the difference cost
 nothing to fix.
 
-**It is *not* a consequence of un-reaped zombies, and this report checked
-rather than assumed.** `unpublish(m)` runs at step 1 of the unload
-(`module.c:498`), before the zombie is created, so a zombie holds no
-`g_live[]` slot and cannot exhaust the array. The two items share a
+**It was *not* a consequence of un-reaped zombies, and this report
+checked rather than assumed.** `unpublish(m)` runs at step 1 of the
+unload (`module.c:498`), before the zombie is created, so a zombie
+holds no `g_live[]` slot and cannot exhaust the array. The two items
+share a
 subsystem and a flavour — resources released only by a request that may
 never come — and nothing else. Recording the non-connection because the
 first draft of this report assumed one.
@@ -201,6 +225,7 @@ collected without being asked for.**
 | `module-zombie-two-of-a-name` | two zombies sharing a name are **both** collected by one sweep — today each needs its own `module_unload` call, and nothing makes any of them |
 | `module-zombie-holds-deps` | unchanged in substance from what `selftest_module_unload_busy` proves, plus: once swept, the dependency pin is **released**, which is the consequence that matters |
 | `module-slots-enospc` | exhausting `MODULE_MAX_LIVE` returns `-ENOSPC` and the machine lives |
+| `module-zombie-swept-on-every-exit` | **not in the design; added in review.** The two exits where the NAME resolves to a zombie — the `-EBUSY` of one still busy, and the `0` after one is freed — each collect the zombies nobody named. Asserted on the zombie-list length across the one call, since a later unload's return value is satisfied by a sweep on any exit and so cannot tell them apart |
 
 **The bug-proof.** `module-zombie-two-of-a-name` must fail against the
 current tree because **nothing collects either of them** — one

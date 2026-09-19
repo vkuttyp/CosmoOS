@@ -39,6 +39,27 @@ static const void *fixture(const char *name, size_t *size)
     return data;
 }
 
+/*
+ * An unload under a short timeout, with the global put back before the
+ * call returns.
+ *
+ * CHECK returns immediately, so a test that sets the global, runs a
+ * check and restores afterwards leaves 50 ms behind on the failing
+ * path -- and every later test that unloads a module then fails for a
+ * reason that has nothing to do with it, which is the misleading kind
+ * of cascade. Restoring around the one call the timeout applies to
+ * removes the window instead of asking each test to be careful inside
+ * it: the global is short for the duration of an unload and never
+ * across an assertion.
+ */
+static int unload_with_timeout(const char *name, unsigned ms)
+{
+    module_set_unload_timeout_ms(ms);
+    int rc = module_unload(name);
+    module_set_unload_timeout_ms(MODULE_UNLOAD_TIMEOUT_MS_DEFAULT);
+    return rc;
+}
+
 bool selftest_bootarchive(const char **reason)
 {
     const struct cosmoboot_info *info = bootinfo_get();
@@ -425,13 +446,7 @@ bool selftest_module_zombie_swept(const char **reason)
     struct kobject *obj = take();
     CHECK(obj != NULL);
 
-    /* Restore the GLOBAL timeout before checking: a CHECK returns
-     * immediately, and leaving 50 ms behind would make every later
-     * test that unloads a module look broken. */
-    module_set_unload_timeout_ms(50);
-    int rc = module_unload("cosmotest");
-    module_set_unload_timeout_ms(5000);
-    CHECK(rc == -EBUSY);                           /* a zombie now */
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);   /* a zombie now */
     kobject_put(obj);                              /* its last object goes */
 
     /*
@@ -465,10 +480,7 @@ bool selftest_module_zombie_name_reused(const char **reason)
     struct kobject *obj = take();
     CHECK(obj != NULL);
 
-    module_set_unload_timeout_ms(50);
-    int rc = module_unload("cosmotest");
-    module_set_unload_timeout_ms(5000);
-    CHECK(rc == -EBUSY);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
 
     /*
      * The name is reused while the zombie is still holding its object.
@@ -512,10 +524,7 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     CHECK(take != NULL);
     o1 = take();
     CHECK(o1 != NULL);
-    module_set_unload_timeout_ms(50);
-    int rc1 = module_unload("cosmotest");
-    if (rc1 != -EBUSY) {
-        module_set_unload_timeout_ms(5000);
+    if (unload_with_timeout("cosmotest", 50) != -EBUSY) {
         *reason = "the first zombie was not created";
         return false;
     }
@@ -526,9 +535,7 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     CHECK(take != NULL);
     o2 = take();
     CHECK(o2 != NULL);
-    int rc2 = module_unload("cosmotest");
-    module_set_unload_timeout_ms(5000);
-    CHECK(rc2 == -EBUSY);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
 
     /* Both collectable now. */
     kobject_put(o1);
@@ -549,6 +556,85 @@ bool selftest_module_zombie_two_of_a_name(const char **reason)
     kinfo("selftest: module-zombie-two-of-a-name: two zombies sharing a name were collected "
           "by one sweep, which the name lookup takes two calls to do");
     return true;
+}
+
+bool selftest_module_zombie_swept_on_every_exit(const char **reason)
+{
+#if !CONFIG_DEBUG
+    /* module_zombie_count is the debug-only seam this needs. */
+    (void)reason;
+    kinfo("selftest: module-zombie-swept-on-every-exit: needs the debug zombie count; skipping");
+    return true;
+#else
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct kobject *(*take)(void);
+    struct module *m = NULL;
+
+    /*
+     * The two exits `module_unload` takes when the NAME resolves to a
+     * zombie. Review found the sweep missing from an early return once
+     * already; these are the two that were still missing it, and the
+     * only observable that can tell "swept on THIS exit" from "swept
+     * on some later one" is the list length across the one call.
+     *
+     * Both phases lean on `list_push_back`: zombies are appended, so
+     * `find_zombie_locked` returns the OLDEST of a name. That is what
+     * lets each phase choose which exit the named call takes.
+     */
+
+    /* --- exit 1: the named zombie is still busy, another is not. --- */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    take = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    struct kobject *o1 = take();                   /* pins zombie 1 */
+    CHECK(o1 != NULL);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
+
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    take = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    struct kobject *o2 = take();                   /* pins zombie 2 */
+    CHECK(o2 != NULL);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
+    CHECK(module_zombie_count() == 2);
+
+    kobject_put(o2);                               /* the SECOND is collectable */
+    CHECK(module_zombie_count() == 2);             /* nothing has swept yet */
+
+    /* The name finds the first zombie, which is still busy: -EBUSY,
+     * and before this unit that exit returned without collecting
+     * anything. The second zombie has to go on the way out. */
+    CHECK(module_unload("cosmotest") == -EBUSY);
+    CHECK(module_zombie_count() == 1);
+
+    /* --- exit 2: the named zombie is freed, another is collectable. --- */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    take = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    struct kobject *o3 = take();
+    CHECK(o3 != NULL);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
+    CHECK(module_zombie_count() == 2);             /* zombie 1 and zombie 3 */
+
+    kobject_put(o1);
+    kobject_put(o3);                               /* both collectable now */
+    CHECK(module_zombie_count() == 2);
+
+    /* The named path frees the first and returns 0. The third is not
+     * named by anything and must still go. */
+    CHECK(module_unload("cosmotest") == 0);
+    CHECK(module_zombie_count() == 0);
+    CHECK(module_unload("cosmotest") == -ENOENT);
+
+    kinfo("selftest: module-zombie-swept-on-every-exit: the -EBUSY and the 0 of a named "
+          "zombie each collected the zombie nobody named");
+    return true;
+#endif
 }
 
 bool selftest_module_slots_enospc(const char **reason)
@@ -620,11 +706,9 @@ bool selftest_module_unload_busy(const char **reason)
     struct kobject *obj = take();
     CHECK(obj != NULL && obj->owner == m && m->live_objects == 1);
 
-    module_set_unload_timeout_ms(50);
     uint64_t t0 = clock_now_ns();
-    int rc = module_unload("cosmotest");
+    int rc = unload_with_timeout("cosmotest", 50);
     uint64_t waited = clock_since_ns(t0);
-    module_set_unload_timeout_ms(5000);
     CHECK(rc == -EBUSY);
     CHECK(waited >= 50000000ULL);                 /* it waited the timeout for the object */
     CHECK(module_find("cosmotest") == NULL);      /* not live */
@@ -659,10 +743,7 @@ bool selftest_module_unload_busy(const char **reason)
     CHECK(dtake != NULL && dreleased != NULL);
     struct kobject *dobj = dtake();
     CHECK(dobj != NULL && dobj->owner == d);
-    module_set_unload_timeout_ms(50);
-    rc = module_unload("cosmotest_dep");
-    module_set_unload_timeout_ms(5000);
-    CHECK(rc == -EBUSY);
+    CHECK(unload_with_timeout("cosmotest_dep", 50) == -EBUSY);
     CHECK(m->refs == 1);                            /* still pinned by the zombie */
     CHECK(module_unload("cosmotest") == -EBUSY);    /* so the dependency cannot go */
     kobject_put(dobj);                              /* release runs, calling into cosmotest */
