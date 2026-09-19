@@ -234,6 +234,22 @@ is logged and counted but does not stop the boot.
 
 ## Ownership and lifetime
 
+**Zombies are collected, not waited for.** A module whose objects
+outlive its unload keeps its image mapped and its dependencies pinned
+(`drop_deps` runs at the free), so `reap_zombies_locked` frees every
+zombie whose `live_objects` has reached zero — at the top of
+`module_load` and at the **end** of `module_unload`, the latter so an
+explicit `module_unload("name")` still finds its own zombie and returns
+0 rather than having it swept out from under the call. It reaps by
+identity, which is what the first-match name lookup cannot do
+(invariant **M24**).
+
+A load also reserves its publish slot **before** `init()` runs, so
+exhausting `MODULE_MAX_LIVE` is `-ENOSPC` on a path where nothing has
+been committed, rather than a panic after the module is initialised,
+linked and counted.
+
+
 The archive bytes belong to the boot memory map and are never freed or
 written. A module's three regions belong to its `struct module` and are
 freed only by `module_unload` or a failed load. `struct module` itself

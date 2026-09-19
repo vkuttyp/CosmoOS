@@ -400,6 +400,146 @@ bool selftest_module_fail(const char **reason)
  * the release runs from module text after the unload returned -EBUSY,
  * and a second unload frees the zombie.
  */
+/* --- the zombie nobody comes back for ------------------------------------- *
+ *
+ * selftest_module_unload_busy proves the reap works when you ask for
+ * it: build a zombie, let its object go, unload the name again, freed.
+ * Everything it asserts is true, and it is why this went unnoticed --
+ * the mechanism was tested and the policy was that nothing invoked it.
+ *
+ * These two ask the question that one does not: who asks?
+ * (docs/audit/next-subsystem-module-zombie-reap.md)
+ */
+bool selftest_module_zombie_swept(const char **reason)
+{
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct module *m = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    struct kobject *(*take)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    struct kobject *obj = take();
+    CHECK(obj != NULL);
+
+    module_set_unload_timeout_ms(50);
+    CHECK(module_unload("cosmotest") == -EBUSY);   /* a zombie now */
+    module_set_unload_timeout_ms(5000);
+    kobject_put(obj);                              /* its last object goes */
+
+    /*
+     * THE CLAIM. Nothing here unloads "cosmotest" again -- that is the
+     * request nobody makes. An unrelated load is enough, and after it
+     * the zombie is gone: a later unload of the name finds nothing
+     * rather than finding a zombie to free.
+     */
+    struct module *other = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &other) == 0);
+    CHECK(module_unload("cosmotest") == 0);        /* this unloads OTHER, the live one */
+    CHECK(module_unload("cosmotest") == -ENOENT);  /* and no zombie was left behind */
+
+    kinfo("selftest: module-zombie-swept: a zombie whose objects died was collected by an "
+          "unrelated load, with no unload of its own name");
+    return true;
+}
+
+bool selftest_module_zombie_name_reused(const char **reason)
+{
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct module *m = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    struct kobject *(*take)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    struct kobject *obj = take();
+    CHECK(obj != NULL);
+
+    module_set_unload_timeout_ms(50);
+    CHECK(module_unload("cosmotest") == -EBUSY);
+    module_set_unload_timeout_ms(5000);
+
+    /*
+     * The name is reused while the zombie is still holding its object.
+     * Before the sweep this was the case that hid a zombie for good:
+     * module_unload finds the LIVE module of that name and never looks
+     * at the zombie list, so the only reaper could not reach it.
+     */
+    struct module *repl = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &repl) == 0);
+    CHECK(repl != m);
+    CHECK(module_find("cosmotest") == repl);
+
+    kobject_put(obj);                              /* the zombie is now collectable */
+
+    /* Unloading the replacement sweeps the zombie too, and the sweep is
+     * by identity: it does not care that they share a name. */
+    CHECK(module_unload("cosmotest") == 0);        /* the replacement */
+    CHECK(module_unload("cosmotest") == -ENOENT);  /* nothing left, zombie included */
+
+    kinfo("selftest: module-zombie-name-reused: a zombie hidden behind a replacement of its "
+          "own name was still collected");
+    return true;
+}
+
+bool selftest_module_zombie_two_of_a_name(const char **reason)
+{
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct kobject *(*take)(void);
+    struct module *m1 = NULL, *m2 = NULL;
+    struct kobject *o1, *o2;
+
+    /* Two zombies of one name, made the only way they can be: load,
+     * strand an object, unload, and do it again under the same name. */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m1) == 0);
+    take = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    o1 = take();
+    CHECK(o1 != NULL);
+    module_set_unload_timeout_ms(50);
+    CHECK(module_unload("cosmotest") == -EBUSY);
+
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m2) == 0);
+    CHECK(m2 != m1);
+    take = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    CHECK(take != NULL);
+    o2 = take();
+    CHECK(o2 != NULL);
+    CHECK(module_unload("cosmotest") == -EBUSY);
+    module_set_unload_timeout_ms(5000);
+
+    /* Both collectable now. */
+    kobject_put(o1);
+    kobject_put(o2);
+
+    /*
+     * ONE sweep takes both. The name lookup cannot: it finds the first
+     * match, so before this unit each zombie needed its own
+     * otherwise-unmotivated call -- and the report's first draft wrongly
+     * said the second could never be found at all. It can; it just
+     * needed a second request nobody had a reason to make.
+     */
+    struct module *live = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &live) == 0);
+    CHECK(module_unload("cosmotest") == 0);        /* the live one */
+    CHECK(module_unload("cosmotest") == -ENOENT);  /* BOTH zombies gone */
+
+    kinfo("selftest: module-zombie-two-of-a-name: two zombies sharing a name were collected "
+          "by one sweep, which the name lookup takes two calls to do");
+    return true;
+}
+
 bool selftest_module_unload_busy(const char **reason)
 {
     size_t size;

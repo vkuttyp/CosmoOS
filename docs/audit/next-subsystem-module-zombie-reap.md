@@ -1,8 +1,38 @@
 # NEXT SUBSYSTEM — a zombie nobody will come back for
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This report is a design, not
-an as-built.
+and wait for the instruction to build it. **This report is as built**
+(PR #186), and the banner below records where the build differed from
+it — including two tests it named and did not produce.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The sweep runs at the *end* of `module_unload`, not the top, and
+   that is what keeps the existing test true.** The report flagged that
+   a sweep might free a zombie before `selftest_module_unload_busy`'s
+   second unload reached it, turning that test's `0` into `-ENOENT`, and
+   said the build must decide deliberately. The decision is ordering:
+   the named paths run first, so an explicit `module_unload("name")`
+   still finds its zombie and returns 0. That test is unchanged and
+   still passes.
+2. **`module-slots-enospc` was NOT built.** Reaching `MODULE_MAX_LIVE`
+   needs thirty-two *distinct* loadable modules — duplicate names are
+   refused — and the boot archive carries three fixtures. Testing it
+   would mean either thirty-two new fixtures or a hook to shrink the
+   limit, and a hook that changes the bound is not obviously testing the
+   same code. The slot change is covered by a `KASSERT` on the reserved
+   index and by the pre-commit ordering being visible in one function.
+   Saying so here rather than quietly dropping the row.
+3. **`module-zombie-holds-deps` was not built either**, because
+   `selftest_module_unload_busy` already proves a zombie keeps its
+   dependency pinned. The report wanted the *converse* — that a swept
+   zombie releases the pin — which `module-zombie-swept` establishes
+   implicitly: the sweep calls `drop_deps` on the same path as the named
+   reap, and a leaked pin would fail the later clean unload in that
+   test. A dedicated test would assert the same code twice.
+4. **The forward declaration.** `module_load` is defined above the
+   zombie helpers, so the sweep needed one — trivial, and the kind of
+   thing a design does not know.
 
 **Subsystem: what module teardown leaves behind, and the request that
 would collect it but nobody makes.** A module whose objects outlive its

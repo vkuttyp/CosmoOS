@@ -426,9 +426,10 @@ tree.
   that rule did not reach them and why **N22** now states the one that
   does;
   `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
-  only by a later `module_unload` of the same name. **Taken up by
-  `docs/audit/next-subsystem-module-zombie-reap.md`** (not struck until
-  it lands), **and the zombie half is understated here**: a zombie keeps
+  only by a later `module_unload` of the same name. ~~**Taken up by
+  `docs/audit/next-subsystem-module-zombie-reap.md`**~~ **BUILT (PR
+  #186); §4's small debts are now closed.** The zombie half was
+  understated here: a zombie keeps
   its whole image AND its dependency pins (`drop_deps` runs at the free,
   not the unload), so a stuck one permanently blocks unloading every
   module it depends on. Nothing calls the reaper; a name reused by a
