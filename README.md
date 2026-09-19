@@ -2795,6 +2795,26 @@ See [docs/development.md](docs/development.md).
   34 host checks in `tests/boot/test_usertest_sections.py`.
   352 self-tests on both architectures, debug and release (PR #188).
 
+- **The checker checks what the format promises.** `cosmofs_check`
+  took three of the format's invariants on trust and had five
+  reporting paths that nothing had ever made fire — code whose
+  behaviour was unknown rather than merely uncovered. Runs are now
+  verified to **ascend by `lblk` and not overlap**, checked as they
+  stream past with one `prev` per inode and no new memory; ordering is
+  tested first and the overlap test skipped for a pair that fails it,
+  because every descending pair also begins inside its predecessor and
+  the two are different repairs. The end of a run is computed in 64
+  bits, so a run near the 2³²-block bound cannot wrap and hide a real
+  overlap. A **name repeated in one directory** is reported through a
+  fixed 4 KiB bitmap whose hit only means *maybe*: the directory is
+  re-scanned to confirm, so a collision costs a re-scan and never a
+  wrong finding — and the names pass completes **before** the walk can
+  recurse, or a subdirectory clears its parent's sheet. The five
+  unfired paths each gained a corruption and a test; all five worked
+  first time, against the report's own prediction that one would not.
+  Thirteen classes, every one of which a test can now make fire.
+  360 self-tests on both architectures, debug and release (PR #189).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

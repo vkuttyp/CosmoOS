@@ -989,17 +989,46 @@ Everything is allocated before the walk starts, so a filesystem too
 large for the memory available is `-ENOMEM` rather than a half-finished
 answer.
 
-**What it does not check.** Extents are claimed, not validated against
-each other: an overlap inside one inode is caught only when it makes two
-claims on one block, and an `lblk` ordering fault that does not is a
-wrong file rather than a wrong filesystem. A name repeated inside one
-directory is not detected either, because the pass keeps maps of numbers
-and that needs a set of strings. `next_ino` is not compared: it is a
-high-water mark rather than a total. All three are inventory rows.
+**Extents are validated against each other, and names against their
+own directory.** Runs must ascend by `lblk` and must not overlap, and
+both are checked as the runs stream past — one `prev` per inode, no new
+memory. **Ordering is tested first and the overlap test is skipped for
+a pair that fails it**, because every descending pair also begins
+inside its predecessor, and `extent_order` and `extent_overlap` are
+different repairs: an ordering fault may be repairable by sorting, an
+overlap is data loss. The end of a run is computed in 64 bits, so a run
+near the 2³²-block bound cannot wrap and hide a real overlap.
 
-**Ten classes, four repairs.** Leaked blocks, orphans, wrong link counts
+A name repeated inside one directory is `dir_dup_name`. The pass keeps
+maps of numbers and this needs a set of strings, so it uses a **fixed
+bitmap** — 4 KiB, hashed into once per entry, cleared per directory —
+and a set bit only means *maybe*: the directory is re-scanned to
+confirm, so a hash collision costs a re-scan and never a wrong finding.
+The names pass runs **to completion before the entry loop can recurse**
+into a subdirectory, because one shared bitmap and a recursive walk
+would otherwise have the child clear the parent's sheet.
+
+**What it does not check**, now one thing rather than three: `next_ino`
+is not compared, because it is a high-water mark rather than a total,
+and reading it as a total would make a legal filesystem look corrupt.
+
+**Every class has a test that makes it fire.** Eight of them did
+already; the five that did not — a block pointer past the pool, a
+snapshot member count too large for its block, an over-long `namelen`,
+a directory reached from two parents, and a cyclic **extent** chain —
+were reporting paths that had never executed, and each now has a
+corruption in `cosmofs_test_corrupt` and a `cosmofs-check-*` test.
+The other four `chain_cycle` sites (the deadlist, the imap and the
+directory-depth walkers) use different guards and stay untested; one
+test does not cover five walkers.
+
+**Thirteen classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired
-with `COSMOFS_CHECK_REPAIR`. The rest are reported: a block both
+with `COSMOFS_CHECK_REPAIR`. The three added with the extent and name
+checks are reported and never repaired: choosing which of two
+overlapping runs survives is data loss, an ordering fault may be
+either, and which of two entries sharing a name is the real one is not
+a question the filesystem can answer. The rest are reported: a block both
 reachable and free is not fixed by setting its bit while the filesystem
 is mounted and the allocator may already have handed it out, and
 choosing which of two inodes keeps a shared block is data loss dressed
