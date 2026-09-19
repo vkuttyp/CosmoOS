@@ -303,14 +303,23 @@ code, this developer's machine against CI:
 
 `fpu` is **flat** — a few per cent, on both architectures, between a
 laptop and a loaded shared runner — while `svc` and `proc` nearly
-double on aarch64. That fits what each does: `fpu` spends its time in
-a fixed hold, so the host's load does not reach it, whereas `svc`
-waits on service state transitions and `proc` spawns. The suite grows
-under load in exactly the places that wait on something other than a
-clock.
+double on aarch64. So the budget was not being outgrown evenly, and a
+section's sensitivity to host load is not predictable from its size:
+`fpu` is 4 checks and `svc` is 34, and they behave oppositely.
 
-Before this unit that whole paragraph was unanswerable, and the budget
-was widened twice without it.
+**Why they differ is not established, and this section deliberately
+does not guess.** A first draft of this paragraph said `fpu` was flat
+because it spends its time in a fixed clock hold while `svc` waits on
+something other than a clock. Both halves are wrong about the code:
+`fpu_hold` runs 300 rounds *alternating* `cosmo_yield()` with a
+200 µs `usleep`, and `svc_selftest` polls service state with **fixed**
+`cosmo_sleep_ns` sleeps of 5 and 10 ms. A causal story pointed at the
+wrong timing mechanism would send the next investigation the wrong
+way, which is worse than the honest gap. The numbers are the finding;
+the explanation is open.
+
+Before this unit none of it was available, and the budget was widened
+twice without it.
 
 A failing self-test is also named against the **load-sensitive list**
 in `docs/testing/flakes.md` (the table under its "The list" heading): the

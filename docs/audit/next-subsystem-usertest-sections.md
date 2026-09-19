@@ -20,10 +20,14 @@ it.
    asked and could not answer.** Same code, laptop against CI: `fpu`
    moves **1.01x** on x86-64 and **1.03x** on aarch64 — flat — while
    `svc` goes 1.36x and **1.90x** and `proc` 1.28x and **1.93x**. The
-   suite grows under load exactly where it waits on something other
-   than a clock (`svc` on service state, `proc` on spawns); `fpu`
-   spends its time in a fixed hold, so a loaded shared runner does
-   not reach it. The budget was widened twice without this.
+   So the budget was not being outgrown evenly, and load-sensitivity
+   does not follow section size — `fpu` is 4 checks and `svc` is 34.
+   **Why** they differ is left open: a first draft of this item
+   explained it by `fpu` holding on a clock and `svc` not, and review
+   showed both halves wrong about the code (`fpu_hold` alternates
+   `cosmo_yield` with a 200 µs `usleep` over 300 rounds; `svc_selftest`
+   polls with fixed 5 and 10 ms sleeps). The numbers are the finding.
+   The budget was widened twice without any of them.
 3. **The sections account for 3610 of 3711 ms (x86-64) and 3827 of
    3938 (aarch64).** The ~100 ms outside them is the spawn, `init`'s
    startup and its teardown -- small, which the report was careful not
