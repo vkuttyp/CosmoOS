@@ -2469,6 +2469,53 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         token = target;
         break;
     }
+    case COSMOFS_CORRUPT_DUP_NAME: {
+        /*
+         * One name twice in a directory, at two DIFFERENT inodes --
+         * which is what makes it a fault rather than a hard link: two
+         * entries resolve differently, unlink removes one and the name
+         * survives.
+         */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        rc = cfs_dir_read_block_at(fs, &in, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned src = 0;
+            while (src < CFS_DIRENTS_PER_BLOCK && d[src].ino == 0)
+                src++;
+            unsigned dst = 0;
+            while (dst < CFS_DIRENTS_PER_BLOCK && d[dst].ino != 0)
+                dst++;
+            if (src == CFS_DIRENTS_PER_BLOCK || dst == CFS_DIRENTS_PER_BLOCK)
+                rc = -EINVAL;
+            else {
+                uint64_t twin = 0;
+                rc = cfs_inode_alloc(fs, &twin);
+                if (rc == 0) {
+                    struct cfs_inode ti;
+                    memset(&ti, 0, sizeof(ti));
+                    ti.mode = CFS_MODE(CFS_TYPE_REG, 0644);
+                    ti.nlink = 1;
+                    ti.ino = twin;
+                    ti.parent = ino;
+                    rc = cfs_inode_write(fs, twin, &ti);
+                }
+                if (rc == 0) {
+                    d[dst] = d[src];          /* the same name ... */
+                    d[dst].ino = twin;        /* ... at a different inode */
+                    d[dst].type = CFS_TYPE_REG;
+                    rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+                    token = ino;
+                }
+            }
+        }
+        kfree(blk);
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */

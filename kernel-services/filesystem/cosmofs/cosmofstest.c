@@ -2012,6 +2012,49 @@ bool selftest_cosmofs_check_snap_members(const char **reason)
     return true;
 }
 
+/*
+ * The one invariant here that is about strings rather than numbers.
+ * The pass keeps a fixed bitmap, hashes each name into it, and re-scans
+ * the directory only when a bit says "maybe" -- so a hash collision
+ * costs a re-scan and never a wrong answer
+ * (docs/audit/next-subsystem-fsck-unchecked.md).
+ */
+bool selftest_cosmofs_check_dup_name(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DUP_NAME, CFS_ROOT_INO, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_dup_name.count == 1 && r.dir_dup_name.name[0] == what);
+    check_teardown(bd);
+
+    /*
+     * And the other half, which is the one a bitmap makes easy to get
+     * wrong: a SOUND directory of many distinct names must report
+     * nothing. Sixty-four names is enough to make a 32768-bit map
+     * collide occasionally, so this is the false-positive path and the
+     * re-scan is what keeps it quiet.
+     */
+    CHECK(check_fixture(&bd, reason));
+    for (unsigned i = 0; i < 64; i++) {
+        char path[64];
+        ksnprintf(path, sizeof(path), ENG "/n%u", i);
+        CHECK(write_file(path, "x", 1));
+    }
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_dup_name.count == 0);
+    CHECK(r.clean);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-dup-name: one name twice at two inodes is reported, and "
+          "sixty-four distinct names in one directory are not");
+    return true;
+}
+
 bool selftest_cosmofs_check_snapshot(const char **reason)
 {
     struct blkdev *bd = NULL;

@@ -105,6 +105,7 @@ struct cosmofs_check_report {
      * (docs/audit/next-subsystem-fsck-unchecked.md). */
     struct cosmofs_check_class extent_order;     /* an inode whose runs do not ascend by lblk */
     struct cosmofs_check_class extent_overlap;   /* two runs of one inode covering one lblk */
+    struct cosmofs_check_class dir_dup_name;     /* a name that repeats in one directory */
     struct cosmofs_check_class counter_wrong;    /* a superblock total the walk disagrees with */
     struct cosmofs_check_class chain_cycle;      /* a metadata chain that revisits a block */
     struct cosmofs_check_class unreadable;       /* a metadata block that could not be read */
@@ -190,6 +191,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_BAD_PTR,        /* a block pointer past the end of the pool */
     COSMOFS_CORRUPT_TWO_PARENTS,    /* a directory named by an entry in a second directory */
     COSMOFS_CORRUPT_SNAP_MEMBERS,   /* a snapshot member count larger than its block holds */
+    COSMOFS_CORRUPT_DUP_NAME,       /* one name twice in a directory, at two inodes */
     COSMOFS_CORRUPT_CHAIN_CYCLE,    /* an extent chain whose last block names an earlier one */
     COSMOFS_CORRUPT_NAMELEN,        /* an entry whose namelen exceeds its slot */
     COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
