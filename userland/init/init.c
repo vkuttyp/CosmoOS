@@ -3552,18 +3552,18 @@ static void fsctl_selftest(void)
     puts("usertest: fsctl ok");
 }
 
-static void selftest(void)
+/*
+ * The bare system-call checks. These sat in selftest()'s own body and
+ * so belonged to no section: fifty-four checks that no per-section
+ * timing could have accounted for, which would have left the suite's
+ * numbers not summing to its total
+ * (docs/audit/next-subsystem-usertest-sections.md). A section now,
+ * with a row in the table below like every other -- and with no
+ * position requirement, which took moving one thing out of it: see
+ * the teardown at the end of selftest().
+ */
+static void syscalls_selftest(void)
 {
-    fs_selftest();
-    fsctl_selftest();
-    net_selftest();
-    proc_selftest();
-    fpu_selftest();
-    trap_selftest();
-    priv_selftest();
-    proc_fs_selftest();
-    svc_selftest();
-
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
     CHECK(cosmo_write(1, "", 0) == 0);
     CHECK(cosmo_write(7, "x", 1) == -COSMO_EBADF);
@@ -3653,10 +3653,88 @@ static void selftest(void)
     big[sizeof(big) - 1] = 2;
     CHECK(big[0] == 1 && big[sizeof(big) - 1] == 2);
 
-    /* Last: closing stderr, then nothing more can be reported there. */
+}
+
+/*
+ * The suite's sections, and the reason this is a table rather than ten
+ * calls in a row (docs/audit/next-subsystem-usertest-sections.md).
+ *
+ * The driver below is the only thing that calls a section, so a section
+ * cannot be timed late, cannot be forgotten, and cannot be added
+ * without a line in the log: adding one is adding a row. Bracketing ten
+ * plain calls by hand would have been a convention instead, and this
+ * suite already had one of those -- each section printing a
+ * `usertest: ... ok` line last -- which TWO of the nine had quietly
+ * stopped honouring (`fs_selftest` runs a check after its line;
+ * `trap_selftest` is an empty function on aarch64 and prints nothing).
+ *
+ * The harness checks this list against the lines it sees, so a row
+ * whose section compiles to nothing is visible rather than silent.
+ */
+struct selftest_section {
+    const char *name;
+    void (*fn)(void);
+};
+
+static const struct selftest_section g_sections[] = {
+    { "fs",       fs_selftest },
+    { "fsctl",    fsctl_selftest },
+    { "net",      net_selftest },
+    { "proc",     proc_selftest },
+    { "fpu",      fpu_selftest },
+    { "trap",     trap_selftest },
+    { "priv",     priv_selftest },
+    { "proc-fs",  proc_fs_selftest },
+    { "svc",      svc_selftest },
+    { "syscalls", syscalls_selftest },
+};
+
+static void selftest(void)
+{
+    size_t n = sizeof(g_sections) / sizeof(g_sections[0]);
+    uint64_t t0 = cosmo_clock_ns();
+    for (size_t i = 0; i < n; i++) {
+        uint64_t s0 = cosmo_clock_ns();
+        g_sections[i].fn();
+        uint64_t s1 = cosmo_clock_ns();
+        /*
+         * The machine channel, beside USERTEST: PASS and
+         * USERTEST: FAIL. The lowercase `usertest: ...` lines each
+         * section prints stay prose and stay unchanged: they are read
+         * by people, one of them is a required marker, and teaching
+         * them to carry a number would put the parser back on the
+         * convention this table exists to stop depending on.
+         *
+         * stdout is line-buffered (libc/src/stdio.c), so this leaves
+         * the guest now rather than at exit -- which is what makes the
+         * list useful when a section never finishes.
+         */
+        printf("USERTEST: section %s %llu ms\n", g_sections[i].name,
+               (unsigned long long)((s1 - s0) / 1000000));
+        fflush(stdout);
+    }
+    /*
+     * Teardown, after every section and therefore structurally last:
+     * closing stderr, and proving it is closed. This used to sit at
+     * the bottom of the checks that are now `syscalls_selftest`, which
+     * gave that row a position requirement -- it had to be last, or a
+     * later section's failed CHECK would write to a closed descriptor
+     * and report nothing. A comment saying "keep this last" is exactly
+     * the kind of convention this table replaced, so the requirement
+     * is gone rather than documented: the loop above may run its rows
+     * in any order.
+     */
     fflush(stdout);
     CHECK(cosmo_close(2) == 0);
     CHECK(cosmo_write(2, "x", 1) == -COSMO_EBADF);
+
+    /* The sum, against which the kernel's own SELFTEST duration for
+     * `process-user` can be read: the difference is the spawn, this
+     * program's startup and its teardown, and it is worth seeing
+     * rather than assuming. */
+    printf("USERTEST: sections %zu, total %llu ms\n", n,
+           (unsigned long long)((cosmo_clock_ns() - t0) / 1000000));
+    fflush(stdout);
 }
 
 static int run_and_wait(const char *what, const char *const argv[])

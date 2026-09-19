@@ -581,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-four, to 2026-09-19**, across CI and this developer's machine, on
+**Thirty-five, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -612,14 +612,15 @@ of this section said eight and then listed nine:
 | PR #186's own CI run | observed, aarch64 (the protection-capable-CPU job), on a **documentation-only commit** (`a0558b6`): `connect 0 in 791 ms`, `sent -104`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:36662 accepted at 91.9s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. **The probe's reading reproduced** -- see below |
 | PR #187's own CI run | observed, aarch64 (the protection-capable-CPU job), on another **documentation-only commit** (`83b42cb`): `connect 0 in 947 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:52290 accepted at 91.8s, **0 byte(s)**`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. Row one a **third** time, and the first where the guest's write succeeded and the host still read nothing -- see below |
 | PR #187's own CI run, the very next one | observed, aarch64, the **GICv3** job this time (`9b5b5f9`, documentation-only): `connect 0 in 755 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:37472 accepted at 82.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a **fourth** time, on a third distinct aarch64 job |
+| PR #188's own CI run | observed, **x86-64** (`f446890`, documentation-only): `connect 0 in 890 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:48970 accepted at 74.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. **The first probe reading on x86-64**, and row one a fifth time -- see below |
 
-Twenty-five entries, thirty-four occurrences -- and the table is the tally,
+Twenty-six entries, thirty-five occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty rows
+them and are not independently re-verified here. The last twenty-one rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-five instrumented** occurrences
-behind the other nineteen rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **twenty-six instrumented** occurrences
+behind the other twenty rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1080,8 +1081,8 @@ reading; two independent ones are a finding. The conclusion above no
 longer rests on a single outing of freshly written code -- which was
 the honest reservation to have about it. Both sightings are aarch64,
 so this is a reproduction and **not** a second architecture; the
-reading has not yet been taken on x86-64, where sighting thirty-one
-occurred and its output was discarded.
+reading had not yet been taken on x86-64 at that point -- sighting
+thirty-five has since taken it, and it is row one as well.
 
 **Sighting thirty-three, and the sharpest version of the reading.**
 2026-09-19, aarch64 CI again, on another documentation-only commit
@@ -1130,13 +1131,23 @@ side `[deadline, ESTABLISHED]` with `slirp probe: connect 1 ms, echo
 1 ms`. Row one a fourth time, in the shape of thirty and thirty-two
 rather than thirty-three: reset before the write.
 
-Four readings, four times row one, across three aarch64 job
-configurations and never yet on x86-64. The reading is not a property
-of one job's timing, and the interpretation has not moved since
-sighting thirty: **slirp holds a host-side connection open, established
-and silent, while remaining responsive to other connections through
-itself.** Where the guest's bytes are lost, when there are any, remains
-unlocated.
+**Sighting thirty-five took the reading on x86-64 at last**, and it is
+row one too. `f446890`, documentation-only again, PR #188's own CI:
+`connect 0 in 890 ms`, `sent -104`, `outstanding 0 then 0`,
+`segs_out +2 retransmits +0 rsts_in +1`; host side
+`[deadline, ESTABLISHED]` with `slirp probe: connect 1 ms, echo 1 ms`.
+The shape of thirty, thirty-two and thirty-four: reset before the
+write.
+
+**Five readings, five times row one, and now on both architectures** —
+three aarch64 job configurations (default, protection-capable, GICv3)
+and x86-64. The x86-64 reading is the one this file had been careful
+to say was missing, and it changes the claim's scope rather than its
+content: the interpretation has not moved since sighting thirty and is
+now architecture-independent. **slirp holds a host-side connection
+open, established and silent, while remaining responsive to other
+connections through itself.** Where the guest's bytes are lost, when
+there are any, remains unlocated.
 
 **What this does not name is the line of code.** It names the component
 and the shape, which is what the unit promised and more than thirty

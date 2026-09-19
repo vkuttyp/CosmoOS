@@ -65,6 +65,95 @@ def load_sensitive_tests(path):
     return names
 
 
+# The user-mode suite's sections, driven from a table in
+# userland/init/init.c (docs/audit/next-subsystem-usertest-sections.md).
+# Named here so a row that silently disappears is a failure rather than
+# a shorter list nobody reads; the suite's own total line carries the
+# count, which is what catches a truncated stream.
+USERTEST_SECTIONS = ["fs", "fsctl", "net", "proc", "fpu", "trap",
+                     "priv", "proc-fs", "svc", "syscalls"]
+SECTION_RE = re.compile(r"^USERTEST: section (\S+) (\d+) ms$")
+SECTION_TOTAL_RE = re.compile(r"^USERTEST: sections (\d+), total (\d+) ms$")
+
+
+def summarize_sections(lines):
+    """Parse the user-mode suite's per-section timings.
+
+    Returns (sections, declared, total) where `sections` is [(name, ms)]
+    in the order printed, and `declared`/`total` come from the suite's
+    final line, or None when it never arrived -- which is what a run
+    that stopped part-way through the suite looks like.
+
+    A short list is not an error here: the caller decides, because the
+    truncated case is exactly the one whose output matters most.
+    """
+    sections = []
+    declared = total = None
+    for ln in lines:
+        m = SECTION_RE.match(ln.strip())
+        if m:
+            sections.append((m.group(1), int(m.group(2))))
+            continue
+        m = SECTION_TOTAL_RE.match(ln.strip())
+        if m:
+            declared, total = int(m.group(1)), int(m.group(2))
+    return sections, declared, total
+
+
+def format_section_summary(sections, total, suite_ms=None):
+    """The one line that names a slow section instead of the whole
+    suite. A function so the bug-proof can hand it two runs that differ
+    only in WHICH section is slow and check the line differs
+    (tests/boot/test_usertest_sections.py)."""
+    slowest = sorted(sections, key=lambda t: -t[1])[:5]
+    # A truncated run has no total, and this is the path whose output
+    # matters most -- so it says so rather than printing "None ms".
+    how_long = f"{total} ms" if total is not None else \
+        f"at least {sum(ms for _, ms in sections)} ms and unfinished"
+    line = (f"boot-test: user-mode suite {how_long} in {len(sections)} sections; "
+            + "slowest: " + ", ".join(f"{n} {ms} ms" for n, ms in slowest))
+    if suite_ms is not None and total is not None:
+        # The gap is the spawn, init's startup and its teardown. Shown
+        # rather than dropped: if the sections sum to half the line,
+        # the interesting half is the one nobody is measuring.
+        line += (f" (the process-user line is {suite_ms} ms; "
+                 f"{suite_ms - total} ms is spawn and teardown)")
+    return line
+
+
+def section_failures(sections, declared, total):
+    """What the harness refuses, given a parsed suite. Reports, never
+    budgets: a per-section budget is the trap this unit removed, and
+    re-introducing it ten times smaller would be worse than leaving it
+    once (docs/verification/design.md, "One line is not always one
+    test")."""
+    out = []
+    if not sections and declared is None:
+        # No user-mode suite ran at all -- a release build. The caller
+        # cannot make this decision with `if sections:`, because a
+        # stream whose section lines were lost but whose total line
+        # survived has no sections and is very much a failure.
+        return out
+    if declared is None:
+        out.append("the user-mode suite printed no total line "
+                   f"(saw {len(sections)} section line(s); it stopped part-way)")
+        return out
+    if len(sections) != declared:
+        out.append(f"the user-mode suite declared {declared} sections "
+                   f"and printed {len(sections)}")
+    seen = [n for n, _ in sections]
+    missing = [n for n in USERTEST_SECTIONS if n not in seen]
+    if missing:
+        out.append("the user-mode suite ran no " + ", ".join(missing)
+                   + " section (a row left the table in init.c?)")
+    unknown = [n for n in seen if n not in USERTEST_SECTIONS]
+    if unknown:
+        out.append("the user-mode suite printed unknown section(s) "
+                   + ", ".join(unknown)
+                   + " (add them to USERTEST_SECTIONS here)")
+    return out
+
+
 def failed_selftests(lines):
     """Names of the self-tests whose own line says FAIL, in log order."""
     names = []
@@ -703,6 +792,18 @@ def main():
             limit = composite_budget_ms.get(name, budget_ms)
             if ms > limit:
                 failures.append(f"self-test {name} took {ms} ms (budget {limit} ms)")
+    # The user-mode suite's own sections. `process-user` above is one
+    # line for all of them, so this is the only place a slow section is
+    # named rather than the whole suite.
+    sections, declared, sect_total = summarize_sections(lines)
+    if sections:
+        suite = next((ms for ms, name in timings if name == "process-user"), None)
+        print(format_section_summary(sections, sect_total, suite))
+    # Unconditional: `section_failures` itself recognises the build
+    # that ran no suite. Guarding here on `sections` would accept a
+    # stream that declared ten sections and printed none. (No
+    # `want_selftest` guard either: it is assigned below.)
+    failures.extend(section_failures(sections, declared, sect_total))
     # A failing self-test on the load-sensitive list is named as such
     # (docs/testing/flakes.md). The run fails either way.
     failures.extend(load_sensitive_notes(failed_selftests(selftest_lines),
