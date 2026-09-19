@@ -1121,14 +1121,26 @@ static void env_pointer_survives_overwrite(void)
  * Found by review, not by the unit.
  */
 /*
- * Four spawns, because `spawnvp_flags` has four exits and the
- * snapshot is freed at each of them. The first build of this case
- * only ever spawned "/bin/true", so `strchr(file, '/')` succeeded
- * every time and the whole PATH-search half -- the loop that holds
- * the snapshot across repeated stat/spawn attempts, and the frees on
- * its success and failure exits -- ran in no test at all. Review
- * found that; a snapshot bug reachable only while walking PATH would
- * not have failed this file.
+ * Four variants over `spawnvp_flags`'s THREE freeing exits. Be exact
+ * about that, because two earlier versions of this comment were not:
+ * the function has four returns, and only three of them free the
+ * snapshot --
+ *
+ *   1. `__env_snapshot()` failed: `env` is NULL, nothing to free.
+ *      Untested, and it needs a malloc that can be made to fail;
+ *      recorded as a gap in docs/libc/testing.md.
+ *   2. the absolute arm -- ONE exit serving both a spawn that runs
+ *      and a spawn that cannot, which is why two variants aim at it:
+ *      the second is there for the errno saved across the `free`.
+ *   3. the PATH search finding something.
+ *   4. the PATH search exhausting every element.
+ *
+ * The first build of this case only ever spawned "/bin/true", so
+ * `strchr(file, '/')` succeeded every time and the whole PATH-search
+ * half -- the loop that holds the snapshot across repeated
+ * stat/spawn attempts, and the frees at 3 and 4 -- ran in no test at
+ * all. Review found that; a snapshot bug reachable only while
+ * walking PATH would not have failed this file.
  *
  * The search path also calls `getenv("PATH")` while holding the
  * snapshot and then keeps using the returned pointer, which is the
@@ -1147,7 +1159,7 @@ static void *env_spawner(void *arg)
      * stopped there could exit having run none of the PATH variants
      * while the summary still claimed thirteen of each. Review found
      * that. The cost is that the last spawns race nothing, which is
-     * the right trade -- the four exits are what this case covers,
+     * the right trade -- the freeing exits are what this case covers,
      * and `spawn_done` now says so rather than the loop bound.
      */
     for (unsigned i = 0; i < 40; i++) {
