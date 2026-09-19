@@ -908,6 +908,51 @@ static void atexit_concurrent(void)
            at_registered, (unsigned)AT_THREADS);
 }
 
+/*
+ * (D) More registrations than ATEXIT_MAX, concurrently. Unlocked, the
+ * bound check and the increment are separate, so two threads can both
+ * pass the check at 31 and both write -- one of them past the end of
+ * a static array. There is no canary to read from userland, so what
+ * this asserts is what userland can see: the surplus is REFUSED with
+ * -1, and the number that run at exit equals the number accepted.
+ * An overwrite past the end would have to corrupt `g_natexit` or its
+ * neighbour to be invisible to both.
+ */
+#define AT_FLOOD 24
+static volatile unsigned at_accepted_flood;
+
+static void *at_flooder(void *arg)
+{
+    (void)arg;
+    while (!at_go)
+        cosmo_yield();
+    for (unsigned i = 0; i < 8; i++)
+        if (atexit(at_handler) == 0)
+            __atomic_fetch_add(&at_accepted_flood, 1, __ATOMIC_RELAXED);
+    return NULL;
+}
+
+static void atexit_bound(void)
+{
+    cosmo_thread_t t[3];
+
+    at_go = 0;
+    for (unsigned i = 0; i < 3; i++)
+        CHECK(cosmo_thread_start(&t[i], at_flooder, NULL, 0) == 0);
+    at_go = 1;
+    for (unsigned i = 0; i < 3; i++)
+        CHECK(cosmo_thread_join(&t[i], NULL) == 0);
+    /* Three threads offering eight each against a table of 32 that
+     * already holds some: more offered than can be taken. */
+    /* The point of the test: more was offered than the table can
+     * hold, so some must have been refused. */
+    CHECK(at_accepted_flood < (unsigned)AT_FLOOD);
+    CHECK(at_accepted_flood + at_registered <= 32u);
+    at_registered += at_accepted_flood;
+    printf("thrtest: atexit-bound: %u of %u offered were accepted, table holds %u\n",
+           at_accepted_flood, (unsigned)AT_FLOOD, at_registered);
+}
+
 /* (E) A handler that calls back into the library must not deadlock --
  * the case exit's take/pop/release/call shape exists for. */
 static volatile int reentrant_ran;
@@ -1759,8 +1804,11 @@ int main(int argc, char **argv)
     env_grow_under_readers();
     env_unset_under_readers();
     atexit_concurrent();
+    /* Before the flood: it fills the table by design, and the
+     * re-entrant handler needs a slot. */
     CHECK(atexit(reentrant_handler) == 0);
     at_registered++;             /* the drain must run this one too */
+    atexit_bound();
 
     /*
      * `exit`, not `return`: the drain is part of what is under test,

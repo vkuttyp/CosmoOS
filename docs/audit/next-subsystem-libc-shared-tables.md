@@ -1,8 +1,50 @@
 # NEXT SUBSYSTEM — the two tables threads left behind
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. Chosen from
-`docs/audit/2026-09-deferred-work-inventory.md` §1.3.
+and wait for the instruction to build it. **This report is as built**
+(PR #191), and the banner below records where the build differed from
+it — including the part that matters most, which is that **the
+headline defect is not demonstrated by a test**.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The environment tests are NOT proofs, and the report said in
+   advance it would say so.** With `setenv` *and* `getenv` both
+   unlocked, three runs pass with **zero misses**. The use-after-free
+   is real — `free(environ)` while another thread is walking it is a
+   read of freed memory, and the allocator can hand that block out —
+   but nothing in this test produces an observable wrong answer from
+   it. They ship as **regression tests for the locked behaviour**, not
+   as demonstrations of the defect, and the defect for `setenv` is
+   argued from the code rather than from a failure anyone has seen.
+2. **The deterministic construction I proposed in review does not
+   work, and the reason is worth more than the construction was.**
+   Review round 2 asked how the `unsetenv` window would be forced;
+   I answered that the test would own the walk and pause mid-array.
+   It cannot: **a walker the test owns never takes the library's
+   lock**, so the lock the fix adds cannot protect it and the test
+   fails identically with and without the fix — a test of nothing. A
+   deterministic version has to pause *inside* `getenv`, which needs
+   the libc test seam I had argued was disproportionate. The test now
+   uses the real `getenv` and is honestly probabilistic.
+3. **`atexit-concurrent` needed a start barrier to contend at all.**
+   The first build started eight threads in a loop and joined them in
+   another; each finished before the next existed, so an unlocked
+   `atexit` passed. With a barrier the eight enter together and the
+   unlocked build loses three handlers — **the drain runs 6 of 9** and
+   the marker fails. That is the bug-proof of record.
+4. **The acceptance count cannot detect a lost update**, which the
+   first build asserted on. Every thread's `atexit` *returns* 0 even
+   when its slot is overwritten, so "8 of 8 accepted" is true on a
+   broken build. What detects it is the **drain count**, and that is
+   what the test asserts.
+5. **The verdict had to move into the drain.** `main` printed
+   `THREADTEST: PASS` and then called `exit`, so a drain that lost a
+   handler or deadlocked could not reach the marker. The last handler
+   prints the verdict now, which also means the LIFO order matters:
+   the checking handler is registered **first**.
+
+Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §1.3.
 
 **Subsystem: `environ` and the `atexit` list, the two process-global
 tables in libc that native threads made unsafe and nobody locked.**
@@ -222,58 +264,46 @@ thread, which is why that program exists.
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
 | `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
 
-**The bug-proof, and the honest difficulty.** A race test that passes
-on a broken build most of the time is not a proof. **Three are
-deterministic and one is not**, and this paragraph has now been wrong
-twice about which — first saying two and two, then calling
-`env-unset-under-readers` countable and stopping there, as though a
-failure that can be counted is a failure that will occur. It is
-deterministic only with the construction spelled out below; without
-that it belongs with the probabilistic one.
+**The bug-proof, as run.** The section below was written before the
+build and was wrong about which tests prove anything. What the
+measurements say:
 
-- `atexit-concurrent` is **countable**: register N handlers from N
-  threads, count how many run. A lost update is a number, not a
-  timing. That is the bug-proof of record — remove the lock and the
-  count comes back below N.
-- `atexit-bound` is likewise countable: the array has a canary past it
-  and the test reads the canary.
-- **`env-unset-under-readers` is countable *when it happens*, and a
-  second draft of this section confused that with reliable.** The
-  failure needs `getenv` to be between two loads when `unsetenv`
-  shifts the target into a slot it has already passed; running both in
-  a loop does not force that, so an unlocked build can pass the test
-  repeatedly — which is the thing this section opens by refusing to
-  accept. Review caught it.
+| mutation | result |
+| --- | --- |
+| `atexit` unlocked (its read-modify-write split by a delay) | **the drain runs 6 of 9 and `THREADTEST: FAIL`** — three handlers lost. The bug-proof of record |
+| `unsetenv` unlocked | passes. Not a proof |
+| `setenv` **and** `getenv` unlocked | passes, **three runs, zero misses**. Not a proof |
 
-  **The window is forced by letting the test own the walk.** libc has
-  no test seam — no `CONFIG_DEBUG`, no weak symbols, nothing — and
-  adding one to `getenv` so a thread can park mid-walk would be the
-  library's first, which is disproportionate for a latent race. It is
-  not needed: the reader in this test walks `environ` itself, with the
-  same loop `getenv` runs, and pauses where it chooses. It reads
-  `environ[i]`, waits on a flag, lets the other thread `unsetenv` an
-  *earlier* name, then resumes and finds the target gone from the part
-  of the array it has left to read. Deterministic, no timing, and no
-  new mechanism in the library.
+**So one of the four is a proof and three are regression tests**, where
+the report promised three deterministic and one probabilistic. The
+prediction was wrong in the unfavourable direction and this is the
+place to say so rather than in a footnote.
 
-  **What that costs in claim strength, stated rather than hidden:**
-  the test drives the same walk `getenv` performs but is not `getenv`,
-  so it proves the hazard is in the **table** rather than in that one
-  function. `getenv`'s own safety then follows from its taking the
-  lock, which `env-grow-under-readers` exercises against the real
-  function. Two halves of one claim, and neither pretends to be the
-  other.
-- `env-grow-under-readers` is the one that is **probabilistic**,
-  because the only thing that distinguishes it is a read of freed
-  memory, and the report will not pretend otherwise. It is made to
-  fail reliably without the lock by making the window wide rather than
-  by iterating and hoping: the reader walks a long environment so it is
-  inside the array for many instructions, and the writer grows it
-  repeatedly so `free` is called often. If that still does not
-  reproduce without the lock, that test is reported as *not* a proof
-  and the three countable ones carry the unit — which is the outcome
-  the straggler-kick unit reached, and better than an assertion that
-  passes for the wrong reason.
+**Why the `atexit` one works and the others do not.** A lost handler is
+a *count* that survives to the end of the program: the drain reports
+it whatever the scheduling was. A use-after-free is only observable if
+the freed block is reused *and* its contents change *and* the reader
+looks after both — three conditions this workload does not arrange,
+even with the reader inside a 460-entry walk and the writer freeing on
+every one of 400 growths. The defect is still real; the test simply
+cannot see it.
+
+**What the environment tests are worth, stated at their real value.**
+They are regression tests: they assert that a reader never misses a
+name that is present, across hundreds of concurrent growths and
+removals, and they would catch a future change that broke the locking
+in a way that *does* produce wrong answers. They are not evidence that
+the lock was needed. The evidence for that is the code — `free()` on a
+pointer another thread is dereferencing — and the allocator's own
+comment about why it took a lock for the same reason.
+
+**A deterministic environment proof, and what it would cost.** Pausing
+a reader *inside* `getenv` would do it, and needs a test seam in libc:
+a debug-only hook, the library's first, since there is no
+`CONFIG_DEBUG` and no weak symbol in it today. That is recorded as the
+way to close this rather than pretended away, and it was not built
+because a seam in a public library for a latent race is a larger
+change than the lock it would be testing.
 
 ## Risks
 
