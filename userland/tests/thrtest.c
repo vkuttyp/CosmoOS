@@ -1077,14 +1077,25 @@ static void env_pointer_survives_overwrite(void)
 
     CHECK(setenv("THRLEAK", "new-value", 1) == 0);
 
-    /* Reuse the heap hard, and write something that is not "old-value". */
+    /*
+     * Reuse the heap, at the SIZE OF THE FREED BLOCK. The first
+     * version of this churn allocated 64 bytes and the test passed
+     * against a `setenv` that freed the string -- vacuous, and its
+     * own bug-proof caught it. The entry is "THRLEAK=old-value",
+     * eighteen bytes with its NUL, and an allocator that segregates
+     * by size will never hand an eighteen-byte hole to a request for
+     * sixty-four. A few neighbouring sizes too, so this does not
+     * depend on the bin boundaries being exactly where they are.
+     */
+    const size_t entry = strlen("THRLEAK") + 1 + strlen("old-value") + 1;   /* 18 */
     volatile unsigned sink = 0;
     for (unsigned i = 0; i < 400; i++) {
-        unsigned char *b = malloc(64);
+        size_t sz = entry + (i % 5) - 2;   /* 16..20 */
+        unsigned char *b = malloc(sz);
         if (b == NULL)
             continue;
-        memset(b, 0x5a, 64);
-        sink += b[0] + b[63];      /* observable: the stores cannot be dropped */
+        memset(b, 0x5a, sz);
+        sink += b[0] + b[sz - 1];  /* observable: the stores cannot be dropped */
         free(b);
     }
     (void)sink;
