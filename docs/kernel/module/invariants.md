@@ -134,7 +134,8 @@ Check: review.
 **M22. A module's memory is freed only after `shutdown()`, one grace
 period, and `live_objects == 0`.** A kobject whose release code lives in
 the module keeps it mapped; the unloader waits up to the unload timeout
-and otherwise leaves a zombie that a later unload reaps
+and otherwise leaves a zombie, which the next module load or unload
+sweeps (**M24**) and an explicit unload of the name also reaps
 (`docs/kernel/quiesce/invariants.md` Q15–Q16). Check: test
 `module-unload-busy` (`-EBUSY` after the timeout, the release runs from
 the zombie's text, the second unload frees it).
@@ -172,3 +173,55 @@ on the built modules shows only these types.
   by the page tables (a fault, then a panic), not by a test. Planned
   with the security phase.
 - `capabilities` are recorded, not enforced (later phases).
+
+**M24. A zombie is collected without being asked for, and by identity.**
+A module whose objects outlive its unload keeps its whole image mapped
+and its dependencies pinned — `drop_deps` runs at the free, not at the
+unload — so a zombie left behind blocks unloading every module it
+depends on. `reap_zombies_locked` now frees every zombie whose
+`live_objects` has reached zero. It runs at the top of `module_load`,
+and in `module_unload` on **every** exit — including the `-EBUSY` a
+pinned dependency returns, which is the one action someone takes on
+discovering the pin, and which the sweep is often exactly what
+unblocks.
+
+**It reaps by identity, not by name**, which is what the name lookup
+cannot do: `find_zombie_locked` returns the first match, so before this
+each zombie needed its own `module_unload` of that name — and a
+replacement loaded under the name hid the zombie completely, because
+`module_unload` finds the live module first and never looks at the
+zombie list.
+
+**In `module_unload` the sweep runs after the name is resolved, never
+before.** An explicit `module_unload("name")` for a zombie is a real
+request and must still find it and return 0; a sweep at the top would
+free it first and leave `-ENOENT`. So the named lookup goes first and
+the sweep follows it on each path — the sweep is for the zombies
+nobody names, and ordering, not placement at one exit, is what keeps
+the named request whole.
+
+**Two properties the walk must keep.** It frees list entries as it goes,
+so it uses `list_for_each_entry_safe` — a plain walk advances through
+the node it has just freed. And it loads `live_objects` with **acquire**,
+as the unload's own wait does: a relaxed zero could unmap module text
+without synchronising against the final object release, which is a
+use-after-free in the release code's own text.
+
+**The publish slot is reserved before `init()` runs.** The search used
+to happen after init, after `MODULE_LIVE`, after the module was linked
+and counted, and it **panicked** when it found nothing — where returning
+an error would have left an initialised, linked, counted module with no
+slot. Claiming the index first makes `-ENOSPC` a clean failure on a path
+where nothing has been committed.
+
+**Asserted by** `module-zombie-swept` (an unrelated load collects a
+zombie, with no unload of its name), `module-zombie-name-reused` (a
+replacement under the zombie's name does not hide it) and
+`module-zombie-two-of-a-name` (one sweep takes both), and
+`module-zombie-swept-on-every-exit` (the two exits where the NAME
+resolves to a zombie sweep the zombies it does not name — asserted on
+the zombie-list length across the one call, because a later unload's
+return value cannot tell which exit did the sweeping). Each fails against
+a tree without the sweep at the assertion that the zombie was *not* left
+behind. `selftest_module_unload_busy` is unchanged and still passes,
+which is the check that the explicit reap still wins.

@@ -337,6 +337,11 @@ bool selftest_ahci_unplug(const char **reason);   /* the disk-gone path with a b
 bool selftest_ahci_reset(const char **reason);    /* COMRESET with a command in flight; the same disk keeps serving */
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
+bool selftest_module_zombie_swept(const char **reason);
+bool selftest_module_zombie_swept_on_every_exit(const char **reason);
+bool selftest_module_zombie_name_reused(const char **reason);
+bool selftest_module_zombie_two_of_a_name(const char **reason);
+bool selftest_module_slots_enospc(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_vcpu_regs_roundtrip(const char **reason);
 bool selftest_hv_caps(const char **reason);

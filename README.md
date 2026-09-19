@@ -2747,6 +2747,31 @@ See [docs/development.md](docs/development.md).
   count must show the retry's hold. 347 self-tests on both
   architectures, debug and release (PR #184).
 
+- **A module zombie is collected without being asked for.** A module
+  whose objects outlive its unload keeps its whole image mapped **and
+  its dependencies pinned** — `drop_deps` runs at the free, not the
+  unload — so one left behind blocks unloading everything beneath it.
+  The only reaper was `module_unload` of the zombie's own name: a
+  request nobody had a reason to make, which a replacement loaded under
+  that name hid entirely, and which took one call per zombie when a
+  name had more than one. **It survived because the happy path was
+  tested and passed** — the mechanism worked, and nothing invoked it.
+  A sweep now frees every zombie whose objects have gone, by identity
+  rather than by name, at the top of a load and on **every** exit from
+  an unload — including the `-EBUSY` a pinned dependency returns, which
+  is the one action someone takes on discovering the pin. The ordering
+  is the point: an explicit `module_unload("name")` is a real request
+  and must still find its own zombie, so the named paths run first and
+  the sweep never steals it. Invariant **M24**, with
+  the two properties such a walk needs — removal-safe iteration, and an
+  **acquire** load of `live_objects` so module text is never unmapped
+  ahead of the final release.
+  A load also reserves its publish slot **before** `init()` runs, so
+  exhausting `MODULE_MAX_LIVE` returns `-ENOSPC` instead of panicking
+  after the module is already initialised, linked and counted — where
+  returning an error would have been worse than the panic.
+  352 self-tests on both architectures, debug and release (PR #186).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

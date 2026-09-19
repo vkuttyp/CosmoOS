@@ -410,7 +410,7 @@ tree.
   below is kept in the past tense it deserves — it is the record of what
   was wrong, not a statement about the tree.
   (`MODULE_MAX_LIVE`'s fixed 32-slot array and the zombie-module reaping
-  below remain small debts and are untouched by the unit.)
+  below were untouched by that unit; PR #186 closed both.)
   ~~**Taken up by `docs/audit/next-subsystem-arp-netif-ref.md`**~~
   **BUILT (PR #184), and this is what it was**: the retry paths in
   `arp_age` and `nd_age` **copied** that bare pointer out from under the
@@ -425,26 +425,33 @@ tree.
   interface up -- it arrives as an argument and is kept, which is why
   that rule did not reach them and why **N22** now states the one that
   does;
-  `MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are reaped
-  only by a later `module_unload` of the same name. **Taken up by
-  `docs/audit/next-subsystem-module-zombie-reap.md`** (not struck until
-  it lands), **and the zombie half is understated here**: a zombie keeps
-  its whole image AND its dependency pins (`drop_deps` runs at the free,
-  not the unload), so a stuck one permanently blocks unloading every
-  module it depends on. Nothing calls the reaper; a name reused by a
-  replacement hides the zombie, because `module_unload` finds the live
-  module first; and `find_zombie_locked` returns the FIRST name match,
-  which the reap then removes -- so N zombies of one name need N of
-  those calls, and nobody makes even the first. (An earlier version of
-  this row said the second was unreachable by any call. That was wrong:
-  it read the first-match lookup without checking that the reap
-  `list_remove`s what it finds.) It survived because the happy path is
-  tested and passes (`selftest_module_unload_busy`): the mechanism
-  works, and there is no policy that invokes it. The slot array's defect
-  is separately that exhaustion **panics** where `-ENOSPC` exists; it is
-  NOT caused by zombies, which hold no slot (`unpublish` runs at unload
-  step 1, before the zombie is made -- checked, because the report's
-  first draft assumed a connection).
+  ~~`MODULE_MAX_LIVE` is a fixed 32-slot array; zombie modules are
+  reaped only by a later `module_unload` of the same name.~~ **~~Taken up by
+  `docs/audit/next-subsystem-module-zombie-reap.md`~~** **BUILT (PR
+  #186); §4's small debts are now closed.** Every `module_load` and
+  every `module_unload` now sweeps the zombie list by identity
+  (invariant **M24**), and exhausting the slot array returns `-ENOSPC`
+  from a slot reserved before `init()` runs. What follows is in the
+  past tense it deserves -- it is the record of what was wrong, not a
+  statement about the tree.
+
+  The zombie half was understated here: a zombie keeps its whole image
+  AND its dependency pins (`drop_deps` runs at the free, not the
+  unload), so one that was never collected blocked unloading every
+  module it depended on, for good. Nothing called the reaper; a name
+  reused by a replacement hid the zombie, because `module_unload` finds
+  the live module first; and `find_zombie_locked` returns the FIRST
+  name match, which the reap then removes -- so N zombies of one name
+  needed N of those calls, and nobody made even the first. (An earlier
+  version of this row said the second was unreachable by any call. That
+  was wrong: it read the first-match lookup without checking that the
+  reap `list_remove`s what it finds.) It survived because the happy
+  path was tested and passed (`selftest_module_unload_busy`): the
+  mechanism worked, and there was no policy that invoked it. The slot
+  array's defect was separately that exhaustion **panicked** where
+  `-ENOSPC` existed; it was NOT caused by zombies, which hold no slot
+  (`unpublish` runs at unload step 1, before the zombie is made --
+  checked, because the report's first draft assumed a connection).
 
 ---
 

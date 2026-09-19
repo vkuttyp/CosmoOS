@@ -44,7 +44,20 @@ static unsigned g_count;
 #define MODULE_MAX_LIVE 32
 static struct module *g_live[MODULE_MAX_LIVE];
 static LIST_HEAD(g_zombies);          /* GOING modules whose objects outlived the unload */
-static unsigned g_unload_timeout_ms = 5000;
+static unsigned reap_zombies_locked(void);   /* defined below; called from load and unload */
+#if CONFIG_DEBUG
+/* The effective slot bound. Only the publish SEARCH honours it; the
+ * walks that scan for a module still cover the whole array, so nothing
+ * published can become invisible. A test sets it to the current live
+ * count to reach -ENOSPC without thirty-two fixtures -- the same search
+ * and the same error return, with a smaller bound (M24). */
+static unsigned g_live_cap = MODULE_MAX_LIVE;
+void module_set_max_live_for_test(unsigned n) { g_live_cap = n ? n : MODULE_MAX_LIVE; }
+#define LIVE_CAP (g_live_cap)
+#else
+#define LIVE_CAP MODULE_MAX_LIVE
+#endif
+static unsigned g_unload_timeout_ms = MODULE_UNLOAD_TIMEOUT_MS_DEFAULT;
 
 /* Per-module data the public struct does not expose. */
 struct module_priv {
@@ -387,6 +400,31 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
     if (m->rodata && (rc = vm_kernel_protect(m->rodata, VM_PROT_READ)) != 0)
         goto fail;
 
+    /*
+     * 7b. Reserve a publish slot BEFORE initialising.
+     *
+     * The slot search used to run after init, after MODULE_LIVE, after
+     * the module was linked into g_modules and counted -- and it
+     * panicked when it found nothing. Returning an error from there
+     * would have been worse than the panic: it would leave an
+     * initialised, linked, counted module with no slot. Claiming the
+     * index here means failure is still free, `goto fail` is still
+     * correct, and nothing has been committed
+     * (docs/audit/next-subsystem-module-zombie-reap.md).
+     */
+    unsigned slot = MODULE_MAX_LIVE;
+    for (unsigned i = 0; i < LIVE_CAP; i++) {
+        if (g_live[i] == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == MODULE_MAX_LIVE) {
+        kerror("module: %s: no free slot (%u live)", origin, LIVE_CAP);
+        rc = -ENOSPC;
+        goto fail;
+    }
+
     /* 8. Initialise. */
     rc = m->info->init();
     if (rc) {
@@ -399,15 +437,10 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
     m->state = MODULE_LIVE;
     list_push_back(&g_modules, &m->link);
     g_count++;
-    bool published = false;
-    for (unsigned i = 0; i < MODULE_MAX_LIVE && !published; i++) {
-        if (g_live[i] == NULL) {
-            __atomic_store_n(&g_live[i], m, __ATOMIC_RELEASE);
-            published = true;
-        }
-    }
-    if (!published)
-        panic("module: more than %u modules live", MODULE_MAX_LIVE);
+    /* The slot was reserved at 7b and this is the only path that fills
+     * it: g_lock is held throughout, so nothing can have taken it. */
+    KASSERT(g_live[slot] == NULL);
+    __atomic_store_n(&g_live[slot], m, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < m->nr_deps; i++)
         m->deps[i]->refs++;
     kinfo("module: loaded %s %s (text %zu KiB, rodata %zu KiB, data %zu KiB, %zu exports%s)", m->name,
@@ -430,6 +463,11 @@ fail:
 int module_load(const void *file, size_t size, const char *origin, struct module **out)
 {
     mutex_lock(&g_lock);
+    /* Collect first: a load is a moment when the module tables are
+     * already being walked under this lock, and a zombie that has
+     * finished dying should not be holding a slot's worth of address
+     * space or a dependency pin while a new module goes in. */
+    reap_zombies_locked();
     int rc = load_locked(file, size, origin, out);
     mutex_unlock(&g_lock);
     return rc;
@@ -454,6 +492,59 @@ static void drop_deps(struct module *m)
     }
 }
 
+/*
+ * Collect every zombie whose objects have all gone.
+ *
+ * A zombie keeps its whole image mapped and its dependencies pinned
+ * (drop_deps runs at the free, not the unload), so one left behind
+ * blocks unloading everything it depends on. Before this, the only
+ * reaper was `module_unload` of the zombie's own name -- a request
+ * nobody has a reason to make, and one a replacement loaded under that
+ * name hides entirely (docs/audit/next-subsystem-module-zombie-reap.md).
+ *
+ * Two constraints, both easy to get wrong:
+ *
+ *  - The walk FREES entries, so it must be removal-safe. A plain
+ *    list_for_each_entry advances through the node it has just freed.
+ *  - `live_objects` is read with ACQUIRE, as the unload's own wait does.
+ *    A relaxed zero could unmap module text without synchronising
+ *    against the final object release -- a use-after-free in the
+ *    release code's own text, which is the thing the zombie exists to
+ *    prevent.
+ *
+ * Reaps by identity, never by name: two zombies sharing a name are just
+ * two list entries here, where the name lookup needs one call each.
+ * Caller holds g_lock.
+ */
+static unsigned reap_zombies_locked(void)
+{
+    struct module *z, *next;
+    unsigned freed = 0;
+    list_for_each_entry_safe(z, next, &g_zombies, link) {
+        if (__atomic_load_n(&z->live_objects, __ATOMIC_ACQUIRE) != 0)
+            continue;
+        list_remove(&z->link);
+        kinfo("module: swept zombie %s", z->name);
+        drop_deps(z);
+        free_module((struct module_priv *)z);
+        freed++;
+    }
+    return freed;
+}
+
+#if CONFIG_DEBUG
+unsigned module_zombie_count(void)
+{
+    struct module *z;
+    unsigned n = 0;
+    mutex_lock(&g_lock);
+    list_for_each_entry(z, &g_zombies, link)
+        n++;
+    mutex_unlock(&g_lock);
+    return n;
+}
+#endif
+
 static struct module *find_zombie_locked(const char *name)
 {
     struct module *m;
@@ -472,10 +563,18 @@ int module_unload(const char *name)
         /* A zombie whose objects have since died is freed now. */
         struct module *z = find_zombie_locked(name);
         if (z == NULL) {
+            /* Nothing of that name, live or dead -- but other zombies
+             * may be collectable, and this is an exit too. */
+            reap_zombies_locked();
             mutex_unlock(&g_lock);
             return -ENOENT;
         }
         if (__atomic_load_n(&z->live_objects, __ATOMIC_ACQUIRE) != 0) {
+            /* `z` is not collectable, so the sweep cannot take it out
+             * from under this call -- and the OTHER zombies may well
+             * be collectable. Asking about one zombie is no reason to
+             * leave the rest. */
+            reap_zombies_locked();
             mutex_unlock(&g_lock);
             return -EBUSY;
         }
@@ -483,9 +582,24 @@ int module_unload(const char *name)
         kinfo("module: freed zombie %s", z->name);
         drop_deps(z);
         free_module((struct module_priv *)z);
+        /* `z` is off the list and freed; the sweep runs after, never
+         * before, so this call's own zombie is the one it named. */
+        reap_zombies_locked();
         mutex_unlock(&g_lock);
         return 0;
     }
+    /*
+     * From here `m` is LIVE, so a sweep cannot touch it, and every exit
+     * below this point has swept. That matters most for the `-EBUSY`
+     * immediately following: the dependant holding `m` may be a ZOMBIE
+     * that is already collectable, in which case sweeping is exactly
+     * what unblocks this unload -- and before this the early return
+     * skipped the sweep entirely, so the one action a user would take
+     * on discovering a pinned dependency did nothing about it
+     * (invariant M24).
+     */
+    reap_zombies_locked();
+
     if (m->refs != 0) {
         kwarn("module: %s has %u dependant(s), not unloading", name, m->refs);
         mutex_unlock(&g_lock);
@@ -521,8 +635,13 @@ int module_unload(const char *name)
          * of the name reaps it once the count reaches zero. The
          * dependencies stay pinned too (drop_deps runs at the free): the
          * outstanding release code may call into them. */
-        kwarn("module: %s still has %u live object(s) after %u ms; kept as a zombie", m->name, live,
-              g_unload_timeout_ms);
+        /* Say what it costs, not just that it happened: the image stays
+         * mapped and every dependency stays pinned until the objects go,
+         * so a dependency of a zombie cannot be unloaded either. */
+        kwarn("module: %s still has %u live object(s) after %u ms; kept as a zombie "
+              "(text %zu KiB mapped, %u dependenc%s pinned until they go)",
+              m->name, live, g_unload_timeout_ms, m->text_size >> 10, m->nr_deps,
+              m->nr_deps == 1 ? "y" : "ies");
         list_push_back(&g_zombies, &m->link);
         mutex_unlock(&g_lock);
         return -EBUSY;
@@ -532,6 +651,14 @@ int module_unload(const char *name)
     kinfo("module: unloaded %s", m->name);
     drop_deps(m);
     free_module((struct module_priv *)m);
+    /* And collect anything else that has finished dying. AFTER the
+     * named lookup, never before it -- as at every other exit from
+     * this function. An explicit `module_unload("name")` for a zombie
+     * must still find it and return 0, which a sweep at the TOP would
+     * steal by freeing it first and leaving -ENOENT. Ordering is the
+     * whole rule: the name is resolved first, the sweep takes the
+     * zombies nobody named, and no exit skips it. */
+    reap_zombies_locked();
     mutex_unlock(&g_lock);
     return 0;
 }

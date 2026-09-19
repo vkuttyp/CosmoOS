@@ -447,6 +447,48 @@ widen: it is "the sampled PC is in the function the thread is spinning
 in", which is the assertion's whole content. A re-run is what
 distinguishes it from a regression.
 
+**The second sighting named the cause, because the trace was kept.**
+2026-09-19, x86-64 CI, on a **documentation-only commit** (`1ec27af`,
+PR #186 — no code changed since `bcd11d6`, which was green on both
+architectures), same assertion, `lockuptest.c:157`. This time the
+sampled stack was in the log:
+
+```text
+cpu 1: pc 0xffffffff8000589e (nmi, 27488 us ago)
+  #0 lock_common                        kernel/core/spinlock.c:51
+  #1 spin_lock_irqsave                  kernel/core/spinlock.c:124
+  #2 waitqueue_empty                    kernel/scheduler/wait.c:90
+  #3 quiesce_note_quiescent_preemptible kernel/core/quiesce.c:118
+  #4 x86_trap_dispatch                  kernel/arch/x86_64/trap.c:103
+  #5                                    kernel/arch/x86_64/isr.S:145
+  #6 spinner_main                       kernel/core/lockuptest.c:71
+  #7 thread_trampoline
+```
+
+**The spinner was not elsewhere and not descheduled.** It is right
+there at frame #6 — the NMI sampled it while an ordinary **interrupt**
+was in flight on the same CPU, and the PC was in that handler's trap
+tail. Neither mechanism the first sighting offered applies; the
+assertion simply has no allowance for the spinner being interrupted,
+which a spinning thread with interrupts enabled will be.
+
+**A hypothesis about the window, held as one.** Frame #3 is
+`quiesce_note_quiescent_preemptible`, and since PR #181 that call does
+more than publish: it takes the waitqueue lock to decide whether to
+wake a grace-period waiter (invariant Q18). A longer trap tail is a
+wider window in which a sample lands inside it. That is consistent with
+this trace and with `lockup-sample` having no sighting in this file
+before 2026-09-18, and it is **not measured** — no before-and-after
+rate was taken, and two sightings cannot supply one.
+
+So the assertion is now a **known-brittle** one with a named cause,
+rather than an unexplained flake: it asserts the sampled PC is in
+`spin_here` while sampling a thread that can be interrupted. The trace
+already carries what would fix it — `spinner_main` is in the walk — so
+a repair exists (accept a PC anywhere in the interrupted thread's
+stack, or assert on the trace rather than the leaf PC). It is recorded
+here rather than patched inside an unrelated unit.
+
 **And the third was not a flake.** `cosmofs-writeback` failed on the
 same branch and looked exactly like the other two -- a timing-ish test,
 in a subsystem the branch does not touch, on one run of three. It was a
@@ -474,7 +516,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty, to 2026-09-18**, across CI and this developer's machine, on
+**Thirty-two, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -501,14 +543,16 @@ of this section said eight and then listed nine:
 | PR #179's own CI run, a third in a row | observed, aarch64: one connection carrying nothing a sixth time |
 | PR #180's own CI run | observed, aarch64: `connect 0 in **803 ms**`, `sent 12`, `outstanding 12 then 12`, **`retransmits +0`** -- one connection carrying nothing a seventh time, and the THIRD sighting with no retransmission |
 | PR #182's own CI run | observed, aarch64, **the first sighting with the probe**: `connect 0 in 894 ms`, `sent -104`; host side `[deadline, ESTABLISHED]` with slirp answering in 1 ms. See below -- this is the one that names where to look |
+| **Local x86-64, 2026-09-19** | observed while verifying an unrelated module unit: `connect 0 in 743 ms`, `sent -104`, `segs_out +2 retransmits +0`, and `tcp_conns=3` -- the probe ran. **Its reading was lost**: the roster goes to the runner's stdout and the run was grepped down to PASS/FAIL. First LOCAL sighting since the probe landed, and the instrument's output was thrown away by the person who built it |
+| PR #186's own CI run | observed, aarch64 (the protection-capable-CPU job), on a **documentation-only commit** (`a0558b6`): `connect 0 in 791 ms`, `sent -104`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:36662 accepted at 91.9s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. **The probe's reading reproduced** -- see below |
 
-Twenty-one entries, thirty occurrences -- and the table is the tally,
+Twenty-three entries, thirty-two occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last sixteen rows
+them and are not independently re-verified here. The last eighteen rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-one instrumented** occurrences
-behind the other fifteen rows carry the guest's side. (These three figures
+92.0s, 0 of 12 bytes`, and the **twenty-two instrumented** occurrences
+behind the other sixteen rows carry the guest's side. (These three figures
 are computed from the table, not carried forward: they were wrong before
 sighting twenty-five, because each update incremented them instead of
 counting the rows.) Rows and occurrences
@@ -935,6 +979,35 @@ responsive to everything else. That is a per-connection failure inside
 slirp, not a stall, not a foreign connection, and not this kernel: the
 guest's side has been fully accounted for since the socket-verdict unit,
 and the host's side now says the same.
+
+**Sighting thirty-two reproduced it, and that matters more than the
+first reading did.** 2026-09-19, aarch64 CI again, on a
+**documentation-only commit** (`a0558b6`, PR #186 -- no code had
+changed since a green run on both architectures), so nothing about it
+can be attributed to a change under test:
+
+```
+guest: connect 0 in 791 ms, sent -104, segs_out +2 retransmits +0 rsts_in +1
+host : 1 connection(s): 127.0.0.1:36662 accepted at 91.9s, 0 byte(s): b''
+       [deadline, ESTABLISHED]; slirp probe: connect 1 ms, echo 1 ms
+       gave up at 111.9s
+```
+
+Row one of the table again, in every particular: the guest's half
+reset before it could write, the host's half **open, established and
+silent for the full twenty seconds** to the deadline, and slirp
+answering a *fresh* connection through itself in 1 ms to connect and
+1 ms to echo while it did so. The only figure that moved is the
+connect: 791 ms against sighting thirty's 894 ms, both inside the
+597--1510 ms band this file has recorded throughout.
+
+**What the second reading buys.** One reading of a new instrument is a
+reading; two independent ones are a finding. The conclusion above no
+longer rests on a single outing of freshly written code -- which was
+the honest reservation to have about it. Both sightings are aarch64,
+so this is a reproduction and **not** a second architecture; the
+reading has not yet been taken on x86-64, where sighting thirty-one
+occurred and its output was discarded.
 
 **What this does not name is the line of code.** It names the component
 and the shape, which is what the unit promised and more than thirty

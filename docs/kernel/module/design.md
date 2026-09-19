@@ -234,6 +234,25 @@ is logged and counted but does not stop the boot.
 
 ## Ownership and lifetime
 
+**Zombies are collected, not waited for.** A module whose objects
+outlive its unload keeps its image mapped and its dependencies pinned
+(`drop_deps` runs at the free), so `reap_zombies_locked` frees every
+zombie whose `live_objects` has reached zero — at the top of
+`module_load`, and in `module_unload` on **every** exit but always
+*after* the name has been resolved, so an explicit
+`module_unload("name")` still finds its own zombie and returns 0 rather
+than having it swept out from under the call. Sweeping on every exit
+matters most for the `-EBUSY` of a pinned dependency: the dependant
+doing the pinning may itself be a collectable zombie, in which case the
+sweep is what unblocks the unload. It reaps by identity, which is what
+the first-match name lookup cannot do (invariant **M24**).
+
+A load also reserves its publish slot **before** `init()` runs, so
+exhausting `MODULE_MAX_LIVE` is `-ENOSPC` on a path where nothing has
+been committed, rather than a panic after the module is initialised,
+linked and counted.
+
+
 The archive bytes belong to the boot memory map and are never freed or
 written. A module's three regions belong to its `struct module` and are
 freed only by `module_unload` or a failed load. `struct module` itself
@@ -249,9 +268,11 @@ release in module text. `kobject_init`/`kobject_track_code` record the
 owner (`module_owner_of`) and raise `live_objects`; the release drops it.
 `module_unload` frees nothing while the count is non-zero: after
 `shutdown()` and one grace period it waits up to the unload timeout, then
-keeps the module as a zombie (memory mapped, name free) that a later
-unload reaps. The zombie is the honest outcome when a `blk_find` holder
-or a mounted filesystem still names a device the driver has removed.
+keeps the module as a zombie (memory mapped, name free), which the next
+module load or unload sweeps once the count reaches zero — nobody has to
+ask for it by name (**M24**). The zombie is the honest outcome when a
+`blk_find` holder or a mounted filesystem still names a device the
+driver has removed.
 
 Live modules are also published in a fixed array `g_live[]` for the
 lock-free `module_owner_of` (a release store per slot; readers walk it
