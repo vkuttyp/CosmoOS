@@ -118,3 +118,23 @@ Check: the self-test requires a two-service chain to start in order,
 requires a cycle to be refused rather than run in some order, and
 requires that when a dependency's definition is bad the dependent is not
 started and the message names the dependency.
+
+**U11. An AND-OR list is left-associative, so a failing left side
+still reaches the `||`.** `A && B || C` is `(A && B) || C`: `A`
+failing skips `B` and runs `C`. `run_line` keeps one skip flag and
+recomputes it at **every** operator from `g_last_status` — the status
+of the last pipeline actually run, which is the list's accumulated
+status because a skipped pipeline does not change it. Guarding that
+recomputation with `if (!skip)`, as the first version did, makes the
+list right-associative: once `&&` has set the flag the `||` is never
+consulted and neither branch runs. That is not a rare shape. It is
+how a script reports a verdict, and `/etc/rc.test`'s own last line is
+exactly it, so for as long as the bug existed `SHTEST: FAIL n` could
+not be printed and a failing run was reported only by a missing
+marker — with two documents claiming otherwise.
+
+Check: `/etc/rc.test` asserts both branches of `false && … || …` and
+of `true && … || …`, each with a two-term list, which means the same
+thing under either parse and so cannot be disabled by the bug it
+guards. Gap: no test of a list longer than three terms, and none
+mixing `&&`/`||` with `&`.

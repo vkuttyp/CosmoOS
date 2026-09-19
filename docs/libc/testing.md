@@ -21,12 +21,24 @@ something rather than assuming
 | `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three — reliable, not forced |
 | `env-unset-under-readers` | three readers against 200 `unsetenv` removals | passes — it removes no array, so it is the regression test of the set |
 | `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |
-| `atexit-bound` | three threads offering 24 registrations at a full-ish table | **accepts 33 into a table of 32** |
-| the drain's own check | registered **first** so the LIFO order runs it **last**; prints the verdict | `THREADTEST: FAIL` |
+| `atexit-bound` | three threads offering 24 registrations at a full-ish table; the bound counts the verdict handler's slot, which is not in `at_registered` | **accepts 33 into a table of 32** — with `ATEXIT_MAX` raised to 33 the check fails, which it did not before that slot was counted |
+| `atexit` from inside the drain | `reentrant_handler` calls `getenv` (the lock `exit` was holding) **and** `atexit` — the drain has popped the flood's slots by then, so the registration succeeds and LIFO runs the new handler next | a drain that walks a snapshot instead of re-reading the list: the late handler never runs |
+| the drain's own check | registered **first** so the LIFO order runs it **last**; prints the verdict **and sets the exit status** | `THREADTEST: FAIL`, and `SHTEST: FAIL 1` from `/etc/rc.test` |
 
 The verdict is printed by the last handler rather than by `main`,
 because the drain is part of what is under test and a `main` that
 printed `PASS` before calling `exit` could not be failed by it.
+
+**The status travels as well as the marker.** `main` ends
+`exit(failures ? 1 : 0)`, and since the drain's own checks can raise
+`failures` after that status is fixed, the last handler ends
+`_exit(1)` when they do — it is the last statement of the last
+handler, and stdout is flushed just above it. The first build of the
+moved verdict left `exit(0)` behind, so `/etc/rc.test`'s
+`/boot/tests/native/thrtest || FAILS=1` saw success on a failing run.
+Proving the repair then showed `rc.test` could not print
+`SHTEST: FAIL n` either, for an unrelated reason in the shell
+(`docs/userland/design.md`, "AND-OR lists are left-associative").
 
 **Two details make the grow case work, and it proved nothing without
 them.** The observed name is added *after* the padding, so a reader

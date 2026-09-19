@@ -34,6 +34,51 @@ version of this line said it could not be demonstrated at all**.
    the build now says where it happens rather than calling it bounded
    and confined to start-up. See "Why it has not bitten".
 
+0b. **The test's own failure signal was lost, twice over, and the
+   second loss was not in this unit at all.** Moving the verdict into
+   the drain (item 4) replaced `main`'s `return failures ? 1 : 0;`
+   with an unconditional `exit(0)`: `thrtest` printed
+   `THREADTEST: FAIL n` and exited **0**, so `/etc/rc.test`'s
+   `/boot/tests/native/thrtest || FAILS=1` never fired. Review found
+   it and said the quiet part — keeping the status costs nothing.
+   `main` now passes the count through, and because `failures` can
+   still rise inside the drain, where a status already handed to
+   `exit` cannot be revised, the last handler ends `_exit(1)`.
+
+   Proving that turned up the second loss. With the status restored,
+   a failing run still printed no verdict: `rc.test` ends
+   `sh -c "exit $FAILS" && echo PASS || echo "FAIL $FAILS"`, and the
+   shell's AND-OR lists were **right**-associative — `run_line`
+   recomputed its skip flag only `if (!skip)`, so once `&&` had set
+   it the `||` was never consulted and *neither* branch ran.
+   `SHTEST: FAIL n` had never been reachable, and two userland
+   documents claimed the script prints it. Fixed in
+   `userland/shell/sh.c` with assertions in `rc.test`; it is a
+   different subsystem from this unit and is called out as such.
+
+   The two are one bug wearing two hats: a failure that does not
+   reach the thing that reports it. The unit's own table had the
+   same shape — see item 0c.
+
+0c. **`atexit-bound` tolerated exactly the overflow it exists to
+   catch.** The check was
+   `at_accepted_flood + at_registered <= 32`, but
+   `atexit_checks_at_exit` occupies a thirty-third slot and is
+   deliberately absent from `at_registered` because it does not
+   count itself in `at_ran`. A table of 32 accepting 33 passed.
+   `docs/libc/testing.md` even names "accepts 33 into a table of 32"
+   as the mutation the test kills, which it did not. It adds that
+   slot now, and with `ATEXIT_MAX` raised to 33 the check fails where
+   it used to pass.
+
+0d. **The re-entrant case tested half of what two comments claimed.**
+   `exit`'s drain says "a handler that registers another gets it run
+   by the next turn of this loop" and this report repeated it, but
+   `reentrant_handler` called only `getenv`. It calls `atexit` now;
+   the drain has already popped the flood's slots by then, so the
+   registration succeeds and LIFO makes the new handler the next one
+   called. The drain runs 32 where it ran 31.
+
 1. **The use-after-free IS demonstrated, after two corrections, and
    an earlier version of this banner said it was not.** The first
    build's readers looked up a name added *before* the padding, so
