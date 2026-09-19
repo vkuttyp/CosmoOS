@@ -288,7 +288,7 @@ measurements say:
 | `atexit` unlocked (its read-modify-write split by a delay) | **`THREADTEST: FAIL 3`**. The flood is accepted **24 of 24** and the table reports holding **33** against an `ATEXIT_MAX` of 32 — the write past the end of a static array, seen from userland — and the drain runs **31 of 33**, two handlers lost. Both defects, countable |
 | `setenv` **and** `getenv` unlocked, **with the heap churned** | **the process dies**: `#GP` at `0x40a940`, signal 11, status 139, three runs of three. The use-after-free, reproduced |
 | `setenv` and `getenv` unlocked, **without churn** | passes — and the reason is the finding: the stale array's pointers are still correct, because `setenv` frees the array and never a string |
-| `unsetenv` unlocked | passes. Not a proof on its own; it shares the grow test's churn hazard but removes no array |
+| `unsetenv` unlocked | passes, and cannot be expected to fail: `unsetenv` frees nothing, so there is no block for the churn to recycle and its hazard is a wrong **answer** rather than a bad pointer. The regression test of the set |
 
 **So three of the five are proofs**, where the report promised three
 deterministic and one probabilistic — right about the count and wrong

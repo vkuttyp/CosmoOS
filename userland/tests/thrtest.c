@@ -819,10 +819,20 @@ static void *env_reader(void *arg)
 /*
  * (A) setenv grows the array while readers walk it. Before the lock
  * this freed `environ` under them -- a use-after-free in the
- * allocator. This one is PROBABILISTIC by nature: the only thing that
- * distinguishes it is a read of freed memory, so the window is made
- * wide (a long environment, many growths) rather than iterated and
- * hoped for. The report says so rather than calling it a proof.
+ * allocator.
+ *
+ * DETERMINISTIC, and it took two things to become so. The observed
+ * name is added AFTER the padding, so a reader actually walks the
+ * part of the array being reallocated instead of finding its answer
+ * at the front. And a fourth thread churns the heap in the same size
+ * class, so the freed array is reused and overwritten before a reader
+ * reads it -- without that, `setenv` frees the array and never a
+ * string, so the stale copy's pointers are all still correct and the
+ * reader gets the right answer out of freed memory.
+ *
+ * With both, the unlocked build dies: #GP, signal 11, three runs of
+ * three. An earlier version of this comment called the test
+ * probabilistic, which it was until the churn thread existed.
  */
 static void env_grow_under_readers(void)
 {
@@ -864,17 +874,19 @@ static void env_grow_under_readers(void)
 /*
  * (B) unsetenv shifts the array while readers are inside `getenv`.
  *
- * This is PROBABILISTIC, and an earlier design of it claimed to be
- * deterministic by having the test walk `environ` itself and pause
- * mid-array. That does not work, and the reason is worth keeping: a
- * walker the test owns never takes the library's lock, so the lock
- * the fix adds cannot protect it -- the test fails identically with
- * and without the fix, which makes it a test of nothing. A
- * deterministic version needs to pause INSIDE `getenv`, which needs a
- * test seam libc does not have.
+ * This one is the REGRESSION TEST of the set, and unlike (A) it does
+ * not reproduce: `unsetenv` frees nothing, so there is no block for
+ * the churn to recycle and its hazard is a wrong ANSWER -- a name
+ * shifted past a walker -- rather than a bad pointer. It asserts that
+ * a reader never misses a name nobody removed while 200 entries
+ * before it are removed under the walk.
  *
- * So the reader here is the real `getenv`, and the window is widened
- * rather than forced: a long environment to walk, and many removals.
+ * An earlier design forced the window by having the test walk
+ * `environ` itself and pause mid-array. That does not work, and the
+ * reason is worth keeping: a walker the test owns never takes the
+ * library's lock, so the lock the fix adds cannot protect it -- the
+ * test fails identically with and without the fix, which makes it a
+ * test of nothing. The reader here is the real `getenv`.
  */
 static void *env_unset_reader(void *arg)
 {
