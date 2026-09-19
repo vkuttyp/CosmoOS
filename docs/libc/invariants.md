@@ -150,8 +150,9 @@ about. The statics that remain fall in three groups. The allocator's
 `g_free` and stdio's `g_std`/`g_files` are behind `g_lock` and `g_io`.
 `tcb.c`'s `g_tls` is written once in `__libc_start`, before the process
 has a second thread, and read-only after. And `stdlib.c`'s `g_atexit`,
-`g_natexit`, `environ` and `g_env_owned` are **genuinely unsynchronised**
--- see the gap below.
+`g_natexit`, `environ` and `g_env_owned` are behind that file's own
+`g_lock` (**L8**), which they were not until
+`docs/audit/next-subsystem-libc-shared-tables.md`.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting `errno`, takes no libc lock, and maps its stacks
@@ -170,17 +171,25 @@ its initialiser in every thread, a `.tbss` array zero in a new one, an
 over-aligned variable aligned, and `strerror` of an unknown code answering
 each thread its own.
 
-**One gap is left, and it is not the one this invariant was about.**
-`atexit` does `g_atexit[g_natexit++] = fn`, an unsynchronised
-read-modify-write on process-global state, and `setenv`/`unsetenv`
-reallocate `environ` with `g_env_owned` tracking ownership -- so two
-threads registering handlers, or one setting the environment while
-another reads it, race. Nothing in the tree does either from a second
-thread: handlers and environment are set before threads start, which is
-the normal shape of both. It is named here rather than fixed because it
-is process state and not per-thread state, and this invariant is about
-the latter; the fix is a lock apiece and belongs to whichever unit needs
-it. `cosmo/thread.h` states the same restriction to callers.
+**The gap this invariant used to name is closed.** It read: *"`atexit`
+does `g_atexit[g_natexit++] = fn`, an unsynchronised read-modify-write
+on process-global state, and `setenv`/`unsetenv` reallocate `environ`
+... Nothing in the tree does either from a second thread"* — and it
+was left because process state was not what this invariant was about.
+Both are locked now (**L8**), and the reason for doing it before a
+program needed it is in the unit: `setenv` growing the array calls
+`free(environ)` while `getenv` may be walking it, so the hazard was a
+use-after-free in the allocator this same file locks, not merely a
+lost update.
+
+**And it is demonstrated, which the unit did not expect.** `thrtest`
+reproduces it deterministically — three runs, a `#GP` at the same
+address, exit status 139 — but only with a thread churning the heap
+alongside: `setenv` copies the old array's pointers and frees only the
+array, so a reader on the stale array still reads correct pointers and
+gets the right answer out of freed memory. The wrong answer needs the
+block reused and overwritten first, which is what any other thread
+allocating does and what the test now arranges.
 
 **L9. A thread waits on a predicate in a `while`, never on a loop count
 and never on a spin.** `cosmo/thread.h` carries a condition variable

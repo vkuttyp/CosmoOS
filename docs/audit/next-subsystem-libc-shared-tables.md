@@ -8,15 +8,25 @@ headline defect is not demonstrated by a test**.
 
 **What the build changed, each found by building rather than reading:**
 
-1. **The environment tests are NOT proofs, and the report said in
-   advance it would say so.** With `setenv` *and* `getenv` both
-   unlocked, three runs pass with **zero misses**. The use-after-free
-   is real — `free(environ)` while another thread is walking it is a
-   read of freed memory, and the allocator can hand that block out —
-   but nothing in this test produces an observable wrong answer from
-   it. They ship as **regression tests for the locked behaviour**, not
-   as demonstrations of the defect, and the defect for `setenv` is
-   argued from the code rather than from a failure anyone has seen.
+1. **The use-after-free IS demonstrated, after two corrections, and
+   an earlier version of this banner said it was not.** The first
+   build's readers looked up a name added *before* the padding, so
+   `getenv` found it at the front and never walked the part of the
+   array being reallocated — review found that, and it meant "does
+   not reproduce" was uninformative rather than a result. With the
+   observed name moved after the padding it still did not reproduce,
+   and **that** is what identified the real reason: `setenv` copies
+   the old array's pointers into the new one and frees only the
+   array, so a reader on the stale array reads pointers that are all
+   still correct and gets the right answer out of freed memory.
+
+   The wrong answer needs the block **reused and overwritten** first.
+   A thread churning the heap in the same size class arranges that,
+   and then the unlocked build dies: **`#GP` at `0x40a940`, signal
+   11, exit status 139, on three runs out of three**, dereferencing a
+   `0x5A5A…` pointer read from the freed array. Deterministic, and it
+   is now the strongest proof in the unit rather than the missing
+   one.
 2. **The deterministic construction I proposed in review does not
    work, and the reason is worth more than the construction was.**
    Review round 2 asked how the `unsetenv` window would be forced;
@@ -275,14 +285,16 @@ measurements say:
 | mutation | result |
 | --- | --- |
 | `atexit` unlocked (its read-modify-write split by a delay) | **`THREADTEST: FAIL 3`**. The flood is accepted **24 of 24** and the table reports holding **33** against an `ATEXIT_MAX` of 32 — the write past the end of a static array, seen from userland — and the drain runs **31 of 33**, two handlers lost. Both defects, countable |
-| `unsetenv` unlocked | passes. Not a proof |
-| `setenv` **and** `getenv` unlocked | passes, **three runs, zero misses**. Not a proof |
+| `setenv` **and** `getenv` unlocked, **with the heap churned** | **the process dies**: `#GP` at `0x40a940`, signal 11, status 139, three runs of three. The use-after-free, reproduced |
+| `setenv` and `getenv` unlocked, **without churn** | passes — and the reason is the finding: the stale array's pointers are still correct, because `setenv` frees the array and never a string |
+| `unsetenv` unlocked | passes. Not a proof on its own; it shares the grow test's churn hazard but removes no array |
 
-**So two of the five are proofs and three are regression tests**, where
-the report promised three deterministic and one probabilistic. The
-prediction was wrong in the unfavourable direction for the environment
-and in the favourable direction for `atexit`, and this is the place to
-say both rather than a footnote.
+**So three of the five are proofs**, where the report promised three
+deterministic and one probabilistic — right about the count and wrong
+about which. `unsetenv` alone is the regression test, and the
+environment's headline defect went from "argued from the code" to
+"kills the process on demand" once the missing ingredient was
+identified.
 
 **The bound test sees the overflow without a canary, which I had said
 it could not.** The design assumed a write past `g_atexit[31]` would
@@ -291,31 +303,27 @@ need memory the test cannot inspect. It does not: the test counts what
 registrations into a table of thirty-two. The accounting is the
 canary.
 
-**Why the `atexit` one works and the others do not.** A lost handler is
-a *count* that survives to the end of the program: the drain reports
-it whatever the scheduling was. A use-after-free is only observable if
-the freed block is reused *and* its contents change *and* the reader
-looks after both — three conditions this workload does not arrange,
-even with the reader inside a 460-entry walk and the writer freeing on
-every one of 400 growths. The defect is still real; the test simply
-cannot see it.
+**The three conditions, and why two of them had to be arranged.** A
+use-after-free is observable only if the freed block is reused, *and*
+its contents change, *and* the reader looks after both. The reader
+looking was the first correction (the observed name moved behind the
+padding); the reuse was the second (a churn thread in the same size
+class). Neither is exotic — any other thread allocating does the
+second — but neither happens by itself in a test whose only
+allocations are the environment's own.
 
-**What the environment tests are worth, stated at their real value.**
-They are regression tests: they assert that a reader never misses a
-name that is present, across hundreds of concurrent growths and
-removals, and they would catch a future change that broke the locking
-in a way that *does* produce wrong answers. They are not evidence that
-the lock was needed. The evidence for that is the code — `free()` on a
-pointer another thread is dereferencing — and the allocator's own
-comment about why it took a lock for the same reason.
+**What this says about the hazard in the field** is worth more than
+the test: a program whose threads only touch the environment will
+probably never see this, and a program whose threads also allocate —
+which is most of them — is one `setenv` away from dereferencing a
+recycled block. That is the argument for a lock in a cold path, and
+it is now measured rather than asserted.
 
-**A deterministic environment proof, and what it would cost.** Pausing
-a reader *inside* `getenv` would do it, and needs a test seam in libc:
-a debug-only hook, the library's first, since there is no
-`CONFIG_DEBUG` and no weak symbol in it today. That is recorded as the
-way to close this rather than pretended away, and it was not built
-because a seam in a public library for a latent race is a larger
-change than the lock it would be testing.
+**No libc test seam was needed after all.** The design floated a
+debug-only park hook inside `getenv` as the way to force the window,
+and called it disproportionate. It is also unnecessary: churn plus a
+reader that actually walks the array reproduces the fault every time,
+with nothing added to the library.
 
 ## Risks
 

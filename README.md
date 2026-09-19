@@ -2829,13 +2829,18 @@ See [docs/development.md](docs/development.md).
   never runs a handler while holding it, and `getenv`'s returned
   pointer stays valid because `setenv` **leaks** the string it
   replaces — deliberate, and recorded so it is not tidied away.
-  Five cases in `thrtest`, and the unit reports honestly that **two
-  are proofs and three are regression tests**: unlocked, `atexit`
-  accepts 33 registrations into a table of 32 and loses two handlers,
-  while the environment races produce no observable wrong answer in
-  three runs. The use-after-free is argued from the code, not from a
-  failure anyone has seen. 360 self-tests on both architectures,
-  debug and release (PR #191).
+  Five cases in `thrtest`, and **the use-after-free is reproduced
+  rather than argued**: unlocked, with a thread churning the heap so
+  the freed array is reused, the process dies with a `#GP` at the
+  same address on three runs of three. Getting there took two
+  corrections — the reader had to look up a name placed *after* the
+  padding so it actually walks the array being reallocated, and the
+  block had to be reused before the stale pointers in it could be
+  wrong. `setenv` frees the array and never a string, so a reader on
+  the stale copy otherwise reads correct pointers out of freed
+  memory. Unlocked `atexit` separately accepts **33 registrations
+  into a table of 32** and loses two handlers. 360 self-tests on both
+  architectures, debug and release (PR #191).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

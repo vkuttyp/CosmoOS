@@ -11,15 +11,14 @@
 
 ## The shared tables under threads (`userland/tests/thrtest.c`)
 
-Five cases, and **two of them are proofs while three are regression
-tests** — a distinction this file states because the unit that added
-them measured it rather than assuming
+Five cases, and the unit that added them measured which prove
+something rather than assuming
 (`docs/audit/next-subsystem-libc-shared-tables.md`).
 
 | case | what it does | unlocked? |
 | --- | --- | --- |
-| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths | **passes** — the use-after-free is real but produces no wrong answer here |
-| `env-unset-under-readers` | three readers against 200 `unsetenv` removals | **passes** — likewise |
+| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three |
+| `env-unset-under-readers` | three readers against 200 `unsetenv` removals | passes — it removes no array, so it is the regression test of the set |
 | `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |
 | `atexit-bound` | three threads offering 24 registrations at a full-ish table | **accepts 33 into a table of 32** |
 | the drain's own check | registered **first** so the LIFO order runs it **last**; prints the verdict | `THREADTEST: FAIL` |
@@ -28,11 +27,14 @@ The verdict is printed by the last handler rather than by `main`,
 because the drain is part of what is under test and a `main` that
 printed `PASS` before calling `exit` could not be failed by it.
 
-The two environment cases are kept as regression tests: they assert a
-reader never misses a name that is present, and would catch a future
-change that broke the locking in a way that *does* produce wrong
-answers. A deterministic version needs a test seam inside `getenv`,
-which libc does not have.
+**Two details make the grow case work, and it proved nothing without
+them.** The observed name is added *after* the padding, so a reader
+walks the part of the array being reallocated instead of finding its
+answer at the front; and a churn thread allocates and fills blocks in
+the same size class, so the freed array is reused before the reader
+reads it. Without the churn the test passes even unlocked, because
+`setenv` frees the array and never a string — the stale copy's
+pointers are all still correct.
 
 ## Host test (`tests/host/test_libc.c`, `make host-test`)
 
