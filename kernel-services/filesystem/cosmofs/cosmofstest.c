@@ -1666,6 +1666,13 @@ static uint64_t check_file_ino(void)
     return vfs_stat(NULL, ENG "/file", &st) == 0 ? st.ino : 0;
 }
 
+/* The fixture's directory, for the faults that need one. */
+static uint64_t check_sub_ino(void)
+{
+    struct cosmo_stat st;
+    return vfs_stat(NULL, ENG "/sub", &st) == 0 ? st.ino : 0;
+}
+
 static void check_teardown(struct blkdev *bd)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
@@ -1909,6 +1916,60 @@ bool selftest_cosmofs_check_namelen(const char **reason)
 
     kinfo("selftest: cosmofs-check-namelen: an entry claiming a name longer than its slot is "
           "refused by length before its bytes are read");
+    return true;
+}
+
+bool selftest_cosmofs_check_two_parents(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, sub_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((sub_ino = check_sub_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_TWO_PARENTS, sub_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-two-parents: a directory named from two directories is "
+          "reported, so the directory graph is checked for being a tree");
+    return true;
+}
+
+/*
+ * The extent chain's OWN guard, which is a different constant from the
+ * one the other four `chain_cycle` sites use: this walker is bounded by
+ * CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2, and the other sites by
+ * CFS_CHECK_MAX_CHAIN or CFS_CHECK_MAX_DEPTH. This unit tests this one
+ * and the report says the other four stay untested rather than
+ * implying one test covers five walkers.
+ */
+bool selftest_cosmofs_check_chain_cycle(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_CHAIN_CYCLE, file_ino, &what) == 0);
+    /* That this call RETURNS is half the assertion: without the guard
+     * the walk does not terminate and the boot reaches its timeout. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.chain_cycle.count >= 1);
+    /*
+     * The walk revisits the two blocks until the guard stops it, so the
+     * live-claim map sees each of them more than once and `dup` fires
+     * too. That is not noise: it is what a cyclic chain looks like to a
+     * checker that claims as it walks, and asserting it keeps the test
+     * honest about what the pass actually reports.
+     */
+    CHECK(r.dup.count >= 1);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-chain-cycle: an extent chain that returns to itself is "
+          "reported and the walk terminates on its own guard");
     return true;
 }
 

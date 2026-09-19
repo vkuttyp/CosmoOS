@@ -188,6 +188,8 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_INO_SLOT,    /* an inode slot whose number is not its position */
     COSMOFS_CORRUPT_EXTENT_ORDER,   /* swap two runs so lblk descends */
     COSMOFS_CORRUPT_BAD_PTR,        /* a block pointer past the end of the pool */
+    COSMOFS_CORRUPT_TWO_PARENTS,    /* a directory named by an entry in a second directory */
+    COSMOFS_CORRUPT_CHAIN_CYCLE,    /* an extent chain whose last block names an earlier one */
     COSMOFS_CORRUPT_NAMELEN,        /* an entry whose namelen exceeds its slot */
     COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
                                      * at a DIFFERENT pool block -- the case block_seen

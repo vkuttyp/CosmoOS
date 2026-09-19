@@ -2359,6 +2359,69 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         kfree(blk);
         break;
     }
+    case COSMOFS_CORRUPT_TWO_PARENTS: {
+        /* A second directory naming a directory that already has a
+         * parent: a cycle in what must be a tree. The checker reaches
+         * it twice and the second arrival is the finding. */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        struct cfs_inode root;
+        rc = cfs_inode_read(fs, CFS_ROOT_INO, &root);
+        if (rc == 0)
+            rc = cfs_dir_read_block_at(fs, &root, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned dst = 0;
+            while (dst < CFS_DIRENTS_PER_BLOCK && d[dst].ino != 0)
+                dst++;
+            if (dst == CFS_DIRENTS_PER_BLOCK)
+                rc = -ENOSPC;
+            else {
+                /* `ino` is the directory to name a second time. */
+                d[dst].ino = ino;
+                d[dst].type = CFS_TYPE_DIR;
+                d[dst].namelen = 6;
+                memcpy(d[dst].name, "second", 7);
+                rc = cfs_dir_write_block_at(fs, &root, 0, blk);
+                token = ino;
+            }
+        }
+        kfree(blk);
+        break;
+    }
+    case COSMOFS_CORRUPT_CHAIN_CYCLE: {
+        /*
+         * Two extent-chain blocks pointing at each other, hung off the
+         * named inode. The walk must terminate on its own guard rather
+         * than on the chain running out -- which is the whole content
+         * of the class, and the reason the bug-proof for it removes
+         * the guard and watches the boot time out.
+         */
+        struct cfs_buf *x = NULL, *y = NULL;
+        rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &x);
+        if (rc)
+            break;
+        rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &y);
+        if (rc) {
+            cfs_buf_put(fs, x);
+            break;
+        }
+        struct cfs_extent_block *ebx = (struct cfs_extent_block *)(x->data + CFS_MHDR_SIZE);
+        struct cfs_extent_block *eby = (struct cfs_extent_block *)(y->data + CFS_MHDR_SIZE);
+        ebx->next = y->blkno;
+        eby->next = x->blkno;          /* back to the first: the cycle */
+        x->dirty = y->dirty = true;
+        uint64_t head = x->blkno;
+        cfs_buf_put(fs, x);
+        cfs_buf_put(fs, y);
+        in.indirect = head;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = head;
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */
