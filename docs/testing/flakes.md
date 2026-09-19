@@ -447,6 +447,48 @@ widen: it is "the sampled PC is in the function the thread is spinning
 in", which is the assertion's whole content. A re-run is what
 distinguishes it from a regression.
 
+**The second sighting named the cause, because the trace was kept.**
+2026-09-19, x86-64 CI, on a **documentation-only commit** (`1ec27af`,
+PR #186 — no code changed since `bcd11d6`, which was green on both
+architectures), same assertion, `lockuptest.c:157`. This time the
+sampled stack was in the log:
+
+```text
+cpu 1: pc 0xffffffff8000589e (nmi, 27488 us ago)
+  #0 lock_common                        kernel/core/spinlock.c:51
+  #1 spin_lock_irqsave                  kernel/core/spinlock.c:124
+  #2 waitqueue_empty                    kernel/scheduler/wait.c:90
+  #3 quiesce_note_quiescent_preemptible kernel/core/quiesce.c:118
+  #4 x86_trap_dispatch                  kernel/arch/x86_64/trap.c:103
+  #5                                    kernel/arch/x86_64/isr.S:145
+  #6 spinner_main                       kernel/core/lockuptest.c:71
+  #7 thread_trampoline
+```
+
+**The spinner was not elsewhere and not descheduled.** It is right
+there at frame #6 — the NMI sampled it while an ordinary **interrupt**
+was in flight on the same CPU, and the PC was in that handler's trap
+tail. Neither mechanism the first sighting offered applies; the
+assertion simply has no allowance for the spinner being interrupted,
+which a spinning thread with interrupts enabled will be.
+
+**A hypothesis about the window, held as one.** Frame #3 is
+`quiesce_note_quiescent_preemptible`, and since PR #181 that call does
+more than publish: it takes the waitqueue lock to decide whether to
+wake a grace-period waiter (invariant Q18). A longer trap tail is a
+wider window in which a sample lands inside it. That is consistent with
+this trace and with `lockup-sample` having no sighting in this file
+before 2026-09-18, and it is **not measured** — no before-and-after
+rate was taken, and two sightings cannot supply one.
+
+So the assertion is now a **known-brittle** one with a named cause,
+rather than an unexplained flake: it asserts the sampled PC is in
+`spin_here` while sampling a thread that can be interrupted. The trace
+already carries what would fix it — `spinner_main` is in the walk — so
+a repair exists (accept a PC anywhere in the interrupted thread's
+stack, or assert on the trace rather than the leaf PC). It is recorded
+here rather than patched inside an unrelated unit.
+
 **And the third was not a flake.** `cosmofs-writeback` failed on the
 same branch and looked exactly like the other two -- a timing-ish test,
 in a subsystem the branch does not touch, on one run of three. It was a

@@ -175,20 +175,24 @@ reach zero (objects whose release code lives in the module), bounded by
 Outputs: `0`; `-ENOENT` (not live and not a zombie); `-EBUSY` (a live
 dependant, logged; or objects still alive after the timeout, in which
 case the module becomes a **zombie**: off the live list, its name free,
-its memory kept so the outstanding releases can still run; a later
-`module_unload` of the name frees it once the count is zero and returns
-0, or `-EBUSY` again). Dependency reference counts drop only when the
-memory is freed: a zombie's outstanding release code may call into its
+its memory kept so the outstanding releases can still run). A zombie is
+freed once its count reaches zero, and **two things free it**: a later
+`module_unload` of its name, which returns `0` when it collected one and
+`-EBUSY` when the count is still non-zero; or the sweep below, which
+needs no one to name it. Dependency reference counts drop only at that
+free: a zombie's outstanding release code may call into its
 dependencies, so they stay pinned (and refuse to unload with `-EBUSY`)
-until the zombie is reaped.
+until it happens.
 
-A zombie does not wait for that named call. Every `module_load` and
-every `module_unload` sweeps the zombie list and frees each entry whose
-count has reached zero, by identity rather than by name (invariant
-**M24**), so a zombie is collected by the next module operation of any
-kind. The named call is kept because it is a real request: it reaps its
-own zombie first and returns `0`, rather than sweeping it and reporting
-`-ENOENT`.
+**The sweep.** Every `module_load` and every `module_unload` walks the
+zombie list and frees each entry whose count has reached zero, by
+identity rather than by name (invariant **M24**), so no zombie waits
+for a request nobody has a reason to make. In `module_unload` the sweep
+runs **after** the name is resolved, never before: an explicit
+`module_unload("name")` for a zombie is a real request, and sweeping
+first would free it and report `-ENOENT` where the caller should get
+`0`. That ordering is the only interaction between the two, and it is
+why the named call still behaves exactly as described above.
 
 ### `struct module *module_owner_of(uintptr_t addr)`, `void module_object_released(struct module *m)`
 
