@@ -217,16 +217,19 @@ thread, which is why that program exists.
 | test | asserts |
 | --- | --- |
 | `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv`; every reader either finds its name or does not, and none reads a freed pointer |
-| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader looking up a name that is never removed must never fail to find it, while another thread unsets a different name |
+| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed. The reader is the test's own copy of `getenv`'s walk, paused at a chosen index, so the interleaving is forced rather than hoped for — see below |
 | `atexit-concurrent` | N threads each registering a distinct handler; **exactly** the number registered run at exit, and none runs twice |
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
 | `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
 
 **The bug-proof, and the honest difficulty.** A race test that passes
-on a broken build most of the time is not a proof. **Three of these
-have a countable answer and one does not** — an earlier draft said two
-and two, and correcting `unsetenv`'s hazard from "freed memory" to
-"wrong answer" is what moved the third:
+on a broken build most of the time is not a proof. **Three are
+deterministic and one is not**, and this paragraph has now been wrong
+twice about which — first saying two and two, then calling
+`env-unset-under-readers` countable and stopping there, as though a
+failure that can be counted is a failure that will occur. It is
+deterministic only with the construction spelled out below; without
+that it belongs with the probabilistic one.
 
 - `atexit-concurrent` is **countable**: register N handlers from N
   threads, count how many run. A lost update is a number, not a
@@ -234,11 +237,32 @@ and two, and correcting `unsetenv`'s hazard from "freed memory" to
   count comes back below N.
 - `atexit-bound` is likewise countable: the array has a canary past it
   and the test reads the canary.
-- **`env-unset-under-readers` is countable too**, and this is the
-  useful consequence of getting `unsetenv` right: its failure is a
-  lookup that *fails to find a name that was never removed*, which is
-  a wrong answer a test can assert on directly, with no dependence on
-  catching a freed pointer before it is reused.
+- **`env-unset-under-readers` is countable *when it happens*, and a
+  second draft of this section confused that with reliable.** The
+  failure needs `getenv` to be between two loads when `unsetenv`
+  shifts the target into a slot it has already passed; running both in
+  a loop does not force that, so an unlocked build can pass the test
+  repeatedly — which is the thing this section opens by refusing to
+  accept. Review caught it.
+
+  **The window is forced by letting the test own the walk.** libc has
+  no test seam — no `CONFIG_DEBUG`, no weak symbols, nothing — and
+  adding one to `getenv` so a thread can park mid-walk would be the
+  library's first, which is disproportionate for a latent race. It is
+  not needed: the reader in this test walks `environ` itself, with the
+  same loop `getenv` runs, and pauses where it chooses. It reads
+  `environ[i]`, waits on a flag, lets the other thread `unsetenv` an
+  *earlier* name, then resumes and finds the target gone from the part
+  of the array it has left to read. Deterministic, no timing, and no
+  new mechanism in the library.
+
+  **What that costs in claim strength, stated rather than hidden:**
+  the test drives the same walk `getenv` performs but is not `getenv`,
+  so it proves the hazard is in the **table** rather than in that one
+  function. `getenv`'s own safety then follows from its taking the
+  lock, which `env-grow-under-readers` exercises against the real
+  function. Two halves of one claim, and neither pretends to be the
+  other.
 - `env-grow-under-readers` is the one that is **probabilistic**,
   because the only thing that distinguishes it is a read of freed
   memory, and the report will not pretend otherwise. It is made to
