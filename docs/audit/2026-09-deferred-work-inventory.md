@@ -48,6 +48,7 @@ paragraph (same pull request), and the README now points here.
 
 | item | where deferred |
 | --- | --- |
+| **`MAP_FIXED` should replace, as POSIX says, instead of returning `-EEXIST`** -- `space_insert` refuses any overlap, so a caller that wants to turn part of its own reservation into writable memory must `munmap` a hole and `mmap` it back, and the two syscalls have a window in which another thread's `mmap(NULL, …)` can be handed the gap. `cosmo_thread_start` does exactly that to place a guard page below a stack, and lost the race three times on aarch64 CI: `EEXIST` out of a thread start (PR #191). Worked around there with a bounded retry; the repair is atomic replacement in `sys_mmap`, which also deletes the punch. Related: with `SYS_mprotect` below, the carve-out would not need unmapping at all | PR #191; `kernel/memory/vmm.c:73`, `libc/src/thread.c` |
 | `SYS_mprotect` for native programs | README.md:1486 |
 | native futex requeue | README.md:1486 (the Linux personality has requeue since milestone 10) |
 | per-thread signal targeting | README.md:1486 |

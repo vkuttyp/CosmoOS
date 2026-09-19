@@ -293,23 +293,49 @@ ordering the `lx_join` entry above describes. A joiner can therefore
 start a new thread while the one it just joined is still being torn
 down.
 
-That is a hypothesis, not a finding. It did not reproduce in fourteen
-local aarch64 boots across both variants, nor in twelve back-to-back
-rounds of spawn-then-grow inside one boot (~60 thread starts). What
-has been fixed is the diagnosis: `cosmo_thread_start` returns `-errno`
-and has three distinct failure points — the reservation, the hole and
-the fixed map (`libc/src/thread.c`) — and `CHECK(... == 0)` threw the
-number away, which is why two failures could say only *that* a start
-failed. `CHECK_START` keeps it, so the third sighting names which
-mapping and why. Note that `RLIMIT_AS` is not the candidate it looks
-like: it defaults to 2 GiB and this process is nowhere near it.
+**That hypothesis was wrong, and so was the one after it.** The third
+sighting carried the number, and the number settled it:
 
-A thread start fails here for memory, and `/etc/rc.test` already
-carries the comment: CI refused this test's second thread stack with
-`-ENOMEM` once before, which is why `thrtest` was moved ahead of the
-hypervisor section that asks for 16 MiB and 256 MiB guests. This is
-that condition, not a new one, and it is load- and layout-sensitive
-rather than deterministic.
+```
+thrtest: FAIL env_reader start at line 883: rc -17
+```
+
+`-17` is `EEXIST`. Not the join/teardown race above, and not memory
+pressure — `RLIMIT_AS` defaults to 2 GiB and the kernel-allocation
+theory that replaced it predicted `-12`. Both were reasoning from
+plausibility; one line of instrumentation beat both.
+
+`EEXIST` from a *thread start* points at one place.
+`cosmo_thread_start` builds a stack in three syscalls — reserve the
+range `PROT_NONE`, `munmap` a hole for the stack and TCB page, `mmap`
+that hole back `MAP_FIXED` — and the punch and the fill are two
+syscalls with unmapped address space between them. Another thread's
+`mmap(NULL, …)` can be handed that gap, because `vm_user_find_free`
+looks for exactly such a hole, and this kernel's `MAP_FIXED` refuses
+to overwrite rather than replacing, so `space_insert` returns
+`-EEXIST` and the loser gets it back from `cosmo_thread_start`.
+
+So this was never a flake. It is a real race, and it belongs in the
+section below rather than this file — kept here because this is where
+the three sightings were recorded while it was still thought to be
+one. `env_churn` is why it appeared now: a test that mallocs
+continuously beside threads that start continuously is what the
+window needs, and both arrived in this unit.
+
+Fixed in `libc/src/thread.c` by losing the race harmlessly — the
+cleanup path already restored the address space exactly, so the
+attempt is retried, bounded at 16. The real repair is
+`MAP_FIXED` replacing as POSIX says, which would remove the punch
+entirely; that is a kernel change, filed in the deferred-work
+inventory. The bug-proof forces the loss on *every* attempt rather
+than reproducing the natural race: with the retry the suite passes,
+with one attempt every thread start in the program fails.
+
+(The first guess, written before the number arrived, was that this
+was the `-ENOMEM` thread-stack condition `/etc/rc.test` already
+carries a comment about — the one that moved `thrtest` ahead of the
+hypervisor section. It is not; that condition is real but is not
+this.)
 
 Two things are still worth keeping. The **printf is not honest under
 this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
