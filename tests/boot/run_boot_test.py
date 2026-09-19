@@ -128,6 +128,12 @@ def section_failures(sections, declared, total):
     once (docs/verification/design.md, "One line is not always one
     test")."""
     out = []
+    if not sections and declared is None:
+        # No user-mode suite ran at all -- a release build. The caller
+        # cannot make this decision with `if sections:`, because a
+        # stream whose section lines were lost but whose total line
+        # survived has no sections and is very much a failure.
+        return out
     if declared is None:
         out.append("the user-mode suite printed no total line "
                    f"(saw {len(sections)} section line(s); it stopped part-way)")
@@ -793,10 +799,11 @@ def main():
     if sections:
         suite = next((ms for ms, name in timings if name == "process-user"), None)
         print(format_section_summary(sections, sect_total, suite))
-    if sections:
-        # No `want_selftest` guard: it is assigned below, and a build
-        # with no user-mode suite prints no section lines anyway.
-        failures.extend(section_failures(sections, declared, sect_total))
+    # Unconditional: `section_failures` itself recognises the build
+    # that ran no suite. Guarding here on `sections` would accept a
+    # stream that declared ten sections and printed none. (No
+    # `want_selftest` guard either: it is assigned below.)
+    failures.extend(section_failures(sections, declared, sect_total))
     # A failing self-test on the load-sensitive list is named as such
     # (docs/testing/flakes.md). The run fails either way.
     failures.extend(load_sensitive_notes(failed_selftests(selftest_lines),

@@ -168,14 +168,33 @@ def test_an_unknown_section_is_named():
     check(any("brand-new" in f for f in fails), f"the unknown section is named ({fails})")
 
 
+def test_a_total_with_no_sections_is_refused():
+    """The hole review found. If every section line is lost or
+    malformed but the total survives, the suite declared ten and
+    printed none -- which is a failure, and was being skipped because
+    the caller guarded on `sections` being non-empty. The decision now
+    lives in `section_failures`, where it can be tested."""
+    sections, declared, total = summarize_sections(
+        ["USERTEST: sections 10, total 400 ms", "USERTEST: PASS"])
+    check(sections == [] and declared == 10, "the total parses with no sections")
+    fails = section_failures(sections, declared, total)
+    check(any("declared 10" in f and "printed 0" in f for f in fails),
+          f"declaring ten and printing none is refused ({fails[:1]})")
+    check(any("fs" in f and "svc" in f for f in fails),
+          "and every missing section is named")
+
+
 def test_no_sections_is_not_an_error():
-    """A release build runs no user-mode suite. It prints no section
-    lines, and that is not a failure -- the caller does not even reach
-    section_failures, so the parse must simply come back empty."""
+    """A release build runs no user-mode suite: no section lines and no
+    total. The caller now invokes section_failures unconditionally, so
+    this case has to be recognised inside it rather than skipped
+    outside it."""
     sections, declared, total = summarize_sections(
         ["[ INFO] boot complete; nothing more to do in this phase"])
     check(sections == [] and declared is None and total is None,
           "a run with no suite parses to nothing")
+    check(section_failures(sections, declared, total) == [],
+          "and a build that ran no suite is not a failure")
 
 
 def test_a_zero_length_section_still_reports():
@@ -200,6 +219,7 @@ def main():
                test_a_row_that_left_the_table,
                test_declared_and_printed_must_agree,
                test_an_unknown_section_is_named,
+               test_a_total_with_no_sections_is_refused,
                test_no_sections_is_not_an_error,
                test_a_zero_length_section_still_reports):
         fn()

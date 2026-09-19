@@ -253,7 +253,9 @@ of the nine had quietly stopped honouring. The lowercase lines stay
 prose and stay unchanged.
 
 **No per-section budget.** Only the composite 20 s remains, and it is
-still the only failure condition. A budget on a section would ration
+the only **duration** the harness will fail a run over -- the
+self-consistency refusals below are failures too, they are just not
+about how long anything took. A budget on a section would ration
 sections that got more thorough and need widening whenever userland
 grows, which is the trap this unit exists to remove; the numbers are
 for attribution, and under TCG they are attribution *between sections

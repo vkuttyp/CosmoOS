@@ -112,9 +112,10 @@ ms` per row and a total; the harness parses them and prints the
 slowest beside the per-test summary. The table is what makes this an
 invariant rather than a convention: the driver is the only caller, so
 a section cannot be added without a line. **No section carries a
-budget** -- the composite 20 s is still the only failure condition,
-because rationing a section that got more thorough is the defect this
-replaced. Check: host test `tests/boot/test_usertest_sections.py` (30
+budget** -- the composite 20 s is still the only **duration** that
+fails a run, because rationing a section that got more thorough is the
+defect this replaced. The suite's self-consistency is checked
+separately and does fail a run: see the Check below. Check: host test `tests/boot/test_usertest_sections.py` (30
 checks), whose bug-proof hands the formatter two runs with identical
 totals differing only in *which* section is slow and requires
 different summaries naming the right one; plus the harness refusing a
