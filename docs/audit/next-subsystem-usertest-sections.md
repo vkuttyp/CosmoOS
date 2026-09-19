@@ -326,7 +326,7 @@ line the harness parses.**
 | --- | --- |
 | `userland/init/init.c` | the trailing body extracted as `syscalls_selftest`, the `g_sections[]` table, and `selftest()` reduced to the loop that times it. **As built:** a table, not ten bracketed calls |
 | `tests/boot/run_boot_test.py` | `summarize_sections`, `section_failures` and `format_section_summary` lifted out of `main()`; the summary printed beside the per-test one. **As built: three functions, not one** (item 4) — and it *does* add failure conditions, all about the suite's own self-consistency, never a duration |
-| `tests/boot/test_usertest_sections.py` (new) | the host cases below, 30 checks |
+| `tests/boot/test_usertest_sections.py` (new) | the host cases below, 34 checks |
 | `tests/host/host.mk` | run the new host test beside `test_nettest_deadline.py` |
 | `docs/verification/design.md` | §6: the admission is discharged, with the first measurement; **and the stale 211 → 410** |
 | `docs/verification/invariants.md` | **F13** (not F6, and not F7 — item 6): a composite test reports its sections. F6 gains the 8284 ms figure; **and the stale 211 → 410** |
@@ -344,9 +344,10 @@ harness — the same division as the nettest units.
 Host tests, driving the parser against synthetic harness output, no
 boot:
 
-`tests/boot/test_usertest_sections.py`, 30 checks, run by
+`tests/boot/test_usertest_sections.py`, 34 checks, run by
 `make host-test`. **As built**: five of these were named in the design
-and six more were added while building, each marked.
+and seven more were added — six while building and one in review, each
+marked.
 
 | test | asserts |
 | --- | --- |
@@ -359,6 +360,7 @@ and six more were added while building, each marked.
 | `declared_and_printed_must_agree` | **added**: the suite's own count against the lines seen, which is what catches a garbled stream |
 | `an_unknown_section_is_named` | **added**: a section added to the table in `init.c` and not to the harness shows up as a name it does not know, rather than being counted silently |
 | `no_sections_is_not_an_error` | a release build, which runs no user-mode suite, produces no summary and no failure |
+| `a_total_with_no_sections_is_refused` | **added in review**: a stream whose section lines were all lost but whose total survived declares ten and prints none. It was being *skipped*, because the caller guarded on `sections` being non-empty; the decision moved inside `section_failures`, where it is testable |
 | `a_zero_length_section_still_reports` | **added**: `trap_selftest` is empty on aarch64; its row reads `0 ms` and is a reading, not an absence — which is the whole difference from the prose markers |
 
 **The bug-proof, and it was run.** Two runs identical except for
@@ -371,12 +373,13 @@ section for being first in the list, last, or longest-named still
 fails.
 
 Proved by replacing `format_section_summary` with the pre-unit shape —
-one line carrying only the total — and running the suite: **3 of 30
+one line carrying only the total — and running the suite: **3 of 34
 fail**, at `the summaries differ`, `the svc run names svc first` and
 `the net run names net first`, and nowhere else. A second proof removes
-the missing-section check from `section_failures`: **1 of 30 fails**, at
-`the missing section is named`, which is the check that stops the
-truncated-run tolerance from becoming a hiding place.
+the missing-section check from `section_failures`: **2 of 34 fail**, at
+`the missing section is named` and `and every missing section is
+named`, which is the check that stops the truncated-run tolerance from
+becoming a hiding place.
 
 And one boot assertion, which is the cheap half and the other half of
 review's point: a **complete** run must carry a section line for every

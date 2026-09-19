@@ -2792,7 +2792,7 @@ See [docs/development.md](docs/development.md).
   is two fifths of the suite from **34** checks and nine sleeps
   waiting on service state, while `proc` with 235 checks is smaller —
   time here is spawning and waiting, not checking. Invariant **F13**,
-  30 host checks in `tests/boot/test_usertest_sections.py`.
+  34 host checks in `tests/boot/test_usertest_sections.py`.
   352 self-tests on both architectures, debug and release (PR #188).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's

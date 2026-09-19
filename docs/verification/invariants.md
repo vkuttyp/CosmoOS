@@ -115,7 +115,7 @@ a section cannot be added without a line. **No section carries a
 budget** -- the composite 20 s is still the only **duration** that
 fails a run, because rationing a section that got more thorough is the
 defect this replaced. The suite's self-consistency is checked
-separately and does fail a run: see the Check below. Check: host test `tests/boot/test_usertest_sections.py` (30
+separately and does fail a run: see the Check below. Check: host test `tests/boot/test_usertest_sections.py` (34
 checks), whose bug-proof hands the formatter two runs with identical
 totals differing only in *which* section is slow and requires
 different summaries naming the right one; plus the harness refusing a
