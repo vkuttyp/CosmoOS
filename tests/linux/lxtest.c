@@ -747,7 +747,32 @@ int main(int argc, char **argv)
     CHECKV(g_child_tid == ctid && g_child_fs_ok, g_child_tid);
     CHECK(tls_is(tcb));                                                   /* the parent's TLS untouched */
     CHECKV(sc0(LX_gettid) == pid, 0);
-    CHECKV(sc3(LX_tgkill, pid, ctid, 0) == -3, 0);                        /* gone */
+    /*
+     * "Gone" is EVENTUAL, not immediate, and asserting it once was
+     * wrong. The kernel wakes the joiner from `thread_clear_tid`,
+     * which `process_thread_exit` calls immediately before
+     * `thread_exit` -- deliberately, so a caller whose join returned
+     * may create another thread at once (kernel/process/process.c).
+     * Between that wake and `thread_exit` completing, the exiting
+     * thread still resolves by tid, so `tgkill` can legitimately
+     * return 0. Linux promises nothing stronger: "my join returned,
+     * therefore that tid is unresolvable" was never true.
+     *
+     * The single-shot version failed twice on CI -- once on x86-64
+     * and once on aarch64, both on commits that could not have
+     * caused it -- and took eleven markers with it each time,
+     * because `/etc/rc.linux` is `lxtest || exit 1`
+     * (docs/testing/flakes.md). Wait for the condition the check
+     * actually means instead of inferring it from the join.
+     */
+    long gone = 0;
+    for (unsigned i = 0; i < 2000; i++) {
+        gone = sc3(LX_tgkill, pid, ctid, 0);
+        if (gone == -3)
+            break;
+        sc0(LX_sched_yield);   /* the exiting thread needs the CPU this loop is on */
+    }
+    CHECKV(gone == -3, gone);                                             /* gone */
     CHECKV(lx_clone(t_basic, g_stacks[0] + sizeof(g_stacks[0]), 0, LX_CLONE_VM | LX_CLONE_THREAD, 0, 0, 0) == -22, 0);   /* no SIGHAND: EINVAL */
     CHECKV(lx_clone(t_basic, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, 0, &g_tidword[0], g_tcb) == -14, 0);   /* PARENT_SETTID to NULL */
     CHECKV(sc6(LX_clone, 0x11, 0, 0, 0, 0, 0) == -38, 0);                /* a fork: ENOSYS */

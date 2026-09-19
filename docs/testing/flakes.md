@@ -653,13 +653,30 @@ resolves by tid, so `tgkill(pid, ctid, 0)` can return 0 where the test
 demands `-ESRCH`. Two intervening checks are all that normally covers
 the window, and on a loaded shared runner they did not.
 
+**A second sighting, 2026-09-19, aarch64 CI** (`1e5b90f`, a
+README-and-docs commit on the libc shared-tables branch), identical
+line and identical consequence: `LINUXTEST: FAIL sc3(LX_tgkill, pid,
+ctid, 0) == -3 (0)`, and with it `SHTEST: PASS` and every `lxsig`
+marker. Two sightings on two architectures in one day, both on
+commits that cannot have caused it.
+
+**The repair named below is now made** (PR #191). The check waits for
+the condition instead of asserting it once: up to 2000 attempts with
+a `sched_yield` between them, because the exiting thread needs the
+CPU the loop is spinning on. It is no weaker — the bound is finite,
+so a kernel that never releases the tid still fails — and it is no
+longer a coin toss on how far `thread_exit` has got. It is the
+Linux ABI test rather than this branch's subsystem, taken because it
+was blocking this branch's aarch64 gate and the repair was already
+written down here.
+
 **The kernel's ordering is the deliberate one; the test's assumption is
 the wrong part** -- "my join returned, therefore that tid is
 unresolvable" was never promised, here or on Linux. The repair is for
 the test to wait for the condition it actually means rather than infer
 it from the join, which is the same shape as `lockup-sample` above: an
 assertion with no allowance for a window the implementation genuinely
-has. Not made here; it belongs to the Linux ABI test.
+has. Made in PR #191, after the second sighting — see above.
 
 
 ## The count
