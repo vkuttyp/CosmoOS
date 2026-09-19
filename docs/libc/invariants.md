@@ -121,7 +121,13 @@ shape of each is set by its consequence:
   string it replaces rather than freeing it, which is deliberate and
   must not be tidied. `env_count` is an unlocked helper called under
   the mutators' lock — the mutex is not recursive and both mutators
-  call it.
+  call it. **Every reader of `environ` inside the library takes the
+  lock**, including the one outside `stdlib.c`: `spawnvp` hands the
+  array to the kernel and takes `__env_snapshot()` — a copy made
+  under the lock — rather than the global, because it cannot hold a
+  libc lock across a system call. Locking the accessors and leaving
+  that caller is what made the first version of this bullet false for
+  the commonest case, and review caught it.
 - **The `atexit` list takes the same lock**, and `exit` must not hold
   it while running a handler: a handler is arbitrary program code that
   may call `atexit` or `getenv`, so the drain takes the lock, removes

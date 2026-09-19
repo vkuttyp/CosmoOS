@@ -9,6 +9,29 @@ version of this line said it could not be demonstrated at all**.
 
 **What the build changed, each found by building rather than reading:**
 
+0. **The lock covered `stdlib.c` and the invariant covered the
+   library, which is not the same thing.** `spawnvp` reads the global
+   `environ` and hands it to the kernel (`libc/src/process.c:126` and
+   `:141`) without taking the lock — so a program doing exactly what
+   the new `cosmo/thread.h` permits, `setenv` on one thread and
+   `spawnvp` on another, walked an array `setenv` had freed. **The
+   same use-after-free the unit exists to close, reached through the
+   one caller the unit did not look at**, and L8's claim that the
+   environment is safe from more than one thread was false for the
+   case a caller is most likely to hit.
+
+   Found by review, not by me, and the miss is the obvious one: I
+   locked the accessors in the file I was editing and swept the
+   *documentation* for contradictions without sweeping the *code* for
+   other readers of the global. `grep -rn environ libc/src` is four
+   lines long and would have found it.
+
+   Fixed with `__env_snapshot()` — a copy of the array taken under the
+   lock, owned by the caller. A **shallow** copy suffices, and only
+   because `setenv` leaks the strings it replaces: the pointers stay
+   valid for as long as the caller holds the snapshot. The leak is
+   load-bearing for the third time in this unit.
+
 1. **The use-after-free IS demonstrated, after two corrections, and
    an earlier version of this banner said it was not.** The first
    build's readers looked up a name added *before* the padding, so
@@ -292,7 +315,8 @@ measurements say:
 | `atexit` unlocked (its read-modify-write split by a delay) | **`THREADTEST: FAIL 3`**. The flood is accepted **24 of 24** and the table reports holding **33** against an `ATEXIT_MAX` of 32 — the write past the end of a static array, seen from userland — and the drain runs **31 of 33**, two handlers lost. Both defects, countable |
 | `setenv` **and** `getenv` unlocked, **with the heap churned** | **the process dies**: `#GP` at `0x40a940`, signal 11, status 139, three runs of three. The use-after-free, reproduced |
 | `setenv` and `getenv` unlocked, **without churn** | passes — and the reason is the finding: the stale array's pointers are still correct, because `setenv` frees the array and never a string |
-| `unsetenv` unlocked | passes, and cannot be expected to fail: `unsetenv` frees nothing, so there is no block for the churn to recycle and its hazard is a wrong **answer** rather than a bad pointer. The regression test of the set |
+| `unsetenv` unlocked | passes, and cannot be expected to fail: `unsetenv` frees nothing, so there is no block for the churn to recycle and its hazard is a wrong **answer** rather than a bad pointer. A regression test |
+| `spawnvp` reading the global again | passes, three runs. **Not a proof.** The window is the gap between reading `environ` and the kernel copying it, which is a few instructions inside a call that then spends milliseconds creating a process — the churn has almost no chance to land in it. A regression test, and the defect is argued from the code: an unlocked read of a pointer another thread passes to `free` |
 
 **So two of the five are proofs and one is a reliable reproduction**,
 where the report promised three deterministic and one probabilistic.
