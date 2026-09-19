@@ -343,7 +343,10 @@ static void walk_extent_chain(struct check *ck, uint64_t head, bool live,
     uint64_t next = head;
     unsigned guard = 0;
     while (next != 0) {
-        (void)guard;
+        if (guard++ > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2) {
+            name_it(&ck->rep->chain_cycle, next);
+            return;
+        }
         claim(ck, next, live);
         struct cfs_buf *b;
         if (read_meta(ck, next, CFS_KIND_EXTENTS, &b))
