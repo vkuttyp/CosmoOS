@@ -581,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-seven, to 2026-09-19**, across CI and this developer's machine, on
+**Thirty-eight, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -615,14 +615,15 @@ of this section said eight and then listed nine:
 | PR #188's own CI run | observed, **x86-64** (`f446890`, documentation-only): `connect 0 in 890 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:48970 accepted at 74.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. **The first probe reading on x86-64**, and row one a fifth time -- see below |
 | PR #189's own CI run | observed, aarch64 (`2559c32`): **`connect 0 in 529 ms`** -- the FASTEST connect recorded, and below the band this file had been quoting -- `sent 12`, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a sixth time |
 | PR #189's own CI run, the next one | observed, aarch64 (`a81365c`, documentation-only): `connect 0 in 1382 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a seventh time, and the first retransmission in nine sightings |
+| PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
 
-Twenty-eight entries, thirty-seven occurrences -- and the table is the tally,
+Twenty-nine entries, thirty-eight occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-three rows
+them and are not independently re-verified here. The last twenty-four rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-eight instrumented** occurrences
-behind the other twenty-two rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **twenty-nine instrumented** occurrences
+behind the other twenty-three rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1143,6 +1144,18 @@ protection-capable boots. `connect 0 in 755 ms`, `sent -104`,
 side `[deadline, ESTABLISHED]` with `slirp probe: connect 1 ms, echo
 1 ms`. Row one a fourth time, in the shape of thirty and thirty-two
 rather than thirty-three: reset before the write.
+
+**Three consecutive branches, and the aarch64 rate is worth a sentence
+of caution rather than a claim.** Sightings thirty-six through
+thirty-eight landed on three successive pull requests (#189 twice,
+#190 once), two of them documentation-only and the third a branch
+whose only change is a new Markdown file. That *looks* like the rate
+has risen sharply on aarch64 CI, and this file has been wrong about a
+rate before: the honest statement is that three consecutive sightings
+is what a constant rate also produces sometimes, no before-and-after
+measurement exists, and the only rate this file has ever measured is
+the one-in-twenty-one local x86-64 figure. Recorded as an observation
+to test, not as a trend.
 
 **Sighting thirty-five took the reading on x86-64 at last**, and it is
 row one too. `f446890`, documentation-only again, PR #188's own CI:
