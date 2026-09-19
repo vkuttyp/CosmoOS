@@ -763,6 +763,35 @@ static int filter_child(const char *mode)
 static volatile int env_stop;
 static volatile unsigned env_misses;
 
+/*
+ * Heap churn, and the reason the environment tests need it.
+ *
+ * `setenv` copies the old array's POINTERS into the new one and frees
+ * only the array; it never frees a string. So a reader still walking
+ * the freed array reads pointers that are all still correct, and gets
+ * the right answer out of freed memory. The defect is real -- it is a
+ * read of a block the allocator has taken back -- but it cannot show
+ * as a wrong answer until something REUSES that block and overwrites
+ * it. This thread is that something: it allocates and frees blocks in
+ * the same size class as the environment array and fills them.
+ */
+static void *env_churn(void *arg)
+{
+    (void)arg;
+    while (!env_stop) {
+        for (unsigned k = 8; k <= 600; k += 8) {
+            void *p = malloc(k * sizeof(char *));
+            if (p == NULL)
+                continue;
+            memset(p, 0x5A, k * sizeof(char *));
+            free(p);
+            if (env_stop)
+                break;
+        }
+    }
+    return NULL;
+}
+
 /* A reader that must always find a name nobody ever removes. */
 static void *env_reader(void *arg)
 {
@@ -801,8 +830,10 @@ static void env_grow_under_readers(void)
         CHECK(setenv(name, "x", 1) == 0);
     }
     CHECK(setenv("STABLE", "yes", 1) == 0);
+    cosmo_thread_t churn;
     env_stop = 0;
     env_misses = 0;
+    CHECK(cosmo_thread_start(&churn, env_churn, NULL, 0) == 0);
     for (unsigned i = 0; i < ENV_READERS; i++)
         CHECK(cosmo_thread_start(&r[i], env_reader, NULL, 0) == 0);
     for (unsigned i = 0; i < ENV_ROUNDS; i++) {
@@ -812,6 +843,7 @@ static void env_grow_under_readers(void)
     env_stop = 1;
     for (unsigned i = 0; i < ENV_READERS; i++)
         CHECK(cosmo_thread_join(&r[i], NULL) == 0);
+    CHECK(cosmo_thread_join(&churn, NULL) == 0);
     CHECK(env_misses == 0);
     printf("thrtest: env-grow-under-readers: %u readers over %u growths, %u misses\n",
            (unsigned)ENV_READERS, (unsigned)ENV_ROUNDS, env_misses);
