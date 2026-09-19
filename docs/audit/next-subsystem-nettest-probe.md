@@ -48,7 +48,7 @@ responsive at that moment at all.
 The tally is `docs/testing/flakes.md`, *The count*. The guest's side is
 **fully accounted for** and this kernel is not at fault:
 
-- The guest's `ksock_connect` returns 0 after **529 ms to 1510 ms**,
+- The guest's `ksock_connect` returns 0 after **493 ms to 1510 ms**,
   against a captured healthy baseline of **150 microseconds**. (This
   report said 597 at the bottom, which was the fastest then recorded;
   sighting thirty-six went below it. The band has widened at both ends
@@ -64,7 +64,7 @@ trigger — that is what "one connection" rules out, and the deliberate
 stale-slot reproduction reproduced the *symptom* without being the
 cause. And a SYN-retransmission mechanism has been proposed and
 withdrawn **twice**, and sightings keep arriving with `retransmits +0`
-while the connect times spread from 529 ms to 1510 ms.
+while the connect times spread from 493 ms to 1510 ms.
 
 ## The problem
 

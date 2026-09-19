@@ -581,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-eight, to 2026-09-19**, across CI and this developer's machine, on
+**Thirty-nine, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -616,14 +616,15 @@ of this section said eight and then listed nine:
 | PR #189's own CI run | observed, aarch64 (`2559c32`): **`connect 0 in 529 ms`** -- the FASTEST connect recorded, and below the band this file had been quoting -- `sent 12`, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a sixth time |
 | PR #189's own CI run, the next one | observed, aarch64 (`a81365c`, documentation-only): `connect 0 in 1382 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a seventh time, and the first retransmission in nine sightings |
 | PR #190's own CI run | observed, aarch64 (`a909ba8`), on a branch whose ONLY change is one new Markdown file: `connect 0 in 623 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one an eighth time |
+| PR #191's own CI run | observed, aarch64 (`f89a240`, documentation-only): **`connect 0 in 493 ms`** -- a new fastest, below the floor set three sightings earlier -- `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a ninth time |
 
-Twenty-nine entries, thirty-eight occurrences -- and the table is the tally,
+Thirty entries, thirty-nine occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-four rows
+them and are not independently re-verified here. The last twenty-five rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-nine instrumented** occurrences
-behind the other twenty-three rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty instrumented** occurrences
+behind the other twenty-four rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1015,15 +1016,17 @@ had no retransmission at all**. Four of seven having exactly one
 retransmission is what a three-sample reader saw as a timer. It is not
 one, and each new sighting has moved that ratio further from one.
 
-**And sighting thirty-six went below the floor.** `529 ms`, against a
-previous fastest of 597. Every statement of a "597 to 1510 ms band"
-in this file and in
-`docs/audit/next-subsystem-nettest-probe.md` was true when written and
-is now wrong at the bottom: the band is **529 to 1510 ms**, and the
-right way to read that is that the range has widened at both ends
-every time it has been tested, which is the opposite of a timer. The
-retransmission ratio moved too — sighting thirty-seven is the first
-`retransmits +1` in nine sightings.
+**And the floor keeps moving.** Sighting thirty-six came in at
+`529 ms` against a previous fastest of 597; sighting thirty-nine at
+**`493 ms`**. Every statement of a band in this file and in
+`docs/audit/next-subsystem-nettest-probe.md` has been true when
+written and wrong at the bottom within a few sightings — 597, then
+529, now **493 to 1510 ms**. Twice in one day is enough to stop
+treating the lower bound as a property: **the range has widened at
+both ends every time it has been tested**, which is the opposite of
+what a timer would do, and the number to quote is the one in this
+paragraph on the day it is read. The retransmission ratio moved too —
+sighting thirty-seven is the first `retransmits +1` in nine sightings.
 
 The roster is **seven-for-seven on one connection carrying nothing**,
 and that remains the only part of this defect that has never varied.
@@ -1088,7 +1091,7 @@ answering a *fresh* connection through itself in 1 ms to connect and
 1 ms to echo while it did so. The only figure that moved is the
 connect: 791 ms against sighting thirty's 894 ms, both inside the
 band this file had recorded to that point (597--1510 ms; sighting
-thirty-six has since taken the floor to 529).
+thirty-six took the floor to 529 and thirty-nine to 493).
 
 **What the second reading buys.** One reading of a new instrument is a
 reading; two independent ones are a finding. The conclusion above no
