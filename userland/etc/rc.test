@@ -26,6 +26,15 @@ true || FAILS=1
 # `A && (B || C)` a failing run printed no verdict at all -- neither
 # branch ran. Each assertion below is a two-term list, so it means the
 # same thing under either parse.
+# A POSITIVE marker for the three-term shape, required by the boot
+# harness (tests/boot/run_boot_test.py). The assertions below record
+# their result in FAILS, and FAILS is reported by the verdict line at
+# the bottom -- which is itself `A && B || C`, so under the bug it
+# prints nothing and the failure shows up only as a missing marker.
+# Review asked for a signal that does not depend on the broken
+# construct to report itself. This is it: one three-term list whose
+# else-branch prints a unique string the harness demands.
+false && echo "ANDOR: wrong-branch" || echo "ANDOR: ok"
 false && echo x > /tmp/shtest/andor-then || echo x > /tmp/shtest/andor-else
 ls /tmp/shtest/andor-then 2> /tmp/shtest/andor.probe && FAILS=1
 ls /tmp/shtest/andor-else 2> /tmp/shtest/andor.probe || FAILS=1

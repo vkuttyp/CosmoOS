@@ -1142,10 +1142,12 @@ static void env_pointer_survives_overwrite(void)
  * all. Review found that; a snapshot bug reachable only while
  * walking PATH would not have failed this file.
  *
- * The search path also calls `getenv("PATH")` while holding the
- * snapshot and then keeps using the returned pointer, which is the
- * deliberate `setenv` leak load-bearing for a fourth time in this
- * unit: another thread is growing the environment throughout.
+ * The search reads PATH out of the snapshot rather than calling
+ * `getenv`, so the path it walks is the one the child will actually
+ * receive -- it used to read the live table, which another thread is
+ * mutating throughout this case, and review found the mismatch. It
+ * points into the snapshot's strings, which is the deliberate
+ * `setenv` leak load-bearing for a fourth time in this unit.
  */
 static unsigned spawn_done[4];   /* attempts completed, per variant */
 

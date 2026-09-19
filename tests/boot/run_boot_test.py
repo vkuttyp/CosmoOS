@@ -316,6 +316,13 @@ elif SATA == "cd":
     REQUIRED_MARKERS += [r"^\[ INFO\] ahci0: port 1: an ATAPI device \(signature 0xeb140101\) is not driven"]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
+# An AND-OR list is left-associative, so `false && X || Y` must run Y
+# (docs/userland/invariants.md U11). Required here rather than checked
+# in the guest, because the script's own verdict line is that same
+# three-term shape: while the shell had the bug it printed neither
+# branch, so a failure could only ever show up as a MISSING marker.
+# This is the positive one.
+ANDOR_MARKER = r"^ANDOR: ok$"
 # The package system's script checks: output lines the harness also requires in self-test builds.
 PKGTEST_MARKERS = [
     r"^pkg: index updated: \d+ packages",
@@ -835,6 +842,10 @@ def main():
         failures.extend(shelltest.failures(lines))
     if want_selftest and not any(re.search(SHTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{SHTEST_MARKER}/ (shell test script)")
+    if want_selftest and not any(re.search(ANDOR_MARKER, ln) for ln in lines):
+        failures.append(f"missing marker /{ANDOR_MARKER}/ (AND-OR left-associativity, U11)")
+    if want_selftest and any(re.search(r"^ANDOR: wrong-branch$", ln) for ln in lines):
+        failures.append("forbidden marker /^ANDOR: wrong-branch$/ (AND-OR ran the && branch after a false left side)")
     if want_selftest:
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):

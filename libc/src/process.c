@@ -145,7 +145,28 @@ static pid_t spawnvp_flags(const char *file, const char *const argv[], const str
         errno = saved;      /* `free` must not repaint a failed spawn's errno */
         return pid;
     }
-    const char *path = getenv("PATH");
+    /*
+     * PATH comes from the SNAPSHOT, not from `getenv`. The snapshot
+     * is the environment the child will receive; `getenv` reads the
+     * live table, and `cosmo/thread.h` now permits another thread to
+     * be calling `setenv` throughout. Two reads of two different
+     * tables need not agree, so a `setenv("PATH", …)` landing between
+     * them would have this process search a path the child does not
+     * have -- starting a binary found through a search path absent
+     * from its own environment -- or miss one it does. Review found
+     * it: the unit snapshotted the array for the kernel and then went
+     * back to the global for the lookup that chooses the binary.
+     *
+     * The strings are safe to point into for the same reason the
+     * shallow copy is: `setenv` leaks the value it replaces.
+     */
+    const char *path = NULL;
+    for (char **e = env; *e != NULL; e++) {
+        if (strncmp(*e, "PATH=", 5) == 0) {
+            path = *e + 5;
+            break;
+        }
+    }
     if (path == NULL)
         path = "/bin:/sbin:/usr/bin:/usr/sbin";
     char cand[1024];

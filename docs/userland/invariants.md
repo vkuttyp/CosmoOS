@@ -133,8 +133,21 @@ exactly it, so for as long as the bug existed `SHTEST: FAIL n` could
 not be printed and a failing run was reported only by a missing
 marker — with two documents claiming otherwise.
 
-Check: `/etc/rc.test` asserts both branches of `false && … || …` and
-of `true && … || …`, each with a two-term list, which means the same
-thing under either parse and so cannot be disabled by the bug it
-guards. Gap: no test of a list longer than three terms, and none
-mixing `&&`/`||` with `&`.
+Check: the boot harness requires `^ANDOR: ok$` and forbids
+`^ANDOR: wrong-branch$` (`tests/boot/run_boot_test.py`), printed by a
+three-term list in `/etc/rc.test` — `false && echo wrong-branch ||
+echo ok`. That is the shape the invariant is about, and the marker is
+a **positive** signal: restoring the `if (!skip)` guard prints
+neither branch, so the marker vanishes and the harness says which
+one is missing.
+
+It is required by the harness rather than checked in the guest for a
+specific reason review pointed out: `rc.test` reports its own verdict
+with `sh -c "exit $FAILS" && echo PASS || echo "FAIL $FAILS"`, which
+is the same three-term shape, so under the bug the script cannot
+report anything at all. A guard that depends on the broken construct
+to announce its own failure is worth very little. `rc.test` also
+asserts both branches of both shapes by their side effects, each
+assertion a two-term list so the assertions themselves survive the
+bug. Gap: no test of a list longer than three terms, and none mixing
+`&&`/`||` with `&`.
