@@ -228,8 +228,14 @@ int setenv(const char *name, const char *value, int overwrite)
              * The old string is LEAKED, deliberately: it may be the
              * kernel's, and a pointer `getenv` already returned still
              * points into it. Freeing it here would turn every such
-             * pointer into a dangling one, which is a worse bug than a
-             * bounded leak in a start-up path.
+             * pointer into a dangling one. That is the worse bug, but
+             * do not call what is left a bounded one: the leak is
+             * UNBOUNDED in the number of `setenv` calls, not in the
+             * size of the environment, and nothing confines `setenv`
+             * to start-up. A program that rewrites a variable in a
+             * loop grows without limit and should keep its own state
+             * instead. The cost is accepted, not absent --
+             * docs/libc/invariants.md L8 states it as a contract.
              */
             environ[i] = e;
             goto out;

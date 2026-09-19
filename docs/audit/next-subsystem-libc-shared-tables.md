@@ -30,7 +30,9 @@ version of this line said it could not be demonstrated at all**.
    lock, owned by the caller. A **shallow** copy suffices, and only
    because `setenv` leaks the strings it replaces: the pointers stay
    valid for as long as the caller holds the snapshot. The leak is
-   load-bearing for the third time in this unit.
+   load-bearing for the third time in this unit — and unbounded, which
+   the build now says where it happens rather than calling it bounded
+   and confined to start-up. See "Why it has not bitten".
 
 1. **The use-after-free IS demonstrated, after two corrections, and
    an earlier version of this banner said it was not.** The first
@@ -209,6 +211,18 @@ valid. That is the correct behaviour and it is held up by a deliberate
 leak rather than by a rule. The build should keep the leak and say why,
 because the obvious tidying — freeing the old string — would turn a
 safe return value into a dangling one.
+
+Saying why means saying the price, which review asked for after the
+build made the leak a documented contract and `__env_snapshot` a
+third thing resting on it. **The leak is unbounded.** Its size is the
+number of `setenv` calls a program makes, not the size of its
+environment, so overwriting one variable in a loop grows the heap
+without limit. There is no reclaiming it while the promise stands:
+freeing the old string requires knowing that no caller still holds a
+pointer to it, and `getenv` hands those out untracked. The build
+accepts the cost and records it in `libc/src/stdlib.c` and
+docs/libc/invariants.md L8 — where the comment used to call it "a
+bounded leak in a start-up path", which was wrong twice over.
 
 ### Why it has not bitten
 

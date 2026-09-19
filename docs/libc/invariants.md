@@ -119,7 +119,17 @@ shape of each is set by its consequence:
   bullets above. The lock covers the **walk** and not the pointer
   `getenv` returns: that stays valid because `setenv` **leaks** the
   string it replaces rather than freeing it, which is deliberate and
-  must not be tidied. `env_count` is an unlocked helper called under
+  must not be tidied. Say the cost plainly, because locking the walk
+  promoted that leak from an implementation detail to a contract:
+  **it is unbounded**. Every overwrite of a variable strands the
+  previous string, so a program that rewrites one in a loop grows
+  without limit — the bound is the number of `setenv` calls, not the
+  size of the environment. Nothing here reclaims it, and nothing may,
+  while the rule is that a pointer from `getenv` stays good: freeing
+  the old string needs to know that no caller still holds it, which
+  is a question this interface cannot ask. A program that overwrites
+  variables in a loop should keep its own state instead of using the
+  environment as one. `env_count` is an unlocked helper called under
   the mutators' lock — the mutex is not recursive and both mutators
   call it. **Every reader of `environ` inside the library takes the
   lock**, including the one outside `stdlib.c`: `spawnvp` hands the
