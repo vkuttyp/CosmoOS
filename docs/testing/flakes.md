@@ -243,6 +243,13 @@ socket-verdict branch, once on that branch's CI again, and once on a
 no code at all. That last one is the clearest of the three: a tree that
 changed one Markdown file cannot have slowed a lockup sample.
 
+**A fourth on 2026-09-19**, same assertion, same line, on the libc
+shared-tables branch — in `aarch64 BUILD=debug test-guard`, which
+passed on an immediate re-run of the same tree. That branch is `libc`
+locking, a shell parser fix and documentation; it cannot slow a lockup
+sample either. Four in three days now, and re-running remains the
+right first move.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
@@ -259,6 +266,35 @@ UAPI header, one self-test that runs in 7 ms, and documentation. It
 touched nothing in the network stack, the filesystem or the lockup
 detector. Recorded together because the three needed three different
 answers, and telling them apart is the whole skill this file is about.
+
+## `thrtest` cannot start a thread
+
+**2026-09-19, `aarch64 BUILD=debug test-gic`**, one of three
+`env_reader` starts in `env-grow-under-readers`:
+`thrtest: FAIL cosmo_thread_start(...) == 0 at line 866`, with the join
+of that slot failing after it — two `CHECK`s, one cause. It passed on
+an immediate re-run of the same tree, and `test-guard` on the same
+architecture and the same build ran `thrtest` clean.
+
+A thread start fails here for memory, and `/etc/rc.test` already
+carries the comment: CI refused this test's second thread stack with
+`-ENOMEM` once before, which is why `thrtest` was moved ahead of the
+hypervisor section that asks for 16 MiB and 256 MiB guests. This is
+that condition, not a new one, and it is load- and layout-sensitive
+rather than deterministic.
+
+Two things are worth keeping. The **printf is not honest under this
+failure**: it reports `3 readers` from `ENV_READERS` whatever actually
+started, so the line said "3 readers over 400 growths, 0 misses" on a
+run where one reader never existed. And `0 misses` from two readers is
+a weaker result than the same words from three — the check passed with
+less concurrency than it claims. Neither is repaired here; both belong
+to the test.
+
+The run is also the first recorded instance of `SHTEST: FAIL 1`
+appearing at all — the exit status and the shell's AND-OR
+associativity were both fixed on this branch, and before them this
+same failure would have printed `SHTEST: PASS`.
 
 **`net-harness` (aarch64), a fourth sighting.** The same
 `nettest.c:929` (`client_ok`) as the three above, on a branch that
