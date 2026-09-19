@@ -292,7 +292,23 @@ costs a re-scan, not a wrong answer. Option 2 is the fallback if the
 re-scan proves too expensive for large directories, and the report says
 so rather than pretending the choice is obvious.
 
-The class is `dir_dup_name`, reported once per duplicate name.
+**As built, "reused per directory" was not enough** (banner item 3).
+`walk_dir` descends in the middle of its own entry loop, so one shared
+bitmap has the child's reset wipe the parent's sheet, and a duplicate
+sitting after a subdirectory is missed. The names pass is a separate
+loop that **finishes before any recursion**; the bitmap is still sized
+once and the budget is still fixed, but the walk order had to change
+and this paragraph did not say so.
+
+**And the re-scan is bounded** (banner item 7): 256 confirmations per
+directory, because each re-reads every earlier block of it and an
+unbounded count is quadratic under `fs->lock`. Past the bound the pass
+sets `partial`, which — since this is the first `partial` that fires
+no class — is also why `clean` now requires `!partial` (item 9).
+
+The class is `dir_dup_name`, reported once per repeat: a name appearing
+three times is two findings, not one, because each confirmation looks
+only at the entries before it.
 
 ### The five unfired classes, and eight corruption kinds in all
 
@@ -328,11 +344,22 @@ as one everywhere it appears.
   high-water mark rather than a total, which is a deliberate choice, not
   an oversight. Reading it as a total would make a legal filesystem look
   corrupt.
-- **No new on-disk format**, no version bump: every check reads what is
-  already there.
-- **No change to the fixed-budget property.** If the duplicate-name
-  bitmap cannot be allocated, the pass reports `partial` exactly as it
-  does for its existing maps.
+- **No new on-disk format**: every check reads what is already there,
+  and no image written by an older kernel needs converting. ~~no
+  version bump~~ — **there is one, and it is not on-disk**: the
+  `/dev/fsctl` CHECK result grew from ten classes to thirteen, and
+  because the kernel writes that fixed-size struct whole, growing it
+  is not prefix-compatible. `COSMO_FSCTL_VERSION` is 2 (banner item
+  8). The sentence as first written was about the format and read as
+  though it covered the control interface too.
+- **No change to the fixed-budget property.** ~~If the duplicate-name
+  bitmap cannot be allocated, the pass reports `partial`~~ — **as
+  built it returns `-ENOMEM` before the walk starts**, together with
+  the maps, which is the stronger form of the same rule and the one
+  the rest of this pass already followed. Review found the first
+  build doing neither: it allocated per call and treated failure as
+  "no duplicate here", silently, inside a report that still said
+  `clean` (banner item 7).
 
 ## Affected files
 

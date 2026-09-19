@@ -1008,6 +1008,18 @@ The names pass runs **to completion before the entry loop can recurse**
 into a subdirectory, because one shared bitmap and a recursive walk
 would otherwise have the child clear the parent's sheet.
 
+**The confirmations are bounded, and the bound is why `clean` now
+requires a complete pass.** Each confirmation re-reads every earlier
+block of its directory, so an unbounded count is quadratic in the
+directory's size while `fs->lock` is held; 256 per directory is the
+cap, and past it the pass sets `partial`. That is the first `partial`
+that fires no class — every other one is an unreadable block, which
+also fills `unreadable` — so **`report_clean` requires `!partial`**: a
+pass that stopped looking cannot answer *this filesystem is sound*.
+The two block buffers the names pass uses are allocated with the maps
+before the walk, so a failure there is `-ENOMEM` up front and never a
+directory silently skipped.
+
 **What it does not check**, now one thing rather than three: `next_ino`
 is not compared, because it is a high-water mark rather than a total,
 and reading it as a total would make a legal filesystem look corrupt.
@@ -1035,6 +1047,14 @@ choosing which of two inodes keeps a shared block is data loss dressed
 as a fix. A repair must leave the classes it claims empty and every
 refused class unchanged — not "clean", which a filesystem carrying a
 cross-link can never be.
+
+**The operator interface carries all thirteen.** `/dev/fsctl`'s CHECK
+result is an array rather than named fields precisely so a version can
+append: version 2 adds indices 10-12 and moves nothing. The struct is
+fixed-size and the kernel writes it whole, so growing it is not
+prefix-compatible and `COSMO_FSCTL_VERSION` is bumped with it — a
+version-1 client and a version-2 kernel disagree at the gate rather
+than part way through a read.
 
 **Both passes are in every build, and an operator can run them.** The
 check was a debug-build tool at first, not because a release kernel
