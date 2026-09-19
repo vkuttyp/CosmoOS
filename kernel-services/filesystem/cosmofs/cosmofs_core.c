@@ -2255,6 +2255,267 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         rc = cfs_inode_write(fs, ino, &in);
         token = ino;
         break;
+    /*
+     * Both of these add runs to a named file rather than editing the
+     * one it has, because the fixture's file is a single block and
+     * neither fault can be expressed in one run. The added runs point
+     * at freshly ALLOCATED blocks, distinct from each other and from
+     * the file's own: a run pointing at the file's block would be a
+     * cross-link and one pointing at a free block would be
+     * seen_not_alloc, and either would make the test pass for the
+     * wrong reason (docs/audit/next-subsystem-fsck-unchecked.md).
+     */
+    case COSMOFS_CORRUPT_EXTENT_ORDER:
+    case COSMOFS_CORRUPT_EXTENT_OVERLAP: {
+        if (ino == 0 || cfs_ext_count(&in.direct[0]) == 0 ||
+            cfs_ext_count(&in.direct[1]) != 0 || cfs_ext_count(&in.direct[2]) != 0) {
+            /* Needs a file of exactly one run with room after it. Refused
+             * rather than silently producing some other fault. */
+            rc = -EINVAL;
+            break;
+        }
+        /*
+         * The overlap case needs its middle run to be TWO blocks wide,
+         * so a third run can begin inside it. A one-block allocation
+         * under a count of two would have the run claim its neighbour,
+         * which the cross-link map catches -- the test would then pass
+         * against the OLD code and prove nothing. (It did, on the
+         * first build: `dup` fired and the vacuity guard caught it.)
+         */
+        uint32_t wide = (kind == COSMOFS_CORRUPT_EXTENT_OVERLAP) ? 2u : 1u;
+        uint64_t a = 0, b = 0, got = 0;
+        rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, wide, &a, &got);
+        if (rc)
+            break;
+        if (got < wide) {
+            rc = -ENOSPC;     /* a short run would mean the same claim-the-neighbour bug */
+            break;
+        }
+        rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, 1, &b, &got);
+        if (rc)
+            break;
+        if (got < 1) {
+            rc = -ENOSPC;
+            break;
+        }
+        uint32_t first = in.direct[0].lblk;      /* count 1: covers [first, first+1) */
+        if (kind == COSMOFS_CORRUPT_EXTENT_ORDER) {
+            /* Ascend, then DESCEND: 0, 5, 3. */
+            in.direct[1].start = a; in.direct[1].count = 1; in.direct[1].lblk = first + 5;
+            in.direct[2].start = b; in.direct[2].count = 1; in.direct[2].lblk = first + 3;
+        } else {
+            /* Ascend throughout, and the third begins inside the
+             * second: 0/[1,3)/2. Strictly ascending, so the ordering
+             * test passes and the overlap test is the one that fires. */
+            in.direct[1].start = a; in.direct[1].count = wide; in.direct[1].lblk = first + 1;
+            in.direct[2].start = b; in.direct[2].count = 1; in.direct[2].lblk = first + 2;
+        }
+        if (in.size < (uint64_t)(first + 8) * CFS_BLOCK)
+            in.size = (uint64_t)(first + 8) * CFS_BLOCK;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
+    }
+    /*
+     * Two of the four `dir_bad` sites that no test had ever reached
+     * (docs/audit/next-subsystem-fsck-unchecked.md). A reporting path
+     * with no test is a path that has never executed.
+     */
+    case COSMOFS_CORRUPT_BAD_PTR:
+        /* A data pointer past the end of every member: `claim` maps it
+         * to CFS_DVA_NONE and must say so rather than indexing a
+         * bitmap with it. The run keeps count 1, so exactly one bad
+         * pointer is claimed. */
+        if (ino == 0 || cfs_ext_count(&in.direct[0]) == 0) {
+            rc = -EINVAL;
+            break;
+        }
+        in.direct[0].start = CFS_DVA_NONE - 1;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = in.direct[0].start;
+        break;
+    case COSMOFS_CORRUPT_NAMELEN: {
+        /* An entry claiming a name longer than its slot can hold. The
+         * check must refuse it by length before reading the bytes. */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        rc = cfs_dir_read_block_at(fs, &in, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned s2 = 0;
+            while (s2 < CFS_DIRENTS_PER_BLOCK && d[s2].ino == 0)
+                s2++;
+            if (s2 == CFS_DIRENTS_PER_BLOCK)
+                rc = -EINVAL;          /* an empty directory cannot carry this fault */
+            else {
+                d[s2].namelen = CFS_NAME_MAX + 1;
+                rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+                token = ino;
+            }
+        }
+        kfree(blk);
+        break;
+    }
+    case COSMOFS_CORRUPT_TWO_PARENTS: {
+        /* A second directory naming a directory that already has a
+         * parent: a cycle in what must be a tree. The checker reaches
+         * it twice and the second arrival is the finding. */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        struct cfs_inode root;
+        rc = cfs_inode_read(fs, CFS_ROOT_INO, &root);
+        if (rc == 0)
+            rc = cfs_dir_read_block_at(fs, &root, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned dst = 0;
+            while (dst < CFS_DIRENTS_PER_BLOCK && d[dst].ino != 0)
+                dst++;
+            if (dst == CFS_DIRENTS_PER_BLOCK)
+                rc = -ENOSPC;
+            else {
+                /* `ino` is the directory to name a second time. */
+                d[dst].ino = ino;
+                d[dst].type = CFS_TYPE_DIR;
+                d[dst].namelen = 6;
+                memcpy(d[dst].name, "second", 7);
+                rc = cfs_dir_write_block_at(fs, &root, 0, blk);
+                token = ino;
+            }
+        }
+        kfree(blk);
+        break;
+    }
+    case COSMOFS_CORRUPT_CHAIN_CYCLE: {
+        /*
+         * Two extent-chain blocks pointing at each other, hung off the
+         * named inode. The walk must terminate on its own guard rather
+         * than on the chain running out -- which is the whole content
+         * of the class, and the reason the bug-proof for it removes
+         * the guard and watches the boot time out.
+         */
+        struct cfs_buf *x = NULL, *y = NULL;
+        rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &x);
+        if (rc)
+            break;
+        rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &y);
+        if (rc) {
+            cfs_buf_put(fs, x);
+            break;
+        }
+        struct cfs_extent_block *ebx = (struct cfs_extent_block *)(x->data + CFS_MHDR_SIZE);
+        struct cfs_extent_block *eby = (struct cfs_extent_block *)(y->data + CFS_MHDR_SIZE);
+        ebx->next = y->blkno;
+        eby->next = x->blkno;          /* back to the first: the cycle */
+        x->dirty = y->dirty = true;
+        uint64_t head = x->blkno;
+        cfs_buf_put(fs, x);
+        cfs_buf_put(fs, y);
+        in.indirect = head;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = head;
+        break;
+    }
+    case COSMOFS_CORRUPT_SNAP_MEMBERS: {
+        /*
+         * A snapshot's member table claiming more members than its
+         * block can hold. The checker must say the TABLE is wrong and
+         * still walk what the block does hold -- otherwise every
+         * member's blocks are reported as leaked instead, which is the
+         * comment beside that site and had never been exercised.
+         *
+         * Version 4 and later only: before it, a snapshot's alloc_root
+         * is an index rather than a member table and there is no count
+         * to be wrong.
+         */
+        if (fs->sb.version < 4) {
+            rc = -ENOTSUP;
+            break;
+        }
+        uint64_t list = fs->sb.snap_root, target = 0;
+        unsigned guard = 0;
+        while (list != 0 && target == 0 && guard++ < 64) {
+            struct cfs_buf *b;
+            if (cfs_buf_get(fs, list, CFS_KIND_SNAPLIST, &b) != 0)
+                break;
+            const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
+            for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
+                if (sb->snap[i].id != 0 && sb->snap[i].alloc_root != 0) {
+                    target = sb->snap[i].alloc_root;
+                    break;
+                }
+            }
+            list = sb->next;
+            cfs_buf_put(fs, b);
+        }
+        if (target == 0) {
+            rc = -ENOENT;          /* no snapshot: the caller must take one first */
+            break;
+        }
+        struct cfs_buf *mb;
+        rc = cfs_buf_get(fs, target, CFS_KIND_MEMBERS, &mb);
+        if (rc)
+            break;
+        struct cfs_member_block *t = (struct cfs_member_block *)(mb->data + CFS_MHDR_SIZE);
+        t->count = CFS_MEMBERS_PER_BLOCK + 1;
+        mb->dirty = true;
+        cfs_buf_put(fs, mb);
+        token = target;
+        break;
+    }
+    case COSMOFS_CORRUPT_DUP_NAME: {
+        /*
+         * One name twice in a directory, at two DIFFERENT inodes --
+         * which is what makes it a fault rather than a hard link: two
+         * entries resolve differently, unlink removes one and the name
+         * survives.
+         */
+        uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+        if (blk == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        rc = cfs_dir_read_block_at(fs, &in, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned src = 0;
+            while (src < CFS_DIRENTS_PER_BLOCK && d[src].ino == 0)
+                src++;
+            unsigned dst = 0;
+            while (dst < CFS_DIRENTS_PER_BLOCK && d[dst].ino != 0)
+                dst++;
+            if (src == CFS_DIRENTS_PER_BLOCK || dst == CFS_DIRENTS_PER_BLOCK)
+                rc = -EINVAL;
+            else {
+                uint64_t twin = 0;
+                rc = cfs_inode_alloc(fs, &twin);
+                if (rc == 0) {
+                    struct cfs_inode ti;
+                    memset(&ti, 0, sizeof(ti));
+                    ti.mode = CFS_MODE(CFS_TYPE_REG, 0644);
+                    ti.nlink = 1;
+                    ti.ino = twin;
+                    ti.parent = ino;
+                    rc = cfs_inode_write(fs, twin, &ti);
+                }
+                if (rc == 0) {
+                    d[dst] = d[src];          /* the same name ... */
+                    d[dst].ino = twin;        /* ... at a different inode */
+                    d[dst].type = CFS_TYPE_REG;
+                    rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+                    token = ino;
+                }
+            }
+        }
+        kfree(blk);
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */

@@ -18,7 +18,17 @@
 
 /* Version 1: LIST, CHECK and SCRUB. Every later version documents itself
  * here, beside the constant, as netctl.h does. */
-#define COSMO_FSCTL_VERSION 1
+/*
+ * Version 2 grows the CHECK result's class array from ten to thirteen
+ * (below). The result is a fixed-size struct the kernel writes whole,
+ * so growing it is NOT prefix-compatible: an old client asking for the
+ * ten-class size would get -ERANGE from a new kernel, part way through
+ * a command that had already passed the version check. Bumping is what
+ * turns that into an early, explicit refusal -- a version-1 client and
+ * a version-2 kernel now disagree at the gate instead of in the middle
+ * (docs/audit/next-subsystem-fsck-unchecked.md).
+ */
+#define COSMO_FSCTL_VERSION 2
 
 #define COSMO_FSCTL_LIST  1   /* the mounts this namespace holds */
 #define COSMO_FSCTL_CHECK 2   /* the structural check, against one id */
@@ -65,7 +75,7 @@ struct cosmo_fsctl_mount {    /* LIST: one per mount */
 };
 
 /*
- * CHECK. The ten classes are an array rather than ten named fields, so a
+ * CHECK. The classes are an array rather than named fields, so a
  * version that adds one grows `nclasses` and moves nothing. The index
  * order is part of the ABI:
  *
@@ -79,8 +89,20 @@ struct cosmo_fsctl_mount {    /* LIST: one per mount */
  *   7 counter_wrong    a superblock total the walk disagrees with
  *   8 chain_cycle      a metadata chain that revisits a block
  *   9 unreadable       a block that could not be read
+ *
+ * Version 2 appends three and moves nothing, which is what the array
+ * is for (docs/audit/next-subsystem-fsck-unchecked.md):
+ *
+ *  10 extent_order     an inode whose runs do not ascend by lblk
+ *  11 extent_overlap   two runs of one inode covering one lblk
+ *  12 dir_dup_name     a name that repeats inside one directory
+ *
+ * A version-1 reader stops at `nclasses` and sees the first ten, which
+ * is the contract; it will report "not clean" with ten zeroes if a
+ * filesystem has only one of the new faults, so a reader that shows
+ * `clean` should also show `nclasses`.
  */
-#define COSMO_FSCTL_CLASSES 10
+#define COSMO_FSCTL_CLASSES 13
 #define COSMO_FSCTL_NAMES   8
 
 struct cosmo_fsctl_class {
@@ -96,7 +118,7 @@ struct cosmo_fsctl_class {
 #define COSMO_FSCTL_R_REPAIR_REFUSED (1u << 2)   /* repair asked for, the walk was not sure */
 
 struct cosmo_fsctl_check {
-    uint32_t nclasses;        /* COSMO_FSCTL_CLASSES for version 1 */
+    uint32_t nclasses;        /* COSMO_FSCTL_CLASSES; 10 in version 1, 13 in version 2 */
     uint32_t flags;           /* COSMO_FSCTL_R_* */
     uint64_t blocks_seen;
     uint64_t inodes_seen;

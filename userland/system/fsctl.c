@@ -36,6 +36,11 @@ static const char *const class_name[COSMO_FSCTL_CLASSES] = {
     "wrong superblock totals",/* counter_wrong */
     "cyclic chains",          /* chain_cycle */
     "unreadable blocks",      /* unreadable */
+    /* Version 2 (docs/audit/next-subsystem-fsck-unchecked.md). A
+     * version-1 kernel sends nclasses = 10 and the loop stops there. */
+    "unordered extents",      /* extent_order */
+    "overlapping extents",    /* extent_overlap */
+    "duplicate names",        /* dir_dup_name */
 };
 
 /*

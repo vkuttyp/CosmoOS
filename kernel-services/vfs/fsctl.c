@@ -196,6 +196,9 @@ static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
                 &rep.alloc_not_seen, &rep.seen_not_alloc, &rep.dup, &rep.nlink_wrong,
                 &rep.orphan, &rep.dangling_entry, &rep.dir_bad, &rep.counter_wrong,
                 &rep.chain_cycle, &rep.unreadable,
+                /* Appended in version 2; the first ten keep their
+                 * indices (uapi/cosmo/fsctl.h). */
+                &rep.extent_order, &rep.extent_overlap, &rep.dir_dup_name,
             };
             c->nclasses = COSMO_FSCTL_CLASSES;
             c->flags = (rep.partial ? COSMO_FSCTL_R_PARTIAL : 0u) |

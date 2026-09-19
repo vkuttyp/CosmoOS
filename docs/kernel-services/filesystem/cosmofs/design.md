@@ -989,23 +989,72 @@ Everything is allocated before the walk starts, so a filesystem too
 large for the memory available is `-ENOMEM` rather than a half-finished
 answer.
 
-**What it does not check.** Extents are claimed, not validated against
-each other: an overlap inside one inode is caught only when it makes two
-claims on one block, and an `lblk` ordering fault that does not is a
-wrong file rather than a wrong filesystem. A name repeated inside one
-directory is not detected either, because the pass keeps maps of numbers
-and that needs a set of strings. `next_ino` is not compared: it is a
-high-water mark rather than a total. All three are inventory rows.
+**Extents are validated against each other, and names against their
+own directory.** Runs must ascend by `lblk` and must not overlap, and
+both are checked as the runs stream past — one `prev` per inode, no new
+memory. **Ordering is tested first and the overlap test is skipped for
+a pair that fails it**, because every descending pair also begins
+inside its predecessor, and `extent_order` and `extent_overlap` are
+different repairs: an ordering fault may be repairable by sorting, an
+overlap is data loss. The end of a run is computed in 64 bits, so a run
+near the 2³²-block bound cannot wrap and hide a real overlap.
 
-**Ten classes, four repairs.** Leaked blocks, orphans, wrong link counts
+A name repeated inside one directory is `dir_dup_name`. The pass keeps
+maps of numbers and this needs a set of strings, so it uses a **fixed
+bitmap** — 4 KiB, hashed into once per entry, cleared per directory —
+and a set bit only means *maybe*: the directory is re-scanned to
+confirm, so a hash collision costs a re-scan and never a wrong finding.
+The names pass runs **to completion before the entry loop can recurse**
+into a subdirectory, because one shared bitmap and a recursive walk
+would otherwise have the child clear the parent's sheet.
+
+**The confirmations are bounded, and the bound is why `clean` now
+requires a complete pass.** Each confirmation re-reads every earlier
+block of its directory, so an unbounded count is quadratic in the
+directory's size while `fs->lock` is held; 256 per directory is the
+cap, and past it the pass sets `partial`. That is the first `partial`
+that fires no class — every other one is an unreadable block, which
+also fills `unreadable` — so **`report_clean` requires `!partial`**: a
+pass that stopped looking cannot answer *this filesystem is sound*.
+The two block buffers the names pass uses are allocated with the maps
+before the walk, so a failure there is `-ENOMEM` up front and never a
+directory silently skipped.
+
+**What it does not check**, now one thing rather than three: `next_ino`
+is not compared, because it is a high-water mark rather than a total,
+and reading it as a total would make a legal filesystem look corrupt.
+
+**Every class has a test that makes it fire.** Eight of them did
+already; the five that did not — a block pointer past the pool, a
+snapshot member count too large for its block, an over-long `namelen`,
+a directory reached from two parents, and a cyclic **extent** chain —
+were reporting paths that had never executed, and each now has a
+corruption in `cosmofs_test_corrupt` and a `cosmofs-check-*` test.
+The other four `chain_cycle` sites (the deadlist, the imap and the
+directory-depth walkers) use different guards and stay untested; one
+test does not cover five walkers.
+
+**Thirteen classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired
-with `COSMOFS_CHECK_REPAIR`. The rest are reported: a block both
+with `COSMOFS_CHECK_REPAIR`. The three added with the extent and name
+checks are reported and never repaired: choosing which of two
+overlapping runs survives is data loss, an ordering fault may be
+either, and which of two entries sharing a name is the real one is not
+a question the filesystem can answer. The rest are reported: a block both
 reachable and free is not fixed by setting its bit while the filesystem
 is mounted and the allocator may already have handed it out, and
 choosing which of two inodes keeps a shared block is data loss dressed
 as a fix. A repair must leave the classes it claims empty and every
 refused class unchanged — not "clean", which a filesystem carrying a
 cross-link can never be.
+
+**The operator interface carries all thirteen.** `/dev/fsctl`'s CHECK
+result is an array rather than named fields precisely so a version can
+append: version 2 adds indices 10-12 and moves nothing. The struct is
+fixed-size and the kernel writes it whole, so growing it is not
+prefix-compatible and `COSMO_FSCTL_VERSION` is bumped with it — a
+version-1 client and a version-2 kernel disagree at the gate rather
+than part way through a read.
 
 **Both passes are in every build, and an operator can run them.** The
 check was a debug-build tool at first, not because a release kernel

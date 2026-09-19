@@ -581,7 +581,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Thirty-five, to 2026-09-19**, across CI and this developer's machine, on
+**Thirty-seven, to 2026-09-19**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -613,14 +613,16 @@ of this section said eight and then listed nine:
 | PR #187's own CI run | observed, aarch64 (the protection-capable-CPU job), on another **documentation-only commit** (`83b42cb`): `connect 0 in 947 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:52290 accepted at 91.8s, **0 byte(s)**`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up 20.0s later. Row one a **third** time, and the first where the guest's write succeeded and the host still read nothing -- see below |
 | PR #187's own CI run, the very next one | observed, aarch64, the **GICv3** job this time (`9b5b5f9`, documentation-only): `connect 0 in 755 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:37472 accepted at 82.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a **fourth** time, on a third distinct aarch64 job |
 | PR #188's own CI run | observed, **x86-64** (`f446890`, documentation-only): `connect 0 in 890 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:48970 accepted at 74.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. **The first probe reading on x86-64**, and row one a fifth time -- see below |
+| PR #189's own CI run | observed, aarch64 (`2559c32`): **`connect 0 in 529 ms`** -- the FASTEST connect recorded, and below the band this file had been quoting -- `sent 12`, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a sixth time |
+| PR #189's own CI run, the next one | observed, aarch64 (`a81365c`, documentation-only): `connect 0 in 1382 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a seventh time, and the first retransmission in nine sightings |
 
-Twenty-six entries, thirty-five occurrences -- and the table is the tally,
+Twenty-eight entries, thirty-seven occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last twenty-one rows
+them and are not independently re-verified here. The last twenty-three rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **twenty-six instrumented** occurrences
-behind the other twenty rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **twenty-eight instrumented** occurrences
+behind the other twenty-two rows carry the guest's side. Rows and
 occurrences differ because **eight** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
@@ -1006,11 +1008,21 @@ nothing.
 
 **Sightings twenty-six and twenty-seven widened the range rather than
 narrowing it**, and they landed on consecutive CI runs of the same pull
-request. The observed connects are now **597, 787, 803, 1031, 1089, 1116 and
+request. The observed connects were then **597, 787, 803, 1031, 1089, 1116 and
 1510 ms** — a spread of two and a half to one — and **three of the seven
 had no retransmission at all**. Four of seven having exactly one
 retransmission is what a three-sample reader saw as a timer. It is not
 one, and each new sighting has moved that ratio further from one.
+
+**And sighting thirty-six went below the floor.** `529 ms`, against a
+previous fastest of 597. Every statement of a "597 to 1510 ms band"
+in this file and in
+`docs/audit/next-subsystem-nettest-probe.md` was true when written and
+is now wrong at the bottom: the band is **529 to 1510 ms**, and the
+right way to read that is that the range has widened at both ends
+every time it has been tested, which is the opposite of a timer. The
+retransmission ratio moved too — sighting thirty-seven is the first
+`retransmits +1` in nine sightings.
 
 The roster is **seven-for-seven on one connection carrying nothing**,
 and that remains the only part of this defect that has never varied.
@@ -1074,7 +1086,8 @@ silent for the full twenty seconds** to the deadline, and slirp
 answering a *fresh* connection through itself in 1 ms to connect and
 1 ms to echo while it did so. The only figure that moved is the
 connect: 791 ms against sighting thirty's 894 ms, both inside the
-597--1510 ms band this file has recorded throughout.
+band this file had recorded to that point (597--1510 ms; sighting
+thirty-six has since taken the floor to 529).
 
 **What the second reading buys.** One reading of a new instrument is a
 reading; two independent ones are a finding. The conclusion above no

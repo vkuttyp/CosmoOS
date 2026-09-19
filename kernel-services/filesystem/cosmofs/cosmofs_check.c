@@ -163,6 +163,29 @@ struct check {
     struct bitmap alive;   /* inode numbers the map holds, whatever their nlink */
     struct counts links;   /* directory entries naming each inode */
     struct counts nlink;   /* what each inode says its link count is */
+    /*
+     * Duplicate names, the one invariant here that is about strings.
+     * A set of names would be unbounded in the size of the largest
+     * directory; this is a fixed bitmap, hashed into once per entry
+     * and CLEARED per directory, so the pass keeps the fixed-budget
+     * property it already has. A set bit means "maybe seen", and the
+     * only thing a hit buys is a re-scan of the directory -- which is
+     * where the answer actually comes from. A false positive costs a
+     * re-scan, never a wrong finding
+     * (docs/audit/next-subsystem-fsck-unchecked.md).
+     */
+    uint8_t *name_seen;
+    /*
+     * The two block buffers the names pass needs, allocated up front
+     * with the maps rather than per call. A mid-walk `kmalloc` that
+     * failed used to mean "no duplicate here", which is a SILENT loss
+     * of coverage in a report that still said `clean` -- review found
+     * it, and the pass's own rule is that it runs out of memory before
+     * it starts or not at all. Neither buffer is used recursively:
+     * `check_dup_names` completes before `walk_dir` descends.
+     */
+    uint8_t *dup_blk;      /* the block check_dup_names is scanning */
+    uint8_t *dup_cmp;      /* the earlier block dir_name_repeats re-reads */
     unsigned flags;
     /* Which counters the comparison found wrong, so that repair fixes
      * those and only those: the orphan repair changes `inode_count`
@@ -171,6 +194,47 @@ struct check {
     bool free_wrong;
     bool inodes_wrong;
 };
+
+/* 4 KiB, so a directory of a hundred names collides a few per cent of
+ * the time and pays a re-scan for it. Sized once for the whole pass. */
+#define CFS_CHECK_NAMEBITS 32768u
+#define CFS_CHECK_NAMEBYTES (CFS_CHECK_NAMEBITS / 8u)
+/*
+ * How many bitmap hits one directory may confirm. Each confirmation
+ * re-reads every earlier block of that directory, so an unbounded
+ * count is quadratic in the directory's size while `fs->lock` is
+ * held. On a sound filesystem a hit is a hash collision and is rare
+ * -- 256 of them in one directory means either a corruption worth
+ * reporting or a directory this strategy is wrong for, and in both
+ * cases the honest answer is `partial`.
+ */
+#define CFS_CHECK_MAX_DUP_CONFIRMS 256u
+
+/* FNV-1a over the name's bytes: short strings, no allocation, and the
+ * quality only has to be good enough that collisions are rare -- a
+ * collision is a re-scan, not an answer. */
+static unsigned name_hash(const char *name, unsigned len)
+{
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < len; i++) {
+        h ^= (unsigned char)name[i];
+        h *= 16777619u;
+    }
+    return h % CFS_CHECK_NAMEBITS;
+}
+
+#if CONFIG_DEBUG
+/*
+ * The hash, for the one test that needs two names KNOWN to collide.
+ * Without this the test would pick a pair by hand, and a change to
+ * `name_hash` would stop them colliding and quietly turn the
+ * false-positive assertion into a test of nothing.
+ */
+unsigned cosmofs_test_name_hash(const char *name, unsigned len)
+{
+    return name_hash(name, len);
+}
+#endif
 
 static void name_it(struct cosmofs_check_class *cl, uint64_t what)
 {
@@ -222,11 +286,66 @@ static void walk_alloc(struct check *ck, uint64_t root, bool live)
     cfs_buf_put(ck->fs, b);
 }
 
+/*
+ * One inode's runs as they stream past, so the format's two ordering
+ * rules can be checked without a map: "runs are sorted by lblk and
+ * never overlap". One `prev` is enough because the walk visits an
+ * inode's runs in their on-disk order -- direct[] then the chain.
+ */
+struct ext_seq {
+    bool have;
+    uint32_t lblk;
+    uint32_t count;
+    uint64_t ino;      /* what the classes name */
+    bool reported;     /* one finding per inode, not one per run after the first */
+};
+
+/*
+ * The two checks, in this order deliberately.
+ *
+ * Tested on an unordered pair, EVERY descending pair also looks like an
+ * overlap -- so a pair that fails ordering is reported as extent_order
+ * and the overlap test is skipped for it. There is nothing useful to
+ * say about the extent of an overlap between runs that are not in
+ * order, and `cosmofs-check-extent-order` requires the two classes to
+ * stay distinct.
+ *
+ * The end is computed in 64 bits. `lblk` and `count` are both uint32_t,
+ * so `lblk + count` wraps for a run near the 2^32-block bound, making a
+ * real overlap invisible -- the production mapper already promotes this
+ * sum (cosmofs_format.h), and a checker that did not would carry the
+ * bug it is looking for.
+ */
+static void check_ext_seq(struct check *ck, struct ext_seq *seq, const struct cfs_extent *e)
+{
+    uint32_t lblk = e->lblk, count = cfs_ext_count(e);
+    if (!seq->have) {
+        seq->have = true;
+        seq->lblk = lblk;
+        seq->count = count;
+        return;
+    }
+    if (!seq->reported) {
+        if (lblk <= seq->lblk) {
+            name_it(&ck->rep->extent_order, seq->ino);
+            seq->reported = true;
+        } else if ((uint64_t)lblk < (uint64_t)seq->lblk + seq->count) {
+            name_it(&ck->rep->extent_overlap, seq->ino);
+            seq->reported = true;
+        }
+    }
+    seq->lblk = lblk;
+    seq->count = count;
+}
+
 /* Every block one extent names. A physical size of zero is a hole. */
-static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live)
+static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live,
+                         struct ext_seq *seq)
 {
     if (cfs_ext_count(e) == 0)
-        return;
+        return;               /* an unused slot is not a run and breaks no order */
+    if (seq != NULL)
+        check_ext_seq(ck, seq, e);
     uint32_t psize = cfs_ext_psize(e);
     for (uint32_t k = 0; k < psize; k++)
         claim(ck, e->start + k, live);
@@ -239,7 +358,8 @@ static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live
  * its extents, which read every extent block twice and left the second
  * read reporting nothing when it failed.
  */
-static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
+static void walk_extent_chain(struct check *ck, uint64_t head, bool live,
+                              struct ext_seq *seq)
 {
     uint64_t next = head;
     unsigned guard = 0;
@@ -254,7 +374,7 @@ static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
             return;
         const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
         for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK; i++)
-            claim_extent(ck, &eb->ext[i], live);
+            claim_extent(ck, &eb->ext[i], live, seq);
         next = eb->next;
         cfs_buf_put(ck->fs, b);
     }
@@ -278,9 +398,12 @@ static void walk_csum_tree(struct check *ck, uint64_t root, bool live)
 /* One inode's trees and every data block its extents name. */
 static void walk_inode_blocks(struct check *ck, const struct cfs_inode *in, bool live)
 {
+    /* One sequence per inode: direct[] then the chain, which is the
+     * order the runs are in on disk. */
+    struct ext_seq seq = { .ino = in->ino };
     for (unsigned i = 0; i < CFS_DIRECT; i++)
-        claim_extent(ck, &in->direct[i], live);
-    walk_extent_chain(ck, in->indirect, live);
+        claim_extent(ck, &in->direct[i], live, &seq);
+    walk_extent_chain(ck, in->indirect, live, &seq);
     walk_csum_tree(ck, in->csum_root, live);
 }
 
@@ -471,6 +594,100 @@ static bool inode_exists(struct check *ck, uint64_t ino, struct cfs_inode *out)
 /* Every entry of one directory, counting references and validating shape.
  * Recursion is bounded by the tree's own depth; a cycle is caught by the
  * reachability map, which refuses to walk an inode twice. */
+/*
+ * Does the entry at (`lblk`, `slot`) repeat a name that appears EARLIER
+ * in this directory? Only earlier, so a name that appears twice is
+ * reported once per repeat rather than once per copy.
+ *
+ * `cur` is the caller's already-read copy of block `lblk`, so the
+ * common case of a repeat inside one block costs no I/O. Earlier
+ * blocks are re-read into a scratch buffer; a block that cannot be
+ * re-read makes the answer unknown, and unknown is reported as NOT a
+ * duplicate -- an unreadable block is already `unreadable` and
+ * `partial`, and inventing a second finding from it would be guessing.
+ */
+static bool dir_name_repeats(struct check *ck, const struct cfs_inode *dir,
+                             const uint8_t *cur, uint64_t lblk, unsigned slot)
+{
+    const struct cfs_dirent *d = (const struct cfs_dirent *)cur;
+    const char *want = d[slot].name;
+    unsigned wantlen = d[slot].namelen;
+
+    /* Earlier slots of the block already in hand. */
+    for (unsigned s = 0; s < slot; s++)
+        if (d[s].ino != 0 && d[s].namelen == wantlen &&
+            memcmp(d[s].name, want, wantlen) == 0)
+            return true;
+    if (lblk == 0)
+        return false;
+
+    uint8_t *scratch = ck->dup_cmp;    /* preallocated: cannot fail here */
+    bool found = false;
+    for (uint64_t b = 0; b < lblk && !found; b++) {
+        if (cfs_dir_read_block_at(ck->fs, dir, b, scratch) != 0)
+            continue;
+        const struct cfs_dirent *e = (const struct cfs_dirent *)scratch;
+        for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++)
+            if (e[s].ino != 0 && e[s].namelen == wantlen &&
+                memcmp(e[s].name, want, wantlen) == 0) {
+                found = true;
+                break;
+            }
+    }
+    return found;
+}
+
+/*
+ * One directory's names, hashed into the shared bitmap. A set bit says
+ * "maybe"; `dir_name_repeats` says yes or no. The re-scan is not
+ * optional -- without it a hash collision between two different names
+ * would be reported as a duplicate on a sound filesystem, which is the
+ * false-positive path `cosmofs-check-dup-name` asserts is quiet.
+ */
+static void check_dup_names(struct check *ck, uint64_t ino, const struct cfs_inode *dir)
+{
+    if (ck->name_seen == NULL)
+        return;
+    memset(ck->name_seen, 0, CFS_CHECK_NAMEBYTES);
+    uint8_t *block = ck->dup_blk;      /* preallocated: cannot fail here */
+    /*
+     * A bound on the confirmations, because each one re-reads every
+     * earlier block of this directory: a directory large enough to
+     * collide often would otherwise do quadratic reads while holding
+     * `fs->lock`, stalling the filesystem during a maintenance pass
+     * (review found this; the report had named the cost and not
+     * bounded it). Past the bound the answer is INCOMPLETE rather than
+     * wrong: `partial` says the pass did not get there, exactly as it
+     * does for a block it could not read.
+     */
+    unsigned confirms = 0;
+    uint64_t blocks = (dir->size + CFS_BLOCK - 1) / CFS_BLOCK;
+    for (uint64_t lblk = 0; lblk < blocks; lblk++) {
+        if (cfs_dir_read_block_at(ck->fs, dir, lblk, block) != 0)
+            continue;         /* already `unreadable` and `partial` in the main pass */
+        const struct cfs_dirent *d = (const struct cfs_dirent *)block;
+        for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
+            if (d[s].ino == 0 || d[s].namelen == 0 || d[s].namelen > CFS_NAME_MAX)
+                continue;     /* a malformed entry is the main pass's finding */
+            unsigned h = name_hash(d[s].name, d[s].namelen);
+            if (ck->name_seen[h >> 3] & (uint8_t)(1u << (h & 7))) {
+                if (confirms >= CFS_CHECK_MAX_DUP_CONFIRMS) {
+                    ck->rep->partial = true;
+                    continue;      /* incomplete, never wrong */
+                }
+                confirms++;
+                if (dir_name_repeats(ck, dir, block, lblk, s))
+                    name_it(&ck->rep->dir_dup_name, ino);
+            } else {
+                ck->name_seen[h >> 3] |= (uint8_t)(1u << (h & 7));
+            }
+        }
+    }
+    /* `block` is ck->dup_blk and belongs to the pass, not to this
+     * call: freeing it here handed the allocator a buffer the next
+     * directory was about to use, which panicked in the slab. */
+}
+
 static void walk_dir(struct check *ck, uint64_t ino, const struct cfs_inode *dir, unsigned depth)
 {
     if (depth > CFS_CHECK_MAX_DEPTH) {
@@ -483,6 +700,22 @@ static void walk_dir(struct check *ck, uint64_t ino, const struct cfs_inode *dir
         return;
     }
     ck->rep->dirs_seen++;
+    /*
+     * Names first, and in a pass of its own that FINISHES before the
+     * loop below can recurse into a subdirectory.
+     *
+     * The design said "a bitmap sized once, reused per directory",
+     * and that is true only if a directory is finished before the
+     * next is started -- which `walk_dir` does not do: it descends in
+     * the middle of its own entry loop, and the child's memset wipes
+     * the parent's sheet. The first build did exactly that and
+     * reported nothing, because the duplicate sat after the
+     * subdirectory that had just cleared the bit its twin had set.
+     * One bitmap plus recursion needs a stack of bitmaps or a pass
+     * that does not recurse; this is the second, and it keeps the
+     * fixed budget (docs/audit/next-subsystem-fsck-unchecked.md).
+     */
+    check_dup_names(ck, ino, dir);
     uint64_t blocks = (dir->size + CFS_BLOCK - 1) / CFS_BLOCK;
     for (uint64_t lblk = 0; lblk < blocks; lblk++) {
         if (cfs_dir_read_block_at(ck->fs, dir, lblk, block) != 0) {
@@ -736,7 +969,20 @@ static bool report_clean(const struct cosmofs_check_report *r)
     return r->alloc_not_seen.count == 0 && r->seen_not_alloc.count == 0 && r->dup.count == 0 &&
            r->nlink_wrong.count == 0 && r->orphan.count == 0 && r->dangling_entry.count == 0 &&
            r->dir_bad.count == 0 && r->counter_wrong.count == 0 && r->chain_cycle.count == 0 &&
-           r->unreadable.count == 0;
+           r->extent_order.count == 0 && r->extent_overlap.count == 0 &&
+           r->dir_dup_name.count == 0 &&
+           r->unreadable.count == 0 &&
+           /*
+            * A pass that did not finish cannot call a filesystem
+            * sound. Every other `partial` also fires a class, so this
+            * changed nothing until the duplicate-name confirmation
+            * bound arrived: that one stops looking without finding
+            * anything, and a report of `clean` plus `partial` would
+            * have told an operator "no findings" about a directory
+            * the pass had stopped reading. A checker's output is the
+            * claim `this filesystem is sound`, and it cannot make it.
+            */
+           !r->partial;
 }
 
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)
@@ -766,6 +1012,16 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         rc = counts_alloc(&ck.links, fs->sb.next_ino + 2);
     if (rc == 0)
         rc = counts_alloc(&ck.nlink, fs->sb.next_ino + 2);
+    /* Part of the same up-front budget as the maps above: if it cannot
+     * be had, the pass says so before it starts rather than half way
+     * through. */
+    if (rc == 0) {
+        ck.name_seen = kmalloc(CFS_CHECK_NAMEBYTES, 0);
+        ck.dup_blk = kmalloc(CFS_BLOCK, 0);
+        ck.dup_cmp = kmalloc(CFS_BLOCK, 0);
+        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL)
+            rc = -ENOMEM;
+    }
     if (rc) {
         mutex_unlock(&fs->lock);
         bitmap_free(&ck.seen);
@@ -774,10 +1030,14 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         bitmap_free(&ck.alive);
         counts_free(&ck.links);
         counts_free(&ck.nlink);
+        kfree(ck.name_seen);
+        kfree(ck.dup_blk);
+        kfree(ck.dup_cmp);
         return rc;   /* -ENOMEM before the walk, never half way through it */
     }
     rep.bytes_allocated = (uint64_t)(ck.seen.nchunks + ck.live.nchunks + ck.reach.nchunks + ck.alive.nchunks +
-                                     ck.links.nchunks + ck.nlink.nchunks) * CFS_BLOCK;
+                                     ck.links.nchunks + ck.nlink.nchunks) * CFS_BLOCK +
+                          CFS_CHECK_NAMEBYTES + 2u * CFS_BLOCK;
 
     /*
      * Blocks this transaction released are still marked allocated until
@@ -838,6 +1098,9 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     bitmap_free(&ck.alive);
     counts_free(&ck.links);
     counts_free(&ck.nlink);
+    kfree(ck.name_seen);
+    kfree(ck.dup_blk);
+    kfree(ck.dup_cmp);
 
     rep.clean = report_clean(&rep);
     rep.elapsed_ns = clock_since_ns(t0);
@@ -848,12 +1111,15 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
               (unsigned long long)rep.unreadable.name[0]);
     if (!rep.clean)
         kwarn("cosmofs: check: %llu leaked, %llu free-in-use, %llu cross-linked, %llu bad nlink, %llu orphan, "
-              "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unreadable",
+              "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unordered extents, "
+              "%llu overlapping extents, %llu duplicate names, %llu unreadable",
               (unsigned long long)rep.alloc_not_seen.count, (unsigned long long)rep.seen_not_alloc.count,
               (unsigned long long)rep.dup.count, (unsigned long long)rep.nlink_wrong.count,
               (unsigned long long)rep.orphan.count, (unsigned long long)rep.dangling_entry.count,
               (unsigned long long)rep.dir_bad.count, (unsigned long long)rep.counter_wrong.count,
-              (unsigned long long)rep.chain_cycle.count, (unsigned long long)rep.unreadable.count);
+              (unsigned long long)rep.chain_cycle.count, (unsigned long long)rep.extent_order.count,
+              (unsigned long long)rep.extent_overlap.count, (unsigned long long)rep.dir_dup_name.count,
+              (unsigned long long)rep.unreadable.count);
     return rc;
 }
 

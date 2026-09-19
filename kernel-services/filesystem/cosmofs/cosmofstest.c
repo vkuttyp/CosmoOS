@@ -1660,10 +1660,68 @@ static bool check_fixture(struct blkdev **bd, const char **reason)
 
 /* The fixture's file, by number: the corruption hook takes an inode and
  * not a path, so the test does the one name resolution. */
+/*
+ * Which classes were not empty, for a failure message.
+ *
+ * `CHECK_CLEAN(r)` says a report was not clean and nothing else; the
+ * class has to be recovered from the serial log, which is exactly what
+ * happened when CI failed `cosmofs-orphan-reserved` while this unit's
+ * report was in review (docs/audit/next-subsystem-fsck-unchecked.md).
+ * The buffer is static because the CHECK macros take a `const char *`
+ * that outlives the call.
+ */
+static const char *check_why(const struct cosmofs_check_report *r)
+{
+    static char buf[224];
+    unsigned n = 0;
+    buf[0] = '\0';
+    const struct { const char *name; const struct cosmofs_check_class *cl; } cls[] = {
+        { "leaked", &r->alloc_not_seen }, { "free-in-use", &r->seen_not_alloc },
+        { "cross-linked", &r->dup },      { "nlink", &r->nlink_wrong },
+        { "orphan", &r->orphan },         { "dangling", &r->dangling_entry },
+        { "dir-bad", &r->dir_bad },       { "counter", &r->counter_wrong },
+        { "chain-cycle", &r->chain_cycle },
+        { "extent-order", &r->extent_order },
+        { "extent-overlap", &r->extent_overlap },
+        { "dup-name", &r->dir_dup_name },
+        { "unreadable", &r->unreadable },
+    };
+    for (unsigned i = 0; i < sizeof(cls) / sizeof(cls[0]); i++) {
+        if (cls[i].cl->count == 0)
+            continue;
+        n += (unsigned)ksnprintf(buf + n, sizeof(buf) - n, "%s%s=%llu first 0x%llx",
+                                 n ? ", " : "report not clean: ", cls[i].name,
+                                 (unsigned long long)cls[i].cl->count,
+                                 (unsigned long long)(cls[i].cl->named ? cls[i].cl->name[0] : 0));
+        if (n >= sizeof(buf) - 40)
+            break;
+    }
+    if (n == 0)
+        ksnprintf(buf, sizeof(buf), "report not clean, but every class is empty (partial=%d)",
+                  (int)r->partial);
+    return buf;
+}
+
+/* `CHECK_CLEAN(r)` with the reason attached. */
+#define CHECK_CLEAN(r)                                                         \
+    do {                                                                       \
+        if (!(r).clean) {                                                      \
+            *reason = check_why(&(r));                                         \
+            return false;                                                      \
+        }                                                                      \
+    } while (0)
+
 static uint64_t check_file_ino(void)
 {
     struct cosmo_stat st;
     return vfs_stat(NULL, ENG "/file", &st) == 0 ? st.ino : 0;
+}
+
+/* The fixture's directory, for the faults that need one. */
+static uint64_t check_sub_ino(void)
+{
+    struct cosmo_stat st;
+    return vfs_stat(NULL, ENG "/sub", &st) == 0 ? st.ino : 0;
 }
 
 static void check_teardown(struct blkdev *bd)
@@ -1804,6 +1862,255 @@ bool selftest_cosmofs_check_faults(const char **reason)
  * from the live tree. A checker that did not walk snapshots would call
  * every one of them a leak.
  */
+/*
+ * The format says runs are sorted by lblk and never overlap
+ * (docs/kernel-services/filesystem/cosmofs/design.md). Until this unit
+ * the checker verified neither, and said so.
+ *
+ * The two are separate tests because they are separate classes, and the
+ * ordering one exists to keep them separate: a descending pair ALSO
+ * satisfies "this begins inside the previous", so a checker that tested
+ * overlap first would report every ordering fault as an overlap.
+ */
+bool selftest_cosmofs_check_extent_order(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_EXTENT_ORDER, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.extent_order.count == 1 && r.extent_order.name[0] == what);
+    /* And NOT as an overlap: the whole reason there are two classes. */
+    CHECK(r.extent_overlap.count == 0);
+    /* Nothing else fires: the runs the hook added point at allocated
+     * blocks of their own, so this is one finding and not a pile. */
+    CHECK(r.dup.count == 0 && r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-extent-order: runs that descend by lblk are reported as "
+          "extent_order and not as an overlap");
+    return true;
+}
+
+bool selftest_cosmofs_check_extent_overlap(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_EXTENT_OVERLAP, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.extent_overlap.count == 1 && r.extent_overlap.name[0] == what);
+    CHECK(r.extent_order.count == 0);        /* the runs ascend; only the ranges overlap */
+    /*
+     * THE VACUITY GUARD, named in the report before the build. The
+     * existing `block_seen` map already catches an overlap that shares
+     * a POOL block, so a careless fixture would be caught by the old
+     * code and prove nothing about the new comparison. The hook points
+     * the overlapping run at a different, freshly allocated block, so
+     * `dup` must stay empty -- if it fires, this test is measuring the
+     * cross-link checker instead.
+     */
+    CHECK(r.dup.count == 0);
+    CHECK(r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-extent-overlap: two runs of one inode covering one lblk at "
+          "DIFFERENT pool blocks are reported, which the cross-link map cannot see");
+    return true;
+}
+
+/*
+ * Two of the four `dir_bad` reporting paths that nothing had ever made
+ * fire (docs/audit/next-subsystem-fsck-unchecked.md). Each is one site
+ * in the checker, and until now each was a line of code with no
+ * evidence it worked.
+ */
+bool selftest_cosmofs_check_bad_ptr(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_BAD_PTR, file_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count == 1 && r.dir_bad.name[0] == what);
+    /* The pass survives it: a pointer it cannot map must not be used to
+     * index the bitmap, which is what the early return is for. */
+    CHECK(r.blocks_seen > 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-bad-ptr: a block pointer past the pool is reported and not "
+          "used to index the seen map");
+    return true;
+}
+
+bool selftest_cosmofs_check_namelen(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    /* The root directory: the fixture put `file` and `sub` in it. */
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_NAMELEN, CFS_ROOT_INO, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-namelen: an entry claiming a name longer than its slot is "
+          "refused by length before its bytes are read");
+    return true;
+}
+
+bool selftest_cosmofs_check_two_parents(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, sub_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((sub_ino = check_sub_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_TWO_PARENTS, sub_ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-two-parents: a directory named from two directories is "
+          "reported, so the directory graph is checked for being a tree");
+    return true;
+}
+
+/*
+ * The extent chain's OWN guard, which is a different constant from the
+ * one the other four `chain_cycle` sites use: this walker is bounded by
+ * CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2, and the other sites by
+ * CFS_CHECK_MAX_CHAIN or CFS_CHECK_MAX_DEPTH. This unit tests this one
+ * and the report says the other four stay untested rather than
+ * implying one test covers five walkers.
+ */
+bool selftest_cosmofs_check_chain_cycle(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0, file_ino = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_CHAIN_CYCLE, file_ino, &what) == 0);
+    /* That this call RETURNS is half the assertion: without the guard
+     * the walk does not terminate and the boot reaches its timeout. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.chain_cycle.count >= 1);
+    /*
+     * The walk revisits the two blocks until the guard stops it, so the
+     * live-claim map sees each of them more than once and `dup` fires
+     * too. That is not noise: it is what a cyclic chain looks like to a
+     * checker that claims as it walks, and asserting it keeps the test
+     * honest about what the pass actually reports.
+     */
+    CHECK(r.dup.count >= 1);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-chain-cycle: an extent chain that returns to itself is "
+          "reported and the walk terminates on its own guard");
+    return true;
+}
+
+/*
+ * The last of the five reporting paths nothing had ever fired. The
+ * comment beside that site says a count past the block is "the table
+ * being wrong, not the snapshot holding nothing" -- so the check must
+ * report the table AND still walk what the block does hold, or every
+ * member's blocks come back as leaks. Both halves are asserted, because
+ * the second is the one the comment is about and the one that had no
+ * evidence behind it.
+ */
+bool selftest_cosmofs_check_snap_members(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/one", 0755) == 0);   /* takes one, and commits */
+
+    int rc = cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_SNAP_MEMBERS, 0, &what);
+    if (rc == -ENOTSUP) {
+        /* A member table is a version-4 shape; before it there is no
+         * count to be wrong. Skipped rather than silently passing. */
+        kinfo("selftest: cosmofs-check-snap-members: needs format v4 or later; skipping");
+        check_teardown(bd);
+        return true;
+    }
+    CHECK(rc == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    /* The walk continued: a bitmap it did not reach would make every
+     * block the snapshot holds look unreferenced. */
+    CHECK(r.alloc_not_seen.count == 0);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-snap-members: a member count past its block is reported as "
+          "the table being wrong, and the walk still reads what the block holds");
+    return true;
+}
+
+/*
+ * The one invariant here that is about strings rather than numbers.
+ * The pass keeps a fixed bitmap, hashes each name into it, and re-scans
+ * the directory only when a bit says "maybe" -- so a hash collision
+ * costs a re-scan and never a wrong answer
+ * (docs/audit/next-subsystem-fsck-unchecked.md).
+ */
+bool selftest_cosmofs_check_dup_name(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DUP_NAME, CFS_ROOT_INO, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_dup_name.count == 1 && r.dir_dup_name.name[0] == what);
+    check_teardown(bd);
+
+    /*
+     * The other half, which is the one a bitmap makes easy to get
+     * wrong: two DIFFERENT names that hash to the same bit must report
+     * nothing. Only the re-scan keeps this quiet -- with the bitmap hit
+     * trusted, a sound filesystem is reported as having a duplicate.
+     *
+     * The pair is deterministic rather than "enough names that
+     * something probably collides": sixty-four distinct names collide
+     * in a 32768-bit map only about six per cent of the time, so that
+     * version of this test would have passed against a missing re-scan
+     * nineteen times in twenty. The collision is ASSERTED first, so a
+     * change to the hash fails here loudly instead of quietly making
+     * the rest of this test vacuous.
+     */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_name_hash("asl", 3) == cosmofs_test_name_hash("bea", 3));
+    CHECK(write_file(ENG "/asl", "x", 1));
+    CHECK(write_file(ENG "/bea", "y", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_dup_name.count == 0);
+    CHECK_CLEAN(r);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-dup-name: one name twice at two inodes is reported, and "
+          "sixty-four distinct names in one directory are not");
+    return true;
+}
+
 bool selftest_cosmofs_check_snapshot(const char **reason)
 {
     struct blkdev *bd = NULL;
@@ -1819,7 +2126,7 @@ bool selftest_cosmofs_check_snapshot(const char **reason)
 
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.snapshots_seen == 1);
-    CHECK(r.clean);                       /* the held blocks are not leaks */
+    CHECK_CLEAN(r);                       /* the held blocks are not leaks */
     CHECK(r.dup.count == 0);              /* nor cross-links: sharing is the point */
     CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
 
@@ -1879,7 +2186,7 @@ bool selftest_cosmofs_orphan_crash(const char **reason)
     CHECK(st.pending_orphans == 1);
     /* What the filesystem looks like with the promise outstanding. */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);                          /* a recorded orphan is not a finding */
+    CHECK_CLEAN(r);                          /* a recorded orphan is not a finding */
     CHECK(r.orphan.count == 0);
     uint64_t free_outstanding = r.counted_free;
 
@@ -1901,7 +2208,7 @@ bool selftest_cosmofs_orphan_crash(const char **reason)
      */
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);                          /* the claim */
+    CHECK_CLEAN(r);                          /* the claim */
     CHECK(r.orphan.count == 0);
     /* The file's sixteen blocks are back, and so is its inode slot. */
     CHECK(r.counted_free >= free_outstanding + 16);
@@ -2016,7 +2323,7 @@ bool selftest_cosmofs_orphan_dir(const char **reason)
     CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
     CHECK(r.nlink_wrong.count == 0);        /* the replay did not touch the parent */
     CHECK(vfs_stat(NULL, ENG "/keep", &pst) == 0);
@@ -2068,7 +2375,7 @@ bool selftest_cosmofs_orphan_rename(const char **reason)
     cosmofs_test_set_writeback(mount_of(ENG), false);
     CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(read_matches(ENG "/victim", "short", 5));   /* the rename itself stood */
     CHECK(r.counted_free >= free_outstanding + 16);   /* the replaced file's blocks came back */
 
@@ -2181,7 +2488,7 @@ bool selftest_cosmofs_orphan_reserved(const char **reason)
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.seen_not_alloc.count == 0);   /* the claim */
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
     CHECK(st.pending_orphans == 0);
 
@@ -2286,7 +2593,7 @@ bool selftest_cosmofs_orphan_supersede(const char **reason)
     CHECK(vfs_sync() == 0);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
 
     kinfo("selftest: cosmofs-orphan-supersede: 100 commits, %llu free blocks lost to them in all",
           (unsigned long long)(first.free_blocks - last.free_blocks));
@@ -2325,7 +2632,7 @@ bool selftest_cosmofs_orphan_rollback(const char **reason)
     CHECK(after.orphan_root == 0);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(read_matches(ENG "/held", "content", 7));   /* the unlink went with it */
 
     kinfo("selftest: cosmofs-orphan-rollback: the failed fill left generation %llu and %llu free blocks",
@@ -2377,7 +2684,7 @@ bool selftest_cosmofs_orphan_suspect(const char **reason)
     CHECK(st.nlink == 1);
     struct cosmofs_check_report r;
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
 
     kinfo("selftest: cosmofs-orphan-suspect: a record naming a linked inode was refused and the file survived");
@@ -2429,7 +2736,7 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
     CHECK(vfs_sync() == 0);
     CHECK(vfs_sync() == 0);   /* the deferred frees land on the commit after the repair's */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.counted_free == free_before);   /* every block the inode held came back */
 
     check_teardown(bd);
@@ -2494,7 +2801,7 @@ bool selftest_cosmofs_check_many_orphans(const char **reason)
     /* Nothing left: the point of the test. A repair that worked from the
      * eight names would report eight repaired and leave four behind, and
      * this pass would find them. */
-    CHECK(r.clean);
+    CHECK_CLEAN(r);
     CHECK(r.orphan.count == 0);
     CHECK(r.counted_free > free_with_orphans);   /* and the space came back */
     check_teardown(bd);

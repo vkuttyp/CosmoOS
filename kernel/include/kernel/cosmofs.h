@@ -98,6 +98,14 @@ struct cosmofs_check_report {
     struct cosmofs_check_class orphan;           /* an inode no name reaches */
     struct cosmofs_check_class dangling_entry;   /* an entry naming a free slot */
     struct cosmofs_check_class dir_bad;          /* a malformed entry or a bad pointer */
+    /* The format says runs are sorted by lblk and never overlap
+     * (docs/.../cosmofs/design.md). Two classes, not one, because they
+     * are different repairs: an ordering fault may be repairable by
+     * sorting, an overlap is data loss
+     * (docs/audit/next-subsystem-fsck-unchecked.md). */
+    struct cosmofs_check_class extent_order;     /* an inode whose runs do not ascend by lblk */
+    struct cosmofs_check_class extent_overlap;   /* two runs of one inode covering one lblk */
+    struct cosmofs_check_class dir_dup_name;     /* a name that repeats in one directory */
     struct cosmofs_check_class counter_wrong;    /* a superblock total the walk disagrees with */
     struct cosmofs_check_class chain_cycle;      /* a metadata chain that revisits a block */
     struct cosmofs_check_class unreadable;       /* a metadata block that could not be read */
@@ -179,6 +187,16 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_DIRENT,      /* an entry whose type disagrees with its inode */
     COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
     COSMOFS_CORRUPT_INO_SLOT,    /* an inode slot whose number is not its position */
+    COSMOFS_CORRUPT_EXTENT_ORDER,   /* swap two runs so lblk descends */
+    COSMOFS_CORRUPT_BAD_PTR,        /* a block pointer past the end of the pool */
+    COSMOFS_CORRUPT_TWO_PARENTS,    /* a directory named by an entry in a second directory */
+    COSMOFS_CORRUPT_SNAP_MEMBERS,   /* a snapshot member count larger than its block holds */
+    COSMOFS_CORRUPT_DUP_NAME,       /* one name twice in a directory, at two inodes */
+    COSMOFS_CORRUPT_CHAIN_CYCLE,    /* an extent chain whose last block names an earlier one */
+    COSMOFS_CORRUPT_NAMELEN,        /* an entry whose namelen exceeds its slot */
+    COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
+                                     * at a DIFFERENT pool block -- the case block_seen
+                                     * cannot see (next-subsystem-fsck-unchecked.md) */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
@@ -196,6 +214,14 @@ void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint
  * (docs/audit/next-subsystem-unmount-leak.md).
  */
 uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
+
+#if CONFIG_DEBUG
+/* The checker's duplicate-name hash. Only `cosmofs-check-dup-name`
+ * uses it, to assert that the two names it relies on really do
+ * collide -- otherwise a change to the hash would make that test's
+ * false-positive half vacuous. */
+unsigned cosmofs_test_name_hash(const char *name, unsigned len);
+#endif
 
 /*
  * The invariant a copied deadlist keeps: no block is named by more than

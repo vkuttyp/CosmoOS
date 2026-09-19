@@ -2,7 +2,86 @@
 
 Date: 2026-09-17. Tree: `main` at 0576f57 (after PR #158, thread
 placement). Chosen from `docs/audit/2026-09-deferred-work-inventory.md`
-§3.
+§3. **This report is as built** (PR #189, two years of calendar days
+after it was merged unbuilt), and the banner below records where the
+build differed from it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The report predicted at least one of the five unfired reporting
+   paths would be wrong. None were.** "Five paths that have never
+   executed is five chances" was a good prior and the measurement
+   disagreed with it: every one reported the right class, naming the
+   right block or inode, on its first execution. What *was* wrong
+   twice was my own test fixture — see items 2 and 4. Recorded because
+   a prediction the build refutes is worth as much as one it confirms.
+2. **The vacuity the report named in advance actually happened.** It
+   warned that an overlap fixture sharing a pool block would be caught
+   by the existing cross-link map and prove nothing. The first build
+   declared a two-block run and allocated one, so the run claimed its
+   neighbour, `dup` fired, and the guard `CHECK(r.dup.count == 0)`
+   failed. The hook now allocates the wide run and refuses with
+   `-ENOSPC` rather than producing a short one.
+3. **The duplicate-name bitmap cannot be "sized once and reused per
+   directory", because `walk_dir` recurses.** The design said exactly
+   that, and it is only true if a directory is finished before the
+   next is begun — which the walk does not do: it descends in the
+   middle of its own entry loop, and the child's `memset` wipes the
+   parent's sheet. The first build reported nothing for a real
+   duplicate that sat *after* a subdirectory. The names pass is now a
+   separate loop that completes before any recursion, which keeps the
+   fixed budget; a stack of bitmaps would not have.
+4. **The false-positive test was nearly worthless, and the arithmetic
+   says so.** It used sixty-four distinct names and expected a
+   collision "occasionally": in a 32768-bit map that is about a six
+   per cent chance, so the bug-proof for the re-scan would have passed
+   against a broken checker nineteen times in twenty. It now uses two
+   names *known* to collide (`asl` and `bea`), and **asserts the
+   collision first** through a debug-only `cosmofs_test_name_hash`, so
+   a change to the hash fails loudly instead of quietly making the
+   test vacuous.
+5. **`docs/kernel-services/filesystem/cosmofs/testing.md` does not
+   exist.** The affected-files table named it; cosmofs documents its
+   tests in `design.md`. The same class of mistake as reserving an
+   invariant number without checking which are taken.
+6. **The operator interface was not in the build until review asked
+   for it**, though the report's affected-files table named it. The
+   three new classes moved `rep.clean` while `/dev/fsctl` still
+   serialised ten, so a filesystem with only one of the new faults
+   told an operator "not clean" and showed ten zeroes. Version 2 of
+   the CHECK result appends indices 10-12. The table also named
+   `userland/bin/fsctl.c`; the file is `userland/system/fsctl.c`.
+7. **Two allocation paths could hide a duplicate, and a bound was
+   missing.** Both are review findings and both were real: a
+   mid-walk `kmalloc` failure returned "no duplicate" into a report
+   that still said `clean`, and an unbounded confirmation re-scan is
+   quadratic in a directory's size under `fs->lock`. The buffers are
+   preallocated with the maps now, and confirmations are capped with
+   `partial` past the cap -- incomplete rather than wrong.
+8. **Growing the CHECK result is a protocol version bump, and the
+   first attempt forgot it.** The class array is designed so "a
+   version that adds one grows `nclasses` and moves nothing", and
+   that is true of the *indices* -- but the result is a fixed-size
+   struct the kernel writes whole, so the struct itself got bigger and
+   an old client asking for the ten-class size would have taken
+   `-ERANGE` in the middle of a command that had already passed the
+   version check. `COSMO_FSCTL_VERSION` is 2, so the disagreement
+   happens at the gate instead. Found in review.
+9. **`partial` now implies not `clean`, and it did not.** The
+   confirmation bound (item 7) is the first `partial` that fires no
+   class: every other one -- an unreadable block -- also fills
+   `unreadable`, so `clean` was already false. With the bound, a
+   report could say `clean` AND `partial` about a directory the pass
+   had stopped reading, and `fsctl(8)` prints "clean" and exits zero.
+   A checker's output is the claim *this filesystem is sound*, and a
+   pass that did not finish cannot make it. Found in review, and it
+   is this report's own thesis pointed back at the implementation.
+10. **Thirteen classes, not "ten plus three".** The report counted
+   eight new corruption *kinds* and five unfired reporting *paths*
+   and was careful to distinguish them; the number that ends up in the
+   documentation is the class count, which is ten before and thirteen
+   after (the eight kinds include five that fire classes that already
+   existed).
 
 **Subsystem: the three format invariants `cosmofs_check` does not
 verify, and the five corruption classes it can report that nothing has
@@ -213,7 +292,23 @@ costs a re-scan, not a wrong answer. Option 2 is the fallback if the
 re-scan proves too expensive for large directories, and the report says
 so rather than pretending the choice is obvious.
 
-The class is `dir_dup_name`, reported once per duplicate name.
+**As built, "reused per directory" was not enough** (banner item 3).
+`walk_dir` descends in the middle of its own entry loop, so one shared
+bitmap has the child's reset wipe the parent's sheet, and a duplicate
+sitting after a subdirectory is missed. The names pass is a separate
+loop that **finishes before any recursion**; the bitmap is still sized
+once and the budget is still fixed, but the walk order had to change
+and this paragraph did not say so.
+
+**And the re-scan is bounded** (banner item 7): 256 confirmations per
+directory, because each re-reads every earlier block of it and an
+unbounded count is quadratic under `fs->lock`. Past the bound the pass
+sets `partial`, which — since this is the first `partial` that fires
+no class — is also why `clean` now requires `!partial` (item 9).
+
+The class is `dir_dup_name`, reported once per repeat: a name appearing
+three times is two findings, not one, because each confirmation looks
+only at the entries before it.
 
 ### The five unfired classes, and eight corruption kinds in all
 
@@ -249,11 +344,22 @@ as one everywhere it appears.
   high-water mark rather than a total, which is a deliberate choice, not
   an oversight. Reading it as a total would make a legal filesystem look
   corrupt.
-- **No new on-disk format**, no version bump: every check reads what is
-  already there.
-- **No change to the fixed-budget property.** If the duplicate-name
-  bitmap cannot be allocated, the pass reports `partial` exactly as it
-  does for its existing maps.
+- **No new on-disk format**: every check reads what is already there,
+  and no image written by an older kernel needs converting. ~~no
+  version bump~~ — **there is one, and it is not on-disk**: the
+  `/dev/fsctl` CHECK result grew from ten classes to thirteen, and
+  because the kernel writes that fixed-size struct whole, growing it
+  is not prefix-compatible. `COSMO_FSCTL_VERSION` is 2 (banner item
+  8). The sentence as first written was about the format and read as
+  though it covered the control interface too.
+- **No change to the fixed-budget property.** ~~If the duplicate-name
+  bitmap cannot be allocated, the pass reports `partial`~~ — **as
+  built it returns `-ENOMEM` before the walk starts**, together with
+  the maps, which is the stronger form of the same rule and the one
+  the rest of this pass already followed. Review found the first
+  build doing neither: it allocated per call and treated failure as
+  "no duplicate here", silently, inside a report that still said
+  `clean` (banner item 7).
 
 ## Affected files
 
@@ -263,9 +369,11 @@ as one everywhere it appears.
 | `kernel/include/kernel/cosmofs.h` | `extent_order`, `extent_overlap`, `dir_dup_name` in `struct cosmofs_check_report`; **eight** `COSMOFS_CORRUPT_*` kinds |
 | `kernel-services/filesystem/cosmofs/cosmofs_core.c` | `cosmofs_test_corrupt` writes the **eight** new corruptions |
 | `kernel-services/filesystem/cosmofs/cosmofstest.c` | a test per class; **a helper that prints a report's non-zero counts**, and every existing `CHECK(r.clean)` swept to use it |
-| `userland/bin/fsctl.c` (or wherever the report is printed) | the three new counts |
+| `kernel/include/uapi/cosmo/fsctl.h` | **as built**: version 2 of the CHECK result — `COSMO_FSCTL_CLASSES` 10 → 13, the three appended at indices 10–12 so nothing moves |
+| `kernel-services/vfs/fsctl.c` | **as built**: the three added to the array the kernel fills |
+| `userland/system/fsctl.c` (**not** `userland/bin/`, which the report guessed) | the three new counts in the printer |
 | `docs/kernel-services/filesystem/cosmofs/design.md` | "What it does not check" shrinks to `next_ino`, with the reason it stays |
-| `docs/kernel-services/filesystem/cosmofs/testing.md` | the new tests |
+| ~~`docs/kernel-services/filesystem/cosmofs/testing.md`~~ | **does not exist** (banner item 5); cosmofs documents its tests in `design.md`, which carries them |
 
 ## Migration plan
 
@@ -301,14 +409,14 @@ touches a fuzzer's target.
 
 | test | what it asserts | bug-proof |
 | --- | --- | --- |
-| `cosmofs-check-extent-overlap` | two runs in one inode covering the same `lblk`, pointing at *different* pool blocks, are reported as `extent_overlap` | remove the comparison: the pass calls the filesystem sound, which is today's behaviour |
-| `cosmofs-check-extent-order` | two runs whose `lblk` descends are reported as `extent_order`, and **not** as an overlap | swap the comparison for `>=`: an ordering fault is reported as an overlap, and the two classes stop meaning different things |
-| `cosmofs-check-dup-name` | the same name twice in one directory, pointing at two inodes, is reported once as `dir_dup_name` | drop the re-scan and trust the bitmap hit: a *collision* between two different names is reported as a duplicate, which is a false positive on a sound filesystem |
-| `cosmofs-check-chain-cycle` | an inode's **extent chain** whose last block points back at an earlier block of the same chain is reported as `chain_cycle`, and the pass terminates | **remove the guard at `cosmofs_check.c:247`**: the walk does not terminate and the boot times out at 180 s, which is what that guard prevents. Raising `CFS_CHECK_MAX_CHAIN` proves nothing — the chain is still cyclic, the guard still fires after more iterations, and that constant does not govern this walker at all |
-| `cosmofs-check-bad-ptr` | a block pointer past the pool's end is `dir_bad` | remove the range test: the pass reads outside the pool |
-| `cosmofs-check-namelen` | an over-long `namelen` is `dir_bad` | remove the length test: the pass reads past the entry |
-| `cosmofs-check-two-parents` | a directory named from two directories is `dir_bad` | remove the second-parent test: a cycle in the directory graph is called sound |
-| `cosmofs-check-snap-members` | a snapshot member count too large for its block is `dir_bad` | remove the fit test: the pass reads past the block |
+| `cosmofs-check-extent-overlap` | two runs in one inode covering the same `lblk`, pointing at *different* pool blocks, are reported as `extent_overlap` | remove the comparison: **run, this test alone fails** — the pass calls the filesystem sound, which was the behaviour before this unit |
+| `cosmofs-check-extent-order` | two runs whose `lblk` descends are reported as `extent_order`, and **not** as an overlap | test overlap *first*: **run, this test alone fails** — the descending pair is reported as an overlap and the two classes stop meaning different things |
+| `cosmofs-check-dup-name` | the same name twice in one directory, pointing at two inodes, is reported once as `dir_dup_name`. **As built** it also asserts the opposite half with two names *known* to collide (`asl`, `bea`), and asserts the collision itself first so the half cannot go vacuous | drop the re-scan and trust the bitmap hit: **run, 1 failure**, at `r.dir_dup_name.count == 0` — a sound filesystem is reported as having a duplicate |
+| `cosmofs-check-chain-cycle` | an inode's **extent chain** whose last block points back at an earlier block of the same chain is reported as `chain_cycle`, and the pass terminates. **As built** it also asserts `dup`, because a walk that claims as it goes sees each block of the cycle more than once — that is what a cyclic chain looks like to this checker, and asserting it keeps the test honest | remove the guard in `walk_extent_chain`: **run, and it is the one proof that is not a failed assertion** — the boot `timed out after 180s`, having reached 199 of 360 self-tests before hanging inside this test. The guard is what stands between a cyclic chain and a kernel that never finishes checking one. Raising `CFS_CHECK_MAX_CHAIN` proves nothing — that constant does not govern this walker |
+| `cosmofs-check-bad-ptr` | a block pointer past the pool's end is `dir_bad`, and the pass survives it rather than indexing the seen map with it | remove the range report: **run, this test alone fails** |
+| `cosmofs-check-namelen` | an over-long `namelen` is `dir_bad` | remove the length test: **run, this test alone fails** |
+| `cosmofs-check-two-parents` | a directory named from two directories is `dir_bad` | remove the second-parent report: **run, this test alone fails** |
+| `cosmofs-check-snap-members` | a snapshot member count too large for its block is `dir_bad`, **and the walk still reads what the block does hold** — the half the site's own comment is about | remove the fit report: **run, this test alone fails** |
 | `cosmofs-replay` (existing) | unchanged, now also checking the three new invariants over 410 images | — |
 | every test asserting `r.clean` (existing) | on failure, reports **which** classes were non-zero rather than only that the report was not clean | assert the boolean alone: a failure says "not clean" and the class has to be recovered from the serial log, which is what happened to the live instance above |
 
@@ -322,16 +430,35 @@ the new comparison removed, the pass reports nothing.
 
 ## Benchmarks
 
-- **`cosmofs_check` wall time** over the boot's scratch filesystem,
-  before and after. The extent checks are a comparison per extent; the
-  claim is that they do not show, and the benchmark is what makes that a
-  measurement.
-- **The duplicate-name cost**, separately, because it is the one that
-  re-reads a directory on a hit: time a directory of many names with no
-  duplicates (the false-positive path) against one with a duplicate.
-- **`cosmofs-replay`'s total**, which is 410 checks and is already the
-  slowest test in the suite at ~13 s. If three new checks move it, the
-  crash suite's budget is where it shows.
+**Measured, two runs of each on one machine, x86-64 debug.** The claim
+was that the extent checks would not show; they do not, and neither
+does the rest.
+
+| | `main` | this branch |
+| --- | --- | --- |
+| `cosmofs-check-clean` | 22, 33 ms | 32, 33 ms |
+| `cosmofs-replay` (410 images) | 12550, 12381 ms | 12421, 12996 ms |
+| `cosmofs-check-dup-name` | *(does not exist)* | 60, 60 ms |
+
+**Both ranges overlap, and that is the whole result** — the difference
+between the two columns is smaller than the difference between two
+runs of the same column, so the honest statement is "no cost outside
+run-to-run variance" rather than a figure. `cosmofs-replay` is the one
+that would have shown it: 410 images, three new checks on each, and it
+is already the slowest test in the suite.
+
+The duplicate-name re-scan is the one cost that could bite, because it
+re-reads a directory on a hit. It does not here, for a reason worth
+stating rather than hiding: the directories in this suite are small,
+so the measurement bounds the cost on *these* filesystems and says
+nothing about a directory of ten thousand names. Option 2 in the
+design (a hash set per directory) remains the fallback if one ever
+appears, and `cosmofs-check-dup-name`'s own 60 ms includes deliberately
+colliding names, which is the re-scan path being exercised.
+
+**Not measured: the memory.** The pass allocates 4 KiB more than it
+did, reported in `bytes_allocated`, and against maps already sized to
+the filesystem that is not a number worth a benchmark.
 
 ## Risks
 
