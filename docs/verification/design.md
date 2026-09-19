@@ -287,6 +287,31 @@ between runs — 1386 ms for `svc` on x86-64 and 1489 ms on aarch64 in
 the runs quoted above. They are for attribution between sections, not
 a baseline: see the budget paragraph.
 
+**And the first thing they attributed was CI's slowdown, which is not
+uniform.** The reason `process-user` has twice outgrown a budget is
+that a shared runner costs some sections far more than others. Same
+code, this developer's machine against CI:
+
+| section | x86-64 local → CI | aarch64 local → CI |
+| --- | --- | --- |
+| `svc` | 1386 → 1890 ms (1.36×) | 1489 → 2823 ms (**1.90×**) |
+| `proc` | 912 → 1170 ms (1.28×) | 939 → 1814 ms (**1.93×**) |
+| `fsctl` | 377 → 503 ms (1.33×) | 416 → 627 ms (1.51×) |
+| `fs` | 128 → 159 ms (1.24×) | 145 → 160 ms (1.10×) |
+| **`fpu`** | 664 → 671 ms (**1.01×**) | 665 → 685 ms (**1.03×**) |
+| whole suite | 3620 → 4727 ms | 3889 → 6360 ms |
+
+`fpu` is **flat** — a few per cent, on both architectures, between a
+laptop and a loaded shared runner — while `svc` and `proc` nearly
+double on aarch64. That fits what each does: `fpu` spends its time in
+a fixed hold, so the host's load does not reach it, whereas `svc`
+waits on service state transitions and `proc` spawns. The suite grows
+under load in exactly the places that wait on something other than a
+clock.
+
+Before this unit that whole paragraph was unanswerable, and the budget
+was widened twice without it.
+
 A failing self-test is also named against the **load-sensitive list**
 in `docs/testing/flakes.md` (the table under its "The list" heading): the
 failure report gains a `note:` line saying the test is on the list and

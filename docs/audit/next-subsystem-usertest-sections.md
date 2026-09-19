@@ -16,28 +16,36 @@ it.
    with 87 takes 34 / 44 ms. Time in this suite is spawning and
    waiting, not checking, and no amount of reading the source would
    have said so. That is the unit justifying itself on its first run.
-2. **The sections account for 3610 of 3711 ms (x86-64) and 3827 of
+2. **CI's slowdown is not uniform, which is the question this report
+   asked and could not answer.** Same code, laptop against CI: `fpu`
+   moves **1.01x** on x86-64 and **1.03x** on aarch64 — flat — while
+   `svc` goes 1.36x and **1.90x** and `proc` 1.28x and **1.93x**. The
+   suite grows under load exactly where it waits on something other
+   than a clock (`svc` on service state, `proc` on spawns); `fpu`
+   spends its time in a fixed hold, so a loaded shared runner does
+   not reach it. The budget was widened twice without this.
+3. **The sections account for 3610 of 3711 ms (x86-64) and 3827 of
    3938 (aarch64).** The ~100 ms outside them is the spawn, `init`'s
    startup and its teardown -- small, which the report was careful not
    to assume in advance, and now measured rather than guessed.
-3. **`trap_selftest` reports `0 ms` on aarch64**, as designed: the
+4. **`trap_selftest` reports `0 ms` on aarch64**, as designed: the
    empty function is still a row, still called, still timed. The
    property the report argued for is visible in a real run.
-4. **The harness needed three functions, not one.** The design named
+5. **The harness needed three functions, not one.** The design named
    `summarize_sections`. Testing *which* section gets named needs the
    summary line to be a function too, so `format_section_summary` was
    extracted as well, and the refusals became `section_failures`. The
    bug-proof is only writable because of the second one.
-5. **A bug of my own, caught before it shipped and worth recording.**
+6. **A bug of my own, caught before it shipped and worth recording.**
    The first draft guarded the new check with `want_selftest`, which
    `main()` assigns *below* that point -- an `UnboundLocalError` on
    every run that had sections at all. The guard was unnecessary: a
    build with no user-mode suite prints no section lines.
-6. **The invariant is F13, not F7.** `docs/verification/invariants.md`
+7. **The invariant is F13, not F7.** `docs/verification/invariants.md`
    already had F7 through F12; the report did not check before
    reserving a number, which is the same class of mistake as reusing a
    test name.
-7. **One section had a position requirement, and a table with an
+8. **One section had a position requirement, and a table with an
    ordering rule is still a convention.** The trailing body ends by
    closing stderr, so as a row it had to be last: any section after it
    whose `CHECK` failed would write to a closed descriptor and report
@@ -325,11 +333,11 @@ line the harness parses.**
 | file | change |
 | --- | --- |
 | `userland/init/init.c` | the trailing body extracted as `syscalls_selftest`, the `g_sections[]` table, and `selftest()` reduced to the loop that times it. **As built:** a table, not ten bracketed calls |
-| `tests/boot/run_boot_test.py` | `summarize_sections`, `section_failures` and `format_section_summary` lifted out of `main()`; the summary printed beside the per-test one. **As built: three functions, not one** (item 4) — and it *does* add failure conditions, all about the suite's own self-consistency, never a duration |
+| `tests/boot/run_boot_test.py` | `summarize_sections`, `section_failures` and `format_section_summary` lifted out of `main()`; the summary printed beside the per-test one. **As built: three functions, not one** (item 5) — and it *does* add failure conditions, all about the suite's own self-consistency, never a duration |
 | `tests/boot/test_usertest_sections.py` (new) | the host cases below, 34 checks |
 | `tests/host/host.mk` | run the new host test beside `test_nettest_deadline.py` |
 | `docs/verification/design.md` | §6: the admission is discharged, with the first measurement; **and the stale 211 → 410** |
-| `docs/verification/invariants.md` | **F13** (not F6, and not F7 — item 6): a composite test reports its sections. F6 gains the 8284 ms figure; **and the stale 211 → 410** |
+| `docs/verification/invariants.md` | **F13** (not F6, and not F7 — item 7): a composite test reports its sections. F6 gains the 8284 ms figure; **and the stale 211 → 410** |
 | `docs/kernel/process/testing.md` | what `process-user` now prints |
 | `docs/userland/testing.md` | the same, from the userland side |
 | `docs/development.md` | **not in the design**: its worked example of a boot's output is the first thing a newcomer reads, and it showed `USERTEST: PASS` with nothing before it |
