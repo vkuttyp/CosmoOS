@@ -1121,7 +1121,7 @@ static void env_pointer_survives_overwrite(void)
  * Found by review, not by the unit.
  */
 /*
- * Three spawns, because `spawnvp_flags` has three exits and the
+ * Four spawns, because `spawnvp_flags` has four exits and the
  * snapshot is freed at each of them. The first build of this case
  * only ever spawned "/bin/true", so `strchr(file, '/')` succeeded
  * every time and the whole PATH-search half -- the loop that holds
@@ -1147,7 +1147,7 @@ static void *env_spawner(void *arg)
      * stopped there could exit having run none of the PATH variants
      * while the summary still claimed thirteen of each. Review found
      * that. The cost is that the last spawns race nothing, which is
-     * the right trade -- the three exits are what this case covers,
+     * the right trade -- the four exits are what this case covers,
      * and `spawn_done` now says so rather than the loop bound.
      */
     for (unsigned i = 0; i < 40; i++) {
