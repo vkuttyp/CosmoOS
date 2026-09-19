@@ -2815,6 +2815,28 @@ See [docs/development.md](docs/development.md).
   Thirteen classes, every one of which a test can now make fire.
   360 self-tests on both architectures, debug and release (PR #189).
 
+- **The two tables threads left behind are locked.** When native
+  threads arrived, `malloc.c` and `stdio.c` took locks and `errno`
+  became thread-local; `stdlib.c`'s environment and `atexit` list were
+  left as they were, and invariant **L8** enumerated three safe tables
+  and said "all three are done" while the library had five. `setenv`
+  growing the environment calls `free(environ)` while `getenv` may be
+  walking it — **a use-after-free in the allocator that same unit
+  locked**, reached through a table it was locked to protect — and
+  `atexit`'s `g_atexit[g_natexit++]` both lost handlers and could
+  write past a static array, because the bound check and the
+  increment were separate. One lock now covers both tables, `exit`
+  never runs a handler while holding it, and `getenv`'s returned
+  pointer stays valid because `setenv` **leaks** the string it
+  replaces — deliberate, and recorded so it is not tidied away.
+  Five cases in `thrtest`, and the unit reports honestly that **two
+  are proofs and three are regression tests**: unlocked, `atexit`
+  accepts 33 registrations into a table of 32 and loses two handlers,
+  while the environment races produce no observable wrong answer in
+  three runs. The use-after-free is argued from the code, not from a
+  failure anyone has seen. 360 self-tests on both architectures,
+  debug and release (PR #191).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

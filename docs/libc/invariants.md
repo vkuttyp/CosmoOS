@@ -69,14 +69,18 @@ requires an execute bit; `errno` ends as the last kernel error or
 `spawnve("/bin")` is `EACCES`, `spawnve("/etc/rc")` is `EACCES`). Gap:
 `PATH` entries longer than 1023 bytes are skipped silently.
 
-**L8. The allocator, stdio and `errno` are each safe from more than one
-thread.** User threads arrived with the audit unit "native threads and a
+**L8. The allocator, stdio, `errno`, the environment and the `atexit`
+list are each safe from more than one thread.** User threads arrived with the audit unit "native threads and a
 futex", and this invariant used to read "the library is single-threaded and
 says so" with a note that on that day `errno` would become thread-local and
 the allocator and stdio would take locks *before anything else was done*.
 The locks landed with the threads unit; `errno` landed with the unit after
-it, because it needed a thread pointer the machine did not have. All three
-are done, and the shape of each is set by its consequence:
+it, because it needed a thread pointer the machine did not have. **This
+invariant then said "all three are done" for a year while the library
+had five shared things**: `environ` and the `atexit` list were left
+unlocked, and the fifth and sixth bullets below are the unit that
+closed them (`docs/audit/next-subsystem-libc-shared-tables.md`). The
+shape of each is set by its consequence:
 
 - **The allocator takes one lock** (`libc/src/malloc.c`). An unlocked free
   list is the one hazard here that corrupts memory silently, which is
@@ -106,6 +110,25 @@ are done, and the shape of each is set by its consequence:
   rather than a fallback: **a thread created by a raw `SYS_thread_create`
   with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
   for a program that wants such a thread to use libc anyway.
+
+- **The environment takes one lock** (`libc/src/stdlib.c`), shared with
+  the `atexit` list because both are cold start-up paths and a second
+  lock is a second chance at an ordering bug. `setenv` growing the
+  array calls `free(environ)`, so an unlocked `getenv` walking it was
+  a use-after-free in the allocator this same invariant locks two
+  bullets above. The lock covers the **walk** and not the pointer
+  `getenv` returns: that stays valid because `setenv` **leaks** the
+  string it replaces rather than freeing it, which is deliberate and
+  must not be tidied. `env_count` is an unlocked helper called under
+  the mutators' lock — the mutex is not recursive and both mutators
+  call it.
+- **The `atexit` list takes the same lock**, and `exit` must not hold
+  it while running a handler: a handler is arbitrary program code that
+  may call `atexit` or `getenv`, so the drain takes the lock, removes
+  one handler, releases, and then calls it. Unlocked, the list lost
+  handlers (`g_natexit++` is a read-modify-write) and could be written
+  **past its end**, because the bound check and the increment were
+  separate.
 
 `feof`/`ferror`/`clearerr`/`fileno` read a word without the lock.
 

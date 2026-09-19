@@ -33,6 +33,22 @@ libc/
   (pointer-returning calls such as `mmap` have their own check).
 - No function in the library blocks on anything but a system call; no
   static buffers except the `FILE` objects and `strerror`'s table.
+- **The library's shared tables each take a lock, and the list is
+  five** (invariant **L8**): the allocator, stdio, `errno`
+  (thread-local rather than locked), the environment, and the `atexit`
+  list. The last two were unlocked for a year after native threads
+  arrived — `setenv` growing the array calls `free(environ)` while
+  `getenv` may be walking it — and are locked as of
+  `docs/audit/next-subsystem-libc-shared-tables.md`. Two rules follow
+  from the mutex not being recursive: a public entry point takes the
+  lock and its helpers do not (`env_count`), and **`exit` never runs
+  an `atexit` handler while holding it**, because a handler is
+  arbitrary program code that may call back into the library.
+- **`getenv`'s result stays valid because `setenv` leaks.** Replacing
+  a value installs a new string and does not free the old one, which
+  may in any case be the kernel's. That leak is what keeps a pointer
+  `getenv` already returned from dangling; it is deliberate, bounded
+  by the number of overwrites, and must not be tidied away.
 - The library is **not** built `-mgeneral-regs-only` any more: the
   compiler may use the vector registers wherever it likes, which it
   does in the float conversions and wherever it vectorises a loop. The

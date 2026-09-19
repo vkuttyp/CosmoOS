@@ -7,6 +7,32 @@
 | Host | `tests/host/test_libc.c`: the pure parts compiled with the host clang under ASan and UBSan, functions renamed with a `c_` prefix so they do not clash with the host's libc | `make host-test` |
 | Target, user mode | `init --selftest` (`userland/init/init.c`): every system-call-backed function through the library, plus `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`, stdio on a file, `opendir`/`readdir`, `inet_pton`/`inet_ntop` | `make test` (self-test builds) |
 | Integration | The shell and the utilities are built on the library and exercised by `/etc/rc.test` and the interactive harness | `make test` |
+| Threads against the library's shared tables | `userland/tests/thrtest.c`, behind the `THREADTEST: PASS` marker | `make test` |
+
+## The shared tables under threads (`userland/tests/thrtest.c`)
+
+Five cases, and **two of them are proofs while three are regression
+tests** — a distinction this file states because the unit that added
+them measured it rather than assuming
+(`docs/audit/next-subsystem-libc-shared-tables.md`).
+
+| case | what it does | unlocked? |
+| --- | --- | --- |
+| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths | **passes** — the use-after-free is real but produces no wrong answer here |
+| `env-unset-under-readers` | three readers against 200 `unsetenv` removals | **passes** — likewise |
+| `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |
+| `atexit-bound` | three threads offering 24 registrations at a full-ish table | **accepts 33 into a table of 32** |
+| the drain's own check | registered **first** so the LIFO order runs it **last**; prints the verdict | `THREADTEST: FAIL` |
+
+The verdict is printed by the last handler rather than by `main`,
+because the drain is part of what is under test and a `main` that
+printed `PASS` before calling `exit` could not be failed by it.
+
+The two environment cases are kept as regression tests: they assert a
+reader never misses a name that is present, and would catch a future
+change that broke the locking in a way that *does* produce wrong
+answers. A deterministic version needs a test seam inside `getenv`,
+which libc does not have.
 
 ## Host test (`tests/host/test_libc.c`, `make host-test`)
 
