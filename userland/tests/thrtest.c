@@ -775,15 +775,27 @@ static volatile unsigned env_misses;
  * it. This thread is that something: it allocates and frees blocks in
  * the same size class as the environment array and fills them.
  */
+static volatile unsigned long env_churn_sink;
+
 static void *env_churn(void *arg)
 {
     (void)arg;
     while (!env_stop) {
         for (unsigned k = 8; k <= 600; k += 8) {
-            void *p = malloc(k * sizeof(char *));
+            unsigned char *p = malloc(k * sizeof(char *));
             if (p == NULL)
                 continue;
             memset(p, 0x5A, k * sizeof(char *));
+            /*
+             * Read it back into a volatile. Without this the fill is
+             * a dead store into a block that is freed immediately
+             * after, and the compiler is entitled to delete it -- at
+             * which point the block is reused WITHOUT its stale
+             * pointers being overwritten and this test quietly stops
+             * exposing anything. The fill is the mechanism, so it has
+             * to be observable.
+             */
+            env_churn_sink += p[0] + p[k * sizeof(char *) - 1];
             free(p);
             if (env_stop)
                 break;
