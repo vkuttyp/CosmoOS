@@ -4,7 +4,8 @@ Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built**
 (PR #191), and the banner below records where the build differed from
 it — including the part that matters most, which is that **the
-headline defect is not demonstrated by a test**.
+headline defect took two corrections to demonstrate, and an earlier
+version of this line said it could not be demonstrated at all**.
 
 **What the build changed, each found by building rather than reading:**
 
@@ -272,8 +273,8 @@ thread, which is why that program exists.
 
 | test | asserts |
 | --- | --- |
-| `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv`; every reader either finds its name or does not, and none reads a freed pointer |
-| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed. The reader is the test's own copy of `getenv`'s walk, paused at a chosen index, so the interleaving is forced rather than hoped for — see below |
+| `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv` **for a name placed after the padding**, so a reader walks the array being reallocated, **and a fourth thread churns the heap** so the freed array is reused. Unlocked, the process dies with a `#GP` |
+| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed, while 200 entries **before** it are removed under the walk. **As built** this is the regression test of the set — it frees no array, so the churn that makes the grow case fatal does not apply to it. The "test owns the walk" construction proposed in review is gone: see banner item 2 |
 | `atexit-concurrent` | N threads each registering a distinct handler; **exactly** the number registered run at exit, and none runs twice |
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
 | `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
