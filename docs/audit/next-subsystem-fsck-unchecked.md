@@ -369,16 +369,35 @@ the new comparison removed, the pass reports nothing.
 
 ## Benchmarks
 
-- **`cosmofs_check` wall time** over the boot's scratch filesystem,
-  before and after. The extent checks are a comparison per extent; the
-  claim is that they do not show, and the benchmark is what makes that a
-  measurement.
-- **The duplicate-name cost**, separately, because it is the one that
-  re-reads a directory on a hit: time a directory of many names with no
-  duplicates (the false-positive path) against one with a duplicate.
-- **`cosmofs-replay`'s total**, which is 410 checks and is already the
-  slowest test in the suite at ~13 s. If three new checks move it, the
-  crash suite's budget is where it shows.
+**Measured, two runs of each on one machine, x86-64 debug.** The claim
+was that the extent checks would not show; they do not, and neither
+does the rest.
+
+| | `main` | this branch |
+| --- | --- | --- |
+| `cosmofs-check-clean` | 22, 33 ms | 32, 33 ms |
+| `cosmofs-replay` (410 images) | 12550, 12381 ms | 12421, 12996 ms |
+| `cosmofs-check-dup-name` | *(does not exist)* | 60, 60 ms |
+
+**Both ranges overlap, and that is the whole result** — the difference
+between the two columns is smaller than the difference between two
+runs of the same column, so the honest statement is "no cost outside
+run-to-run variance" rather than a figure. `cosmofs-replay` is the one
+that would have shown it: 410 images, three new checks on each, and it
+is already the slowest test in the suite.
+
+The duplicate-name re-scan is the one cost that could bite, because it
+re-reads a directory on a hit. It does not here, for a reason worth
+stating rather than hiding: the directories in this suite are small,
+so the measurement bounds the cost on *these* filesystems and says
+nothing about a directory of ten thousand names. Option 2 in the
+design (a hash set per directory) remains the fallback if one ever
+appears, and `cosmofs-check-dup-name`'s own 60 ms includes deliberately
+colliding names, which is the re-scan path being exercised.
+
+**Not measured: the memory.** The pass allocates 4 KiB more than it
+did, reported in `bytes_allocated`, and against maps already sized to
+the filesystem that is not a number worth a benchmark.
 
 ## Risks
 
