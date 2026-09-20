@@ -106,8 +106,13 @@ nothing more:
 - reject any `prot` bit this kernel does not define, per the native
   flags rule (`docs/kernel/security/design.md`, "Unknown flag bits"),
   so a program can probe for a future bit and none is silently
-  dropped. This is the one place the native call differs from
-  `lx_mprotect`, which keeps Linux's rule of ignoring them;
+  dropped. **The Linux door already does this**: `lx_prot`
+  (`compat/linux/convert.c:200-203`) returns −1 for any bit outside
+  `READ|WRITE|EXEC` and `lx_mprotect` turns that into `-EINVAL`. An
+  earlier draft of this report claimed the two doors would differ
+  here, which was an assumption about Linux's usual rule rather than
+  a reading of the code; review caught it. They agree, and the native
+  call is simply following the ABI's own rule;
 - require `addr` page-aligned and `len` non-zero and page-aligned —
   `munmap`'s rule, not Linux's round-up, again for consistency within
   the ABI;
@@ -146,10 +151,11 @@ the libc header.
 | `libc/src/thread.c` | the comment that says the call does not exist; **no behaviour change** |
 | `userland/init/init.c` | the native ABI cases below |
 | `docs/kernel/syscall/api.md` | the table row and the prose note beside `munmap`'s |
+| `kernel/include/kernel/vmm.h` | `vm_user_protect`'s contract listed only `-EINVAL` and `-ENOMEM` while the implementation has returned `-EBUSY` since PR #193 — **fixed in this report's commit**, because a false contract in a public header should not wait for the unit that consumes it |
 | `docs/kernel/memory/api.md` | `vm_user_protect` gains its own entry. It has none today — and checking that turned up that neither `vm_user_map_anon` nor `vm_user_unmap` has one either; only `vm_user_map_anon_replace`, added by the last unit. Documenting the call this unit exposes is in scope; the other two are a pre-existing gap and are named here rather than quietly widened into it |
 | `docs/kernel/memory/invariants.md` | W^X is simultaneous and user code can now reach the protect path; M18's large-page refusal is unreachable for user anon memory (always 4 KiB) and should say so |
 | `docs/compat/linux/*` | the personality is no longer the only door |
-| `docs/audit/2026-09-deferred-work-inventory.md` | strike §1.2's entry |
+| `docs/audit/2026-09-deferred-work-inventory.md` | strike §1.2's entry **and add a row for the follow-up this report defers**: `cosmo_thread_start` to map read/write and protect its guard page, dropping the reservation-and-replace. Striking one entry while deferring new work without recording it is how a deferral becomes a loss, and review caught that this table did exactly that |
 | `README.md` | Status entry |
 
 ## Tests
@@ -176,12 +182,31 @@ check that `WXN` does not forbid it once `W` is gone. Without this
 the unit could ship with W^X enforced so eagerly that the call is
 useless for its main purpose.
 
-**In `memtest.c`**, one addition: `vm-replace-race` already runs a
-protect racer against replacements, and it asserts only that protect
-never returns something unexpected. It should also assert that a
-protect which returns 0 **actually changed the protection** — the
-racer proves the `-EBUSY` path is honoured but not that the success
-path still works under contention.
+**It needs cache maintenance on AArch64, and there is nothing to
+reuse.** Bytes written as data are not visible to the instruction
+fetcher until the data cache is cleaned to the point of unification,
+the instruction cache is invalidated for the range, and an `isb`
+runs; without that the test may execute whatever was there before
+and pass or fail for the wrong reason. Review raised this and it is
+right. There is **no existing helper** — `grep` finds no i-cache
+maintenance in `libc/`, `userland/` or `tests/`, and the kernel has
+none for this purpose either — so the unit has to write the
+sequence, `#if` on the architecture, and x86-64 needs nothing. That
+is scope, not a detail, and it is the reason this test is listed
+separately from the permission cases.
+
+**In `memtest.c`**: nothing, and the reason is worth writing down.
+An earlier draft proposed that `vm-replace-race`'s protect racer
+should assert that a protect returning 0 **actually changed the
+protection**. That assertion cannot hold: the moment it returns, the
+competing thread may replace the whole range, so the observation
+races and the test would reject correct behaviour on an unlucky
+schedule. Review caught it. Either the observation happens under a
+synchronisation the racer does not have, or it does not happen —
+and adding synchronisation would remove the contention the test
+exists to create. The success path under contention stays covered
+the way it already is: every replacement must return 0, and the
+region list and `mapped_pages` must agree at the end.
 
 ## Risks
 
@@ -201,9 +226,17 @@ what makes the distinction reachable from user code.
 `vm_user_protect` has had exactly one caller and one personality
 reaching it. Exposing it natively means arbitrary user ranges,
 arbitrary alignments and concurrent callers. The split/merge paths
-are tested, but by a self-test that drives them in one thread; the
-fuzzer should reach the new number (it takes syscall numbers from
-`SYS_COUNT`, so it will, the day the number exists).
+are tested, but by a self-test that drives them in one thread.
+
+**The fuzzer will not reach it by itself.** An earlier draft said it
+would, on the assumption that it walks `SYS_COUNT`; it does not —
+`userland/init/init.c:3884` has an explicit `allowed[]` list and
+`SYS_COUNT` only sizes the coverage histogram. `SYS_mprotect` must be
+added to that list, and **with constrained arguments**: an
+unconstrained one would eventually protect the fuzzer's own stack or
+text away and kill the run, which is why `setrlimit` is already
+excluded by name there. The same constraint the memory calls already
+get.
 
 **Nothing about large pages.** M18 refuses to split a large leaf, and
 user anonymous memory is mapped in 4 KiB pages, so the case is
@@ -231,9 +264,9 @@ current sequence against four mutations days ago, and rewriting it
 immediately spends that for a syscall on a cold path. It is a good
 follow-up with its own argument, and the inventory should carry it.
 
-**Give the native call Linux's semantics** (round `len` up, ignore
-unknown bits). Rejected: the native ABI's rule is that an undefined
-flag bit is an error, stated in the security design and followed by
-`mmap`, `mount`, `umount` and `open`. A new call should not be the
-exception, and the personality keeps Linux's behaviour where Linux
-programs need it.
+**Give the native call Linux's `len` semantics** (round up rather
+than require a page multiple). Rejected: `munmap` requires a page
+multiple and the two calls should agree with each other. Note that
+the *other* half of this alternative — ignoring unknown `prot` bits
+— is not a difference at all: `lx_prot` already rejects them, so
+both doors refuse and only the `len` rule differs.
