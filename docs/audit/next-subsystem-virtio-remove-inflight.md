@@ -170,12 +170,14 @@ the other side from a real second CPU, assert the protected object.
    at least four have been accepted *and completed* — the device is
    live, not merely present.
 3. Arm the completion hold. Wait until the submitter has filled the
-   driver's slots: accepted minus completed reaches `nr_slots`, or the
-   submitter starts seeing `-EAGAIN` refusals from the driver (the block
-   layer queues those; either says the table is full).
+   driver's slots: with completions held, accepted minus completed
+   grows monotonically, and once it exceeds `nr_slots` the table is
+   full and the excess is on the block layer's pending list. (The
+   submitter never sees the driver's `-EAGAIN`: `blk_submit` queues it
+   and returns 0, as "What is established" says; the count is the only
+   observable, and it is enough.)
 4. `pci_test_remove(pdev)` from the test thread, while the submitter
-   keeps submitting. Record a `blk_test_tick` immediately after it
-   returns.
+   keeps submitting. The removal stamps its own boundary (step 6).
 5. Release the hold. Keep the submitter running until it has seen four
    `-ENODEV` refusals after the remove, then stop and join it.
 6. Assert:
@@ -191,15 +193,24 @@ the other side from a real second CPU, assert the protected object.
      double completion) and no fewer (a stranded slot) — and the
      `-ENODEV` completions plus the submitter's `-ENODEV` refusals are
      everything the unregister turned away.
-   - no completion carries a stamp later than the remove's return. The
-     submitter's `done` callback is the test's own code, run at
-     `bio_complete`; it stamps each completion with `blk_test_tick()`
-     and keeps the maximum, and the test stamps once after
-     `pci_test_remove` returns. Completions the driver issued *inside*
-     `vblk_remove` are ordered before that stamp, as its comment says;
-     any stamp after it is the late-interrupt use-after-free, whether
-     or not it happened to crash. This needs `blk_test_tick` callable
-     from the test (it is `static` today) and nothing more.
+   - no completion carries a stamp later than the removal's own
+     boundary stamp. The submitter's `done` callback is the test's own
+     code, run at `bio_complete`; it stamps each completion with
+     `blk_test_tick()` and keeps the maximum. The boundary is stamped
+     **inside the removal**, not by the caller afterwards: a debug
+     stamp at the end of `vblk_remove`, after its leftover walk, drawn
+     from the same sequence (`vblk_test_remove_seq()`). A stamp taken
+     by the test after `pci_test_remove` returns would race a callback
+     on another CPU that completes after the return but draws its
+     number first, and would pass the very case the check exists for.
+     With the boundary inside, the atomic increment puts every
+     completion and the end of the remove in one total order: a
+     completion numbered after the boundary completed after the driver
+     had finished removing, which is the late-interrupt use-after-free
+     whether or not it happened to crash; one numbered before it is
+     the leftover walk's own, or an interrupt the reset still allowed,
+     and both are the removal's business. This needs `blk_test_tick`
+     callable from the driver and the test (it is `static` today).
    - `blk_find("vdb") == NULL`; the virtio device is off its bus
      (`device_find(&virtio_bus, name) == NULL`); the PCI function is
      `DEV_UNBOUND` with `driver` and `drvdata` NULL and the virtio-pci
@@ -239,10 +250,10 @@ than claiming the reset was proved.
 | --- | --- |
 | `scripts/qemu-run.sh` | `QEMU_RMDISK`, a second `virtio-blk-pci` attached last on both machines; `QEMU_RMDISK=0` leaves it out |
 | `tests/boot/run_boot_test.py` | a fresh `boot-test.log.rmdisk.img` per run; the `vdb` marker when the disk is present |
-| `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, a release counter (debug) |
+| `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, `vblk_test_remove_seq` (the boundary stamp, at the end of `vblk_remove`), a release counter (debug) |
 | `drivers/pci/pci.c`, `drivers/include/drivers/pci.h` | `pci_test_rebind` (debug) |
 | `kernel/device/device.c`, `kernel/include/kernel/device.h` | `device_test_bind` for it, beside `device_test_unbind` |
-| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `blk_test_tick` made callable (debug), so a completion callback can stamp itself |
+| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `blk_test_tick` made callable (debug), so the driver's remove and the test's completion callback draw from one sequence |
 | `kernel/device/devtest.c` | `selftest_virtio_remove_inflight`; the comment at 623-640 that names this unit as future work becomes a pointer to the test |
 | `kernel/core/selftest.c` | the registry entry, beside `blk-unregister-drain` |
 | `docs/kernel/device/{api,testing}.md` | the knob, the attachment order, the machine the tests assume, the test |
@@ -257,7 +268,7 @@ than claiming the reset was proved.
 
 | case | what it establishes |
 | --- | --- |
-| `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after `pci_test_remove` returns (the completion callback's own stamps); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
+| `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after the removal's own boundary stamp (the completion callback's stamps against `vblk_test_remove_seq`); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
 | the same, unheld | the natural race, a regression guard |
 | the rebind | `vdb` comes back and reads the same first sector: the hardware was left sane |
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
