@@ -165,6 +165,17 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
  * outranks one in a report, and review caught it. */
 int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot);
 
+/* Make the bytes of [base, base+size) visible to instruction fetch, for
+ * the pages that are PRESENT. A demand-zero page never touched has no
+ * leaf translation and nothing written to it: nothing to sync, and on
+ * AArch64 cache maintenance by a VA with no translation is a
+ * translation fault at EL1 with no fixup -- an unprivileged
+ * mmap(RW); mprotect(RX) would panic the kernel. Walks the range page
+ * by page under space->lock, so a leaf cannot be torn down between the
+ * query and the maintenance. Call from the owning process's context;
+ * the range must be inside the user window. */
+void vm_user_sync_icache(struct vm_space *space, uint64_t base, size_t size);
+
 /* Number of regions in a user space (tests). */
 unsigned vm_user_region_count(struct vm_space *space);
 

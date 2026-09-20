@@ -3707,6 +3707,31 @@ static void syscalls_selftest(void)
             CHECK(fn() == 42);
             CHECK(cosmo_munmap((void *)jit, P) == 0);
         }
+        /*
+         * A page NEVER TOUCHED made executable: no leaf translation, so
+         * nothing to sync -- and on hardware cache maintenance by that
+         * VA would be a translation fault at EL1 with no fixup. Review
+         * found the first version doing exactly that. QEMU cannot show
+         * the fault (the maintenance is a no-op there), so this case is
+         * the regression test that the present-pages walk stays, not a
+         * demonstration of the panic it prevents. Then a range with one
+         * page written and one not: the written one must still run.
+         */
+        long cold = cosmo_mmap(NULL, 2 * P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        CHECK(cold > 0);
+        if (cold > 0) {
+            CHECK(cosmo_mprotect((void *)cold, 2 * P, COSMO_PROT_READ | COSMO_PROT_EXEC) == 0);
+            CHECK(cosmo_mprotect((void *)cold, 2 * P, COSMO_PROT_READ | COSMO_PROT_WRITE) == 0);
+#if defined(__x86_64__)
+            static const uint8_t code2[] = { 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+#else
+            static const uint8_t code2[] = { 0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6 };
+#endif
+            memcpy((void *)cold, code2, sizeof(code2));   /* page 0 written, page 1 never */
+            CHECK(cosmo_mprotect((void *)cold, 2 * P, COSMO_PROT_READ | COSMO_PROT_EXEC) == 0);
+            CHECK(((int (*)(void))cold)() == 42);
+            CHECK(cosmo_munmap((void *)cold, 2 * P) == 0);
+        }
     }
 
     /* Milestone 5: partial unmaps split regions; a hole makes the strict

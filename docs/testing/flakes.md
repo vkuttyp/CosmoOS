@@ -1420,9 +1420,41 @@ leaves one entry re-created. Both are the "N things after an action"
 family this file's list describes: the check assumes a quiet interval
 it never arranged.
 
-One sighting, so no rate and no mechanism claimed. What it needs if it
-recurs is the counters at the moment of failure — `entries`, `expired`,
+One sighting, so no rate and no mechanism claimed — and the very next
+CI run of the same branch (`ea811a0`, a documentation commit on top
+of the same code) passed the x86-64 boot, so it did not reproduce on
+the next try. What it needs if it recurs is the counters at the
+moment of failure — `entries`, `expired`,
 `out_new` before and after — printed by the check rather than
 recovered from a log, which is the instrument-before-theory lesson
 this file keeps re-learning. Not repaired here; it belongs to the
 network tests.
+
+## `el2-guest-irq-queue`: the second injection was not still pending
+
+**2026-09-20, aarch64 CI, the GIC boot, on the `mprotect` unit's first
+CI run (`60ccfd7`)** — a memory-syscall change touching nothing in the
+hypervisor — and the same tree passed `aarch64 BUILD=debug test-gic`
+in the local 22-step list an hour later, plus the plain and guard
+boots:
+
+```text
+SELFTEST: el2-guest-irq-queue ... FAIL: check failed: x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 at line 1157 (3 ms)
+```
+
+Step: inject INTID 42, run until the guest acknowledges it (hypercall
+42), inject 42 again **while the first is Active**, run again, and
+expect the guest back at its heartbeat (hypercall 2) with the second
+still pending — "the completion of one instance is not the delivery of
+the next" (`kernel-services/virtualization/hvtest.c`). What came back
+instead is not in the log, and the check prints only that it was not
+hypercall 2. So the candidates are the obvious two and neither is
+established: the guest's EOI and the second injection interleaved the
+other way round on a loaded runner under TCG, delivering the second
+instance early; or the run returned a different exit kind altogether.
+
+One sighting, no rate. If it recurs, the check should print `x.kind`
+and `x.hypercall.nr`, which would settle which of the two it is at no
+cost — the instrument-before-theory point again. Not repaired here; it
+belongs to the vGIC tests.
+

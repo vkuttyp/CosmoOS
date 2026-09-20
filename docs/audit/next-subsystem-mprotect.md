@@ -45,18 +45,37 @@ that this environment cannot give.
    only in the prose paragraph that carries the count; adding 93
    beside it is when that showed. Both rows are in the table now.
 
-5. **`thread.c`'s comment described a punch that #193 had removed.**
+5. **The first sync could panic the kernel from user mode, and QEMU
+   could not show it.** It ran `dc cvau`/`ic ivau` by VA over the whole
+   range. A demand-zero page the caller never touched has no leaf
+   translation, and on hardware cache maintenance by such a VA is a
+   translation fault at EL1 with no fixup — so `mmap(RW)` followed by
+   `mprotect(RX)` without a write in between was an unprivileged
+   panic. Review found it. The fuzzer had been driving exactly that
+   case hundreds of times a boot, on both architectures, and passing,
+   because QEMU implements the maintenance as a no-op: the third thing
+   this environment hid in one unit. `vm_user_sync_icache` now walks
+   the range page by page **under `space->lock`** and syncs only the
+   present ones; the lock is what keeps a leaf from being torn down
+   between the query and the maintenance. The self-test makes an
+   untouched range executable and then a half-written one — a
+   regression test that the walk stays, not a demonstration of the
+   fault, which only hardware can give.
+
+6. **`thread.c`'s comment described a punch that #193 had removed.**
    Updating it for the new syscall found it still narrating reserve,
    punch a hole, fixed-map into the hole. It now describes
    reserve-and-replace, says the call exists, and says why libc keeps
    the sequence anyway.
 
-**A Linux program running on this kernel can change the protection of
-its own memory. A native program cannot.** `lx_mprotect`
-(`compat/linux/syscalls.c:1012-1031`) validates and calls
-`vm_user_protect`; the native ABI has no such call at all. The
-machinery is built, tested and in use — only one of the two doors
-opens onto it.
+**A Linux program running on this kernel could change the protection
+of its own memory. A native program could not** — the state this
+report was written against, and the state this unit ended.
+`lx_mprotect` (`compat/linux/syscalls.c:1012-1031`) validated and
+called `vm_user_protect`; the native ABI had no such call at all. The
+machinery was built, tested and in use — only one of the two doors
+opened onto it. (Present tense from here on in the design sections
+describes that starting point; the banner above is what shipped.)
 
 **Takes up** the inventory's §1.2 entry **"`SYS_mprotect` for native
 programs"** (README.md:1486), deferred there and again by the
@@ -112,8 +131,8 @@ This tree's usual failure is a check enforced in `native.c` and
 missing from the Linux personality — a second door onto the same
 objects. Here the personality is the *complete* one. A native program
 that wants a guard page, a read-only table after initialisation, or a
-JIT buffer has no call to make, while the same program compiled
-against Linux headers does.
+JIT buffer had no call to make, while the same program compiled
+against Linux headers did.
 
 ### `MAP_FIXED` replacement is not a substitute for it
 

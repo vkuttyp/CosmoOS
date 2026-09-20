@@ -430,7 +430,7 @@ static int64_t sys_mprotect(struct syscall_args *a)
      * that itself (SCTLR_EL1.UCI is clear), so the kernel does when the
      * range becomes executable -- for every caller, not just a test. */
     if (vprot & VM_PROT_EXEC)
-        arch_mmu_sync_icache_user((vaddr_t)addr, len);
+        vm_user_sync_icache(process_current()->space, addr, len);
     return 0;
 }
 

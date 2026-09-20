@@ -1035,7 +1035,7 @@ static int64_t lx_mprotect(struct syscall_args *a)
      * its instruction stream synchronised by the kernel, because a
      * Linux JIT cannot do it from EL0 here either. */
     if (vprot & VM_PROT_EXEC)
-        arch_mmu_sync_icache_user((vaddr_t)addr, len);
+        vm_user_sync_icache(process_current()->space, addr, len);
     return 0;
 }
 

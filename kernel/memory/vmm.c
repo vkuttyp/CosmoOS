@@ -23,6 +23,7 @@
 #include <kernel/vmm.h>
 
 #include <arch/cpu.h>
+#include <arch/mmu.h>
 #include <arch/trap.h>
 #include <arch/user.h>
 #include <kernel/faultinject.h>
@@ -1320,6 +1321,29 @@ out:
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
     return rc;
+}
+
+void vm_user_sync_icache(struct vm_space *space, uint64_t base, size_t size)
+{
+    KASSERT(space->user);
+    /*
+     * Present pages only. Review found the first version syncing the
+     * whole range unconditionally: correct for every page that has been
+     * written, and a translation fault with no fixup for every page that
+     * has not -- which is any demand-zero page the caller never touched.
+     * QEMU hid it by implementing the maintenance as a no-op, and the
+     * fuzzer had been driving exactly this case hundreds of times a boot
+     * without noticing. Under the lock, because user_range_teardown
+     * clears leaves under this same lock per chunk: a page seen present
+     * here stays present until the maintenance is done.
+     */
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    for (vaddr_t va = (vaddr_t)base; va < base + size; va += PAGE_SIZE) {
+        paddr_t pa;
+        if (arch_mmu_query(&space->mmu, va, &pa, NULL, NULL, NULL))
+            arch_mmu_sync_icache_user(va, PAGE_SIZE);
+    }
+    spin_unlock_irqrestore(&space->lock, s);
 }
 
 uint64_t vm_user_mapped_pages_sum(struct vm_space *space)
