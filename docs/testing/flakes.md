@@ -1394,3 +1394,35 @@ instead, with the reason in a comment beside it. **The next unit that
 adds a thread-creating self-test before those tests will hit this**,
 and the useful part of this entry is that the bisect above takes
 twenty minutes and the control takes four.
+
+## `net-nat`'s expiry step found an entry after aging the table
+
+**2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
+first CI run (`60ccfd7`)** — a change to the memory syscalls that
+touches nothing in the network stack, and a test that had passed four
+times on the same tree locally (`test`, `test-gic`, `test-guard`, and
+the release boot) in the hour before:
+
+```text
+SELFTEST: net-nat          ... FAIL: check failed: ns1.entries == 0 && ns1.expired > ns0.expired at line 4186 (1300 ms)
+```
+
+Step (6) of `net-nat` (`kernel-services/network/nettest.c`) calls
+`nat_age` with a timestamp two UDP timeouts in the future and then
+reads the statistics, expecting an empty table. That is deterministic
+on its face — nothing about it waits — so the only way `entries` is
+non-zero afterwards is that **an entry was created between the aging
+and the read**. Two candidates, neither established: a frame from step
+(5)'s flood still arriving through the tap after the drain loop
+returned, or the periodic age work (`nat_age` is called from the ARP
+ageing thread) interleaving with the test's own call in a way that
+leaves one entry re-created. Both are the "N things after an action"
+family this file's list describes: the check assumes a quiet interval
+it never arranged.
+
+One sighting, so no rate and no mechanism claimed. What it needs if it
+recurs is the counters at the moment of failure — `entries`, `expired`,
+`out_new` before and after — printed by the check rather than
+recovered from a log, which is the instrument-before-theory lesson
+this file keeps re-learning. Not repaired here; it belongs to the
+network tests.
