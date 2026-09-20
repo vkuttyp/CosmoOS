@@ -621,6 +621,24 @@ static void repl_filler(void *arg)
     }
 }
 
+/*
+ * Punch the hole back before every replacement. Without this the
+ * first replacement covers the range with one region and there is no
+ * hole for the remaining rounds -- one window instead of REPL_ROUNDS
+ * of them, which is why the mutation that leaves holes unclaimed
+ * survived the first two versions of this test.
+ */
+static void repl_hole_replacer(void *arg)
+{
+    struct repl_racer *r = arg;
+    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
+        vm_user_unmap(r->sp, r->base + 2 * PAGE_SIZE, r->size - 4 * PAGE_SIZE, 0);
+        if (vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race") != 0)
+            r->bad++;
+    }
+    r->stop = true;
+}
+
 static void repl_unmapper(void *arg)
 {
     struct repl_racer *r = arg;
@@ -672,7 +690,7 @@ bool selftest_vm_replace_race(const char **reason)
     CHECK(vm_user_map_anon(sp, A, 2 * PAGE_SIZE, VM_PROT_RW, 0, "lo") == 0);
     CHECK(vm_user_map_anon(sp, A + 62 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "hi") == 0);
     struct repl_racer e = { .sp = sp, .base = A, .size = 64 * PAGE_SIZE };
-    struct thread *te = thread_create(repl_replacer, &e, "vm-repl-e", SCHED_PRIO_DEFAULT);
+    struct thread *te = thread_create(repl_hole_replacer, &e, "vm-repl-e", SCHED_PRIO_DEFAULT);
     struct thread *tf = thread_create(repl_filler, &e, "vm-fill-f", SCHED_PRIO_DEFAULT);
     CHECK(te != NULL && tf != NULL);
     thread_join(te);
