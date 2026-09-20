@@ -282,9 +282,18 @@ module's symbols.
 - No host unit test for the virtqueue ring logic (`virtq_add`/`virtq_pop`
   are pure enough for one with a fake transport); the target tests cover
   it only through real I/O.
-- No test unloads a driver *module* with requests in flight (a device
-  is removed with them outstanding — `virtio-remove-inflight` — but the
-  module stays loaded), unregisters the console sink while other CPUs
+- **The removal barrier (Q11b) is compiled into every build; its
+  adversary is not.** The `gone`/`in_done` drain runs in release as in
+  debug, but the hooks that park a walk and count the drain's spins are
+  `CONFIG_DEBUG`, so a release boot exercises the barrier without
+  observing it. Accepted: the observation needs a seam, and a seam in a
+  release build is a seam in the shipped driver. The debug run is the
+  proof and the harness now insists it actually ran.
+- No test unloads a driver *module* with requests in flight — a
+  different path from a device removal (`vblk_module_shutdown`
+  unregisters the driver and the model unbinds what it holds), and
+  untested at either level; `virtio-remove-inflight` removes a *device*
+  with them outstanding and leaves the module loaded. unregisters the console sink while other CPUs
   log (invariant D12's gap), or exercises `pci_msi_enable` (every QEMU
   virtio device has MSI-X).
 - No PCI hot-plug: the removal test drives `pci_test_remove` and

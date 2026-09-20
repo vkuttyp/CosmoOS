@@ -720,6 +720,17 @@ was.
 The sibling helper in `kernel/device/devtest.c` (`threads_settle_blk`)
 already had the bounded shape; that is where this one came from.
 
+**Why the bound has no committed test.** Review asked for one twice.
+An automated negative means a test that deliberately leaks a thread
+and then waits out the deadline: a second of dead time in every debug
+boot, and a thread left running while it decides, in the file whose
+subject is detecting stuck CPUs. The bound is proved by mutation
+instead — remove a `thread_join` and the helper returns false, which
+fails the step — and that is recorded here so an edit to the helper
+knows what to re-run. If it ever grows a caller outside
+`kernel/core/lockuptest.c` it should move somewhere testable and take
+a real test with it.
+
 ## `irq-route`'s interrupt count, and the failure it manufactured
 
 **Seen once, 2026-09-20**, AArch64 debug, on the virtio-removal branch:
