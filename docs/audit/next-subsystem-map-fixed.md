@@ -172,6 +172,16 @@ things close it, and they are different problems:
   argue about. It does not touch ordinary mapping, which never needs
   it: an `mmap(NULL, …)` cannot be handed a range that a quiesced
   region still owns.
+
+  **It is initialised in `vm_space_create_user`** (`vmm.c:620-649`),
+  beside `spinlock_init(&space->lock, "user_space")` at `vmm.c:633`
+  and before any caller can reach the space. Only user spaces get
+  one; the kernel space never replaces. Review asked, and the answer
+  was missing rather than obvious: a field added to a struct in a
+  design document is not specified until the document says who
+  initialises it and when. `vm_space_destroy` (`vmm.c:737`) needs no
+  counterpart unless `struct mutex` acquires a destructor, and the
+  report should not invent one — if it does, that is where it goes.
 - **Replacement against unmapping**: `VM_REGION_QUIESCED` is an
   **ownership claim**, not only a fault suppressor. No operation may
   unlink a region carrying it except the replacement that set it, so
@@ -245,6 +255,7 @@ moment when another thread can take it. The `munmap`, the retry loop,
 | `kernel/memory/vmm.c` | `vm_user_map_anon_replace`: checks and accounting first, quiesce, teardown, swap; `VM_REGION_POPULATED` refused |
 | `kernel/memory/vmm.c` (fault path) | `vm_fault_handler` gains its third outcome: a fault on a `VM_REGION_QUIESCED` region installs nothing, yields, and returns so the instruction retries |
 | `kernel/include/kernel/vmm.h` | the declaration and contract, `VM_REGION_QUIESCED`, `struct vm_space::replace_lock`, and why the new region must be demand-zero |
+| `kernel/memory/vmm.c` (`vm_space_create_user`) | `mutex_init` for `replace_lock`, beside the existing `spinlock_init` |
 | `kernel/memory/vmm.c` (`vm_user_unmap`) | backs off rather than unlinking a region another replacement has claimed |
 | `kernel/syscall/native.c` | `MAP_FIXED` calls the new primitive; `COSMO_MAP_FIXED_NOREPLACE` accepted and validated |
 | `kernel/include/uapi/cosmo/syscall.h` | `COSMO_MAP_FIXED_NOREPLACE` beside `COSMO_MAP_FIXED` |
