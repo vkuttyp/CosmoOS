@@ -278,6 +278,9 @@ requeue holds under two rules
    broadcaster reading the word after the requeue and marking or waking
    as the value required; its removal **passed** every test, because
    rule 2 already covers each case it was written for, and it is gone.
+   A requeue answered `-EAGAIN` is retried against the value now in
+   `seq`, never returned from: a concurrent *signal* wakes one and
+   leaves the rest asleep on a word this broadcast promised to empty.
 
 Two invariants on the recorded word follow. **It is published the way
 `seq` is**: the waiter's store of the mutex then load of `seq`, and the

@@ -857,13 +857,21 @@ static unsigned cv_sleepers(void)
     return n < 0 ? 0 : (unsigned)n;
 }
 
-/* Wait until `n` are asleep on `cv_c`. Holding `cv_m`, so nobody can be
- * anywhere but on their way to sleep; a deadline, not a count. */
+/* Wait until `n` are asleep on `cv_c`. Entered holding `cv_m`, and
+ * returns holding it, but lets go of it each pass: a waiter that came
+ * back round its loop for any reason (a spurious wake is in the
+ * contract) needs the mutex to reach the word again, and CI's first run
+ * of these steps found exactly that -- a count that never reached `n`
+ * because the counter held what the counted needed. A deadline, not a
+ * count. */
 static void cv_await_asleep(unsigned n)
 {
     uint64_t deadline = cosmo_clock_ns() + JOIN_BUDGET_NS;
-    while (cv_sleepers() < n && cosmo_clock_ns() < deadline)
+    while (cv_sleepers() < n && cosmo_clock_ns() < deadline) {
+        cosmo_mutex_unlock(&cv_m);
         cosmo_yield();
+        cosmo_mutex_lock(&cv_m);
+    }
     CHECK(cv_sleepers() == n);
 }
 
@@ -919,11 +927,20 @@ static void bp_probe(int phase)
 
 /* Step 26: a concurrent broadcaster, from inside the window between the
  * outer broadcast's increment of `seq` and its requeue. The inner one's
- * requeue moves everybody; the outer's compare fails with -EAGAIN. */
+ * requeue moves everybody; the outer's compare fails with -EAGAIN, and
+ * its retry finds nobody. Then a concurrent *signal* in the same window:
+ * it wakes one and leaves the rest, and the outer broadcast's retry is
+ * what moves them -- returning on -EAGAIN instead strands them, which a
+ * review found before a test did. */
 static void ea_probe(int phase)
 {
     if (phase == 0)
         cosmo_cond_broadcast(&cv_c);
+}
+static void es_probe(int phase)
+{
+    if (phase == 0)
+        cosmo_cond_signal(&cv_c);
 }
 
 /* Step 27: a timed waiter with a short budget that main requeues and
@@ -2433,6 +2450,18 @@ int main(int argc, char **argv)
         CHECK(cv_woke == N);
         CHECK(__cosmo_thread_stats.bcast_eagain == 1);
         CHECK(__cosmo_thread_stats.bcast_requeued == N);   /* the inner one moved them all */
+
+        hd_start(w, N);
+        stats_reset();
+        cv_ready = 1;
+        __atomic_store_n(&__cosmo_cond_bcast_probe, es_probe, __ATOMIC_RELEASE);
+        cosmo_cond_broadcast(&cv_c);             /* a signal lands first: one woken, N-1 left for the retry */
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == N);
+        CHECK(__cosmo_thread_stats.bcast_eagain == 1);
+        CHECK(__cosmo_thread_stats.bcast_requeued == N - 1);   /* the retry moved the rest */
     }
 
     STEP("27");

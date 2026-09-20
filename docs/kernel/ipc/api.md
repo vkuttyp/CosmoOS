@@ -94,7 +94,9 @@ wakes up to `nr_wake` and moves up to `nr_requeue` more onto the second
 word; a word requeued onto itself is counted and left where it is (the
 move would push each waiter to the tail of the list being walked, an
 unbounded walk with interrupts off — found and fixed by the native
-thread door unit). Native: `SYS_futex_wait`/`SYS_futex_wake` (83, 84)
+thread door unit), and with nothing to wake it leaves `wake_seq` alone,
+so the count does not wake a waiter caught between its compare and its
+enqueue. Native: `SYS_futex_wait`/`SYS_futex_wake` (83, 84)
 since the threads unit and `SYS_futex_requeue` (94, compare form) since
 the native thread door; the Linux `futex` call reaches all three. Full
 contract: `docs/compat/linux/api.md`.

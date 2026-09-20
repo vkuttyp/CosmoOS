@@ -345,7 +345,8 @@ list. Waiters live on the waiting thread's stack.
   pointer under that bucket's lock until they agree). `uaddr2 == uaddr1`
   counts the waiters and moves none (moving them re-pushed each to the
   tail of the list being walked: an unbounded walk with interrupts off,
-  fixed by the native thread door unit). Thread context. Also reached
+  fixed by the native thread door unit), and with `nr_wake` 0 does not
+  bump `wake_seq` either — a count that woke what it counted. Thread context. Also reached
   by the native `SYS_futex_requeue` (compare form only).
 
 ## Thread pointer (`kernel/include/arch/user.h`, `kernel/arch/x86_64/user.c`, `context.c`)

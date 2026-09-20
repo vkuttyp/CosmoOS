@@ -82,7 +82,7 @@ seven or eight.
 | 23 | held at 1, eight waiters, every one returns | a waiter relocking through the fast path; the requeue waking none (move all); the wake-all broadcast (the count, not a hang) |
 | 24 | held at 2; not held at all | the same two hangs |
 | 25 | another thread holds the mutex and unlocks inside the broadcast, before the requeue and, separately, after it — through `__cosmo_cond_bcast_probe`, on the broadcasting thread | none specific: this is the interleaving the report's third rule was written for, and the step is what showed the two rules already cover it |
-| 26 | a concurrent broadcaster (the probe, before the requeue) moves `seq` first: `-EAGAIN`, the inner call owns the handoff | the kernel requeue without its compare |
+| 26 | a concurrent broadcaster (the probe, before the requeue) moves `seq` first: `-EAGAIN`, the retry finds nobody; then a concurrent *signal*: one woken, the retry moves the other two | the kernel requeue without its compare; returning on `-EAGAIN` instead of retrying (the signal case hangs) |
 | 27 | a requeued timed wait expires on the mutex word, held past its budget | — (the count of moved waiters is the assertion) |
 | 28 | a condition nobody has waited on: `mutex` NULL, `seq` bumped | — |
 | 29 | the recorded mutex's page unmapped after the last waiter left; broadcast returns (a child: `thrtest stale-mutex`, status 0) | any load through the pointer: the child faults — the report's read-after-requeue did, tried without its guard, before it was removed altogether |
@@ -93,7 +93,13 @@ nobody one run in three because its waiter was still between its
 unlock and its `futex_wait`. The steps now wait until the kernel says
 every waiter is asleep — a requeue of the condition's word onto itself,
 which the kernel counts without moving (`kernel/ipc/futex.c`; putting
-the move back stops the boot at that count, with interrupts off).
+the move back stops the boot at that count, with interrupts off). **A
+count must not perturb**: the first CI run failed both architectures
+at that wait, because the probe still bumped the bucket's wake
+sequence, a waiter between its compare and its enqueue returned
+spuriously, went round its loop, and blocked on the mutex the counter
+held. The kernel no longer bumps it for a same-word requeue with
+nothing to wake, and the wait releases the mutex each pass.
 
 ## Host test (`tests/host/test_libc.c`, `make host-test`)
 

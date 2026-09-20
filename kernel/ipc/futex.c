@@ -198,7 +198,18 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
             spin_unlock(&hi->lock);
         spin_unlock_irqrestore(&lo->lock, s);
     }
-    b1->wake_seq++;
+    /*
+     * A wake or a move counts as a wake for a waiter caught between its
+     * compare and its enqueue on uaddr1: it returns spuriously rather than
+     * sleeping on a word whose waiters have just been moved away. A word
+     * requeued onto itself with nothing to wake moves nobody, and must
+     * not bump the sequence: it is the count of sleepers the native
+     * thread door's tests read, and a count that woke the waiters it was
+     * counting sent them round their loop and onto a mutex the counter
+     * held -- CI's slower hosts hit that window every run.
+     */
+    if (uaddr1 != uaddr2 || nr_wake)
+        b1->wake_seq++;
     b1->queue_seq++;
     b2->queue_seq++;
     int woken = 0, requeued = 0;

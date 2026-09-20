@@ -389,15 +389,27 @@ void cosmo_cond_broadcast(cosmo_cond_t *c)
     void (*probe)(int) = __atomic_exchange_n(&__cosmo_cond_bcast_probe, 0, __ATOMIC_ACQ_REL);
     if (probe)
         probe(0);
-    long n = cosmo_futex_requeue(&c->seq, &m->state, 1, ~0u, seq);
+    long n;
+    for (;;) {
+        n = cosmo_futex_requeue(&c->seq, &m->state, 1, ~0u, seq);
+        if (n != -EAGAIN)
+            break;
+        /*
+         * `seq` moved between our increment and the requeue: a concurrent
+         * signal or broadcast. A broadcast moved everybody and there is
+         * nothing left to do; a signal woke ONE and left the rest asleep
+         * on a word our increment already promised to empty -- returning
+         * here strands them (a review found it). Requeue again against
+         * the value that is there now: a waiter that read it and sleeps
+         * anyway is moved and woken once spuriously, which the contract
+         * permits, and one that has not yet slept compares unequal to
+         * whatever it read before.
+         */
+        stat_inc(&__cosmo_thread_stats.bcast_eagain);
+        seq = __atomic_load_n(&c->seq, __ATOMIC_SEQ_CST);
+    }
     if (probe)
         probe(1);
-    if (n == -EAGAIN) {
-        /* A concurrent broadcaster moved `seq` first; its requeue woke the
-         * head of the chain. Nothing here to do. */
-        stat_inc(&__cosmo_thread_stats.bcast_eagain);
-        return;
-    }
     if (n > 0)
         __atomic_fetch_add(&__cosmo_thread_stats.bcast_requeued, (unsigned)n, __ATOMIC_RELAXED);
 }
