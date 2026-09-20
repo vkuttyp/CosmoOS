@@ -126,7 +126,9 @@ An unknown conversion prints the `%` and the character.
 - `mount(source, target, fstype, flags)`, `umount`, `umount2(target,
   flags)`, `MS_RDONLY`, `MNT_FORCE`.
 - `mmap(hint, len, prot, flags, fd, off)` (anonymous only: `fd` and `off`
-  are ignored, `MAP_FAILED` on error), `munmap`, `PROT_*`, `MAP_ANONYMOUS`,
+  are ignored, `MAP_FAILED` on error), `munmap`, `mprotect` (POSIX, except
+  that `len` must be a page multiple and `EBUSY` is possible against a
+  concurrent `MAP_FIXED` replacement of the same range), `PROT_*`, `MAP_ANONYMOUS`,
   `MAP_FIXED`, `MAP_PRIVATE` (0).
 
 ## spawn.h, sys/wait.h, signal.h (**native**)

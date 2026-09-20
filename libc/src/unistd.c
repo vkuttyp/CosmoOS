@@ -152,6 +152,7 @@ void *mmap(void *hint, size_t len, int prot, int flags, int fd, long off)
 }
 
 int munmap(void *addr, size_t len) { return (int)__syscall_ret(cosmo_munmap(addr, len)); }
+int mprotect(void *addr, size_t len, int prot) { return (int)__syscall_ret(cosmo_mprotect(addr, len, prot)); }
 
 int nanosleep(const struct timespec *req, struct timespec *rem)
 {

@@ -141,7 +141,16 @@
 /* A socket's own answer about itself. One option so far -- the pending
  * error -- because a door with one thing behind it beats one that lies. */
 #define SYS_getsockopt 92 /* (int h, int level, int opt, void *val, size_t *len) -> 0 */
-#define SYS_COUNT     93
+/* Change the protection of a mapped range. The Linux personality had
+ * this call from milestone 10; the native ABI did not, so a native
+ * program could not do what the same program compiled for Linux could
+ * (docs/audit/next-subsystem-mprotect.md). W|X is EINVAL, as at mmap; a
+ * range with an unmapped page is ENOMEM and nothing changes; EBUSY if a
+ * MAP_FIXED replacement holds part of the range. Adding PROT_EXEC makes
+ * the kernel synchronise the instruction stream for the range, because
+ * user code cannot (SCTLR_EL1.UCI is not set). */
+#define SYS_mprotect  93  /* (void *addr, size_t len, int prot) -> 0 */
+#define SYS_COUNT     94
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five

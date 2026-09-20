@@ -394,6 +394,25 @@ no return); `-ENOMEM` if the region or a split spare cannot be
 allocated or `COSMO_RLIMIT_AS` would be exceeded — in which case
 nothing has changed, not even a split. Anonymous user memory only.
 
+### `int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot)`
+
+Change the protection of every page of `[base, base+size)`: splits
+regions at the ends so the range is covered by whole regions, rewrites
+their `prot` and the leaf permissions, shoots down, and merges equal
+neighbours afterwards. `-EINVAL` for W+X or a bad range; `-ENOMEM` if a
+page of the range is unmapped or a split spare cannot be allocated,
+with nothing changed; `-EBUSY` if a `MAP_FIXED` replacement has claimed
+part of the range (invariant M40 — splitting a quiesced region would
+copy the claim into pieces the owner does not know about).
+
+Reached by the ELF loader, by the Linux personality's `mprotect`, and
+since the `mprotect` unit by the native `SYS_mprotect`. It does **not**
+synchronise the instruction stream: that is done by the two syscall
+doors, which run in the owning process's context, via
+`arch_mmu_sync_icache_user` — the loader has no stale lines to worry
+about in a fresh address space, and this function may be called on a
+space that is not current.
+
 ### `void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages)`
 
 The process layer's `COSMO_RLIMIT_AS` and `MEM` in pages

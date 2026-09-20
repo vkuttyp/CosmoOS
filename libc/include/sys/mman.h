@@ -13,4 +13,8 @@
 #define MAP_FAILED ((void *)-1)
 void *mmap(void *hint, size_t len, int prot, int flags, int fd, long off);
 int munmap(void *addr, size_t len);
+/* POSIX, with two things POSIX does not say: len must be a page
+ * multiple (EINVAL, not rounded), and EBUSY if a MAP_FIXED mapping is
+ * replacing part of the range on another thread at that instant. */
+int mprotect(void *addr, size_t len, int prot);
 #endif

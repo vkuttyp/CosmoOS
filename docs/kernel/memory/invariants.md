@@ -129,7 +129,11 @@ Checked by: explicit test in `descend`/`arch_mmu_map`; review of callers.
 
 **M18. Unmap and protect never split a large page.** Both refuse with
 `-EINVAL` before changing anything if the range does not cover a large
-leaf entirely.
+leaf entirely. User anonymous memory is mapped in 4 KiB pages
+(demand-zero faults and `VM_REGION_POPULATED` both map page by page),
+so a user `mprotect` cannot reach this refusal today — by circumstance,
+not by a check. If user mappings ever grow large pages, `mprotect` of a
+sub-range becomes `-EINVAL`, and this sentence is where to look.
 Checked by: the two-pass structure in `arch_mmu_unmap`/`arch_mmu_protect`.
 
 **M19. Intermediate page-table pages are not reclaimed (documented
@@ -390,3 +394,35 @@ sizes). Each is bug-proofed: removing `replace_lock`, letting
 `vm_user_unmap` ignore the claim, counting whole regions instead of
 the intersection in `covered_pages`, and moving the limit check after
 the split each kill one of them.
+
+**M41. A user range made executable has its instruction stream
+synchronised by the kernel, at the syscall door.** W^X is enforced per
+call — `WRITE|EXEC` together is `-EINVAL` at `vm_user_map_anon`,
+`vm_user_map_anon_replace` and `vm_user_protect` — and *not*
+historically: a page may be written and then made executable, which is
+what the ELF loader does and what a JIT needs. Bytes written as data
+are not necessarily visible to instruction fetch on AArch64 until the
+data cache is cleaned to the point of unification, the instruction
+cache invalidated for the range, and an `isb` executed; user code
+cannot do that here, because EL0 may run `dc cvau`/`ic ivau` only when
+`SCTLR_EL1.UCI` is set and this kernel does not set it. So both
+`mprotect` doors call `arch_mmu_sync_icache_user` after a successful
+protect that adds `VM_PROT_EXEC`, line by line from `CTR_EL0`, inside
+the user-access bracket — kept because the rule everywhere else is
+that EL1 touches EL0-accessible memory only inside it, **not** because
+it was shown to be needed: see below. x86-64 keeps its instruction
+cache coherent with stores and the call is a no-op.
+Checked by: `init --selftest` writes a function's bytes as data,
+`mprotect`s the page `R|X` and calls it, with no cache maintenance of
+its own. Under QEMU TCG that cannot distinguish a kernel that syncs
+from one that does not — TCG invalidates translated code on write — so
+it is a regression test that the path runs without trapping, not a
+proof of coherence; hardware is where the proof would be. **The
+bracket is not proved either.** With it removed, the guard boot (PAN
+present and on) ran the self-test without a fault, so on this
+platform the `dc cvau`/`ic ivau` by VA are not stopped by PAN —
+whether because QEMU does not apply PAN to them or because the
+architecture exempts them is not settled here. Two of this
+invariant's four mutations are therefore unobservable under QEMU,
+and it says so rather than claiming a proof it does not have.
+

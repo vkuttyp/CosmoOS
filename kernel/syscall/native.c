@@ -399,6 +399,41 @@ static int64_t sys_munmap(struct syscall_args *a)
     return vm_user_unmap(process_current()->space, addr, len, VM_UNMAP_STRICT);
 }
 
+static int64_t sys_mprotect(struct syscall_args *a)
+{
+    uint64_t addr = a->a[0];
+    size_t len = (size_t)a->a[1];
+    int prot = (int)a->a[2];
+
+    /* The native rules, the same ones mmap and munmap keep: an
+     * undefined prot bit is an error rather than ignored, and len is a
+     * page multiple rather than rounded up. */
+    if (prot & ~(COSMO_PROT_READ | COSMO_PROT_WRITE | COSMO_PROT_EXEC))
+        return -EINVAL;
+    if (!is_page_aligned(addr) || len == 0 || !is_page_aligned(len) || !user_range_ok(addr, len))
+        return -EINVAL;
+    vm_prot_t vprot = 0;
+    if (prot & COSMO_PROT_READ)
+        vprot |= VM_PROT_READ;
+    if (prot & COSMO_PROT_WRITE)
+        vprot |= VM_PROT_WRITE;
+    if (prot & COSMO_PROT_EXEC)
+        vprot |= VM_PROT_EXEC;
+
+    /* W|X, a hole in the range and a range a replacement has claimed are
+     * all decided in the VM layer, not here; this door only translates. */
+    int rc = vm_user_protect(process_current()->space, addr, len, vprot);
+    if (rc)
+        return rc;
+    /* Bytes written to this range as data may still be in the data
+     * cache and stale in the instruction cache. User code cannot fix
+     * that itself (SCTLR_EL1.UCI is clear), so the kernel does when the
+     * range becomes executable -- for every caller, not just a test. */
+    if (vprot & VM_PROT_EXEC)
+        vm_user_sync_icache(process_current()->space, addr, len);
+    return 0;
+}
+
 static int64_t sys_log(struct syscall_args *a)
 {
     uint64_t ustr = a->a[0];
@@ -1837,6 +1872,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_clock_ns] = sys_clock_ns,
     [SYS_mmap] = sys_mmap,
     [SYS_munmap] = sys_munmap,
+    [SYS_mprotect] = sys_mprotect,
     [SYS_log] = sys_log,
     [SYS_close] = sys_close,
     [SYS_open] = sys_open,

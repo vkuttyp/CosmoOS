@@ -99,6 +99,8 @@ kernel stack.
 | 89 | `symlink` | `const char *target, const char *path` | 0 | `EEXIST`, `EPERM` (a filesystem without links), `EOPNOTSUPP` (a cosmofs older than format version 8), `ENAMETOOLONG`, path errors |
 | 90 | `readlink` | `const char *path, char *buf, size_t len` | bytes copied, **not terminated** | `EINVAL` (not a link, or `len` 0), path errors, `EFAULT` |
 | 91 | `lstat` | `const char *path, struct cosmo_stat *st` | 0 | as `stat`, but a link named last is reported rather than followed |
+| 92 | `getsockopt` | `int h, int level, int opt, void *val, size_t *len` | 0 | see the paragraph below; this row was missing from the table until the `mprotect` unit added 93 beside it |
+| 93 | `mprotect` | `void *addr, size_t len, int prot` | 0 | `EINVAL` (unaligned, zero or non-page-multiple `len`, an undefined `prot` bit, `W|X`), `ENOMEM` (a page of the range is unmapped: nothing changes), `EBUSY` (a `MAP_FIXED` replacement holds part of the range) |
 | 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
 Calls 89–91 are the symbolic-link calls, specified with the rest of the
@@ -119,7 +121,7 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 93: 89–91 are the symbolic-link calls and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 94: 89–91 are the symbolic-link calls, **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every
@@ -177,6 +179,17 @@ Details per call:
   needed); a range with an unmapped page is `EINVAL` and nothing
   changes. This strict rule is the native contract; the Linux
   personality's `munmap` skips unmapped pages.
+- **mprotect**: any page-aligned range inside the window whose every
+  page is mapped; regions split and merge as needed, and a range with
+  an unmapped page is `ENOMEM` with nothing changed. `W|X` is `EINVAL`
+  in one call, as at `mmap`; write-then-protect-to-execute is allowed,
+  and when a range becomes executable the kernel synchronises its
+  instruction stream (on AArch64 user code cannot: `SCTLR_EL1.UCI` is
+  not set). `EBUSY` is the one answer POSIX does not name: a `MAP_FIXED`
+  replacement on another thread holds part of the range for the length
+  of its teardown (invariant M40), which is a race in the caller, not
+  something to sleep through. The Linux personality's `mprotect` rounds
+  `len` up; the native one requires a page multiple, as `munmap` does.
 - **EFAULT** everywhere: a user pointer that names an unmapped,
   `PROT_NONE` or wrong-permission page, or one the kernel cannot
   populate for lack of memory, makes the call return `EFAULT`; the

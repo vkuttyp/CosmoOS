@@ -1,14 +1,87 @@
 # NEXT SUBSYSTEM — a call one personality has and the other does not
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(PR #195), and the banner below records where the build
+differed from the design — including two proofs the design promised
+that this environment cannot give.
 
-**A Linux program running on this kernel can change the protection of
-its own memory. A native program cannot.** `lx_mprotect`
-(`compat/linux/syscalls.c:1012-1031`) validates and calls
-`vm_user_protect`; the native ABI has no such call at all. The
-machinery is built, tested and in use — only one of the two doors
-opens onto it.
+**What the build changed:**
+
+1. **The sync lives at the two syscall doors, not in
+   `vm_user_protect`.** The design said "`vmm.c` or the arch layer".
+   `vm_user_protect` is also called by the ELF loader on a space that
+   is not current, and the maintenance is by virtual address in the
+   current regime, so it goes where the calling process's context is
+   guaranteed: `sys_mprotect` and `lx_mprotect`, both, after a
+   successful protect that adds `VM_PROT_EXEC`, via
+   `arch_mmu_sync_icache_user` (a no-op on x86-64).
+
+2. **Two of the four mutations cannot be observed under QEMU, and the
+   unit says so instead of claiming them.** Removing the sync
+   entirely passes: TCG invalidates translated code on data writes,
+   so the write-then-execute self-test is a regression test that the
+   path runs without trapping, not a proof of coherence. And removing
+   the user-access bracket around the maintenance did **not** fault
+   under the guard boot with PAN present and on — so the bracket is
+   kept because EL1 touches EL0-accessible memory only inside it
+   everywhere else, not because it was shown to be needed. The design
+   asserted that PAN would fault the EL1 access; that is not
+   established here, and the invariant (M41) records the gap. The two
+   that do bite: accepting an undefined `prot` bit fails the native
+   flags case, and pointing the fuzzer at the scratch page it writes
+   into makes it protect that page and then write to it —
+   `syscall-fuzz` fails on the child's `status == 0`, with the fault
+   at `g_fz_page + 4000`, `fz_string`'s own offset.
+
+3. **`docs/compat/linux/api.md` was stale about `vm_user_protect`.**
+   It said the range had to be exactly one region (`-EINVAL`
+   otherwise, "a recorded VMM limit"), which has not been true since
+   the function learned to split — `design.md` in the same directory
+   said so. Fixed in passing, and noted because the affected-files
+   table below did not know it was wrong.
+
+4. **The syscall table was missing row 92.** `getsockopt` was recorded
+   only in the prose paragraph that carries the count; adding 93
+   beside it is when that showed. Both rows are in the table now.
+
+5. **The first sync could panic the kernel from user mode, and QEMU
+   could not show it.** It ran `dc cvau`/`ic ivau` by VA over the whole
+   range. A demand-zero page the caller never touched has no leaf
+   translation, and on hardware cache maintenance by such a VA is a
+   translation fault at EL1 with no fixup — so `mmap(RW)` followed by
+   `mprotect(RX)` without a write in between was an unprivileged
+   panic. Review found it. The fuzzer had been driving exactly that
+   case hundreds of times a boot, on both architectures, and passing,
+   because QEMU implements the maintenance as a no-op: the third thing
+   this environment hid in one unit. `vm_user_sync_icache` now walks
+   the range page by page **under `space->lock`** and syncs only the
+   present ones; the lock is what keeps a leaf from being torn down
+   between the query and the maintenance. Review then found the
+   second half: that walk held the lock with interrupts off for the
+   whole range, and a lazy mapping at the 2 GiB limit is 524,288
+   queries nothing can interrupt — an unprivileged stall. It walks in
+   the teardown's 32-page chunks now, taking the lock per chunk as
+   `user_range_teardown` does, and syncs consecutive present pages as
+   one run so the barriers are paid per run. The self-test makes an
+   untouched range executable and then a half-written one — a
+   regression test that the walk stays, not a demonstration of the
+   fault, which only hardware can give.
+
+6. **`thread.c`'s comment described a punch that #193 had removed.**
+   Updating it for the new syscall found it still narrating reserve,
+   punch a hole, fixed-map into the hole. It now describes
+   reserve-and-replace, says the call exists, and says why libc keeps
+   the sequence anyway.
+
+**A Linux program running on this kernel could change the protection
+of its own memory. A native program could not** — the state this
+report was written against, and the state this unit ended.
+`lx_mprotect` (`compat/linux/syscalls.c:1012-1031`) validated and
+called `vm_user_protect`; the native ABI had no such call at all. The
+machinery was built, tested and in use — only one of the two doors
+opened onto it. (Present tense from here on in the design sections
+describes that starting point; the banner above is what shipped.)
 
 **Takes up** the inventory's §1.2 entry **"`SYS_mprotect` for native
 programs"** (README.md:1486), deferred there and again by the
@@ -64,8 +137,8 @@ This tree's usual failure is a check enforced in `native.c` and
 missing from the Linux personality — a second door onto the same
 objects. Here the personality is the *complete* one. A native program
 that wants a guard page, a read-only table after initialisation, or a
-JIT buffer has no call to make, while the same program compiled
-against Linux headers does.
+JIT buffer had no call to make, while the same program compiled
+against Linux headers did.
 
 ### `MAP_FIXED` replacement is not a substitute for it
 

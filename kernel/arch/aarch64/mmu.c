@@ -21,6 +21,7 @@
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/mmu.h>
+#include <arch/user.h>
 #include <aarch64/platform.h>
 #include <aarch64/sysreg.h>
 
@@ -524,4 +525,40 @@ void arch_mmu_near_arena(vaddr_t *lo, vaddr_t *hi)
     vaddr_t end = ((vaddr_t)__kernel_end + PAGE_2M_SIZE - 1) & ~(vaddr_t)(PAGE_2M_SIZE - 1);
     *lo = end;
     *hi = (vaddr_t)KERNEL_IMAGE_BASE + (vaddr_t)(120u << 20);
+}
+
+void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
+{
+    /*
+     * The sequence the WXN crash test runs at EL1 (kernel/core/main.c),
+     * applied line by line over a range and to a USER address. Two
+     * things about it:
+     *
+     * The line sizes come from CTR_EL0 -- DminLine and IminLine are
+     * log2 words -- because stepping by a guessed size either misses
+     * lines (stale instructions execute) or does extra work.
+     *
+     * The user pages are EL0-accessible, and the rule everywhere else is
+     * that EL1 touches such memory only inside the user-access bracket
+     * (PAN cleared, as for a copy). The bracket is kept for that rule,
+     * NOT because it was shown to be needed: with it removed, the guard
+     * boot -- PAN present and enabled -- ran the write-then-execute
+     * self-test without a fault. Whether that is QEMU not applying PAN
+     * to DC/IC by VA or the architecture exempting them is not settled
+     * here; on hardware is where to find out (docs/kernel/memory/
+     * invariants.md M41).
+     */
+    uint64_t ctr = READ_SYSREG(ctr_el0);
+    size_t dline = 4u << ((ctr >> 16) & 0xf);
+    size_t iline = 4u << (ctr & 0xf);
+    vaddr_t end = va + len;
+
+    arch_user_access_begin();
+    for (vaddr_t p = va & ~(vaddr_t)(dline - 1); p < end; p += dline)
+        __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    for (vaddr_t p = va & ~(vaddr_t)(iline - 1); p < end; p += iline)
+        __asm__ volatile("ic ivau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+    arch_user_access_end();
 }
