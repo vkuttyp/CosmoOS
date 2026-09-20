@@ -14,8 +14,12 @@ for exactly such a gap.
 That is not a hypothesis. It cost three aarch64 CI failures in PR #191
 and is papered over there by a retry loop.
 
-Closes the inventory's §1.2 entry **"`MAP_FIXED` should replace, as
-POSIX says, instead of returning `-EEXIST`"**.
+**Takes up** the inventory's §1.2 entry **"`MAP_FIXED` should replace,
+as POSIX says, instead of returning `-EEXIST`"** — which the
+inventory marks as taken up by this report. A report proposes; the
+entry is struck through when the unit is *built*, as every other
+closed entry there was. Saying "closes" here put two different
+statuses on one item, which review caught.
 
 ## What is established
 
