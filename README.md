@@ -2858,6 +2858,43 @@ See [docs/development.md](docs/development.md).
   inventory. 360 self-tests on both
   architectures, debug and release (PR #191).
 
+- **`MAP_FIXED` replaces, as POSIX says, and the range is owned while
+  it does.** `space_insert` refused any overlap, so a fixed mapping
+  over live memory returned `-EEXIST` and a caller wanting to convert
+  part of a range it already owned had to `munmap` a hole and `mmap`
+  it back — two syscalls with the range belonging to nobody in
+  between, which `vm_user_find_free` will hand to the next
+  `mmap(NULL, …)`. `cosmo_thread_start` does exactly that to place a
+  guard page below each stack and **lost the race three times on
+  aarch64 CI**, getting `EEXIST` out of a thread start; the previous
+  unit shipped a bounded retry and filed the real repair.
+  `vm_user_map_anon_replace` is that repair: three critical sections,
+  because the page-table teardown takes the space lock itself once
+  per chunk, with the new region put in under the
+  same lock that clears the old ones, marked `VM_REGION_QUIESCED`
+  and still claimed across it, so **one region owns the whole
+  interval — holes included — at every instant**. An earlier version
+  claimed only the regions that existed and left a spanned hole for
+  the allocator to hand out, which review caught as a route to a
+  kernel panic. The
+  claim is an ownership claim — a user fault on such a region
+  installs nothing and retries, a kernel fault inside a copy reports
+  `-EFAULT`, `munmap` refuses it with `-EBUSY`, and a per-space mutex
+  serialises replacements — so the finishing swap cannot fail, which
+  matters because every fallible step and the whole page accounting
+  happen before the first change. Both doors use it: the native
+  `mmap` now conforms, and the Linux personality, which already
+  replaced but as an unmap followed by a map (**the same window, one
+  door further in**), no longer has it. `COSMO_MAP_FIXED_NOREPLACE`
+  keeps the old refusal, because "place this only if the range is
+  free" is a real request and the self-tests assert it. libc drops
+  the punch, the retry and `STACK_MAP_ATTEMPTS`. Invariant **M40**;
+  `vm-replace` and `vm-replace-race`, each bug-proofed by four
+  mutations — and one of those mutations found a vacuous case of my
+  own, a refusal whose range could not split and so could not show
+  that a failure changes nothing. 362 self-tests on both
+  architectures (PR #193).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

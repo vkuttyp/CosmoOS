@@ -8,6 +8,7 @@
 #define PROT_EXEC COSMO_PROT_EXEC
 #define MAP_ANONYMOUS COSMO_MAP_ANONYMOUS
 #define MAP_FIXED COSMO_MAP_FIXED
+#define MAP_FIXED_NOREPLACE COSMO_MAP_FIXED_NOREPLACE
 #define MAP_PRIVATE 0
 #define MAP_FAILED ((void *)-1)
 void *mmap(void *hint, size_t len, int prot, int flags, int fd, long off);

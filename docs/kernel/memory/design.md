@@ -404,7 +404,8 @@ from the cache's `object_size` or the page order. All kmalloc results are
 | free of reserved/free/wrong-order page | panic (bug) |
 | refcount underflow | panic (bug) |
 | arena exhausted | `vm_kernel_alloc` returns 0 |
-| map over existing mapping | `-EEXIST` |
+| map over existing mapping (`arch_mmu_map`, and `space_insert` for a region) | `-EEXIST` |
+| user `MAP_FIXED` over an existing mapping | **replaces it** (`vm_user_map_anon_replace`, invariant M40); `COSMO_MAP_FIXED_NOREPLACE` asks for the refusal instead and gets `-EEXIST` |
 | unmap crossing a partial large page | `-EINVAL` |
 | kernel fault outside any region | panic with VMM report |
 | kernel fault in PHYS region (permission) | panic with region name and prot |

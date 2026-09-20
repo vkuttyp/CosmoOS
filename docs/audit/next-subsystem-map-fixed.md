@@ -1,7 +1,58 @@
 # NEXT SUBSYSTEM — the hole between two syscalls
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(PR #193), and the banner below records where the build differed from
+the design.
+
+**What the build changed:**
+
+1. **The design left a hole for the allocator to hand out, and that
+   was a route to a kernel panic.** The protocol below quiesces the
+   regions the range covers and leaves them linked across the
+   teardown — which owns every part of the range that was *mapped*,
+   and no part that was not. A range spanning a **hole** therefore
+   had that hole owned by nobody for the length of the teardown,
+   `vm_user_find_free` will hand it to a concurrent
+   `mmap(NULL, …)`, and the final swap then collides with a mapping
+   that had every right to exist, straight into `KASSERT(irc == 0)`.
+   Found by review of the implementation, not of this report.
+
+   The build does the simpler thing instead: the new region goes in
+   **during the first critical section**, marked `VM_REGION_QUIESCED`,
+   so one region owns the whole interval — holes included — from the
+   moment the lock is first released. The teardown works on the page
+   tables, not the region list, so it does not mind that the old
+   records are already gone, and the insert can never collide because
+   the range is cleared and filled under one hold of the lock. The
+   third section only clears the claim and merges.
+
+2. **The bug-proof this report proposed cannot work.** It says to
+   restore the punch in `cosmo_thread_start` and watch `EEXIST` come
+   back. Once `MAP_FIXED` replaces, the refill does not fail — it
+   silently clobbers whatever took the hole. The report was reasoning
+   with the old semantics still in force. Four mutations of the
+   primitive replaced it: removing `replace_lock`, letting
+   `vm_user_unmap` ignore the claim, counting whole regions in
+   `covered_pages`, and moving the limit check after the split.
+
+3. **`covered_pages` had to count the intersection, not the region.**
+   Not in the design at all. It runs before the split, so a region may
+   reach past either end of the range; counting it whole credited six
+   pages for a two-page replacement and drove `mapped_pages`
+   backwards.
+
+4. **A test of "a failure changes nothing" needs a failure with
+   something to change.** The `-ENOMEM` case refused a range whose
+   ends fell on region boundaries, so no split was needed and moving
+   the limit check after the mutation was invisible to it. It now
+   refuses a range that starts and ends inside regions and covers a
+   hole.
+
+5. **`vm-replace-race` runs after the quiesce block**, because
+   `quiesce-kick-spinner` fails if any test creates threads before it
+   — six no-op threads reproduce it, and `main` is the control. The
+   sensitivity is that test's; see docs/testing/flakes.md.
 
 **`MAP_FIXED` does not replace.** POSIX says a fixed mapping takes the
 range whatever was there; this kernel refuses it. A caller that wants
@@ -151,6 +202,9 @@ limit checks all happen before anything is unlinked or split:
    — subtract `covered`, add `npages` — so the budget is held across
    the teardown and the third section needs no check. Mark every
    covered region `VM_REGION_QUIESCED` and **leave them linked**.
+   *(Superseded — banner item 1. Leaving them linked owns only what
+   was mapped, so a hole the range spanned stays available. The build
+   inserts the new region here instead.)*
 3. **Outside the lock**: `user_range_teardown(base, size)`. The range
    is still owned by the quiesced regions, so no `mmap(NULL, …)` can
    be handed it, and the teardown finds exactly the old pages.

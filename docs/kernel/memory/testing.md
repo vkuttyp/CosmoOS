@@ -68,6 +68,45 @@ reservation has no frames and can be split by `protect`; a lenient unmap
 across two regions and a gap leaves exactly the expected pieces;
 `vm_space_destroy` returns the frames.
 
+### `SELFTEST: vm-replace` (`selftest_vm_replace`, the `MAP_FIXED` unit)
+
+On a scratch user space: replacing a whole region leaves one region,
+the accounting exact, and **no frames** — the teardown ran and the new
+region is demand-zero. Replacing the middle of a region splits at both
+ends into three; replacing across several regions **and a hole**
+leaves one; a replacement with matching attributes merges with its
+neighbour. `VM_REGION_POPULATED` is `-EINVAL` and changes nothing.
+
+Two refusals, because a failure must change nothing: over
+`COSMO_RLIMIT_AS` leaves the old mapping intact, and a refusal of a
+range that starts and ends *inside* regions and covers a hole — one
+that **would have split** — leaves the region count and the accounting
+untouched. The first version of that case refused a range whose ends
+fell on region boundaries, so no split was needed and a limit check
+placed after the mutation passed it.
+
+Finally, no region is left `VM_REGION_QUIESCED`: a claim outliving its
+replacement would hang a faulting thread rather than fail it.
+
+### `SELFTEST: vm-replace-race` (`selftest_vm_replace_race`, the `MAP_FIXED` unit)
+
+Four hundred overlapping replacements from two threads, then a
+replacer against an unmapper, then a replacer against a **filler** and
+a **protector** over a 64-page range whose hole is re-punched every
+round. Every replacement must return 0; the unmapper may see only 0 or
+`-EBUSY`; nothing may be left claimed across the whole area; and
+`mapped_pages` must equal the sum of the region sizes.
+
+Each thread is there for a defect that reached review: the overlapping
+pair for `replace_lock`, the unmapper for the ownership claim, the
+filler for a hole left unclaimed (which let a valid concurrent mapping
+panic the kernel on the swap's `KASSERT`), and the protector for a
+split that strands a claim for ever. The racers `sched_yield`, and the
+test is **registered after the quiesce block** —
+`quiesce-kick-spinner` fails if any test creates threads before it,
+which is that test's sensitivity and not this one's
+(`docs/testing/flakes.md`).
+
 ### `SELFTEST: uaccess` (`selftest_uaccess`, `kernel/syscall/uaccesstest.c`)
 
 From a kernel thread (no process, so every user address is unmapped):

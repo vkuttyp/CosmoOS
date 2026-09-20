@@ -111,24 +111,23 @@ shape of each is set by its consequence:
   with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
   for a program that wants such a thread to use libc anyway.
 
-- **A thread stack is built in three syscalls, and the middle one
-  opens a window.** `cosmo_thread_start` reserves guard + stack + TCB
-  page `PROT_NONE`, `munmap`s a hole for the upper part, and `mmap`s
-  it back `MAP_FIXED` as read/write, because there is no `mprotect`
-  to turn a reservation writable in place. Between the punch and the
-  fill that hole is unmapped address space, and another thread's
-  `mmap(NULL, …)` may be handed it — `vm_user_find_free` looks for
-  exactly such a gap. This kernel's `MAP_FIXED` refuses to overwrite
-  (`space_insert` returns `-EEXIST`) rather than replacing as POSIX
-  says, so the loser of that race sees **`EEXIST` from a thread
-  start**. It is not theoretical: three aarch64 CI failures, all with
-  a thread mallocing continuously beside threads starting
-  continuously. **The retry is the contract**: the cleanup path
-  restores the address space exactly, so the attempt is made again,
-  bounded at `STACK_MAP_ATTEMPTS`. Anything that reshapes this
-  sequence must keep that property, and the real repair — atomic
-  `MAP_FIXED` replacement — is a kernel change filed in the
-  deferred-work inventory.
+- **A thread stack is built by reserving the span and replacing the
+  upper part**, and the reservation is held across both calls.
+  `cosmo_thread_start` maps guard + stack + TCB page `PROT_NONE`, then
+  `MAP_FIXED`s everything above the guard as read/write. There is no
+  instant when the range is unowned, so no other thread's
+  `mmap(NULL, …)` can be handed it.
+
+  It used to punch a hole instead — reserve, `munmap` the upper part,
+  `mmap` it back — because `MAP_FIXED` refused to overwrite. Those are
+  two syscalls with the hole unmapped between them, `vm_user_find_free`
+  looks for exactly such a gap, and the refill then lost with
+  **`EEXIST` out of a thread start**: three aarch64 CI failures, and a
+  bounded retry shipped to make losing harmless. `MAP_FIXED` now
+  replaces as POSIX says (kernel invariant **M40**), so the punch, the
+  retry and `STACK_MAP_ATTEMPTS` are all gone. **Anything that
+  reshapes this sequence must keep the reservation covering the range
+  throughout** — that, and not the retry, is what makes it safe.
 
 - **The environment takes one lock** (`libc/src/stdlib.c`), shared with
   the `atexit` list because both are cold start-up paths and a second

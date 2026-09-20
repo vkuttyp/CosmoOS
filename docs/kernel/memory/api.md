@@ -372,11 +372,36 @@ description or `no region` (a kernel bug). A fault while the calling
 CPU holds `vm_space.lock` panics with a distinct message rather than
 deadlocking. Design.md §6.1.
 
+### `int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags, const char *name)`
+
+`MAP_FIXED` with POSIX semantics: takes `[base, base+size)` whatever is
+there. The **only** way to map over live user memory —
+`vm_user_map_anon` still refuses an overlap with `-EEXIST`, which is
+what `COSMO_MAP_FIXED_NOREPLACE` asks for.
+
+The range is owned by a region at every instant, including any hole it
+spans: the replaced records are unlinked and the new region inserted,
+marked `VM_REGION_QUIESCED`, under one hold of `space->lock`, and the
+claim is released only after `user_range_teardown` has run. Nothing
+may fault into a claimed region and nothing but the owning replacement
+may unlink or split one — `vm_user_unmap` and `vm_user_protect` both
+answer `-EBUSY`. Invariant **M40**.
+
+Every fallible step precedes the first change, so the finishing swap
+cannot fail. `-EINVAL` for a bad range, W+X, or `VM_REGION_POPULATED`
+(populating allocates, and nothing fallible may run after the point of
+no return); `-ENOMEM` if the region or a split spare cannot be
+allocated or `COSMO_RLIMIT_AS` would be exceeded — in which case
+nothing has changed, not even a split. Anonymous user memory only.
+
 ### `void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages)`
 
 The process layer's `COSMO_RLIMIT_AS` and `MEM` in pages
-(`docs/kernel/security/design.md` §2): `vm_user_map_anon` refuses growth
-of `mapped_pages` past the first (`-ENOMEM`), the demand-zero fault and
+(`docs/kernel/security/design.md` §2): `vm_user_map_anon` and
+`vm_user_map_anon_replace` refuse growth of `mapped_pages` past the
+first (`-ENOMEM`; the replacement checks
+`mapped_pages - covered + npages`, so replacing a range with one the
+same size cannot fail a limit it already satisfies), the demand-zero fault and
 populated maps refuse frames at or past the second. Lowering below the
 current use changes nothing already mapped.
 

@@ -948,15 +948,27 @@ static int64_t lx_mmap(struct syscall_args *a)
     }
     uint64_t base;
     int rc;
+    bool replaced = false;
     if (flags & LX_MAP_FIXED) {
         if (!is_page_aligned(hint) || !user_range_ok(hint, len)) {
             rc = -EINVAL;
             goto out;
         }
-        rc = vm_user_unmap(p->space, hint, len, 0);   /* Linux replaces what was there */
+        base = hint;
+        /*
+         * Linux replaces what was there, and this used to do it as an
+         * unmap followed by a map -- two holds of space->lock with the
+         * range belonging to nobody in between. Another thread's
+         * mmap(NULL, ...) could be handed that gap, after which the map
+         * failed with -EEXIST: a failure Linux never produces. One
+         * operation now, which owns the range throughout
+         * (docs/audit/next-subsystem-map-fixed.md).
+         */
+        rc = vm_user_map_anon_replace(p->space, base, len, f ? VM_PROT_RW : vprot, 0,
+                                      f ? "mmap-file" : "mmap");
         if (rc)
             goto out;
-        base = hint;
+        replaced = true;
     } else {
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
         base = vm_user_find_free(p->space, from, len);
@@ -967,9 +979,11 @@ static int64_t lx_mmap(struct syscall_args *a)
             goto out;
         }
     }
-    rc = vm_user_map_anon(p->space, base, len, f ? VM_PROT_RW : vprot, 0, f ? "mmap-file" : "mmap");
-    if (rc)
-        goto out;
+    if (!replaced) {
+        rc = vm_user_map_anon(p->space, base, len, f ? VM_PROT_RW : vprot, 0, f ? "mmap-file" : "mmap");
+        if (rc)
+            goto out;
+    }
     if (f) {
         rc = fill_from_file(f, base, len, off);
         if (rc == 0 && vprot != VM_PROT_RW)

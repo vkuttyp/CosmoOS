@@ -17,6 +17,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/sched.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
 #include <kernel/vmm.h>
@@ -546,6 +547,26 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
         arch_irq_state_t s = spin_lock_irqsave(&space->lock);
         r = space_find(space, addr);
 
+        /*
+         * A replacement owns this range and is tearing its pages down.
+         * Installing one now would hand the teardown a page belonging to
+         * the mapping that replaces it -- it would query it, unmap it and
+         * free it, leaving a live region holding a freed frame. So:
+         * nothing is installed. A user fault returns and the instruction
+         * runs again, by which time the claim is normally gone; the yield
+         * is there so a single CPU cannot spin out the replacer. A
+         * kernel-mode fault inside a user copy must NOT retry -- it could
+         * be uninterruptible -- so it takes the fixup and reports -EFAULT,
+         * which is the truth: that memory is being replaced.
+         */
+        if (r != NULL && (r->flags & VM_REGION_QUIESCED)) {
+            spin_unlock_irqrestore(&space->lock, s);
+            if (!from_user)
+                goto unserviced;
+            sched_yield();
+            return;
+        }
+
         if (r != NULL && r->kind == VM_REGION_ANON && !(fl & (VM_FAULT_PRESENT | VM_FAULT_RESERVED)) &&
             access_allowed(r, fl)) {
             struct page *frame_page = NULL;
@@ -631,6 +652,7 @@ int vm_space_create_user(struct vm_space **out)
         return -ENOMEM;
 
     spinlock_init(&space->lock, "user_space");
+    mutex_init(&space->replace_lock, "vm_replace");
     list_init(&space->regions);
     space->arena_lo = 0;
     space->arena_hi = 0;
@@ -967,6 +989,9 @@ static unsigned split_at_ends(struct vm_space *space, vaddr_t base, size_t size,
     return used;
 }
 
+/* Defined with the replacement primitive below, which is what sets the flag. */
+static bool range_quiesced(struct vm_space *space, vaddr_t base, size_t size);
+
 int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned flags)
 {
     KASSERT(space->user);
@@ -980,6 +1005,17 @@ int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned f
     int rc = 0;
 
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    /*
+     * A region another replacement has claimed is not ours to unlink:
+     * that replacement is between its teardown and its swap and expects
+     * to find exactly what it left. Report it rather than corrupt it --
+     * the caller is racing munmap against MAP_FIXED on one range, which
+     * is a bug in the caller, but it must not become a bug here.
+     */
+    if (range_quiesced(space, (vaddr_t)base, size)) {
+        rc = -EBUSY;
+        goto out;
+    }
     if ((flags & VM_UNMAP_STRICT) && !range_fully_mapped(space, (vaddr_t)base, size)) {
         rc = -EINVAL;
         goto out;
@@ -1020,6 +1056,197 @@ out:
     return rc;
 }
 
+/*
+ * Pages of [base, base+size) that the regions covering it account for.
+ * Lock held. Used to charge the replacement before anything is changed.
+ */
+static uint64_t covered_pages(struct vm_space *space, vaddr_t base, size_t size)
+{
+    uint64_t n = 0;
+    vaddr_t end = base + size;
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r->base + r->size <= base)
+            continue;
+        if (r->base >= end)
+            break;
+        /*
+         * The INTERSECTION, not the region. This runs before the split,
+         * so a region may reach past either end of the range and only
+         * the part inside it is being replaced. Counting the whole
+         * region credited six pages for a two-page replacement in the
+         * middle of a six-page mapping, and mapped_pages went backwards.
+         */
+        vaddr_t lo = r->base > base ? r->base : base;
+        vaddr_t hi = (r->base + r->size) < end ? (r->base + r->size) : end;
+        n += (hi - lo) / PAGE_SIZE;
+    }
+    return n;
+}
+
+/* Any region of [base, base+size) already claimed by a replacement.
+ * Lock held. */
+static bool range_quiesced(struct vm_space *space, vaddr_t base, size_t size)
+{
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r->base + r->size <= base)
+            continue;
+        if (r->base >= base + size)
+            break;
+        if (r->flags & VM_REGION_QUIESCED)
+            return true;
+    }
+    return false;
+}
+
+int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot,
+                             unsigned flags, const char *name)
+{
+    KASSERT(space->user);
+    if (!user_range_valid(base, size))
+        return -EINVAL;
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
+        return -EINVAL;
+    /*
+     * Populating allocates frames and can fail; the swap below must not
+     * be able to. See the contract in vmm.h.
+     */
+    if (flags & VM_REGION_POPULATED)
+        return -EINVAL;
+
+    /*
+     * Allocate before any lock, as unmap and map both do: a failure here
+     * is a failure that has changed nothing.
+     */
+    unsigned rflags = VM_REGION_USER | (flags & VM_REGION_GUARD_BELOW);
+    struct vm_region *fresh = region_new((vaddr_t)base, size, prot & ~VM_PROT_USER, VM_CACHE_WB,
+                                         VM_REGION_ANON, rflags, 0, name);
+    struct vm_region *spares[2] = { region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL),
+                                    region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL) };
+    struct vm_region *removed[64];
+    unsigned nr = 0, used = 0;
+    uint64_t npages = size / PAGE_SIZE;
+    int rc = 0;
+
+    /* One replacement at a time: the teardown below cannot hold the
+     * spinlock, so two of these would otherwise interleave. */
+    mutex_lock(&space->replace_lock);
+    if (fresh == NULL || spares[0] == NULL || spares[1] == NULL) {
+        rc = -ENOMEM;
+        goto out_free;
+    }
+
+    /* --- first critical section: every check, then claim the range --- */
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    if (range_quiesced(space, (vaddr_t)base, size)) {
+        /* Only reachable if some other path learns to quiesce; the
+         * replace_lock already excludes the one writer there is. */
+        spin_unlock_irqrestore(&space->lock, s);
+        rc = -EBUSY;
+        goto out_free;
+    }
+    uint64_t covered = covered_pages(space, (vaddr_t)base, size);
+    if (space->mapped_pages - covered + npages > space->limit_mapped_pages) {   /* COSMO_RLIMIT_AS */
+        spin_unlock_irqrestore(&space->lock, s);
+        rc = -ENOMEM;
+        goto out_free;
+    }
+    unsigned need = splits_needed(space, (vaddr_t)base, size);
+    KASSERT(need <= 2);
+    used = split_at_ends(space, (vaddr_t)base, size, spares);
+    KASSERT(used == need);
+
+    /*
+     * Charge the final state now, so the swap needs no check. Between
+     * here and it, mapped_pages describes where this is going rather
+     * than where it is.
+     */
+    space->mapped_pages = space->mapped_pages - covered + npages;
+
+    /*
+     * Clear the range and put the NEW region in, claimed, before the
+     * lock is released. One region then owns the whole interval --
+     * including any HOLE it spanned, which is the part that matters:
+     * an unclaimed hole is one `vm_user_find_free` will hand to a
+     * concurrent `mmap(NULL, ...)`, and the swap would then collide
+     * with a perfectly valid mapping and panic on its KASSERT. An
+     * earlier version left the old regions linked instead and had
+     * exactly that hole; review found it.
+     *
+     * The insert cannot collide: the range was cleared a few lines
+     * above under this same hold of the lock.
+     */
+    struct vm_region *r, *tmp;
+    list_for_each_entry_safe(r, tmp, &space->regions, link) {
+        if (r->base + r->size <= base)
+            continue;
+        if (r->base >= base + size)
+            break;
+        KASSERT(r->base >= base && r->base + r->size <= base + size);
+        list_remove(&r->link);
+        if (nr < 64)
+            removed[nr++] = r;
+        else
+            kmem_cache_free(g_region_cache, r);
+    }
+    fresh->flags |= VM_REGION_QUIESCED;
+    int irc = space_insert(space, fresh);
+    KASSERT(irc == 0);   /* just cleared, and nothing else holds this lock */
+    (void)irc;
+    spin_unlock_irqrestore(&space->lock, s);
+
+    /*
+     * The teardown works on the page tables, not the region list, so
+     * the old pages go even though their records are already gone.
+     * Faults on the range meanwhile find `fresh` and its claim, and
+     * install nothing.
+     */
+    user_range_teardown(space, (vaddr_t)base, size);
+
+    /*
+     * Release the claim across the WHOLE RANGE, not through `fresh`.
+     * `region_split` copies flags, so anything that split the claimed
+     * region while the teardown ran left pieces carrying the claim,
+     * and clearing one pointer would strand the others: faults there
+     * would retry for ever, copies would take -EFAULT, and later
+     * unmaps and replacements would see -EBUSY. Nothing splits it
+     * today -- `vm_user_protect` refuses a claimed range, just below
+     * -- and this loop is what keeps that from being load-bearing.
+     */
+    s = spin_lock_irqsave(&space->lock);
+    struct vm_region *qr;
+    list_for_each_entry(qr, &space->regions, link) {
+        if (qr->base + qr->size <= base)
+            continue;
+        if (qr->base >= base + size)
+            break;
+        qr->flags &= ~VM_REGION_QUIESCED;
+    }
+    struct vm_region *merged[2];
+    unsigned nm = region_merge_around(space, fresh, merged, 2);
+    spin_unlock_irqrestore(&space->lock, s);
+
+    mutex_unlock(&space->replace_lock);
+    for (unsigned i = 0; i < nr; i++)
+        kmem_cache_free(g_region_cache, removed[i]);
+    for (unsigned i = 0; i < nm; i++)
+        kmem_cache_free(g_region_cache, merged[i]);
+    for (unsigned i = used; i < 2; i++)
+        if (spares[i])
+            kmem_cache_free(g_region_cache, spares[i]);
+    return 0;
+
+out_free:
+    mutex_unlock(&space->replace_lock);
+    if (fresh)
+        kmem_cache_free(g_region_cache, fresh);
+    for (unsigned i = 0; i < 2; i++)
+        if (spares[i])
+            kmem_cache_free(g_region_cache, spares[i]);
+    return rc;
+}
+
 int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot)
 {
     KASSERT(space->user);
@@ -1036,6 +1263,20 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
     int rc = 0;
 
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    /*
+     * The same ownership rule `vm_user_unmap` keeps: a region a
+     * replacement has claimed is not ours to touch. Splitting one
+     * would be worse than unlinking it -- `region_split` copies
+     * flags, so the pieces carry the claim, and the replacement
+     * releases the range it knows about while any piece pushed
+     * outside it stays claimed for ever: faults retrying without
+     * end, copies taking -EFAULT, later unmaps refused. Review found
+     * that; the rule was stated for unmap and applied only there.
+     */
+    if (range_quiesced(space, (vaddr_t)base, size)) {
+        rc = -EBUSY;
+        goto out;
+    }
     if (!range_fully_mapped(space, (vaddr_t)base, size)) {
         rc = -ENOMEM;
         goto out;
@@ -1079,6 +1320,25 @@ out:
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
     return rc;
+}
+
+uint64_t vm_user_mapped_pages_sum(struct vm_space *space)
+{
+    uint64_t n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link)
+        n += r->size / PAGE_SIZE;
+    spin_unlock_irqrestore(&space->lock, s);
+    return n;
+}
+
+bool vm_user_range_quiesced(struct vm_space *space, uint64_t base, size_t size)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    bool q = range_quiesced(space, (vaddr_t)base, size);
+    spin_unlock_irqrestore(&space->lock, s);
+    return q;
 }
 
 unsigned vm_user_region_count(struct vm_space *space)

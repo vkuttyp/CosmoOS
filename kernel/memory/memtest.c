@@ -15,6 +15,7 @@
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/sched.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
@@ -459,6 +460,301 @@ bool selftest_user_vmm(const char **reason)
     vm_space_destroy(sp);
     CHECK(free_pages() >= before + 3);
     kinfo("selftest: user-vmm: split, merge, PROT_NONE and masked shootdown on a private space");
+    return true;
+}
+
+/* --- MAP_FIXED replacement (docs/audit/next-subsystem-map-fixed.md) --- */
+
+bool selftest_vm_replace(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000320000000000ULL;
+    paddr_t pa;
+
+    /* Replace one whole region: the old one is gone, the count and the
+     * page accounting are exact. */
+    CHECK(vm_user_map_anon(sp, A, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "old") == 0);
+    CHECK(sp->mapped_pages == 4 && sp->anon_pages == 4);
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_READ, 0, "new") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+    /* The teardown really ran: the old frames went back and the new
+     * region is demand-zero, so nothing is populated yet. */
+    CHECK(sp->anon_pages == 0);
+    CHECK(!arch_mmu_query(&sp->mmu, A, &pa, NULL, NULL, NULL));
+    CHECK(vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_READ));
+
+    /* Replace the middle of a region: splits at both ends, three
+     * regions, and the pages still add up. */
+    CHECK(vm_user_unmap(sp, A, 4 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "span") == 0);
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ, 0, "mid") == 0);
+    CHECK(vm_user_region_count(sp) == 3);
+    CHECK(sp->mapped_pages == 6);
+    CHECK(vm_user_range_mapped(sp, A, 2 * PAGE_SIZE, VM_PROT_RW));
+    CHECK(vm_user_range_mapped(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ));
+    CHECK(vm_user_range_mapped(sp, A + 4 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW));
+
+    /* Replace a range spanning several regions and a hole: everything
+     * covered goes, the hole is tolerated, one region is left. */
+    CHECK(vm_user_unmap(sp, A + PAGE_SIZE, PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon_replace(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "all") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 6);
+
+    /* A replacement that merges with an equal neighbour still merges. */
+    CHECK(vm_user_unmap(sp, A, 6 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 2 * PAGE_SIZE, VM_PROT_RW, 0, "m") == 0);
+    CHECK(vm_user_map_anon(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ, 0, "m") == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "m") == 0);
+    CHECK(vm_user_region_count(sp) == 1);   /* same prot, cache and name: merged */
+
+    /* Populated is refused, and nothing changed. */
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "p") == -EINVAL);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+
+    /* Over the address-space limit: -ENOMEM, and the OLD mapping is
+     * still there. A failure must not be half applied, which is why
+     * every check runs before the first change. */
+    vm_space_set_limits(sp, 4, UINT64_MAX);
+    CHECK(vm_user_map_anon_replace(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "big") == -ENOMEM);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+    CHECK(vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_RW));
+    /* Same size is not over the limit, even at the limit: the covered
+     * pages are credited before the check. */
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_READ, 0, "same") == 0);
+    CHECK(sp->mapped_pages == 4);
+    vm_space_set_limits(sp, UINT64_MAX, UINT64_MAX);
+
+    /*
+     * A refusal that would have SPLIT, which is the one that catches a
+     * limit check placed after the mutation instead of before it. The
+     * range must start and end inside existing regions (so both splits
+     * are needed) and must cover a hole (so it asks for more pages than
+     * it frees, and can therefore exceed the limit at all).
+     *
+     * The first version of this test refused a range whose ends fell on
+     * region boundaries, so no split was needed and moving the check
+     * after `split_at_ends` was invisible to it -- the mutation passed.
+     * A test for "a failure changes nothing" has to arrange something
+     * for the failure to change.
+     */
+    CHECK(vm_user_unmap(sp, A, 4 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 8 * PAGE_SIZE, VM_PROT_RW, 0, "h") == 0);
+    CHECK(vm_user_unmap(sp, A + 3 * PAGE_SIZE, 2 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(sp->mapped_pages == 6);
+    vm_space_set_limits(sp, 7, UINT64_MAX);   /* 6 now; the replace would need 8 */
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 4 * PAGE_SIZE, VM_PROT_RW, 0, "x") == -ENOMEM);
+    CHECK(vm_user_region_count(sp) == 2);     /* no split survived the refusal */
+    CHECK(sp->mapped_pages == 6);
+    CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
+    vm_space_set_limits(sp, UINT64_MAX, UINT64_MAX);
+
+    /* No region is left claimed after any of that: a stuck claim would
+     * hang a faulting thread rather than fail it. */
+    CHECK(!vm_user_range_quiesced(sp, A, 4 * PAGE_SIZE));
+
+    vm_space_destroy(sp);
+    kinfo("selftest: vm-replace: MAP_FIXED takes the range whole, splits and merges, "
+          "and a refused replacement changes nothing");
+    return true;
+}
+
+/*
+ * Two replacements of overlapping ranges, and an unmapper racing them.
+ * This is the case the three-section protocol exists for: a second
+ * replacement must not quiesce regions the first is between the
+ * teardown and the swap of, and an unmap must not unlink them either.
+ * Without replace_lock the swap meets records the other removed; the
+ * symptom is a failed insert after the accounting has been applied.
+ */
+#define REPL_ROUNDS 200
+
+struct repl_racer {
+    struct vm_space *sp;
+    uint64_t base;
+    size_t size;
+    volatile int bad;          /* a replacement that did not return 0 */
+    volatile unsigned probes;  /* addresses the filler was offered */
+    volatile bool stop;
+};
+
+static void repl_replacer(void *arg)
+{
+    struct repl_racer *r = arg;
+    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
+        int rc = vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race");
+        if (rc != 0)
+            r->bad++;   /* every one of these must succeed */
+    }
+    r->stop = true;
+}
+
+/*
+ * Takes whatever address the allocator offers inside the window the
+ * replacements work in, and gives it back. If a replacement ever
+ * leaves part of its range unclaimed -- a HOLE it spanned, most
+ * obviously -- this thread is what gets handed it, and the
+ * replacement's insert then collides with a valid mapping.
+ */
+static void repl_filler(void *arg)
+{
+    struct repl_racer *r = arg;
+    /*
+     * Take free addresses in the window and MAP them, briefly. Probing
+     * alone proved nothing, and asserting "never offered an address
+     * inside the range" was simply false: `inflight` is raised before
+     * the primitive can take the lock and claim anything, so there is
+     * a legitimate moment where the hole is still free. Two earlier
+     * versions of this thread were wrong in those two ways.
+     *
+     * What actually matters is not who is offered what, but that a
+     * replacement cannot be made to fail or to panic by someone taking
+     * a hole it is about to claim. So: take them, and map them. With
+     * the range claimed in the same critical section that clears it,
+     * the replacement's insert cannot collide whatever this does. With
+     * holes left unclaimed, this is the thread that makes the insert
+     * meet a valid mapping -- and the KASSERT takes the kernel down.
+     */
+    while (!r->stop) {
+        uint64_t got = vm_user_find_free(r->sp, r->base, PAGE_SIZE);
+        if (got == 0)
+            continue;
+        r->probes++;
+        if (vm_user_map_anon(r->sp, got, PAGE_SIZE, VM_PROT_RW, 0, "fill") == 0)
+            vm_user_unmap(r->sp, got, PAGE_SIZE, 0);
+        /*
+         * Yield. Without this the loop holds a CPU for the whole test
+         * and the *next* self-tests measure a machine that is not
+         * idle: quiesce-kick-spinner started failing on its straggler
+         * IPI count, twice in a row, and the full list had been green
+         * before this thread existed. A racer that perturbs its
+         * neighbours is a racer that has to be re-explained every time
+         * something else goes red.
+         */
+        sched_yield();
+    }
+}
+
+/*
+ * Punch the hole back before every replacement. Without this the
+ * first replacement covers the range with one region and the
+ * remaining rounds span no hole at all -- one window instead of
+ * REPL_ROUNDS of them, which is why the first versions of this case
+ * let the mutation through.
+ */
+/*
+ * Protect the range while replacements run. Must only ever see 0 or
+ * -EBUSY: a protect that split a claimed region would leave pieces
+ * carrying the claim, and the final vm_user_range_quiesced check
+ * below is what catches one that outlives its replacement.
+ */
+static void repl_protector(void *arg)
+{
+    struct repl_racer *r = arg;
+    while (!r->stop) {
+        /*
+         * A SUB-RANGE, so it splits. Protecting the replacement's
+         * exact range splits nothing (`splits_needed` is 0) and the
+         * mutation this is meant to catch walks straight past it --
+         * the first version of this racer did exactly that.
+         */
+        int rc = vm_user_protect(r->sp, r->base + 8 * PAGE_SIZE, r->size - 16 * PAGE_SIZE,
+                                 VM_PROT_READ);
+        if (rc != 0 && rc != -EBUSY && rc != -ENOMEM)
+            r->bad++;
+        sched_yield();
+    }
+}
+
+static void repl_hole_replacer(void *arg)
+{
+    struct repl_racer *r = arg;
+    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
+        vm_user_unmap(r->sp, r->base + 2 * PAGE_SIZE, r->size - 4 * PAGE_SIZE, 0);
+        if (vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race") != 0)
+            r->bad++;
+    }
+    r->stop = true;
+}
+
+static void repl_unmapper(void *arg)
+{
+    struct repl_racer *r = arg;
+    while (!r->stop) {
+        int rc = vm_user_unmap(r->sp, r->base, r->size, 0);
+        /* 0 or -EBUSY (a replacement owns it). Anything else, and in
+         * particular a corrupted list, is the failure. */
+        if (rc != 0 && rc != -EBUSY)
+            r->bad++;
+        sched_yield();   /* do not hold a CPU away from the rest of the suite */
+    }
+}
+
+bool selftest_vm_replace_race(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000330000000000ULL;
+
+    CHECK(vm_user_map_anon(sp, A, 8 * PAGE_SIZE, VM_PROT_RW, 0, "race") == 0);
+
+    /* Overlapping by half, so each sees regions the other split. */
+    struct repl_racer a = { .sp = sp, .base = A, .size = 6 * PAGE_SIZE };
+    struct repl_racer b = { .sp = sp, .base = A + 2 * PAGE_SIZE, .size = 6 * PAGE_SIZE };
+    struct thread *ta = thread_create(repl_replacer, &a, "vm-repl-a", SCHED_PRIO_DEFAULT);
+    struct thread *tb = thread_create(repl_replacer, &b, "vm-repl-b", SCHED_PRIO_DEFAULT);
+    CHECK(ta != NULL && tb != NULL);
+    thread_join(ta);
+    thread_join(tb);
+    CHECK(a.bad == 0 && b.bad == 0);
+
+    /* An unmapper against a replacer: never anything but 0 or -EBUSY. */
+    struct repl_racer c = { .sp = sp, .base = A, .size = 4 * PAGE_SIZE };
+    struct thread *tc = thread_create(repl_replacer, &c, "vm-repl-c", SCHED_PRIO_DEFAULT);
+    struct thread *td = thread_create(repl_unmapper, &c, "vm-unmap-d", SCHED_PRIO_DEFAULT);
+    CHECK(tc != NULL && td != NULL);
+    thread_join(tc);
+    thread_join(td);
+    CHECK(c.bad == 0);
+
+    /*
+     * A replacement spanning a HOLE, with a thread taking free
+     * addresses throughout. The hole must be owned for the whole
+     * operation: unclaimed, the allocator hands it out and the swap
+     * collides with a mapping that had every right to be there.
+     */
+    CHECK(vm_user_unmap(sp, A, 8 * PAGE_SIZE, 0) == 0);
+    /* 64 pages with a 60-page hole: the teardown is long enough for a
+     * probing thread to look inside it many times. */
+    CHECK(vm_user_map_anon(sp, A, 2 * PAGE_SIZE, VM_PROT_RW, 0, "lo") == 0);
+    CHECK(vm_user_map_anon(sp, A + 62 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "hi") == 0);
+    struct repl_racer e = { .sp = sp, .base = A, .size = 64 * PAGE_SIZE };
+    struct thread *te = thread_create(repl_hole_replacer, &e, "vm-repl-e", SCHED_PRIO_DEFAULT);
+    struct thread *tf = thread_create(repl_filler, &e, "vm-fill-f", SCHED_PRIO_DEFAULT);
+    struct thread *tp = thread_create(repl_protector, &e, "vm-prot-g", SCHED_PRIO_DEFAULT);
+    CHECK(te != NULL && tf != NULL && tp != NULL);
+    thread_join(te);
+    thread_join(tf);
+    thread_join(tp);
+    CHECK(e.bad == 0);     /* every replacement returned 0, and nothing panicked */
+    CHECK(e.probes > 0);   /* the filler actually ran */
+
+    /* Nothing is left claimed, and the space is still coherent. */
+    /* The WHOLE area the racers used, not the first eight pages: a
+     * claim stranded by a split lands at the range's edges. */
+    CHECK(!vm_user_range_quiesced(sp, A, 64 * PAGE_SIZE));
+    CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
+
+    vm_space_destroy(sp);
+    kinfo("selftest: vm-replace-race: %u overlapping replacements and an unmapper against them, "
+          "no failed swap with %u fills racing a range whose hole is re-punched every "
+          "round, nothing left claimed", REPL_ROUNDS * 2, e.probes);
     return true;
 }
 
