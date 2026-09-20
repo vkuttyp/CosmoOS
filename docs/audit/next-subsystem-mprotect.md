@@ -57,7 +57,13 @@ that this environment cannot give.
    this environment hid in one unit. `vm_user_sync_icache` now walks
    the range page by page **under `space->lock`** and syncs only the
    present ones; the lock is what keeps a leaf from being torn down
-   between the query and the maintenance. The self-test makes an
+   between the query and the maintenance. Review then found the
+   second half: that walk held the lock with interrupts off for the
+   whole range, and a lazy mapping at the 2 GiB limit is 524,288
+   queries nothing can interrupt — an unprivileged stall. It walks in
+   the teardown's 32-page chunks now, taking the lock per chunk as
+   `user_range_teardown` does, and syncs consecutive present pages as
+   one run so the barriers are paid per run. The self-test makes an
    untouched range executable and then a half-written one — a
    regression test that the walk stays, not a demonstration of the
    fault, which only hardware can give.

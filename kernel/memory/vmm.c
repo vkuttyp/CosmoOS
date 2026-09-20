@@ -1327,23 +1327,44 @@ void vm_user_sync_icache(struct vm_space *space, uint64_t base, size_t size)
 {
     KASSERT(space->user);
     /*
-     * Present pages only. Review found the first version syncing the
-     * whole range unconditionally: correct for every page that has been
-     * written, and a translation fault with no fixup for every page that
-     * has not -- which is any demand-zero page the caller never touched.
-     * QEMU hid it by implementing the maintenance as a no-op, and the
-     * fuzzer had been driving exactly this case hundreds of times a boot
-     * without noticing. Under the lock, because user_range_teardown
-     * clears leaves under this same lock per chunk: a page seen present
-     * here stays present until the maintenance is done.
+     * Present pages only, and a BOUNDED hold of the lock. Review found
+     * the first version twice: syncing the whole range unconditionally
+     * -- a demand-zero page never touched has no leaf translation, and
+     * cache maintenance by such a VA is a translation fault at EL1 with
+     * no fixup, so mmap(RW); mprotect(RX) was an unprivileged panic --
+     * and then walking every page of the range in one critical section
+     * with interrupts off, which for a lazy mapping at the 2 GiB limit
+     * is 524,288 queries nothing can interrupt. QEMU showed neither: it
+     * implements the maintenance as a no-op.
+     *
+     * So this walks in the teardown's chunks, taking the lock per chunk
+     * as user_range_teardown does. Under the lock, because that same
+     * teardown clears leaves under it per chunk: a page seen present
+     * here stays present until its maintenance is done. Consecutive
+     * present pages are synced as one run, so the barriers are paid per
+     * run rather than per page. A whole-table skip for absent ranges
+     * would be faster still and needs an arch walker this tree does not
+     * have; the bound on the critical section is what removes the
+     * hazard, and that is what this does.
      */
-    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
-    for (vaddr_t va = (vaddr_t)base; va < base + size; va += PAGE_SIZE) {
-        paddr_t pa;
-        if (arch_mmu_query(&space->mmu, va, &pa, NULL, NULL, NULL))
-            arch_mmu_sync_icache_user(va, PAGE_SIZE);
+    for (vaddr_t va = (vaddr_t)base; va < base + size; va += TEARDOWN_CHUNK_PAGES * PAGE_SIZE) {
+        vaddr_t end = MIN(va + TEARDOWN_CHUNK_PAGES * PAGE_SIZE, (vaddr_t)(base + size));
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        vaddr_t run = 0;
+        for (vaddr_t p = va; p < end; p += PAGE_SIZE) {
+            paddr_t pa;
+            bool present = arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL);
+            if (present && run == 0)
+                run = p;                                   /* a run begins */
+            if (!present && run != 0) {
+                arch_mmu_sync_icache_user(run, p - run);   /* ... and ends */
+                run = 0;
+            }
+        }
+        if (run != 0)
+            arch_mmu_sync_icache_user(run, end - run);
+        spin_unlock_irqrestore(&space->lock, s);
     }
-    spin_unlock_irqrestore(&space->lock, s);
 }
 
 uint64_t vm_user_mapped_pages_sum(struct vm_space *space)
