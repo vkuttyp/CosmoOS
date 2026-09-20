@@ -688,7 +688,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Forty-six, to 2026-09-20**, across CI and this developer's machine, on
+**Forty-seven, to 2026-09-20**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -728,16 +728,17 @@ of this section said eight and then listed nine:
 | PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and the **second `retransmits +1` ever recorded**, after sighting thirty-seven -- named rather than counted, because a count of "sightings since" is the figure this section keeps getting wrong. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
 | PR #191's own CI run, the same job re-run | observed, aarch64 (`8aff8ad`), on the **re-run of the job above** -- so twice on one commit: `connect 0 in 668 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:53036 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a twelfth time, and the first time a **re-run reproduced it on the same commit** -- which is worth more than another reading, because "re-run it" has been this file's standing advice |
 | PR #192's own CI run | observed, aarch64 (`876eec8`), on a report branch whose **only** file is one Markdown document: `connect 0 in 715 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:49176 accepted at 89.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, gave up at 109.0s. Row one a thirteenth time, the `sent 12, never acknowledged` variant, and the **first probe reading that is not 1 ms / 1 ms**: `slirp probe: connect 1 ms, echo 2 ms`. One millisecond is not a mechanism, and it is recorded because this file's rule is to write the numbers down, not because it means anything yet |
-| PR #193's own CI run, twice in one run — x86-64 and aarch64 | observed on both architectures of the same run (`dc52e54`), in the protection-capable and GIC boots respectively: x86-64 `connect 0 in 1274 ms`, aarch64 `connect 0 in 1479 ms`; both `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`, host side `0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a fifteenth and sixteenth time. **Both carry a retransmission**, which had been recorded only twice before in the whole file — two of them in one run, on two architectures, with otherwise identical counters. Recorded together because they are one run; no claim is made from the pair beyond that |
 | PR #192's own CI run, the next commit | observed, aarch64 (`3ff1df2`), the **immediately following** commit on the same one-document branch: `connect 0 in 676 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33140 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a fourteenth time, the same `sent 12` variant as the row above, and the probe is back to 1 ms / 1 ms — so the 2 ms in sighting forty-three was a single reading and nothing more |
+| PR #193's own CI run, twice in one run — x86-64 and aarch64 | observed on both architectures of the same run (`dc52e54`), in the protection-capable and GIC boots respectively: x86-64 `connect 0 in 1274 ms`, aarch64 `connect 0 in 1479 ms`; both `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`, host side `0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a fifteenth and sixteenth time. **Both carry a retransmission**, which had been recorded only twice before in the whole file — two of them in one run, on two architectures, with otherwise identical counters. Recorded together because they are one run; no claim is made from the pair beyond that |
+| PR #195's own CI run, the head with the panic fix | observed, aarch64 (`f560ab8`), the plain debug boot: `connect 0 in 1266 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:36528 accepted at 93.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 113.9s. Row one a seventeenth time, on a memory-syscall branch that touches no network code — the x86-64 job of the same run passed. The fourth `retransmits +1` in the last five sightings, where the whole file before them held two; and `echo 2 ms` for the second time, after sighting forty-three. Two counts, written down, no claim from either |
 
-Thirty-six entries, forty-six occurrences -- and the table is the tally,
+Thirty-seven entries, forty-seven occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last thirty-one rows
+them and are not independently re-verified here. The last thirty-two rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **thirty-seven instrumented** occurrences
-behind the other thirty rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty-eight instrumented** occurrences
+behind the other thirty-one rows carry the guest's side. Rows and
 occurrences differ because **nine** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
