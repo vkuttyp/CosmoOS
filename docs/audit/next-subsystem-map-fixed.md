@@ -113,41 +113,77 @@ where it belongs.
 
 ## Design
 
-**One primitive, one critical section.** Add to `vmm.c`:
+**One primitive, one owner of the range throughout.** Add to `vmm.c`:
 
 ```c
 /* MAP_FIXED, POSIX semantics: take [base, base+size) whatever is there.
- * Unlink what it replaces and insert the new region under ONE hold of
- * space->lock, so the range is never unowned. */
+ * The range is owned by a region at every instant -- first the ones
+ * being replaced (quiesced), then the new one -- so no concurrent
+ * mmap(NULL, ...) can be handed it, and no fault can populate a page
+ * the teardown would then free. */
 int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
                              vm_prot_t prot, unsigned flags, const char *name);
 ```
 
-The body is the two existing halves interleaved:
+The body is **three** critical sections, not one, and the reason is
+`user_range_teardown`: it takes `space->lock` itself, once per chunk
+(`vmm.c:709-735`), so it cannot be called with the lock held. An
+earlier draft of this report had the primitive insert the new region
+and then tear down; review showed that is wrong, and the two defects
+it found are the shape of the design below.
+
+**Nothing fallible may run after the first mutation.** Allocation and
+limit checks all happen before anything is unlinked or split:
 
 1. **Before the lock**, allocate the new region and the two split
    spares — `vm_user_unmap` and `vm_user_map_anon` both already do
    their allocation here, for the same reason.
-2. **Under the lock**: split at the ends; unlink every region inside
-   the range into `removed[]` and subtract their pages from
-   `mapped_pages`; check `COSMO_RLIMIT_AS` **after** that subtraction,
-   so replacing a range with one the same size cannot fail a limit it
-   already satisfies; `space_insert` the new region, which can no
-   longer collide because the range was just cleared; add its pages;
-   `region_merge_around`.
-3. **After the lock**: `user_range_teardown` for the old range, then
-   free the removed records and any unused spare — exactly what
-   `vm_user_unmap` does today, and for the same reason: the teardown
-   sends TLB shootdown IPIs and must not run under a spinlock with
-   interrupts off.
+2. **First critical section**, all checks before any change: sum the
+   pages of the regions the range covers; check `COSMO_RLIMIT_AS`
+   against `mapped_pages - covered + npages`, so replacing a range
+   with one the same size cannot fail a limit it already satisfies;
+   check `splits_needed` against the spares actually allocated. Only
+   then split at the ends and **apply the whole page accounting now**
+   — subtract `covered`, add `npages` — so the budget is held across
+   the teardown and the third section needs no check. Mark every
+   covered region `VM_REGION_QUIESCED` and **leave them linked**.
+3. **Outside the lock**: `user_range_teardown(base, size)`. The range
+   is still owned by the quiesced regions, so no `mmap(NULL, …)` can
+   be handed it, and the teardown finds exactly the old pages.
+4. **Third critical section**: unlink the quiesced regions,
+   `space_insert` the new one — which cannot collide, because the
+   range was just cleared, and cannot fail for memory, because the
+   region was allocated in step 1 — and `region_merge_around`.
+5. **After the lock**: free the removed records and any unused spare.
 
-**The new region must be demand-zero.** The teardown in step 3 unmaps
-the whole range in the page tables, so anything populated in step 2
-would be torn out again. The primitive therefore refuses
-`VM_REGION_POPULATED` with `-EINVAL`, and says why in its contract.
-Both callers pass `0` today (`native.c:371`, `syscalls.c:970`), so
-this costs nothing and prevents a later caller from discovering the
-ordering the hard way.
+**`VM_REGION_QUIESCED`: a region that does not fault in.** This is
+the second thing review found, and it is not a detail. The fault
+handler installs a demand-zero page **under `space->lock`**
+(`vmm.c:514-580`). Without the flag, a fault landing between the
+insert and a given teardown chunk would install a page into the *new*
+region, and that chunk would then `arch_mmu_query` it, unmap it,
+`pmm_free_page` it and decrement `anon_pages` — a live region holding
+a freed frame, which is kernel corruption rather than a lost user
+write. Refusing `VM_REGION_POPULATED` does not help: the danger is
+pages faulted in *after* insertion.
+
+Because both the installer and the teardown take the same lock, a
+flag tested under it is enough. A fault on a quiesced region
+**installs nothing and returns**, so the instruction re-executes and
+faults again; the window is one teardown and the flag is gone. This
+is a third outcome for the fault handler, beside "serviced" and
+"unserviced", and it is the one change this unit makes outside the
+VM and syscall layers.
+
+**The new region must be demand-zero.** Not because the teardown
+would tear it out — with the ordering above the teardown is already
+finished when the region goes in — but because populating allocates
+frames, `pmm_alloc_page` can fail, and step 4 must not be able to
+fail. Every fallible thing belongs before the first mutation. The
+primitive refuses `VM_REGION_POPULATED` with `-EINVAL` and says
+*that* in its contract. Both callers pass `0` today
+(`native.c:371`, `syscalls.c:970`), so it costs nothing now and stops
+a later caller reintroducing a failure after the point of no return.
 
 **Native `mmap` gains POSIX semantics.** `sys_mmap`'s `MAP_FIXED` arm
 calls the new primitive. The `-EEXIST` return disappears from that
@@ -179,8 +215,9 @@ moment when another thread can take it. The `munmap`, the retry loop,
 
 | file | change |
 | --- | --- |
-| `kernel/memory/vmm.c` | `vm_user_map_anon_replace`: the unmap and map halves under one lock, teardown after, `VM_REGION_POPULATED` refused |
-| `kernel/include/kernel/vmm.h` | its declaration and contract, including why the new region must be demand-zero |
+| `kernel/memory/vmm.c` | `vm_user_map_anon_replace`: checks and accounting first, quiesce, teardown, swap; `VM_REGION_POPULATED` refused |
+| `kernel/memory/vmm.c` (fault path) | `vm_fault_handler` gains its third outcome: a fault on a `VM_REGION_QUIESCED` region installs nothing, yields, and returns so the instruction retries |
+| `kernel/include/kernel/vmm.h` | the declaration and contract, `VM_REGION_QUIESCED`, and why the new region must be demand-zero |
 | `kernel/syscall/native.c` | `MAP_FIXED` calls the new primitive; `COSMO_MAP_FIXED_NOREPLACE` accepted and validated |
 | `kernel/include/uapi/cosmo/syscall.h` | `COSMO_MAP_FIXED_NOREPLACE` beside `COSMO_MAP_FIXED` |
 | `compat/linux/syscalls.c` | `LX_MAP_FIXED` uses the primitive; its `vm_user_unmap` call goes |
@@ -209,6 +246,14 @@ moment when another thread can take it. The `munmap`, the retry loop,
 | the replaced range reads as zeroes | the teardown really ran; the old frames are not visible through the new mapping |
 | `vm_user_region_count` after a replace that merges | the merge still happens |
 
+| a replace whose teardown races a fault on the range | the faulting thread eventually reads zeroes; **`anon_pages` balances**; no frame of the new region was freed |
+| after any replace, success or failure | no region is left `VM_REGION_QUIESCED` |
+
+The fault-racing case is the one that distinguishes this design from
+the draft review rejected, and it needs two CPUs: one replacing in a
+loop, one touching the range. Its bug-proof is to clear the quiesce
+check in the fault handler — the frame accounting must then go wrong.
+
 **In `init.c`** (the native ABI, from userland): `MAP_FIXED` over a
 mapping with a known byte in it succeeds and the byte is gone;
 `MAP_FIXED_NOREPLACE` over the same mapping returns `-EEXIST` and the
@@ -226,28 +271,39 @@ second.
 
 ## Risks
 
-**The teardown still runs outside the lock, after the insert.** The
-new region is demand-zero, so there are no pages of its own to lose,
-and the range is owned throughout — but a thread that touches the
-address *while the replacing thread is still in the teardown* could
-fault in a page that the teardown then unmaps. That is the same
-exposure POSIX `MAP_FIXED` has (the caller is replacing memory other
-threads may be using), and it is the reason `VM_REGION_POPULATED` is
-refused rather than handled. It is stated here rather than discovered
-later.
+**A quiesced fault spins.** A thread faulting on the range while the
+teardown runs installs nothing and re-executes the instruction, so it
+faults again until the flag clears. The window is one
+`user_range_teardown` over the replaced range, and the replacing
+thread never waits on the faulting one, so it cannot deadlock — but
+on a single CPU a tight re-fault loop must not starve the replacer.
+The fault path should yield before returning on a quiesced region,
+and the test below exists to show a thread does get through.
+
+**The page accounting is applied early and held.** Step 2 charges the
+new region and credits the old ones before either has happened, so
+that step 4 cannot fail a limit check. Between the two, `mapped_pages`
+describes the intended state rather than the current one. That is the
+price of an infallible finish, and anything reading `mapped_pages`
+concurrently (only `COSMO_RLIMIT_AS` does) sees a figure that is
+correct for the range's owner but briefly counts the new region's
+size for regions still linked. Worth stating because a future reader
+of that counter will find it surprising.
 
 **`init.c`'s SIGSEGV handler maps `MAP_FIXED` at a fixed address on
 every fault** (`init.c:1783`) and currently gets `-EEXIST` on the
-second and later faults, silently. After this change each fault
-replaces the page with a fresh zero one. The handler stores into it
-immediately afterwards, so the behaviour should be unchanged — but it
-is a live caller whose semantics change, and the suite must show it.
+second and later faults, silently. Afterwards each fault replaces the
+page with a fresh zero one. The handler stores into it immediately,
+so the behaviour should be unchanged — but it is a live caller whose
+semantics change and the suite must show it.
 
-**A replacement that fails must change nothing.** Two of the failure
-paths (the limit check and a missing spare) happen after the range has
-been cleared in the current sketch. They must be ordered before any
-unlinking, or the unlinking must be undone. The `-ENOMEM` tests above
-exist to force that ordering rather than assume it.
+**The flag is a third state for the fault handler.** "Serviced",
+"unserviced" and now "retry" — the one change this unit makes outside
+the VM and syscall layers. A region left quiesced by a bug would hang
+a process in a fault loop rather than failing it, which is a worse
+symptom than a crash. The flag is set and cleared in the same
+function, and a test should assert no region is left quiesced after a
+replace.
 
 **Scope.** The primitive is anonymous-memory only, matching both
 callers. File mappings do not go through `vm_user_map_anon` and are
