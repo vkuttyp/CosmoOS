@@ -103,25 +103,34 @@ the `-EIO` count equal to what the remove found, and nothing completed
 after the removal's own boundary stamp
 (`docs/audit/next-subsystem-virtio-remove-inflight.md`).
 
-**Q11b. A driver's removal refuses new completion walks and waits for
-the ones inside, before it reads its own tables or frees anything.**
-The same shape as Q11 one level down, and for a reason Q11 does not
-cover: `blk_unregister` keeps *submissions* out of the driver, and a
-device reset stops the *device*, but neither waits for an interrupt
-handler that is already running the driver's completion path — this
-kernel has no `synchronize_irq`. `virtio_blk` therefore sets `gone`
-(seq_cst) and drains `in_done` as the **first** act of `vblk_remove`,
-before `blk_unregister`, the reset, the leftover completions and the
-`virtq_free`/`dma_free` that would otherwise run under a walking
-handler. First, rather than last, because a walk that waits does so in
-interrupt context with interrupts disabled, and a CPU that cannot take
-an interrupt cannot acknowledge a TLB shootdown either (one-second
-deadline, `docs/testing/flakes.md`): the wait is the length of a drain,
-not of a prologue. Check: `virtio-remove-inflight`'s third pass parks a
-real completion walk inside the driver and the removal is seen to spin
-waiting for it; removing the drain is a hang or a fault. Gap: only
-`virtio_blk` does this — the NVMe, AHCI and USB drivers have the same
-shape and no such barrier, named in the report's deferred list.
+**Q11b. A driver's removal releases its interrupt before it touches
+the state that interrupt's handler touches.** `blk_unregister` keeps
+*submissions* out of a driver (Q11) and a device reset stops the
+*device*, but neither has anything to say about a completion handler
+that is already running: that is what the interrupt layer's own
+contract is for — a handler is a read-side section, `interrupt_unregister`
+stops it starting, and `synchronize_irq` waits for one still inside
+(`kernel/include/kernel/interrupt.h`). Releasing a vector does both:
+`pci_msix_release` masks the entry and calls `irq_release_msi`, which
+unregisters and synchronises.
+
+So a removal orders its teardown: stop the device, **release the
+interrupt**, then read and clear the driver's tables, then free what a
+handler would have walked. NVMe releases its vectors before freeing its
+queues and says so; xHCI calls `synchronize_irq` by hand; AHCI disables
+its interrupt before tearing its ports down. `virtio_blk` did its slot
+walk *before* `virtq_free` — which is where a virtio queue's vector is
+released — so its removal read and cleared the very table `vblk_done`
+reads and clears, and then freed the ring under a handler that could
+still be in it. Fixed by moving the release first; the walk also takes
+`vb->lock` per slot, as `vblk_timeout` always did, which is the rule
+rather than the thing that carries the guarantee.
+
+Check: `virtio-remove-inflight`'s third pass holds a quiesce read-side
+section across the removal's teardown and takes three stamps from one
+sequence — the removal enters the teardown, the section ends, the walk
+begins — and asserts that order; putting the release back after the
+walk makes the walk start inside the section and fails it.
 
 **Q12. After `netif_unregister` no transmit or receive touches the
 driver, no packet of the interface is queued or being input, and no ARP

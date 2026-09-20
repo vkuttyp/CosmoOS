@@ -134,14 +134,17 @@ omitted for FLUSH; direction decides which side of the chain the data
 is on), then kicks. The completion callback pops cookies (bios), reads
 the status byte (OK → 0, UNSUPP → `-ENOTSUP`, else `-EIO`), frees the
 slot and calls `bio_complete`. `max_sectors` is 128 × 512 / block size.
-Remove: **refuse new completion walks and drain the ones inside**
-(`gone`/`in_done`, seq_cst, invariant Q11b — first, before anything
-else the removal does), then unregister, reset the device, complete the
-leftovers with `-EIO` one slot at a time under `vb->lock` as
-`vblk_timeout` does, and free the queue and pool. The drain is what
-makes the rest safe: a reset stops the device but not a handler already
-inside `vblk_done`, and freeing the virtqueue under one is a
-use-after-free. That order is now raced rather than argued
+Remove: unregister the block device, reset the device, **free the
+queue** — which is where the transport masks the MSI-X entry and
+`synchronize_irq`s it, so no completion handler is running or can start
+— and only then complete the leftovers with `-EIO`, one slot at a time
+under `vb->lock` as `vblk_timeout` does, and free the DMA pool. The
+order is the guarantee (invariant Q11b): until the vector is released a
+handler can be inside `vblk_done` reading and clearing the same slot
+table, and the ring the removal is about to free. This driver walked
+the table first until the virtio-removal unit; NVMe, xHCI and AHCI
+already released their interrupts before freeing what a handler
+touches. That order is now raced rather than argued
 (`virtio-remove-inflight`, `docs/kernel/device/testing.md`): in debug
 builds the driver can be told to leave one device's finished requests
 unconsumed, so the remove finds its slot table occupied by

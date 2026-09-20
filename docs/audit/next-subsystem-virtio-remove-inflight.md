@@ -44,27 +44,39 @@ and the banner below records where the build differed from the design.
 7. **The unit found a defect, which is what it was for, and it came
    from review rather than from the test.** `vblk_remove` read and
    cleared the driver's slot table with no lock while the completion
-   path takes `vb->lock` for the same table — and, the deeper half,
-   *nothing waited for a completion handler at all*: `blk_unregister`
-   keeps submissions out and a device reset stops the device, but
-   neither waits for an interrupt handler already inside `vblk_done`,
-   and this kernel has no `synchronize_irq`. The removal could
-   therefore complete a bio the handler was completing, unmap a slot
-   twice, and free the virtqueue and the DMA pool under a walking
-   handler. Fixed with the barrier the block layer uses one level up —
-   `gone` then drain `in_done`, invariant **Q11b** — placed **first**
-   in `vblk_remove`, because a walk that waits does so with interrupts
-   disabled and a CPU that cannot take an interrupt cannot acknowledge
-   a TLB shootdown (one second, `docs/testing/flakes.md`). A third test
-   pass parks a real completion walk inside the driver and watches the
-   removal wait for it.
-8. **That third pass took four rounds to make deterministic**, and the
-   causes are recorded in the code and in
-   `docs/kernel/device/testing.md` rather than smoothed over: a shared
-   CPU, an arming order that let thread creation need the parked CPU, a
-   drain placed after the prologue, and then a window too short to
-   catch anything. It is five runs for five on x86-64 and two for two
-   on AArch64 now, with the retry left in as insurance and unused.
+   path takes `vb->lock` for the same table — and, the deeper half, it
+   did so *before releasing the queue's interrupt*, then freed the ring
+   and the DMA pool a handler would be walking. `blk_unregister` keeps
+   submissions out and a device reset stops the device; neither has
+   anything to say about a handler already inside `vblk_done`.
+8. **The first fix was wrong, and the review that found the defect
+   found that too.** I built a `gone`/`in_done` barrier in the driver
+   on the belief — stated in the code, the invariant, this report and
+   the README — that *this kernel has no `synchronize_irq`*. It has
+   one: `kernel/include/kernel/interrupt.h` declares it, documents that
+   a handler is a quiesce read-side section, and `pci_msix_release`
+   already masks the entry and calls it through `irq_release_msi`.
+   NVMe releases its vectors before freeing its queues and says so in a
+   comment; xHCI calls `synchronize_irq` by hand; AHCI disables its
+   interrupt before tearing its ports down. **virtio-blk was the only
+   one of the four doing it in the wrong order**, and the fix is that
+   order, not a new mechanism: `virtq_free` (which releases the vector)
+   moves ahead of the slot walk, and the hand-rolled counter is gone.
+   A counter could not have been right anyway — review's next point —
+   because it can only see handlers that have already entered, while
+   the mask is what stops one that has not.
+9. **The third pass is a read-side section, not a parked handler.** It
+   holds `quiesce_read_lock` from a thread across the removal's
+   teardown and asserts three stamps from one sequence: the removal
+   enters the teardown, the section ends, the walk begins. An earlier
+   version parked a real completion walk inside `vblk_done`, which
+   meant spinning in interrupt context on cpu0 — where every MSI-X
+   vector lands — for as long as the removal took: that CPU stops
+   answering TLB shootdowns (one-second deadline) and stops ticking for
+   the lockup detectors, and `lockup-hard` duly failed beside it. A
+   preemption-disabled section is the same thing to
+   `synchronize_quiesce` and none of those things to the machine. It
+   also took the park hook back out of the completion path.
 7. **A latent flake was repaired on the way**: six `thread_count() ==
    before` checks in `lockuptest.c`, asserted the instant a join
    returns, when the count falls at the reaper. This branch's thread
@@ -434,9 +446,11 @@ removal an event the kernel receives rather than one a test issues;
 **a module unload with requests in flight**, which is a different path
 from a device removal — `vblk_module_shutdown` unregisters the driver
 and the model unbinds every device it holds — and has no test at
-either level; **invariant Q11b in the other three block drivers**
-(NVMe, AHCI, USB storage all have a completion path and a remove, and
-none of them has this barrier), each on a device of its own; and
+either level; **a removal test for the other three block drivers** (NVMe, AHCI and
+USB storage each already release their interrupt before freeing what a
+handler touches — that is where this driver's fix came from — but none
+of the three is *tested* under a removal with I/O outstanding), each
+needing a device of its own in the machine; and
 `vpci_remove` under a module unload with a mounted filesystem on
 `vda`, which is a policy question (refuse, or drain) before it is a
 test.

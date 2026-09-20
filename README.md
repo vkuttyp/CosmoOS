@@ -2975,18 +2975,23 @@ See [docs/development.md](docs/development.md).
   `blk_unregister` dropped from the driver's remove (a kernel page
   fault) and a leftover slot completed twice. **And it found the defect
   it was built to find, through review rather than through the test:**
-  `vblk_remove` touched the driver's slot table with no lock while the
-  completion path takes one -- and nothing waited for a completion
-  handler at all, because a reset stops the device but not an interrupt
-  handler already inside the driver, and this kernel has no
-  `synchronize_irq`. The removal could complete a bio twice, unmap a
-  slot twice, and free the virtqueue under a walking handler. It now
-  refuses new completion walks and drains the ones inside as its
-  **first** act -- invariant **Q11b**, the shape `blk_unregister`
-  already uses one level up, placed first so that a walk waiting with
-  interrupts off cannot outlast the one-second TLB-shootdown deadline
-  -- and a third test pass parks a real completion walk inside the
-  driver and watches the removal spin waiting for it. Found on the way and
+  `vblk_remove` read and cleared the driver's slot table -- with no
+  lock, and *before releasing the queue's interrupt* -- then freed the
+  ring and the DMA pool that a completion handler would be walking. A
+  reset stops the device; it says nothing about a handler already
+  inside the driver. The kernel has had the answer all along
+  (`synchronize_irq`, and a handler is a quiesce read-side section):
+  NVMe releases its vectors before freeing its queues, xHCI calls
+  `synchronize_irq` by hand, AHCI disables its interrupt before tearing
+  its ports down, and **virtio-blk was the only one of the four in the
+  wrong order**. The fix is the order -- `virtq_free`, which releases
+  the vector, now precedes the slot walk (invariant **Q11b**) -- and
+  the third test pass holds a read-side section across the teardown and
+  asserts the removal entered it, the section ended, and only then did
+  the walk begin. A first attempt built a private barrier in the driver
+  instead, on the mistaken belief that the kernel had no
+  `synchronize_irq`; the review that found the defect found that too,
+  and the mechanism it wanted was already there. Found on the way and
   repaired here because it blocked the gate: six checks in
   `lockuptest.c` asserted `thread_count() == before` the instant a join
   returned, and the count falls at the reaper, not at the join —

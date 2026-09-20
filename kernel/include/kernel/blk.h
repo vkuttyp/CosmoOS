@@ -186,15 +186,14 @@ struct blk_test_driver_hooks {
     uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
     unsigned (*releases)(void);                      /* release hooks run so far */
     unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
-    /* The removal's drain, raced: park one completion walk inside the
-     * driver until the drain's counter moves, then ask whether a walk
-     * parked, on which CPU, and how long the removal spun for it. */
-    void (*park_done)(struct blkdev *bd);
-    bool (*done_is_parked)(void);
-    unsigned (*park_cpu)(void);
-    unsigned (*park_exit)(void);          /* 0 never parked, 1 the drain was seen, 2 the bound expired */
-    unsigned (*in_done_at_drain)(void);   /* completion walks inside when the drain looked */
-    unsigned (*drain_spins)(void);
+    /* The removal's teardown order, observable: when it entered the
+     * queue teardown (which masks the queue's interrupt and
+     * `synchronize_irq`s it) and when it began walking the slot table
+     * afterwards. A read-side section a test holds across the first must
+     * have ended before the second -- invariant Q11b. */
+    void (*stamps_reset)(void);
+    uint64_t (*before_irq_seq)(void);
+    uint64_t (*walk_seq)(void);
 };
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
 const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);

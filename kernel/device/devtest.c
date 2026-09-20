@@ -15,6 +15,7 @@
 #include <kernel/pmm.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
+#include <kernel/quiesce.h>
 #include <kernel/random.h>
 #include <kernel/selftest.h>
 #include <kernel/cosmofs.h>
@@ -1226,77 +1227,90 @@ out:
 }
 
 /*
- * The third pass, and the one the review that found the defect asked
- * for. A completion walk is parked *inside* the driver -- counted as
- * in-flight, before it touches the slot table -- and then the device is
- * removed. The removal must wait for that walk to leave before it
- * completes the leftovers and frees the virtqueue and the DMA pool; a
- * device reset stops the device but not a handler already running, and
- * this kernel has no `synchronize_irq`.
- *
- * A releaser on another CPU lets the parked walk go, but only once the
- * removal's drain has actually spun: a release on a timer would let the
- * walk leave before the removal ever looked, and the test would pass
- * having raced nothing. That is `blk-unregister-drain`'s shape, one
- * level down, and the spin counter is the same kind of evidence.
+ * The third pass is `rm_irq_order_pass` below, which carries its own
+ * account: the removal's teardown order, which is what the defect was.
  */
 struct rm_remover {
     struct pci_device *pdev;
-    struct blkdev *bd;
-    volatile unsigned ready, go, done, parked_first;
+    volatile unsigned ready, go, done;
     volatile int rc;
 };
 
 /*
- * The removal runs on a thread of its own, and not on the one driving
- * the test, because the parked walk spins in interrupt context on
- * whichever CPU took the vector -- CPU 0, on this machine -- and a
- * removal issued from a thread that shares that CPU would never start.
+ * The removal runs on a thread of its own so that the test thread can
+ * hold a read-side section across it without the two contending for one
+ * CPU.
  */
 static void rm_remover_main(void *arg)
 {
     struct rm_remover *rm = arg;
-    /*
-     * Ready first, then wait for the word. Everything expensive --
-     * creating this thread, mapping its stack, whatever kernel
-     * allocation that needs -- happens before a walk is parked. A
-     * thread created *after* the park can need a TLB shootdown, and a
-     * shootdown needs an acknowledgement from the CPU the parked walk
-     * sits on with interrupts disabled: the park then expires before
-     * the removal it was waiting for has even begun, which is what this
-     * test did two runs in four before the order was fixed.
-     */
     __atomic_store_n(&rm->ready, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&rm->go, __ATOMIC_ACQUIRE))
         sched_yield();
-    /*
-     * Arm the park here, and wait here for a walk to sit in it, because
-     * this thread is the one that is not on the parked walk's CPU. The
-     * removal's first act is its drain, so the walk has to be inside
-     * *before* the removal starts -- arming and removing without
-     * waiting leaves a window of microseconds for an interrupt to
-     * arrive in, which it usually does not. The wait itself is the gap
-     * between two completions, and the park's bound covers it.
-     */
-    g_rm->park_done(rm->bd);
-    uint64_t end = clock_now_ns() + 100ull * 1000000ull;
-    while (!g_rm->done_is_parked() && clock_now_ns() < end)
-        sched_yield();
-    __atomic_store_n(&rm->parked_first, g_rm->done_is_parked() ? 1u : 0u, __ATOMIC_RELEASE);
     rm->rc = pci_test_remove(rm->pdev);
     __atomic_store_n(&rm->done, 1u, __ATOMIC_RELEASE);
 }
 
-static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned threads0, bool *caught,
-                          const char **reason)
+/*
+ * The third pass: the removal's teardown order, which is what the
+ * defect was. `vblk_remove` must release the queue's interrupt --
+ * `virtq_free` masks the MSI-X entry and `synchronize_irq`s it -- before
+ * it reads and clears the slot table that `vblk_done` also reads and
+ * clears, and before it frees the ring a handler would be walking. The
+ * kernel's own contract makes that sufficient: a handler is a quiesce
+ * read-side section, so a grace period after unregistration proves no
+ * CPU is inside one (`kernel/include/kernel/interrupt.h`).
+ *
+ * So the adversary is a read-side section, held by this test across the
+ * removal's teardown, and the evidence is three stamps from one
+ * sequence: the removal enters the teardown, this section ends, the
+ * removal starts its walk. In that order, and it cannot be otherwise
+ * unless the teardown has stopped waiting -- or has moved back after
+ * the walk, which is the mutation.
+ *
+ * A *thread* holds the section rather than a parked interrupt handler.
+ * An earlier version parked a real completion walk, which meant
+ * spinning in interrupt context on cpu0 (where every MSI-X vector
+ * lands) for as long as the removal took: a CPU that cannot take an
+ * interrupt cannot answer a TLB shootdown (one second) and stops
+ * ticking for the lockup detectors, and `lockup-hard` failed next to
+ * it. A preemption-disabled section is the same thing to
+ * `synchronize_quiesce` and none of those things to the machine.
+ */
+struct rm_holder {
+    volatile unsigned held, stop;
+    volatile uint64_t exit_seq;
+};
+
+#define RM_HOLD_NS (60ull * 1000000ull)   /* long enough for a teardown, short enough to be polite */
+
+static void rm_holder_main(void *arg)
+{
+    struct rm_holder *h = arg;
+    uint64_t end = clock_now_ns() + RM_HOLD_NS;
+    quiesce_read_lock();
+    __atomic_store_n(&h->held, 1u, __ATOMIC_RELEASE);
+    /* Must not block while holding it; spinning is what a read-side
+     * section is allowed to do, and preemption is merely disabled, so
+     * this CPU still ticks and still answers its IPIs. */
+    while (clock_now_ns() < end && !__atomic_load_n(&h->stop, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    __atomic_store_n(&h->exit_seq, blk_test_tick(), __ATOMIC_RELEASE);
+    quiesce_read_unlock();
+}
+
+static bool rm_irq_order_pass(struct blkdev *bd, struct pci_device *pdev, unsigned threads0, bool *caught,
+                              const char **reason)
 {
     static struct rm_submitter s;
     static struct rm_remover rm;
+    static struct rm_holder h;
     bool ok = true;
+    struct thread *t = NULL, *rt = NULL, *ht = NULL;
     *caught = false;
-    struct thread *t = NULL, *rt = NULL;
     memset(&s, 0, sizeof(s));
     memset(&rm, 0, sizeof(rm));
+    memset(&h, 0, sizeof(h));
     s.bd = bd;
     rm.pdev = pdev;
     s.buf = kmalloc(4096, 0);
@@ -1311,34 +1325,24 @@ static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned t
         sched_yield();
     RM_CHECK(s.c_ok >= 4);
 
-    /*
-     * Arm the park and remove, both without waiting to *observe* the
-     * park first: this thread may share a CPU with the walk that parks,
-     * and then it would not run until the park's own bound expired. The
-     * walk leaves when the removal's drain counter moves, so the two
-     * hand off to each other with nothing else in the loop; whether a
-     * walk really parked is read afterwards, from the flag it set.
-     */
-    /*
-     * On a CPU of its own, away from the submitter as well as from the
-     * parked walk: the removal's `blk_unregister` waits for submitters
-     * to leave, and sharing a CPU with one made the prologue long
-     * enough for the park's bound to expire -- which is how this failed,
-     * one run in three, before the two were separated.
-     */
-    rm.bd = bd;
-    rt = thread_create_on(rm_remover_main, &rm, "vrmrm", SCHED_PRIO_DEFAULT, CPUMASK_OF(other_cpu_than(cpu)));
+    g_rm->stamps_reset();
+    /* Both on CPUs of their own: the holder spins, and the removal must
+     * not be behind it in a run queue. */
+    ht = thread_create_on(rm_holder_main, &h, "vrmhold", SCHED_PRIO_DEFAULT, CPUMASK_OF(other_cpu_than(cpu)));
+    RM_CHECK(ht != NULL);
+    rt = thread_create_on(rm_remover_main, &rm, "vrmrm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
     RM_CHECK(rt != NULL);
     RM_CHECK(wait_flag_blk(&rm.ready, 2000));
+    RM_CHECK(wait_flag_blk(&h.held, 2000));       /* the section is open */
     __atomic_store_n(&rm.go, 1u, __ATOMIC_RELEASE);
     RM_CHECK(wait_flag_blk(&rm.done, 8000));
     thread_join(rt);
     rt = NULL;
+    thread_join(ht);
+    ht = NULL;
     RM_CHECK(rm.rc == 0);
-    unsigned spins = g_rm->drain_spins();
-    bool parked_first = rm.parked_first != 0;
-    unsigned park_cpu = g_rm->park_cpu();
-    bool parked = g_rm->done_is_parked();
+
+    uint64_t before_irq = g_rm->before_irq_seq(), walk = g_rm->walk_seq(), held_until = h.exit_seq;
     uint64_t boundary = g_rm->remove_seq();
     unsigned found = g_rm->inflight_at_remove();
 
@@ -1350,41 +1354,42 @@ static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned t
     t = NULL;
 
     /*
-     * A walk has to arrive between the removal starting and its drain --
-     * a window of one `blk_unregister` and a device reset, with the
-     * submitter's completions arriving in thousands a second, so it
-     * nearly always does. When it does not there is nothing to conclude
-     * and the caller tries again rather than failing: `*caught` says
-     * which happened.
+     * The removal has to have entered the teardown while the section was
+     * still open, or the run says nothing and the caller tries again.
      */
-    *caught = parked && parked_first && spins > 0;
+    *caught = before_irq != 0 && held_until != 0 && before_irq < held_until;
     if (!*caught) {
-        kinfo("selftest: virtio-remove-inflight: drained: no completion walk arrived in the removal's window "
-              "(parked %u before the removal %u, spins %u, park exit %u, in_done at the drain %u); retrying",
-              (unsigned)parked, (unsigned)parked_first, spins, g_rm->park_exit(), g_rm->in_done_at_drain());
+        kinfo("selftest: virtio-remove-inflight: irq-order: the teardown did not overlap the read-side section "
+              "(entered %llu, section ended %llu); retrying",
+              (unsigned long long)before_irq, (unsigned long long)held_until);
         goto out;
     }
+    /* And the walk did not begin until the section had ended. */
+    RM_CHECK(walk != 0 && held_until < walk);
     RM_CHECK(s.other == 0 && s.c_other == 0);
     RM_CHECK(rm_completions(&s) == s.ok);
-    RM_CHECK(s.c_double == 0);                          /* the walk and the removal did not both complete one */
+    RM_CHECK(s.c_double == 0);
     RM_CHECK(s.c_eio == found);
     RM_CHECK(boundary != 0 && s.max_seq < boundary);
     RM_CHECK(rm_find() == NULL);
     blkdev_put(bd);
     bd = NULL;
     RM_CHECK(threads_settle_blk(threads0));
-    kinfo("selftest: virtio-remove-inflight: drained: a completion walk parked inside the driver on cpu%u, the "
-          "removal spun %u time(s) waiting for it; %u accepted, %u found in flight, %u completed -EIO, %u -ENODEV, "
-          "%u ok",
-          park_cpu, spins, s.ok, found, s.c_eio, s.c_enodev, s.c_ok);
+    kinfo("selftest: virtio-remove-inflight: irq-order: the removal entered the queue teardown at %llu with a "
+          "read-side section open, the section ended at %llu and only then did the slot walk begin, at %llu; "
+          "%u accepted, %u found in flight, %u completed -EIO, %u -ENODEV, %u ok",
+          (unsigned long long)before_irq, (unsigned long long)held_until, (unsigned long long)walk, s.ok, found,
+          s.c_eio, s.c_enodev, s.c_ok);
 
 out:
-    g_rm->park_done(NULL);      /* never leave the park armed */
+    __atomic_store_n(&h.stop, 1u, __ATOMIC_RELEASE);
     if (rt != NULL) {
-        __atomic_store_n(&rm.go, 1u, __ATOMIC_RELEASE);   /* never leave it waiting */
-        (void)wait_flag_blk(&rm.done, 5000);
+        __atomic_store_n(&rm.go, 1u, __ATOMIC_RELEASE);
+        (void)wait_flag_blk(&rm.done, 8000);
         thread_join(rt);
     }
+    if (ht != NULL)
+        thread_join(ht);
     if (t != NULL) {
         __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
         thread_join(t);
@@ -1445,7 +1450,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
     }
 
     bool ok = true;
-    unsigned drain_attempts = 0;
+    unsigned order_attempts = 0;
     for (unsigned pass = 0; pass < 3; pass++) {
         if (pass > 0) {
             bd = rm_find();
@@ -1455,7 +1460,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
          * a regression guard. 2: a completion walk parked inside the
          * driver, which is what the removal's drain exists for. */
         bool caught = true;
-        bool passed = pass == 2 ? rm_drain_pass(bd, pdev, threads0, &caught, reason)
+        bool passed = pass == 2 ? rm_irq_order_pass(bd, pdev, threads0, &caught, reason)
                                 : rm_pass(bd, pdev, pass == 0, threads0, reason);
         bd = NULL;   /* every pass drops the reference it was given */
         if (!passed) {
@@ -1465,7 +1470,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
         if (!caught) {
             /* Nothing was in the window: rebind and run this pass again,
              * a bounded number of times. */
-            RM_CHECK(++drain_attempts < 4);
+            RM_CHECK(++order_attempts < 4);
             RM_CHECK(pci_test_rebind(pdev) == 0);
             pass--;
             continue;
