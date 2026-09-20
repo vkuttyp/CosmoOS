@@ -247,24 +247,23 @@ the assertions are about the protected object:
 **A third pass, and the defect it belongs to.** Review of the first
 build found that `vblk_remove` read and cleared `vb->inflight` with no
 lock while `vblk_done` touches it only under `vb->lock` — and, worse,
-that nothing waited for a completion handler at all: the reset stops
-the device, not a handler already inside the driver, and the removal
-went on to free the virtqueue and the DMA pool. The fix is invariant
-**Q11b** (`docs/kernel/quiesce/invariants.md`), and the third pass is
-its adversary: a real completion walk is parked *inside* the driver and
-the removal must wait for it. As run, the walk parks on cpu0 — where
-every MSI-X vector lands — and the removal spins tens to hundreds of
-times before proceeding, on both architectures.
+that it did so *before releasing the queue's interrupt*, then freed the
+ring and the DMA pool a handler would be walking. The fix is the
+teardown order, invariant **Q11b**
+(`docs/kernel/quiesce/invariants.md`): `virtq_free`, which is where the
+transport masks the MSI-X entry and `synchronize_irq`s it, now precedes
+the slot walk.
 
-Getting that pass to be deterministic took four rounds, and each cause
-is worth knowing for the next test of this shape: the submitter and the
-removal shared a CPU, so the removal outlasted the park; the park was
-armed before the removing thread was created, and creating a thread can
-need a TLB shootdown that a parked walk (interrupt context, interrupts
-off) cannot acknowledge; the removal drained last, so the park had to
-outlast a whole prologue; and once the drain went first the window
-became too short for an interrupt to land in. It now arms from the
-removing thread, waits there for a walk to be inside, and removes.
+The third pass is its adversary, and it is a **read-side section held
+by a thread**, not a parked interrupt handler: `quiesce_read_lock` is
+what `synchronize_irq` waits on, and a preemption-disabled section
+costs the machine nothing, while an interrupt handler parked on cpu0 —
+where every MSI-X vector lands — stops that CPU answering TLB
+shootdowns and ticking for the lockup detectors (an earlier version did
+exactly that, and `lockup-hard` failed beside it). The evidence is
+three stamps from one sequence: the removal enters the teardown, the
+section ends, the walk begins. Putting the release back after the walk
+makes the walk start inside the section, and the step fails.
 
 The first two passes run twice, held and unheld. **The unheld pass finds
 0 requests in flight at the remove, every run, on both architectures**

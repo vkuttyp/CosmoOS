@@ -373,9 +373,16 @@ design predicted in three places):
 | `vpci_remove` without `pci_msix_disable` | a late interrupt after the vector is torn down; may be silent | **killed**, by a different observable than predicted: no late interrupt appeared, and the **rebind** failed (`pci_test_rebind(pdev) == 0`) because the second probe cannot take vectors the first never released. The teardown is proved by the re-probe, not by an interrupt |
 | `vblk_remove` without the device reset | the leftover completions are issued for requests the device still holds; may be silent under TCG | **survived**: the boot **passed**, the test passed, 64 found and 64 completed. Predicted, and it stands as predicted — the reset is kept for the rule, not for a proof this environment can give (the `mprotect` unit's PAN bracket, again) |
 | a `thread_join` removed from `lockup-soft` | — (the repair this unit made; its own proof) | **killed** by `threads_settled(before)` after its one-second bound: waiting for the condition is no weaker than asserting it |
-| the removal not waiting for the completion path (the drain removed) | — (the defect review found; see below) | **killed**: no pass sees a drain, the three retries are exhausted and the step fails. By the test's own instrumentation rather than by catching the use-after-free — the parked walk's bound expires and it leaves before it can touch the freed ring |
-| the walk refused but not counted (`in_done` underflows) | — | **killed**: the drain never ends and the boot times out |
-| the leftover walk without `vb->lock` | — | **survived**, and that is the honest state: with the drain in place the walk is exclusive, so the lock is the rule `vblk_timeout` already followed rather than the thing carrying the guarantee. It stays for the rule |
+| the queue released **after** the slot walk, as it was before the fix | — (the defect review found; see below) | **killed**: the walk begins while the test's read-side section is still open — `held_until < walk` fails. That is the ordering property itself, so the proof is the defect put back |
+| the leftover walk without `vb->lock` | — | **survived**, and that is the honest state: with the vector released first the walk is already exclusive, so the lock is the rule `vblk_timeout` always followed rather than the thing carrying the guarantee. It stays for the rule |
+
+Three earlier mutations proved the *first* attempt at this fix — a
+`gone`/`in_done` barrier inside the driver — and are not in the table
+because the code they perturbed is gone: the drain removed was killed,
+the counter miscounted hung the boot, and the lock alone survived.
+They are recorded here rather than deleted silently, because the
+design they belonged to was wrong for a reason worth keeping (item 8
+of the banner).
 
 **Two of the seven are killed by the kernel rather than by the test**,
 and that is worth saying plainly: for those two the test is not the
