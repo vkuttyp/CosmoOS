@@ -1164,30 +1164,25 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
      */
     space->mapped_pages = space->mapped_pages - covered + npages;
 
-    /* Claim, and LEAVE LINKED: the range stays owned across the
-     * teardown, so vm_user_find_free cannot hand it to anyone. */
-    struct vm_region *r;
-    list_for_each_entry(r, &space->regions, link) {
-        if (r->base + r->size <= base)
-            continue;
-        if (r->base >= base + size)
-            break;
-        r->flags |= VM_REGION_QUIESCED;
-    }
-    spin_unlock_irqrestore(&space->lock, s);
-
-    /* --- the teardown, which takes the lock itself, per chunk --- */
-    user_range_teardown(space, (vaddr_t)base, size);
-
-    /* --- last critical section: unlink the claimed, insert the new --- */
-    s = spin_lock_irqsave(&space->lock);
-    struct vm_region *tmp;
+    /*
+     * Clear the range and put the NEW region in, claimed, before the
+     * lock is released. One region then owns the whole interval --
+     * including any HOLE it spanned, which is the part that matters:
+     * an unclaimed hole is one `vm_user_find_free` will hand to a
+     * concurrent `mmap(NULL, ...)`, and the swap would then collide
+     * with a perfectly valid mapping and panic on its KASSERT. An
+     * earlier version left the old regions linked instead and had
+     * exactly that hole; review found it.
+     *
+     * The insert cannot collide: the range was cleared a few lines
+     * above under this same hold of the lock.
+     */
+    struct vm_region *r, *tmp;
     list_for_each_entry_safe(r, tmp, &space->regions, link) {
         if (r->base + r->size <= base)
             continue;
         if (r->base >= base + size)
             break;
-        KASSERT(r->flags & VM_REGION_QUIESCED);
         KASSERT(r->base >= base && r->base + r->size <= base + size);
         list_remove(&r->link);
         if (nr < 64)
@@ -1195,9 +1190,23 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
         else
             kmem_cache_free(g_region_cache, r);
     }
+    fresh->flags |= VM_REGION_QUIESCED;
     int irc = space_insert(space, fresh);
-    KASSERT(irc == 0);   /* the range was just cleared and stays claimed */
+    KASSERT(irc == 0);   /* just cleared, and nothing else holds this lock */
     (void)irc;
+    spin_unlock_irqrestore(&space->lock, s);
+
+    /*
+     * The teardown works on the page tables, not the region list, so
+     * the old pages go even though their records are already gone.
+     * Faults on the range meanwhile find `fresh` and its claim, and
+     * install nothing.
+     */
+    user_range_teardown(space, (vaddr_t)base, size);
+
+    /* Release the claim and merge. Nothing here can fail. */
+    s = spin_lock_irqsave(&space->lock);
+    fresh->flags &= ~VM_REGION_QUIESCED;
     struct vm_region *merged[2];
     unsigned nm = region_merge_around(space, fresh, merged, 2);
     spin_unlock_irqrestore(&space->lock, s);

@@ -579,6 +579,7 @@ struct repl_racer {
     uint64_t base;
     size_t size;
     volatile int bad;
+    volatile unsigned probes;
     volatile bool stop;
 };
 
@@ -591,6 +592,33 @@ static void repl_replacer(void *arg)
             r->bad++;   /* every one of these must succeed */
     }
     r->stop = true;
+}
+
+/*
+ * Takes whatever address the allocator offers inside the window the
+ * replacements work in, and gives it back. If a replacement ever
+ * leaves part of its range unclaimed -- a HOLE it spanned, most
+ * obviously -- this thread is what gets handed it, and the
+ * replacement's insert then collides with a valid mapping.
+ */
+static void repl_filler(void *arg)
+{
+    struct repl_racer *r = arg;
+    /*
+     * PROBE ONLY, and as tightly as possible. The first version mapped
+     * and unmapped a page between probes, which sampled the window so
+     * slowly that it never hit it -- the mutation that leaves holes
+     * unclaimed passed. What is being asked is one question, so ask
+     * only that: while a replacement is in flight, can the allocator
+     * offer an address inside its range? It must not, for any part of
+     * it, hole included.
+     */
+    while (!r->stop) {
+        uint64_t got = vm_user_find_free(r->sp, r->base, PAGE_SIZE);
+        if (got != 0 && got >= r->base && got < r->base + r->size)
+            r->bad++;
+        r->probes++;
+    }
 }
 
 static void repl_unmapper(void *arg)
@@ -632,13 +660,34 @@ bool selftest_vm_replace_race(const char **reason)
     thread_join(td);
     CHECK(c.bad == 0);
 
+    /*
+     * A replacement spanning a HOLE, with a thread taking free
+     * addresses throughout. The hole must be owned for the whole
+     * operation: unclaimed, the allocator hands it out and the swap
+     * collides with a mapping that had every right to be there.
+     */
+    CHECK(vm_user_unmap(sp, A, 8 * PAGE_SIZE, 0) == 0);
+    /* 64 pages with a 60-page hole: the teardown is long enough for a
+     * probing thread to look inside it many times. */
+    CHECK(vm_user_map_anon(sp, A, 2 * PAGE_SIZE, VM_PROT_RW, 0, "lo") == 0);
+    CHECK(vm_user_map_anon(sp, A + 62 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "hi") == 0);
+    struct repl_racer e = { .sp = sp, .base = A, .size = 64 * PAGE_SIZE };
+    struct thread *te = thread_create(repl_replacer, &e, "vm-repl-e", SCHED_PRIO_DEFAULT);
+    struct thread *tf = thread_create(repl_filler, &e, "vm-fill-f", SCHED_PRIO_DEFAULT);
+    CHECK(te != NULL && tf != NULL);
+    thread_join(te);
+    thread_join(tf);
+    CHECK(e.bad == 0);
+    CHECK(e.probes > 0);   /* the prober actually ran */
+
     /* Nothing is left claimed, and the space is still coherent. */
     CHECK(!vm_user_range_quiesced(sp, A, 8 * PAGE_SIZE));
     CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
 
     vm_space_destroy(sp);
     kinfo("selftest: vm-replace-race: %u overlapping replacements and an unmapper against them, "
-          "no failed swap and nothing left claimed", REPL_ROUNDS * 2);
+          "no failed swap, %u probes never offered an address inside a live replacement, "
+          "nothing left claimed", REPL_ROUNDS * 2, e.probes);
     return true;
 }
 
