@@ -15,6 +15,7 @@
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/sched.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
@@ -627,6 +628,16 @@ static void repl_filler(void *arg)
         r->probes++;
         if (vm_user_map_anon(r->sp, got, PAGE_SIZE, VM_PROT_RW, 0, "fill") == 0)
             vm_user_unmap(r->sp, got, PAGE_SIZE, 0);
+        /*
+         * Yield. Without this the loop holds a CPU for the whole test
+         * and the *next* self-tests measure a machine that is not
+         * idle: quiesce-kick-spinner started failing on its straggler
+         * IPI count, twice in a row, and the full list had been green
+         * before this thread existed. A racer that perturbs its
+         * neighbours is a racer that has to be re-explained every time
+         * something else goes red.
+         */
+        sched_yield();
     }
 }
 
@@ -657,6 +668,7 @@ static void repl_unmapper(void *arg)
          * particular a corrupted list, is the failure. */
         if (rc != 0 && rc != -EBUSY)
             r->bad++;
+        sched_yield();   /* do not hold a CPU away from the rest of the suite */
     }
 }
 
