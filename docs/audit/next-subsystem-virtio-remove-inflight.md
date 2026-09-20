@@ -71,10 +71,22 @@ the PCI function (`drivers/include/drivers/virtio.h:74`).
 **The tools the test needs exist.** A second CPU for the other side
 (`other_cpu_for_blk`, and the rule that a property about two CPUs needs
 a test with two CPUs); the frame poisoner that turned a 1-in-30 crash
-into a deterministic failure (the rare-crash unit); the sequence stamps
-`blk_test_tick` records so "after the unregister returned" is an order
-and not two clocks (`blk.c:340-360`); and the harness's per-run fresh
+into a deterministic failure (the rare-crash unit); the sequence
+`blk_test_tick` draws stamps from so "after the unregister returned" is
+an order and not two clocks (`blk.c:340-360` — today it stamps only the
+unregister's return and the parked submitter's departure, and it is
+`static`; this unit makes it callable so the test's own completion
+callback can stamp each completion); and the harness's per-run fresh
 disk images, one `dd` line each.
+
+**And one fact about a full slot table that the assertions must
+respect.** A driver that refuses a bio with `-EAGAIN` does not hand it
+back to the submitter: `blk_submit` queues it on the device's `pending`
+list and every completion resubmits from the head (`blk.c`, "The pending
+queue"), and `blk_unregister` completes whatever is still pending with
+`-ENODEV` (`blk.c:430-437`). So in exactly the state step 3 builds — the
+driver's table full — some *accepted* bios will complete `-ENODEV`, from
+the block layer, not the driver.
 
 ## The problem
 
@@ -168,13 +180,26 @@ the other side from a real second CPU, assert the protected object.
    `-ENODEV` refusals after the remove, then stop and join it.
 6. Assert:
    - `vblk_test_inflight_at_remove() >= 1`: the window was occupied.
-   - every accepted bio completed exactly once, each with `0` or
-     `-EIO`, none with anything else; `-ENODEV` only from refusals.
-   - no completion carries a stamp later than the remove's return: the
-     driver completed its leftovers *inside* `vblk_remove`, as its
-     comment says, and nothing completed afterwards (a completion after
-     the return is the late-interrupt use-after-free, whether or not it
-     happened to crash).
+   - every accepted bio completed exactly once, each with one of three
+     statuses and nothing else: `0` (done before the hold, or done and
+     consumed), `-EIO` (a slot the driver held at the remove, completed
+     by `vblk_remove`'s leftover walk), `-ENODEV` (queued on the block
+     layer's pending list behind a full table, completed by
+     `blk_unregister`). The sharper claim is the count: **the `-EIO`
+     completions equal `vblk_test_inflight_at_remove()` exactly** —
+     the driver completed precisely the slots it held, no more (a
+     double completion) and no fewer (a stranded slot) — and the
+     `-ENODEV` completions plus the submitter's `-ENODEV` refusals are
+     everything the unregister turned away.
+   - no completion carries a stamp later than the remove's return. The
+     submitter's `done` callback is the test's own code, run at
+     `bio_complete`; it stamps each completion with `blk_test_tick()`
+     and keeps the maximum, and the test stamps once after
+     `pci_test_remove` returns. Completions the driver issued *inside*
+     `vblk_remove` are ordered before that stamp, as its comment says;
+     any stamp after it is the late-interrupt use-after-free, whether
+     or not it happened to crash. This needs `blk_test_tick` callable
+     from the test (it is `static` today) and nothing more.
    - `blk_find("vdb") == NULL`; the virtio device is off its bus
      (`device_find(&virtio_bus, name) == NULL`); the PCI function is
      `DEV_UNBOUND` with `driver` and `drvdata` NULL and the virtio-pci
@@ -217,6 +242,7 @@ than claiming the reset was proved.
 | `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, a release counter (debug) |
 | `drivers/pci/pci.c`, `drivers/include/drivers/pci.h` | `pci_test_rebind` (debug) |
 | `kernel/device/device.c`, `kernel/include/kernel/device.h` | `device_test_bind` for it, beside `device_test_unbind` |
+| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `blk_test_tick` made callable (debug), so a completion callback can stamp itself |
 | `kernel/device/devtest.c` | `selftest_virtio_remove_inflight`; the comment at 623-640 that names this unit as future work becomes a pointer to the test |
 | `kernel/core/selftest.c` | the registry entry, beside `blk-unregister-drain` |
 | `docs/kernel/device/{api,testing}.md` | the knob, the attachment order, the machine the tests assume, the test |
@@ -231,7 +257,7 @@ than claiming the reset was proved.
 
 | case | what it establishes |
 | --- | --- |
-| `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes each exactly once with `-EIO`, nothing completes after `pci_test_remove` returns, the disk, the virtio device and the driver binding are gone, the release runs on the last put, and the poisoner is silent |
+| `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after `pci_test_remove` returns (the completion callback's own stamps); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
 | the same, unheld | the natural race, a regression guard |
 | the rebind | `vdb` comes back and reads the same first sector: the hardware was left sane |
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
@@ -245,7 +271,11 @@ than claiming the reset was proved.
   is recorded, not predicted.
 - `vblk_remove` skipping the leftover completions → the held bios never
   complete: the submitter's accepted count never meets its completed
-  count, reported by the bounded wait.
+  count, reported by the bounded wait; and the `-EIO` count falls short
+  of `vblk_test_inflight_at_remove()`.
+- `vblk_remove` completing a slot twice → the `-EIO` count exceeds
+  `vblk_test_inflight_at_remove()`, and a bio's `done` runs twice, which
+  the callback counts.
 - `vpci_remove` without `pci_msix_disable` → a late interrupt after the
   vector is torn down. **May be silent under TCG** if the reset alone
   stops the device from signalling; if it is, the report says so and
