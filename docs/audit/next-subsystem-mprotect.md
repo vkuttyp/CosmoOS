@@ -146,6 +146,8 @@ the libc header.
 | --- | --- |
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_mprotect 93`, `SYS_COUNT` → 94 |
 | `kernel/syscall/native.c` | `sys_mprotect`, and its entry in the dispatch table |
+| `kernel/memory/vmm.c` or the arch layer | instruction-stream synchronisation when a protection change adds `VM_PROT_EXEC` — userland cannot do it without `SCTLR_EL1.UCI`, which this kernel does not set |
+| `userland/init/init.c` (fuzzer) | `SYS_mprotect` in `allowed[]`, with constrained arguments |
 | `libc/include/sys/mman.h` | `int mprotect(void *, size_t, int)` |
 | `libc/src/` (beside `mmap`) | the wrapper |
 | `libc/src/thread.c` | the comment that says the call does not exist; **no behaviour change** |
@@ -182,18 +184,46 @@ check that `WXN` does not forbid it once `W` is gone. Without this
 the unit could ship with W^X enforced so eagerly that the call is
 useless for its main purpose.
 
-**It needs cache maintenance on AArch64, and there is nothing to
-reuse.** Bytes written as data are not visible to the instruction
-fetcher until the data cache is cleaned to the point of unification,
-the instruction cache is invalidated for the range, and an `isb`
-runs; without that the test may execute whatever was there before
-and pass or fail for the wrong reason. Review raised this and it is
-right. There is **no existing helper** — `grep` finds no i-cache
-maintenance in `libc/`, `userland/` or `tests/`, and the kernel has
-none for this purpose either — so the unit has to write the
-sequence, `#if` on the architecture, and x86-64 needs nothing. That
-is scope, not a detail, and it is the reason this test is listed
-separately from the permission cases.
+**It needs cache maintenance on AArch64, and userland cannot do it.**
+Bytes written as data are not visible to the instruction fetcher
+until the data cache is cleaned to the point of unification, the
+instruction cache is invalidated for the range, and an `isb` runs.
+Two rounds of review sharpened this and both corrections matter.
+
+The sequence **does** already exist: `kernel/core/main.c:247` runs
+`dc cvau / dsb ish / ic ivau / dsb ish / isb` before executing
+freshly written code in the WXN crash test. An earlier draft said
+there was nothing to reuse, which was my search being too narrow
+twice — it looks in `libc/`, `userland/`, `tests/` and
+`kernel/arch/aarch64/`, and the code is in `kernel/core/`.
+
+But that sequence runs at **EL1**, and **EL0 may not run it here**.
+`dc cvau` and `ic ivau` are permitted from user mode only when
+`SCTLR_EL1.UCI` is set; this kernel does not set it and does not
+even define the bit (`aarch64/sysreg.h` defines `M`, `A`, `C`, `SA`,
+`SA0`, `I`, `WXN`, `SPAN`, `RES1` — no `UCI`). A user-mode test that
+simply inlines the sequence would **trap**, not validate anything.
+
+**So the kernel does the maintenance, not the caller.** When
+`mprotect` adds `VM_PROT_EXEC` to a range, the kernel synchronises
+the instruction stream for that range before returning. This is the
+right answer rather than the convenient one:
+
+- it makes the syscall correct for **every** caller, not just this
+  test — any JIT would otherwise have to know the rule, and could
+  not obey it anyway without `UCI`;
+- the alternative, enabling `SCTLR_EL1.UCI`, widens what EL0 may do
+  to the cache hierarchy and is a security-relevant `SCTLR` change
+  that deserves its own argument and its own unit, not a line in
+  this one;
+- x86-64 needs nothing, so it is one `#if` in one place in the
+  kernel instead of one in every program.
+
+That is a real addition to the unit's scope, surfaced before any
+code was written, and it is the part of this report most likely to
+be wrong in a way that only hardware will show: it should be
+implemented against the ARM ARM's rules for the point of
+unification, not from the crash test's sequence copied by eye.
 
 **In `memtest.c`**: nothing, and the reason is worth writing down.
 An earlier draft proposed that `vm-replace-race`'s protect racer
