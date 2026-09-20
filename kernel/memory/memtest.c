@@ -658,7 +658,14 @@ static void repl_protector(void *arg)
 {
     struct repl_racer *r = arg;
     while (!r->stop) {
-        int rc = vm_user_protect(r->sp, r->base, r->size, VM_PROT_READ);
+        /*
+         * A SUB-RANGE, so it splits. Protecting the replacement's
+         * exact range splits nothing (`splits_needed` is 0) and the
+         * mutation this is meant to catch walks straight past it --
+         * the first version of this racer did exactly that.
+         */
+        int rc = vm_user_protect(r->sp, r->base + 8 * PAGE_SIZE, r->size - 16 * PAGE_SIZE,
+                                 VM_PROT_READ);
         if (rc != 0 && rc != -EBUSY && rc != -ENOMEM)
             r->bad++;
         sched_yield();
