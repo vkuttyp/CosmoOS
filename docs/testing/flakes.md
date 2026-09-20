@@ -762,7 +762,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Forty-seven, to 2026-09-20**, across CI and this developer's machine, on
+**Forty-eight, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -805,14 +805,15 @@ of this section said eight and then listed nine:
 | PR #192's own CI run, the next commit | observed, aarch64 (`3ff1df2`), the **immediately following** commit on the same one-document branch: `connect 0 in 676 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33140 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a fourteenth time, the same `sent 12` variant as the row above, and the probe is back to 1 ms / 1 ms — so the 2 ms in sighting forty-three was a single reading and nothing more |
 | PR #193's own CI run, twice in one run — x86-64 and aarch64 | observed on both architectures of the same run (`dc52e54`), in the protection-capable and GIC boots respectively: x86-64 `connect 0 in 1274 ms`, aarch64 `connect 0 in 1479 ms`; both `sent -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`, host side `0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one a fifteenth and sixteenth time. **Both carry a retransmission**, which had been recorded only twice before in the whole file — two of them in one run, on two architectures, with otherwise identical counters. Recorded together because they are one run; no claim is made from the pair beyond that |
 | PR #195's own CI run, the head with the panic fix | observed, aarch64 (`f560ab8`), the plain debug boot: `connect 0 in 1266 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:36528 accepted at 93.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 113.9s. Row one a seventeenth time, on a memory-syscall branch that touches no network code — the x86-64 job of the same run passed. The fourth `retransmits +1` in the last five sightings, where the whole file before them held two; and `echo 2 ms` for the second time, after sighting forty-three. Two counts, written down, no claim from either |
+| PR #199's own CI run | observed, aarch64 (`a82c833`), the **other interrupt controller** boot: `connect 0 in 526 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:60998 accepted at 92.9s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 112.9s. Row one an eighteenth time, on a branch that touches the block layer, one driver and the tests and no network code at all; the x86-64 job of the same run passed. `echo 2 ms` for the third time (sightings forty-three and forty-eight), and `retransmits +0` after four of the last five carried one — both written down, neither claimed |
 
-Thirty-seven entries, forty-seven occurrences -- and the table is the tally,
+Thirty-eight entries, forty-eight occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last thirty-two rows
+them and are not independently re-verified here. The last thirty-three rows
 were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **thirty-eight instrumented** occurrences
-behind the other thirty-one rows carry the guest's side. Rows and
+92.0s, 0 of 12 bytes`, and the **thirty-nine instrumented** occurrences
+behind the other thirty-two rows carry the guest's side. Rows and
 occurrences differ because **nine** rows hold more than one sighting;
 the shapes table below is per *sighting* and is the one to count from.
 
