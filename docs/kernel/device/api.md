@@ -353,14 +353,19 @@ True if a sink of that name is registered. Diagnostics and self-tests.
 | Knob | Default | Effect |
 |---|---|---|
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img`, created as 8 MiB of zeros if missing | Backing file of the `virtio-blk-pci` scratch disk (`vda`). The boot test creates a fresh `boot-test.log.testdisk.img` every run |
+| `QEMU_RMDISK` | `<image dir>/rmdisk.img`, created as 4 MiB of zeros if missing | Backing file of the second `virtio-blk-pci`, the disk `virtio-remove-inflight` removes and re-probes (`vdb` on q35, `vdc` on `virt`). `0` leaves the device out of the machine and the test skips. The boot test creates a fresh `boot-test.log.rmdisk.img` every run |
 | `QEMU_VCON` | `<image dir>/vcon.log`, truncated on start | File the `virtconsole` port writes to. The boot test uses `boot-test.log.vcon` and requires the `boot complete` line in it |
 | `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`, `QEMU_PCAP` | empty | Phase 8 network knobs (port forwards, the fw_cfg harness parameter, a pcap of the NIC); see `docs/kernel-services/network/testing.md` |
 | `QEMU_IOMMU` | `1` | `0` leaves the IOMMU out of the machine (`-device intel-iommu` / `iommu=smmuv3`): the devices take the identity DMA path and the harness drops the two `iommu:` markers. See `docs/kernel/iommu/testing.md` |
 
 `qemu-run.sh` always attaches, in this order after the AHCI boot disk:
-`virtio-blk-pci` (scratch disk), `virtio-rng-pci`, `virtio-serial-pci`
-with one `virtconsole`, and since Phase 8 `virtio-net-pci` on a
-user-mode `netdev` (MAC `52:54:00:c0:5f:05`), which replaces QEMU's
-default e1000e. Under QEMU q35 these appear as `pci:00:02.0` to
-`pci:00:05.0` (vendor `1af4`, transitional ids `1001`, `1005`, `1003`,
-`1000`).
+`virtio-blk-pci` (scratch disk), `nvme`, `virtio-rng-pci`,
+`virtio-serial-pci` with one `virtconsole`, `virtio-net-pci` on a
+user-mode `netdev` (MAC `52:54:00:c0:5f:05`, which replaces QEMU's
+default e1000e), the second NIC, the xHCI controller, the AHCI disk,
+and **last** the removal disk's `virtio-blk-pci` (`QEMU_RMDISK`). Under
+QEMU q35 the virtio functions are `pci:00:02.0` (block), `00:04.0`
+(rng), `00:05.0` (console), `00:06.0` (net) and `00:09.0` (the removal
+disk) — vendor `1af4`, transitional ids `1001`, `1005`, `1003`, `1000`.
+The removal disk is last precisely so that adding it moved none of the
+others; `docs/kernel/device/testing.md` lists the whole machine.

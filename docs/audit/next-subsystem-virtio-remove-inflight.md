@@ -1,7 +1,48 @@
 # NEXT SUBSYSTEM — a virtio device dedicated to removal
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**,
+and the banner below records where the build differed from the design.
+
+**What the build changed:**
+
+1. **The seams reach the driver through a table, because the driver is
+   a module.** The design said "one debug hook in `virtio_blk.c`" and
+   the test would call it; the link said otherwise — the kernel image
+   cannot name a module's symbols. `virtio_blk` publishes a
+   `struct blk_test_driver_hooks` to the block layer at its module init
+   (`blk_test_driver_hooks_set`), the test asks for it by driver name,
+   and a build where the module did not publish skips rather than
+   fails to link.
+2. **The disk is found by capacity, not by name.** The design said
+   `blk_find("vdb")`. On `virt` the boot image is itself a virtio-blk,
+   so the removal disk is **`vdc`** there and `vdb` on q35. It is 4 MiB
+   where every other disk in the machine is 8, so the test looks for
+   the only 4 MiB virtio disk and the two machines need no special
+   case. The harness's marker allows either name.
+3. **The unheld pass finds nothing, and that is the measurement.** The
+   report expected the held pass to occupy the window and the unheld
+   one to be a regression guard; as run, the unheld pass finds **0**
+   requests in flight at the remove, every run, on both architectures.
+   That is the number that says the hook is necessary, so it is printed
+   and kept rather than treated as a boring second pass.
+4. **`-ENODEV` completions were not in the design's first draft and are
+   in the build**, with the sharper count beside them: review found
+   that a driver's `-EAGAIN` is queued by `blk_submit` rather than
+   returned, so a full table produces accepted bios that
+   `blk_unregister` completes `-ENODEV`. The assertion is three
+   statuses, and `-EIO` **equal** to what the remove found.
+5. **The boundary stamp is inside `vblk_remove`**, also from review: a
+   stamp the caller takes after `pci_test_remove` returns can be beaten
+   by a completion on another CPU that draws its number first.
+6. **Two of the five designed bug-proofs could not be observed, and two
+   others were added.** See "Bug-proofs, as run" below.
+7. **A latent flake was repaired on the way**: six `thread_count() ==
+   before` checks in `lockuptest.c`, asserted the instant a join
+   returns, when the count falls at the reaper. This branch's thread
+   churn exposed one on AArch64; the repair is a bounded wait, made
+   here because it blocked the gate, and recorded in
+   `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,

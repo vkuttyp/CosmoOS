@@ -689,6 +689,37 @@ assertion with no allowance for a window the implementation genuinely
 has. Made in PR #191, after the second sighting — see above.
 
 
+## `lockup-*`'s thread count, and a window the implementation has
+
+**`lockup-soft` failed once on 2026-09-20**, AArch64 debug, on the
+branch of the virtio-removal unit: `check failed: thread_count() ==
+before at line 464`. Six checks in `kernel/core/lockuptest.c` asserted
+that, each immediately after joining the threads the test made.
+
+**The assertion was the wrong part, and the kernel's ordering is
+deliberate** — the same shape as `lxtest`'s tgkill-after-join above.
+`thread_join` returns when the exiting thread calls
+`complete(&self->exited)`; `thread_count()` falls in
+`thread_unregister`, which runs from the **last** `thread_put`, and the
+exiting thread's own reference is dropped by the reaper after it has
+switched away (`kernel/scheduler/thread.c`). Between a join returning
+and the count falling there is a window, by design, and a one-shot
+assertion had no allowance for it.
+
+**What the branch changed was timing, not mechanism.** It registers a
+thread-creating self-test (`virtio-remove-inflight`) shortly before
+these, so the reaper has company; the window was always there and
+nothing in the branch touches the scheduler. The repair is the one this
+file prescribes: wait for the condition with a bound
+(`threads_settled`, one second, yielding so the reaper gets the CPU the
+loop is on). It is no weaker — a test that really leaks a thread still
+fails, which the unit proved by removing a `thread_join` and watching
+the bound fire — and it is made in the branch it blocked, as `lxtest`'s
+was.
+
+The sibling helper in `kernel/device/devtest.c` (`threads_settle_blk`)
+already had the bounded shape; that is where this one came from.
+
 ## The count
 
 `net-harness` sightings live here, in one place, because six different

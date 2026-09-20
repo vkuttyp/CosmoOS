@@ -16,8 +16,10 @@ qemu-system-aarch64 -machine virt,gic-version=2,accel=tcg -cpu cortex-a72 -smp 4
 ```
 
 - `QEMU_CPU`, `QEMU_SMP`, `QEMU_MEM`, `QEMU_ACCEL`, `QEMU_EXTRA`,
-  `QEMU_TESTDISK`, `QEMU_VCON`, `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`,
-  `QEMU_PCAP` and `OVMF_CODE` keep their meanings. `-cpu max` adds PAN and
+  `QEMU_TESTDISK`, `QEMU_RMDISK`, `QEMU_VCON`, `QEMU_NET_HOSTFWD`,
+  `QEMU_FWCFG_NETTEST`, `QEMU_PCAP` and `OVMF_CODE` keep their meanings.
+  The `virt` machine's boot image is itself a virtio-blk, so the removal
+  disk is `vdc` here and `vdb` on q35; the test finds it by capacity. `-cpu max` adds PAN and
   is also supported.
 - `QEMU_GIC` selects the interrupt controller: `2` (the default, the
   GICv2 driver in `gic.c`) or `3` (the GICv3 driver in `gicv3.c`).

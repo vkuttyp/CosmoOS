@@ -95,8 +95,13 @@ register, 3 after find, 2 after unregister, release after both puts).
 **Q11. After `blk_unregister` no bio reaches the driver, and no
 `blk_submit` is inside the driver.** `gone` and `submitting` are
 `seq_cst` on both sides (Dekker); `blk_submit` returns `-ENODEV`. Check:
-`blk-lifetime`. Gap: the submit/unregister race itself is not driven by a
-test (it needs two CPUs hitting a window of a few instructions).
+`blk-lifetime`; `blk-submit-unregister` and `blk-unregister-drain` race
+the window itself from a second CPU on a synthetic device; and
+`virtio-remove-inflight` runs the whole removal of a **real** virtio-blk
+with its slot table full — every accepted bio completed exactly once,
+the `-EIO` count equal to what the remove found, and nothing completed
+after the removal's own boundary stamp
+(`docs/audit/next-subsystem-virtio-remove-inflight.md`).
 
 **Q12. After `netif_unregister` no transmit or receive touches the
 driver, no packet of the interface is queued or being input, and no ARP

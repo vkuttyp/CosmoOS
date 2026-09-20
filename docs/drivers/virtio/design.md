@@ -135,7 +135,15 @@ is on), then kicks. The completion callback pops cookies (bios), reads
 the status byte (OK → 0, UNSUPP → `-ENOTSUP`, else `-EIO`), frees the
 slot and calls `bio_complete`. `max_sectors` is 128 × 512 / block size.
 Remove: unregister, reset the device, complete leftovers with `-EIO`,
-free the queue and pool.
+free the queue and pool. That order is now raced rather than argued
+(`virtio-remove-inflight`, `docs/kernel/device/testing.md`): in debug
+builds the driver can be told to leave one device's finished requests
+unconsumed, so the remove finds its slot table occupied by
+construction, and it records what it found and stamps the end of its
+leftover walk from the block layer's test sequence so a completion can
+be ordered against it. The hooks are published to the block layer at
+module init (`blk_test_driver_hooks_set`), since the kernel image
+cannot name a module's symbols.
 
 **virtio_rng** (`virtio_rng.c`): no features; one queue; a 64-byte DMA
 buffer posted device-writable. Each completion credits `len × 8` bits

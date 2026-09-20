@@ -621,18 +621,16 @@ static bool threads_settle_blk(unsigned expected)
 
 /* --- removing a device that is busy ---------------------------------------
  *
- * docs/audit/next-subsystem-lifetime-windows.md. `vpci_remove` is the
- * virtio PCI driver's remove hook and only module unload drives it, so a
- * device removed while a request is in flight is a case nothing reaches.
+ * docs/audit/next-subsystem-lifetime-windows.md. What this test drives is
+ * the unbind *transition*, on a synthetic device of its own.
  *
- * What this test drives is the *transition*, on a device of its own.
- * Removing the machine's live virtio-blk is not available to a boot-time
- * suite: it is the scratch disk the filesystem tests run on, and a test
- * that destroys it destroys the run. The remaining work -- a virtio
- * device dedicated to removal, so `vpci_remove` itself is exercised with
- * real I/O outstanding -- is named in the report rather than smuggled in
- * here, because adding a device to the test machine is a change to CI's
- * machine and not a step of this unit.
+ * It used to say that `vpci_remove` with real I/O outstanding was out of
+ * reach, because the machine's only virtio-blk was the scratch disk the
+ * filesystem tests run on. The machine has a second one now, attached to
+ * be removed, and `virtio-remove-inflight` below does exactly that
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md). This test keeps
+ * its own subject: the model's bookkeeping, on a device whose driver is
+ * two functions long, where the assertion is exact.
  *
  * What is testable here, and is the half the review found missing, is
  * that removal is the *whole* unbind and not the driver's hook: the hook

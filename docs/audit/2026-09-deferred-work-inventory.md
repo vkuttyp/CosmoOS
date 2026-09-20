@@ -346,10 +346,14 @@ tree.
   device dedicated to removal in the test machine -- the machine's
   virtio-blk is the scratch disk the filesystem tests run on, so a
   boot-time suite that removes it destroys the run.
-  **Taken up by `docs/audit/next-subsystem-virtio-remove-inflight.md`**:
-  a second virtio-blk (`vdb`, `QEMU_RMDISK`) attached last on both
-  machines, `pci_test_remove` with the driver's slots occupied by
-  construction, and a rebind that brings the disk back.
+  ~~**Taken up by**~~ **BUILT (the virtio-removal unit,
+  `docs/audit/next-subsystem-virtio-remove-inflight.md`)**: a second
+  virtio-blk (`QEMU_RMDISK`; `vdb` on q35, `vdc` on `virt`) attached
+  last on both machines, `virtio-remove-inflight` driving
+  `pci_test_remove` with the driver's slots occupied by construction --
+  64 found in flight, 64 completed `-EIO`, nothing after the removal's
+  own boundary stamp -- and `pci_test_rebind` bringing the disk back
+  with its sector intact. **The row is closed in every clause.**
 - ~~**What the straggler kick is worth is an open question**, added by
   that unit rather than struck by it.~~ -- **ANSWERED (PR #179): it
   works, but barely.** About 220 kick IPIs sent and **1 publish
