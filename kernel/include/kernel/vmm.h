@@ -157,7 +157,12 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
 /* Change the protection of every page of [base, base+size), splitting
  * regions at the ends and merging equal neighbours afterwards. -EINVAL
  * for W+X or a bad range; -ENOMEM if a page of the range is unmapped
- * (nothing changes) or a split cannot be allocated. */
+ * (nothing changes) or a split cannot be allocated; -EBUSY if a
+ * MAP_FIXED replacement has claimed part of the range -- splitting a
+ * VM_REGION_QUIESCED region would copy the claim into pieces the
+ * owner does not know about (invariant M40). The -EBUSY arrived with
+ * that unit and this contract did not: a stale contract in a header
+ * outranks one in a report, and review caught it. */
 int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot);
 
 /* Number of regions in a user space (tests). */
