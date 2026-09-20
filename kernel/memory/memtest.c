@@ -630,6 +630,24 @@ static void repl_filler(void *arg)
     }
 }
 
+/*
+ * Punch the hole back before every replacement. Without this the
+ * first replacement covers the range with one region and the
+ * remaining rounds span no hole at all -- one window instead of
+ * REPL_ROUNDS of them, which is why the first versions of this case
+ * let the mutation through.
+ */
+static void repl_hole_replacer(void *arg)
+{
+    struct repl_racer *r = arg;
+    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
+        vm_user_unmap(r->sp, r->base + 2 * PAGE_SIZE, r->size - 4 * PAGE_SIZE, 0);
+        if (vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race") != 0)
+            r->bad++;
+    }
+    r->stop = true;
+}
+
 static void repl_unmapper(void *arg)
 {
     struct repl_racer *r = arg;
