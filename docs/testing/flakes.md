@@ -727,8 +727,8 @@ of this section said eight and then listed nine:
 | PR #191's own CI run, a later one | observed, **x86-64** (`7ca342b`): `connect 0 in 715 ms`, `sent -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `[deadline, ESTABLISHED]`, probe 1 ms / 1 ms. Row one a tenth time, and **only the second x86-64 reading** after sighting thirty-five |
 | PR #191's own CI run, the protection-capable aarch64 job | observed, aarch64 (`096a15d`, a **documentation-only** commit): **`connect 0 in 1478 ms`** -- a new slowest, where sighting thirty-nine set a new fastest -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:55062 accepted at 92.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 112.9s. Row one an eleventh time, and the **second `retransmits +1` ever recorded**, after sighting thirty-seven -- named rather than counted, because a count of "sightings since" is the figure this section keeps getting wrong. The self-test also blew its budget at 21971 ms against 8000 ms, which is the waiting, not a second fault |
 | PR #191's own CI run, the same job re-run | observed, aarch64 (`8aff8ad`), on the **re-run of the job above** -- so twice on one commit: `connect 0 in 668 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:53036 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a twelfth time, and the first time a **re-run reproduced it on the same commit** -- which is worth more than another reading, because "re-run it" has been this file's standing advice |
-| PR #192's own CI run, the next commit | observed, aarch64 (`3ff1df2`), the **immediately following** commit on the same one-document branch: `connect 0 in 676 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33140 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a fourteenth time, the same `sent 12` variant as the row above, and the probe is back to 1 ms / 1 ms — so the 2 ms in sighting forty-three was a single reading and nothing more |
 | PR #192's own CI run | observed, aarch64 (`876eec8`), on a report branch whose **only** file is one Markdown document: `connect 0 in 715 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:49176 accepted at 89.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, gave up at 109.0s. Row one a thirteenth time, the `sent 12, never acknowledged` variant, and the **first probe reading that is not 1 ms / 1 ms**: `slirp probe: connect 1 ms, echo 2 ms`. One millisecond is not a mechanism, and it is recorded because this file's rule is to write the numbers down, not because it means anything yet |
+| PR #192's own CI run, the next commit | observed, aarch64 (`3ff1df2`), the **immediately following** commit on the same one-document branch: `connect 0 in 676 ms`, **`sent 12`**, `recv -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33140 accepted at 91.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 111.9s. Row one a fourteenth time, the same `sent 12` variant as the row above, and the probe is back to 1 ms / 1 ms — so the 2 ms in sighting forty-three was a single reading and nothing more |
 
 Thirty-five entries, forty-four occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
@@ -1271,6 +1271,35 @@ file has been wrong about that twice, and nothing here identifies a
 change that would have altered it. What it does say is that
 "re-run it first" can no longer be relied on for this family, which
 is a practical fact for whoever hits it next.
+
+## An aarch64 boot that reached the self-tests and no further
+
+**2026-09-20, `0814e79`, the same one-document branch** (`make
+ARCH=aarch64 BUILD=debug test`). The harness reported **339**
+self-tests in 76.3 s — the usual count on this architecture is 360 —
+and then failed at 85.8 s with only userland markers missing:
+
+```text
+  - missing marker /^init: CosmoOS userland, pid \d+/
+  - missing marker /^CosmoOS userland ready/
+  - missing marker /^init: rc exited with status 0/
+```
+
+**No test failed.** There is no `SELFTEST: FAIL`, no forbidden
+marker, and no panic in the dump; the serial log simply ends inside
+`cosmofs-replay`, which is this architecture's slowest test and was
+mid-way through its mount/unmount loop over `/mnt/crash`. The guest
+stopped producing output and userland never started.
+
+This is **not** the `net-harness` family above — different symptom,
+different place, and the previous commit on this same branch failed
+the other way. It is recorded as its own shape with one sighting and
+no explanation, because the alternative is to file it under a family
+it does not belong to, which is the mistake this file exists to stop.
+
+The branch it appeared on contains three Markdown files and no code
+(`git diff main..HEAD --stat`), so whatever it is, it is not the
+change under review.
 
 **Three consecutive branches, and the aarch64 rate is worth a sentence
 of caution rather than a claim.** Sightings thirty-six through
