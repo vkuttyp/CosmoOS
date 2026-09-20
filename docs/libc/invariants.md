@@ -69,14 +69,18 @@ requires an execute bit; `errno` ends as the last kernel error or
 `spawnve("/bin")` is `EACCES`, `spawnve("/etc/rc")` is `EACCES`). Gap:
 `PATH` entries longer than 1023 bytes are skipped silently.
 
-**L8. The allocator, stdio and `errno` are each safe from more than one
-thread.** User threads arrived with the audit unit "native threads and a
+**L8. The allocator, stdio, `errno`, the environment and the `atexit`
+list are each safe from more than one thread.** User threads arrived with the audit unit "native threads and a
 futex", and this invariant used to read "the library is single-threaded and
 says so" with a note that on that day `errno` would become thread-local and
 the allocator and stdio would take locks *before anything else was done*.
 The locks landed with the threads unit; `errno` landed with the unit after
-it, because it needed a thread pointer the machine did not have. All three
-are done, and the shape of each is set by its consequence:
+it, because it needed a thread pointer the machine did not have. **This
+invariant then said "all three are done" for a year while the library
+had five shared things**: `environ` and the `atexit` list were left
+unlocked, and the fifth and sixth bullets below are the unit that
+closed them (`docs/audit/next-subsystem-libc-shared-tables.md`). The
+shape of each is set by its consequence:
 
 - **The allocator takes one lock** (`libc/src/malloc.c`). An unlocked free
   list is the one hazard here that corrupts memory silently, which is
@@ -107,6 +111,60 @@ are done, and the shape of each is set by its consequence:
   with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
   for a program that wants such a thread to use libc anyway.
 
+- **A thread stack is built in three syscalls, and the middle one
+  opens a window.** `cosmo_thread_start` reserves guard + stack + TCB
+  page `PROT_NONE`, `munmap`s a hole for the upper part, and `mmap`s
+  it back `MAP_FIXED` as read/write, because there is no `mprotect`
+  to turn a reservation writable in place. Between the punch and the
+  fill that hole is unmapped address space, and another thread's
+  `mmap(NULL, …)` may be handed it — `vm_user_find_free` looks for
+  exactly such a gap. This kernel's `MAP_FIXED` refuses to overwrite
+  (`space_insert` returns `-EEXIST`) rather than replacing as POSIX
+  says, so the loser of that race sees **`EEXIST` from a thread
+  start**. It is not theoretical: three aarch64 CI failures, all with
+  a thread mallocing continuously beside threads starting
+  continuously. **The retry is the contract**: the cleanup path
+  restores the address space exactly, so the attempt is made again,
+  bounded at `STACK_MAP_ATTEMPTS`. Anything that reshapes this
+  sequence must keep that property, and the real repair — atomic
+  `MAP_FIXED` replacement — is a kernel change filed in the
+  deferred-work inventory.
+
+- **The environment takes one lock** (`libc/src/stdlib.c`), shared with
+  the `atexit` list because both are cold start-up paths and a second
+  lock is a second chance at an ordering bug. `setenv` growing the
+  array calls `free(environ)`, so an unlocked `getenv` walking it was
+  a use-after-free in the allocator this same invariant locks two
+  bullets above. The lock covers the **walk** and not the pointer
+  `getenv` returns: that stays valid because `setenv` **leaks** the
+  string it replaces rather than freeing it, which is deliberate and
+  must not be tidied. Say the cost plainly, because locking the walk
+  promoted that leak from an implementation detail to a contract:
+  **it is unbounded**. Every overwrite of a variable strands the
+  previous string, so a program that rewrites one in a loop grows
+  without limit — the bound is the number of `setenv` calls, not the
+  size of the environment. Nothing here reclaims it, and nothing may,
+  while the rule is that a pointer from `getenv` stays good: freeing
+  the old string needs to know that no caller still holds it, which
+  is a question this interface cannot ask. A program that overwrites
+  variables in a loop should keep its own state instead of using the
+  environment as one. `env_count` is an unlocked helper called under
+  the mutators' lock — the mutex is not recursive and both mutators
+  call it. **Every reader of `environ` inside the library takes the
+  lock**, including the one outside `stdlib.c`: `spawnvp` hands the
+  array to the kernel and takes `__env_snapshot()` — a copy made
+  under the lock — rather than the global, because it cannot hold a
+  libc lock across a system call. Locking the accessors and leaving
+  that caller is what made the first version of this bullet false for
+  the commonest case, and review caught it.
+- **The `atexit` list takes the same lock**, and `exit` must not hold
+  it while running a handler: a handler is arbitrary program code that
+  may call `atexit` or `getenv`, so the drain takes the lock, removes
+  one handler, releases, and then calls it. Unlocked, the list lost
+  handlers (`g_natexit++` is a read-modify-write) and could be written
+  **past its end**, because the bound check and the increment were
+  separate.
+
 `feof`/`ferror`/`clearerr`/`fileno` read a word without the lock.
 
 **`strerror` and `getcwd(NULL)` are done, and one of them never needed
@@ -127,8 +185,9 @@ about. The statics that remain fall in three groups. The allocator's
 `g_free` and stdio's `g_std`/`g_files` are behind `g_lock` and `g_io`.
 `tcb.c`'s `g_tls` is written once in `__libc_start`, before the process
 has a second thread, and read-only after. And `stdlib.c`'s `g_atexit`,
-`g_natexit`, `environ` and `g_env_owned` are **genuinely unsynchronised**
--- see the gap below.
+`g_natexit`, `environ` and `g_env_owned` are behind that file's own
+`g_lock` (**L8**), which they were not until
+`docs/audit/next-subsystem-libc-shared-tables.md`.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting `errno`, takes no libc lock, and maps its stacks
@@ -147,17 +206,25 @@ its initialiser in every thread, a `.tbss` array zero in a new one, an
 over-aligned variable aligned, and `strerror` of an unknown code answering
 each thread its own.
 
-**One gap is left, and it is not the one this invariant was about.**
-`atexit` does `g_atexit[g_natexit++] = fn`, an unsynchronised
-read-modify-write on process-global state, and `setenv`/`unsetenv`
-reallocate `environ` with `g_env_owned` tracking ownership -- so two
-threads registering handlers, or one setting the environment while
-another reads it, race. Nothing in the tree does either from a second
-thread: handlers and environment are set before threads start, which is
-the normal shape of both. It is named here rather than fixed because it
-is process state and not per-thread state, and this invariant is about
-the latter; the fix is a lock apiece and belongs to whichever unit needs
-it. `cosmo/thread.h` states the same restriction to callers.
+**The gap this invariant used to name is closed.** It read: *"`atexit`
+does `g_atexit[g_natexit++] = fn`, an unsynchronised read-modify-write
+on process-global state, and `setenv`/`unsetenv` reallocate `environ`
+... Nothing in the tree does either from a second thread"* — and it
+was left because process state was not what this invariant was about.
+Both are locked now (**L8**), and the reason for doing it before a
+program needed it is in the unit: `setenv` growing the array calls
+`free(environ)` while `getenv` may be walking it, so the hazard was a
+use-after-free in the allocator this same file locks, not merely a
+lost update.
+
+**And it is demonstrated, which the unit did not expect.** `thrtest`
+reproduces it reliably — three runs of three, a `#GP` at the same
+address, exit status 139 — but only with a thread churning the heap
+alongside: `setenv` copies the old array's pointers and frees only the
+array, so a reader on the stale array still reads correct pointers and
+gets the right answer out of freed memory. The wrong answer needs the
+block reused and overwritten first, which is what any other thread
+allocating does and what the test now arranges.
 
 **L9. A thread waits on a predicate in a `while`, never on a loop count
 and never on a spin.** `cosmo/thread.h` carries a condition variable

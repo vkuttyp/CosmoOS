@@ -825,7 +825,22 @@ static int run_line(const char *line)
     }
     int pos = 0;
     int rc = 0;
-    int skip = 0;   /* 0: run, 1: skip until next ';', 2: skip because && failed / || succeeded */
+    /*
+     * 0: run, 1: skip until next ';', 2: skip because && failed / || succeeded.
+     *
+     * An AND-OR list is LEFT-associative: `A && B || C` is
+     * `(A && B) || C`, so a failing A must still reach C. This loop
+     * used to recompute `skip` only `if (!skip)`, which meant that
+     * once `&&` had set it, the following `||` was never consulted
+     * and neither branch ran. `A && B || C` with a failing A did
+     * nothing at all. Recomputing at every operator from
+     * `g_last_status` -- the status of the last pipeline actually
+     * run, which is the list's accumulated status -- is the whole
+     * fix. Found in /etc/rc.test, whose verdict line is exactly this
+     * shape, so `SHTEST: FAIL n` could never print and a failing run
+     * was reported only by the absence of `SHTEST: PASS`.
+     */
+    int skip = 0;
     while (toks[pos].type != T_END) {
         struct pipeline pl;
         if (toks[pos].type == T_SEMI || toks[pos].type == T_AMP) {
@@ -848,12 +863,10 @@ static int run_line(const char *line)
         }
         if (toks[pos].type == T_AND_IF) {
             pos++;
-            if (!skip)
-                skip = g_last_status != 0 ? 2 : 0;
+            skip = g_last_status != 0 ? 2 : 0;
         } else if (toks[pos].type == T_OR_IF) {
             pos++;
-            if (!skip)
-                skip = g_last_status == 0 ? 2 : 0;
+            skip = g_last_status == 0 ? 2 : 0;
         } else if (toks[pos].type == T_SEMI) {
             pos++;
             skip = 0;

@@ -1,8 +1,143 @@
 # NEXT SUBSYSTEM — the two tables threads left behind
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. Chosen from
-`docs/audit/2026-09-deferred-work-inventory.md` §1.3.
+and wait for the instruction to build it. **This report is as built**
+(PR #191), and the banner below records where the build differed from
+it — including the part that matters most: **the headline defect IS
+demonstrated.** It took two corrections to get there, and an earlier
+version of this very line said it could not be demonstrated at all.
+Read the next sentence as the current state and the clause after the
+comma as history, not the other way round — review has now twice read
+this line as a live claim that the defect is undemonstrated, which is
+the opposite of what it records.
+
+**What the build changed, each found by building rather than reading:**
+
+0. **The lock covered `stdlib.c` and the invariant covered the
+   library, which is not the same thing.** `spawnvp` reads the global
+   `environ` and hands it to the kernel (`libc/src/process.c:126` and
+   `:141`) without taking the lock — so a program doing exactly what
+   the new `cosmo/thread.h` permits, `setenv` on one thread and
+   `spawnvp` on another, walked an array `setenv` had freed. **The
+   same use-after-free the unit exists to close, reached through the
+   one caller the unit did not look at**, and L8's claim that the
+   environment is safe from more than one thread was false for the
+   case a caller is most likely to hit.
+
+   Found by review, not by me, and the miss is the obvious one: I
+   locked the accessors in the file I was editing and swept the
+   *documentation* for contradictions without sweeping the *code* for
+   other readers of the global. `grep -rn environ libc/src` is four
+   lines long and would have found it.
+
+   Fixed with `__env_snapshot()` — a copy of the array taken under the
+   lock, owned by the caller. A **shallow** copy suffices, and only
+   because `setenv` leaks the strings it replaces: the pointers stay
+   valid for as long as the caller holds the snapshot. The leak is
+   load-bearing for the third time in this unit — and unbounded, which
+   the build now says where it happens rather than calling it bounded
+   and confined to start-up. See "Why it has not bitten".
+
+0b. **The test's own failure signal was lost, twice over, and the
+   second loss was not in this unit at all.** Moving the verdict into
+   the drain (item 4) replaced `main`'s `return failures ? 1 : 0;`
+   with an unconditional `exit(0)`: `thrtest` printed
+   `THREADTEST: FAIL n` and exited **0**, so `/etc/rc.test`'s
+   `/boot/tests/native/thrtest || FAILS=1` never fired. Review found
+   it and said the quiet part — keeping the status costs nothing.
+   `main` now passes the count through, and because `failures` can
+   still rise inside the drain, where a status already handed to
+   `exit` cannot be revised, the last handler ends `_exit(1)`.
+
+   Proving that turned up the second loss. With the status restored,
+   a failing run still printed no verdict: `rc.test` ends
+   `sh -c "exit $FAILS" && echo PASS || echo "FAIL $FAILS"`, and the
+   shell's AND-OR lists were **right**-associative — `run_line`
+   recomputed its skip flag only `if (!skip)`, so once `&&` had set
+   it the `||` was never consulted and *neither* branch ran.
+   `SHTEST: FAIL n` had never been reachable, and two userland
+   documents claimed the script prints it. Fixed in
+   `userland/shell/sh.c` with assertions in `rc.test`; it is a
+   different subsystem from this unit and is called out as such.
+
+   The two are one bug wearing two hats: a failure that does not
+   reach the thing that reports it. The unit's own table had the
+   same shape — see item 0c.
+
+0c. **`atexit-bound` tolerated exactly the overflow it exists to
+   catch.** The check was
+   `at_accepted_flood + at_registered <= 32`, but
+   `atexit_checks_at_exit` occupies a thirty-third slot and is
+   deliberately absent from `at_registered` because it does not
+   count itself in `at_ran`. A table of 32 accepting 33 passed.
+   `docs/libc/testing.md` even names "accepts 33 into a table of 32"
+   as the mutation the test kills, which it did not. It adds that
+   slot now, and with `ATEXIT_MAX` raised to 33 the check fails where
+   it used to pass.
+
+0d. **The re-entrant case tested half of what two comments claimed.**
+   `exit`'s drain says "a handler that registers another gets it run
+   by the next turn of this loop" and this report repeated it, but
+   `reentrant_handler` called only `getenv`. It calls `atexit` now;
+   the drain has already popped the flood's slots by then, so the
+   registration succeeds and LIFO makes the new handler the next one
+   called. The drain runs 32 where it ran 31.
+
+1. **The use-after-free IS demonstrated, after two corrections, and
+   an earlier version of this banner said it was not.** The first
+   build's readers looked up a name added *before* the padding, so
+   `getenv` found it at the front and never walked the part of the
+   array being reallocated — review found that, and it meant "does
+   not reproduce" was uninformative rather than a result. With the
+   observed name moved after the padding it still did not reproduce,
+   and **that** is what identified the real reason: `setenv` copies
+   the old array's pointers into the new one and frees only the
+   array, so a reader on the stale array reads pointers that are all
+   still correct and gets the right answer out of freed memory.
+
+   The wrong answer needs the block **reused and overwritten** first.
+   A thread churning the heap in the same size class arranges that,
+   and then the unlocked build dies: **`#GP` at `0x40a940`, signal
+   11, exit status 139, on three runs out of three**, dereferencing a
+   `0x5A5A…` pointer read from the freed array. **Reliable rather
+   than deterministic**, and the distinction is the last thing review
+   corrected: nothing forces the interleaving — three readers, a
+   writer and the churn all run uncoordinated — so three-of-three is
+   evidence and not a guarantee, and a different scheduler could let
+   an unlocked build through. It is still the strongest reproduction
+   in the unit rather than the missing one.
+2. **The deterministic construction I proposed in review does not
+   work, and the reason is worth more than the construction was.**
+   Review round 2 asked how the `unsetenv` window would be forced;
+   I answered that the test would own the walk and pause mid-array.
+   It cannot: **a walker the test owns never takes the library's
+   lock**, so the lock the fix adds cannot protect it and the test
+   fails identically with and without the fix — a test of nothing. A
+   deterministic version has to pause *inside* `getenv`, which needs
+   the libc test seam I had argued was disproportionate. The test now
+   uses the real `getenv` and is honestly probabilistic.
+3. **`atexit-concurrent` needed a start barrier to contend at all.**
+   The first build started eight threads in a loop and joined them in
+   another; each finished before the next existed, so an unlocked
+   `atexit` passed. With a barrier the eight enter together and the
+   unlocked build loses three handlers — **the drain runs 6 of 9** and
+   the marker fails. That is the bug-proof of record.
+4. **The acceptance count cannot detect a lost update, but it does
+   detect the overflow.** Every thread's `atexit` *returns* 0 even
+   when its slot is overwritten, so "8 of 8 accepted" is true on a
+   broken build and the **drain count** is what catches a lost
+   handler. The same count catches the other defect for free, which
+   the design said it could not: an unlocked build accepts
+   **thirty-three** registrations into a table of thirty-two, so the
+   accounting is the canary the design thought it needed memory
+   inspection for.
+5. **The verdict had to move into the drain.** `main` printed
+   `THREADTEST: PASS` and then called `exit`, so a drain that lost a
+   handler or deadlocked could not reach the marker. The last handler
+   prints the verdict now, which also means the LIFO order matters:
+   the checking handler is registered **first**.
+
+Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §1.3.
 
 **Subsystem: `environ` and the `atexit` list, the two process-global
 tables in libc that native threads made unsafe and nobody locked.**
@@ -126,13 +261,35 @@ leak rather than by a rule. The build should keep the leak and say why,
 because the obvious tidying — freeing the old string — would turn a
 safe return value into a dangling one.
 
-### Why it has not bitten
+Saying why means saying the price, which review asked for after the
+build made the leak a documented contract and `__env_snapshot` a
+third thing resting on it. **The leak is unbounded.** Its size is the
+number of `setenv` calls a program makes, not the size of its
+environment, so overwriting one variable in a loop grows the heap
+without limit. There is no reclaiming it while the promise stands:
+freeing the old string requires knowing that no caller still holds a
+pointer to it, and `getenv` hands those out untracked. The build
+accepts the cost and records it in `libc/src/stdlib.c` and
+docs/libc/invariants.md L8 — where the comment used to call it "a
+bounded leak in a start-up path", which was wrong twice over.
+
+### Why it had not bitten
 
 **Nothing in the tree uses threads and the environment together.**
 `setenv` and `getenv` are called by `init` and the shell, neither of
-which creates threads; `thrtest` creates threads and does not touch the
-environment. The race is **latent and reachable**, not observed, and
-this report says so rather than implying a failure it cannot point to.
+which creates threads; `thrtest` did not touch the environment when
+this paragraph was written.
+
+That last clause is why the heading is in the past tense now. The race
+**is** observed: `env-grow-under-readers` kills the process (`#GP`,
+signal 11, three runs of three) and this report's banner records what
+the first two attempts got wrong. What the paragraph above still
+explains correctly is why nothing had hit it *before* a test went
+looking — no shipping program combines the two — and that remains the
+answer to "if it is this easy to hit, why has it never happened".
+An earlier version of this paragraph said the race was "latent and
+reachable, not observed", which was true when written and false once
+the test landed; review caught it still standing.
 That is also why it is worth doing now: the cost of closing it is a
 lock, and the cost of finding it later is a use-after-free in a program
 nobody suspects.
@@ -216,64 +373,64 @@ thread, which is why that program exists.
 
 | test | asserts |
 | --- | --- |
-| `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv`; every reader either finds its name or does not, and none reads a freed pointer |
-| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed. The reader is the test's own copy of `getenv`'s walk, paused at a chosen index, so the interleaving is forced rather than hoped for — see below |
+| `env-grow-under-readers` | one thread calling `setenv` with fresh names while others loop in `getenv` **for a name placed after the padding**, so a reader walks the array being reallocated, **and a fourth thread churns the heap** so the freed array is reused. Unlocked, the process dies with a `#GP` |
+| `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed, while 200 entries **before** it are removed under the walk. **As built** this is the regression test of the set — it frees no array, so the churn that makes the grow case fatal does not apply to it. The "test owns the walk" construction proposed in review is gone: see banner item 2 |
 | `atexit-concurrent` | N threads each registering a distinct handler; **exactly** the number registered run at exit, and none runs twice |
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
 | `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
 
-**The bug-proof, and the honest difficulty.** A race test that passes
-on a broken build most of the time is not a proof. **Three are
-deterministic and one is not**, and this paragraph has now been wrong
-twice about which — first saying two and two, then calling
-`env-unset-under-readers` countable and stopping there, as though a
-failure that can be counted is a failure that will occur. It is
-deterministic only with the construction spelled out below; without
-that it belongs with the probabilistic one.
+**The bug-proof, as run.** The section below was written before the
+build and was wrong about which tests prove anything. What the
+measurements say:
 
-- `atexit-concurrent` is **countable**: register N handlers from N
-  threads, count how many run. A lost update is a number, not a
-  timing. That is the bug-proof of record — remove the lock and the
-  count comes back below N.
-- `atexit-bound` is likewise countable: the array has a canary past it
-  and the test reads the canary.
-- **`env-unset-under-readers` is countable *when it happens*, and a
-  second draft of this section confused that with reliable.** The
-  failure needs `getenv` to be between two loads when `unsetenv`
-  shifts the target into a slot it has already passed; running both in
-  a loop does not force that, so an unlocked build can pass the test
-  repeatedly — which is the thing this section opens by refusing to
-  accept. Review caught it.
+| mutation | result |
+| --- | --- |
+| `atexit` unlocked (its read-modify-write split by a delay) | **`THREADTEST: FAIL 3`**. The flood is accepted **24 of 24** and the table reports holding **33** against an `ATEXIT_MAX` of 32 — the write past the end of a static array, seen from userland — and the drain runs **31 of 33**, two handlers lost. Both defects, countable |
+| `setenv` **and** `getenv` unlocked, **with the heap churned** | **the process dies**: `#GP` at `0x40a940`, signal 11, status 139, three runs of three. The use-after-free, reproduced |
+| `setenv` and `getenv` unlocked, **without churn** | passes — and the reason is the finding: the stale array's pointers are still correct, because `setenv` frees the array and never a string |
+| `unsetenv` unlocked | passes, and cannot be expected to fail: `unsetenv` frees nothing, so there is no block for the churn to recycle and its hazard is a wrong **answer** rather than a bad pointer. A regression test |
+| `spawnvp` reading the global again | passes, three runs. **Not a proof.** The window is the gap between reading `environ` and the kernel copying it, which is a few instructions inside a call that then spends milliseconds creating a process — the churn has almost no chance to land in it. A regression test, and the defect is argued from the code: an unlocked read of a pointer another thread passes to `free` |
 
-  **The window is forced by letting the test own the walk.** libc has
-  no test seam — no `CONFIG_DEBUG`, no weak symbols, nothing — and
-  adding one to `getenv` so a thread can park mid-walk would be the
-  library's first, which is disproportionate for a latent race. It is
-  not needed: the reader in this test walks `environ` itself, with the
-  same loop `getenv` runs, and pauses where it chooses. It reads
-  `environ[i]`, waits on a flag, lets the other thread `unsetenv` an
-  *earlier* name, then resumes and finds the target gone from the part
-  of the array it has left to read. Deterministic, no timing, and no
-  new mechanism in the library.
+**So two of the five are proofs and one is a reliable reproduction**,
+where the report promised three deterministic and one probabilistic.
+The `atexit` pair are proofs in the strict sense — a lost handler and
+an over-count are numbers that do not depend on when anything
+happened. The environment one reproduces three times out of three and
+is *evidence*, because nothing forces its interleaving. `unsetenv` is
+the regression test. The headline defect went from "argued from the
+code" to "kills the process whenever it has been asked to", which is
+weaker than "on demand" and is what the runs support.
 
-  **What that costs in claim strength, stated rather than hidden:**
-  the test drives the same walk `getenv` performs but is not `getenv`,
-  so it proves the hazard is in the **table** rather than in that one
-  function. `getenv`'s own safety then follows from its taking the
-  lock, which `env-grow-under-readers` exercises against the real
-  function. Two halves of one claim, and neither pretends to be the
-  other.
-- `env-grow-under-readers` is the one that is **probabilistic**,
-  because the only thing that distinguishes it is a read of freed
-  memory, and the report will not pretend otherwise. It is made to
-  fail reliably without the lock by making the window wide rather than
-  by iterating and hoping: the reader walks a long environment so it is
-  inside the array for many instructions, and the writer grows it
-  repeatedly so `free` is called often. If that still does not
-  reproduce without the lock, that test is reported as *not* a proof
-  and the three countable ones carry the unit — which is the outcome
-  the straggler-kick unit reached, and better than an assertion that
-  passes for the wrong reason.
+**The bound test sees the overflow without a canary, which I had said
+it could not.** The design assumed a write past `g_atexit[31]` would
+need memory the test cannot inspect. It does not: the test counts what
+`atexit` *accepted*, and an unlocked build accepts thirty-three
+registrations into a table of thirty-two. The accounting is the
+canary.
+
+**The three conditions, and why two of them had to be arranged.** A
+use-after-free is observable only if the freed block is reused, *and*
+its contents change, *and* the reader looks after both. The reader
+looking was the first correction (the observed name moved behind the
+padding); the reuse was the second (a churn thread in the same size
+class). Neither is exotic — any other thread allocating does the
+second — but neither happens by itself in a test whose only
+allocations are the environment's own.
+
+**What this says about the hazard in the field** is worth more than
+the test: a program whose threads only touch the environment will
+probably never see this, and a program whose threads also allocate —
+which is most of them — is one `setenv` away from dereferencing a
+recycled block. That is the argument for a lock in a cold path, and
+it is now measured rather than asserted.
+
+**No libc test seam was needed after all.** The design floated a
+debug-only park hook inside `getenv` as the way to force the window,
+and called it disproportionate. It is also unnecessary: churn plus a
+reader that actually walks the array reproduced the fault on every
+run it has been given, with nothing added to the library — and a seam
+is still what a *deterministic* version would need, which is the
+honest reason this one is called reliable instead.
 
 ## Risks
 

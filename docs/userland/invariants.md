@@ -118,3 +118,36 @@ Check: the self-test requires a two-service chain to start in order,
 requires a cycle to be refused rather than run in some order, and
 requires that when a dependency's definition is bad the dependent is not
 started and the message names the dependency.
+
+**U11. An AND-OR list is left-associative, so a failing left side
+still reaches the `||`.** `A && B || C` is `(A && B) || C`: `A`
+failing skips `B` and runs `C`. `run_line` keeps one skip flag and
+recomputes it at **every** operator from `g_last_status` — the status
+of the last pipeline actually run, which is the list's accumulated
+status because a skipped pipeline does not change it. Guarding that
+recomputation with `if (!skip)`, as the first version did, makes the
+list right-associative: once `&&` has set the flag the `||` is never
+consulted and neither branch runs. That is not a rare shape. It is
+how a script reports a verdict, and `/etc/rc.test`'s own last line is
+exactly it, so for as long as the bug existed `SHTEST: FAIL n` could
+not be printed and a failing run was reported only by a missing
+marker — with two documents claiming otherwise.
+
+Check: the boot harness requires `^ANDOR: ok$` and forbids
+`^ANDOR: wrong-branch$` (`tests/boot/run_boot_test.py`), printed by a
+three-term list in `/etc/rc.test` — `false && echo wrong-branch ||
+echo ok`. That is the shape the invariant is about, and the marker is
+a **positive** signal: restoring the `if (!skip)` guard prints
+neither branch, so the marker vanishes and the harness says which
+one is missing.
+
+It is required by the harness rather than checked in the guest for a
+specific reason review pointed out: `rc.test` reports its own verdict
+with `sh -c "exit $FAILS" && echo PASS || echo "FAIL $FAILS"`, which
+is the same three-term shape, so under the bug the script cannot
+report anything at all. A guard that depends on the broken construct
+to announce its own failure is worth very little. `rc.test` also
+asserts both branches of both shapes by their side effects, each
+assertion a two-term list so the assertions themselves survive the
+bug. Gap: no test of a list longer than three terms, and none mixing
+`&&`/`||` with `&`.

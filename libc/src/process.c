@@ -122,9 +122,51 @@ pid_t spawnve_as(const char *path, const char *const argv[], const char *const e
 static pid_t spawnvp_flags(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh,
                            unsigned extra, pid_t pgid)
 {
-    if (strchr(file, '/'))
-        return spawn_req(file, argv, (const char *const *)environ, h, nh, extra, pgid);
-    const char *path = getenv("PATH");
+    /*
+     * A snapshot rather than the global. `setenv` growing the
+     * environment frees the old array under `stdlib.c`'s lock, so
+     * reading `environ` here -- and handing it to the kernel to copy
+     * -- is a use-after-free the moment a program does what
+     * `cosmo/thread.h` now says it may: set the environment from one
+     * thread and spawn from another. The unit that locked the
+     * environment locked `stdlib.c`'s own accessors and left this
+     * one, which made invariant L8 over-promise
+     * (docs/audit/next-subsystem-libc-shared-tables.md).
+     */
+    char **env = __env_snapshot();
+    if (env == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (strchr(file, '/')) {
+        pid_t pid = spawn_req(file, argv, (const char *const *)env, h, nh, extra, pgid);
+        int saved = errno;
+        free(env);
+        errno = saved;      /* `free` must not repaint a failed spawn's errno */
+        return pid;
+    }
+    /*
+     * PATH comes from the SNAPSHOT, not from `getenv`. The snapshot
+     * is the environment the child will receive; `getenv` reads the
+     * live table, and `cosmo/thread.h` now permits another thread to
+     * be calling `setenv` throughout. Two reads of two different
+     * tables need not agree, so a `setenv("PATH", …)` landing between
+     * them would have this process search a path the child does not
+     * have -- starting a binary found through a search path absent
+     * from its own environment -- or miss one it does. Review found
+     * it: the unit snapshotted the array for the kernel and then went
+     * back to the global for the lookup that chooses the binary.
+     *
+     * The strings are safe to point into for the same reason the
+     * shallow copy is: `setenv` leaks the value it replaces.
+     */
+    const char *path = NULL;
+    for (char **e = env; *e != NULL; e++) {
+        if (strncmp(*e, "PATH=", 5) == 0) {
+            path = *e + 5;
+            break;
+        }
+    }
     if (path == NULL)
         path = "/bin:/sbin:/usr/bin:/usr/sbin";
     char cand[1024];
@@ -138,9 +180,11 @@ static pid_t spawnvp_flags(const char *file, const char *const argv[], const str
             strcpy(cand + dl + 1, file);
             struct stat st;
             if (stat(cand, &st) == 0 && S_ISREG(st.st_type)) {
-                pid_t pid = spawn_req(cand, argv, (const char *const *)environ, h, nh, extra, pgid);
-                if (pid >= 0)
+                pid_t pid = spawn_req(cand, argv, (const char *const *)env, h, nh, extra, pgid);
+                if (pid >= 0) {
+                    free(env);
                     return pid;
+                }
                 last = errno;
                 if (errno != ENOENT)
                     break;
@@ -150,6 +194,7 @@ static pid_t spawnvp_flags(const char *file, const char *const argv[], const str
             break;
         path = end + 1;
     }
+    free(env);
     errno = last;
     return -1;
 }

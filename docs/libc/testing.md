@@ -7,6 +7,48 @@
 | Host | `tests/host/test_libc.c`: the pure parts compiled with the host clang under ASan and UBSan, functions renamed with a `c_` prefix so they do not clash with the host's libc | `make host-test` |
 | Target, user mode | `init --selftest` (`userland/init/init.c`): every system-call-backed function through the library, plus `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`, stdio on a file, `opendir`/`readdir`, `inet_pton`/`inet_ntop` | `make test` (self-test builds) |
 | Integration | The shell and the utilities are built on the library and exercised by `/etc/rc.test` and the interactive harness | `make test` |
+| Threads against the library's shared tables | `userland/tests/thrtest.c`, behind the `THREADTEST: PASS` marker | `make test` |
+
+## The shared tables under threads (`userland/tests/thrtest.c`)
+
+Eight cases, and the unit that added them measured which prove
+something rather than assuming
+(`docs/audit/next-subsystem-libc-shared-tables.md`).
+
+| case | what it does | unlocked? |
+| --- | --- | --- |
+| `env-spawn-under-setenv` | a thread looping `spawnvp` while another grows the environment and a third churns the heap — the reader of `environ` that lives outside `stdlib.c`. Four variants over `spawnvp_flags`'s **three freeing exits** — the function has four returns and only three free the snapshot. The absolute arm is *one* exit serving both a spawn that runs and one that cannot, so two variants aim at it: the second checks the **errno survives the `free`**, which is the only reason that arm saves and restores it. The other two are the `PATH` search finding something and the `PATH` search exhausting every element. The fourth return — `__env_snapshot` failing, where there is nothing to free — is untested and listed in the gaps below. The first build spawned only `/bin/true`, so the PATH-search half — the loop holding the snapshot across repeated attempts, and its frees — ran in no test; review found that, and then found the errno arm still missing | passes: a regression test, not a proof (the window is a few instructions inside a call that then spends milliseconds creating a process). The errno arm **is** a proof, and its mutation dies: drop the save/restore and ten `absolute spawn miss left errno 0, wanted ENOENT` lines appear. It guards something real rather than a defensive habit — `free` calls `munmap` for a large block (`libc/src/malloc.c:187`), and `munmap` sets `errno` |
+| `env-grow-under-readers` | three readers in `getenv` against 400 `setenv` growths, **plus a thread churning the heap** so the freed array is reused | **the process dies**: `#GP`, signal 11, three runs of three — reliable, not forced |
+| `env-unset-under-readers` | three readers against 200 `unsetenv` removals | passes — it removes no array, so it is the regression test of the set |
+| `env-pointer-survives-overwrite` | holds the pointer `getenv` returned, overwrites the name, reuses the heap 400 times **at the freed entry's own size**, and reads it again — the contract the deliberate leak buys, which no other case here would have missed | **freeing the replaced string**. The size matters: the first version churned 64-byte blocks against an 18-byte entry, and passed against a `setenv` that freed it — vacuous, and caught by its own bug-proof |
+| `atexit-concurrent` | eight threads registering through a start barrier | the drain loses handlers |
+| `atexit-bound` | three threads offering 24 registrations at a full-ish table; the bound counts the verdict handler's slot, which is not in `at_registered` | **accepts 33 into a table of 32** — with `ATEXIT_MAX` raised to 33 the check fails, which it did not before that slot was counted |
+| `atexit` from inside the drain | `reentrant_handler` calls `getenv` (the lock `exit` was holding) **and** `atexit` — the drain has popped the flood's slots by then, so the registration succeeds and LIFO runs the new handler next | a drain that walks a snapshot instead of re-reading the list: the late handler never runs |
+| the drain's own check | registered **first** so the LIFO order runs it **last**; prints the verdict **and sets the exit status** | `THREADTEST: FAIL`, and `SHTEST: FAIL 1` from `/etc/rc.test` |
+
+The verdict is printed by the last handler rather than by `main`,
+because the drain is part of what is under test and a `main` that
+printed `PASS` before calling `exit` could not be failed by it.
+
+**The status travels as well as the marker.** `main` ends
+`exit(failures ? 1 : 0)`, and since the drain's own checks can raise
+`failures` after that status is fixed, the last handler ends
+`_exit(1)` when they do — it is the last statement of the last
+handler, and stdout is flushed just above it. The first build of the
+moved verdict left `exit(0)` behind, so `/etc/rc.test`'s
+`/boot/tests/native/thrtest || FAILS=1` saw success on a failing run.
+Proving the repair then showed `rc.test` could not print
+`SHTEST: FAIL n` either, for an unrelated reason in the shell
+(`docs/userland/design.md`, "AND-OR lists are left-associative").
+
+**Two details make the grow case work, and it proved nothing without
+them.** The observed name is added *after* the padding, so a reader
+walks the part of the array being reallocated instead of finding its
+answer at the front; and a churn thread allocates and fills blocks in
+the same size class, so the freed array is reused before the reader
+reads it. Without the churn the test passes even unlocked, because
+`setenv` frees the array and never a string — the stale copy's
+pointers are all still correct.
 
 ## Host test (`tests/host/test_libc.c`, `make host-test`)
 
@@ -51,5 +93,18 @@ with `USERTEST: PASS` or `USERTEST: FAIL (n checks)`.
   string functions are exercised only through everything else.
 - No fuzzing of `vsnprintf` or `strtol`.
 - No test of `atexit` ordering or of `fflush(NULL)` beyond exit.
+- **Two new branches have no test and cannot get one from userland**,
+  both recorded here rather than left implicit. `spawnvp_flags`
+  returns `ENOMEM` when `__env_snapshot` cannot allocate, and
+  `cosmo_thread_start`'s `EEXIST` retry has three behaviours worth
+  checking — that it retries on `EEXIST`, that it does *not* retry on
+  any other errno, and that exhausting `STACK_MAP_ATTEMPTS` returns
+  rather than spins. Each needs a failure seam the library does not
+  have: a malloc that can be made to fail, and a `MAP_FIXED` that can
+  be made to collide. Both were proved by source mutation instead,
+  which is this repository's bug-proof convention but leaves nothing
+  standing in the suite; the retry's proof is in
+  `docs/testing/flakes.md`. Adding the seams is the fix and is not
+  done here.
 - No leak or fragmentation measurement of the allocator under a
   long-running program (nothing runs long yet).
