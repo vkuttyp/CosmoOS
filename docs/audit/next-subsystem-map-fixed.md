@@ -156,6 +156,33 @@ limit checks all happen before anything is unlinked or split:
    region was allocated in step 1 — and `region_merge_around`.
 5. **After the lock**: free the removed records and any unused spare.
 
+**Two replacements must not overlap, and the flag is what says so.**
+Review found the hole: nothing in the three sections above stops a
+second replacement quiescing the same regions and tearing down the
+same range, after which one of the two final swaps meets records the
+other already removed — `space_insert` failing with `-EEXIST` *after*
+accounting and splits are applied, which is precisely the
+failure-after-mutation this design just finished removing. Two
+things close it, and they are different problems:
+
+- **Replacement against replacement**: a `struct mutex replace_lock`
+  per user space (`kernel/include/kernel/mutex.h`; `sys_mmap` runs
+  where it may sleep), held for the whole operation. Strict
+  serialisation, no back-off loop, and therefore no livelock to
+  argue about. It does not touch ordinary mapping, which never needs
+  it: an `mmap(NULL, …)` cannot be handed a range that a quiesced
+  region still owns.
+- **Replacement against unmapping**: `VM_REGION_QUIESCED` is an
+  **ownership claim**, not only a fault suppressor. No operation may
+  unlink a region carrying it except the replacement that set it, so
+  `vm_user_unmap` meeting one drops the lock, yields and re-scans.
+  Without this a `munmap` racing a replace could free the range, a
+  third thread's `mmap(NULL, …)` could take it, and the swap would
+  collide. That is a caller bug, but it must not corrupt the space.
+
+With both, step 4 is guaranteed to find exactly the regions step 2
+quiesced, which is what makes it infallible.
+
 **`VM_REGION_QUIESCED`: a region that does not fault in.** This is
 the second thing review found, and it is not a detail. The fault
 handler installs a demand-zero page **under `space->lock`**
@@ -217,7 +244,8 @@ moment when another thread can take it. The `munmap`, the retry loop,
 | --- | --- |
 | `kernel/memory/vmm.c` | `vm_user_map_anon_replace`: checks and accounting first, quiesce, teardown, swap; `VM_REGION_POPULATED` refused |
 | `kernel/memory/vmm.c` (fault path) | `vm_fault_handler` gains its third outcome: a fault on a `VM_REGION_QUIESCED` region installs nothing, yields, and returns so the instruction retries |
-| `kernel/include/kernel/vmm.h` | the declaration and contract, `VM_REGION_QUIESCED`, and why the new region must be demand-zero |
+| `kernel/include/kernel/vmm.h` | the declaration and contract, `VM_REGION_QUIESCED`, `struct vm_space::replace_lock`, and why the new region must be demand-zero |
+| `kernel/memory/vmm.c` (`vm_user_unmap`) | backs off rather than unlinking a region another replacement has claimed |
 | `kernel/syscall/native.c` | `MAP_FIXED` calls the new primitive; `COSMO_MAP_FIXED_NOREPLACE` accepted and validated |
 | `kernel/include/uapi/cosmo/syscall.h` | `COSMO_MAP_FIXED_NOREPLACE` beside `COSMO_MAP_FIXED` |
 | `compat/linux/syscalls.c` | `LX_MAP_FIXED` uses the primitive; its `vm_user_unmap` call goes |
@@ -225,7 +253,7 @@ moment when another thread can take it. The `munmap`, the retry loop,
 | `libc/src/thread.c` | reserve-then-replace; the punch, the retry and `STACK_MAP_ATTEMPTS` removed |
 | `kernel/memory/memtest.c` | the primitive's own tests, below |
 | `userland/init/init.c` | the `-EEXIST` assertion moves to `MAP_FIXED_NOREPLACE`; a new one that `MAP_FIXED` replaces and the range reads back as zeroes |
-| `docs/kernel/memory/design.md`, `invariants.md` | the replacement rule and the one-critical-section property |
+| `docs/kernel/memory/design.md`, `invariants.md` | the replacement rule, the three-section protocol, and what `VM_REGION_QUIESCED` claims |
 | `docs/libc/invariants.md` | the thread-stack invariant PR #191 added says the retry is the contract; it becomes "the reservation is held across the replace" |
 | `docs/compat/linux/*` | the door that already replaced now does so atomically |
 | `docs/audit/2026-09-deferred-work-inventory.md` | strike §1.2's entry |
@@ -248,6 +276,8 @@ moment when another thread can take it. The `munmap`, the retry loop,
 
 | a replace whose teardown races a fault on the range | the faulting thread eventually reads zeroes; **`anon_pages` balances**; no frame of the new region was freed |
 | after any replace, success or failure | no region is left `VM_REGION_QUIESCED` |
+| two threads replacing overlapping ranges | both return, the range ends owned by exactly one region, `mapped_pages` and `anon_pages` balance, and neither saw `-EEXIST` |
+| `munmap` racing a replace of the same range | no region is unlinked out from under the replacement; the space is consistent whichever wins |
 
 The fault-racing case is the one that distinguishes this design from
 the draft review rejected, and it needs two CPUs: one replacing in a
