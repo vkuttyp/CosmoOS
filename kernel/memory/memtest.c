@@ -462,6 +462,83 @@ bool selftest_user_vmm(const char **reason)
     return true;
 }
 
+/* --- MAP_FIXED replacement (docs/audit/next-subsystem-map-fixed.md) --- */
+
+bool selftest_vm_replace(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000320000000000ULL;
+    paddr_t pa;
+
+    /* Replace one whole region: the old one is gone, the count and the
+     * page accounting are exact. */
+    CHECK(vm_user_map_anon(sp, A, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "old") == 0);
+    CHECK(sp->mapped_pages == 4 && sp->anon_pages == 4);
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_READ, 0, "new") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+    /* The teardown really ran: the old frames went back and the new
+     * region is demand-zero, so nothing is populated yet. */
+    CHECK(sp->anon_pages == 0);
+    CHECK(!arch_mmu_query(&sp->mmu, A, &pa, NULL, NULL, NULL));
+    CHECK(vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_READ));
+
+    /* Replace the middle of a region: splits at both ends, three
+     * regions, and the pages still add up. */
+    CHECK(vm_user_unmap(sp, A, 4 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "span") == 0);
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ, 0, "mid") == 0);
+    CHECK(vm_user_region_count(sp) == 3);
+    CHECK(sp->mapped_pages == 6);
+    CHECK(vm_user_range_mapped(sp, A, 2 * PAGE_SIZE, VM_PROT_RW));
+    CHECK(vm_user_range_mapped(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ));
+    CHECK(vm_user_range_mapped(sp, A + 4 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW));
+
+    /* Replace a range spanning several regions and a hole: everything
+     * covered goes, the hole is tolerated, one region is left. */
+    CHECK(vm_user_unmap(sp, A + PAGE_SIZE, PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon_replace(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "all") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 6);
+
+    /* A replacement that merges with an equal neighbour still merges. */
+    CHECK(vm_user_unmap(sp, A, 6 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 2 * PAGE_SIZE, VM_PROT_RW, 0, "m") == 0);
+    CHECK(vm_user_map_anon(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_READ, 0, "m") == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "m") == 0);
+    CHECK(vm_user_region_count(sp) == 1);   /* same prot, cache and name: merged */
+
+    /* Populated is refused, and nothing changed. */
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "p") == -EINVAL);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+
+    /* Over the address-space limit: -ENOMEM, and the OLD mapping is
+     * still there. A failure must not be half applied, which is why
+     * every check runs before the first change. */
+    vm_space_set_limits(sp, 4, UINT64_MAX);
+    CHECK(vm_user_map_anon_replace(sp, A, 6 * PAGE_SIZE, VM_PROT_RW, 0, "big") == -ENOMEM);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->mapped_pages == 4);
+    CHECK(vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_RW));
+    /* Same size is not over the limit, even at the limit: the covered
+     * pages are credited before the check. */
+    CHECK(vm_user_map_anon_replace(sp, A, 4 * PAGE_SIZE, VM_PROT_READ, 0, "same") == 0);
+    CHECK(sp->mapped_pages == 4);
+    vm_space_set_limits(sp, UINT64_MAX, UINT64_MAX);
+
+    /* No region is left claimed after any of that: a stuck claim would
+     * hang a faulting thread rather than fail it. */
+    CHECK(!vm_user_range_quiesced(sp, A, 4 * PAGE_SIZE));
+
+    vm_space_destroy(sp);
+    kinfo("selftest: vm-replace: MAP_FIXED takes the range whole, splits and merges, "
+          "and a refused replacement changes nothing");
+    return true;
+}
+
 /* --- resource limits at the VMM and handle-table level (docs/kernel/security/design.md §2) --- */
 
 #include <kernel/handle.h>

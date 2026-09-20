@@ -334,7 +334,10 @@ static int64_t sys_mmap(struct syscall_args *a)
     /* A flag bit this kernel does not define is refused, so a program can
      * learn what the kernel it runs on supports and a future flag is
      * never silently dropped (the rule for every native flags word). */
-    if (flags & ~(COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED))
+    if (flags & ~(COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE))
+        return -EINVAL;
+    /* NOREPLACE qualifies FIXED; on its own it has no address to keep. */
+    if ((flags & COSMO_MAP_FIXED_NOREPLACE) && !(flags & COSMO_MAP_FIXED))
         return -EINVAL;
     if (len == 0 || !is_page_aligned(len) || len > (size_t)(USER_HI - USER_LO))
         return -EINVAL;
@@ -359,6 +362,19 @@ static int64_t sys_mmap(struct syscall_args *a)
         if (!is_page_aligned(hint) || !user_range_ok(hint, len))
             return -EINVAL;
         base = hint;
+        /*
+         * POSIX: a fixed mapping takes the range whatever is there.
+         * Replacement is one operation in the VM layer rather than an
+         * unmap and a map here, because the gap between those two is a
+         * window another thread's mmap(NULL, ...) can be handed -- which
+         * is exactly what cosmo_thread_start used to lose
+         * (docs/audit/next-subsystem-map-fixed.md). NOREPLACE keeps the
+         * old refusal.
+         */
+        if (!(flags & COSMO_MAP_FIXED_NOREPLACE)) {
+            int frc = vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
+            return frc ? frc : (int64_t)base;
+        }
     } else {
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
         base = vm_user_find_free(p->space, from, len);

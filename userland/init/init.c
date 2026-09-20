@@ -3612,7 +3612,28 @@ static void syscalls_selftest(void)
     CHECK(fx == 0x0000200000000000L);
     if (fx > 0) {
         *(volatile char *)fx = 'z';
-        CHECK(cosmo_mmap((void *)fx, 4096, COSMO_PROT_READ, COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED) == -COSMO_EEXIST);
+        /*
+         * NOREPLACE is the old refusal, and it must leave the mapping
+         * alone: the byte is still there afterwards.
+         */
+        CHECK(cosmo_mmap((void *)fx, 4096, COSMO_PROT_READ,
+                         COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE) ==
+              -COSMO_EEXIST);
+        CHECK(*(volatile char *)fx == 'z');
+        /* NOREPLACE without FIXED has no address to keep. */
+        CHECK(cosmo_mmap((void *)fx, 4096, COSMO_PROT_READ,
+                         COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED_NOREPLACE) == -COSMO_EINVAL);
+        /*
+         * Plain FIXED replaces, as POSIX says: it succeeds over a live
+         * mapping and what comes back is fresh zeroes, not the 'z'.
+         * Before this unit it returned -EEXIST, and a caller that
+         * wanted to convert part of a range it already owned had to
+         * unmap a hole and race for it.
+         */
+        long again = cosmo_mmap((void *)fx, 4096, COSMO_PROT_READ | COSMO_PROT_WRITE,
+                                COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED);
+        CHECK(again == fx);
+        CHECK(*(volatile char *)fx == 0);
         CHECK(cosmo_munmap((void *)fx, 4096) == 0);
     }
     CHECK(cosmo_munmap((void *)0x10, 4096) == -COSMO_EINVAL);

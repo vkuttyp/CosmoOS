@@ -566,7 +566,15 @@ struct cosmo_dirent {
 #define COSMO_PROT_EXEC  (1 << 2)
 
 #define COSMO_MAP_ANONYMOUS (1 << 0)
-#define COSMO_MAP_FIXED     (1 << 1)  /* hint is a requirement */
+#define COSMO_MAP_FIXED     (1 << 1)  /* hint is a requirement, and REPLACES what is there (POSIX) */
+/*
+ * With COSMO_MAP_FIXED: place it only if the range is entirely free,
+ * -EEXIST otherwise. This is what COSMO_MAP_FIXED alone used to do
+ * before it was made to conform; "reserve this exact range if nobody
+ * has it" is a real request and keeps its own name (Linux spells it
+ * MAP_FIXED_NOREPLACE).
+ */
+#define COSMO_MAP_FIXED_NOREPLACE (1 << 2)
 
 /* Error numbers (subset, values as in kernel/errno.h). */
 #define COSMO_EPERM   1

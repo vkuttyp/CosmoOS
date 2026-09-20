@@ -13,8 +13,6 @@
 #include "libc.h"
 
 #define STACK_DEFAULT (64u * 1024u)
-/* Attempts at the reserve/punch/fill sequence below; see the race it loses. */
-#define STACK_MAP_ATTEMPTS 16u
 #define PAGE          4096u
 
 /*
@@ -90,56 +88,29 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      */
     size_t tcb = (__cosmo_tcb_storage() + PAGE - 1u) & ~(size_t)(PAGE - 1u);
     /*
-     * Reserve, punch, fill -- and the punch and the fill are two
-     * syscalls with a WINDOW between them. The hole is unmapped
-     * address space for that instant, and any other thread's
-     * `mmap(NULL, ...)` may be handed it: `vm_user_find_free` looks
-     * for exactly such a gap. The fill is `MAP_FIXED`, and this
-     * kernel's `MAP_FIXED` refuses to overwrite rather than
-     * replacing (`space_insert` returns -EEXIST), so the loser of
-     * that race gets **EEXIST from a thread start**.
+     * Reserve, then REPLACE the upper part. The reservation is held
+     * across both calls, so there is no instant when this range is
+     * unowned and no `mmap(NULL, ...)` from another thread can be
+     * handed it.
      *
-     * That is not hypothetical. CI caught it three times on aarch64
-     * before the diagnosis was good enough to name it: `rc -17` out
-     * of `cosmo_thread_start` while another thread churned the heap.
-     * It surfaced when a test that mallocs continuously started
-     * running beside threads that start continuously, which is a
-     * perfectly ordinary thing for a program to do.
-     *
-     * The window cannot be closed from here: with no `mprotect`,
-     * turning part of a reservation into writable memory takes an
-     * unmap and a map, and only the kernel can make that pair
-     * atomic. POSIX says `MAP_FIXED` replaces, and if it did, the
-     * punch would not be needed at all -- the reservation would hold
-     * the range throughout. That is a kernel change and belongs to
-     * its own unit; it is filed in the deferred-work inventory.
-     *
-     * What is done here is to lose the race harmlessly: the cleanup
-     * below already restores the address space exactly, so the whole
-     * attempt can simply be made again. Each retry races
-     * independently and the window is one syscall wide, so the
-     * chance of losing ATTEMPTS times running is not a number worth
-     * writing down -- but the loop is bounded rather than infinite,
-     * because a caller deserves an error rather than a hang if the
-     * address space really is that contended.
+     * This used to be reserve, punch a hole, fill it -- and the punch
+     * and the fill were two syscalls with the hole unmapped between
+     * them. `vm_user_find_free` looks for exactly such a gap, and the
+     * fill then lost with `EEXIST` because `MAP_FIXED` refused to
+     * overwrite. CI caught it three times on aarch64, and a bounded
+     * retry shipped to make losing harmless. `MAP_FIXED` now replaces
+     * as POSIX says (docs/audit/next-subsystem-map-fixed.md), the
+     * punch is gone, and the retry with it: there is nothing left to
+     * lose.
      */
-    char *base = NULL;
-    for (unsigned attempt = 0; ; attempt++) {
-        base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (base == MAP_FAILED)
-            return -errno;                     /* the reservation */
-        if (munmap(base + PAGE, size + tcb) != 0) {
-            int e = errno;
-            munmap(base, size + PAGE + tcb);
-            return -e;                         /* the hole */
-        }
-        if (mmap(base + PAGE, size + tcb, PROT_READ | PROT_WRITE,
-                 MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) != MAP_FAILED)
-            break;                             /* the fixed map into the hole */
+    char *base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (base == MAP_FAILED)
+        return -errno;                         /* the reservation */
+    if (mmap(base + PAGE, size + tcb, PROT_READ | PROT_WRITE,
+             MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
         int e = errno;
-        munmap(base, PAGE);                    /* all that is still ours */
-        if (e != EEXIST || attempt + 1 >= STACK_MAP_ATTEMPTS)
-            return -e;
+        munmap(base, size + PAGE + tcb);       /* the reservation is still whole */
+        return -e;                             /* the replacement */
     }
 
     t->fn = fn;

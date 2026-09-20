@@ -18,6 +18,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
 
+#include <kernel/mutex.h>
 #include <arch/mmu.h>
 #include <arch/trap.h>
 
@@ -31,6 +32,17 @@ enum vm_region_kind {
 #define VM_REGION_GUARD_ABOVE (1u << 1)
 #define VM_REGION_POPULATED   (1u << 2)  /* ANON: fully populated at creation */
 #define VM_REGION_USER        (1u << 3)  /* accessible from user mode (U/S) */
+/*
+ * A replacement owns this region and is tearing its pages down. The range
+ * stays owned -- so no mmap(NULL, ...) can be handed it -- but nothing may
+ * fault a page into it and nothing but the owning replacement may unlink
+ * it. A user fault on such a region installs nothing and returns, so the
+ * instruction retries; a kernel fault inside a user copy takes the fixup
+ * and reports -EFAULT. Set and cleared by vm_user_map_anon_replace, which
+ * holds vm_space::replace_lock throughout, so it is never seen by anyone
+ * but that one writer and the readers below.
+ */
+#define VM_REGION_QUIESCED    (1u << 4)
 
 struct vm_region {
     struct list_node link;   /* in vm_space.regions, sorted by base */
@@ -48,6 +60,15 @@ struct vm_space {
     struct arch_mmu_context mmu;
     struct list_node regions;
     spinlock_t lock;
+    /*
+     * Serialises vm_user_map_anon_replace against itself. The teardown in
+     * the middle of a replacement cannot run under `lock` (it takes it
+     * per chunk), so two replacements of overlapping ranges could
+     * otherwise interleave and one would meet records the other removed.
+     * A mutex, not a spinlock: the operation sleeps. User spaces only --
+     * the kernel space never replaces.
+     */
+    struct mutex replace_lock;
     vaddr_t arena_lo;        /* kernel VA arena for dynamic allocations */
     vaddr_t arena_hi;
     vaddr_t near_lo;         /* arena inside the top 2 GiB, above the image (modules) */
@@ -114,6 +135,22 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
 #define VM_UNMAP_STRICT (1u << 0)
 int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned flags);
 
+/* MAP_FIXED with POSIX semantics: take [base, base+size) whatever is
+ * there. The range is owned by a region at every instant -- first the
+ * ones being replaced, marked VM_REGION_QUIESCED and left linked, then
+ * the new one -- so no concurrent mmap(NULL, ...) can be handed it and
+ * no fault can populate a page the teardown would then free.
+ *
+ * Every fallible step runs before the first mutation, and the page
+ * accounting is applied up front, so the finishing swap cannot fail.
+ * VM_REGION_POPULATED is refused with -EINVAL for exactly that reason:
+ * populating allocates, allocation can fail, and nothing fallible may
+ * run after the point of no return. -ENOMEM if the region or a split
+ * spare cannot be allocated or COSMO_RLIMIT_AS would be exceeded, in
+ * which case nothing has changed. Anonymous user memory only. */
+int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot,
+                             unsigned flags, const char *name);
+
 /* Change the protection of every page of [base, base+size), splitting
  * regions at the ends and merging equal neighbours afterwards. -EINVAL
  * for W+X or a bad range; -ENOMEM if a page of the range is unmapped
@@ -122,6 +159,11 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
 
 /* Number of regions in a user space (tests). */
 unsigned vm_user_region_count(struct vm_space *space);
+
+/* Whether any region of [base, base+size) is still claimed by a
+ * replacement (tests): a claim outlasting its replacement would hang a
+ * faulting thread rather than fail it. */
+bool vm_user_range_quiesced(struct vm_space *space, uint64_t base, size_t size);
 
 /* The process layer's resource limits, in pages (docs/kernel/security/design.md
  * §2): mapped pages bound vm_user_map_anon, populated pages bound the

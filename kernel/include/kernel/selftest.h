@@ -28,6 +28,7 @@ bool selftest_asid_race(const char **reason);       /* two CPUs may not both tag
 bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
+bool selftest_vm_replace(const char **reason);  /* kernel/memory/memtest.c: MAP_FIXED replacement */
 bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: address-space, memory and handle limits */
 bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */
 bool selftest_uaccess_guard(const char **reason);   /* the guard on kernel access to user memory, where the CPU has one */
