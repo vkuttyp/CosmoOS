@@ -747,10 +747,18 @@ static void *bump(void *arg)
  * itself and then makes one call; what happens next is the assertion, and
  * only the parent can see it.
  */
+static int stale_mutex_child(void);   /* step 29's child, below with its step */
+
 static int filter_child(const char *mode)
 {
     uint64_t mask[COSMO_SYSCALL_MASK_WORDS];
     cosmo_thread_t t;
+    if (strcmp(mode, "nap") == 0) {         /* step 30: a live process to aim at and miss */
+        cosmo_sleep_ns(300ull * 1000ull * 1000ull);
+        return 0;
+    }
+    if (strcmp(mode, "stale-mutex") == 0)   /* step 29 */
+        return stale_mutex_child();
     if (strcmp(mode, "filter-deny") == 0) {
         memset(mask, 0xff, sizeof(mask));   /* everything but thread_create */
         mask[SYS_thread_create / 64] &= ~(1ull << (SYS_thread_create % 64));
@@ -764,6 +772,264 @@ static int filter_child(const char *mode)
         return 2;
     cosmo_thread_exit(7);                   /* and yet this one works */
     return 3;
+}
+
+/* ---- the native thread door ------------------------------------------- *
+ *
+ * docs/audit/next-subsystem-native-thread-door.md: `cosmo_cond_broadcast`
+ * over `SYS_futex_requeue`, and `cosmo_thread_kill`. Steps 23 to 30.
+ */
+
+/* libc's second seam and its counters, declared here for the reason the
+ * probe above is: no public header offers them, and this is the one
+ * program with any business reading them (libc/src/libc.h). The struct
+ * is libc's layout, copied. */
+extern void (*__cosmo_cond_bcast_probe)(int phase);
+struct __cosmo_thread_stats {
+    volatile unsigned mutex_sleeps, empty_wakes, bcast_requeued, bcast_eagain;
+};
+extern struct __cosmo_thread_stats __cosmo_thread_stats;
+
+static void stats_reset(void)
+{
+    __atomic_store_n(&__cosmo_thread_stats.mutex_sleeps, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&__cosmo_thread_stats.empty_wakes, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&__cosmo_thread_stats.bcast_requeued, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&__cosmo_thread_stats.bcast_eagain, 0, __ATOMIC_RELAXED);
+}
+
+/*
+ * A join that gives up. Every bug-proof in these steps is a *hang* -- a
+ * waiter requeued onto a word nobody will wake -- and a hang under a
+ * plain join is a boot deadline and no line number. This reports it.
+ */
+#define JOIN_BUDGET_NS (3ull * 1000ull * 1000ull * 1000ull)
+static int join_bounded(cosmo_thread_t *t)
+{
+    uint64_t deadline = cosmo_clock_ns() + JOIN_BUDGET_NS;
+    for (;;) {
+        unsigned v = __atomic_load_n(&t->done, __ATOMIC_ACQUIRE);
+        if (v == 0)
+            return cosmo_thread_join(t, NULL);
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline)
+            return -ETIMEDOUT;
+        cosmo_futex_wait(&t->done, v, deadline - now);
+    }
+}
+
+/*
+ * Step 23's waiter: like `cv_waiter`, but it HOLDS the mutex for a
+ * moment after the wait returns. That is what makes the herd visible by
+ * construction rather than by scheduling luck: a broadcast that wakes all
+ * eight has seven of them find the mutex held for that moment and sleep
+ * on its word, one each; a broadcast that requeues has each one woken by
+ * the previous unlock onto a free mutex, and none of them sleep.
+ */
+#define HD_HOLD_NS (1000ull * 1000ull)
+static void *hd_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);
+    while (!cv_ready)
+        cosmo_cond_wait(&cv_c, &cv_m);
+    cosmo_sleep_ns(HD_HOLD_NS);
+    cv_woke++;
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/*
+ * How many threads are asleep on `cv_c`'s word -- the kernel's answer,
+ * which is the only one there is. "Entered" is not "asleep": a waiter
+ * that has bumped `cv_entered` and unlocked may still be on its way to
+ * `futex_wait`, and a requeue that runs first moves nobody (step 27
+ * failed that way once in three runs). A requeue of a word onto itself
+ * moves nothing and returns the count; the kernel leaves such waiters in
+ * place (kernel/ipc/futex.c) rather than walking them round the list.
+ */
+static unsigned cv_sleepers(void)
+{
+    long n = cosmo_futex_requeue(&cv_c.seq, &cv_c.seq, 0, ~0u, cv_c.seq);
+    return n < 0 ? 0 : (unsigned)n;
+}
+
+/* Wait until `n` are asleep on `cv_c`. Holding `cv_m`, so nobody can be
+ * anywhere but on their way to sleep; a deadline, not a count. */
+static void cv_await_asleep(unsigned n)
+{
+    uint64_t deadline = cosmo_clock_ns() + JOIN_BUDGET_NS;
+    while (cv_sleepers() < n && cosmo_clock_ns() < deadline)
+        cosmo_yield();
+    CHECK(cv_sleepers() == n);
+}
+
+/* Start `n` herd waiters and wait, under `cv_m`, until every one is
+ * asleep on the condition. Returns holding `cv_m`. */
+static void hd_start(cosmo_thread_t *w, unsigned n)
+{
+    cv_ready = cv_woke = cv_entered = 0;
+    for (unsigned i = 0; i < n; i++)
+        CHECK(cosmo_thread_start(&w[i], hd_waiter, NULL, 32u * 1024u) == 0);
+    cosmo_mutex_lock(&cv_m);
+    cv_await_entered(n);
+    cv_await_asleep(n);
+}
+
+/*
+ * Step 25: a thread that holds `cv_m` while main broadcasts without it,
+ * and unlocks at the moment the probe names, `bp_at_phase`: 0 is after
+ * `seq` moved and before the requeue, 1 is after the requeue and before
+ * the broadcast has looked at the word. Either way its unlock finds 1
+ * (it took a free mutex; the waiters are asleep on the condition, not on
+ * it) and wakes nobody. At phase 0 a broadcast that marked the word
+ * *before* its requeue has had the mark undone and then moves the
+ * waiters onto a free word with no unlock coming; at phase 1 the same
+ * happens to one that marks after but only once, without reading. Rule
+ * 2 reads 0 after the window, at either phase, and wakes one.
+ */
+static volatile unsigned bp_holding, bp_go, bp_done, bp_phase_seen, bp_state_seen, bp_at_phase;
+static void *bp_holder(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    __atomic_store_n(&bp_holding, 1, __ATOMIC_RELEASE);
+    cosmo_futex_wake(&bp_holding, 1);
+    while (__atomic_load_n(&bp_go, __ATOMIC_ACQUIRE) == 0)
+        cosmo_futex_wait(&bp_go, 0, 0);
+    cosmo_mutex_unlock(&cv_m);
+    __atomic_store_n(&bp_done, 1, __ATOMIC_RELEASE);
+    cosmo_futex_wake(&bp_done, 1);
+    return NULL;
+}
+static void bp_probe(int phase)
+{
+    bp_phase_seen |= 1u << phase;
+    if ((unsigned)phase != bp_at_phase)
+        return;
+    bp_state_seen = cv_m.state;                 /* 1: the holder, uncontended */
+    __atomic_store_n(&bp_go, 1, __ATOMIC_RELEASE);
+    cosmo_futex_wake(&bp_go, 1);
+    while (__atomic_load_n(&bp_done, __ATOMIC_ACQUIRE) == 0)
+        cosmo_futex_wait(&bp_done, 0, 0);       /* the holder has unlocked: the word is 0 */
+}
+
+/* Step 26: a concurrent broadcaster, from inside the window between the
+ * outer broadcast's increment of `seq` and its requeue. The inner one's
+ * requeue moves everybody; the outer's compare fails with -EAGAIN. */
+static void ea_probe(int phase)
+{
+    if (phase == 0)
+        cosmo_cond_broadcast(&cv_c);
+}
+
+/* Step 27: a timed waiter with a short budget that main requeues and
+ * then keeps the mutex from, past the budget -- so the timeout expires
+ * on the *mutex* word, where the requeue put it. */
+#define RQ_TIMED_BUDGET_NS (100ull * 1000ull * 1000ull)
+static void *rq_timed_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);
+    uint64_t deadline = cosmo_clock_ns() + RQ_TIMED_BUDGET_NS;
+    int rc = 0;
+    while (!cv_ready) {
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline) { rc = -ETIMEDOUT; break; }
+        rc = cosmo_cond_timedwait(&cv_c, &cv_m, deadline - now);
+        if (rc == -ETIMEDOUT)
+            break;
+    }
+    cv_timed_rc = rc;
+    cv_woke++;
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/*
+ * Step 29's child: a condition waited on with a mutex that lives on a
+ * page, the waiter gone, the page unmapped, and then a broadcast. The
+ * recorded pointer is stale; the broadcast must not read through it.
+ * Run in a child so that the bug-proof -- reading the word without
+ * first learning from the requeue that a waiter is on it -- is a fault
+ * the parent observes as a status, not the death of this program.
+ */
+static cosmo_cond_t sm_c = COSMO_COND_INIT;
+static volatile unsigned sm_entered, sm_ready;
+static void *sm_waiter(void *arg)
+{
+    cosmo_mutex_t *m = arg;
+    cosmo_mutex_lock(m);
+    sm_entered = 1;
+    cosmo_futex_wake(&sm_entered, 1);
+    while (!sm_ready)
+        cosmo_cond_wait(&sm_c, m);
+    cosmo_mutex_unlock(m);
+    return NULL;
+}
+static int stale_mutex_child(void)
+{
+    void *page = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED)
+        return 2;
+    cosmo_mutex_t *m = page;
+    m->state = 0;
+    cosmo_thread_t w;
+    if (cosmo_thread_start(&w, sm_waiter, m, 32u * 1024u) != 0)
+        return 3;
+    while (!sm_entered)
+        cosmo_futex_wait(&sm_entered, 0, 0);
+    cosmo_mutex_lock(m);
+    sm_ready = 1;
+    cosmo_cond_signal(&sm_c);
+    cosmo_mutex_unlock(m);
+    if (cosmo_thread_join(&w, NULL) != 0)
+        return 4;
+    if (sm_c.mutex != (void *)m)
+        return 5;                       /* the wait did record it */
+    if (munmap(page, PAGE) != 0)
+        return 6;
+    cosmo_cond_broadcast(&sm_c);        /* nobody waiting: must not touch *m */
+    return 0;
+}
+
+/* Step 30: threads for `cosmo_thread_kill` to aim at. */
+#define TK_BUDGET_NS (2000ull * 1000ull * 1000ull)
+static volatile unsigned tk_tid, tk_stop;
+/* Runs until the handler has run on it, or a deadline. A deadline and
+ * not a flag from main: the handler is the only thing that ends it. */
+static void *tk_target(void *arg)
+{
+    (void)arg;
+    __atomic_store_n(&tk_tid, cosmo_thread_id(), __ATOMIC_RELEASE);
+    cosmo_futex_wake(&tk_tid, 1);
+    uint64_t deadline = cosmo_clock_ns() + TK_BUDGET_NS;
+    while (handler_tid != cosmo_thread_id() && cosmo_clock_ns() < deadline)
+        cosmo_yield();
+    return NULL;
+}
+/* Blocks SIGUSR1, waits for main's word, unblocks -- so the signal main
+ * aimed at it while blocked is delivered here, and nowhere else. */
+static void *tk_masked(void *arg)
+{
+    (void)arg;
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    __atomic_store_n(&tk_tid, cosmo_thread_id(), __ATOMIC_RELEASE);
+    cosmo_futex_wake(&tk_tid, 1);
+    while (__atomic_load_n(&tk_stop, __ATOMIC_ACQUIRE) == 0)
+        cosmo_futex_wait(&tk_stop, 0, 0);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);   /* pending: delivered now, on this thread */
+    uint64_t deadline = cosmo_clock_ns() + TK_BUDGET_NS;
+    while (handler_tid != cosmo_thread_id() && cosmo_clock_ns() < deadline)
+        cosmo_yield();
+    return NULL;
 }
 
 
@@ -2033,9 +2299,280 @@ int main(int argc, char **argv)
         CHECK(cosmo_thread_join(&w, NULL) == 0);
     }
 
+
     STEP("23");
     /*
-     * (23) The bound holds, and the process survives reaching it. This is
+     * (23) **The herd, measured** -- the number libc's broadcast comment
+     * deferred to the report (docs/audit/next-subsystem-native-thread-door.md).
+     * Eight waiters each holding the mutex for a moment after the wait;
+     * one broadcast with the mutex held at 1 (the broadcaster took it
+     * uncontended). Counted: sleeps on the mutex word from the broadcast
+     * to the last return. Waking all eight makes that seven by
+     * construction -- every waiter but the first finds the mutex held.
+     * Requeueing makes it none: each is woken by the unlock that freed
+     * the mutex. Not "contended-path entries": every condition waiter
+     * takes that path now by rule, so that count would say nothing.
+     *
+     * And every waiter returns, which is the first two rules' bug-proof
+     * with a bounded join: mark the word before the requeue instead of
+     * after, or let a waiter relock through the fast path, and the join
+     * times out.
+     */
+    {
+        enum { HD_N = 8 };
+        cosmo_thread_t w[HD_N];
+        hd_start(w, HD_N);
+        cosmo_mutex_unlock(&cv_m);
+        cosmo_mutex_lock(&cv_m);                 /* uncontended: held at 1 */
+        CHECK(cv_m.state == 1);
+        stats_reset();
+        cv_ready = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < HD_N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == HD_N);
+        unsigned sleeps = __cosmo_thread_stats.mutex_sleeps, empty = __cosmo_thread_stats.empty_wakes;
+        unsigned moved = __cosmo_thread_stats.bcast_requeued;
+        printf("thrtest: herd: %u waiters, %u moved by the requeue, %u sleeps on the mutex word (wake-all: %u), %u empty wakes\n",
+               HD_N, moved, sleeps, HD_N - 1, empty);
+        CHECK(moved == HD_N);
+        CHECK(sleeps < HD_N - 1);
+    }
+
+    STEP("24");
+    /*
+     * (24) **Held at 2, and not held at all.** The same eight, twice.
+     * First with the mutex already marked contended -- rule 2 reads 2 and
+     * does nothing, and the broadcaster's own unlock carries the chain.
+     * Then with the broadcaster not holding the mutex: rule 2 reads 0 and
+     * issues the one wake that starts it. Bug-proof for the second half:
+     * break on 0 without waking, and the join times out.
+     */
+    {
+        enum { HD_N = 8 };
+        cosmo_thread_t w[HD_N];
+        hd_start(w, HD_N);
+        if (cv_m.state == 1)
+            __atomic_store_n(&cv_m.state, 2, __ATOMIC_RELEASE);   /* the conservative mark, by hand */
+        CHECK(cv_m.state == 2);
+        stats_reset();
+        cv_ready = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < HD_N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == HD_N);
+        CHECK(__cosmo_thread_stats.bcast_requeued == HD_N);
+
+        hd_start(w, HD_N);
+        cv_ready = 1;                            /* under the mutex, as the contract asks */
+        cosmo_mutex_unlock(&cv_m);
+        stats_reset();
+        cosmo_cond_broadcast(&cv_c);             /* without it */
+        for (unsigned i = 0; i < HD_N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == HD_N);
+        CHECK(__cosmo_thread_stats.bcast_requeued == HD_N);
+    }
+
+    STEP("25");
+    /*
+     * (25) **Another thread holds the mutex, and unlocks inside the
+     * broadcast** -- once before its requeue, once after. Built from the
+     * mechanism: libc's broadcast probe runs on this thread inside the
+     * window, tells the holder to unlock, and waits until it has. The
+     * holder's unlock finds 1 and wakes nobody; the waiters end up on a
+     * free word. A broadcast that marked the word before the requeue has
+     * had its mark undone in the first variant and strands them; rule 2
+     * reads 0 after the window, in both, and wakes one.
+     */
+    for (unsigned at = 0; at < 2u; at++) {
+        enum { N = 3 };
+        cosmo_thread_t w[N], h;
+        hd_start(w, N);
+        cv_ready = 1;
+        cosmo_mutex_unlock(&cv_m);
+        bp_holding = bp_go = bp_done = bp_phase_seen = bp_state_seen = 0;
+        bp_at_phase = at;
+        CHECK(cosmo_thread_start(&h, bp_holder, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&bp_holding, __ATOMIC_ACQUIRE) == 0)
+            cosmo_futex_wait(&bp_holding, 0, 0);
+        __atomic_store_n(&__cosmo_cond_bcast_probe, bp_probe, __ATOMIC_RELEASE);
+        cosmo_cond_broadcast(&cv_c);
+        CHECK(bp_phase_seen == 3u);              /* both phases ran */
+        CHECK(bp_state_seen == 1u);              /* the holder held it uncontended */
+        CHECK(join_bounded(&h) == 0);
+        for (unsigned i = 0; i < N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == N);
+    }
+
+    STEP("26");
+    /*
+     * (26) **A concurrent broadcaster moved `seq` first.** From inside the
+     * outer broadcast's window, before its requeue, the probe broadcasts
+     * again: the inner call moves every waiter and the outer's compare
+     * fails with -EAGAIN, on which it touches nothing -- the inner one's
+     * rule 2 owns the handoff. Every waiter returns.
+     */
+    {
+        enum { N = 3 };
+        cosmo_thread_t w[N];
+        hd_start(w, N);
+        stats_reset();
+        cv_ready = 1;
+        __atomic_store_n(&__cosmo_cond_bcast_probe, ea_probe, __ATOMIC_RELEASE);
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < N; i++)
+            CHECK(join_bounded(&w[i]) == 0);
+        CHECK(cv_woke == N);
+        CHECK(__cosmo_thread_stats.bcast_eagain == 1);
+        CHECK(__cosmo_thread_stats.bcast_requeued == N);   /* the inner one moved them all */
+    }
+
+    STEP("27");
+    /*
+     * (27) **A requeued waiter still times out**, on the mutex word now.
+     * One timed waiter with a 100 ms budget; the broadcast moves it (the
+     * predicate stays false) and this thread keeps the mutex for twice
+     * the budget. The wait returns -ETIMEDOUT, then relocks when the mutex
+     * is released.
+     */
+    {
+        cosmo_thread_t w;
+        cv_ready = cv_woke = cv_entered = 0;
+        cv_timed_rc = 1;
+        CHECK(cosmo_thread_start(&w, rq_timed_waiter, NULL, 32u * 1024u) == 0);
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(1);
+        cv_await_asleep(1);
+        stats_reset();
+        cosmo_cond_broadcast(&cv_c);             /* moved, not woken: the predicate is false */
+        cosmo_sleep_ns(2 * RQ_TIMED_BUDGET_NS);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(join_bounded(&w) == 0);
+        CHECK(__cosmo_thread_stats.bcast_requeued == 1);
+        CHECK(cv_timed_rc == -ETIMEDOUT);
+        CHECK(cv_woke == 1);
+    }
+
+    STEP("28");
+    /*
+     * (28) **A condition nobody has waited on** records no mutex; a
+     * broadcast on it bumps `seq` and returns.
+     */
+    {
+        cosmo_cond_t fresh = COSMO_COND_INIT;
+        cosmo_cond_broadcast(&fresh);
+        CHECK(fresh.mutex == NULL);
+        CHECK(fresh.seq == 1);
+    }
+
+    STEP("29");
+    /*
+     * (29) **The recorded mutex is gone, and the broadcast does not read
+     * it.** In a child (`stale_mutex_child`): the waiter left, the page
+     * the mutex lived on was unmapped, and the broadcast returned. The
+     * bug-proof is a broadcast that reads the word without the requeue
+     * having reported a waiter: the child faults, and this status says
+     * so.
+     */
+    {
+        const char *av[] = { SELF_PATH, "stale-mutex", NULL };
+        pid_t p = spawnvp(SELF_PATH, av, NULL, 0);
+        CHECK(p > 0);
+        int st = -1;
+        if (p > 0)
+            CHECK(waitpid(p, &st, 0) == p);
+        if (st != 0)
+            printf("thrtest: stale-mutex child status %d\n", st);
+        CHECK(st == 0);
+    }
+
+    STEP("30");
+    /*
+     * (30) **`cosmo_thread_kill` aims.** The handler records the thread it
+     * ran on. A sibling with the handler: it ran there, not here. A
+     * sibling with the signal blocked: nothing runs anywhere until it
+     * unblocks, then it runs there. This thread by its pid-as-tid. A tid
+     * of another process: -ESRCH, and that process saw nothing (a child
+     * napping; SIGUSR1's default would have ended it with 138). A joined
+     * thread: -ESRCH *eventually* -- `lxtest`'s tgkill-after-join lesson
+     * (docs/testing/flakes.md), waited for rather than asserted once.
+     * A bad signal: -EINVAL.
+     */
+    {
+        cosmo_thread_t w;
+        CHECK(signal(SIGUSR1, on_usr1) != SIG_ERR);
+
+        /* A sibling, running. */
+        handler_tid = tk_tid = 0;
+        CHECK(cosmo_thread_start(&w, tk_target, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&tk_tid, __ATOMIC_ACQUIRE) == 0)
+            cosmo_futex_wait(&tk_tid, 0, 0);
+        CHECK(tk_tid == w.tid);
+        CHECK(cosmo_thread_kill(w.tid, 0) == 0);           /* alive */
+        CHECK(cosmo_thread_kill(w.tid, SIGUSR1) == 0);
+        CHECK(join_bounded(&w) == 0);
+        CHECK(handler_tid == w.tid);                        /* there */
+        CHECK(handler_tid != (unsigned)getpid());           /* and not here */
+
+        /* Gone, eventually. */
+        int gone = 0;
+        for (unsigned i = 0; i < 2000u; i++) {
+            gone = cosmo_thread_kill(w.tid, 0);
+            if (gone == -ESRCH)
+                break;
+            cosmo_yield();                                  /* the exiting thread needs this CPU */
+        }
+        CHECK(gone == -ESRCH);
+
+        /* A sibling with it blocked. */
+        handler_tid = tk_tid = tk_stop = 0;
+        CHECK(cosmo_thread_start(&w, tk_masked, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&tk_tid, __ATOMIC_ACQUIRE) == 0)
+            cosmo_futex_wait(&tk_tid, 0, 0);
+        CHECK(cosmo_thread_kill(w.tid, SIGUSR1) == 0);
+        for (unsigned i = 0; i < 50u; i++)
+            cosmo_yield();                                  /* time for a wrong delivery to show */
+        CHECK(handler_tid == 0);                            /* pending, delivered nowhere */
+        __atomic_store_n(&tk_stop, 1, __ATOMIC_RELEASE);
+        cosmo_futex_wake(&tk_stop, 1);
+        CHECK(join_bounded(&w) == 0);
+        CHECK(handler_tid == w.tid);                        /* delivered there, on unblock */
+
+        /* This thread, by the pid. */
+        handler_tid = 0;
+        CHECK(cosmo_thread_kill((cosmo_tid_t)getpid(), SIGUSR1) == 0);
+        for (unsigned i = 0; i < 200u && handler_tid == 0; i++)
+            cosmo_yield();
+        CHECK(handler_tid == (unsigned)getpid());
+
+        /* Another process's thread: unreachable, and untouched. */
+        {
+            const char *av[] = { SELF_PATH, "nap", NULL };
+            pid_t p = spawnvp(SELF_PATH, av, NULL, 0);
+            CHECK(p > 0);
+            if (p > 0) {
+                CHECK(cosmo_thread_kill((cosmo_tid_t)p, SIGUSR1) == -ESRCH);
+                CHECK(kill(p, 0) == 0);                     /* it was there to be missed */
+                int st = -1;
+                CHECK(waitpid(p, &st, 0) == p);
+                CHECK(st == 0);                             /* not 138 */
+            }
+        }
+
+        /* The arguments. */
+        CHECK(cosmo_thread_kill((cosmo_tid_t)getpid(), 200) == -EINVAL);
+        CHECK(cosmo_thread_kill((cosmo_tid_t)getpid(), -1) == -EINVAL);
+        CHECK(cosmo_thread_kill(0xdead0000u, 0) == -ESRCH);
+    }
+
+    STEP("31");
+    /*
+     * (31) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256
      * threads, and the memory they hold is returned as the kernel reaps
      * them, not the instant their joins return -- so anything after it is
@@ -2081,9 +2618,9 @@ int main(int argc, char **argv)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
     }
 
-    STEP("24");
+    STEP("32");
     /*
-     * (24) **A program can find its own program headers**, which is how it
+     * (32) **A program can find its own program headers**, which is how it
      * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
      * kernel passes the standard trio in the auxiliary vector and knows
      * nothing about thread-local storage; everything above that is the

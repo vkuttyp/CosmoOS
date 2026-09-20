@@ -95,6 +95,16 @@ void cosmo_thread_finish(void *ret) __attribute__((noreturn));
 /* The calling thread's id: a process's first thread answers its pid. */
 cosmo_tid_t cosmo_thread_id(void);
 
+/* Send `sig` to one thread of the calling process -- `tgkill` with the
+ * process implied. `sig` 0 probes. Returns 0 or -errno: -ESRCH for a tid
+ * that is not a live thread of this process (another process's thread is
+ * never reachable through this call), -EINVAL for a bad signal. The
+ * target's own mask decides delivery; the handler runs on that thread.
+ * "Gone" is eventual: a joined thread still resolves by tid until it has
+ * finished exiting, so a probe right after `cosmo_thread_join` may still
+ * say 0 -- wait for -ESRCH rather than asserting it once. */
+int cosmo_thread_kill(cosmo_tid_t tid, int sig);
+
 /*
  * A mutex, and the futex's whole point. Three states so that an uncontended
  * unlock is one atomic store and no syscall: 0 free, 1 held, 2 held with
@@ -117,17 +127,29 @@ int cosmo_mutex_trylock(cosmo_mutex_t *m);   /* 0, or -EBUSY */
  * and until it existed every program that needed one wrote a futex
  * protocol by hand.
  *
- * One word, because there is nothing else to keep: a sequence number that
- * every signal increments. No waiter count, no associated mutex, no
+ * Two words. A sequence number that every signal increments, and the
+ * mutex the condition was last waited on with, which `cosmo_cond_broadcast`
+ * needs so it can move waiters onto it instead of waking them all
+ * (docs/audit/next-subsystem-native-thread-door.md). No waiter count, no
  * allocation and nothing to destroy -- the same shape as `cosmo_mutex_t`,
  * and for the same reason: a primitive that cannot fail to be created can
  * be a static object in the program that uses it.
+ *
+ * One mutex per condition at a time. Waiting on one condition with two
+ * different mutexes concurrently is undefined here as it is in POSIX; the
+ * recorded word has one value that matters. And a mutex a condition has
+ * been waited on with must outlive any broadcast of that condition made
+ * **without holding that mutex**: a broadcaster that holds it is safe by
+ * construction (nobody frees a held mutex); one that does not may read the
+ * mutex word after the last waiter has left, and the storage must still
+ * be there.
  */
 typedef struct {
     volatile unsigned seq;
+    void *mutex;                /* the `cosmo_mutex_t *` last waited with; NULL until the first wait */
 } cosmo_cond_t;
 
-#define COSMO_COND_INIT { 0 }
+#define COSMO_COND_INIT { 0, 0 }
 
 /*
  * **Wait in a loop, on a predicate. Always.**
@@ -178,6 +200,16 @@ typedef struct {
 void cosmo_cond_wait(cosmo_cond_t *c, cosmo_mutex_t *m);
 int cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long timeout_ns);
 void cosmo_cond_signal(cosmo_cond_t *c);
+/*
+ * Wake every waiter -- by waking one and moving the rest onto the recorded
+ * mutex, so they are woken one per unlock instead of all contending at
+ * once (the herd `SYS_futex_requeue` exists to avoid; the number is in
+ * `docs/libc/testing.md`). Works held or not held: a broadcaster that holds
+ * the mutex hands the waiters over with its own unlock; one that does not
+ * still has them drained one per unlock, by whoever holds it or by the
+ * broadcast itself when nobody does. See the lifetime rule at
+ * `cosmo_cond_t`.
+ */
 void cosmo_cond_broadcast(cosmo_cond_t *c);
 
 #endif /* COSMO_THREAD_H */

@@ -13,6 +13,7 @@
 #include <cosmo/klog.h>
 #include <cosmo/procinfo.h>
 #include <cosmo/syscall.h>
+#include <cosmo/thread.h>
 #include <uapi/cosmo/fsctl.h>
 #include <cosmo/sysctl.h>
 #include <dirent.h>
@@ -3987,8 +3988,12 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
         SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
         SYS_vm_mem, SYS_vm_mem_rw, SYS_vcpu_create, SYS_vcpu_regs, SYS_vcpu_irq, SYS_setresuid, SYS_setresgid,
         SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups, SYS_getrlimit, SYS_ioready, SYS_setnonblock,
-        SYS_aio_create, SYS_aio_submit,
+        SYS_aio_create, SYS_aio_submit, SYS_futex_requeue, SYS_thread_kill,
         /* setrlimit is left out: a random low memory limit would end the fuzzer itself */
+        /* futex_wait, futex_wake and thread_create are not here either -- they
+         * predate the two thread calls above and a random thread_create needs
+         * its own constraints (a bad stack pointer ends the fuzzer); named in
+         * docs/audit/next-subsystem-native-thread-door.md, not quietly absorbed */
         /* and a few numbers past the table, for the dispatcher's own check */
         SYS_COUNT, SYS_COUNT + 1, 1000, -1,
     };
@@ -4046,6 +4051,27 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
                 a[0] = (long)0xffff800000000000ull + (long)fz_below(4096) * 4096;
             }
             a[2] = (long)fz_below(16);
+            break;
+        case SYS_futex_requeue:
+            /* Two words nobody waits on: a requeue between them moves nothing
+             * and is harmless whatever the counts. The scratch page's words,
+             * or an invalid one, for the range and alignment checks. */
+            if (fz_below(3))
+                a[0] = (long)g_fz_page + (long)fz_below(1024) * 4 + (fz_below(4) == 0 ? 1 : 0);
+            if (fz_below(3))
+                a[1] = (long)g_fz_page + (long)fz_below(1024) * 4;
+            break;
+        case SYS_thread_kill:
+            /* Signal 0 only: a random signal to a random tid of the fuzzer's
+             * own process is the fuzzer killing itself, the setrlimit and
+             * mprotect lesson a third time. Tids: our own, the pid (a valid
+             * tid for the first thread), or garbage. */
+            switch (fz_below(3)) {
+            case 0: a[0] = (long)cosmo_thread_id(); break;
+            case 1: a[0] = (long)getpid(); break;
+            default: break;
+            }
+            a[1] = 0;
             break;
         case SYS_open: case SYS_stat: case SYS_mkdir: case SYS_unlink: case SYS_rmdir: case SYS_chdir:
         case SYS_umount:

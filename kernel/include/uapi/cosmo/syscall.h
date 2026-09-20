@@ -150,7 +150,9 @@
  * the kernel synchronise the instruction stream for the range, because
  * user code cannot (SCTLR_EL1.UCI is not set). */
 #define SYS_mprotect  93  /* (void *addr, size_t len, int prot) -> 0 */
-#define SYS_COUNT     94
+#define SYS_futex_requeue 94  /* (uint32_t *w1, uint32_t *w2, unsigned nr_wake, unsigned nr_requeue, uint32_t val) -> woken + requeued */
+#define SYS_thread_kill 95  /* (cosmo_tid_t tid, int sig) -> 0; a thread of the calling process only */
+#define SYS_COUNT     96
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five

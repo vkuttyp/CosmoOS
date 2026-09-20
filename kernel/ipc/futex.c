@@ -213,10 +213,21 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
             sched_wake(w->thread);
             woken++;
         } else if ((unsigned)requeued < nr_requeue) {
-            list_remove(&w->link);
-            w->uaddr = uaddr2;
-            __atomic_store_n(&w->bucket, b2, __ATOMIC_RELEASE);
-            list_push_back(&b2->waiters, &w->link);
+            /*
+             * A word requeued onto itself is counted and left where it is,
+             * as on Linux. Moving it would push it to the tail of the list
+             * this loop is walking, where it matches uaddr1 again and is
+             * moved again: an unbounded walk with interrupts off that any
+             * program could ask for. Left in place it is the one thing
+             * userland cannot otherwise learn -- how many are asleep on a
+             * word -- which the native thread door's tests use.
+             */
+            if (uaddr2 != uaddr1) {
+                list_remove(&w->link);
+                w->uaddr = uaddr2;
+                __atomic_store_n(&w->bucket, b2, __ATOMIC_RELEASE);
+                list_push_back(&b2->waiters, &w->link);
+            }
             requeued++;
         } else {
             break;
