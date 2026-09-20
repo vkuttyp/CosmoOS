@@ -354,7 +354,7 @@ void cosmo_cond_signal(cosmo_cond_t *c)
  * them through one at a time -- instead of waking all of them to contend
  * at once, of which all but one go straight back to sleep on the mutex.
  * With eight waiters that herd was seven sleeps on the mutex word per
- * broadcast, by construction; with the requeue it is one (`thrtest`,
+ * broadcast, by construction; with the requeue it is none (`thrtest`,
  * "the herd", and docs/libc/testing.md for the numbers as run).
  *
  * The requeue is not a drop-in, because `cosmo_mutex_unlock` wakes only

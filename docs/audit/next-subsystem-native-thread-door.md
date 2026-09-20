@@ -31,11 +31,13 @@ build differed from the design.
    requeue of the condition's word onto itself is the kernel's own
    count of sleepers. The kernel now counts such waiters in place, as
    Linux does; the walk put back stops the boot at that count.
-2. **The herd number is one, not zero.** "Wake one, move the rest": the
-   one the requeue wakes finds the broadcaster still holding the mutex
-   and sleeps on it once. Eight waiters: 8 moved, 1 sleep against 7 for
-   wake-all, 1 empty wake (the last link of the chain), on both
-   architectures. The test asserts below *N − 1* as designed.
+2. **The herd number, as run.** Eight waiters: 8 moved, 0 sleeps on the
+   mutex word against 7 for wake-all, 1 empty wake (the last link of the
+   chain), on both architectures. The first build, with the third rule
+   still marking the word before the woken waiter reached it, showed 1:
+   "wake one, move the rest" lets the one woken waiter find the
+   broadcaster still holding. The test asserts below *N − 1* as
+   designed and prints the row.
 3. **The broadcast probe has two phases.** `__cosmo_cond_bcast_probe`
    is called with 0 after `seq` moves and before the requeue, and with
    1 after the requeue and before rule 2 — one seam, taken once. The

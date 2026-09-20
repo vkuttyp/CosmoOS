@@ -2938,7 +2938,7 @@ See [docs/development.md](docs/development.md).
   reading the word after the requeue, was removed by its own bug-proof
   passing, and with it the only load through the recorded pointer. The
   measurement libc's own comment
-  had deferred: eight waiters, one broadcast, **one** sleep on the mutex
+  had deferred: eight waiters, one broadcast, **no** sleep on the mutex
   word against seven for wake-all, on both architectures. Building it
   found a kernel bug: a requeue of a word onto itself re-pushed each
   waiter to the tail of the list being walked, an unbounded loop with

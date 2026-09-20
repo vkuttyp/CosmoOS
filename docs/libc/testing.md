@@ -65,14 +65,17 @@ which every condition waiter now makes by rule.
 
 | build | moved by the requeue | sleeps on the mutex word | wake-all would sleep | empty wakes |
 | --- | --- | --- | --- | --- |
-| x86-64 | 8 | 1 | 7 | 1 |
-| AArch64 | 8 | 1 | 7 | 1 |
+| x86-64 | 8 | 0 | 7 | 1 |
+| AArch64 | 8 | 0 | 7 | 1 |
 
-The one sleep is the one waiter the requeue *wakes* (wake one, move the
-rest): it finds the broadcaster still holding the mutex and sleeps on it
-once. The one empty wake is the last link of the chain, whose unlock
-finds 2 and nobody left. The test asserts sleeps below seven and prints
-the row; the wake-all broadcast put back gives seven or eight.
+None, or one: the one waiter the requeue *wakes* (wake one, move the
+rest) can find the broadcaster still holding the mutex and sleep on it
+once, and did in every run of the first build — whose third rule marked
+the word 2 before the woken waiter reached it; without that mark the
+runs above found it free. The one empty wake is the last link of the
+chain, whose unlock finds 2 and nobody left. The test asserts sleeps
+below seven and prints the row; the wake-all broadcast put back gives
+seven or eight.
 
 | step | case | bug-proof (each a hang a bounded join reports, unless said) |
 | --- | --- | --- |
