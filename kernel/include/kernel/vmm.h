@@ -160,6 +160,11 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
 /* Number of regions in a user space (tests). */
 unsigned vm_user_region_count(struct vm_space *space);
 
+/* Sum of every user region's size, in pages (tests): mapped_pages
+ * should always equal it, and a replacement that miscounts is the way
+ * to make it not. */
+uint64_t vm_user_mapped_pages_sum(struct vm_space *space);
+
 /* Whether any region of [base, base+size) is still claimed by a
  * replacement (tests): a claim outlasting its replacement would hang a
  * faulting thread rather than fail it. */

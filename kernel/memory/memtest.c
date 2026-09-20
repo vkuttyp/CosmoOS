@@ -539,6 +539,84 @@ bool selftest_vm_replace(const char **reason)
     return true;
 }
 
+/*
+ * Two replacements of overlapping ranges, and an unmapper racing them.
+ * This is the case the three-section protocol exists for: a second
+ * replacement must not quiesce regions the first is between the
+ * teardown and the swap of, and an unmap must not unlink them either.
+ * Without replace_lock the swap meets records the other removed; the
+ * symptom is a failed insert after the accounting has been applied.
+ */
+#define REPL_ROUNDS 200
+
+struct repl_racer {
+    struct vm_space *sp;
+    uint64_t base;
+    size_t size;
+    volatile int bad;
+    volatile bool stop;
+};
+
+static void repl_replacer(void *arg)
+{
+    struct repl_racer *r = arg;
+    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
+        int rc = vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race");
+        if (rc != 0)
+            r->bad++;   /* every one of these must succeed */
+    }
+    r->stop = true;
+}
+
+static void repl_unmapper(void *arg)
+{
+    struct repl_racer *r = arg;
+    while (!r->stop) {
+        int rc = vm_user_unmap(r->sp, r->base, r->size, 0);
+        /* 0 or -EBUSY (a replacement owns it). Anything else, and in
+         * particular a corrupted list, is the failure. */
+        if (rc != 0 && rc != -EBUSY)
+            r->bad++;
+    }
+}
+
+bool selftest_vm_replace_race(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000330000000000ULL;
+
+    CHECK(vm_user_map_anon(sp, A, 8 * PAGE_SIZE, VM_PROT_RW, 0, "race") == 0);
+
+    /* Overlapping by half, so each sees regions the other split. */
+    struct repl_racer a = { .sp = sp, .base = A, .size = 6 * PAGE_SIZE };
+    struct repl_racer b = { .sp = sp, .base = A + 2 * PAGE_SIZE, .size = 6 * PAGE_SIZE };
+    struct thread *ta = thread_create(repl_replacer, &a, "vm-repl-a", SCHED_PRIO_DEFAULT);
+    struct thread *tb = thread_create(repl_replacer, &b, "vm-repl-b", SCHED_PRIO_DEFAULT);
+    CHECK(ta != NULL && tb != NULL);
+    thread_join(ta);
+    thread_join(tb);
+    CHECK(a.bad == 0 && b.bad == 0);
+
+    /* An unmapper against a replacer: never anything but 0 or -EBUSY. */
+    struct repl_racer c = { .sp = sp, .base = A, .size = 4 * PAGE_SIZE };
+    struct thread *tc = thread_create(repl_replacer, &c, "vm-repl-c", SCHED_PRIO_DEFAULT);
+    struct thread *td = thread_create(repl_unmapper, &c, "vm-unmap-d", SCHED_PRIO_DEFAULT);
+    CHECK(tc != NULL && td != NULL);
+    thread_join(tc);
+    thread_join(td);
+    CHECK(c.bad == 0);
+
+    /* Nothing is left claimed, and the space is still coherent. */
+    CHECK(!vm_user_range_quiesced(sp, A, 8 * PAGE_SIZE));
+    CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
+
+    vm_space_destroy(sp);
+    kinfo("selftest: vm-replace-race: %u overlapping replacements and an unmapper against them, "
+          "no failed swap and nothing left claimed", REPL_ROUNDS * 2);
+    return true;
+}
+
 /* --- resource limits at the VMM and handle-table level (docs/kernel/security/design.md §2) --- */
 
 #include <kernel/handle.h>

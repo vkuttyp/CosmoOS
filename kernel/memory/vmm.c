@@ -1283,6 +1283,17 @@ out:
     return rc;
 }
 
+uint64_t vm_user_mapped_pages_sum(struct vm_space *space)
+{
+    uint64_t n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link)
+        n += r->size / PAGE_SIZE;
+    spin_unlock_irqrestore(&space->lock, s);
+    return n;
+}
+
 bool vm_user_range_quiesced(struct vm_space *space, uint64_t base, size_t size)
 {
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);

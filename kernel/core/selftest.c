@@ -366,6 +366,7 @@ static const struct selftest tests[] = {
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },
     { "vm-replace",      selftest_vm_replace },
+    { "vm-replace-race", selftest_vm_replace_race },
     { "rlimit",          selftest_rlimit },
     { "uaccess",         selftest_uaccess },
     { "uaccess-guard",   selftest_uaccess_guard },
