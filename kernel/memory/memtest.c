@@ -529,6 +529,31 @@ bool selftest_vm_replace(const char **reason)
     CHECK(sp->mapped_pages == 4);
     vm_space_set_limits(sp, UINT64_MAX, UINT64_MAX);
 
+    /*
+     * A refusal that would have SPLIT, which is the one that catches a
+     * limit check placed after the mutation instead of before it. The
+     * range must start and end inside existing regions (so both splits
+     * are needed) and must cover a hole (so it asks for more pages than
+     * it frees, and can therefore exceed the limit at all).
+     *
+     * The first version of this test refused a range whose ends fell on
+     * region boundaries, so no split was needed and moving the check
+     * after `split_at_ends` was invisible to it -- the mutation passed.
+     * A test for "a failure changes nothing" has to arrange something
+     * for the failure to change.
+     */
+    CHECK(vm_user_unmap(sp, A, 4 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_map_anon(sp, A, 8 * PAGE_SIZE, VM_PROT_RW, 0, "h") == 0);
+    CHECK(vm_user_unmap(sp, A + 3 * PAGE_SIZE, 2 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(sp->mapped_pages == 6);
+    vm_space_set_limits(sp, 7, UINT64_MAX);   /* 6 now; the replace would need 8 */
+    CHECK(vm_user_map_anon_replace(sp, A + 2 * PAGE_SIZE, 4 * PAGE_SIZE, VM_PROT_RW, 0, "x") == -ENOMEM);
+    CHECK(vm_user_region_count(sp) == 2);     /* no split survived the refusal */
+    CHECK(sp->mapped_pages == 6);
+    CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
+    vm_space_set_limits(sp, UINT64_MAX, UINT64_MAX);
+
     /* No region is left claimed after any of that: a stuck claim would
      * hang a faulting thread rather than fail it. */
     CHECK(!vm_user_range_quiesced(sp, A, 4 * PAGE_SIZE));
