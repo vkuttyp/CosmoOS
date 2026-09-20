@@ -95,4 +95,31 @@ size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);
  */
 extern void (*__cosmo_cond_probe)(void);
 
+/*
+ * The broadcast's seam, same shape (one-shot, taken by the broadcast that
+ * finds it), called twice by that one broadcast: with 0 after `seq` has
+ * moved and before the requeue, with 1 after the requeue and before the
+ * return. What runs there in `thrtest`: another holder's unlock, at
+ * either phase, which the handoff must survive; and at phase 0 a
+ * concurrent broadcaster moving `seq` first. Neither can be reached by
+ * arranging threads.
+ */
+extern void (*__cosmo_cond_bcast_probe)(int phase);
+
+/*
+ * Counters for the measurement the condition variable's broadcast owed
+ * (`docs/audit/next-subsystem-native-thread-door.md`): how often a thread
+ * actually slept on a mutex word, how many wakes found nobody there, and
+ * what each broadcast's requeue reported. Relaxed increments on paths that
+ * are already a system call; read by `thrtest`, meaningful only from a
+ * quiet point the reader establishes. libc's own, like the probes.
+ */
+struct __cosmo_thread_stats {
+    volatile unsigned mutex_sleeps;     /* futex_wait calls on a mutex word */
+    volatile unsigned empty_wakes;      /* mutex unlocks whose futex_wake found no waiter */
+    volatile unsigned bcast_requeued;   /* woken + requeued, summed over broadcasts */
+    volatile unsigned bcast_eagain;     /* broadcasts whose requeue found seq already moved */
+};
+extern struct __cosmo_thread_stats __cosmo_thread_stats;
+
 #endif

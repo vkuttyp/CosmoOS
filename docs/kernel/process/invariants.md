@@ -306,9 +306,11 @@ exception's own signal number), review.
 with the process, and a signal to an exited thread is refused.**
 `thread_put` frees `sig_info` and `init_regs`; `process_release` frees
 `sigactions` and `sig_shared_info`; `process_find_thread` skips
-`THREAD_EXITED` threads (`tgkill` to a gone tid is `-ESRCH`). Check:
-`lxtest` (`tgkill(pid, tid, 0)` after the join is `-ESRCH`); the
-`released` log lines; review. Gap: no leak counter.
+`THREAD_EXITED` threads (`tgkill` and the native `SYS_thread_kill` to a
+gone tid are `-ESRCH`). Check: `lxtest` (`tgkill(pid, tid, 0)` after the
+join is `-ESRCH`, waited for — "gone" is eventual, `docs/testing/flakes.md`);
+`thrtest` step 30 (`cosmo_thread_kill(tid, 0)` after the join, the same
+bounded wait); the `released` log lines; review. Gap: no leak counter.
 
 **P-S4. The process ends when its last live thread does, and an exiting
 process takes every thread with it.** `nr_live` counts threads that have

@@ -207,33 +207,55 @@ static unsigned cas(volatile unsigned *p, unsigned expect, unsigned want)
     return expect;   /* what was there */
 }
 
+struct __cosmo_thread_stats __cosmo_thread_stats;   /* see libc.h */
+
+static inline void stat_inc(volatile unsigned *p)
+{
+    __atomic_fetch_add(p, 1, __ATOMIC_RELAXED);
+}
+
+/*
+ * The contended path, from a caller that has already seen `c` in the
+ * word. From here the lock is *always* taken by exchanging 2 in, never 1,
+ * so "held, and a waiter may exist" survives the handover and the next
+ * unlock wakes. Taking it with 1 instead -- which this library did until
+ * a review -- strands a waiter whenever three or more contend: the winner
+ * leaves 1 behind, the unlock sees 1 and wakes nobody, and a thread
+ * already asleep on 2 is never called again. The cost of the conservative
+ * 2 is one futex_wake with no waiter.
+ *
+ * A condition waiter enters here directly, with `c` = 1, whatever the word
+ * says: it may have been *requeued* onto this mutex by a broadcast and
+ * woken by the holder's unlock, and if it then took a free mutex with the
+ * fast path's 1 its own unlock would wake nobody and the waiters still
+ * asleep behind it would never be called -- the same strand, through a
+ * different door (docs/audit/next-subsystem-native-thread-door.md).
+ */
+static void mutex_lock_contended(cosmo_mutex_t *m, unsigned c)
+{
+    if (c != 2)
+        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
+    while (c != 0) {
+        stat_inc(&__cosmo_thread_stats.mutex_sleeps);
+        cosmo_futex_wait(&m->state, 2, 0);
+        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
+    }
+}
+
 void cosmo_mutex_lock(cosmo_mutex_t *m)
 {
     unsigned c = cas(&m->state, 0, 1);
     if (c == 0)
         return;                        /* uncontended: one atomic, no syscall */
-    /*
-     * Contended. From here the lock is *always* taken by exchanging 2 in,
-     * never 1, so "held, and a waiter may exist" survives the handover and
-     * the next unlock wakes. Taking it with 1 instead -- which this
-     * library did until a review -- strands a waiter whenever three or more
-     * contend: the winner leaves 1 behind, the unlock sees 1 and wakes
-     * nobody, and a thread already asleep on 2 is never called again. The
-     * cost of the conservative 2 is one futex_wake with no waiter.
-     */
-    if (c != 2)
-        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
-    while (c != 0) {
-        cosmo_futex_wait(&m->state, 2, 0);
-        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
-    }
+    mutex_lock_contended(m, c);
 }
 
 void cosmo_mutex_unlock(cosmo_mutex_t *m)
 {
     if (__atomic_fetch_sub(&m->state, 1, __ATOMIC_ACQ_REL) != 1) {
         __atomic_store_n(&m->state, 0, __ATOMIC_RELEASE);
-        cosmo_futex_wake(&m->state, 1);
+        if (cosmo_futex_wake(&m->state, 1) == 0)
+            stat_inc(&__cosmo_thread_stats.empty_wakes);
     }
 }
 
@@ -266,15 +288,29 @@ int cosmo_mutex_trylock(cosmo_mutex_t *m)
  */
 
 void (*__cosmo_cond_probe)(void);   /* see libc.h; NULL in every real program */
+void (*__cosmo_cond_bcast_probe)(int phase);
 
 int cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long timeout_ns)
 {
+    /*
+     * Record the mutex, then read `seq` -- both sequentially consistent,
+     * because with the broadcast's "increment `seq`, then read the mutex"
+     * they are the Dekker shape, and a broadcaster that does not hold the
+     * mutex is ordered against this wait by nothing else. Under a total
+     * order there are two outcomes and both are safe: the broadcaster's
+     * read came after this store and it sees our mutex, or it came before
+     * and then its increment came before our read of `seq`, so the
+     * `futex_wait` below compares unequal and never sleeps. Relaxed
+     * accesses permit the third outcome on AArch64 -- both miss -- and
+     * that is a waiter asleep with nobody coming.
+     */
+    __atomic_store_n(&c->mutex, m, __ATOMIC_SEQ_CST);
     /*
      * Read before the unlock. This single ordering is the property; moving
      * it below the unlock is the lost-wakeup bug, and the probe below is
      * how a test can actually make that bug fail.
      */
-    unsigned seq = __atomic_load_n(&c->seq, __ATOMIC_RELAXED);
+    unsigned seq = __atomic_load_n(&c->seq, __ATOMIC_SEQ_CST);
     cosmo_mutex_unlock(m);
 
     void (*probe)(void) = __atomic_exchange_n(&__cosmo_cond_probe, 0, __ATOMIC_ACQ_REL);
@@ -282,7 +318,15 @@ int cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long t
         probe();
 
     long rc = cosmo_futex_wait(&c->seq, seq, timeout_ns);
-    cosmo_mutex_lock(m);
+    /*
+     * Through the contended path, never the fast one: this thread may have
+     * been requeued onto the mutex and woken by an unlock, and there may
+     * be others asleep behind it that only an unlock finding 2 will reach.
+     * It cannot tell, so it always holds at 2 (mutex_lock_contended). The
+     * price is one empty wake after a plain signal; the measurement in
+     * docs/libc/testing.md carries it.
+     */
+    mutex_lock_contended(m, 1);
     /*
      * Only a timeout is reported. Everything else -- woken, `-EAGAIN`
      * because `seq` had already moved, or any error this call cannot do
@@ -305,15 +349,72 @@ void cosmo_cond_signal(cosmo_cond_t *c)
     cosmo_futex_wake(&c->seq, 1);
 }
 
+/*
+ * Wake one waiter and move the rest onto the mutex, where the unlocks let
+ * them through one at a time -- instead of waking all of them to contend
+ * at once, of which all but one go straight back to sleep on the mutex.
+ * With eight waiters that herd was seven sleeps on the mutex word per
+ * broadcast, by construction; with the requeue it is none (`thrtest`,
+ * "the herd", and docs/libc/testing.md for the numbers as run).
+ *
+ * The requeue is not a drop-in, because `cosmo_mutex_unlock` wakes only
+ * when it finds 2 and the fast path takes a free mutex with 1. Two rules
+ * (docs/audit/next-subsystem-native-thread-door.md, invariant L10):
+ *
+ *   1. A condition waiter relocks through the contended path -- in
+ *      cosmo_cond_timedwait -- so it holds at 2 and its unlock reaches
+ *      the next one asleep on the word.
+ *   2. Wake one, never none. The woken waiter is the head of the chain:
+ *      it relocks at 2 whatever the word says, so whoever holds the mutex
+ *      -- the broadcaster, a stranger, nobody -- the next unlock wakes,
+ *      and by rule 1 every link does the same. That is the whole of it.
+ *      The report designed a third step, the broadcaster reading the word
+ *      after the requeue and marking or waking as needed; the bug-proof
+ *      that removed it PASSED, because rule 2 already covers every case
+ *      it was written for, and dead code that reads through a pointer is
+ *      worse than none.
+ *
+ * So the recorded pointer is never loaded through, by anyone: libc hands
+ * it to the kernel as an address, and the kernel never reads the second
+ * word of a requeue. A condition may outlive the mutex it was last waited
+ * on with and be broadcast at afterwards, and nothing is touched.
+ */
 void cosmo_cond_broadcast(cosmo_cond_t *c)
 {
-    __atomic_fetch_add(&c->seq, 1, __ATOMIC_ACQ_REL);
-    /*
-     * Every waiter, which then contend for the mutex -- the herd
-     * `FUTEX_REQUEUE` exists to avoid. `SYS_futex_wake`'s count is
-     * unbounded in the kernel, so this is one call; whether the second
-     * syscall a requeue would cost is worth saving is a measurement the
-     * report defers rather than a guess made here.
-     */
-    cosmo_futex_wake(&c->seq, ~0u);
+    unsigned seq = __atomic_add_fetch(&c->seq, 1, __ATOMIC_SEQ_CST);
+    cosmo_mutex_t *m = __atomic_load_n((cosmo_mutex_t *volatile *)&c->mutex, __ATOMIC_SEQ_CST);
+    if (m == NULL)
+        return;                        /* nobody has ever waited: nothing to move, nothing to wake */
+
+    void (*probe)(int) = __atomic_exchange_n(&__cosmo_cond_bcast_probe, 0, __ATOMIC_ACQ_REL);
+    if (probe)
+        probe(0);
+    long n;
+    for (;;) {
+        n = cosmo_futex_requeue(&c->seq, &m->state, 1, ~0u, seq);
+        if (n != -EAGAIN)
+            break;
+        /*
+         * `seq` moved between our increment and the requeue: a concurrent
+         * signal or broadcast. A broadcast moved everybody and there is
+         * nothing left to do; a signal woke ONE and left the rest asleep
+         * on a word our increment already promised to empty -- returning
+         * here strands them (a review found it). Requeue again against
+         * the value that is there now: a waiter that read it and sleeps
+         * anyway is moved and woken once spuriously, which the contract
+         * permits, and one that has not yet slept compares unequal to
+         * whatever it read before.
+         */
+        stat_inc(&__cosmo_thread_stats.bcast_eagain);
+        seq = __atomic_load_n(&c->seq, __ATOMIC_SEQ_CST);
+    }
+    if (probe)
+        probe(1);
+    if (n > 0)
+        __atomic_fetch_add(&__cosmo_thread_stats.bcast_requeued, (unsigned)n, __ATOMIC_RELAXED);
+}
+
+int cosmo_thread_kill(cosmo_tid_t tid, int sig)
+{
+    return (int)cosmo_syscall2(SYS_thread_kill, tid, sig);
 }

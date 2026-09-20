@@ -51,6 +51,7 @@ static inline long cosmo_syscall6(long nr, long a1, long a2, long a3, long a4, l
 #define cosmo_syscall2(n, a, b)               cosmo_syscall6((n), (long)(a), (long)(b), 0, 0, 0, 0)
 #define cosmo_syscall3(n, a, b, c)            cosmo_syscall6((n), (long)(a), (long)(b), (long)(c), 0, 0, 0)
 #define cosmo_syscall4(n, a, b, c, d)         cosmo_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), 0, 0)
+#define cosmo_syscall5(n, a, b, c, d, e)      cosmo_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), 0)
 
 static inline void cosmo_exit(int status) __attribute__((noreturn));
 static inline void cosmo_exit(int status)
@@ -494,6 +495,14 @@ static inline long cosmo_futex_wait(volatile unsigned *word, unsigned val, unsig
 static inline long cosmo_futex_wake(volatile unsigned *word, unsigned n)
 {
     return cosmo_syscall2(SYS_futex_wake, word, n);
+}
+/* Wake up to `nr_wake` waiters on `w1` and move up to `nr_requeue` more
+ * onto `w2`, if `*w1` still holds `val` (else -EAGAIN, nobody moved).
+ * Returns woken + requeued. The kernel never reads `w2`: it is a key. */
+static inline long cosmo_futex_requeue(volatile unsigned *w1, volatile unsigned *w2, unsigned nr_wake,
+                                       unsigned nr_requeue, unsigned val)
+{
+    return cosmo_syscall5(SYS_futex_requeue, w1, w2, nr_wake, nr_requeue, val);
 }
 
 #endif /* COSMO_SYSCALL_H */

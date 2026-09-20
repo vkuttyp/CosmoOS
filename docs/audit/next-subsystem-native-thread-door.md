@@ -1,7 +1,71 @@
 # NEXT SUBSYSTEM — the two thread calls the native door still lacks
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(the native thread door unit), and the banner below records where the
+build differed from the design.
+
+**What the build changed:**
+
+0. **Rule 2 is gone, and its bug-proof is why.** Removing the
+   post-requeue loop — the broadcaster reading the mutex word and
+   marking or waking as needed — **passed every test**. It had to: the
+   requeue wakes one waiter, that waiter relocks at 2 by rule 1
+   whatever the word says (the broadcaster holds it, a stranger does,
+   nobody does), and its unlock wakes the next. Rule 2 covered no case
+   rule 1 and "wake one, never none" did not already cover, so the
+   built design has two rules, not three; the broadcaster never loads
+   through the recorded pointer, the kernel never reads a requeue's
+   second word, and the lifetime contract this report wrote for the
+   header — and the "kernel-side handoff" alternative kept on file to
+   close its window — are both unnecessary and not shipped. The
+   other-holder interleaving (step 25) and the stale-mutex case (step
+   29) stay as regression guards for the argument. The bug-proof that
+   does remain for the chain's head is "move all, wake none": a hang.
+1. **A kernel bug the design did not know about.** `futex_requeue` of a
+   word onto itself re-pushed each waiter to the tail of the list it
+   was walking, where it matched `uaddr1` again: an unbounded walk with
+   interrupts off that any program could ask for. Found because the
+   tests needed to know when their waiters were *asleep* — "entered" is
+   not "asleep", and step 27 moved nobody one run in three — and a
+   requeue of the condition's word onto itself is the kernel's own
+   count of sleepers. The kernel now counts such waiters in place, as
+   Linux does; the walk put back stops the boot at that count.
+2. **The herd number, as run.** Eight waiters: 8 moved, 0 sleeps on the
+   mutex word against 7 for wake-all, 1 empty wake (the last link of the
+   chain), on both architectures. The first build, with the third rule
+   still marking the word before the woken waiter reached it, showed 1:
+   "wake one, move the rest" lets the one woken waiter find the
+   broadcaster still holding. The test asserts below *N − 1* as
+   designed and prints the row.
+3. **The broadcast probe has two phases.** `__cosmo_cond_bcast_probe`
+   is called with 0 after `seq` moves and before the requeue, and with
+   1 after the requeue and before rule 2 — one seam, taken once. The
+   report placed the other-holder interleaving at "between the requeue
+   and rule 2's read" and called it the existing probe's; it is a
+   second seam, and step 25 runs the holder's unlock at *both* phases,
+   since a mark-before-requeue design loses at phase 0 and a single
+   mark-after loses at phase 1. Step 26 uses phase 0 for the concurrent
+   broadcaster.
+4. **`cosmo_thread_kill` has one name, in `cosmo/thread.h`.** The
+   report's "two raw wrappers in `cosmo/syscall.h`" became one
+   (`cosmo_futex_requeue`): `cosmo_thread_kill` returns `-errno` and
+   needs nothing more than the call, and a second name for it in the
+   raw header would have collided with the public one.
+5. **The stale-mutex case runs in a child** (`thrtest stale-mutex`),
+   so its bug-proof is a status the parent checks rather than the death
+   of the test program — the pipe-observed shape the report named.
+6. **`thrtest` steps 23–30**, before the bound step (it exhausts a
+   resource and anything after it runs on a machine still recovering),
+   which moves the bound and the program-header steps to 31 and 32.
+7. **The measurement's counters are a libc seam**
+   (`struct __cosmo_thread_stats`: mutex sleeps, empty wakes, requeued,
+   `-EAGAIN`), relaxed increments on paths that are already a system
+   call, read by `thrtest` alone.
+8. **The fuzzer's three older thread calls stay out**, as the report
+   put it to the implementer: a random `thread_create` needs its own
+   constraints, and this unit did not write them. Named in
+   `docs/verification/design.md`.
 
 **README.md:1485-1486 names three things native threads were left
 without: `SYS_mprotect`, futex requeue and per-thread signal
@@ -132,7 +196,8 @@ associated mutex"), so the target of the requeue has to come from
 somewhere.
 
 So the design has a layout change, three rules and one measurement,
-not a one-line swap.
+not a one-line swap — and the build has two rules, the third having
+been removed by its own bug-proof passing (the banner, and "Design").
 
 ## Design
 
@@ -188,38 +253,18 @@ the test here, as it is for `seq` itself (`libc/src/thread.c`, "why
 it cannot lose a wakeup"): the window is one store and one load and
 no probe sits between them.
 
-**The word is dereferenced only when a waiter has just been counted
-on it.** A recorded pointer can outlive the mutex it points to — a
-condition in a long-lived structure, a mutex on a stack frame that has
-returned — and nothing clears it when the last waiter leaves. So the
-broadcaster never reads through `c->mutex` on its own account. It
-reads the *pointer* and passes `&m->state` to `SYS_futex_requeue`,
-which is an address to the kernel, not a load; if `mutex` is `NULL`
-nobody has ever waited and there is nothing to do but `seq++`. Then
-it looks at the requeue's return: **0 means nobody was on the
-condition, and the broadcast is over without `m->state` ever having
-been read.** A positive return means a thread that was waiting with
-this mutex has just been woken or moved onto it, and that thread is
-about to relock it — the mutex is alive, because a program that frees
-a mutex while a thread is inside `cosmo_cond_wait` with it is broken
-before libc touches anything. Only then does rule 2 run. The kernel
-touches `w2` only to move waiters, in its own user-access bracket,
-where a bad address is `-EFAULT` and not a crash.
+**The word is never loaded through** (as built; the design below this
+line was three rules, and the banner says how it became two). The
+broadcaster reads the *pointer* and passes `&m->state` to
+`SYS_futex_requeue`, which is an address to the kernel, not a load, and
+the kernel never reads a requeue's second word; if `mutex` is `NULL`
+nobody has ever waited and there is nothing to do but `seq++`. A
+recorded pointer can outlive the mutex it points to — a condition in a
+long-lived structure, a mutex on a stack frame that has returned — and
+nothing clears it when the last waiter leaves, and nothing needs to:
+no code on either side dereferences it. There is no lifetime contract.
 
-What that leaves is one interleaving the design accepts and names:
-a broadcast **without the mutex held**, concurrent with the last
-waiter leaving by **timeout** and the program **freeing the mutex's
-storage** — all between the requeue's return and rule 2's first load.
-A broadcaster that holds the mutex has no such window, since nobody
-frees a held mutex; a waiter that leaves because of *this* broadcast
-relocks at 2 and is the chain, not the exit. The contract, in the
-header: *a mutex a condition has been waited on with outlives any
-broadcast of that condition made without holding it*. glibc carried
-the same contract for twenty years of requeue-based condition
-variables and it is why the report's alternatives include the kernel
-doing the handoff instead.
-
-**`cosmo_cond_broadcast` requeues under three rules.** The mutex
+**`cosmo_cond_broadcast` requeues under two rules.** The mutex
 protocol they serve is the one `cosmo_mutex_lock`'s own comment
 states: *while a sleeper exists on the mutex word, a holder holds it
 at 2*, because only an unlock that finds 2 wakes.
@@ -229,43 +274,43 @@ at 2*, because only an unlock that finds 2 wakes.
    out or `-EAGAIN`, it cannot tell which — the waiter takes the mutex
    by **exchanging 2 in**, never by `cas(0, 1)`. This is the loop
    `cosmo_mutex_lock` already runs once it has seen contention,
-   entered from the top: `cosmo_mutex_lock_contended(m)`, a static
-   helper the two share. It is what makes the handoff a chain: each
-   woken waiter holds at 2, so its unlock wakes the next. The cost is
-   the one `cosmo_mutex_lock` already accepted for the same reason —
-   one `futex_wake` with nobody there, for the last waiter in the
-   chain. The bug-proof is the fast path put back: three waiters, one
-   broadcast, a bounded join reports the two that never return.
-2. **After the requeue, make the word reachable.** `seq++`, then
+   entered from the top: `mutex_lock_contended(m, 1)`, a static helper
+   the two share. It is what makes the handoff a chain: each woken
+   waiter holds at 2, so its unlock wakes the next. The cost is the
+   one `cosmo_mutex_lock` already accepted for the same reason — one
+   `futex_wake` with nobody there, for the last waiter in the chain.
+   The bug-proof is the fast path put back: the chain breaks after its
+   first link and the boot stops at step 20's four waiters.
+2. **Wake one, never none.** `seq++`, then
    `futex_requeue(&c->seq, &m->state, 1, ~0u, seq)` — wake one, move
-   the rest — and, **if the requeue reported anyone**, *then* the
-   broadcaster looks at `m->state` and acts on what it sees, in a
-   loop until one of three things is true:
-   it read **2** (a holder will wake on unlock; done); it read **1**
-   and its `cas(1, 2)` succeeded (same); it read **0** and it woke one
-   sleeper on `m->state` itself (that sleeper relocks at 2 by rule 1,
-   and its unlock carries the chain). A CAS that fails because the
-   word moved goes round again. This is done *after* the requeue
-   rather than before because a mark made before can be undone by an
-   unlock that lands in between; done after, every interleaving ends
-   with either a holder at 2 or a wake already issued, and the
-   ordinary mutex protocol takes it from there. It is rule 2 that
-   makes rule 3 unnecessary for correctness.
-3. **The broadcaster need not hold the mutex.** Rule 2 does not ask
-   who holds it, only what the word says, so a broadcast without the
-   mutex requeues like any other and the waiters drain one per
-   unlock — which is still the serialised handoff the requeue exists
-   for, since each waiter needs the mutex next anyway. There is no
-   wake-all fallback in the design, because a fallback is a second
-   path to keep correct and rule 2 already covers the case.
+   the rest. The woken waiter is the head of the chain: by rule 1 it
+   relocks at 2 whatever the word said — the broadcaster holds it, a
+   stranger does, nobody does — so the next unlock wakes, and every
+   link does the same. This is why the broadcaster need not hold the
+   mutex and why there is no wake-all fallback. The bug-proof is
+   "move all, wake none": nobody heads the chain and the boot stops at
+   step 7's worker, broadcast at and never woken. A requeue answered
+   `-EAGAIN` — `seq` moved between the increment and the requeue, a
+   concurrent signal or broadcast — is **retried against the value now
+   there**, not returned from: a concurrent *signal* woke one and left
+   the rest asleep on a word this broadcast's increment already
+   promised to empty (a review found that; the test followed).
 
-A requeued waiter returns from its `cosmo_futex_wait` on the cond word
-only when the mutex's unlock (or rule 2's wake) reaches it, and takes
-the mutex by rule 1. `cosmo_cond_signal` is unchanged: a single wake
-is already optimal, and its waiter also relocks by rule 1, which is
-the one place the rule costs a wake that today's code does not pay —
-once per signalled wait, on an uncontended mutex. The measurement
-below reports that too, so the trade is a number and not a claim.
+The design as reviewed had a third rule between these — the
+broadcaster reading `m->state` after the requeue and marking it 2 or
+waking one as the value required, with a guard that read it only once
+the requeue had reported a waiter, and a lifetime contract for the
+window that guard left. Its bug-proof, the loop removed, **passed**:
+rule 2 already covers every case it was written for. The banner
+records the retraction; the tests it motivated (another holder
+unlocking inside the broadcast at either probe phase; the recorded
+mutex's page unmapped) stay as regression guards for the argument.
+
+`cosmo_cond_signal` is unchanged: a single wake is already optimal,
+and its waiter also relocks by rule 1, which is the one place the rule
+costs a wake that today's code does not pay — once per signalled wait,
+on an uncontended mutex. The measurement below reports that too, so
+the trade is a number and not a claim.
 
 **`SYS_thread_kill` is `tgkill` with the process implied.** The
 target is a thread of the **calling process** — a tid from another
@@ -337,13 +382,13 @@ is the measurement, and the bug-proof is the old broadcast: put
 
 | case | what it establishes |
 | --- | --- |
-| broadcast, mutex held (state 1), three or more waiters | every waiter returns — rule 2 found 1 and marked 2, and rule 1 carried the chain. Two bug-proofs, each a bounded join reporting a hang: remove rule 2's loop (the requeued waiters are never woken); relock through `cosmo_mutex_lock`'s fast path instead of rule 1 (the first waiter returns, the rest never do) |
-| broadcast, mutex held with a recorded waiter (state 2) | same, and rule 2 reads 2 and does nothing — no double-marking, no extra wake |
-| broadcast, mutex **not** held | every waiter returns: rule 2 found 0 and issued the wake that starts the chain. Bug-proof: make rule 2 break on 0 without waking, and they hang |
-| broadcast while **another** thread holds the mutex | the holder unlocks at an instrumented moment (the `__cosmo_cond_probe` hook, which exists for exactly this: between the requeue and rule 2's read); every waiter returns. This is the interleaving that a mark-before-requeue design loses, and the test is written from that mechanism, not from a stopwatch |
+| broadcast, mutex held (state 1), eight waiters (step 23) | every waiter returns — the woken one relocks at 2, the broadcaster's unlock wakes the first moved one, and rule 1 carries the chain. Bug-proofs, each a hang: relock through `cosmo_mutex_lock`'s fast path instead of rule 1; move all and wake none. (As designed: also "remove rule 2's loop" — which passed, and is why there is no rule 2) |
+| broadcast, mutex held with a recorded waiter (state 2) (step 24) | same; the broadcaster's unlock wakes directly |
+| broadcast, mutex **not** held (step 24) | every waiter returns: the woken one takes the free mutex at 2 and its unlock starts the chain |
+| broadcast while **another** thread holds the mutex (step 25) | the holder unlocks at an instrumented moment — libc's second seam, `__cosmo_cond_bcast_probe`, on the broadcasting thread, at *both* its phases (before the requeue, after it); every waiter returns. Written from the mechanism, not a stopwatch; as built it is the regression guard for the argument that no broadcaster-side fix-up is needed |
 | broadcast on a condition nobody has waited on | `mutex` is `NULL`; returns after `seq++`, no requeue, no fault |
-| broadcast after the last waiter has left and the mutex's page is **unmapped** | the waiter used a mutex on an `mmap`'d page; it left; the page was `munmap`'d; the broadcast returns. Bug-proof: run rule 2 without the "reported anyone" guard, and the load of `m->state` faults — observed through a pipe, the way the `mprotect` cases observe theirs |
-| `-EAGAIN` from the requeue (a concurrent broadcaster moved `seq` first) | the first broadcaster returns without touching the mutex; the second owns the handoff; every waiter returns |
+| broadcast after the last waiter has left and the mutex's page is **unmapped** (step 29) | the waiter used a mutex on an `mmap`'d page; it left; the page was `munmap`'d; the broadcast returns. In a child, so any load through the pointer is a status the parent checks: the designed rule 2 faulted here when run without its guard, and as built nothing loads through the pointer at all |
+| `-EAGAIN` from the requeue (step 26) | a concurrent **broadcaster** moved `seq` first: the retry finds nobody, every waiter returns. A concurrent **signal** moved it: one woken, and the retry moves the other *N − 1* — the case the design's "return on `-EAGAIN`" stranded, found in review |
 | `SYS_futex_requeue` with a stale `val` | `-EAGAIN`, nobody moved |
 | a requeued waiter and a timeout | `cosmo_cond_timedwait` on a requeued thread still times out, on the mutex word now |
 | `thread_kill` to a sibling with a handler | the handler runs **on that thread** — it records `cosmo_thread_id()` — and on no other |
@@ -355,8 +400,8 @@ is the measurement, and the bug-proof is the old broadcast: put
 
 ## Risks
 
-**A requeue that strands waiters is a hang, not a failure.** Rules 1
-and 2 above are load-bearing, and their failure mode is a thread that
+**A requeue that strands waiters is a hang, not a failure.** Both
+rules above are load-bearing, and their failure mode is a thread that
 never returns. The tests use bounded joins so that a stranded waiter
 is a reported failure rather than a hung suite — the same discipline
 as `thrtest`'s heap barrier.
@@ -368,11 +413,10 @@ matter, the alternative is a per-waiter "was I requeued" flag the
 broadcaster sets, which is more state and a second thing to get
 right, and the report prefers the number first.
 
-**The recorded pointer is a lifetime the caller now owes**, stated
-above: a mutex outlives unlocked broadcasts of a condition it was
-waited on with. Reachable only by unlocked broadcast + timed-out
-waiter + a free, all inside one window; not assertable; named in the
-header rather than left for a crash to teach.
+**The recorded pointer is a lifetime the caller now owes** — as
+designed. As built it is not: nothing loads through the pointer, and
+the header says a condition may outlive its mutex and still be
+broadcast at.
 
 **A condition waited on with two mutexes at once now has a word that
 is wrong for one of them.** POSIX makes that undefined already; the
@@ -403,31 +447,29 @@ has no legacy to serve.
 **Give `cosmo_cond_broadcast` a mutex parameter instead of a second
 word.** Rejected: it changes every caller's signature for a value the
 condition already saw at wait time, and a broadcaster that passes the
-wrong mutex — or one it does not hold — has the same problems rule 2
-solves, with less information to solve them.
+wrong mutex — or one it does not hold — has the same problems the
+woken head of the chain solves, with less information to solve them.
 
 **Mark the mutex 2 before the requeue and fall back to wake-all when
 it reads 0** — the first draft of this report. Rejected on review:
 the mark can be undone by another holder's unlock before the requeue
 lands, and the woken waiter's fast-path relock breaks the chain
 regardless. The pre-mark solved the broadcaster's own case and no
-other; the post-requeue loop and the contended relock solve all of
-them, and the fallback then has no case left to serve.
+other; the contended relock and "wake one, never none" solve all of
+them (the post-requeue loop this report then added was itself
+removed by its bug-proof passing), and the fallback has no case left
+to serve.
 
 **A waiter count in the condition, so a broadcast with none returns
 early.** Rejected: the requeue's own return value is that count, at
 the moment it matters, for free — and a count read without the mutex
-goes stale in exactly the window the count was meant to close, so it
-would not close the lifetime gap either.
+goes stale in exactly the window the count was meant to close.
 
 **Do the handoff in the kernel: a requeue that also marks `w2` (the
 `FUTEX_WAKE_OP` shape), so libc never loads the mutex word after the
-move.** The one design that closes the lifetime window entirely,
-because the kernel's touch of `w2` is bracketed and only happens when
-it moved someone. Rejected for this unit: a second futex operation
-with one caller, on an ABI the Linux door must also carry; the
-measurement comes first, and if the named window ever costs anyone
-anything this is the fix, on file.
+move.** Considered as the design that would close the lifetime window
+the third rule left. Not needed as built: libc never loads the mutex
+word after the move because it never needs to.
 
 **Require broadcasters to hold the mutex.** Rejected: POSIX permits
 broadcasting unlocked, and a rule a caller can violate silently into a

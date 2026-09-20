@@ -115,7 +115,7 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 |---|---|---|
 | `errno.h` | `errno` (per-thread, `__errno_location`), `E*` (values = `COSMO_E*`) | `__syscall_ret`, `tcb.c` |
 | `cosmo/tcb.h` | `struct __cosmo_tcb` (**libc's, including `reserved[]`**), `cosmo_tcb_storage`, `cosmo_tcb_install` | `SYS_set_tls` |
-| `cosmo/thread.h` | threads (`cosmo_thread_start`/`-_join`/`-_finish`/`-_id`), a mutex, and a **condition variable** (`cosmo_cond_wait`/`-_timedwait`/`-_signal`/`-_broadcast`) -- wait in a `while` on a predicate, always | `SYS_thread_create`/`-_exit`/`-_self`, `SYS_futex_wait`/`-_wake` |
+| `cosmo/thread.h` | threads (`cosmo_thread_start`/`-_join`/`-_finish`/`-_id`/`-_kill`), a mutex, and a **condition variable** (`cosmo_cond_wait`/`-_timedwait`/`-_signal`/`-_broadcast`) -- wait in a `while` on a predicate, always; the broadcast requeues onto the recorded mutex rather than waking the herd | `SYS_thread_create`/`-_exit`/`-_self`/`-_kill`, `SYS_futex_wait`/`-_wake`/`-_requeue` |
 | `string.h`, `ctype.h`, `stdlib.h`, `stdio.h`, `assert.h`, `limits.h` | as above | pure C, `mmap`, `write`/`read` |
 | `unistd.h`, `fcntl.h`, `sys/stat.h`, `dirent.h`, `sys/mount.h` | files, handles, directories | system calls 1–22, 35–39 |
 | `spawn.h`, `sys/wait.h`, `signal.h` | processes | system calls 32–34, 37 |

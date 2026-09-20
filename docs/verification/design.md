@@ -180,7 +180,13 @@ rather than the kernel are excluded and named in the source: `exit`,
 `read`, `recvfrom`, `accept`, `connect`, `wait`, `kill`, `spawn`,
 `vcpu_run`; `sleep_ns` is capped at 1 ms; `munmap` addresses are confined
 to the scratch page or to invalid ranges; `mmap` never sets `MAP_FIXED`;
-`dup` never targets 0..2. Every other call, including `mount`, `umount`,
+`dup` never targets 0..2; `thread_kill` sends signal 0 only (a random
+signal to a tid of its own process is the fuzzer killing itself) and
+`futex_requeue` moves between words nobody waits on. `futex_wait`,
+`futex_wake` and `thread_create` are not in the list at all, which
+predates the two thread calls that are: a random `thread_create` needs
+its own constraints, and the gap is named in
+`docs/audit/next-subsystem-native-thread-door.md` rather than absorbed. Every other call, including `mount`, `umount`,
 `klog`, `setgroups` and the VMM calls, is made and must answer with
 `-EPERM`, another errno, or a value. Privilege is dropped so the fuzzer
 cannot unmount the root or reconfigure the system; what it can create it

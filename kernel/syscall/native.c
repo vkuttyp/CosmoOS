@@ -208,6 +208,25 @@ static int64_t sys_futex_wake(struct syscall_args *a)
 }
 
 /*
+ * Wake up to `nr_wake` waiters on the first word and move up to
+ * `nr_requeue` more onto the second without waking them -- if the first
+ * word still holds `val`, else -EAGAIN and nobody moved. The compare form
+ * only: the native ABI is new and need not carry the non-comparing
+ * FUTEX_REQUEUE's lost-wakeup race for compatibility with nothing
+ * (docs/audit/next-subsystem-native-thread-door.md). The kernel never
+ * reads the second word -- it is a key, not a load -- which is what lets
+ * libc's broadcast hand it a pointer it has not dereferenced itself.
+ * Returns woken + requeued, as the Linux door reports.
+ */
+static int64_t sys_futex_requeue(struct syscall_args *a)
+{
+    if (!user_range_ok(a->a[0], 4) || !user_range_ok(a->a[1], 4))
+        return -EFAULT;
+    return futex_requeue(process_current()->space, a->a[0], a->a[1], (unsigned)a->a[2], (unsigned)a->a[3], true,
+                         (uint32_t)a->a[4]);
+}
+
+/*
  * The calling thread's thread pointer, and only the calling thread's: a
  * thread pointer is the definition of per-thread state, so this is shaped
  * like sigprocmask and not like the syscall filter. SYS_thread_create's
@@ -1310,6 +1329,33 @@ static int64_t sys_kill(struct syscall_args *a)
     return rc;
 }
 
+/*
+ * tgkill with the process implied: the target is a thread of the calling
+ * process, named by the id `SYS_thread_self` and `SYS_thread_create`
+ * report (the pid for the first thread), and a tid of any other process
+ * is -ESRCH by construction -- `kill` is the process-scoped door with its
+ * own permission story, and this one cannot reach through it. No
+ * credential check: a thread may signal its own process already. Signal
+ * 0 probes, as at `kill`; the thread's own mask decides delivery, as it
+ * does for a fault, and the handler runs on the targeted thread's frame.
+ */
+static int64_t sys_thread_kill(struct syscall_args *a)
+{
+    uint32_t tid = (uint32_t)a->a[0];
+    int sig = (int)a->a[1];
+    if (sig < 0 || sig >= COSMO_NSIG)
+        return -EINVAL;
+    struct process *cur = process_current();
+    struct thread *t = process_find_thread(cur, tid);
+    if (t == NULL)
+        return -ESRCH;
+    if (sig == 0)
+        return 0;   /* it exists; nothing is sent */
+    struct signal_info info = { .sig = sig, .source = SIGSRC_TKILL, .sender_pid = cur->pid,
+                                .sender_uid = cur->cred.ruid };
+    return signal_send_thread(t, sig, &info);
+}
+
 /* --- sessions, process groups and the terminal ------------------------------ */
 
 static int64_t sys_setpgid(struct syscall_args *a)
@@ -1892,6 +1938,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_thread_self] = sys_thread_self,
     [SYS_futex_wait] = sys_futex_wait,
     [SYS_futex_wake] = sys_futex_wake,
+    [SYS_futex_requeue] = sys_futex_requeue,
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,
     [SYS_set_tls] = sys_set_tls,
@@ -1910,6 +1957,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_spawn] = sys_spawn,
     [SYS_wait] = sys_wait,
     [SYS_kill] = sys_kill,
+    [SYS_thread_kill] = sys_thread_kill,
     [SYS_pipe] = sys_pipe,
     [SYS_dup] = sys_dup,
     [SYS_getppid] = sys_getppid,

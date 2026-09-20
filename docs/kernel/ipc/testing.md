@@ -47,7 +47,14 @@ status 137.
 `futex_wait`/`futex_wake` are exercised through the Linux `futex` call
 by `tests/linux/lxtest` (`-EAGAIN` on a mismatch, `-ETIMEDOUT` after 20
 ms, a wake with no waiter returns 0, an unknown operation `-ENOSYS`);
-`docs/compat/linux/testing.md`. No two-thread test exists yet.
+`docs/compat/linux/testing.md`. The native door's tests are
+`userland/tests/thrtest.c` steps 23–27 (`docs/libc/testing.md`, "The
+native thread door"): eight waiters requeued by one broadcast, the
+handoff chain across every interleaving libc's probe can reach, a
+requeued waiter timing out on the word it was moved to, and a concurrent
+requeue answered `-EAGAIN`. The same-address walk is proved by putting
+the move back: the boot stops at step 23's sleeper count, which requeues
+the condition's word onto itself.
 
 ## Non-blocking mode and readiness (milestone 8)
 

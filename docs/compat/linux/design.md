@@ -305,7 +305,9 @@ check is atomic against the bucket's other operations: the bucket's
 `queue_seq` is noted, the word compared unlocked, and the act happens
 under the locks only if the sequence is unchanged, else the compare is
 redone — the same shape as `futex_wait`'s compare-then-enqueue; both
-operations return woken + requeued as the Linux kernel does),
+operations return woken + requeued as the Linux kernel does; a word
+requeued onto itself is counted in place, never moved — the native thread
+door unit found the move walking the list without bound),
 `FUTEX_WAIT_BITSET` and
 `FUTEX_WAKE_BITSET` with the all-ones set only (`-ENOSYS` for a real
 bitset; an absolute timeout on the named clock, already-past deadlines

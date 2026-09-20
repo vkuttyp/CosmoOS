@@ -101,6 +101,8 @@ kernel stack.
 | 91 | `lstat` | `const char *path, struct cosmo_stat *st` | 0 | as `stat`, but a link named last is reported rather than followed |
 | 92 | `getsockopt` | `int h, int level, int opt, void *val, size_t *len` | 0 | see the paragraph below; this row was missing from the table until the `mprotect` unit added 93 beside it |
 | 93 | `mprotect` | `void *addr, size_t len, int prot` | 0 | `EINVAL` (unaligned, zero or non-page-multiple `len`, an undefined `prot` bit, `W|X`), `ENOMEM` (a page of the range is unmapped: nothing changes), `EBUSY` (a `MAP_FIXED` replacement holds part of the range) |
+| 94 | `futex_requeue` | `uint32_t *w1, uint32_t *w2, unsigned nr_wake, unsigned nr_requeue, uint32_t val` | woken + requeued | `EAGAIN` (`*w1 != val`: nobody moved), `EINVAL` (a word not 4-aligned), `EFAULT` (a word outside the user window; `w2` is never read) |
+| 95 | `thread_kill` | `cosmo_tid_t tid, int sig` | 0 | `ESRCH` (not a live thread of the calling process — another process's thread is never reachable here), `EINVAL` (`sig` outside 0..`COSMO_NSIG`-1); `sig` 0 probes |
 | 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
 Calls 89–91 are the symbolic-link calls, specified with the rest of the
@@ -121,7 +123,7 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 94: 89–91 are the symbolic-link calls, **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 96: 89–91 are the symbolic-link calls, **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 83–88 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every
@@ -190,6 +192,24 @@ Details per call:
   of its teardown (invariant M40), which is a race in the caller, not
   something to sleep through. The Linux personality's `mprotect` rounds
   `len` up; the native one requires a page multiple, as `munmap` does.
+- **futex_requeue**: the compare form only — `val` is compared with
+  `*w1` atomically against the bucket's other operations and `EAGAIN`
+  says "the word moved; decide again"; the non-comparing form has the
+  lost-wakeup race glibc abandoned it for and the native ABI has no
+  history to serve. Both words 4-aligned and inside the window; the
+  kernel never loads `w2`, it is a key, which is what lets libc's
+  broadcast pass a pointer it has not dereferenced. A word requeued
+  onto itself is counted and left in place (moving it would walk the
+  list it is on without bound), and that count is how many are asleep
+  on it — the one thing userland cannot otherwise learn.
+- **thread_kill**: `tgkill` with the process implied. The tid is one of
+  the calling process's own (`SYS_thread_self`'s answer, a create's
+  return, or the pid for the first thread); any other, including a live
+  thread of another process, is `ESRCH` by construction — `kill` is the
+  process-scoped door with its own permission story and this is not a
+  second way through it. The target's own mask decides delivery and
+  the handler runs on the target's frame; "gone" after a join is
+  eventual, as at `tgkill` (`docs/testing/flakes.md`).
 - **EFAULT** everywhere: a user pointer that names an unmapped,
   `PROT_NONE` or wrong-permission page, or one the kernel cannot
   populate for lack of memory, makes the call return `EFAULT`; the

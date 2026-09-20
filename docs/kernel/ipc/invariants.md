@@ -64,4 +64,7 @@ test kills a blocked *writer*.
 - Channels, events and shared memory are not written; the futex
   (`futex.c`) exists since Phase 11 with its invariant L4 in
   `docs/compat/linux/invariants.md` (no lost wake between compare and
-  sleep) and no native system call yet.
+  sleep); native calls since the threads unit (wait, wake) and the
+  native thread door (requeue). A requeue of a word onto itself moves
+  nothing and counts: the move would walk the list it is on without
+  bound.

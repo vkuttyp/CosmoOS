@@ -603,7 +603,20 @@ predicate never becomes true, broadcast at twenty times, returns from
 every wait and goes back round its `while` every time. This is what makes
 the loop contract a tested property rather than a comment in a header.
 
-(23) The bound holds: creating threads until `-EAGAIN` stops
+(23)–(30) **The native thread door** (`docs/libc/testing.md`, "The native
+thread door", carries the table and the numbers): the herd measured with
+eight waiters and one requeueing broadcast; every waiter returning with
+the mutex held at 1, at 2, and not held; another holder unlocking inside
+the broadcast at either phase of libc's `__cosmo_cond_bcast_probe`; a
+concurrent broadcaster answered `-EAGAIN`; a requeued timed wait
+expiring on the mutex word; a never-waited condition; the recorded
+mutex's page unmapped before a broadcast (a child, so the bug-proof is a
+status); and `cosmo_thread_kill` aiming at a running sibling, a sibling
+with the signal blocked, this thread by its pid, another process's
+thread (`-ESRCH`, untouched), a joined thread (`-ESRCH`, eventually) and
+bad signals. They precede the bound step for the reason it gives.
+
+(31) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
 creates succeed -- three rather than one, because a join that returned
 before the kernel stopped counting its thread left the next create refused
@@ -617,7 +630,7 @@ memory, which is this step working rather than a bug -- and which cost two
 runs to diagnose only because the step counted three different causes as
 one number. Each cause now prints itself.
 
-(24) **A program can find its own program headers**, which is how it finds
+(32) **A program can find its own program headers**, which is how it finds
 its own `PT_TLS`: the auxiliary vector's `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
 are present, `PHENT` is the only size the loader accepts, and -- the part
 that matters -- some `PT_LOAD` in those headers covers the address of
@@ -698,6 +711,22 @@ own joins depend on exactly the same code. That is evidence the contract
 belongs where it now lives rather than in a personality, but it proves
 nothing about this test, so each was rewritten to perturb the native
 wrapper alone.
+
+The native thread door's proofs (steps 23–30), each run on x86-64 with
+the mutation reverted after: the wake-all broadcast put back (step 23's
+count returns to seven or eight); a waiter relocking through the fast
+path, and the requeue waking none (each a bounded join reporting a hang
+in step 23); the kernel requeue without its compare (step 26's `-EAGAIN`
+never comes); `SYS_thread_kill` delivering to the process instead of the
+thread (step 30's blocked sibling sees the handler run elsewhere); and
+the same-address requeue moving waiters again (the boot stops at step
+23's sleeper count with interrupts off — the kernel bug this unit found).
+One proof **passed** and changed the design: the report's third rule,
+the broadcaster reading the mutex word after the requeue, removed —
+every step still passed, because the woken waiter heads the chain
+under rule 1 whatever the word says. The rule is gone, and with it the
+only load through the recorded pointer and the lifetime contract it
+needed.
 
 ## cwdtest: the working directory from more than one thread
 
