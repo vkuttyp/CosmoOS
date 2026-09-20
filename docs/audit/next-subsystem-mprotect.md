@@ -2,7 +2,7 @@
 
 Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built**
-(the `mprotect` unit), and the banner below records where the build
+(PR #195), and the banner below records where the build
 differed from the design — including two proofs the design promised
 that this environment cannot give.
 

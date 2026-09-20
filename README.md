@@ -2917,7 +2917,7 @@ See [docs/development.md](docs/development.md).
   both would be settled. `MAP_FIXED`
   replacement can never substitute for this call — it returns
   demand-zero memory — and libc's thread stacks deliberately keep the
-  reserve-and-replace sequence #193 proved (PR number below).
+  reserve-and-replace sequence #193 proved (PR #195).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
