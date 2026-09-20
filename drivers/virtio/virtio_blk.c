@@ -81,6 +81,42 @@ struct vblk {
     bool dead;                  /* a request timed out: the device was reset and every request fails */
 };
 
+#if CONFIG_DEBUG
+/*
+ * The seams of `virtio-remove-inflight`
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md). With a hold on a
+ * device, its completion walk returns without consuming anything, so the
+ * requests the device has finished stay in the slot table and the remove
+ * finds them by construction rather than by racing a device that answers
+ * in microseconds. The remove records how many it found and stamps its
+ * own end from the block layer's test sequence, after its leftover walk,
+ * so a completion can be ordered against it: one stamped later completed
+ * after the driver had finished removing. The release is counted so a
+ * test can see the last reference go.
+ */
+static struct blkdev *g_test_hold_bd;
+static unsigned g_test_inflight_at_remove;
+static uint64_t g_test_remove_seq;
+static unsigned g_test_releases;
+
+static void vblk_test_hold_completions(struct blkdev *bd) { __atomic_store_n(&g_test_hold_bd, bd, __ATOMIC_RELEASE); }
+static unsigned vblk_test_inflight_at_remove(void) { return __atomic_load_n(&g_test_inflight_at_remove, __ATOMIC_ACQUIRE); }
+static uint64_t vblk_test_remove_seq(void) { return __atomic_load_n(&g_test_remove_seq, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_releases(void) { return __atomic_load_n(&g_test_releases, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_nr_slots(struct blkdev *bd) { return ((struct vblk *)bd->priv)->nr_slots; }
+
+/* Published to the block layer at module init: this driver is a module,
+ * and the kernel's self-test cannot name its symbols. */
+static const struct blk_test_driver_hooks vblk_test_hooks = {
+    .driver = "virtio_blk",
+    .hold_completions = vblk_test_hold_completions,
+    .inflight_at_remove = vblk_test_inflight_at_remove,
+    .remove_seq = vblk_test_remove_seq,
+    .releases = vblk_test_releases,
+    .nr_slots = vblk_test_nr_slots,
+};
+#endif
+
 static void unmap_slot(struct vblk *vb, unsigned slot)
 {
     struct vblk_map *mp = &vb->maps[slot];
@@ -180,6 +216,10 @@ static void vblk_done(struct virtqueue *vq)
     struct vblk *vb = vq->vdev->priv;
     uint32_t len;
     struct bio *bio;
+#if CONFIG_DEBUG
+    if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
+        return;   /* held: the finished requests stay in flight for the remove to find */
+#endif
     while ((bio = virtq_pop(vq, &len)) != NULL) {
         /* Ownership is decided under the lock, by pointer, before the bio
          * is touched: the timeout path may have completed it already (and
@@ -325,6 +365,9 @@ fail:
 static void vblk_release(struct blkdev *bd)
 {
     struct vblk *vb = bd->priv;
+#if CONFIG_DEBUG
+    __atomic_fetch_add(&g_test_releases, 1u, __ATOMIC_ACQ_REL);
+#endif
     kfree(vb->inflight);
     kfree(vb->maps);
     kfree(vb);
@@ -335,6 +378,12 @@ static void vblk_remove(struct virtio_device *vdev)
     struct vblk *vb = vdev->priv;
     blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
     virtio_device_reset(vdev);   /* the device drops every in-flight request */
+#if CONFIG_DEBUG
+    unsigned found = 0;
+    for (unsigned i = 0; i < vb->nr_slots; i++)
+        found += vb->inflight[i] != NULL;
+    __atomic_store_n(&g_test_inflight_at_remove, found, __ATOMIC_RELEASE);
+#endif
     for (unsigned i = 0; i < vb->nr_slots; i++) {
         if (vb->inflight[i]) {
             struct bio *bio = vb->inflight[i];
@@ -343,6 +392,11 @@ static void vblk_remove(struct virtio_device *vdev)
             bio_complete(bio, -EIO);
         }
     }
+#if CONFIG_DEBUG
+    /* The boundary: every completion of this device's is stamped before
+     * this or it happened after the driver was done removing. */
+    __atomic_store_n(&g_test_remove_seq, blk_test_tick(), __ATOMIC_RELEASE);
+#endif
     virtq_free(vb->vq);
     dma_free(&vdev->dev, vb->slots_bytes, vb->slots, vb->slots_dma);
     vb->vq = NULL;
@@ -362,12 +416,18 @@ static struct virtio_driver vblk_driver = {
 
 static int vblk_module_init(void)
 {
+#if CONFIG_DEBUG
+    blk_test_driver_hooks_set(&vblk_test_hooks);
+#endif
     return virtio_register_driver(&vblk_driver);
 }
 
 static void vblk_module_shutdown(void)
 {
     virtio_unregister_driver(&vblk_driver);
+#if CONFIG_DEBUG
+    blk_test_driver_hooks_set(NULL);
+#endif
 }
 
 COSMO_MODULE("virtio_blk", "1.0", vblk_module_init, vblk_module_shutdown, "virtio", MODULE_CAP_DRIVER);

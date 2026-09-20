@@ -349,9 +349,22 @@ static uint64_t g_test_seq;
 static uint64_t g_test_left_seq;         /* the parked submitter left */
 static uint64_t g_test_unreg_seq;        /* blk_unregister returned */
 
-static uint64_t blk_test_tick(void)
+uint64_t blk_test_tick(void)
 {
     return __atomic_add_fetch(&g_test_seq, 1u, __ATOMIC_SEQ_CST);
+}
+
+static const struct blk_test_driver_hooks *g_test_driver_hooks;
+
+void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h)
+{
+    __atomic_store_n(&g_test_driver_hooks, h, __ATOMIC_RELEASE);
+}
+
+const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver)
+{
+    const struct blk_test_driver_hooks *h = __atomic_load_n(&g_test_driver_hooks, __ATOMIC_ACQUIRE);
+    return h && strcmp(h->driver, driver) == 0 ? h : NULL;
 }
 
 void blk_test_unregister_pause(unsigned ms) { __atomic_store_n(&g_test_pause_ms, ms, __ATOMIC_RELEASE); }
@@ -854,6 +867,10 @@ void blk_dump(void)
 #include <kernel/module.h>
 EXPORT_SYMBOL(blk_register);
 EXPORT_SYMBOL(blk_register_named);
+#if CONFIG_DEBUG
+EXPORT_SYMBOL(blk_test_tick);
+EXPORT_SYMBOL(blk_test_driver_hooks_set);
+#endif
 EXPORT_SYMBOL(bio_segment);
 EXPORT_SYMBOL(blk_unregister);
 EXPORT_SYMBOL(blk_submit);

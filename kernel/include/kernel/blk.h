@@ -166,6 +166,29 @@ bool blk_test_submitter_parked(void);
 unsigned blk_test_unregister_spins(void);
 void blk_test_release_in_driver(void);
 bool blk_test_drain_ordered(void);
+/* One sequence for every stamp a test compares: a driver's remove stamps
+ * its end with it and a completion callback stamps itself, so "after"
+ * is an order and not two clocks (docs/audit/next-subsystem-virtio-remove-inflight.md). */
+uint64_t blk_test_tick(void);
+
+/*
+ * A driver's own seams, published to the block layer at its module init
+ * so a kernel self-test can reach a driver that is a module -- the
+ * kernel image cannot name a module's symbols. NULL clears; a NULL
+ * entry is "not offered" and a test that needs it skips. One driver at
+ * a time is all any test has asked for
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md).
+ */
+struct blk_test_driver_hooks {
+    const char *driver;                              /* "virtio_blk" */
+    void (*hold_completions)(struct blkdev *bd);     /* leave this device's finished requests unconsumed; NULL releases */
+    unsigned (*inflight_at_remove)(void);            /* what the last remove found in its slot table */
+    uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
+    unsigned (*releases)(void);                      /* release hooks run so far */
+    unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
+};
+void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
+const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);
 #endif
 
 /* Validate and hand to the driver. -EINVAL (range, alignment, size,

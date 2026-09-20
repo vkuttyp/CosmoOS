@@ -156,6 +156,7 @@ struct virtio_driver {
 
 extern struct bus_type virtio_bus;
 
+
 int virtio_register_driver(struct virtio_driver *vdrv);
 void virtio_unregister_driver(struct virtio_driver *vdrv);
 

@@ -332,6 +332,7 @@ bool selftest_net_bench(const char **reason);          /* unit 11: loopback thro
 bool selftest_net_nicbench(const char **reason);       /* traffic that leaves the machine, per interface */
 bool selftest_blk_submit_unregister(const char **reason);
 bool selftest_blk_unregister_drain(const char **reason);
+bool selftest_virtio_remove_inflight(const char **reason);
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */

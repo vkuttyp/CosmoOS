@@ -32,6 +32,7 @@
 
 #include <drivers/pci.h>
 #include <drivers/usb.h>
+#include <drivers/virtio.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -970,6 +971,276 @@ bool selftest_blk_unregister_drain(const char **reason)
     kinfo("selftest: blk-unregister-drain: the unregister spun %u time(s) for a submitter inside the driver and "
           "returned after it left",
           spins);
+    return true;
+#endif
+}
+
+/* --- a live virtio device removed with I/O outstanding ---------------------
+ *
+ * docs/audit/next-subsystem-virtio-remove-inflight.md. The window the
+ * lifetime-windows unit named and could not reach: `vpci_remove`, which
+ * only module unload had ever run, with requests at the device. The test
+ * machine now carries a virtio-blk that exists to be removed (4 MiB, the
+ * only disk of that size: vdb on q35, vdc on virt, found by capacity
+ * because its name differs), and this test removes it while a submitter
+ * on another CPU keeps going, then brings it back.
+ *
+ * The lifetime unit's three steps. Hold the window open by construction:
+ * a hook leaves the device's finished requests unconsumed in the driver's
+ * slot table, so the remove finds them rather than racing a device that
+ * answers in microseconds. Drive the other side from a real second CPU.
+ * Assert the protected object: every accepted bio completes exactly
+ * once, with one of three statuses -- 0 (done before the hold), -EIO (a
+ * slot the remove found, completed by its leftover walk), -ENODEV (queued
+ * on the block layer's pending list behind a full table, completed by
+ * blk_unregister) -- and the -EIO count is exactly what the remove found;
+ * nothing completes after the remove's own boundary stamp; the disk, the
+ * virtio device and the binding are gone; the release runs on the last
+ * put. Then the rebind: the disk comes back under its old name and reads
+ * back the sector written before the removal, which is the assertion
+ * that the removal left the hardware sane, and the reason the machine is
+ * as this test found it when the next test runs.
+ */
+
+#if CONFIG_DEBUG
+#define RM_POOL 96u   /* more bios than the driver has slots, so the pending list is exercised */
+#define RM_CAPACITY 8192u   /* the removal disk's sectors: 4 MiB, and no other disk's size */
+
+static const struct blk_test_driver_hooks *g_rm;   /* the driver's seams, published at its module init */
+
+struct rm_bio {
+    struct bio bio;
+    volatile unsigned busy;
+};
+
+struct rm_submitter {
+    struct blkdev *bd;
+    void *buf;
+    struct rm_bio pool[RM_POOL];
+    volatile unsigned started, stop;
+    volatile unsigned ok, refused, other;          /* blk_submit's answers */
+    volatile unsigned c_ok, c_eio, c_enodev, c_other, c_double;   /* completions by status */
+    volatile uint64_t max_seq;                     /* the latest completion's stamp */
+};
+
+static void rm_done(struct bio *bio)
+{
+    struct rm_bio *rb = container_of(bio, struct rm_bio, bio);
+    struct rm_submitter *s = bio->arg;
+    uint64_t seq = blk_test_tick();
+    uint64_t seen = __atomic_load_n(&s->max_seq, __ATOMIC_ACQUIRE);
+    while (seq > seen && !__atomic_compare_exchange_n(&s->max_seq, &seen, seq, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        ;
+    switch (bio->status) {
+    case 0:       __atomic_fetch_add(&s->c_ok, 1u, __ATOMIC_ACQ_REL); break;
+    case -EIO:    __atomic_fetch_add(&s->c_eio, 1u, __ATOMIC_ACQ_REL); break;
+    case -ENODEV: __atomic_fetch_add(&s->c_enodev, 1u, __ATOMIC_ACQ_REL); break;
+    default:      __atomic_fetch_add(&s->c_other, 1u, __ATOMIC_ACQ_REL); break;
+    }
+    /* Exactly once: a second completion of a bio that is not in flight
+     * is the double the leftover walk must never produce. */
+    if (__atomic_exchange_n(&rb->busy, 0u, __ATOMIC_ACQ_REL) == 0)
+        __atomic_fetch_add(&s->c_double, 1u, __ATOMIC_ACQ_REL);
+}
+
+static void rm_submitter_main(void *arg)
+{
+    struct rm_submitter *s = arg;
+    __atomic_store_n(&s->started, 1u, __ATOMIC_RELEASE);
+    unsigned next = 0;
+    while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
+        struct rm_bio *rb = &s->pool[next];
+        next = (next + 1) % RM_POOL;
+        if (__atomic_load_n(&rb->busy, __ATOMIC_ACQUIRE)) {
+            sched_yield();   /* the pool is all in flight: that is the full table the test wants */
+            continue;
+        }
+        rb->bio = (struct bio){ .dev = s->bd, .sector = 1, .nsectors = 1, .dir = BIO_READ,
+                                .buf = s->buf, .done = rm_done, .arg = s };
+        __atomic_store_n(&rb->busy, 1u, __ATOMIC_RELEASE);
+        int rc = blk_submit(&rb->bio);
+        if (rc == 0) {
+            __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
+        } else {
+            __atomic_store_n(&rb->busy, 0u, __ATOMIC_RELEASE);   /* refused: never completes */
+            if (rc == -ENODEV)
+                __atomic_fetch_add(&s->refused, 1u, __ATOMIC_ACQ_REL);
+            else
+                __atomic_fetch_add(&s->other, 1u, __ATOMIC_ACQ_REL);
+            sched_yield();   /* the device is gone: spinning on it measures this CPU, not the window */
+        }
+    }
+}
+
+static unsigned rm_completions(const struct rm_submitter *s)
+{
+    return __atomic_load_n(&s->c_ok, __ATOMIC_ACQUIRE) + __atomic_load_n(&s->c_eio, __ATOMIC_ACQUIRE) +
+           __atomic_load_n(&s->c_enodev, __ATOMIC_ACQUIRE) + __atomic_load_n(&s->c_other, __ATOMIC_ACQUIRE);
+}
+
+/* The removal disk, by its size: the names differ between the machines. */
+static struct blkdev *rm_find(void)
+{
+    static const char *const names[] = { "vdb", "vdc", "vdd", "vde" };
+    for (unsigned k = 0; k < ARRAY_SIZE(names); k++) {
+        struct blkdev *bd = blk_find(names[k]);
+        if (bd == NULL)
+            continue;
+        if (bd->capacity == RM_CAPACITY && !bd->read_only && bd->sector_size == 512)
+            return bd;
+        blkdev_put(bd);
+    }
+    return NULL;
+}
+
+/* A synchronous read or write of one sector, for the before-and-after. */
+struct rm_sync { volatile unsigned done; };
+static void rm_sync_done(struct bio *bio) { __atomic_store_n(&((struct rm_sync *)bio->arg)->done, 1u, __ATOMIC_RELEASE); }
+static int rm_io(struct blkdev *bd, enum bio_dir dir, void *buf)
+{
+    struct rm_sync w = { 0 };
+    struct bio bio = { .dev = bd, .sector = 0, .nsectors = 1, .dir = dir, .buf = buf, .done = rm_sync_done, .arg = &w };
+    int rc = blk_submit(&bio);
+    if (rc)
+        return rc;
+    if (!wait_flag_blk(&w.done, 2000))
+        return -ETIMEDOUT;
+    return bio.status;
+}
+
+/* One pass: held (the window occupied by construction) or not (the
+ * natural race, a regression guard). Returns false on a failed check. */
+static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsigned threads0, const char **reason)
+{
+    static struct rm_submitter s;
+    memset(&s, 0, sizeof(s));
+    s.bd = bd;
+    s.buf = kmalloc(4096, 0);
+    CHECK(s.buf != NULL);
+    unsigned nr_slots = g_rm->nr_slots(bd);
+    unsigned cpu = other_cpu_for_blk();
+
+    struct thread *t = thread_create_on(rm_submitter_main, &s, "vrm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    CHECK(wait_flag_blk(&s.started, 1000));
+
+    /* Live, not merely present: four accepted and completed. */
+    uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
+    while ((s.c_ok < 4 || s.ok < 4) && clock_now_ns() < end)
+        sched_yield();
+    CHECK(s.c_ok >= 4);
+
+    if (held) {
+        /* Nothing completes from here: accepted minus completed grows
+         * until the driver's table is full and the excess is pending. */
+        g_rm->hold_completions(bd);
+        end = clock_now_ns() + 2000ull * 1000000ull;
+        while (s.ok - rm_completions(&s) <= nr_slots && clock_now_ns() < end)
+            sched_yield();
+        CHECK(s.ok - rm_completions(&s) > nr_slots);
+    }
+
+    unsigned releases0 = g_rm->releases();
+    CHECK(pci_test_remove(pdev) == 0);   /* the removal stamps its own end */
+    uint64_t boundary = g_rm->remove_seq();
+    unsigned found = g_rm->inflight_at_remove();
+    if (held)
+        g_rm->hold_completions(NULL);
+
+    /* Keep submitting after the remove: refused, and nothing completes. */
+    end = clock_now_ns() + 2000ull * 1000000ull;
+    while (s.refused < 4 && clock_now_ns() < end)
+        sched_yield();
+    __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t);
+
+    /* The protected object. */
+    CHECK(s.other == 0);                                /* blk_submit answered 0 or -ENODEV, nothing else */
+    CHECK(s.refused >= 4);
+    CHECK(rm_completions(&s) == s.ok);                  /* every accepted bio completed... */
+    CHECK(s.c_double == 0);                             /* ...exactly once */
+    CHECK(s.c_other == 0);                              /* with 0, -EIO or -ENODEV and nothing else */
+    CHECK(s.c_eio == found);                            /* the remove completed precisely the slots it held */
+    if (held)
+        CHECK(found >= 1);                              /* the window was occupied */
+    CHECK(boundary != 0 && s.max_seq < boundary);       /* nothing completed after the driver was done removing */
+    CHECK(pdev->dev.driver == NULL && pdev->dev.drvdata == NULL && pdev->dev.state == DEV_UNBOUND);
+    CHECK(rm_find() == NULL);                           /* the disk is gone from the registry */
+    CHECK(g_rm->releases() == releases0);           /* and not yet released: this test still holds it */
+    blkdev_put(bd);                                     /* the last holder */
+    CHECK(g_rm->releases() == releases0 + 1);       /* now it is */
+    kfree(s.buf);
+    CHECK(threads_settle_blk(threads0));
+    /*
+     * The `found` figure is the measurement, and the two passes are what
+     * make it one. Held, the driver's table is full by construction and
+     * the remove has real work to do; unheld, a QEMU device answers in
+     * microseconds and the remove reliably finds **nothing** -- which is
+     * why the hook exists and why the unheld pass is labelled a
+     * regression guard rather than a proof (the report's own words).
+     */
+    kinfo("selftest: virtio-remove-inflight: %s: %u accepted, %u refused; %u found in flight at the remove, "
+          "%u completed -EIO, %u -ENODEV, %u ok; nothing after the boundary",
+          held ? "held" : "unheld", s.ok, s.refused, found, s.c_eio, s.c_enodev, s.c_ok);
+    return true;
+}
+#endif /* CONFIG_DEBUG */
+
+bool selftest_virtio_remove_inflight(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: virtio-remove-inflight: no test hooks in this build; skipping");
+    return true;
+#else
+    if (other_cpu_for_blk() == 0) {
+        kinfo("selftest: virtio-remove-inflight: one CPU, no submitter to race");
+        return true;
+    }
+    g_rm = blk_test_driver_hooks("virtio_blk");
+    if (g_rm == NULL) {
+        kinfo("selftest: virtio-remove-inflight: virtio_blk published no test seams; skipping");
+        return true;
+    }
+    struct blkdev *bd = rm_find();
+    if (bd == NULL) {
+        kinfo("selftest: virtio-remove-inflight: no removal disk (QEMU_RMDISK=0); skipping");
+        return true;
+    }
+    unsigned threads0 = thread_count();
+    struct pci_device *pdev = to_pci_device(to_virtio_device(bd->dev)->hw);
+    const char *pci_name = pdev->dev.name;
+    char name[BLKDEV_NAME_MAX];
+    memcpy(name, bd->name, sizeof(name));
+
+    /* Something to read back after the rebind. */
+    uint8_t *pattern = kmalloc(4096, 0), *check = kmalloc(4096, 0);
+    CHECK(pattern != NULL && check != NULL);
+    for (unsigned i = 0; i < 512; i++)
+        pattern[i] = (uint8_t)(i * 7 + 3);
+    CHECK(rm_io(bd, BIO_WRITE, pattern) == 0);
+
+    for (unsigned pass = 0; pass < 2; pass++) {
+        bool held = pass == 0;
+        if (pass == 1) {
+            bd = rm_find();
+            CHECK(bd != NULL);
+        }
+        if (!rm_pass(bd, pdev, held, threads0, reason))
+            return false;
+        /* Back: the same function, the same name, the same sector. */
+        CHECK(pci_test_rebind(pdev) == 0);
+        struct blkdev *again = rm_find();
+        CHECK(again != NULL);
+        CHECK(strcmp(again->name, name) == 0);
+        memset(check, 0, 512);
+        CHECK(rm_io(again, BIO_READ, check) == 0);
+        CHECK(memcmp(check, pattern, 512) == 0);
+        blkdev_put(again);
+    }
+    kfree(pattern);
+    kfree(check);
+    kinfo("selftest: virtio-remove-inflight: %s (%s) removed with I/O outstanding and re-probed, twice", name, pci_name);
     return true;
 #endif
 }

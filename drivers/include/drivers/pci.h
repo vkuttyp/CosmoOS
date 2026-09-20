@@ -107,6 +107,8 @@ void pci_unregister_driver(struct pci_driver *pdrv);
  * would leave the device bound holding a dangling pointer
  * (docs/audit/next-subsystem-lifetime-windows.md). */
 int pci_test_remove(struct pci_device *p);
+/* And back: 0 once a driver bound it, -EBUSY if it is still bound, -ENODEV. */
+int pci_test_rebind(struct pci_device *p);
 #endif
 
 /* Configuration access. Any context; a spinlock in the legacy path. */
