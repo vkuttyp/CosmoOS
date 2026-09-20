@@ -538,10 +538,15 @@ void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
      * log2 words -- because stepping by a guessed size either misses
      * lines (stale instructions execute) or does extra work.
      *
-     * The user pages are EL0-accessible, so with PAN set an EL1 access
-     * to them faults; the DC/IC by-VA instructions are permission
-     * checked like reads. The bracket clears PAN around them, exactly as
-     * for a user copy.
+     * The user pages are EL0-accessible, and the rule everywhere else is
+     * that EL1 touches such memory only inside the user-access bracket
+     * (PAN cleared, as for a copy). The bracket is kept for that rule,
+     * NOT because it was shown to be needed: with it removed, the guard
+     * boot -- PAN present and enabled -- ran the write-then-execute
+     * self-test without a fault. Whether that is QEMU not applying PAN
+     * to DC/IC by VA or the architecture exempting them is not settled
+     * here; on hardware is where to find out (docs/kernel/memory/
+     * invariants.md M41).
      */
     uint64_t ctr = READ_SYSREG(ctr_el0);
     size_t dline = 4u << ((ctr >> 16) & 0xf);

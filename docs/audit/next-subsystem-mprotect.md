@@ -1,7 +1,55 @@
 # NEXT SUBSYSTEM — a call one personality has and the other does not
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(the `mprotect` unit), and the banner below records where the build
+differed from the design — including two proofs the design promised
+that this environment cannot give.
+
+**What the build changed:**
+
+1. **The sync lives at the two syscall doors, not in
+   `vm_user_protect`.** The design said "`vmm.c` or the arch layer".
+   `vm_user_protect` is also called by the ELF loader on a space that
+   is not current, and the maintenance is by virtual address in the
+   current regime, so it goes where the calling process's context is
+   guaranteed: `sys_mprotect` and `lx_mprotect`, both, after a
+   successful protect that adds `VM_PROT_EXEC`, via
+   `arch_mmu_sync_icache_user` (a no-op on x86-64).
+
+2. **Two of the four mutations cannot be observed under QEMU, and the
+   unit says so instead of claiming them.** Removing the sync
+   entirely passes: TCG invalidates translated code on data writes,
+   so the write-then-execute self-test is a regression test that the
+   path runs without trapping, not a proof of coherence. And removing
+   the user-access bracket around the maintenance did **not** fault
+   under the guard boot with PAN present and on — so the bracket is
+   kept because EL1 touches EL0-accessible memory only inside it
+   everywhere else, not because it was shown to be needed. The design
+   asserted that PAN would fault the EL1 access; that is not
+   established here, and the invariant (M41) records the gap. The two
+   that do bite: accepting an undefined `prot` bit fails the native
+   flags case, and pointing the fuzzer at the scratch page it writes
+   into makes it protect that page and then write to it —
+   `syscall-fuzz` fails on the child's `status == 0`, with the fault
+   at `g_fz_page + 4000`, `fz_string`'s own offset.
+
+3. **`docs/compat/linux/api.md` was stale about `vm_user_protect`.**
+   It said the range had to be exactly one region (`-EINVAL`
+   otherwise, "a recorded VMM limit"), which has not been true since
+   the function learned to split — `design.md` in the same directory
+   said so. Fixed in passing, and noted because the affected-files
+   table below did not know it was wrong.
+
+4. **The syscall table was missing row 92.** `getsockopt` was recorded
+   only in the prose paragraph that carries the count; adding 93
+   beside it is when that showed. Both rows are in the table now.
+
+5. **`thread.c`'s comment described a punch that #193 had removed.**
+   Updating it for the new syscall found it still narrating reserve,
+   punch a hole, fixed-map into the hole. It now describes
+   reserve-and-replace, says the call exists, and says why libc keeps
+   the sequence anyway.
 
 **A Linux program running on this kernel can change the protection of
 its own memory. A native program cannot.** `lx_mprotect`

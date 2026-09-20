@@ -175,7 +175,10 @@ refused) apply to Linux images unchanged. Check: `lxtest` requests an
 RWX anonymous mapping and gets `-EINVAL`; the loader tests in
 `docs/kernel/process/testing.md`. Gap: a program that maps RW, writes
 code and `mprotect`s to RX (a JIT) works, as on Linux; nothing prevents
-it, by design.
+it, by design — and since the native `mprotect` unit the kernel
+synchronises the instruction stream when a range becomes executable
+(kernel invariant M41), for this door as for the native one, because
+a Linux JIT cannot do the maintenance from EL0 here either.
 
 ## Milestone 10
 

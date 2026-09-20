@@ -2895,6 +2895,30 @@ See [docs/development.md](docs/development.md).
   that a failure changes nothing. 362 self-tests on both
   architectures (PR #193).
 
+- **`mprotect`, which one personality already had.** The Linux
+  personality has been able to change a mapping's protection since
+  milestone 10 — `lx_mprotect` over `vm_user_protect`, which the ELF
+  loader also uses — and the native ABI could not: this tree's usual
+  second-door bug, inverted. `SYS_mprotect` (93) is the native door,
+  keeping the native rules `mmap` and `munmap` keep (an undefined
+  `prot` bit is `EINVAL` rather than ignored, `len` is a page multiple
+  rather than rounded) and translating for the VM layer, which decides
+  W^X, holes and claimed ranges. The part that only came out of review
+  of the report: **user code cannot make freshly written bytes
+  executable on AArch64**, because `dc cvau`/`ic ivau` need
+  `SCTLR_EL1.UCI` and this kernel does not set it — so the kernel
+  synchronises the instruction stream when a range gains `PROT_EXEC`,
+  at both doors, for every JIT and not just a test (invariant M41).
+  Honest about what QEMU can show: TCG invalidates translated code on
+  write, so the write-then-execute self-test proves the path runs
+  without trapping, not coherence — and removing the PAN bracket
+  around the maintenance did not fault under the guard boot either, so
+  the bracket is kept for the rule, not for a proof. Hardware is where
+  both would be settled. `MAP_FIXED`
+  replacement can never substitute for this call — it returns
+  demand-zero memory — and libc's thread stacks deliberately keep the
+  reserve-and-replace sequence #193 proved (PR number below).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
