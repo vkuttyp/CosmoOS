@@ -138,6 +138,24 @@ if [ "$sata" != "0" ]; then
     sata_dev_x86="-device $sata_model,drive=sata0,bus=ide.1"
     sata_dev_a64="-device ahci,id=ahci0 -device $sata_model,drive=sata0,bus=ahci0.1"
 fi
+# The removal disk (docs/audit/next-subsystem-virtio-remove-inflight.md):
+# a second virtio-blk that exists to be removed with I/O outstanding by
+# the `virtio-remove-inflight` self-test, and re-probed after. Attached
+# after every device the documentation numbers, so no slot moves; 4 MiB
+# rather than 8, a capacity no other disk here has, because its name is
+# not the same on both machines (vdb on q35; vdc on virt, where the boot
+# image is a virtio-blk too) and the test finds it by size. QEMU_RMDISK:
+# a file (default rmdisk.img beside the others), or 0 for no such disk,
+# in which case the test skips.
+rmdisk=${QEMU_RMDISK:-$outdir/rmdisk.img}
+rm_devs=""
+if [ "$rmdisk" != "0" ]; then
+    if [ ! -f "$rmdisk" ]; then
+        dd if=/dev/zero of="$rmdisk" bs=1048576 count=4 status=none 2>/dev/null \
+            || dd if=/dev/zero of="$rmdisk" bs=1048576 count=4 2>/dev/null
+    fi
+    rm_devs="-drive if=none,id=rmdisk,format=raw,file=$rmdisk -device virtio-blk-pci,drive=rmdisk"
+fi
 # The display (docs/kernel/diagnostics/design.md, "The framebuffer
 # console"): whatever device the firmware lights and hands the loader as
 # a Graphics Output Protocol framebuffer, which the kernel then draws on.
@@ -227,6 +245,7 @@ if [ "$arch" = aarch64 ]; then
         $nic_devs \
         $usb_devs \
         $sata_drive $sata_dev_a64 \
+        $rm_devs \
         $display_dev_a64 \
         $qmp \
         $fwcfg \
@@ -262,6 +281,7 @@ exec qemu-system-x86_64 \
     $nic_devs \
     $usb_devs \
     $sata_drive $sata_dev_x86 \
+    $rm_devs \
     $display_dev_x86 \
     $qmp \
     $fwcfg \

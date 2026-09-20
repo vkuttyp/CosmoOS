@@ -2948,6 +2948,55 @@ See [docs/development.md](docs/development.md).
   removal with a bounded join reporting the hang; the syscall fuzzer
   gets both calls, `thread_kill` with signal 0 only. Report:
   `docs/audit/next-subsystem-native-thread-door.md`.
+- **A device removed while it was busy, at last on a real one.** The
+  lifetime-and-quiescence work named four windows nothing had ever
+  raced; three got an adversary and the fourth — a virtio device
+  removed with I/O outstanding — was narrowed to the *unbind
+  transition* on a synthetic device, because the machine's only
+  virtio-blk is the scratch disk every filesystem test runs on. The
+  reason was a machine, not a mechanism: the machine now carries a
+  second, 4 MiB virtio-blk that exists to be removed (`QEMU_RMDISK`,
+  attached after every function the documentation numbers, so nothing
+  moved). `virtio-remove-inflight` fills the driver's slot table by
+  construction — a hook leaves the device's finished requests
+  unconsumed, because a QEMU device answers in microseconds and the
+  natural race finds **nothing** in flight, every run, on both
+  architectures — removes the function while a submitter on another CPU
+  keeps going, and asserts the protected object: every accepted bio
+  completed exactly once with `0`, `-EIO` or `-ENODEV`, the `-EIO`
+  count *equal* to what the remove found (64 of 64: no double
+  completion, no stranded slot), and nothing completed after the
+  boundary the removal stamps inside itself — a stamp the caller takes
+  afterwards can be beaten by a callback that completes later and
+  numbers itself earlier. Then it brings the disk back with
+  `pci_test_rebind` and reads the sector written before the removal,
+  which is what says the removal left the hardware sane and what lets
+  the test leave the machine as it found it. Nine mutations, including
+  `blk_unregister` dropped from the driver's remove (a kernel page
+  fault) and a leftover slot completed twice. **And it found the defect
+  it was built to find, through review rather than through the test:**
+  `vblk_remove` read and cleared the driver's slot table -- with no
+  lock, and *before releasing the queue's interrupt* -- then freed the
+  ring and the DMA pool that a completion handler would be walking. A
+  reset stops the device; it says nothing about a handler already
+  inside the driver. The kernel has had the answer all along
+  (`synchronize_irq`, and a handler is a quiesce read-side section):
+  NVMe releases its vectors before freeing its queues, xHCI calls
+  `synchronize_irq` by hand, AHCI disables its interrupt before tearing
+  its ports down, and **virtio-blk was the only one of the four in the
+  wrong order**. The fix is the order -- `virtq_free`, which releases
+  the vector, now precedes the slot walk (invariant **Q11b**) -- and
+  the third test pass holds a read-side section across the teardown and
+  asserts the removal entered it, the section ended, and only then did
+  the walk begin. A first attempt built a private barrier in the driver
+  instead, on the mistaken belief that the kernel had no
+  `synchronize_irq`; the review that found the defect found that too,
+  and the mechanism it wanted was already there. Found on the way and
+  repaired here because it blocked the gate: six checks in
+  `lockuptest.c` asserted `thread_count() == before` the instant a join
+  returned, and the count falls at the reaper, not at the join —
+  `docs/testing/flakes.md`. Report:
+  `docs/audit/next-subsystem-virtio-remove-inflight.md`.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

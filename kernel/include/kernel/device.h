@@ -107,6 +107,9 @@ const struct resource *device_resource(const struct device *dev, enum resource_t
 /* The whole unbind transition -- the driver's remove *and* the
  * bookkeeping after it (docs/audit/next-subsystem-lifetime-windows.md). */
 void device_test_unbind(struct device *dev);
+/* And back: probe the registered drivers against a device a test unbound
+ * (0, -EBUSY if it is not unbound, -ENODEV if none took it). */
+int device_test_bind(struct device *dev);
 #endif
 
 int device_register(struct device *dev);

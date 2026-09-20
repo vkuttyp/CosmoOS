@@ -33,6 +33,36 @@
 #define STR_(x) #x
 #define STR(x)  STR_(x)
 
+/*
+ * "Every thread this test made is gone" is an EVENTUAL condition, and
+ * asserting it the instant a join returns was wrong.
+ * `thread_join` returns on the exiting thread's `complete(&self->exited)`;
+ * the count falls in `thread_unregister`, which runs from the LAST
+ * `thread_put` -- and the exiting thread's own reference is dropped by
+ * the reaper after it has switched away (kernel/scheduler/thread.c). So
+ * between a join returning and the count falling there is a window the
+ * implementation genuinely has, and six checks here had no allowance for
+ * it. It fired for the first time on 2026-09-20, on the branch that put
+ * a thread-creating self-test immediately before these
+ * (`virtio-remove-inflight`), which is a change of timing and not of
+ * mechanism: the window was always there.
+ *
+ * Waiting for the condition is no weaker than asserting it -- the bound
+ * is finite, so a test that really leaks a thread still fails -- and it
+ * is the repair `docs/testing/flakes.md` prescribes for this shape,
+ * already made once for `lxtest`'s tgkill-after-join.
+ */
+static bool threads_settled(unsigned before)
+{
+    uint64_t deadline = clock_now_ns() + 1000ull * 1000000ull;
+    while (thread_count() != before) {
+        if (clock_now_ns() > deadline)
+            return false;
+        sched_yield();   /* the reaper needs the CPU this loop is on */
+    }
+    return true;
+}
+
 /* The spinner is a dozen instructions at -O1 on either architecture; a
  * compile that grew it past this bound fails the range check loudly
  * rather than letting a wrong PC pass. */
@@ -160,7 +190,7 @@ bool selftest_lockup_sample(const char **reason)
     CHECK(when >= t0 && when <= t1);
     kinfo("selftest: lockup-sample: cpu %d answered in %llu us; pc in spin_here, depth %u", k,
           (unsigned long long)((t1 - t0) / 1000), depth);
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 
@@ -304,7 +334,7 @@ bool selftest_lockup_sample_irqoff(const char **reason)
     }
     CHECK(ok2);
     CHECK(m2 & CPUMASK_OF((unsigned)k));
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 
@@ -399,7 +429,7 @@ bool selftest_lockup_sample_busy(const char **reason)
         CHECK(el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 * 1000 * 1000);
         kinfo("selftest: lockup-sample-busy: two masked targets, one bound: %llu us", (unsigned long long)(el / 1000));
     }
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 
@@ -461,7 +491,7 @@ bool selftest_lockup_soft(const char **reason)
     CHECK(in_fn(s1.soft_pc, (const void *)spin_here, SPIN_FN_BOUND));
     CHECK(s2.soft_reports == s1.soft_reports);
     CHECK(s2.hard_reports == s0.hard_reports);
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 
@@ -520,7 +550,7 @@ bool selftest_lockup_hard(const char **reason)
     CHECK(s1b.hard_reports == s1.hard_reports);
     CHECK(s2.hard_reports == s1.hard_reports);
     CHECK(s2.soft_reports == s0.soft_reports);
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 
@@ -550,7 +580,7 @@ bool selftest_lockup_quiet(const char **reason)
     CHECK(t != NULL);
     CHECK(s1.soft_reports == s0.soft_reports);
     CHECK(s1.hard_reports == s0.hard_reports);
-    CHECK(thread_count() == before);
+    CHECK(threads_settled(before));
     return true;
 }
 

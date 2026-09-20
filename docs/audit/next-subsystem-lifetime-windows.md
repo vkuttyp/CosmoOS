@@ -586,6 +586,14 @@ from a third. Putting the releaser beside the callback deadlocked the
 machine on the first run, and the reason is written where the CPUs are
 chosen rather than left for the next person.
 
+> **Built since** (the virtio-removal unit,
+> `docs/audit/next-subsystem-virtio-remove-inflight.md`): the machine
+> now carries a virtio-blk that exists to be removed, and
+> `virtio-remove-inflight` drives `vpci_remove` itself with the
+> driver's slot table full, then re-probes the function. What follows
+> is what this unit could reach, and it is left standing as the record
+> of where it stopped.
+
 **The virtio window stops lower than the report expected, and says so.**
 `pci_test_remove` performs the whole unbind, which is what the review
 asked for, and `device-remove-busy` asserts it: the hook runs once, the

@@ -70,8 +70,15 @@ make ARCH=aarch64 test
 
 ## Gaps
 
-- No test drives the straggler IPI (Q6) or the `blk_submit`/`blk_unregister`
-  window (Q11); both are reviewed, not exercised.
+- No test drives the straggler IPI (Q6); it is reviewed, not exercised.
+- The `blk_submit`/`blk_unregister` window (Q11) **is** exercised, and
+  this bullet used to say it was not: `blk-submit-unregister` and
+  `blk-unregister-drain` have raced it from a second CPU on a synthetic
+  device since the lifetime-windows unit, and since the virtio-removal
+  unit `virtio-remove-inflight` runs the whole removal of a real
+  virtio-blk with the driver's slot table full — asserting what the
+  removal completed, in what order, and that the function can be
+  re-probed (`docs/kernel/device/testing.md`).
 - No thread-sanitizer run of the host model.
 - `synchronize_quiesce` latency is tick-bound (one to two ticks with idle
   CPUs); a wake-on-publish design would shorten it and is listed under

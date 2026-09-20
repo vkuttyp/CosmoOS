@@ -46,8 +46,12 @@ To try a different device set, append to `QEMU_EXTRA`, for example
 
 - No negative tests on the target: legacy-only device, feature
   rejection, notify offsets outside the window, probe failure inside a
-  driver, unload with requests in flight, console dead state (the ring
-  logic itself is covered on the host by `test_virtq`).
+  driver, console dead state (the ring logic itself is covered on the
+  host by `test_virtq`). ~~Unload with requests in flight~~ is covered
+  for virtio-blk since the virtio-removal unit:
+  `virtio-remove-inflight` removes a live device with its slot table
+  full and re-probes it (`docs/kernel/device/testing.md`); what remains
+  is the same for the *module* rather than the device.
 - `virtio_net` has no driver; indirect descriptors and event index are
   never negotiated and so never tested.
 - MSI affinity: every vector targets CPU 0.

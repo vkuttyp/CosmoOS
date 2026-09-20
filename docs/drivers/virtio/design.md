@@ -134,8 +134,25 @@ omitted for FLUSH; direction decides which side of the chain the data
 is on), then kicks. The completion callback pops cookies (bios), reads
 the status byte (OK → 0, UNSUPP → `-ENOTSUP`, else `-EIO`), frees the
 slot and calls `bio_complete`. `max_sectors` is 128 × 512 / block size.
-Remove: unregister, reset the device, complete leftovers with `-EIO`,
-free the queue and pool.
+Remove: unregister the block device, reset the device, **free the
+queue** — which is where the transport masks the MSI-X entry and
+`synchronize_irq`s it, so no completion handler is running or can start
+— and only then complete the leftovers with `-EIO`, one slot at a time
+under `vb->lock` as `vblk_timeout` does, and free the DMA pool. The
+order is the guarantee (invariant Q11b): until the vector is released a
+handler can be inside `vblk_done` reading and clearing the same slot
+table, and the ring the removal is about to free. This driver walked
+the table first until the virtio-removal unit; NVMe, xHCI and AHCI
+already released their interrupts before freeing what a handler
+touches. That order is now raced rather than argued
+(`virtio-remove-inflight`, `docs/kernel/device/testing.md`): in debug
+builds the driver can be told to leave one device's finished requests
+unconsumed, so the remove finds its slot table occupied by
+construction, and it records what it found and stamps the end of its
+leftover walk from the block layer's test sequence so a completion can
+be ordered against it. The hooks are published to the block layer at
+module init (`blk_test_driver_hooks_set`), since the kernel image
+cannot name a module's symbols.
 
 **virtio_rng** (`virtio_rng.c`): no features; one queue; a 64-byte DMA
 buffer posted device-writable. Each completion credits `len × 8` bits

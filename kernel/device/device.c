@@ -192,6 +192,30 @@ void device_test_unbind(struct device *dev)
 {
     unbind(dev);
 }
+
+/*
+ * The reverse, for a device a test unbound: the driver walk
+ * device_register does, on a device that is on its bus and unbound. A
+ * device in DEV_FAILED is refused rather than retried into a state the
+ * boot did not leave it in. 0 once a driver is bound, -EBUSY if it was
+ * not unbound, -ENODEV if no registered driver took it.
+ */
+int device_test_bind(struct device *dev)
+{
+    model_lock();
+    if (dev->state != DEV_UNBOUND) {
+        model_unlock();
+        return -EBUSY;
+    }
+    struct device_driver *drv;
+    list_for_each_entry(drv, &dev->bus->drivers, bus_link) {
+        if (try_bind(dev, drv))
+            break;
+    }
+    bool bound = dev->state == DEV_BOUND;
+    model_unlock();
+    return bound ? 0 : -ENODEV;
+}
 #endif
 
 int device_register(struct device *dev)

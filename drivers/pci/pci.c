@@ -200,6 +200,17 @@ int pci_test_remove(struct pci_device *p)
     device_test_unbind(&p->dev);
     return 0;
 }
+
+/* Re-probe a function a test removed: the registered drivers against an
+ * unbound device, which is how the boot bound it in the first place. The
+ * assertion this exists for is that a removal left the hardware sane
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md). */
+int pci_test_rebind(struct pci_device *p)
+{
+    if (p == NULL)
+        return -ENODEV;
+    return device_test_bind(&p->dev);
+}
 #endif
 
 /* --- enumeration --------------------------------------------------------- */

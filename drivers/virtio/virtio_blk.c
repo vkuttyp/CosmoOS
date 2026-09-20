@@ -81,6 +81,61 @@ struct vblk {
     bool dead;                  /* a request timed out: the device was reset and every request fails */
 };
 
+#if CONFIG_DEBUG
+/*
+ * The seams of `virtio-remove-inflight`
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md). With a hold on a
+ * device, its completion walk returns without consuming anything, so the
+ * requests the device has finished stay in the slot table and the remove
+ * finds them by construction rather than by racing a device that answers
+ * in microseconds. The remove records how many it found and stamps its
+ * own end from the block layer's test sequence, after its leftover walk,
+ * so a completion can be ordered against it: one stamped later completed
+ * after the driver had finished removing. The release is counted so a
+ * test can see the last reference go.
+ */
+static struct blkdev *g_test_hold_bd;
+static unsigned g_test_inflight_at_remove;
+static uint64_t g_test_remove_seq;
+static unsigned g_test_releases;
+/*
+ * Two stamps from the block layer's test sequence, so a test can put the
+ * removal's teardown in order against something it holds itself: one as
+ * the removal enters the queue teardown (which masks the queue's MSI-X
+ * entry and `synchronize_irq`s it) and one as it begins walking the slot
+ * table afterwards. A read-side section held across the first must have
+ * ended before the second -- that is invariant Q11b, observable.
+ */
+static uint64_t g_test_before_irq_seq, g_test_walk_seq;
+
+static void vblk_test_hold_completions(struct blkdev *bd) { __atomic_store_n(&g_test_hold_bd, bd, __ATOMIC_RELEASE); }
+static unsigned vblk_test_inflight_at_remove(void) { return __atomic_load_n(&g_test_inflight_at_remove, __ATOMIC_ACQUIRE); }
+static uint64_t vblk_test_remove_seq(void) { return __atomic_load_n(&g_test_remove_seq, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_releases(void) { return __atomic_load_n(&g_test_releases, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_nr_slots(struct blkdev *bd) { return ((struct vblk *)bd->priv)->nr_slots; }
+static uint64_t vblk_test_before_irq_seq(void) { return __atomic_load_n(&g_test_before_irq_seq, __ATOMIC_ACQUIRE); }
+static uint64_t vblk_test_walk_seq(void) { return __atomic_load_n(&g_test_walk_seq, __ATOMIC_ACQUIRE); }
+static void vblk_test_stamps_reset(void)
+{
+    __atomic_store_n(&g_test_before_irq_seq, 0ull, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_walk_seq, 0ull, __ATOMIC_RELEASE);
+}
+
+/* Published to the block layer at module init: this driver is a module,
+ * and the kernel's self-test cannot name its symbols. */
+static const struct blk_test_driver_hooks vblk_test_hooks = {
+    .driver = "virtio_blk",
+    .hold_completions = vblk_test_hold_completions,
+    .inflight_at_remove = vblk_test_inflight_at_remove,
+    .remove_seq = vblk_test_remove_seq,
+    .releases = vblk_test_releases,
+    .nr_slots = vblk_test_nr_slots,
+    .stamps_reset = vblk_test_stamps_reset,
+    .before_irq_seq = vblk_test_before_irq_seq,
+    .walk_seq = vblk_test_walk_seq,
+};
+#endif
+
 static void unmap_slot(struct vblk *vb, unsigned slot)
 {
     struct vblk_map *mp = &vb->maps[slot];
@@ -180,6 +235,12 @@ static void vblk_done(struct virtqueue *vq)
     struct vblk *vb = vq->vdev->priv;
     uint32_t len;
     struct bio *bio;
+    if (vb == NULL)
+        return;
+#if CONFIG_DEBUG
+    if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
+        return;   /* held: the finished requests stay in flight for the remove to find */
+#endif
     while ((bio = virtq_pop(vq, &len)) != NULL) {
         /* Ownership is decided under the lock, by pointer, before the bio
          * is touched: the timeout path may have completed it already (and
@@ -325,6 +386,9 @@ fail:
 static void vblk_release(struct blkdev *bd)
 {
     struct vblk *vb = bd->priv;
+#if CONFIG_DEBUG
+    __atomic_fetch_add(&g_test_releases, 1u, __ATOMIC_ACQ_REL);
+#endif
     kfree(vb->inflight);
     kfree(vb->maps);
     kfree(vb);
@@ -335,17 +399,63 @@ static void vblk_remove(struct virtio_device *vdev)
     struct vblk *vb = vdev->priv;
     blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
     virtio_device_reset(vdev);   /* the device drops every in-flight request */
+    /*
+     * Release the queue -- and with it the interrupt -- BEFORE touching
+     * the slot table. `virtq_free` tears the queue down through the
+     * transport, and `vpci_teardown_queue` masks the MSI-X entry and
+     * calls `pci_msix_release`, which unregisters the vector and
+     * `synchronize_irq`s it. That is the kernel's own contract for
+     * exactly this (`kernel/include/kernel/interrupt.h`): a handler is a
+     * quiesce read-side section, so a grace period after unregistration
+     * proves no CPU is still inside it, and the mask is what stops one
+     * that has not started yet.
+     *
+     * Until that has happened a completion walk can be running on
+     * another CPU, and the walk below reads and clears the very table
+     * `vblk_done` reads and clears -- so the old order (walk, then free
+     * the queue) could complete a bio twice, unmap a slot twice, and
+     * free the ring under a handler still in it. Nothing was wrong with
+     * the steps; they were in the wrong order.
+     */
+#if CONFIG_DEBUG
+    __atomic_store_n(&g_test_before_irq_seq, blk_test_tick(), __ATOMIC_RELEASE);
+#endif
+    virtq_free(vb->vq);
+    vb->vq = NULL;
+#if CONFIG_DEBUG
+    /* The interrupt is released: every read-side section that was open
+     * when the teardown began has ended (invariant Q11b), and this stamp
+     * is what a test compares its own section against. */
+    __atomic_store_n(&g_test_walk_seq, blk_test_tick(), __ATOMIC_RELEASE);
+    unsigned found = 0;
+    for (unsigned i = 0; i < vb->nr_slots; i++)
+        found += vb->inflight[i] != NULL;
+    __atomic_store_n(&g_test_inflight_at_remove, found, __ATOMIC_RELEASE);
+#endif
+    /*
+     * The slots that are left, one at a time under the lock and
+     * completed outside it -- which is what `vblk_timeout` a few lines
+     * up has always done, and what this walk did not. With the
+     * interrupt released above the walk is already exclusive, so the
+     * lock is the rule rather than the thing that carries it.
+     */
     for (unsigned i = 0; i < vb->nr_slots; i++) {
-        if (vb->inflight[i]) {
-            struct bio *bio = vb->inflight[i];
+        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
+        struct bio *bio = vb->inflight[i];
+        if (bio) {
             unmap_slot(vb, i);
             vb->inflight[i] = NULL;
-            bio_complete(bio, -EIO);
         }
+        spin_unlock_irqrestore(&vb->lock, s);
+        if (bio)
+            bio_complete(bio, -EIO);
     }
-    virtq_free(vb->vq);
+#if CONFIG_DEBUG
+    /* The boundary: every completion of this device's is stamped before
+     * this or it happened after the driver was done removing. */
+    __atomic_store_n(&g_test_remove_seq, blk_test_tick(), __ATOMIC_RELEASE);
+#endif
     dma_free(&vdev->dev, vb->slots_bytes, vb->slots, vb->slots_dma);
-    vb->vq = NULL;
     vb->slots = NULL;
     vdev->priv = NULL;
     blkdev_put(&vb->bd);         /* the creator's reference; vblk_release frees when holders are gone */
@@ -362,12 +472,18 @@ static struct virtio_driver vblk_driver = {
 
 static int vblk_module_init(void)
 {
+#if CONFIG_DEBUG
+    blk_test_driver_hooks_set(&vblk_test_hooks);
+#endif
     return virtio_register_driver(&vblk_driver);
 }
 
 static void vblk_module_shutdown(void)
 {
     virtio_unregister_driver(&vblk_driver);
+#if CONFIG_DEBUG
+    blk_test_driver_hooks_set(NULL);
+#endif
 }
 
 COSMO_MODULE("virtio_blk", "1.0", vblk_module_init, vblk_module_shutdown, "virtio", MODULE_CAP_DRIVER);

@@ -40,13 +40,30 @@ crash-consistency harness).
   (`docs/kernel-services/network/testing.md`);
 - since milestone 9, `nvme` (`serial=cosmo-nvme0`) over `QEMU_NVMEDISK`
   (a fresh 8 MiB `boot-test.log.nvme.img` per harness run;
-  `docs/drivers/nvme/testing.md`).
+  `docs/drivers/nvme/testing.md`);
+- since the virtio-removal unit, **last of all**, a second
+  `virtio-blk-pci` over `QEMU_RMDISK` (a fresh **4 MiB**
+  `boot-test.log.rmdisk.img` per harness run): the disk
+  `virtio-remove-inflight` removes and re-probes. It is attached after
+  every function above so that none of them moves, which makes it
+  `vdb` on q35 and `vdc` on `virt` (where the boot image is a
+  virtio-blk too) — so the test finds it by its capacity, which no
+  other disk in the machine has, rather than by a name that differs
+  between the two machines. `QEMU_RMDISK=0` leaves it out and the test
+  skips.
 
-Under q35 that is 9 PCI functions: host bridge, VGA, the four virtio
-functions at `00:02.0`–`00:05.0` (the explicit `-netdev`/`-device`
-pair replaces QEMU's default e1000e, so the slots moved down by one in
-Phase 8), the ISA bridge, AHCI, SMBus. The tests do not depend on the
-VGA beyond enumerating it.
+Under q35 the functions are, in enumeration order: host bridge
+(`00:00.0`), VGA (`00:01.0`), `virtio-blk` for the scratch disk
+(`00:02.0`), `nvme` (`00:03.0`), `virtio-rng` (`00:04.0`),
+`virtio-serial` (`00:05.0`), `virtio-net` (`00:06.0`), `e1000e`
+(`00:07.0`), `xhci` (`00:08.0`), `virtio-blk` for the removal disk
+(`00:09.0`), plus the ISA bridge, AHCI and SMBus of the chipset. (This
+paragraph said "9 functions, the four virtio functions at
+`00:02.0`–`00:05.0`" from Phase 8 until the virtio-removal unit; NVMe
+had taken `00:03.0` at milestone 9 and the USB and second NIC came
+later, so it had been describing an older machine for some time. The
+removal disk's own arrival moved nothing.) The tests do not depend on
+the VGA beyond enumerating it.
 
 ## Self-tests (`kernel/device/devtest.c`)
 
@@ -190,15 +207,100 @@ QEMU_TESTDISK=/tmp/disk.img make run   # keep a scratch disk between runs
 `device_dump()`, `blk_dump()`, `module_dump()` print the model, the
 block registry and the module list; they are not wired to a command yet.
 
+### `virtio-remove-inflight`
+
+`docs/audit/next-subsystem-virtio-remove-inflight.md`. The window the
+lifetime-windows unit named and narrowed: `vpci_remove` — which only a
+module unload had ever run — with requests at the device. Debug builds,
+on the removal disk above; skips on one CPU, without the disk, or if
+`virtio_blk` published no test seams.
+
+A submitter on another CPU reads the disk continuously from a pool of
+96 bios (more than the driver's slots, so the block layer's pending
+list is exercised too). The window is held open by construction rather
+than by a stopwatch: a driver hook makes `vblk_done` return without
+consuming anything, so requests the device has finished stay in the
+slot table and `vblk_remove` finds them. Then `pci_test_remove`, and
+the assertions are about the protected object:
+
+- every accepted bio completes exactly **once**, with one of three
+  statuses and nothing else — `0`, `-EIO` (a slot the remove found,
+  completed by its leftover walk) or `-ENODEV` (queued on the pending
+  list behind a full table, completed by `blk_unregister`);
+- the `-EIO` count **equals** what the remove found in flight: no
+  double completion, no stranded slot;
+- no completion is stamped after the removal's own boundary stamp,
+  which `vblk_remove` takes at the end of its leftover walk from
+  `blk_test_tick`'s sequence — inside the removal, because a stamp the
+  caller takes after `pci_test_remove` returns can be beaten by a
+  callback on another CPU that completes later and numbers itself
+  earlier;
+- the disk is off the registry, the function is `DEV_UNBOUND` with no
+  `driver` and no `drvdata`, and the release runs when the test drops
+  the last reference and not before;
+- then `pci_test_rebind` brings it back: same name, and the first
+  sector still holds what was written before the removal. That is the
+  assertion that the removal left the hardware sane — status 0, MSI-X
+  disabled, BARs unmapped — and the reason the test leaves the machine
+  as it found it.
+
+**A third pass, and the defect it belongs to.** Review of the first
+build found that `vblk_remove` read and cleared `vb->inflight` with no
+lock while `vblk_done` touches it only under `vb->lock` — and, worse,
+that it did so *before releasing the queue's interrupt*, then freed the
+ring and the DMA pool a handler would be walking. The fix is the
+teardown order, invariant **Q11b**
+(`docs/kernel/quiesce/invariants.md`): `virtq_free`, which is where the
+transport masks the MSI-X entry and `synchronize_irq`s it, now precedes
+the slot walk.
+
+The third pass is its adversary, and it is a **read-side section held
+by a thread**, not a parked interrupt handler: `quiesce_read_lock` is
+what `synchronize_irq` waits on, and a preemption-disabled section
+costs the machine nothing, while an interrupt handler parked on cpu0 —
+where every MSI-X vector lands — stops that CPU answering TLB
+shootdowns and ticking for the lockup detectors (an earlier version did
+exactly that, and `lockup-hard` failed beside it). The evidence is
+three stamps from one sequence: the removal enters the teardown, the
+section ends, the walk begins. Putting the release back after the walk
+makes the walk start inside the section, and the step fails.
+
+The first two passes run twice, held and unheld. **The unheld pass finds
+0 requests in flight at the remove, every run, on both architectures**
+— a QEMU device answers in microseconds — which is the measurement
+that says the hook is necessary and the unheld pass is a regression
+guard rather than a proof. Held, x86-64: 89 accepted, 64 found in
+flight, 64 `-EIO`, 12 `-ENODEV`, 13 `0`; AArch64: 79, 64, 64, 10, 5.
+The driver's seams reach the test through a hook table the module
+publishes to the block layer at its init
+(`blk_test_driver_hooks_set`), because the kernel image cannot name a
+module's symbols.
+
 ## Gaps
 
 - No host unit test for the virtqueue ring logic (`virtq_add`/`virtq_pop`
   are pure enough for one with a fake transport); the target tests cover
   it only through real I/O.
-- No test unloads a driver module with requests in flight, unregisters
-  the console sink while other CPUs log (invariant D12's gap), or
-  exercises `pci_msi_enable` (every QEMU virtio device has MSI-X).
-- No hot-plug, no legacy configuration access under test (q35 always has
-  an MCFG), no test of a probe failure inside a real driver.
+- **The removal's teardown order (Q11b) is in every build; the
+  observation of it is not.** `virtq_free` precedes the slot walk in
+  release as in debug, but the stamps a test orders itself against are
+  `CONFIG_DEBUG`, so a release boot exercises the order without
+  observing it. Accepted: the observation needs a seam, and a seam in a
+  release build is a seam in the shipped driver. The debug run is the
+  proof and the harness now insists it actually ran.
+- No test unloads a driver *module* with requests in flight — a
+  different path from a device removal (`vblk_module_shutdown`
+  unregisters the driver and the model unbinds what it holds), and
+  untested at either level; `virtio-remove-inflight` removes a *device*
+  with them outstanding and leaves the module loaded.
+- No test unregisters the console sink while other CPUs log (invariant
+  D12's gap), or exercises `pci_msi_enable` (every QEMU virtio device
+  has MSI-X).
+- No PCI hot-plug: the removal test drives `pci_test_remove` and
+  `pci_test_rebind`, which are the model's own transitions, not an
+  event from the machine (`device_del` over QMP would need a rescan and
+  a hotplug interrupt this kernel does not have). No legacy
+  configuration access under test (q35 always has an MCFG), no test of
+  a probe failure inside a real driver.
 - `virtio_net` is not driven; the transport handles the device but no
   driver binds it.

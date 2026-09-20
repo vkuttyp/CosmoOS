@@ -1,7 +1,88 @@
 # NEXT SUBSYSTEM — a virtio device dedicated to removal
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**,
+and the banner below records where the build differed from the design.
+
+**What the build changed:**
+
+1. **The seams reach the driver through a table, because the driver is
+   a module.** The design said "one debug hook in `virtio_blk.c`" and
+   the test would call it; the link said otherwise — the kernel image
+   cannot name a module's symbols. `virtio_blk` publishes a
+   `struct blk_test_driver_hooks` to the block layer at its module init
+   (`blk_test_driver_hooks_set`), the test asks for it by driver name,
+   and a build where the module did not publish skips rather than
+   fails to link.
+2. **The disk is found by capacity, not by name.** The design said
+   `blk_find("vdb")`. On `virt` the boot image is itself a virtio-blk,
+   so the removal disk is **`vdc`** there and `vdb` on q35. It is 4 MiB
+   where every other disk in the machine is 8, so the test looks for
+   the only 4 MiB virtio disk and the two machines need no special
+   case. The harness's marker allows either name.
+3. **The unheld pass finds nothing, and that is the measurement.** The
+   report expected the held pass to occupy the window and the unheld
+   one to be a regression guard; as run, the unheld pass finds **0**
+   requests in flight at the remove, every run, on both architectures.
+   That is the number that says the hook is necessary, so it is printed
+   and kept rather than treated as a boring second pass.
+4. **`-ENODEV` completions were not in the design's first draft and are
+   in the build**, with the sharper count beside them: review found
+   that a driver's `-EAGAIN` is queued by `blk_submit` rather than
+   returned, so a full table produces accepted bios that
+   `blk_unregister` completes `-ENODEV`. The assertion is three
+   statuses, and `-EIO` **equal** to what the remove found.
+5. **The boundary stamp is inside `vblk_remove`**, also from review: a
+   stamp the caller takes after `pci_test_remove` returns can be beaten
+   by a completion on another CPU that draws its number first.
+6. **The bug-proofs did not land where the design aimed them.** Two
+   mutations kill the *machine* before the test can assert anything (a
+   page fault in the block layer), one was killed by an observable the
+   design did not name (the re-probe, not a late interrupt), one
+   survived exactly as predicted, and one was added because of the
+   first two. See "Bug-proofs, as run".
+7. **The unit found a defect, which is what it was for, and it came
+   from review rather than from the test.** `vblk_remove` read and
+   cleared the driver's slot table with no lock while the completion
+   path takes `vb->lock` for the same table — and, the deeper half, it
+   did so *before releasing the queue's interrupt*, then freed the ring
+   and the DMA pool a handler would be walking. `blk_unregister` keeps
+   submissions out and a device reset stops the device; neither has
+   anything to say about a handler already inside `vblk_done`.
+8. **The first fix was wrong, and the review that found the defect
+   found that too.** I built a `gone`/`in_done` barrier in the driver
+   on the belief — stated in the code, the invariant, this report and
+   the README — that *this kernel has no `synchronize_irq`*. It has
+   one: `kernel/include/kernel/interrupt.h` declares it, documents that
+   a handler is a quiesce read-side section, and `pci_msix_release`
+   already masks the entry and calls it through `irq_release_msi`.
+   NVMe releases its vectors before freeing its queues and says so in a
+   comment; xHCI calls `synchronize_irq` by hand; AHCI disables its
+   interrupt before tearing its ports down. **virtio-blk was the only
+   one of the four doing it in the wrong order**, and the fix is that
+   order, not a new mechanism: `virtq_free` (which releases the vector)
+   moves ahead of the slot walk, and the hand-rolled counter is gone.
+   A counter could not have been right anyway — review's next point —
+   because it can only see handlers that have already entered, while
+   the mask is what stops one that has not.
+9. **The third pass is a read-side section, not a parked handler.** It
+   holds `quiesce_read_lock` from a thread across the removal's
+   teardown and asserts three stamps from one sequence: the removal
+   enters the teardown, the section ends, the walk begins. An earlier
+   version parked a real completion walk inside `vblk_done`, which
+   meant spinning in interrupt context on cpu0 — where every MSI-X
+   vector lands — for as long as the removal took: that CPU stops
+   answering TLB shootdowns (one-second deadline) and stops ticking for
+   the lockup detectors, and `lockup-hard` duly failed beside it. A
+   preemption-disabled section is the same thing to
+   `synchronize_quiesce` and none of those things to the machine. It
+   also took the park hook back out of the completion path.
+10. **A latent flake was repaired on the way**: six `thread_count() ==
+   before` checks in `lockuptest.c`, asserted the instant a join
+   returns, when the count falls at the reaper. This branch's thread
+   churn exposed one on AArch64; the repair is a bounded wait, made
+   here because it blocked the gate, and recorded in
+   `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,
@@ -117,24 +198,29 @@ unit's whole reason to exist.
 ### The machine: a second virtio-blk, last in line
 
 `scripts/qemu-run.sh` attaches a second `virtio-blk-pci` over
-`QEMU_RMDISK` (default `<image dir>/rmdisk.img`, 8 MiB of zeros created
-when missing; the harness makes `boot-test.log.rmdisk.img` fresh per
-run as it does the others). It is attached **after every device the
+`QEMU_RMDISK` (default `<image dir>/rmdisk.img`, **4 MiB** of zeros
+created when missing; the harness makes `boot-test.log.rmdisk.img`
+fresh per run as it does the others). Four rather than eight because
+every other disk in the machine is 8 MiB, and the size is what the
+test identifies this one by — see below. It is attached **after every device the
 documentation numbers** — after the NIC, the NVMe, the USB and SATA
 controllers — so `00:02.0`–`00:05.0` keep their meaning and no test
 that counts or names PCI functions moves; and after `vda` on both
-machines, so it is **`vdb`** by the same ordering rule that makes the
-scratch disk `vda`. `QEMU_RMDISK=0` leaves it out, and the test then
-skips with that reason. The boot marker `blk: vdb: 16384 sectors of 512
-bytes` is required when the disk is present. Nothing else in the tree
-learns of `vdb`: `blk-bench`'s name list does not include it, the
+machines. That makes it **`vdb` on q35 and `vdc` on `virt`**, where the
+boot image is itself a virtio-blk and takes the name first — the
+design said `vdb` on both and was wrong about the `virt` machine.
+`QEMU_RMDISK=0` leaves it out, and the test then skips with that
+reason. The boot marker `blk: vd[bc]: 8192 sectors of 512 bytes` is
+required when the disk is present. Nothing else in the tree learns of
+it: `blk-bench`'s name list does not include it, the
 filesystem tests find `vda` by name, and `blk_count` assertions are
 relative.
 
 ### The device is reachable from its disk
 
-The test finds the disk by name, `blk_find("vdb")`, holds the reference
-that returns, and reaches the PCI function through the two hops the
+The test finds the disk by **capacity**: the only 4 MiB virtio disk in
+the machine, which needs no special case for the two machines' two
+names (`rm_find`). It holds the reference that `blk_find` returns, and reaches the PCI function through the two hops the
 model already records: `to_virtio_device(bd->dev)->hw` is the bus device
 behind the transport, `to_pci_device` of that is what `pci_test_remove`
 takes. No new field.
@@ -158,14 +244,14 @@ so the test asserts the window was occupied rather than hoping.
 
 ### The test: `virtio-remove-inflight`
 
-Debug builds; skips on one CPU or without `vdb`. The shape is the
+Debug builds; skips on one CPU or without the removal disk. The shape is the
 lifetime unit's three steps: hold the window open by construction, drive
 the other side from a real second CPU, assert the protected object.
 
-1. Find `vdb`, hold it, resolve its PCI function. Read the first sector
+1. Find the removal disk, hold it, resolve its PCI function. Read the first sector
    once, so the device is known to work before it is removed.
 2. Start a submitter on another CPU (the `blk-submit-unregister` shape):
-   it submits reads of `vdb` continuously, counting accepted, refused
+   it submits reads of the removal disk continuously, counting accepted, refused
    (`-ENODEV`), any other errno, and completions by status. Wait until
    at least four have been accepted *and completed* — the device is
    live, not merely present.
@@ -211,7 +297,7 @@ the other side from a real second CPU, assert the protected object.
      the leftover walk's own, or an interrupt the reset still allowed,
      and both are the removal's business. This needs `blk_test_tick`
      callable from the driver and the test (it is `static` today).
-   - `blk_find("vdb") == NULL`; the virtio device is off its bus
+   - the disk is no longer in the registry; the virtio device is off its bus
      (`device_find(&virtio_bus, name) == NULL`); the PCI function is
      `DEV_UNBOUND` with `driver` and `drvdata` NULL and the virtio-pci
      driver's bound count one lower.
@@ -221,8 +307,8 @@ the other side from a real second CPU, assert the protected object.
      of the boot.
 7. **Bring it back.** `pci_test_rebind(pdev)` (new, debug: the bus's
    `try_bind` against the registered driver, for a device in
-   `DEV_UNBOUND`) re-probes the function: `vdb` reappears with the same
-   name and capacity, and a read of its first sector returns what step
+   `DEV_UNBOUND`) re-probes the function: the disk reappears with the
+   same name and capacity, and a read of its first sector returns what step
    1 read. This is the assertion that the removal left the hardware
    sane — status 0, MSI-X disabled, BARs unmapped, and the device able
    to be driven again — and it means the test leaves the machine as it
@@ -249,7 +335,7 @@ than claiming the reset was proved.
 | file | change |
 | --- | --- |
 | `scripts/qemu-run.sh` | `QEMU_RMDISK`, a second `virtio-blk-pci` attached last on both machines; `QEMU_RMDISK=0` leaves it out |
-| `tests/boot/run_boot_test.py` | a fresh `boot-test.log.rmdisk.img` per run; the `vdb` marker when the disk is present |
+| `tests/boot/run_boot_test.py` | a fresh `boot-test.log.rmdisk.img` per run; the `vd[bc]` marker when the disk is present, and the test's own three lines wherever it can run |
 | `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, `vblk_test_remove_seq` (the boundary stamp, at the end of `vblk_remove`), a release counter (debug) |
 | `drivers/pci/pci.c`, `drivers/include/drivers/pci.h` | `pci_test_rebind` (debug) |
 | `kernel/device/device.c`, `kernel/include/kernel/device.h` | `device_test_bind` for it, beside `device_test_unbind` |
@@ -270,34 +356,38 @@ than claiming the reset was proved.
 | --- | --- |
 | `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after the removal's own boundary stamp (the completion callback's stamps against `vblk_test_remove_seq`); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
 | the same, unheld | the natural race, a regression guard |
-| the rebind | `vdb` comes back and reads the same first sector: the hardware was left sane |
+| the rebind | the disk comes back under its old name and reads the same first sector: the hardware was left sane |
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
 | the documented PCI numbering | `00:02.0`–`00:05.0` unchanged with the new function present (`selftest_pci` walks every function; the doc's count is corrected, not asserted) |
 
-**Bug-proofs**, each to fail for its stated reason, each reverted after:
+**Bug-proofs, as run** (x86-64, each applied, built, booted and
+reverted; the table says what actually happened, which is not what the
+design predicted in three places):
 
-- `vblk_remove` without `blk_unregister` first → a bio accepted after the
-  reset reaches a driver whose slots are freed: the submitter's bio
-  never completes, or the poisoner reports the touch. Which of the two
-  is recorded, not predicted.
-- `vblk_remove` skipping the leftover completions → the held bios never
-  complete: the submitter's accepted count never meets its completed
-  count, reported by the bounded wait; and the `-EIO` count falls short
-  of `vblk_test_inflight_at_remove()`.
-- `vblk_remove` completing a slot twice → the `-EIO` count exceeds
-  `vblk_test_inflight_at_remove()`, and a bio's `done` runs twice, which
-  the callback counts.
-- `vpci_remove` without `pci_msix_disable` → a late interrupt after the
-  vector is torn down. **May be silent under TCG** if the reset alone
-  stops the device from signalling; if it is, the report says so and
-  the proof stands on the argument, as the mprotect unit's PAN bracket
-  does.
-- `vpci_remove` without the reset → the device keeps its rings; the
-  leftover completions are issued for requests the device still holds.
-  Same caveat: the observable is the poisoner, and it may not fire.
-- the rebind without the removal having disabled MSI-X → the second
-  probe's `pci_msix_enable` fails or double-allocates: `vdb` does not
-  come back.
+| mutation | designed expectation | as run |
+| --- | --- | --- |
+| `vblk_remove` without `blk_unregister` first | a bio reaches a driver whose slots are freed: the submitter hangs, or the poisoner reports | **killed** — the machine dies first: `KERNEL PANIC: page fault: kernel write at 0x624 ... from a kernel thread`, 12 s into the boot. The defect is real and immediate; the *test's* assertions never get to speak |
+| `vblk_remove` skipping its leftover completions | the held bios never complete | **killed** by the test: `rm_completions(&s) == s.ok` — 64 accepted bios with no completion |
+| `vblk_remove` completing a leftover slot twice | the `-EIO` count exceeds what the remove found, and `c_double` fires | **killed**, but again by the machine, not the counter: a page fault at address 0 inside the block layer with `blk-pending` held. A second `bio_complete` corrupts the list before the test can count it. So this mutation does **not** prove the counter |
+| the remove reporting one more in flight than it completed | — (added because of the row above) | **killed** by `s.c_eio == found`: the equality is live, not vacuous |
+| `vpci_remove` without `pci_msix_disable` | a late interrupt after the vector is torn down; may be silent | **killed**, by a different observable than predicted: no late interrupt appeared, and the **rebind** failed (`pci_test_rebind(pdev) == 0`) because the second probe cannot take vectors the first never released. The teardown is proved by the re-probe, not by an interrupt |
+| `vblk_remove` without the device reset | the leftover completions are issued for requests the device still holds; may be silent under TCG | **survived**: the boot **passed**, the test passed, 64 found and 64 completed. Predicted, and it stands as predicted — the reset is kept for the rule, not for a proof this environment can give (the `mprotect` unit's PAN bracket, again) |
+| a `thread_join` removed from `lockup-soft` | — (the repair this unit made; its own proof) | **killed** by `threads_settled(before)` after its one-second bound: waiting for the condition is no weaker than asserting it |
+| the queue released **after** the slot walk, as it was before the fix | — (the defect review found; see below) | **killed**: the walk begins while the test's read-side section is still open — `held_until < walk` fails. That is the ordering property itself, so the proof is the defect put back |
+| the leftover walk without `vb->lock` | — | **survived**, and that is the honest state: with the vector released first the walk is already exclusive, so the lock is the rule `vblk_timeout` always followed rather than the thing carrying the guarantee. It stays for the rule |
+
+Three earlier mutations proved the *first* attempt at this fix — a
+`gone`/`in_done` barrier inside the driver — and are not in the table
+because the code they perturbed is gone: the drain removed was killed,
+the counter miscounted hung the boot, and the lock alone survived.
+They are recorded here rather than deleted silently, because the
+design they belonged to was wrong for a reason worth keeping (item 8
+of the banner).
+
+**Two of the seven are killed by the kernel rather than by the test**,
+and that is worth saying plainly: for those two the test is not the
+thing standing guard, the block layer's own structure is. The test's
+counters are guarded by the fourth row instead.
 
 ## Risks
 
@@ -308,7 +398,7 @@ opt-out, and the marker is gated on it.
 
 **A test that removes a device could leave the machine worse for the
 tests after it.** The rebind is the answer, and it is asserted: the
-test ends with `vdb` back and readable. If the rebind fails the test
+test ends with the disk back and readable. If the rebind fails the test
 fails, loudly, before anything else runs on a machine with a half-dead
 function.
 
@@ -359,11 +449,18 @@ is that a proof's adversary is built from the mechanism.
 
 Named and deferred by this report: PCI hotplug (a rescan, a hotplug
 interrupt, `device_del` from the harness), which would make the
-removal an event the kernel receives rather than one a test issues; the
-same test for the NVMe, AHCI and USB drivers' remove paths, each on a
-device of its own; and `vpci_remove` under a module unload with a
-mounted filesystem on `vda`, which is a policy question (refuse, or
-drain) before it is a test.
+removal an event the kernel receives rather than one a test issues;
+**a module unload with requests in flight**, which is a different path
+from a device removal — `vblk_module_shutdown` unregisters the driver
+and the model unbinds every device it holds — and has no test at
+either level; **a removal test for the other three block drivers** (NVMe, AHCI and
+USB storage each already release their interrupt before freeing what a
+handler touches — that is where this driver's fix came from — but none
+of the three is *tested* under a removal with I/O outstanding), each
+needing a device of its own in the machine; and
+`vpci_remove` under a module unload with a mounted filesystem on
+`vda`, which is a policy question (refuse, or drain) before it is a
+test.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

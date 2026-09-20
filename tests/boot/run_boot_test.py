@@ -314,6 +314,21 @@ if SATA == "disk":
     ]
 elif SATA == "cd":
     REQUIRED_MARKERS += [r"^\[ INFO\] ahci0: port 1: an ATAPI device \(signature 0xeb140101\) is not driven"]
+# The removal disk (docs/audit/next-subsystem-virtio-remove-inflight.md):
+# a 4 MiB virtio-blk the `virtio-remove-inflight` self-test removes and
+# re-probes; vdb on q35, vdc on virt (the boot image is a virtio-blk
+# there). QEMU_RMDISK=0 leaves it out and the test skips.
+RMDISK = os.environ.get("QEMU_RMDISK", "1") != "0"
+if RMDISK:
+    REQUIRED_MARKERS += [r"^\[ INFO\] blk: vd[bc]: 8192 sectors of 512 bytes"]
+# Its self-test must have RUN rather than skipped, wherever it can: see
+# RMDISK_MARKERS below, which are checked only when this build has
+# self-tests at all (a release build compiles them out).
+RMDISK_MARKERS = [
+    r"^\[ INFO\] selftest: virtio-remove-inflight: held: ",
+    r"^\[ INFO\] selftest: virtio-remove-inflight: unheld: ",
+    r"^\[ INFO\] selftest: virtio-remove-inflight: irq-order: ",
+]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
 # An AND-OR list is left-associative, so `false && X || Y` must run Y
@@ -620,6 +635,12 @@ def main():
         f.truncate(8 * 1024 * 1024)
     env["QEMU_TESTDISK"] = testdisk
     env["QEMU_NVMEDISK"] = nvmedisk
+    # The removal disk: fresh per run like the others, unless left out.
+    if RMDISK:
+        rmdisk = args.log + ".rmdisk.img"
+        with open(rmdisk, "wb") as f:
+            f.truncate(4 * 1024 * 1024)
+        env["QEMU_RMDISK"] = rmdisk
     env["QEMU_USBDISK"] = usbdisk
     env["QEMU_SATADISK"] = satadisk
     env["QEMU_VCON"] = vcon
@@ -820,6 +841,17 @@ def main():
         failures.append("no 'SELFTEST: PASS' line")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
+
+    # The removal test skips itself in four configurations, and three of
+    # them are visible from here: no disk, one CPU, or a build without
+    # self-tests. In the configuration where it *can* run it must be seen
+    # to have run, or a suite that silently stopped exercising the
+    # removal path would keep passing
+    # (docs/audit/next-subsystem-virtio-remove-inflight.md).
+    if want_selftest and RMDISK and os.environ.get("QEMU_SMP", "4") != "1":
+        for m in RMDISK_MARKERS:
+            if not any(re.search(m, ln) for ln in lines):
+                failures.append(f"missing marker /{m}/ (the removal test skipped instead of running)")
 
     # The network exchange happens inside the self-tests; without them
     # (release builds) the harness only provided the devices.

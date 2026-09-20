@@ -463,6 +463,7 @@ static const struct selftest tests[] = {
     { "iommu",           selftest_iommu },
     { "blk-submit-unregister", selftest_blk_submit_unregister },
     { "blk-unregister-drain", selftest_blk_unregister_drain },
+    { "virtio-remove-inflight", selftest_virtio_remove_inflight },
     { "blk-lifetime",    selftest_blk_lifetime },
     { "fault-kmalloc",   selftest_fault_kmalloc },
     { "fault-blk",       selftest_fault_blk },
