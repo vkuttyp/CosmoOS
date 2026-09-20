@@ -77,7 +77,7 @@ and the banner below records where the build differed from the design.
    preemption-disabled section is the same thing to
    `synchronize_quiesce` and none of those things to the machine. It
    also took the park hook back out of the completion path.
-7. **A latent flake was repaired on the way**: six `thread_count() ==
+10. **A latent flake was repaired on the way**: six `thread_count() ==
    before` checks in `lockuptest.c`, asserted the instant a join
    returns, when the count falls at the reaper. This branch's thread
    churn exposed one on AArch64; the repair is a bounded wait, made
