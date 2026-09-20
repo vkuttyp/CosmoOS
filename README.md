@@ -1483,7 +1483,7 @@ See [docs/development.md](docs/development.md).
   `tests/native/thrtest` -- from userland, because a kernel
   self-test cannot create a *user* thread -- with eleven bug-proofs, four of
   which sent the test back for a stronger assertion rather than the code. `SYS_mprotect`, futex
-  requeue and per-thread signal targeting remain later units; `vmctl`'s
+  requeue and per-thread signal targeting were later units, and all three have since landed (#195 and the native thread door unit); `vmctl`'s
   conversion to a thread per vCPU, which was the reason for all of this,
   landed in the unit two entries below.
 - **A thread pointer, and `errno` per thread** (`docs/audit/next-subsystem-errno-tls.md`,
@@ -2919,6 +2919,35 @@ See [docs/development.md](docs/development.md).
   demand-zero memory — and libc's thread stacks deliberately keep the
   reserve-and-replace sequence #193 proved (PR #195).
 
+- **The two thread calls the native door still lacked.** After
+  `mprotect`, `README` still listed futex requeue and per-thread signal
+  targeting as what native threads went without -- both built since
+  milestone 10, both reachable only through the Linux personality.
+  `SYS_futex_requeue` (94, the compare form only: the native ABI is new
+  and need not carry the race glibc abandoned `FUTEX_REQUEUE` for) and
+  `SYS_thread_kill` (95, `tgkill` with the process implied, so another
+  process's thread is `ESRCH` by construction) close the gap. The unit's
+  substance was in libc: `cosmo_cond_broadcast` now wakes one waiter and
+  moves the rest onto the mutex, and the report's review found that a
+  requeue is not a drop-in for a three-state mutex whose unlock wakes
+  only when it finds 2 -- so the condition records its mutex (two words,
+  published `SEQ_CST` against `seq`) and waiters relock through the
+  contended path, which makes the one waiter a broadcast wakes the head
+  of a chain that every unlock carries (invariant L10,
+  `docs/libc/invariants.md`). The report's third rule, the broadcaster
+  reading the word after the requeue, was removed by its own bug-proof
+  passing, and with it the only load through the recorded pointer. The
+  measurement libc's own comment
+  had deferred: eight waiters, one broadcast, **one** sleep on the mutex
+  word against seven for wake-all, on both architectures. Building it
+  found a kernel bug: a requeue of a word onto itself re-pushed each
+  waiter to the tail of the list being walked, an unbounded loop with
+  interrupts off that any program could ask for; counted in place now,
+  and that count is how `thrtest` knows its waiters are asleep rather
+  than merely arrived. Eight `thrtest` steps, every rule bug-proofed by
+  removal with a bounded join reporting the hang; the syscall fuzzer
+  gets both calls, `thread_kill` with signal 0 only. Report:
+  `docs/audit/next-subsystem-native-thread-door.md`.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

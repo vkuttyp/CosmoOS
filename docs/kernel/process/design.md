@@ -997,6 +997,22 @@ deadline is `clock_now_ns()` plus the duration, and a value near the top of
 the range would wrap into the past and expire at once, which is the
 opposite of what the caller asked for.
 
+**Two more, from the native thread door unit**
+(`docs/audit/next-subsystem-native-thread-door.md`). `SYS_futex_requeue`
+(94) is `futex_requeue` in its compare form only: wake up to `nr_wake`
+waiters on one word and move up to `nr_requeue` more onto another
+without waking them, if the first word still holds `val`, else
+`-EAGAIN`. `SYS_thread_kill` (95) is `tgkill` with the process implied:
+`process_find_thread` on the caller's own process, then
+`signal_send_thread` with `SIGSRC_TKILL` — a tid of another process is
+`-ESRCH` by construction, so the new capability is aim, not reach. Both
+had existed in the kernel since milestone 10 and been reachable only
+through the Linux door. Their consumer is libc's `cosmo_cond_broadcast`,
+which now requeues instead of waking the herd (`docs/libc/invariants.md`
+L10), and building that found that a requeue of a word onto itself
+walked the list it was on without bound — counted in place now, as on
+Linux, and used by `thrtest` as the count of sleepers on a word.
+
 **One id, seen by both doors.** `thread.user_tid` is the id userland sees:
 the pid for a process's first thread, `0x10000 + tid` for the rest, so a
 thread id and a pid can never collide. It was `lx_tid`, "the Linux view of
@@ -1131,10 +1147,12 @@ a thread its own thread pointer, and libc keeps a 128-byte block behind it
 whose first fields are `errno` and the cached tid. `cosmo/thread.h` itself
 needs none of the three.
 
-Named and deferred: `SYS_mprotect`; futex
-requeue (the Linux door already exposes it); per-thread signal *targeting*
-(a native `tgkill`); a thread's name and priority in `struct cosmo_thread`;
-`COSMO_RLIMIT_NTHREAD`; and `/proc` per-thread entries.
+Named and deferred then, and since built: `SYS_mprotect` (the mprotect
+unit, PR #195); futex requeue and per-thread signal *targeting*
+(`SYS_futex_requeue` and `SYS_thread_kill`, the native thread door unit,
+above). Still deferred: a thread's name and priority in
+`struct cosmo_thread`; `COSMO_RLIMIT_NTHREAD`; and `/proc` per-thread
+entries.
 
 **Both of this section's named consumers have since landed.** `vmctl` runs
 a thread per vCPU (the audit unit "a thread per vCPU, and a way to stop

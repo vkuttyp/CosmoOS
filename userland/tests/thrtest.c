@@ -60,6 +60,7 @@ static int failures;
     do {                                                                     \
         if (!(cond)) {                                                       \
             printf("thrtest: FAIL %s at line %d\n", #cond, __LINE__);        \
+            fflush(stdout);   /* a later hang must not take this line with it */ \
             failures++;                                                      \
         }                                                                    \
     } while (0)
@@ -882,13 +883,13 @@ static void hd_start(cosmo_thread_t *w, unsigned n)
  * Step 25: a thread that holds `cv_m` while main broadcasts without it,
  * and unlocks at the moment the probe names, `bp_at_phase`: 0 is after
  * `seq` moved and before the requeue, 1 is after the requeue and before
- * the broadcast has looked at the word. Either way its unlock finds 1
- * (it took a free mutex; the waiters are asleep on the condition, not on
- * it) and wakes nobody. At phase 0 a broadcast that marked the word
- * *before* its requeue has had the mark undone and then moves the
- * waiters onto a free word with no unlock coming; at phase 1 the same
- * happens to one that marks after but only once, without reading. Rule
- * 2 reads 0 after the window, at either phase, and wakes one.
+ * the broadcast returns. Either way its unlock finds 1 (it took a free
+ * mutex; the waiters are asleep on the condition, not on it) and wakes
+ * nobody. The handoff must not depend on that unlock, and does not: the
+ * one waiter the requeue wakes relocks at 2 whatever the word says and
+ * its unlock carries the rest. The report designed a broadcaster-side
+ * fix-up for exactly this window; this step is what showed it was not
+ * needed, and it stays as the regression guard for the argument.
  */
 static volatile unsigned bp_holding, bp_go, bp_done, bp_phase_seen, bp_state_seen, bp_at_phase;
 static void *bp_holder(void *arg)
@@ -953,10 +954,12 @@ static void *rq_timed_waiter(void *arg)
 /*
  * Step 29's child: a condition waited on with a mutex that lives on a
  * page, the waiter gone, the page unmapped, and then a broadcast. The
- * recorded pointer is stale; the broadcast must not read through it.
- * Run in a child so that the bug-proof -- reading the word without
- * first learning from the requeue that a waiter is on it -- is a fault
- * the parent observes as a status, not the death of this program.
+ * recorded pointer is stale; the broadcast must not read through it,
+ * and nothing does -- it is an address to the kernel, which never loads
+ * a requeue's second word. Run in a child so that a broadcast that did
+ * read the word (the report's third rule, which faulted here when it
+ * was tried without its guard) is a status the parent observes, not the
+ * death of this program.
  */
 static cosmo_cond_t sm_c = COSMO_COND_INIT;
 static volatile unsigned sm_entered, sm_ready;
@@ -2309,14 +2312,14 @@ int main(int argc, char **argv)
      * uncontended). Counted: sleeps on the mutex word from the broadcast
      * to the last return. Waking all eight makes that seven by
      * construction -- every waiter but the first finds the mutex held.
-     * Requeueing makes it none: each is woken by the unlock that freed
-     * the mutex. Not "contended-path entries": every condition waiter
-     * takes that path now by rule, so that count would say nothing.
+     * Requeueing makes it one: the one the requeue wakes finds the
+     * broadcaster still holding; every other is woken by the unlock that
+     * freed the mutex. Not "contended-path entries": every condition
+     * waiter takes that path now by rule, so that count would say nothing.
      *
-     * And every waiter returns, which is the first two rules' bug-proof
-     * with a bounded join: mark the word before the requeue instead of
-     * after, or let a waiter relock through the fast path, and the join
-     * times out.
+     * And every waiter returns, which is both rules' bug-proof with a
+     * bounded join: let a waiter relock through the fast path, or have
+     * the requeue wake none, and the join times out.
      */
     {
         enum { HD_N = 8 };
@@ -2343,11 +2346,10 @@ int main(int argc, char **argv)
     STEP("24");
     /*
      * (24) **Held at 2, and not held at all.** The same eight, twice.
-     * First with the mutex already marked contended -- rule 2 reads 2 and
-     * does nothing, and the broadcaster's own unlock carries the chain.
-     * Then with the broadcaster not holding the mutex: rule 2 reads 0 and
-     * issues the one wake that starts it. Bug-proof for the second half:
-     * break on 0 without waking, and the join times out.
+     * First with the mutex already marked contended, so the broadcaster's
+     * own unlock wakes the first requeued waiter directly. Then with the
+     * broadcaster not holding the mutex: the woken waiter takes it free,
+     * at 2, and its unlock starts the chain. Same bug-proofs as 23.
      */
     {
         enum { HD_N = 8 };
@@ -2383,9 +2385,10 @@ int main(int argc, char **argv)
      * mechanism: libc's broadcast probe runs on this thread inside the
      * window, tells the holder to unlock, and waits until it has. The
      * holder's unlock finds 1 and wakes nobody; the waiters end up on a
-     * free word. A broadcast that marked the word before the requeue has
-     * had its mark undone in the first variant and strands them; rule 2
-     * reads 0 after the window, in both, and wakes one.
+     * free word, and every one still returns, because the woken waiter
+     * takes the free word at 2 and its unlock reaches the next. No
+     * mutation of the two rules is specific to this step (23 catches
+     * both); it guards the interleaving the report thought needed more.
      */
     for (unsigned at = 0; at < 2u; at++) {
         enum { N = 3 };
@@ -2413,8 +2416,8 @@ int main(int argc, char **argv)
      * (26) **A concurrent broadcaster moved `seq` first.** From inside the
      * outer broadcast's window, before its requeue, the probe broadcasts
      * again: the inner call moves every waiter and the outer's compare
-     * fails with -EAGAIN, on which it touches nothing -- the inner one's
-     * rule 2 owns the handoff. Every waiter returns.
+     * fails with -EAGAIN, on which it touches nothing -- the inner one
+     * woke the head of the chain. Every waiter returns.
      */
     {
         enum { N = 3 };
@@ -2474,10 +2477,10 @@ int main(int argc, char **argv)
     /*
      * (29) **The recorded mutex is gone, and the broadcast does not read
      * it.** In a child (`stale_mutex_child`): the waiter left, the page
-     * the mutex lived on was unmapped, and the broadcast returned. The
-     * bug-proof is a broadcast that reads the word without the requeue
-     * having reported a waiter: the child faults, and this status says
-     * so.
+     * the mutex lived on was unmapped, and the broadcast returned. Any
+     * load through the pointer faults here and this status says so;
+     * there is none, by construction, since the report's read-after-
+     * requeue was removed.
      */
     {
         const char *av[] = { SELF_PATH, "stale-mutex", NULL };

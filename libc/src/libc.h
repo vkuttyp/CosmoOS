@@ -99,11 +99,10 @@ extern void (*__cosmo_cond_probe)(void);
  * The broadcast's seam, same shape (one-shot, taken by the broadcast that
  * finds it), called twice by that one broadcast: with 0 after `seq` has
  * moved and before the requeue, with 1 after the requeue and before the
- * mutex word is made reachable. Phase 1 is the interleaving that a
- * mark-the-mutex-first design loses -- another holder's unlock landing
- * between the requeue and the mark -- and phase 0 is a concurrent
- * broadcaster moving `seq` first. Neither can be reached by arranging
- * threads.
+ * return. What runs there in `thrtest`: another holder's unlock, at
+ * either phase, which the handoff must survive; and at phase 0 a
+ * concurrent broadcaster moving `seq` first. Neither can be reached by
+ * arranging threads.
  */
 extern void (*__cosmo_cond_bcast_probe)(int phase);
 

@@ -219,6 +219,39 @@ siginfo and no `sigsuspend`. Job control is here: `SIGSTOP` and friends
 stop a process, `WUNTRACED`/`WCONTINUED` report it, and the shell has
 `jobs`/`fg`/`bg`.
 
+## cosmo/thread.h (**native**)
+
+```c
+typedef unsigned cosmo_tid_t;
+int  cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t stack_size);
+int  cosmo_thread_join(cosmo_thread_t *t, void **ret);
+void cosmo_thread_finish(void *ret);          /* noreturn */
+cosmo_tid_t cosmo_thread_id(void);
+int  cosmo_thread_kill(cosmo_tid_t tid, int sig);   /* 0 or -errno; the calling process's threads only */
+typedef struct { volatile unsigned state; } cosmo_mutex_t;            /* COSMO_MUTEX_INIT */
+typedef struct { volatile unsigned seq; void *mutex; } cosmo_cond_t;   /* COSMO_COND_INIT */
+void cosmo_mutex_lock(cosmo_mutex_t *m);  void cosmo_mutex_unlock(cosmo_mutex_t *m);  int cosmo_mutex_trylock(cosmo_mutex_t *m);
+void cosmo_cond_wait(cosmo_cond_t *c, cosmo_mutex_t *m);
+int  cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long timeout_ns);   /* 0 or -ETIMEDOUT */
+void cosmo_cond_signal(cosmo_cond_t *c);  void cosmo_cond_broadcast(cosmo_cond_t *c);
+```
+
+The header carries the contracts (wait in a `while` on a predicate,
+always; a signaller changes the predicate under the waiter's mutex);
+this file records the shapes. Every function returns `-errno` rather
+than setting `errno`, takes no library lock, and maps its stacks with
+`mmap`. `cosmo_thread_kill` is `SYS_thread_kill`: `tgkill` with the
+process implied — `-ESRCH` for any tid that is not a live thread of
+this process, `-EINVAL` for a bad signal, `sig` 0 a probe whose
+`-ESRCH` after a join is *eventual* (wait for it). The condition
+variable is two words since the native thread door unit: the sequence
+number, and the mutex it was last waited on with, which
+`cosmo_cond_broadcast` requeues the waiters onto (`SYS_futex_requeue`)
+instead of waking them all — under the two rules of invariant L10. The
+recorded mutex is only ever an address: nothing loads through it, so a
+condition may outlive the mutex it was last waited on with. One mutex
+per condition at a time, as POSIX.
+
 ## sys/socket.h, netinet/in.h, arpa/inet.h
 
 **native** `struct sockaddr { sa_family, sa_port (host order),

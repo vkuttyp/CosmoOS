@@ -109,7 +109,9 @@ documented in `docs/kernel/syscall/api.md`.
   thread, `0x10000 + kernel tid` otherwise), or NULL. A borrowed
   pointer, used only to queue a signal under the process's lock, which
   is safe while the process exists (`sig_info` lives until
-  `thread_put`).
+  `thread_put`). Callers: `tgkill`/`tkill` in the Linux personality and
+  the native `SYS_thread_kill`, which searches the caller's own process
+  only.
 
 ### `int process_wait_exit(struct process *p)`
 - Purpose: block until `p` has exited; return its status (kernel
@@ -211,7 +213,8 @@ fault_addr, code (1 unmapped, 2 protection), sender_pid, sender_uid }`.
 - `int signal_send(struct process *p, int sig, const struct signal_info *info)`,
   `int signal_send_thread(struct thread *t, int sig, ...)`: queue (any
   context; `-EINVAL` for a number outside 1..64, `-ESRCH` for a thread
-  without a process). Under `p->lock`: `SIGKILL` sets the kill flag and
+  without a process; the thread form is what `tgkill` and the native
+  `SYS_thread_kill` use, with `SIGSRC_TKILL`). Under `p->lock`: `SIGKILL` sets the kill flag and
   wakes every thread; an ignored signal (action `SIG_IGN`, or `SIG_DFL`
   with an ignore default: `SIGCHLD`, `SIGURG`, `SIGWINCH`, `SIGCONT` and
   the stop signals) is discarded even when blocked; a default-terminate

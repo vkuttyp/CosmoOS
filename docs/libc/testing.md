@@ -8,6 +8,7 @@
 | Target, user mode | `init --selftest` (`userland/init/init.c`): every system-call-backed function through the library, plus `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`, stdio on a file, `opendir`/`readdir`, `inet_pton`/`inet_ntop` | `make test` (self-test builds) |
 | Integration | The shell and the utilities are built on the library and exercised by `/etc/rc.test` and the interactive harness | `make test` |
 | Threads against the library's shared tables | `userland/tests/thrtest.c`, behind the `THREADTEST: PASS` marker | `make test` |
+| The condition variable's broadcast over requeue, and `cosmo_thread_kill` | `userland/tests/thrtest.c` steps 23–30, same marker | `make test` |
 
 ## The shared tables under threads (`userland/tests/thrtest.c`)
 
@@ -49,6 +50,47 @@ the same size class, so the freed array is reused before the reader
 reads it. Without the churn the test passes even unlocked, because
 `setenv` frees the array and never a string — the stale copy's
 pointers are all still correct.
+
+## The native thread door (`userland/tests/thrtest.c` steps 23–30)
+
+`docs/audit/next-subsystem-native-thread-door.md`. The broadcast's old
+comment deferred a measurement "to the report"; this is it, as run.
+
+**The herd** (step 23): eight waiters, each holding the mutex for a
+millisecond after its wait returns so that the herd is visible by
+construction and not by scheduling luck; one broadcast with the mutex
+held at 1. Counted from the broadcast to the last return: sleeps on the
+mutex word (calls to `futex_wait` on it), not "contended-path entries",
+which every condition waiter now makes by rule.
+
+| build | moved by the requeue | sleeps on the mutex word | wake-all would sleep | empty wakes |
+| --- | --- | --- | --- | --- |
+| x86-64 | 8 | 1 | 7 | 1 |
+| AArch64 | 8 | 1 | 7 | 1 |
+
+The one sleep is the one waiter the requeue *wakes* (wake one, move the
+rest): it finds the broadcaster still holding the mutex and sleeps on it
+once. The one empty wake is the last link of the chain, whose unlock
+finds 2 and nobody left. The test asserts sleeps below seven and prints
+the row; the wake-all broadcast put back gives seven or eight.
+
+| step | case | bug-proof (each a hang a bounded join reports, unless said) |
+| --- | --- | --- |
+| 23 | held at 1, eight waiters, every one returns | a waiter relocking through the fast path; the requeue waking none (move all); the wake-all broadcast (the count, not a hang) |
+| 24 | held at 2; not held at all | the same two hangs |
+| 25 | another thread holds the mutex and unlocks inside the broadcast, before the requeue and, separately, after it — through `__cosmo_cond_bcast_probe`, on the broadcasting thread | none specific: this is the interleaving the report's third rule was written for, and the step is what showed the two rules already cover it |
+| 26 | a concurrent broadcaster (the probe, before the requeue) moves `seq` first: `-EAGAIN`, the inner call owns the handoff | the kernel requeue without its compare |
+| 27 | a requeued timed wait expires on the mutex word, held past its budget | — (the count of moved waiters is the assertion) |
+| 28 | a condition nobody has waited on: `mutex` NULL, `seq` bumped | — |
+| 29 | the recorded mutex's page unmapped after the last waiter left; broadcast returns (a child: `thrtest stale-mutex`, status 0) | any load through the pointer: the child faults — the report's read-after-requeue did, tried without its guard, before it was removed altogether |
+| 30 | `cosmo_thread_kill`: a running sibling's handler runs there and not here; a sibling with the signal blocked sees nothing anywhere until it unblocks; this thread by its pid; another process's thread `-ESRCH` and untouched (a napping child exits 0, not 138); a joined thread `-ESRCH` eventually; bad signals `-EINVAL` | the kernel delivering to the process instead of the thread |
+
+**What the tests wait for.** "Entered" is not "asleep": step 27 moved
+nobody one run in three because its waiter was still between its
+unlock and its `futex_wait`. The steps now wait until the kernel says
+every waiter is asleep — a requeue of the condition's word onto itself,
+which the kernel counts without moving (`kernel/ipc/futex.c`; putting
+the move back stops the boot at that count, with interrupts off).
 
 ## Host test (`tests/host/test_libc.c`, `make host-test`)
 

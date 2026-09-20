@@ -342,7 +342,11 @@ list. Waiters live on the waiting thread's stack.
   compare runs unlocked between two reads of it and is redone when they
   differ. Returns woken + requeued; `-EINVAL`, `-EFAULT`. A woken waiter
   dequeues itself from whichever bucket it is on (it re-reads its bucket
-  pointer under that bucket's lock until they agree). Thread context.
+  pointer under that bucket's lock until they agree). `uaddr2 == uaddr1`
+  counts the waiters and moves none (moving them re-pushed each to the
+  tail of the list being walked: an unbounded walk with interrupts off,
+  fixed by the native thread door unit). Thread context. Also reached
+  by the native `SYS_futex_requeue` (compare form only).
 
 ## Thread pointer (`kernel/include/arch/user.h`, `kernel/arch/x86_64/user.c`, `context.c`)
 

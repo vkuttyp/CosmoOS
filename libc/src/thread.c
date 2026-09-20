@@ -354,32 +354,30 @@ void cosmo_cond_signal(cosmo_cond_t *c)
  * them through one at a time -- instead of waking all of them to contend
  * at once, of which all but one go straight back to sleep on the mutex.
  * With eight waiters that herd was seven sleeps on the mutex word per
- * broadcast, by construction; with the requeue it is none (`thrtest`,
+ * broadcast, by construction; with the requeue it is one (`thrtest`,
  * "the herd", and docs/libc/testing.md for the numbers as run).
  *
  * The requeue is not a drop-in, because `cosmo_mutex_unlock` wakes only
- * when it finds 2. Three rules (docs/audit/next-subsystem-native-thread-door.md):
+ * when it finds 2 and the fast path takes a free mutex with 1. Two rules
+ * (docs/audit/next-subsystem-native-thread-door.md, invariant L10):
  *
  *   1. A condition waiter relocks through the contended path -- in
- *      cosmo_cond_timedwait, so each woken waiter holds at 2 and its
- *      unlock reaches the next.
- *   2. AFTER the requeue, make the word reachable: read it and act --
- *      2, a holder's unlock will wake, done; 1, mark it 2; 0, nobody
- *      holds it, so wake one of the moved waiters ourselves, and rule 1
- *      makes that one the head of the chain. After and not before,
- *      because a mark made before the requeue can be undone by another
- *      holder's unlock landing in between, leaving the waiters on a free
- *      word with no unlock coming.
- *   3. Which is why the broadcaster need not hold the mutex: rule 2 asks
- *      what the word says, not who holds it.
+ *      cosmo_cond_timedwait -- so it holds at 2 and its unlock reaches
+ *      the next one asleep on the word.
+ *   2. Wake one, never none. The woken waiter is the head of the chain:
+ *      it relocks at 2 whatever the word says, so whoever holds the mutex
+ *      -- the broadcaster, a stranger, nobody -- the next unlock wakes,
+ *      and by rule 1 every link does the same. That is the whole of it.
+ *      The report designed a third step, the broadcaster reading the word
+ *      after the requeue and marking or waking as needed; the bug-proof
+ *      that removed it PASSED, because rule 2 already covers every case
+ *      it was written for, and dead code that reads through a pointer is
+ *      worse than none.
  *
- * And the word is read only after the requeue reported a waiter. The
- * recorded pointer can outlive the mutex it names -- nothing clears it
- * when the last waiter leaves -- so on our own account we pass it to the
- * kernel as an address (which it never loads) and load through it only
- * once a thread that was waiting with that very mutex has been woken or
- * moved onto it: that thread is about to relock it, so it is alive. What
- * remains is the lifetime rule in cosmo/thread.h.
+ * So the recorded pointer is never loaded through, by anyone: libc hands
+ * it to the kernel as an address, and the kernel never reads the second
+ * word of a requeue. A condition may outlive the mutex it was last waited
+ * on with and be broadcast at afterwards, and nothing is touched.
  */
 void cosmo_cond_broadcast(cosmo_cond_t *c)
 {
@@ -395,28 +393,13 @@ void cosmo_cond_broadcast(cosmo_cond_t *c)
     if (probe)
         probe(1);
     if (n == -EAGAIN) {
-        /* A concurrent broadcaster moved `seq` first; its requeue owns the
-         * waiters and its rule 2 makes them reachable. Not our word to
-         * touch. */
+        /* A concurrent broadcaster moved `seq` first; its requeue woke the
+         * head of the chain. Nothing here to do. */
         stat_inc(&__cosmo_thread_stats.bcast_eagain);
         return;
     }
-    if (n <= 0)
-        return;                        /* nobody was waiting; `m` is not read */
-    __atomic_fetch_add(&__cosmo_thread_stats.bcast_requeued, (unsigned)n, __ATOMIC_RELAXED);
-
-    for (;;) {
-        unsigned s = __atomic_load_n(&m->state, __ATOMIC_ACQUIRE);
-        if (s == 2)
-            break;                     /* whoever holds it will wake on unlock */
-        if (s == 0) {
-            cosmo_futex_wake(&m->state, 1);   /* free: start the chain ourselves */
-            break;
-        }
-        if (cas(&m->state, 1, 2) == 1)
-            break;                     /* held at 1, now 2: its unlock will wake */
-        /* The word moved under the CAS; look again. */
-    }
+    if (n > 0)
+        __atomic_fetch_add(&__cosmo_thread_stats.bcast_requeued, (unsigned)n, __ATOMIC_RELAXED);
 }
 
 int cosmo_thread_kill(cosmo_tid_t tid, int sig)

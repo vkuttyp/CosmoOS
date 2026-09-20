@@ -137,12 +137,11 @@ int cosmo_mutex_trylock(cosmo_mutex_t *m);   /* 0, or -EBUSY */
  *
  * One mutex per condition at a time. Waiting on one condition with two
  * different mutexes concurrently is undefined here as it is in POSIX; the
- * recorded word has one value that matters. And a mutex a condition has
- * been waited on with must outlive any broadcast of that condition made
- * **without holding that mutex**: a broadcaster that holds it is safe by
- * construction (nobody frees a held mutex); one that does not may read the
- * mutex word after the last waiter has left, and the storage must still
- * be there.
+ * recorded word has one value that matters. It is only ever an address:
+ * the broadcast hands it to the kernel, which never reads a requeue's
+ * second word, and nothing in this library loads through it -- so a
+ * condition that outlives the mutex it was last waited on with may still
+ * be broadcast at.
  */
 typedef struct {
     volatile unsigned seq;
@@ -161,7 +160,7 @@ typedef struct {
  *
  * `cosmo_cond_wait` may return with nothing having happened. That is not
  * an apology for the implementation, it is the interface: it is what lets
- * the structure be one word with no bookkeeping, and it is what every
+ * the structure be two words with no bookkeeping, and it is what every
  * other condition variable specifies, so a reader who knows one knows
  * this one. A caller who writes `if` instead of `while` has written a bug
  * that passes every test on an unloaded machine.
@@ -204,11 +203,10 @@ void cosmo_cond_signal(cosmo_cond_t *c);
  * Wake every waiter -- by waking one and moving the rest onto the recorded
  * mutex, so they are woken one per unlock instead of all contending at
  * once (the herd `SYS_futex_requeue` exists to avoid; the number is in
- * `docs/libc/testing.md`). Works held or not held: a broadcaster that holds
- * the mutex hands the waiters over with its own unlock; one that does not
- * still has them drained one per unlock, by whoever holds it or by the
- * broadcast itself when nobody does. See the lifetime rule at
- * `cosmo_cond_t`.
+ * `docs/libc/testing.md`). Works held or not held: the one waiter woken
+ * relocks as if contended and its unlock wakes the next, whoever holds
+ * the mutex at the time, so the broadcaster's own unlock is not what the
+ * handoff depends on.
  */
 void cosmo_cond_broadcast(cosmo_cond_t *c);
 

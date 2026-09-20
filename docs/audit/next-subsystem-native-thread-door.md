@@ -1,7 +1,69 @@
 # NEXT SUBSYSTEM — the two thread calls the native door still lacks
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(the native thread door unit), and the banner below records where the
+build differed from the design.
+
+**What the build changed:**
+
+0. **Rule 2 is gone, and its bug-proof is why.** Removing the
+   post-requeue loop — the broadcaster reading the mutex word and
+   marking or waking as needed — **passed every test**. It had to: the
+   requeue wakes one waiter, that waiter relocks at 2 by rule 1
+   whatever the word says (the broadcaster holds it, a stranger does,
+   nobody does), and its unlock wakes the next. Rule 2 covered no case
+   rule 1 and "wake one, never none" did not already cover, so the
+   built design has two rules, not three; the broadcaster never loads
+   through the recorded pointer, the kernel never reads a requeue's
+   second word, and the lifetime contract this report wrote for the
+   header — and the "kernel-side handoff" alternative kept on file to
+   close its window — are both unnecessary and not shipped. The
+   other-holder interleaving (step 25) and the stale-mutex case (step
+   29) stay as regression guards for the argument. The bug-proof that
+   does remain for the chain's head is "move all, wake none": a hang.
+1. **A kernel bug the design did not know about.** `futex_requeue` of a
+   word onto itself re-pushed each waiter to the tail of the list it
+   was walking, where it matched `uaddr1` again: an unbounded walk with
+   interrupts off that any program could ask for. Found because the
+   tests needed to know when their waiters were *asleep* — "entered" is
+   not "asleep", and step 27 moved nobody one run in three — and a
+   requeue of the condition's word onto itself is the kernel's own
+   count of sleepers. The kernel now counts such waiters in place, as
+   Linux does; the walk put back stops the boot at that count.
+2. **The herd number is one, not zero.** "Wake one, move the rest": the
+   one the requeue wakes finds the broadcaster still holding the mutex
+   and sleeps on it once. Eight waiters: 8 moved, 1 sleep against 7 for
+   wake-all, 1 empty wake (the last link of the chain), on both
+   architectures. The test asserts below *N − 1* as designed.
+3. **The broadcast probe has two phases.** `__cosmo_cond_bcast_probe`
+   is called with 0 after `seq` moves and before the requeue, and with
+   1 after the requeue and before rule 2 — one seam, taken once. The
+   report placed the other-holder interleaving at "between the requeue
+   and rule 2's read" and called it the existing probe's; it is a
+   second seam, and step 25 runs the holder's unlock at *both* phases,
+   since a mark-before-requeue design loses at phase 0 and a single
+   mark-after loses at phase 1. Step 26 uses phase 0 for the concurrent
+   broadcaster.
+4. **`cosmo_thread_kill` has one name, in `cosmo/thread.h`.** The
+   report's "two raw wrappers in `cosmo/syscall.h`" became one
+   (`cosmo_futex_requeue`): `cosmo_thread_kill` returns `-errno` and
+   needs nothing more than the call, and a second name for it in the
+   raw header would have collided with the public one.
+5. **The stale-mutex case runs in a child** (`thrtest stale-mutex`),
+   so its bug-proof is a status the parent checks rather than the death
+   of the test program — the pipe-observed shape the report named.
+6. **`thrtest` steps 23–30**, before the bound step (it exhausts a
+   resource and anything after it runs on a machine still recovering),
+   which moves the bound and the program-header steps to 31 and 32.
+7. **The measurement's counters are a libc seam**
+   (`struct __cosmo_thread_stats`: mutex sleeps, empty wakes, requeued,
+   `-EAGAIN`), relaxed increments on paths that are already a system
+   call, read by `thrtest` alone.
+8. **The fuzzer's three older thread calls stay out**, as the report
+   put it to the implementer: a random `thread_create` needs its own
+   constraints, and this unit did not write them. Named in
+   `docs/verification/design.md`.
 
 **README.md:1485-1486 names three things native threads were left
 without: `SYS_mprotect`, futex requeue and per-thread signal

@@ -120,7 +120,7 @@ of sectors is left out (a write of one sector is applied whole).
 ### `init --syscall-fuzz N SEED`
 Drops to uid/gid 1000, closes handle 0, maps one scratch page, makes `N`
 system calls with arguments from the pools in `design.md`, and prints
-`USERTEST: syscall-fuzz ok: N calls, E errors, S successes, C/56 system
+`USERTEST: syscall-fuzz ok: N calls, E errors, S successes, C/SYS_COUNT system
 calls exercised, seed SEED`; exit status 0. The kernel self-test
 `syscall-fuzz` runs it with `20000 20260905` and requires status 0. The
 excluded calls and the per-call constraints are listed in the source and

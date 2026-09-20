@@ -256,6 +256,51 @@ becomes true. The probe's necessity is itself proved: the same
 lost-wakeup bug that hangs step 19 **passes** when the test uses a
 signaller thread instead.
 
+**L10. A broadcast moves its waiters onto the mutex, and every one of
+them is reachable.** `cosmo_cond_broadcast` wakes one waiter and
+requeues the rest onto the mutex the condition recorded at wait time
+(`SYS_futex_requeue`, compare form), so they are woken one per unlock
+instead of all contending at once. Because `cosmo_mutex_unlock` wakes
+only when it finds 2, and the fast path takes a free mutex with 1, the
+requeue holds under two rules
+(`docs/audit/next-subsystem-native-thread-door.md`):
+
+1. **A condition waiter relocks through the contended path** — it
+   exchanges 2 in, never `cas(0, 1)` — because it may have been requeued
+   and woken by an unlock with others still asleep behind it, and only a
+   holder at 2 reaches them. One empty wake after a plain signal is the
+   price.
+2. **Wake one, never none.** The woken waiter is the head of the chain:
+   by rule 1 it holds at 2 whatever the word said — the broadcaster's,
+   a stranger's, nobody's — so the next unlock wakes, and every link
+   does the same. The broadcaster need not hold the mutex, and there is
+   no wake-all fallback. The report designed a third rule, the
+   broadcaster reading the word after the requeue and marking or waking
+   as the value required; its removal **passed** every test, because
+   rule 2 already covers each case it was written for, and it is gone.
+
+Two invariants on the recorded word follow. **It is published the way
+`seq` is**: the waiter's store of the mutex then load of `seq`, and the
+broadcaster's increment of `seq` then load of the mutex, are all
+`SEQ_CST` — the Dekker shape — so either the broadcaster sees the
+waiter's mutex or the waiter sees the new `seq` and never sleeps; relaxed
+accesses permit both to miss on AArch64. **It is never loaded through**:
+libc hands it to the kernel as an address, and the kernel never reads a
+requeue's second word — so a condition that outlives the mutex it was
+last waited on with may still be broadcast at, and there is no lifetime
+rule for the caller.
+
+*Checked by*: `thrtest` steps 23 to 29 (`docs/libc/testing.md`, "The
+native thread door") — the herd measured with eight waiters; every
+waiter returning with the mutex held at 1, at 2, and not held; another
+holder unlocking inside the broadcast at either phase of libc's
+`__cosmo_cond_bcast_probe`; a concurrent broadcaster answered `-EAGAIN`;
+a requeued timed wait expiring on the mutex word; a never-waited
+condition; and the recorded mutex's page unmapped before a broadcast,
+in a child so any load through the pointer is a status. Each rule's
+removal is a hang that a bounded join reports; the publication order is
+by argument, as `seq`'s is.
+
 ## Gaps (documented, not invariants)
 
 - No `<math.h>`, locales, wide characters or a wall clock
