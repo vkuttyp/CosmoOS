@@ -1122,18 +1122,42 @@ static struct blkdev *rm_find(void)
 }
 
 /* A synchronous read or write of one sector, for the before-and-after. */
-struct rm_sync { volatile unsigned done; };
-static void rm_sync_done(struct bio *bio) { __atomic_store_n(&((struct rm_sync *)bio->arg)->done, 1u, __ATOMIC_RELEASE); }
+/*
+ * The bio and the word its completion writes are **static**, not stack
+ * objects, and that is not a style choice: the block layer owns an
+ * accepted bio until `bio_complete`, and the wait below gives up after
+ * two seconds. A stack bio would leave the driver holding a pointer
+ * into a frame that has returned, and a late completion would write
+ * through it -- found in review, and the only reason the rest of this
+ * test was safe is that its submitter already used a static pool. The
+ * `busy` flag is the other half: if a request never completed, its
+ * storage is still spoken for and reusing it would be the same bug a
+ * second time, so the next call refuses instead.
+ */
+static struct rm_sync { volatile unsigned done, busy; } rm_sync_state;
+static struct bio rm_sync_bio;
+static void rm_sync_done(struct bio *bio)
+{
+    struct rm_sync *w = bio->arg;
+    __atomic_store_n(&w->busy, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&w->done, 1u, __ATOMIC_RELEASE);
+}
 static int rm_io(struct blkdev *bd, enum bio_dir dir, void *buf)
 {
-    struct rm_sync w = { 0 };
-    struct bio bio = { .dev = bd, .sector = 0, .nsectors = 1, .dir = dir, .buf = buf, .done = rm_sync_done, .arg = &w };
-    int rc = blk_submit(&bio);
-    if (rc)
+    if (__atomic_load_n(&rm_sync_state.busy, __ATOMIC_ACQUIRE))
+        return -EBUSY;   /* an earlier request never completed: its storage is still the driver's */
+    __atomic_store_n(&rm_sync_state.done, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&rm_sync_state.busy, 1u, __ATOMIC_RELEASE);
+    rm_sync_bio = (struct bio){ .dev = bd, .sector = 0, .nsectors = 1, .dir = dir, .buf = buf,
+                                .done = rm_sync_done, .arg = &rm_sync_state };
+    int rc = blk_submit(&rm_sync_bio);
+    if (rc) {
+        __atomic_store_n(&rm_sync_state.busy, 0u, __ATOMIC_RELEASE);   /* refused: never accepted, never completes */
         return rc;
-    if (!wait_flag_blk(&w.done, 2000))
-        return -ETIMEDOUT;
-    return bio.status;
+    }
+    if (!wait_flag_blk(&rm_sync_state.done, 2000))
+        return -ETIMEDOUT;   /* `busy` stays raised: the storage is not reusable until it completes */
+    return rm_sync_bio.status;
 }
 
 /* One pass: held (the window occupied by construction) or not (the
