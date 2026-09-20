@@ -597,6 +597,17 @@ static unsigned other_cpu_for_blk(void)
     return 0;
 }
 
+/* A second CPU that is neither 0 nor `avoid`, for a test that needs two
+ * threads to make progress independently; `avoid` again when the machine
+ * has only the one. */
+static unsigned other_cpu_than(unsigned avoid)
+{
+    for (unsigned c = 1; c < cpu_count(); c++)
+        if (c != avoid && cpu_online(c))
+            return c;
+    return avoid;
+}
+
 static bool wait_flag_blk(const volatile unsigned *flag, unsigned ms)
 {
     uint64_t end = clock_now_ns() + (uint64_t)ms * 1000000ULL;
@@ -1231,7 +1242,8 @@ out:
  */
 struct rm_remover {
     struct pci_device *pdev;
-    volatile unsigned done;
+    struct blkdev *bd;
+    volatile unsigned ready, go, done, parked_first;
     volatile int rc;
 };
 
@@ -1244,15 +1256,44 @@ struct rm_remover {
 static void rm_remover_main(void *arg)
 {
     struct rm_remover *rm = arg;
+    /*
+     * Ready first, then wait for the word. Everything expensive --
+     * creating this thread, mapping its stack, whatever kernel
+     * allocation that needs -- happens before a walk is parked. A
+     * thread created *after* the park can need a TLB shootdown, and a
+     * shootdown needs an acknowledgement from the CPU the parked walk
+     * sits on with interrupts disabled: the park then expires before
+     * the removal it was waiting for has even begun, which is what this
+     * test did two runs in four before the order was fixed.
+     */
+    __atomic_store_n(&rm->ready, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&rm->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    /*
+     * Arm the park here, and wait here for a walk to sit in it, because
+     * this thread is the one that is not on the parked walk's CPU. The
+     * removal's first act is its drain, so the walk has to be inside
+     * *before* the removal starts -- arming and removing without
+     * waiting leaves a window of microseconds for an interrupt to
+     * arrive in, which it usually does not. The wait itself is the gap
+     * between two completions, and the park's bound covers it.
+     */
+    g_rm->park_done(rm->bd);
+    uint64_t end = clock_now_ns() + 100ull * 1000000ull;
+    while (!g_rm->done_is_parked() && clock_now_ns() < end)
+        sched_yield();
+    __atomic_store_n(&rm->parked_first, g_rm->done_is_parked() ? 1u : 0u, __ATOMIC_RELEASE);
     rm->rc = pci_test_remove(rm->pdev);
     __atomic_store_n(&rm->done, 1u, __ATOMIC_RELEASE);
 }
 
-static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned threads0, const char **reason)
+static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned threads0, bool *caught,
+                          const char **reason)
 {
     static struct rm_submitter s;
     static struct rm_remover rm;
     bool ok = true;
+    *caught = false;
     struct thread *t = NULL, *rt = NULL;
     memset(&s, 0, sizeof(s));
     memset(&rm, 0, sizeof(rm));
@@ -1278,14 +1319,24 @@ static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned t
      * hand off to each other with nothing else in the loop; whether a
      * walk really parked is read afterwards, from the flag it set.
      */
-    g_rm->park_done(bd);
-    rt = thread_create_on(rm_remover_main, &rm, "vrmrm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    /*
+     * On a CPU of its own, away from the submitter as well as from the
+     * parked walk: the removal's `blk_unregister` waits for submitters
+     * to leave, and sharing a CPU with one made the prologue long
+     * enough for the park's bound to expire -- which is how this failed,
+     * one run in three, before the two were separated.
+     */
+    rm.bd = bd;
+    rt = thread_create_on(rm_remover_main, &rm, "vrmrm", SCHED_PRIO_DEFAULT, CPUMASK_OF(other_cpu_than(cpu)));
     RM_CHECK(rt != NULL);
-    RM_CHECK(wait_flag_blk(&rm.done, 5000));
+    RM_CHECK(wait_flag_blk(&rm.ready, 2000));
+    __atomic_store_n(&rm.go, 1u, __ATOMIC_RELEASE);
+    RM_CHECK(wait_flag_blk(&rm.done, 8000));
     thread_join(rt);
     rt = NULL;
     RM_CHECK(rm.rc == 0);
     unsigned spins = g_rm->drain_spins();
+    bool parked_first = rm.parked_first != 0;
     unsigned park_cpu = g_rm->park_cpu();
     bool parked = g_rm->done_is_parked();
     uint64_t boundary = g_rm->remove_seq();
@@ -1298,8 +1349,21 @@ static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned t
     thread_join(t);
     t = NULL;
 
-    RM_CHECK(parked);                                   /* a real completion walk sat in the window */
-    RM_CHECK(spins > 0);                                /* and the removal waited for it */
+    /*
+     * A walk has to arrive between the removal starting and its drain --
+     * a window of one `blk_unregister` and a device reset, with the
+     * submitter's completions arriving in thousands a second, so it
+     * nearly always does. When it does not there is nothing to conclude
+     * and the caller tries again rather than failing: `*caught` says
+     * which happened.
+     */
+    *caught = parked && parked_first && spins > 0;
+    if (!*caught) {
+        kinfo("selftest: virtio-remove-inflight: drained: no completion walk arrived in the removal's window "
+              "(parked %u before the removal %u, spins %u, park exit %u, in_done at the drain %u); retrying",
+              (unsigned)parked, (unsigned)parked_first, spins, g_rm->park_exit(), g_rm->in_done_at_drain());
+        goto out;
+    }
     RM_CHECK(s.other == 0 && s.c_other == 0);
     RM_CHECK(rm_completions(&s) == s.ok);
     RM_CHECK(s.c_double == 0);                          /* the walk and the removal did not both complete one */
@@ -1317,6 +1381,7 @@ static bool rm_drain_pass(struct blkdev *bd, struct pci_device *pdev, unsigned t
 out:
     g_rm->park_done(NULL);      /* never leave the park armed */
     if (rt != NULL) {
+        __atomic_store_n(&rm.go, 1u, __ATOMIC_RELEASE);   /* never leave it waiting */
         (void)wait_flag_blk(&rm.done, 5000);
         thread_join(rt);
     }
@@ -1380,6 +1445,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
     }
 
     bool ok = true;
+    unsigned drain_attempts = 0;
     for (unsigned pass = 0; pass < 3; pass++) {
         if (pass > 0) {
             bd = rm_find();
@@ -1388,12 +1454,21 @@ bool selftest_virtio_remove_inflight(const char **reason)
         /* 0: the window held open by construction. 1: the natural race,
          * a regression guard. 2: a completion walk parked inside the
          * driver, which is what the removal's drain exists for. */
-        bool passed = pass == 2 ? rm_drain_pass(bd, pdev, threads0, reason)
+        bool caught = true;
+        bool passed = pass == 2 ? rm_drain_pass(bd, pdev, threads0, &caught, reason)
                                 : rm_pass(bd, pdev, pass == 0, threads0, reason);
         bd = NULL;   /* every pass drops the reference it was given */
         if (!passed) {
             ok = false;
             goto out;
+        }
+        if (!caught) {
+            /* Nothing was in the window: rebind and run this pass again,
+             * a bounded number of times. */
+            RM_CHECK(++drain_attempts < 4);
+            RM_CHECK(pci_test_rebind(pdev) == 0);
+            pass--;
+            continue;
         }
         /* Back: the same function, the same name, the same sector. */
         RM_CHECK(pci_test_rebind(pdev) == 0);

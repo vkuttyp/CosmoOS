@@ -127,6 +127,7 @@ static unsigned g_test_releases;
  */
 static struct blkdev *g_test_park_bd;
 static unsigned g_test_done_parked, g_test_park_cpu, g_test_drain_spins;
+static unsigned g_test_park_exit, g_test_in_done_at_drain;   /* why the park left; what the drain saw */
 
 /*
  * The park waits for the *drain* rather than for a thread to release it.
@@ -147,9 +148,17 @@ static void vblk_test_park(struct vblk *vb)
     __atomic_store_n(&g_test_park_bd, NULL, __ATOMIC_RELEASE);   /* one walk, once */
     __atomic_store_n(&g_test_park_cpu, arch_cpu_id(), __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_done_parked, 1u, __ATOMIC_RELEASE);
-    uint64_t end = clock_now_ns() + 500ull * 1000000ull;
+    /*
+     * 200 ms. The drain is the removal's first act, so this waits for a
+     * store and a load and not for a prologue; the bound is a safety
+     * net, well under the one-second TLB-shootdown deadline that a CPU
+     * spinning here with interrupts off cannot acknowledge.
+     */
+    uint64_t end = clock_now_ns() + 200ull * 1000000ull;
     while (__atomic_load_n(&g_test_drain_spins, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
         arch_cpu_relax();
+    __atomic_store_n(&g_test_park_exit, __atomic_load_n(&g_test_drain_spins, __ATOMIC_ACQUIRE) ? 1u : 2u,
+                     __ATOMIC_RELEASE);
 }
 
 static void vblk_test_hold_completions(struct blkdev *bd) { __atomic_store_n(&g_test_hold_bd, bd, __ATOMIC_RELEASE); }
@@ -161,10 +170,14 @@ static void vblk_test_park_done(struct blkdev *bd)
 {
     __atomic_store_n(&g_test_done_parked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_drain_spins, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_park_exit, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_in_done_at_drain, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_park_bd, bd, __ATOMIC_RELEASE);
 }
 static bool vblk_test_done_is_parked(void) { return __atomic_load_n(&g_test_done_parked, __ATOMIC_ACQUIRE) != 0; }
 static unsigned vblk_test_park_cpu(void) { return __atomic_load_n(&g_test_park_cpu, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_park_exit(void) { return __atomic_load_n(&g_test_park_exit, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_in_done_at_drain(void) { return __atomic_load_n(&g_test_in_done_at_drain, __ATOMIC_ACQUIRE); }
 static unsigned vblk_test_drain_spins(void) { return __atomic_load_n(&g_test_drain_spins, __ATOMIC_ACQUIRE); }
 
 /* Published to the block layer at module init: this driver is a module,
@@ -179,6 +192,8 @@ static const struct blk_test_driver_hooks vblk_test_hooks = {
     .park_done = vblk_test_park_done,
     .done_is_parked = vblk_test_done_is_parked,
     .park_cpu = vblk_test_park_cpu,
+    .park_exit = vblk_test_park_exit,
+    .in_done_at_drain = vblk_test_in_done_at_drain,
     .drain_spins = vblk_test_drain_spins,
 };
 #endif
@@ -454,23 +469,40 @@ static void vblk_release(struct blkdev *bd)
 static void vblk_remove(struct virtio_device *vdev)
 {
     struct vblk *vb = vdev->priv;
-    blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
-    virtio_device_reset(vdev);   /* the device drops every in-flight request */
     /*
-     * And no completion walk is inside the driver after this. The reset
-     * stops the device; it does not wait for an interrupt handler that
-     * is already in `vblk_done`, and this kernel has no
-     * `synchronize_irq`. So the same barrier the block layer uses one
-     * level up: refuse, then drain
-     * (docs/audit/next-subsystem-virtio-remove-inflight.md).
+     * First of all, before anything else this function does: refuse new
+     * completion walks and wait for the ones already inside. A device
+     * reset stops the *device*; it does not wait for an interrupt
+     * handler that is already in `vblk_done`, and this kernel has no
+     * `synchronize_irq` -- so without this the removal reads and clears
+     * the slot table under a walk that is doing the same, and then
+     * frees the virtqueue and the DMA pool under it. The barrier is the
+     * one the block layer uses one level up (invariant Q11's shape):
+     * `gone` seq_cst, then drain `in_done`.
+     *
+     * It goes first, and not after `blk_unregister` and the reset,
+     * because a walk that has to wait here waits in interrupt context
+     * with interrupts disabled, and a CPU that cannot take an interrupt
+     * cannot acknowledge a TLB shootdown either (whose deadline is one
+     * second, `docs/testing/flakes.md`). Keeping the wait to the length
+     * of a drain rather than the length of the whole prologue is what
+     * makes that safe. The cost is small and stated: a completion the
+     * device posted after this point is not consumed, so its bio is
+     * completed `-EIO` by the leftover walk below rather than with the
+     * status the device gave it -- on a device that is being removed.
      */
     __atomic_store_n(&vb->gone, true, __ATOMIC_SEQ_CST);
+#if CONFIG_DEBUG
+    __atomic_store_n(&g_test_in_done_at_drain, __atomic_load_n(&vb->in_done, __ATOMIC_SEQ_CST), __ATOMIC_RELEASE);
+#endif
     while (__atomic_load_n(&vb->in_done, __ATOMIC_SEQ_CST) != 0) {
 #if CONFIG_DEBUG
         __atomic_fetch_add(&g_test_drain_spins, 1u, __ATOMIC_ACQ_REL);
 #endif
         sched_yield();
     }
+    blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
+    virtio_device_reset(vdev);   /* the device drops every in-flight request */
 #if CONFIG_DEBUG
     unsigned found = 0;
     for (unsigned i = 0; i < vb->nr_slots; i++)

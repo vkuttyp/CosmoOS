@@ -192,6 +192,8 @@ struct blk_test_driver_hooks {
     void (*park_done)(struct blkdev *bd);
     bool (*done_is_parked)(void);
     unsigned (*park_cpu)(void);
+    unsigned (*park_exit)(void);          /* 0 never parked, 1 the drain was seen, 2 the bound expired */
+    unsigned (*in_done_at_drain)(void);   /* completion walks inside when the drain looked */
     unsigned (*drain_spins)(void);
 };
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
