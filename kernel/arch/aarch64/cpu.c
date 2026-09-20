@@ -121,10 +121,6 @@ void arch_cpu_relax(void)
 {
     yield_hint();
 }
-/* Exported for the same reason as on x86-64: a module that spins in a
- * context where it may not sleep wants the hint. */
-#include <kernel/module.h>
-EXPORT_SYMBOL(arch_cpu_relax);
 
 void arch_cpu_wait_for_interrupt(void)
 {

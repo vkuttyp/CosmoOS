@@ -281,10 +281,10 @@ module's symbols.
 - No host unit test for the virtqueue ring logic (`virtq_add`/`virtq_pop`
   are pure enough for one with a fake transport); the target tests cover
   it only through real I/O.
-- **The removal barrier (Q11b) is compiled into every build; its
-  adversary is not.** The `gone`/`in_done` drain runs in release as in
-  debug, but the hooks that park a walk and count the drain's spins are
-  `CONFIG_DEBUG`, so a release boot exercises the barrier without
+- **The removal's teardown order (Q11b) is in every build; the
+  observation of it is not.** `virtq_free` precedes the slot walk in
+  release as in debug, but the stamps a test orders itself against are
+  `CONFIG_DEBUG`, so a release boot exercises the order without
   observing it. Accepted: the observation needs a seam, and a seam in a
   release build is a seam in the shipped driver. The debug run is the
   proof and the harness now insists it actually ran.

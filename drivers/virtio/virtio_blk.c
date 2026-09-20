@@ -11,17 +11,13 @@
  */
 
 #include <kernel/blk.h>
-#include <kernel/timer.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
-#include <kernel/sched.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
-
-#include <arch/cpu.h>
 
 #include <drivers/virtio.h>
 

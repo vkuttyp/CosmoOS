@@ -1456,9 +1456,10 @@ bool selftest_virtio_remove_inflight(const char **reason)
             bd = rm_find();
             RM_CHECK(bd != NULL);
         }
-        /* 0: the window held open by construction. 1: the natural race,
-         * a regression guard. 2: a completion walk parked inside the
-         * driver, which is what the removal's drain exists for. */
+        /* 0: the driver's slot table filled by construction. 1: the
+         * natural race, a regression guard. 2: the teardown order --
+         * a read-side section held across the removal's release of the
+         * queue's interrupt. */
         bool caught = true;
         bool passed = pass == 2 ? rm_irq_order_pass(bd, pdev, threads0, &caught, reason)
                                 : rm_pass(bd, pdev, pass == 0, threads0, reason);
