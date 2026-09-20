@@ -2870,8 +2870,13 @@ See [docs/development.md](docs/development.md).
   unit shipped a bounded retry and filed the real repair.
   `vm_user_map_anon_replace` is that repair: three critical sections,
   because the page-table teardown takes the space lock itself once
-  per chunk, with the replaced regions marked `VM_REGION_QUIESCED`
-  and **left linked** across it so the range is never unowned. The
+  per chunk, with the new region put in under the
+  same lock that clears the old ones, marked `VM_REGION_QUIESCED`
+  and still claimed across it, so **one region owns the whole
+  interval — holes included — at every instant**. An earlier version
+  claimed only the regions that existed and left a spanned hole for
+  the allocator to hand out, which review caught as a route to a
+  kernel panic. The
   claim is an ownership claim — a user fault on such a region
   installs nothing and retries, a kernel fault inside a copy reports
   `-EFAULT`, `munmap` refuses it with `-EBUSY`, and a per-space mutex

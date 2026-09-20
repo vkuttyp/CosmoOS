@@ -136,10 +136,13 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
 int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned flags);
 
 /* MAP_FIXED with POSIX semantics: take [base, base+size) whatever is
- * there. The range is owned by a region at every instant -- first the
- * ones being replaced, marked VM_REGION_QUIESCED and left linked, then
- * the new one -- so no concurrent mmap(NULL, ...) can be handed it and
- * no fault can populate a page the teardown would then free.
+ * there. The range is owned by a region at every instant: the new
+ * region goes in under the same lock that clears the old ones, marked
+ * VM_REGION_QUIESCED, and stays claimed across the teardown. So no
+ * concurrent mmap(NULL, ...) can be handed any part of the range --
+ * including a HOLE it spanned, which an earlier version left
+ * unclaimed -- and no fault can populate a page the teardown would
+ * then free.
  *
  * Every fallible step runs before the first mutation, and the page
  * accounting is applied up front, so the finishing swap cannot fail.

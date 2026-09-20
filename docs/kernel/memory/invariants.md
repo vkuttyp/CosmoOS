@@ -348,10 +348,15 @@ root.
 **M40. A fixed mapping replaces what is there, and the range is owned
 at every instant while it does.** `vm_user_map_anon_replace` is the
 only way to take a range that is already mapped. It never leaves the
-range unowned: the regions it replaces are marked
-`VM_REGION_QUIESCED` and **left linked** across the page-table
-teardown, and only then unlinked and swapped for the new region. This
-is not decoration. The teardown (`user_range_teardown`) takes
+range unowned: the replaced regions are unlinked and the **new region
+put in, marked `VM_REGION_QUIESCED`, under the same hold of the lock**,
+and it stays claimed across the page-table teardown. One region
+therefore owns the whole interval — **including any hole the range
+spanned**, which is the part an earlier version got wrong: it claimed
+only the regions that existed, so a hole belonged to nobody during the
+teardown, `vm_user_find_free` could hand it to a concurrent
+`mmap(NULL, …)`, and the swap then collided with a valid mapping and
+hit its `KASSERT`. This is not decoration. The teardown (`user_range_teardown`) takes
 `space->lock` itself, once per chunk, so it cannot run inside the
 critical section that changes the region list — and if the range were
 unowned across it, `vm_user_find_free` would hand it to the next
@@ -367,8 +372,8 @@ and a teardown chunk would install a page into the *new* region which
 that chunk would then free, leaving a live region holding a freed
 frame. `vm_user_unmap` returns `-EBUSY` rather than unlinking a
 claimed region, and `vm_space::replace_lock` serialises replacements
-against each other, so the final swap always finds exactly what it
-claimed and cannot fail.
+against each other. The insert cannot collide at all, because the
+range is cleared and filled under one hold of the lock.
 
 Every fallible step runs before the first mutation and the page
 accounting is applied up front, so that swap needs no check.
