@@ -344,3 +344,44 @@ consumed a tag per generation that nothing ever released.
 Checked by: `asid-quiet`, which asserts `kernel_space.mmu.asid == 0`
 after routing half of its four hundred switches through the kernel's
 root.
+
+**M40. A fixed mapping replaces what is there, and the range is owned
+at every instant while it does.** `vm_user_map_anon_replace` is the
+only way to take a range that is already mapped. It never leaves the
+range unowned: the regions it replaces are marked
+`VM_REGION_QUIESCED` and **left linked** across the page-table
+teardown, and only then unlinked and swapped for the new region. This
+is not decoration. The teardown (`user_range_teardown`) takes
+`space->lock` itself, once per chunk, so it cannot run inside the
+critical section that changes the region list — and if the range were
+unowned across it, `vm_user_find_free` would hand it to the next
+`mmap(NULL, …)`. That is the bug this replaced: `cosmo_thread_start`
+built a guard page by unmapping a hole in its own reservation and
+mapping it back, and lost the race three times on aarch64 CI.
+
+`VM_REGION_QUIESCED` is an **ownership claim**, not only a marker. A
+user fault on such a region installs nothing and returns so the
+instruction retries; a kernel fault inside a user copy takes the fixup
+and reports `-EFAULT`. Without that, a fault landing between the swap
+and a teardown chunk would install a page into the *new* region which
+that chunk would then free, leaving a live region holding a freed
+frame. `vm_user_unmap` returns `-EBUSY` rather than unlinking a
+claimed region, and `vm_space::replace_lock` serialises replacements
+against each other, so the final swap always finds exactly what it
+claimed and cannot fail.
+
+Every fallible step runs before the first mutation and the page
+accounting is applied up front, so that swap needs no check.
+`VM_REGION_POPULATED` is refused for the same reason: populating
+allocates, and allocation can fail after the point of no return.
+
+Checked by: `vm-replace` (replacement whole, split at both ends,
+across a hole, merging, `VM_REGION_POPULATED` refused, and a refusal
+that *would* have split leaving the region count and the accounting
+untouched); `vm-replace-race` (four hundred overlapping replacements
+from two threads plus an unmapper against them, no failed swap,
+nothing left claimed, `mapped_pages` equal to the sum of the region
+sizes). Each is bug-proofed: removing `replace_lock`, letting
+`vm_user_unmap` ignore the claim, counting whole regions instead of
+the intersection in `covered_pages`, and moving the limit check after
+the split each kill one of them.
