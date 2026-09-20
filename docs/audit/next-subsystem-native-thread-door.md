@@ -68,7 +68,7 @@ value 2; `unlock` decrements, and **wakes one waiter only if it found
 can be used, below.
 
 **The fuzzer covers none of the thread calls.** `allowed[]`
-(`userland/init/init.c:3884`) lists neither `SYS_futex_wait`,
+(`userland/init/init.c:3983`) lists neither `SYS_futex_wait`,
 `SYS_futex_wake` nor `SYS_thread_create`. That predates this unit and
 is named here; the two new calls go in with constraints, and the
 three old ones are an open question this report puts to the
