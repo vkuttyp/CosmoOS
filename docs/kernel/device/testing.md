@@ -292,9 +292,10 @@ module's symbols.
   different path from a device removal (`vblk_module_shutdown`
   unregisters the driver and the model unbinds what it holds), and
   untested at either level; `virtio-remove-inflight` removes a *device*
-  with them outstanding and leaves the module loaded. unregisters the console sink while other CPUs
-  log (invariant D12's gap), or exercises `pci_msi_enable` (every QEMU
-  virtio device has MSI-X).
+  with them outstanding and leaves the module loaded.
+- No test unregisters the console sink while other CPUs log (invariant
+  D12's gap), or exercises `pci_msi_enable` (every QEMU virtio device
+  has MSI-X).
 - No PCI hot-plug: the removal test drives `pci_test_remove` and
   `pci_test_rebind`, which are the model's own transitions, not an
   event from the machine (`device_del` over QMP would need a rescan and
