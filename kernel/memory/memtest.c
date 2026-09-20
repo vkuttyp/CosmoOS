@@ -580,6 +580,7 @@ struct repl_racer {
     size_t size;
     volatile int bad;
     volatile unsigned probes;
+    volatile int inflight;
     volatile bool stop;
 };
 
@@ -614,8 +615,23 @@ static void repl_filler(void *arg)
      * it, hole included.
      */
     while (!r->stop) {
+        /*
+         * Only while a replacement is IN FLIGHT. Outside one the test
+         * itself has punched a hole, and a hole nobody is replacing is
+         * free for the asking -- counting that made this fail against
+         * correct code as well as broken code, which is no test at all.
+         *
+         * `inflight` is read on both sides of the probe so a sample
+         * that straddles the end of a replacement is discarded. That
+         * leaves a theoretical edge and no practical one: after a
+         * replacement returns, its range is covered by a single
+         * region, so there is nothing inside it to offer until the
+         * next punch.
+         */
+        int before = r->inflight;
         uint64_t got = vm_user_find_free(r->sp, r->base, PAGE_SIZE);
-        if (got != 0 && got >= r->base && got < r->base + r->size)
+        int after = r->inflight;
+        if (before && after && got != 0 && got >= r->base && got < r->base + r->size)
             r->bad++;
         r->probes++;
     }
@@ -633,8 +649,10 @@ static void repl_hole_replacer(void *arg)
     struct repl_racer *r = arg;
     for (unsigned i = 0; i < REPL_ROUNDS; i++) {
         vm_user_unmap(r->sp, r->base + 2 * PAGE_SIZE, r->size - 4 * PAGE_SIZE, 0);
+        r->inflight = 1;
         if (vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race") != 0)
             r->bad++;
+        r->inflight = 0;
     }
     r->stop = true;
 }
