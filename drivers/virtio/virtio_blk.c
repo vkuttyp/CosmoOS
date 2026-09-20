@@ -11,13 +11,17 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/timer.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/sched.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+
+#include <arch/cpu.h>
 
 #include <drivers/virtio.h>
 
@@ -79,6 +83,19 @@ struct vblk {
     spinlock_t lock;
     bool flush;
     bool dead;                  /* a request timed out: the device was reset and every request fails */
+    /*
+     * The removal's barrier against the completion path, the same shape
+     * `blk_unregister` uses against `blk_submit` (invariant Q11): `gone`
+     * refuses new completion walks and `in_done` counts the ones inside,
+     * both sequentially consistent, so a handler that did not see `gone`
+     * has raised `in_done` before the remove reads it, or the remove saw
+     * its increment. Without it the remove frees the virtqueue and the
+     * DMA pool while an interrupt handler is walking them: a device
+     * reset stops the *device*, and nothing here waits for a handler
+     * that is already running (this kernel has no `synchronize_irq`).
+     */
+    bool gone;
+    uint32_t in_done;
 };
 
 #if CONFIG_DEBUG
@@ -98,12 +115,57 @@ static struct blkdev *g_test_hold_bd;
 static unsigned g_test_inflight_at_remove;
 static uint64_t g_test_remove_seq;
 static unsigned g_test_releases;
+/*
+ * The second adversary: park one completion walk *inside* the driver --
+ * after it has been counted in `in_done` and before it touches the slot
+ * table -- so the removal's drain has something real to wait for. A
+ * releaser thread lets it go once the drain's spin counter has moved,
+ * which is what says the drain is really draining rather than the test
+ * hoping (`blk-unregister-drain`'s shape, one level down). Bounded, so a
+ * mistake costs a slow boot rather than a wedged CPU: this spins in
+ * interrupt context.
+ */
+static struct blkdev *g_test_park_bd;
+static unsigned g_test_done_parked, g_test_park_cpu, g_test_drain_spins;
+
+/*
+ * The park waits for the *drain* rather than for a thread to release it.
+ * This spins in interrupt context, and on this machine every MSI-X
+ * vector targets CPU 0 (docs/drivers/virtio/testing.md), so a park that
+ * waited to be released would starve whichever thread was supposed to
+ * release it whenever that thread shared the CPU -- which is how the
+ * first version of this failed. Waiting for the drain's own counter
+ * needs no second thread and is the evidence the test wants anyway: the
+ * counter moved, so the removal was inside its wait while this walk was
+ * inside the driver. Bounded, so a removal that never comes costs a
+ * slow boot rather than a wedged CPU.
+ */
+static void vblk_test_park(struct vblk *vb)
+{
+    if (__atomic_load_n(&g_test_park_bd, __ATOMIC_ACQUIRE) != &vb->bd)
+        return;
+    __atomic_store_n(&g_test_park_bd, NULL, __ATOMIC_RELEASE);   /* one walk, once */
+    __atomic_store_n(&g_test_park_cpu, arch_cpu_id(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_done_parked, 1u, __ATOMIC_RELEASE);
+    uint64_t end = clock_now_ns() + 500ull * 1000000ull;
+    while (__atomic_load_n(&g_test_drain_spins, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
+        arch_cpu_relax();
+}
 
 static void vblk_test_hold_completions(struct blkdev *bd) { __atomic_store_n(&g_test_hold_bd, bd, __ATOMIC_RELEASE); }
 static unsigned vblk_test_inflight_at_remove(void) { return __atomic_load_n(&g_test_inflight_at_remove, __ATOMIC_ACQUIRE); }
 static uint64_t vblk_test_remove_seq(void) { return __atomic_load_n(&g_test_remove_seq, __ATOMIC_ACQUIRE); }
 static unsigned vblk_test_releases(void) { return __atomic_load_n(&g_test_releases, __ATOMIC_ACQUIRE); }
 static unsigned vblk_test_nr_slots(struct blkdev *bd) { return ((struct vblk *)bd->priv)->nr_slots; }
+static void vblk_test_park_done(struct blkdev *bd)
+{
+    __atomic_store_n(&g_test_done_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_drain_spins, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_park_bd, bd, __ATOMIC_RELEASE);
+}
+static bool vblk_test_done_is_parked(void) { return __atomic_load_n(&g_test_done_parked, __ATOMIC_ACQUIRE) != 0; }
+static unsigned vblk_test_park_cpu(void) { return __atomic_load_n(&g_test_park_cpu, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_drain_spins(void) { return __atomic_load_n(&g_test_drain_spins, __ATOMIC_ACQUIRE); }
 
 /* Published to the block layer at module init: this driver is a module,
  * and the kernel's self-test cannot name its symbols. */
@@ -114,6 +176,10 @@ static const struct blk_test_driver_hooks vblk_test_hooks = {
     .remove_seq = vblk_test_remove_seq,
     .releases = vblk_test_releases,
     .nr_slots = vblk_test_nr_slots,
+    .park_done = vblk_test_park_done,
+    .done_is_parked = vblk_test_done_is_parked,
+    .park_cpu = vblk_test_park_cpu,
+    .drain_spins = vblk_test_drain_spins,
 };
 #endif
 
@@ -216,9 +282,20 @@ static void vblk_done(struct virtqueue *vq)
     struct vblk *vb = vq->vdev->priv;
     uint32_t len;
     struct bio *bio;
+    if (vb == NULL)
+        return;
 #if CONFIG_DEBUG
     if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
         return;   /* held: the finished requests stay in flight for the remove to find */
+#endif
+    /* Inside: the remove waits for this to fall before it frees anything. */
+    __atomic_fetch_add(&vb->in_done, 1u, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&vb->gone, __ATOMIC_SEQ_CST)) {
+        __atomic_fetch_sub(&vb->in_done, 1u, __ATOMIC_SEQ_CST);
+        return;   /* removed: the slots are the remove's to complete, not ours */
+    }
+#if CONFIG_DEBUG
+    vblk_test_park(vb);   /* the adversary's window, counted as inside */
 #endif
     while ((bio = virtq_pop(vq, &len)) != NULL) {
         /* Ownership is decided under the lock, by pointer, before the bio
@@ -250,6 +327,7 @@ static void vblk_done(struct virtqueue *vq)
         }
         bio_complete(bio, status);
     }
+    __atomic_fetch_sub(&vb->in_done, 1u, __ATOMIC_SEQ_CST);
 }
 
 /* The device stopped answering: reset it (it drops every request) and
@@ -378,19 +456,45 @@ static void vblk_remove(struct virtio_device *vdev)
     struct vblk *vb = vdev->priv;
     blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
     virtio_device_reset(vdev);   /* the device drops every in-flight request */
+    /*
+     * And no completion walk is inside the driver after this. The reset
+     * stops the device; it does not wait for an interrupt handler that
+     * is already in `vblk_done`, and this kernel has no
+     * `synchronize_irq`. So the same barrier the block layer uses one
+     * level up: refuse, then drain
+     * (docs/audit/next-subsystem-virtio-remove-inflight.md).
+     */
+    __atomic_store_n(&vb->gone, true, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&vb->in_done, __ATOMIC_SEQ_CST) != 0) {
+#if CONFIG_DEBUG
+        __atomic_fetch_add(&g_test_drain_spins, 1u, __ATOMIC_ACQ_REL);
+#endif
+        sched_yield();
+    }
 #if CONFIG_DEBUG
     unsigned found = 0;
     for (unsigned i = 0; i < vb->nr_slots; i++)
         found += vb->inflight[i] != NULL;
     __atomic_store_n(&g_test_inflight_at_remove, found, __ATOMIC_RELEASE);
 #endif
+    /*
+     * The slots that are left, one at a time under the lock and
+     * completed outside it -- which is what `vblk_timeout` a few lines
+     * up has always done, and what this walk did not. The drain above
+     * makes the walk exclusive, so the lock is the rule rather than the
+     * thing that carries it; with neither, a completion racing here
+     * completes a bio twice or unmaps a slot twice.
+     */
     for (unsigned i = 0; i < vb->nr_slots; i++) {
-        if (vb->inflight[i]) {
-            struct bio *bio = vb->inflight[i];
+        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
+        struct bio *bio = vb->inflight[i];
+        if (bio) {
             unmap_slot(vb, i);
             vb->inflight[i] = NULL;
-            bio_complete(bio, -EIO);
         }
+        spin_unlock_irqrestore(&vb->lock, s);
+        if (bio)
+            bio_complete(bio, -EIO);
     }
 #if CONFIG_DEBUG
     /* The boundary: every completion of this device's is stamped before

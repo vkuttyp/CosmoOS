@@ -182,6 +182,11 @@ void arch_cpu_relax(void)
 {
     __asm__ volatile("pause" ::: "memory");
 }
+/* A module that spins wants the hint too (the virtio-blk driver's
+ * removal test parks a completion walk in interrupt context, where
+ * sched_yield is not available). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(arch_cpu_relax);
 
 void arch_cpu_wait_for_interrupt(void)
 {

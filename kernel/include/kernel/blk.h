@@ -186,6 +186,13 @@ struct blk_test_driver_hooks {
     uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
     unsigned (*releases)(void);                      /* release hooks run so far */
     unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
+    /* The removal's drain, raced: park one completion walk inside the
+     * driver until the drain's counter moves, then ask whether a walk
+     * parked, on which CPU, and how long the removal spun for it. */
+    void (*park_done)(struct blkdev *bd);
+    bool (*done_is_parked)(void);
+    unsigned (*park_cpu)(void);
+    unsigned (*drain_spins)(void);
 };
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
 const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);
