@@ -2971,9 +2971,22 @@ See [docs/development.md](docs/development.md).
   numbers itself earlier. Then it brings the disk back with
   `pci_test_rebind` and reads the sector written before the removal,
   which is what says the removal left the hardware sane and what lets
-  the test leave the machine as it found it. Six mutations, including
+  the test leave the machine as it found it. Nine mutations, including
   `blk_unregister` dropped from the driver's remove (a kernel page
-  fault) and a leftover slot completed twice. Found on the way and
+  fault) and a leftover slot completed twice. **And it found the defect
+  it was built to find, through review rather than through the test:**
+  `vblk_remove` touched the driver's slot table with no lock while the
+  completion path takes one -- and nothing waited for a completion
+  handler at all, because a reset stops the device but not an interrupt
+  handler already inside the driver, and this kernel has no
+  `synchronize_irq`. The removal could complete a bio twice, unmap a
+  slot twice, and free the virtqueue under a walking handler. It now
+  refuses new completion walks and drains the ones inside as its
+  **first** act -- invariant **Q11b**, the shape `blk_unregister`
+  already uses one level up, placed first so that a walk waiting with
+  interrupts off cannot outlast the one-second TLB-shootdown deadline
+  -- and a third test pass parks a real completion walk inside the
+  driver and watches the removal spin waiting for it. Found on the way and
   repaired here because it blocked the gate: six checks in
   `lockuptest.c` asserted `thread_count() == before` the instant a join
   returned, and the count falls at the reaper, not at the join —
