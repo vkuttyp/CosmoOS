@@ -1359,3 +1359,37 @@ it does not belong to, which is the mistake this file exists to stop.
 The branch it appeared on contains three Markdown files and no code
 (`git diff main..HEAD --stat`), so whatever it is, it is not the
 change under review.
+
+## `quiesce-kick-spinner` is upset by any test that creates threads
+
+**2026-09-20, found while building the `MAP_FIXED` replacement unit,
+and it is not a flake at all — which is the point of writing it
+here.** `quiesce-kick-spinner` failed on
+`mid.straggler_ipis > before.straggler_ipis` twice in a row at the
+same line, and I twice put it down to the loaded-host family this
+file describes. The control settled it in one run: **`main` passed
+360/360 on the same machine while the branch failed reliably.** A
+failure that reproduces is not a flake, and the cheapest way to tell
+is to run the parent commit.
+
+Bisected from there:
+
+| step | result |
+| --- | --- |
+| disable the new `vm-replace-race` only | 361/361 pass |
+| pin its racer threads to one CPU | still fails |
+| cut its rounds from 200 to 20 | still fails |
+| **a stub that creates and joins six no-op threads, no VM work** | **still fails** |
+
+So nothing in the new code is involved. The sensitivity is
+`quiesce-kick-spinner`'s: it pins a spinner to `other_cpu()` and
+requires a straggler IPI to be sent to it, and **any** test that
+churns kernel threads beforehand — fifty tests beforehand, in this
+case — is enough to stop that happening.
+
+Not repaired here, because it belongs to the quiescence unit and not
+to a VM one. `vm-replace-race` is registered after the quiesce block
+instead, with the reason in a comment beside it. **The next unit that
+adds a thread-creating self-test before those tests will hit this**,
+and the useful part of this entry is that the bisect above takes
+twenty minutes and the control takes four.
