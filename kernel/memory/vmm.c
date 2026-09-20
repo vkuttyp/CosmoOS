@@ -1204,9 +1204,25 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
      */
     user_range_teardown(space, (vaddr_t)base, size);
 
-    /* Release the claim and merge. Nothing here can fail. */
+    /*
+     * Release the claim across the WHOLE RANGE, not through `fresh`.
+     * `region_split` copies flags, so anything that split the claimed
+     * region while the teardown ran left pieces carrying the claim,
+     * and clearing one pointer would strand the others: faults there
+     * would retry for ever, copies would take -EFAULT, and later
+     * unmaps and replacements would see -EBUSY. Nothing splits it
+     * today -- `vm_user_protect` refuses a claimed range, just below
+     * -- and this loop is what keeps that from being load-bearing.
+     */
     s = spin_lock_irqsave(&space->lock);
-    fresh->flags &= ~VM_REGION_QUIESCED;
+    struct vm_region *qr;
+    list_for_each_entry(qr, &space->regions, link) {
+        if (qr->base + qr->size <= base)
+            continue;
+        if (qr->base >= base + size)
+            break;
+        qr->flags &= ~VM_REGION_QUIESCED;
+    }
     struct vm_region *merged[2];
     unsigned nm = region_merge_around(space, fresh, merged, 2);
     spin_unlock_irqrestore(&space->lock, s);
@@ -1247,6 +1263,20 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
     int rc = 0;
 
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    /*
+     * The same ownership rule `vm_user_unmap` keeps: a region a
+     * replacement has claimed is not ours to touch. Splitting one
+     * would be worse than unlinking it -- `region_split` copies
+     * flags, so the pieces carry the claim, and the replacement
+     * releases the range it knows about while any piece pushed
+     * outside it stays claimed for ever: faults retrying without
+     * end, copies taking -EFAULT, later unmaps refused. Review found
+     * that; the rule was stated for unmap and applied only there.
+     */
+    if (range_quiesced(space, (vaddr_t)base, size)) {
+        rc = -EBUSY;
+        goto out;
+    }
     if (!range_fully_mapped(space, (vaddr_t)base, size)) {
         rc = -ENOMEM;
         goto out;

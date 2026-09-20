@@ -648,6 +648,23 @@ static void repl_filler(void *arg)
  * REPL_ROUNDS of them, which is why the first versions of this case
  * let the mutation through.
  */
+/*
+ * Protect the range while replacements run. Must only ever see 0 or
+ * -EBUSY: a protect that split a claimed region would leave pieces
+ * carrying the claim, and the final vm_user_range_quiesced check
+ * below is what catches one that outlives its replacement.
+ */
+static void repl_protector(void *arg)
+{
+    struct repl_racer *r = arg;
+    while (!r->stop) {
+        int rc = vm_user_protect(r->sp, r->base, r->size, VM_PROT_READ);
+        if (rc != 0 && rc != -EBUSY && rc != -ENOMEM)
+            r->bad++;
+        sched_yield();
+    }
+}
+
 static void repl_hole_replacer(void *arg)
 {
     struct repl_racer *r = arg;
@@ -713,14 +730,18 @@ bool selftest_vm_replace_race(const char **reason)
     struct repl_racer e = { .sp = sp, .base = A, .size = 64 * PAGE_SIZE };
     struct thread *te = thread_create(repl_hole_replacer, &e, "vm-repl-e", SCHED_PRIO_DEFAULT);
     struct thread *tf = thread_create(repl_filler, &e, "vm-fill-f", SCHED_PRIO_DEFAULT);
-    CHECK(te != NULL && tf != NULL);
+    struct thread *tp = thread_create(repl_protector, &e, "vm-prot-g", SCHED_PRIO_DEFAULT);
+    CHECK(te != NULL && tf != NULL && tp != NULL);
     thread_join(te);
     thread_join(tf);
+    thread_join(tp);
     CHECK(e.bad == 0);     /* every replacement returned 0, and nothing panicked */
     CHECK(e.probes > 0);   /* the filler actually ran */
 
     /* Nothing is left claimed, and the space is still coherent. */
-    CHECK(!vm_user_range_quiesced(sp, A, 8 * PAGE_SIZE));
+    /* The WHOLE area the racers used, not the first eight pages: a
+     * claim stranded by a split lands at the range's edges. */
+    CHECK(!vm_user_range_quiesced(sp, A, 64 * PAGE_SIZE));
     CHECK(sp->mapped_pages == vm_user_mapped_pages_sum(sp));
 
     vm_space_destroy(sp);
