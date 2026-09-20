@@ -720,6 +720,28 @@ was.
 The sibling helper in `kernel/device/devtest.c` (`threads_settle_blk`)
 already had the bounded shape; that is where this one came from.
 
+## `irq-route`'s interrupt count, and the failure it manufactured
+
+**Seen once, 2026-09-20**, AArch64 debug, on the virtio-removal branch:
+`irq-route ... FAIL: check failed: hits >= 5` — a count of PIT
+interrupts over a fixed `udelay(50000)` (200 Hz, so ten expected and
+five demanded). That is the family this file exists for: N things after
+a fixed interval, which measures the host when the host is busy. Not
+reproduced in three further runs with the same image, and the same tree
+with the branch's new device absent (`QEMU_RMDISK=0`) passed three for
+three as well, so it is a sighting and not a consequence of the branch.
+
+**It also manufactured a second failure, and that part is a real
+defect in the test.** `irq-affinity` failed immediately after with
+`irq_request(...) == 0` returning `-EBUSY`: `irq-route`'s `CHECK`
+returns the moment the count fails, *before* its `irq_disable` and its
+release, so the GSI stays held and the next test to request one is
+refused. One flake presented as two failures, and the second names a
+subsystem it has nothing to do with. Naming it here rather than fixing
+it: the repair is the usual one for this file — a test that acquires a
+resource releases it on every exit — and it belongs to whoever next
+touches `kernel/interrupt/irqtest.c`.
+
 ## The count
 
 `net-harness` sightings live here, in one place, because six different

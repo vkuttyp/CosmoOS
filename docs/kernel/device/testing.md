@@ -244,7 +244,29 @@ the assertions are about the protected object:
   disabled, BARs unmapped — and the reason the test leaves the machine
   as it found it.
 
-The whole sequence runs twice, held and unheld. **The unheld pass finds
+**A third pass, and the defect it belongs to.** Review of the first
+build found that `vblk_remove` read and cleared `vb->inflight` with no
+lock while `vblk_done` touches it only under `vb->lock` — and, worse,
+that nothing waited for a completion handler at all: the reset stops
+the device, not a handler already inside the driver, and the removal
+went on to free the virtqueue and the DMA pool. The fix is invariant
+**Q11b** (`docs/kernel/quiesce/invariants.md`), and the third pass is
+its adversary: a real completion walk is parked *inside* the driver and
+the removal must wait for it. As run, the walk parks on cpu0 — where
+every MSI-X vector lands — and the removal spins tens to hundreds of
+times before proceeding, on both architectures.
+
+Getting that pass to be deterministic took four rounds, and each cause
+is worth knowing for the next test of this shape: the submitter and the
+removal shared a CPU, so the removal outlasted the park; the park was
+armed before the removing thread was created, and creating a thread can
+need a TLB shootdown that a parked walk (interrupt context, interrupts
+off) cannot acknowledge; the removal drained last, so the park had to
+outlast a whole prologue; and once the drain went first the window
+became too short for an interrupt to land in. It now arms from the
+removing thread, waits there for a walk to be inside, and removes.
+
+The first two passes run twice, held and unheld. **The unheld pass finds
 0 requests in flight at the remove, every run, on both architectures**
 — a QEMU device answers in microseconds — which is the measurement
 that says the hook is necessary and the unheld pass is a regression

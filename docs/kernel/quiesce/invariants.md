@@ -103,6 +103,26 @@ the `-EIO` count equal to what the remove found, and nothing completed
 after the removal's own boundary stamp
 (`docs/audit/next-subsystem-virtio-remove-inflight.md`).
 
+**Q11b. A driver's removal refuses new completion walks and waits for
+the ones inside, before it reads its own tables or frees anything.**
+The same shape as Q11 one level down, and for a reason Q11 does not
+cover: `blk_unregister` keeps *submissions* out of the driver, and a
+device reset stops the *device*, but neither waits for an interrupt
+handler that is already running the driver's completion path — this
+kernel has no `synchronize_irq`. `virtio_blk` therefore sets `gone`
+(seq_cst) and drains `in_done` as the **first** act of `vblk_remove`,
+before `blk_unregister`, the reset, the leftover completions and the
+`virtq_free`/`dma_free` that would otherwise run under a walking
+handler. First, rather than last, because a walk that waits does so in
+interrupt context with interrupts disabled, and a CPU that cannot take
+an interrupt cannot acknowledge a TLB shootdown either (one-second
+deadline, `docs/testing/flakes.md`): the wait is the length of a drain,
+not of a prologue. Check: `virtio-remove-inflight`'s third pass parks a
+real completion walk inside the driver and the removal is seen to spin
+waiting for it; removing the drain is a hang or a fault. Gap: only
+`virtio_blk` does this — the NVMe, AHCI and USB drivers have the same
+shape and no such barrier, named in the report's deferred list.
+
 **Q12. After `netif_unregister` no transmit or receive touches the
 driver, no packet of the interface is queued or being input, and no ARP
 or ND entry names it.** Steps: GONE flag → registry removal → grace

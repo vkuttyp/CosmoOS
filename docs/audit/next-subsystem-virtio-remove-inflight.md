@@ -41,6 +41,30 @@ and the banner below records where the build differed from the design.
    design did not name (the re-probe, not a late interrupt), one
    survived exactly as predicted, and one was added because of the
    first two. See "Bug-proofs, as run".
+7. **The unit found a defect, which is what it was for, and it came
+   from review rather than from the test.** `vblk_remove` read and
+   cleared the driver's slot table with no lock while the completion
+   path takes `vb->lock` for the same table — and, the deeper half,
+   *nothing waited for a completion handler at all*: `blk_unregister`
+   keeps submissions out and a device reset stops the device, but
+   neither waits for an interrupt handler already inside `vblk_done`,
+   and this kernel has no `synchronize_irq`. The removal could
+   therefore complete a bio the handler was completing, unmap a slot
+   twice, and free the virtqueue and the DMA pool under a walking
+   handler. Fixed with the barrier the block layer uses one level up —
+   `gone` then drain `in_done`, invariant **Q11b** — placed **first**
+   in `vblk_remove`, because a walk that waits does so with interrupts
+   disabled and a CPU that cannot take an interrupt cannot acknowledge
+   a TLB shootdown (one second, `docs/testing/flakes.md`). A third test
+   pass parks a real completion walk inside the driver and watches the
+   removal wait for it.
+8. **That third pass took four rounds to make deterministic**, and the
+   causes are recorded in the code and in
+   `docs/kernel/device/testing.md` rather than smoothed over: a shared
+   CPU, an arming order that let thread creation need the parked CPU, a
+   drain placed after the prologue, and then a window too short to
+   catch anything. It is five runs for five on x86-64 and two for two
+   on AArch64 now, with the retry left in as insurance and unused.
 7. **A latent flake was repaired on the way**: six `thread_count() ==
    before` checks in `lockuptest.c`, asserted the instant a join
    returns, when the count falls at the reaper. This branch's thread
@@ -332,6 +356,9 @@ design predicted in three places):
 | `vpci_remove` without `pci_msix_disable` | a late interrupt after the vector is torn down; may be silent | **killed**, by a different observable than predicted: no late interrupt appeared, and the **rebind** failed (`pci_test_rebind(pdev) == 0`) because the second probe cannot take vectors the first never released. The teardown is proved by the re-probe, not by an interrupt |
 | `vblk_remove` without the device reset | the leftover completions are issued for requests the device still holds; may be silent under TCG | **survived**: the boot **passed**, the test passed, 64 found and 64 completed. Predicted, and it stands as predicted — the reset is kept for the rule, not for a proof this environment can give (the `mprotect` unit's PAN bracket, again) |
 | a `thread_join` removed from `lockup-soft` | — (the repair this unit made; its own proof) | **killed** by `threads_settled(before)` after its one-second bound: waiting for the condition is no weaker than asserting it |
+| the removal not waiting for the completion path (the drain removed) | — (the defect review found; see below) | **killed**: no pass sees a drain, the three retries are exhausted and the step fails. By the test's own instrumentation rather than by catching the use-after-free — the parked walk's bound expires and it leaves before it can touch the freed ring |
+| the walk refused but not counted (`in_done` underflows) | — | **killed**: the drain never ends and the boot times out |
+| the leftover walk without `vb->lock` | — | **survived**, and that is the honest state: with the drain in place the walk is exclusive, so the lock is the rule `vblk_timeout` already followed rather than the thing carrying the guarantee. It stays for the rule |
 
 **Two of the seven are killed by the kernel rather than by the test**,
 and that is worth saying plainly: for those two the test is not the
