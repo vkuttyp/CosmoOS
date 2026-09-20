@@ -75,7 +75,12 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      *
      * The guard stays directly below the stack, which is what it is for --
      * the kernel gives a thread stack none, so a library that allocates one
-     * must. There is no mprotect syscall, so the guard costs a reservation,
+     * must. (There was no mprotect syscall when this was written; there is
+ * one now, and mapping read/write then protecting the guard page would
+ * be simpler. Kept as is: the reserve-and-replace sequence was proved
+ * against four mutations in the MAP_FIXED unit, and respending that
+ * for one syscall on a cold path is a separate decision, filed in the
+ * inventory.) The guard costs a reservation,
      * a hole punched in it, and a fixed map into the hole; the lowest page
      * keeps the reservation's PROT_NONE and an overflow faults there. The
      * block sits *above* the stack, where a stack that grows down never

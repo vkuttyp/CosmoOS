@@ -34,6 +34,7 @@
 #include <kernel/version.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
+#include <arch/mmu.h>
 #include <kernel/wait.h>
 #include <kernel/utsns.h>
 #include <arch/user.h>
@@ -1027,7 +1028,15 @@ static int64_t lx_mprotect(struct syscall_args *a)
         vprot |= VM_PROT_EXEC;
     if (!user_range_ok(addr, len))
         return -ENOMEM;
-    return vm_user_protect(process_current()->space, addr, len, vprot);
+    int rc = vm_user_protect(process_current()->space, addr, len, vprot);
+    if (rc)
+        return rc;
+    /* The same rule as the native door: a range made executable gets
+     * its instruction stream synchronised by the kernel, because a
+     * Linux JIT cannot do it from EL0 here either. */
+    if (vprot & VM_PROT_EXEC)
+        arch_mmu_sync_icache_user((vaddr_t)addr, len);
+    return 0;
 }
 
 static int64_t lx_madvise(struct syscall_args *a) { (void)a; return 0; }

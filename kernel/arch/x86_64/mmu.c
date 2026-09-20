@@ -579,3 +579,12 @@ void arch_mmu_near_arena(vaddr_t *lo, vaddr_t *hi)
     *lo = (vaddr_t)0xFFFFFFFF88000000ULL;   /* -mcmodel=kernel: anywhere in the top 2 GiB */
     *hi = (vaddr_t)0xFFFFFFFFFF000000ULL;
 }
+
+void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
+{
+    /* x86-64 keeps the instruction cache coherent with data stores made
+     * through the same address space; a store followed by a branch to
+     * it fetches the new bytes. Nothing to do. */
+    (void)va;
+    (void)len;
+}

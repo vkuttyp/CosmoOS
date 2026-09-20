@@ -158,6 +158,16 @@ void arch_mmu_shootdown_ipi_handler(void);
 /* Bitmask of supported leaf sizes beyond 4 KiB: PAGE_2M_SIZE | PAGE_1G_SIZE. */
 size_t arch_mmu_large_page_sizes(void);
 
+/* Make bytes written as data to [va, va+len) of the CURRENT user space
+ * visible to instruction fetch: on AArch64, clean the data cache to the
+ * point of unification, invalidate the instruction cache for the range
+ * and isb; on x86-64 nothing, its instruction cache is coherent with
+ * stores. Called from the owning process's context (the range must
+ * translate in the current regime) with the pages readable; the kernel
+ * does this, not the caller, because EL0 may not run the maintenance
+ * instructions unless SCTLR_EL1.UCI is set, which it is not. */
+void arch_mmu_sync_icache_user(vaddr_t va, size_t len);
+
 /* Lowest kernel-half virtual address; below it is user space. */
 vaddr_t arch_mmu_kernel_base(void);
 /* The near arena: kernel virtual addresses modules are loaded at, chosen

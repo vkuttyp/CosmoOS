@@ -128,6 +128,11 @@ static inline long cosmo_munmap(void *addr, size_t len)
     return cosmo_syscall2(SYS_munmap, addr, len);
 }
 
+static inline long cosmo_mprotect(void *addr, size_t len, int prot)
+{
+    return cosmo_syscall3(SYS_mprotect, addr, len, prot);
+}
+
 static inline long cosmo_log(const char *s, size_t len)
 {
     return cosmo_syscall2(SYS_log, s, len);

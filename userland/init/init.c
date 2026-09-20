@@ -3638,6 +3638,77 @@ static void syscalls_selftest(void)
     }
     CHECK(cosmo_munmap((void *)0x10, 4096) == -COSMO_EINVAL);
 
+    /*
+     * mprotect (docs/audit/next-subsystem-mprotect.md). The kernel is
+     * the observer for the permission cases, as in probe("efault"): a
+     * copy into a read-only page is -EFAULT, a copy out of a PROT_NONE
+     * page is -EFAULT, and the process never has to survive a trap.
+     */
+    {
+        const size_t P = 4096;
+        long pg = cosmo_mmap(NULL, 2 * P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        CHECK(pg > 0);
+        int ph[2];
+        CHECK(cosmo_pipe(ph) == 0);
+        if (pg > 0) {
+            *(volatile char *)pg = 'q';
+            /* RW -> R: a copy INTO it faults, and what was there survives. */
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_READ) == 0);
+            CHECK(cosmo_write(ph[1], "0123456789abcdef", 16) == 16);
+            CHECK(cosmo_read(ph[0], (void *)pg, 16) == -COSMO_EFAULT);
+            CHECK(*(volatile char *)pg == 'q');
+            /* R -> RW: the same copy succeeds; the byte before it is intact. */
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_READ | COSMO_PROT_WRITE) == 0);
+            CHECK(cosmo_write(ph[1], "0123456789abcdef", 16) == 16);
+            CHECK(cosmo_read(ph[0], (void *)(pg + 64), 16) == 16);
+            CHECK(*(volatile char *)pg == 'q' && *(volatile char *)(pg + 64) == '0');
+            /* -> PROT_NONE: a copy OUT of it faults; back to RW, contents kept. */
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_NONE) == 0);
+            CHECK(cosmo_write(ph[1], (void *)pg, 16) == -COSMO_EFAULT);
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_READ | COSMO_PROT_WRITE) == 0);
+            CHECK(*(volatile char *)pg == 'q');
+            /* Refusals: W|X; an undefined prot bit (the native flags rule);
+             * unaligned; zero length; len not a page multiple (not rounded). */
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_WRITE | COSMO_PROT_EXEC) == -COSMO_EINVAL);
+            CHECK(cosmo_mprotect((void *)pg, P, COSMO_PROT_READ | (1 << 7)) == -COSMO_EINVAL);
+            CHECK(cosmo_mprotect((void *)(pg + 1), P, COSMO_PROT_READ) == -COSMO_EINVAL);
+            CHECK(cosmo_mprotect((void *)pg, 0, COSMO_PROT_READ) == -COSMO_EINVAL);
+            CHECK(cosmo_mprotect((void *)pg, P + 1, COSMO_PROT_READ) == -COSMO_EINVAL);
+            /* A range with a hole: -ENOMEM, and the mapped page is UNCHANGED
+             * -- a failure must not be half applied. */
+            CHECK(cosmo_munmap((void *)(pg + P), P) == 0);
+            CHECK(cosmo_mprotect((void *)pg, 2 * P, COSMO_PROT_READ) == -COSMO_ENOMEM);
+            CHECK(cosmo_write(ph[1], "0123456789abcdef", 16) == 16);
+            CHECK(cosmo_read(ph[0], (void *)(pg + 128), 16) == 16);   /* still writable */
+            CHECK(cosmo_munmap((void *)pg, P) == 0);
+        }
+        cosmo_close(ph[0]);
+        cosmo_close(ph[1]);
+
+        /*
+         * The one that is not a permissions check: write a function's
+         * bytes as DATA, make the page executable, call it. This is what
+         * mprotect is for, and on AArch64 it is also the proof that the
+         * kernel synchronised the instruction stream -- the test does no
+         * cache maintenance of its own, because from EL0 it cannot.
+         */
+        long jit = cosmo_mmap(NULL, P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        CHECK(jit > 0);
+        if (jit > 0) {
+#if defined(__x86_64__)
+            static const uint8_t code[] = { 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };   /* mov eax,42; ret */
+#else
+            static const uint8_t code[] = { 0x40, 0x05, 0x80, 0x52,    /* mov w0, #42 */
+                                            0xC0, 0x03, 0x5F, 0xD6 };  /* ret */
+#endif
+            memcpy((void *)jit, code, sizeof(code));
+            CHECK(cosmo_mprotect((void *)jit, P, COSMO_PROT_READ | COSMO_PROT_EXEC) == 0);
+            int (*fn)(void) = (int (*)(void))jit;
+            CHECK(fn() == 42);
+            CHECK(cosmo_munmap((void *)jit, P) == 0);
+        }
+    }
+
     /* Milestone 5: partial unmaps split regions; a hole makes the strict
      * native munmap refuse the whole range; PROT_NONE reserves. */
     long sp = cosmo_mmap(NULL, 4 * 4096, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
@@ -3803,6 +3874,8 @@ static unsigned fz_below(unsigned n)
 }
 
 static uint8_t *g_fz_page;   /* one mapped scratch page */
+static uint8_t *g_fz_prot_page;   /* mprotect's own target: nothing else reads or writes it,
+                                    * so any protection it ends up with hurts nobody */
 
 static long fz_pointer(void)
 {
@@ -3875,6 +3948,7 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
     }
     close(0);
     g_fz_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+    g_fz_prot_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
     if (g_fz_page == MAP_FAILED) {
         printf("USERTEST: syscall-fuzz: cannot map the scratch page\n");
         return 1;
@@ -3882,7 +3956,7 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
     g_fz_rng = seed ? seed : 1;
 
     static const int allowed[] = {
-        SYS_write, SYS_getpid, SYS_yield, SYS_sleep_ns, SYS_clock_ns, SYS_mmap, SYS_munmap, SYS_log, SYS_close,
+        SYS_write, SYS_getpid, SYS_yield, SYS_sleep_ns, SYS_clock_ns, SYS_mmap, SYS_munmap, SYS_mprotect, SYS_log, SYS_close,
         SYS_open, SYS_stat, SYS_fstat, SYS_lseek, SYS_mkdir, SYS_unlink, SYS_rmdir, SYS_rename, SYS_getdents,
         SYS_sync, SYS_mount, SYS_umount, SYS_socket, SYS_bind, SYS_listen, SYS_sendto, SYS_shutdown, SYS_getsockname,
         SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
@@ -3935,6 +4009,18 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
             } else {
                 a[0] = (long)0xffff800000000000ull + (long)fz_below(4096) * 4096;
             }
+            break;
+        case SYS_mprotect:
+            /* Only its own page, or an invalid range -- never the scratch
+             * page fz_string writes into, our text, stack or heap: a random
+             * PROT_NONE there would end the fuzzer itself. Any prot. */
+            if (fz_below(2)) {
+                a[0] = (long)g_fz_prot_page + (fz_below(3) == 0 ? 1 : 0);
+                a[1] = fz_below(2) ? 4096 : fz_len();
+            } else {
+                a[0] = (long)0xffff800000000000ull + (long)fz_below(4096) * 4096;
+            }
+            a[2] = (long)fz_below(16);
             break;
         case SYS_open: case SYS_stat: case SYS_mkdir: case SYS_unlink: case SYS_rmdir: case SYS_chdir:
         case SYS_umount:
