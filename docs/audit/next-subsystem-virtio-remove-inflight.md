@@ -35,8 +35,12 @@ and the banner below records where the build differed from the design.
 5. **The boundary stamp is inside `vblk_remove`**, also from review: a
    stamp the caller takes after `pci_test_remove` returns can be beaten
    by a completion on another CPU that draws its number first.
-6. **Two of the five designed bug-proofs could not be observed, and two
-   others were added.** See "Bug-proofs, as run" below.
+6. **The bug-proofs did not land where the design aimed them.** Two
+   mutations kill the *machine* before the test can assert anything (a
+   page fault in the block layer), one was killed by an observable the
+   design did not name (the re-probe, not a late interrupt), one
+   survived exactly as predicted, and one was added because of the
+   first two. See "Bug-proofs, as run".
 7. **A latent flake was repaired on the way**: six `thread_count() ==
    before` checks in `lockuptest.c`, asserted the instant a join
    returns, when the count falls at the reaper. This branch's thread
@@ -315,30 +319,24 @@ than claiming the reset was proved.
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
 | the documented PCI numbering | `00:02.0`–`00:05.0` unchanged with the new function present (`selftest_pci` walks every function; the doc's count is corrected, not asserted) |
 
-**Bug-proofs**, each to fail for its stated reason, each reverted after:
+**Bug-proofs, as run** (x86-64, each applied, built, booted and
+reverted; the table says what actually happened, which is not what the
+design predicted in three places):
 
-- `vblk_remove` without `blk_unregister` first → a bio accepted after the
-  reset reaches a driver whose slots are freed: the submitter's bio
-  never completes, or the poisoner reports the touch. Which of the two
-  is recorded, not predicted.
-- `vblk_remove` skipping the leftover completions → the held bios never
-  complete: the submitter's accepted count never meets its completed
-  count, reported by the bounded wait; and the `-EIO` count falls short
-  of `vblk_test_inflight_at_remove()`.
-- `vblk_remove` completing a slot twice → the `-EIO` count exceeds
-  `vblk_test_inflight_at_remove()`, and a bio's `done` runs twice, which
-  the callback counts.
-- `vpci_remove` without `pci_msix_disable` → a late interrupt after the
-  vector is torn down. **May be silent under TCG** if the reset alone
-  stops the device from signalling; if it is, the report says so and
-  the proof stands on the argument, as the mprotect unit's PAN bracket
-  does.
-- `vpci_remove` without the reset → the device keeps its rings; the
-  leftover completions are issued for requests the device still holds.
-  Same caveat: the observable is the poisoner, and it may not fire.
-- the rebind without the removal having disabled MSI-X → the second
-  probe's `pci_msix_enable` fails or double-allocates: `vdb` does not
-  come back.
+| mutation | designed expectation | as run |
+| --- | --- | --- |
+| `vblk_remove` without `blk_unregister` first | a bio reaches a driver whose slots are freed: the submitter hangs, or the poisoner reports | **killed** — the machine dies first: `KERNEL PANIC: page fault: kernel write at 0x624 ... from a kernel thread`, 12 s into the boot. The defect is real and immediate; the *test's* assertions never get to speak |
+| `vblk_remove` skipping its leftover completions | the held bios never complete | **killed** by the test: `rm_completions(&s) == s.ok` — 64 accepted bios with no completion |
+| `vblk_remove` completing a leftover slot twice | the `-EIO` count exceeds what the remove found, and `c_double` fires | **killed**, but again by the machine, not the counter: a page fault at address 0 inside the block layer with `blk-pending` held. A second `bio_complete` corrupts the list before the test can count it. So this mutation does **not** prove the counter |
+| the remove reporting one more in flight than it completed | — (added because of the row above) | **killed** by `s.c_eio == found`: the equality is live, not vacuous |
+| `vpci_remove` without `pci_msix_disable` | a late interrupt after the vector is torn down; may be silent | **killed**, by a different observable than predicted: no late interrupt appeared, and the **rebind** failed (`pci_test_rebind(pdev) == 0`) because the second probe cannot take vectors the first never released. The teardown is proved by the re-probe, not by an interrupt |
+| `vblk_remove` without the device reset | the leftover completions are issued for requests the device still holds; may be silent under TCG | **survived**: the boot **passed**, the test passed, 64 found and 64 completed. Predicted, and it stands as predicted — the reset is kept for the rule, not for a proof this environment can give (the `mprotect` unit's PAN bracket, again) |
+| a `thread_join` removed from `lockup-soft` | — (the repair this unit made; its own proof) | **killed** by `threads_settled(before)` after its one-second bound: waiting for the condition is no weaker than asserting it |
+
+**Two of the seven are killed by the kernel rather than by the test**,
+and that is worth saying plainly: for those two the test is not the
+thing standing guard, the block layer's own structure is. The test's
+counters are guarded by the fourth row instead.
 
 ## Risks
 
