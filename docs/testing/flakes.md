@@ -1272,35 +1272,6 @@ change that would have altered it. What it does say is that
 "re-run it first" can no longer be relied on for this family, which
 is a practical fact for whoever hits it next.
 
-## An aarch64 boot that reached the self-tests and no further
-
-**2026-09-20, `0814e79`, the same one-document branch** (`make
-ARCH=aarch64 BUILD=debug test`). The harness reported **339**
-self-tests in 76.3 s — the usual count on this architecture is 360 —
-and then failed at 85.8 s with only userland markers missing:
-
-```text
-  - missing marker /^init: CosmoOS userland, pid \d+/
-  - missing marker /^CosmoOS userland ready/
-  - missing marker /^init: rc exited with status 0/
-```
-
-**No test failed.** There is no `SELFTEST: FAIL`, no forbidden
-marker, and no panic in the dump; the serial log simply ends inside
-`cosmofs-replay`, which is this architecture's slowest test and was
-mid-way through its mount/unmount loop over `/mnt/crash`. The guest
-stopped producing output and userland never started.
-
-This is **not** the `net-harness` family above — different symptom,
-different place, and the previous commit on this same branch failed
-the other way. It is recorded as its own shape with one sighting and
-no explanation, because the alternative is to file it under a family
-it does not belong to, which is the mistake this file exists to stop.
-
-The branch it appeared on contains three Markdown files and no code
-(`git diff main..HEAD --stat`), so whatever it is, it is not the
-change under review.
-
 **Three consecutive branches, and the aarch64 rate is worth a sentence
 of caution rather than a claim.** Sightings thirty-six through
 thirty-eight landed on three successive pull requests (#189 twice,
@@ -1358,3 +1329,33 @@ nothing. The local rate this file measures is **x86-64's**. Hunt on
 x86-64.
 
 Update this section and leave the rest alone.
+
+
+## An aarch64 boot that reached the self-tests and no further
+
+**2026-09-20, `0814e79`, the same one-document branch** (`make
+ARCH=aarch64 BUILD=debug test`). The harness reported **339**
+self-tests in 76.3 s — the usual count on this architecture is 360 —
+and then failed at 85.8 s with only userland markers missing:
+
+```text
+  - missing marker /^init: CosmoOS userland, pid \d+/
+  - missing marker /^CosmoOS userland ready/
+  - missing marker /^init: rc exited with status 0/
+```
+
+**No test failed.** There is no `SELFTEST: FAIL`, no forbidden
+marker, and no panic in the dump; the serial log simply ends inside
+`cosmofs-replay`, which is this architecture's slowest test and was
+mid-way through its mount/unmount loop over `/mnt/crash`. The guest
+stopped producing output and userland never started.
+
+This is **not** the `net-harness` family above — different symptom,
+different place, and the previous commit on this same branch failed
+the other way. It is recorded as its own shape with one sighting and
+no explanation, because the alternative is to file it under a family
+it does not belong to, which is the mistake this file exists to stop.
+
+The branch it appeared on contains three Markdown files and no code
+(`git diff main..HEAD --stat`), so whatever it is, it is not the
+change under review.
