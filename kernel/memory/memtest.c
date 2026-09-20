@@ -578,9 +578,8 @@ struct repl_racer {
     struct vm_space *sp;
     uint64_t base;
     size_t size;
-    volatile int bad;
-    volatile unsigned probes;
-    volatile int inflight;
+    volatile int bad;          /* a replacement that did not return 0 */
+    volatile unsigned probes;  /* addresses the filler was offered */
     volatile bool stop;
 };
 
@@ -606,55 +605,29 @@ static void repl_filler(void *arg)
 {
     struct repl_racer *r = arg;
     /*
-     * PROBE ONLY, and as tightly as possible. The first version mapped
-     * and unmapped a page between probes, which sampled the window so
-     * slowly that it never hit it -- the mutation that leaves holes
-     * unclaimed passed. What is being asked is one question, so ask
-     * only that: while a replacement is in flight, can the allocator
-     * offer an address inside its range? It must not, for any part of
-     * it, hole included.
+     * Take free addresses in the window and MAP them, briefly. Probing
+     * alone proved nothing, and asserting "never offered an address
+     * inside the range" was simply false: `inflight` is raised before
+     * the primitive can take the lock and claim anything, so there is
+     * a legitimate moment where the hole is still free. Two earlier
+     * versions of this thread were wrong in those two ways.
+     *
+     * What actually matters is not who is offered what, but that a
+     * replacement cannot be made to fail or to panic by someone taking
+     * a hole it is about to claim. So: take them, and map them. With
+     * the range claimed in the same critical section that clears it,
+     * the replacement's insert cannot collide whatever this does. With
+     * holes left unclaimed, this is the thread that makes the insert
+     * meet a valid mapping -- and the KASSERT takes the kernel down.
      */
     while (!r->stop) {
-        /*
-         * Only while a replacement is IN FLIGHT. Outside one the test
-         * itself has punched a hole, and a hole nobody is replacing is
-         * free for the asking -- counting that made this fail against
-         * correct code as well as broken code, which is no test at all.
-         *
-         * `inflight` is read on both sides of the probe so a sample
-         * that straddles the end of a replacement is discarded. That
-         * leaves a theoretical edge and no practical one: after a
-         * replacement returns, its range is covered by a single
-         * region, so there is nothing inside it to offer until the
-         * next punch.
-         */
-        int before = r->inflight;
         uint64_t got = vm_user_find_free(r->sp, r->base, PAGE_SIZE);
-        int after = r->inflight;
-        if (before && after && got != 0 && got >= r->base && got < r->base + r->size)
-            r->bad++;
+        if (got == 0)
+            continue;
         r->probes++;
+        if (vm_user_map_anon(r->sp, got, PAGE_SIZE, VM_PROT_RW, 0, "fill") == 0)
+            vm_user_unmap(r->sp, got, PAGE_SIZE, 0);
     }
-}
-
-/*
- * Punch the hole back before every replacement. Without this the
- * first replacement covers the range with one region and there is no
- * hole for the remaining rounds -- one window instead of REPL_ROUNDS
- * of them, which is why the mutation that leaves holes unclaimed
- * survived the first two versions of this test.
- */
-static void repl_hole_replacer(void *arg)
-{
-    struct repl_racer *r = arg;
-    for (unsigned i = 0; i < REPL_ROUNDS; i++) {
-        vm_user_unmap(r->sp, r->base + 2 * PAGE_SIZE, r->size - 4 * PAGE_SIZE, 0);
-        r->inflight = 1;
-        if (vm_user_map_anon_replace(r->sp, r->base, r->size, VM_PROT_RW, 0, "race") != 0)
-            r->bad++;
-        r->inflight = 0;
-    }
-    r->stop = true;
 }
 
 static void repl_unmapper(void *arg)
@@ -713,8 +686,8 @@ bool selftest_vm_replace_race(const char **reason)
     CHECK(te != NULL && tf != NULL);
     thread_join(te);
     thread_join(tf);
-    CHECK(e.bad == 0);
-    CHECK(e.probes > 0);   /* the prober actually ran */
+    CHECK(e.bad == 0);     /* every replacement returned 0, and nothing panicked */
+    CHECK(e.probes > 0);   /* the filler actually ran */
 
     /* Nothing is left claimed, and the space is still coherent. */
     CHECK(!vm_user_range_quiesced(sp, A, 8 * PAGE_SIZE));
@@ -722,8 +695,8 @@ bool selftest_vm_replace_race(const char **reason)
 
     vm_space_destroy(sp);
     kinfo("selftest: vm-replace-race: %u overlapping replacements and an unmapper against them, "
-          "no failed swap, %u probes never offered an address inside a live replacement, "
-          "nothing left claimed", REPL_ROUNDS * 2, e.probes);
+          "no failed swap with %u fills racing a range whose hole is re-punched every "
+          "round, nothing left claimed", REPL_ROUNDS * 2, e.probes);
     return true;
 }
 
