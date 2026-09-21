@@ -3096,29 +3096,33 @@ See [docs/development.md](docs/development.md).
   shared mapping on x86-64 / AArch64, 3.9 / 6.6 us with one, and a
   cross-process round trip 132 / 145 us. Invariant **I7**.
   Report: `docs/audit/next-subsystem-shared-futex.md` (PR #203).
-- **The hold that held only at the door.** `virtio-remove-inflight`'s
-  held pass found **0** in flight once in CI, on a branch that touches
-  no driver: the seam that parks a device's finished requests was
-  checked once at `vblk_done`'s entry, so a handler already inside its
-  pop loop when the hold landed kept popping, and a QEMU device
-  finishes a table's worth in one burst. The check now runs before
-  every pop, and a fourth pass, `held-inside`, builds that moment
-  rather than racing for it -- every hold in it stored from a
-  completion callback, the parked requests known to be finished at the
-  device by an exact seam (`unconsumed`: used entries not yet popped)
-  instead of a wait. With the check back at the door it fails
-  deterministically. Recorded in `docs/testing/flakes.md`;
-  `docs/kernel/device/testing.md`; the #199 report's banner, item 11
-  (PR #204). **And that reading was wrong**: the same failure recurred
-  on the fixed driver the same day, and the mechanism is the test's own
-  count -- an accept counted after `blk_submit` returned, a completion
-  counted before it on the other CPU, and `accepted - completed`
-  wrapping for an instant, so the wait for a full table exited at once.
-  The accept is counted before the submit now and the order is
-  asserted by the test thread on every turn; the worst case of the old
-  order fails within a millisecond. The per-pop check stays: the hole
-  it closed is real, it just was not this one. Item 12 of the same
-  banner, and the same section of `docs/testing/flakes.md`.
+- **The count that could wrap, and the hold that held only at the door.**
+  `virtio-remove-inflight`'s held pass found **0** in flight twice in
+  CI, on branches that touch no driver, with every bio completed `0`
+  and the pass over in 30 ms. The cause was the test's own count: the
+  submitter counted an accept after `blk_submit` returned while the
+  completion callback on the other CPU had already counted the
+  completion, so `accepted - completed` -- two unsigned words --
+  wrapped for that instant, the wait for a full table exited at once,
+  and the remove walked an empty table. The accept is counted before
+  the submit now, and the pass asserts `completed <= accepted` on every
+  turn of its loops, completed read first and both atomically, from
+  the test thread while the submitter runs on the other CPU; the worst
+  case of the old order fails that assertion within a millisecond
+  (PR #206). Reading the first sighting also found a real hole in the
+  test's seam, closed on the way (PR #204): the hold that parks a
+  device's finished requests was checked once at `vblk_done`'s entry,
+  so a handler already inside its pop loop when the hold landed kept
+  popping. The check runs before every pop now, and a fourth pass,
+  `held-inside`, builds that moment rather than racing for it -- every
+  hold in it stored from a completion callback, the parked requests
+  known to be finished at the device by an exact seam (`unconsumed`:
+  used entries not yet popped) instead of a wait; with the check back
+  at the door it fails deterministically. The hole was real and was
+  first taken for the cause; the second sighting, on the driver with
+  the hole closed, is what named the count. `docs/testing/flakes.md`;
+  `docs/kernel/device/testing.md`; the #199 report's banner, items 11
+  and 12.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
