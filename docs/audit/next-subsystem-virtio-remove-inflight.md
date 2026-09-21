@@ -94,6 +94,16 @@ and the banner below records where the build differed from the design.
    (`unconsumed`: used entries the driver has not popped) in place of a
    wait on the clock. `docs/kernel/device/testing.md`, and the record in
    `docs/testing/flakes.md`.
+12. **The failure that led to item 11 had another cause, found when it
+   recurred on the fixed driver the same day**: the test counted an
+   accept after `blk_submit` returned while the completion callback on
+   the other CPU had already counted the completion, and `accepted -
+   completed` wrapped for that instant, so the held pass's wait for a
+   full table exited at once and the remove walked an empty table. The
+   accept is counted before the submit now, and the pass asserts
+   `completed <= accepted` on every turn of its loops; the worst case
+   of the old order fails within a millisecond. Item 11's hole is real
+   and stays closed; it was not this. `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,

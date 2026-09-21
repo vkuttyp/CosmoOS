@@ -1631,9 +1631,35 @@ stored from a completion callback, from inside the handler, and the
 two requests it parks behind the hold are known to be finished at the
 device by a new exact seam (`unconsumed`: used-ring entries not yet
 popped) rather than by waiting. It fails deterministically with the
-check back at the door (`docs/kernel/device/testing.md`). No re-run
-was needed to discharge the sighting: the mechanism is gone, not
-outwaited.
+check back at the door (`docs/kernel/device/testing.md`).
+
+**The reading above was wrong, and the second sighting said so.** With
+the per-pop check merged (`cc645a0`), PR #205's x86-64
+protection-capable boot failed the same way the same day (run
+35594…, `found >= 1`, 35 ms, every bio completed `0`). The contract
+hole the per-pop check closed is real -- the `held-inside` pass proves
+it -- but it was not this failure's mechanism. The mechanism is the
+**test's own count**: the submitter counted an accept *after*
+`blk_submit` returned, while the completion callback on the other CPU
+had already counted the completion (a QEMU device answers in
+microseconds), so for that instant `completed` exceeded `accepted`,
+and `accepted - completed` -- two unsigned words -- wrapped to a huge
+number. The held pass's wait for "more outstanding than the table
+holds" exited on it at once, the remove ran against a table with
+nothing in it, and every assertion but the count held, which is
+exactly the shape both sightings had. The accept is now counted before
+the submit and uncounted on refusal, and the pass asserts `completed
+<= accepted` on every turn of both its loops, from the test thread
+while the submitter runs on the other CPU -- the only observer an
+ordering between two counters can have. The worst case of the old
+order (the accept counted after its own completion, held open for a
+millisecond) fails that assertion within a millisecond of the pass
+starting; a mere `sched_yield` in the window did not, because a yield
+with nothing else runnable is a no-op, and that is worth writing down
+too. What this cost: a plausible mechanism that explained every number
+was taken for the mechanism, and the second sighting on the fixed code
+is what named the real one -- the reading this file's own rule
+(*instrument before theorising*) exists to prevent.
 
 ## `el2-guest-irq-queue`: the second injection was not still pending
 

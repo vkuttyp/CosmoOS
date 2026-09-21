@@ -277,13 +277,12 @@ publishes to the block layer at its init
 (`blk_test_driver_hooks_set`), because the kernel image cannot name a
 module's symbols.
 
-**A fourth pass, and the failure it belongs to.** The hold was first
+**A fourth pass, and the hole it belongs to.** The hold was first
 checked once, at the handler's door. A handler already inside its pop
-loop when the hold was stored kept popping, and a QEMU device finishes
-a table's worth in one burst, so once in CI the held pass found **0**
-in flight with every other assertion holding
-(`docs/testing/flakes.md`, "`virtio-remove-inflight`'s held pass found
-nothing"). The check now runs before every pop, and the `held-inside`
+loop when the hold was stored kept popping, which is a hole in the
+seam's contract; it was found while reading a CI failure of the held
+pass (`found >= 1`) that turned out to have another cause, below. The
+check now runs before every pop, and the `held-inside`
 pass builds that moment instead of racing for it: every hold in it is
 stored from a completion callback -- from inside the handler -- so no
 handler can be between its check and its pop when a hold lands. It
@@ -300,6 +299,23 @@ check back at the door the handler pops all three and the remove finds
 the first of the two counts the pass asserts; the held pass beside it
 still found its 64 that run, which is the difference between a window
 raced and a window built.
+
+**The failure's real cause was the count.** The held pass found 0 in
+flight twice in CI, before and after the per-pop check, with every
+bio completed `0` and the pass over in 30 ms: the submitter counted an
+accept after `blk_submit` returned, the completion callback on the
+other CPU counted the completion first, and `accepted - completed`
+(two unsigned words) wrapped for that instant, so the wait for "more
+outstanding than the table holds" exited at once and the remove walked
+an empty table. The accept is now counted before the submit and
+uncounted on refusal, and the pass asserts `completed <= accepted` on
+every turn of both its loops from the test thread, which is the
+observer an ordering between two counters needs. The worst case of the
+old order -- the accept counted after its own completion, held open
+for a millisecond -- fails that assertion within a millisecond
+(`check failed: rm_completions(&s) <= s.ok`); a `sched_yield` alone in
+the window does not, being a no-op with nothing else runnable
+(`docs/testing/flakes.md`).
 
 ## Gaps
 

@@ -3109,7 +3109,16 @@ See [docs/development.md](docs/development.md).
   instead of a wait. With the check back at the door it fails
   deterministically. Recorded in `docs/testing/flakes.md`;
   `docs/kernel/device/testing.md`; the #199 report's banner, item 11
-  (PR #204).
+  (PR #204). **And that reading was wrong**: the same failure recurred
+  on the fixed driver the same day, and the mechanism is the test's own
+  count -- an accept counted after `blk_submit` returned, a completion
+  counted before it on the other CPU, and `accepted - completed`
+  wrapping for an instant, so the wait for a full table exited at once.
+  The accept is counted before the submit now and the order is
+  asserted by the test thread on every turn; the worst case of the old
+  order fails within a millisecond. The per-pop check stays: the hole
+  it closed is real, it just was not this one. Item 12 of the same
+  banner, and the same section of `docs/testing/flakes.md`.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
