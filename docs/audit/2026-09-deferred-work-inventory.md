@@ -69,7 +69,7 @@ paragraph (same pull request), and the README now points here.
 | the cwd-ref fix is a regression test, not a proof; the seam that would prove it is named and not built | README.md:1637; `docs/audit/next-subsystem-cwd-ref.md` |
 | `net-bench` took 71 s once in a hundred boots (x86-64, throughput normal, time lost between rounds; a retransmit backoff after a receive-queue drop is the likeliest mechanism) | README.md:1804; `docs/testing/flakes.md` history |
 | the userland test programs' own timing assumptions (`thrtest`, `cwdtest`) | `docs/audit/next-subsystem-suite-waits.md`, deferrals |
-| no named pipes and ~~no unix sockets~~ ("both things this kernel does not have") -- **the unix socket is BUILT (the unix-sockets unit, `docs/audit/next-subsystem-unix-sockets.md`)**, with `mknod` and the `VNODE_SOCK` node; the named pipe remains, and is now a `VNODE_FIFO` through the same `mknod` plus the pipe's queue | README.md:650 |
+| ~~no named pipes and no unix sockets ("both things this kernel does not have")~~ **BOTH BUILT**: the unix socket by the unix-sockets unit (`docs/audit/next-subsystem-unix-sockets.md`, `mknod` and the `VNODE_SOCK` node), the named pipe by the named-pipes unit (`docs/audit/next-subsystem-named-pipes.md`: `VNODE_FIFO` through the same `mknod`, the pipe's ring split from its ends, POSIX's open rules, files that can say whether they would block) | README.md:650 |
 
 ### 1.4 Explicitly not done, by decision or measurement
 

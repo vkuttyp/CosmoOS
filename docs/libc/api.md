@@ -106,9 +106,12 @@ An unknown conversion prints the `%` and the character.
 ## unistd.h, fcntl.h, sys/stat.h, dirent.h, sys/mount.h, sys/mman.h, time.h
 
 - `open(path, flags, [mode])` with `O_RDONLY`, `O_WRONLY`, `O_RDWR`,
-  `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY` (the native
-  `COSMO_O_*` values); `read`, `write`, `close`, `lseek`, `unlink`,
-  `rmdir`, `rename`, `mkdir(path, mode)`, `sync`, `access(path, mode)`
+  `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_NOFOLLOW`,
+  `O_NONBLOCK` (the native `COSMO_O_*` values; `O_NONBLOCK` is a FIFO's
+  open rules and per-open mode, the named-pipes unit); `read`, `write`,
+  `close`, `lseek`, `unlink`, `rmdir`, `rename`, `mkdir(path, mode)`,
+  `mkfifo(path, mode)` (`SYS_mknod` with `COSMO_DT_FIFO`), `sync`,
+  `access(path, mode)`
   (`stat` plus a mode-bit check for `X_OK`), `isatty(fd)` (a successful
   `tcgetattr`; sets `ENOTTY`), `getpid`, `getppid`, `chdir`, `getcwd(buf,
   size)` (NULL `buf` allocates), `dup`, `dup2`, `pipe`, `sleep`
@@ -118,7 +121,7 @@ An unknown conversion prints the `%` and the character.
   fields `st_ino`, `st_type` (`DT_*`), `st_mode`, `st_nlink`, `st_uid`,
   `st_gid`, `st_size`, `st_mtime_ns`, `st_ctime_ns`. `S_ISREG`, `S_ISDIR`,
   `S_ISCHR`, `S_ISFIFO`, `S_ISSOCK` take `st_type`, not `st_mode`.
-  `stat`, `fstat` (works on files, the console, pipe ends).
+  `stat`, `fstat` (works on files, FIFOs, the console, pipe ends).
 - `DIR`, `struct dirent { d_ino, d_type, d_name[256] }`, `opendir`
   (`O_RDONLY | O_DIRECTORY`), `readdir` (4 KiB `getdents` refills; a
   malformed record sets `EIO`), `closedir`. `DT_UNKNOWN/REG/DIR/CHR/

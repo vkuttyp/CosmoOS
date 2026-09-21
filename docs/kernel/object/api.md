@@ -49,7 +49,12 @@ mode is a property of the object, shared by every handle to it (there
 is no open-file-description layer between a handle and its object).
 `struct waitqueue *poll_wq(obj, unsigned events)` returns the queue a
 waiter for `events` sleeps on, woken whenever `ready` may have changed
-for those bits; NULL means readiness never changes (a file). The
+for those bits; NULL means readiness never changes (a regular file).
+Since the named-pipes unit a `struct file`'s three answers come from
+its vnode's optional `ready`/`poll_wq`/`set_nonblock` when the vnode
+has them (a FIFO does; a device may) and are the defaults otherwise --
+and because each open of a node is its own `struct file`, a FIFO's
+non-blocking mode is per open, as POSIX has it. The
 asynchronous I/O ring (`docs/kernel/io/`) is built on `ready` and
 `poll_wq` alone. `int flush(obj)` is called by `handle_close` on the
 object it is about to put, before the put, on the closer's thread:
