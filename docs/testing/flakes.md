@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Sixty-five, to 2026-09-21**, across CI and this developer's machine, on
+**Sixty-six, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -843,6 +843,7 @@ of this section said eight and then listed nine:
 | `main` @ `92f5bd2` | observed, aarch64, the protection-capable boot of the unix-sockets report merge's `main` run on 2026-09-21 (35601645471), read from the logs afterwards: **`connect -104 in 1327 ms`** -- the connect itself reset, `sent -1`, `recv -1`, `pending error -104`, `sndbuf free 0`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:43980 accepted at 74.7s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 94.7s. The connect-reset shape of PR #171's first and `26c1b5f`'s aarch64, this time with a retransmission |
 | `main` @ `19f508c` | observed, aarch64, the plain debug boot of the named-pipes report merge's `main` run on 2026-09-21 (35620649878, a documentation-only commit), read from the logs afterwards: `connect 0 in 1213 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:35822 accepted at 96.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 2 ms`, gave up at 116.1s. Row one |
 | PR #209's own CI run | observed, aarch64, the plain debug boot (`84df382`, run 35631426307, the named-pipes build, whose diff touches no inet path): `connect 0 in 638 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:38752 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 115.0s; the self-test blew its budget at 21128 ms against 8000 ms, which is the waiting. Row one |
+| PR #209's own CI run, a later commit -- **x86-64** | observed, x86-64, the plain debug boot (`fd8beaa`, run 35634418562, a **documentation-only** commit: five files of prose restating one rule): `connect 0 in 926 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:43012 accepted at 82.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 102.8s. Row one, and this PR's second sighting, one per architecture |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -853,15 +854,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty-three entries, sixty-five occurrences -- and the table is the tally,
+Fifty-four entries, sixty-six occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last forty-eight rows carry
-the instrument's reading, forty-one of them watched as they happened
+are not independently re-verified here. The last forty-nine rows carry
+the instrument's reading, forty-two of them watched as they happened
 and seven of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-six
-instrumented** occurrences behind the other forty-seven rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-seven
+instrumented** occurrences behind the other forty-eight rows carry the
 guest's side. Rows and occurrences differ because **eleven** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
