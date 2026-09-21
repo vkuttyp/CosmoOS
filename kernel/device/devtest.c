@@ -1112,6 +1112,37 @@ static unsigned rm_completions(const struct rm_submitter *s)
            __atomic_load_n(&s->c_enodev, __ATOMIC_ACQUIRE) + __atomic_load_n(&s->c_other, __ATOMIC_ACQUIRE);
 }
 
+static bool rm_wait_completions(const struct rm_submitter *s, unsigned n)
+{
+    uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
+    while (rm_completions(s) < n) {
+        if (clock_now_ns() > end)
+            return false;
+        sched_yield();
+    }
+    return true;
+}
+
+/*
+ * A pass leaving with I/O accepted -- a check failed before the remove,
+ * with the hold set -- must not free the buffer the device reads into
+ * while a request can still complete into it. The hold is released
+ * first, so what the device has finished is consumed; then every
+ * accepted bio is waited for, and one that never completes leaves its
+ * buffer allocated: the storage is spoken for (`rm_io`'s rule). After a
+ * pass that ran to its end this is a no-op. Found in review.
+ */
+static void rm_drain(struct rm_submitter *s)
+{
+    g_rm->hold_completions(NULL);
+    unsigned accepted = __atomic_load_n(&s->ok, __ATOMIC_ACQUIRE);
+    if (rm_completions(s) < accepted && !rm_wait_completions(s, accepted)) {
+        kerror("selftest: virtio-remove-inflight: %u of %u accepted bios never completed; their buffer stays allocated",
+               accepted - rm_completions(s), accepted);
+        s->buf = NULL;
+    }
+}
+
 /* The removal disk, by its size: the names differ between the machines. */
 static struct blkdev *rm_find(void)
 {
@@ -1245,11 +1276,11 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
           held ? "held" : "unheld", s.ok, s.refused, found, s.c_eio, s.c_enodev, s.c_ok);
 
 out:
-    g_rm->hold_completions(NULL);
     if (t != NULL) {
         __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
         thread_join(t);
     }
+    rm_drain(&s);
     if (bd != NULL)
         blkdev_put(bd);
     kfree(s.buf);
@@ -1424,6 +1455,7 @@ out:
         __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
         thread_join(t);
     }
+    rm_drain(&s);
     if (bd != NULL)
         blkdev_put(bd);
     kfree(s.buf);
@@ -1473,17 +1505,6 @@ static bool rm_wait_unconsumed(struct blkdev *bd, unsigned n)
 {
     uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
     while (g_rm->unconsumed(bd) < n) {
-        if (clock_now_ns() > end)
-            return false;
-        sched_yield();
-    }
-    return true;
-}
-
-static bool rm_wait_completions(const struct rm_submitter *s, unsigned n)
-{
-    uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
-    while (rm_completions(s) < n) {
         if (clock_now_ns() > end)
             return false;
         sched_yield();
@@ -1543,8 +1564,8 @@ static bool rm_hold_inside_pass(struct blkdev *bd, struct pci_device *pdev, unsi
           "finished requests before the handler; it popped %u in all, the remove found %u in flight and completed "
           "them -EIO", s.c_ok, found);
 out:
-    g_rm->hold_completions(NULL);
-    __atomic_store_n(&s.rehold, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&s.rehold, NULL, __ATOMIC_RELEASE);   /* before the release: no callback re-arms it */
+    rm_drain(&s);
     if (bd != NULL)
         blkdev_put(bd);
     kfree(s.buf);
