@@ -155,11 +155,11 @@ Check: boot test marker (`module: loaded hello 1.0`), test
 
 ## Format
 
-**M22. `struct cosmo_module_info` is 240 bytes and `struct
+**M25. `struct cosmo_module_info` is 240 bytes and `struct
 modsig_trailer` is 88 bytes.** Both are `STATIC_ASSERT`ed; the section
 size and the trailer position are checked against them. Check: build.
 
-**M23. Only the relocation types non-PIC `-mcmodel=kernel` code emits
+**M26. Only the relocation types non-PIC `-mcmodel=kernel` code emits
 are accepted.** `64`, `PC32`, `PLT32`, `32`, `32S`, `NONE`; GOT forms
 and everything else are `-ENOEXEC`. Check: review; `llvm-objdump -r`
 on the built modules shows only these types.

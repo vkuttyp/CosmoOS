@@ -1,7 +1,9 @@
 # Deferred work inventory
 
 Date: 2026-09-14. Tree: `main` at 0318119 (after PR #131, the suite-waits
-unit). Purpose: **the base for the next §68 reports** -- everything the
+unit); re-read against 21f4288 (after PR #199) on 2026-09-21, with the
+README line numbers below still those of 0318119. Purpose: **the base
+for the next §68 reports** -- everything the
 repository's own documents defer, delay or set for later, in one place,
 cross-checked against the code so that a report proposes something that
 is actually open and does not re-propose something already built.
@@ -51,8 +53,8 @@ paragraph (same pull request), and the README now points here.
 | ~~**`MAP_FIXED` should replace, as POSIX says, instead of returning `-EEXIST`**~~ **BUILT (PR #193)**: `vm_user_map_anon_replace` takes the range in three critical sections with it owned at every instant (the new region goes in under the same lock that clears the old ones, `VM_REGION_QUIESCED` until the teardown is done, so holes it spanned are owned too), both syscall doors use it, `COSMO_MAP_FIXED_NOREPLACE` keeps the old refusal, and libc's punch and retry are gone. Invariant **M40**. The original entry read: -- `space_insert` refuses any overlap, so a caller that wants to turn part of its own reservation into writable memory must `munmap` a hole and `mmap` it back, and the two syscalls have a window in which another thread's `mmap(NULL, …)` can be handed the gap. `cosmo_thread_start` does exactly that to place a guard page below a stack, and lost the race three times on aarch64 CI: `EEXIST` out of a thread start (PR #191). Worked around there with a bounded retry; the repair is atomic replacement in `sys_mmap`, which also deletes the punch. Related: with `SYS_mprotect` below, the carve-out would not need unmapping at all. **Taken up by `docs/audit/next-subsystem-map-fixed.md`**, which found the second door: the Linux personality already replaces (`compat/linux/syscalls.c:951-956`) but in two lock acquisitions, so it has the same window and fails in a way Linux never does | PR #191; `kernel/memory/vmm.c:73`, `libc/src/thread.c` |
 | ~~**`SYS_mprotect` for native programs**~~ **BUILT (PR #195)**: `SYS_mprotect` 93 over `vm_user_protect`, the native flags rule kept (an undefined `prot` bit is `EINVAL`, `len` a page multiple), and the kernel synchronising the instruction stream when a range becomes executable, at both doors, because EL0 cannot without `SCTLR_EL1.UCI`. Invariant **M41**. The original entry read: the Linux personality already has it (`lx_mprotect`, `compat/linux/syscalls.c:1012`) over a `vm_user_protect` that is built, tested and used by the ELF loader; only the native ABI has no call. Taken up by `docs/audit/next-subsystem-mprotect.md` | README.md:1486 |
 | `cosmo_thread_start` to map read/write and `mprotect` its guard page, dropping reserve-and-replace — one map and one protect instead of a reservation and a `MAP_FIXED`. Deferred by the `mprotect` report on purpose: PR #193 proved the current sequence against four mutations and respending that for one syscall on a cold path needs its own argument | `docs/audit/next-subsystem-mprotect.md`, "Alternatives considered"; `libc/src/thread.c` |
-| ~~**native futex requeue**~~ **BUILT (native thread door unit)**: `SYS_futex_requeue` 94, the compare form, and `cosmo_cond_broadcast` requeueing under invariant L10 (the herd measured: 0 sleeps on the mutex word against 7). The original entry read: `futex_requeue` is built (`kernel/ipc/futex.c:159`) and the Linux door calls it; `cosmo_cond_broadcast` wakes every waiter and says the herd is what requeue exists to avoid. Taken up by `docs/audit/next-subsystem-native-thread-door.md`, with per-thread signal targeting, as one unit | README.md:1486 (the Linux personality has requeue since milestone 10) |
-| ~~**per-thread signal targeting**~~ **BUILT (native thread door unit)**: `SYS_thread_kill` 95, `tgkill` with the process implied, `cosmo_thread_kill` in libc. The original entry read: `signal_send_thread` is built (`kernel/process/signal.c:373`) and `lx_tgkill` uses it; the native `kill` is process-scoped. Taken up by `docs/audit/next-subsystem-native-thread-door.md`, with futex requeue | README.md:1486 |
+| ~~**native futex requeue**~~ **BUILT (native thread door unit, PR #197)**: `SYS_futex_requeue` 94, the compare form, and `cosmo_cond_broadcast` requeueing under invariant L10 (the herd measured: 0 sleeps on the mutex word against 7). The original entry read: `futex_requeue` is built (`kernel/ipc/futex.c:159`) and the Linux door calls it; `cosmo_cond_broadcast` wakes every waiter and says the herd is what requeue exists to avoid. Taken up by `docs/audit/next-subsystem-native-thread-door.md`, with per-thread signal targeting, as one unit | README.md:1486 (the Linux personality has requeue since milestone 10) |
+| ~~**per-thread signal targeting**~~ **BUILT (native thread door unit, PR #197)**: `SYS_thread_kill` 95, `tgkill` with the process implied, `cosmo_thread_kill` in libc. The original entry read: `signal_send_thread` is built (`kernel/process/signal.c:373`) and `lx_tgkill` uses it; the native `kill` is process-scoped. Taken up by `docs/audit/next-subsystem-native-thread-door.md`, with futex requeue | README.md:1486 |
 | the device models tested under two guest CPUs (needs a guest-side virtio driver), "named as its own unit" | README.md:1595 |
 | the display driver that sets a mode (section 60 "GPU later") | README.md:727 |
 | GPU, Wi-Fi, Bluetooth, "later" | constitution §60 (Prompt #2), the hardware roadmap; the README's former Next paragraph |
@@ -111,9 +113,22 @@ AHCI are the two entries from that list now built.
   no topology structure, no SRAT parsing).
 - huge pages for user space; memory deduplication; memory compression;
   swap.
-- shared mappings: `MAP_SHARED` is still private; no shared-memory
+- **Taken up by `docs/audit/next-subsystem-file-regions.md`** (not
+  struck until it lands), which corrected this row before taking it:
+  shared mappings: `MAP_SHARED` is still private; no shared-memory
   primitive of any kind (which also rules out shared futexes across
-  processes).
+  processes). As re-checked 2026-09-21: natively there is no file
+  mapping at all (`sys_mmap` refuses anything not anonymous,
+  `kernel/syscall/native.c:364`, "file mappings arrive with the VFS");
+  the Linux personality's file mapping is an eager copy that refuses
+  `MAP_SHARED|PROT_WRITE` with `-EOPNOTSUPP` and gives a read-only
+  `MAP_SHARED` mapping a snapshot a later `write()` never reaches
+  (`compat/linux/syscalls.c:936-946`); and the page cache already owns
+  the frames a shared mapping would install (`kernel/include/kernel/pagecache.h`).
+  Constitution §14 lists file-backed mappings, shared mappings and
+  copy-on-write in the VMM's *must* list, not its "eventually" list. A
+  shared futex across processes stays open (`kernel/ipc/futex.c:44-46`
+  keys by space) and is named in that report as deferred.
 - ASLR and KASLR: none; no randomised load base, stack or `brk`.
 
 ### 2.3 Scheduler and synchronisation (constitution §20-22)
@@ -162,13 +177,24 @@ IPv6 routing beyond loopback and ND against a real peer.
 
 ### 2.6 Linux compatibility (constitution §40 phases 3-4; Prompt #2 §30)
 
-- `execve` is still `lx_nosys` (compat/linux/syscalls.c:1892) -- by the
+- `execve` is still `lx_nosys` (compat/linux/syscalls.c:2045) -- by the
   native model's design (spawn, no fork/exec), but a Linux program that
   execs dies.
-- missing: `epoll`, `sendmsg`/`recvmsg`, `socketpair`, real
-  `setsockopt`/`getsockopt`, `sched_getaffinity`, `rseq`, `statx`,
-  `memfd_create`, `eventfd`/`timerfd`/`signalfd`, shared memory,
-  netlink, `readlink` (no symlinks), `mremap`/`msync`.
+- missing (re-checked 2026-09-21): `epoll`, `sendmsg`/`recvmsg`,
+  `socketpair`, `rseq`, `statx`, `memfd_create`,
+  `eventfd`/`timerfd`/`signalfd`, shared memory, netlink, `mremap`;
+  `msync` is taken up by `docs/audit/next-subsystem-file-regions.md`.
+  `setsockopt`/`getsockopt` exist as stubs: `getsockopt` answers
+  `SOL_SOCKET`/`SO_ERROR` only and `setsockopt` is `-ENOPROTOOPT` for
+  everything (compat/linux/syscalls.c:1918-1930). ~~`sched_getaffinity`~~
+  is built (`:1661`); ~~`readlink` (no symlinks)~~ is built with
+  symlinks (PR #142). Found on the re-check and not previously listed:
+  `pselect6` -- musl's `select` is `pselect6` on both architectures, so
+  every `select` caller gets `-ENOSYS`; `sysinfo` (`lx_nosys`); and a
+  real directory fd -- `check_dirfd` returns `-ENOSYS` for any `dirfd`
+  but `AT_FDCWD` (`:133-137`), so an `openat` relative to an opened
+  directory fails. Each is a small unit; the three together are the
+  next Linux-personality candidate.
 - `/proc` and `/sys` compatibility for Linux binaries (the native `/proc`
   holds process facts only); running a real distribution userland
   (phase 4).

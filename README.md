@@ -2947,7 +2947,7 @@ See [docs/development.md](docs/development.md).
   than merely arrived. Eight `thrtest` steps, every rule bug-proofed by
   removal with a bounded join reporting the hang; the syscall fuzzer
   gets both calls, `thread_kill` with signal 0 only. Report:
-  `docs/audit/next-subsystem-native-thread-door.md`.
+  `docs/audit/next-subsystem-native-thread-door.md` (PR #197).
 - **A device removed while it was busy, at last on a real one.** The
   lifetime-and-quiescence work named four windows nothing had ever
   raced; three got an adversary and the fourth — a virtio device
@@ -2996,7 +2996,7 @@ See [docs/development.md](docs/development.md).
   `lockuptest.c` asserted `thread_count() == before` the instant a join
   returned, and the count falls at the reaper, not at the join —
   `docs/testing/flakes.md`. Report:
-  `docs/audit/next-subsystem-virtio-remove-inflight.md`.
+  `docs/audit/next-subsystem-virtio-remove-inflight.md` (PR #199).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
