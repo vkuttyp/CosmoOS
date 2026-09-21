@@ -43,7 +43,7 @@ is deliberate: the list going silently empty is the failure it guards.
 | `net-icmp-limit` | `kernel-services/network/nettest.c`, `selftest_net_icmp_limit` | the 300-echo flood is decided within the one-second limiter window the test saw begin | at most `ICMP_RATE_PER_SEC` replies to a burst, exactly one window's worth | the window's phase is now observed (an echo refused, then one replied), but that the flood's ~20 ms fits in the window's remaining second is time; a host holding the vCPU for most of a second inside the flood fails it. A 50× margin, the largest here |
 | `el2-guest-timer-ontime` | `kernel-services/virtualization/hvtest.c`, `selftest_el2_guest_timer_ontime` (runs under `make test-gic`) | the guest's timer is late by less than four times the ~15 ms it asked for | the WFI park wakes on the guest's deadline in 1 ms slices, not by sleeping the whole interval or in coarse slices | a wake-reason counter would say "the deadline passed", which a coarse park also satisfies; only the lateness distinguishes them, and lateness is time |
 
-**Observed twice, not yet on the list: the TLB shootdown deadline.**
+**Observed three times, not yet on the list: the TLB shootdown deadline.**
 `kernel/arch/x86_64/mmu.c:324` gives every other CPU one second to
 acknowledge an IPI and panics otherwise. On 2026-09-17 a debug boot
 panicked with `TLB shootdown ... acknowledged by 2 of 3 CPUs` on a
@@ -55,7 +55,13 @@ overloaded host is not evidence about the bound. **It recurred on
 QEMU and nothing else running: `mmu: TLB shootdown of
 0xffffc000104f3000+0x2000 acknowledged by 2 of 3 CPUs`, `CPU: 1`,
 during the interactive harness's `dmesg` after every self-test and
-`thrtest` had passed; the rerun passed. That branch changes nothing in
+`thrtest` had passed; the rerun passed. **A third, 2026-09-21**, x86-64
+debug on the same machine, in a bug-proof boot of the unix-sockets
+branch (a mutated `handle.c`, nothing near the MMU): `TLB shootdown of
+0xffffc000104af000+0x4000 acknowledged by 2 of 3 CPUs`, 68 s into the
+boot, with only that one QEMU running; the mutation's re-run passed and
+was caught by the test it targets. Still the shape, still no answer to
+which CPU did not answer. That branch changes nothing in
 the MMU or the IPI path (futex, signal targeting, libc) and the panic
 site is the same, so the second sighting is on the shape and not on the
 unit — but a second sighting on a quiet host is what the first was
