@@ -218,9 +218,10 @@ on the removal disk above; skips on one CPU, without the disk, or if
 A submitter on another CPU reads the disk continuously from a pool of
 96 bios (more than the driver's slots, so the block layer's pending
 list is exercised too). The window is held open by construction rather
-than by a stopwatch: a driver hook makes `vblk_done` return without
-consuming anything, so requests the device has finished stay in the
-slot table and `vblk_remove` finds them. Then `pci_test_remove`, and
+than by a stopwatch: a driver hook makes `vblk_done` stop consuming --
+checked before every pop, not once at its door -- so requests the
+device has finished stay in the slot table and `vblk_remove` finds
+them. Then `pci_test_remove`, and
 the assertions are about the protected object:
 
 - every accepted bio completes exactly **once**, with one of three
@@ -275,6 +276,27 @@ The driver's seams reach the test through a hook table the module
 publishes to the block layer at its init
 (`blk_test_driver_hooks_set`), because the kernel image cannot name a
 module's symbols.
+
+**A fourth pass, and the failure it belongs to.** The hold was first
+checked once, at the handler's door. A handler already inside its pop
+loop when the hold was stored kept popping, and a QEMU device finishes
+a table's worth in one burst, so once in CI the held pass found **0**
+in flight with every other assertion holding
+(`docs/testing/flakes.md`, "`virtio-remove-inflight`'s held pass found
+nothing"). The check now runs before every pop, and the `held-inside`
+pass builds that moment instead of racing for it: every hold in it is
+stored from a completion callback -- from inside the handler -- so no
+handler can be between its check and its pop when a hold lands. It
+posts one request whose completion stores the hold; two more, waiting
+for each to be finished at the device and parked in the used ring (a
+new exact seam, `unconsumed`: used entries not yet popped, so nothing
+waits on a clock); arms the re-hold, releases, and posts a fourth,
+whose completion brings the handler in with three finished requests
+before it. The handler pops one, that completion stores the hold from
+inside the loop, and the other two stay: the remove finds exactly 2 and
+completes them `-EIO`; 2 completed `0`, 4 in all, none twice. With the
+check back at the door the handler pops all three and the remove finds
+0, deterministically.
 
 ## Gaps
 

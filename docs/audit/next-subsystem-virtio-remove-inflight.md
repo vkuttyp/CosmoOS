@@ -83,6 +83,17 @@ and the banner below records where the build differed from the design.
    churn exposed one on AArch64; the repair is a bounded wait, made
    here because it blocked the gate, and recorded in
    `docs/testing/flakes.md`.
+11. **The hold is checked before every pop, not once at the door**
+   (a follow-up after the merge, 2026-09-21). The first build checked
+   the hold at `vblk_done`'s entry; a handler already inside its pop
+   loop when the hold was stored kept popping, a QEMU device finishes
+   a table's worth in one burst, and once in CI the held pass found 0
+   in flight with every other assertion holding. The check moved into
+   the loop, and a fourth pass, `held-inside`, builds that moment by
+   storing every hold from a completion callback, with a new exact seam
+   (`unconsumed`: used entries the driver has not popped) in place of a
+   wait on the clock. `docs/kernel/device/testing.md`, and the record in
+   `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,
@@ -233,8 +244,8 @@ the driver's own in-flight table non-empty at the moment `vblk_remove`
 runs, and a real QEMU device completes a read in microseconds. So one
 debug hook in `virtio_blk.c`: `vblk_test_hold_completions(bool)` — as
 built, `hold_completions(struct blkdev *)` in the published hook table,
-`NULL` releasing (banner item 1) — which makes `vblk_done` (the interrupt's completion walk) return without
-consuming anything while armed. The device does the I/O and signals; the
+`NULL` releasing (banner item 1) — which makes `vblk_done` (the interrupt's completion walk) stop
+consuming while armed, checked before every pop (banner item 11). The device does the I/O and signals; the
 driver leaves the slots in flight by construction; the remove then finds
 them. That is the honest description of what the hook does — the
 requests are done at the device and unconsumed by the driver — and it is
