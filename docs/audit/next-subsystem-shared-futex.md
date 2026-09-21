@@ -1,9 +1,10 @@
 # NEXT SUBSYSTEM — a futex keyed by what the word maps
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. **This report is as built**
-(the shared-futex unit), and the banner below records where the build
-differed from the design; the sections after it are the design as
+and wait for the instruction to build it. That wait is over: the
+instruction was given and the unit is built. **This report is as
+built** (the shared-futex unit), and the banner below records where the
+build differed from the design; the sections after it are the design as
 reviewed.
 
 **What the build changed:**
