@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Fifty-nine, to 2026-09-21**, across CI and this developer's machine, on
+**Sixty-two, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -837,6 +837,9 @@ of this section said eight and then listed nine:
 | PR #203's own CI run, a later commit | observed, aarch64, the plain debug boot (`a0a0c38`, run 35586739597): **`connect 0 in 286 ms`** -- the fastest connect this file has recorded, by two hundred milliseconds -- **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:39430 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s. Row one, the `sent 12` variant |
 | PR #203's own CI run, a documentation-only commit | observed, aarch64, the plain debug boot (`5122041`, run 35587325294, a commit that changes one paragraph of one report): `connect 0 in 1353 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:38064 accepted at 93.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 113.9s. Row one, the `sent 12` variant, and the first `sent 12` reading that also retransmitted |
 | `main` @ `2f79ea5`, twice in one run — x86-64 and aarch64 | observed on 2026-09-21 on both architectures of the shared-futex merge's `main` run (35595160535), each the plain debug boot: x86-64 `connect 0 in 640 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`, host side `127.0.0.1:39696 accepted at 91.1s, 0 byte(s)`; aarch64 `connect 0 in 1358 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`, host side `127.0.0.1:51800 accepted at 95.0s, 0 byte(s)`; both `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one on both, the second run to show it on both architectures at once (PR #193's was the first) |
+| PR #204's own CI run | observed, aarch64, the plain debug boot (`3c170f5`, job 106306472451, a driver-test branch): `connect 0 in 1223 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:59216 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 115.0s. Row one, the `sent 12` variant with a retransmission |
+| PR #205's own CI run | observed, aarch64, the plain debug boot (`e51f07e`, run 35596999894, a one-document branch): `connect 0 in 606 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33812 accepted at 95.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 116.0s. Row one, the `sent 12` variant |
+| PR #207's own CI run | observed, **x86-64**, the plain debug boot (`89bd3d5`, run 35611499251, the unix-sockets build, whose diff touches no inet path): `connect 0 in 1008 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:38154 accepted at 75.2s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 95.2s. Row one |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -847,15 +850,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Forty-seven entries, fifty-nine occurrences -- and the table is the tally,
+Fifty entries, sixty-two occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last forty-two rows carry
-the instrument's reading, thirty-seven of them watched as they happened
+are not independently re-verified here. The last forty-five rows carry
+the instrument's reading, forty of them watched as they happened
 and five of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty
-instrumented** occurrences behind the other forty-one rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-three
+instrumented** occurrences behind the other forty-four rows carry the
 guest's side. Rows and occurrences differ because **eleven** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
