@@ -83,6 +83,7 @@ named and the two the review-revised lifetime rule added.
 | `FUTEX_PRIVATE_FLAG` still masked at the Linux door | `lxtest`: all four flag checks -- the wake through the *other* key woke the waiter (1, expected 0) and its own then found nobody (0, expected 1), in both directions |
 | the counter's test inverted (`shared_maps != 0` skips the walk) | the same six checks as the first row: a process that shares got the private key |
 | `shared_maps` not decremented at the record's release | `KERNEL PANIC: vm_space_destroy: 0 anon and 0 file pages, 1 shared maps unaccounted` at the first exit of a process that mapped a file shared |
+| the moved waiters' references not taken (the one add of item 6 removed) | `KERNEL PANIC: kobject_get on a released vnode object` in the mmap section: the moved waiters put references they never held, the vnode was released under the mapping that still held it, and the next classification's get found it gone |
 | the moved waiters' old references never put after a requeue | the double requeue: `vm.cache_pages == cp_a - 1` false -- file A's vnode never released, its page never left -- and the section's final `cache_pages == cache0` |
 | the per-waiter reference not taken on a requeue onto a shared word | `KERNEL PANIC: kobject_get on a released vnode object`: the moved waiter's put at dequeue took the vnode's count to zero under the open file, and the next reference to it found it released |
 
