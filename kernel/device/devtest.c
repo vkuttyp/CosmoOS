@@ -1125,6 +1125,30 @@ static unsigned rm_completions(const struct rm_submitter *s)
            __atomic_load_n(&s->c_enodev, __ATOMIC_ACQUIRE) + __atomic_load_n(&s->c_other, __ATOMIC_ACQUIRE);
 }
 
+/*
+ * Accepted minus completed, never negative: completed is read FIRST and
+ * accepted second, both atomically. Accepted is counted before the
+ * submit, so at any instant completed <= accepted; and between the two
+ * reads accepted can only grow (a refusal's decrement undoes an
+ * increment that no completion ever matched), so the second read is at
+ * least the first read's true accepted count. Read the other way round
+ * an accept and its completion landing between the reads would make the
+ * difference wrap -- the same wrap the old counting order produced.
+ */
+static unsigned rm_outstanding(const struct rm_submitter *s)
+{
+    unsigned c = rm_completions(s);
+    unsigned ok = __atomic_load_n(&s->ok, __ATOMIC_ACQUIRE);
+    return ok - c;
+}
+
+/* The order invariant, read the same way. */
+static bool rm_order_ok(const struct rm_submitter *s)
+{
+    unsigned c = rm_completions(s);
+    return c <= __atomic_load_n(&s->ok, __ATOMIC_ACQUIRE);
+}
+
 static bool rm_wait_completions(const struct rm_submitter *s, unsigned n)
 {
     uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
@@ -1235,7 +1259,7 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
      * only observer an ordering between two counters can have. */
     uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
     while ((s.c_ok < 4 || s.ok < 4) && clock_now_ns() < end) {
-        RM_CHECK(rm_completions(&s) <= s.ok);
+        RM_CHECK(rm_order_ok(&s));
         sched_yield();
     }
     RM_CHECK(s.c_ok >= 4);
@@ -1245,12 +1269,12 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
          * until the driver's table is full and the excess is pending. */
         g_rm->hold_completions(bd);
         end = clock_now_ns() + 2000ull * 1000000ull;
-        while (s.ok - rm_completions(&s) <= nr_slots && clock_now_ns() < end) {
-            RM_CHECK(rm_completions(&s) <= s.ok);   /* the accept is counted first, so this never wraps */
+        while (rm_outstanding(&s) <= nr_slots && clock_now_ns() < end) {
+            RM_CHECK(rm_order_ok(&s));
             sched_yield();
         }
-        RM_CHECK(rm_completions(&s) <= s.ok);
-        RM_CHECK(s.ok - rm_completions(&s) > nr_slots);
+        RM_CHECK(rm_order_ok(&s));
+        RM_CHECK(rm_outstanding(&s) > nr_slots);
     }
 
     unsigned releases0 = g_rm->releases();
