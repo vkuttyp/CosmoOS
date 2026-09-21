@@ -125,7 +125,7 @@ spinlock, which `might_sleep` in `copy_from_user` enforces); compare with
 futex contract permits and musl retries), else enqueue; unlock;
 `wait_event_killable` with an optional timer (`-ETIMEDOUT`; a kill gives
 `-EINTR`); dequeue. `wake`: lock, bump `wake_seq`, mark and wake up to `n`
-waiters of that `(space, uaddr)`, return the count. No wake is lost: a
+waiters of that key, return the count. No wake is lost: a
 wake that ran after the waiter's read of the word bumped the sequence the
 waiter checks before sleeping (`docs/kernel/lockdep/design.md`, "futex"). The Linux call accepts `FUTEX_WAIT`
 (0), `FUTEX_WAKE` (1), the requeues and the bitset forms, with

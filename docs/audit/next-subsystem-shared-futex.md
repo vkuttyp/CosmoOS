@@ -15,7 +15,18 @@ reviewed.
    there is no separate `futex_key_release` function. The waiter
    carries a key, not a space and an address, and `bucket_of` and the
    two match lines take the key -- the whole change to the futex, as
-   designed.
+   designed, plus one thing review added to the build: `futex_wait`
+   classifies the word AGAIN after it has read and compared it, and a
+   changed key returns 0 (the spurious wake the contract permits). The
+   key is taken before the read with the space lock released between,
+   so a thread that unmapped the address and `MAP_FIXED`-mapped
+   something else at it in that window would have had the word read
+   from the new mapping and the waiter enqueued under the old key. A
+   caller racing its own `munmap` against its own wait has a bug, but
+   the waiter is the one that would hang for it; the re-check costs one
+   lookup on the classifying path and nothing on the private one. No
+   test drives the window: it needs a remap between two instructions of
+   one system call, and the re-check is the argument.
 1. **The fault handler had to learn about interrupts.** The tests
    found the file-backed page fault running with interrupts masked, as
    every trap enters: the anonymous arm never minded (it neither sleeps

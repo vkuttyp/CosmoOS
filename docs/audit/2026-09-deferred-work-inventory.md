@@ -140,9 +140,9 @@ AHCI are the two entries from that list now built.
   the page cache already owned the frames a shared mapping would install (`kernel/include/kernel/pagecache.h`).
   Constitution §14 lists file-backed mappings, shared mappings and
   copy-on-write in the VMM's *must* list, not its "eventually" list. A
-  shared futex across processes stays open (`kernel/ipc/futex.c:44-46`
-  keys by space) and is named in that report as deferred, as are
-  `memfd`/`shm_open` and the loader's segments; the description of the
+  shared futex across processes was named in that report as deferred
+  and is built since (the shared-futex unit, above); `memfd`/`shm_open`
+  and the loader's segments remain deferred; the description of the
   two doors above is the record of what was wrong, and what they do now
   is in `docs/kernel/syscall/api.md` and `docs/compat/linux/api.md`.
 - ASLR and KASLR: none; no randomised load base, stack or `brk`.

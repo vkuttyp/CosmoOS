@@ -116,6 +116,30 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
         return -EAGAIN;
     }
 
+    /*
+     * The key was taken before the word was read, with the space lock
+     * released in between: a thread that unmapped this address and
+     * mapped something else at it (MAP_FIXED) in that window would have
+     * had the word read from the new mapping and the waiter enqueued
+     * under the old key, where a wake through the new mapping never
+     * looks. A caller racing its own munmap against its own wait has a
+     * bug, but the waiter is the one that would hang for it, so the
+     * word is classified again and a changed key returns 0 -- the
+     * spurious wake the contract permits (review found the window).
+     */
+    struct futex_key again;
+    krc = vm_user_futex_key(space, uaddr, private, &again);
+    if (krc) {
+        key_put(&w.key);
+        return krc;
+    }
+    bool same = key_eq(&again, &w.key);
+    key_put(&again);
+    if (!same) {
+        key_put(&w.key);
+        return 0;
+    }
+
     s = spin_lock_irqsave(&b->lock);
     if (b->wake_seq != seq) {
         spin_unlock_irqrestore(&b->lock, s);
