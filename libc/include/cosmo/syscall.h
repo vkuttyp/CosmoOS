@@ -177,6 +177,10 @@ static inline long cosmo_mkdir(const char *path, unsigned mode)
 {
     return cosmo_syscall2(SYS_mkdir, path, mode);
 }
+static inline long cosmo_mknod(const char *path, unsigned mode, unsigned type)
+{
+    return cosmo_syscall3(SYS_mknod, path, mode, type);
+}
 static inline long cosmo_unlink(const char *path)
 {
     return cosmo_syscall1(SYS_unlink, path);

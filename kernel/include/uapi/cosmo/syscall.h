@@ -162,7 +162,8 @@
 #define SYS_sendmsg   97  /* (int h, const struct cosmo_msg *) -> bytes; a unix socket carries the message's handles */
 #define SYS_recvmsg   98  /* (int h, struct cosmo_msg *) -> bytes; nr_handles and flags are written back */
 #define SYS_socketpair 99 /* (int family, int type, int h[2]) -> 0; two connected sockets, no name */
-#define SYS_COUNT     100
+#define SYS_mknod     100 /* (const char *path, uint32_t mode, uint32_t type) -> 0; type COSMO_DT_FIFO: a named pipe */
+#define SYS_COUNT     101
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -577,6 +578,7 @@ struct cosmo_sockaddr {
 #define COSMO_O_EXCL      0x0080
 #define COSMO_O_TRUNC     0x0200
 #define COSMO_O_APPEND    0x0400
+#define COSMO_O_NONBLOCK  0x0800   /* the open, and the file, do not wait (a FIFO's open rules; per open) */
 #define COSMO_O_DIRECTORY 0x10000
 #define COSMO_O_NOFOLLOW  0x20000  /* a symbolic link as the last component is ELOOP, not its target */
 

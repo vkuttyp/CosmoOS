@@ -32,6 +32,7 @@ off_t lseek(int fd, off_t off, int whence) { return __syscall_ret(cosmo_lseek(fd
 int stat(const char *path, struct stat *st) { return (int)__syscall_ret(cosmo_stat(path, (struct cosmo_stat *)st)); }
 int fstat(int fd, struct stat *st) { return (int)__syscall_ret(cosmo_fstat(fd, (struct cosmo_stat *)st)); }
 int mkdir(const char *path, mode_t mode) { return (int)__syscall_ret(cosmo_mkdir(path, mode)); }
+int mkfifo(const char *path, mode_t mode) { return (int)__syscall_ret(cosmo_mknod(path, mode, COSMO_DT_FIFO)); }
 int unlink(const char *path) { return (int)__syscall_ret(cosmo_unlink(path)); }
 int lstat(const char *path, struct stat *st) { return (int)__syscall_ret(cosmo_lstat(path, (struct cosmo_stat *)st)); }
 int symlink(const char *target, const char *path) { return (int)__syscall_ret(cosmo_symlink(target, path)); }

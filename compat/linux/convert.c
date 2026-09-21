@@ -27,6 +27,8 @@ int lx_open_flags(unsigned lx, unsigned *native)
         n |= COSMO_O_DIRECTORY;
     if (lx & LX_O_NOFOLLOW)
         n |= COSMO_O_NOFOLLOW;
+    if (lx & LX_O_NONBLOCK)
+        n |= COSMO_O_NONBLOCK;   /* a FIFO's open rules, and the open's mode (the named-pipes unit) */
     /* Accepted and dropped: no effect on this kernel. */
     unsigned known = LX_O_ACCMODE | LX_O_CREAT | LX_O_EXCL | LX_O_TRUNC | LX_O_APPEND | LX_O_DIRECTORY | LX_O_CLOEXEC |
                      LX_O_NONBLOCK | LX_O_NOCTTY | LX_O_LARGEFILE | LX_O_NOFOLLOW;

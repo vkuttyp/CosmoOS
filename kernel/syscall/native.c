@@ -601,7 +601,7 @@ static int64_t sys_open(struct syscall_args *a)
 {
     unsigned flags = (unsigned)a->a[1];
     if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND |
-                  COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW))
+                  COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW | COSMO_O_NONBLOCK))
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
@@ -746,6 +746,26 @@ static int64_t sys_mkdir(struct syscall_args *a)
     struct vnode *cwd = process_cwd_get();
     rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1]);
     vnode_put(cwd);
+    return rc;
+}
+
+/* A named pipe (the named-pipes unit): the one special node a program
+ * makes by name. A socket's name is made by bind, and a DT_SOCK node
+ * without a socket behind it is a dead name, so that is -EINVAL. */
+static int64_t sys_mknod(struct syscall_args *a)
+{
+    if ((uint32_t)a->a[2] != COSMO_DT_FIFO)
+        return -EINVAL;
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    struct vnode *vn;
+    rc = vfs_mknod(cwd, path, (uint32_t)a->a[1], VNODE_FIFO, &vn);
+    vnode_put(cwd);
+    if (rc == 0)
+        vnode_put(vn);
     return rc;
 }
 
@@ -2384,6 +2404,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_sendmsg] = sys_sendmsg,
     [SYS_recvmsg] = sys_recvmsg,
     [SYS_socketpair] = sys_socketpair,
+    [SYS_mknod] = sys_mknod,
     [SYS_pipe] = sys_pipe,
     [SYS_dup] = sys_dup,
     [SYS_getppid] = sys_getppid,

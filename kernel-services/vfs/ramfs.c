@@ -9,6 +9,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/cred.h>
 #include <kernel/errno.h>
+#include <kernel/fifo.h>
 #include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
@@ -34,12 +35,14 @@ struct ramfs_node {
     const struct chrdev_ops *chr;   /* character nodes */
     void *chr_priv;
     char *target;               /* symbolic links: the path, NUL terminated */
+    struct fifo *fifo;          /* named pipes: the ring's holder (kernel/ipc/fifo.c) */
 };
 
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
 static const struct vnode_ops ramfs_lnk_ops;
 static const struct vnode_ops ramfs_sock_ops;
+static const struct vnode_ops ramfs_fifo_ops;
 
 static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t mode, struct vnode *parent)
 {
@@ -60,7 +63,7 @@ static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t
     vn->uid = cred_current()->euid;
     vn->gid = cred_current()->egid;
     vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : type == VNODE_LNK ? &ramfs_lnk_ops
-            : type == VNODE_SOCK ? &ramfs_sock_ops : &ramfs_file_ops;
+            : type == VNODE_SOCK ? &ramfs_sock_ops : type == VNODE_FIFO ? &ramfs_fifo_ops : &ramfs_file_ops;
     vn->fs_priv = n;
     vn->flags |= VNODE_PINNED;   /* the reference from vnode_alloc is the pin */
     vn->nlink = type == VNODE_DIR ? 2 : 1;
@@ -144,13 +147,27 @@ static int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t
 }
 
 /* A unix socket's name: a node with no contents and no operations but
- * its own removal; open() refuses it in the VFS. */
+ * its own removal; open() refuses it in the VFS. A named pipe: a node
+ * whose opens share the pipe's ring (kernel/ipc/fifo.c), the fifo made
+ * here and freed with the node. */
 static int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
                        struct vnode **out)
 {
-    if (type != VNODE_SOCK)
+    if (type == VNODE_SOCK)
+        return ramfs_create_common(dir, name, len, mode, VNODE_SOCK, out);
+    if (type != VNODE_FIFO)
         return -EINVAL;
-    return ramfs_create_common(dir, name, len, mode, VNODE_SOCK, out);
+    struct fifo *fifo = fifo_alloc();
+    if (fifo == NULL)
+        return -ENOMEM;
+    int rc = ramfs_create_common(dir, name, len, mode, VNODE_FIFO, out);
+    if (rc) {
+        fifo_free(fifo);
+        return rc;
+    }
+    struct ramfs_node *n = (*out)->fs_priv;
+    n->fifo = fifo;
+    return 0;
 }
 
 /*
@@ -322,10 +339,42 @@ static int ramfs_truncate(struct vnode *vn, uint64_t size)
 static void ramfs_evict(struct vnode *vn)
 {
     struct ramfs_node *n = vn->fs_priv;
-    if (n != NULL)
+    if (n != NULL) {
         kfree(n->target);
+        if (n->fifo != NULL)
+            fifo_free(n->fifo);   /* asserts no ring: the opens went before the node could */
+    }
     kfree(n);
     vn->fs_priv = NULL;
+}
+
+/* --- named pipes: every operation is the fifo's, given the file --------- */
+
+static struct fifo *fifo_of(const struct vnode *vn)
+{
+    return ((const struct ramfs_node *)vn->fs_priv)->fifo;
+}
+
+static int ramfs_fifo_open(struct vnode *vn, struct file *f) { return fifo_open(fifo_of(vn), f); }
+static void ramfs_fifo_release(struct vnode *vn, struct file *f) { fifo_release(fifo_of(vn), f); }
+static int64_t ramfs_fifo_read(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
+{
+    (void)off;
+    return fifo_read(fifo_of(vn), f, buf, len);
+}
+static int64_t ramfs_fifo_write(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
+{
+    (void)off;
+    return fifo_write(fifo_of(vn), f, buf, len);
+}
+static unsigned ramfs_fifo_ready(struct vnode *vn, struct file *f) { return fifo_ready(fifo_of(vn), f); }
+static struct waitqueue *ramfs_fifo_poll_wq(struct vnode *vn, struct file *f, unsigned events)
+{
+    return fifo_poll_wq(fifo_of(vn), f, events);
+}
+static int ramfs_fifo_set_nonblock(struct vnode *vn, struct file *f, int on)
+{
+    return fifo_set_nonblock(fifo_of(vn), f, on);
 }
 
 static const struct vnode_ops ramfs_dir_ops = {
@@ -342,6 +391,17 @@ static const struct vnode_ops ramfs_dir_ops = {
 };
 
 static const struct vnode_ops ramfs_sock_ops = {
+    .evict = ramfs_evict,
+};
+
+static const struct vnode_ops ramfs_fifo_ops = {
+    .open = ramfs_fifo_open,
+    .release = ramfs_fifo_release,
+    .read_file = ramfs_fifo_read,
+    .write_file = ramfs_fifo_write,
+    .ready = ramfs_fifo_ready,
+    .poll_wq = ramfs_fifo_poll_wq,
+    .set_nonblock = ramfs_fifo_set_nonblock,
     .evict = ramfs_evict,
 };
 
@@ -399,6 +459,26 @@ static int64_t ramfs_chr_write_file(struct vnode *vn, struct file *f, uint64_t o
     return n->chr->write ? n->chr->write(vn, off, buf, len) : -ENOTSUP;
 }
 
+/* Readiness, for a device that has an opinion; the file type's defaults
+ * (always ready, never changes, -EOPNOTSUPP) for one that has not. */
+static unsigned ramfs_chr_ready(struct vnode *vn, struct file *f)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->ready ? n->chr->ready(vn, f) : (COSMO_IO_READABLE | COSMO_IO_WRITABLE);
+}
+
+static struct waitqueue *ramfs_chr_poll_wq(struct vnode *vn, struct file *f, unsigned events)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->poll_wq ? n->chr->poll_wq(vn, f, events) : NULL;
+}
+
+static int ramfs_chr_set_nonblock(struct vnode *vn, struct file *f, int on)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->set_nonblock ? n->chr->set_nonblock(vn, f, on) : -EOPNOTSUPP;
+}
+
 static const struct vnode_ops ramfs_chr_ops = {
     .read = ramfs_chr_read,
     .write = ramfs_chr_write,
@@ -406,6 +486,9 @@ static const struct vnode_ops ramfs_chr_ops = {
     .release = ramfs_chr_release,
     .read_file = ramfs_chr_read_file,
     .write_file = ramfs_chr_write_file,
+    .ready = ramfs_chr_ready,
+    .poll_wq = ramfs_chr_poll_wq,
+    .set_nonblock = ramfs_chr_set_nonblock,
     .evict = ramfs_evict,
 };
 

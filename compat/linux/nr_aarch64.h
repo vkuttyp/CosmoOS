@@ -99,6 +99,7 @@
 #define LX_tgkill 131
 #define LX_openat 56
 #define LX_mkdirat 34
+#define LX_mknodat 33
 #define LX_newfstatat 79
 #define LX_unlinkat 35
 #define LX_renameat 38

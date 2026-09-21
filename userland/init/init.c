@@ -1275,6 +1275,7 @@ static int filter_case(const char *kind)
 static int signal_probe(const char *kind);
 static int mmap_probe(const char *what);
 static int unix_probe(const char *kind);
+static int fifo_probe(const char *kind);
 
 static int probe(const char *kind)
 {
@@ -1529,6 +1530,8 @@ static int probe(const char *kind)
         return mmap_probe(kind + 5);
     if (strncmp(kind, "unix-", 5) == 0)
         return unix_probe(kind + 5);
+    if (strncmp(kind, "fifo-", 5) == 0)
+        return fifo_probe(kind + 5);
     return signal_probe(kind);
 }
 
@@ -4826,12 +4829,164 @@ static void unix_selftest(void)
     }
 }
 
+/* --- named pipes: the children of the fifo section and of the kernel's
+ * ipc-fifo (docs/audit/next-subsystem-named-pipes.md, "Tests") --- */
+
+#define FIFO_ROUNDS 2000u
+
+static int fifo_probe(const char *kind)
+{
+    if (strncmp(kind, "block-read:", 11) == 0) {
+        /* The kernel's ipc-fifo kills this process while the open waits
+         * for a writer that never comes; the open's own undo is what the
+         * test then measures. */
+        int fd = open(kind + 11, O_RDONLY);
+        return fd < 0 ? 10 : 11;   /* neither: killed inside the open */
+    }
+    if (strncmp(kind, "writer:", 7) == 0) {
+        /* Lines across the blocking open: the parent opens read-only
+         * after spawning this, so one of the two opens waits. */
+        int fd = open(kind + 7, O_WRONLY);
+        if (fd < 0)
+            return 10;
+        if (write(fd, "one\n", 4) != 4 || write(fd, "two\n", 4) != 4 || write(fd, "three\n", 6) != 6)
+            return 11;
+        return close(fd) == 0 ? 0 : 12;
+    }
+    if (strncmp(kind, "pingpong:", 9) == 0) {
+        /* "<in>:<out>" -- this side reads <in> and writes <out>; the
+         * opens are ordered so that neither process waits on both. */
+        char in[64];
+        const char *colon = strchr(kind + 9, ':');
+        if (colon == NULL || (size_t)(colon - (kind + 9)) >= sizeof(in))
+            return 10;
+        memcpy(in, kind + 9, (size_t)(colon - (kind + 9)));
+        in[colon - (kind + 9)] = '\0';
+        int rfd = open(in, O_RDONLY);
+        if (rfd < 0)
+            return 11;
+        int wfd = open(colon + 1, O_WRONLY);
+        if (wfd < 0)
+            return 12;
+        char c;
+        for (unsigned i = 0; i < FIFO_ROUNDS; i++) {
+            if (read(rfd, &c, 1) != 1)
+                return 13;
+            if (write(wfd, &c, 1) != 1)
+                return 14;
+        }
+        return 0;
+    }
+    return 99;
+}
+
+static void fifo_selftest(void)
+{
+    char buf[64];
+    struct stat st;
+    (void)unlink("/tmp/fifo-u");
+
+    /* The node: mkfifo makes a DT_FIFO of the given mode; a second is
+     * EEXIST; a socket's name is not made this way; a filesystem without
+     * mknod refuses. */
+    CHECK(mkfifo("/tmp/fifo-u", 0644) == 0);
+    CHECK(stat("/tmp/fifo-u", &st) == 0 && S_ISFIFO(st.st_type) && (st.st_mode & 07777) == 0644);
+    CHECK(mkfifo("/tmp/fifo-u", 0644) < 0 && errno == EEXIST);
+    CHECK(cosmo_mknod("/tmp/fifo-s", 0644, COSMO_DT_SOCK) == -COSMO_EINVAL);
+    CHECK(mkfifo("/proc/fifo-x", 0644) < 0 && errno == EOPNOTSUPP);
+
+    /* The open rules from user mode, and readiness through the handle:
+     * a non-blocking writer with no reader is ENXIO; a non-blocking
+     * reader returns at once and reads end of file; a writer arriving
+     * turns that into EAGAIN until it writes. */
+    CHECK(open("/tmp/fifo-u", O_WRONLY | O_NONBLOCK) < 0 && errno == ENXIO);
+    int rd = open("/tmp/fifo-u", O_RDONLY | O_NONBLOCK);
+    CHECK(rd >= 0);
+    CHECK(read(rd, buf, sizeof(buf)) == 0);
+    CHECK(cosmo_ioready(rd) == (COSMO_IO_READABLE | COSMO_IO_HANGUP));
+    int wr = open("/tmp/fifo-u", O_WRONLY | O_NONBLOCK);
+    CHECK(wr >= 0);
+    CHECK(cosmo_ioready(rd) == 0);
+    CHECK(read(rd, buf, sizeof(buf)) < 0 && errno == EAGAIN);
+    CHECK(cosmo_ioready(wr) == COSMO_IO_WRITABLE);
+    CHECK(write(wr, "ab", 2) == 2);
+    CHECK(cosmo_ioready(rd) == COSMO_IO_READABLE);
+    CHECK(fstat(rd, &st) == 0 && S_ISFIFO(st.st_type));
+    CHECK(lseek(rd, 0, SEEK_SET) < 0 && errno == ESPIPE);
+    /* Non-blocking is per open: a second reader switched on its own
+     * handle, the first switched off, each answering for itself. */
+    int rd2 = open("/tmp/fifo-u", O_RDONLY);
+    CHECK(rd2 >= 0);
+    CHECK(cosmo_setnonblock(rd2, 1) == 0 && cosmo_setnonblock(rd, 0) == 0);
+    CHECK(read(rd2, buf, sizeof(buf)) == 2 && memcmp(buf, "ab", 2) == 0);
+    CHECK(read(rd2, buf, sizeof(buf)) < 0 && errno == EAGAIN);
+    CHECK(close(rd2) == 0);
+    CHECK(close(wr) == 0);
+    CHECK(read(rd, buf, sizeof(buf)) == 0);   /* blocking, and the last writer is gone: end of file */
+    CHECK(close(rd) == 0);
+
+    /* A child writes lines across the blocking open; the parent reads
+     * them and end of file after the child's close. */
+    {
+        const char *argv[] = { "init", "--probe", "fifo-writer:/tmp/fifo-u", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+        CHECK(pid > 0);
+        rd = open("/tmp/fifo-u", O_RDONLY);
+        CHECK(rd >= 0);
+        size_t got = 0;
+        for (;;) {
+            long n = read(rd, buf + got, sizeof(buf) - got);
+            CHECK(n >= 0);
+            if (n <= 0)
+                break;
+            got += (size_t)n;
+        }
+        CHECK(got == 14 && memcmp(buf, "one\ntwo\nthree\n", 14) == 0);
+        CHECK(close(rd) == 0);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+    }
+
+    /* The last reader's close: EPIPE for the writer. */
+    rd = open("/tmp/fifo-u", O_RDONLY | O_NONBLOCK);
+    wr = open("/tmp/fifo-u", O_WRONLY);
+    CHECK(rd >= 0 && wr >= 0 && close(rd) == 0);
+    CHECK(write(wr, "x", 1) < 0 && errno == EPIPE);
+    CHECK(close(wr) == 0);
+    CHECK(unlink("/tmp/fifo-u") == 0);
+
+    /* The bench: a one-byte round trip to a child over two FIFOs, against
+     * the two-pipe figure the unix section prints. */
+    {
+        (void)unlink("/tmp/fifo-in");
+        (void)unlink("/tmp/fifo-out");
+        CHECK(mkfifo("/tmp/fifo-in", 0644) == 0 && mkfifo("/tmp/fifo-out", 0644) == 0);
+        const char *argv[] = { "init", "--probe", "fifo-pingpong:/tmp/fifo-in:/tmp/fifo-out", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+        CHECK(pid > 0);
+        int out = open("/tmp/fifo-in", O_WRONLY);    /* waits for the child's reader */
+        int in = open("/tmp/fifo-out", O_RDONLY);    /* the child's writer waits for this */
+        CHECK(out >= 0 && in >= 0);
+        uint64_t t0 = cosmo_clock_ns();
+        for (unsigned i = 0; i < FIFO_ROUNDS; i++)
+            CHECK(write(out, "p", 1) == 1 && read(in, buf, 1) == 1);
+        uint64_t t_fifo = cosmo_clock_since_ns(t0);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+        CHECK(close(out) == 0 && close(in) == 0);
+        CHECK(unlink("/tmp/fifo-in") == 0 && unlink("/tmp/fifo-out") == 0);
+        fprintf(stderr, "USERBENCH: fifo: %llu ns per one-byte round trip over two FIFOs\n",
+                (unsigned long long)(t_fifo / FIFO_ROUNDS));
+    }
+}
+
 static const struct selftest_section g_sections[] = {
     { "fs",       fs_selftest },
     { "mmap",     mmap_selftest },
     { "fsctl",    fsctl_selftest },
     { "net",      net_selftest },
     { "unix",     unix_selftest },
+    { "fifo",     fifo_selftest },
     { "proc",     proc_selftest },
     { "fpu",      fpu_selftest },
     { "trap",     trap_selftest },

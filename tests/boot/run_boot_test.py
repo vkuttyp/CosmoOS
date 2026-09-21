@@ -70,7 +70,7 @@ def load_sensitive_tests(path):
 # Named here so a row that silently disappears is a failure rather than
 # a shorter list nobody reads; the suite's own total line carries the
 # count, which is what catches a truncated stream.
-USERTEST_SECTIONS = ["fs", "mmap", "fsctl", "net", "unix", "proc", "fpu", "trap",
+USERTEST_SECTIONS = ["fs", "mmap", "fsctl", "net", "unix", "fifo", "proc", "fpu", "trap",
                      "priv", "proc-fs", "svc", "syscalls"]
 SECTION_RE = re.compile(r"^USERTEST: section (\S+) (\d+) ms$")
 SECTION_TOTAL_RE = re.compile(r"^USERTEST: sections (\d+), total (\d+) ms$")
@@ -339,6 +339,9 @@ SHTEST_MARKER = r"^SHTEST: PASS"
 # branch, so a failure could only ever show up as a MISSING marker.
 # This is the positive one.
 ANDOR_MARKER = r"^ANDOR: ok$"
+# The shell test's named pipe: `echo via-fifo > fifo & cat fifo` prints
+# the line only if the FIFO's open rules and end-of-file work from the shell.
+FIFO_MARKER = r"^via-fifo$"
 # The package system's script checks: output lines the harness also requires in self-test builds.
 PKGTEST_MARKERS = [
     r"^pkg: index updated: \d+ packages",
@@ -877,6 +880,8 @@ def main():
         failures.append(f"missing marker /{SHTEST_MARKER}/ (shell test script)")
     if want_selftest and not any(re.search(ANDOR_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{ANDOR_MARKER}/ (AND-OR left-associativity, U11)")
+    if want_selftest and not any(re.search(FIFO_MARKER, ln) for ln in lines):
+        failures.append(f"missing marker /{FIFO_MARKER}/ (the shell test's named pipe)")
     if want_selftest and any(re.search(r"^ANDOR: wrong-branch$", ln) for ln in lines):
         failures.append("forbidden marker /^ANDOR: wrong-branch$/ (AND-OR ran the && branch after a false left side)")
     if want_selftest:

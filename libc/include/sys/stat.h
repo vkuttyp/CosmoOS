@@ -25,4 +25,5 @@ int stat(const char *path, struct stat *st);
 int lstat(const char *path, struct stat *st);
 int fstat(int fd, struct stat *st);
 int mkdir(const char *path, mode_t mode);
+int mkfifo(const char *path, mode_t mode);   /* a named pipe: SYS_mknod with COSMO_DT_FIFO */
 #endif

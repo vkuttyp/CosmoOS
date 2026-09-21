@@ -662,6 +662,7 @@ static const struct selftest tests[] = {
     { "tty-ttin",        selftest_tty_ttin },
     { "hid-arm",         selftest_hid_arm },
     { "ipc-pipe",        selftest_ipc_pipe },
+    { "ipc-fifo",        selftest_ipc_fifo },
     { "unix-stream",     selftest_unix_stream },
     { "unix-dgram",      selftest_unix_dgram },
     { "unix-name",       selftest_unix_name },
