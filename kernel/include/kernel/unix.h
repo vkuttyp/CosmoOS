@@ -79,6 +79,10 @@ int  unix_socketpair(int type, struct socket **a, struct socket **b);
  * or exactly `plen` long. `pack` writes `family` and the name into
  * `out` (at least 2 + UNIX_PATH_MAX bytes) and returns the full size. */
 int unix_addr_parse(const char *path, size_t plen, struct unix_addr *out);
+/* A user address of `len` bytes whose family (already read by the
+ * door) is the unix one: copied in and parsed. -EINVAL for a length
+ * over the shape, -EFAULT for a bad pointer. */
+int unix_addr_from_user(uint64_t uptr, size_t len, struct unix_addr *out);
 size_t unix_addr_pack(const struct unix_addr *a, uint16_t family, void *out);
 
 /* Drop the references a handle set still owns (a send that failed). */

@@ -37,6 +37,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/uaccess.h>
 #include <kernel/unix.h>
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
@@ -307,6 +308,16 @@ int unix_addr_parse(const char *path, size_t plen, struct unix_addr *out)
     out->len = (uint8_t)n;
     memcpy(out->bytes, path, n);
     return 0;
+}
+
+int unix_addr_from_user(uint64_t uptr, size_t len, struct unix_addr *out)
+{
+    struct cosmo_sockaddr_un un;   /* the same layout at both doors: a 16-bit family, 108 bytes of path */
+    if (len < sizeof(un.family) || len > sizeof(un))
+        return -EINVAL;
+    if (copy_from_user(&un, uptr, len))
+        return -EFAULT;
+    return unix_addr_parse(un.path, len - sizeof(un.family), out);
 }
 
 size_t unix_addr_pack(const struct unix_addr *a, uint16_t family, void *out)

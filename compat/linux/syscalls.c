@@ -1748,14 +1748,8 @@ static int lx_any_addr_from_user(uint64_t uptr, size_t len, struct lx_any_addr *
     if (copy_from_user(&family, uptr, sizeof(family)))
         return -EFAULT;
     out->family = family;
-    if (family == LX_AF_UNIX) {
-        struct lx_sockaddr_un un;
-        if (len > sizeof(un))
-            return -EINVAL;
-        if (copy_from_user(&un, uptr, len))
-            return -EFAULT;
-        return unix_addr_parse(un.sun_path, len - sizeof(family), &out->ua);
-    }
+    if (family == LX_AF_UNIX)
+        return unix_addr_from_user(uptr, len, &out->ua);   /* Linux's sockaddr_un has the same layout */
     return addr_from_user(uptr, len, &out->na);
 }
 

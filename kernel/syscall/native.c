@@ -971,14 +971,8 @@ static int any_addr_from_user(uint64_t uptr, size_t len, struct any_addr *out)
     if (copy_from_user(&family, uptr, sizeof(family)))
         return -EFAULT;
     out->family = family;
-    if (family == COSMO_AF_UNIX) {
-        struct cosmo_sockaddr_un un;
-        if (len > sizeof(un))
-            return -EINVAL;
-        if (copy_from_user(&un, uptr, len))
-            return -EFAULT;
-        return unix_addr_parse(un.path, len - sizeof(family), &out->ua);
-    }
+    if (family == COSMO_AF_UNIX)
+        return unix_addr_from_user(uptr, len, &out->ua);
     return addr_from_user(uptr, len, &out->na);
 }
 
