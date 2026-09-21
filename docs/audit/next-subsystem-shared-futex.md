@@ -126,12 +126,18 @@ a correctness gap reachable today, in the tree since 2332d59, with a
 deterministic two-process test the tree can build from what PR #201
 added.
 
-## What is established
+## What is established (before this unit)
 
-**The futex is three operations over one table, and every one of them
-matches on `(space, uaddr)`.** Sixty-four buckets under spinlocks; a
-waiter is a stack-allocated `struct futex_waiter { space, uaddr, bucket,
-thread, woken, timed_out }` on a bucket's list (`futex.c:15-31`).
+This section describes the futex as the report found it, which is the
+state the design below starts from; the build replaced the key and the
+waiter's fields as the banner says, and `kernel/ipc/futex.c` now
+matches on a `struct futex_key`.
+
+**The futex was three operations over one table, and every one of them
+matched on `(space, uaddr)`.** Sixty-four buckets under spinlocks; a
+waiter was a stack-allocated `struct futex_waiter { space, uaddr, bucket,
+thread, woken, timed_out }` on a bucket's list (`futex.c:15-31` at the
+time).
 `futex_wait` reads the bucket's `wake_seq`, copies and compares the word
 with no lock held (a user copy may fault and may sleep — the rule L8 of
 the lockdep invariants records), re-takes the lock and enqueues only if
