@@ -762,7 +762,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Fifty-seven, to 2026-09-21**, across CI and this developer's machine, on
+**Fifty-nine, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -814,6 +814,7 @@ of this section said eight and then listed nine:
 | PR #203's own CI run | observed, aarch64, the GICv3 boot (`b7dcf9b`, run 35585299449, the shared-futex build, no network file in its diff): `connect 0 in 1395 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:50412 accepted at 94.1s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.1s. Row one, with a SYN retransmission. First recorded in prose only, as "sighting forty-one" counted from the prose while this table stood at forty-nine -- the loss the paragraph below warns of -- and in the table since the same day |
 | PR #203's own CI run, a later commit | observed, aarch64, the plain debug boot (`a0a0c38`, run 35586739597): **`connect 0 in 286 ms`** -- the fastest connect this file has recorded, by two hundred milliseconds -- **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:39430 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s. Row one, the `sent 12` variant |
 | PR #203's own CI run, a documentation-only commit | observed, aarch64, the plain debug boot (`5122041`, run 35587325294, a commit that changes one paragraph of one report): `connect 0 in 1353 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:38064 accepted at 93.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 113.9s. Row one, the `sent 12` variant, and the first `sent 12` reading that also retransmitted |
+| `main` @ `2f79ea5`, twice in one run — x86-64 and aarch64 | observed on 2026-09-21 on both architectures of the shared-futex merge's `main` run (35595160535), each the plain debug boot: x86-64 `connect 0 in 640 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`, host side `127.0.0.1:39696 accepted at 91.1s, 0 byte(s)`; aarch64 `connect 0 in 1358 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`, host side `127.0.0.1:51800 accepted at 95.0s, 0 byte(s)`; both `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`. Row one on both, the second run to show it on both architectures at once (PR #193's was the first) |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -824,16 +825,16 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Forty-six entries, fifty-seven occurrences -- and the table is the tally,
+Forty-seven entries, fifty-nine occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last forty-one rows carry
+are not independently re-verified here. The last forty-two rows carry
 the instrument's reading, thirty-seven of them watched as they happened
-and four of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **forty-eight
-instrumented** occurrences behind the other forty rows carry the
-guest's side. Rows and occurrences differ because **ten** rows hold
+and five of `main`'s read from the logs afterwards: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty
+instrumented** occurrences behind the other forty-one rows carry the
+guest's side. Rows and occurrences differ because **eleven** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
 
