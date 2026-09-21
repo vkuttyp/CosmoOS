@@ -426,3 +426,56 @@ architecture exempts them is not settled here. Two of this
 invariant's four mutations are therefore unobservable under QEMU,
 and it says so rather than claiming a proof it does not have.
 
+
+**M42. A shared file page's PTE gains write only in the fault handler.**
+A `VM_REGION_FILE` region's cache frame is installed read-only unless
+the installing fault is a shared write that marked the page dirty; a
+write fault on a present read-only cache frame in a shared region marks
+the entry dirty (under the cache mutex) and raises the PTE; a write
+fault in a private region **replaces** the PTE with a copy and never
+raises it. `pagecache_sync` lowers every present writable PTE of a run
+of pages, and shoots down, *before* the bytes are read for the disk;
+`vm_user_protect` applies `prot & ~WRITE` to every cache frame's PTE in
+a FILE region whatever `prot` records, shared or private -- raising a
+private region's read-installed frame would write the file through a
+private mapping -- and `prot` itself only to a copy-on-write copy. So a clean shared page is mapped read-only
+everywhere, and a write between a write-back's read and its marking
+clean cannot be lost. Checked by: the `mmap` section of `init --selftest`
+(a write, `MS_SYNC`, a write, `MS_SYNC`: the second sync writes the page
+again, `vm.file_dirty_faults` +1 and `vm.cache_writebacks` +1 -- the
+counter is what tells "the PTE stayed writable" from "the fault marked
+nothing dirty", and both mutations were run); `lxtest` (a write through a
+`MAP_PRIVATE` mapping does not reach the file).
+
+**M43. A frame installed in a user space is referenced per mapping and
+freed on the last put.** A page-cache frame (`PG_PAGECACHE`) has
+`refcount == 1 + the PTEs mapping it`: the reference is taken in
+`pagecache_fault_page` under the cache mutex and put after the PTE is
+gone and shot down; an anonymous frame is the mapping's alone at 1.
+Every teardown (`user_range_teardown`, `vm_file_map_truncate`) uses
+`pmm_page_put`; the cache's own `remove_entry` uses `pmm_free_page`,
+whose count check is the assertion that the cache's reference was the
+last. Reclaim leaves a frame whose count is not one alone, and truncate
+unmaps before it frees. `file_pages` is checked zero at
+`vm_space_destroy` beside `anon_pages`. Checked by: `pagecache-pinned`
+(a referenced frame survives a forced reclaim and goes when the
+reference does), `vm-file-fault-hold` (a second thread's install of the
+same page leaves one frame), the `mmap` section's leak cycle (200
+map/write/unmap cycles in a child whose exit runs the count check), and
+every process exit.
+
+**M44. A FILE fault installs only what the region it re-finds maps.**
+Between its first phase (under the space lock) and its install (under
+the cache mutex, then the space lock again) the region may have been
+unmapped, replaced, or remapped to another file; the install is
+preceded by finding the region again and comparing what it maps --
+vnode, file index for this address, sharing, access -- and not its
+pointer, and a mismatch installs nothing and lets the instruction retry.
+The fault installs only below `min(vn->size, pagecache.trim_bound)`, the
+bound the cache sets before either filesystem lowers the size. Checked
+by: `vm-file-fault-hold` (a fault held after its first phase while the
+range is unmapped: nothing installed, the retry is `SIGSEGV`; while the
+range is replaced by a mapping of another file: the retry reads the
+other file's byte and `vm.file_fault_retries` counts one), the `mmap`
+section's past-the-end and truncate-under-a-mapping children (`SIGBUS`,
+not zeros and not the old bytes).

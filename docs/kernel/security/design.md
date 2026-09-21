@@ -349,7 +349,7 @@ reclaimed. The per-file cap (`RAMFS_MAX_FILE`, 64 MiB) stays.
 
 **The page cache as a whole**: a global limit (`pagecache_limit_pages`,
 a quarter of the buddy's pages at boot; `sysctl vm.cache_limit`,
-`vm.cache_pages`) and a reclaim path. Clean pages of reclaimable mounts
+`vm.cache_pages`) and a reclaim path. Clean pages of reclaimable mounts that no user mapping holds (the file-regions unit: a mapped frame is skipped, `pinned_skips`)
 sit on one global LRU (most recently inserted or written back at the
 head); a page leaves the LRU when it is dirtied or freed and returns
 when `pagecache_sync` cleans it. Before a read, write or page get/put

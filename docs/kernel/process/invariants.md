@@ -117,7 +117,10 @@ handler routes a fault whose frame has `VM_FAULT_USER` and no
 serviceable region (or no memory to service it) to
 `vm_user_hooks.fatal`, which raises `SIGSEGV` on the thread (milestone
 10: a handler frame is built on the trap frame and the hook returns, or
-the process ends with 139 after interrupts are re-enabled); every other
+the process ends with 139 after interrupts are re-enabled) -- or
+`SIGBUS` (135) for a file mapping's page the file cannot supply, past
+its end or a read that failed (the file-regions unit,
+`docs/kernel/memory/design.md` §7.6); every other
 CPU exception from user mode, registered or not, is a signal on the
 thread (`arch_trap_unhandled` on x86-64; the AArch64 classifier maps
 every EL0 syndrome to a registered kind) — `lxsig badstack` (a `push`
@@ -171,7 +174,8 @@ every child it creates and sees `-ECHILD` afterwards.
 
 **P21. Syscall numbers are stable and only appended.**
 `uapi/cosmo/syscall.h` numbers, once assigned, never change meaning
-(0–42 when this was written, 0–95 as of PR #197); `SYS_COUNT` (96 today) only grows -- the file-regions report proposes 96 as `SYS_msync`, which makes it 97 when that unit lands. Unknown numbers, including values above `SYS_COUNT` and
+(0–42 when this was written, 0–96 as of the file-regions unit, whose
+`SYS_msync` is 96); `SYS_COUNT` (97) only grows. Unknown numbers, including values above `SYS_COUNT` and
 negative values reinterpreted as large unsigned, return `-ENOSYS`
 without side effects. Check: test `process-user` (`SYS_COUNT`, 999999,
 -1), review.

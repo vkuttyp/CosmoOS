@@ -194,7 +194,8 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | Nr | Call | Translation | Deviations |
 |---|---|---|---|
 | 12 | `brk` | `brk(0)` returns the break; growing maps `[page_up(brk), page_up(addr))` anonymous RW (`vm_user_map_anon`, region name `brk`); shrinking unmaps `[page_up(addr), page_up(brk))`; the break is stored exactly as requested | on any failure (below `brk_start`, more than 1 GiB above it, range taken, out of memory) the **unchanged** break is returned, as Linux does |
-| 9 | `mmap` | `lx_prot`; `MAP_FIXED` → `vm_user_unmap` then map at `addr` (must be page aligned and in range, else `-EINVAL`); otherwise `vm_user_find_free` from a page-aligned hint, falling back to `USER_MMAP_BASE`. Milestone 10, a file (`MAP_PRIVATE`, or `MAP_SHARED` without `PROT_WRITE`): the fd needs READ (`-EBADF`), the offset must be page aligned (`-EINVAL`); an anonymous RW region is filled from the file through a bounce page (`file_pread` + `copy_to_user`, bytes past the end zero) and then set to the requested protection | `MAP_SHARED|PROT_WRITE` on a file `-EOPNOTSUPP` (a snapshot, not a shared page cache); `PROT_WRITE|PROT_EXEC` `-EINVAL` (W^X); `MAP_NORESERVE`, `MAP_STACK`, `MAP_POPULATE` ignored; `len` 0 or larger than the user window `-EINVAL`; no free range `-ENOMEM` |
+| 9 | `mmap` | `lx_prot`; `MAP_FIXED` → the replacement (`vm_user_map_anon_replace`, or `vm_user_map_file` with `VM_MAP_REPLACE` for a file: the range owned throughout, `docs/audit/next-subsystem-map-fixed.md`) at `addr` (must be page aligned and in range, else `-EINVAL`); otherwise `vm_user_find_free` from a page-aligned hint, falling back to `USER_MMAP_BASE`. A file (since the file-regions unit, `docs/kernel/memory/design.md` §7): a `VM_REGION_FILE` region over the file's page cache, demand-paged -- `MAP_SHARED` the file's own pages, `MAP_PRIVATE` copy-on-write; the fd needs READ (`-EBADF`), a regular file (`-ENODEV`), the offset page aligned (`-EINVAL`); `MAP_SHARED|PROT_WRITE` needs the file opened for writing through a handle with WRITE (`-EACCES`), and such a mapping of a read-only fd cannot later be `mprotect`ed writable (`-EACCES`); a touch past the end of the file is `SIGBUS`. This row used to describe an eager copy through a bounce page and `-EOPNOTSUPP` for a shared writable mapping; both are gone | `PROT_WRITE|PROT_EXEC` `-EINVAL` (W^X); `MAP_NORESERVE`, `MAP_STACK`, `MAP_POPULATE` ignored; `MAP_SHARED|MAP_ANONYMOUS` is private to the process (unobservable without `fork`); `len` 0 or larger than the user window `-EINVAL`; no free range `-ENOMEM` |
+| 26 | `msync` | `vm_user_msync` over the page-rounded range with `MS_SYNC`: the dirty pages of every file mapped in it are written and waited for; `MS_ASYNC` returns at once (the cache already owns the pages), `MS_INVALIDATE` is nothing to do (the mapping is the cache); an anonymous range is skipped | `MS_SYNC|MS_ASYNC` or an undefined bit `-EINVAL`; `addr` unaligned `-EINVAL`; a page of the range unmapped `-ENOMEM`, before anything is written |
 | 11 | `munmap` | `vm_user_unmap` of the page-rounded range | `-EINVAL` unless `addr` is page aligned, `len` non-zero and the range is a user range |
 | 10 | `mprotect` | `vm_user_protect` | same W^X rules; `len` rounded up to a page (the native call requires a multiple); regions split and merge as needed and a hole is `-ENOMEM`, `-EBUSY` if a `MAP_FIXED` replacement holds part of the range; adding `PROT_EXEC` makes the kernel synchronise the instruction stream (invariant M41). This row used to say the range had to be exactly one region — that has not been true since `vm_user_protect` learned to split, and `design.md` said so while this row did not |
 | 28 | `madvise` | 0 | advice ignored |
@@ -271,8 +272,9 @@ as Linux does.
 `clone3` 435 (x86-64 numbers; the AArch64
 rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `select` 23,
-`mremap` 25, `msync` 26, `sendmsg` 46, `recvmsg` 47 have numbers in the
-tables but no entry: they go through `lx_unknown`.
+`mremap` 25, `sendmsg` 46, `recvmsg` 47 have numbers in the tables but
+no entry: they go through `lx_unknown`. `msync` 26 has an entry since
+the file-regions unit (the `mmap` row above).
 
 ## Symbolic links
 

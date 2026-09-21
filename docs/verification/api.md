@@ -64,7 +64,7 @@ Never fails in interrupt context (`irq_depth != 0`). Counts `seen` and
 
 ### `int faultinject_configure(const char *spec)`, `void faultinject_init(void)`
 `spec` is `kind:every[:budget]` entries separated by commas, kinds
-`kmalloc`, `blk-submit`, `blk-complete`, `demand-page`, `demand-copy`; `-EINVAL` on a malformed entry
+`kmalloc`, `blk-submit`, `blk-complete`, `demand-page`, `demand-copy`, `usb-csw`, `ahci-ci`, `hv-selfcheck`, `file-readpage` (a page cache miss's read fails with `-EIO`: a mapped touch is `SIGBUS`); `-EINVAL` on a malformed entry
 (unknown kind, missing or zero `every`, a field that does not fit an
 unsigned 32-bit integer, trailing characters), in which case nothing is
 armed: the specification is parsed completely before the first rule is

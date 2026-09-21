@@ -125,11 +125,20 @@ An unknown conversion prints the `%` and the character.
   FIFO/SOCK`.
 - `mount(source, target, fstype, flags)`, `umount`, `umount2(target,
   flags)`, `MS_RDONLY`, `MNT_FORCE`.
-- `mmap(hint, len, prot, flags, fd, off)` (anonymous only: `fd` and `off`
-  are ignored, `MAP_FAILED` on error), `munmap`, `mprotect` (POSIX, except
-  that `len` must be a page multiple and `EBUSY` is possible against a
-  concurrent `MAP_FIXED` replacement of the same range), `PROT_*`, `MAP_ANONYMOUS`,
-  `MAP_FIXED`, `MAP_PRIVATE` (0).
+- `mmap(hint, len, prot, flags, fd, off)` (`MAP_FAILED` on error; since
+  the file-regions unit a file mapping too: `MAP_SHARED` maps the file's
+  own pages, `MAP_PRIVATE` is copy-on-write, `fd` and `off` are passed
+  through, `off` page aligned, a regular file only (`ENODEV`), a shared
+  writable mapping only of a file opened for writing (`EACCES`), and
+  `MAP_SHARED` with `MAP_ANONYMOUS` is `EINVAL` -- there is no `fork` to
+  share it with), `munmap`, `mprotect` (POSIX, except that `len` must be
+  a page multiple, `EBUSY` is possible against a concurrent `MAP_FIXED`
+  replacement of the same range, and a shared mapping of a read-only fd
+  cannot be made writable, `EACCES`), `msync` (`MS_SYNC` writes and waits,
+  `MS_ASYNC` returns at once, `MS_INVALIDATE` is nothing to do),
+  `PROT_*`, `MAP_ANONYMOUS`, `MAP_FIXED`, `MAP_FIXED_NOREPLACE`,
+  `MAP_SHARED`, `MAP_PRIVATE`, `MS_*`. The raw wrappers `cosmo_mmap_fd`
+  and `cosmo_msync` beside `cosmo_mmap`.
 
 ## spawn.h, sys/wait.h, signal.h (**native**)
 

@@ -1812,12 +1812,30 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
         if (first == NULL)
             first = r;
         r->prot = prot;
-        /* A shared file page's PTE gains write only in the fault handler,
-         * which marks the page dirty as it does; here the PTEs of such a
-         * region get everything but write, and the next write faults. */
-        vm_prot_t pte_prot = (r->fmap != NULL && r->fmap->shared) ? (prot & ~VM_PROT_WRITE) : prot;
-        rc = arch_mmu_protect(&space->mmu, r->base, r->size, pte_prot);
-        KASSERT(rc == 0);   /* whole 4 KiB user pages only: nothing to split */
+        if (r->fmap == NULL) {
+            rc = arch_mmu_protect(&space->mmu, r->base, r->size, prot);
+            KASSERT(rc == 0);   /* whole 4 KiB user pages only: nothing to split */
+            continue;
+        }
+        /*
+         * A cache frame's PTE gains write only in the fault handler --
+         * which marks a shared page dirty as it raises it, and REPLACES
+         * a private mapping's frame with a copy rather than raising it.
+         * So here a cache frame gets everything but write whatever the
+         * region is (a private region's read-installed frames too: raising
+         * one would write the file through a private mapping), and only
+         * a copy-on-write copy, the mapping's own anonymous frame, takes
+         * the protection as asked. Per page, because a private region
+         * holds both kinds.
+         */
+        for (vaddr_t p = r->base; p < r->base + r->size; p += PAGE_SIZE) {
+            paddr_t pa;
+            if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
+                continue;
+            bool cache_frame = (phys_to_page(pa)->flags & PG_PAGECACHE) != 0;
+            rc = arch_mmu_protect(&space->mmu, p, PAGE_SIZE, cache_frame ? (prot & ~VM_PROT_WRITE) : prot);
+            KASSERT(rc == 0);
+        }
     }
 
     /* Merge inside the range and with both neighbours. */

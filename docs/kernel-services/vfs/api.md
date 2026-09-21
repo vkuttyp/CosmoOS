@@ -321,10 +321,25 @@ console is still a kobject handed to processes at spawn, not a node.
 ## Page cache (`kernel/include/kernel/pagecache.h`)
 
 `struct pagecache`: `PC_HASH` (32) buckets of `struct pc_entry { index,
-page, dirty, next }`, `nr_pages`, `nr_dirty`, a mutex. Callers hold the
-vnode lock; the functions take `pc.lock` beneath it.
+page, dirty, next }`, `nr_pages`, `nr_dirty`, a mutex, and since the
+file-regions unit `mappings` (the `struct vm_file_map` records of the
+file's user mappings, under the mutex) and `trim_bound` (the end a
+fault installs below, together with `vn->size`: set by `pagecache_truncate`,
+lifted by a growing `pagecache_write`). Callers hold the vnode lock; the
+functions take `pc.lock` beneath it.
 
 - **`void pagecache_init(struct pagecache *pc)`**
+- **`void pagecache_lock(vn)` / `pagecache_unlock(vn)`** The cache
+  half of a FILE fault (`docs/kernel/memory/design.md` §7.2): the
+  reclaim every entry runs, then the mutex; the caller installs the
+  frame under it and unlocks.
+- **`int pagecache_fault_page(vn, index, bool dirty, struct page **out)`**
+  Under the mutex: `-EFBIG` for an index at or past
+  `min(vn->size, trim_bound)` (the caller ends the access with `SIGBUS`
+  rather than inheriting the zero page a write would get); otherwise the
+  entry, read in on a miss, marked dirty when `dirty` (a shared write),
+  and **one reference taken for the mapping** (`pmm_page_get`), which the
+  caller puts after its PTE is gone or if it installs nothing.
 - **`int64_t pagecache_read(vn, off, buf, len)`** Bounded by `vn->size`;
   misses allocate a frame (`pmm_alloc_page`, zeroed) and call
   `ops->readpage` for pages inside the file. Returns bytes or, if
@@ -334,21 +349,29 @@ vnode lock; the functions take `pc.lock` beneath it.
 - **`int pagecache_sync(vn)`** `ops->writepage`/`writepages` for every
   dirty page, in ascending order; stops at the first error, leaves the
   failed pages dirty, and records the error (`wb_err`, `wb_seq` under
-  `pc->lock`).
+  `pc->lock`). Before each run is read for the disk, every mapping's
+  present writable PTEs of those pages are lowered to read-only
+  (`vm_file_map_writeprotect`), so the next write faults and dirties the
+  page again (invariant M42).
 - **`bool pagecache_error_since(pc, seen, &err, &now)`** / **`uint32_t
   pagecache_wb_seq(pc)`** Under `pc->lock`: whether a failure was
   recorded after sequence `seen`, its errno, the current sequence.
-- **`void pagecache_truncate(vn, size)`** Drops pages entirely past
-  `size`, zeroes the tail of the last page. Does not change `vn->size`.
+- **`void pagecache_truncate(vn, size)`** Sets `trim_bound`, unmaps the
+  dropped pages from every mapping (`vm_file_map_truncate`), then drops
+  pages entirely past `size` and zeroes the tail of the last page. Does
+  not change `vn->size`.
 - **`unsigned pagecache_drop(vn, bool lost)`** Frees every page; returns
   how many were dirty, counted in `dropped_dirty` when `lost` (a named
-  file's), not when the file was unlinked.
+  file's), not when the file was unlinked. Asserts `mappings` is empty:
+  a mapping holds a reference to its vnode.
 - **`int pagecache_get_page(vn, index, buf)` / `pagecache_put_page(vn, index, buf)`**
   Whole-page access for filesystems that keep structures in file data.
 - **`void pagecache_get_stats(struct pagecache_stats *out)`** `hits`,
   `misses`, `writebacks`, `pages`, `reclaimed`, `budget_refusals`,
   `wb_errors` (failures recorded), `dropped_dirty` (a named file's dirty
-  pages dropped at its vnode's release: data lost) (global).
+  pages dropped at its vnode's release: data lost), `pinned_skips`
+  (reclaim candidates left alone because a mapping holds the frame)
+  (global).
 
 ## Storage pool (`kernel/include/kernel/storage.h`)
 

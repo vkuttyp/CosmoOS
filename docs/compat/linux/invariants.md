@@ -196,17 +196,29 @@ TLS, join through the cleared word, `-EINVAL`/`-ENOSYS`/`-EFAULT`
 refusals), `lxsig group`/`lastthread`, `docs/kernel/process/invariants.md`
 P-S4. Gap: no test creates threads up to `PROCESS_MAX_THREADS`.
 
-**L14. A private file mapping is a snapshot the file never sees.**
-`mmap` with a file copies the bytes at call time into an anonymous
-region and applies the protection afterwards; a write through a
-`MAP_PRIVATE` mapping changes the mapping only; `MAP_SHARED|PROT_WRITE`
-is refused (`-EOPNOTSUPP`) rather than pretending to share. Check:
-`lxtest` (a 6000-byte file mapped over two pages: bytes match, the tail
-is zero, a mapping at offset one page matches, a write does not reach
-the file, `-EOPNOTSUPP`, an unaligned offset `-EINVAL`, a bad fd
-`-EBADF`); `lxdyn` loads through the loader, not `mmap`. Gap: a real
-dynamic linker's `mmap` of a shared object is not exercised (no `ld.so`
-in the tree).
+**L14. A private file mapping's written pages are its own and never
+reach the file; a shared mapping and the file are one.** Since the
+file-regions unit `mmap` with a file is a `VM_REGION_FILE` region over
+the page cache (`docs/kernel/memory/invariants.md` M42--M44): a write
+through a `MAP_PRIVATE` mapping copies the page and changes the copy
+only, while an unwritten page of the same mapping shows a later
+`write()` to the file (the copy is per page); a write through a
+`MAP_SHARED` mapping is in the file at once and a `write()` is in the
+mapping at once, with no `msync` between, because they are one frame.
+`MAP_SHARED|PROT_WRITE` on a file opened read-only is `-EACCES`, and so
+is a later `mprotect` to writable of a shared mapping of such a file.
+This invariant used to say a private mapping was a snapshot the file
+never sees, and `MAP_SHARED|PROT_WRITE` was `-EOPNOTSUPP`; that was the
+eager copy, which is gone. Check: `lxtest` (a 6000-byte file mapped over
+two pages: bytes match, the tail is zero, a mapping at offset one page
+matches, a write does not reach the file; `MAP_SHARED|PROT_WRITE`
+succeeds and both directions are coherent; `msync` with `MS_SYNC|MS_ASYNC`
+or an undefined bit `-EINVAL`; a read-only `MAP_SHARED` sees a later
+`pwrite`; a read-only fd is `-EACCES` for a shared writable mapping and
+for `mprotect(PROT_WRITE)` of its shared mapping; an unaligned offset
+`-EINVAL`, a bad fd `-EBADF`); `lxdyn` loads through the loader, not
+`mmap`. Gap: a real dynamic linker's `mmap` of a shared object is not
+exercised (no `ld.so` in the tree).
 
 **L15. The two number tables never disagree on a shared call's
 meaning.** Every `LX_*` name in `nr_aarch64.h` has the same name in

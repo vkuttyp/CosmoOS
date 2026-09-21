@@ -88,7 +88,9 @@ the documented order is enforced by review.
 
 Flags: `PG_RESERVED`, `PG_BUDDY`, `PG_SLAB`, `PG_KMALLOC_LARGE`,
 `PG_PAGETABLE`, `PG_DEFERRED`, `PG_POISONED` (free and holding the
-debug poison pattern; checked and cleared at the next allocation).
+debug poison pattern; checked and cleared at the next allocation),
+`PG_PAGECACHE` (a page cache frame: `refcount` is 1 plus the user PTEs
+mapping it, design.md §7.3).
 
 Globals set by `pmm_init`/`vmm_init`: `pmm_page_array`, `pmm_max_pfn`,
 `pmm_hhdm_base`, `pmm_hhdm_limit`.
@@ -352,7 +354,11 @@ of that region can happen (single CPU today).
 
 ### `void vm_get_stats(struct vm_stats *)`, `void vm_dump(struct vm_space *)`
 
-Take `vm_space.lock`. `vm_dump` prints one line per region.
+Take `vm_space.lock`. `vm_dump` prints one line per region. Since the
+file-regions unit `vm_stats` carries the FILE fault's counters
+(`file_faults`, `file_cow_faults`, `file_dirty_faults`,
+`file_fault_retries`, `file_sigbus`; atomic, since they are counted
+under many spaces' locks), which `sysctl vm.file_*` reports.
 
 ### Page-fault behaviour (not a function callers invoke)
 
@@ -362,8 +368,13 @@ kernel address is fatal to the process at once. Otherwise the space is
 a user one (NULL on a kernel thread). If the address lies in a
 `VM_REGION_ANON` region, the fault is not-present, no reserved bit is
 set, and the access kind is within the region's `prot`, it allocates a
-zeroed frame, maps it, and returns. Every other case, including an
-allocation failure on that path, is: fatal to the process for a
+zeroed frame, maps it, and returns. If it lies in a `VM_REGION_FILE`
+region and the access is within `prot`, the FILE fault of design.md
+§7.2 runs: the page comes from the file's cache (or is copied for a
+private write), the region is found again under the cache mutex before
+anything is installed, and a page the file cannot supply is `SIGBUS`
+(the hook's `sig`); this path may sleep. Every other case, including an
+allocation failure on the anonymous path, is: fatal to the process for a
 user-mode frame; for a kernel-mode frame at a user address, resumed at
 the faulting PC's exception fixup when the exception table has one
 (`fixups` counts these), which is how `copy_*_user` reports `-EFAULT`;
@@ -392,18 +403,70 @@ cannot fail. `-EINVAL` for a bad range, W+X, or `VM_REGION_POPULATED`
 (populating allocates, and nothing fallible may run after the point of
 no return); `-ENOMEM` if the region or a split spare cannot be
 allocated or `COSMO_RLIMIT_AS` would be exceeded — in which case
-nothing has changed, not even a split. Anonymous user memory only.
+nothing has changed, not even a split. Anonymous user memory only; a
+file mapping with `MAP_FIXED` goes through the same replacement
+(`map_replace`, the body both share) via `vm_user_map_file` below.
+
+### `int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot, unsigned flags, struct vnode *vn, uint64_t off, const char *name)`
+
+The file-regions unit (design.md §7). Maps the pages of `vn` from the
+page-aligned `off` into `[base, base+size)` as a `VM_REGION_FILE`
+region, demand-paged from the file's cache: `VM_MAP_SHARED` maps the
+cache's own frames (a write through the mapping is a write to the
+file, seen by `read()` and every other mapping), otherwise the mapping
+is private, copy-on-write. `VM_MAP_REPLACE` is `MAP_FIXED` with the
+range owned throughout (M40) instead of `-EEXIST`. `maxprot` bounds what
+`vm_user_protect` may later grant; `prot` must lie within it and not be
+W+X. Takes its own reference to the vnode for the mapping's life and
+links a `struct vm_file_map` on `vn->pc.mappings` before the region is
+inserted. The caller has checked the file's type and rights (both
+syscall doors do, with their own errnos). `-EINVAL`, `-EEXIST`,
+`-ENOMEM` (also `COSMO_RLIMIT_AS`).
+
+### `int vm_user_msync(struct vm_space *space, uint64_t base, size_t size)`
+
+Write back the dirty pages of every file mapped in the range: `-ENOMEM`
+if a page is unmapped, checked before anything is written; an anonymous
+range is skipped; the first write-back error is returned. Two passes
+(design.md §7.6), because `pagecache_sync` sleeps under the cache mutex
+and the order is vnode → pagecache → vm_space. `MS_ASYNC` and
+`MS_INVALIDATE` are the doors' business and do not reach here.
+
+### `void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep)`, `void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n)`
+
+The page cache's two ways of reaching every mapping of a file, called
+with the cache mutex held: unmap a record's pages from file index `keep`
+on (truncate, before the cache frees them; copy-on-write frames go too),
+and lower to read-only the present PTEs of `n` pages from `index`
+(write-back, before the bytes are read for the disk; shared records
+only). Each takes the record's space lock per page, shoots down with it
+released, and puts the frames it unmapped last.
+
+### `void vm_test_file_hold_arm(void)`, `unsigned vm_test_file_hold_state(void)` (debug builds)
+
+The seam of `vm-file-fault-hold` (design.md §7, testing.md): armed, the
+next FILE fault in any user space blocks after its first phase until
+another FILE fault in that space installs or part of that space is
+unmapped. State 0 idle, 1 armed, 2 held; `sysctl debug.file_fault_hold`.
+Release builds: no-ops, and the sysctl is `-ENOENT`.
 
 ### `int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot)`
 
 Change the protection of every page of `[base, base+size)`: splits
 regions at the ends so the range is covered by whole regions, rewrites
 their `prot` and the leaf permissions, shoots down, and merges equal
-neighbours afterwards. `-EINVAL` for W+X or a bad range; `-ENOMEM` if a
+neighbours afterwards. `-EINVAL` for W+X or a bad range; `-EACCES` if a
+FILE region in the range has a `maxprot` that does not cover `prot`
+(a shared mapping of a file opened read-only), checked over the whole
+range before anything changes; `-ENOMEM` if a
 page of the range is unmapped or a split spare cannot be allocated,
 with nothing changed; `-EBUSY` if a `MAP_FIXED` replacement has claimed
 part of the range (invariant M40 — splitting a quiesced region would
-copy the claim into pieces the owner does not know about).
+copy the claim into pieces the owner does not know about). In a FILE
+region the leaves are rewritten per page: a cache frame gets
+`prot & ~WRITE` whatever `prot` records, shared or private, and only a
+copy-on-write copy gets `prot` -- a cache frame's PTE gains write only
+in the fault handler (M42).
 
 Reached by the ELF loader, by the Linux personality's `mprotect`, and
 since the `mprotect` unit by the native `SYS_mprotect`. It does **not**

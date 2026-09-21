@@ -4110,6 +4110,24 @@ static void mmap_selftest(void)
     }
     CHECK(cosmo_close(rfd) == 0);
 
+    /* A private mapping made writable AFTER its page was installed
+     * read-only: the cache frame's PTE must not be raised by mprotect
+     * (the write would reach the file through a private mapping); the
+     * write copies instead. Found by self-review, not by the report. */
+    unsigned char *pm = mmap(NULL, P, PROT_READ, MAP_PRIVATE, fd, 0);
+    CHECK(pm != MAP_FAILED);
+    if (pm != MAP_FAILED) {
+        unsigned char first = pm[0];                          /* installs the cache frame, read-only */
+        CHECK(first == sh[0]);
+        uint64_t cowp = sysctl_u64("vm.file_cow_faults");
+        CHECK(cosmo_mprotect(pm, P, COSMO_PROT_READ | COSMO_PROT_WRITE) == 0);
+        pm[0] = (unsigned char)(first + 1);                   /* copy-on-write, not a write through */
+        CHECK(sysctl_u64("vm.file_cow_faults") == cowp + 1);
+        CHECK(file_rd(fd, 0, &b, 1) == 1 && b == first);      /* the file untouched */
+        CHECK(sh[0] == first && pm[0] == (unsigned char)(first + 1));
+        CHECK(munmap(pm, P) == 0);
+    }
+
     /* The end of the file, a truncate under a mapping, the address-space
      * limit, and the leak cycle: each in a child, judged by its status. */
     CHECK(probe_status("mmap-past-end") == 128 + 7);

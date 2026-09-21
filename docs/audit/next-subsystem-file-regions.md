@@ -1,7 +1,100 @@
 # NEXT SUBSYSTEM — file-backed regions: the mappings the constitution requires
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(the file-regions unit), and the banner below records where the build
+differed from the design; the sections after it are the design as
+reviewed, kept as the record of what was argued before the code
+existed.
+
+**What the build changed:**
+
+0. **The cache half of the fault is three calls, not one.** The design
+   named `pagecache_map_page`; as built it is `pagecache_lock` (the
+   reclaim every entry to a cache runs, then the mutex),
+   `pagecache_fault_page` (the bound, `get()`, the dirty mark, the
+   reference) and `pagecache_unlock`, so the caller's install sits
+   between two calls it makes itself rather than inside one that returns
+   holding a lock. The copy-on-write copy is made by the fault handler
+   from the cache frame under the mutex, and the cache frame's reference
+   is put again before the space lock is taken: a private copy never
+   references the cache.
+1. **A private write finding the cache frame present replaces the PTE;
+   a shared write raises it; anything else present drops what phase two
+   made.** Exactly as review corrected the report (round one), with one
+   more case the build met: memory for a private copy running out is the
+   anonymous rule (`-ENOMEM` -> `SIGSEGV` on a user touch, `-EFAULT` in a
+   copy), while a page the *file* cannot supply is `SIGBUS`. The report
+   had folded both into `SIGBUS`; the fault distinguishes them.
+2. **The seam is armed and released in the kernel, never written from
+   user space.** `sysctl` is read-only in this ABI, so `debug.file_fault_hold`
+   reports the state (0 idle, 1 armed, 2 held) and the kernel self-test
+   arms it (`vm_test_file_hold_arm`) before spawning the child; the hold
+   is released by the next FILE install in that space or by any unmap or
+   replacement of part of it, which is exactly the two events the proofs
+   need and needs no write. Event-driven, as designed. The child spins
+   on the state reading 2 before it acts.
+3. **Three held-fault variants, not two.** Review of the report's first
+   draft asked for the re-find to be proved for the stated reason, and
+   "unmap under a held fault" cannot show it -- with the region gone
+   there is nothing to install into, correct code or not. The third
+   variant replaces the range with a `MAP_FIXED` mapping of *another
+   file* while the fault is held: the re-find sees a different vnode,
+   installs nothing, and the retry reads the other file's byte. A fault
+   trusting its first phase would install the first file's page under
+   the second file's name, and that is what the "no re-find" mutation
+   did (below). `vm_user_map_file`'s replacement path releases the hold
+   for it.
+4. **The injected read failure fires on any miss, and the kernel test
+   makes the file.** `FI_FILE_READPAGE` (`file-readpage`) is checked
+   before the "inside the file, and a readpage exists" test, so a hole
+   on ramfs -- which has no `readpage` -- fails too and the proof needs
+   no disk. The child could not make the file itself: its own write to
+   create the hole was the first miss and spent the injected failure,
+   which is how the test failed on its first run.
+5. **`vm.cache_writebacks` and the counters exist as sysctls**, as the
+   review-revised report said; `pinned_skips` was added to
+   `pagecache_stats` for `pagecache-pinned`, which the report had not
+   listed. The bench maps 2 MiB, not 4: the section runs inside the
+   per-suite budget and a larger file measured nothing different.
+6. **The harness has a list of the user-mode sections and its own
+   unit test hard-coded ten**; the section joined the list and the test
+   now derives its counts and names from it. Reading the section list
+   from `init.c` would have been the other answer and was not taken:
+   the list in the harness is what makes a row that compiles to nothing
+   visible.
+7. **The numbers.** `SYS_msync` 96, `SYS_COUNT` 97; `COSMO_MAP_SHARED`
+   `1 << 3`, `COSMO_MAP_PRIVATE` `1 << 4`; invariants **M42** (a shared
+   page's PTE gains write only in the fault handler), **M43** (a frame
+   is referenced per mapping and freed on the last put), **M44** (a FILE
+   fault installs only what the region it re-finds maps, below the bound),
+   **V33** (the cache tells every mapping before it frees or cleans a
+   page); 366 self-tests on both architectures; the user-mode suite's
+   `mmap` section 264 ms on x86-64 and 300 ms on AArch64. The
+   `arch_mmu_protect` "not called by any current code path" gap in the
+   memory testing document was false before this unit (`vm_user_protect`
+   calls it) and is struck.
+8. **The bench, as run** (`USERBENCH: mmap 2048 KiB`, QEMU TCG, one
+   boot each): x86-64 `read()` of the cached file 15644 us, first touch
+   through a shared mapping 6991 us (13654 ns/page), the dirtying write
+   of every page 7434 us (14520 ns/page); AArch64 10523 us, 6118 us
+   (11949 ns/page), 10384 us (20281 ns/page). The first touch of a page
+   costs about what reading it through `read()` costs per 64 KiB
+   request divided by sixteen -- the fault is not cheaper than the copy
+   under TCG, where a trap is expensive, and the report expected nothing
+   else. The demand-zero fault path gained one `kind` test before its
+   arm and no measurable cost: the suite's `process-user` line is within
+   its run-to-run spread (4107 / 4149 / 4202 ms across three boots
+   against 3688 ms before the section existed, the difference being the
+   section).
+9. **What review found on the report, kept here because the build
+   followed it:** the private-write PTE rule (item 1), the two-pass
+   `msync` (built exactly as the revised design says, with the cursor
+   resolving the region that *contains* the start address first), and
+   the `SYS_COUNT` wording.
+
+**Bug-proofs, as run** -- see the table under "Tests" (filled in after
+the eight mutations ran, each alone, on x86-64).
 
 **The VMM has two kinds of region and the constitution requires four
 things it cannot do with them.** §14 of the constitution lists what the

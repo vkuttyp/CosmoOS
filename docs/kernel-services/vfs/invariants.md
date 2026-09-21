@@ -559,3 +559,28 @@ file whose own failure does not advance `wb_seq_seen` reports it twice;
 an opener starting at sequence 0 hears an error older than itself; a
 `handle_close` without the flush returns 0; a drop without the count
 leaves `dropped_dirty` unchanged.
+
+**V33. A page cache frame a mapping holds is neither reclaimed nor freed
+under it, and the cache tells every mapping before it frees or cleans a
+page.** Since the file-regions unit (`docs/kernel/memory/design.md` §7)
+a frame of the cache may be installed in user address spaces: each
+installation takes one reference to it under `pc->lock`
+(`pagecache_fault_page`), so `refcount == 1 + the PTEs mapping it`.
+`pagecache_reclaim`, deciding under the owning cache's mutex, leaves a
+frame whose count is not one alone (`pinned_skips`). `pagecache_truncate`
+walks `pc->mappings` and unmaps every record's pages from the dropped
+index on *before* `remove_entry`, whose `pmm_free_page` panics on any
+count but one -- the assertion that the cache's reference was the last.
+`pagecache_sync` walks the same list *before* it reads a run of pages
+for the disk and lowers every present writable PTE (M42). A fault
+installs only below `min(vn->size, trim_bound)`: both filesystems trim
+the cache before they lower the size, and the bound covers that window.
+`pagecache_drop` asserts the list is empty, because a mapping holds a
+reference to its vnode. Locking: `vnode.lock → pagecache.lock →
+vm_space.lock`; the install runs under the cache mutex, so a truncate or
+a write-back on the same file is serialised against it. **Checked by**
+`pagecache-pinned` (a referenced frame survives a forced reclaim and
+goes when the reference does; an index past the end is `-EFBIG`), the
+`mmap` section of `init --selftest` (truncate under a mapping is
+`SIGBUS`, not the old bytes; a write after `MS_SYNC` is written again),
+`vm-file-fault-hold`.
