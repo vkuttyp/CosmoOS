@@ -1494,6 +1494,38 @@ mechanism, recorded so that the next one has a first to compare
 against. What to read on that one is the runner's QEMU invocation and
 its stderr, which this log did not keep.
 
+## An aarch64 release boot whose console stopped mid-line after an interrupt
+
+**2026-09-21, `43f6790`, PR #203's aarch64 job, the release boot** (run
+35590771083): the three debug boots of the same job had passed, and the
+release boot's interactive harness got through its first eleven
+commands. `sleep 5` was interrupted -- the terminal echoed `^C`, `sleep`
+exited with status 130, the prompt came back -- and the next line the
+harness typed, `echo after-interrupt-ok`, echoed as far as
+`cosmo$ echo after-interrupt-o` and stopped. Nothing followed for the
+rest of the 180 s: no prompt, no output, no kernel line. The harness
+reported `no prompt before command 12` and every later command as never
+sent. The same image built locally from the same commit passed the same
+harness in 13.9 s.
+
+**What the log does and does not say.** The prompt came back after the
+interrupt, so the shell reaped the job and was reading again; the
+keystrokes up to `o` were echoed, so the console's receive path was
+alive after `^C`; then one keystroke was not echoed, and nothing after
+it. Echo is the terminal's work, not the shell's, so the reader is not
+what stopped: either the serial receive path stopped delivering or the
+guest stopped altogether, and a release build carries no lockup
+detector to say which. One sighting, on a branch that changes the
+futex, the file fault's interrupt mask and one reference count -- none
+of them on the path from a receive interrupt to an echo -- recorded so
+that the next one is read for the two things this log cannot answer:
+whether the guest still ticks (the harness could send a second Enter
+and a `^C` before giving up and report whether either echoed), and
+which CPU the console's receive interrupt was on (`serial: console
+input on IRQ` is in the `dmesg` output above the stall). Not a bound
+and not a list entry: re-run, and if it recurs, instrument before
+theorising.
+
 ## `quiesce-kick-spinner` is upset by any test that creates threads
 
 **2026-09-20, found while building the `MAP_FIXED` replacement unit,
