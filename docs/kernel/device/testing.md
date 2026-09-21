@@ -313,7 +313,7 @@ every turn of both its loops from the test thread, which is the
 observer an ordering between two counters needs. The worst case of the
 old order -- the accept counted after its own completion, held open
 for a millisecond -- fails that assertion within a millisecond
-(`check failed: rm_completions(&s) <= s.ok`); a `sched_yield` alone in
+(`check failed: rm_order_ok(&s)`); a `sched_yield` alone in
 the window does not, being a no-op with nothing else runnable
 (`docs/testing/flakes.md`).
 
