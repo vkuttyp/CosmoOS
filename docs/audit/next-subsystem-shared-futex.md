@@ -189,21 +189,25 @@ are two buckets like any two; the address-order lock rule and the nested
 annotation are unchanged. Requeueing a waiter from a shared word to a
 private one, or the reverse, moves it between the keys' buckets and
 rewrites its key under both locks, as the requeue already rewrites
-`uaddr` and `bucket`. **The reference follows the key, and is taken per
-waiter.** A waiter moved onto a shared word by a requeue has no
-reference of its own — it came in private — so the requeue takes one
-for it from the destination key's vnode as it moves it (`vnode_get` is
-an atomic increment and runs under the bucket locks); the requeue's own
-reference on that key protects the call, not the waiters, and review
-of this report's first draft caught the design relying on it. A waiter
-moved from a shared word to a private one keeps the reference it holds
-until it dequeues, because dropping it may release the vnode and a
-release does block I/O, which cannot happen under a spinlock. So the
-rule the waiter keeps is: **a waiter holds a reference to every vnode
-its key has ever named, and puts them all at dequeue** — in practice
-one, since a waiter is requeued at most once between keys in any use
-the tree has, but the waiter records what it holds rather than what it
-assumes.
+`uaddr` and `bucket`. **A waiter holds exactly one reference: to the vnode of its current
+key, or none, and a requeue that changes the key exchanges it.** Every
+waiter matched on the source word carries the source key, so all of
+them hold references to one vnode or to none; the requeue therefore
+deals with at most one old vnode and one new one however many waiters
+it moves. Under the two bucket locks it takes one reference to the
+destination key's vnode per waiter it moves onto a shared word
+(`vnode_get` is an atomic increment) and counts the waiters it moved off
+a shared word; after the locks are released it puts that many
+references to the old vnode, because a put may release the vnode and a
+release does block I/O, which cannot happen under a spinlock. The
+requeue's own reference on each key protects the call, not the
+waiters. Review of this report caught two earlier versions: one that
+relied on the call's reference for the moved waiters, and one that let
+a waiter accumulate references across repeated requeues with one slot
+to hold them in — a chain shared → private → shared is legal and
+unbounded, and the exchange rule handles it with one slot because each
+step leaves the waiter holding the reference its key names and no
+other. At dequeue the waiter puts the one it holds.
 
 ### Lifetime
 
@@ -272,6 +276,7 @@ documents. No structure a program sees changes size or number.
 | unmap under a waiter | a thread waits on a shared word; another unmaps the page; the wait times out, the process exits cleanly, the poisoner is silent (the vnode reference outlived the mapping) |
 | requeue across kinds | waiters on a shared word requeued onto a private one and woken there; the sleeper counts move with them |
 | requeue onto a shared word, then the mapping goes | waiters on a private word requeued onto a word in a shared mapping; the shared mapping is unmapped by another thread; the waiters time out cleanly and the poisoner is silent — the reference taken per moved waiter is what outlives the mapping |
+| requeue off a shared word, then off again | waiters on a shared word requeued onto a private word, then onto a word in a *second* shared file, then woken; the first file is unlinked and its last reference dropped before the wake: no leak of the first vnode (its release runs, observed by the file's page count returning) and no use of it — the exchange left each waiter holding only its current key's reference |
 | `lxtest`: the flag both ways | on a `MAP_SHARED` page: a clone thread waits *with* `FUTEX_PRIVATE_FLAG`; a wake *without* it wakes 0, a wake *with* it wakes 1; then the reverse pair — the flag selects the key and both keys work |
 | `lxtest`: a private mutex's cost | a wait/wake pair with the flag set on a shared page takes the private path (a counter, `vm.futex_shared_keys`, does not move) |
 | exit | `vm_space_destroy` checks `shared_maps == 0` on every process exit |
@@ -289,6 +294,10 @@ documents. No structure a program sees changes size or number.
   the requeue-then-unmap case, with the same caveat as the row above:
   the vnode can be released under the moved waiters, shown only if
   something reuses it before the timeout.
+- the old references not put after a shared-to-private (or
+  shared-to-shared) requeue → the requeue-off-a-shared-word case: the
+  first file's vnode never releases, its page count never returns —
+  a leak a counting test can see, and this one does.
 - `FUTEX_PRIVATE_FLAG` still masked → the `lxtest` flag case: the wake
   without the flag wakes the private waiter (1, expected 0).
 - classification skipped when `shared_maps != 0` (the counter's test
@@ -327,10 +336,12 @@ under the space lock from a record that holds one too. A vnode that is
 the same file reopened after a full release is a different pointer and a
 different key, which is correct: nothing could have been waiting on it.
 
-**Lifetime through requeue.** The reference travels with the waiter,
-not the word, so a requeue onto a private word does not drop it and a
-requeue from one leaves nothing to drop; the release is at dequeue, in
-one place.
+**Lifetime through requeue.** A waiter holds the one reference its
+current key names; a requeue that changes the key takes the new
+references under the locks and puts the old ones after them, and the
+waiter's own release is at dequeue, in one place. The put after the
+locks is the one step that could be forgotten, and the
+requeue-then-unmap test in both directions is what would show it.
 
 ## Alternatives considered
 
