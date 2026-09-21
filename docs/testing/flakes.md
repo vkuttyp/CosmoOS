@@ -67,6 +67,22 @@ never completes is a kernel defect, so widening it would hide the thing
 it exists to catch. A re-run distinguishes the two, as everywhere else
 here.
 
+**Observed once, not yet on the list: `timer-cancel-sync`'s lower
+bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
+against a callback holding for 20 ms on another CPU took at least
+10 ms -- the wait spanned the callback. On 2026-09-21, x86-64 debug on
+the developer's machine, during a bug-proof boot of a mutated tree
+(the mutation in `devtest.c`'s removal submitter, nothing near timers):
+`check failed: sync_ns >= MS(10)`, 23 ms into the test. The clock
+starts after `wait_flag(&p->entered)` returns, so a host that holds
+this vCPU for more than ten of the callback's twenty milliseconds
+between that return and `t0` makes a correct sync look short; a sync
+that returned before the callback ended would also fail
+`p->done == 1` on the next line, and that passed. One local sighting,
+the same family as the rows above, recorded here rather than listed;
+if it recurs the fix is to time from `entered` itself, not from a
+point this thread reaches later.
+
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
 timer at "less than what it asked for"); both bounds still sit an order
@@ -1598,6 +1614,136 @@ network tests.
 
 ## `virtio-remove-inflight`'s held pass found nothing
 
+Not a flake to list: a defect in the test's own count, found by its
+second sighting and closed by construction -- and a hole in a test seam,
+found by its first sighting and closed on the way, which was not the
+cause.
+
+**The sightings.** 2026-09-21, twice. First the aarch64 GICv3 boot of
+PR #203's CI (run 35586893021, `51c5b23`, a branch that touches
+nothing under `drivers/`): `SELFTEST: virtio-remove-inflight ... FAIL:
+check failed: found >= 1 at line 1219 (30 ms)`. Then, the same day and
+with PR #204 merged, the x86-64 protection-capable boot of PR #205's
+CI (run 35596999894, a documentation-only branch): the same check, 35
+ms. Both the held pass -- the driver's slot table filled by
+construction, the completions held -- and the remove found **0** in
+flight, with every other assertion in the pass holding: every accepted
+bio completed exactly once, with `0` or `-ENODEV` and no `-EIO`, and
+`c_eio == found == 0`.
+
+**The cause: the test's own count.** The submitter counted an accept
+*after* `blk_submit` returned, while the completion callback on the
+other CPU had already counted the completion -- a QEMU device answers
+in microseconds -- so for that instant `completed` exceeded
+`accepted`, and `accepted - completed`, two unsigned words, wrapped to
+a huge number. The held pass's wait for "more outstanding than the
+table holds" exited on it at once, the remove ran against a table with
+nothing in it, and every assertion but the count held: exactly the
+shape both sightings had. The accept is now counted before the submit
+and uncounted on refusal, and the pass asserts `completed <= accepted`
+on every turn of both its loops, completed read first and both
+atomically (read the other way round, an accept and its completion
+landing between the reads would wrap the difference again), from the
+test thread while the submitter runs on the other CPU -- the only
+observer an ordering between two counters can have. The worst case of
+the old order (the accept counted after its own completion, held open
+for a millisecond) fails that assertion within a millisecond of the
+pass starting; a mere `sched_yield` in the window did not, because a
+yield with nothing else runnable is a no-op, and that is worth writing
+down too (PR #206).
+
+**What the first sighting found instead, and why it stays.** Reading
+the first failure found that the hold -- the debug seam that parks a
+device's finished requests so the remove has a full table to walk --
+was checked once, at `vblk_done`'s entry, so a handler already inside
+its pop loop when the hold landed kept popping. That is a hole in the
+seam's contract ("from this moment, finished requests stay in
+flight"), and it was closed (PR #204): the check runs before every pop,
+and a fourth pass, `held-inside`, builds the moment rather than racing
+for it -- every hold in it stored from a completion callback, from
+inside the handler, the two requests it parks known to be finished at
+the device by a new exact seam (`unconsumed`: used-ring entries not
+yet popped) rather than by waiting. It fails deterministically with
+the check back at the door (`docs/kernel/device/testing.md`). It was
+taken for the cause, and the second sighting on the driver with the
+hole closed is what showed it was not: a mechanism that explains every
+number is sufficient, not identified, until the failure is shown to
+stop -- the reading this file's own rule (*instrument before
+theorising*) exists to prevent, and the one it caught this time by
+the cheapest instrument there is, a second look at the failing code
+after the first fix.
+
+## `quiesce-kick-spinner` is upset by any test that creates threads
+
+**2026-09-20, found while building the `MAP_FIXED` replacement unit,
+and it is not a flake at all — which is the point of writing it
+here.** `quiesce-kick-spinner` failed on
+`mid.straggler_ipis > before.straggler_ipis` twice in a row at the
+same line, and I twice put it down to the loaded-host family this
+file describes. The control settled it in one run: **`main` passed
+360/360 on the same machine while the branch failed reliably.** A
+failure that reproduces is not a flake, and the cheapest way to tell
+is to run the parent commit.
+
+Bisected from there:
+
+| step | result |
+| --- | --- |
+| disable the new `vm-replace-race` only | 361/361 pass |
+| pin its racer threads to one CPU | still fails |
+| cut its rounds from 200 to 20 | still fails |
+| **a stub that creates and joins six no-op threads, no VM work** | **still fails** |
+
+So nothing in the new code is involved. The sensitivity is
+`quiesce-kick-spinner`'s: it pins a spinner to `other_cpu()` and
+requires a straggler IPI to be sent to it, and **any** test that
+churns kernel threads beforehand — fifty tests beforehand, in this
+case — is enough to stop that happening.
+
+Not repaired here, because it belongs to the quiescence unit and not
+to a VM one. `vm-replace-race` is registered after the quiesce block
+instead, with the reason in a comment beside it. **The next unit that
+adds a thread-creating self-test before those tests will hit this**,
+and the useful part of this entry is that the bisect above takes
+twenty minutes and the control takes four.
+
+## `net-nat`'s expiry step found an entry after aging the table
+
+**2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
+first CI run (`60ccfd7`)** — a change to the memory syscalls that
+touches nothing in the network stack, and a test that had passed four
+times on the same tree locally (`test`, `test-gic`, `test-guard`, and
+the release boot) in the hour before:
+
+```text
+SELFTEST: net-nat          ... FAIL: check failed: ns1.entries == 0 && ns1.expired > ns0.expired at line 4186 (1300 ms)
+```
+
+Step (6) of `net-nat` (`kernel-services/network/nettest.c`) calls
+`nat_age` with a timestamp two UDP timeouts in the future and then
+reads the statistics, expecting an empty table. That is deterministic
+on its face — nothing about it waits — so the only way `entries` is
+non-zero afterwards is that **an entry was created between the aging
+and the read**. Two candidates, neither established: a frame from step
+(5)'s flood still arriving through the tap after the drain loop
+returned, or the periodic age work (`nat_age` is called from the ARP
+ageing thread) interleaving with the test's own call in a way that
+leaves one entry re-created. Both are the "N things after an action"
+family this file's list describes: the check assumes a quiet interval
+it never arranged.
+
+One sighting, so no rate and no mechanism claimed — and the very next
+CI run of the same branch (`ea811a0`, a documentation commit on top
+of the same code) passed the x86-64 boot, so it did not reproduce on
+the next try. What it needs if it recurs is the counters at the
+moment of failure — `entries`, `expired`,
+`out_new` before and after — printed by the check rather than
+recovered from a log, which is the instrument-before-theory lesson
+this file keeps re-learning. Not repaired here; it belongs to the
+network tests.
+
+## `virtio-remove-inflight`'s held pass found nothing
+
 Not a flake to list: a defect in a test seam, found by the one failure
 it produced and closed by construction.
 
@@ -1632,9 +1778,35 @@ stored from a completion callback, from inside the handler, and the
 two requests it parks behind the hold are known to be finished at the
 device by a new exact seam (`unconsumed`: used-ring entries not yet
 popped) rather than by waiting. It fails deterministically with the
-check back at the door (`docs/kernel/device/testing.md`). No re-run
-was needed to discharge the sighting: the mechanism is gone, not
-outwaited.
+check back at the door (`docs/kernel/device/testing.md`).
+
+**The reading above was wrong, and the second sighting said so.** With
+the per-pop check merged (`cc645a0`), PR #205's x86-64
+protection-capable boot failed the same way the same day (run
+35594…, `found >= 1`, 35 ms, every bio completed `0`). The contract
+hole the per-pop check closed is real -- the `held-inside` pass proves
+it -- but it was not this failure's mechanism. The mechanism is the
+**test's own count**: the submitter counted an accept *after*
+`blk_submit` returned, while the completion callback on the other CPU
+had already counted the completion (a QEMU device answers in
+microseconds), so for that instant `completed` exceeded `accepted`,
+and `accepted - completed` -- two unsigned words -- wrapped to a huge
+number. The held pass's wait for "more outstanding than the table
+holds" exited on it at once, the remove ran against a table with
+nothing in it, and every assertion but the count held, which is
+exactly the shape both sightings had. The accept is now counted before
+the submit and uncounted on refusal, and the pass asserts `completed
+<= accepted` on every turn of both its loops, from the test thread
+while the submitter runs on the other CPU -- the only observer an
+ordering between two counters can have. The worst case of the old
+order (the accept counted after its own completion, held open for a
+millisecond) fails that assertion within a millisecond of the pass
+starting; a mere `sched_yield` in the window did not, because a yield
+with nothing else runnable is a no-op, and that is worth writing down
+too. What this cost: a plausible mechanism that explained every number
+was taken for the mechanism, and the second sighting on the fixed code
+is what named the real one -- the reading this file's own rule
+(*instrument before theorising*) exists to prevent.
 
 ## `el2-guest-irq-queue`: the second injection was not still pending
 

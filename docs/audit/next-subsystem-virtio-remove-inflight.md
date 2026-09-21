@@ -85,15 +85,25 @@ and the banner below records where the build differed from the design.
    `docs/testing/flakes.md`.
 11. **The hold is checked before every pop, not once at the door**
    (PR #204, a follow-up after the merge, 2026-09-21). The first build checked
-   the hold at `vblk_done`'s entry; a handler already inside its pop
-   loop when the hold was stored kept popping, a QEMU device finishes
-   a table's worth in one burst, and once in CI the held pass found 0
-   in flight with every other assertion holding. The check moved into
-   the loop, and a fourth pass, `held-inside`, builds that moment by
+   the hold at `vblk_done`'s entry, so a handler already inside its pop
+   loop when the hold was stored kept popping -- a hole in the seam's
+   contract, found while reading a CI failure of the held pass that
+   item 12 explains and that this hole did not cause. The check moved
+   into the loop, and a fourth pass, `held-inside`, builds that moment by
    storing every hold from a completion callback, with a new exact seam
    (`unconsumed`: used entries the driver has not popped) in place of a
    wait on the clock. `docs/kernel/device/testing.md`, and the record in
    `docs/testing/flakes.md`.
+12. **The failure that led to item 11 had another cause, found when it
+   recurred on the fixed driver the same day**: the test counted an
+   accept after `blk_submit` returned while the completion callback on
+   the other CPU had already counted the completion, and `accepted -
+   completed` wrapped for that instant, so the held pass's wait for a
+   full table exited at once and the remove walked an empty table. The
+   accept is counted before the submit now, and the pass asserts
+   `completed <= accepted` on every turn of its loops; the worst case
+   of the old order fails within a millisecond. Item 11's hole is real
+   and stays closed; it was not this. `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,
