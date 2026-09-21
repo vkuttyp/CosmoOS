@@ -1049,12 +1049,18 @@ struct rm_submitter {
     volatile unsigned ok, refused, other;          /* blk_submit's answers */
     volatile unsigned c_ok, c_eio, c_enodev, c_other, c_double;   /* completions by status */
     volatile uint64_t max_seq;                     /* the latest completion's stamp */
+    struct blkdev *volatile rehold;                /* `held-inside`: store the hold from the next completion */
 };
 
 static void rm_done(struct bio *bio)
 {
     struct rm_bio *rb = container_of(bio, struct rm_bio, bio);
     struct rm_submitter *s = bio->arg;
+    /* The `held-inside` pass: its holds are stored from here, inside
+     * the handler's loop, which is the moment that pass is about. */
+    struct blkdev *rh = __atomic_exchange_n(&s->rehold, NULL, __ATOMIC_ACQ_REL);
+    if (rh != NULL)
+        g_rm->hold_completions(rh);
     uint64_t seq = blk_test_tick();
     uint64_t seen = __atomic_load_n(&s->max_seq, __ATOMIC_ACQUIRE);
     while (seq > seen && !__atomic_compare_exchange_n(&s->max_seq, &seen, seq, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -1424,6 +1430,126 @@ out:
     return ok;
 }
 
+/*
+ * The fourth pass: the hold stored while the handler is inside its
+ * loop. The hold's contract is "from this moment, finished requests
+ * stay in flight"; a check at the handler's door kept it only for
+ * handlers not yet running, and a handler already popping when the
+ * hold was stored drained the table -- the held pass found 0 once in
+ * CI, on a driver nothing had changed (docs/testing/flakes.md). This
+ * pass builds that moment rather than racing for it, and every hold in
+ * it is stored from a completion callback, i.e. from inside the
+ * handler, so that no handler can be between its check and its pop
+ * when a hold lands (a hold stored by a thread has exactly that
+ * window against a handler that has just run a callback):
+ *
+ *   arm; post P: its completion stores the hold from inside the loop,
+ *   and the handler stops. Post A, wait until the device has finished
+ *   it (`unconsumed` >= 1: parked in the used ring by the hold); post
+ *   B, the same (>= 2). Arm again; release; post C.
+ *
+ * C's completion brings the handler in with three finished requests to
+ * pop. It pops A, whose callback stores the hold from inside the loop.
+ * With the check before every pop, B and C stay: the remove finds
+ * exactly two and completes them -EIO. With the check at the door the
+ * handler pops all three and the remove finds none. Deterministic
+ * either way: nothing here waits on a clock for the device.
+ */
+static bool rm_post(struct rm_submitter *s, unsigned k)
+{
+    struct rm_bio *rb = &s->pool[k];
+    rb->bio = (struct bio){ .dev = s->bd, .sector = 1, .nsectors = 1, .dir = BIO_READ,
+                            .buf = s->buf, .done = rm_done, .arg = s };
+    __atomic_store_n(&rb->busy, 1u, __ATOMIC_RELEASE);
+    int rc = blk_submit(&rb->bio);
+    if (rc == 0)
+        __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
+    else
+        __atomic_store_n(&rb->busy, 0u, __ATOMIC_RELEASE);
+    return rc == 0;
+}
+
+static bool rm_wait_unconsumed(struct blkdev *bd, unsigned n)
+{
+    uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
+    while (g_rm->unconsumed(bd) < n) {
+        if (clock_now_ns() > end)
+            return false;
+        sched_yield();
+    }
+    return true;
+}
+
+static bool rm_wait_completions(const struct rm_submitter *s, unsigned n)
+{
+    uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
+    while (rm_completions(s) < n) {
+        if (clock_now_ns() > end)
+            return false;
+        sched_yield();
+    }
+    return true;
+}
+
+static bool rm_hold_inside_pass(struct blkdev *bd, struct pci_device *pdev, unsigned threads0, const char **reason)
+{
+    static struct rm_submitter s;
+    bool ok = true;
+    memset(&s, 0, sizeof(s));
+    s.bd = bd;
+    s.buf = kmalloc(4096, 0);
+    RM_CHECK(s.buf != NULL);
+    RM_CHECK(g_rm->unconsumed != NULL);
+    unsigned releases0 = g_rm->releases();
+
+    /* P: the first hold, stored from inside the handler. */
+    __atomic_store_n(&s.rehold, bd, __ATOMIC_RELEASE);
+    RM_CHECK(rm_post(&s, 0));
+    RM_CHECK(rm_wait_completions(&s, 1));
+    RM_CHECK(__atomic_load_n(&s.rehold, __ATOMIC_ACQUIRE) == NULL);
+    /* A and B: finished at the device, parked by the hold. */
+    RM_CHECK(rm_post(&s, 1));
+    RM_CHECK(rm_wait_unconsumed(bd, 1));
+    RM_CHECK(rm_post(&s, 2));
+    RM_CHECK(rm_wait_unconsumed(bd, 2));
+    RM_CHECK(rm_completions(&s) == 1);                 /* the hold held */
+    /* Release, with the next completion re-storing it from inside the
+     * loop; C's completion is what brings the handler in. */
+    __atomic_store_n(&s.rehold, bd, __ATOMIC_RELEASE);
+    g_rm->hold_completions(NULL);
+    RM_CHECK(rm_post(&s, 3));
+    RM_CHECK(rm_wait_completions(&s, 2));
+    RM_CHECK(__atomic_load_n(&s.rehold, __ATOMIC_ACQUIRE) == NULL);
+
+    RM_CHECK(pci_test_remove(pdev) == 0);
+    uint64_t boundary = g_rm->remove_seq();
+    unsigned found = g_rm->inflight_at_remove();
+    g_rm->hold_completions(NULL);
+
+    RM_CHECK(s.c_double == 0 && s.c_other == 0 && s.c_enodev == 0);
+    RM_CHECK(s.c_ok == 2);                             /* P, and the one pop before the hold landed inside the loop */
+    RM_CHECK(found == 2);                              /* the two behind it, still in the table when the remove walked it */
+    RM_CHECK(s.c_eio == found);
+    RM_CHECK(rm_completions(&s) == 4);
+    RM_CHECK(boundary != 0 && s.max_seq < boundary);
+    RM_CHECK(pdev->dev.driver == NULL && pdev->dev.drvdata == NULL && pdev->dev.state == DEV_UNBOUND);
+    RM_CHECK(rm_find() == NULL);
+    RM_CHECK(g_rm->releases() == releases0);
+    blkdev_put(bd);
+    bd = NULL;
+    RM_CHECK(g_rm->releases() == releases0 + 1);
+    RM_CHECK(threads_settle_blk(threads0));
+    kinfo("selftest: virtio-remove-inflight: held-inside: the hold stored from a completion callback with three "
+          "finished requests before the handler; it popped %u in all, the remove found %u in flight and completed "
+          "them -EIO", s.c_ok, found);
+out:
+    g_rm->hold_completions(NULL);
+    __atomic_store_n(&s.rehold, NULL, __ATOMIC_RELEASE);
+    if (bd != NULL)
+        blkdev_put(bd);
+    kfree(s.buf);
+    return ok;
+}
 #endif /* CONFIG_DEBUG */
 
 bool selftest_virtio_remove_inflight(const char **reason)
@@ -1475,7 +1601,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
 
     bool ok = true;
     unsigned order_attempts = 0;
-    for (unsigned pass = 0; pass < 3; pass++) {
+    for (unsigned pass = 0; pass < 4; pass++) {
         if (pass > 0) {
             bd = rm_find();
             RM_CHECK(bd != NULL);
@@ -1483,9 +1609,11 @@ bool selftest_virtio_remove_inflight(const char **reason)
         /* 0: the driver's slot table filled by construction. 1: the
          * natural race, a regression guard. 2: the teardown order --
          * a read-side section held across the removal's release of the
-         * queue's interrupt. */
+         * queue's interrupt. 3: the hold stored while the handler is
+         * inside its loop. */
         bool caught = true;
         bool passed = pass == 2 ? rm_irq_order_pass(bd, pdev, threads0, &caught, reason)
+                    : pass == 3 ? rm_hold_inside_pass(bd, pdev, threads0, reason)
                                 : rm_pass(bd, pdev, pass == 0, threads0, reason);
         bd = NULL;   /* every pass drops the reference it was given */
         if (!passed) {
@@ -1511,7 +1639,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
         RM_CHECK(memcmp(check, pattern, 512) == 0);
         blkdev_put(again);
     }
-    kinfo("selftest: virtio-remove-inflight: %s (%s) removed with I/O outstanding and re-probed, three times", name,
+    kinfo("selftest: virtio-remove-inflight: %s (%s) removed with I/O outstanding and re-probed, four times", name,
           pci_name);
 
 out:

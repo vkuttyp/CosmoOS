@@ -267,6 +267,18 @@ unsigned virtq_free_count(struct virtqueue *vq)
     return n;
 }
 
+/* Used-ring entries the device has finished and the driver has not yet
+ * popped: exactly what `virtio-remove-inflight`'s hold leaves behind,
+ * so a test can know a request is parked at the device rather than
+ * guess it from time. Debug measurement; the same lock as the pop. */
+unsigned virtq_unconsumed(struct virtqueue *vq)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
+    unsigned n = (uint16_t)(read_le16(&vq->used->idx) - vq->last_used);
+    spin_unlock_irqrestore(&vq->lock, s);
+    return n;
+}
+
 void virtq_interrupt(struct virtqueue *vq)
 {
     vq->interrupts++;
@@ -281,3 +293,4 @@ EXPORT_SYMBOL(virtq_add);
 EXPORT_SYMBOL(virtq_kick);
 EXPORT_SYMBOL(virtq_pop);
 EXPORT_SYMBOL(virtq_free_count);
+EXPORT_SYMBOL(virtq_unconsumed);

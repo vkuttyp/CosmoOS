@@ -197,6 +197,8 @@ void virtq_kick(struct virtqueue *vq);
  * NULL when nothing has completed. Any context. */
 void *virtq_pop(struct virtqueue *vq, uint32_t *len);
 unsigned virtq_free_count(struct virtqueue *vq);
+/* Finished by the device, not yet popped (a debug measurement). */
+unsigned virtq_unconsumed(struct virtqueue *vq);
 
 /* Transport side: register a discovered device (fills dev.name). */
 int virtio_device_register(struct virtio_device *vdev);

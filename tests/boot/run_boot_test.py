@@ -328,6 +328,7 @@ RMDISK_MARKERS = [
     r"^\[ INFO\] selftest: virtio-remove-inflight: held: ",
     r"^\[ INFO\] selftest: virtio-remove-inflight: unheld: ",
     r"^\[ INFO\] selftest: virtio-remove-inflight: irq-order: ",
+    r"^\[ INFO\] selftest: virtio-remove-inflight: held-inside: ",
 ]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
