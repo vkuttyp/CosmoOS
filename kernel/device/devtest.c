@@ -1229,9 +1229,15 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
     RM_CHECK(wait_flag_blk(&s.started, 1000));
 
     /* Live, not merely present: four accepted and completed. */
+    /* Completed never exceeds accepted, because the accept is counted
+     * before the submit (rm_submitter_main): asserted by this thread on
+     * every turn while the submitter runs on the other CPU, which is the
+     * only observer an ordering between two counters can have. */
     uint64_t end = clock_now_ns() + 2000ull * 1000000ull;
-    while ((s.c_ok < 4 || s.ok < 4) && clock_now_ns() < end)
+    while ((s.c_ok < 4 || s.ok < 4) && clock_now_ns() < end) {
+        RM_CHECK(rm_completions(&s) <= s.ok);
         sched_yield();
+    }
     RM_CHECK(s.c_ok >= 4);
 
     if (held) {
@@ -1239,9 +1245,11 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
          * until the driver's table is full and the excess is pending. */
         g_rm->hold_completions(bd);
         end = clock_now_ns() + 2000ull * 1000000ull;
-        while (s.ok - rm_completions(&s) <= nr_slots && clock_now_ns() < end)
+        while (s.ok - rm_completions(&s) <= nr_slots && clock_now_ns() < end) {
+            RM_CHECK(rm_completions(&s) <= s.ok);   /* the accept is counted first, so this never wraps */
             sched_yield();
-        RM_CHECK(rm_completions(&s) <= s.ok);   /* the accept is counted first, so this never wraps */
+        }
+        RM_CHECK(rm_completions(&s) <= s.ok);
         RM_CHECK(s.ok - rm_completions(&s) > nr_slots);
     }
 
