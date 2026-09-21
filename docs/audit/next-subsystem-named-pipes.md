@@ -67,6 +67,12 @@ wanted anyway: a `struct file` that can say whether it would block.
    in all on both architectures; the `fifo` section (13 sections);
    invariant **I9** (`docs/kernel/ipc/invariants.md`); Linux `mknodat`
    259 / 33.
+8. **Review fixes.** `fifo_count`'s counter is atomic (each fifo has
+   its own lock, so two FIFOs' opens on two CPUs could lose an update);
+   an open allocates a ring only when the fifo has none, dropping the
+   lock to allocate and looking again, so a second open of an active
+   FIFO allocates nothing and cannot fail for a ring it would not use;
+   and `fifo_counts`, declared and unused, is gone.
 
 **Bug-proofs, as run.** Each mutation applied alone on x86-64, the
 debug suite booted, the file restored from HEAD; the report's nine.

@@ -51,7 +51,7 @@ struct fifo_open {
     bool nonblock;               /* this open's mode (POSIX: per open) */
 };
 
-static unsigned g_rings;         /* live rings held by fifos */
+static unsigned g_rings;         /* live rings held by fifos; atomic, since each fifo has its own lock */
 
 struct fifo *fifo_alloc(void)
 {
@@ -87,7 +87,7 @@ static struct pipe *drop_locked(struct fifo *fifo, struct pipe *ring, unsigned s
     spin_unlock(&ring->lock);
     if (last) {
         fifo->ring = NULL;
-        g_rings--;
+        __atomic_sub_fetch(&g_rings, 1, __ATOMIC_RELAXED);
     }
     return last ? ring : NULL;
 }
@@ -123,18 +123,26 @@ int fifo_open(struct fifo *fifo, struct file *f)
     fo->side = side;
     fo->nonblock = nonblock;
 
-    /* A ring in hand before the lock: the allocator is not a thing to
-     * call with a spinlock held, and the ring is cheap to give back. */
-    struct pipe *fresh = pipe_ring_alloc();
-    if (fresh == NULL) {
-        kfree(fo);
-        return -ENOMEM;
-    }
+    /* The first open makes the ring. The allocator is not a thing to
+     * call with a spinlock held, so an open that finds no ring drops the
+     * lock, allocates one and looks again; an open that finds a ring
+     * allocates nothing, and one that lost the race to make it gives
+     * its ring back after the lock. */
+    struct pipe *fresh = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&fifo->lock);
+    while (fifo->ring == NULL && fresh == NULL) {
+        spin_unlock_irqrestore(&fifo->lock, s);
+        fresh = pipe_ring_alloc();
+        if (fresh == NULL) {
+            kfree(fo);
+            return -ENOMEM;
+        }
+        s = spin_lock_irqsave(&fifo->lock);
+    }
     if (fifo->ring == NULL) {
         fifo->ring = fresh;
         fresh = NULL;
-        g_rings++;
+        __atomic_add_fetch(&g_rings, 1, __ATOMIC_RELAXED);
     }
     struct pipe *ring = fifo->ring;
     spin_lock(&ring->lock);
@@ -155,7 +163,7 @@ int fifo_open(struct fifo *fifo, struct file *f)
     struct pipe *gone = refused ? drop_locked(fifo, ring, side) : NULL;
     spin_unlock_irqrestore(&fifo->lock, s);
     if (fresh != NULL)
-        pipe_ring_free(fresh);
+        pipe_ring_free(fresh);   /* another opener made the ring first */
     if (refused) {
         if (gone != NULL)
             pipe_ring_free(gone);
@@ -236,19 +244,4 @@ int fifo_set_nonblock(struct fifo *fifo, struct file *f, int on)
 unsigned fifo_count(void)
 {
     return __atomic_load_n(&g_rings, __ATOMIC_ACQUIRE);
-}
-
-void fifo_counts(struct fifo *fifo, unsigned *readers, unsigned *writers)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&fifo->lock);
-    struct pipe *ring = fifo->ring;
-    if (ring == NULL) {
-        *readers = *writers = 0;
-    } else {
-        spin_lock(&ring->lock);
-        *readers = ring->readers;
-        *writers = ring->writers;
-        spin_unlock(&ring->lock);
-    }
-    spin_unlock_irqrestore(&fifo->lock, s);
 }

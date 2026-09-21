@@ -45,8 +45,7 @@ struct waitqueue *fifo_poll_wq(struct fifo *fifo, struct file *f, unsigned event
 /* Per open, as POSIX has it: `on` 1/0 sets, -1 asks; returns the previous mode. */
 int fifo_set_nonblock(struct fifo *fifo, struct file *f, int on);
 
-/* Live rings held by fifos (the leak test), and one fifo's counts. */
+/* Live rings held by fifos (the leak test). */
 unsigned fifo_count(void);
-void fifo_counts(struct fifo *fifo, unsigned *readers, unsigned *writers);
 
 #endif /* KERNEL_FIFO_H */
