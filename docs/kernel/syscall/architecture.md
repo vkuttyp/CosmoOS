@@ -156,7 +156,7 @@ before anything else runs; `sys_fstat` accepts every I/O object with a
 pipe, `write` on a full pipe, `wait`, `sleep_ns`, the socket waits) use
 `wait_event_killable` and return `-EINTR` when the process is killed,
 after which the dispatcher's `process_check_kill` ends the process.
-`SYS_COUNT` was 58 at the end of audit milestone 6 and is 96 now — the
+`SYS_COUNT` was 58 at the end of audit milestone 6 and is 96 as of PR #197 (the file-regions report proposes 96 as `SYS_msync`, making it 97 when built) — the
 header is the authority and `docs/kernel/syscall/api.md` lists every
 number; what follows is how it grew: Phase 12 added the seven virtualization calls 43–49,
 the Prompt #3 fix pass the six credential calls 50–55, audit milestone 6
