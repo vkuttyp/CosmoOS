@@ -1383,6 +1383,16 @@ write.
 them x86-64 (sightings thirty-five and forty) and the rest aarch64
 across three job configurations (default, protection-capable, GICv3).
 
+**Sighting forty-one, 2026-09-21**, aarch64, the GICv3 boot of PR
+#203's CI (run 35585299449, `b7dcf9b`: the shared-futex build, whose
+diff touches no network code): `connect 0 in 1395 ms, sent -104 in
+0 ms, recv -1 in 0 ms, pending error -104, sndbuf free 65536 before,
+65536 after send, 65536 after read (outstanding 0 then 0), state 0,
+segs_out +3 retransmits +1 refused +0 rsts_in +1`. Row one again --
+reset before the write, one SYN retransmission -- and the eleventh
+reading. Read as this file says to read it, recorded, and the job
+re-run.
+
 This paragraph was written at five readings and its conclusion has not
 needed changing since, which is worth as much as the readings
 themselves: **slirp holds a host-side connection open, established and
