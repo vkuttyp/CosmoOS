@@ -496,6 +496,7 @@ static const struct selftest tests[] = {
     { "virtio-console",  selftest_virtio_console },
     { "crc32c",          selftest_crc32c },
     { "pagecache",       selftest_pagecache },
+    { "pagecache-pinned", selftest_pagecache_pinned },
     { "vfs-ramfs",       selftest_vfs_ramfs },
     { "vfs-symlink",     selftest_vfs_symlink },
     { "vfs-symlink-walk", selftest_vfs_symlink_walk },
@@ -731,6 +732,8 @@ static const struct selftest tests[] = {
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },
     { "process-rlimit",  selftest_process_rlimit },
+    { "vm-file-fault-hold", selftest_vm_file_fault_hold },
+    { "vm-file-readpage-fail", selftest_vm_file_readpage_fail },
     { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
     /* Last: what the harness typed at the keyboard while everything

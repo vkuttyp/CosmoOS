@@ -231,9 +231,11 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
     }
     e->index = index;
     e->page->flags |= PG_PAGECACHE;   /* the frame is the cache's: a mapping references, never owns, it */
-    if (index * PAGE_SIZE < vn->size && vn->ops->readpage) {
-        int rc = faultinject_should_fail(FI_FILE_READPAGE) ? -EIO
-                                                             : vn->ops->readpage(vn, index, page_to_virt(e->page));
+    /* The injected failure stands in for readpage on ANY miss, a hole
+     * on ramfs included, so the SIGBUS proof does not need a disk. */
+    bool injected = faultinject_should_fail(FI_FILE_READPAGE);
+    if (injected || (index * PAGE_SIZE < vn->size && vn->ops->readpage)) {
+        int rc = injected ? -EIO : vn->ops->readpage(vn, index, page_to_virt(e->page));
         if (rc) {
             e->page->flags &= ~PG_PAGECACHE;
             pmm_free_page(e->page);

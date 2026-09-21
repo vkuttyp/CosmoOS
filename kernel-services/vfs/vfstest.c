@@ -10,6 +10,7 @@
 #include <kernel/object.h>
 #include <kernel/pagecache.h>
 #include <kernel/pipe.h>
+#include <kernel/pmm.h>
 #include <kernel/ramblk.h>
 #include <kernel/syscall.h>
 #include <kernel/errno.h>
@@ -1980,5 +1981,77 @@ bool selftest_write_bench(const char **reason)
         BCHECK(vfs_unlink(NULL, "/tmp/wbench.bin") == 0);
     }
     kfree(buf);
+    return true;
+}
+
+/*
+ * A frame a mapping references is not reclaimed (the file-regions unit):
+ * pagecache_fault_page takes the mapping's reference under the cache
+ * mutex, and reclaim, deciding under that mutex, leaves a frame whose
+ * count is not one alone. Put the reference and it goes. cosmofs on a
+ * RAM device, because ramfs pages are never reclaimed at all.
+ */
+bool selftest_pagecache_pinned(const char **reason)
+{
+    static uint8_t buf[PAGE_SIZE];
+    struct file *f;
+    struct pagecache_stats s0, s1;
+    struct blkdev *bd = ramblk_create(1024);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, "/mnt/pin", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/mnt/pin", "cosmofs", bd, 0) == 0);
+    CHECK(vfs_open(NULL, "/mnt/pin/f", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    struct vnode *vn = f->vn;
+    const unsigned NPAGES = 256;
+    for (unsigned i = 0; i < NPAGES; i++) {
+        memset(buf, (int)(i & 0xff), sizeof(buf));
+        CHECK(file_write(f, buf, PAGE_SIZE) == PAGE_SIZE);
+    }
+    CHECK(file_sync(f) == 0);   /* every page clean: every page a candidate */
+
+    /* Page 3 as a mapping would hold it. */
+    struct page *held = NULL;
+    pagecache_lock(vn);
+    CHECK(pagecache_fault_page(vn, 3, false, &held) == 0);
+    pagecache_unlock(vn);
+    CHECK(held != NULL && (held->flags & PG_PAGECACHE) && held->refcount == 2);
+    /* Past the end: the bound, not a zero page. */
+    struct page *none = NULL;
+    pagecache_lock(vn);
+    CHECK(pagecache_fault_page(vn, NPAGES, false, &none) == -EFBIG);
+    pagecache_unlock(vn);
+    CHECK(none == NULL);
+
+    /* Force reclaim: a limit below what is cached, then a read of every
+     * page. Page 3 survives it, referenced. */
+    pagecache_get_stats(&s0);
+    uint64_t saved = pagecache_limit();
+    pagecache_set_limit(s0.pages > NPAGES / 2 ? s0.pages - NPAGES / 2 : 1);
+    for (unsigned i = 0; i < NPAGES; i++)
+        CHECK(file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE);
+    pagecache_get_stats(&s1);
+    CHECK(s1.reclaimed > s0.reclaimed);
+    CHECK(s1.pinned_skips > s0.pinned_skips);
+    CHECK(held->refcount == 2 && (held->flags & PG_PAGECACHE));   /* still the cache's, still ours */
+    CHECK(((uint8_t *)page_to_virt(held))[0] == 3);
+
+    /* Put the reference: now it can go, and a sweep takes it. */
+    pmm_page_put(held);
+    pagecache_get_stats(&s0);
+    pagecache_set_limit(1);
+    for (unsigned i = 0; i < NPAGES; i++)
+        CHECK(file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE);
+    pagecache_get_stats(&s1);
+    pagecache_set_limit(saved);
+    CHECK(s1.reclaimed > s0.reclaimed);
+
+    file_put(f);
+    CHECK(vfs_unlink(NULL, "/mnt/pin/f") == 0);
+    CHECK(vfs_umount("/mnt/pin") == 0);
+    CHECK(vfs_rmdir(NULL, "/mnt/pin") == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: pagecache-pinned: a referenced frame survives reclaim and goes when the reference does");
     return true;
 }

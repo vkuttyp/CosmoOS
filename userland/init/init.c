@@ -1272,6 +1272,7 @@ static int filter_case(const char *kind)
 /* The signal probes need the vector-register helpers below, so they
  * live past them and probe() ends by handing the kind on. */
 static int signal_probe(const char *kind);
+static int mmap_probe(const char *what);
 
 static int probe(const char *kind)
 {
@@ -1522,7 +1523,194 @@ static int probe(const char *kind)
         *(volatile char *)fresh = 1;   /* the demand fault fails: fatal */
         return 9;
     }
+    if (strncmp(kind, "mmap-", 5) == 0)
+        return mmap_probe(kind + 5);
     return signal_probe(kind);
+}
+
+/* --- file mappings: the children of the mmap section and of two kernel
+ * self-tests (docs/audit/next-subsystem-file-regions.md, "Tests") --- */
+
+#define MMAP_TEST_FILE "/tmp/mmtest"
+
+static long file_rd(int fd, uint64_t off, void *buf, size_t n)
+{
+    if (cosmo_lseek(fd, (long)off, COSMO_SEEK_SET) != (long)off)
+        return -1;
+    return cosmo_read(fd, buf, n);
+}
+
+static long file_wr(int fd, uint64_t off, const void *buf, size_t n)
+{
+    if (cosmo_lseek(fd, (long)off, COSMO_SEEK_SET) != (long)off)
+        return -1;
+    return cosmo_write(fd, buf, n);
+}
+
+static uint64_t sysctl_u64(const char *name)
+{
+    char buf[64];
+    long n = cosmo_sysctl(name, buf, sizeof(buf) - 1);
+    if (n < 0)
+        return (uint64_t)-1;
+    buf[n < (long)sizeof(buf) - 1 ? n : (long)sizeof(buf) - 1] = 0;
+    return strtoull(buf, NULL, 10);
+}
+
+struct mmap_race_arg {
+    volatile unsigned char *page;
+    unsigned char seen;
+};
+
+static void *mmap_race_toucher(void *arg)
+{
+    struct mmap_race_arg *a = arg;
+    a->seen = a->page[0];   /* the FILE fault the kernel holds when armed */
+    return NULL;
+}
+
+static int mmap_probe(const char *what)
+{
+    const size_t P = 4096;
+    if (strcmp(what, "writer") == 0) {
+        /* The other process of the two-process test: map the section's
+         * file shared and write one byte the parent then reads. */
+        int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR, 0);
+        if (fd < 0)
+            return 10;
+        unsigned char *m = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 11;
+        m[2 * P + 7] = 0xC3;
+        return munmap(m, 3 * P) == 0 ? 0 : 12;
+    }
+    if (strcmp(what, "past-end") == 0) {
+        /* A two-page mapping of a one-page file: the second page is
+         * SIGBUS, not zeros (the bound, and get()'s zero page not
+         * inherited). Exit 135 from outside. */
+        int fd = (int)cosmo_open("/tmp/mm-short", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        if (fd < 0)
+            return 10;
+        if (cosmo_write(fd, "short", 5) != 5)
+            return 11;
+        volatile unsigned char *m = mmap(NULL, 2 * P, PROT_READ, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 12;
+        if (m[0] != 's' || m[5] != 0)
+            return 13;   /* inside: the bytes, and the zeroed tail */
+        return m[P] ? 14 : 15;   /* neither: the touch is fatal */
+    }
+    if (strcmp(what, "truncate") == 0) {
+        /* Truncate under a mapping: the page is unmapped before the
+         * cache frees it, and the next touch is SIGBUS, not the old
+         * bytes. O_TRUNC is this ABI's truncate. Exit 135 from outside. */
+        int fd = (int)cosmo_open("/tmp/mm-trunc", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        if (fd < 0)
+            return 10;
+        static unsigned char pat[3 * 4096];
+        memset(pat, 0x5C, sizeof(pat));
+        if (cosmo_write(fd, pat, sizeof(pat)) != (long)sizeof(pat))
+            return 11;
+        volatile unsigned char *m = mmap(NULL, 3 * P, PROT_READ, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 12;
+        if (m[0] != 0x5C || m[2 * P + 1] != 0x5C)
+            return 13;   /* all three pages installed */
+        int again = (int)cosmo_open("/tmp/mm-trunc", COSMO_O_RDWR | COSMO_O_TRUNC, 0);
+        if (again < 0)
+            return 14;
+        return m[2 * P + 1] == 0x5C ? 16 : 17;   /* neither: the touch is fatal */
+    }
+    if (strcmp(what, "cycle") == 0) {
+        /* The leak proof's other half: 200 map/write/unmap cycles, shared
+         * and private; this process's exit then runs the kernel's
+         * file_pages == 0 check by construction. */
+        int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR, 0);
+        if (fd < 0)
+            return 10;
+        unsigned char pat_first = 0;
+        if (cosmo_read(fd, &pat_first, 1) != 1)
+            return 14;
+        for (int i = 0; i < 200; i++) {
+            unsigned char *s = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, (i & 1) ? MAP_SHARED : MAP_PRIVATE, fd, 0);
+            if (s == MAP_FAILED)
+                return 11;
+            s[P + (i & 0xff)] = (unsigned char)i;   /* a write: dirties (shared) or copies (private) */
+            if (s[0] != pat_first)
+                return 12;   /* a read through the mapping too */
+            if (munmap(s, 3 * P) != 0)
+                return 13;
+        }
+        return 0;
+    }
+    if (strcmp(what, "as-limit") == 0) {
+        /* COSMO_RLIMIT_AS refuses a file mapping past it as it refuses an
+         * anonymous one: lowering below the current use is allowed, and
+         * growth is what is refused. */
+        int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR, 0);
+        if (fd < 0)
+            return 10;
+        if (cosmo_setrlimit(COSMO_RLIMIT_AS, P) != 0)
+            return 11;
+        if (cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED, fd, 0) != -COSMO_ENOMEM)
+            return 12;
+        return 0;
+    }
+    if (strcmp(what, "readfail") == 0) {
+        /* The kernel test made the file (pages 0-1 a hole) and armed
+         * debug.faultinject file-readpage for the next cache miss, so
+         * the touch of page 0 is that miss, the read "fails", and the
+         * touch is SIGBUS. Exit 135 from outside. */
+        int fd = (int)cosmo_open("/tmp/mm-readfail", COSMO_O_RDONLY, 0);
+        if (fd < 0)
+            return 10;
+        volatile unsigned char *m = mmap(NULL, 3 * P, PROT_READ, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 12;
+        return m[0] ? 13 : 14;   /* neither: fatal */
+    }
+    if (strcmp(what, "race") == 0 || strcmp(what, "unmap-race") == 0) {
+        /* The kernel test armed the hold. Thread A's touch is held after
+         * the fault's first phase; this thread waits for the kernel to
+         * say so (state 2), then either touches the same page (race: A
+         * resumes, finds it present, retries) or unmaps the range
+         * (unmap-race: A resumes, installs nothing, and its retry is
+         * SIGSEGV: exit 139 from outside). */
+        int fd = (int)cosmo_open("/tmp/mm-race", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        if (fd < 0)
+            return 10;
+        if (cosmo_write(fd, "race", 4) != 4)
+            return 11;
+        unsigned char *m = mmap(NULL, P, PROT_READ, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 12;
+        if (sysctl_u64("debug.file_fault_hold") != 1)
+            return 20;   /* not armed: the test was run without its kernel half */
+        struct mmap_race_arg arg = { .page = m, .seen = 0 };
+        cosmo_thread_t t;
+        if (cosmo_thread_start(&t, mmap_race_toucher, &arg, 64 * 1024) != 0)
+            return 13;
+        for (unsigned spins = 0; sysctl_u64("debug.file_fault_hold") != 2; spins++) {
+            if (spins > 20000)
+                return 21;   /* never held */
+            cosmo_yield();
+        }
+        if (what[0] == 'r') {
+            if (m[0] != 'r')
+                return 14;   /* this thread's fault installs and releases A */
+            cosmo_thread_join(&t, NULL);
+            if (arg.seen != 'r')
+                return 15;
+            if (sysctl_u64("debug.file_fault_hold") != 0)
+                return 16;
+            return munmap(m, P) == 0 ? 0 : 17;
+        }
+        if (munmap(m, P) != 0)   /* releases A, whose retry finds no region */
+            return 18;
+        cosmo_thread_join(&t, NULL);
+        return 19;   /* A's death ends the process before this returns */
+    }
+    return 99;
 }
 
 #if defined(__x86_64__)
@@ -3794,8 +3982,209 @@ struct selftest_section {
     void (*fn)(void);
 };
 
+/* Run `init --probe <what>` and return its status (-1 if it could not run). */
+static int probe_status(const char *what)
+{
+    const char *argv[] = { "init", "--probe", what, NULL };
+    pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (pid < 0)
+        return -1;
+    int status = -1;
+    if (waitpid(pid, &status, 0) != pid)
+        return -1;
+    return status;
+}
+
+/*
+ * File mappings (docs/audit/next-subsystem-file-regions.md, "Tests"):
+ * coherence in both directions, the first shared memory between two
+ * processes in this system, copy-on-write, the offset, the end of the
+ * file, a truncate under a mapping, msync and the re-dirtying fault,
+ * the rights, the native rules, the leak cycle, and the bench.
+ */
+static void mmap_selftest(void)
+{
+    const size_t P = 4096;
+    uint64_t cache0 = sysctl_u64("vm.cache_pages");
+    static unsigned char pat[3 * 4096];
+    for (size_t i = 0; i < sizeof(pat); i++)
+        pat[i] = (unsigned char)(i * 13 + 7);
+    int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+    CHECK(fd >= 0);
+    CHECK(cosmo_write(fd, pat, sizeof(pat)) == (long)sizeof(pat));
+
+    /* Shared, both directions, no msync between: one frame. */
+    unsigned char *sh = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(sh != MAP_FAILED);
+    CHECK(memcmp(sh, pat, sizeof(pat)) == 0);
+    unsigned char b = 0;
+    sh[100] = 0xA5;
+    CHECK(file_rd(fd, 100, &b, 1) == 1 && b == 0xA5);      /* through the mapping, then read() */
+    b = 0x3C;
+    CHECK(file_wr(fd, P + 5, &b, 1) == 1 && sh[P + 5] == 0x3C);   /* write(), then the mapping */
+
+    /* The offset: the second page, and the byte write() just put there. */
+    unsigned char *o = mmap(NULL, P, PROT_READ, MAP_SHARED, fd, (long)P);
+    CHECK(o != MAP_FAILED);
+    CHECK(memcmp(o, sh + P, P) == 0 && o[5] == 0x3C);
+    CHECK(munmap(o, P) == 0);
+
+    /* Two processes: a child maps the same file shared and writes. */
+    CHECK(probe_status("mmap-writer") == 0);
+    CHECK(sh[2 * P + 7] == 0xC3);
+
+    /* Private: written pages are the mapping's own; an unwritten page
+     * still shows a later write() (the copy is per page). */
+    unsigned char *pv = mmap(NULL, 2 * P, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    CHECK(pv != MAP_FAILED);
+    CHECK(pv[100] == 0xA5);
+    uint64_t cow0 = sysctl_u64("vm.file_cow_faults");
+    pv[100] = 0x11;                                        /* the copy */
+    CHECK(sysctl_u64("vm.file_cow_faults") == cow0 + 1);
+    CHECK(file_rd(fd, 100, &b, 1) == 1 && b == 0xA5);      /* the file untouched */
+    CHECK(sh[100] == 0xA5);                                /* and the shared mapping */
+    b = 0x88;
+    CHECK(file_wr(fd, 101, &b, 1) == 1);
+    CHECK(pv[101] == pat[101] && pv[100] == 0x11);         /* page 0 is the copy: neither the write nor a loss */
+    b = 0x77;
+    CHECK(file_wr(fd, P + 9, &b, 1) == 1 && pv[P + 9] == 0x77);   /* page 1 is still the cache's */
+    CHECK(munmap(pv, 2 * P) == 0);
+
+    /* msync's rules, on ramfs (nothing to write back). */
+    CHECK(msync(sh, 3 * P, MS_SYNC) == 0);
+    CHECK(msync(sh, 3 * P, MS_ASYNC) == 0);
+    CHECK(msync(sh, 3 * P, MS_INVALIDATE) == 0);
+    CHECK(cosmo_msync(sh, 3 * P, MS_SYNC | MS_ASYNC) == -COSMO_EINVAL);
+    CHECK(cosmo_msync(sh, 3 * P, 8) == -COSMO_EINVAL);
+    CHECK(cosmo_msync(sh, 4 * P, MS_SYNC) == -COSMO_ENOMEM);   /* the guard page after the mapping */
+    CHECK(cosmo_msync(sh + 1, P, MS_SYNC) == -COSMO_EINVAL);
+    void *an = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    CHECK(an != MAP_FAILED && msync(an, P, MS_SYNC) == 0 && munmap(an, P) == 0);
+
+    /* The native rules: what a program can probe. */
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED | COSMO_MAP_PRIVATE, fd, 0) == -COSMO_EINVAL);
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, 0, fd, 0) == -COSMO_EINVAL);
+    CHECK(cosmo_mmap(NULL, P, COSMO_PROT_READ, COSMO_MAP_ANONYMOUS | COSMO_MAP_SHARED) == -COSMO_EINVAL);
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED, fd, 100) == -COSMO_EINVAL);
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED, 999, 0) == -COSMO_EBADF);
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED | (1 << 30), fd, 0) == -COSMO_EINVAL);
+    int dfd = (int)cosmo_open("/tmp", COSMO_O_RDONLY, 0);
+    CHECK(dfd >= 0 && cosmo_mmap_fd(NULL, P, COSMO_PROT_READ, COSMO_MAP_SHARED, dfd, 0) == -COSMO_ENODEV);
+    CHECK(cosmo_close(dfd) == 0);
+
+    /* Rights: a file opened read-only. */
+    int rfd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDONLY, 0);
+    CHECK(rfd >= 0);
+    CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_SHARED, rfd, 0) == -COSMO_EACCES);
+    unsigned char *rp = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_PRIVATE, rfd, 0);   /* private: a copy is fine */
+    CHECK(rp != MAP_FAILED);
+    if (rp != MAP_FAILED) {
+        rp[0] = 1;
+        CHECK(munmap(rp, P) == 0);
+    }
+    unsigned char *rs = mmap(NULL, P, PROT_READ, MAP_SHARED, rfd, 0);
+    CHECK(rs != MAP_FAILED);
+    if (rs != MAP_FAILED) {
+        CHECK(cosmo_mprotect(rs, P, COSMO_PROT_READ | COSMO_PROT_WRITE) == -COSMO_EACCES);   /* maxprot */
+        CHECK(cosmo_mprotect(rs, P, COSMO_PROT_NONE) == 0 && cosmo_mprotect(rs, P, COSMO_PROT_READ) == 0);
+        CHECK(rs[0] == sh[0]);
+        CHECK(munmap(rs, P) == 0);
+    }
+    CHECK(cosmo_close(rfd) == 0);
+
+    /* The end of the file, a truncate under a mapping, the address-space
+     * limit, and the leak cycle: each in a child, judged by its status. */
+    CHECK(probe_status("mmap-past-end") == 128 + 7);
+    CHECK(probe_status("mmap-truncate") == 128 + 7);
+    CHECK(probe_status("mmap-as-limit") == 0);
+    CHECK(probe_status("mmap-cycle") == 0);
+    CHECK(cosmo_unlink("/tmp/mm-short") == 0 && cosmo_unlink("/tmp/mm-trunc") == 0);
+
+    /* msync writes, and the re-dirtying fault, on cosmofs. */
+    if (cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
+        int cfd = (int)cosmo_open("/mnt/mm-sync", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        CHECK(cfd >= 0);
+        CHECK(cosmo_write(cfd, pat, 2 * P) == (long)(2 * P));
+        CHECK(cosmo_fsync(cfd) == 0);
+        unsigned char *cm = mmap(NULL, 2 * P, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+        CHECK(cm != MAP_FAILED);
+        if (cm != MAP_FAILED) {
+            uint64_t wb0 = sysctl_u64("vm.cache_writebacks");
+            uint64_t df0 = sysctl_u64("vm.file_dirty_faults");
+            cm[P + 1] = 0xE1;                                       /* page 1 dirty: one fault */
+            CHECK(sysctl_u64("vm.file_dirty_faults") == df0 + 1);
+            CHECK(msync(cm, 2 * P, MS_SYNC) == 0);
+            uint64_t wb1 = sysctl_u64("vm.cache_writebacks");
+            CHECK(wb1 == wb0 + 1);                                  /* the one dirty page, written */
+            CHECK(msync(cm, 2 * P, MS_SYNC) == 0);
+            CHECK(sysctl_u64("vm.cache_writebacks") == wb1);        /* nothing written since: nothing to write */
+            cm[P + 2] = 0xE2;                                       /* the PTE was lowered: a fault raises it */
+            CHECK(sysctl_u64("vm.file_dirty_faults") == df0 + 2);
+            CHECK(msync(cm, 2 * P, MS_SYNC) == 0);
+            CHECK(sysctl_u64("vm.cache_writebacks") == wb1 + 1);    /* written again */
+            CHECK(file_rd(cfd, P + 1, &b, 1) == 1 && b == 0xE1);
+            CHECK(munmap(cm, 2 * P) == 0);
+        }
+        CHECK(cosmo_close(cfd) == 0);
+        CHECK(cosmo_unlink("/mnt/mm-sync") == 0);
+        CHECK(cosmo_umount("/mnt") == 0);
+    } else {
+        printf("usertest: mmap: no cosmofs scratch disk; the msync write-back checks did not run\n");
+    }
+
+    /* The bench: first touch of a cached 2 MiB file through a shared
+     * mapping, against read() of the same bytes; and the cost of the
+     * dirtying faults over 512 pages. */
+    {
+        const size_t BIG = 2u << 20;
+        int bh = (int)cosmo_open("/tmp/mm-bench", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        CHECK(bh >= 0);
+        unsigned char *buf = malloc(64 * 1024);
+        CHECK(buf != NULL);
+        for (size_t off = 0; off < BIG; off += 64 * 1024) {
+            memset(buf, (int)(off >> 16), 64 * 1024);
+            CHECK(cosmo_write(bh, buf, 64 * 1024) == 64 * 1024);
+        }
+        uint64_t t0 = cosmo_clock_ns();
+        for (size_t off = 0; off < BIG; off += 64 * 1024)
+            CHECK(file_rd(bh, off, buf, 64 * 1024) == 64 * 1024);
+        uint64_t t_read = cosmo_clock_since_ns(t0);
+        unsigned char *bm = mmap(NULL, BIG, PROT_READ | PROT_WRITE, MAP_SHARED, bh, 0);
+        CHECK(bm != MAP_FAILED);
+        if (bm != MAP_FAILED) {
+            t0 = cosmo_clock_ns();
+            unsigned sum = 0;
+            for (size_t off = 0; off < BIG; off += P)
+                sum += bm[off];
+            uint64_t t_touch = cosmo_clock_since_ns(t0);
+            t0 = cosmo_clock_ns();
+            for (size_t off = 0; off < BIG; off += P)
+                bm[off] = (unsigned char)sum;
+            uint64_t t_dirty = cosmo_clock_since_ns(t0);
+            fprintf(stderr,
+                    "USERBENCH: mmap %zu KiB: read() %llu us, first touch %llu us (%llu ns/page), "
+                    "dirtying write %llu us (%llu ns/page)\n",
+                    BIG / 1024, (unsigned long long)(t_read / 1000), (unsigned long long)(t_touch / 1000),
+                    (unsigned long long)(t_touch / (BIG / P)), (unsigned long long)(t_dirty / 1000),
+                    (unsigned long long)(t_dirty / (BIG / P)));
+            CHECK(munmap(bm, BIG) == 0);
+        }
+        free(buf);
+        CHECK(cosmo_close(bh) == 0 && cosmo_unlink("/tmp/mm-bench") == 0);
+    }
+
+    CHECK(munmap(sh, 3 * P) == 0);
+    CHECK(cosmo_close(fd) == 0);
+    CHECK(cosmo_unlink(MMAP_TEST_FILE) == 0);
+    /* The observable half of the leak proof: the files are gone and
+     * ramfs freed their frames with them; the section ran alone. */
+    CHECK(sysctl_u64("vm.cache_pages") == cache0);
+    printf("usertest: mmap ok\n");
+}
+
 static const struct selftest_section g_sections[] = {
     { "fs",       fs_selftest },
+    { "mmap",     mmap_selftest },
     { "fsctl",    fsctl_selftest },
     { "net",      net_selftest },
     { "proc",     proc_selftest },
