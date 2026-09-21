@@ -149,7 +149,7 @@ interrupts enabled and may block; every user pointer passes through
 `uaccess` (`copy_from_user`, `copy_to_user`, `strncpy_from_user`,
 `user_range_ok`); every handle passes through the process's handle table
 with rights (a Linux fd *is* a native handle: 0/1/2 are the console or
-whatever `spawn` mapped). 100 numbers have an entry: 87 are translated,
+whatever `spawn` mapped). 103 numbers have an entry: 90 are translated,
 13 return `-ENOSYS` explicitly (listed at the end); everything else
 returns `-ENOSYS` through `lx_unknown`, which increments
 `linux_state.unknown_syscalls` and logs the first eight per process at
@@ -254,8 +254,11 @@ as Linux does.
 
 | Nr | Call | Translation | Deviations |
 |---|---|---|---|
-| 41 | `socket` | `ksock_create` for `AF_INET` (2)/`AF_INET6` (10), `SOCK_STREAM` (1)/`SOCK_DGRAM` (2); handle with READ and WRITE | `SOCK_NONBLOCK`/`SOCK_CLOEXEC` dropped; other families `-EAFNOSUPPORT` (`AF_UNIX` included); other types `-EINVAL`; protocol ignored |
-| 49 | `bind` | `ksock_bind` | address length `2..28` |
+| 41 | `socket` | `ksock_create` for `AF_UNIX` (1, since the unix-sockets unit; `SOCK_SEQPACKET` is `-ESOCKTNOSUPPORT`), `AF_INET` (2)/`AF_INET6` (10), `SOCK_STREAM` (1)/`SOCK_DGRAM` (2); handle with READ and WRITE | `SOCK_NONBLOCK`/`SOCK_CLOEXEC` dropped; other families `-EAFNOSUPPORT` (`AF_UNIX` included); other types `-EINVAL`; protocol ignored |
+| 49 | `bind` | `ksock_bind`, or `unix_bind` for an `AF_UNIX` `sockaddr_un` (a NUL-terminated path, a path as long as the length says, or a leading NUL and an abstract name; `-EADDRINUSE`, `-EOPNOTSUPP` on cosmofs) | address length `2..28`, or `2..110` for `AF_UNIX` |
+| 46 / 211 | `sendmsg` | (the unix-sockets unit) the vector element by element on a stream, with `SCM_RIGHTS` riding on the first that carries a byte; gathered and sent once for a datagram; each descriptor passes `handle_transfer_check` with SAME rights | one control type, `SOL_SOCKET`/`SCM_RIGHTS`, at most 32 descriptors; `MSG_DONTWAIT` honoured, `MSG_NOSIGNAL` means nothing more (no write raises a signal) |
+| 47 / 212 | `recvmsg` | into a buffer of at most 64 KiB scattered over the vector; the descriptors installed in order until the first refusal, the rest closed with `MSG_CTRUNC`; `MSG_TRUNC` for a cut datagram; `msg_name`/`msg_namelen` the sender's name | `msg_controllen` is the room: `CMSG_SPACE(n * 4)` |
+| 53 / 199 | `socketpair` | `AF_UNIX` only, `SOCK_STREAM` or `SOCK_DGRAM` (`SOCK_NONBLOCK`, `SOCK_CLOEXEC` accepted); `unix_socketpair`, both installed with the connected rights | |
 | 42 | `connect` | `ksock_connect` | |
 | 50 | `listen` | `ksock_listen` | |
 | 43, 288 | `accept`, `accept4` | `ksock_accept`; peer address out; new handle with READ and WRITE | `accept4` flags dropped |
@@ -272,8 +275,9 @@ as Linux does.
 `clone3` 435 (x86-64 numbers; the AArch64
 rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `select` 23,
-`mremap` 25, `sendmsg` 46, `recvmsg` 47 have numbers in the tables but
-no entry: they go through `lx_unknown`. `msync` 26 has an entry since
+`mremap` 25 has a number in the tables but no entry: it goes through
+`lx_unknown`; `sendmsg` 46 and `recvmsg` 47 have entries since the
+unix-sockets unit. `msync` 26 has an entry since
 the file-regions unit (the `mmap` row above).
 
 ## Symbolic links

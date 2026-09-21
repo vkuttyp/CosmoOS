@@ -65,6 +65,11 @@ Three rules make the vocabulary worth having:
 - **Holding a handle is not permission to pass it on.** DUP and TRANSFER
   are separate rights and separate from READ and WRITE, because "you may
   read this" and "you may give this to anyone" are different statements.
+  The rule for giving is one function, `handle_transfer_check`, with two
+  callers: the `spawn` map, and a unix socket's message (the
+  unix-sockets unit) -- a handle that rides in a `sendmsg` needs
+  TRANSFER and arrives with the rights the sender named, SAME or a
+  subset.
 - **Using an object and administering it are different.** MANAGE covers
   the operations that change an object's behaviour rather than its
   contents -- making it non-blocking today, and whatever each type

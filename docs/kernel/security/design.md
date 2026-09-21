@@ -103,6 +103,17 @@ Not done here: mount namespaces (a confined process still sees the same
 mount table), pid and uts namespaces, a working directory for a rooted
 child, and any way to give a running process a new root.
 
+**Abstract unix socket names are scoped by the root** (the unix-sockets
+unit, `docs/kernel/ipc/design.md`). Linux's abstract namespace is
+global; here the registry keys an abstract name by the binding
+process's root vnode as well as the bytes, and a lookup uses the
+caller's root, so a jailed process sees only the abstract sockets bound
+under the same root -- a socket named in the filesystem is already
+inside or outside the root by its path. The user-mode jail test
+asserts both: a rooted child's connect to the parent's abstract name is
+`ECONNREFUSED`, and to the parent's path `ENOENT`, while an unjailed
+connect to the same abstract name succeeds.
+
 ## 1c. Process domains
 
 A process belongs to a domain. The system boots in domain 0; a spawn may

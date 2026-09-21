@@ -1,14 +1,95 @@
 # NEXT SUBSYSTEM — unix domain sockets: a name in the filesystem, and a handle that rides in a message
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and the
-unit it names is the one the README has called a standing gap since the
-service manager was built: "a named pipe and a unix socket — are both
-things this kernel does not have" (README, the `svc` entry; the
-deferred-work inventory, §1.3). It closes the unix-socket half of that
-sentence, and with it three of the Linux personality's missing calls
-(`sendmsg`, `recvmsg`, `socketpair`; inventory §2.6). Named pipes stay
-open and are named at the end as the next thing this unit makes cheap.
+and wait for the instruction to build it. That wait is over: the
+instruction was given and the unit is built. **This report is as
+built** (the unix-sockets unit), and the banner below records where
+the build differed from the design; the sections after it are the
+design as reviewed. The unit it names is the one the README had called
+a standing gap since the service manager was built: "a named pipe and a
+unix socket — are both things this kernel does not have" (the `svc`
+entry; the deferred-work inventory, §1.3). It closes the unix-socket
+half of that sentence, and with it three of the Linux personality's
+missing calls (`sendmsg`, `recvmsg`, `socketpair`; inventory §2.6).
+Named pipes stay open and are named at the end as the next thing this
+unit makes cheap.
+
+**What the build changed:**
+
+1. **Waiting on another socket holds no reference to it.** The design
+   had a connector wait on the listener's own wait queue. `unix-close-race`
+   found what that means: the connector's reference kept the listener
+   alive past its last handle, so closing the listener released nothing
+   and the connector never returned -- the wait depended on a release
+   the wait itself prevented. As built, a connector blocked on a full
+   backlog and a datagram sender blocked on a full queue hold nothing:
+   both sleep on one global queue (`g_room_wq`) for a change of
+   generation (bumped by `accept`, `listen`, a datagram receive and every
+   unix socket's release) and resolve the name again when they wake, so
+   a released listener is simply not found and the connect is refused.
+   Invariant I8 says so; the mutation that puts the reference back
+   hangs the boot in exactly the case the test builds.
+2. **Handles arrive "what fits, in order", and the stream boundary is
+   "once any byte was copied".** `recvmsg` installs a message's handles
+   in order until the first refusal or the end of the caller's room and
+   releases the rest with `HTRUNC`; in the transport the same rule
+   decides against the room the caller gave. A stream read stops before
+   a send that carries handles once it has copied any byte from an
+   earlier one (the first build let it cross, and `unix-handles` said so
+   before anything shipped).
+3. **The Linux door's own handles could not ride.** `lxtest`'s
+   `SCM_RIGHTS` row found that the Linux `pipe2` and `openat` installed
+   their handles with the access rights alone -- no DUP, no TRANSFER --
+   which its own `dup` never noticed because it copies rights without
+   checking DUP. Both now install with `HANDLE_RIGHT_OWNER` as the native
+   `open` and `pipe` do: a Linux descriptor can be dup'd and passed.
+4. **The address is Linux's size.** `struct cosmo_sockaddr_un` has
+   `path[108]`, the size of `sun_path`, not the 110 the design wrote; a
+   name is at most 107 bytes of path or 107 of abstract bytes.
+5. **No native `getpeername`.** The native ABI never had one and this
+   unit adds none: `accept` writes the peer's name, `recvmsg` the
+   sender's, `getsockname` the socket's own; the Linux door's
+   `getpeername` works on a unix socket as on an inet one.
+6. **The tests, as built.** No separate `unix-lifetime`: every `unix-*`
+   test counts live unix sockets (and pipes, where it makes any) before
+   and after. `unix-poll` reads readiness through `kobject_ready` and
+   the wait queue through `kobject_poll_wq`, not through the async ring.
+   The `EACCES` case runs in the `unix` section as a uid-1000 child, not
+   in the kernel (the kernel is root). The no-`mknod` refusal is proved
+   on `/proc` (procfs has no `mknod`) rather than on a cosmofs mount,
+   which the kernel test has no disk for. The jail case accepts and
+   closes its own unjailed connection before spawning the jailed child,
+   so a mutation that let the child through fails a check instead of
+   deadlocking the parent's wait on the child's blocked connect -- which
+   is how that mutation first failed.
+7. **The numbers.** `SYS_sendmsg` 97, `SYS_recvmsg` 98,
+   `SYS_socketpair` 99, `SYS_COUNT` 100; six self-tests, 372 in all on
+   both architectures; `UNIX_BUF` 64 KiB, `UNIX_DGRAM_MAX` 64 messages
+   and 256 KiB, `UNIX_BACKLOG_MAX` 128, `UNIX_HANDLES_MAX` 32; invariant
+   **I8** (`docs/kernel/ipc/invariants.md`); `handle_transfer_check` in
+   `kernel/object/handle.c`, spawn's map converted to it.
+
+**Bug-proofs, as run.** Each mutation applied alone on x86-64, the
+debug suite booted, the file restored from HEAD; the report's eight and
+one for the rule the build added.
+
+| mutation | what failed |
+| --- | --- |
+| the rights not narrowed at send (`handle_transfer_check` gives the giver's full rights) | `unix-handles`: the subset came back as the full set (`r == HANDLE_RIGHT_WRITE`) |
+| TRANSFER not checked | `unix-handles`: a handle without TRANSFER passed the check; the `unix` section: the `cosmo_sendmsg` of the dup without TRANSFER succeeded where `EPERM` was expected |
+| the registry entry kept past the socket's release | a **hard lockup** on CPU 0 in `reg_find_locked`, reached from `unix-stream`'s connect to the dead name: the freed entry's poisoned links loop the list |
+| abstract names not keyed by the root | the `unix` section: the jailed child's connect to the parent's abstract name succeeded, and its exit status failed the check. On the first run this mutation deadlocked instead -- the child, no longer refused, blocked on a backlog the section's own earlier connection had filled while the parent waited for the child -- and the section now accepts and closes that connection first (banner item 6) |
+| the unix-socket-in-flight refusal removed | `unix-handles`: the send of a unix socket returned 1 (`-EINVAL` expected) |
+| queued handles not released at a socket's release | `unix-handles`: `kobject_refcount(wr) == refs0` failed after the receiver's release -- the pipe end stayed held |
+| the backlog not bounded | `unix-stream`: the third connect succeeded (`-EAGAIN` expected); `unix-close-race`: the connector never waited, so the listener's close found nothing to refuse (`-ECONNREFUSED` expected) |
+| the ancillary boundary ignored on a stream | `unix-handles`: the read crossed into the send that carried handles, 6 bytes for the 2 expected |
+| the connector holding the listener's reference while it waits (banner item 1) | `unix-close-race`: the listener's close released nothing, the connector never returned, and the boot timed out with `unix-close-race` the last test started -- the deadlock the rule exists to prevent, reported as a timeout because a kernel thread blocked in a killable wait with no process to kill has no other way to fail |
+
+**Benchmarks, as run** (`USERBENCH: unix`, one-byte round trips to a
+child, 2000 of them): x86-64 121 us over a unix stream pair against 140
+over two pipes; AArch64 147 against 181. The socket sits where the
+report expected it, nearer the pipe than TCP, and a little ahead of the
+pipe: one object to wake per direction rather than two.
 
 ## What is established (before this unit)
 

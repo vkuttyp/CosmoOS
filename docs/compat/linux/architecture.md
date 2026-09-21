@@ -111,7 +111,7 @@ what Linux is.
   unit: the stop signals stop, and `wait4` takes `WUNTRACED` and
   `WCONTINUED`.)
 - `/proc`, `/sys`, `/dev` nodes, `ioctl` beyond the terminal requests,
-  `epoll`/`select`, `sendmsg`/`recvmsg`, writable shared file mappings,
+  `epoll`/`select`, writable shared file mappings,
   `mremap`, shared memory, namespaces, seccomp: later stages or never.
 - Running a Linux distribution's userspace (stage 4).
 - Anything in the native personality or subsystems on behalf of Linux:

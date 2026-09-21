@@ -68,6 +68,63 @@ released. `init --selftest` repeats it through `setnonblock`/`ioready`
 `lxtest` covers `pipe2(O_NONBLOCK)`, `fcntl(F_GETFL/F_SETFL)` and the
 same fill-to-`EAGAIN`.
 
+## Unix domain sockets (the unix-sockets unit)
+
+Six self-tests in `kernel/ipc/unixtest.c`, each counting live unix
+sockets (and pipes, where it makes any) before and after -- the leak
+half of invariant I8 asserted, not hoped for:
+
+- `unix-stream`: a name bound and listened on; connect completes
+  before accept and the bytes wait; both ways; `shutdown(WR)` reads 0
+  on the other side while the reverse still flows; the client gone,
+  the server's write is `-EPIPE` and its read 0; a backlog of two,
+  the third connect `-EAGAIN` non-blocking and admitted after an
+  accept; a released listener refuses its queue (0, `-EPIPE`) while the
+  accepted connection lives; a dead name `-ECONNREFUSED`, a regular
+  file `-ECONNREFUSED`, no such path `-ENOENT`, a datagram socket's
+  name `-EPROTOTYPE`.
+- `unix-dgram`: `sendto` by name, the sender's name back (none, then an
+  abstract one), a default destination and a reply to the name that
+  came with it, truncation flagged and the remainder dropped,
+  `-EMSGSIZE`, the queue's message bound then `-EAGAIN` and room again,
+  a released receiver refused by name and by default destination.
+- `unix-name`: `bind` makes a `DT_SOCK` node of mode 0755, `open` is
+  `-ENXIO`, a second bind of the path and of an abstract name
+  `-EADDRINUSE`, binding twice `-EINVAL`, `unlink` then connect `-ENOENT`
+  with the existing connection alive, a filesystem without `mknod`
+  (`/proc`) refused.
+- `unix-handles`: a pipe end rides with the rights the sender named and
+  the message's reference is seen and returned; a unix socket is
+  `-EINVAL` and the caller keeps its reference; room for one of three
+  installs the first and releases two with `HTRUNC`; no room asked for
+  releases all; ancillary items stay with their bytes (a read stops at
+  the boundary of a send with handles and never crosses into it); a
+  socket released with a message queued releases the handles in it;
+  `handle_transfer_check` on a table (SAME, a subset, more than held
+  `-EPERM`, no TRANSFER `-EPERM`, no such handle `-EBADF`).
+- `unix-close-race` (two CPUs): a blocked reader (0), writer (`-EPIPE`),
+  connector on a full backlog (`-ECONNREFUSED`) and accepter (`-EINVAL`
+  after `shutdown(RD)`) each released from the other CPU. The connector
+  case is the one the build found: a connector that held a reference
+  to the listener could never be released by the listener's close.
+- `unix-poll`: readiness through the object's type -- a listener
+  readable with a connection queued, a stream readable by its bytes,
+  writable by its space (a full queue is not) and hung up by its peer,
+  a datagram socket writable always.
+
+`init --selftest`'s `unix` section (`docs/userland/testing.md`) drives
+the doors: a pair with `SO_PEERCRED`, a child echoing over its end from
+the spawn map and returning a file's bytes from a handle it received in
+a message, `-EPERM` without TRANSFER, `-EINVAL` for a unix socket, a
+child connecting to a path with the accepted socket naming the child's
+pid, `EADDRINUSE`, a uid-1000 child refused `EACCES` by the node's
+mode, a jailed child that reaches neither the abstract name nor the
+path, `ECONNREFUSED` then `ENOENT` after `unlink`, datagrams by name
+with the sender's abstract name back and `MSG_TRUNC`,
+`ESOCKTNOSUPPORT`, and the bench. `lxtest` covers the Linux door
+(`docs/compat/linux/testing.md`). The mutations run are in the report's
+as-built banner.
+
 ## Gaps and planned tests
 
 - No test kills a writer blocked on a full pipe.

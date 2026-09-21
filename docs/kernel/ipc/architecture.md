@@ -55,8 +55,9 @@ gone.
 
 - Named pipes (FIFOs in the filesystem), `poll`/
   `select`, `splice`, message boundaries, priorities.
-- Channels with typed messages and handle passing, events, shared
-  memory, futexes: later entries in this directory.
+- Events, shared memory: later entries in this directory. Messages
+  with handle passing exist as unix domain sockets (`unix.c`, the
+  unix-sockets unit); futexes as `futex.c`.
 - Signals on `EPIPE` (`SIGPIPE`): there are no signals; the writer gets
   the error and the shell reports it.
 
@@ -67,6 +68,8 @@ gone.
 | `pipe_create(struct kobject **rd, struct kobject **wr)`, `pipe_stats` | `kernel/pipe.h` | `sys_pipe`, self-tests |
 | `pipe_read`/`pipe_write` kobject types with `read`/`write`/`stat` | `kernel/object.h` (`kobject_io_type`) | `sys_read`, `sys_write`, `sys_fstat` |
 | `SYS_pipe` (35) | `uapi/cosmo/syscall.h` | libc `pipe()` |
+| `unix_*` (`kernel/unix.h`): the `COSMO_AF_UNIX` transport behind `struct socket` | `kernel/unix.h` | `kernel-services/network/socket.c`, both doors |
+| `SYS_sendmsg` (97), `SYS_recvmsg` (98), `SYS_socketpair` (99) | `uapi/cosmo/syscall.h` | libc `cosmo_sendmsg`/`cosmo_recvmsg`/`socketpair` |
 
 Tests (`testing.md`): a self-test (`ipc-pipe`) moves 1 MiB through a
 pipe between two kernel threads with mismatched chunk sizes and checks

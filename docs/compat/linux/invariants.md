@@ -243,7 +243,7 @@ kernel's `unistd.h` tables.
   pgid is `-ECHILD`. Process groups exist (the signals unit) and
   `kill(-pgid)` uses them, so this is a gap in `wait4` rather than in
   the kernel.
-- No `fork`, `execve`, `select`/`epoll`, `sendmsg`/`recvmsg`, shared
+- No `fork`, `execve`, `select`/`epoll`, shared
   file mappings, real-time signal queues. (Job control arrived with the
   job-control unit, `wait4` included.)
 - `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)

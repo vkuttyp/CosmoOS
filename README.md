@@ -647,7 +647,9 @@ See [docs/development.md](docs/development.md).
   one supervisor process per service, and the state in the filesystem
   (`/run/svc/<name>.pid`, `/var/log/svc/<name>`). A central manager
   would need a control channel, and the two Unix answers — a named pipe
-  and a unix socket — are both things this kernel does not have;
+  and a unix socket — were both things this kernel did not have then
+  (the unix socket exists since the unix-sockets unit; `svc`'s shape
+  stands on its own reasons);
   building an IPC mechanism in order to build a service manager is
   backwards. A definition is `key value` lines, and an **unknown key is
   an error**, because a typo in `root` or `user` would otherwise leave a
@@ -3123,6 +3125,47 @@ See [docs/development.md](docs/development.md).
   the hole closed, is what named the count. `docs/testing/flakes.md`;
   `docs/kernel/device/testing.md`; the #199 report's banner, items 11
   and 12.
+- **Unix domain sockets: a name in the filesystem, and a handle that
+  rides in a message.** Since the service manager was built the README
+  has said "a named pipe and a unix socket — are both things this
+  kernel does not have"; the second exists now, and the `mknod` the
+  first needs with it. A third family in the socket object
+  (`COSMO_AF_UNIX`, dispatched inside the socket layer, so no door or
+  rights table learns a new kind): a stream connection is the pipe's
+  bounded queue twice, a datagram socket one such queue, a listener a
+  backlog-bounded queue of connections made at `connect` -- the client
+  writes before anyone accepts and the bytes wait. A name is a
+  `VNODE_SOCK` node made by the new `mknod` vnode operation (ramfs;
+  cosmofs has no on-disk type and refuses), mode 0755, owned by the
+  caller, the node's mode the access control for connecting, `open`
+  answering `ENXIO`; or an abstract name keyed by the caller's **root**,
+  so a jail sees only its own. A message carries bytes, a name and
+  handles: a handle rides under spawn's transfer rule, factored into
+  one function both callers use, and arrives with the rights the sender
+  named, installed in order until the first refusal (`HTRUNC`); a unix
+  socket does not ride (the cycle Linux garbage-collects is refused,
+  and the collector named as the unit that would lift it). `socketpair`,
+  `SO_PEERCRED`, `sendmsg`/`recvmsg`; the Linux door's `AF_UNIX`,
+  `sockaddr_un` in its three forms, `SCM_RIGHTS`, `MSG_CTRUNC`,
+  `socketpair`. **Building it found two things.** A waiter on another
+  socket must hold no reference to it: a connector blocked on a full
+  backlog that held the listener kept it alive past its last handle,
+  and the wait depended on a release the wait prevented -- so such
+  waiters sleep on one generation queue and resolve the name again
+  (invariant **I8**). And the Linux door's `pipe2` and `openat`
+  installed handles with no owner rights, so no Linux descriptor could
+  ever have been passed; they carry them now. Six self-tests (a stream
+  end to end, datagrams, names, handles, a two-CPU close race,
+  readiness), a `unix` section of the user suite (a child on the other
+  end of a pair, a file handle across it, `SO_PEERCRED` naming the
+  child, a uid-1000 child refused by the node's mode, a jailed child
+  reaching neither the abstract name nor the path), `lxtest` rows;
+  nine mutations, each caught by a named test or, for the reference
+  rule, by the deadlock it exists to prevent. Bench: a one-byte round
+  trip to a child costs 121 / 147 us over a unix pair on x86-64 /
+  AArch64 against 140 / 181 over two pipes. Invariant **I8**; 372
+  self-tests on both architectures. Report:
+  `docs/audit/next-subsystem-unix-sockets.md` (PR #TBD).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
