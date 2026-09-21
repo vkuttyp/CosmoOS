@@ -189,13 +189,26 @@ are two buckets like any two; the address-order lock rule and the nested
 annotation are unchanged. Requeueing a waiter from a shared word to a
 private one, or the reverse, moves it between the keys' buckets and
 rewrites its key under both locks, as the requeue already rewrites
-`uaddr` and `bucket`. A waiter that came in with a vnode reference and
-is requeued onto a private word keeps the reference until it dequeues:
-the reference is the waiter's, not the word's.
+`uaddr` and `bucket`. **The reference follows the key, and is taken per
+waiter.** A waiter moved onto a shared word by a requeue has no
+reference of its own — it came in private — so the requeue takes one
+for it from the destination key's vnode as it moves it (`vnode_get` is
+an atomic increment and runs under the bucket locks); the requeue's own
+reference on that key protects the call, not the waiters, and review
+of this report's first draft caught the design relying on it. A waiter
+moved from a shared word to a private one keeps the reference it holds
+until it dequeues, because dropping it may release the vnode and a
+release does block I/O, which cannot happen under a spinlock. So the
+rule the waiter keeps is: **a waiter holds a reference to every vnode
+its key has ever named, and puts them all at dequeue** — in practice
+one, since a waiter is requeued at most once between keys in any use
+the tree has, but the waiter records what it holds rather than what it
+assumes.
 
 ### Lifetime
 
-A waiter holds its vnode reference from classification to dequeue. If
+A waiter holds its vnode reference from classification — or from the
+requeue that moved it onto a shared word — to dequeue. If
 its mapping is unmapped underneath it (another thread's `munmap`), the
 word is gone but the vnode is not: the waiter sleeps to its timeout or
 its kill exactly as a private waiter on an unmapped word does today, and
@@ -219,7 +232,7 @@ reference like an open file's. `shared_maps` is checked zero at
 | `docs/compat/linux/{design,api,invariants,testing}.md` | the flag honoured; L4's key; the test rows |
 | `docs/kernel/memory/{design,api}.md` | `vm_user_futex_key`, `shared_maps`; §7.7's item struck |
 | `docs/kernel/syscall/api.md`, `docs/libc/api.md` | what a native futex on a shared page now means |
-| `docs/audit/2026-09-deferred-work-inventory.md` | the §2.2 clause struck |
+| `docs/audit/2026-09-deferred-work-inventory.md` | the §2.2 clause, marked "taken up" by this report and not struck until the build lands, struck by the build's documents commit |
 | `README.md` | Status entry |
 
 ## New APIs
@@ -258,6 +271,7 @@ documents. No structure a program sees changes size or number.
 | a word in anonymous memory | libc's own mutex under the herd (`thrtest`, unchanged) and the sleeper count the native thread door reads: `shared_maps == 0` for that process, and the counts are what they were |
 | unmap under a waiter | a thread waits on a shared word; another unmaps the page; the wait times out, the process exits cleanly, the poisoner is silent (the vnode reference outlived the mapping) |
 | requeue across kinds | waiters on a shared word requeued onto a private one and woken there; the sleeper counts move with them |
+| requeue onto a shared word, then the mapping goes | waiters on a private word requeued onto a word in a shared mapping; the shared mapping is unmapped by another thread; the waiters time out cleanly and the poisoner is silent — the reference taken per moved waiter is what outlives the mapping |
 | `lxtest`: the flag both ways | on a `MAP_SHARED` page: a clone thread waits *with* `FUTEX_PRIVATE_FLAG`; a wake *without* it wakes 0, a wake *with* it wakes 1; then the reverse pair — the flag selects the key and both keys work |
 | `lxtest`: a private mutex's cost | a wait/wake pair with the flag set on a shared page takes the private path (a counter, `vm.futex_shared_keys`, does not move) |
 | exit | `vm_space_destroy` checks `shared_maps == 0` on every process exit |
@@ -271,6 +285,10 @@ documents. No structure a program sees changes size or number.
   on the next allocation. **May be silent** if nothing reuses the vnode
   before the timeout; the report says so, and the reference stands on
   the argument if it is.
+- the per-waiter reference not taken on a private-to-shared requeue →
+  the requeue-then-unmap case, with the same caveat as the row above:
+  the vnode can be released under the moved waiters, shown only if
+  something reuses it before the timeout.
 - `FUTEX_PRIVATE_FLAG` still masked → the `lxtest` flag case: the wake
   without the flag wakes the private waiter (1, expected 0).
 - classification skipped when `shared_maps != 0` (the counter's test
