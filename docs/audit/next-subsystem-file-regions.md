@@ -236,13 +236,29 @@ serialised against faults on the same file without a third mechanism.
    range was unmapped, replaced, or remapped to something else in the
    gap — drops the reference taken in step 2 and returns without
    installing, and the instruction retries against whatever is there
-   now, exactly as the quiesced arm does. If the PTE is already present
-   (a second thread faulted the same page first, or this is a write
-   into a page mapped read-only for dirtiness), the frame is not mapped
-   twice: the reference is dropped and, for a write, the PTE is
-   raised to writable. Otherwise `arch_mmu_map`; `file_pages++` (or
-   `anon_pages++` for a copy); for an executable mapping, the
-   instruction-stream sync M41 requires. Release both.
+   now, exactly as the quiesced arm does. If the PTE is already
+   present, what happens depends on what is present and why, and only
+   one of the three cases raises a PTE in place:
+   - **shared, write, the cache frame present read-only**: the page
+     was installed clean and is dirty now (step 2 marked it); the PTE
+     is raised to writable. This is the one in-place upgrade, and it is
+     what "a shared page's PTE gains write only in the fault handler"
+     means.
+   - **private, write, the cache frame present read-only**
+     (`PG_PAGECACHE` on the frame `arch_mmu_query` returns): the
+     private read that installed it must not become a write through
+     it. The PTE is **replaced**: unmap it, drop that mapping's
+     reference to the cache frame (`pmm_page_put`, `file_pages--`),
+     map the copy made in step 2 (`anon_pages++`), shoot down. Raising
+     the PTE would write the file through a private mapping.
+   - **anything else present** — a second thread installed the same
+     page first, or a private copy already stands where this write
+     lands: nothing is mapped twice. The reference or the copy from
+     step 2 is dropped, and the instruction retries against a PTE that
+     already permits it (a private copy is always mapped writable).
+   Otherwise `arch_mmu_map`; `file_pages++` (or `anon_pages++` for a
+   copy); for an executable mapping, the instruction-stream sync M41
+   requires. Release both.
 
 Faults on different files run in parallel; faults on one file are
 serialised by its cache mutex, which is what `read()` on one file already
@@ -317,9 +333,23 @@ written through it.
 ### `msync`, at both doors
 
 `SYS_msync` 96 `(addr, len, flags)` (`SYS_COUNT` → 97), and `LX_msync`
-26 over the same kernel function. `MS_SYNC`: for every FILE region in the
-range, `pagecache_sync` the vnode and return the first error — the whole
-file's dirty pages, which is more than asked and never less. `MS_ASYNC`:
+26 over the same kernel function, `vm_user_msync`. It cannot call
+`pagecache_sync` from under the space lock — the lock order is
+`vnode.lock → pagecache.lock → vm_space.lock`, `pagecache_sync` sleeps
+under the cache mutex and is entered under the vnode lock as `file_sync`
+enters it — so it is **two passes**. First, under `space->lock`: check
+the range is wholly mapped (`-ENOMEM` otherwise, before anything is
+written), and release. Then a cursor walk: under `space->lock`, find
+the first FILE region at or after the cursor within the range, take a
+vnode reference through its record (`vnode_get`, under the lock, so the
+vnode cannot go with a concurrent unmap), set the cursor to the region's
+end, release; `mutex_lock(&vn->lock)`, `pagecache_sync(vn)`,
+unlock, `vnode_put`; repeat until the cursor leaves the range. A region
+unmapped between the two holds is not a problem: the reference kept the
+vnode, and syncing a file is a file operation that owes nothing to the
+mapping that named it. `MS_SYNC`: that walk, returning the first error —
+the whole file's dirty pages for each vnode met, which is more than
+asked and never less. `MS_ASYNC`:
 the dirty pages are already known to the cache and reach the filesystem
 by `vfs_sync`, the writeback thread or the last close, which is what
 "scheduled" means here; the call returns 0 without writing. `MS_INVALIDATE`:
