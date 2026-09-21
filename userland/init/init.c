@@ -4745,6 +4745,11 @@ static void unix_selftest(void)
          * jail's refusal a refusal. */
         int cs = socket(AF_UNIX, SOCK_STREAM, 0);
         CHECK(cs >= 0 && connect(cs, (struct sockaddr *)&an, 2 + 1 + 8) == 0);
+        /* Accepted and closed, so the backlog has room again: a jailed
+         * child that were NOT refused would fail its check rather than
+         * block on a full backlog while this process waits for it. */
+        int acc = accept(as, NULL, NULL);
+        CHECK(acc >= 0 && close(acc) == 0);
         CHECK(close(cs) == 0);
         CHECK(mkdir("/tmp/jail", 0755) == 0 || errno == EEXIST);
         const char *argv[] = { "init", "--probe", "unix-jail", NULL };
