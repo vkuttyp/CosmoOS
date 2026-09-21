@@ -880,37 +880,6 @@ static int64_t lx_brk(struct syscall_args *a)
     return (int64_t)want;
 }
 
-/* Fill [base, base+len) of the caller's own new mapping from `f` at
- * `off`: file_pread into a bounce page, copy_to_user into the region
- * (demand-zero pages appear as the copy touches them). Bytes past the end
- * of the file stay zero. */
-static int fill_from_file(struct file *f, uint64_t base, size_t len, uint64_t off)
-{
-    char stack[IO_CHUNK];
-    struct io_bounce b;
-    syscall_bounce_get(&b, stack, len);   /* up to 64 KiB per pread; the stack chunk when the heap refuses */
-    void *buf = b.buf;
-    int rc = 0;
-    size_t done = 0;
-    while (done < len) {
-        size_t chunk = len - done < b.cap ? len - done : b.cap;
-        int64_t n = file_pread(f, buf, chunk, off + done);
-        if (n < 0) {
-            rc = (int)n;
-            break;
-        }
-        if (n == 0)
-            break;   /* end of file: the rest is zero */
-        if (copy_to_user(base + done, buf, (size_t)n)) {
-            rc = -ENOMEM;   /* the region is ours and mapped: only memory can fail the copy */
-            break;
-        }
-        done += (size_t)n;
-    }
-    syscall_bounce_put(&b);
-    return rc;
-}
-
 static int64_t lx_mmap(struct syscall_args *a)
 {
     uint64_t hint = a->a[0];
@@ -933,23 +902,47 @@ static int64_t lx_mmap(struct syscall_args *a)
         vprot |= VM_PROT_WRITE;
     if (nprot & COSMO_PROT_EXEC)
         vprot |= VM_PROT_EXEC;
-    /* A file: MAP_PRIVATE, or MAP_SHARED without PROT_WRITE, is a snapshot
-     * of the file's bytes (docs/compat/linux/design.md, "Dynamic
-     * executables"); a writable shared mapping would need page-cache-backed
-     * regions this kernel does not have. */
+    /*
+     * A file: a FILE region over its page cache (docs/audit/next-subsystem-file-regions.md).
+     * MAP_SHARED maps the file's own pages -- a write through the mapping
+     * is a write to the file, seen by read() and every other mapping;
+     * MAP_PRIVATE is copy-on-write. The same checks the native door makes
+     * (kernel/syscall/native.c, mmap_file_check), with Linux's errnos: a
+     * regular file (-ENODEV), the READ right (-EBADF), and for a shared
+     * writable mapping a file opened for writing through a handle with
+     * the WRITE right (-EACCES). The eager copy this used to make is gone.
+     */
     struct file *f = NULL;
+    bool shared = (flags & LX_MAP_SHARED) != 0;
+    vm_prot_t maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
     if (!(flags & LX_MAP_ANONYMOUS)) {
-        if ((flags & LX_MAP_SHARED) && (nprot & COSMO_PROT_WRITE))
-            return -EOPNOTSUPP;
-        if (!is_page_aligned(off))
+        if (!is_page_aligned(off) || off + len < off)
             return -EINVAL;
         f = file_of((int)a->a[4], HANDLE_RIGHT_READ);
         if (f == NULL)
             return -EBADF;
+        if (f->vn->type != VNODE_REG) {
+            file_put(f);
+            return -ENODEV;
+        }
+        bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY;
+        if (writable) {
+            struct kobject *w = handle_lookup(&p->handles, (int)a->a[4], HANDLE_RIGHT_WRITE);
+            if (w == NULL)
+                writable = false;
+            else
+                kobject_put(w);
+        }
+        if (shared && (nprot & COSMO_PROT_WRITE) && !writable) {
+            file_put(f);
+            return -EACCES;
+        }
+        if (shared && !writable)
+            maxprot &= ~VM_PROT_WRITE;
     }
+    unsigned fflags = shared ? VM_MAP_SHARED : 0;
     uint64_t base;
     int rc;
-    bool replaced = false;
     if (flags & LX_MAP_FIXED) {
         if (!is_page_aligned(hint) || !user_range_ok(hint, len)) {
             rc = -EINVAL;
@@ -963,42 +956,43 @@ static int64_t lx_mmap(struct syscall_args *a)
          * mmap(NULL, ...) could be handed that gap, after which the map
          * failed with -EEXIST: a failure Linux never produces. One
          * operation now, which owns the range throughout
-         * (docs/audit/next-subsystem-map-fixed.md).
+         * (docs/audit/next-subsystem-map-fixed.md), for a file too.
          */
-        rc = vm_user_map_anon_replace(p->space, base, len, f ? VM_PROT_RW : vprot, 0,
-                                      f ? "mmap-file" : "mmap");
-        if (rc)
-            goto out;
-        replaced = true;
-    } else {
-        uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
-        base = vm_user_find_free(p->space, from, len);
-        if (base == 0 && from != USER_MMAP_BASE)
-            base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
-        if (base == 0) {
-            rc = -ENOMEM;
-            goto out;
-        }
+        rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, fflags | VM_MAP_REPLACE, f->vn, off,
+                                  "mmap-file")
+               : vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
+        goto out;
     }
-    if (!replaced) {
-        rc = vm_user_map_anon(p->space, base, len, f ? VM_PROT_RW : vprot, 0, f ? "mmap-file" : "mmap");
-        if (rc)
-            goto out;
+    uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
+    base = vm_user_find_free(p->space, from, len);
+    if (base == 0 && from != USER_MMAP_BASE)
+        base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
+    if (base == 0) {
+        rc = -ENOMEM;
+        goto out;
     }
-    if (f) {
-        rc = fill_from_file(f, base, len, off);
-        if (rc == 0 && vprot != VM_PROT_RW)
-            rc = vm_user_protect(p->space, base, len, vprot);
-        if (rc) {
-            vm_user_unmap(p->space, base, len, 0);
-            goto out;
-        }
-    }
-    rc = 0;
+    rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, fflags, f->vn, off, "mmap-file")
+           : vm_user_map_anon(p->space, base, len, vprot, 0, "mmap");
 out:
     if (f)
         file_put(f);
     return rc ? rc : (int64_t)base;
+}
+
+static int64_t lx_msync(struct syscall_args *a)
+{
+    uint64_t addr = a->a[0];
+    size_t len = page_align_up((size_t)a->a[1]);
+    int flags = (int)a->a[2];
+    if (flags & ~(LX_MS_ASYNC | LX_MS_INVALIDATE | LX_MS_SYNC))
+        return -EINVAL;
+    if ((flags & LX_MS_ASYNC) && (flags & LX_MS_SYNC))
+        return -EINVAL;
+    if (!is_page_aligned(addr) || len == 0 || !user_range_ok(addr, len))
+        return -EINVAL;
+    if (!(flags & LX_MS_SYNC))   /* ASYNC and INVALIDATE: see sys_msync */
+        return vm_user_range_mapped(process_current()->space, addr, len, 0) ? 0 : -ENOMEM;
+    return vm_user_msync(process_current()->space, addr, len);
 }
 
 static int64_t lx_munmap(struct syscall_args *a)
@@ -1990,6 +1984,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_mmap] = lx_mmap,
     [LX_mprotect] = lx_mprotect,
     [LX_munmap] = lx_munmap,
+    [LX_msync] = lx_msync,
     [LX_brk] = lx_brk,
     [LX_rt_sigaction] = lx_rt_sigaction,
     [LX_rt_sigprocmask] = lx_rt_sigprocmask,

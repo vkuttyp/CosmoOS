@@ -8,7 +8,12 @@
 
 #include <kernel/asid.h>
 #include <kernel/bootinfo.h>
+#include <kernel/completion.h>
 #include <kernel/errno.h>
+#include <kernel/lockdep.h>
+#include <kernel/pagecache.h>
+#include <kernel/signal.h>
+#include <kernel/vfs.h>
 #include <kernel/interrupt.h>
 #include <kernel/kernel.h>
 #include <kernel/kmalloc.h>
@@ -490,7 +495,7 @@ static void describe_region(const struct vm_region *r, char *buf, size_t len)
         return;
     }
     ksnprintf(buf, len, "region '%s' %p+0x%zx %s %c%c%c%s", r->name, (void *)r->base, r->size,
-              r->kind == VM_REGION_ANON ? "anon" : "phys",
+              r->kind == VM_REGION_ANON ? "anon" : r->kind == VM_REGION_FILE ? "file" : "phys",
               (r->prot & VM_PROT_READ) ? 'r' : '-',
               (r->prot & VM_PROT_WRITE) ? 'w' : '-',
               (r->prot & VM_PROT_EXEC) ? 'x' : '-',
@@ -513,6 +518,229 @@ void vm_set_user_hooks(const struct vm_user_hooks *hooks)
     g_user_hooks = hooks;
 }
 
+static void user_shootdown(struct vm_space *space, vaddr_t va, size_t len);
+
+/* --- the debug seam: a FILE fault held between its two phases --- */
+
+#if CONFIG_DEBUG
+static struct {
+    unsigned state;               /* 0 idle, 1 armed, 2 held */
+    struct vm_space *space;       /* held: whose fault */
+    struct thread *holder;
+    struct completion released;
+    spinlock_t lock;
+} g_file_hold = { .lock = SPINLOCK_INIT("vm-file-hold") };
+
+void vm_test_file_hold_arm(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_file_hold.lock);
+    completion_init(&g_file_hold.released, "vm-file-hold");
+    g_file_hold.space = NULL;
+    g_file_hold.holder = NULL;
+    g_file_hold.state = 1;
+    spin_unlock_irqrestore(&g_file_hold.lock, s);
+}
+
+unsigned vm_test_file_hold_state(void)
+{
+    return __atomic_load_n(&g_file_hold.state, __ATOMIC_ACQUIRE);
+}
+
+/* After phase one: if armed, this fault becomes the held one and waits. */
+static void file_hold_seam(struct vm_space *space)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_file_hold.lock);
+    bool take = g_file_hold.state == 1;
+    if (take) {
+        g_file_hold.state = 2;
+        g_file_hold.space = space;
+        g_file_hold.holder = thread_current();
+    }
+    spin_unlock_irqrestore(&g_file_hold.lock, s);
+    if (!take)
+        return;
+    wait_for_completion(&g_file_hold.released);
+    s = spin_lock_irqsave(&g_file_hold.lock);
+    g_file_hold.state = 0;
+    g_file_hold.space = NULL;
+    g_file_hold.holder = NULL;
+    spin_unlock_irqrestore(&g_file_hold.lock, s);
+}
+
+/* The two events that release a held fault: another FILE fault in the
+ * same space installed, or part of the space was unmapped. */
+static void file_hold_release(struct vm_space *space)
+{
+    if (__atomic_load_n(&g_file_hold.state, __ATOMIC_ACQUIRE) != 2)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_file_hold.lock);
+    bool fire = g_file_hold.state == 2 && g_file_hold.space == space && g_file_hold.holder != thread_current();
+    spin_unlock_irqrestore(&g_file_hold.lock, s);
+    if (fire)
+        complete(&g_file_hold.released);
+}
+#else
+void vm_test_file_hold_arm(void) {}
+unsigned vm_test_file_hold_state(void) { return 0; }
+static inline void file_hold_seam(struct vm_space *space) { (void)space; }
+static inline void file_hold_release(struct vm_space *space) { (void)space; }
+#endif
+
+/* --- the FILE fault, phases two and three --- */
+
+/*
+ * A frame installed in a user space is owned two ways: a page-cache
+ * frame (PG_PAGECACHE) is the cache's, and the mapping holds one
+ * reference to it per PTE; an anonymous frame -- demand-zero, populated,
+ * or a copy-on-write copy -- is the mapping's alone at reference 1. Both
+ * are released with pmm_page_put, which frees on the last reference, so
+ * the teardown does not need to know which it holds beyond the counter
+ * it credits.
+ */
+static void frame_uncount(struct vm_space *space, struct page *page)
+{
+    if (page->flags & PG_PAGECACHE)
+        space->file_pages--;
+    else
+        space->anon_pages--;
+}
+
+/*
+ * Phase two under the cache mutex, phase three under the space lock
+ * nested inside it (docs/audit/next-subsystem-file-regions.md, "The
+ * fault, in two phases under one lock order"). Returns 0 when the page
+ * is installed OR when the world changed and the instruction should
+ * simply retry; -ENOMEM when a private copy could not be allocated (the
+ * anonymous rule); any other error when the file could not supply the
+ * page (SIGBUS).
+ */
+static int file_fault(struct vm_space *space, vaddr_t va, unsigned fl, struct vnode *vn, uint64_t index,
+                      bool shared, bool from_user)
+{
+    (void)from_user;
+    bool write = (fl & VM_FAULT_WRITE) != 0;
+    might_sleep();   /* readpage may sleep; the copies assert this rule for themselves */
+    file_hold_seam(space);
+
+    pagecache_lock(vn);
+    struct page *cache = NULL, *copy = NULL, *to_put = NULL;
+    int rc = pagecache_fault_page(vn, index, shared && write, &cache);
+    if (rc) {
+        pagecache_unlock(vn);
+        return rc;
+    }
+    if (!shared && write) {
+        /* Copy-on-write: the copy is what this mapping owns from here;
+         * the cache frame is read under the mutex and not referenced. */
+        copy = pmm_alloc_page(0);
+        if (copy == NULL) {
+            pmm_page_put(cache);
+            pagecache_unlock(vn);
+            return -ENOMEM;
+        }
+        memcpy(page_to_virt(copy), page_to_virt(cache), PAGE_SIZE);
+        pmm_page_put(cache);
+        cache = NULL;
+    }
+
+    /* Phase three: the region is found again, and identity is by what
+     * it maps -- vnode, index, sharing -- not by pointer. */
+    bool shoot = false;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, va);
+    bool same = r != NULL && r->kind == VM_REGION_FILE && !(r->flags & VM_REGION_QUIESCED) &&
+                r->fmap->vn == vn && r->fmap->shared == shared &&
+                (va - r->fmap->base + r->fmap->off) / PAGE_SIZE == index && access_allowed(r, fl);
+    if (!same) {
+        spin_unlock_irqrestore(&space->lock, s);
+        if (copy)
+            pmm_free_page(copy);
+        if (cache)
+            pmm_page_put(cache);
+        pagecache_unlock(vn);
+        __atomic_fetch_add(&g_stats.file_fault_retries, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+
+    paddr_t pa;
+    unsigned mflags = ARCH_MMU_MAP_USER;
+    if (arch_mmu_query(&space->mmu, va, &pa, NULL, NULL, NULL)) {
+        struct page *present = phys_to_page(pa);
+        if (shared && write) {
+            /* Installed clean, dirty now (phase two marked it): the one
+             * in-place upgrade. The PTE already holds its reference. */
+            KASSERT(present == cache);
+            int prc = arch_mmu_protect(&space->mmu, va, PAGE_SIZE, r->prot);
+            KASSERT(prc == 0);
+            (void)prc;
+            pmm_page_put(cache);
+            shoot = true;
+            __atomic_fetch_add(&g_stats.file_dirty_faults, 1, __ATOMIC_RELAXED);
+        } else if (!shared && write && (present->flags & PG_PAGECACHE)) {
+            /* A private read installed the cache frame read-only; the
+             * write must not go through it. The PTE is REPLACED by the
+             * copy, never raised. */
+            int urc = arch_mmu_unmap(&space->mmu, va, PAGE_SIZE);
+            KASSERT(urc == 0);
+            (void)urc;
+            space->file_pages--;
+            to_put = present;
+            int mrc = arch_mmu_map(&space->mmu, va, page_to_phys(copy), PAGE_SIZE, r->prot, r->cache, mflags);
+            if (mrc)
+                panic("cannot map %p in region '%s' (%d)", (void *)va, r->name, mrc);
+            space->anon_pages++;
+            copy = NULL;
+            shoot = true;
+            __atomic_fetch_add(&g_stats.file_cow_faults, 1, __ATOMIC_RELAXED);
+        } else {
+            /* Another thread installed this page first, or a private
+             * copy already stands here: nothing is mapped twice. */
+            if (copy)
+                pmm_free_page(copy);
+            if (cache)
+                pmm_page_put(cache);
+            __atomic_fetch_add(&g_stats.file_fault_retries, 1, __ATOMIC_RELAXED);
+        }
+    } else if (!shared && write) {
+        if (space->anon_pages >= space->limit_anon_pages) {   /* COSMO_RLIMIT_MEM */
+            spin_unlock_irqrestore(&space->lock, s);
+            pmm_free_page(copy);
+            pagecache_unlock(vn);
+            return -ENOMEM;
+        }
+        int mrc = arch_mmu_map(&space->mmu, va, page_to_phys(copy), PAGE_SIZE, r->prot, r->cache, mflags);
+        if (mrc)
+            panic("cannot map %p in region '%s' (%d)", (void *)va, r->name, mrc);
+        space->anon_pages++;
+        if (r->prot & VM_PROT_EXEC)
+            arch_mmu_sync_icache_user(va, PAGE_SIZE);   /* M41: bytes just copied become instructions */
+        __atomic_fetch_add(&g_stats.file_cow_faults, 1, __ATOMIC_RELAXED);
+    } else {
+        /* The cache frame itself. Writable only for a shared write that
+         * dirtied it; otherwise read-only, so the first write faults and
+         * the page is marked dirty then (the rule: a shared page's PTE
+         * gains write only here). */
+        vm_prot_t prot = (shared && write) ? r->prot : (r->prot & ~VM_PROT_WRITE);
+        int mrc = arch_mmu_map(&space->mmu, va, page_to_phys(cache), PAGE_SIZE, prot, r->cache, mflags);
+        if (mrc)
+            panic("cannot map %p in region '%s' (%d)", (void *)va, r->name, mrc);
+        space->file_pages++;
+        if (r->prot & VM_PROT_EXEC)
+            arch_mmu_sync_icache_user(va, PAGE_SIZE);   /* M41: the page was filled by readpage */
+        __atomic_fetch_add(&g_stats.file_faults, 1, __ATOMIC_RELAXED);
+        if (shared && write)
+            __atomic_fetch_add(&g_stats.file_dirty_faults, 1, __ATOMIC_RELAXED);
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    if (shoot)
+        user_shootdown(space, va, PAGE_SIZE);
+    if (to_put)
+        pmm_page_put(to_put);
+    pagecache_unlock(vn);
+    file_hold_release(space);
+    return 0;
+}
+
 static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
@@ -531,9 +759,10 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
      * never selected on a user frame's behalf (a lazily mapped kernel
      * region must not be populated by an unprivileged process). */
     if (from_user && kernel_addr && g_user_hooks != NULL) {
-        g_user_hooks->fatal(addr, fl, frame);
+        g_user_hooks->fatal(addr, fl, frame, SIGSEGV);
         return;   /* a handler frame was set up */
     }
+    int fatal_sig = SIGSEGV;
 
     if (kernel_addr)
         space = &kernel_space;
@@ -566,6 +795,41 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
                 goto unserviced;
             sched_yield();
             return;
+        }
+
+        /*
+         * A file's page: phase one of the FILE fault. Everything the
+         * cache half needs is copied out under the lock -- the vnode
+         * (referenced), the file index, the sharing, the region's
+         * protection -- and the lock is released, because the page may
+         * have to be read from disk and that sleeps. The region is found
+         * AGAIN under the lock before anything is installed (file_fault).
+         */
+        if (r != NULL && r->kind == VM_REGION_FILE && !(fl & VM_FAULT_RESERVED) && access_allowed(r, fl) &&
+            space->user) {
+            struct vm_file_map *m = r->fmap;
+            struct vnode *vn = m->vn;
+            vnode_get(vn);
+            uint64_t index = (page - m->base + m->off) / PAGE_SIZE;
+            bool shared = m->shared;
+            spin_unlock_irqrestore(&space->lock, s);
+
+            int frc = file_fault(space, page, fl, vn, index, shared, from_user);
+            vnode_put(vn);
+            if (frc == 0)
+                return;   /* installed, or the world changed and the instruction retries */
+            if (frc == -ENOMEM) {
+                oom = true;   /* memory for a private copy: the anonymous rule applies */
+                r = NULL;
+                goto unserviced;
+            }
+            /* The file could not supply the page: past its end, or a read
+             * that failed. SIGBUS for user code; a kernel copy takes its
+             * fixup and reports -EFAULT, which is the truth. */
+            __atomic_fetch_add(&g_stats.file_sigbus, 1, __ATOMIC_RELAXED);
+            fatal_sig = SIGBUS;
+            r = NULL;
+            goto unserviced;
         }
 
         if (r != NULL && r->kind == VM_REGION_ANON && !(fl & (VM_FAULT_PRESENT | VM_FAULT_RESERVED)) &&
@@ -613,7 +877,7 @@ unserviced:
      * running out of memory on a demand-zero page: the process, not the
      * kernel, is what runs out. */
     if (from_user && g_user_hooks != NULL) {
-        g_user_hooks->fatal(addr, fl, frame);
+        g_user_hooks->fatal(addr, fl, frame, fatal_sig);
         return;   /* a handler frame was set up */
     }
 
@@ -627,6 +891,8 @@ unserviced:
 
     if (oom)
         panic_frame(frame, "out of memory populating %p in region '%s'", (void *)addr, r ? r->name : "?");
+    if (fatal_sig == SIGBUS)
+        panic_frame(frame, "kernel fault at %p: a file page the file could not supply", (void *)addr);
     panic_frame(frame, "page fault: %s %s at %p (%s): %s",
                 from_user ? "user" : "kernel",
                 (fl & VM_FAULT_EXEC) ? "execute" : (fl & VM_FAULT_WRITE) ? "write" : "read",
@@ -744,7 +1010,7 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
             struct page *page = phys_to_page(pa);
             KASSERT(page != NULL);
             frames[n++] = page;
-            space->anon_pages--;
+            frame_uncount(space, page);
         }
         int rc = arch_mmu_unmap(&space->mmu, va, chunk);
         KASSERT(rc == 0);
@@ -752,8 +1018,42 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
 
         user_shootdown(space, va, chunk);
 
+        /* The mapping's reference: the last one frees, and for a cache
+         * frame the cache's own is never the mapping's to drop. */
         for (unsigned i = 0; i < n; i++)
-            pmm_free_page(frames[i]);
+            pmm_page_put(frames[i]);
+    }
+}
+
+/*
+ * Free a user region's record, never under the space lock. A FILE region
+ * drops its count on the mapping record; the one that takes it to zero
+ * unlinks the record from the vnode (under the cache mutex, which is why
+ * this cannot run under the spinlock) and drops the vnode reference.
+ */
+static void region_put(struct vm_region *r)
+{
+    struct vm_file_map *m = r->fmap;
+    kmem_cache_free(g_region_cache, r);
+    if (m == NULL)
+        return;
+    if (__atomic_fetch_sub(&m->regions, 1u, __ATOMIC_ACQ_REL) != 1)
+        return;
+    struct vnode *vn = m->vn;
+    pagecache_lock(vn);
+    list_remove(&m->link);
+    pagecache_unlock(vn);
+    vnode_put(vn);
+    kfree(m);
+}
+
+/* Drop every region on a local list gathered under the lock. */
+static void regions_put_all(struct list_node *gone)
+{
+    while (!list_empty(gone)) {
+        struct vm_region *r = list_first_entry(gone, struct vm_region, link);
+        list_remove(&r->link);
+        region_put(r);
     }
 }
 
@@ -782,16 +1082,19 @@ void vm_space_destroy(struct vm_space *space)
         spin_unlock_irqrestore(&space->lock, s);
 
         user_range_teardown(space, base, size);
-        kmem_cache_free(g_region_cache, r);
+        region_put(r);
     }
     /* Every frame this space populated has been handed back: the loop
      * above tore down every region, and a region's range is where its
      * frames are. A residue names a leak (frames the space still owns
      * with nothing left to free them) and an underflow names a double
-     * free, so the number is printed rather than asserted away. */
-    if (space->anon_pages != 0)
-        panic("vm_space_destroy: %llu anon pages unaccounted (mapped_pages %llu)",
-              (unsigned long long)space->anon_pages, (unsigned long long)space->mapped_pages);
+     * free, so the number is printed rather than asserted away. The
+     * file-page count is checked the same way: a cache frame installed
+     * and never put would keep a page the file no longer has. */
+    if (space->anon_pages != 0 || space->file_pages != 0)
+        panic("vm_space_destroy: %llu anon and %llu file pages unaccounted (mapped_pages %llu)",
+              (unsigned long long)space->anon_pages, (unsigned long long)space->file_pages,
+              (unsigned long long)space->mapped_pages);
 
     /*
      * Whatever any CPU still holds under this space's tag goes now, and
@@ -877,6 +1180,9 @@ static void region_split(struct vm_region *r, struct vm_region *spare, vaddr_t a
     spare->kind = r->kind;
     spare->flags = r->flags & ~VM_REGION_GUARD_BELOW;
     spare->phys = r->phys;
+    spare->fmap = r->fmap;
+    if (r->fmap != NULL)
+        __atomic_fetch_add(&r->fmap->regions, 1u, __ATOMIC_ACQ_REL);   /* the piece points at the record too */
     spare->name = r->name;
     r->size = at - r->base;
     r->flags &= ~VM_REGION_GUARD_ABOVE;
@@ -1001,7 +1307,7 @@ int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned f
 
     struct vm_region *spares[2] = { region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL),
                                     region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL) };
-    struct vm_region *removed[64];
+    LIST_HEAD(gone);   /* the unlinked records, freed after the lock: a FILE one takes a mutex to go */
     unsigned nr = 0, used = 0;
     int rc = 0;
 
@@ -1039,18 +1345,17 @@ int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned f
         KASSERT(r->base >= base && r->base + r->size <= base + size);
         list_remove(&r->link);
         space->mapped_pages -= r->size / PAGE_SIZE;
-        if (nr < 64)
-            removed[nr++] = r;
-        else
-            kmem_cache_free(g_region_cache, r);   /* only the record: frames are found by the tables */
+        list_push_back(&gone, &r->link);   /* only the record: frames are found by the tables */
+        nr++;
     }
 out:
     spin_unlock_irqrestore(&space->lock, s);
 
-    if (rc == 0 && nr > 0)
+    if (rc == 0 && nr > 0) {
         user_range_teardown(space, (vaddr_t)base, size);
-    for (unsigned i = 0; i < nr; i++)
-        kmem_cache_free(g_region_cache, removed[i]);
+        file_hold_release(space);
+    }
+    regions_put_all(&gone);
     for (unsigned i = used; i < 2; i++)
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
@@ -1101,39 +1406,27 @@ static bool range_quiesced(struct vm_space *space, vaddr_t base, size_t size)
     return false;
 }
 
-int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot,
-                             unsigned flags, const char *name)
+/*
+ * The replacement itself, for a prepared region `fresh` (anonymous or a
+ * file mapping) covering [base, base+size). Takes ownership of `fresh`
+ * on success and on failure alike: the caller never frees it. The
+ * contract is vm_user_map_anon_replace's in vmm.h.
+ */
+static int map_replace(struct vm_space *space, struct vm_region *fresh)
 {
-    KASSERT(space->user);
-    if (!user_range_valid(base, size))
-        return -EINVAL;
-    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
-        return -EINVAL;
-    /*
-     * Populating allocates frames and can fail; the swap below must not
-     * be able to. See the contract in vmm.h.
-     */
-    if (flags & VM_REGION_POPULATED)
-        return -EINVAL;
-
-    /*
-     * Allocate before any lock, as unmap and map both do: a failure here
-     * is a failure that has changed nothing.
-     */
-    unsigned rflags = VM_REGION_USER | (flags & VM_REGION_GUARD_BELOW);
-    struct vm_region *fresh = region_new((vaddr_t)base, size, prot & ~VM_PROT_USER, VM_CACHE_WB,
-                                         VM_REGION_ANON, rflags, 0, name);
+    vaddr_t base = fresh->base;
+    size_t size = fresh->size;
     struct vm_region *spares[2] = { region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL),
                                     region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL) };
-    struct vm_region *removed[64];
-    unsigned nr = 0, used = 0;
+    LIST_HEAD(gone);
+    unsigned used = 0;
     uint64_t npages = size / PAGE_SIZE;
     int rc = 0;
 
     /* One replacement at a time: the teardown below cannot hold the
      * spinlock, so two of these would otherwise interleave. */
     mutex_lock(&space->replace_lock);
-    if (fresh == NULL || spares[0] == NULL || spares[1] == NULL) {
+    if (spares[0] == NULL || spares[1] == NULL) {
         rc = -ENOMEM;
         goto out_free;
     }
@@ -1186,10 +1479,7 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
             break;
         KASSERT(r->base >= base && r->base + r->size <= base + size);
         list_remove(&r->link);
-        if (nr < 64)
-            removed[nr++] = r;
-        else
-            kmem_cache_free(g_region_cache, r);
+        list_push_back(&gone, &r->link);
     }
     fresh->flags |= VM_REGION_QUIESCED;
     int irc = space_insert(space, fresh);
@@ -1229,10 +1519,10 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
     spin_unlock_irqrestore(&space->lock, s);
 
     mutex_unlock(&space->replace_lock);
-    for (unsigned i = 0; i < nr; i++)
-        kmem_cache_free(g_region_cache, removed[i]);
+    file_hold_release(space);
+    regions_put_all(&gone);
     for (unsigned i = 0; i < nm; i++)
-        kmem_cache_free(g_region_cache, merged[i]);
+        region_put(merged[i]);
     for (unsigned i = used; i < 2; i++)
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
@@ -1240,12 +1530,222 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
 
 out_free:
     mutex_unlock(&space->replace_lock);
-    if (fresh)
-        kmem_cache_free(g_region_cache, fresh);
+    region_put(fresh);
     for (unsigned i = 0; i < 2; i++)
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
     return rc;
+}
+
+int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot,
+                             unsigned flags, const char *name)
+{
+    KASSERT(space->user);
+    if (!user_range_valid(base, size))
+        return -EINVAL;
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
+        return -EINVAL;
+    /*
+     * Populating allocates frames and can fail; the swap must not be
+     * able to. See the contract in vmm.h.
+     */
+    if (flags & VM_REGION_POPULATED)
+        return -EINVAL;
+
+    /*
+     * Allocate before any lock, as unmap and map both do: a failure here
+     * is a failure that has changed nothing.
+     */
+    unsigned rflags = VM_REGION_USER | (flags & VM_REGION_GUARD_BELOW);
+    struct vm_region *fresh = region_new((vaddr_t)base, size, prot & ~VM_PROT_USER, VM_CACHE_WB,
+                                         VM_REGION_ANON, rflags, 0, name);
+    if (fresh == NULL)
+        return -ENOMEM;
+    return map_replace(space, fresh);
+}
+
+int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
+                     unsigned flags, struct vnode *vn, uint64_t off, const char *name)
+{
+    KASSERT(space->user);
+    if (!user_range_valid(base, size) || !is_page_aligned(off) || off + size < off)
+        return -EINVAL;
+    prot &= ~VM_PROT_USER;
+    maxprot &= ~VM_PROT_USER;
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
+        return -EINVAL;
+    if (prot & ~maxprot)
+        return -EINVAL;
+
+    struct vm_file_map *m = kzalloc(sizeof(*m));
+    struct vm_region *r = region_new((vaddr_t)base, size, prot, VM_CACHE_WB, VM_REGION_FILE, VM_REGION_USER, 0,
+                                     name);
+    if (m == NULL || r == NULL) {
+        if (m)
+            kfree(m);
+        if (r)
+            kmem_cache_free(g_region_cache, r);
+        return -ENOMEM;
+    }
+    vnode_get(vn);
+    m->vn = vn;
+    m->space = space;
+    m->base = (vaddr_t)base;
+    m->size = size;
+    m->off = off;
+    m->shared = (flags & VM_MAP_SHARED) != 0;
+    m->maxprot = maxprot;
+    m->regions = 1;
+    r->fmap = m;
+
+    /* On the vnode's list before the region can take a fault, so a
+     * truncate or a write-back never misses a page this mapping holds. */
+    pagecache_lock(vn);
+    list_push_back(&vn->pc.mappings, &m->link);
+    pagecache_unlock(vn);
+
+    if (flags & VM_MAP_REPLACE)
+        return map_replace(space, r);   /* owns `r` either way */
+
+    uint64_t npages = size / PAGE_SIZE;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    int rc = 0;
+    if (space->mapped_pages + npages > space->limit_mapped_pages)   /* COSMO_RLIMIT_AS */
+        rc = -ENOMEM;
+    else
+        rc = space_insert(space, r);
+    if (rc == 0)
+        space->mapped_pages += npages;
+    spin_unlock_irqrestore(&space->lock, s);
+    if (rc)
+        region_put(r);   /* unlinks the record and drops the vnode */
+    return rc;
+}
+
+int vm_user_msync(struct vm_space *space, uint64_t base, size_t size)
+{
+    KASSERT(space->user);
+    if (!user_range_valid(base, size))
+        return -EINVAL;
+
+    /* First pass: nothing is written if any page is unmapped. */
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    bool whole = range_fully_mapped(space, (vaddr_t)base, size);
+    spin_unlock_irqrestore(&space->lock, s);
+    if (!whole)
+        return -ENOMEM;
+
+    /* The cursor walk: the region containing the cursor, or the first
+     * FILE region after it inside the range; its vnode referenced under
+     * the lock, synced under the vnode lock with the space lock gone. */
+    int rc = 0;
+    vaddr_t cursor = (vaddr_t)base, end = (vaddr_t)base + size;
+    while (cursor < end) {
+        struct vnode *vn = NULL;
+        vaddr_t next = end;
+        s = spin_lock_irqsave(&space->lock);
+        struct vm_region *r;
+        list_for_each_entry(r, &space->regions, link) {
+            if (r->base + r->size <= cursor)
+                continue;
+            if (r->base >= end)
+                break;
+            next = r->base + r->size;
+            if (r->kind == VM_REGION_FILE) {
+                vn = r->fmap->vn;
+                vnode_get(vn);
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&space->lock, s);
+        cursor = next;
+        if (vn == NULL)
+            continue;
+        mutex_lock(&vn->lock);
+        int src = pagecache_sync(vn);
+        mutex_unlock(&vn->lock);
+        vnode_put(vn);
+        if (src && rc == 0)
+            rc = src;
+    }
+    return rc;
+}
+
+/*
+ * The teardown of one record's pages from file index `keep` on, under the
+ * cache mutex (pagecache_truncate). Regions are not unlinked -- the
+ * mapping stays, and a touch past the end is SIGBUS from now on -- so
+ * this cannot reuse the "no region can repopulate" argument of
+ * user_range_teardown; what keeps a fault out is the mutex the caller
+ * holds, which every install needs. Copy-on-write frames in the range go
+ * too: the file no longer has those bytes.
+ */
+void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep)
+{
+    uint64_t keep_off = keep * PAGE_SIZE;
+    if (keep_off >= m->off + m->size)
+        return;
+    vaddr_t lo = keep_off > m->off ? m->base + (keep_off - m->off) : m->base;
+    vaddr_t hi = m->base + m->size;
+    struct vm_space *space = m->space;
+
+    for (vaddr_t va = lo; va < hi; va += TEARDOWN_CHUNK_PAGES * PAGE_SIZE) {
+        size_t chunk = MIN((size_t)(TEARDOWN_CHUNK_PAGES * PAGE_SIZE), (size_t)(hi - va));
+        struct page *frames[TEARDOWN_CHUNK_PAGES];
+        unsigned n = 0;
+
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
+            struct vm_region *r = space_find(space, p);
+            if (r == NULL || r->fmap != m)
+                continue;   /* a piece since unmapped or remapped to something else */
+            paddr_t pa;
+            if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
+                continue;
+            struct page *page = phys_to_page(pa);
+            frames[n++] = page;
+            frame_uncount(space, page);
+            int rc = arch_mmu_unmap(&space->mmu, p, PAGE_SIZE);
+            KASSERT(rc == 0);
+            (void)rc;
+        }
+        spin_unlock_irqrestore(&space->lock, s);
+
+        if (n > 0)
+            user_shootdown(space, va, chunk);
+        for (unsigned i = 0; i < n; i++)
+            pmm_page_put(frames[i]);
+    }
+}
+
+void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n)
+{
+    if (!m->shared)
+        return;   /* a private record never maps a cache frame writable */
+    uint64_t lo_off = index * PAGE_SIZE, hi_off = lo_off + (uint64_t)n * PAGE_SIZE;
+    if (hi_off <= m->off || lo_off >= m->off + m->size)
+        return;
+    vaddr_t lo = lo_off > m->off ? m->base + (lo_off - m->off) : m->base;
+    vaddr_t hi = hi_off < m->off + m->size ? m->base + (hi_off - m->off) : m->base + m->size;
+    struct vm_space *space = m->space;
+    bool changed = false;
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    for (vaddr_t p = lo; p < hi; p += PAGE_SIZE) {
+        struct vm_region *r = space_find(space, p);
+        if (r == NULL || r->fmap != m)
+            continue;
+        vm_prot_t cur;
+        if (!arch_mmu_query(&space->mmu, p, NULL, &cur, NULL, NULL) || !(cur & VM_PROT_WRITE))
+            continue;
+        int rc = arch_mmu_protect(&space->mmu, p, PAGE_SIZE, r->prot & ~VM_PROT_WRITE);
+        KASSERT(rc == 0);
+        (void)rc;
+        changed = true;
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    if (changed)
+        user_shootdown(space, lo, hi - lo);   /* before the page is written: a stale writable entry would be a lost write */
 }
 
 int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot)
@@ -1282,6 +1782,20 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
         rc = -ENOMEM;
         goto out;
     }
+    /* A file mapping's ceiling: a shared mapping of a file opened
+     * read-only cannot be made writable by a later call (POSIX: EACCES).
+     * Checked over the whole range before anything changes. */
+    struct vm_region *first = NULL, *r;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r->base + r->size <= base)
+            continue;
+        if (r->base >= base + size)
+            break;
+        if (r->fmap != NULL && (prot & ~r->fmap->maxprot)) {
+            rc = -EACCES;
+            goto out;
+        }
+    }
     unsigned need = splits_needed(space, (vaddr_t)base, size);
     if ((need > 0 && spares[0] == NULL) || (need > 1 && spares[1] == NULL)) {
         rc = -ENOMEM;
@@ -1290,7 +1804,6 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
     used = split_at_ends(space, (vaddr_t)base, size, spares);
     KASSERT(used == need);
 
-    struct vm_region *first = NULL, *r;
     list_for_each_entry(r, &space->regions, link) {
         if (r->base + r->size <= base)
             continue;
@@ -1299,9 +1812,13 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
         if (first == NULL)
             first = r;
         r->prot = prot;
+        /* A shared file page's PTE gains write only in the fault handler,
+         * which marks the page dirty as it does; here the PTEs of such a
+         * region get everything but write, and the next write faults. */
+        vm_prot_t pte_prot = (r->fmap != NULL && r->fmap->shared) ? (prot & ~VM_PROT_WRITE) : prot;
+        rc = arch_mmu_protect(&space->mmu, r->base, r->size, pte_prot);
+        KASSERT(rc == 0);   /* whole 4 KiB user pages only: nothing to split */
     }
-    rc = arch_mmu_protect(&space->mmu, (vaddr_t)base, size, prot);
-    KASSERT(rc == 0);   /* whole 4 KiB user pages only: nothing to split */
 
     /* Merge inside the range and with both neighbours. */
     if (first != NULL) {
@@ -1316,7 +1833,7 @@ out:
     if (rc == 0)
         user_shootdown(space, (vaddr_t)base, size);
     for (unsigned i = 0; i < nf; i++)
-        kmem_cache_free(g_region_cache, freed[i]);
+        region_put(freed[i]);
     for (unsigned i = used; i < 2; i++)
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);

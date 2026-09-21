@@ -141,9 +141,7 @@ int access(const char *path, int mode)
 
 void *mmap(void *hint, size_t len, int prot, int flags, int fd, long off)
 {
-    (void)fd;
-    (void)off;
-    long r = cosmo_mmap(hint, len, prot, flags);
+    long r = cosmo_mmap_fd(hint, len, prot, flags, fd, (uint64_t)off);
     if (r < 0 && r > -4096) {
         errno = (int)-r;
         return MAP_FAILED;
@@ -152,6 +150,7 @@ void *mmap(void *hint, size_t len, int prot, int flags, int fd, long off)
 }
 
 int munmap(void *addr, size_t len) { return (int)__syscall_ret(cosmo_munmap(addr, len)); }
+int msync(void *addr, size_t len, int flags) { return (int)__syscall_ret(cosmo_msync(addr, len, flags)); }
 int mprotect(void *addr, size_t len, int prot) { return (int)__syscall_ret(cosmo_mprotect(addr, len, prot)); }
 
 int nanosleep(const struct timespec *req, struct timespec *rem)

@@ -24,6 +24,7 @@ struct slab;
 #define PG_PAGETABLE     (1u << 4) /* holds an MMU translation table */
 #define PG_DEFERRED      (1u << 5) /* RAM not yet reachable through the direct map */
 #define PG_POISONED      (1u << 6) /* free and filled with the poison pattern (CONFIG_DEBUG) */
+#define PG_PAGECACHE     (1u << 7) /* a page cache frame: refcount is 1 + the PTEs mapping it */
 
 struct page {
     uint32_t flags;

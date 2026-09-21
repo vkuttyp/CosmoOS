@@ -591,11 +591,47 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_pread64, mfd, &one, 1, 4096) == 1 && one == pattern[4096], one);
         CHECKV(sc2(LX_munmap, fm2, 4096) == 0, 0);
     }
-    CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED, mfd, 0) == -95, 0);   /* EOPNOTSUPP */
-    long fm3 = sc6(LX_mmap, 0, 4096, LX_PROT_READ, LX_MAP_SHARED, mfd, 0);                          /* read-only shared: a snapshot */
+    /* MAP_SHARED|PROT_WRITE: the file's own pages (the file-regions unit;
+     * this used to be -EOPNOTSUPP). A write through the mapping is in the
+     * file at once, a write() is in the mapping at once: one frame. */
+    long fsm = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED, mfd, 0);
+    CHECKV(fsm > 0, fsm);
+    if (fsm > 0) {
+        unsigned char *sb = (unsigned char *)fsm;
+        CHECK(memeq(sb, pattern, 4096));
+        sb[10] = 0xAB;
+        unsigned char one = 0;
+        CHECKV(sc4(LX_pread64, mfd, &one, 1, 10) == 1 && one == 0xAB, one);
+        unsigned char wc = 0xCD;
+        CHECKV(sc4(LX_pwrite64, mfd, &wc, 1, 20) == 1, 0);
+        CHECKV(sb[20] == 0xCD, sb[20]);
+        CHECKV(sc3(LX_msync, fsm, 4096, LX_MS_SYNC) == 0, 0);
+        CHECKV(sc3(LX_msync, fsm, 4096, LX_MS_SYNC | LX_MS_ASYNC) == -22, 0);   /* one or the other */
+        CHECKV(sc3(LX_msync, fsm, 4096, 8) == -22, 0);                          /* an undefined bit */
+        CHECKV(sc2(LX_munmap, fsm, 4096) == 0, 0);
+        CHECKV(sc4(LX_pwrite64, mfd, pattern + 10, 1, 10) == 1, 0);           /* the pattern back, for the checks below */
+        CHECKV(sc4(LX_pwrite64, mfd, pattern + 20, 1, 20) == 1, 0);
+    }
+    long fm3 = sc6(LX_mmap, 0, 4096, LX_PROT_READ, LX_MAP_SHARED, mfd, 0);   /* read-only shared: coherent, not a snapshot */
     CHECKV(fm3 > 0 && memeq((const void *)fm3, pattern, 4096), fm3);
-    if (fm3 > 0)
+    if (fm3 > 0) {
+        unsigned char wz = 0x5A;
+        CHECKV(sc4(LX_pwrite64, mfd, &wz, 1, 30) == 1, 0);
+        CHECKV(((const unsigned char *)fm3)[30] == 0x5A, 0);                  /* a later write() is seen */
+        CHECKV(sc4(LX_pwrite64, mfd, pattern + 30, 1, 30) == 1, 0);
         sc2(LX_munmap, fm3, 4096);
+    }
+    /* A shared writable mapping of a file opened read-only: EACCES. */
+    long rofd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmap", LX_O_RDONLY, 0);
+    CHECKV(rofd >= 3, rofd);
+    CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED, rofd, 0) == -13, 0);
+    long ros = sc6(LX_mmap, 0, 4096, LX_PROT_READ, LX_MAP_SHARED, rofd, 0);
+    CHECKV(ros > 0, ros);
+    if (ros > 0) {
+        CHECKV(sc3(LX_mprotect, ros, 4096, LX_PROT_READ | LX_PROT_WRITE) == -13, 0);   /* maxprot */
+        sc2(LX_munmap, ros, 4096);
+    }
+    CHECKV(sc1(LX_close, rofd) == 0, 0);
     CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, mfd, 100) == -22, 0);               /* unaligned offset */
     CHECKV(sc1(LX_close, mfd) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxmap", 0) == 0, 0);

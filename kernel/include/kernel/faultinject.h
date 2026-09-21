@@ -29,6 +29,7 @@ enum fi_kind {
     FI_USB_CSW,       /* usb_storage queues the CSW read without ringing the doorbell: a hang with a transfer in flight */
     FI_AHCI_CI,       /* ahci fills a slot and never sets its PxCI bit: a command that never starts */
     FI_HV_SELFCHECK,  /* the hypervisor's boot self-check reports failure: the backend-disable path */
+    FI_FILE_READPAGE, /* a page cache miss's readpage fails with -EIO: a mapped touch is SIGBUS */
     FI_KIND_COUNT,
 };
 
