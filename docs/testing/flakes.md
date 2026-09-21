@@ -67,6 +67,22 @@ never completes is a kernel defect, so widening it would hide the thing
 it exists to catch. A re-run distinguishes the two, as everywhere else
 here.
 
+**Observed once, not yet on the list: `timer-cancel-sync`'s lower
+bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
+against a callback holding for 20 ms on another CPU took at least
+10 ms -- the wait spanned the callback. On 2026-09-21, x86-64 debug on
+the developer's machine, during a bug-proof boot of a mutated tree
+(the mutation in `devtest.c`'s removal submitter, nothing near timers):
+`check failed: sync_ns >= MS(10)`, 23 ms into the test. The clock
+starts after `wait_flag(&p->entered)` returns, so a host that holds
+this vCPU for more than ten of the callback's twenty milliseconds
+between that return and `t0` makes a correct sync look short; a sync
+that returned before the callback ended would also fail
+`p->done == 1` on the next line, and that passed. One local sighting,
+the same family as the rows above, recorded here rather than listed;
+if it recurs the fix is to time from `entered` itself, not from a
+point this thread reaches later.
+
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
 timer at "less than what it asked for"); both bounds still sit an order
