@@ -1755,14 +1755,16 @@ static int lx_any_addr_from_user(uint64_t uptr, size_t len, struct lx_any_addr *
 
 /* A name in its Linux shape, bounded by the caller's socklen_t, the full
  * size reported back. */
-static int lx_sock_addr_to_user(struct socket *s, uint64_t uptr, uint64_t ulen, const struct lx_any_addr *a)
+static int lx_sock_addr_to_user(struct socket *s, uint64_t uptr, uint64_t ulenp, const struct lx_any_addr *a)
 {
+    /* `ulenp` is the user address of the socklen_t, in and out, as in
+     * addr_to_user above; the value is read from it, never used as one. */
     if (s->family != COSMO_AF_UNIX)
-        return addr_to_user(uptr, ulen, &a->na);
-    if (uptr == 0 || ulen == 0)
+        return addr_to_user(uptr, ulenp, &a->na);
+    if (uptr == 0 || ulenp == 0)
         return 0;
     int32_t cap;
-    if (copy_from_user(&cap, ulen, sizeof(cap)))
+    if (copy_from_user(&cap, ulenp, sizeof(cap)))
         return -EFAULT;
     if (cap < 0)
         return -EINVAL;
@@ -1772,7 +1774,7 @@ static int lx_sock_addr_to_user(struct socket *s, uint64_t uptr, uint64_t ulen, 
     if (n && copy_to_user(uptr, &un, n))
         return -EFAULT;
     int32_t out = (int32_t)full;
-    return copy_to_user(ulen, &out, sizeof(out)) ? -EFAULT : 0;
+    return copy_to_user(ulenp, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
 /* The bytes of a send: a datagram whole, a stream in chunks, through the
@@ -1833,7 +1835,7 @@ static int64_t lx_socket(struct syscall_args *a)
     if (family != LX_AF_INET && family != LX_AF_INET6 && family != LX_AF_UNIX)
         return -EAFNOSUPPORT;
     if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM)
-        return family == LX_AF_UNIX ? -ESOCKTNOSUPPORT : -EINVAL;   /* SEQPACKET: a type this family lacks */
+        return type >= 1 && type <= 10 ? -ESOCKTNOSUPPORT : -EINVAL;   /* a known type this family lacks (SEQPACKET, RAW, RDM, DCCP, PACKET), or no type at all: Linux's two answers */
     struct socket *s;
     int rc = ksock_create(family == LX_AF_INET ? COSMO_AF_INET : family == LX_AF_INET6 ? COSMO_AF_INET6 : COSMO_AF_UNIX,
                           type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, process_current()->cred.euid,
@@ -1902,6 +1904,7 @@ static int64_t lx_accept(struct syscall_args *a)
         return serr;
     struct socket *c;
     struct lx_any_addr peer;
+    memset(&peer, 0, sizeof(peer));   /* the family's half is filled below; the other stays zero */
     int rc = ksock_accept(s, &c, &peer.na);
     ksock_put(s);
     if (rc)
@@ -2230,7 +2233,9 @@ static int64_t lx_recvmsg(struct syscall_args *a)
             return -EFAULT;
         if (!user_range_ok(iov.iov_base, iov.iov_len))
             return -EFAULT;
-        total += iov.iov_len;
+        /* One receive fills at most SOCK_CHUNK * 16 bytes, so the sum
+         * need not grow past it: saturated, as sendmsg's is bounded. */
+        total = total + iov.iov_len > SOCK_CHUNK * 16 ? SOCK_CHUNK * 16 : total + (size_t)iov.iov_len;
     }
     struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_READ);
     if (s == NULL)
