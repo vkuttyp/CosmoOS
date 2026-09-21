@@ -1004,6 +1004,17 @@ int main(int argc, char **argv)
     CHECKV(sc6(LX_futex, &word, LX_FUTEX_WAIT, 5, &to, 0, 0) == -110, 0);   /* ETIMEDOUT */
     CHECKV(sc6(LX_futex, &word, LX_FUTEX_WAKE, 1, 0, 0, 0) == 0, 0);
     CHECKV(sc6(LX_futex, &word, 99, 0, 0, 0, 0) == -38, 0);
+    /* A misaligned word is EINVAL on every path, the past-deadline
+     * WAIT_BITSET one included (it used to read the word and answer
+     * EAGAIN or ETIMEDOUT there; the shared-futex unit's review). */
+    {
+        struct lx_timespec gone_by;
+        sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &gone_by);
+        if (gone_by.tv_sec > 0)
+            gone_by.tv_sec -= 1;
+        CHECKV(sc6(LX_futex, (char *)&word + 1, LX_FUTEX_WAIT_BITSET, 5, &gone_by, 0, LX_FUTEX_BITSET_MATCH_ANY) == -22, 0);
+        CHECKV(sc6(LX_futex, (char *)&word + 1, LX_FUTEX_WAKE, 1, 0, 0, 0) == -22, 0);
+    }
 
     /* --- random, sockets --- */
     unsigned char rnd[32] = { 0 };

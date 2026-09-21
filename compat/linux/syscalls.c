@@ -1439,6 +1439,11 @@ static int64_t lx_futex(struct syscall_args *a)
     struct vm_space *space = process_current()->space;
     if (!user_range_ok(uaddr, 4))
         return -EFAULT;
+    /* Once, for every operation: the past-deadline WAIT_BITSET path below
+     * reads the word itself and used to answer -EAGAIN/-ETIMEDOUT for a
+     * misaligned address the futex would have refused (review). */
+    if (uaddr & 3)
+        return -EINVAL;
     switch (op) {
     case LX_FUTEX_WAIT:
     case LX_FUTEX_WAIT_BITSET: {
