@@ -467,12 +467,13 @@ Each applied alone on x86-64, the debug suite booted, the file restored:
 | --- | --- |
 | `pagecache_sync` not lowering the PTEs | the `mmap` section's re-dirty check: the second write did not fault (`file_dirty_faults` short by one) and the third `MS_SYNC` wrote nothing |
 | the fault marking nothing dirty | the first `MS_SYNC` wrote nothing (`cache_writebacks` unchanged) while `file_dirty_faults` still counted the fault -- the counter is what tells this from the row above |
-| no reference taken at install | see the as-built banner of the report for what the first munmap of a file mapping did to the cache's frame |
-| `pagecache_truncate` freeing without unmapping | see the report's banner |
+| no reference taken at install | `pagecache-pinned` (`refcount == 2` false), then the poisoner: the section's first `munmap` freed the cache's frame under the cache and its own `0xA5` byte turned up in the poison dump (`pmm: use after free of pfn 58547`) |
+| `pagecache_truncate` freeing without unmapping | `KERNEL PANIC: pmm: freeing pfn 48151 with refcount 2` from `remove_entry` on the truncate child: the mapping's reference was still on the frame |
 | no bound (`vn->size` alone) | **nothing**, as the report declared in advance: the window is between a filesystem's trim and its size drop, and the seam is in the fault, not there |
 | phase three by kind alone (no vnode, index, sharing) | `vm-file-fault-hold`: the remap child read the first file's byte under the second file's name |
 | `maxprot` ignored | the `mmap` section's `mprotect(PROT_WRITE)` of a read-only fd's shared mapping succeeded; `lxtest` likewise |
 | `SHARED\|ANONYMOUS` accepted | the `mmap` section's probe check |
+| `vm_user_protect` giving a private region's cache frames the asked protection (self-review's finding) | the `mmap` section: no copy-on-write fault, the file's byte changed, and the shared mapping of the same page saw the private write |
 
-(The rows that say "see the report" are filled from the run recorded in
-`docs/audit/next-subsystem-file-regions.md`, "Bug-proofs, as run".)
+The same table, with the panic lines quoted, is in
+`docs/audit/next-subsystem-file-regions.md`, "Bug-proofs, as run".

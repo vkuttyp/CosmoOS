@@ -2997,6 +2997,58 @@ See [docs/development.md](docs/development.md).
   returned, and the count falls at the reaper, not at the join —
   `docs/testing/flakes.md`. Report:
   `docs/audit/next-subsystem-virtio-remove-inflight.md` (PR #199).
+- **File-backed regions: the mappings the constitution requires.** The
+  constitution's §14 *must* list has file-backed mappings, shared
+  mappings and copy-on-write, and the VMM had two region kinds and none
+  of the three: the native `mmap` refused every file mapping with a
+  comment that had outlived the VFS ("file mappings arrive with the
+  VFS"), and the Linux personality copied a file eagerly into an
+  anonymous region, refusing `MAP_SHARED|PROT_WRITE` and handing a
+  read-only `MAP_SHARED` mapping a snapshot no later `write()` ever
+  reached. Now a file is mapped as a `VM_REGION_FILE` region over **the
+  page cache's own frames**: a shared mapping and `read()`/`write()` are
+  one frame, coherent in both directions with nothing to synchronise;
+  a private mapping is copy-on-write, per page; every page is
+  demand-paged. The fault runs in two phases under the order
+  `vnode → pagecache → vm_space` with the install **under the cache
+  mutex**, so a truncate or a write-back on the same file is serialised
+  against it without a third mechanism, and the region is found again
+  by what it maps -- vnode, index, sharing -- before anything is
+  installed. Building it found that both filesystems trim the cache
+  *before* they lower the size, so the cache keeps a bound for that
+  window. Dirtiness is a write fault, not a hardware bit: a shared
+  page's PTE gains write only in the fault handler and write-back lowers
+  it before the bytes are read for the disk. A cache frame is referenced
+  once per PTE; reclaim skips a referenced frame; truncate unmaps before
+  it frees; and every process exit checks `file_pages == 0` as it
+  checks `anon_pages`. `SIGBUS` past the end or on a read that fails;
+  `maxprot` so a shared mapping of a read-only fd cannot be made
+  writable; `msync` at both doors (`SYS_msync` 96, `LX_msync` 26);
+  `COSMO_MAP_SHARED`/`COSMO_MAP_PRIVATE` with the native refusal rules
+  (`SHARED|ANONYMOUS` is `EINVAL`: there is no `fork`, so nobody to share
+  with). The dynamic linker's mappings became demand-paged copy-on-write
+  mappings of the same files, with the existing `lxtest` dynamic cases
+  as their regression suite. An `mmap` section of `init --selftest`
+  proves the coherence both ways, **the first shared memory between two
+  processes in this system** (a spawned child writes a byte the parent
+  reads), copy-on-write per page, the rights, the native rules, `SIGBUS`
+  past the end and under a truncate (children, by status), the
+  address-space limit, a leak cycle whose exit runs the count check,
+  and on cosmofs that `MS_SYNC` writes exactly the dirtied page and a
+  write after it faults and is written again; three kernel tests hold a
+  fault between its phases through an event-driven seam while another
+  thread installs the same page, unmaps the range, or replaces it with
+  another file (nothing installed, one frame, the other file's byte),
+  make a cache miss's read fail under a mapping (`SIGBUS`), and pin a
+  frame against a forced reclaim. Nine mutations, each run: the
+  write-back not lowering PTEs and the fault marking nothing dirty fail
+  the same section on *different* checks (the counter tells them
+  apart); a frame installed without its reference is caught by the
+  poisoner with the section's own byte in the dump; a truncate that
+  frees before unmapping dies on the frame-count assertion; the bound alone survived, as the report declared in advance (the window is inside a filesystem's truncate and no seam sits there); the re-find by kind alone let a held fault install one file's page under another file's name, which only the third held-fault variant could show; `maxprot` ignored and `SHARED|ANONYMOUS` accepted each failed their probe. **And self-review found what the report had not**: `mprotect` on a private mapping raised a read-only cache frame to writable, so a write after it went through to the file; the rule is per frame now -- a cache frame's PTE never gains write from `mprotect`, only a copy-on-write copy does -- with its own check and its own mutation.
+  Invariants **M42**--**M44**, **V33**; 366 self-tests on both
+  architectures. Report: `docs/audit/next-subsystem-file-regions.md`
+  (PR #201).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

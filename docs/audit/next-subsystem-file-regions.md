@@ -93,8 +93,34 @@ existed.
    resolving the region that *contains* the start address first), and
    the `SYS_COUNT` wording.
 
-**Bug-proofs, as run** -- see the table under "Tests" (filled in after
-the eight mutations ran, each alone, on x86-64).
+**Bug-proofs, as run.** Each mutation applied alone on x86-64, the debug
+suite booted, the file restored from HEAD before the next; the eight the
+report named and a ninth for what self-review found.
+
+| mutation | what failed |
+| --- | --- |
+| `pagecache_sync` not lowering the PTEs | the `mmap` section: `vm.file_dirty_faults == df0 + 2` (the second write did not fault) and `vm.cache_writebacks == wb1 + 1` (the third `MS_SYNC` wrote nothing) |
+| the fault marking nothing dirty (`pagecache_fault_page(..., false, ...)`) | the same section, a different check first: `wb1 == wb0 + 1` (the first `MS_SYNC` wrote nothing) -- then the two above. The counter tells the two mutations apart, as the report said it would |
+| no `pmm_page_get` at install | `pagecache-pinned` (`held->refcount == 2` false), then **the poisoner**: the section's first `munmap` put the cache's only reference and freed the frame under the cache, and `KERNEL PANIC: pmm: use after free of pfn 58547 ... 8 byte(s) at offset 96-104 (poison 5a)` with the dump showing `a5` at offset 100 -- the section's own `sh[100] = 0xA5`, written into a frame the cache still believed it held |
+| `pagecache_truncate` freeing without unmapping | `KERNEL PANIC: pmm: freeing pfn 48151 with refcount 2` from `remove_entry`, on the truncate child: the mapping's reference was still on the frame, exactly the count check M43 leans on; the suite stopped there |
+| no bound (`vn->size` alone) | **nothing**, as declared in advance: `boot-test: PASS`. The window is between a filesystem's trim and its size drop and no seam sits there |
+| phase three by kind alone (no vnode, index or sharing) | `vm-file-fault-hold`: the remap variant's `status == 0` -- the held fault installed the first file's page under the second file's name and the child read the wrong byte. The race and unmap variants passed the mutation, which is why the remap variant exists |
+| `maxprot` ignored | the `mmap` section's `mprotect(rs, READ|WRITE) == -EACCES`, and `lxtest`'s `LX_mprotect(ros, ...) == -13` |
+| `SHARED\|ANONYMOUS` accepted | the `mmap` section's `cosmo_mmap(..., ANONYMOUS \| SHARED) == -EINVAL` |
+| `vm_user_protect` giving a private region's cache frames the asked protection (the self-review finding, item 10) | the `mmap` section: `vm.file_cow_faults == cowp + 1` (no copy was made), `file_rd(fd, 0, ...) == first` (**the file changed**: the write went through the cache frame) and `sh[0] == first` (the shared mapping saw the private mapping's write) |
+
+10. **Self-review found a defect the report did not name, and the build
+    fixed it before the tests could.** `vm_user_protect` applied
+    `prot & ~WRITE` to a *shared* FILE region and `prot` to everything
+    else -- so a private region's page installed read-only for a read
+    and then `mprotect`ed writable had its cache frame's PTE raised, and
+    the next write went through to the file. The rule as built is per
+    frame, not per region: a cache frame's PTE never gains write from
+    `mprotect`, shared or private, and only a copy-on-write copy takes
+    the protection as asked. The `mmap` section proves it (a private
+    read, `mprotect(RW)`, a write: `vm.file_cow_faults` +1, the file
+    untouched), and the mutation that restores the old rule fails that
+    check: the three lines in the last row above -- no copy, the file changed, the shared mapping saw it.
 
 **The VMM has two kinds of region and the constitution requires four
 things it cannot do with them.** §14 of the constitution lists what the
