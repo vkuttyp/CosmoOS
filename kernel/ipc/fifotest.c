@@ -13,6 +13,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/errno.h>
 #include <kernel/fifo.h>
+#include <kernel/log.h>
 #include <kernel/object.h>
 #include <kernel/pipe.h>
 #include <kernel/process.h>
@@ -302,7 +303,12 @@ bool selftest_ipc_fifo(const char **reason)
     CHECK(s1.alive == s0.alive);
 
 out:
-    if (t != NULL)
+    if (!ok)
+        kprintf("selftest: ipc-fifo: %s\n", *reason);   /* before a cleanup that may assert (fifo_free) */
+    /* An opener still inside its open (a mutation that made it block)
+     * cannot be joined: it is left with its count, and the node stays
+     * with it rather than being evicted under a live ring. */
+    if (t != NULL && __atomic_load_n(&o.done, __ATOMIC_ACQUIRE))
         thread_join(t);
     if (o.f != NULL)
         file_put(o.f);   /* an opener's file the test never adopted */
