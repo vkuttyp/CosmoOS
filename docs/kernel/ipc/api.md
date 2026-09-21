@@ -84,14 +84,36 @@ likewise. Releases run from the last `kobject_put` of the end, which
 ## Futex (`kernel/include/kernel/futex.h`, Phase 11)
 
 `int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val,
-uint64_t timeout_ns)` blocks while the user word equals `val` (0 woken,
-`-EAGAIN` differs, `-ETIMEDOUT`, `-EINTR` killed, `-EFAULT`, `-EINVAL`
-misaligned); `int futex_wake(struct vm_space *space, uint64_t uaddr,
-unsigned n)` wakes up to `n` waiters and returns the count. The compare
-and the enqueue happen under one bucket lock (64 buckets).
-`int futex_requeue(space, uaddr1, uaddr2, nr_wake, nr_requeue, cmp, cmpval)`
+uint64_t timeout_ns, bool private)` blocks while the user word equals
+`val` (0 woken, `-EAGAIN` differs, `-ETIMEDOUT`, `-EINTR` killed,
+`-EFAULT`, `-EINVAL` misaligned); `int futex_wake(struct vm_space *space,
+uint64_t uaddr, unsigned n, bool private)` wakes up to `n` waiters and
+returns the count. The compare and the enqueue happen under one bucket
+lock (64 buckets).
+
+**The key is what the word maps** (the shared-futex unit,
+`docs/audit/next-subsystem-shared-futex.md`): `struct futex_key { obj,
+off, held }` -- the space and the address for a word in the process's
+own memory; the vnode and the file offset for a word in a `MAP_SHARED`
+file mapping, with `held` the one vnode reference the waiter holds for
+the vnode its current key names. `vm_user_futex_key(space, uaddr,
+private, &key)` (`docs/kernel/memory/api.md`) classifies under the
+space lock; `private` -- Linux's `FUTEX_PRIVATE_FLAG`, the program's
+promise that nobody else can see the word -- and a space with no shared
+mapping (`vm_space::shared_maps == 0`) both return the private key
+without a walk. The native calls always classify. Two processes sharing
+a page therefore share the futex; two mappings of one file in one
+process too; a private mapping's word is the process's own (its page is
+a copy once written). A waiter's reference is put at dequeue; a wake's
+or a requeue's own reference lives for the call.
+`int futex_requeue(space, uaddr1, uaddr2, nr_wake, nr_requeue, cmp, cmpval, private)`
 wakes up to `nr_wake` and moves up to `nr_requeue` more onto the second
-word; a word requeued onto itself is counted and left where it is (the
+word; both words are classified, and a requeue that changes the key
+exchanges the reference -- every waiter on the source word carries its
+key, so there is one old vnode and one new however many move: the new
+references are taken in one atomic add for every moved waiter
+(`vnode_get_n`), under the bucket locks and before they drop, and the
+old ones put after the locks are released (a put may block). A word requeued onto itself is counted and left where it is (the
 move would push each waiter to the tail of the list being walked, an
 unbounded walk with interrupts off — found and fixed by the native
 thread door unit), and with nothing to wake it leaves `wake_seq` alone,

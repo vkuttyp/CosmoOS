@@ -1532,6 +1532,8 @@ static int probe(const char *kind)
  * self-tests (docs/audit/next-subsystem-file-regions.md, "Tests") --- */
 
 #define MMAP_TEST_FILE "/tmp/mmtest"
+#define FUTEX_WORD_OFF 512            /* the shared futex word's offset in the section's file */
+#define FUTEX_PINGPONG_ROUNDS 500u
 
 static long file_rd(int fd, uint64_t off, void *buf, size_t n)
 {
@@ -1567,6 +1569,49 @@ static void *mmap_race_toucher(void *arg)
     struct mmap_race_arg *a = arg;
     a->seen = a->page[0];   /* the FILE fault the kernel holds when armed */
     return NULL;
+}
+
+/* A thread that waits on a futex word and records the result. */
+struct fut_arg {
+    volatile unsigned *w;
+    unsigned val;
+    uint64_t timeout_ns;
+    long rc;
+};
+
+static void *fut_waiter(void *arg)
+{
+    struct fut_arg *a = arg;
+    a->rc = cosmo_futex_wait(a->w, a->val, a->timeout_ns);
+    return NULL;
+}
+
+/* How many are asleep on `w` (which holds `val`): a requeue of the word
+ * onto itself counts and moves nobody (the native thread door), and since
+ * the shared-futex unit the count crosses a process boundary exactly when
+ * the key does. */
+static long sleepers_on(volatile unsigned *w, unsigned val)
+{
+    return cosmo_futex_requeue(w, w, 0, 1000, val);
+}
+
+/* Spin (yielding) until `n` are asleep on `w`; false after ~2 s. */
+static int wait_sleepers(volatile unsigned *w, unsigned val, long n)
+{
+    for (unsigned i = 0; i < 20000; i++) {
+        if (sleepers_on(w, val) == n)
+            return 1;
+        cosmo_yield();
+    }
+    return 0;
+}
+
+static uint64_t bench_wakes(volatile unsigned *w, unsigned n)
+{
+    uint64_t t0 = cosmo_clock_ns();
+    for (unsigned i = 0; i < n; i++)
+        cosmo_futex_wake(w, 1);
+    return cosmo_clock_since_ns(t0);
 }
 
 static int mmap_probe(const char *what)
@@ -1660,6 +1705,41 @@ static int mmap_probe(const char *what)
             return 12;
         m[0] = (unsigned char)(first + 1);             /* the copy is refused: fatal */
         return 9;
+    }
+    if (strncmp(what, "futex-", 6) == 0) {
+        /* The other process of the shared-futex tests: map the section's
+         * file shared and act on the word at FUTEX_WORD_OFF. wait: sleep
+         * on 0 (exit 0 woken, 2 EAGAIN, 20 timed out); pingpong: N round
+         * trips against the parent through two words. */
+        int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR, 0);
+        if (fd < 0)
+            return 10;
+        unsigned char *m = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            return 11;
+        volatile unsigned *w = (volatile unsigned *)(m + FUTEX_WORD_OFF);
+        if (strcmp(what, "futex-wait") == 0) {
+            long rc = cosmo_futex_wait(w, 0, 5000000000ull);
+            if (rc == 0)
+                return 0;
+            if (rc == -COSMO_EAGAIN)
+                return 2;
+            return rc == -COSMO_ETIMEDOUT ? 20 : 23;
+        }
+        if (strcmp(what, "futex-pingpong") == 0) {
+            /* w: the parent's turn counter, w2: this process's. Each side
+             * waits for its own word to reach the round, then bumps the
+             * other's and wakes. */
+            volatile unsigned *w2 = w + 1;
+            for (unsigned i = 1; i <= FUTEX_PINGPONG_ROUNDS; i++) {
+                while (*w2 != i)
+                    cosmo_futex_wait(w2, i - 1, 5000000000ull);
+                *w = i;
+                cosmo_futex_wake(w, 1);
+            }
+            return 0;
+        }
+        return 24;
     }
     if (strcmp(what, "as-limit") == 0) {
         /* COSMO_RLIMIT_AS refuses a file mapping past it as it refuses an
@@ -4042,6 +4122,10 @@ static void mmap_selftest(void)
 {
     const size_t P = 4096;
     uint64_t cache0 = sysctl_u64("vm.cache_pages");
+    /* The futex bench, private path: this process has no shared mapping
+     * yet, so a futex call pays one integer test and no walk. */
+    static volatile unsigned anon_word;
+    uint64_t t_priv = bench_wakes(&anon_word, 50000);
     static unsigned char pat[3 * 4096];
     for (size_t i = 0; i < sizeof(pat); i++)
         pat[i] = (unsigned char)(i * 13 + 7);
@@ -4163,6 +4247,164 @@ static void mmap_selftest(void)
         CHECK(file_rd(fd, 0, &b, 1) == 1 && b == first);      /* the file untouched */
         CHECK(sh[0] == first && pm[0] == (unsigned char)(first + 1));
         CHECK(munmap(pm, P) == 0);
+    }
+
+    /* --- the futex keyed by what the word maps (the shared-futex unit) --- */
+    {
+        volatile unsigned *fw = (volatile unsigned *)(sh + FUTEX_WORD_OFF);
+        uint64_t sk0 = sysctl_u64("vm.futex_shared_keys");
+        struct fut_arg fa;
+        cosmo_thread_t t;
+
+        /* Two processes, one word: the child sleeps on it; the parent
+         * counts it asleep -- across the process boundary, which only the
+         * key can cross -- then writes and wakes. The first wait across
+         * two processes in this system. */
+        *fw = 0;
+        const char *wargv[] = { "init", "--probe", "mmap-futex-wait", NULL };
+        pid_t wpid = spawnve("/boot/init", wargv, NULL, NULL, 0);
+        CHECK(wpid > 0);
+        CHECK(wait_sleepers(fw, 0, 1));
+        *fw = 1;
+        CHECK(cosmo_futex_wake(fw, 1) == 1);
+        int wst = -1;
+        CHECK(waitpid(wpid, &wst, 0) == wpid && wst == 0);
+        CHECK(sysctl_u64("vm.futex_shared_keys") > sk0);
+
+        /* The wake before the sleep: nobody woken, and the child's wait
+         * sees the changed word (EAGAIN, exit 2) -- L4 across keys. */
+        *fw = 1;
+        CHECK(cosmo_futex_wake(fw, 1) == 0);
+        CHECK(probe_status("mmap-futex-wait") == 2);
+
+        /* Private stays private: a private mapping of the same file, the
+         * same offset. Its waiter is not counted on the shared word and
+         * not woken by it; a wake on it wakes only it. */
+        *fw = 0;
+        unsigned char *pv2 = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        CHECK(pv2 != MAP_FAILED);
+        if (pv2 != MAP_FAILED) {
+            volatile unsigned *pw = (volatile unsigned *)(pv2 + FUTEX_WORD_OFF);
+            CHECK(*pw == 0);
+            fa = (struct fut_arg){ .w = pw, .val = 0, .timeout_ns = 300000000ull, .rc = 1 };
+            CHECK(cosmo_thread_start(&t, fut_waiter, &fa, 64 * 1024) == 0);
+            CHECK(wait_sleepers(pw, 0, 1));
+            CHECK(sleepers_on(fw, 0) == 0);          /* not on the shared key */
+            CHECK(cosmo_futex_wake(fw, 1) == 0);     /* the shared wake finds nobody */
+            CHECK(cosmo_futex_wake(pw, 1) == 1);     /* the private one finds it */
+            cosmo_thread_join(&t, NULL);
+            CHECK(fa.rc == 0);
+            CHECK(munmap(pv2, P) == 0);
+        }
+
+        /* Unmap under a waiter: a second shared mapping, a thread asleep
+         * on its word, the mapping gone; the wait times out cleanly (the
+         * reference outlived the mapping) and nothing is left dangling. */
+        unsigned char *sh2 = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        CHECK(sh2 != MAP_FAILED);
+        if (sh2 != MAP_FAILED) {
+            volatile unsigned *w2 = (volatile unsigned *)(sh2 + FUTEX_WORD_OFF);
+            fa = (struct fut_arg){ .w = w2, .val = 0, .timeout_ns = 200000000ull, .rc = 1 };
+            CHECK(cosmo_thread_start(&t, fut_waiter, &fa, 64 * 1024) == 0);
+            CHECK(wait_sleepers(fw, 0, 1));          /* the same key as sh's word */
+            CHECK(munmap(sh2, 3 * P) == 0);
+            cosmo_thread_join(&t, NULL);
+            CHECK(fa.rc == -COSMO_ETIMEDOUT);
+        }
+
+        /* Requeue across kinds: a waiter on the shared word moved onto a
+         * private word and woken there; the counts move with it. */
+        static volatile unsigned priv_word;
+        priv_word = 0;
+        fa = (struct fut_arg){ .w = fw, .val = 0, .timeout_ns = 2000000000ull, .rc = 1 };
+        CHECK(cosmo_thread_start(&t, fut_waiter, &fa, 64 * 1024) == 0);
+        CHECK(wait_sleepers(fw, 0, 1));
+        CHECK(cosmo_futex_requeue(fw, &priv_word, 0, 1, 0) == 1);
+        CHECK(sleepers_on(fw, 0) == 0 && sleepers_on(&priv_word, 0) == 1);
+        CHECK(cosmo_futex_wake(&priv_word, 1) == 1);
+        cosmo_thread_join(&t, NULL);
+        CHECK(fa.rc == 0);
+
+        /* Requeue onto a shared word, then the mapping goes: the reference
+         * taken per moved waiter is what outlives it. */
+        unsigned char *sh3 = mmap(NULL, 3 * P, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        CHECK(sh3 != MAP_FAILED);
+        if (sh3 != MAP_FAILED) {
+            volatile unsigned *w3 = (volatile unsigned *)(sh3 + FUTEX_WORD_OFF);
+            priv_word = 0;
+            fa = (struct fut_arg){ .w = &priv_word, .val = 0, .timeout_ns = 200000000ull, .rc = 1 };
+            CHECK(cosmo_thread_start(&t, fut_waiter, &fa, 64 * 1024) == 0);
+            CHECK(wait_sleepers(&priv_word, 0, 1));
+            CHECK(cosmo_futex_requeue(&priv_word, w3, 0, 1, 0) == 1);
+            CHECK(sleepers_on(fw, 0) == 1);          /* it is on the file's key now */
+            CHECK(munmap(sh3, 3 * P) == 0);
+            cosmo_thread_join(&t, NULL);
+            CHECK(fa.rc == -COSMO_ETIMEDOUT);
+        }
+
+        /* Requeue off a shared word, and off again: shared (file A) ->
+         * private -> shared (file B); file A released in between. The
+         * exchange left the waiter holding B's reference only, so A's
+         * release runs (its pages go) and the wake through B finds it. */
+        int fdb = (int)cosmo_open("/tmp/mm-futex-b", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        CHECK(fdb >= 0);
+        CHECK(cosmo_write(fdb, pat, P) == (long)P);
+        unsigned char *mb = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_SHARED, fdb, 0);
+        CHECK(mb != MAP_FAILED);
+        int fda = (int)cosmo_open("/tmp/mm-futex-a", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        CHECK(fda >= 0);
+        CHECK(cosmo_write(fda, pat, P) == (long)P);
+        unsigned char *ma = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_SHARED, fda, 0);
+        CHECK(ma != MAP_FAILED);
+        if (mb != MAP_FAILED && ma != MAP_FAILED) {
+            volatile unsigned *wa = (volatile unsigned *)(ma + FUTEX_WORD_OFF);
+            volatile unsigned *wb = (volatile unsigned *)(mb + FUTEX_WORD_OFF);
+            *wa = 0;
+            *wb = 0;
+            priv_word = 0;
+            uint64_t cp_a = sysctl_u64("vm.cache_pages");
+            fa = (struct fut_arg){ .w = wa, .val = 0, .timeout_ns = 3000000000ull, .rc = 1 };
+            CHECK(cosmo_thread_start(&t, fut_waiter, &fa, 64 * 1024) == 0);
+            CHECK(wait_sleepers(wa, 0, 1));
+            CHECK(cosmo_futex_requeue(wa, &priv_word, 0, 1, 0) == 1);
+            CHECK(cosmo_futex_requeue(&priv_word, wb, 0, 1, 0) == 1);
+            CHECK(sleepers_on(wb, 0) == 1 && sleepers_on(wa, 0) == 0);
+            /* File A goes entirely: the mapping, the fd, the name. Its
+             * one page leaves the cache only if nothing references the
+             * vnode -- which is the waiter's exchanged reference. */
+            CHECK(munmap(ma, P) == 0);
+            CHECK(cosmo_close(fda) == 0 && cosmo_unlink("/tmp/mm-futex-a") == 0);
+            CHECK(sysctl_u64("vm.cache_pages") == cp_a - 1);
+            CHECK(cosmo_futex_wake(wb, 1) == 1);
+            cosmo_thread_join(&t, NULL);
+            CHECK(fa.rc == 0);
+            CHECK(munmap(mb, P) == 0);
+        }
+        CHECK(cosmo_close(fdb) == 0 && cosmo_unlink("/tmp/mm-futex-b") == 0);
+
+        /* The bench: the walking path (this process shares now), and the
+         * round trip through a shared word to another process and back. */
+        uint64_t t_walk = bench_wakes(&anon_word, 50000);
+        volatile unsigned *pp = fw, *pp2 = fw + 1;
+        *pp = 0;
+        *pp2 = 0;
+        const char *pargv[] = { "init", "--probe", "mmap-futex-pingpong", NULL };
+        pid_t ppid = spawnve("/boot/init", pargv, NULL, NULL, 0);
+        CHECK(ppid > 0);
+        uint64_t t0 = cosmo_clock_ns();
+        for (unsigned i = 1; i <= FUTEX_PINGPONG_ROUNDS; i++) {
+            *pp2 = i;
+            cosmo_futex_wake(pp2, 1);
+            while (*pp != i)
+                cosmo_futex_wait(pp, i - 1, 5000000000ull);
+        }
+        uint64_t t_rt = cosmo_clock_since_ns(t0);
+        int pst = -1;
+        CHECK(waitpid(ppid, &pst, 0) == ppid && pst == 0);
+        fprintf(stderr, "USERBENCH: futex: %llu ns per wake with no shared mapping, %llu with one, "
+                        "%llu ns per cross-process round trip\n",
+                (unsigned long long)(t_priv / 50000), (unsigned long long)(t_walk / 50000),
+                (unsigned long long)(t_rt / FUTEX_PINGPONG_ROUNDS));
     }
 
     /* The end of the file, a truncate under a mapping, the address-space

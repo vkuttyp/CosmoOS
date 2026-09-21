@@ -106,6 +106,13 @@ struct vm_space {
     uint64_t anon_pages;     /* frames populated for this space's ANON regions, and COW copies */
     uint64_t file_pages;     /* page-cache frames installed in this space's FILE regions */
     /*
+     * Shared file-mapping records pointing into this space (atomic): the
+     * futex classifies a word only in a space that has one, so a process
+     * that never maps a file MAP_SHARED pays an integer test per futex
+     * call and never walks its regions (docs/audit/next-subsystem-shared-futex.md).
+     */
+    uint64_t shared_maps;
+    /*
      * User spaces: the CPUs that may hold translations of this space.
      * A CPU joins on switch-in and leaves only when something flushes
      * what it holds -- a tag-generation rollover, or this space's
@@ -237,6 +244,18 @@ void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n)
  * (M41), which the cache does by the frame's kernel alias. */
 bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index);
 
+/*
+ * The futex's identity for a user word (docs/audit/next-subsystem-shared-futex.md):
+ * a word in a shared file mapping is keyed by (vnode, file offset) with
+ * a vnode reference taken into `out->held`; anything else by (space,
+ * uaddr) with no reference. `private` (the Linux flag) skips the lookup,
+ * and so does a space with no shared mapping at all. The lookup runs
+ * under the space lock. Returns 0; the caller releases the reference
+ * with vnode_put when the key is done with.
+ */
+struct futex_key;
+int vm_user_futex_key(struct vm_space *space, uint64_t uaddr, bool private, struct futex_key *out);
+
 /* Change the protection of every page of [base, base+size), splitting
  * regions at the ends and merging equal neighbours afterwards. -EINVAL
  * for W+X or a bad range; -EACCES if a FILE region in the range has a
@@ -356,6 +375,7 @@ struct vm_stats {
     uint64_t file_dirty_faults;   /* a shared page's PTE raised to writable */
     uint64_t file_fault_retries;  /* the re-find found the world changed, or the page already present */
     uint64_t file_sigbus;         /* faults the file could not serve */
+    uint64_t futex_shared_keys;   /* futex calls whose word was classified as a shared file word */
 };
 
 void vm_get_stats(struct vm_stats *out);

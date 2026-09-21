@@ -1429,10 +1429,21 @@ static int64_t lx_futex(struct syscall_args *a)
     uint64_t uaddr = a->a[0];
     unsigned op = (unsigned)a->a[1] & (unsigned)LX_FUTEX_CMD_MASK;
     bool realtime = ((unsigned)a->a[1] & LX_FUTEX_CLOCK_REALTIME) != 0;
+    /* The flag is the program's promise that nobody outside this
+     * process can see the word: the private key, no lookup. Without it
+     * the word is classified by what it maps, so a process-shared mutex
+     * in a MAP_SHARED page is shared (the shared-futex unit; the flag
+     * used to be masked out and every futex was private). */
+    bool private = ((unsigned)a->a[1] & LX_FUTEX_PRIVATE_FLAG) != 0;
     uint32_t val = (uint32_t)a->a[2];
     struct vm_space *space = process_current()->space;
     if (!user_range_ok(uaddr, 4))
         return -EFAULT;
+    /* Once, for every operation: the past-deadline WAIT_BITSET path below
+     * reads the word itself and used to answer -EAGAIN/-ETIMEDOUT for a
+     * misaligned address the futex would have refused (review). */
+    if (uaddr & 3)
+        return -EINVAL;
     switch (op) {
     case LX_FUTEX_WAIT:
     case LX_FUTEX_WAIT_BITSET: {
@@ -1462,13 +1473,13 @@ static int64_t lx_futex(struct syscall_args *a)
             if (timeout == 0)
                 timeout = 1;
         }
-        return futex_wait(space, uaddr, val, timeout);
+        return futex_wait(space, uaddr, val, timeout, private);
     }
     case LX_FUTEX_WAKE:
     case LX_FUTEX_WAKE_BITSET:
         if (op == LX_FUTEX_WAKE_BITSET && (uint32_t)a->a[5] != LX_FUTEX_BITSET_MATCH_ANY)
             return -ENOSYS;
-        return futex_wake(space, uaddr, val);
+        return futex_wake(space, uaddr, val, private);
     case LX_FUTEX_REQUEUE:
     case LX_FUTEX_CMP_REQUEUE: {
         uint64_t uaddr2 = a->a[4];
@@ -1477,7 +1488,8 @@ static int64_t lx_futex(struct syscall_args *a)
         unsigned nr_requeue = (unsigned)a->a[3];
         /* Both report woken + requeued, as the Linux kernel does for both
          * operations (its man page's "woken" for REQUEUE notwithstanding). */
-        return futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5]);
+        return futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5],
+                             private);
     }
     default:
         return -ENOSYS;

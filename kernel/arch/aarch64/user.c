@@ -57,6 +57,11 @@ bool arch_trap_frame_is_user(const struct arch_trap_frame *frame)
     return (frame->spsr & (SPSR_M_MASK | SPSR_M_AARCH32)) == SPSR_M_EL0T;
 }
 
+bool arch_trap_frame_irqs_enabled(const struct arch_trap_frame *frame)
+{
+    return (frame->spsr & DAIF_I) == 0;
+}
+
 /* --- the user register set (milestone 10) ------------------------------------ */
 
 #include <kernel/string.h>

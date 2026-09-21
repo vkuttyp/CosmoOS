@@ -44,6 +44,11 @@ struct kobject {
 /* Reference 1 belongs to the caller. Records the owner of type->release. */
 void kobject_init(struct kobject *obj, const struct kobject_type *type);
 void kobject_get(struct kobject *obj);
+/* `n` references in one add, for a caller that has counted under a lock
+ * how many holders it is creating and must not spend `n` atomic
+ * operations there. `n == 0` is a no-op; a released object panics as
+ * in `kobject_get`. */
+void kobject_get_n(struct kobject *obj, uint32_t n);
 /* Take a reference unless the count is already zero (the release is
  * running or about to). For lookups from tables the release path clears
  * under a lock the looker holds: a plain get would panic. */

@@ -243,7 +243,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the named clock | clock ids `0..7` |
 | 318 | `getrandom` | `random_get_bytes` in 256-byte pieces | flags ignored; at most 256 KiB per call |
 | 63 | `uname` | `sysname "Linux"`, `nodename "cosmo"`, `release "6.0.0-cosmo"`, `version "<KERNEL_NAME> <KERNEL_VERSION> <COSMO_BUILD_ID>"`, `machine "x86_64"`, `domainname "(none)"` (six 65-byte fields, 390 bytes) | a presentation decision so libcs' version checks pass |
-| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(uaddr, uaddr2, val, nr_requeue, cmp, val3)` (both return woken + requeued, as the Linux kernel does); `FUTEX_PRIVATE_FLAG` (128) masked off | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
+| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout, private)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val, private)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(space, uaddr, uaddr2, val, nr_requeue, cmp, val3, private)` (both return woken + requeued, as the Linux kernel does); `FUTEX_PRIVATE_FLAG` (128) honoured both ways since the shared-futex unit: set, the key is this process's with no lookup; clear, the word is classified by what it maps, so a word in a `MAP_SHARED` page is shared with every process mapping it (`docs/kernel/ipc/api.md`, I7) -- it used to be masked off and every futex was private | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
 
 ### Sockets
 
@@ -311,11 +311,16 @@ followed by `d_name`.
 
 ## Futex (`kernel/include/kernel/futex.h`, `kernel/ipc/futex.c`)
 
-**ABI stability: internal.** A native primitive keyed by `(struct
-vm_space *, user address)`; 64 buckets, each a spinlock and a waiter
-list. Waiters live on the waiting thread's stack.
+**ABI stability: internal.** A native primitive keyed by what the word
+maps (`struct futex_key`: the space and the address for a private word,
+the vnode and the file offset for a word in a `MAP_SHARED` file mapping,
+with the one vnode reference the waiter holds; the shared-futex unit,
+`docs/kernel/ipc/api.md`); 64 buckets, each a spinlock and a waiter
+list. Waiters live on the waiting thread's stack. Every entry point
+takes `private`: true skips the classification (Linux's flag), false
+classifies through `vm_user_futex_key`.
 
-### `int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns)`
+### `int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns, bool private)`
 - Purpose: block while the 32-bit user word at `uaddr` equals `val`.
 - Under the bucket lock: `copy_from_user` the word (`-EFAULT`), compare
   (`-EAGAIN` when it differs), enqueue. Then `wait_event_killable` on a
@@ -327,13 +332,13 @@ list. Waiters live on the waiting thread's stack.
 - Thread context only; may block; takes the bucket lock with interrupts
   off for the compare and the dequeue.
 
-### `int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)`
-- Wakes up to `n` waiters of exactly that `(space, uaddr)`, in FIFO
+### `int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n, bool private)`
+- Wakes up to `n` waiters of exactly that key, in FIFO
   order, marking each `woken` before `sched_wake`; returns how many.
   `-EINVAL` for a misaligned address. Any thread context; does not
   block; takes the bucket lock with interrupts off.
 
-### `int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue, bool cmp, uint32_t cmpval)` (milestone 10)
+### `int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue, bool cmp, uint32_t cmpval, bool private)` (milestone 10)
 - Wakes up to `nr_wake` waiters on `uaddr1` and moves up to
   `nr_requeue` more onto `uaddr2`'s list (their `uaddr` and bucket
   pointer rewritten under both buckets' locks, lower address first, the

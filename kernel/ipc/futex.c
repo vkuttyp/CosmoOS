@@ -8,14 +8,24 @@
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/uaccess.h>
+#include <kernel/vfs.h>
+#include <kernel/vmm.h>
 #include <kernel/wait.h>
 
 #define FUTEX_BUCKETS 64
 
+/*
+ * A waiter's identity is its key (docs/audit/next-subsystem-shared-futex.md):
+ * what the word maps, not which space asked. `key.held` is the one vnode
+ * reference the waiter holds -- the vnode its CURRENT key names, or NULL
+ * -- taken when it was classified or when a requeue moved it onto a
+ * shared word, exchanged by a requeue that changes the key, and put at
+ * dequeue. Every waiter on one word carries that word's key, so a requeue
+ * deals with one old vnode and one new one however many it moves.
+ */
 struct futex_waiter {
     struct list_node link;
-    struct vm_space *space;
-    uint64_t uaddr;             /* under the bucket lock: a requeue moves the waiter */
+    struct futex_key key;       /* under the bucket lock: a requeue moves the waiter */
     struct bucket *bucket;      /* the list the link is on; changed only with both buckets locked */
     struct thread *thread;
     bool woken;
@@ -41,10 +51,25 @@ void futex_init(void)
     }
 }
 
-static struct bucket *bucket_of(struct vm_space *space, uint64_t uaddr)
+static struct bucket *bucket_of(const struct futex_key *k)
 {
-    uint64_t h = (uintptr_t)space ^ (uaddr >> 2) ^ (uaddr >> 17);
+    uint64_t h = (uintptr_t)k->obj ^ (k->off >> 2) ^ (k->off >> 17);
     return &g_buckets[h % FUTEX_BUCKETS];
+}
+
+static bool key_eq(const struct futex_key *a, const struct futex_key *b)
+{
+    return a->obj == b->obj && a->off == b->off;
+}
+
+/* The reference a key holds, dropped where a put may block: never under
+ * a bucket lock. */
+static void key_put(struct futex_key *k)
+{
+    if (k->held != NULL) {
+        vnode_put(k->held);
+        k->held = NULL;
+    }
 }
 
 static void timeout_fired(struct timer *t, void *arg)
@@ -55,12 +80,16 @@ static void timeout_fired(struct timer *t, void *arg)
     sched_wake(w->thread);
 }
 
-int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns)
+int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns, bool private)
 {
     if (uaddr & 3)
         return -EINVAL;
-    struct bucket *b = bucket_of(space, uaddr);
-    struct futex_waiter w = { .space = space, .uaddr = uaddr, .bucket = b, .thread = thread_current() };
+    struct futex_waiter w = { .thread = thread_current() };
+    int krc = vm_user_futex_key(space, uaddr, private, &w.key);
+    if (krc)
+        return krc;
+    struct bucket *b = bucket_of(&w.key);
+    w.bucket = b;
     list_init(&w.link);
 
     /*
@@ -78,14 +107,43 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
     spin_unlock_irqrestore(&b->lock, s);
 
     uint32_t cur;
-    if (copy_from_user(&cur, uaddr, sizeof(cur)))
+    if (copy_from_user(&cur, uaddr, sizeof(cur))) {
+        key_put(&w.key);
         return -EFAULT;
-    if (cur != val)
+    }
+    if (cur != val) {
+        key_put(&w.key);
         return -EAGAIN;
+    }
+
+    /*
+     * The key was taken before the word was read, with the space lock
+     * released in between: a thread that unmapped this address and
+     * mapped something else at it (MAP_FIXED) in that window would have
+     * had the word read from the new mapping and the waiter enqueued
+     * under the old key, where a wake through the new mapping never
+     * looks. A caller racing its own munmap against its own wait has a
+     * bug, but the waiter is the one that would hang for it, so the
+     * word is classified again and a changed key returns 0 -- the
+     * spurious wake the contract permits (review found the window).
+     */
+    struct futex_key again;
+    krc = vm_user_futex_key(space, uaddr, private, &again);
+    if (krc) {
+        key_put(&w.key);
+        return krc;
+    }
+    bool same = key_eq(&again, &w.key);
+    key_put(&again);
+    if (!same) {
+        key_put(&w.key);
+        return 0;
+    }
 
     s = spin_lock_irqsave(&b->lock);
     if (b->wake_seq != seq) {
         spin_unlock_irqrestore(&b->lock, s);
+        key_put(&w.key);
         return 0;
     }
     list_push_back(&b->waiters, &w.link);
@@ -122,6 +180,9 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
         }
         spin_unlock_irqrestore(&cur_b->lock, s);
     }
+    /* Dequeued: the one reference the waiter holds -- to whatever vnode
+     * its key names now, after any requeue -- goes here, with no lock. */
+    key_put(&w.key);
 
     if (was_woken)
         return 0;
@@ -130,11 +191,15 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
     return -ETIMEDOUT;
 }
 
-int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
+int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n, bool private)
 {
     if (uaddr & 3)
         return -EINVAL;
-    struct bucket *b = bucket_of(space, uaddr);
+    struct futex_key key;
+    int krc = vm_user_futex_key(space, uaddr, private, &key);
+    if (krc)
+        return krc;
+    struct bucket *b = bucket_of(&key);
     int woken = 0;
     arch_irq_state_t s = spin_lock_irqsave(&b->lock);
     b->wake_seq++;   /* a waiter between its compare and its enqueue sees this and retries */
@@ -142,7 +207,7 @@ int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
     list_for_each_entry_safe(w, tmp, &b->waiters, link) {
         if ((unsigned)woken >= n)
             break;
-        if (w->space != space || w->uaddr != uaddr)
+        if (!key_eq(&w->key, &key))
             continue;
         list_remove(&w->link);
         list_init(&w->link);
@@ -153,15 +218,26 @@ int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
     if (woken)
         b->queue_seq++;
     spin_unlock_irqrestore(&b->lock, s);
+    key_put(&key);   /* the call's own reference; a waiter's is its own */
     return woken;
 }
 
 int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue,
-                  bool cmp, uint32_t cmpval)
+                  bool cmp, uint32_t cmpval, bool private)
 {
     if ((uaddr1 & 3) || (uaddr2 & 3))
         return -EINVAL;
-    struct bucket *b1 = bucket_of(space, uaddr1), *b2 = bucket_of(space, uaddr2);
+    struct futex_key k1, k2;
+    int krc = vm_user_futex_key(space, uaddr1, private, &k1);
+    if (krc)
+        return krc;
+    krc = vm_user_futex_key(space, uaddr2, private, &k2);
+    if (krc) {
+        key_put(&k1);
+        return krc;
+    }
+    struct bucket *b1 = bucket_of(&k1), *b2 = bucket_of(&k2);
+    bool same_key = key_eq(&k1, &k2);
     /* Two buckets of one class: lower address first, always (no other path
      * takes two), the second annotated as nested for lockdep
      * (docs/kernel/lockdep/invariants.md, "futex"). */
@@ -184,10 +260,16 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
             seq = b1->queue_seq;
             spin_unlock_irqrestore(&b1->lock, s);
             uint32_t cur;
-            if (copy_from_user(&cur, uaddr1, sizeof(cur)))
+            if (copy_from_user(&cur, uaddr1, sizeof(cur))) {
+                key_put(&k1);
+                key_put(&k2);
                 return -EFAULT;
-            if (cur != cmpval)
+            }
+            if (cur != cmpval) {
+                key_put(&k1);
+                key_put(&k2);
                 return -EAGAIN;
+            }
         }
         s = spin_lock_irqsave(&lo->lock);
         if (hi != lo)
@@ -208,14 +290,14 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
      * counting sent them round their loop and onto a mutex the counter
      * held -- CI's slower hosts hit that window every run.
      */
-    if (uaddr1 != uaddr2 || nr_wake)
+    if (!same_key || nr_wake)
         b1->wake_seq++;
     b1->queue_seq++;
     b2->queue_seq++;
-    int woken = 0, requeued = 0;
+    int woken = 0, requeued = 0, moved = 0;
     struct futex_waiter *w, *tmp;
     list_for_each_entry_safe(w, tmp, &b1->waiters, link) {
-        if (w->space != space || w->uaddr != uaddr1)
+        if (!key_eq(&w->key, &k1))
             continue;
         if ((unsigned)woken < nr_wake) {
             list_remove(&w->link);
@@ -233,19 +315,47 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
              * userland cannot otherwise learn -- how many are asleep on a
              * word -- which the native thread door's tests use.
              */
-            if (uaddr2 != uaddr1) {
+            if (!same_key) {
                 list_remove(&w->link);
-                w->uaddr = uaddr2;
+                /*
+                 * The key changes, so the reference is exchanged: the
+                 * waiter now holds one to the destination's vnode --
+                 * taken below, one add for all of them, before the locks
+                 * drop -- and gives up the one it held, which is put
+                 * after the locks are released: every waiter on uaddr1
+                 * held k1's vnode, so one vnode, `moved` times.
+                 */
+                w->key.obj = k2.obj;
+                w->key.off = k2.off;
+                w->key.held = k2.held;
                 __atomic_store_n(&w->bucket, b2, __ATOMIC_RELEASE);
                 list_push_back(&b2->waiters, &w->link);
+                moved++;
             }
             requeued++;
         } else {
             break;
         }
     }
+    /*
+     * The moved waiters' new references, in one add: `moved` holders of
+     * one vnode were created above, and the count must say so before
+     * the locks drop, because a moved waiter that wakes and dequeues
+     * after the unlock puts a reference it must already hold. One
+     * atomic add under the locks rather than one per waiter (review of
+     * the build): the walk is bounded by the waiters present on the
+     * word, and the reference traffic on the vnode's line need not
+     * scale with it at all.
+     */
+    if (moved > 0 && k2.held != NULL)
+        vnode_get_n(k2.held, (unsigned)moved);
     if (hi != lo)
         spin_unlock(&hi->lock);
     spin_unlock_irqrestore(&lo->lock, s);
+    /* The moved waiters' old references, and the call's own two. */
+    for (int i = 0; i < moved && k1.held != NULL; i++)
+        vnode_put(k1.held);
+    key_put(&k1);
+    key_put(&k2);
     return woken + requeued;
 }

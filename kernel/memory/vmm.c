@@ -10,6 +10,7 @@
 #include <kernel/bootinfo.h>
 #include <kernel/completion.h>
 #include <kernel/errno.h>
+#include <kernel/futex.h>
 #include <kernel/lockdep.h>
 #include <kernel/pagecache.h>
 #include <kernel/signal.h>
@@ -28,6 +29,7 @@
 #include <kernel/vmm.h>
 
 #include <arch/cpu.h>
+#include <arch/irq.h>
 #include <arch/mmu.h>
 #include <arch/trap.h>
 #include <arch/user.h>
@@ -824,7 +826,23 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
             bool shared = m->shared;
             spin_unlock_irqrestore(&space->lock, s);
 
+            /*
+             * A trap runs with interrupts masked as the hardware left
+             * them, which the anonymous arm never minded: it neither
+             * sleeps nor shoots down. This arm does both, so it runs
+             * with interrupts as the interrupted context had them --
+             * enabled for user code and for a copy inside a system
+             * call, and left masked for a fault taken with them masked,
+             * which is a context that must not sleep and which
+             * might_sleep() then reports. Found by the shared-futex
+             * unit's tests, as a shootdown asserting arch_irq_enabled().
+             */
+            bool enable = arch_trap_frame_irqs_enabled(frame);
+            if (enable)
+                arch_irq_enable();
             int frc = file_fault(space, page, fl, vn, index, shared, from_user);
+            if (enable)
+                arch_irq_disable();
             vnode_put(vn);
             if (frc == 0)
                 return;   /* installed, or the world changed and the instruction retries */
@@ -1050,6 +1068,8 @@ static void region_put(struct vm_region *r)
     if (__atomic_fetch_sub(&m->regions, 1u, __ATOMIC_ACQ_REL) != 1)
         return;
     struct vnode *vn = m->vn;
+    if (m->shared)
+        __atomic_fetch_sub(&m->space->shared_maps, 1u, __ATOMIC_ACQ_REL);
     pagecache_lock(vn);
     list_remove(&m->link);
     pagecache_unlock(vn);
@@ -1101,10 +1121,10 @@ void vm_space_destroy(struct vm_space *space)
      * free, so the number is printed rather than asserted away. The
      * file-page count is checked the same way: a cache frame installed
      * and never put would keep a page the file no longer has. */
-    if (space->anon_pages != 0 || space->file_pages != 0)
-        panic("vm_space_destroy: %llu anon and %llu file pages unaccounted (mapped_pages %llu)",
+    if (space->anon_pages != 0 || space->file_pages != 0 || space->shared_maps != 0)
+        panic("vm_space_destroy: %llu anon and %llu file pages, %llu shared maps unaccounted (mapped_pages %llu)",
               (unsigned long long)space->anon_pages, (unsigned long long)space->file_pages,
-              (unsigned long long)space->mapped_pages);
+              (unsigned long long)space->shared_maps, (unsigned long long)space->mapped_pages);
 
     /*
      * Whatever any CPU still holds under this space's tag goes now, and
@@ -1606,6 +1626,8 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     m->shared = (flags & VM_MAP_SHARED) != 0;
     m->maxprot = maxprot;
     m->regions = 1;
+    if (m->shared)
+        __atomic_fetch_add(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);   /* the futex classifies only in a space that shares */
     r->fmap = m;
 
     /* On the vnode's list before the region can take a fault, so a
@@ -1726,6 +1748,29 @@ void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep)
         for (unsigned i = 0; i < n; i++)
             pmm_page_put(frames[i]);
     }
+}
+
+int vm_user_futex_key(struct vm_space *space, uint64_t uaddr, bool private, struct futex_key *out)
+{
+    out->obj = space;
+    out->off = uaddr;
+    out->held = NULL;
+    /* The program's promise (Linux's flag), or a space that has nothing
+     * to share: the private key, and no walk. */
+    if (private || __atomic_load_n(&space->shared_maps, __ATOMIC_ACQUIRE) == 0)
+        return 0;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, (vaddr_t)uaddr);
+    if (r != NULL && r->kind == VM_REGION_FILE && r->fmap->shared) {
+        struct vm_file_map *m = r->fmap;
+        out->obj = m->vn;
+        out->off = m->off + (uaddr - m->base);
+        out->held = m->vn;
+        vnode_get(m->vn);   /* an atomic increment: fine under the spinlock */
+        __atomic_fetch_add(&g_stats.futex_shared_keys, 1, __ATOMIC_RELAXED);
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    return 0;
 }
 
 bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index)

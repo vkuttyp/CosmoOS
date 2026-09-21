@@ -117,6 +117,14 @@ expose them (`docs/kernel/syscall/api.md`).
 - Concurrency: atomic acq_rel; usable in interrupt context and under
   spinlocks. Panics if the count was 0 (use after release).
 
+### `void kobject_get_n(struct kobject *obj, uint32_t n)`
+- Purpose: `n` references in one add, for a caller that has counted
+  under a lock how many holders it is creating and must not spend `n`
+  atomic operations there (a futex requeue's moved waiters). `n == 0`
+  is a no-op.
+- Concurrency: as `kobject_get`, including the panic on a released
+  object.
+
 ### `void kobject_put(struct kobject *obj)`
 - Purpose: drop a reference; runs `type->release` when it was the last,
   then drops the owner module's live-object count (so the release runs

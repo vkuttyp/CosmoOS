@@ -255,6 +255,13 @@ this process, `-EINVAL` for a bad signal, `sig` 0 a probe whose
 `-ESRCH` after a join is *eventual* (wait for it). The condition
 variable is two words since the native thread door unit: the sequence
 number, and the mutex it was last waited on with, which
+Since the shared-futex unit the raw calls on a word in a `MAP_SHARED`
+file mapping (`cosmo_futex_wait`, `cosmo_futex_wake`,
+`cosmo_futex_requeue`) name a futex every process mapping that file
+shares, so a mutex or a condition variable built on such a word works
+across processes; the library's own mutex and condition variable live
+in the process's memory and are unchanged (`docs/kernel/ipc/api.md`, I7).
+
 `cosmo_cond_broadcast` requeues the waiters onto (`SYS_futex_requeue`)
 instead of waking them all — under the two rules of invariant L10. The
 recorded mutex is only ever an address: nothing loads through it, so a

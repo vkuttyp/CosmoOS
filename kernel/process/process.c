@@ -842,7 +842,7 @@ static void thread_clear_tid(struct thread *t)
     t->clear_child_tid = 0;
     uint32_t zero = 0;
     if (copy_to_user(addr, &zero, sizeof(zero)) == 0)
-        futex_wake(t->proc->space, addr, 1);
+        futex_wake(t->proc->space, addr, 1, false);   /* classified: the tid word may live anywhere */
 }
 
 void process_thread_exit(int status)
