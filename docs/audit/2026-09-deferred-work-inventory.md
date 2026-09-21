@@ -123,9 +123,12 @@ AHCI are the two entries from that list now built.
   `SIGBUS` past the end, `maxprot`, the first shared memory between two
   processes in this system (invariants **M42--M44**, **V33**). Still
   open from this row: a shared futex across processes
-  (`kernel/ipc/futex.c` keys by space), `memfd`/`shm_open`, and the
-  ELF loader mapping `PT_LOAD` segments as file regions -- named as
-  deferred in that report. The record of what was wrong, as the report
+  (`kernel/ipc/futex.c` keys by space) -- **taken up by
+  `docs/audit/next-subsystem-shared-futex.md`** (not struck until it
+  lands: the key becomes what the word maps, and the Linux
+  `FUTEX_PRIVATE_FLAG`, today masked out, is honoured) --
+  `memfd`/`shm_open`, and the ELF loader mapping `PT_LOAD` segments as
+  file regions -- named as deferred in that report. The record of what was wrong, as the report
   corrected it before taking the row: natively there was no file
   mapping at all (`sys_mmap` refused anything not anonymous with the
   comment "file mappings arrive with the VFS"); the Linux personality's
