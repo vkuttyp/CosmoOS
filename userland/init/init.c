@@ -1669,18 +1669,25 @@ static int mmap_probe(const char *what)
             return 12;
         return m[0] ? 13 : 14;   /* neither: fatal */
     }
-    if (strcmp(what, "race") == 0 || strcmp(what, "unmap-race") == 0) {
+    if (strcmp(what, "race") == 0 || strcmp(what, "unmap-race") == 0 || strcmp(what, "remap-race") == 0) {
         /* The kernel test armed the hold. Thread A's touch is held after
          * the fault's first phase; this thread waits for the kernel to
          * say so (state 2), then either touches the same page (race: A
-         * resumes, finds it present, retries) or unmaps the range
+         * resumes, finds it present, retries), unmaps the range
          * (unmap-race: A resumes, installs nothing, and its retry is
-         * SIGSEGV: exit 139 from outside). */
+         * SIGSEGV: exit 139 from outside), or replaces the range with a
+         * mapping of ANOTHER file (remap-race: A resumes, its re-find
+         * sees a different vnode, installs nothing, and its retry reads
+         * the other file's byte -- a fault that trusted its first phase
+         * would install the first file's page under the second's name). */
         int fd = (int)cosmo_open("/tmp/mm-race", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
         if (fd < 0)
             return 10;
         if (cosmo_write(fd, "race", 4) != 4)
             return 11;
+        int fd2 = (int)cosmo_open("/tmp/mm-race2", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        if (fd2 < 0 || cosmo_write(fd2, "other", 5) != 5)
+            return 22;
         unsigned char *m = mmap(NULL, P, PROT_READ, MAP_SHARED, fd, 0);
         if (m == MAP_FAILED)
             return 12;
@@ -1695,7 +1702,7 @@ static int mmap_probe(const char *what)
                 return 21;   /* never held */
             cosmo_yield();
         }
-        if (what[0] == 'r') {
+        if (strcmp(what, "race") == 0) {
             if (m[0] != 'r')
                 return 14;   /* this thread's fault installs and releases A */
             cosmo_thread_join(&t, NULL);
@@ -1704,6 +1711,17 @@ static int mmap_probe(const char *what)
             if (sysctl_u64("debug.file_fault_hold") != 0)
                 return 16;
             return munmap(m, P) == 0 ? 0 : 17;
+        }
+        if (strcmp(what, "remap-race") == 0) {
+            /* The replacement releases A (the range changed hands). */
+            if (mmap(m, P, PROT_READ, MAP_SHARED | MAP_FIXED, fd2, 0) != m)
+                return 23;
+            cosmo_thread_join(&t, NULL);
+            if (arg.seen != 'o')
+                return 24;   /* A read the first file's page under the second's name */
+            if (m[0] != 'o' || sysctl_u64("debug.file_fault_hold") != 0)
+                return 25;
+            return munmap(m, P) == 0 ? 0 : 26;
         }
         if (munmap(m, P) != 0)   /* releases A, whose retry finds no region */
             return 18;

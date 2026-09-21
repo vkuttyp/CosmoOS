@@ -822,7 +822,22 @@ bool selftest_vm_file_fault_hold(const char **reason)
     CHECK(vm_test_file_hold_state() == 0);
     vm_get_stats(&s1);
     CHECK(s1.file_fault_retries - s0.file_fault_retries == 1);
-    kinfo("selftest: vm-file-fault-hold: a held fault installs nothing over another's page or a gone range");
+
+    /* The range replaced by a mapping of another file while held: the
+     * re-find is by (vnode, index, sharing), so the first file's page is
+     * not installed under the second file's name. */
+    static const char *const remap_argv[] = { "init", "--probe", "mmap-remap-race", NULL };
+    vm_get_stats(&s0);
+    vm_test_file_hold_arm();
+    ok = run_module(remap_argv, &status, reason);
+    if (!ok)
+        return false;
+    CHECK(status == 0);
+    CHECK(vm_test_file_hold_state() == 0);
+    vm_get_stats(&s1);
+    CHECK(s1.file_fault_retries - s0.file_fault_retries == 1);
+    CHECK(vfs_unlink(NULL, "/tmp/mm-race") == 0 && vfs_unlink(NULL, "/tmp/mm-race2") == 0);
+    kinfo("selftest: vm-file-fault-hold: a held fault installs nothing over another's page, a gone range, or another file's");
     return true;
 #else
     (void)reason;

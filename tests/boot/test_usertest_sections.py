@@ -47,10 +47,10 @@ def full(slow=None, slow_ms=3000):
 def test_sections_parsed():
     """Ten lines in, ten rows out, in the order printed."""
     timings = full()
-    sections, declared, total = summarize_sections(run(timings, total=400))
+    sections, declared, total = summarize_sections(run(timings, total=40 * len(USERTEST_SECTIONS)))
     check(sections == timings, f"ten sections parse in order (got {len(sections)})")
-    check(declared == 10, f"the declared count is read (got {declared})")
-    check(total == 400, f"the total is read (got {total})")
+    check(declared == len(USERTEST_SECTIONS), f"the declared count is read (got {declared})")
+    check(total == 40 * len(USERTEST_SECTIONS), f"the total is read (got {total})")
     check(section_failures(sections, declared, total) == [],
           "a complete run is not a failure")
 
@@ -61,9 +61,9 @@ def test_lines_among_noise():
              "usertest: sockets ok",
              "SELFTEST: process-user     ... ok (3711 ms)",
              "USERTEST: PASS"]
-    sections, declared, total = summarize_sections(run(full(), total=400, extra=noise))
-    check(len(sections) == 10, f"ten sections found among other output (got {len(sections)})")
-    check(declared == 10 and total == 400, "the total line survives the noise")
+    sections, declared, total = summarize_sections(run(full(), total=40 * len(USERTEST_SECTIONS), extra=noise))
+    check(len(sections) == len(USERTEST_SECTIONS), f"ten sections found among other output (got {len(sections)})")
+    check(declared == len(USERTEST_SECTIONS) and total == 40 * len(USERTEST_SECTIONS), "the total line survives the noise")
     # `usertest: sockets ok` is prose and must not be mistaken for a section.
     check(all(n in USERTEST_SECTIONS for n, _ in sections),
           "the lowercase prose lines are not parsed as sections")
@@ -116,7 +116,7 @@ def test_truncated_run_parses():
     parser tolerates a short list."""
     stopped = full()[:4]
     sections, declared, total = summarize_sections(run(stopped, total=None))
-    check([n for n, _ in sections] == ["fs", "fsctl", "net", "proc"],
+    check([n for n, _ in sections] == USERTEST_SECTIONS[:4],
           f"the four that finished are named (got {[n for n, _ in sections]})")
     check(declared is None and total is None, "no total line was invented")
     fails = section_failures(sections, declared, total)
@@ -150,11 +150,11 @@ def test_a_row_that_left_the_table():
 def test_declared_and_printed_must_agree():
     """The suite's own count is the check on a garbled stream: ten
     declared, nine printed, is a failure even though all nine parse."""
-    lines = run(full()[:9], total=400)
-    lines[-1] = "USERTEST: sections 10, total 400 ms"
+    lines = run(full()[:9], total=40 * len(USERTEST_SECTIONS))
+    lines[-1] = f"USERTEST: sections {len(USERTEST_SECTIONS)}, total {40 * len(USERTEST_SECTIONS)} ms"
     sections, declared, total = summarize_sections(lines)
     fails = section_failures(sections, declared, total)
-    check(any("declared 10" in f and "printed 9" in f for f in fails),
+    check(any(f"declared {len(USERTEST_SECTIONS)}" in f and "printed 9" in f for f in fails),
           f"the mismatch is refused ({fails})")
 
 
@@ -175,10 +175,10 @@ def test_a_total_with_no_sections_is_refused():
     the caller guarded on `sections` being non-empty. The decision now
     lives in `section_failures`, where it can be tested."""
     sections, declared, total = summarize_sections(
-        ["USERTEST: sections 10, total 400 ms", "USERTEST: PASS"])
-    check(sections == [] and declared == 10, "the total parses with no sections")
+        [f"USERTEST: sections {len(USERTEST_SECTIONS)}, total {40 * len(USERTEST_SECTIONS)} ms", "USERTEST: PASS"])
+    check(sections == [] and declared == len(USERTEST_SECTIONS), "the total parses with no sections")
     fails = section_failures(sections, declared, total)
-    check(any("declared 10" in f and "printed 0" in f for f in fails),
+    check(any(f"declared {len(USERTEST_SECTIONS)}" in f and "printed 0" in f for f in fails),
           f"declaring ten and printing none is refused ({fails[:1]})")
     check(any("fs" in f and "svc" in f for f in fails),
           "and every missing section is named")
