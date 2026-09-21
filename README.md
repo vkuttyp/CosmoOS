@@ -3049,6 +3049,53 @@ See [docs/development.md](docs/development.md).
   Invariants **M42**--**M44**, **V33**; 366 self-tests on both
   architectures. Report: `docs/audit/next-subsystem-file-regions.md`
   (PR #201).
+- **A futex keyed by what the word maps.** The file-regions unit gave
+  two processes one page and left them no way to wait on it: the futex
+  was keyed by address space, so a sleeper on a word in a shared page
+  was invisible to a wake from another process on the same word --
+  nothing refused, the wake found nobody -- and the Linux door masked
+  out `FUTEX_PRIVATE_FLAG`, the one bit that says which kind a futex is,
+  so a musl process-shared mutex in a shared page was the program that
+  broke. Now a futex's identity is what the word maps: the space and the
+  address for a word in the process's own memory, the vnode and the
+  file offset for a word in a `MAP_SHARED` file mapping, with the one
+  vnode reference the waiter holds for the vnode its current key names.
+  The VMM classifies under the space lock and skips the walk entirely in
+  a process with no shared mapping, so libc's mutex pays one load; the
+  Linux flag is honoured both ways; the native calls always classify,
+  on the native rule that the kernel does not ask the program what it
+  can see. The whole change to the futex is its hash and two match
+  lines; the sequences and the compare-then-enqueue that L4 rests on
+  are untouched, and a requeue that changes the key exchanges the
+  reference -- taken per moved waiter under the bucket locks, the old
+  ones put after them -- which three review rounds on the report
+  sharpened from "the reference travels with the waiter" to a rule that
+  survives an unbounded chain of requeues with one slot. The `mmap`
+  section proves the two-process wait (**the first wait across two
+  processes in this system**, the parent counting the child asleep
+  through a requeue of the word onto itself, a count that crosses the
+  boundary only if the key does), the wake before the sleep, private
+  stays private, unmap under a waiter, requeue across kinds and onto a
+  shared word that then goes, and a double requeue through two files
+  with the first released between; `lxtest` proves the flag both ways
+  on a shared page with clone threads. Building it found that the
+  file-backed page fault ran with interrupts masked, as every trap
+  enters -- the anonymous arm never minded, the file arm sleeps and
+  shoots down, and the file-regions unit's own tests never contended
+  the cache mutex, so the assert never fired until this unit's did:
+  the arm now runs with interrupts as the interrupted context had them.
+  Seven mutations, each run: the key by space alone and the counter's
+  test inverted each lose the two-process wake (the child times out,
+  the count never crosses); the flag still masked fails all four
+  `lxtest` checks; the counter not decremented panics at the first exit
+  of a process that shared; the old references not put after a requeue
+  leak the first file's vnode, which the double-requeue's page count
+  sees; the reference not taken per moved waiter panics on a released
+  vnode; and the reference not taken at classification survives, as the
+  report declared in advance. Bench: a wake costs 2.0 / 3.9 us with no
+  shared mapping on x86-64 / AArch64, 3.9 / 6.6 us with one, and a
+  cross-process round trip 132 / 145 us. Invariant **I7**.
+  Report: `docs/audit/next-subsystem-shared-futex.md` (PR #203).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

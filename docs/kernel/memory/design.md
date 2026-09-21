@@ -667,7 +667,27 @@ serialised against faults without a third mechanism.
 
 Faults on different files run in parallel; faults on one file
 serialise on its cache mutex, which is what `read()` on one file
-already does. `file_pages` is checked zero at `vm_space_destroy` beside
+already does. **The arm runs with interrupts as the interrupted context
+had them**: a trap enters with them masked and the anonymous arm never
+minded, since it neither sleeps nor shoots down; this arm does both, so
+the handler enables them before phase two when the trap frame says the
+interrupted context had them enabled (`arch_trap_frame_irqs_enabled`:
+user code, a copy inside a system call) and masks them again after. A
+fault taken with them masked is a fault in a context that must not
+sleep, and `might_sleep` reports it. Found by the shared-futex unit's
+tests, as a shootdown asserting `arch_irq_enabled()` -- the file-regions
+unit's own tests never contended the cache mutex, so the sleep never
+happened and the assert never fired.
+
+**`vm_user_futex_key`** (the shared-futex unit): the futex asks the VMM
+what a word maps. Under the space lock, a word in a shared FILE region
+is keyed by the record's vnode and `off + (uaddr - base)`, with a vnode
+reference taken for the key; anything else by `(space, uaddr)`. The
+lookup is skipped for Linux's `FUTEX_PRIVATE_FLAG` and in a space whose
+`shared_maps` -- shared mapping records pointing into it, kept by
+`vm_user_map_file` and the record's release, checked zero at destroy --
+is zero, so a process that never maps a file shared pays one load per
+futex call and no walk. `file_pages` is checked zero at `vm_space_destroy` beside
 `anon_pages`: a leaked cache frame is found at the exit of the process
 that leaked it.
 
@@ -777,8 +797,10 @@ anonymous rule (`SIGSEGV` on a user touch, `-EFAULT` in a copy).
 ### 7.7 What stays open
 
 Named in the unit's report: `memfd`/`shm_open` (a file on a memory
-filesystem, mapped shared); a futex keyed by frame for shared pages
-(`kernel/ipc/futex.c` keys by space); the ELF loader mapping `PT_LOAD`
+filesystem, mapped shared); ~~a futex keyed by frame for shared pages
+(`kernel/ipc/futex.c` keys by space)~~ -- built by the shared-futex
+unit, keyed by `(vnode, file offset)` rather than by frame
+(`vm_user_futex_key` below; `docs/kernel/ipc/api.md`); the ELF loader mapping `PT_LOAD`
 segments as file regions; eviction of mapped pages under pressure, with
 the page-level reverse map it needs; `mremap`; a user `PHYS` region for
 a device; `MAP_POPULATE`; `madvise` on file regions.

@@ -122,13 +122,15 @@ AHCI are the two entries from that list now built.
   copy-on-write, demand-paged, `msync` (`SYS_msync` 96, `LX_msync` 26),
   `SIGBUS` past the end, `maxprot`, the first shared memory between two
   processes in this system (invariants **M42--M44**, **V33**). Still
-  open from this row: a shared futex across processes
-  (`kernel/ipc/futex.c` keys by space) -- **taken up by
-  `docs/audit/next-subsystem-shared-futex.md`** (not struck until it
-  lands: the key becomes what the word maps, and the Linux
-  `FUTEX_PRIVATE_FLAG`, today masked out, is honoured) --
+  open from this row: ~~a shared futex across processes
+  (`kernel/ipc/futex.c` keys by space)~~ -- **BUILT (the shared-futex
+  unit, `docs/audit/next-subsystem-shared-futex.md`)**: the key is what
+  the word maps, `(vnode, file offset)` for a `MAP_SHARED` word with a
+  reference the waiter holds and a requeue exchanges, the Linux
+  `FUTEX_PRIVATE_FLAG` honoured both ways instead of masked out, the
+  first wait across two processes in this system (invariant **I7**) --
   `memfd`/`shm_open`, and the ELF loader mapping `PT_LOAD` segments as
-  file regions -- named as deferred in that report. The record of what was wrong, as the report
+  file regions -- named as deferred in that report and still open. The record of what was wrong, as the report
   corrected it before taking the row: natively there was no file
   mapping at all (`sys_mmap` refused anything not anonymous with the
   comment "file mappings arrive with the VFS"); the Linux personality's

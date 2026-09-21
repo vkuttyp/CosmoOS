@@ -64,7 +64,34 @@ test kills a blocked *writer*.
 - Channels, events and shared memory are not written; the futex
   (`futex.c`) exists since Phase 11 with its invariant L4 in
   `docs/compat/linux/invariants.md` (no lost wake between compare and
-  sleep); native calls since the threads unit (wait, wake) and the
+  sleep) and, since the shared-futex unit, I7 below (the key is what the
+  word maps); native calls since the threads unit (wait, wake) and the
   native thread door (requeue). A requeue of a word onto itself moves
   nothing and counts: the move would walk the list it is on without
   bound.
+
+**I7. A futex's identity is what the word maps, and a waiter holds the
+one reference its key names.** Since the shared-futex unit
+(`docs/audit/next-subsystem-shared-futex.md`) a word in a `MAP_SHARED`
+file mapping is keyed by `(vnode, file offset)` and every other word by
+`(space, uaddr)`; the classification runs under the space lock
+(`vm_user_futex_key`) and is skipped -- the private key -- for Linux's
+`FUTEX_PRIVATE_FLAG` and in a space with no shared mapping
+(`shared_maps == 0`, kept by `vm_user_map_file` and the mapping record's
+release, checked zero at `vm_space_destroy`). A shared key carries a
+vnode reference: a waiter's from classification to dequeue, exchanged
+by a requeue that changes its key (taken per moved waiter under the
+bucket locks, the old ones put after them, one vnode each way since
+every waiter on a word carries that word's key); a wake's or a
+requeue's own for the call. So a wake from another process finds the
+sleeper, a wake on a private mapping's word does not find a shared
+one's, a waiter whose mapping is unmapped or whose word is requeued
+never holds a dangling vnode, and a vnode a waiter no longer keys is
+released. L4 (no lost wake) is unchanged: the sequences are per bucket
+and the key only chooses the bucket. **Checked by** the `mmap` section
+of `init --selftest` (the two-process wait and its sleeper count across
+the boundary, the wake before the sleep, private stays private, unmap
+under a waiter, requeue across kinds, requeue onto a shared word then
+the mapping gone, the double requeue through two files with the first
+released between), `lxtest` (the flag both ways on a shared page), and
+every process exit.

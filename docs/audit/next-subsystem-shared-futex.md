@@ -1,7 +1,70 @@
 # NEXT SUBSYSTEM — a futex keyed by what the word maps
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it.
+and wait for the instruction to build it. **This report is as built**
+(the shared-futex unit), and the banner below records where the build
+differed from the design; the sections after it are the design as
+reviewed.
+
+**What the build changed:**
+
+0. **The key carries its reference.** `struct futex_key { obj, off,
+   held }`: `held` is the vnode reference a shared key holds, so a
+   waiter's key, a wake's key and a requeue's two keys are each one
+   object with one release (`key_put`, never under a bucket lock);
+   there is no separate `futex_key_release` function. The waiter
+   carries a key, not a space and an address, and `bucket_of` and the
+   two match lines take the key -- the whole change to the futex, as
+   designed.
+1. **The fault handler had to learn about interrupts.** The tests
+   found the file-backed page fault running with interrupts masked, as
+   every trap enters: the anonymous arm never minded (it neither sleeps
+   nor shoots down) and the file-regions unit's tests never contended
+   the cache mutex, so the sleep never happened and the shootdown's
+   `arch_irq_enabled()` assert never fired -- until this unit's waiters
+   and the write-back thread contended it. The arm now runs with
+   interrupts as the interrupted context had them
+   (`arch_trap_frame_irqs_enabled`, new on both architectures: user
+   code and a copy inside a system call enable them; a fault taken
+   with them masked is a context that must not sleep, and
+   `might_sleep` reports it). Recorded in `docs/kernel/memory/design.md`
+   §7.2.
+2. **The sysctl is `vm.futex_shared_keys`** (classifications that
+   yielded a shared key), and the exit check is folded into the
+   existing panic line (`0 anon and 0 file pages, N shared maps
+   unaccounted`).
+3. **The thread-exit wake classifies too.** `clear_child_tid`'s wake
+   (`kernel/process/process.c`) passes "classify" rather than
+   "private": a tid word can live anywhere the program put it.
+4. **The bench sizes are 50 000 wakes and 500 round trips**, half the
+   report's, because the section runs inside the suite's budget; the
+   numbers are per operation and unchanged by the count. **As run**
+   (QEMU TCG, one boot each): x86-64 1976 ns per wake with no shared
+   mapping (the integer test), 3875 with one (the walk), 131 705 ns per
+   cross-process round trip; AArch64 3928, 6555 and 144 550. The walk
+   costs about a wake's worth and is paid only by a process that shares;
+   the private path is what libc's mutex pays, and it is the old cost
+   plus one load. The `mmap` section is 1186 ms on x86-64 and 1468 on
+   AArch64, most of it the round trips and the three deliberate
+   timeouts.
+5. **The numbers.** Invariant **I7** (`docs/kernel/ipc/invariants.md`);
+   L4 amended to say it holds per key; 366 self-tests on both
+   architectures, unchanged in count (the unit's tests are sections and
+   `lxtest` rows).
+
+**Bug-proofs, as run.** Each mutation applied alone on x86-64, the
+debug suite booted, the file restored from HEAD; the five the report
+named and the two the review-revised lifetime rule added.
+
+| mutation | what failed |
+| --- | --- |
+| the key by space alone (`vm_user_futex_key` always private) | the two-process case: `wait_sleepers(fw, 0, 1)` never saw the child asleep, the wake returned 0, the child exited 20 (`-ETIMEDOUT`), `vm.futex_shared_keys` did not move -- and the unmap-under-a-waiter case's count too |
+| the vnode reference not taken at classification (`held = NULL`) | **nothing**, as declared in advance: `boot-test: PASS`. The files stay open through every case, so nothing reuses the vnode before a timeout |
+| `FUTEX_PRIVATE_FLAG` still masked at the Linux door | `lxtest`: all four flag checks -- the wake through the *other* key woke the waiter (1, expected 0) and its own then found nobody (0, expected 1), in both directions |
+| the counter's test inverted (`shared_maps != 0` skips the walk) | the same six checks as the first row: a process that shares got the private key |
+| `shared_maps` not decremented at the record's release | `KERNEL PANIC: vm_space_destroy: 0 anon and 0 file pages, 1 shared maps unaccounted` at the first exit of a process that mapped a file shared |
+| the moved waiters' old references never put after a requeue | the double requeue: `vm.cache_pages == cp_a - 1` false -- file A's vnode never released, its page never left -- and the section's final `cache_pages == cache0` |
+| the per-waiter reference not taken on a requeue onto a shared word | `KERNEL PANIC: kobject_get on a released vnode object`: the moved waiter's put at dequeue took the vnode's count to zero under the open file, and the next reference to it found it released |
 
 **The file-regions unit gave two processes one page and left them no way
 to wait on it.** PR #201 built shared file mappings: a `MAP_SHARED`

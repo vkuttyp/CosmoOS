@@ -59,7 +59,13 @@ and requeue) and repeated when they differ, so the value it acts on was
 the word's value while no other futex operation touched the bucket — the
 atomicity Linux gets from reading the word under the bucket lock. Gap:
 the race itself is not driven by a test; the primitive's contention
-behaviour beyond two waiters is untested.
+behaviour beyond two waiters is untested. Since the shared-futex unit
+the rule holds per key rather than per `(space, uaddr)` -- the sequences
+are the bucket's and the key only chooses the bucket -- and
+`FUTEX_PRIVATE_FLAG` chooses between the private key and what the word
+maps (`docs/kernel/ipc/invariants.md` I7). Check: `lxtest` (on a
+`MAP_SHARED` page, a waiter with the flag is not woken without it and is
+with it, and the reverse pair).
 
 **L5. Signals are delivered only through the kernel core, and only in
 ways Linux programs expect.** (Milestone 10; the stage-1 rule "recorded,

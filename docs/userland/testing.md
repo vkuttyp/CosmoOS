@@ -59,7 +59,27 @@ path), `mmap-cycle` (200 map/write/unmap cycles, shared and private;
 its exit runs the kernel's `file_pages == 0` check by construction); a
 `write()` into a page mapped `PROT_READ|PROT_EXEC` shared runs the
 kernel-alias instruction-cache sync (`vm.cache_exec_syncs` +1; a
-regression check, TCG cannot show coherence); on cosmofs (`vda` at `/mnt`), a write through a
+regression check, TCG cannot show coherence); **the futex keyed by what
+the word maps** (the shared-futex unit): a child (`mmap-futex-wait`)
+maps the file shared and sleeps on a word in it, the parent counts it
+asleep through a requeue of the word onto itself -- a count that
+crosses the process boundary only if the key does -- then writes and
+wakes it (1 woken, the child exits 0: the first wait across two
+processes in this system); the wake before the sleep (0 woken, the
+child's wait `EAGAIN`); a private mapping's word at the same offset is
+neither counted nor woken by the shared key and is by its own; a thread
+asleep on a second shared mapping's word whose mapping is then unmapped
+times out cleanly; a waiter on the shared word requeued onto a private
+word and woken there, the counts moving with it; private waiters
+requeued onto a shared mapping's word and the mapping then unmapped
+(they time out, the reference taken per moved waiter outliving it); a
+double requeue shared (file A) -> private -> shared (file B) with file A
+unmapped, closed and unlinked in between: its one page leaves the cache
+(`vm.cache_pages` -1, the exchanged reference having let it go) and the
+wake through B finds the waiter; `USERBENCH: futex` (50 000 wakes with
+no waiter before any shared mapping exists and again with one, and 500
+cross-process round trips through two shared words with
+`mmap-futex-pingpong`); on cosmofs (`vda` at `/mnt`), a write through a
 shared mapping dirties by one fault, `MS_SYNC` writes exactly that page
 (`vm.cache_writebacks` +1), a second `MS_SYNC` writes nothing, a second
 write faults again (the PTE was lowered) and the third `MS_SYNC` writes

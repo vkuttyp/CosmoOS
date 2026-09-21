@@ -222,6 +222,14 @@ Details per call:
   of its teardown (invariant M40), which is a race in the caller, not
   something to sleep through. The Linux personality's `mprotect` rounds
   `len` up; the native one requires a page multiple, as `munmap` does.
+- **futex_wait**, **futex_wake**, **futex_requeue** on a word in a
+  `MAP_SHARED` file mapping (since the shared-futex unit): the futex is
+  keyed by what the word maps -- the file and the offset -- so every
+  process mapping that file shares it, and a wake from one finds a
+  sleeper in another. A word anywhere else is the process's own, as
+  before. The native calls carry no flag: the kernel can see what the
+  word maps and looks, and a process that never maps a file shared pays
+  one load per call and no walk (`docs/kernel/ipc/api.md`, I7).
 - **futex_requeue**: the compare form only — `val` is compared with
   `*w1` atomically against the bucket's other operations and `EAGAIN`
   says "the word moved; decide again"; the non-comparing form has the
@@ -359,7 +367,9 @@ Details per call:
   `docs/kernel/security/design.md` §3), since the file-regions unit
   `vm.cache_writebacks` (the cache's write-back count), `vm.cache_exec_syncs` (writes into a page some mapping executes, synced by the kernel alias) and the FILE
   fault's counters `vm.file_faults`, `vm.file_cow_faults`,
-  `vm.file_dirty_faults`, `vm.file_fault_retries`, `vm.file_sigbus`
+  `vm.file_dirty_faults`, `vm.file_fault_retries`, `vm.file_sigbus`,
+  `vm.futex_shared_keys` (futex calls whose word was classified as a
+  shared file word, the shared-futex unit)
   (`docs/kernel/memory/design.md` §7) and, debug builds, the state of
   the held-fault seam `debug.file_fault_hold` (0 idle, 1 armed, 2
   held; `-ENOENT` in release builds), since Phase 12

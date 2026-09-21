@@ -376,7 +376,7 @@ the same on both, and it is not the order the check counts suggest --
 `svc` 1386 / 1489 ms from **34** checks and nine sleeps waiting on
 service state, `proc` 912 / 939 ms from 235, `fpu` 664 / 665 ms from 4
 (it spawns two partners), then `fsctl`, `fs`, `trap`, `priv`, `net`,
-`proc-fs`, `syscalls`, and since the file-regions unit `mmap` (264 / 300 ms, four spawned children and a 2 MiB bench). Time here is spawning and waiting, not
+`proc-fs`, `syscalls`, and since the file-regions unit `mmap` (264 / 300 ms then; 1186 / 1468 ms since the shared-futex unit added its two-process waits, three deliberate timeouts and the futex bench). Time here is spawning and waiting, not
 checking.
 
 ## Gaps and planned tests

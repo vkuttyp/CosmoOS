@@ -108,10 +108,14 @@ as on Linux; a `MAP_FIXED` mapping replaces whatever was there.
 
 ### futex (`kernel/ipc/futex.c`)
 
-A native primitive: `futex_wait(space, uaddr, val, timeout_ns)` and
-`futex_wake(space, uaddr, n)`. One table of 64 buckets hashed by
-`(space, uaddr)`; each waiter is a `struct futex_waiter { space, uaddr,
-struct waitqueue wq (one waiter), woken }` on the bucket list; each
+A native primitive: `futex_wait(space, uaddr, val, timeout_ns,
+private)` and `futex_wake(space, uaddr, n, private)`. One table of 64
+buckets hashed by the **key** -- since the shared-futex unit what the
+word maps: `(space, uaddr)` for a word in the process's own memory,
+`(vnode, file offset)` for a word in a `MAP_SHARED` file mapping, so
+two processes sharing a page share the futex (`docs/kernel/ipc/api.md`,
+invariant I7). Each waiter is a `struct futex_waiter { key, bucket,
+thread, woken, timed_out }` on the bucket list; each
 bucket carries a `wake_seq`. `wait`: lock the bucket, read `wake_seq`,
 unlock; `copy_from_user` the word with no lock held (a demand fault may
 allocate, a fatal fault kills the process: neither may happen under a
@@ -124,8 +128,15 @@ futex contract permits and musl retries), else enqueue; unlock;
 waiters of that `(space, uaddr)`, return the count. No wake is lost: a
 wake that ran after the waiter's read of the word bumped the sequence the
 waiter checks before sleeping (`docs/kernel/lockdep/design.md`, "futex"). The Linux call accepts `FUTEX_WAIT`
-(0), `FUTEX_WAKE` (1), with or without `FUTEX_PRIVATE_FLAG` (128) and
+(0), `FUTEX_WAKE` (1), the requeues and the bitset forms, with
 `FUTEX_CLOCK_REALTIME`; other operations return `-ENOSYS`.
+**`FUTEX_PRIVATE_FLAG` (128) is honoured both ways**: set, the key is
+this process's without a lookup (the program's promise that nobody
+outside it can see the word, and the cheaper path); clear, the word is
+classified by what it maps, so a `PTHREAD_PROCESS_SHARED` mutex in a
+`MAP_SHARED` page -- musl clears the flag for one -- is shared. This
+door used to mask the flag out, and every futex was private; the
+shared-futex unit ended that.
 
 ### Signals, stage 1
 

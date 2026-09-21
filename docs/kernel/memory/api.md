@@ -450,6 +450,17 @@ synchronises the instruction stream for a `write()` into that page by
 the frame's kernel alias (`arch_mmu_sync_icache_kernel`, design.md
 §7.5).
 
+### `int vm_user_futex_key(struct vm_space *space, uint64_t uaddr, bool private, struct futex_key *out)`
+
+The futex's identity for a user word (the shared-futex unit,
+`docs/kernel/ipc/api.md`): a word in a shared file mapping is keyed by
+`(vnode, file offset)` with a vnode reference taken into `out->held`;
+anything else by `(space, uaddr)` with none. `private` (Linux's flag)
+skips the lookup, and so does a space whose `shared_maps` is zero. Under
+the space lock; returns 0. The caller releases the reference when the
+key is done with. `vm.futex_shared_keys` counts the shared
+classifications.
+
 ### `void vm_test_file_hold_arm(void)`, `unsigned vm_test_file_hold_state(void)` (debug builds)
 
 The seam of `vm-file-fault-hold` (design.md §7, testing.md): armed, the
