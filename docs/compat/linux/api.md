@@ -137,7 +137,7 @@ bounds check returns `-ENOSYS` and logs `unknown number ... (linux)`).
 (`compat/linux/nr_aarch64.h`), selected by `linux_abi.h` per
 architecture (`LX_*`; the calls that exist only on x86-64 — `open`,
 `stat`, `lstat`, `poll`, `access`, `pipe`, `select`, `dup2`, `pause`,
-`fork`, `vfork`, `rename`, `mkdir`, `rmdir`, `creat`, `unlink`,
+`fork`, `vfork`, `rename`, `mkdir`, `mknod`, `rmdir`, `creat`, `unlink`,
 `readlink`, `symlink`, `getpgrp`, `arch_prctl`, `time` — have no AArch64
 number and
 their table rows are `#ifdef`-guarded). Arguments arrive in `rdi rsi rdx
@@ -171,7 +171,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `check_dirfd` then `stat`, or `lstat` with `AT_SYMLINK_NOFOLLOW` (0x100) | other flags ignored |
 | 217 | `getdents64` | `file_readdir` into a kernel buffer of `len - len/4` bytes, `lx_dirents_from_native` into a second buffer of `len`, copied out | `len` clamped to 64 KiB, `-EINVAL` below 32; `d_off` is the offset of the next record in *this* buffer, not a seekable cookie |
 | 83, 258 | `mkdir`, `mkdirat` | `vfs_mkdir(cwd, path, mode & 07777)` | `mkdirat`: `check_dirfd` |
-| 259 / 33 | `mknodat` | (the named-pipes unit) `S_IFIFO` → `vfs_mknod(cwd, path, mode & 07777, VNODE_FIFO)` | `S_IFSOCK` `-EINVAL` (a socket's name is made by `bind`); any other type `-EPERM`, Linux's answer to a caller without `CAP_MKNOD`; `dev` ignored; `check_dirfd` |
+| 133 / —, 259 / 33 | `mknod`, `mknodat` | (the named-pipes unit) `S_IFIFO` → `vfs_mknod(cwd, path, mode & 07777, VNODE_FIFO)`; `mknod` is x86-64's legacy form (AArch64 has only `mknodat`) | `S_IFSOCK` `-EINVAL` (a socket's name is made by `bind`); any other type `-EPERM`, Linux's answer to a caller without `CAP_MKNOD`; `dev` ignored; `check_dirfd` |
 | 84 | `rmdir` | `vfs_rmdir` | |
 | 87, 263 | `unlink`, `unlinkat` | `vfs_unlink`; `unlinkat` with `AT_REMOVEDIR` (0x200) → `vfs_rmdir` | `check_dirfd` |
 | 82, 264 | `rename`, `renameat` | `vfs_rename` | `check_dirfd` on both dirfds |

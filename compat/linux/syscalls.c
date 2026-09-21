@@ -582,16 +582,9 @@ static int64_t lx_mkdirat(struct syscall_args *a)
  * (S_IFIFO); a socket's name is made by bind (S_IFSOCK -EINVAL, as the
  * native mknod says); every other type is -EPERM, Linux's answer to a
  * caller without CAP_MKNOD. */
-static int64_t lx_mknodat(struct syscall_args *a)
+static int64_t do_mknod(const char *path, uint32_t mode)
 {
-    char path[VFS_PATH_MAX];
-    int rc = get_path(a->a[1], path);
-    if (rc)
-        return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
-    if (rc)
-        return rc;
-    uint32_t mode = (uint32_t)a->a[2];
+    int rc;
     switch (mode & LX_S_IFMT) {
     case LX_S_IFIFO:
         break;
@@ -607,6 +600,29 @@ static int64_t lx_mknodat(struct syscall_args *a)
     if (rc == 0)
         vnode_put(vn);
     return rc;
+}
+
+static int64_t lx_mknodat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[1], path);
+    if (rc)
+        return rc;
+    rc = check_dirfd((int64_t)a->a[0], path);
+    if (rc)
+        return rc;
+    return do_mknod(path, (uint32_t)a->a[2]);
+}
+
+/* The legacy mknod (x86-64 only; AArch64 has the *at form alone), as
+ * mkdir beside mkdirat. */
+static __maybe_unused int64_t lx_mknod(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    return do_mknod(path, (uint32_t)a->a[1]);
 }
 
 static int64_t lx_unlinkat(struct syscall_args *a)
@@ -2569,6 +2585,9 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_openat] = lx_openat,
     [LX_mkdirat] = lx_mkdirat,
     [LX_mknodat] = lx_mknodat,
+#ifdef LX_mknod
+    [LX_mknod] = lx_mknod,
+#endif
     [LX_newfstatat] = lx_newfstatat,
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,

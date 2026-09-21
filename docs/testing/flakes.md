@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Sixty-two, to 2026-09-21**, across CI and this developer's machine, on
+**Sixty-five, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -840,6 +840,9 @@ of this section said eight and then listed nine:
 | PR #204's own CI run | observed, aarch64, the plain debug boot (`3c170f5`, job 106306472451, a driver-test branch): `connect 0 in 1223 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:59216 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 115.0s. Row one, the `sent 12` variant with a retransmission |
 | PR #205's own CI run | observed, aarch64, the plain debug boot (`e51f07e`, run 35596999894, a one-document branch): `connect 0 in 606 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:33812 accepted at 95.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 116.0s. Row one, the `sent 12` variant |
 | PR #207's own CI run | observed, **x86-64**, the plain debug boot (`89bd3d5`, run 35611499251, the unix-sockets build, whose diff touches no inet path): `connect 0 in 1008 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:38154 accepted at 75.2s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 95.2s. Row one |
+| `main` @ `92f5bd2` | observed, aarch64, the protection-capable boot of the unix-sockets report merge's `main` run on 2026-09-21 (35601645471), read from the logs afterwards: **`connect -104 in 1327 ms`** -- the connect itself reset, `sent -1`, `recv -1`, `pending error -104`, `sndbuf free 0`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:43980 accepted at 74.7s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 94.7s. The connect-reset shape of PR #171's first and `26c1b5f`'s aarch64, this time with a retransmission |
+| `main` @ `19f508c` | observed, aarch64, the plain debug boot of the named-pipes report merge's `main` run on 2026-09-21 (35620649878, a documentation-only commit), read from the logs afterwards: `connect 0 in 1213 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:35822 accepted at 96.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 2 ms`, gave up at 116.1s. Row one |
+| PR #209's own CI run | observed, aarch64, the plain debug boot (`84df382`, run 35631426307, the named-pipes build, whose diff touches no inet path): `connect 0 in 638 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:38752 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 115.0s; the self-test blew its budget at 21128 ms against 8000 ms, which is the waiting. Row one |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -850,15 +853,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty entries, sixty-two occurrences -- and the table is the tally,
+Fifty-three entries, sixty-five occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last forty-five rows carry
-the instrument's reading, forty of them watched as they happened
-and five of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-three
-instrumented** occurrences behind the other forty-four rows carry the
+are not independently re-verified here. The last forty-eight rows carry
+the instrument's reading, forty-one of them watched as they happened
+and seven of `main`'s read from the logs afterwards: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-six
+instrumented** occurrences behind the other forty-seven rows carry the
 guest's side. Rows and occurrences differ because **eleven** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
@@ -1551,6 +1554,27 @@ which CPU the console's receive interrupt was on (`serial: console
 input on IRQ` is in the `dmesg` output above the stall). Not a bound
 and not a list entry: re-run, and if it recurs, instrument before
 theorising.
+
+**It recurred, 2026-09-21, `4be3b72`, PR #208's aarch64 job, the
+release boot** (run 35620152470; the branch changes one Markdown file):
+the three debug boots passed, the interactive harness got through its
+first twenty-six commands -- the interrupt, the two `fg`s, the line
+editing, `after-pipeline-ok` -- and then typed `sleep 1 &`, `jobs`, and
+`pkg update && pkg install hello && hello && pkg list`. The echo of
+that last line stopped at `pkg update && pkg install hel`, and the very
+next thing in the log is `process: pid 30 'sleep' exited with status
+0` -- the background job from two commands earlier finishing. Nothing
+followed for the rest of the 180 s: `no prompt before command 28`, no
+prompt, no kernel line. Second sighting, same shape as the first --
+keystrokes echoed up to a point and then not, right after a job event
+the shell must handle (there `^C` and a reaped foreground job, here a
+reaped background job) -- and the same build kind, the aarch64
+release. Two is not a mechanism, but two is a place to look: what the
+shell does when a child exits while the terminal is in the middle of a
+line, and whether the console's receive path is the thing that stops
+or merely the thing that goes quiet. The sequence is deterministic
+enough to try on purpose: a background `sleep` timed to exit
+mid-keystroke. Still not a list entry; still re-run first.
 
 ## `quiesce-kick-spinner` is upset by any test that creates threads
 

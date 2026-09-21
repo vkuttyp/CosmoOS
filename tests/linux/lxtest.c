@@ -576,6 +576,9 @@ int main(int argc, char **argv)
     CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxfifo", LX_S_IFIFO | 0644, 0) == 0, 0);
     CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxchr", LX_S_IFCHR | 0644, 0) == -1, 0);       /* EPERM */
     CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxsockn", LX_S_IFSOCK | 0644, 0) == -22, 0);   /* EINVAL: bind makes those */
+#ifdef LX_mknod
+    CHECKV(sc3(LX_mknod, "/tmp/lxfifo", LX_S_IFIFO | 0644, 0) == -17, 0);   /* the legacy form, x86-64: EEXIST */
+#endif
     CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxfifo", LX_O_WRONLY | LX_O_NONBLOCK, 0) == -6, 0);   /* ENXIO: no reader */
     long fr = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxfifo", LX_O_RDONLY | LX_O_NONBLOCK, 0);
     CHECKV(fr >= 3, fr);

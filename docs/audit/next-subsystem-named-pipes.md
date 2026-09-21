@@ -72,7 +72,11 @@ wanted anyway: a `struct file` that can say whether it would block.
    an open allocates a ring only when the fifo has none, dropping the
    lock to allocate and looking again, so a second open of an active
    FIFO allocates nothing and cannot fail for a ring it would not use;
-   and `fifo_counts`, declared and unused, is gone.
+   and `fifo_counts`, declared and unused, is gone. The Linux door
+   also gained the legacy `mknod` (133, x86-64 only; AArch64 has the
+   `*at` form alone) beside `mknodat`, as `mkdir` sits beside
+   `mkdirat`; CosmoReview asked for it under the number 25, which is
+   `mremap`.
 
 **Bug-proofs, as run.** Each mutation applied alone on x86-64, the
 debug suite booted, the file restored from HEAD; the report's nine.
