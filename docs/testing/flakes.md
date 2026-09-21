@@ -1595,6 +1595,46 @@ recovered from a log, which is the instrument-before-theory lesson
 this file keeps re-learning. Not repaired here; it belongs to the
 network tests.
 
+## `virtio-remove-inflight`'s held pass found nothing
+
+Not a flake to list: a defect in a test seam, found by the one failure
+it produced and closed by construction.
+
+**The sighting.** 2026-09-21, aarch64, the GICv3 boot of PR #203's CI
+(run 35586893021, `51c5b23`, a branch that touches nothing under
+`drivers/`): `SELFTEST: virtio-remove-inflight ... FAIL: check failed:
+found >= 1 at line 1219 (30 ms)`. The held pass -- the driver's slot
+table filled by construction, the completions held -- and the remove
+found **0** in flight. Every other assertion in the pass held: every
+accepted bio completed exactly once, with `0` or `-ENODEV` and no
+`-EIO`, and `c_eio == found == 0`. So the requests were not lost; they
+were *consumed*, by the driver, after the hold was stored.
+
+**The reading.** The hold was checked once, at `vblk_done`'s entry. A
+handler already inside its pop loop when the hold landed kept popping
+-- the check was behind it -- and a QEMU device finishes a table's
+worth in one burst (its AIO completions land a batch per main-loop
+turn), so a handler entered on such a burst pops the whole table after
+the hold is stored. The test then saw its condition (accepted minus
+completed above the table's size: the pending list had formed behind a
+full table, which is true whether or not the handler is draining it),
+removed the device, and `vblk_remove`'s `virtq_free` waited, as it
+must, for that handler to finish -- which is exactly why the walk found
+nothing. The seam's contract was "from this moment, finished requests
+stay in flight"; the check at the door kept it only for handlers not
+yet running.
+
+**What changed.** The check runs before every pop, so a handler inside
+its loop stops at its next one; and a fourth pass, `held-inside`,
+builds the moment rather than racing for it -- every hold in it is
+stored from a completion callback, from inside the handler, and the
+two requests it parks behind the hold are known to be finished at the
+device by a new exact seam (`unconsumed`: used-ring entries not yet
+popped) rather than by waiting. It fails deterministically with the
+check back at the door (`docs/kernel/device/testing.md`). No re-run
+was needed to discharge the sighting: the mechanism is gone, not
+outwaited.
+
 ## `el2-guest-irq-queue`: the second injection was not still pending
 
 **2026-09-20, aarch64 CI, the GIC boot, on the `mprotect` unit's first

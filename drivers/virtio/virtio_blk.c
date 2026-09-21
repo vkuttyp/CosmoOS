@@ -110,6 +110,11 @@ static uint64_t g_test_before_irq_seq, g_test_walk_seq;
 
 static void vblk_test_hold_completions(struct blkdev *bd) { __atomic_store_n(&g_test_hold_bd, bd, __ATOMIC_RELEASE); }
 static unsigned vblk_test_inflight_at_remove(void) { return __atomic_load_n(&g_test_inflight_at_remove, __ATOMIC_ACQUIRE); }
+static unsigned vblk_test_unconsumed(struct blkdev *bd)
+{
+    struct vblk *vb = bd->priv;
+    return vb->vq != NULL ? virtq_unconsumed(vb->vq) : 0;
+}
 static uint64_t vblk_test_remove_seq(void) { return __atomic_load_n(&g_test_remove_seq, __ATOMIC_ACQUIRE); }
 static unsigned vblk_test_releases(void) { return __atomic_load_n(&g_test_releases, __ATOMIC_ACQUIRE); }
 static unsigned vblk_test_nr_slots(struct blkdev *bd) { return ((struct vblk *)bd->priv)->nr_slots; }
@@ -127,6 +132,7 @@ static const struct blk_test_driver_hooks vblk_test_hooks = {
     .driver = "virtio_blk",
     .hold_completions = vblk_test_hold_completions,
     .inflight_at_remove = vblk_test_inflight_at_remove,
+    .unconsumed = vblk_test_unconsumed,
     .remove_seq = vblk_test_remove_seq,
     .releases = vblk_test_releases,
     .nr_slots = vblk_test_nr_slots,
@@ -237,11 +243,24 @@ static void vblk_done(struct virtqueue *vq)
     struct bio *bio;
     if (vb == NULL)
         return;
+    for (;;) {
 #if CONFIG_DEBUG
-    if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
-        return;   /* held: the finished requests stay in flight for the remove to find */
+        /*
+         * Held: the finished requests stay in flight for the remove to
+         * find. Checked before EVERY pop, not once at the door: a
+         * handler already inside this loop when the hold is stored is
+         * the case the hold exists for, and with the check at the door
+         * it kept popping -- the device had finished every slot, the
+         * handler drained them all, and the remove walked an empty
+         * table (`virtio-remove-inflight` held: found 0, once in CI;
+         * docs/testing/flakes.md). The `held-inside` pass builds that
+         * moment on purpose.
+         */
+        if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
+            return;
 #endif
-    while ((bio = virtq_pop(vq, &len)) != NULL) {
+        if ((bio = virtq_pop(vq, &len)) == NULL)
+            return;
         /* Ownership is decided under the lock, by pointer, before the bio
          * is touched: the timeout path may have completed it already (and
          * a synchronous caller freed its stack frame), so neither its

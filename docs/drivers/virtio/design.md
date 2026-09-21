@@ -147,8 +147,10 @@ already released their interrupts before freeing what a handler
 touches. That order is now raced rather than argued
 (`virtio-remove-inflight`, `docs/kernel/device/testing.md`): in debug
 builds the driver can be told to leave one device's finished requests
-unconsumed, so the remove finds its slot table occupied by
-construction, and it records what it found and stamps the end of its
+unconsumed -- checked before every pop, not once at the handler's door,
+so a handler already inside its loop when it is told stops too -- so the
+remove finds its slot table occupied by construction, and it records
+what it found and stamps the end of its
 leftover walk from the block layer's test sequence so a completion can
 be ordered against it. The hooks are published to the block layer at
 module init (`blk_test_driver_hooks_set`), since the kernel image

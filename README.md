@@ -3096,6 +3096,20 @@ See [docs/development.md](docs/development.md).
   shared mapping on x86-64 / AArch64, 3.9 / 6.6 us with one, and a
   cross-process round trip 132 / 145 us. Invariant **I7**.
   Report: `docs/audit/next-subsystem-shared-futex.md` (PR #203).
+- **The hold that held only at the door.** `virtio-remove-inflight`'s
+  held pass found **0** in flight once in CI, on a branch that touches
+  no driver: the seam that parks a device's finished requests was
+  checked once at `vblk_done`'s entry, so a handler already inside its
+  pop loop when the hold landed kept popping, and a QEMU device
+  finishes a table's worth in one burst. The check now runs before
+  every pop, and a fourth pass, `held-inside`, builds that moment
+  rather than racing for it -- every hold in it stored from a
+  completion callback, the parked requests known to be finished at the
+  device by an exact seam (`unconsumed`: used entries not yet popped)
+  instead of a wait. With the check back at the door it fails
+  deterministically. Recorded in `docs/testing/flakes.md`;
+  `docs/kernel/device/testing.md`; the #199 report's banner, item 11
+  (PR #204).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

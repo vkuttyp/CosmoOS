@@ -83,6 +83,17 @@ and the banner below records where the build differed from the design.
    churn exposed one on AArch64; the repair is a bounded wait, made
    here because it blocked the gate, and recorded in
    `docs/testing/flakes.md`.
+11. **The hold is checked before every pop, not once at the door**
+   (PR #204, a follow-up after the merge, 2026-09-21). The first build checked
+   the hold at `vblk_done`'s entry; a handler already inside its pop
+   loop when the hold was stored kept popping, a QEMU device finishes
+   a table's worth in one burst, and once in CI the held pass found 0
+   in flight with every other assertion holding. The check moved into
+   the loop, and a fourth pass, `held-inside`, builds that moment by
+   storing every hold from a completion callback, with a new exact seam
+   (`unconsumed`: used entries the driver has not popped) in place of a
+   wait on the clock. `docs/kernel/device/testing.md`, and the record in
+   `docs/testing/flakes.md`.
 
 **The lifetime-windows unit stopped one level lower than it planned, and
 said so.** Its report (`docs/audit/next-subsystem-lifetime-windows.md`,
@@ -233,8 +244,8 @@ the driver's own in-flight table non-empty at the moment `vblk_remove`
 runs, and a real QEMU device completes a read in microseconds. So one
 debug hook in `virtio_blk.c`: `vblk_test_hold_completions(bool)` — as
 built, `hold_completions(struct blkdev *)` in the published hook table,
-`NULL` releasing (banner item 1) — which makes `vblk_done` (the interrupt's completion walk) return without
-consuming anything while armed. The device does the I/O and signals; the
+`NULL` releasing (banner item 1) — which makes `vblk_done` (the interrupt's completion walk) stop
+consuming while armed, checked before every pop (banner item 11). The device does the I/O and signals; the
 driver leaves the slots in flight by construction; the remove then finds
 them. That is the honest description of what the hook does — the
 requests are done at the device and unconsumed by the driver — and it is
@@ -336,8 +347,8 @@ than claiming the reset was proved.
 | file | change |
 | --- | --- |
 | `scripts/qemu-run.sh` | `QEMU_RMDISK`, a second `virtio-blk-pci` attached last on both machines; `QEMU_RMDISK=0` leaves it out |
-| `tests/boot/run_boot_test.py` | a fresh `boot-test.log.rmdisk.img` per run; the `vd[bc]` marker when the disk is present, and the test's own three lines wherever it can run |
-| `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, `vblk_test_remove_seq` (the boundary stamp, at the end of `vblk_remove`), a release counter (debug) |
+| `tests/boot/run_boot_test.py` | a fresh `boot-test.log.rmdisk.img` per run; the `vd[bc]` marker when the disk is present, and the test's own four lines (`held`, `unheld`, `irq-order`, and since banner item 11 `held-inside`) wherever it can run |
+| `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions` (checked before every pop, banner item 11), `vblk_test_inflight_at_remove`, `vblk_test_unconsumed` (used entries not yet popped, banner item 11, over `virtq_unconsumed`), `vblk_test_remove_seq` (the boundary stamp, at the end of `vblk_remove`), a release counter (debug) |
 | `drivers/pci/pci.c`, `drivers/include/drivers/pci.h` | `pci_test_rebind` (debug) |
 | `kernel/device/device.c`, `kernel/include/kernel/device.h` | `device_test_bind` for it, beside `device_test_unbind` |
 | `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `struct blk_test_driver_hooks` and `blk_test_driver_hooks_set`, the table a driver publishes for its test seams (as built, banner item 1); `blk_test_tick` made callable (debug), so the driver's remove and the test's completion callback draw from one sequence |
@@ -359,6 +370,7 @@ than claiming the reset was proved.
 | `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after the removal's own boundary stamp (the completion callback's stamps against `vblk_test_remove_seq`); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
 | the same, unheld | the natural race, a regression guard |
 | `irq-order` (as built, banner item 9) | a read-side section held across the teardown: the queue's interrupt is released, and `synchronize_irq` waited, before the slot walk (`held_until < walk`) |
+| `held-inside` (as built, banner item 11) | the hold stored from inside the handler's loop, every hold in the pass stored from a completion callback; two requests parked behind it by `unconsumed`, a fourth whose completion brings the handler in: it pops one, the remove finds exactly 2 and completes them `-EIO`, 4 completed in all, none twice. With the check at the door the handler pops all three and the remove finds 0 |
 | the rebind | the disk comes back under its old name and reads the same first sector: the hardware was left sane |
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
 | the documented PCI numbering | `00:02.0`–`00:05.0` unchanged with the new function present (`selftest_pci` walks every function; the doc's count is corrected, not asserted) |

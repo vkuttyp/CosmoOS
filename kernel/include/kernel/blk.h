@@ -183,6 +183,7 @@ struct blk_test_driver_hooks {
     const char *driver;                              /* "virtio_blk" */
     void (*hold_completions)(struct blkdev *bd);     /* leave this device's finished requests unconsumed; NULL releases */
     unsigned (*inflight_at_remove)(void);            /* what the last remove found in its slot table */
+    unsigned (*unconsumed)(struct blkdev *bd);       /* finished by the device, left unpopped by the hold */
     uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
     unsigned (*releases)(void);                      /* release hooks run so far */
     unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
