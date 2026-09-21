@@ -1643,6 +1643,24 @@ static int mmap_probe(const char *what)
         }
         return 0;
     }
+    if (strcmp(what, "mem-limit") == 0) {
+        /* A copy-on-write copy is anonymous memory: a private page read
+         * first (the cache frame installed read-only) and then written
+         * needs a frame, and COSMO_RLIMIT_MEM refuses it like any other
+         * (review found the check missing on the replace path). Exit
+         * 139 from outside. */
+        int fd = (int)cosmo_open(MMAP_TEST_FILE, COSMO_O_RDWR, 0);
+        if (fd < 0)
+            return 10;
+        volatile unsigned char *m = mmap(NULL, P, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        if (m == MAP_FAILED)
+            return 11;
+        unsigned char first = m[0];                    /* the cache frame, read-only */
+        if (cosmo_setrlimit(COSMO_RLIMIT_MEM, 0) != 0)   /* nothing more may be populated */
+            return 12;
+        m[0] = (unsigned char)(first + 1);             /* the copy is refused: fatal */
+        return 9;
+    }
     if (strcmp(what, "as-limit") == 0) {
         /* COSMO_RLIMIT_AS refuses a file mapping past it as it refuses an
          * anonymous one: lowering below the current use is allowed, and
@@ -4133,7 +4151,25 @@ static void mmap_selftest(void)
     CHECK(probe_status("mmap-past-end") == 128 + 7);
     CHECK(probe_status("mmap-truncate") == 128 + 7);
     CHECK(probe_status("mmap-as-limit") == 0);
+    CHECK(probe_status("mmap-mem-limit") == 128 + 11);
     CHECK(probe_status("mmap-cycle") == 0);
+
+    /* A write() into a page some mapping executes from: the kernel
+     * synchronises the instruction stream by the frame's kernel alias
+     * (M41; review found the path missing). A regression check that
+     * the path runs -- TCG cannot show coherence -- and that the counter
+     * moved; W^X keeps this mapping read/execute. */
+    unsigned char *xm = mmap(NULL, P, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    CHECK(xm != MAP_FAILED);
+    if (xm != MAP_FAILED) {
+        CHECK(xm[0] == pat[0]);                        /* installed, executable */
+        uint64_t xs0 = sysctl_u64("vm.cache_exec_syncs");
+        b = 0x90;
+        CHECK(file_wr(fd, 0, &b, 1) == 1 && xm[0] == 0x90);
+        CHECK(sysctl_u64("vm.cache_exec_syncs") == xs0 + 1);
+        CHECK(file_wr(fd, 0, pat, 1) == 1);
+        CHECK(munmap(xm, P) == 0);
+    }
     CHECK(cosmo_unlink("/tmp/mm-short") == 0 && cosmo_unlink("/tmp/mm-trunc") == 0);
 
     /* msync writes, and the re-dirtying fault, on cosmofs. */

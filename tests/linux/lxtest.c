@@ -621,6 +621,20 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_pwrite64, mfd, pattern + 30, 1, 30) == 1, 0);
         sc2(LX_munmap, fm3, 4096);
     }
+    /* The mapping type: none, or a value past MAP_SHARED_VALIDATE, is
+     * EINVAL, anonymous or not; 3 (SHARED_VALIDATE) is shared. */
+    CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_ANONYMOUS, -1, 0) == -22, 0);
+    CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ, 0, mfd, 0) == -22, 0);
+    CHECKV(sc6(LX_mmap, 0, 4096, LX_PROT_READ, 4, mfd, 0) == -22, 0);
+    long sv = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED | LX_MAP_PRIVATE, mfd, 0);
+    CHECKV(sv > 0, sv);
+    if (sv > 0) {
+        ((unsigned char *)sv)[40] = 0x77;
+        unsigned char got = 0;
+        CHECKV(sc4(LX_pread64, mfd, &got, 1, 40) == 1 && got == 0x77, got);   /* shared, as VALIDATE means */
+        CHECKV(sc4(LX_pwrite64, mfd, pattern + 40, 1, 40) == 1, 0);
+        sc2(LX_munmap, sv, 4096);
+    }
     /* A shared writable mapping of a file opened read-only: EACCES. */
     long rofd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmap", LX_O_RDONLY, 0);
     CHECKV(rofd >= 3, rofd);

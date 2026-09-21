@@ -345,7 +345,11 @@ functions take `pc.lock` beneath it.
   `ops->readpage` for pages inside the file. Returns bytes or, if
   nothing was read, the error.
 - **`int64_t pagecache_write(vn, off, buf, len)`** Dirties pages and
-  grows `vn->size`; `-EFBIG` on offset overflow.
+  grows `vn->size` (lifting `trim_bound`); `-EFBIG` on offset overflow.
+  A page some mapping executes from has its instruction stream
+  synchronised by the frame's kernel alias after the write
+  (`arch_mmu_sync_icache_kernel`, `exec_syncs`), as does
+  `pagecache_put_page`.
 - **`int pagecache_sync(vn)`** `ops->writepage`/`writepages` for every
   dirty page, in ascending order; stops at the first error, leaves the
   failed pages dirty, and records the error (`wb_err`, `wb_seq` under
@@ -370,7 +374,7 @@ functions take `pc.lock` beneath it.
   `misses`, `writebacks`, `pages`, `reclaimed`, `budget_refusals`,
   `wb_errors` (failures recorded), `dropped_dirty` (a named file's dirty
   pages dropped at its vnode's release: data lost), `pinned_skips`
-  (reclaim candidates left alone because a mapping holds the frame)
+  (reclaim candidates left alone because a mapping holds the frame), `exec_syncs` (writes into a page some mapping executes: the instruction cache synced by the kernel alias)
   (global).
 
 ## Storage pool (`kernel/include/kernel/storage.h`)

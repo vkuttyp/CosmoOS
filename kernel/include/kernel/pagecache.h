@@ -117,6 +117,7 @@ struct pagecache_stats {
     uint64_t wb_errors;        /* write-back failures recorded (pagecache_sync) */
     uint64_t dropped_dirty;    /* dirty pages dropped at a vnode's release: data lost */
     uint64_t pinned_skips;     /* reclaim candidates left alone because a mapping holds the frame */
+    uint64_t exec_syncs;       /* writes into a page some mapping executes: the I-cache synced by the kernel alias */
 };
 void pagecache_get_stats(struct pagecache_stats *out);
 

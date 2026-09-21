@@ -442,6 +442,14 @@ and lower to read-only the present PTEs of `n` pages from `index`
 only). Each takes the record's space lock per page, shoots down with it
 released, and puts the frames it unmapped last.
 
+### `bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index)`
+
+Whether the record's region covering file page `index` is executable
+(under the record's space lock). The page cache asks before it
+synchronises the instruction stream for a `write()` into that page by
+the frame's kernel alias (`arch_mmu_sync_icache_kernel`, design.md
+§7.5).
+
 ### `void vm_test_file_hold_arm(void)`, `unsigned vm_test_file_hold_state(void)` (debug builds)
 
 The seam of `vm-file-fault-hold` (design.md §7, testing.md): armed, the

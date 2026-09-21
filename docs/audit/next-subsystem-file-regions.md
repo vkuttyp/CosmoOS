@@ -109,6 +109,23 @@ report named and a ninth for what self-review found.
 | `SHARED\|ANONYMOUS` accepted | the `mmap` section's `cosmo_mmap(..., ANONYMOUS \| SHARED) == -EINVAL` |
 | `vm_user_protect` giving a private region's cache frames the asked protection (the self-review finding, item 10) | the `mmap` section: `vm.file_cow_faults == cowp + 1` (no copy was made), `file_rd(fd, 0, ...) == first` (**the file changed**: the write went through the cache frame) and `sh[0] == first` (the shared mapping saw the private mapping's write) |
 
+11. **Review of the build found three more, all fixed with a check
+    each.** The copy-on-write path that *replaces* a present cache frame
+    did not check `COSMO_RLIMIT_MEM` while the not-present copy did, so
+    a process could read every page of a private mapping and then write
+    them all past its limit (now checked; `mmap-mem-limit`, a child
+    ending in 139). A `write()` into a page some mapping executes from
+    changed instructions with no instruction-cache maintenance, and the
+    writer need not be the executing process, so the fault-time sync of
+    M41 was not enough: the cache now asks each mapping record whether
+    its region over the written page is executable and synchronises by
+    the frame's direct-map alias (`arch_mmu_sync_icache_kernel`, new on
+    both architectures; `vm.cache_exec_syncs`; a regression check, since
+    TCG cannot show coherence). And the Linux door decided "shared" on
+    the `MAP_SHARED` bit alone, accepting no type and `SHARED|PRIVATE`:
+    the low four bits are now validated as Linux does -- 1, 2, or 3
+    (`MAP_SHARED_VALIDATE`, shared), anonymous or not, else `-EINVAL`
+    (`lxtest`). A fourth finding was wording in the inventory row.
 10. **Self-review found a defect the report did not name, and the build
     fixed it before the tests could.** `vm_user_protect` applied
     `prot & ~WRITE` to a *shared* FILE region and `prot` to everything

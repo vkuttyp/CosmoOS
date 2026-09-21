@@ -354,7 +354,7 @@ Details per call:
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
   `docs/kernel/security/design.md` §3), since the file-regions unit
-  `vm.cache_writebacks` (the cache's write-back count) and the FILE
+  `vm.cache_writebacks` (the cache's write-back count), `vm.cache_exec_syncs` (writes into a page some mapping executes, synced by the kernel alias) and the FILE
   fault's counters `vm.file_faults`, `vm.file_cow_faults`,
   `vm.file_dirty_faults`, `vm.file_fault_retries`, `vm.file_sigbus`
   (`docs/kernel/memory/design.md` §7) and, debug builds, the state of

@@ -562,3 +562,24 @@ void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
     __asm__ volatile("dsb ish\n\tisb" ::: "memory");
     arch_user_access_end();
 }
+
+void arch_mmu_sync_icache_kernel(vaddr_t va, size_t len)
+{
+    /* The user sequence above, without the user-access bracket: the
+     * address is the frame's direct-map alias. `dc cvau` reaches the
+     * point of unification from any alias of a physically indexed data
+     * cache; `ic ivau` is issued for the same range, and the whole thing
+     * is ordered with the same barriers (docs/kernel/memory/invariants.md
+     * M41: TCG cannot show the difference, the argument stands). */
+    uint64_t ctr = READ_SYSREG(ctr_el0);
+    size_t dline = 4u << ((ctr >> 16) & 0xf);
+    size_t iline = 4u << (ctr & 0xf);
+    vaddr_t end = va + len;
+
+    for (vaddr_t p = va & ~(vaddr_t)(dline - 1); p < end; p += dline)
+        __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    for (vaddr_t p = va & ~(vaddr_t)(iline - 1); p < end; p += iline)
+        __asm__ volatile("ic ivau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+}

@@ -1903,7 +1903,7 @@ static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
     "kernel.hostname",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
-    "vm.cache_writebacks", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
+    "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
     "vm.file_fault_retries", "vm.file_sigbus",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
@@ -1945,10 +1945,10 @@ static int sysctl_value(const char *name, char *out, size_t n)
     }
     if (strcmp(name, "vm.cache_limit") == 0)
         return ksnprintf(out, n, "%llu", (unsigned long long)pagecache_limit());
-    if (strcmp(name, "vm.cache_writebacks") == 0) {
+    if (strcmp(name, "vm.cache_writebacks") == 0 || strcmp(name, "vm.cache_exec_syncs") == 0) {
         struct pagecache_stats st;
         pagecache_get_stats(&st);
-        return ksnprintf(out, n, "%llu", (unsigned long long)st.writebacks);
+        return ksnprintf(out, n, "%llu", (unsigned long long)(name[9] == 'w' ? st.writebacks : st.exec_syncs));
     }
     /* The file-mapping counters (docs/audit/next-subsystem-file-regions.md):
      * what the mmap section of init --selftest reads to tell one

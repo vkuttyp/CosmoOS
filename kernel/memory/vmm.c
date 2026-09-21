@@ -679,7 +679,17 @@ static int file_fault(struct vm_space *space, vaddr_t va, unsigned fl, struct vn
         } else if (!shared && write && (present->flags & PG_PAGECACHE)) {
             /* A private read installed the cache frame read-only; the
              * write must not go through it. The PTE is REPLACED by the
-             * copy, never raised. */
+             * copy, never raised. The copy is anonymous memory and
+             * counts against COSMO_RLIMIT_MEM like the not-present
+             * copy below: a process could otherwise read every page of
+             * a private mapping and then write them all past its limit
+             * (review found the check missing here). */
+            if (space->anon_pages >= space->limit_anon_pages) {   /* COSMO_RLIMIT_MEM */
+                spin_unlock_irqrestore(&space->lock, s);
+                pmm_free_page(copy);   /* the present frame's reference is the PTE's, not ours */
+                pagecache_unlock(vn);
+                return -ENOMEM;
+            }
             int urc = arch_mmu_unmap(&space->mmu, va, PAGE_SIZE);
             KASSERT(urc == 0);
             (void)urc;
@@ -1716,6 +1726,20 @@ void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep)
         for (unsigned i = 0; i < n; i++)
             pmm_page_put(frames[i]);
     }
+}
+
+bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index)
+{
+    uint64_t off = index * PAGE_SIZE;
+    if (off < m->off || off >= m->off + m->size)
+        return false;
+    vaddr_t va = m->base + (off - m->off);
+    struct vm_space *space = m->space;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, va);
+    bool exec = r != NULL && r->fmap == m && (r->prot & VM_PROT_EXEC);
+    spin_unlock_irqrestore(&space->lock, s);
+    return exec;
 }
 
 void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n)

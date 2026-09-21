@@ -136,9 +136,10 @@ AHCI are the two entries from that list now built.
   Constitution §14 lists file-backed mappings, shared mappings and
   copy-on-write in the VMM's *must* list, not its "eventually" list. A
   shared futex across processes stays open (`kernel/ipc/futex.c:44-46`
-  keys by space) and is named in that report as deferred. Both are
-  past tense now: the doors are described in `docs/kernel/syscall/api.md`
-  and `docs/compat/linux/api.md`.
+  keys by space) and is named in that report as deferred, as are
+  `memfd`/`shm_open` and the loader's segments; the description of the
+  two doors above is the record of what was wrong, and what they do now
+  is in `docs/kernel/syscall/api.md` and `docs/compat/linux/api.md`.
 - ASLR and KASLR: none; no randomised load base, stack or `brk`.
 
 ### 2.3 Scheduler and synchronisation (constitution §20-22)

@@ -92,10 +92,12 @@ well-formed heap) leaves the break unchanged.
 ### mmap family
 
 Flags translate: `MAP_ANONYMOUS` (0x20) or a file (since the file-regions
-unit: "Dynamic executables" below), `MAP_PRIVATE`/`MAP_SHARED` (an
-anonymous mapping is private either way, there being no `fork` to share
-it with; a file mapping is copy-on-write or the file's own pages,
-respectively), `MAP_FIXED` (0x10) forces the address (and
+unit: "Dynamic executables" below); the type in the low four bits must
+be `MAP_PRIVATE` (2), `MAP_SHARED` (1) or `MAP_SHARED_VALIDATE` (3,
+shared), anonymous or not, else `-EINVAL` as Linux says (an anonymous
+mapping is private either way, there being no `fork` to share it with;
+a file mapping is copy-on-write or the file's own pages, respectively),
+`MAP_FIXED` (0x10) forces the address (and
 unmaps what was there, as Linux does: `vm_user_unmap` then map),
 `MAP_NORESERVE`/`MAP_STACK`/`MAP_POPULATE` ignored. `PROT_*` bits equal
 the native ones; `PROT_NONE` reserves and traps. A hint that is not page

@@ -913,7 +913,15 @@ static int64_t lx_mmap(struct syscall_args *a)
      * the WRITE right (-EACCES). The eager copy this used to make is gone.
      */
     struct file *f = NULL;
-    bool shared = (flags & LX_MAP_SHARED) != 0;
+    /* Linux's mapping type is the low four bits: MAP_SHARED 1,
+     * MAP_PRIVATE 2, MAP_SHARED_VALIDATE 3 (shared, every flag checked);
+     * no type, or any other value, is -EINVAL -- anonymous mappings
+     * included, which need one too. Review found this door deciding on
+     * the SHARED bit alone. */
+    unsigned type = flags & 0x0f;
+    if (type == 0 || type > 3)
+        return -EINVAL;
+    bool shared = type != LX_MAP_PRIVATE;
     vm_prot_t maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
     if (!(flags & LX_MAP_ANONYMOUS)) {
         if (!is_page_aligned(off) || off + len < off)

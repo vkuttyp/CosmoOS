@@ -588,3 +588,9 @@ void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
     (void)va;
     (void)len;
 }
+
+void arch_mmu_sync_icache_kernel(vaddr_t va, size_t len)
+{
+    (void)va;   /* as above: coherent, whichever alias the store used */
+    (void)len;
+}

@@ -232,6 +232,10 @@ int vm_user_msync(struct vm_space *space, uint64_t base, size_t size);
  */
 void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep);
 void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n);
+/* Whether the record's region covering file page `index` is executable:
+ * a write() into such a page must synchronise the instruction stream
+ * (M41), which the cache does by the frame's kernel alias. */
+bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index);
 
 /* Change the protection of every page of [base, base+size), splitting
  * regions at the ends and merging equal neighbours afterwards. -EINVAL

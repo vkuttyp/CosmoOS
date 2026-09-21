@@ -654,8 +654,12 @@ serialised against faults without a third mechanism.
    dirty now: the one in-place upgrade); a **private write** finding the
    cache frame read-only **replaces** the PTE with the copy (unmap, the
    mapping's reference put, `file_pages--`, the copy mapped,
-   `anon_pages++`: raising it would write the file through a private
-   mapping); anything else present is a second thread's install or a
+   `anon_pages++`, with `COSMO_RLIMIT_MEM` checked first exactly as for
+   a not-present copy -- review found it unchecked on this path, which
+   would have let a process read every page of a private mapping and
+   then write them all past its limit; raising the PTE instead would
+   write the file through a private mapping); anything else present is
+   a second thread's install or a
    copy already standing, and nothing is mapped twice. Otherwise the
    frame is mapped: a cache frame read-only unless this is the shared
    write that dirtied it, a copy with the region's protection, with the
@@ -723,6 +727,24 @@ one would write the file through a private mapping; found by
 self-review), and `prot` itself only to a copy-on-write copy, which is
 the mapping's own anonymous frame. So a cache frame under a private
 mapping is never writable through it.
+
+**A `write()` into a page some mapping executes from.** M41 says the
+kernel synchronises the instruction stream when data becomes
+instructions, and a `write()` or `pwrite()` into a file whose page is
+mapped `PROT_EXEC` in some process is such a write, made by a process
+that need not be the one executing it (review found the path missing).
+`pagecache_write` and `pagecache_put_page`, under the cache mutex, ask
+each mapping record whether its region covering the written page is
+executable (`vm_file_map_exec_at`) and, if one is, run
+`arch_mmu_sync_icache_kernel` on the frame's direct-map alias: on
+AArch64 the data cache is cleaned by that alias (a physically indexed
+cache reaches the point of unification from any alias) and the
+instruction cache invalidated for the range, then `isb`; on x86-64
+nothing. Counted in `vm.cache_exec_syncs`. TCG cannot show the
+difference, as it cannot for M41; the `mmap` section checks the path
+runs and the counter moves. A write through *another mapping's PTE*
+never reaches the kernel and is the writer's own business, as on any
+system with shared mappings.
 
 ### 7.6 msync, the doors, the signals
 

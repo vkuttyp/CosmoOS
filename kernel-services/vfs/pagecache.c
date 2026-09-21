@@ -276,6 +276,27 @@ static void remove_entry(struct pagecache *pc, struct pc_entry *e)
     kfree(e);
 }
 
+/*
+ * Bytes written through the kernel into a page some process executes
+ * from (a shared PROT_EXEC mapping of the file): the instruction stream
+ * must be synchronised (M41), and the writer need not be that process,
+ * so it is done by the frame's kernel alias. Under pc->lock; the
+ * mapping list cannot change under it. A write through another mapping's
+ * PTE never comes here and is the writer's own business, as on any
+ * system with shared mappings.
+ */
+static void sync_exec_mappings(struct pagecache *pc, struct pc_entry *e)
+{
+    struct vm_file_map *m;
+    list_for_each_entry(m, &pc->mappings, link) {
+        if (vm_file_map_exec_at(m, e->index)) {
+            arch_mmu_sync_icache_kernel((vaddr_t)page_to_virt(e->page), PAGE_SIZE);
+            stat_add(&g_stats.exec_syncs, 1);
+            return;
+        }
+    }
+}
+
 /* A write dirties the page: off the LRU until pagecache_sync cleans it. */
 static void mark_dirty(struct pagecache *pc, struct pc_entry *e)
 {
@@ -338,6 +359,8 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
             break;
         memcpy((uint8_t *)page_to_virt(e->page) + in_page, in + done, n);
         mark_dirty(&vn->pc, e);
+        if (!list_empty(&vn->pc.mappings))
+            sync_exec_mappings(&vn->pc, e);
         done += n;
         if (off + done > vn->size) {
             vn->size = off + done;
@@ -570,6 +593,8 @@ int pagecache_put_page(struct vnode *vn, uint64_t index, const void *buf)
     if (e) {
         memcpy(page_to_virt(e->page), buf, PAGE_SIZE);
         mark_dirty(&vn->pc, e);
+        if (!list_empty(&vn->pc.mappings))
+            sync_exec_mappings(&vn->pc, e);
     }
     mutex_unlock(&vn->pc.lock);
     return e ? 0 : err;

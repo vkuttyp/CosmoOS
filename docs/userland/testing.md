@@ -50,9 +50,14 @@ status -- `mmap-past-end` (a two-page mapping of a five-byte file: the
 second page is `SIGBUS`, 135, not zeros), `mmap-truncate` (three pages
 mapped and installed, the file reopened `O_TRUNC`, the touch is
 `SIGBUS`, not the old bytes), `mmap-as-limit` (`COSMO_RLIMIT_AS` lowered
-to a page: a file mapping is `ENOMEM`), `mmap-cycle` (200 map/write/unmap
-cycles, shared and private; its exit runs the kernel's `file_pages == 0`
-check by construction); on cosmofs (`vda` at `/mnt`), a write through a
+to a page: a file mapping is `ENOMEM`), `mmap-mem-limit` (a private page read, then
+`COSMO_RLIMIT_MEM` set to 0, then written: the copy is refused and the
+touch is fatal, 139 -- the check review found missing on the replace
+path), `mmap-cycle` (200 map/write/unmap cycles, shared and private;
+its exit runs the kernel's `file_pages == 0` check by construction); a
+`write()` into a page mapped `PROT_READ|PROT_EXEC` shared runs the
+kernel-alias instruction-cache sync (`vm.cache_exec_syncs` +1; a
+regression check, TCG cannot show coherence); on cosmofs (`vda` at `/mnt`), a write through a
 shared mapping dirties by one fault, `MS_SYNC` writes exactly that page
 (`vm.cache_writebacks` +1), a second `MS_SYNC` writes nothing, a second
 write faults again (the PTE was lowered) and the third `MS_SYNC` writes
