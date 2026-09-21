@@ -377,7 +377,7 @@ thread, which is why that program exists.
 | `env-unset-under-readers` | against `unsetenv`, whose hazard is a **wrong answer** and not freed memory: a reader must never fail to find a name that was never removed, while 200 entries **before** it are removed under the walk. **As built** this is the regression test of the set — it frees no array, so the churn that makes the grow case fatal does not apply to it. The "test owns the walk" construction proposed in review is gone: see banner item 2 |
 | `atexit-concurrent` | N threads each registering a distinct handler; **exactly** the number registered run at exit, and none runs twice |
 | `atexit-bound` | more registrations than `ATEXIT_MAX`, concurrently: the surplus is refused with `-1` and nothing is written past the array |
-| `exit-drain-reentrant` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
+| `atexit-drain` | a handler that itself calls `atexit` and `getenv` completes rather than deadlocking — the case the drain's shape exists for |
 
 **The bug-proof, as run.** The section below was written before the
 build and was wrong about which tests prove anything. What the
@@ -440,7 +440,7 @@ honest reason this one is called reliable instead.
   calls `getenv` while the main thread holds the lock deadlocks that
   thread.
 - **Deadlock at exit is the failure this design most has to avoid**,
-  which is why no handler runs under the lock. `exit-drain-reentrant`
+  which is why no handler runs under the lock. `atexit-drain`
   is the test for it and is the one to write first.
 - **Contention is not a concern and saying so is part of the design.**
   These are cold paths — a program reads its environment at start-up

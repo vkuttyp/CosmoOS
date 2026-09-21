@@ -231,8 +231,9 @@ takes. No new field.
 nothing about a bio at the device. The case this unit exists for needs
 the driver's own in-flight table non-empty at the moment `vblk_remove`
 runs, and a real QEMU device completes a read in microseconds. So one
-debug hook in `virtio_blk.c`: `vblk_test_hold_completions(bool)`, which
-makes `vblk_done` (the interrupt's completion walk) return without
+debug hook in `virtio_blk.c`: `vblk_test_hold_completions(bool)` — as
+built, `hold_completions(struct blkdev *)` in the published hook table,
+`NULL` releasing (banner item 1) — which makes `vblk_done` (the interrupt's completion walk) return without
 consuming anything while armed. The device does the I/O and signals; the
 driver leaves the slots in flight by construction; the remove then finds
 them. That is the honest description of what the hook does — the
@@ -339,9 +340,10 @@ than claiming the reset was proved.
 | `drivers/virtio/virtio_blk.c` | `vblk_test_hold_completions`, `vblk_test_inflight_at_remove`, `vblk_test_remove_seq` (the boundary stamp, at the end of `vblk_remove`), a release counter (debug) |
 | `drivers/pci/pci.c`, `drivers/include/drivers/pci.h` | `pci_test_rebind` (debug) |
 | `kernel/device/device.c`, `kernel/include/kernel/device.h` | `device_test_bind` for it, beside `device_test_unbind` |
-| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `blk_test_tick` made callable (debug), so the driver's remove and the test's completion callback draw from one sequence |
+| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | `struct blk_test_driver_hooks` and `blk_test_driver_hooks_set`, the table a driver publishes for its test seams (as built, banner item 1); `blk_test_tick` made callable (debug), so the driver's remove and the test's completion callback draw from one sequence |
 | `kernel/device/devtest.c` | `selftest_virtio_remove_inflight`; the comment at 623-640 that names this unit as future work becomes a pointer to the test |
 | `kernel/core/selftest.c` | the registry entry, beside `blk-unregister-drain` |
+| `kernel/core/lockuptest.c` (as built, banner item 10) | `threads_settled`: six checks that asserted `thread_count() == before` the instant a join returned now wait, bounded, for the reaper |
 | `docs/kernel/device/{api,testing}.md` | the knob, the attachment order, the machine the tests assume, the test |
 | `docs/drivers/virtio/{design,testing}.md` | the hooks; the gap struck |
 | `docs/kernel/quiesce/{invariants,testing}.md` | Q11's check gains the real device |
@@ -356,6 +358,7 @@ than claiming the reset was proved.
 | --- | --- |
 | `virtio-remove-inflight`, held | with `n ≥ 1` requests done at the device and unconsumed, the removal completes exactly those `n` with `-EIO` and the block layer completes the pending ones with `-ENODEV`; every accepted bio completes once; nothing completes after the removal's own boundary stamp (the completion callback's stamps against `vblk_test_remove_seq`); the disk, the virtio device and the driver binding are gone; the release runs on the last put; the poisoner is silent |
 | the same, unheld | the natural race, a regression guard |
+| `irq-order` (as built, banner item 9) | a read-side section held across the teardown: the queue's interrupt is released, and `synchronize_irq` waited, before the slot walk (`held_until < walk`) |
 | the rebind | the disk comes back under its old name and reads the same first sector: the hardware was left sane |
 | `QEMU_RMDISK=0` | the test skips with its reason; every other marker unchanged |
 | the documented PCI numbering | `00:02.0`–`00:05.0` unchanged with the new function present (`selftest_pci` walks every function; the doc's count is corrected, not asserted) |
