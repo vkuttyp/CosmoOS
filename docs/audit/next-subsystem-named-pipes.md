@@ -118,7 +118,16 @@ and a write-only open fail with `-ENXIO` when no reader is there;
 one program idiom that keeps a FIFO from ever reporting end-of-file). A
 blocked open is killable. The open hook is where the FIFO differs from
 every device: it can wait, and it waits on the fifo's own queue, not
-under any lock.
+under any lock. **An open that fails undoes itself.** The VFS runs the
+release hook only for an open that succeeded (`dev_open`), so the open
+hook is the only place that can take back what a failed open did: an
+opener killed while waiting (`-EINTR`), or refused (`-ENXIO`), or out of
+memory, decrements the count it added before returning, and if it was
+the first open and is now the last, frees the ring it made -- under the
+same lock the counts live under, and waking the other side's openers
+whose condition it changed. So a failed open leaves the counts, the ring
+and `fifo_count` as it found them, and the peer an open woke is not
+left waiting on a count that will never be released.
 
 **Per-open state is the file.** `open` sets `file->priv` to a small
 `struct fifo_open { side, nonblock }`; `read_file` and `write_file` call
@@ -164,8 +173,9 @@ shell test script that uses it.
 ### Lifetime, in one paragraph
 
 The ring belongs to the FIFO node while any open holds it and is freed
-by the last release; an unlinked FIFO with opens keeps its ring until
-they close (the node lives as long as its files do, as any unlinked
+by the last release, and an open that fails is not an open -- it takes
+back its count and, if it made the ring, the ring; an unlinked FIFO
+with opens keeps its ring until they close (the node lives as long as its files do, as any unlinked
 node); the node's `evict` frees nothing (there is nothing to free once
 the opens are gone) and asserts the ring is NULL. Invariant **I9**: *a
 FIFO's ring exists exactly while an open of it does, its reader and
@@ -238,7 +248,7 @@ file ignores it, as on Linux.
 | test | what it proves |
 | --- | --- |
 | `ipc-pipe` (unchanged) | the ring split changed nothing for the anonymous pipe |
-| `ipc-fifo` (kernel) | a FIFO node made by `vfs_mknod` is `DT_FIFO`; `open(O_RDONLY)` waits for a writer and `open(O_WRONLY)` for a reader (each from a second thread, both orders); `O_NONBLOCK` read-only returns at once, write-only `-ENXIO` without a reader; `O_RDWR` never blocks; bytes both ways; the last writer's close gives end-of-file after the bytes it wrote; the last reader's close gives `-EPIPE`; two readers and two writers, the counts following each close; readiness through the file (`READABLE` with bytes, `READABLE\|HANGUP` with no writer, `WRITABLE` with room); `set_nonblock` per open (one open non-blocking, another not, on the same FIFO); `unlink` while open (reads and writes continue, a new open `-ENOENT`); the ring freed by the last release (`fifo_count`); a blocked opener killed returns `-EINTR` |
+| `ipc-fifo` (kernel) | a FIFO node made by `vfs_mknod` is `DT_FIFO`; `open(O_RDONLY)` waits for a writer and `open(O_WRONLY)` for a reader (each from a second thread, both orders); `O_NONBLOCK` read-only returns at once, write-only `-ENXIO` without a reader; `O_RDWR` never blocks; bytes both ways; the last writer's close gives end-of-file after the bytes it wrote; the last reader's close gives `-EPIPE`; two readers and two writers, the counts following each close; readiness through the file (`READABLE` with bytes, `READABLE\|HANGUP` with no writer, `WRITABLE` with room); `set_nonblock` per open (one open non-blocking, another not, on the same FIFO); `unlink` while open (reads and writes continue, a new open `-ENOENT`); the ring freed by the last release (`fifo_count`); a blocked opener killed returns `-EINTR` **and leaves nothing behind**: the side's count and `fifo_count` back at their values before the open, and a later opener of the other side still waiting for a real peer |
 | `init --selftest`, section `fifo` (native) | `mkfifo` a path; a child writes lines the parent reads across the blocking open; `O_NONBLOCK` rules from user mode; `ioready` on a FIFO handle; `mknod` of a `DT_SOCK` name `EINVAL`; `mkfifo` on `/proc` refused; `stat` reports `S_ISFIFO` |
 | `lxtest` rows | `mknodat(AT_FDCWD, path, S_IFIFO\|0644)`; `open(O_RDONLY\|O_NONBLOCK)` 0, `open(O_WRONLY\|O_NONBLOCK)` `-6`; a reader and a writer, bytes across, `fstat` `S_IFIFO`; `fcntl(F_SETFL, O_NONBLOCK)` then `read` `-11`; `mknodat(S_IFCHR)` `-1` (`EPERM`) |
 | the shell test (`SHTEST`) | `mkfifo /tmp/sh-fifo; echo via-fifo > /tmp/sh-fifo & cat /tmp/sh-fifo` prints the line |
@@ -264,6 +274,9 @@ booted, the file restored:
   reads end-of-file.
 - the anonymous pipe's end release forgetting its count (the split's
   own risk) → `ipc-pipe`: no end-of-file / no `-EPIPE`.
+- a failed open not undoing its count → `ipc-fifo`: after the killed
+  opener, the other side's open returns at once against a peer that is
+  not there, and `fifo_count` does not return.
 
 ## Benchmarks
 
