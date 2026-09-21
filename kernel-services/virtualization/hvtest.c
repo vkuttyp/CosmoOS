@@ -1397,6 +1397,13 @@ bool selftest_el2_guest_timer(const char **reason)
      * again. */
     CHECK(vcpu_run(v, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    /* Printed before the check, because CI has seen this check fail once
+     * with nothing to read (docs/testing/flakes.md, "el2-guest-timer's
+     * heartbeat read a clock not past the arming"): the next sighting
+     * needs to say whether the guest's clock stood still or went back. */
+    if (x.hypercall.a0 <= armed_at)
+        kinfo("selftest: el2-guest-timer: heartbeat after the handler read %llu, armed at %llu, CNTVOFF %llu",
+              (unsigned long long)x.hypercall.a0, (unsigned long long)armed_at, (unsigned long long)off);
     CHECK(x.hypercall.a0 > armed_at);
     CHECK(vcpu_run(v, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
