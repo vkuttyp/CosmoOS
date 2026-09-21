@@ -223,9 +223,13 @@ sandbox — that a Linux program will use one. This system's jails are
 roots, and a global abstract namespace would be a hole through every
 one of them, so the registry keys an abstract name by **(the caller's
 root vnode, the bytes)**: a jailed process sees only the abstract
-sockets bound by processes with the same root. That is one comparison
-more than Linux does, and it is the comparison the security model
-requires.
+sockets bound by processes with the same root. The bound socket holds a
+reference to that root vnode from bind to release, exactly as a
+path-bound socket holds its node's, so the pointer the key uses cannot
+be freed and reused for another root while it is a key; a jail whose
+root is torn down after its last process leaves has, by then, no bound
+abstract sockets left to key on it. That is one comparison more than
+Linux does, and it is the comparison the security model requires.
 
 **`getsockname` and `getpeername`** return the bound name (the path as
 given at bind, abstract names as given) in a `struct
@@ -240,8 +244,10 @@ Two new native calls, **`SYS_sendmsg`** and **`SYS_recvmsg`**, take a
 struct cosmo_msg {
     void *buf;                          /* the bytes */
     size_t len;
-    const struct cosmo_sockaddr_un *addr;  /* sendmsg: the destination (dgram), NULL when connected;
-                                              recvmsg: where the sender's name goes, NULL to skip */
+    struct cosmo_sockaddr_un *addr;     /* sendmsg: read as the destination (dgram), NULL when connected;
+                                           recvmsg: written with the sender's name, NULL to skip -- one
+                                           field read by one call and written by the other, so not const,
+                                           as recvfrom's and accept's address pointers are not */
     size_t addrlen;                     /* in: the buffer's size; recvmsg out: the name's size */
     int *handles;                       /* sendmsg: handles to send; recvmsg: where received ones land */
     const unsigned *rights;             /* sendmsg: per handle, COSMO_RIGHTS_SAME or a subset; NULL = SAME */
@@ -257,6 +263,18 @@ time (a stream accepts a partial write and the loop continues; a
 datagram is gathered into one kernel buffer bounded by
 `UNIX_MSG_MAX`), and `lx_recvmsg` scatters one message into the vector.
 
+**Where the handles go on a stream, at the Linux door.** `lx_sendmsg`
+walks `msg_iov` one element at a time into `unix_send`, and the
+`SCM_RIGHTS` set rides with the **first** call only -- the one that
+writes the first byte of the send, which is where Linux places
+ancillary data -- with every later element a plain write; an empty
+first element is skipped so the handles ride with a byte. A stream
+send that blocks or returns short after that first call has already
+delivered its handles with the bytes it wrote, which is Linux's
+behaviour for a partial `sendmsg`; the count returned is the bytes
+written. A datagram is gathered into one kernel buffer and sent once,
+handles and all.
+
 **A handle in a message is spawn's rule, called again.** For each
 handle named, the sender must hold `HANDLE_RIGHT_TRANSFER` on it, and
 the rights it names must be `COSMO_RIGHTS_SAME` or a subset of what it
@@ -266,10 +284,16 @@ message, and the message owns those references while it is in flight:
 a socket released with messages queued drops every reference in them.
 At `recvmsg` the handles are installed in the receiver's table with the
 rights the message carries, and the numbers are written to `handles[]`.
-A receiver with less room than the message carries gets what fits, the
-rest are dropped (their references put), and `COSMO_MSG_HTRUNC` is set
-— Linux's `MSG_CTRUNC`, and Linux's behaviour (the descriptors are
-closed, not held for a later read). A `recvmsg` that names no room
+"What fits" is literal and in message order: `handle_install` is
+called for each handle in turn, and the first `-EMFILE` (or the end of
+the caller's `handles[]` room) ends the installing -- the handles
+installed so far stay installed, they are the receiver's now; the rest
+are dropped (their references put), `nr_handles` reports how many
+landed, and `COSMO_MSG_HTRUNC` is set. No reservation and no rollback:
+Linux's `MSG_CTRUNC` behaviour is exactly this (`scm_detach_fds`
+installs until `get_unused_fd` fails and closes the remainder), and a
+receiver that wants all-or-nothing checks the count before trusting
+the set. A `recvmsg` that names no room
 (`nr_handles == 0`) on a message that carries handles gets the bytes
 and the flag and the handles are dropped: a program that does not ask
 for descriptors is not made to hold them. On a stream, ancillary items
