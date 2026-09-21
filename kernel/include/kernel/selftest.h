@@ -178,6 +178,12 @@ bool selftest_hid_keyboard(const char **reason);  /* reads back what it typed, a
 /* kernel/device/devtest.c: a hub unplugged with a device behind it. */
 bool selftest_usb_hub_unplug(const char **reason);       /* kernel/tty/ttytest.c */
 bool selftest_ipc_pipe(const char **reason);        /* kernel/ipc/pipetest.c */
+bool selftest_unix_stream(const char **reason);     /* kernel/ipc/unixtest.c */
+bool selftest_unix_dgram(const char **reason);
+bool selftest_unix_name(const char **reason);
+bool selftest_unix_handles(const char **reason);
+bool selftest_unix_close_race(const char **reason);
+bool selftest_unix_poll(const char **reason);
 
 /* Phase 5: kernel/module/modtest.c */
 bool selftest_bootarchive(const char **reason);

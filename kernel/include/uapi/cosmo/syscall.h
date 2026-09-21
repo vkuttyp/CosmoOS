@@ -159,7 +159,10 @@
  * is EINVAL; a range with an unmapped page is ENOMEM and nothing is
  * written; an anonymous range in it is skipped. */
 #define SYS_msync     96  /* (void *addr, size_t len, int flags) -> 0 */
-#define SYS_COUNT     97
+#define SYS_sendmsg   97  /* (int h, const struct cosmo_msg *) -> bytes; a unix socket carries the message's handles */
+#define SYS_recvmsg   98  /* (int h, struct cosmo_msg *) -> bytes; nr_handles and flags are written back */
+#define SYS_socketpair 99 /* (int family, int type, int h[2]) -> 0; two connected sockets, no name */
+#define SYS_COUNT     100
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -457,14 +460,57 @@ struct cosmo_procinfo {
     char name[32];
 };
 
+#define COSMO_AF_UNIX  1    /* a socket in this machine: named in the filesystem, or not at all */
 #define COSMO_AF_INET  2
 #define COSMO_AF_INET6 10
 #define COSMO_SOCK_STREAM 1
 #define COSMO_SOCK_DGRAM  2
 #define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: the socket starts non-blocking */
 
+/*
+ * The unix address: `family` COSMO_AF_UNIX, then the name. A NUL-terminated
+ * path names a socket node in the filesystem (bind creates it; connect
+ * needs write permission on it); a path whose first byte is 0 names an
+ * abstract socket, not in the filesystem, the rest of the bytes up to the
+ * length passed being the name, and the namespace is the caller's root. An
+ * unbound socket reports the family alone (length 2).
+ */
+#define COSMO_UNIX_PATH_MAX 108
+struct cosmo_sockaddr_un {
+    uint16_t family;
+    char path[COSMO_UNIX_PATH_MAX];
+};
+
+/* A message (SYS_sendmsg / SYS_recvmsg): bytes, a name, handles. One
+ * buffer, not a vector -- this ABI has no iovec. */
+#define COSMO_UNIX_HANDLES_MAX 32
+#define COSMO_MSG_HTRUNC   0x08   /* recvmsg: handles were dropped for want of room (Linux's MSG_CTRUNC) */
+#define COSMO_MSG_TRUNC    0x20   /* recvmsg: a datagram was longer than the buffer */
+#define COSMO_MSG_DONTWAIT 0x40   /* this call only: -EAGAIN instead of blocking */
+struct cosmo_msg {
+    void *buf;                          /* the bytes */
+    size_t len;
+    struct cosmo_sockaddr_un *addr;     /* sendmsg: read as the destination (a datagram), NULL when connected;
+                                           recvmsg: written with the sender's name, NULL to skip. One field,
+                                           read by one call and written by the other, so not const */
+    size_t addrlen;                     /* in: the address buffer's size; recvmsg out: the name's full size */
+    int *handles;                       /* sendmsg: the handles to send; recvmsg: where received ones land */
+    const unsigned *rights;             /* sendmsg: per handle, COSMO_RIGHTS_SAME or a subset; NULL means SAME */
+    unsigned nr_handles;                /* in: how many / room for how many; recvmsg out: how many landed */
+    unsigned flags;                     /* in: COSMO_MSG_DONTWAIT; recvmsg out: COSMO_MSG_TRUNC, COSMO_MSG_HTRUNC */
+};
+
+/* SO_PEERCRED: who is on the other end of a connected unix stream socket
+ * (either side of an accept, either end of a socketpair), recorded when the
+ * connection was made. */
+struct cosmo_ucred {
+    int32_t pid;
+    uint32_t uid, gid;
+};
+
 /* Socket options (SYS_getsockopt). */
 #define COSMO_SOL_SOCKET 1
+#define COSMO_SO_PEERCRED 17   /* struct cosmo_ucred; a connected unix stream socket only */
 /* The pending asynchronous error, as an int, and POSIX's sign: a *positive*
  * errno, 0 when there is none. Reading it clears it, so it is delivered to
  * exactly one caller -- the answer SYS_ioready's COSMO_IO_ERROR cannot give,
@@ -650,7 +696,9 @@ struct cosmo_dirent {
 #define COSMO_ELOOP   40   /* too many symbolic links in one resolution */
 #define COSMO_EPIPE   32
 #define COSMO_EMSGSIZE 90
+#define COSMO_EPROTOTYPE 91 /* connect/sendto: a unix name whose socket is of the other type */
 #define COSMO_EOPNOTSUPP 95
+#define COSMO_ESOCKTNOSUPPORT 94 /* socket(): a type this family does not have (SOCK_SEQPACKET on AF_UNIX) */
 #define COSMO_EAFNOSUPPORT 97
 #define COSMO_EADDRINUSE 98
 #define COSMO_EADDRNOTAVAIL 99

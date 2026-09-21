@@ -20,10 +20,17 @@ walked before the last one), `VNODE_HASH` 64 (per-mount vnode buckets).
 
 ### Types
 
-- `enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR }`: the values equal
-  `COSMO_DT_REG/DIR/CHR` so `stat` and `getdents` report them directly.
+- `enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK }`:
+  the values equal `COSMO_DT_REG/DIR/CHR/LNK/SOCK` so `stat` and
+  `getdents` report them directly. A `VNODE_SOCK` is a unix socket's
+  name (the unix-sockets unit): made by `bind` through `vfs_mknod`,
+  connected to rather than opened (`open` answers `-ENXIO`), removed by
+  `unlink`.
 - `struct vnode_ops`: the filesystem's per-vnode callbacks (`lookup`,
-  `create`, `mkdir`, `unlink`, `rmdir`, `rename`, `readdir`, `readpage`,
+  `create`, `mkdir`, `mknod` (optional: a `VNODE_SOCK`; a filesystem
+  without it refuses with `-EOPNOTSUPP` -- cosmofs has no on-disk type
+  for one, so socket names live on ramfs), `unlink`, `rmdir`,
+  `rename`, `readdir`, `readpage`,
   `writepage`, `truncate`, `read`/`write` for `VNODE_CHR`, `sync`,
   `evict`). They are called with the vnode locks the VFS holds: the
   parent locked for directory operations, the vnode locked for data
@@ -205,6 +212,13 @@ file object exists. Returns a referenced `struct file`.
 **`int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode)`**
 `-EEXIST` (including `path` = `/`), `-EINVAL` for `.`/`..`, `-ENOENT`
 for a missing parent, `-ENOTDIR`, `-EROFS`, `-ENOTSUP`.
+
+**`int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out)`**
+Makes a special node -- `VNODE_SOCK` only -- at `path`, under the same
+parent rules as `create` (write and search permission on the directory,
+`-EROFS`): `-EEXIST` when the name exists, `-EOPNOTSUPP` when the
+filesystem has no `mknod`; the new node referenced in `*out`. The unix
+socket's `bind` is its caller.
 
 **`int vfs_unlink(struct vnode *start, const char *path)`** Removes a
 non-directory (`-EISDIR` for a directory, `-EBUSY` for a mountpoint or a

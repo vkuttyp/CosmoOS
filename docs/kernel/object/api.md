@@ -196,6 +196,15 @@ Zero the slots, count 0, initialise the lock. Once, before any use.
   NULL when `h` is out of range or free.
 - Concurrency: non-blocking, interrupt-safe.
 
+### `int handle_transfer_check(struct handle_table *t, int h, unsigned give, struct kobject **obj, unsigned *rights)`
+- Purpose: the rule for giving a handle to another process, shared by
+  the `spawn` map and a unix socket's message: the giver must hold
+  TRANSFER on `h`, and `give` is `COSMO_RIGHTS_SAME` or a subset of
+  what it holds -- never more.
+- Outputs: 0 with `*obj` the referenced object and `*rights` what to
+  install it with; `-EBADF` for no such handle, `-EPERM` otherwise.
+- Concurrency: non-blocking, interrupt-safe.
+
 ### `struct kobject *handle_lookup(struct handle_table *t, int h, unsigned rights_needed)`
 - Purpose: translate a handle to a referenced object.
 - Outputs: the object with one new reference, or NULL when `h` is out

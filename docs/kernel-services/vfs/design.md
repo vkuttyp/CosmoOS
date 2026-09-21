@@ -5,7 +5,7 @@
 ### VFS core (`kernel/include/kernel/vfs.h`)
 
 ```c
-enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR };
+enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK };
 
 struct vnode {
     struct kobject obj;             /* vnode_type; release() is the eviction path */
@@ -552,6 +552,22 @@ runs in interrupt context and only completes a `completion`.
 Vnode ~400 bytes plus page cache entries; ramfs stores every file page
 resident; cosmofs keeps 64 metadata buffers (256 KiB) and a bitmap of
 `nblocks/8` bytes (256 bytes for the 8 MiB test disk) per mount.
+
+## Socket nodes
+
+A unix socket's name in the filesystem is a `VNODE_SOCK` (the
+unix-sockets unit, `docs/kernel/ipc/design.md`): a node with no contents
+and no operations of its own, made by `bind` through the optional
+`mknod` vnode operation (`vfs_mknod`, the same parent rules as
+`create`), owned by the caller, mode 0755. The node is a name and an
+access control -- `connect` needs write permission on it -- and not the
+socket: the socket keeps a reference to the node from bind to release
+and a registry in `kernel/ipc/unix.c` maps the node to it; `unlink`
+removes the name and leaves the socket and its connections alone;
+`open` of the node is `-ENXIO`. ramfs implements `mknod`; cosmofs has no
+on-disk type for a socket and leaves it NULL, so `bind` on a cosmofs
+path is `-EOPNOTSUPP` -- socket names live under the ramfs root, which
+is where Unix keeps them too.
 
 ## Error handling
 

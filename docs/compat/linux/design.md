@@ -218,7 +218,9 @@ flowinfo, 16-byte address, scope) to `struct netaddr` and back (output
 length honoured, full size reported). `setsockopt` returns 0 for
 `SOL_SOCKET` options (`SO_REUSEADDR`, `SO_KEEPALIVE`, `SO_BROADCAST`,
 ...) and `-ENOPROTOOPT` otherwise; `getsockopt` `-ENOPROTOOPT`;
-`sendmsg`/`recvmsg`/`poll`/`select`/`epoll_*` `-ENOSYS`.
+`poll`/`select`/`epoll_*` `-ENOSYS`; `sendmsg`/`recvmsg`/`socketpair`
+are built since the unix-sockets unit (with `AF_UNIX` and `SCM_RIGHTS`).
+`getsockopt(SO_PEERCRED)` answers on a connected unix stream socket.
 
 ## Stage 2 (audit milestone 10)
 
@@ -483,7 +485,7 @@ in `lxhello` (whose table is at `0x400040`). Details in `testing.md`.
   `clone` with `CLONE_THREAD` once the kernel has user threads; signal
   frames and `rt_sigreturn`; `execve` once the native side has it.
 - Stage 3: `epoll`/`poll` (over the object readiness operation that
-  milestone 8 added), `sendmsg`, `/proc`.
+  milestone 8 added), ~~`sendmsg`~~ (built, the unix-sockets unit), `/proc`.
 - Another architecture's Linux ABI (AArch64) reuses everything but the
   numbers table and `arch_prctl`. Phase 13 put the x86-64 table under
   `#if defined(ARCH_X86_64)` and left an empty table elsewhere;

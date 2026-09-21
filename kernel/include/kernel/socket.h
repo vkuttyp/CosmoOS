@@ -17,6 +17,7 @@
 #include <kernel/wait.h>
 
 struct tcp_pcb;
+struct unix_sock;
 
 enum socket_state {
     SS_UNCONNECTED,
@@ -29,11 +30,12 @@ enum socket_state {
 
 struct socket {
     struct kobject obj;
-    int family;                 /* COSMO_AF_INET / COSMO_AF_INET6 */
+    int family;                 /* COSMO_AF_INET / COSMO_AF_INET6 / COSMO_AF_UNIX */
     int type;                   /* COSMO_SOCK_STREAM / COSMO_SOCK_DGRAM */
     enum socket_state state;
-    struct udp_pcb udp;         /* SOCK_DGRAM */
-    struct tcp_pcb *tcp;        /* SOCK_STREAM */
+    struct udp_pcb udp;         /* SOCK_DGRAM, inet */
+    struct tcp_pcb *tcp;        /* SOCK_STREAM, inet */
+    struct unix_sock *un;       /* COSMO_AF_UNIX: the transport in kernel/ipc/unix.c; every ksock_* dispatches on the family */
     struct waitqueue wait;
     /* Pending asynchronous error, delivered once (invariant N21). Written
      * by sock_set_error from any context -- including packet receive,
@@ -56,6 +58,10 @@ struct socket {
 
 void socket_init(void);
 int ksock_create(int family, int type, uint32_t uid, struct socket **out);
+/* The inet entry points below refuse a unix socket with -EAFNOSUPPORT (an
+ * inet address cannot name it); the doors call the unix_* entry points
+ * of kernel/unix.h for a unix address. The address-free ones -- listen,
+ * accept, a connected send or receive, shutdown, ready -- dispatch. */
 int ksock_bind(struct socket *s, const struct netaddr *addr);
 int ksock_listen(struct socket *s, int backlog);
 int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer);   /* blocks */

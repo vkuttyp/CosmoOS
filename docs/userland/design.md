@@ -323,9 +323,11 @@ is what this is.
 
 **There is no service daemon.** One supervisor process per service, and
 the state is in the filesystem. A central manager would need a control
-channel, and the two Unix answers to that -- a named pipe and a unix
-socket -- are both things this kernel does not have (`mknod` is not in
-`vnode_ops`, and sockets are AF_INET). Inventing a third would mean
+channel, and when `svc` was built the two Unix answers to that -- a
+named pipe and a unix socket -- were both things this kernel did not
+have (`mknod` was not in `vnode_ops`, and sockets were AF_INET). The
+unix-sockets unit has since built the second and the `mknod` the first
+needs; `svc`'s shape stands on its own reasons. Inventing a third would mean
 building an IPC mechanism in order to build a service manager, which is
 backwards. It also means a supervisor that dies takes one service with
 it rather than all of them, and that `svc` is an ordinary program with

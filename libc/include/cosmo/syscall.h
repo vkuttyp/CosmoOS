@@ -269,6 +269,33 @@ static inline long cosmo_getsockname(int h, struct cosmo_sockaddr *sa, size_t *l
 {
     return cosmo_syscall3(SYS_getsockname, h, sa, len);
 }
+/* The same calls with the address's length given, for a unix address
+ * (struct cosmo_sockaddr_un), whose size is the name's. */
+static inline long cosmo_bind_len(int h, const void *sa, size_t len)
+{
+    return cosmo_syscall3(SYS_bind, h, sa, len);
+}
+static inline long cosmo_connect_len(int h, const void *sa, size_t len)
+{
+    return cosmo_syscall3(SYS_connect, h, sa, len);
+}
+static inline long cosmo_sendto_len(int h, const void *buf, size_t len, const void *to, size_t tolen)
+{
+    return cosmo_syscall5(SYS_sendto, h, buf, len, to, tolen);
+}
+/* Unix domain sockets: a message with handles, and a connected pair. */
+static inline long cosmo_sendmsg(int h, const struct cosmo_msg *m)
+{
+    return cosmo_syscall2(SYS_sendmsg, h, m);
+}
+static inline long cosmo_recvmsg(int h, struct cosmo_msg *m)
+{
+    return cosmo_syscall2(SYS_recvmsg, h, m);
+}
+static inline long cosmo_socketpair(int family, int type, int h[2])
+{
+    return cosmo_syscall3(SYS_socketpair, family, type, h);
+}
 
 
 /* Phase 9: processes, pipes, the working directory, introspection. */

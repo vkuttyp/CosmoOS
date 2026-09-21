@@ -31,7 +31,23 @@ an empty `argv` `EINVAL`), `waitpid` with no children (`ECHILD`),
 `ERANGE`, `getppid() == 0`, its own `procinfo` record, `klog_read`,
 `sysctl_get` (`kernel.name`, `hw.ncpu`, `sysctl.names`, `ENOENT`,
 truncation), `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`.
-Since the file-regions unit an `mmap` section (`mmap_selftest`): a
+Since the unix-sockets unit a `unix` section (`unix_selftest`): a
+stream pair carries bytes both ways and `SO_PEERCRED` names this
+process; a child echoes over the end it was given through the spawn
+map and answers a message carrying a file handle with the file's bytes;
+`sendmsg` of a handle without TRANSFER is `EPERM` and of a unix socket
+`EINVAL`; a listener bound at `/tmp/ux-sock` is a `DT_SOCK` node of mode
+0755 that `open` refuses `ENXIO`, a child connects to it and the
+accepted socket's `SO_PEERCRED` is the child's pid, `getsockname` is
+the path and a second bind `EADDRINUSE`; a uid-1000 child is refused
+`EACCES` by the node's mode; a jailed child (`spawnve_in`) reaches
+neither the parent's abstract name (`ECONNREFUSED`) nor its path
+(`ENOENT`) while an unjailed connect to the abstract name works; the
+name outlives the socket (`ECONNREFUSED`) until `unlink` (`ENOENT`);
+datagrams by name with the sender's abstract name back through
+`cosmo_recvmsg` and `MSG_TRUNC`; `SOCK_SEQPACKET` `ESOCKTNOSUPPORT`; and
+`USERBENCH: unix`, a one-byte round trip to a child over a stream pair
+against the same over two pipes. Since the file-regions unit an `mmap` section (`mmap_selftest`): a
 `MAP_SHARED` mapping of a `/tmp` file is coherent with `read()` and
 `write()` in both directions with no `msync` between; a spawned child
 maps the same file shared and writes a byte the parent reads (**the

@@ -114,6 +114,13 @@ struct kobject *handle_get(struct handle_table *t, int h, unsigned *rights_out);
 /* Drop the table's reference. -EBADF if the slot is empty or invalid. */
 int handle_close(struct handle_table *t, int h);
 
+/* The rule for giving a handle to another process -- spawn's handle map
+ * and a unix socket's message both call it: the giver must hold TRANSFER
+ * on `h`, and `give` is COSMO_RIGHTS_SAME or a subset of what it holds,
+ * never more. On success *obj is the referenced object and *rights what
+ * to install it with; -EBADF for no such handle, -EPERM otherwise. */
+int handle_transfer_check(struct handle_table *t, int h, unsigned give, struct kobject **obj, unsigned *rights);
+
 unsigned handle_table_count(struct handle_table *t);
 
 #endif /* KERNEL_HANDLE_H */

@@ -123,7 +123,70 @@ since the threads unit and `SYS_futex_requeue` (94, compare form) since
 the native thread door; the Linux `futex` call reaches all three. Full
 contract: `docs/compat/linux/api.md`.
 
+## Unix domain sockets (`kernel/include/kernel/unix.h`)
+
+The transport behind `COSMO_AF_UNIX`; `struct socket` owns a
+`struct unix_sock` for the family and the socket layer's entry points
+dispatch to these (`docs/kernel/ipc/design.md`, "Unix domain sockets").
+`struct unix_addr { abstract, len, bytes[108] }` is a name as the doors
+parse it (`len == 0`: none); `struct unix_handles { nr, objs[32],
+rights[32] }` is what rides in a message.
+
+- `int unix_create(struct socket *s)` / `void unix_release(struct socket *s)`:
+  called by `ksock_create` and the socket's release.
+- `int unix_bind(s, const struct unix_addr *a)`: `-EINVAL` unnamed or
+  already bound; `-EADDRINUSE` if the name exists (path or abstract);
+  the filesystem's error for a path (`-EOPNOTSUPP` without `mknod`,
+  `-EACCES` without write permission on the directory).
+- `int unix_listen(s, backlog)`: a bound stream socket; the backlog is
+  clamped to `1..UNIX_BACKLOG_MAX`.
+- `int unix_connect(s, a)`: a stream waits for backlog room holding no
+  reference (or `-EAGAIN` non-blocking) and returns 0 with the
+  server-side socket queued; `-ECONNREFUSED` for a name with no
+  listener, a node that is not a socket, or a listener that has gone;
+  the lookup's error for a path that does not resolve; `-EPROTOTYPE`
+  for the other socket type; `-EISCONN`. A datagram socket records a
+  default destination.
+- `int unix_accept(s, struct socket **out)`: the queued socket,
+  referenced, connected, with the peer's name and credentials;
+  `-EAGAIN` non-blocking; `-EINVAL` once the listener is shut down.
+- `int64_t unix_send(s, buf, len, to, struct unix_handles *h, dontwait)`:
+  bytes sent (a stream may send fewer); `h` consumed on success;
+  `-EPIPE`, `-ENOTCONN`, `-EMSGSIZE` (a datagram above
+  `UNIX_MSG_MAX`), `-ECONNREFUSED` (the datagram's destination is
+  gone), `-EAGAIN`, `-EINVAL` (a unix socket among the handles).
+- `int64_t unix_recv(s, buf, len, from, h, flags, dontwait)`: bytes
+  received, 0 at end of stream; `h->nr` in: the room, out: delivered;
+  `flags` gets `COSMO_MSG_TRUNC` / `COSMO_MSG_HTRUNC`.
+- `int unix_shutdown(s, how)` (after the socket's `shut` bits are set),
+  `unix_getsockname`, `unix_getpeername`, `unix_peercred` (`-ENOTCONN`
+  unless a connected stream socket), `unsigned unix_ready(s)`,
+  `int unix_socketpair(type, &a, &b)`.
+- `int unix_addr_parse(path, plen, out)` / `size_t unix_addr_pack(a, family, out)`:
+  the user shape at both doors (a 16-bit family, then a NUL-terminated
+  path, a path exactly as long as the length says, or a leading NUL and
+  the bytes of an abstract name).
+- `void unix_handles_drop(h)`, `unsigned unix_socket_count(void)`.
+
 ## System calls (`kernel/syscall/native.c`)
+
+**`sendmsg(int h, const struct cosmo_msg *m)`** (97) and
+**`recvmsg(int h, struct cosmo_msg *m)`** (98): one buffer, a
+`struct cosmo_sockaddr_un` (in: a datagram's destination; out: the
+sender's name, `addrlen` the full size back), handles with per-handle
+rights (`COSMO_RIGHTS_SAME` or a subset), `nr_handles` (in: how many /
+the room; out: how many landed) and `flags` (in `COSMO_MSG_DONTWAIT`;
+out `TRUNC`, `HTRUNC`). Each handle sent passes
+`handle_transfer_check`; `-EPERM` sends nothing. On an inet socket a
+message carries no handles (`-EINVAL`). **`socketpair(int family, int
+type, int h[2])`** (99): `AF_UNIX` only, two connected sockets
+installed with `HANDLE_RIGHT_SOCK_CONNECTED`. `getsockopt(SOL_SOCKET,
+SO_PEERCRED)` fills a `struct cosmo_ucred { pid, uid, gid }` on a
+connected unix stream socket (`-ENOPROTOOPT` on an inet one). `bind`,
+`connect`, `sendto`, `recvfrom`, `accept` and `getsockname` read or
+write a `struct cosmo_sockaddr_un` when the family is `AF_UNIX`, the
+length passed delimiting the name.
+
 
 **`pipe(int h[2])`** (35): `-EFAULT` unless `h` names 8 writable user
 bytes; `pipe_create`; installs the read end with `HANDLE_RIGHT_READ`
@@ -144,3 +207,7 @@ missing `read` operation would.
 | reader or writer killed while blocked | `-EINTR`, or the partial count for a write that had progressed |
 | out of memory | `pipe_create` `-ENOMEM`; `sys_pipe` returns it |
 | handle table full | `-EMFILE`, both ends released |
+| a unix message's handles do not all fit the receiver's table or room | the first ones installed in order, the rest released, `COSMO_MSG_HTRUNC` |
+| a unix socket handle in a message | `-EINVAL`, nothing sent (the cycle Linux garbage-collects is refused) |
+| a listener released with connections queued | each client reads 0 and writes `-EPIPE` |
+| a datagram destination released | `-ECONNREFUSED` to the sender, by name or default destination |

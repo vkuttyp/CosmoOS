@@ -95,3 +95,23 @@ under a waiter, requeue across kinds, requeue onto a shared word then
 the mapping gone, the double requeue through two files with the first
 released between), `lxtest` (the flag both ways on a shared page), and
 every process exit.
+
+**I8. Every reference a unix socket, a connection or a message holds
+is dropped by the release of the object that holds it, and nothing
+waits on another socket while holding it alive.** A bound socket holds
+its node (or, for an abstract name, its root) and its registry entry
+from bind to release; a connection is held by its two ends and by
+nobody else; a listener's queue holds the server-side sockets it has
+not handed out; a message holds one reference per handle it carries
+and is freed, references and all, when received or when its queue's
+socket is released; a datagram's default destination is a pointer
+cleared by the peer's release, never a reference. A connector waiting
+for backlog room and a sender waiting for queue room hold no reference
+to the socket they wait on: they wait for a generation change and
+resolve the name again. So closing a socket's last handle always
+releases it, `unix_socket_count` returns to its value after every case,
+and a unix socket cannot ride in a message (the one reference cycle
+this rule cannot break without a collector is refused). **Checked by**
+every `unix-*` self-test's count before and after, `unix-handles` (the
+reference a message holds, seen and returned), `unix-close-race` (the
+connector released by the listener's close), and the userland cases.

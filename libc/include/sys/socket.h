@@ -2,15 +2,24 @@
 #define _SYS_SOCKET_H
 #include <sys/types.h>
 #include <uapi/cosmo/syscall.h>
+#define AF_UNIX COSMO_AF_UNIX
+#define AF_LOCAL COSMO_AF_UNIX
 #define AF_INET COSMO_AF_INET
 #define AF_INET6 COSMO_AF_INET6
+#define SOL_SOCKET COSMO_SOL_SOCKET
+#define SO_ERROR COSMO_SO_ERROR
+#define SO_PEERCRED COSMO_SO_PEERCRED
+#define MSG_DONTWAIT COSMO_MSG_DONTWAIT
+#define MSG_TRUNC COSMO_MSG_TRUNC
+#define MSG_CTRUNC COSMO_MSG_HTRUNC
 #define SOCK_STREAM COSMO_SOCK_STREAM
 #define SOCK_DGRAM COSMO_SOCK_DGRAM
 #define SOCK_NONBLOCK COSMO_SOCK_NONBLOCK
 #define SHUT_RD COSMO_SHUT_RD
 #define SHUT_WR COSMO_SHUT_WR
 #define SHUT_RDWR COSMO_SHUT_RDWR
-/* The native, family-tagged address is the only address shape. */
+/* The native, family-tagged inet address; a unix address is struct
+ * sockaddr_un (sys/un.h), passed with its own length. */
 struct sockaddr {
     uint16_t sa_family;
     uint16_t sa_port;       /* host order */
@@ -29,4 +38,11 @@ ssize_t send(int fd, const void *buf, size_t n, int flags);
 ssize_t recv(int fd, void *buf, size_t n, int flags);
 int shutdown(int fd, int how);
 int getsockname(int fd, struct sockaddr *sa, socklen_t *len);
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len);
+/* Two connected unix sockets, no name (AF_UNIX only). */
+int socketpair(int family, int type, int proto, int sv[2]);
+struct ucred {
+    int32_t pid;
+    uint32_t uid, gid;
+};
 #endif

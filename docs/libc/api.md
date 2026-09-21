@@ -275,8 +275,22 @@ sa_flowinfo, sa_addr[16] (network order, 4 bytes used for AF_INET),
 sa_scope }`, the layout of `struct cosmo_sockaddr`; `socklen_t` must
 be at least its size (`EINVAL` otherwise). `socket`, `bind`, `listen`,
 `accept`, `connect`, `sendto`, `recvfrom`, `send`, `recv`, `shutdown`,
-`getsockname` (flags arguments are ignored). `AF_INET`, `AF_INET6`,
-`SOCK_STREAM`, `SOCK_DGRAM`, `SHUT_*`. `htons`, `ntohs`, `htonl`,
+`getsockname`, `getsockopt` (the `flags` arguments of `send`, `sendto`,
+`recv` and `recvfrom` are ignored, as before -- the native calls carry
+none; `MSG_DONTWAIT` is honoured only through `cosmo_sendmsg` /
+`cosmo_recvmsg`'s `flags` field, and a non-blocking socket through
+`setnonblock` blocks nowhere). `AF_UNIX`, `AF_INET`,
+`AF_INET6`, `SOCK_STREAM`, `SOCK_DGRAM`, `SHUT_*`, `SOL_SOCKET`,
+`SO_ERROR`, `SO_PEERCRED` (`struct ucred { pid, uid, gid }`),
+`MSG_TRUNC`, `MSG_CTRUNC`. A unix address is `struct sockaddr_un {
+sun_family, sun_path[108] }` (`sys/un.h`, the layout of `struct
+cosmo_sockaddr_un`), passed with its own length: 2 plus the path and
+its NUL, or 2 plus 1 plus an abstract name's bytes; `bind`, `connect`
+and `sendto` pass that length through. `socketpair(AF_UNIX, type, 0,
+sv)`. Handles in a message go through the native `cosmo_sendmsg` /
+`cosmo_recvmsg` (`cosmo/syscall.h`, `struct cosmo_msg`): one buffer,
+handles and per-handle rights; there is no POSIX `sendmsg` with an
+`iovec` in this libc. `htons`, `ntohs`, `htonl`,
 `ntohl`. `inet_pton(family, text, out)` (1, 0 for bad text,
 -1/`EAFNOSUPPORT`), `inet_ntop(family, addr, buf, size)` (IPv6 with the
 longest zero run compressed; `ENOSPC` when the buffer is short).
