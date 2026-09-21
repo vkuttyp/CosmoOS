@@ -130,6 +130,11 @@ bool arch_trap_frame_is_user(const struct arch_trap_frame *frame)
     return (frame->cs & 3) != 0;
 }
 
+bool arch_trap_frame_irqs_enabled(const struct arch_trap_frame *frame)
+{
+    return (frame->rflags & RFLAGS_IF) != 0;
+}
+
 /* --- the user register set (milestone 10) ------------------------------------ */
 
 

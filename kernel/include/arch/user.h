@@ -119,6 +119,14 @@ bool arch_user_guard_present(void);
 struct arch_trap_frame;
 bool arch_trap_frame_is_user(const struct arch_trap_frame *frame);
 
+/* True if the interrupted context had interrupts enabled (RFLAGS.IF /
+ * PSTATE.I clear). A trap runs with them masked as the hardware left
+ * them; a handler that must sleep -- the file-backed page fault -- may
+ * enable them only if the context it interrupted had them enabled, and
+ * a fault taken with them disabled is a fault in a context that must not
+ * sleep (docs/kernel/memory/design.md §7.2). */
+bool arch_trap_frame_irqs_enabled(const struct arch_trap_frame *frame);
+
 /* Copy n bytes between kernel memory and user memory (either direction:
  * the caller knows which side is which) with every access listed in the
  * exception table. Returns the number of bytes NOT copied: 0 on success,

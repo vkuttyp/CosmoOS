@@ -304,6 +304,20 @@ static long lx_poll_ms(struct lx_pollfd *fds, unsigned long n, int ms)
 #endif
 }
 
+/* The shared-futex unit's flag test: wait on the word `arg` points at,
+ * with FUTEX_PRIVATE_FLAG when the low bit of the argument's second word
+ * says so. */
+static volatile unsigned *g_flag_word;
+static long g_flag_rc[2];
+static int t_flag_waiter(void *arg)
+{
+    int with_flag = (int)(uintptr_t)arg;
+    struct lx_timespec to = { 2, 0 };
+    g_flag_rc[with_flag] = sc6(LX_futex, g_flag_word, LX_FUTEX_WAIT | (with_flag ? LX_FUTEX_PRIVATE_FLAG : 0), 0,
+                               &to, 0, 0);
+    return 0;
+}
+
 /* Join like a libc: wait while the CHILD_CLEARTID word is nonzero. */
 static int lx_join(int32_t *word)
 {
@@ -634,6 +648,39 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_pread64, mfd, &got, 1, 40) == 1 && got == 0x77, got);   /* shared, as VALIDATE means */
         CHECKV(sc4(LX_pwrite64, mfd, pattern + 40, 1, 40) == 1, 0);
         sc2(LX_munmap, sv, 4096);
+    }
+    /* The futex flag on a shared page (the shared-futex unit): with
+     * FUTEX_PRIVATE_FLAG the key is this process's, without it the key is
+     * the file's -- the flag used to be masked out. A waiter with the flag
+     * is not woken by a wake without it and is by one with it; the reverse
+     * pair for a waiter without. The sleeper count through a self
+     * CMP_REQUEUE says when each is asleep. */
+    long fsm2 = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED, mfd, 0);
+    CHECKV(fsm2 > 0, fsm2);
+    if (fsm2 > 0) {
+        g_flag_word = (volatile unsigned *)(fsm2 + 256);
+        *g_flag_word = 0;
+        for (int with_flag = 1; with_flag >= 0; with_flag--) {
+            unsigned f = with_flag ? LX_FUTEX_PRIVATE_FLAG : 0, other = with_flag ? 0 : LX_FUTEX_PRIVATE_FLAG;
+            int32_t ptid = 0;
+            g_tidword[2] = 1;
+            g_flag_rc[with_flag] = 99;
+            long ct = lx_clone(t_flag_waiter, g_stacks[2] + sizeof(g_stacks[2]), (void *)(uintptr_t)with_flag,
+                               THREAD_FLAGS, &ptid, &g_tidword[2], g_tcb);
+            CHECKV(ct > 0, ct);
+            long asleep = 0;
+            for (int i = 0; i < 4000 && asleep != 1; i++) {
+                asleep = sc6(LX_futex, g_flag_word, LX_FUTEX_CMP_REQUEUE | f, 0, 1000, g_flag_word, 0);
+                if (asleep != 1)
+                    sc0(LX_sched_yield);
+            }
+            CHECKV(asleep == 1, asleep);
+            CHECKV(sc6(LX_futex, g_flag_word, LX_FUTEX_WAKE | other, 1, 0, 0, 0) == 0, with_flag);   /* the other key */
+            CHECKV(sc6(LX_futex, g_flag_word, LX_FUTEX_WAKE | f, 1, 0, 0, 0) == 1, with_flag);       /* its own */
+            CHECKV(lx_join(&g_tidword[2]) == 0, with_flag);
+            CHECKV(g_flag_rc[with_flag] == 0, g_flag_rc[with_flag]);
+        }
+        sc2(LX_munmap, fsm2, 4096);
     }
     /* A shared writable mapping of a file opened read-only: EACCES. */
     long rofd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmap", LX_O_RDONLY, 0);

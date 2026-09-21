@@ -197,14 +197,14 @@ static int64_t sys_futex_wait(struct syscall_args *a)
      * -EINVAL; 0 is still "no timeout". */
     if (a->a[2] > (uint64_t)INT64_MAX)
         return -EINVAL;
-    return futex_wait(process_current()->space, a->a[0], (uint32_t)a->a[1], a->a[2]);
+    return futex_wait(process_current()->space, a->a[0], (uint32_t)a->a[1], a->a[2], false);
 }
 
 static int64_t sys_futex_wake(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[0], 4))
         return -EFAULT;
-    return futex_wake(process_current()->space, a->a[0], (unsigned)a->a[1]);
+    return futex_wake(process_current()->space, a->a[0], (unsigned)a->a[1], false);
 }
 
 /*
@@ -223,7 +223,7 @@ static int64_t sys_futex_requeue(struct syscall_args *a)
     if (!user_range_ok(a->a[0], 4) || !user_range_ok(a->a[1], 4))
         return -EFAULT;
     return futex_requeue(process_current()->space, a->a[0], a->a[1], (unsigned)a->a[2], (unsigned)a->a[3], true,
-                         (uint32_t)a->a[4]);
+                         (uint32_t)a->a[4], false);   /* the native calls always classify: the kernel can see what the word maps */
 }
 
 /*
@@ -1908,7 +1908,7 @@ static const char *const sysctl_names[] = {
     "kernel.hostname",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
-    "vm.file_fault_retries", "vm.file_sigbus",
+    "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
     "sysctl.names",
@@ -1975,6 +1975,11 @@ static int sysctl_value(const char *name, char *out, size_t n)
         else
             return -ENOENT;
         return ksnprintf(out, n, "%llu", (unsigned long long)v);
+    }
+    if (strcmp(name, "vm.futex_shared_keys") == 0) {
+        struct vm_stats st;
+        vm_get_stats(&st);
+        return ksnprintf(out, n, "%llu", (unsigned long long)st.futex_shared_keys);
     }
     if (strcmp(name, "debug.file_fault_hold") == 0) {
 #if CONFIG_DEBUG
