@@ -29,8 +29,10 @@ struct fifo *fifo_alloc(void);
 void fifo_free(struct fifo *fifo);
 
 /*
- * POSIX's open rules, from f->flags: O_RDONLY waits until a writer has
- * the FIFO open, O_WRONLY until a reader has; with O_NONBLOCK a
+ * POSIX's open rules, from f->flags: O_RDONLY waits for a writer,
+ * O_WRONLY for a reader -- for the other side to have opened since this
+ * open joined (its open generation), so a peer that came and went
+ * meanwhile counts; with O_NONBLOCK a
  * read-only open returns at once and a write-only one is -ENXIO when no
  * reader is there; O_RDWR counts as both and never blocks. The wait is
  * killable (-EINTR). An open that fails leaves the fifo as it found it:

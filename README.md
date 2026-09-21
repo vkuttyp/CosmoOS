@@ -3176,7 +3176,10 @@ See [docs/development.md](docs/development.md).
   ring is made by the first open and freed by the last release, and
   its reader and writer counts are the live **opens** of each side, so
   the pipe's own end-of-file and `EPIPE` rules follow from them
-  (invariant **I9**). Open is POSIX's: read-only waits for a writer,
+  (invariant **I9**). Open is POSIX's: read-only waits for a writer
+  (one that opened since the reader joined, even if it has closed
+  again by the time the reader runs: the other side's open generation,
+  not its count, which lost exactly that writer),
   write-only for a reader, `O_NONBLOCK` (`0x0800`, new to the native
   `open`) makes the first return at once and the second `ENXIO`,
   `O_RDWR` never blocks; the wait is killable, and an open that fails

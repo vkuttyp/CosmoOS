@@ -105,7 +105,9 @@ which filesystem holds it.
   open may remain; a live ring is a panic (an open outlived its node).
 - **`int fifo_open(struct fifo *, struct file *f)`**: POSIX's open rules
   from `f->flags` -- `O_RDONLY` waits for a writer, `O_WRONLY` for a
-  reader, `O_NONBLOCK` makes the first return at once and the second
+  reader (for the other side's open generation to move past what it
+  was when this open joined: a peer that opened and closed meanwhile
+  counts), `O_NONBLOCK` makes the first return at once and the second
   `-ENXIO` without a reader, `O_RDWR` counts as both and never blocks;
   killable (`-EINTR`). Adds the open's count(s) to the ring (making the
   ring if it is the first open) and sets `f->priv`. **An open that

@@ -210,7 +210,12 @@ give end-of-file when the last writer has closed and the ring is empty
 `-EPIPE` when no reader remains.
 
 **Open's rules are POSIX's.** `open(O_RDONLY)` blocks until a writer has
-the FIFO open; `open(O_WRONLY)` blocks until a reader has; each wakes the
+the FIFO open; `open(O_WRONLY)` blocks until a reader has (**as built,
+banner item 1:** until the other side has *opened since this open
+joined* -- its open generation moved -- so a writer that came and went
+before the woken reader ran still counts, and the reader returns to
+read its bytes and end of file; waiting on the live count instead lost
+that writer); each wakes the
 other side's openers; `O_NONBLOCK` makes a read-only open return at once
 and a write-only open fail with `-ENXIO` when no reader is there;
 `O_RDWR` counts as both and never blocks (Linux's behaviour, and the

@@ -125,9 +125,16 @@ close are read first) and `-EPIPE` when no reader remains. The ring
 pointer and the counts change together, under one lock order: the
 fifo's lock outside the ring's.
 
-**Open** is POSIX's: `O_RDONLY` waits until a writer has the FIFO open,
-`O_WRONLY` until a reader has (each open wakes the other side's openers
-on the fifo's queue, and the wait is on that queue with no lock held);
+**Open** is POSIX's: `O_RDONLY` waits for a writer, `O_WRONLY` for a
+reader -- precisely, an open that finds no peer waits until the *other
+side's open generation* (`r_gen`/`w_gen` in the fifo, opens ever per
+side, kept beside the counts) has moved past what it was when this
+open joined, not until the peer's count is nonzero: a writer that
+opened, wrote and closed before the woken reader got to run has still
+had the FIFO open, and the reader returns to read its bytes and end of
+file (waiting on the count lost exactly that writer; Linux keeps the
+same two counters). Each open wakes the other side's openers on the
+fifo's queue, and the wait is on that queue with no lock held;
 with `O_NONBLOCK` a read-only open returns at once and a write-only one
 is `-ENXIO` when no reader is there; `O_RDWR` counts as both sides and
 never blocks. The wait is killable. **An open that fails undoes
