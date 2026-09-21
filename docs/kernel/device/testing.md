@@ -296,7 +296,10 @@ before it. The handler pops one, that completion stores the hold from
 inside the loop, and the other two stay: the remove finds exactly 2 and
 completes them `-EIO`; 2 completed `0`, 4 in all, none twice. With the
 check back at the door the handler pops all three and the remove finds
-0, deterministically.
+0, deterministically -- as run, `check failed: s.c_ok == 2` (4 popped),
+the first of the two counts the pass asserts; the held pass beside it
+still found its 64 that run, which is the difference between a window
+raced and a window built.
 
 ## Gaps
 
