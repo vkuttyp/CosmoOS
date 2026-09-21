@@ -232,6 +232,12 @@ bool selftest_unix_dgram(const char **reason)
     CHECK(unix_send(a, "q", 1, NULL, NULL, true) == -EAGAIN);
     CHECK(unix_recv(b, buf, 1, NULL, NULL, &flags, false) == 1);
     CHECK(unix_send(a, "q", 1, NULL, NULL, true) == 1);
+    /* shutdown(RD) on the receiver: what waits is dropped and a sender is
+     * refused, by the default destination and by name. */
+    b->shut |= 1;
+    CHECK(unix_shutdown(b, COSMO_SHUT_RD) == 0);
+    CHECK(unix_send(a, "x", 1, NULL, NULL, true) == -ECONNREFUSED);
+    CHECK(unix_send(a, "x", 1, &bn, NULL, true) == -ECONNREFUSED);
     /* The receiver goes: a send to it is refused, whether by name or by
      * the default destination. */
     put(&b);

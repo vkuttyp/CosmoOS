@@ -2168,12 +2168,18 @@ static int64_t lx_sendmsg(struct syscall_args *a)
             rc = -ENOMEM;
         size_t at = 0;
         for (uint64_t i = 0; i < m.msg_iovlen && rc == 0; i++) {
+            /* The vector is user memory and another thread may have
+             * grown an element since it was summed: the second pass
+             * copies no more than the buffer was sized for. */
             struct lx_iovec iov;
-            if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov)) ||
+            if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov)) || iov.iov_len > total - at ||
                 copy_from_user(tmp + at, iov.iov_base, iov.iov_len))
                 rc = -EFAULT;
-            at += iov.iov_len;
+            else
+                at += iov.iov_len;
         }
+        if (rc == 0)
+            total = at;   /* what was actually gathered, if an element shrank */
         if (rc == 0) {
             if (s->family == COSMO_AF_UNIX)
                 rc = unix_send(s, tmp, total, have_to ? &to.ua : NULL, &hs, dontwait);

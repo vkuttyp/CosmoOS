@@ -144,7 +144,13 @@ static bool name_eq(const struct unix_addr *a, const struct unix_addr *b)
 }
 
 /* Under g_reg_lock: the bound socket keyed by `key` (its node, or the
- * root plus the bytes for an abstract name), referenced, or NULL. */
+ * root plus the bytes for an abstract name), referenced, or NULL. A
+ * socket leaves the registry in its release, which runs after its count
+ * has reached zero, so for a moment a dying socket is still listed: the
+ * reference is taken with kobject_tryget, and a count already at zero
+ * means "not found" (docs/kernel/object/architecture.md, "Leaving a
+ * table"). The memory is still valid then -- the release unlinks under
+ * this lock before anything is freed. */
 static struct unix_sock *reg_find_locked(struct vnode *key, const struct unix_addr *a)
 {
     struct unix_sock *u;
@@ -153,7 +159,8 @@ static struct unix_sock *reg_find_locked(struct vnode *key, const struct unix_ad
             continue;
         if (a->abstract && !name_eq(&u->name, a))
             continue;
-        ksock_get(u->sock);
+        if (!kobject_tryget(&u->sock->obj))
+            continue;   /* being released: its entry goes in a moment */
         return u;
     }
     return NULL;
@@ -1060,11 +1067,16 @@ int unix_shutdown(struct socket *s, int how)
         spin_unlock_irqrestore(&c->lock, st);
         free_gone(&gone);
     } else if (s->type == COSMO_SOCK_DGRAM && (how == COSMO_SHUT_RD || how == COSMO_SHUT_RDWR)) {
+        /* Nobody reads any more: what waits is dropped, a sender waiting
+         * for room is woken to find the queue refused, and no later send
+         * lands in it. */
         struct list_node gone = LIST_HEAD_INIT(gone);
         arch_irq_state_t st = spin_lock_irqsave(&u->qlock);
+        u->rxq.rd_closed = true;
         uq_drain_locked(&u->rxq, &gone);
         spin_unlock_irqrestore(&u->qlock, st);
         free_gone(&gone);
+        room_changed();
     }
     wake_sock(s);
     return 0;

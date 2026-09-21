@@ -1901,6 +1901,7 @@ static int64_t sys_recvmsg(struct syscall_args *a)
      * installed are the receiver's now, the rest are released and the
      * flag says so -- Linux's MSG_CTRUNC, and no rollback. */
     unsigned installed = 0;
+    int landed[COSMO_UNIX_HANDLES_MAX];
     struct handle_table *t = &process_current()->handles;
     for (unsigned i = 0; i < hs.nr; i++) {
         if (n < 0)
@@ -1910,12 +1911,11 @@ static int64_t sys_recvmsg(struct syscall_args *a)
             flags |= COSMO_MSG_HTRUNC;
             break;
         }
+        landed[installed++] = hv;
         if (copy_to_user((uint64_t)(uintptr_t)(m.handles + i), &hv, sizeof(hv))) {
-            handle_close(t, hv);
             n = -EFAULT;
             break;
         }
-        installed++;
     }
     unix_handles_drop(&hs);   /* the message's references; the table took its own */
     if (n >= 0 && m.addr) {
@@ -1938,15 +1938,20 @@ static int64_t sys_recvmsg(struct syscall_args *a)
         m.addrlen = full;
     }
     ksock_put(s);
-    if (n < 0)
-        return n;
     m.nr_handles = installed;
     m.flags = flags;
-    /* The out fields, and only those. */
-    if (copy_to_user(a->a[1] + offsetof(struct cosmo_msg, addrlen), &m.addrlen, sizeof(m.addrlen)) ||
-        copy_to_user(a->a[1] + offsetof(struct cosmo_msg, nr_handles), &m.nr_handles, sizeof(m.nr_handles)) ||
-        copy_to_user(a->a[1] + offsetof(struct cosmo_msg, flags), &m.flags, sizeof(m.flags)))
-        return -EFAULT;
+    /* The out fields, and only those. A fault anywhere after the handles
+     * landed closes every one of them: a call that fails reports no
+     * descriptor, so it leaves none behind. */
+    if (n >= 0 && (copy_to_user(a->a[1] + offsetof(struct cosmo_msg, addrlen), &m.addrlen, sizeof(m.addrlen)) ||
+                   copy_to_user(a->a[1] + offsetof(struct cosmo_msg, nr_handles), &m.nr_handles, sizeof(m.nr_handles)) ||
+                   copy_to_user(a->a[1] + offsetof(struct cosmo_msg, flags), &m.flags, sizeof(m.flags))))
+        n = -EFAULT;
+    if (n < 0) {
+        for (unsigned i = 0; i < installed; i++)
+            handle_close(t, landed[i]);
+        return n;
+    }
     return n;
 }
 

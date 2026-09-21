@@ -62,7 +62,20 @@ unit makes cheap.
    so a mutation that let the child through fails a check instead of
    deadlocking the parent's wait on the child's blocked connect -- which
    is how that mutation first failed.
-7. **The numbers.** `SYS_sendmsg` 97, `SYS_recvmsg` 98,
+7. **Review of the build fixed four more things.** A registry lookup
+   takes its reference with `kobject_tryget`, because a socket leaves
+   the registry in its release, after its count has reached zero, and a
+   lookup in that moment must find nothing rather than revive it
+   (`docs/kernel/object/architecture.md`, "Leaving a table").
+   `shutdown(RD)` on a datagram socket marks its queue refused and wakes
+   the senders waiting for room, so none is stranded and no later send
+   lands in it (`unix-dgram` checks the refusal). The Linux datagram
+   `sendmsg` copies no more than it sized its buffer for, since the
+   vector is user memory another thread may grow between the two passes.
+   And the native `recvmsg` closes every handle it installed when a
+   later fault fails the call, so a failed call leaves no descriptor
+   behind.
+8. **The numbers.** `SYS_sendmsg` 97, `SYS_recvmsg` 98,
    `SYS_socketpair` 99, `SYS_COUNT` 100; six self-tests, 372 in all on
    both architectures; `UNIX_BUF` 64 KiB, `UNIX_DGRAM_MAX` 64 messages
    and 256 KiB, `UNIX_BACKLOG_MAX` 128, `UNIX_HANDLES_MAX` 32; invariant

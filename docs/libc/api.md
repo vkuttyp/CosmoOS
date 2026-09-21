@@ -275,8 +275,11 @@ sa_flowinfo, sa_addr[16] (network order, 4 bytes used for AF_INET),
 sa_scope }`, the layout of `struct cosmo_sockaddr`; `socklen_t` must
 be at least its size (`EINVAL` otherwise). `socket`, `bind`, `listen`,
 `accept`, `connect`, `sendto`, `recvfrom`, `send`, `recv`, `shutdown`,
-`getsockname`, `getsockopt` (flags arguments are ignored except
-`MSG_DONTWAIT`, which the kernel honours). `AF_UNIX`, `AF_INET`,
+`getsockname`, `getsockopt` (the `flags` arguments of `send`, `sendto`,
+`recv` and `recvfrom` are ignored, as before -- the native calls carry
+none; `MSG_DONTWAIT` is honoured only through `cosmo_sendmsg` /
+`cosmo_recvmsg`'s `flags` field, and a non-blocking socket through
+`setnonblock` blocks nowhere). `AF_UNIX`, `AF_INET`,
 `AF_INET6`, `SOCK_STREAM`, `SOCK_DGRAM`, `SHUT_*`, `SOL_SOCKET`,
 `SO_ERROR`, `SO_PEERCRED` (`struct ucred { pid, uid, gid }`),
 `MSG_TRUNC`, `MSG_CTRUNC`. A unix address is `struct sockaddr_un {
