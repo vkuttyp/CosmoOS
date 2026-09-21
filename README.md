@@ -3067,8 +3067,8 @@ See [docs/development.md](docs/development.md).
   can see. The whole change to the futex is its hash and two match
   lines; the sequences and the compare-then-enqueue that L4 rests on
   are untouched, and a requeue that changes the key exchanges the
-  reference -- taken per moved waiter under the bucket locks, the old
-  ones put after them -- which three review rounds on the report
+  reference -- one add of as many references as waiters moved, under
+  the bucket locks, the old ones put after them -- which three review rounds on the report
   sharpened from "the reference travels with the waiter" to a rule that
   survives an unbounded chain of requeues with one slot. The `mmap`
   section proves the two-process wait (**the first wait across two
@@ -3090,7 +3090,7 @@ See [docs/development.md](docs/development.md).
   `lxtest` checks; the counter not decremented panics at the first exit
   of a process that shared; the old references not put after a requeue
   leak the first file's vnode, which the double-requeue's page count
-  sees; the reference not taken per moved waiter panics on a released
+  sees; the moved waiters' references not taken panics on a released
   vnode; and the reference not taken at classification survives, as the
   report declared in advance. Bench: a wake costs 2.0 / 3.9 us with no
   shared mapping on x86-64 / AArch64, 3.9 / 6.6 us with one, and a

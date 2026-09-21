@@ -319,17 +319,15 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
                 list_remove(&w->link);
                 /*
                  * The key changes, so the reference is exchanged: the
-                 * waiter takes one to the destination's vnode here (an
-                 * atomic increment, fine under the locks) and gives up
-                 * the one it held, which is put after the locks are
-                 * released -- every waiter on uaddr1 held k1's vnode, so
-                 * one vnode, `moved` times.
+                 * waiter now holds one to the destination's vnode --
+                 * taken below, one add for all of them, before the locks
+                 * drop -- and gives up the one it held, which is put
+                 * after the locks are released: every waiter on uaddr1
+                 * held k1's vnode, so one vnode, `moved` times.
                  */
                 w->key.obj = k2.obj;
                 w->key.off = k2.off;
                 w->key.held = k2.held;
-                if (k2.held != NULL)
-                    vnode_get(k2.held);
                 __atomic_store_n(&w->bucket, b2, __ATOMIC_RELEASE);
                 list_push_back(&b2->waiters, &w->link);
                 moved++;
@@ -339,6 +337,18 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
             break;
         }
     }
+    /*
+     * The moved waiters' new references, in one add: `moved` holders of
+     * one vnode were created above, and the count must say so before
+     * the locks drop, because a moved waiter that wakes and dequeues
+     * after the unlock puts a reference it must already hold. One
+     * atomic add under the locks rather than one per waiter (review of
+     * the build): the walk is bounded by the waiters present on the
+     * word, and the reference traffic on the vnode's line need not
+     * scale with it at all.
+     */
+    if (moved > 0 && k2.held != NULL)
+        vnode_get_n(k2.held, (unsigned)moved);
     if (hi != lo)
         spin_unlock(&hi->lock);
     spin_unlock_irqrestore(&lo->lock, s);

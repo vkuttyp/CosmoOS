@@ -121,7 +121,7 @@ something of its own is still open before taking its storage apart
 (V23). Holds `mnt->lock` across the walk: `pred` must not sleep, and the
 vnode it is shown is not referenced for it.
 
-**`vnode_get` / `vnode_put`** Reference counting. The last put runs the
+**`vnode_get` / `vnode_get_n` / `vnode_put`** Reference counting; `vnode_get_n` takes `n` in one add, for a caller that counted its holders under a lock. The last put runs the
 release path: unhash, sync dirty pages (regular files), drop the page
 cache, `ops->evict`, free. Release may therefore do block I/O and take
 `mnt->lock`; never drop the last reference with that lock held.

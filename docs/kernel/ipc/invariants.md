@@ -80,9 +80,9 @@ file mapping is keyed by `(vnode, file offset)` and every other word by
 (`shared_maps == 0`, kept by `vm_user_map_file` and the mapping record's
 release, checked zero at `vm_space_destroy`). A shared key carries a
 vnode reference: a waiter's from classification to dequeue, exchanged
-by a requeue that changes its key (taken per moved waiter under the
-bucket locks, the old ones put after them, one vnode each way since
-every waiter on a word carries that word's key); a wake's or a
+by a requeue that changes its key (one add of as many references as
+waiters moved, under the bucket locks, the old ones put after them, one
+vnode each way since every waiter on a word carries that word's key); a wake's or a
 requeue's own for the call. So a wake from another process finds the
 sleeper, a wake on a private mapping's word does not find a shared
 one's, a waiter whose mapping is unmapped or whose word is requeued

@@ -35,6 +35,15 @@ void kobject_get(struct kobject *obj)
         panic("kobject_get on a released %s object %p", obj->type->name, (void *)obj);
 }
 
+void kobject_get_n(struct kobject *obj, uint32_t n)
+{
+    if (n == 0)
+        return;
+    uint32_t old = __atomic_fetch_add(&obj->refcount, n, __ATOMIC_ACQ_REL);
+    if (old == 0)
+        panic("kobject_get_n on a released %s object %p", obj->type->name, (void *)obj);
+}
+
 bool kobject_tryget(struct kobject *obj)
 {
     uint32_t cur = __atomic_load_n(&obj->refcount, __ATOMIC_ACQUIRE);

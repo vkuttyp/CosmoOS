@@ -260,6 +260,8 @@ struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino);   /* referen
  * shown is not referenced for it and must not be kept. */
 bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, void *arg), void *arg);
 static inline void vnode_get(struct vnode *vn) { kobject_get(&vn->obj); }
+/* `n` references in one add (a requeue's moved waiters, counted under the bucket locks). */
+static inline void vnode_get_n(struct vnode *vn, unsigned n) { kobject_get_n(&vn->obj, n); }
 /* Drop a reference. The last one unhashes the vnode under the mount's hash
  * lock before it falls to zero, so a hashed vnode always has a reference
  * (docs/kernel/lockdep/design.md, "the vnode cache"). */

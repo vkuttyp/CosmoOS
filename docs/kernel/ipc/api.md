@@ -111,9 +111,9 @@ wakes up to `nr_wake` and moves up to `nr_requeue` more onto the second
 word; both words are classified, and a requeue that changes the key
 exchanges the reference -- every waiter on the source word carries its
 key, so there is one old vnode and one new however many move: the new
-references are taken per moved waiter under the bucket locks (an atomic
-increment) and the old ones put after the locks are released (a put may
-block). A word requeued onto itself is counted and left where it is (the
+references are taken in one atomic add for every moved waiter
+(`vnode_get_n`), under the bucket locks and before they drop, and the
+old ones put after the locks are released (a put may block). A word requeued onto itself is counted and left where it is (the
 move would push each waiter to the tail of the list being walked, an
 unbounded walk with interrupts off — found and fixed by the native
 thread door unit), and with nothing to wake it leaves `wake_seq` alone,

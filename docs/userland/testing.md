@@ -72,7 +72,7 @@ asleep on a second shared mapping's word whose mapping is then unmapped
 times out cleanly; a waiter on the shared word requeued onto a private
 word and woken there, the counts moving with it; private waiters
 requeued onto a shared mapping's word and the mapping then unmapped
-(they time out, the reference taken per moved waiter outliving it); a
+(they time out, the reference each moved waiter was given outliving it); a
 double requeue shared (file A) -> private -> shared (file B) with file A
 unmapped, closed and unlinked in between: its one page leaves the cache
 (`vm.cache_pages` -1, the exchanged reference having let it go) and the

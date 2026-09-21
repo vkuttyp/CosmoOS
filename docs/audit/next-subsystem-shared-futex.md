@@ -63,6 +63,14 @@ reviewed.
    L4 amended to say it holds per key; 366 self-tests on both
    architectures, unchanged in count (the unit's tests are sections and
    `lxtest` rows).
+6. **The moved waiters' references are one add.** Review of the build
+   pointed at `moved` atomic increments on the destination vnode under
+   both bucket locks with interrupts off. The number of holders is
+   known when the walk ends, so `vnode_get_n(k2.held, moved)` takes
+   them in one add before the locks drop (`kobject_get_n`, new: `n`
+   references, the released-object panic of `kobject_get`). The walk
+   itself is bounded by the waiters present on the word, as before; the
+   reference traffic no longer scales with it. Bug-proof below.
 
 **Bug-proofs, as run.** Each mutation applied alone on x86-64, the
 debug suite booted, the file restored from HEAD; the five the report
@@ -350,7 +358,7 @@ documents. No structure a program sees changes size or number.
 | a word in anonymous memory | libc's own mutex under the herd (`thrtest`, unchanged) and the sleeper count the native thread door reads: `shared_maps == 0` for that process, and the counts are what they were |
 | unmap under a waiter | a thread waits on a shared word; another unmaps the page; the wait times out, the process exits cleanly, the poisoner is silent (the vnode reference outlived the mapping) |
 | requeue across kinds | waiters on a shared word requeued onto a private one and woken there; the sleeper counts move with them |
-| requeue onto a shared word, then the mapping goes | waiters on a private word requeued onto a word in a shared mapping; the shared mapping is unmapped by another thread; the waiters time out cleanly and the poisoner is silent — the reference taken per moved waiter is what outlives the mapping |
+| requeue onto a shared word, then the mapping goes | waiters on a private word requeued onto a word in a shared mapping; the shared mapping is unmapped by another thread; the waiters time out cleanly and the poisoner is silent — the reference each moved waiter is given is what outlives the mapping |
 | requeue off a shared word, then off again | waiters on a shared word requeued onto a private word, then onto a word in a *second* shared file, then woken; the first file is unlinked and its last reference dropped before the wake: no leak of the first vnode (its release runs, observed by the file's page count returning) and no use of it — the exchange left each waiter holding only its current key's reference |
 | `lxtest`: the flag both ways | on a `MAP_SHARED` page: a clone thread waits *with* `FUTEX_PRIVATE_FLAG`; a wake *without* it wakes 0, a wake *with* it wakes 1; then the reverse pair — the flag selects the key and both keys work |
 | `lxtest`: a private mutex's cost | a wait/wake pair with the flag set on a shared page takes the private path (a counter, `vm.futex_shared_keys`, does not move) |
