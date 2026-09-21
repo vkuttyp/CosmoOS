@@ -1092,10 +1092,23 @@ static void rm_submitter_main(void *arg)
         rb->bio = (struct bio){ .dev = s->bd, .sector = 1, .nsectors = 1, .dir = BIO_READ,
                                 .buf = s->buf, .done = rm_done, .arg = s };
         __atomic_store_n(&rb->busy, 1u, __ATOMIC_RELEASE);
+        /*
+         * Counted as accepted BEFORE the submit, and uncounted if refused:
+         * a QEMU device completes in microseconds and the callback counts
+         * the completion on another CPU, so an accept counted after the
+         * submit returned could be counted after its own completion --
+         * and `accepted - completed`, two unsigned words, wrapped to a
+         * huge number for that instant. The held pass's wait for "more
+         * outstanding than the table holds" exited on it at once and the
+         * remove walked an empty table: `found >= 1` failed twice in CI
+         * with every bio completed `0` (docs/testing/flakes.md). With
+         * the accept counted first, completed never exceeds accepted,
+         * which `rm_pass` now asserts.
+         */
+        __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
         int rc = blk_submit(&rb->bio);
-        if (rc == 0) {
-            __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
-        } else {
+        if (rc != 0) {
+            __atomic_fetch_sub(&s->ok, 1u, __ATOMIC_ACQ_REL);
             __atomic_store_n(&rb->busy, 0u, __ATOMIC_RELEASE);   /* refused: never completes */
             if (rc == -ENODEV)
                 __atomic_fetch_add(&s->refused, 1u, __ATOMIC_ACQ_REL);
@@ -1228,6 +1241,7 @@ static bool rm_pass(struct blkdev *bd, struct pci_device *pdev, bool held, unsig
         end = clock_now_ns() + 2000ull * 1000000ull;
         while (s.ok - rm_completions(&s) <= nr_slots && clock_now_ns() < end)
             sched_yield();
+        RM_CHECK(rm_completions(&s) <= s.ok);   /* the accept is counted first, so this never wraps */
         RM_CHECK(s.ok - rm_completions(&s) > nr_slots);
     }
 
@@ -1493,11 +1507,12 @@ static bool rm_post(struct rm_submitter *s, unsigned k)
     rb->bio = (struct bio){ .dev = s->bd, .sector = 1, .nsectors = 1, .dir = BIO_READ,
                             .buf = s->buf, .done = rm_done, .arg = s };
     __atomic_store_n(&rb->busy, 1u, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);   /* before the submit: see rm_submitter_main */
     int rc = blk_submit(&rb->bio);
-    if (rc == 0)
-        __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
-    else
+    if (rc != 0) {
+        __atomic_fetch_sub(&s->ok, 1u, __ATOMIC_ACQ_REL);
         __atomic_store_n(&rb->busy, 0u, __ATOMIC_RELEASE);
+    }
     return rc == 0;
 }
 
