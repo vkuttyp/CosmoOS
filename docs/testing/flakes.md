@@ -762,7 +762,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Forty-nine, to 2026-09-21**, across CI and this developer's machine, on
+**Fifty-seven, to 2026-09-21**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -807,6 +807,13 @@ of this section said eight and then listed nine:
 | PR #195's own CI run, the head with the panic fix | observed, aarch64 (`f560ab8`), the plain debug boot: `connect 0 in 1266 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:36528 accepted at 93.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 113.9s. Row one a seventeenth time, on a memory-syscall branch that touches no network code — the x86-64 job of the same run passed. The fourth `retransmits +1` in the last five sightings, where the whole file before them held two; and `echo 2 ms` for the second time, after sighting forty-three. Two counts, written down, no claim from either |
 | PR #199's own CI run | observed, aarch64 (`a82c833`), the **other interrupt controller** boot: `connect 0 in 526 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:60998 accepted at 92.9s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 112.9s. Row one an eighteenth time, on a branch that touches the block layer, one driver and the tests and no network code at all; the x86-64 job of the same run passed. `echo 2 ms` for the third time (sightings forty-three and forty-seven), and `retransmits +0` after four of the last five carried one — both written down, neither claimed |
 | PR #199's own CI run, a later commit | observed, aarch64 (`9e93d89`), the **plain debug** boot this time: `connect 0 in 931 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:35338 accepted at 84.7s, 0 byte(s)`, **`[deadline, ESTABLISHED]`**, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 104.7s. Row one a nineteenth time, and **this PR's second** — the sighting above was the other-interrupt-controller boot of an earlier commit, this one the plain boot of a later one, so two distinct aarch64 jobs on one branch. The `sent 12` variant, where the guest's write succeeded and the host still read nothing |
+| `main` @ `26c1b5f`, twice in one run — aarch64 and x86-64 | observed on 2026-09-20 on both architectures of one `main` run (35493372819), read from the logs a day later rather than watched: aarch64 (plain debug) **`connect -104 in 849 ms`** -- the connect itself reset, `sent -1`, `recv -1`, `pending error -104`, `sndbuf free 0`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; x86-64 (protection-capable) `connect 0 in 914 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; both host sides `0 byte(s)`, `[deadline, ESTABLISHED]`, probes 2 ms / 2 ms and 1 ms / 1 ms. The aarch64 one is the connect-reset shape of PR #171's first; the x86-64 one is row one |
+| `main` @ `8e2cc55` | observed, aarch64, the plain debug boot of a `main` run on 2026-09-20 (35497897134), read from the logs a day later: `connect 0 in 911 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:37554 accepted at 93.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 113.9s. Row one, the `sent 12` variant |
+| `main` @ `238ac40` | observed, aarch64, the protection-capable boot of a `main` run on 2026-09-20 (35502406994), read from the logs a day later: `connect 0 in 1219 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:57212 accepted at 94.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.9s. Row one, with a SYN retransmission |
+| `main` @ `2332d59` | observed, aarch64, the protection-capable boot of the file-regions merge's `main` run on 2026-09-21 (35577048217), read from the logs the same day: `connect 0 in 494 ms` -- one millisecond above the fastest recorded -- `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:38114 accepted at 93.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 113.9s. Row one |
+| PR #203's own CI run | observed, aarch64, the GICv3 boot (`b7dcf9b`, run 35585299449, the shared-futex build, no network file in its diff): `connect 0 in 1395 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:50412 accepted at 94.1s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.1s. Row one, with a SYN retransmission. First recorded in prose only, as "sighting forty-one" counted from the prose while this table stood at forty-nine -- the loss the paragraph below warns of -- and in the table since the same day |
+| PR #203's own CI run, a later commit | observed, aarch64, the plain debug boot (`a0a0c38`, run 35586739597): **`connect 0 in 286 ms`** -- the fastest connect this file has recorded, by two hundred milliseconds -- **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +3 retransmits +0 rsts_in +1`; host side `127.0.0.1:39430 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s. Row one, the `sent 12` variant |
+| PR #203's own CI run, a documentation-only commit | observed, aarch64, the plain debug boot (`5122041`, run 35587325294, a commit that changes one paragraph of one report): `connect 0 in 1353 ms`, **`sent 12`**, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:38064 accepted at 93.8s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 113.9s. Row one, the `sent 12` variant, and the first `sent 12` reading that also retransmitted |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -817,15 +824,18 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Thirty-nine entries, forty-nine occurrences -- and the table is the tally,
+Forty-six entries, fifty-seven occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
-has lost. The first five rows are inherited from the row that recorded
-them and are not independently re-verified here. The last thirty-four rows
-were watched as they happened: PR #167's carries the host's `accepted at
-92.0s, 0 of 12 bytes`, and the **forty instrumented** occurrences
-behind the other thirty-three rows carry the guest's side. Rows and
-occurrences differ because **nine** rows hold more than one sighting;
-the shapes table below is per *sighting* and is the one to count from.
+has lost (it happened once more on 2026-09-21, and the row is above).
+The first five rows are inherited from the row that recorded them and
+are not independently re-verified here. The last forty-one rows carry
+the instrument's reading, thirty-seven of them watched as they happened
+and four of `main`'s read from the logs afterwards: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **forty-eight
+instrumented** occurrences behind the other forty rows carry the
+guest's side. Rows and occurrences differ because **ten** rows hold
+more than one sighting; the shapes table below is per *sighting* and
+is the one to count from.
 
 (**Every figure in this paragraph is computed from the table, not
 carried forward.** They were wrong before sighting twenty-five because
@@ -1383,15 +1393,31 @@ write.
 them x86-64 (sightings thirty-five and forty) and the rest aarch64
 across three job configurations (default, protection-capable, GICv3).
 
-**Sighting forty-one, 2026-09-21**, aarch64, the GICv3 boot of PR
-#203's CI (run 35585299449, `b7dcf9b`: the shared-futex build, whose
-diff touches no network code): `connect 0 in 1395 ms, sent -104 in
+**Sighting fifty-five, 2026-09-21** -- this paragraph first said
+forty-one, a number counted from the prose while the table stood at
+forty-nine, the mistake *The count* exists to prevent; the table now
+has the row and the paragraph the table's number -- aarch64, the GICv3
+boot of PR #203's CI (run 35585299449, `b7dcf9b`: the shared-futex
+build, whose diff touches no network code): `connect 0 in 1395 ms, sent -104 in
 0 ms, recv -1 in 0 ms, pending error -104, sndbuf free 65536 before,
 65536 after send, 65536 after read (outstanding 0 then 0), state 0,
 segs_out +3 retransmits +1 refused +0 rsts_in +1`. Row one again --
-reset before the write, one SYN retransmission -- and the eleventh
-reading. Read as this file says to read it, recorded, and the job
-re-run.
+reset before the write, one SYN retransmission. Read as this file says
+to read it, recorded, and the job re-run.
+
+**Sightings fifty-six and fifty-seven, the same day and the same
+branch**, both the plain aarch64 debug boot: `a0a0c38` at `connect 0
+in 286 ms` -- the fastest connect recorded, two hundred milliseconds
+under the previous floor -- and `5122041`, a commit that changes one
+paragraph of one report, at `connect 0 in 1353 ms` with `retransmits
++1`; both `sent 12`, `recv -104`, `rsts_in +1`, the host having read
+nothing. Three of this branch's five aarch64 runs failed this way, and
+reading `main`'s own runs for 2026-09-20 and 21 found five more
+occurrences nobody had recorded (the `main` rows above), on trees that
+differ from each other only in what this file already discharges.
+Three in five is what the rate looks like on the CI runner today,
+written down as *Three consecutive branches* was: an observation, not
+a measured rate.
 
 This paragraph was written at five readings and its conclusion has not
 needed changing since, which is worth as much as the readings
@@ -1456,6 +1482,17 @@ it does not belong to, which is the mistake this file exists to stop.
 The branch it appeared on contains three Markdown files and no code
 (`git diff main..HEAD --stat`), so whatever it is, it is not the
 change under review.
+
+## An x86-64 boot that printed nothing at all
+
+`main` @ `c6aaef0`, 2026-09-20, the x86-64 plain debug boot (run
+35509878126): `boot-test: FAIL after 0.5s`, the serial log empty,
+every marker missing from `cosmoboot-uefi` onward. Half a second is
+before the firmware's first line, so nothing the kernel does is inside
+the window; the next `main` run (`d04a8b1`) passed. One sighting and no
+mechanism, recorded so that the next one has a first to compare
+against. What to read on that one is the runner's QEMU invocation and
+its stderr, which this log did not keep.
 
 ## `quiesce-kick-spinner` is upset by any test that creates threads
 
