@@ -35,6 +35,7 @@ enum vnode_type {
     VNODE_DIR = COSMO_DT_DIR,
     VNODE_CHR = COSMO_DT_CHR,
     VNODE_LNK = COSMO_DT_LNK,
+    VNODE_SOCK = COSMO_DT_SOCK,   /* a unix socket's name: made by bind through mknod; open() is -ENXIO */
 };
 
 /* How many symbolic links one path resolution may expand before it is
@@ -59,6 +60,11 @@ struct vnode_ops {
      * returns the bytes copied, or -errno. */
     int (*readlink)(struct vnode *vn, char *buf, size_t len);
     int (*mkdir)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
+    /* A special node -- today VNODE_SOCK, a unix socket's name. Optional:
+     * a filesystem without it refuses with -EOPNOTSUPP (cosmofs has no
+     * on-disk type for one). Under dir->lock, like create. */
+    int (*mknod)(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
+                 struct vnode **out);
     int (*unlink)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
     int (*rmdir)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
     int (*rename)(struct vnode *odir, const char *oname, size_t olen, struct vnode *victim, struct vnode *ndir,
@@ -297,6 +303,10 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
 int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out);
 int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode);
 int vfs_unlink(struct vnode *start, const char *path);
+/* Make a special node (VNODE_SOCK) at `path`: -EEXIST if the name exists,
+ * -EOPNOTSUPP if the filesystem has no mknod, -EACCES without write
+ * permission on the directory; the new node referenced in *out. */
+int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out);
 int vfs_rmdir(struct vnode *start, const char *path);
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
 /* Set a regular file's length, dropping what is above it and reading as

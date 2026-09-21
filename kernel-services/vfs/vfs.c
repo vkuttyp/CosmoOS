@@ -1328,6 +1328,10 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
             return -ENOTDIR;
         }
     }
+    if (vn->type == VNODE_SOCK) {
+        vnode_put(vn);
+        return -ENXIO;   /* a socket's name is connected to, not opened (Linux's answer) */
+    }
     if (vn->type == VNODE_DIR && acc != COSMO_O_RDONLY) {
         vnode_put(vn);
         return -EISDIR;
@@ -1727,6 +1731,39 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
 int vfs_unlink(struct vnode *start, const char *path)
 {
     return remove_entry(start, path, false);
+}
+
+int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out)
+{
+    if (type != VNODE_SOCK)
+        return -EINVAL;
+    struct vnode *parent;
+    char last[VFS_NAME_MAX + 1];
+    size_t len;
+    int rc = parent_for_mutation(start, path, last, &parent, &len);
+    if (rc)
+        return rc;
+    mutex_lock(&parent->lock);
+    struct vnode *vn = NULL;
+    if (parent->flags & VNODE_DEAD) {
+        rc = -ENOENT;
+    } else if (parent->ops->mknod == NULL) {
+        rc = -EOPNOTSUPP;
+    } else {
+        rc = parent->ops->lookup(parent, last, len, &vn);
+        if (rc == 0) {
+            vnode_put(vn);
+            vn = NULL;
+            rc = -EEXIST;
+        } else if (rc == -ENOENT) {
+            rc = parent->ops->mknod(parent, last, len, mode & 07777, type, &vn);
+        }
+    }
+    mutex_unlock(&parent->lock);
+    vnode_put(parent);
+    if (rc == 0)
+        *out = vn;
+    return rc;
 }
 
 int vfs_rmdir(struct vnode *start, const char *path)

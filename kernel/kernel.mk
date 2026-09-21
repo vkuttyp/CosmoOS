@@ -70,6 +70,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/tty/ttytest.c \
 	kernel/ipc/pipe.c \
 	kernel/ipc/pipetest.c \
+	kernel/ipc/unix.c \
+	kernel/ipc/unixtest.c \
 	kernel/ipc/futex.c \
 	kernel/io/aio.c \
 	kernel/io/poll.c \

@@ -221,10 +221,18 @@ struct lx_winsize {
 #define LX_TIMER_ABSTIME 1
 
 /* --- sockets --- */
+#define LX_AF_UNIX 1
 #define LX_AF_INET 2
 #define LX_AF_INET6 10
 #define LX_SOCK_STREAM 1
 #define LX_SOCK_DGRAM 2
+#define LX_SOCK_SEQPACKET 5
+#define LX_SO_PEERCRED 17
+#define LX_SCM_RIGHTS 1
+#define LX_MSG_CTRUNC   0x08
+#define LX_MSG_TRUNC    0x20
+#define LX_MSG_DONTWAIT 0x40
+#define LX_MSG_NOSIGNAL 0x4000
 #define LX_SOCK_NONBLOCK 04000
 #define LX_SOCK_CLOEXEC 02000000
 #define LX_SOL_SOCKET 1
@@ -338,6 +346,35 @@ struct lx_sockaddr_in {          /* 16 bytes */
     uint16_t sin_port;           /* network order */
     uint32_t sin_addr;           /* network order */
     uint8_t sin_zero[8];
+};
+
+struct lx_sockaddr_un {          /* 110 bytes */
+    uint16_t sun_family;
+    char sun_path[108];          /* NUL-terminated, or as long as the length says; a leading NUL: abstract */
+};
+
+struct lx_msghdr {               /* 56 bytes, both architectures */
+    uint64_t msg_name;
+    uint32_t msg_namelen;
+    uint32_t pad0;
+    uint64_t msg_iov;
+    uint64_t msg_iovlen;
+    uint64_t msg_control;
+    uint64_t msg_controllen;
+    int32_t msg_flags;
+    uint32_t pad1;
+};
+
+struct lx_cmsghdr {              /* 16 bytes; data follows, the whole padded to 8 */
+    uint64_t cmsg_len;
+    int32_t cmsg_level;
+    int32_t cmsg_type;
+};
+
+struct lx_ucred {
+    int32_t pid;
+    uint32_t uid;
+    uint32_t gid;
 };
 
 struct lx_sockaddr_in6 {         /* 28 bytes */

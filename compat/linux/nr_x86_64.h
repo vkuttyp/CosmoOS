@@ -46,6 +46,7 @@
 #define LX_sendto 44
 #define LX_recvfrom 45
 #define LX_sendmsg 46
+#define LX_socketpair 53
 #define LX_recvmsg 47
 #define LX_shutdown 48
 #define LX_bind 49

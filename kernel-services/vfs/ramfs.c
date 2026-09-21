@@ -39,6 +39,7 @@ struct ramfs_node {
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
 static const struct vnode_ops ramfs_lnk_ops;
+static const struct vnode_ops ramfs_sock_ops;
 
 static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t mode, struct vnode *parent)
 {
@@ -58,7 +59,8 @@ static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t
      * namespace, the calling process afterwards. */
     vn->uid = cred_current()->euid;
     vn->gid = cred_current()->egid;
-    vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : type == VNODE_LNK ? &ramfs_lnk_ops : &ramfs_file_ops;
+    vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : type == VNODE_LNK ? &ramfs_lnk_ops
+            : type == VNODE_SOCK ? &ramfs_sock_ops : &ramfs_file_ops;
     vn->fs_priv = n;
     vn->flags |= VNODE_PINNED;   /* the reference from vnode_alloc is the pin */
     vn->nlink = type == VNODE_DIR ? 2 : 1;
@@ -139,6 +141,16 @@ static int ramfs_create(struct vnode *dir, const char *name, size_t len, uint32_
 static int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
     return ramfs_create_common(dir, name, len, mode, VNODE_DIR, out);
+}
+
+/* A unix socket's name: a node with no contents and no operations but
+ * its own removal; open() refuses it in the VFS. */
+static int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
+                       struct vnode **out)
+{
+    if (type != VNODE_SOCK)
+        return -EINVAL;
+    return ramfs_create_common(dir, name, len, mode, VNODE_SOCK, out);
 }
 
 /*
@@ -325,6 +337,11 @@ static const struct vnode_ops ramfs_dir_ops = {
     .rename = ramfs_rename,
     .readdir = ramfs_readdir,
     .symlink = ramfs_symlink,
+    .mknod = ramfs_mknod,
+    .evict = ramfs_evict,
+};
+
+static const struct vnode_ops ramfs_sock_ops = {
     .evict = ramfs_evict,
 };
 

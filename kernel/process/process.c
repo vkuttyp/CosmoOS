@@ -384,19 +384,14 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
     }
     for (unsigned i = 0; i < attr->nr_handles; i++) {
         unsigned rights;
-        struct kobject *obj = handle_get(&parent->handles, attr->handles[i].parent, &rights);
-        if (obj == NULL)
-            return -EBADF;
-        /* Giving a handle to another process is its own right, separate
-         * from being able to read or write through it, and the child may
-         * be given less than the parent holds -- never more. */
-        unsigned give = attr->handles[i].rights;
-        if (!(rights & HANDLE_RIGHT_TRANSFER) || (give != COSMO_RIGHTS_SAME && (give & ~rights) != 0)) {
-            kobject_put(obj);
-            return -EPERM;
-        }
-        int rc = handle_install_at(&p->handles, attr->handles[i].child, obj,
-                                   give == COSMO_RIGHTS_SAME ? rights : give);
+        struct kobject *obj;
+        /* The rule is handle_transfer_check's, shared with a unix socket's
+         * message: TRANSFER held, the child given SAME or a subset. */
+        int rc = handle_transfer_check(&parent->handles, attr->handles[i].parent, attr->handles[i].rights, &obj,
+                                       &rights);
+        if (rc)
+            return rc;
+        rc = handle_install_at(&p->handles, attr->handles[i].child, obj, rights);
         kobject_put(obj);
         if (rc < 0)
             return rc;

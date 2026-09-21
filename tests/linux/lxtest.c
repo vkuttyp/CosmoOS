@@ -1073,7 +1073,99 @@ int main(int argc, char **argv)
     CHECKV(sc6(LX_getsockopt, ce, LX_SOL_SOCKET, LX_SO_ERROR, &err, &elen, 0) == 0, 0);
     CHECKV(err == 111, err);                                        /* positive, as POSIX asks */
     CHECKV(sc1(LX_close, ce) == 0, 0);
-    CHECKV(sc3(LX_socket, 1, LX_SOCK_STREAM, 0) == -97, 0);   /* AF_UNIX: EAFNOSUPPORT */
+    /* --- unix domain sockets: a name, a pair, a handle in a message --- */
+    CHECKV(sc3(LX_socket, LX_AF_UNIX, LX_SOCK_SEQPACKET, 0) == -94, 0);   /* ESOCKTNOSUPPORT */
+    (void)sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-ux", 0);
+    long uls = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_STREAM | LX_SOCK_CLOEXEC, 0);
+    CHECKV(uls >= 3, uls);
+    struct lx_sockaddr_un uname;
+    __builtin_memset(&uname, 0, sizeof(uname));
+    uname.sun_family = LX_AF_UNIX;
+    __builtin_memcpy(uname.sun_path, "/tmp/lx-ux", 11);
+    CHECKV(sc3(LX_bind, uls, &uname, 2 + 11) == 0, 0);
+    CHECKV(sc2(LX_listen, uls, 2) == 0, 0);
+    CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lx-ux", LX_O_RDONLY, 0) == -6, 0);   /* ENXIO */
+    long ucs = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_STREAM, 0);
+    CHECKV(ucs >= 3, ucs);
+    CHECKV(sc3(LX_connect, ucs, &uname, 2 + 10) == 0, 0);   /* unterminated: as long as the length says */
+    CHECKV(sc3(LX_write, ucs, "hi", 2) == 2, 0);            /* before anyone accepts */
+    struct lx_sockaddr_un upeer;
+    int32_t uplen = sizeof(upeer);
+    long uas = sc4(LX_accept4, uls, &upeer, &uplen, 0);
+    CHECKV(uas >= 3 && uplen == 2, uplen);                   /* the client has no name */
+    CHECKV(sc3(LX_read, uas, buf, 16) == 2 && memeq(buf, "hi", 2), 0);
+    uplen = sizeof(upeer);
+    CHECKV(sc3(LX_getpeername, ucs, &upeer, &uplen) == 0 && uplen == 2 + 11 && upeer.sun_family == LX_AF_UNIX &&
+               memeq(upeer.sun_path, "/tmp/lx-ux", 11), uplen);
+    struct lx_ucred ucr = { 0 };
+    int32_t ucl = sizeof(ucr);
+    CHECKV(sc6(LX_getsockopt, uas, LX_SOL_SOCKET, LX_SO_PEERCRED, &ucr, &ucl, 0) == 0 && ucr.pid == sc0(LX_getpid), ucr.pid);
+    /* A pipe's write end rides in a message; what arrives writes into the pipe. */
+    int32_t upipe[2];
+    CHECKV(sc2(LX_pipe2, upipe, 0) == 0, 0);
+    struct { struct lx_cmsghdr h; int32_t fd; uint8_t pad[4]; } ctl = {
+        .h = { .cmsg_len = 20, .cmsg_level = LX_SOL_SOCKET, .cmsg_type = LX_SCM_RIGHTS }, .fd = upipe[1] };
+    struct lx_iovec uiov = { .iov_base = (uint64_t)(uintptr_t)"m", .iov_len = 1 };
+    struct lx_msghdr umsg = { .msg_iov = (uint64_t)(uintptr_t)&uiov, .msg_iovlen = 1,
+                              .msg_control = (uint64_t)(uintptr_t)&ctl, .msg_controllen = sizeof(ctl) };
+    long smrc = sc3(LX_sendmsg, ucs, &umsg, 0);
+    CHECKV(smrc == 1, smrc);
+    struct { struct lx_cmsghdr h; int32_t fd; uint8_t pad[4]; } rctl;
+    __builtin_memset(&rctl, 0, sizeof(rctl));
+    struct lx_iovec uriov = { .iov_base = (uint64_t)(uintptr_t)buf, .iov_len = 16 };
+    struct lx_msghdr rmsg = { .msg_iov = (uint64_t)(uintptr_t)&uriov, .msg_iovlen = 1,
+                              .msg_control = (uint64_t)(uintptr_t)&rctl, .msg_controllen = sizeof(rctl) };
+    long rm1 = sc3(LX_recvmsg, uas, &rmsg, LX_MSG_DONTWAIT);   /* the message is there, or the test says why not */
+    CHECKV(rm1 == 1 && buf[0] == 'm', rm1);
+    CHECKV(rmsg.msg_controllen == 24 && rctl.h.cmsg_type == LX_SCM_RIGHTS && rctl.h.cmsg_len == 20 && rctl.fd >= 3, rctl.fd);
+    CHECKV(rmsg.msg_flags == 0, rmsg.msg_flags);
+    CHECKV(sc3(LX_write, rctl.fd, "z", 1) == 1 && sc3(LX_read, upipe[0], buf, 4) == 1 && buf[0] == 'z', 0);
+    CHECKV(sc1(LX_close, rctl.fd) == 0, 0);
+    /* Too little control room: the bytes arrive, the handle is closed, MSG_CTRUNC says so. */
+    ctl.fd = upipe[1];
+    smrc = sc3(LX_sendmsg, ucs, &umsg, 0);
+    CHECKV(smrc == 1, smrc);
+    rmsg.msg_controllen = 8;
+    long rmrc = sc3(LX_recvmsg, uas, &rmsg, LX_MSG_DONTWAIT);
+    CHECKV(rmrc == 1, rmrc);
+    CHECKV((rmsg.msg_flags & LX_MSG_CTRUNC) && rmsg.msg_controllen == 0, rmsg.msg_flags);
+    CHECKV(sc1(LX_close, upipe[0]) == 0 && sc1(LX_close, upipe[1]) == 0, 0);
+    CHECKV(sc1(LX_close, ucs) == 0, 0);
+    CHECKV(sc3(LX_read, uas, buf, 16) == 0, 0);             /* end of stream */
+    CHECKV(sc1(LX_close, uas) == 0 && sc1(LX_close, uls) == 0, 0);
+    CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-ux", 0) == 0, 0);
+    /* An abstract name, and a pair. */
+    long als = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_STREAM, 0), acs = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_STREAM, 0);
+    CHECKV(als >= 3 && acs >= 3, als);
+    __builtin_memset(&uname, 0, sizeof(uname));
+    uname.sun_family = LX_AF_UNIX;
+    __builtin_memcpy(uname.sun_path + 1, "lxabs", 5);
+    CHECKV(sc3(LX_bind, als, &uname, 2 + 1 + 5) == 0 && sc2(LX_listen, als, 1) == 0, 0);
+    CHECKV(sc3(LX_connect, acs, &uname, 2 + 1 + 5) == 0, 0);
+    uplen = sizeof(upeer);
+    long aas = sc4(LX_accept4, als, &upeer, &uplen, LX_SOCK_NONBLOCK);
+    CHECKV(aas >= 3, aas);
+    uplen = sizeof(upeer);
+    CHECKV(sc3(LX_getpeername, acs, &upeer, &uplen) == 0 && uplen == 2 + 1 + 5 && upeer.sun_path[0] == 0 &&
+               memeq(upeer.sun_path + 1, "lxabs", 5), uplen);
+    CHECKV(sc3(LX_read, aas, buf, 4) == -11, 0);            /* EAGAIN: the accepted end is non-blocking */
+    CHECKV(sc1(LX_close, aas) == 0 && sc1(LX_close, acs) == 0 && sc1(LX_close, als) == 0, 0);
+    int32_t usv[2] = { -1, -1 };
+    CHECKV(sc4(LX_socketpair, LX_AF_UNIX, LX_SOCK_STREAM, 0, usv) == 0 && usv[0] >= 3 && usv[1] >= 3, usv[0]);
+    CHECKV(sc3(LX_write, usv[0], "pair", 4) == 4 && sc3(LX_read, usv[1], buf, 16) == 4 && memeq(buf, "pair", 4), 0);
+    CHECKV(sc1(LX_close, usv[0]) == 0 && sc1(LX_close, usv[1]) == 0, 0);
+    /* A datagram by name. */
+    (void)sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-dg", 0);
+    long ud1 = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_DGRAM, 0), ud2 = sc3(LX_socket, LX_AF_UNIX, LX_SOCK_DGRAM, 0);
+    __builtin_memset(&uname, 0, sizeof(uname));
+    uname.sun_family = LX_AF_UNIX;
+    __builtin_memcpy(uname.sun_path, "/tmp/lx-dg", 10);
+    CHECKV(ud1 >= 3 && ud2 >= 3 && sc3(LX_bind, ud1, &uname, 2 + 11) == 0, 0);
+    CHECKV(sc6(LX_sendto, ud2, "dg", 2, 0, &uname, 2 + 11) == 2, 0);
+    uplen = sizeof(upeer);
+    CHECKV(sc6(LX_recvfrom, ud1, buf, 16, 0, &upeer, &uplen) == 2 && uplen == 2 && memeq(buf, "dg", 2), uplen);
+    CHECKV(sc1(LX_close, ud1) == 0 && sc1(LX_close, ud2) == 0, 0);
+    CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-dg", 0) == 0, 0);
 
     /* --- non-blocking sockets: SOCK_NONBLOCK, accept4, EINPROGRESS --- */
     long nb = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM | LX_SOCK_NONBLOCK, 0);

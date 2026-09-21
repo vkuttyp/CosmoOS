@@ -27,6 +27,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -1273,6 +1274,7 @@ static int filter_case(const char *kind)
  * live past them and probe() ends by handing the kind on. */
 static int signal_probe(const char *kind);
 static int mmap_probe(const char *what);
+static int unix_probe(const char *kind);
 
 static int probe(const char *kind)
 {
@@ -1525,6 +1527,8 @@ static int probe(const char *kind)
     }
     if (strncmp(kind, "mmap-", 5) == 0)
         return mmap_probe(kind + 5);
+    if (strncmp(kind, "unix-", 5) == 0)
+        return unix_probe(kind + 5);
     return signal_probe(kind);
 }
 
@@ -4515,11 +4519,314 @@ static void mmap_selftest(void)
     printf("usertest: mmap ok\n");
 }
 
+
+/* --- unix domain sockets (docs/audit/next-subsystem-unix-sockets.md) ---- */
+
+#define UX_ROUNDS 2000u
+
+static void ux_name(struct sockaddr_un *un, const char *path)
+{
+    memset(un, 0, sizeof(*un));
+    un->sun_family = AF_UNIX;
+    strcpy(un->sun_path, path);
+}
+
+static socklen_t ux_len(const char *path)
+{
+    return (socklen_t)(2 + strlen(path) + 1);
+}
+
+/* A child on the other end of a socketpair: handle 3 is the socket. */
+static int unix_probe(const char *kind)
+{
+    char buf[64];
+    if (strcmp(kind, "echo") == 0) {
+        /* Echo each message; a message carrying a handle is a file whose
+         * bytes are the reply; "quit" ends it. */
+        for (;;) {
+            int h[1] = { -1 };
+            struct cosmo_msg m = { .buf = buf, .len = sizeof(buf), .handles = h, .nr_handles = 1 };
+            long n = cosmo_recvmsg(3, &m);
+            if (n <= 0)
+                return 10;
+            if (n == 4 && memcmp(buf, "quit", 4) == 0)
+                return 0;
+            if (m.nr_handles == 1) {
+                char fb[32];
+                long r = cosmo_read(h[0], fb, sizeof(fb));
+                cosmo_close(h[0]);
+                if (r <= 0)
+                    return 11;
+                if (cosmo_sendto(3, fb, (size_t)r, NULL) != r)
+                    return 12;
+                continue;
+            }
+            if (cosmo_sendto(3, buf, (size_t)n, NULL) != n)
+                return 13;
+        }
+    }
+    if (strcmp(kind, "pingpong") == 0) {
+        for (unsigned i = 0; i < UX_ROUNDS; i++) {
+            if (cosmo_recvfrom(3, buf, 1, NULL, NULL) != 1)
+                return 10;
+            if (cosmo_sendto(3, buf, 1, NULL) != 1)
+                return 11;
+        }
+        return 0;
+    }
+    if (strcmp(kind, "pipe-pingpong") == 0) {
+        /* Handles 3 (read) and 4 (write). */
+        for (unsigned i = 0; i < UX_ROUNDS; i++) {
+            if (cosmo_read(3, buf, 1) != 1)
+                return 10;
+            if (cosmo_write(4, buf, 1) != 1)
+                return 11;
+        }
+        return 0;
+    }
+    if (strncmp(kind, "connect:", 8) == 0) {
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0)
+            return 10;
+        struct sockaddr_un un;
+        ux_name(&un, kind + 8);
+        if (connect(s, (struct sockaddr *)&un, ux_len(kind + 8)) != 0)
+            return 11;
+        if (send(s, "hi", 2, 0) != 2)
+            return 12;
+        if (recv(s, buf, sizeof(buf), 0) != 2 || memcmp(buf, "ok", 2) != 0)
+            return 13;
+        return 0;
+    }
+    if (strncmp(kind, "eacces:", 7) == 0) {
+        /* As an unprivileged user: a node without write permission for us
+         * refuses the connection with EACCES. */
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0)
+            return 10;
+        struct sockaddr_un un;
+        ux_name(&un, kind + 7);
+        if (connect(s, (struct sockaddr *)&un, ux_len(kind + 7)) == 0)
+            return 11;
+        return errno == EACCES ? 0 : 12;
+    }
+    if (strcmp(kind, "jail") == 0) {
+        /* Rooted elsewhere: the parent's abstract name is not in this
+         * root's namespace, and its path is not in this root. */
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0)
+            return 10;
+        struct sockaddr_un un;
+        memset(&un, 0, sizeof(un));
+        un.sun_family = AF_UNIX;
+        memcpy(un.sun_path + 1, "jailtest", 8);
+        if (connect(s, (struct sockaddr *)&un, 2 + 1 + 8) == 0 || errno != ECONNREFUSED)
+            return 11;
+        ux_name(&un, "/tmp/ux-sock");
+        if (connect(s, (struct sockaddr *)&un, ux_len("/tmp/ux-sock")) == 0 || errno != ENOENT)
+            return 12;
+        return 0;
+    }
+    return 99;
+}
+
+static void unix_selftest(void)
+{
+    char buf[64];
+    int sv[2];
+
+    /* A pair: bytes both ways, and each end told the other's credentials
+     * (both this process). */
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    CHECK(write(sv[0], "ab", 2) == 2 && read(sv[1], buf, sizeof(buf)) == 2 && memcmp(buf, "ab", 2) == 0);
+    CHECK(write(sv[1], "cd", 2) == 2 && read(sv[0], buf, sizeof(buf)) == 2 && memcmp(buf, "cd", 2) == 0);
+    struct ucred uc;
+    socklen_t ul = sizeof(uc);
+    CHECK(getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &uc, &ul) == 0 && ul == sizeof(uc));
+    CHECK(uc.pid == getpid() && uc.uid == 0 && uc.gid == 0);
+    CHECK(cosmo_ioready(sv[0]) == COSMO_IO_WRITABLE);
+    CHECK(write(sv[1], "r", 1) == 1 && (cosmo_ioready(sv[0]) & COSMO_IO_READABLE));
+    CHECK(read(sv[0], buf, 1) == 1);
+    CHECK(close(sv[0]) == 0 && close(sv[1]) == 0);
+
+    /* A child on the other end, given its end through the spawn map, and
+     * a file handle that rides in a message: the child reads the file we
+     * opened and answers with its bytes. */
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    {
+        struct spawn_handle map[] = { { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 2, 2, 0, 0 }, { 3, sv[1], 0, 0 } };
+        const char *argv[] = { "init", "--probe", "unix-echo", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, map, 4);
+        CHECK(pid > 0);
+        CHECK(close(sv[1]) == 0);
+        CHECK(write(sv[0], "ping", 4) == 4 && read(sv[0], buf, sizeof(buf)) == 4 && memcmp(buf, "ping", 4) == 0);
+        int fd = open("/tmp/ux-file", O_RDWR | O_CREAT | O_TRUNC, 0644);
+        CHECK(fd >= 0 && write(fd, "data", 4) == 4 && lseek(fd, 0, SEEK_SET) == 0);
+        int hs[1] = { fd };
+        char fdtag[3] = "fd";
+        struct cosmo_msg m = { .buf = fdtag, .len = 2, .handles = hs, .nr_handles = 1 };
+        CHECK(cosmo_sendmsg(sv[0], &m) == 2);
+        CHECK(read(sv[0], buf, sizeof(buf)) == 4 && memcmp(buf, "data", 4) == 0);
+        /* Without TRANSFER the handle does not go: a dup that dropped it. */
+        int nt = dup_rights(fd, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE);
+        CHECK(nt >= 0);
+        hs[0] = nt;
+        CHECK(cosmo_sendmsg(sv[0], &m) == -COSMO_EPERM);
+        CHECK(close(nt) == 0);
+        /* A unix socket does not ride in a message. */
+        int sp[2];
+        CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, sp) == 0);
+        hs[0] = sp[0];
+        CHECK(cosmo_sendmsg(sv[0], &m) == -COSMO_EINVAL);
+        CHECK(close(sp[0]) == 0 && close(sp[1]) == 0);
+        CHECK(close(fd) == 0);
+        CHECK(write(sv[0], "quit", 4) == 4);
+        int st = -1;
+        CHECK(waitpid(pid, &st, 0) == pid && st == 0);
+        CHECK(close(sv[0]) == 0);
+        CHECK(unlink("/tmp/ux-file") == 0);
+    }
+
+    /* A name in the filesystem: a child connects to it, and the accepted
+     * socket says who the child is. */
+    (void)unlink("/tmp/ux-sock");
+    int ls = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(ls >= 0);
+    struct sockaddr_un un;
+    ux_name(&un, "/tmp/ux-sock");
+    CHECK(bind(ls, (struct sockaddr *)&un, ux_len("/tmp/ux-sock")) == 0);
+    CHECK(listen(ls, 4) == 0);
+    struct stat st;
+    CHECK(stat("/tmp/ux-sock", &st) == 0 && S_ISSOCK(st.st_type) && (st.st_mode & 07777) == 0755);
+    CHECK(open("/tmp/ux-sock", O_RDONLY) < 0 && errno == ENXIO);
+    {
+        const char *argv[] = { "init", "--probe", "unix-connect:/tmp/ux-sock", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+        CHECK(pid > 0);
+        struct sockaddr_un peer;
+        socklen_t plen = sizeof(peer);
+        int a = accept(ls, (struct sockaddr *)&peer, &plen);
+        CHECK(a >= 0 && plen == 2);   /* the child has no name */
+        CHECK(recv(a, buf, sizeof(buf), 0) == 2 && memcmp(buf, "hi", 2) == 0);
+        ul = sizeof(uc);
+        CHECK(getsockopt(a, SOL_SOCKET, SO_PEERCRED, &uc, &ul) == 0 && uc.pid == pid);
+        CHECK(send(a, "ok", 2, 0) == 2);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+        CHECK(close(a) == 0);
+    }
+    /* getsockname is the path; a second bind of it is in use. */
+    {
+        struct sockaddr_un me;
+        socklen_t ml = sizeof(me);
+        CHECK(getsockname(ls, (struct sockaddr *)&me, &ml) == 0 && ml == ux_len("/tmp/ux-sock"));
+        CHECK(me.sun_family == AF_UNIX && strcmp(me.sun_path, "/tmp/ux-sock") == 0);
+        int again = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(again >= 0 && bind(again, (struct sockaddr *)&un, ux_len("/tmp/ux-sock")) < 0 && errno == EADDRINUSE);
+        CHECK(close(again) == 0);
+    }
+    /* Another user may not connect to a node it cannot write. */
+    {
+        const char *argv[] = { "init", "--probe", "unix-eacces:/tmp/ux-sock", NULL };
+        pid_t pid = spawnve_as("/boot/init", argv, NULL, NULL, 0, 1000, 1000);
+        CHECK(pid > 0);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+    }
+    /* A jailed child sees neither the abstract name nor the path. */
+    {
+        int as = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un an;
+        memset(&an, 0, sizeof(an));
+        an.sun_family = AF_UNIX;
+        memcpy(an.sun_path + 1, "jailtest", 8);
+        CHECK(as >= 0 && bind(as, (struct sockaddr *)&an, 2 + 1 + 8) == 0 && listen(as, 1) == 0);
+        /* But an unjailed connect to it works, which is what makes the
+         * jail's refusal a refusal. */
+        int cs = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(cs >= 0 && connect(cs, (struct sockaddr *)&an, 2 + 1 + 8) == 0);
+        CHECK(close(cs) == 0);
+        CHECK(mkdir("/tmp/jail", 0755) == 0 || errno == EEXIST);
+        const char *argv[] = { "init", "--probe", "unix-jail", NULL };
+        pid_t pid = spawnve_in("/boot/init", argv, NULL, NULL, 0, "/tmp/jail");
+        CHECK(pid > 0);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+        CHECK(close(as) == 0);
+    }
+    CHECK(close(ls) == 0);
+    /* The name outlives the socket and refuses until it is unlinked. */
+    {
+        int cs = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(cs >= 0 && connect(cs, (struct sockaddr *)&un, ux_len("/tmp/ux-sock")) < 0 && errno == ECONNREFUSED);
+        CHECK(unlink("/tmp/ux-sock") == 0);
+        CHECK(connect(cs, (struct sockaddr *)&un, ux_len("/tmp/ux-sock")) < 0 && errno == ENOENT);
+        CHECK(close(cs) == 0);
+    }
+
+    /* Datagrams by name, the sender's name back, truncation flagged. */
+    {
+        (void)unlink("/tmp/ux-dg");
+        int d1 = socket(AF_UNIX, SOCK_DGRAM, 0), d2 = socket(AF_UNIX, SOCK_DGRAM, 0);
+        CHECK(d1 >= 0 && d2 >= 0);
+        struct sockaddr_un dn;
+        ux_name(&dn, "/tmp/ux-dg");
+        CHECK(bind(d1, (struct sockaddr *)&dn, ux_len("/tmp/ux-dg")) == 0);
+        CHECK(sendto(d2, "dgram", 5, 0, (struct sockaddr *)&dn, ux_len("/tmp/ux-dg")) == 5);
+        struct sockaddr_un from;
+        socklen_t fl = sizeof(from);
+        CHECK(recvfrom(d1, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fl) == 5 && fl == 2);
+        struct sockaddr_un a2;
+        memset(&a2, 0, sizeof(a2));
+        a2.sun_family = AF_UNIX;
+        memcpy(a2.sun_path + 1, "dg-a", 4);
+        CHECK(bind(d2, (struct sockaddr *)&a2, 2 + 1 + 4) == 0);
+        CHECK(sendto(d2, "0123456789", 10, 0, (struct sockaddr *)&dn, ux_len("/tmp/ux-dg")) == 10);
+        struct cosmo_msg rm = { .buf = buf, .len = 4, .addr = (struct cosmo_sockaddr_un *)&from, .addrlen = sizeof(from) };
+        CHECK(cosmo_recvmsg(d1, &rm) == 4 && (rm.flags & COSMO_MSG_TRUNC) && rm.addrlen == 2 + 1 + 4);
+        CHECK(from.sun_path[0] == 0 && memcmp(from.sun_path + 1, "dg-a", 4) == 0);
+        CHECK(socket(AF_UNIX, 5, 0) < 0 && errno == ESOCKTNOSUPPORT);
+        CHECK(close(d1) == 0 && close(d2) == 0 && unlink("/tmp/ux-dg") == 0);
+    }
+
+    /* The bench: a one-byte round trip to a child over a unix stream
+     * pair, and the same over a pair of pipes. */
+    {
+        CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        struct spawn_handle map[] = { { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 2, 2, 0, 0 }, { 3, sv[1], 0, 0 } };
+        const char *argv[] = { "init", "--probe", "unix-pingpong", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, map, 4);
+        CHECK(pid > 0 && close(sv[1]) == 0);
+        uint64_t t0 = cosmo_clock_ns();
+        for (unsigned i = 0; i < UX_ROUNDS; i++)
+            CHECK(write(sv[0], "p", 1) == 1 && read(sv[0], buf, 1) == 1);
+        uint64_t t_ux = cosmo_clock_since_ns(t0);
+        int st2 = -1;
+        CHECK(waitpid(pid, &st2, 0) == pid && st2 == 0 && close(sv[0]) == 0);
+        int p_out[2], p_in[2];
+        CHECK(pipe(p_out) == 0 && pipe(p_in) == 0);
+        struct spawn_handle pmap[] = { { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 2, 2, 0, 0 },
+                                       { 3, p_out[0], 0, 0 }, { 4, p_in[1], 0, 0 } };
+        const char *pargv[] = { "init", "--probe", "unix-pipe-pingpong", NULL };
+        pid = spawnve("/boot/init", pargv, NULL, pmap, 5);
+        CHECK(pid > 0 && close(p_out[0]) == 0 && close(p_in[1]) == 0);
+        t0 = cosmo_clock_ns();
+        for (unsigned i = 0; i < UX_ROUNDS; i++)
+            CHECK(write(p_out[1], "p", 1) == 1 && read(p_in[0], buf, 1) == 1);
+        uint64_t t_pipe = cosmo_clock_since_ns(t0);
+        CHECK(waitpid(pid, &st2, 0) == pid && st2 == 0);
+        CHECK(close(p_out[1]) == 0 && close(p_in[0]) == 0);
+        fprintf(stderr, "USERBENCH: unix: %llu ns per one-byte round trip over a stream pair, %llu over two pipes\n",
+                (unsigned long long)(t_ux / UX_ROUNDS), (unsigned long long)(t_pipe / UX_ROUNDS));
+    }
+}
+
 static const struct selftest_section g_sections[] = {
     { "fs",       fs_selftest },
     { "mmap",     mmap_selftest },
     { "fsctl",    fsctl_selftest },
     { "net",      net_selftest },
+    { "unix",     unix_selftest },
     { "proc",     proc_selftest },
     { "fpu",      fpu_selftest },
     { "trap",     trap_selftest },

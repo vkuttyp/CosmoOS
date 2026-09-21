@@ -166,6 +166,24 @@ int handle_close(struct handle_table *t, int h)
     return rc;
 }
 
+int handle_transfer_check(struct handle_table *t, int h, unsigned give, struct kobject **obj, unsigned *rights)
+{
+    unsigned have;
+    struct kobject *o = handle_get(t, h, &have);
+    if (o == NULL)
+        return -EBADF;
+    /* Giving a handle to another process is its own right, separate
+     * from being able to read or write through it, and the receiver may
+     * be given less than the giver holds -- never more. */
+    if (!(have & HANDLE_RIGHT_TRANSFER) || (give != COSMO_RIGHTS_SAME && (give & ~have) != 0)) {
+        kobject_put(o);
+        return -EPERM;
+    }
+    *obj = o;
+    *rights = give == COSMO_RIGHTS_SAME ? have : give;
+    return 0;
+}
+
 unsigned handle_table_count(struct handle_table *t)
 {
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);

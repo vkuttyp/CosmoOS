@@ -25,6 +25,7 @@
 #include <kernel/sched.h>
 #include <kernel/signal.h>
 #include <kernel/socket.h>
+#include <kernel/unix.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 #include <kernel/tty.h>
@@ -309,7 +310,7 @@ static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
     vnode_put(cwd);
     if (rc)
         return rc;
-    unsigned rights = 0, acc = flags & COSMO_O_ACCMODE;
+    unsigned rights = HANDLE_RIGHT_OWNER, acc = flags & COSMO_O_ACCMODE;   /* as the native open: the file is the caller's to dup and pass */
     if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_READ;
     if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR)
@@ -719,8 +720,10 @@ static int64_t do_pipe(uint64_t uarr, unsigned flags)
     }
     struct handle_table *t = &process_current()->handles;
     int32_t h[2];
-    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ);
-    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE);
+    /* The owner rights too, as the native pipe gives: a Linux descriptor
+     * can be dup'd and passed in a message (SCM_RIGHTS needs TRANSFER). */
+    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
     kobject_put(rd);
     kobject_put(wr);
     if (h[0] < 0 || h[1] < 0) {
@@ -1723,17 +1726,122 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *na)
     return copy_to_user(ulen, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
+/*
+ * --- the unix address at this door -----------------------------------------
+ * Linux's sockaddr_un is the family and 108 bytes of path, parsed by the
+ * transport's own rule (kernel/unix.h): a NUL-terminated path, a path
+ * exactly as long as the length says, or a leading NUL and the bytes of
+ * an abstract name. `struct lx_any_addr` is whichever shape the family
+ * said.
+ */
+struct lx_any_addr {
+    uint16_t family;
+    struct netaddr na;
+    struct unix_addr ua;
+};
+
+static int lx_any_addr_from_user(uint64_t uptr, size_t len, struct lx_any_addr *out)
+{
+    uint16_t family;
+    if (len < sizeof(family))
+        return -EINVAL;
+    if (copy_from_user(&family, uptr, sizeof(family)))
+        return -EFAULT;
+    out->family = family;
+    if (family == LX_AF_UNIX) {
+        struct lx_sockaddr_un un;
+        if (len > sizeof(un))
+            return -EINVAL;
+        if (copy_from_user(&un, uptr, len))
+            return -EFAULT;
+        return unix_addr_parse(un.sun_path, len - sizeof(family), &out->ua);
+    }
+    return addr_from_user(uptr, len, &out->na);
+}
+
+/* A name in its Linux shape, bounded by the caller's socklen_t, the full
+ * size reported back. */
+static int lx_sock_addr_to_user(struct socket *s, uint64_t uptr, uint64_t ulen, const struct lx_any_addr *a)
+{
+    if (s->family != COSMO_AF_UNIX)
+        return addr_to_user(uptr, ulen, &a->na);
+    if (uptr == 0 || ulen == 0)
+        return 0;
+    int32_t cap;
+    if (copy_from_user(&cap, ulen, sizeof(cap)))
+        return -EFAULT;
+    if (cap < 0)
+        return -EINVAL;
+    struct lx_sockaddr_un un;
+    size_t full = unix_addr_pack(&a->ua, LX_AF_UNIX, &un);
+    size_t n = (size_t)cap < full ? (size_t)cap : full;
+    if (n && copy_to_user(uptr, &un, n))
+        return -EFAULT;
+    int32_t out = (int32_t)full;
+    return copy_to_user(ulen, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
+/* The bytes of a send: a datagram whole, a stream in chunks, through the
+ * family's transport; `h` is the handles riding along (a unix socket
+ * only), consumed by the first chunk that goes. */
+static int64_t lx_sock_send(struct socket *s, uint64_t ubuf, size_t len, const struct lx_any_addr *to,
+                            struct unix_handles *h, bool dontwait)
+{
+    bool un = s->family == COSMO_AF_UNIX;
+    if (to != NULL && (un ? to->family != LX_AF_UNIX : to->family == LX_AF_UNIX))
+        return -EAFNOSUPPORT;
+    if (!un && h != NULL && h->nr > 0)
+        return -EINVAL;
+    size_t cap = s->type == COSMO_SOCK_DGRAM ? (len ? len : 1) : SOCK_CHUNK;
+    if (cap > SOCK_CHUNK * 16)
+        return -EMSGSIZE;
+    uint8_t *tmp = kmalloc(cap, 0);
+    if (tmp == NULL)
+        return -ENOMEM;
+    int64_t done = 0, rc = 0;
+    if (s->type == COSMO_SOCK_DGRAM) {
+        if (copy_from_user(tmp, ubuf, len))
+            rc = -EFAULT;
+        else if (un)
+            rc = unix_send(s, tmp, len, to ? &to->ua : NULL, h, dontwait);
+        else
+            rc = ksock_sendto(s, tmp, len, to ? &to->na : NULL);
+        done = rc > 0 ? rc : 0;
+    } else {
+        while ((size_t)done < len) {
+            size_t n = len - (size_t)done < SOCK_CHUNK ? len - (size_t)done : SOCK_CHUNK;
+            if (copy_from_user(tmp, ubuf + (uint64_t)done, n)) {
+                rc = -EFAULT;
+                break;
+            }
+            int64_t w = un ? unix_send(s, tmp, n, to ? &to->ua : NULL, h, dontwait)
+                           : ksock_sendto(s, tmp, n, to ? &to->na : NULL);
+            if (w <= 0) {
+                rc = w;
+                break;
+            }
+            done += w;
+            if ((size_t)w < n)
+                break;
+        }
+        if (len == 0 && un)
+            rc = unix_send(s, tmp, 0, to ? &to->ua : NULL, h, dontwait);
+    }
+    kfree(tmp);
+    return done > 0 ? done : rc;
+}
+
 static int64_t lx_socket(struct syscall_args *a)
 {
     int family = (int)a->a[0];
     bool nonblock = ((unsigned)a->a[1] & LX_SOCK_NONBLOCK) != 0;
     unsigned type = (unsigned)a->a[1] & ~(unsigned)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC);
-    if (family != LX_AF_INET && family != LX_AF_INET6)
+    if (family != LX_AF_INET && family != LX_AF_INET6 && family != LX_AF_UNIX)
         return -EAFNOSUPPORT;
     if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM)
-        return -EINVAL;
+        return family == LX_AF_UNIX ? -ESOCKTNOSUPPORT : -EINVAL;   /* SEQPACKET: a type this family lacks */
     struct socket *s;
-    int rc = ksock_create(family == LX_AF_INET ? COSMO_AF_INET : COSMO_AF_INET6,
+    int rc = ksock_create(family == LX_AF_INET ? COSMO_AF_INET : family == LX_AF_INET6 ? COSMO_AF_INET6 : COSMO_AF_UNIX,
                           type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, process_current()->cred.euid,
                           &s);
     if (rc)
@@ -1747,30 +1855,36 @@ static int64_t lx_socket(struct syscall_args *a)
 
 static int64_t lx_bind(struct syscall_args *a)
 {
-    struct netaddr addr;
-    int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
+    struct lx_any_addr addr;
+    int rc = lx_any_addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
     int serr = 0;
     struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_BIND, &serr);
     if (s == NULL)
         return serr;
-    rc = ksock_bind(s, &addr);
+    if (addr.family == LX_AF_UNIX)
+        rc = s->family == COSMO_AF_UNIX ? unix_bind(s, &addr.ua) : -EAFNOSUPPORT;
+    else
+        rc = ksock_bind(s, &addr.na);
     ksock_put(s);
     return rc;
 }
 
 static int64_t lx_connect(struct syscall_args *a)
 {
-    struct netaddr addr;
-    int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
+    struct lx_any_addr addr;
+    int rc = lx_any_addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
     int serr = 0;
     struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_CONNECT, &serr);
     if (s == NULL)
         return serr;
-    rc = ksock_connect(s, &addr);
+    if (addr.family == LX_AF_UNIX)
+        rc = s->family == COSMO_AF_UNIX ? unix_connect(s, &addr.ua) : -EAFNOSUPPORT;
+    else
+        rc = ksock_connect(s, &addr.na);
     ksock_put(s);
     return rc;
 }
@@ -1793,14 +1907,16 @@ static int64_t lx_accept(struct syscall_args *a)
     if (s == NULL)
         return serr;
     struct socket *c;
-    struct netaddr peer;
-    int rc = ksock_accept(s, &c, &peer);
+    struct lx_any_addr peer;
+    int rc = ksock_accept(s, &c, &peer.na);
     ksock_put(s);
     if (rc)
         return rc;
     if (a->a[3] & LX_SOCK_NONBLOCK)   /* accept4 flags; accept passes 0 */
         ksock_set_nonblock(c, true);
-    rc = addr_to_user(a->a[1], a->a[2], &peer);
+    if (c->family == COSMO_AF_UNIX)
+        unix_getpeername(c, &peer.ua);
+    rc = lx_sock_addr_to_user(c, a->a[1], a->a[2], &peer);
     if (rc) {
         ksock_put(c);
         return rc;
@@ -1814,55 +1930,24 @@ static int64_t lx_sendto(struct syscall_args *a)
 {
     uint64_t ubuf = a->a[1];
     size_t len = (size_t)a->a[2];
+    unsigned flags = (unsigned)a->a[3];
     if (!user_range_ok(ubuf, len))
         return -EFAULT;
-    struct netaddr to;
+    struct lx_any_addr to;
     bool have_to = a->a[4] != 0;
     if (have_to) {
-        int rc = addr_from_user(a->a[4], (size_t)a->a[5], &to);
+        int rc = lx_any_addr_from_user(a->a[4], (size_t)a->a[5], &to);
         if (rc)
             return rc;
     }
     struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_WRITE);
     if (s == NULL)
         return -EBADF;
-    size_t cap = s->type == COSMO_SOCK_DGRAM ? (len ? len : 1) : SOCK_CHUNK;
-    if (cap > SOCK_CHUNK * 16) {
-        ksock_put(s);
-        return -EMSGSIZE;
-    }
-    uint8_t *tmp = kmalloc(cap, 0);
-    if (tmp == NULL) {
-        ksock_put(s);
-        return -ENOMEM;
-    }
-    int64_t done = 0, rc = 0;
-    if (s->type == COSMO_SOCK_DGRAM) {
-        if (copy_from_user(tmp, ubuf, len))
-            rc = -EFAULT;
-        else
-            rc = ksock_sendto(s, tmp, len, have_to ? &to : NULL);
-        done = rc > 0 ? rc : 0;
-    } else {
-        while ((size_t)done < len) {
-            size_t n = len - (size_t)done < SOCK_CHUNK ? len - (size_t)done : SOCK_CHUNK;
-            if (copy_from_user(tmp, ubuf + (uint64_t)done, n)) {
-                rc = -EFAULT;
-                break;
-            }
-            int64_t w = ksock_sendto(s, tmp, n, have_to ? &to : NULL);
-            if (w <= 0) {
-                rc = w;
-                break;
-            }
-            done += w;
-            if ((size_t)w < n)
-                break;
-        }
-    }
-    kfree(tmp);
+    /* MSG_NOSIGNAL means nothing more here: no socket write raises a
+     * signal on this system, it returns -EPIPE. */
+    int64_t rc = lx_sock_send(s, ubuf, len, have_to ? &to : NULL, NULL, (flags & LX_MSG_DONTWAIT) != 0);
     ksock_put(s);
-    return done > 0 ? done : rc;
+    return rc;
 }
 
 static int64_t lx_recvfrom(struct syscall_args *a)
@@ -1880,17 +1965,21 @@ static int64_t lx_recvfrom(struct syscall_args *a)
         ksock_put(s);
         return -ENOMEM;
     }
-    struct netaddr from;
-    int64_t rc = ksock_recvfrom(s, tmp, cap, a->a[4] ? &from : NULL);
-    ksock_put(s);
+    struct lx_any_addr from;
+    int64_t rc;
+    if (s->family == COSMO_AF_UNIX)
+        rc = unix_recv(s, tmp, cap, &from.ua, NULL, NULL, ((unsigned)a->a[3] & LX_MSG_DONTWAIT) != 0);
+    else
+        rc = ksock_recvfrom(s, tmp, cap, a->a[4] ? &from.na : NULL);
     if (rc > 0 && copy_to_user(ubuf, tmp, (size_t)rc))
         rc = -EFAULT;
     kfree(tmp);
     if (rc >= 0 && a->a[4]) {
-        int r2 = addr_to_user(a->a[4], a->a[5], &from);
+        int r2 = lx_sock_addr_to_user(s, a->a[4], a->a[5], &from);
         if (r2)
-            return r2;
+            rc = r2;
     }
+    ksock_put(s);
     return rc;
 }
 
@@ -1910,10 +1999,16 @@ static int64_t name_call(struct syscall_args *a, bool peer)
     struct socket *s = sock_of((int)a->a[0], 0);
     if (s == NULL)
         return -EBADF;
-    struct netaddr addr;
-    int rc = peer ? ksock_getpeername(s, &addr) : ksock_getsockname(s, &addr);
+    struct lx_any_addr addr;
+    int rc;
+    if (s->family == COSMO_AF_UNIX)
+        rc = peer ? unix_getpeername(s, &addr.ua) : unix_getsockname(s, &addr.ua);
+    else
+        rc = peer ? ksock_getpeername(s, &addr.na) : ksock_getsockname(s, &addr.na);
+    if (rc == 0)
+        rc = lx_sock_addr_to_user(s, a->a[1], a->a[2], &addr);
     ksock_put(s);
-    return rc ? rc : addr_to_user(a->a[1], a->a[2], &addr);
+    return rc;
 }
 
 static int64_t lx_getsockname(struct syscall_args *a) { return name_call(a, false); }
@@ -1949,7 +2044,21 @@ static int64_t lx_getsockopt(struct syscall_args *a)
     if (s == NULL)
         return -EBADF;
     int64_t rc;
-    if ((int)a->a[1] != LX_SOL_SOCKET || (int)a->a[2] != LX_SO_ERROR) {
+    if ((int)a->a[1] == LX_SOL_SOCKET && (int)a->a[2] == LX_SO_PEERCRED) {
+        struct cosmo_ucred uc;
+        rc = s->family == COSMO_AF_UNIX ? unix_peercred(s, &uc) : -ENOPROTOOPT;
+        if (rc == 0) {
+            struct lx_ucred lu = { .pid = uc.pid, .uid = uc.uid, .gid = uc.gid };
+            uint32_t room = sizeof(lu);
+            if (a->a[4] && copy_from_user(&room, a->a[4], sizeof(room)))
+                rc = -EFAULT;
+            else if (room < sizeof(lu))
+                rc = -EINVAL;
+            else if (copy_to_user(a->a[3], &lu, sizeof(lu)) ||
+                     (a->a[4] && copy_to_user(a->a[4], &(uint32_t){ sizeof(lu) }, sizeof(uint32_t))))
+                rc = -EFAULT;
+        }
+    } else if ((int)a->a[1] != LX_SOL_SOCKET || (int)a->a[2] != LX_SO_ERROR) {
         rc = -ENOPROTOOPT;
     } else {
         int val = 0;
@@ -1976,6 +2085,290 @@ static int64_t lx_getsockopt(struct syscall_args *a)
     }
     ksock_put(s);
     return rc;
+}
+
+/*
+ * --- sendmsg, recvmsg, socketpair ------------------------------------------
+ * struct msghdr: a name, a vector, a control buffer. SCM_RIGHTS is the one
+ * control type: int descriptors in, under spawn's transfer rule with SAME
+ * rights (Linux has no narrower notion); int descriptors out, installed in
+ * order until the first refusal, the rest closed with MSG_CTRUNC.
+ */
+#define LX_CMSG_HDR ((uint64_t)sizeof(struct lx_cmsghdr))
+#define LX_CMSG_ALIGN(n) (((n) + 7u) & ~7ull)
+
+static int lx_msg_handles_in(uint64_t control, uint64_t controllen, struct unix_handles *hs)
+{
+    hs->nr = 0;
+    if (control == 0 || controllen == 0)
+        return 0;
+    struct handle_table *t = &process_current()->handles;
+    uint64_t off = 0;
+    while (off + LX_CMSG_HDR <= controllen) {
+        struct lx_cmsghdr ch;
+        if (copy_from_user(&ch, control + off, sizeof(ch)))
+            return -EFAULT;
+        if (ch.cmsg_len < LX_CMSG_HDR || off + ch.cmsg_len > controllen)
+            return -EINVAL;
+        if (ch.cmsg_level != LX_SOL_SOCKET || ch.cmsg_type != LX_SCM_RIGHTS)
+            return -EINVAL;
+        uint64_t n = (ch.cmsg_len - LX_CMSG_HDR) / sizeof(int32_t);
+        if (hs->nr + n > UNIX_HANDLES_MAX)
+            return -EINVAL;
+        for (uint64_t i = 0; i < n; i++) {
+            int32_t fd;
+            if (copy_from_user(&fd, control + off + LX_CMSG_HDR + i * sizeof(fd), sizeof(fd)))
+                return -EFAULT;
+            int rc = handle_transfer_check(t, fd, COSMO_RIGHTS_SAME, &hs->objs[hs->nr], &hs->rights[hs->nr]);
+            if (rc)
+                return rc;
+            hs->nr++;
+        }
+        off += LX_CMSG_ALIGN(ch.cmsg_len);
+    }
+    return 0;
+}
+
+static int64_t lx_sendmsg(struct syscall_args *a)
+{
+    struct lx_msghdr m;
+    if (copy_from_user(&m, a->a[1], sizeof(m)))
+        return -EFAULT;
+    unsigned flags = (unsigned)a->a[2];
+    if (m.msg_iovlen > IOV_MAX)
+        return -EINVAL;
+    struct lx_any_addr to;
+    bool have_to = m.msg_name != 0 && m.msg_namelen != 0;
+    if (have_to) {
+        int rc = lx_any_addr_from_user(m.msg_name, m.msg_namelen, &to);
+        if (rc)
+            return rc;
+    }
+    struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_WRITE);
+    if (s == NULL)
+        return -EBADF;
+    struct unix_handles hs = { .nr = 0 };
+    int64_t rc = lx_msg_handles_in(m.msg_control, m.msg_controllen, &hs);
+    if (rc == 0 && s->family != COSMO_AF_UNIX && hs.nr > 0)
+        rc = -EINVAL;
+    bool dontwait = (flags & LX_MSG_DONTWAIT) != 0;
+    if (rc == 0 && s->type == COSMO_SOCK_DGRAM) {
+        /* Gathered into one buffer and sent once, handles and all. */
+        size_t total = 0;
+        for (uint64_t i = 0; i < m.msg_iovlen && rc == 0; i++) {
+            struct lx_iovec iov;
+            if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov)))
+                rc = -EFAULT;
+            else if (!user_range_ok(iov.iov_base, iov.iov_len))
+                rc = -EFAULT;
+            else if (total + iov.iov_len > SOCK_CHUNK * 16)
+                rc = -EMSGSIZE;
+            else
+                total += iov.iov_len;
+        }
+        uint8_t *tmp = rc ? NULL : kmalloc(total ? total : 1, 0);
+        if (rc == 0 && tmp == NULL)
+            rc = -ENOMEM;
+        size_t at = 0;
+        for (uint64_t i = 0; i < m.msg_iovlen && rc == 0; i++) {
+            struct lx_iovec iov;
+            if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov)) ||
+                copy_from_user(tmp + at, iov.iov_base, iov.iov_len))
+                rc = -EFAULT;
+            at += iov.iov_len;
+        }
+        if (rc == 0) {
+            if (s->family == COSMO_AF_UNIX)
+                rc = unix_send(s, tmp, total, have_to ? &to.ua : NULL, &hs, dontwait);
+            else
+                rc = ksock_sendto(s, tmp, total, have_to ? &to.na : NULL);
+        }
+        kfree(tmp);
+    } else if (rc == 0) {
+        /* A stream: element by element; the handles ride with the first
+         * element that carries a byte, which is where Linux puts them. */
+        int64_t done = 0;
+        bool any = false;
+        for (uint64_t i = 0; i < m.msg_iovlen; i++) {
+            struct lx_iovec iov;
+            if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov))) {
+                rc = -EFAULT;
+                break;
+            }
+            if (iov.iov_len == 0)
+                continue;
+            if (!user_range_ok(iov.iov_base, iov.iov_len)) {
+                rc = -EFAULT;
+                break;
+            }
+            any = true;
+            int64_t w = lx_sock_send(s, iov.iov_base, (size_t)iov.iov_len, have_to ? &to : NULL, &hs, dontwait);
+            if (w < 0) {
+                rc = w;
+                break;
+            }
+            done += w;
+            if ((uint64_t)w < iov.iov_len)
+                break;
+        }
+        if (!any && rc == 0 && hs.nr > 0 && s->family == COSMO_AF_UNIX)
+            rc = lx_sock_send(s, 0, 0, have_to ? &to : NULL, &hs, dontwait);   /* handles and no bytes */
+        if (done > 0)
+            rc = done;
+    }
+    unix_handles_drop(&hs);   /* whatever no message took */
+    ksock_put(s);
+    return rc;
+}
+
+static int64_t lx_recvmsg(struct syscall_args *a)
+{
+    struct lx_msghdr m;
+    if (copy_from_user(&m, a->a[1], sizeof(m)))
+        return -EFAULT;
+    unsigned flags = (unsigned)a->a[2];
+    if (m.msg_iovlen > IOV_MAX)
+        return -EINVAL;
+    size_t total = 0;
+    for (uint64_t i = 0; i < m.msg_iovlen; i++) {
+        struct lx_iovec iov;
+        if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov)))
+            return -EFAULT;
+        if (!user_range_ok(iov.iov_base, iov.iov_len))
+            return -EFAULT;
+        total += iov.iov_len;
+    }
+    struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_READ);
+    if (s == NULL)
+        return -EBADF;
+    size_t cap = total < SOCK_CHUNK * 16 ? (total ? total : 1) : SOCK_CHUNK * 16;
+    uint8_t *tmp = kmalloc(cap, 0);
+    if (tmp == NULL) {
+        ksock_put(s);
+        return -ENOMEM;
+    }
+    /* Room for handles: what the control buffer can hold after a header. */
+    unsigned room = 0;
+    if (m.msg_control != 0 && m.msg_controllen >= LX_CMSG_HDR + sizeof(int32_t))
+        room = (unsigned)((m.msg_controllen - LX_CMSG_HDR) / sizeof(int32_t));
+    if (room > UNIX_HANDLES_MAX)
+        room = UNIX_HANDLES_MAX;
+    struct unix_handles hs = { .nr = room };
+    struct lx_any_addr from;
+    unsigned oflags = 0;
+    int64_t n;
+    if (s->family == COSMO_AF_UNIX) {
+        n = unix_recv(s, tmp, total < cap ? total : cap, &from.ua, &hs, &oflags, (flags & LX_MSG_DONTWAIT) != 0);
+    } else {
+        hs.nr = 0;
+        n = ksock_recvfrom(s, tmp, total < cap ? total : cap, &from.na);
+    }
+    /* Scatter. */
+    size_t at = 0;
+    for (uint64_t i = 0; i < m.msg_iovlen && n > 0 && at < (size_t)n; i++) {
+        struct lx_iovec iov;
+        if (copy_from_user(&iov, m.msg_iov + i * sizeof(iov), sizeof(iov))) {
+            n = -EFAULT;
+            break;
+        }
+        size_t c = (size_t)n - at < iov.iov_len ? (size_t)n - at : (size_t)iov.iov_len;
+        if (c && copy_to_user(iov.iov_base, tmp + at, c)) {
+            n = -EFAULT;
+            break;
+        }
+        at += c;
+    }
+    kfree(tmp);
+    /* The handles, in order until the first refusal (MSG_CTRUNC). */
+    struct handle_table *t = &process_current()->handles;
+    unsigned installed = 0;
+    int32_t fds[UNIX_HANDLES_MAX];
+    for (unsigned i = 0; i < hs.nr && n >= 0; i++) {
+        int hv = handle_install(t, hs.objs[i], hs.rights[i]);
+        if (hv < 0) {
+            oflags |= COSMO_MSG_HTRUNC;
+            break;
+        }
+        fds[installed++] = hv;
+    }
+    unix_handles_drop(&hs);
+    uint64_t controllen = 0;
+    if (n >= 0 && installed > 0) {
+        struct lx_cmsghdr ch = { .cmsg_len = LX_CMSG_HDR + installed * sizeof(int32_t),
+                                 .cmsg_level = LX_SOL_SOCKET, .cmsg_type = LX_SCM_RIGHTS };
+        if (copy_to_user(m.msg_control, &ch, sizeof(ch)) ||
+            copy_to_user(m.msg_control + LX_CMSG_HDR, fds, installed * sizeof(int32_t))) {
+            for (unsigned i = 0; i < installed; i++)
+                handle_close(t, fds[i]);
+            n = -EFAULT;
+        }
+        controllen = LX_CMSG_ALIGN(ch.cmsg_len);
+        if (controllen > m.msg_controllen)
+            controllen = m.msg_controllen;
+    }
+    int32_t mflags = 0;
+    if (oflags & COSMO_MSG_HTRUNC)
+        mflags |= LX_MSG_CTRUNC;
+    if (oflags & COSMO_MSG_TRUNC)
+        mflags |= LX_MSG_TRUNC;
+    if (n >= 0 && m.msg_name != 0 && m.msg_namelen != 0) {
+        /* The sender's name, bounded by msg_namelen, the full size back. */
+        uint8_t buf[sizeof(struct lx_sockaddr_un)];
+        size_t full = s->family == COSMO_AF_UNIX ? unix_addr_pack(&from.ua, LX_AF_UNIX, buf)
+                                                 : lx_sockaddr_from_netaddr(&from.na, buf, sizeof(buf));
+        size_t c = m.msg_namelen < full ? m.msg_namelen : full;
+        if (c && copy_to_user(m.msg_name, buf, c))
+            n = -EFAULT;
+        m.msg_namelen = (uint32_t)full;
+    }
+    ksock_put(s);
+    if (n < 0)
+        return n;
+    m.msg_controllen = controllen;
+    m.msg_flags = mflags;
+    if (copy_to_user(a->a[1] + offsetof(struct lx_msghdr, msg_namelen), &m.msg_namelen, sizeof(m.msg_namelen)) ||
+        copy_to_user(a->a[1] + offsetof(struct lx_msghdr, msg_controllen), &m.msg_controllen,
+                     sizeof(m.msg_controllen)) ||
+        copy_to_user(a->a[1] + offsetof(struct lx_msghdr, msg_flags), &m.msg_flags, sizeof(m.msg_flags)))
+        return -EFAULT;
+    return n;
+}
+
+static int64_t lx_socketpair(struct syscall_args *a)
+{
+    if ((int)a->a[0] != LX_AF_UNIX)
+        return -EAFNOSUPPORT;
+    unsigned type = (unsigned)a->a[1] & ~(unsigned)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC);
+    bool nonblock = ((unsigned)a->a[1] & LX_SOCK_NONBLOCK) != 0;
+    if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM)
+        return -ESOCKTNOSUPPORT;
+    if (!user_range_ok(a->a[3], 2 * sizeof(int32_t)))
+        return -EFAULT;
+    struct socket *x, *y;
+    int rc = unix_socketpair(type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, &x, &y);
+    if (rc)
+        return rc;
+    if (nonblock) {
+        ksock_set_nonblock(x, true);
+        ksock_set_nonblock(y, true);
+    }
+    struct handle_table *t = &process_current()->handles;
+    int32_t h[2];
+    h[0] = handle_install(t, &x->obj, HANDLE_RIGHT_SOCK_CONNECTED);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, &y->obj, HANDLE_RIGHT_SOCK_CONNECTED);
+    ksock_put(x);
+    ksock_put(y);
+    if (h[0] < 0 || h[1] < 0) {
+        if (h[0] >= 0)
+            handle_close(t, h[0]);
+        return -EMFILE;
+    }
+    if (copy_to_user(a->a[3], h, sizeof(h))) {
+        handle_close(t, h[0]);
+        handle_close(t, h[1]);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 /* --- the table ------------------------------------------------------------------------ */
@@ -2052,6 +2445,9 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getpeername] = lx_getpeername,
     [LX_setsockopt] = lx_setsockopt,
     [LX_getsockopt] = lx_getsockopt,
+    [LX_sendmsg] = lx_sendmsg,
+    [LX_recvmsg] = lx_recvmsg,
+    [LX_socketpair] = lx_socketpair,
     [LX_clone] = lx_clone,
 #ifdef LX_fork
     [LX_fork] = lx_nosys,

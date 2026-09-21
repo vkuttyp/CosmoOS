@@ -37,9 +37,11 @@
 #define ENOTEMPTY 39  /* directory not empty */
 #define ELOOP     40  /* too many levels */
 #define EMSGSIZE  90  /* message too long */
+#define EPROTOTYPE 91 /* a unix name of the other socket type */
 #define ENOPROTOOPT 92 /* protocol option not available */
 #define ENOTSUP   95  /* operation not supported */
 #define EOPNOTSUPP 95 /* alias */
+#define ESOCKTNOSUPPORT 94 /* socket type not supported by this family */
 #define EAFNOSUPPORT 97 /* address family not supported */
 #define EADDRINUSE 98 /* address already in use */
 #define EADDRNOTAVAIL 99 /* cannot assign requested address */

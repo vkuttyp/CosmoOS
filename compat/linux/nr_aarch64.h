@@ -40,6 +40,7 @@
 #define LX_accept 202
 #define LX_sendto 206
 #define LX_recvfrom 207
+#define LX_socketpair 199
 #define LX_sendmsg 211
 #define LX_recvmsg 212
 #define LX_shutdown 210

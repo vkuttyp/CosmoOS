@@ -14,22 +14,48 @@ int socket(int family, int type, int proto) { return (int)__syscall_ret(cosmo_so
 int listen(int fd, int backlog) { return (int)__syscall_ret(cosmo_listen(fd, backlog)); }
 int shutdown(int fd, int how) { return (int)__syscall_ret(cosmo_shutdown(fd, how)); }
 
+/* A unix address is as long as its name; an inet one is the whole
+ * struct. The kernel reads the family first and the right shape after. */
+static int addr_len_ok(const struct sockaddr *sa, socklen_t len)
+{
+    if (sa == NULL || len < 2)
+        return 0;
+    if (sa->sa_family == AF_UNIX)
+        return len <= sizeof(struct cosmo_sockaddr_un);
+    return len >= sizeof(struct cosmo_sockaddr);
+}
+
 int bind(int fd, const struct sockaddr *sa, socklen_t len)
 {
-    if (len < sizeof(struct cosmo_sockaddr)) {
+    if (!addr_len_ok(sa, len)) {
         errno = EINVAL;
         return -1;
     }
-    return (int)__syscall_ret(cosmo_bind(fd, (const struct cosmo_sockaddr *)sa));
+    return (int)__syscall_ret(cosmo_bind_len(fd, sa, len));
 }
 
 int connect(int fd, const struct sockaddr *sa, socklen_t len)
 {
-    if (len < sizeof(struct cosmo_sockaddr)) {
+    if (!addr_len_ok(sa, len)) {
         errno = EINVAL;
         return -1;
     }
-    return (int)__syscall_ret(cosmo_connect(fd, (const struct cosmo_sockaddr *)sa));
+    return (int)__syscall_ret(cosmo_connect_len(fd, sa, len));
+}
+
+int socketpair(int family, int type, int proto, int sv[2])
+{
+    (void)proto;
+    return (int)__syscall_ret(cosmo_socketpair(family, type, sv));
+}
+
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len)
+{
+    size_t l = len ? *len : 0;
+    long r = __syscall_ret(cosmo_getsockopt(fd, level, opt, val, len ? &l : NULL));
+    if (r >= 0 && len)
+        *len = (socklen_t)l;
+    return (int)r;
 }
 
 int accept(int fd, struct sockaddr *peer, socklen_t *len)
@@ -44,11 +70,11 @@ int accept(int fd, struct sockaddr *peer, socklen_t *len)
 ssize_t sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr *to, socklen_t len)
 {
     (void)flags;
-    if (to && len < sizeof(struct cosmo_sockaddr)) {
+    if (to && !addr_len_ok(to, len)) {
         errno = EINVAL;
         return -1;
     }
-    return __syscall_ret(cosmo_sendto(fd, buf, n, (const struct cosmo_sockaddr *)to));
+    return __syscall_ret(cosmo_sendto_len(fd, buf, n, to, to ? len : 0));
 }
 
 ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *from, socklen_t *len)
