@@ -3108,7 +3108,8 @@ See [docs/development.md](docs/development.md).
   device by an exact seam (`unconsumed`: used entries not yet popped)
   instead of a wait. With the check back at the door it fails
   deterministically. Recorded in `docs/testing/flakes.md`;
-  `docs/kernel/device/testing.md`; the #199 report's banner, item 11.
+  `docs/kernel/device/testing.md`; the #199 report's banner, item 11
+  (PR #204).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

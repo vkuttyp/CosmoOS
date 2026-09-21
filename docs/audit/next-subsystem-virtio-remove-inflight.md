@@ -84,7 +84,7 @@ and the banner below records where the build differed from the design.
    here because it blocked the gate, and recorded in
    `docs/testing/flakes.md`.
 11. **The hold is checked before every pop, not once at the door**
-   (a follow-up after the merge, 2026-09-21). The first build checked
+   (PR #204, a follow-up after the merge, 2026-09-21). The first build checked
    the hold at `vblk_done`'s entry; a handler already inside its pop
    loop when the hold was stored kept popping, a QEMU device finishes
    a table's worth in one burst, and once in CI the held pass found 0
