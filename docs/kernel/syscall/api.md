@@ -178,7 +178,10 @@ Details per call:
   `write()` is in the mapping at once -- and `PRIVATE` copy-on-write.
   The fd needs the READ right (`EBADF`) and a regular file (`ENODEV`);
   `SHARED` with `PROT_WRITE` needs the file opened for writing through a
-  handle with the WRITE right (`EACCES`), and such a mapping of a
+  handle with the WRITE right (`EACCES`) -- one lookup carries the file
+  and its rights (`handle_get`), because a second lookup of the number
+  could resolve to another file if a thread closed and reopened it in
+  between -- and such a mapping of a
   read-only fd cannot later be `mprotect`ed writable (`EACCES`, the
   mapping's `maxprot`). A touch past the end of the file, or a page the
   file cannot read, is `SIGBUS`. Any undefined bit is `EINVAL`;

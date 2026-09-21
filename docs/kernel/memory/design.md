@@ -738,9 +738,12 @@ each mapping record whether its region covering the written page is
 executable (`vm_file_map_exec_at`) and, if one is, run
 `arch_mmu_sync_icache_kernel` on the frame's direct-map alias: on
 AArch64 the data cache is cleaned by that alias (a physically indexed
-cache reaches the point of unification from any alias) and the
-instruction cache invalidated for the range, then `isb`; on x86-64
-nothing. Counted in `vm.cache_exec_syncs`. TCG cannot show the
+cache reaches the point of unification from any alias) and then the
+**whole** instruction cache is invalidated (`ic ialluis`) -- invalidation
+by one VA is not guaranteed to reach a VIPT instruction cache's entries
+for another alias, and the executing process's alias is not this
+context's to walk (review caught a first version that invalidated by
+the kernel alias alone); then `isb`. On x86-64 nothing. Counted in `vm.cache_exec_syncs`. TCG cannot show the
 difference, as it cannot for M41; the `mmap` section checks the path
 runs and the counter moves. A write through *another mapping's PTE*
 never reaches the kernel and is the writer's own business, as on any

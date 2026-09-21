@@ -356,23 +356,27 @@ static struct file *file_of(int h, unsigned rights);
  */
 static int mmap_file_check(int fd, bool shared, bool write, struct file **fp, vm_prot_t *maxprot)
 {
-    struct file *f = file_of(fd, HANDLE_RIGHT_READ);
-    if (f == NULL)
+    /* ONE lookup, carrying the handle's rights: a second lookup of the
+     * same number could resolve to a different file if another thread
+     * closed and reopened it in between, and "writable" would then be
+     * decided by a file other than the one mapped (review found the
+     * first version doing exactly that). */
+    unsigned rights = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, fd, &rights);
+    if (obj == NULL)
         return -EBADF;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL || !(rights & HANDLE_RIGHT_READ)) {
+        kobject_put(obj);
+        return -EBADF;
+    }
     if (f->vn->type != VNODE_REG) {
         file_put(f);
         return -ENODEV;
     }
-    bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY;
-    if (writable) {
-        /* The handle's rights bound the file's mode: a handle duplicated
-         * without WRITE cannot map for writing what the file allows. */
-        struct kobject *w = handle_lookup(&process_current()->handles, fd, HANDLE_RIGHT_WRITE);
-        if (w == NULL)
-            writable = false;
-        else
-            kobject_put(w);
-    }
+    /* The handle's rights bound the file's mode: a handle duplicated
+     * without WRITE cannot map for writing what the file allows. */
+    bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE);
     if (shared && write && !writable) {
         file_put(f);
         return -EACCES;

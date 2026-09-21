@@ -4128,6 +4128,25 @@ static void mmap_selftest(void)
     }
     CHECK(cosmo_close(rfd) == 0);
 
+    /* The handle's rights, not only the file's mode: a copy of the
+     * read/write handle carrying READ alone cannot map shared for
+     * writing, and its shared mapping cannot be made writable. One
+     * lookup decides both (review found two, which a concurrent close
+     * and reopen of the number could have split). */
+    int rofd = (int)cosmo_dup_rights(fd, -1, COSMO_RIGHT_READ);
+    CHECK(rofd >= 0);
+    if (rofd >= 0) {
+        CHECK(cosmo_mmap_fd(NULL, P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_SHARED, rofd, 0) == -COSMO_EACCES);
+        unsigned char *rr = mmap(NULL, P, PROT_READ, MAP_SHARED, rofd, 0);
+        CHECK(rr != MAP_FAILED);
+        if (rr != MAP_FAILED) {
+            CHECK(rr[0] == sh[0]);
+            CHECK(cosmo_mprotect(rr, P, COSMO_PROT_READ | COSMO_PROT_WRITE) == -COSMO_EACCES);
+            CHECK(munmap(rr, P) == 0);
+        }
+        CHECK(cosmo_close(rofd) == 0);
+    }
+
     /* A private mapping made writable AFTER its page was installed
      * read-only: the cache frame's PTE must not be raised by mprotect
      * (the write would reach the file through a private mapping); the

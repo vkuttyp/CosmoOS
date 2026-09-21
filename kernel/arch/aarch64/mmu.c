@@ -565,21 +565,26 @@ void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
 
 void arch_mmu_sync_icache_kernel(vaddr_t va, size_t len)
 {
-    /* The user sequence above, without the user-access bracket: the
-     * address is the frame's direct-map alias. `dc cvau` reaches the
-     * point of unification from any alias of a physically indexed data
-     * cache; `ic ivau` is issued for the same range, and the whole thing
-     * is ordered with the same barriers (docs/kernel/memory/invariants.md
-     * M41: TCG cannot show the difference, the argument stands). */
+    /* The address is the frame's direct-map alias, and the process that
+     * executes the page is not this context's to walk: its alias is
+     * another VA in another space. The data cache is cleaned by this
+     * alias -- `dc cvau` reaches the point of unification from any alias
+     * of a physically indexed data cache -- but `ic ivau` by one VA is
+     * NOT guaranteed to reach a VIPT instruction cache's entries for
+     * another alias of the same frame (review caught a first version
+     * that invalidated by the kernel alias alone). So the whole
+     * instruction cache is invalidated, inner-shareable (`ic ialluis`),
+     * which is alias-free by definition. The event -- a write() into a
+     * page some mapping executes from -- is rare enough that the cost is
+     * irrelevant (docs/kernel/memory/invariants.md M41: TCG cannot show
+     * the difference, the argument stands). */
     uint64_t ctr = READ_SYSREG(ctr_el0);
     size_t dline = 4u << ((ctr >> 16) & 0xf);
-    size_t iline = 4u << (ctr & 0xf);
     vaddr_t end = va + len;
 
     for (vaddr_t p = va & ~(vaddr_t)(dline - 1); p < end; p += dline)
         __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
     __asm__ volatile("dsb ish" ::: "memory");
-    for (vaddr_t p = va & ~(vaddr_t)(iline - 1); p < end; p += iline)
-        __asm__ volatile("ic ivau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("ic ialluis" ::: "memory");
     __asm__ volatile("dsb ish\n\tisb" ::: "memory");
 }

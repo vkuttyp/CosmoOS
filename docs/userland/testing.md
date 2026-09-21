@@ -45,7 +45,9 @@ probe (neither or both of `SHARED`/`PRIVATE`, `SHARED|ANONYMOUS`, an
 unaligned offset, an undefined bit `EINVAL`; a bad fd `EBADF`; a
 directory `ENODEV`); a read-only fd (`MAP_SHARED|PROT_WRITE` `EACCES`,
 a private writable mapping fine, `mprotect(PROT_WRITE)` of its shared
-mapping `EACCES`, `PROT_NONE` and back allowed); four children judged by
+mapping `EACCES`, `PROT_NONE` and back allowed); a read/write handle
+duplicated with `COSMO_RIGHT_READ` alone (`cosmo_dup_rights`): the same
+two refusals, the rights and not only the mode deciding; four children judged by
 status -- `mmap-past-end` (a two-page mapping of a five-byte file: the
 second page is `SIGBUS`, 135, not zeros), `mmap-truncate` (three pages
 mapped and installed, the file reopened `O_TRUNC`, the touch is

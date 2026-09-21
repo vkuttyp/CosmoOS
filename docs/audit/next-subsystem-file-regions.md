@@ -118,14 +118,27 @@ report named and a ninth for what self-review found.
     changed instructions with no instruction-cache maintenance, and the
     writer need not be the executing process, so the fault-time sync of
     M41 was not enough: the cache now asks each mapping record whether
-    its region over the written page is executable and synchronises by
-    the frame's direct-map alias (`arch_mmu_sync_icache_kernel`, new on
-    both architectures; `vm.cache_exec_syncs`; a regression check, since
+    its region over the written page is executable and synchronises:
+    the data cache cleaned by the frame's direct-map alias and the whole
+    instruction cache invalidated (`arch_mmu_sync_icache_kernel`, new on
+    both architectures; a first version invalidated by the kernel alias
+    alone, which review noted need not reach a VIPT cache's user alias; `vm.cache_exec_syncs`; a regression check, since
     TCG cannot show coherence). And the Linux door decided "shared" on
     the `MAP_SHARED` bit alone, accepting no type and `SHARED|PRIVATE`:
     the low four bits are now validated as Linux does -- 1, 2, or 3
     (`MAP_SHARED_VALIDATE`, shared), anonymous or not, else `-EINVAL`
-    (`lxtest`). A fourth finding was wording in the inventory row.
+    (`lxtest`). A fourth finding was wording in the inventory row. The
+    second reviewer then found both doors looking the fd up twice --
+    once for the file, once for the WRITE right -- so a concurrent close
+    and reopen of the number could have had "writable" decided by a file
+    other than the one mapped; one `handle_get` lookup now carries the
+    file and its rights, and the section maps through a read/write
+    handle duplicated with READ alone. Its three performance findings
+    (the cache mutex across a miss's read, the per-mapping PTE work
+    under it, the executable-mapping scan on `write()`) are the design
+    choices the Risks section records, gated where they can be, and
+    stand until a measurement says otherwise; its `msync` finding
+    misread Linux, which accepts flags 0.
 10. **Self-review found a defect the report did not name, and the build
     fixed it before the tests could.** `vm_user_protect` applied
     `prot & ~WRITE` to a *shared* FILE region and `prot` to everything

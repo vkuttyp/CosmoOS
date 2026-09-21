@@ -926,21 +926,23 @@ static int64_t lx_mmap(struct syscall_args *a)
     if (!(flags & LX_MAP_ANONYMOUS)) {
         if (!is_page_aligned(off) || off + len < off)
             return -EINVAL;
-        f = file_of((int)a->a[4], HANDLE_RIGHT_READ);
-        if (f == NULL)
+        /* One lookup carrying the rights, as the native door: a second
+         * lookup of the number could resolve to another file if a thread
+         * closed and reopened it in between (review). */
+        unsigned rights = 0;
+        struct kobject *obj = handle_get(&p->handles, (int)a->a[4], &rights);
+        if (obj == NULL)
             return -EBADF;
+        f = file_from_kobject(obj);
+        if (f == NULL || !(rights & HANDLE_RIGHT_READ)) {
+            kobject_put(obj);
+            return -EBADF;
+        }
         if (f->vn->type != VNODE_REG) {
             file_put(f);
             return -ENODEV;
         }
-        bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY;
-        if (writable) {
-            struct kobject *w = handle_lookup(&p->handles, (int)a->a[4], HANDLE_RIGHT_WRITE);
-            if (w == NULL)
-                writable = false;
-            else
-                kobject_put(w);
-        }
+        bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE);
         if (shared && (nprot & COSMO_PROT_WRITE) && !writable) {
             file_put(f);
             return -EACCES;
