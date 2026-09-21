@@ -56,7 +56,8 @@ block), `PG_SLAB`, `PG_KMALLOC_LARGE` (page-backed kmalloc; order in
 `order`), `PG_PAGETABLE`, `PG_DEFERRED` (RAM the bootstrap map cannot
 reach; released by the VMM), `PG_POISONED` (debug builds: the frame is
 free and holds the poison pattern its free wrote, which the next
-allocation verifies -- §2.5).
+allocation verifies -- §2.5), `PG_PAGECACHE` (a page cache frame, whose
+`refcount` is 1 plus the user PTEs mapping it -- §7.3).
 
 Keeping the free-list link inside `struct page` rather than inside the
 free frame means the PMM never touches a frame's contents to manage it.
@@ -239,15 +240,16 @@ x86-64 implementation (`kernel/arch/x86_64/mmu.c`):
 ### 3.2 Spaces and regions (`vmm.c`)
 
 ```c
-enum vm_region_kind { VM_REGION_PHYS, VM_REGION_ANON };
+enum vm_region_kind { VM_REGION_PHYS, VM_REGION_ANON, VM_REGION_FILE };
 
 struct vm_region {
     struct list_node link;         /* sorted by base in the space */
     vaddr_t base; size_t size;     /* page multiples; size excludes guards */
     vm_prot_t prot; vm_cache_t cache;
     enum vm_region_kind kind;
-    unsigned flags;                /* VM_REGION_GUARD_BELOW/ABOVE, VM_REGION_POPULATED */
+    unsigned flags;                /* VM_REGION_GUARD_BELOW/ABOVE, VM_REGION_POPULATED, VM_REGION_QUIESCED */
     paddr_t phys;                  /* PHYS: mapped physical base */
+    struct vm_file_map *fmap;      /* FILE: the mapping record (§7) */
     const char *name;
 };
 
@@ -258,9 +260,13 @@ struct vm_space {
     vaddr_t arena_lo, arena_hi;    /* kernel VA arena for vm_kernel_alloc */
     vaddr_t near_lo, near_hi;      /* near arena: top 2 GiB above the image (modules) */
     bool user;                     /* a process address space (Phase 4) */
-    uint64_t anon_pages;
+    uint64_t anon_pages;           /* demand-zero, populated, and copy-on-write frames */
+    uint64_t file_pages;           /* page-cache frames installed in FILE regions (§7) */
 };
 ```
+
+The third kind, `VM_REGION_FILE`, arrived with the file-regions unit
+(`docs/audit/next-subsystem-file-regions.md`) and is described in §7.
 
 Kernel layout (x86-64, 48-bit):
 
@@ -584,3 +590,195 @@ scalability work (audit 5.4) outside this milestone. (ASIDs were too,
 until the address-space tag unit built them: §2.6.) The native ABI does
 not gain `mprotect` or `brk`; both are Linux-personality calls, and the
 native `munmap` keeps its strict contract.
+
+## 7. File-backed regions (the file-regions unit)
+
+`docs/audit/next-subsystem-file-regions.md`. Constitution §14's *must*
+list has file-backed mappings, shared mappings and copy-on-write, and
+until this unit the VMM had two region kinds and none of the three: the
+native `mmap` refused every file mapping, and the Linux personality
+copied a file eagerly into an anonymous region. Now a file is mapped as
+a `VM_REGION_FILE` region over **the page cache's own frames**.
+
+### 7.1 The mapping record
+
+A FILE region points at a `struct vm_file_map` (`kernel/vmm.h`): the
+vnode (referenced for the record's life), the space, the range **as
+first mapped**, the file offset of its base, whether it is shared, the
+`maxprot` a later `mprotect` may reach, and a count of the regions
+pointing at it. `vm_user_map_file` creates one and links it on the
+vnode's `pagecache.mappings` under the cache mutex *before* the region
+goes into the space, so no page can be installed that a truncate or a
+write-back does not know about. `region_split` copies the pointer and
+counts the piece; every site that frees a region (`vm_user_unmap`, the
+replacement, `vm_space_destroy`, the merge helpers) goes through
+`region_put`, and the one that takes the count to zero unlinks the
+record and drops the vnode -- never under the space lock, because the
+cache mutex is taken to do it. The record describes the range as first
+mapped; a piece since unmapped or reprotected is a sub-range whose PTEs
+are absent or different, which every walk over it tolerates. This is
+the reverse map, at record granularity: enough for the two operations
+that must reach every mapping of a file (truncate, write-back), and
+deliberately not a per-page map. FILE regions never merge.
+
+### 7.2 The fault, in two phases under one lock order
+
+The order is **`vnode.lock → pagecache.lock → vm_space.lock`**. The
+first arrow is the page cache's existing rule; the second is this
+unit's, and it is why **the install happens under the cache mutex**: a
+truncate or a write-back on the same file, which hold it too, are
+serialised against faults without a third mechanism.
+
+1. Under `space->lock`: find the region. FILE, not quiesced, the access
+   within `prot`: take a vnode reference, note the file index
+   (`(page - fmap->base + fmap->off) / PAGE_SIZE`), the sharing and the
+   access, release the lock. The handler may now sleep (`might_sleep`,
+   the rule every user copy already asserts for itself).
+2. `pagecache_lock` (after the reclaim every entry to a cache runs),
+   then `pagecache_fault_page`: `-EFBIG` for an index at or past
+   `min(vn->size, trim_bound)` (§7.4); otherwise the entry, read in on a
+   miss with the mutex held as `read()` does, marked dirty for a shared
+   write, and **one reference taken for the mapping** (`pmm_page_get`).
+   A private write allocates an anonymous frame and copies the cache
+   page into it under the mutex: copy-on-write, the copy owned by the
+   region, the cache frame not referenced.
+3. Still under the mutex, `space->lock` again and **the region is found
+   again**, by what it maps -- the same vnode, the same file index for
+   this address, the same sharing, the access still allowed -- and not
+   by pointer, because region structures come from a cache and a pointer
+   can be reused. Anything else drops the reference (or frees the copy),
+   installs nothing, counts `file_fault_retries`, and the instruction
+   retries against whatever is there now. If the PTE is already present,
+   one of three things: a **shared write** finding the cache frame
+   read-only raises it in place (the page was installed clean and is
+   dirty now: the one in-place upgrade); a **private write** finding the
+   cache frame read-only **replaces** the PTE with the copy (unmap, the
+   mapping's reference put, `file_pages--`, the copy mapped,
+   `anon_pages++`, with `COSMO_RLIMIT_MEM` checked first exactly as for
+   a not-present copy -- review found it unchecked on this path, which
+   would have let a process read every page of a private mapping and
+   then write them all past its limit; raising the PTE instead would
+   write the file through a private mapping); anything else present is
+   a second thread's install or a
+   copy already standing, and nothing is mapped twice. Otherwise the
+   frame is mapped: a cache frame read-only unless this is the shared
+   write that dirtied it, a copy with the region's protection, with the
+   M41 instruction-stream sync for an executable mapping.
+
+Faults on different files run in parallel; faults on one file
+serialise on its cache mutex, which is what `read()` on one file
+already does. `file_pages` is checked zero at `vm_space_destroy` beside
+`anon_pages`: a leaked cache frame is found at the exit of the process
+that leaked it.
+
+### 7.3 Ownership of a frame
+
+A frame installed in a user space is owned two ways. A page-cache frame
+carries `PG_PAGECACHE` and is the cache's; a mapping holds **one
+reference per PTE** to it, taken under the cache mutex, put after the
+PTE is gone and shot down. An anonymous frame -- demand-zero,
+populated, or a copy-on-write copy -- is the mapping's alone at
+reference 1. `user_range_teardown` puts every frame it finds with
+`pmm_page_put`, which frees on the last reference, and credits the
+counter the flag names. Reclaim (`pagecache_reclaim`), deciding under
+the owning cache's mutex, leaves a frame whose count is not one alone
+(`pinned_skips`): a mapped clean page stays resident, and the global
+limit is soft where mappings are concerned.
+
+### 7.4 The bound the cache owns
+
+Both filesystems trim the cache before they lower `vn->size`
+(`ramfs_truncate`, `cfs_truncate`). A `read()` never cared, being
+bounded by the size at the moment it runs; a fault that reads the size
+to choose between installing and `SIGBUS` would, in that window, install
+a page past the new end that nothing then unmaps. So the cache keeps
+`trim_bound`: `UINT64_MAX` until `pagecache_truncate` sets it to the new
+size under the mutex, lifted back by a `pagecache_write` that grows the
+file. The fault installs only below `min(vn->size, trim_bound)`. Neither
+filesystem's order or failure semantics changed.
+
+### 7.5 Truncate and write-back reach every mapping
+
+`pagecache_truncate`, under the mutex and before it frees anything,
+walks `mappings` and `vm_file_map_truncate` unmaps every page of each
+record from the dropped index on -- the frame found by
+`arch_mmu_query`, the PTE cleared under the space lock, the range shot
+down, the mapping's reference put -- copy-on-write frames included (the
+file no longer has those bytes; a reference past the end is `SIGBUS`,
+private or shared). Only then does `remove_entry` free the cache's own
+reference, which is now the last, and `pmm_free_page`'s count check is
+the assertion that it was.
+
+Dirtiness is tracked by write fault, not by hardware dirty bits (DBM is
+optional on AArch64, and a software rule is one rule on two
+architectures with a counter a test can read): **a shared file page's
+PTE gains write only in the fault handler**. It is installed read-only
+when clean; the write fault marks the entry dirty and raises the PTE;
+`pagecache_sync`, *before* it reads a run of pages for the disk, walks
+`mappings` and `vm_file_map_writeprotect` lowers every present writable
+PTE of those pages to `prot & ~WRITE` and shoots down -- so a write
+landing after that faults, waits for the mutex, and dirties the page
+again, and one landing before is in what is written. The other order
+(write, then lower) would mark clean a page written between the two.
+`vm_user_protect` records `prot` in the region and applies
+`prot & ~WRITE` to every cache frame's PTE, shared or private (a
+private region's read-installed frames are cache frames too, and raising
+one would write the file through a private mapping; found by
+self-review), and `prot` itself only to a copy-on-write copy, which is
+the mapping's own anonymous frame. So a cache frame under a private
+mapping is never writable through it.
+
+**A `write()` into a page some mapping executes from.** M41 says the
+kernel synchronises the instruction stream when data becomes
+instructions, and a `write()` or `pwrite()` into a file whose page is
+mapped `PROT_EXEC` in some process is such a write, made by a process
+that need not be the one executing it (review found the path missing).
+`pagecache_write` and `pagecache_put_page`, under the cache mutex, ask
+each mapping record whether its region covering the written page is
+executable (`vm_file_map_exec_at`) and, if one is, run
+`arch_mmu_sync_icache_kernel` on the frame's direct-map alias: on
+AArch64 the data cache is cleaned by that alias (a physically indexed
+cache reaches the point of unification from any alias) and then the
+**whole** instruction cache is invalidated (`ic ialluis`) -- invalidation
+by one VA is not guaranteed to reach a VIPT instruction cache's entries
+for another alias, and the executing process's alias is not this
+context's to walk (review caught a first version that invalidated by
+the kernel alias alone); then `isb`. On x86-64 nothing. Counted in `vm.cache_exec_syncs`. TCG cannot show the
+difference, as it cannot for M41; the `mmap` section checks the path
+runs and the counter moves. A write through *another mapping's PTE*
+never reaches the kernel and is the writer's own business, as on any
+system with shared mappings.
+
+### 7.6 msync, the doors, the signals
+
+`vm_user_msync` cannot call `pagecache_sync` under the space lock (it
+sleeps under the cache mutex and is entered under the vnode lock, as
+`file_sync` enters it), so it is two passes: the wholly-mapped check
+(`-ENOMEM` before anything is written), then a cursor walk that finds
+the FILE region containing the cursor or the first after it, takes a
+vnode reference under the space lock, releases, and syncs under the
+vnode lock; a region unmapped between the two holds is not a problem,
+because the reference kept the vnode and syncing a file owes nothing to
+the mapping that named it. `MS_ASYNC` returns at once (the dirty pages
+are the cache's already); `MS_INVALIDATE` is nothing to do, the mapping
+being the cache.
+
+The native door: `COSMO_MAP_SHARED`, `COSMO_MAP_PRIVATE`, `fd` and `off`
+as the fifth and sixth arguments, `SYS_msync` 96 (`SYS_COUNT` 97), and
+the rules in `docs/kernel/syscall/api.md`. The Linux door maps a file the
+same way and its eager copy is gone (`docs/compat/linux/design.md`). A
+file mapping goes through the replacement path for `MAP_FIXED`, so M40
+holds for it. A fault the file cannot serve -- past the bound, a read
+that failed, the mount's budget refused the page -- is `SIGBUS`
+(`vm_user_hooks::fatal` takes the signal); a kernel copy takes its fixup
+and reports `-EFAULT`. Memory for a private copy running out is the
+anonymous rule (`SIGSEGV` on a user touch, `-EFAULT` in a copy).
+
+### 7.7 What stays open
+
+Named in the unit's report: `memfd`/`shm_open` (a file on a memory
+filesystem, mapped shared); a futex keyed by frame for shared pages
+(`kernel/ipc/futex.c` keys by space); the ELF loader mapping `PT_LOAD`
+segments as file regions; eviction of mapped pages under pressure, with
+the page-level reverse map it needs; `mremap`; a user `PHYS` region for
+a device; `MAP_POPULATE`; `madvise` on file regions.

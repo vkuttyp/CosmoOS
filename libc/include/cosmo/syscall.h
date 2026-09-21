@@ -121,7 +121,18 @@ static inline uint64_t cosmo_clock_realtime_ns(void)
 
 static inline long cosmo_mmap(void *hint, size_t len, int prot, int flags)
 {
-    return cosmo_syscall4(SYS_mmap, hint, len, prot, flags);
+    return cosmo_syscall6(SYS_mmap, (long)hint, (long)len, prot, flags, -1, 0);
+}
+
+/* A file mapping: fd and off are the fifth and sixth arguments. */
+static inline long cosmo_mmap_fd(void *hint, size_t len, int prot, int flags, int fd, uint64_t off)
+{
+    return cosmo_syscall6(SYS_mmap, (long)hint, (long)len, prot, flags, fd, (long)off);
+}
+
+static inline long cosmo_msync(void *addr, size_t len, int flags)
+{
+    return cosmo_syscall3(SYS_msync, addr, len, flags);
 }
 
 static inline long cosmo_munmap(void *addr, size_t len)

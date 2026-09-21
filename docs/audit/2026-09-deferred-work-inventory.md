@@ -113,22 +113,33 @@ AHCI are the two entries from that list now built.
   no topology structure, no SRAT parsing).
 - huge pages for user space; memory deduplication; memory compression;
   swap.
-- **Taken up by `docs/audit/next-subsystem-file-regions.md`** (not
-  struck until it lands), which corrected this row before taking it:
-  shared mappings: `MAP_SHARED` is still private; no shared-memory
+- ~~shared mappings: `MAP_SHARED` is still private; no shared-memory
   primitive of any kind (which also rules out shared futexes across
-  processes). As re-checked 2026-09-21: natively there is no file
-  mapping at all (`sys_mmap` refuses anything not anonymous,
-  `kernel/syscall/native.c:364`, "file mappings arrive with the VFS");
-  the Linux personality's file mapping is an eager copy that refuses
-  `MAP_SHARED|PROT_WRITE` with `-EOPNOTSUPP` and gives a read-only
-  `MAP_SHARED` mapping a snapshot a later `write()` never reaches
-  (`compat/linux/syscalls.c:936-946`); and the page cache already owns
-  the frames a shared mapping would install (`kernel/include/kernel/pagecache.h`).
+  processes).~~ **BUILT (the file-regions unit,
+  `docs/audit/next-subsystem-file-regions.md`)**: `VM_REGION_FILE` over
+  the page cache's own frames at both doors -- shared mappings coherent
+  with `read()` and `write()` by construction, private ones
+  copy-on-write, demand-paged, `msync` (`SYS_msync` 96, `LX_msync` 26),
+  `SIGBUS` past the end, `maxprot`, the first shared memory between two
+  processes in this system (invariants **M42--M44**, **V33**). Still
+  open from this row: a shared futex across processes
+  (`kernel/ipc/futex.c` keys by space), `memfd`/`shm_open`, and the
+  ELF loader mapping `PT_LOAD` segments as file regions -- named as
+  deferred in that report. The record of what was wrong, as the report
+  corrected it before taking the row: natively there was no file
+  mapping at all (`sys_mmap` refused anything not anonymous with the
+  comment "file mappings arrive with the VFS"); the Linux personality's
+  file mapping was an eager copy that refused
+  `MAP_SHARED|PROT_WRITE` with `-EOPNOTSUPP` and gave a read-only
+  `MAP_SHARED` mapping a snapshot a later `write()` never reached; and
+  the page cache already owned the frames a shared mapping would install (`kernel/include/kernel/pagecache.h`).
   Constitution §14 lists file-backed mappings, shared mappings and
   copy-on-write in the VMM's *must* list, not its "eventually" list. A
   shared futex across processes stays open (`kernel/ipc/futex.c:44-46`
-  keys by space) and is named in that report as deferred.
+  keys by space) and is named in that report as deferred, as are
+  `memfd`/`shm_open` and the loader's segments; the description of the
+  two doors above is the record of what was wrong, and what they do now
+  is in `docs/kernel/syscall/api.md` and `docs/compat/linux/api.md`.
 - ASLR and KASLR: none; no randomised load base, stack or `brk`.
 
 ### 2.3 Scheduler and synchronisation (constitution §20-22)
@@ -183,7 +194,7 @@ IPv6 routing beyond loopback and ND against a real peer.
 - missing (re-checked 2026-09-21): `epoll`, `sendmsg`/`recvmsg`,
   `socketpair`, `rseq`, `statx`, `memfd_create`,
   `eventfd`/`timerfd`/`signalfd`, shared memory, netlink, `mremap`;
-  `msync` is taken up by `docs/audit/next-subsystem-file-regions.md`.
+  ~~`msync`~~ is built (the file-regions unit, `LX_msync` 26).
   `setsockopt`/`getsockopt` exist as stubs: `getsockopt` answers
   `SOL_SOCKET`/`SO_ERROR` only and `setsockopt` is `-ENOPROTOOPT` for
   everything (compat/linux/syscalls.c:1918-1930). ~~`sched_getaffinity`~~

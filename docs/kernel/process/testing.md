@@ -57,7 +57,7 @@ within 5 s, then waits for the process count to return to its baseline
 (the object is released by the reaper). Skipped with a log line when
 the loader found no module.
 
-**One `SELFTEST` line, ten sections, and each reports its own time.**
+**One `SELFTEST` line, eleven sections (ten when this was written; the file-regions unit added `mmap`), and each reports its own time.**
 `selftest()` drives a table of sections rather than calling them in a
 row, timing each and printing
 
@@ -376,7 +376,7 @@ the same on both, and it is not the order the check counts suggest --
 `svc` 1386 / 1489 ms from **34** checks and nine sleeps waiting on
 service state, `proc` 912 / 939 ms from 235, `fpu` 664 / 665 ms from 4
 (it spawns two partners), then `fsctl`, `fs`, `trap`, `priv`, `net`,
-`proc-fs`, `syscalls`. Time here is spawning and waiting, not
+`proc-fs`, `syscalls`, and since the file-regions unit `mmap` (264 / 300 ms, four spawned children and a 2 MiB bench). Time here is spawning and waiting, not
 checking.
 
 ## Gaps and planned tests

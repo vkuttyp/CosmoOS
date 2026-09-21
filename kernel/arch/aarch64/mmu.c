@@ -562,3 +562,29 @@ void arch_mmu_sync_icache_user(vaddr_t va, size_t len)
     __asm__ volatile("dsb ish\n\tisb" ::: "memory");
     arch_user_access_end();
 }
+
+void arch_mmu_sync_icache_kernel(vaddr_t va, size_t len)
+{
+    /* The address is the frame's direct-map alias, and the process that
+     * executes the page is not this context's to walk: its alias is
+     * another VA in another space. The data cache is cleaned by this
+     * alias -- `dc cvau` reaches the point of unification from any alias
+     * of a physically indexed data cache -- but `ic ivau` by one VA is
+     * NOT guaranteed to reach a VIPT instruction cache's entries for
+     * another alias of the same frame (review caught a first version
+     * that invalidated by the kernel alias alone). So the whole
+     * instruction cache is invalidated, inner-shareable (`ic ialluis`),
+     * which is alias-free by definition. The event -- a write() into a
+     * page some mapping executes from -- is rare enough that the cost is
+     * irrelevant (docs/kernel/memory/invariants.md M41: TCG cannot show
+     * the difference, the argument stands). */
+    uint64_t ctr = READ_SYSREG(ctr_el0);
+    size_t dline = 4u << ((ctr >> 16) & 0xf);
+    vaddr_t end = va + len;
+
+    for (vaddr_t p = va & ~(vaddr_t)(dline - 1); p < end; p += dline)
+        __asm__ volatile("dc cvau, %0" ::"r"(p) : "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    __asm__ volatile("ic ialluis" ::: "memory");
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+}

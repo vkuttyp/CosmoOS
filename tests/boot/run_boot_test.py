@@ -70,7 +70,7 @@ def load_sensitive_tests(path):
 # Named here so a row that silently disappears is a failure rather than
 # a shorter list nobody reads; the suite's own total line carries the
 # count, which is what catches a truncated stream.
-USERTEST_SECTIONS = ["fs", "fsctl", "net", "proc", "fpu", "trap",
+USERTEST_SECTIONS = ["fs", "mmap", "fsctl", "net", "proc", "fpu", "trap",
                      "priv", "proc-fs", "svc", "syscalls"]
 SECTION_RE = re.compile(r"^USERTEST: section (\S+) (\d+) ms$")
 SECTION_TOTAL_RE = re.compile(r"^USERTEST: sections (\d+), total (\d+) ms$")

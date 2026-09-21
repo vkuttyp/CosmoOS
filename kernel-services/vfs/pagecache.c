@@ -3,6 +3,9 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
+#include <kernel/lockdep.h>
+#include <kernel/panic.h>
 #include <kernel/kmalloc.h>
 #include <kernel/list.h>
 #include <kernel/object.h>
@@ -12,6 +15,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
+#include <kernel/vmm.h>
 
 static struct pagecache_stats g_stats;
 static spinlock_t g_stats_lock = SPINLOCK_INIT("pagecache-stats");
@@ -113,16 +117,29 @@ unsigned pagecache_reclaim(unsigned max)
             continue;
         }
         /* The entry may have been dirtied, freed or reused since. */
-        bool valid = false;
+        bool valid = false, pinned = false;
         s = spin_lock_irqsave(&g_lru_lock);
         struct pc_entry *cur;
         list_for_each_entry(cur, &g_lru, lru) {
             if (cur == e) {
                 valid = e->vn == vn && !e->dirty;
+                /* A mapping holds the frame (a reference per PTE, taken
+                 * under the mutex this holds): left alone, and moved to
+                 * the head so the next candidate differs. */
+                if (valid && __atomic_load_n(&e->page->refcount, __ATOMIC_ACQUIRE) != 1) {
+                    valid = false;
+                    pinned = true;
+                    list_remove(&e->lru);
+                    list_push_front(&g_lru, &e->lru);
+                }
                 break;
             }
         }
         spin_unlock_irqrestore(&g_lru_lock, s);
+        if (pinned) {
+            stat_add(&g_stats.pinned_skips, 1);
+            skipped++;
+        }
         if (valid) {
             remove_entry(&vn->pc, e);
             stat_add(&g_stats.reclaimed, 1);
@@ -156,6 +173,8 @@ void pagecache_init(struct pagecache *pc)
 {
     memset(pc, 0, sizeof(*pc));
     mutex_init(&pc->lock, "pagecache");
+    list_init(&pc->mappings);
+    pc->trim_bound = UINT64_MAX;
 }
 
 static struct pc_entry *find(struct pagecache *pc, uint64_t index)
@@ -211,9 +230,14 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
         return NULL;
     }
     e->index = index;
-    if (index * PAGE_SIZE < vn->size && vn->ops->readpage) {
-        int rc = vn->ops->readpage(vn, index, page_to_virt(e->page));
+    e->page->flags |= PG_PAGECACHE;   /* the frame is the cache's: a mapping references, never owns, it */
+    /* The injected failure stands in for readpage on ANY miss, a hole
+     * on ramfs included, so the SIGBUS proof does not need a disk. */
+    bool injected = faultinject_should_fail(FI_FILE_READPAGE);
+    if (injected || (index * PAGE_SIZE < vn->size && vn->ops->readpage)) {
+        int rc = injected ? -EIO : vn->ops->readpage(vn, index, page_to_virt(e->page));
         if (rc) {
+            e->page->flags &= ~PG_PAGECACHE;
             pmm_free_page(e->page);
             kfree(e);
             __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
@@ -244,8 +268,33 @@ static void remove_entry(struct pagecache *pc, struct pc_entry *e)
     pc->nr_pages--;
     __atomic_fetch_sub(&e->vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
     stat_add(&g_stats.pages, -1);
+    /* The cache's reference is the last: truncate unmapped first, reclaim
+     * skipped a mapped frame, and a released vnode has no mappings.
+     * pmm_free_page panics on any other count, which is the check. */
+    e->page->flags &= ~PG_PAGECACHE;
     pmm_free_page(e->page);
     kfree(e);
+}
+
+/*
+ * Bytes written through the kernel into a page some process executes
+ * from (a shared PROT_EXEC mapping of the file): the instruction stream
+ * must be synchronised (M41), and the writer need not be that process,
+ * so it is done by the frame's kernel alias. Under pc->lock; the
+ * mapping list cannot change under it. A write through another mapping's
+ * PTE never comes here and is the writer's own business, as on any
+ * system with shared mappings.
+ */
+static void sync_exec_mappings(struct pagecache *pc, struct pc_entry *e)
+{
+    struct vm_file_map *m;
+    list_for_each_entry(m, &pc->mappings, link) {
+        if (vm_file_map_exec_at(m, e->index)) {
+            arch_mmu_sync_icache_kernel((vaddr_t)page_to_virt(e->page), PAGE_SIZE);
+            stat_add(&g_stats.exec_syncs, 1);
+            return;
+        }
+    }
 }
 
 /* A write dirties the page: off the LRU until pagecache_sync cleans it. */
@@ -310,9 +359,13 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
             break;
         memcpy((uint8_t *)page_to_virt(e->page) + in_page, in + done, n);
         mark_dirty(&vn->pc, e);
+        if (!list_empty(&vn->pc.mappings))
+            sync_exec_mappings(&vn->pc, e);
         done += n;
-        if (off + done > vn->size)
+        if (off + done > vn->size) {
             vn->size = off + done;
+            vn->pc.trim_bound = UINT64_MAX;   /* the file grew: the size governs again */
+        }
     }
     mutex_unlock(&vn->pc.lock);
     return done ? (int64_t)done : err;
@@ -356,6 +409,16 @@ int pagecache_sync(struct vnode *vn)
                     n++;
                 }
             }
+
+            /* Before the bytes are read for the disk, every writable PTE
+             * of these pages is lowered (and shot down), so a write that
+             * lands after this faults, waits for this mutex, and dirties
+             * the page again; one that landed before is in what is
+             * written. The other order -- write, then lower -- would
+             * mark clean a page written between the two. */
+            struct vm_file_map *m;
+            list_for_each_entry(m, &pc->mappings, link)
+                vm_file_map_writeprotect(m, e->index, n);
 
             unsigned done = 0;
             if (n > 1 && vn->ops->writepages) {
@@ -416,6 +479,13 @@ void pagecache_truncate(struct vnode *vn, uint64_t size)
     struct pagecache *pc = &vn->pc;
     uint64_t keep = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     mutex_lock(&pc->lock);
+    /* The bound first, then the mappings, then the frames: a fault that
+     * takes this mutex next sees the new end, and no PTE names a frame
+     * the loop below frees. */
+    pc->trim_bound = size;
+    struct vm_file_map *m;
+    list_for_each_entry(m, &pc->mappings, link)
+        vm_file_map_truncate(m, keep);
     for (unsigned b = 0; b < PC_HASH; b++) {
         struct pc_entry *e = pc->buckets[b];
         while (e) {
@@ -438,6 +508,10 @@ unsigned pagecache_drop(struct vnode *vn, bool count_lost)
     struct pagecache *pc = &vn->pc;
     unsigned lost = 0;
     mutex_lock(&pc->lock);
+    /* A mapping holds a reference to the vnode, so a vnode being dropped
+     * has none; a forced unmount reaches here only through the same
+     * release. The frames below are therefore at reference 1. */
+    KASSERT(list_empty(&pc->mappings));
     for (unsigned b = 0; b < PC_HASH; b++) {
         struct pc_entry *e = pc->buckets[b];
         pc->buckets[b] = NULL;
@@ -452,6 +526,7 @@ unsigned pagecache_drop(struct vnode *vn, bool count_lost)
             pc->nr_pages--;
             __atomic_fetch_sub(&vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
             stat_add(&g_stats.pages, -1);
+            e->page->flags &= ~PG_PAGECACHE;
             pmm_free_page(e->page);
             kfree(e);
             e = next;
@@ -461,6 +536,40 @@ unsigned pagecache_drop(struct vnode *vn, bool count_lost)
         stat_add(&g_stats.dropped_dirty, (int64_t)lost);
     mutex_unlock(&pc->lock);
     return count_lost ? lost : 0;
+}
+
+void pagecache_lock(struct vnode *vn)
+{
+    reclaim_if_needed();
+    mutex_lock(&vn->pc.lock);
+}
+
+void pagecache_unlock(struct vnode *vn)
+{
+    mutex_unlock(&vn->pc.lock);
+}
+
+int pagecache_fault_page(struct vnode *vn, uint64_t index, bool dirty, struct page **out)
+{
+    struct pagecache *pc = &vn->pc;
+    lockdep_assert_held(&pc->lock, LOCKDEP_KIND_MUTEX);
+    /* The end of the file as a mapping sees it: the size, and the trim
+     * bound for the window between a trim and the size drop that follows
+     * it. Past it get() would make a zero page, which is right for a
+     * write() and wrong for a mapping (POSIX: SIGBUS). */
+    uint64_t size = __atomic_load_n(&vn->size, __ATOMIC_RELAXED);
+    uint64_t end = size < pc->trim_bound ? size : pc->trim_bound;
+    if (index >= (end + PAGE_SIZE - 1) / PAGE_SIZE)
+        return -EFBIG;
+    int err = 0;
+    struct pc_entry *e = get(vn, index, &err);
+    if (e == NULL)
+        return err;
+    if (dirty)
+        mark_dirty(pc, e);
+    pmm_page_get(e->page);   /* the mapping's reference, taken under the mutex reclaim decides under */
+    *out = e->page;
+    return 0;
 }
 
 int pagecache_get_page(struct vnode *vn, uint64_t index, void *buf)
@@ -484,6 +593,8 @@ int pagecache_put_page(struct vnode *vn, uint64_t index, const void *buf)
     if (e) {
         memcpy(page_to_virt(e->page), buf, PAGE_SIZE);
         mark_dirty(&vn->pc, e);
+        if (!list_empty(&vn->pc.mappings))
+            sync_exec_mappings(&vn->pc, e);
     }
     mutex_unlock(&vn->pc.lock);
     return e ? 0 : err;

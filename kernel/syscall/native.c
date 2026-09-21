@@ -342,30 +342,88 @@ static int64_t sys_clock_ns(struct syscall_args *a)
     }
 }
 
+static struct file *file_of(int h, unsigned rights);
+
+/*
+ * The file half of a mapping request, the same at both doors
+ * (compat/linux/syscalls.c makes the same checks with Linux's names): a
+ * regular file (else -ENODEV) reachable through a handle with the READ
+ * right (else -EBADF); a SHARED mapping with PROT_WRITE needs the file
+ * opened for writing and the handle's WRITE right (else -EACCES). On
+ * success *fp holds a referenced file and *maxprot the ceiling a later
+ * mprotect may reach: a shared mapping of a file opened read-only can
+ * never be made writable, everything else is bounded by W^X alone.
+ */
+static int mmap_file_check(int fd, bool shared, bool write, struct file **fp, vm_prot_t *maxprot)
+{
+    /* ONE lookup, carrying the handle's rights: a second lookup of the
+     * same number could resolve to a different file if another thread
+     * closed and reopened it in between, and "writable" would then be
+     * decided by a file other than the one mapped (review found the
+     * first version doing exactly that). */
+    unsigned rights = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, fd, &rights);
+    if (obj == NULL)
+        return -EBADF;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL || !(rights & HANDLE_RIGHT_READ)) {
+        kobject_put(obj);
+        return -EBADF;
+    }
+    if (f->vn->type != VNODE_REG) {
+        file_put(f);
+        return -ENODEV;
+    }
+    /* The handle's rights bound the file's mode: a handle duplicated
+     * without WRITE cannot map for writing what the file allows. */
+    bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE);
+    if (shared && write && !writable) {
+        file_put(f);
+        return -EACCES;
+    }
+    *maxprot = VM_PROT_READ | VM_PROT_EXEC | ((!shared || writable) ? VM_PROT_WRITE : 0);
+    *fp = f;
+    return 0;
+}
+
 static int64_t sys_mmap(struct syscall_args *a)
 {
     uint64_t hint = a->a[0];
     size_t len = (size_t)a->a[1];
     int prot = (int)a->a[2];
     int flags = (int)a->a[3];
+    int fd = (int)a->a[4];
+    uint64_t off = a->a[5];
     struct process *p = process_current();
 
     /* A flag bit this kernel does not define is refused, so a program can
      * learn what the kernel it runs on supports and a future flag is
      * never silently dropped (the rule for every native flags word). */
-    if (flags & ~(COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE))
+    if (flags & ~(COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE | COSMO_MAP_SHARED |
+                  COSMO_MAP_PRIVATE))
         return -EINVAL;
     /* NOREPLACE qualifies FIXED; on its own it has no address to keep. */
     if ((flags & COSMO_MAP_FIXED_NOREPLACE) && !(flags & COSMO_MAP_FIXED))
         return -EINVAL;
     if (len == 0 || !is_page_aligned(len) || len > (size_t)(USER_HI - USER_LO))
         return -EINVAL;
-    if (!(flags & COSMO_MAP_ANONYMOUS))
-        return -EINVAL; /* file mappings arrive with the VFS */
+    bool anon = (flags & COSMO_MAP_ANONYMOUS) != 0;
+    bool shared = (flags & COSMO_MAP_SHARED) != 0;
+    /*
+     * A file mapping names exactly one of SHARED and PRIVATE. Anonymous
+     * memory may say PRIVATE (it is) and may not say SHARED: without a
+     * fork there is nobody to share it with, and a program that asked
+     * for cross-process anonymous sharing must not be told yes
+     * (docs/audit/next-subsystem-file-regions.md, "The two doors").
+     */
+    if (anon ? shared : (shared == ((flags & COSMO_MAP_PRIVATE) != 0)))
+        return -EINVAL;
     if (prot & ~(COSMO_PROT_READ | COSMO_PROT_WRITE | COSMO_PROT_EXEC))
         return -EINVAL;
     if ((prot & COSMO_PROT_WRITE) && (prot & COSMO_PROT_EXEC))
         return -EINVAL; /* W^X */
+    if (!anon && (!is_page_aligned(off) || off + len < off))
+        return -EINVAL;
 
     vm_prot_t vprot = 0;
     if (prot & COSMO_PROT_READ)
@@ -376,10 +434,21 @@ static int64_t sys_mmap(struct syscall_args *a)
         vprot |= VM_PROT_EXEC;
     /* PROT_NONE reserves the range: every access faults (design.md §6.2). */
 
+    struct file *f = NULL;
+    vm_prot_t maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
+    if (!anon) {
+        int frc = mmap_file_check(fd, shared, (vprot & VM_PROT_WRITE) != 0, &f, &maxprot);
+        if (frc)
+            return frc;
+    }
+
+    int rc;
     uint64_t base;
     if (flags & COSMO_MAP_FIXED) {
-        if (!is_page_aligned(hint) || !user_range_ok(hint, len))
-            return -EINVAL;
+        if (!is_page_aligned(hint) || !user_range_ok(hint, len)) {
+            rc = -EINVAL;
+            goto out;
+        }
         base = hint;
         /*
          * POSIX: a fixed mapping takes the range whatever is there.
@@ -388,25 +457,55 @@ static int64_t sys_mmap(struct syscall_args *a)
          * window another thread's mmap(NULL, ...) can be handed -- which
          * is exactly what cosmo_thread_start used to lose
          * (docs/audit/next-subsystem-map-fixed.md). NOREPLACE keeps the
-         * old refusal.
+         * old refusal. A file mapping goes through the same replacement,
+         * so M40 holds for it too.
          */
         if (!(flags & COSMO_MAP_FIXED_NOREPLACE)) {
-            int frc = vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
-            return frc ? frc : (int64_t)base;
+            rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot,
+                                      VM_MAP_REPLACE | (shared ? VM_MAP_SHARED : 0), f->vn, off, "mmap-file")
+                   : vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
+            goto out;
         }
     } else {
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
         base = vm_user_find_free(p->space, from, len);
         if (base == 0 && from != USER_MMAP_BASE)
             base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
-        if (base == 0)
-            return -ENOMEM;
+        if (base == 0) {
+            rc = -ENOMEM;
+            goto out;
+        }
     }
 
-    int rc = vm_user_map_anon(p->space, base, len, vprot, 0, "mmap");
-    if (rc)
-        return rc;
-    return (int64_t)base;
+    rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, shared ? VM_MAP_SHARED : 0, f->vn, off,
+                              "mmap-file")
+           : vm_user_map_anon(p->space, base, len, vprot, 0, "mmap");
+out:
+    if (f)
+        file_put(f);
+    return rc ? rc : (int64_t)base;
+}
+
+static int64_t sys_msync(struct syscall_args *a)
+{
+    uint64_t addr = a->a[0];
+    size_t len = (size_t)a->a[1];
+    int flags = (int)a->a[2];
+    if (flags & ~(COSMO_MS_ASYNC | COSMO_MS_INVALIDATE | COSMO_MS_SYNC))
+        return -EINVAL;   /* an undefined bit: the native rule */
+    if ((flags & COSMO_MS_ASYNC) && (flags & COSMO_MS_SYNC))
+        return -EINVAL;   /* POSIX: one or the other */
+    if (!is_page_aligned(addr) || len == 0 || !is_page_aligned(len) || !user_range_ok(addr, len))
+        return -EINVAL;
+    if (!(flags & COSMO_MS_SYNC)) {
+        /* ASYNC: the dirty pages are the cache's already and reach the
+         * filesystem by vfs_sync, the write-back thread or the last
+         * close, which is what "scheduled" means here. INVALIDATE:
+         * nothing is stale, the mapping IS the cache. Both still owe
+         * the range check. */
+        return vm_user_range_mapped(process_current()->space, addr, len, 0) ? 0 : -ENOMEM;
+    }
+    return vm_user_msync(process_current()->space, addr, len);
 }
 
 static int64_t sys_munmap(struct syscall_args *a)
@@ -1808,11 +1907,14 @@ static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
     "kernel.hostname",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
+    "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
+    "vm.file_fault_retries", "vm.file_sigbus",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
     "sysctl.names",
     "debug.faultinject",
     "debug.preempt_probe",
+    "debug.file_fault_hold",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -1847,6 +1949,40 @@ static int sysctl_value(const char *name, char *out, size_t n)
     }
     if (strcmp(name, "vm.cache_limit") == 0)
         return ksnprintf(out, n, "%llu", (unsigned long long)pagecache_limit());
+    if (strcmp(name, "vm.cache_writebacks") == 0 || strcmp(name, "vm.cache_exec_syncs") == 0) {
+        struct pagecache_stats st;
+        pagecache_get_stats(&st);
+        return ksnprintf(out, n, "%llu", (unsigned long long)(name[9] == 'w' ? st.writebacks : st.exec_syncs));
+    }
+    /* The file-mapping counters (docs/audit/next-subsystem-file-regions.md):
+     * what the mmap section of init --selftest reads to tell one
+     * mutation of the fault from another. */
+    if (strncmp(name, "vm.file_", 8) == 0) {
+        struct vm_stats st;
+        vm_get_stats(&st);
+        const char *k = name + 8;
+        uint64_t v;
+        if (strcmp(k, "faults") == 0)
+            v = st.file_faults;
+        else if (strcmp(k, "cow_faults") == 0)
+            v = st.file_cow_faults;
+        else if (strcmp(k, "dirty_faults") == 0)
+            v = st.file_dirty_faults;
+        else if (strcmp(k, "fault_retries") == 0)
+            v = st.file_fault_retries;
+        else if (strcmp(k, "sigbus") == 0)
+            v = st.file_sigbus;
+        else
+            return -ENOENT;
+        return ksnprintf(out, n, "%llu", (unsigned long long)v);
+    }
+    if (strcmp(name, "debug.file_fault_hold") == 0) {
+#if CONFIG_DEBUG
+        return ksnprintf(out, n, "%u", vm_test_file_hold_state());
+#else
+        return -ENOENT;
+#endif
+    }
     if (strcmp(name, "vm.pages_total") == 0 || strcmp(name, "vm.pages_free") == 0) {
         struct pmm_stats st;
         pmm_get_stats(&st);
@@ -1958,6 +2094,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_wait] = sys_wait,
     [SYS_kill] = sys_kill,
     [SYS_thread_kill] = sys_thread_kill,
+    [SYS_msync] = sys_msync,
     [SYS_pipe] = sys_pipe,
     [SYS_dup] = sys_dup,
     [SYS_getppid] = sys_getppid,

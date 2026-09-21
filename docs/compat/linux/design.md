@@ -91,9 +91,13 @@ well-formed heap) leaves the break unchanged.
 
 ### mmap family
 
-Flags translate: `MAP_ANONYMOUS` (0x20) required (`ENODEV` otherwise:
-file mappings are stage 2), `MAP_PRIVATE`/`MAP_SHARED` accepted (all
-mappings are private), `MAP_FIXED` (0x10) forces the address (and
+Flags translate: `MAP_ANONYMOUS` (0x20) or a file (since the file-regions
+unit: "Dynamic executables" below); the type in the low four bits must
+be `MAP_PRIVATE` (2), `MAP_SHARED` (1) or `MAP_SHARED_VALIDATE` (3,
+shared), anonymous or not, else `-EINVAL` as Linux says (an anonymous
+mapping is private either way, there being no `fork` to share it with;
+a file mapping is copy-on-write or the file's own pages, respectively),
+`MAP_FIXED` (0x10) forces the address (and
 unmaps what was there, as Linux does: `vm_user_unmap` then map),
 `MAP_NORESERVE`/`MAP_STACK`/`MAP_POPULATE` ignored. `PROT_*` bits equal
 the native ones; `PROT_NONE` reserves and traps. A hint that is not page
@@ -348,15 +352,24 @@ first free range at or above `USER_INTERP_BASE` (`0x7F0000000000`) and
 starts the process at the interpreter's entry with `AT_BASE` = its bias,
 `AT_ENTRY` = the program's entry, `AT_PHDR`/`AT_PHNUM` = the program's
 table, `AT_EXECFN` = the path and `AT_PLATFORM` = the machine string.
-`mmap` with a file (`MAP_PRIVATE`, or `MAP_SHARED` without `PROT_WRITE`,
-which is the same thing for a file nobody else writes) maps an anonymous
-region and fills it from the file (`file_pread` through a bounce buffer
-into the caller's own new mapping, bytes past the end zero), then
-applies the requested protection: a private file mapping is a snapshot,
-which is what a dynamic linker needs for text and data and what a
-`MAP_PRIVATE` mapping is allowed to be. `MAP_SHARED | PROT_WRITE` on a
-file is `-EOPNOTSUPP` (no page-cache-backed regions yet). Offsets must
-be page aligned (`-EINVAL`).
+`mmap` with a file maps a `VM_REGION_FILE` region over the file's page
+cache (the file-regions unit, `docs/kernel/memory/design.md` §7): the
+pages are demand-paged, `MAP_SHARED` maps the cache's own frames so a
+write through the mapping is a write to the file and is seen by
+`read()` and every other mapping, and `MAP_PRIVATE` is copy-on-write --
+a page written through the mapping becomes the mapping's own, and a
+page not yet written still shows a later `write()` to the file, which is
+what POSIX leaves unspecified and what the linker's binaries were built
+for. The eager copy this used to make (`fill_from_file`: `file_pread`
+through a bounce buffer into a fresh anonymous region) is gone, and with
+it the snapshot: the interpreter's text and data are demand-paged
+copy-on-write mappings of the same files. `MAP_SHARED | PROT_WRITE`
+needs the file opened for writing through a handle with the WRITE right
+(`-EACCES` otherwise); a mapping of anything but a regular file is
+`-ENODEV`; offsets must be page aligned (`-EINVAL`). A shared mapping of
+a file opened read-only cannot later be `mprotect`ed writable
+(`-EACCES`). Touching a page past the end of the file is `SIGBUS`.
+`msync` (26 / 227) is the native `vm_user_msync` with Linux's flags.
 
 ### `poll` and `ppoll`
 

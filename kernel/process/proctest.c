@@ -21,6 +21,7 @@
 #include <kernel/signal.h>
 #include <kernel/timer.h>
 #include <kernel/tty.h>
+#include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
 #include <uapi/cosmo/syscall.h>
@@ -779,6 +780,111 @@ bool selftest_process_oom(const char **reason)
 #else
     (void)reason;
     kinfo("selftest: process-oom: fault injection is compiled out of this build");
+    return true;
+#endif
+}
+
+/*
+ * The two held-fault proofs of the file-regions unit
+ * (docs/audit/next-subsystem-file-regions.md, "One seam, for two
+ * proofs"): a FILE fault held between its phases while another thread
+ * installs the same page (the retry path finds it present: one frame),
+ * and while the range is unmapped (the retry path installs nothing and
+ * the instruction's retry is SIGSEGV). The seam is event-driven: the
+ * held fault moves when the other event happens, never on a clock.
+ */
+bool selftest_vm_file_fault_hold(const char **reason)
+{
+#if CONFIG_DEBUG
+    static const char *const race_argv[] = { "init", "--probe", "mmap-race", NULL };
+    static const char *const unmap_argv[] = { "init", "--probe", "mmap-unmap-race", NULL };
+    struct vm_stats s0, s1;
+    int status;
+
+    vm_get_stats(&s0);
+    vm_test_file_hold_arm();
+    bool ok = run_module(race_argv, &status, reason);
+    if (!ok)
+        return false;
+    if (status == -1)
+        return true;
+    CHECK(status == 0);
+    CHECK(vm_test_file_hold_state() == 0);   /* held, then released by the other thread's install */
+    vm_get_stats(&s1);
+    CHECK(s1.file_fault_retries - s0.file_fault_retries == 1);
+
+    vm_get_stats(&s0);
+    vm_test_file_hold_arm();
+    ok = run_module(unmap_argv, &status, reason);
+    if (!ok)
+        return false;
+    CHECK(status == COSMO_EXIT_FAULT);      /* the retry met no region */
+    CHECK(vm_test_file_hold_state() == 0);
+    vm_get_stats(&s1);
+    CHECK(s1.file_fault_retries - s0.file_fault_retries == 1);
+
+    /* The range replaced by a mapping of another file while held: the
+     * re-find is by (vnode, index, sharing), so the first file's page is
+     * not installed under the second file's name. */
+    static const char *const remap_argv[] = { "init", "--probe", "mmap-remap-race", NULL };
+    vm_get_stats(&s0);
+    vm_test_file_hold_arm();
+    ok = run_module(remap_argv, &status, reason);
+    if (!ok)
+        return false;
+    CHECK(status == 0);
+    CHECK(vm_test_file_hold_state() == 0);
+    vm_get_stats(&s1);
+    CHECK(s1.file_fault_retries - s0.file_fault_retries == 1);
+    CHECK(vfs_unlink(NULL, "/tmp/mm-race") == 0 && vfs_unlink(NULL, "/tmp/mm-race2") == 0);
+    kinfo("selftest: vm-file-fault-hold: a held fault installs nothing over another's page, a gone range, or another file's");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: vm-file-fault-hold: the seam is compiled out of this build");
+    return true;
+#endif
+}
+
+/* A cache miss whose read fails under a mapping: SIGBUS on the touch,
+ * nothing installed, the counter says so. */
+bool selftest_vm_file_readpage_fail(const char **reason)
+{
+#if CONFIG_FAULTINJECT
+    static const char *const argv[] = { "init", "--probe", "mmap-readfail", NULL };
+    struct vm_stats s0, s1;
+    struct fi_stats st;
+    int status;
+
+    /* The file is made here, not by the child: its first two pages are a
+     * hole (written past), so the child's touch of page 0 is the first
+     * miss after the rule is armed -- a child making the file would spend
+     * the injected failure on its own write. */
+    struct file *f;
+    CHECK(vfs_open(NULL, "/tmp/mm-readfail", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    CHECK(file_pwrite(f, "hole", 4, 2 * PAGE_SIZE) == 4);
+    file_put(f);
+
+    vm_get_stats(&s0);
+    faultinject_set(FI_FILE_READPAGE, 1, 1, NULL);   /* the next miss, in any file */
+    bool ok = run_module(argv, &status, reason);
+    faultinject_clear(FI_FILE_READPAGE);
+    CHECK(vfs_unlink(NULL, "/tmp/mm-readfail") == 0);
+    if (!ok)
+        return false;
+    if (status == -1)
+        return true;
+    faultinject_stats(FI_FILE_READPAGE, &st);
+    CHECK(st.hits == 1);
+    CHECK(status == 128 + SIGBUS);
+    vm_get_stats(&s1);
+    CHECK(s1.file_sigbus - s0.file_sigbus == 1);
+    CHECK(s1.file_faults == s0.file_faults);   /* nothing installed */
+    kinfo("selftest: vm-file-readpage-fail: a read that fails under a mapping is SIGBUS");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: vm-file-readpage-fail: fault injection is compiled out of this build");
     return true;
 #endif
 }

@@ -34,7 +34,7 @@ kernel stack.
 | 4 | `yield` | none | 0 | none |
 | 5 | `sleep_ns` | `uint64_t ns` | 0 after at least `ns` | `EINVAL` (> 1 hour) |
 | 6 | `clock_ns` | `unsigned clock` (`COSMO_CLOCK_MONOTONIC` 0, `COSMO_CLOCK_REALTIME` 1; milestone 10) | monotonic nanoseconds since boot, or nanoseconds since 1970 from the RTC-seeded wall clock | `EINVAL` |
-| 7 | `mmap` | `void *hint, size_t len, int prot, int flags` | address | `EINVAL`, `ENOMEM`, `EEXIST` |
+| 7 | `mmap` | `void *hint, size_t len, int prot, int flags, int fd, uint64_t off` | address | `EINVAL`, `ENOMEM`, `EEXIST`; a file mapping (since the file-regions unit): `EBADF`, `ENODEV`, `EACCES` -- the **mmap** bullet below |
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
 | 10 | `close` | `int h` | 0; the handle is closed even when an error is returned | `EBADF`; a file's pending write-back error (`EIO`, once per open file: `docs/kernel-services/vfs/design.md`, "Write-back errors") |
@@ -103,6 +103,7 @@ kernel stack.
 | 93 | `mprotect` | `void *addr, size_t len, int prot` | 0 | `EINVAL` (unaligned, zero or non-page-multiple `len`, an undefined `prot` bit, `W|X`), `ENOMEM` (a page of the range is unmapped: nothing changes), `EBUSY` (a `MAP_FIXED` replacement holds part of the range) |
 | 94 | `futex_requeue` | `uint32_t *w1, uint32_t *w2, unsigned nr_wake, unsigned nr_requeue, uint32_t val` | woken + requeued | `EAGAIN` (`*w1 != val`: nobody moved), `EINVAL` (a word not 4-aligned), `EFAULT` (a word outside the user window; `w2` is never read) |
 | 95 | `thread_kill` | `cosmo_tid_t tid, int sig` | 0 | `ESRCH` (not a live thread of the calling process — another process's thread is never reachable here), `EINVAL` (`sig` outside 0..`COSMO_NSIG`-1); `sig` 0 probes |
+| 96 | `msync` | `void *addr, size_t len, int flags` | 0 | `EINVAL` (unaligned, zero or non-page-multiple `len`, an undefined flag bit, `COSMO_MS_SYNC` with `COSMO_MS_ASYNC`), `ENOMEM` (a page of the range is unmapped: nothing is written); the **msync** bullet below |
 | 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
 Calls 89–91 are the symbolic-link calls, specified with the rest of the
@@ -123,7 +124,7 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 96: 89–91 are the symbolic-link calls, **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 83–88 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 97: 89–91 are the symbolic-link calls, **96 is `SYS_msync`** (the file-regions unit, with `mmap` gaining `fd` and `off`, `COSMO_MAP_SHARED` and `COSMO_MAP_PRIVATE`: row 96 and the **mmap** and **msync** bullets below; `docs/audit/next-subsystem-file-regions.md`), **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 83–88 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every
@@ -164,9 +165,26 @@ Details per call:
   kernel it runs on supports and a future flag cannot be silently
   ignored. The Linux personality keeps Linux's rule for its own flag
   words, which is to ignore what it does not know.
-- **mmap**: `len` must be a non-zero page multiple; `flags` must
-  include `COSMO_MAP_ANONYMOUS` (file mappings arrive with the VFS);
-  any other bit is `EINVAL`;
+- **mmap**: `len` must be a non-zero page multiple; `flags` is
+  `COSMO_MAP_ANONYMOUS` for anonymous memory (with `COSMO_MAP_PRIVATE`
+  allowed, being what it is, and `COSMO_MAP_SHARED` refused: there is no
+  `fork`, so nobody to share it with, and a program asking must not be
+  told yes) or, since the file-regions unit, a file mapping naming
+  exactly one of `COSMO_MAP_SHARED` and `COSMO_MAP_PRIVATE`, with `fd`
+  and `off` (page aligned) as the fifth and sixth arguments: a
+  `VM_REGION_FILE` region over the file's page cache
+  (`docs/kernel/memory/design.md` §7), demand-paged, `SHARED` the file's
+  own pages -- a write through the mapping is in the file at once and a
+  `write()` is in the mapping at once -- and `PRIVATE` copy-on-write.
+  The fd needs the READ right (`EBADF`) and a regular file (`ENODEV`);
+  `SHARED` with `PROT_WRITE` needs the file opened for writing through a
+  handle with the WRITE right (`EACCES`) -- one lookup carries the file
+  and its rights (`handle_get`), because a second lookup of the number
+  could resolve to another file if a thread closed and reopened it in
+  between -- and such a mapping of a
+  read-only fd cannot later be `mprotect`ed writable (`EACCES`, the
+  mapping's `maxprot`). A touch past the end of the file, or a page the
+  file cannot read, is `SIGBUS`. Any undefined bit is `EINVAL`;
   `prot` is any subset of READ/WRITE/EXEC except WRITE+EXEC (W^X);
   `PROT_NONE` reserves the range: every access, from user code or from
   a system call given a pointer into it, faults (`-EFAULT` for the
@@ -175,7 +193,19 @@ Details per call:
   falling back to `0x0000100000000000`; the result keeps one unmapped
   page between regions. With `COSMO_MAP_FIXED`, `hint` must be page
   aligned and inside the window, and an overlap is `EEXIST` (no silent
-  replacement). Pages are demand-zero.
+  replacement). Pages are demand-zero. A file mapping with
+  `COSMO_MAP_FIXED` goes through the same replacement (M40 holds for it).
+- **msync**: a page-aligned range inside the window whose every page is
+  mapped (`ENOMEM` otherwise, checked before anything is written).
+  `COSMO_MS_SYNC` writes back the dirty pages of every file mapped in
+  the range and waits -- the whole file's dirty pages for each file met,
+  which is more than asked and never less -- returning the first
+  write-back error; `COSMO_MS_ASYNC` returns 0 at once, because the
+  dirty pages are already the cache's to write; `COSMO_MS_INVALIDATE` is
+  honoured by definition, the mapping being the cache. `SYNC` with
+  `ASYNC`, or an undefined bit, is `EINVAL`; an anonymous range is
+  skipped. The open file's once-only write-back report (`fsync`, `close`)
+  is untouched by an `msync`.
 - **munmap**: any page-aligned range inside the window whose every page
   is mapped (by `mmap`, the stack or an ELF segment: regions split as
   needed); a range with an unmapped page is `EINVAL` and nothing
@@ -326,7 +356,13 @@ Details per call:
   `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
-  `docs/kernel/security/design.md` §3), since Phase 12
+  `docs/kernel/security/design.md` §3), since the file-regions unit
+  `vm.cache_writebacks` (the cache's write-back count), `vm.cache_exec_syncs` (writes into a page some mapping executes, synced by the kernel alias) and the FILE
+  fault's counters `vm.file_faults`, `vm.file_cow_faults`,
+  `vm.file_dirty_faults`, `vm.file_fault_retries`, `vm.file_sigbus`
+  (`docs/kernel/memory/design.md` §7) and, debug builds, the state of
+  the held-fault seam `debug.file_fault_hold` (0 idle, 1 armed, 2
+  held; `-ENOENT` in release builds), since Phase 12
   `hv.backend`, `hv.vms`, `hv.vcpus`, `hv.exits`
   (`docs/kernel-services/virtualization/api.md`), `net.steer` (1 when
   received packets are steered to per-CPU queues, 0 when every packet

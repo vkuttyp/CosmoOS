@@ -406,7 +406,7 @@ Not tested yet:
   `QEMU_MEM` exceeds 4 GiB (`make test QEMU_MEM=5G` runs it manually).
 - **1 GiB pages.** QEMU's `qemu64` CPU lacks `pdpe1gb`, so the 1 GiB leaf
   path in `mmu.c` is compiled but not executed in CI.
-- **`arch_mmu_protect`.** Not called by any current code path or test.
+- ~~**`arch_mmu_protect`.** Not called by any current code path or test.~~ Called by `vm_user_protect`, by the FILE fault (a shared page raised to writable) and by `vm_file_map_writeprotect` since the file-regions unit, and exercised by every `mprotect` and `msync` test.
 - **Fuzzing.** No fuzz driver for `arch_mmu_map`/`unmap` sequences or the
   region allocator.
 - **Power loss** does not apply; nothing here is persistent.
@@ -414,3 +414,66 @@ Not tested yet:
 Planned: a `QEMU_MEM=6G` CI job once the runners allow it, an OOM
 injection hook (`PMM_FLAGS_FAIL_INJECT` under `CONFIG_DEBUG`), a host
 test for `mmu.c` against a fake direct map, and SMP stress with Phase 3.
+
+## File-backed regions (the file-regions unit)
+
+`docs/audit/next-subsystem-file-regions.md`. The user-mode half is the
+`mmap` section of `init --selftest` (`docs/userland/testing.md`); the
+kernel half is three self-tests.
+
+### `SELFTEST: vm-file-fault-hold` (`selftest_vm_file_fault_hold`, `kernel/process/proctest.c`; debug builds)
+
+The two-phase fault's seam: armed with `vm_test_file_hold_arm`, the next
+FILE fault in any user space blocks after its first phase -- the space
+lock released, the vnode referenced, the cache mutex not yet taken --
+until another FILE fault in that space installs or part of that space is
+unmapped (event-driven, never timed; `debug.file_fault_hold` reads 0, 1
+or 2). Three children of `init --probe`: **mmap-race**, a second thread
+touches the same page and completes, the held fault finds it present
+and installs nothing (`file_fault_retries` +1, exit 0); **mmap-unmap-race**,
+the main thread unmaps the range, the held fault installs nothing and
+its retry is `SIGSEGV` (exit 139, `+1`); **mmap-remap-race**, the main
+thread replaces the range with a `MAP_FIXED` mapping of another file,
+the held fault's re-find sees a different vnode, installs nothing, and
+its retry reads the other file's byte (exit 0, `+1`) -- the case a fault
+that trusted its first phase would get wrong by installing the first
+file's page under the second's name. After each, the seam is back at 0.
+
+### `SELFTEST: vm-file-readpage-fail` (`selftest_vm_file_readpage_fail`, `proctest.c`; fault-injection builds)
+
+The test makes a file whose first two pages are a hole, arms
+`file-readpage` for the next miss in any file, and runs `init --probe
+mmap-readfail`, which maps the file and touches page 0: the miss's read
+"fails", the touch is `SIGBUS` (exit 135), `vm.file_sigbus` +1 and
+`vm.file_faults` unchanged. The file is made by the test and not the
+child because a child making it would spend the injected failure on its
+own write.
+
+### `SELFTEST: pagecache-pinned` (`selftest_pagecache_pinned`, `kernel-services/vfs/vfstest.c`)
+
+On cosmofs over a RAM device (ramfs pages are never reclaimed): 256
+pages written and synced, page 3 taken as a mapping would take it
+(`pagecache_fault_page`: `refcount` 2, `PG_PAGECACHE` set; index 256 is
+`-EFBIG`), the global limit lowered below what is cached and every page
+read: reclaim runs (`reclaimed` grows) and skips the held frame
+(`pinned_skips` grows, the frame still the cache's with its bytes). The
+reference put and the sweep repeated: it goes.
+
+### Mutations, as run
+
+Each applied alone on x86-64, the debug suite booted, the file restored:
+
+| mutation | what failed |
+| --- | --- |
+| `pagecache_sync` not lowering the PTEs | the `mmap` section's re-dirty check: the second write did not fault (`file_dirty_faults` short by one) and the third `MS_SYNC` wrote nothing |
+| the fault marking nothing dirty | the first `MS_SYNC` wrote nothing (`cache_writebacks` unchanged) while `file_dirty_faults` still counted the fault -- the counter is what tells this from the row above |
+| no reference taken at install | `pagecache-pinned` (`refcount == 2` false), then the poisoner: the section's first `munmap` freed the cache's frame under the cache and its own `0xA5` byte turned up in the poison dump (`pmm: use after free of pfn 58547`) |
+| `pagecache_truncate` freeing without unmapping | `KERNEL PANIC: pmm: freeing pfn 48151 with refcount 2` from `remove_entry` on the truncate child: the mapping's reference was still on the frame |
+| no bound (`vn->size` alone) | **nothing**, as the report declared in advance: the window is between a filesystem's trim and its size drop, and the seam is in the fault, not there |
+| phase three by kind alone (no vnode, index, sharing) | `vm-file-fault-hold`: the remap child read the first file's byte under the second file's name |
+| `maxprot` ignored | the `mmap` section's `mprotect(PROT_WRITE)` of a read-only fd's shared mapping succeeded; `lxtest` likewise |
+| `SHARED\|ANONYMOUS` accepted | the `mmap` section's probe check |
+| `vm_user_protect` giving a private region's cache frames the asked protection (self-review's finding) | the `mmap` section: no copy-on-write fault, the file's byte changed, and the shared mapping of the same page saw the private write |
+
+The same table, with the panic lines quoted, is in
+`docs/audit/next-subsystem-file-regions.md`, "Bug-proofs, as run".

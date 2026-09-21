@@ -240,6 +240,26 @@ is at or above `pagecache_limit()` (a quarter of RAM at boot;
 `docs/kernel/security/design.md` §3). The frame is addressed through the
 direct map. Memory: 48 bytes of entry per cached page plus the page.
 
+**Mapped into user space (the file-regions unit,
+`docs/kernel/memory/design.md` §7).** A cache frame carries
+`PG_PAGECACHE` and may be installed in user address spaces by a
+`VM_REGION_FILE` region; each installation takes one reference to it
+under `pc->lock` (`pagecache_fault_page`), so `refcount == 1 + the PTEs
+mapping it`, and the mapping puts the reference after its PTE is gone.
+The cache keeps `mappings`, the list of `struct vm_file_map` records
+(one per `mmap`, linked under `pc->lock`), and walks it in two places:
+`pagecache_truncate` unmaps every record's pages from the dropped index
+on *before* it frees them, and `pagecache_sync` lowers every present
+writable PTE of a run *before* it reads the run for the disk, so a
+write landing after that faults and dirties the page again. Reclaim
+leaves a frame whose count is not one alone (`pinned_skips`). The
+cache also keeps `trim_bound`: both filesystems trim the cache before
+they lower `vn->size`, and a fault installs only below
+`min(vn->size, trim_bound)` so that window cannot install a page past
+the new end; a `pagecache_write` that grows the file lifts it. The
+install itself happens under `pc->lock`, which is what serialises it
+against a truncate or a write-back on the same file (invariant V33).
+
 ### Symbolic links and the walk
 
 A fourth vnode type, `VNODE_LNK` (`COSMO_DT_LNK`, 6). The walk expands a
@@ -519,8 +539,13 @@ Described under "Locking" above. Filesystem callbacks run with the
 vnode locks the VFS took; cosmofs adds `cfs->lock` beneath them. Page
 cache writeback runs under `vnode->lock` and calls `writepage`, which
 takes `cfs->lock`: the order `vnode->lock → pagecache.lock → cfs->lock →
-blk` holds everywhere. `bio_complete` runs in interrupt context and only
-completes a `completion`.
+blk` holds everywhere. Since the file-regions unit `pagecache.lock →
+vm_space.lock` as well: a FILE fault installs its page under the cache
+mutex with the space's spinlock nested inside, and truncate and
+write-back take each mapping's space lock the same way, while the space
+lock is never held when the mutex is taken (a region's record is
+unlinked from the cache after the lock is released). `bio_complete`
+runs in interrupt context and only completes a `completion`.
 
 ## Memory
 
@@ -664,6 +689,7 @@ arithmetic. Init: every new system call on ramfs, then `mount("vda",
 - Data checksums: `csum_root` → a tree keyed by block number.
 - Multiple pool members and allocation groups behind `pool_*`.
 - Hard links, `chmod`/`chown`, the sticky bit, memory-pressure
-  eviction, a dentry cache, `mmap` of files (the page cache already owns
-  frames), a host `mkfs`. Symbolic links are built (this document,
-  "Symbolic links and the walk").
+  eviction of *mapped* pages, a dentry cache, a host `mkfs`. Symbolic
+  links are built (this document, "Symbolic links and the walk");
+  `mmap` of files is built, over the frames the cache already owned
+  (the file-regions unit, "Page cache" above).

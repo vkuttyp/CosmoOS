@@ -118,18 +118,22 @@ static struct vm_space *hook_current_space(void)
 }
 
 /* A user fault no region services: SIGSEGV on the faulting thread, with
- * the frame at hand (a handler runs on it, or the process ends). */
-static void hook_fatal(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame)
+ * the frame at hand (a handler runs on it, or the process ends). A file
+ * mapping's page the file cannot supply -- past its end, or a read that
+ * failed -- is SIGBUS (docs/audit/next-subsystem-file-regions.md). */
+static void hook_fatal(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame, int sig)
 {
     struct process *p = process_current();
     KASSERT(p != NULL);
-    kdebug("process: pid %u '%s' fault: %s %s at %p (%s)", p->pid, p->name,
+    kdebug("process: pid %u '%s' fault: %s %s at %p (%s)%s", p->pid, p->name,
            (fault_flags & VM_FAULT_USER) ? "user" : "kernel",
            (fault_flags & VM_FAULT_EXEC) ? "execute" : (fault_flags & VM_FAULT_WRITE) ? "write" : "read",
-           (void *)(uintptr_t)addr, (fault_flags & VM_FAULT_PRESENT) ? "protection" : "not present");
-    /* Linux's SEGV_MAPERR / SEGV_ACCERR distinction rides in `code`. */
-    struct signal_info info = { .sig = SIGSEGV, .source = SIGSRC_FAULT, .fault_addr = addr,
-                                .code = (fault_flags & VM_FAULT_PRESENT) ? 2u : 1u };
+           (void *)(uintptr_t)addr, (fault_flags & VM_FAULT_PRESENT) ? "protection" : "not present",
+           sig == SIGBUS ? ", a file page the file could not supply" : "");
+    /* Linux's SEGV_MAPERR / SEGV_ACCERR distinction rides in `code`;
+     * for SIGBUS it is BUS_ADRERR (2). */
+    struct signal_info info = { .sig = sig, .source = SIGSRC_FAULT, .fault_addr = addr,
+                                .code = sig == SIGBUS ? 2u : (fault_flags & VM_FAULT_PRESENT) ? 2u : 1u };
     signal_fault_info(&info, frame);
 }
 

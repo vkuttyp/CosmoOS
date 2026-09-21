@@ -25,6 +25,34 @@
 enum vm_region_kind {
     VM_REGION_PHYS,  /* fixed physical backing: image, direct map, MMIO */
     VM_REGION_ANON,  /* frames owned by the region; demand-zero unless populated */
+    VM_REGION_FILE,  /* a file's pages, from its page cache: shared, or copy-on-write (private) */
+};
+
+struct vnode;
+struct vm_space;
+
+/*
+ * What the vnode knows about one mmap of it (docs/audit/next-subsystem-file-regions.md,
+ * "A third kind of region"). Created by vm_user_map_file, linked on the
+ * vnode's pagecache.mappings under the cache mutex, and pointed at by
+ * every region cut from that mapping. It describes the range AS FIRST
+ * MAPPED: a piece since unmapped or reprotected is a sub-range whose
+ * PTEs are absent or different, which every walk over it tolerates.
+ * `regions` counts the regions pointing here (atomic; changed under the
+ * space lock by split and by every region free); the one that takes it
+ * to zero unlinks the record and drops the vnode reference, never under
+ * the space lock, because the cache mutex is taken to do it.
+ */
+struct vm_file_map {
+    struct vnode *vn;        /* referenced for the record's life */
+    struct vm_space *space;
+    vaddr_t base;            /* as first mapped */
+    size_t size;
+    uint64_t off;            /* file offset of `base` (page aligned) */
+    bool shared;             /* MAP_SHARED: the cache's frames, writes reach the file */
+    vm_prot_t maxprot;       /* the most vm_user_protect may grant */
+    unsigned regions;
+    struct list_node link;   /* pagecache.mappings */
 };
 
 /* Region flags. */
@@ -53,6 +81,7 @@ struct vm_region {
     enum vm_region_kind kind;
     unsigned flags;
     paddr_t phys;            /* PHYS: physical base */
+    struct vm_file_map *fmap; /* FILE: the mapping record; NULL otherwise */
     const char *name;        /* immortal string */
 };
 
@@ -74,7 +103,8 @@ struct vm_space {
     vaddr_t near_lo;         /* arena inside the top 2 GiB, above the image (modules) */
     vaddr_t near_hi;
     bool user;               /* a process address space (lower half) */
-    uint64_t anon_pages;     /* frames populated for this space's ANON regions */
+    uint64_t anon_pages;     /* frames populated for this space's ANON regions, and COW copies */
+    uint64_t file_pages;     /* page-cache frames installed in this space's FILE regions */
     /*
      * User spaces: the CPUs that may hold translations of this space.
      * A CPU joins on switch-in and leaves only when something flushes
@@ -103,9 +133,11 @@ extern struct vm_space kernel_space;
 struct arch_trap_frame;
 struct vm_user_hooks {
     struct vm_space *(*current_space)(void);              /* NULL for kernel threads */
-    /* A user fault no region services. Returns only when a signal handler
-     * frame was set up on `frame` (the trap then returns into the handler). */
-    void (*fatal)(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame);
+    /* A user fault no region services (`sig` SIGSEGV), or a FILE fault
+     * whose page the file cannot supply -- past the end, or a read that
+     * failed (`sig` SIGBUS). Returns only when a signal handler frame was
+     * set up on `frame` (the trap then returns into the handler). */
+    void (*fatal)(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame, int sig);
 };
 void vm_set_user_hooks(const struct vm_user_hooks *hooks);
 
@@ -154,10 +186,63 @@ int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned f
 int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot,
                              unsigned flags, const char *name);
 
+/*
+ * Map a file into [base, base+size): the pages of `vn` from offset `off`
+ * (page aligned), demand-paged from its page cache. VM_MAP_SHARED: the
+ * cache's own frames, so a write through the mapping is a write to the
+ * file and is seen by read() and by every other mapping; without it a
+ * private, copy-on-write mapping whose written pages are its own and
+ * never reach the file. VM_MAP_REPLACE: MAP_FIXED semantics, the range
+ * taken whatever is there, owned throughout (M40), instead of -EEXIST on
+ * an overlap. `maxprot` bounds what vm_user_protect may later grant
+ * (-EACCES past it): R|X for a shared mapping of a file opened
+ * read-only, RWX otherwise. `prot` must be within `maxprot` and not W+X.
+ * The caller has checked the file's rights and type (a regular file);
+ * this takes its own reference to the vnode for the mapping's life.
+ * Returns 0, -EEXIST, -EINVAL, -ENOMEM (also COSMO_RLIMIT_AS).
+ */
+#define VM_MAP_SHARED  (1u << 0)
+#define VM_MAP_REPLACE (1u << 1)
+int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
+                     unsigned flags, struct vnode *vn, uint64_t off, const char *name);
+
+/*
+ * msync: write back the dirty pages of every file mapped in
+ * [base, base+size). -ENOMEM if a page of the range is unmapped (checked
+ * before anything is written); an anonymous range in it is skipped.
+ * Two passes, because pagecache_sync sleeps under the cache mutex and
+ * the lock order is vnode -> pagecache -> vm_space: the wholly-mapped
+ * check under the space lock, then a cursor walk that finds the FILE
+ * region containing the cursor (or the first after it), takes a vnode
+ * reference under the space lock, releases it, and syncs under the vnode
+ * lock as file_sync does. Returns the first write-back error. MS_ASYNC
+ * and MS_INVALIDATE are the callers' business: the dirty pages are
+ * already the cache's to write, and the mapping IS the cache.
+ */
+int vm_user_msync(struct vm_space *space, uint64_t base, size_t size);
+
+/*
+ * The page cache's two ways of reaching every mapping of a file, called
+ * with the cache mutex held (docs/kernel-services/vfs/design.md, "Page
+ * cache"): unmap the pages of the record whose file index is at or past
+ * `keep` (truncate: before the cache frees them), and lower to read-only
+ * the present PTEs of `n` pages from file index `index` (write-back:
+ * the next write must fault to dirty the page again; shared records
+ * only, a private record never maps a cache frame writable).
+ */
+void vm_file_map_truncate(struct vm_file_map *m, uint64_t keep);
+void vm_file_map_writeprotect(struct vm_file_map *m, uint64_t index, unsigned n);
+/* Whether the record's region covering file page `index` is executable:
+ * a write() into such a page must synchronise the instruction stream
+ * (M41), which the cache does by the frame's kernel alias. */
+bool vm_file_map_exec_at(struct vm_file_map *m, uint64_t index);
+
 /* Change the protection of every page of [base, base+size), splitting
  * regions at the ends and merging equal neighbours afterwards. -EINVAL
- * for W+X or a bad range; -ENOMEM if a page of the range is unmapped
- * (nothing changes) or a split cannot be allocated; -EBUSY if a
+ * for W+X or a bad range; -EACCES if a FILE region in the range has a
+ * maxprot that does not cover `prot` (nothing changes); -ENOMEM if a
+ * page of the range is unmapped (nothing changes) or a split cannot be
+ * allocated; -EBUSY if a
  * MAP_FIXED replacement has claimed part of the range -- splitting a
  * VM_REGION_QUIESCED region would copy the claim into pieces the
  * owner does not know about (invariant M40). The -EBUSY arrived with
@@ -264,9 +349,29 @@ struct vm_stats {
     uint64_t anon_pages;       /* frames populated for ANON regions */
     uint64_t faults_handled;   /* demand-zero populations */
     uint64_t fixups;           /* kernel-mode faults resumed at an exception fixup */
+    /* FILE regions (docs/audit/next-subsystem-file-regions.md). Atomic:
+     * they are counted under many spaces' locks. */
+    uint64_t file_faults;         /* cache frames installed */
+    uint64_t file_cow_faults;     /* private copies made */
+    uint64_t file_dirty_faults;   /* a shared page's PTE raised to writable */
+    uint64_t file_fault_retries;  /* the re-find found the world changed, or the page already present */
+    uint64_t file_sigbus;         /* faults the file could not serve */
 };
 
 void vm_get_stats(struct vm_stats *out);
+
+/*
+ * Debug seam for the two held-fault proofs
+ * (docs/audit/next-subsystem-file-regions.md, "One seam, for two
+ * proofs"). Armed, the next FILE fault taken in any user space blocks
+ * after its first phase -- the space lock released, the vnode
+ * referenced, the cache mutex not yet taken -- until another FILE fault
+ * in that space installs, or any part of that space is unmapped.
+ * Event-driven, not timed. State: 0 idle, 1 armed, 2 held; readable as
+ * sysctl debug.file_fault_hold. CONFIG_DEBUG only.
+ */
+void vm_test_file_hold_arm(void);
+unsigned vm_test_file_hold_state(void);
 void vm_dump(struct vm_space *space);
 
 #endif /* KERNEL_VMM_H */

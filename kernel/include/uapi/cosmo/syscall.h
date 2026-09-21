@@ -24,7 +24,7 @@
 #define SYS_yield     4   /* () -> 0 */
 #define SYS_sleep_ns  5   /* (uint64_t ns) -> 0 */
 #define SYS_clock_ns  6   /* (unsigned clock) -> nanoseconds: COSMO_CLOCK_MONOTONIC (0, since boot) or COSMO_CLOCK_REALTIME (1, since 1970) */
-#define SYS_mmap      7   /* (void *hint, size_t len, int prot, int flags) -> addr */
+#define SYS_mmap      7   /* (void *hint, size_t len, int prot, int flags, int fd, uint64_t off) -> addr; fd and off for a file mapping */
 #define SYS_munmap    8   /* (void *addr, size_t len) -> 0 */
 #define SYS_log       9   /* (const char *s, size_t len) -> 0 */
 #define SYS_close     10  /* (int h) -> 0 */
@@ -152,7 +152,14 @@
 #define SYS_mprotect  93  /* (void *addr, size_t len, int prot) -> 0 */
 #define SYS_futex_requeue 94  /* (uint32_t *w1, uint32_t *w2, unsigned nr_wake, unsigned nr_requeue, uint32_t val) -> woken + requeued */
 #define SYS_thread_kill 95  /* (cosmo_tid_t tid, int sig) -> 0; a thread of the calling process only */
-#define SYS_COUNT     96
+/* Write back the dirty pages of every file mapped in [addr, addr+len)
+ * (COSMO_MS_SYNC), or return at once because the cache already knows them
+ * (COSMO_MS_ASYNC); COSMO_MS_INVALIDATE is honoured by definition, the
+ * mapping being the cache. SYNC and ASYNC together, or an undefined bit,
+ * is EINVAL; a range with an unmapped page is ENOMEM and nothing is
+ * written; an anonymous range in it is skipped. */
+#define SYS_msync     96  /* (void *addr, size_t len, int flags) -> 0 */
+#define SYS_COUNT     97
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -586,6 +593,27 @@ struct cosmo_dirent {
  * MAP_FIXED_NOREPLACE).
  */
 #define COSMO_MAP_FIXED_NOREPLACE (1 << 2)
+/*
+ * A file mapping (no COSMO_MAP_ANONYMOUS; fd and off are the fifth and
+ * sixth arguments, off page aligned) names exactly one of these:
+ * SHARED maps the file's own pages, so a write through the mapping is a
+ * write to the file and is seen by read() and every other mapping of it;
+ * PRIVATE is copy-on-write, its written pages its own and never the
+ * file's. SHARED with ANONYMOUS is refused (-EINVAL): there is no fork,
+ * so anonymous memory has nobody to be shared with, and a program asking
+ * must not be told yes. PRIVATE with ANONYMOUS is accepted, being what
+ * anonymous memory is. A shared mapping with PROT_WRITE needs the file
+ * opened for writing and the handle's WRITE right (-EACCES); a mapping of
+ * anything but a regular file is -ENODEV. Touching a page past the end
+ * of the file is SIGBUS.
+ */
+#define COSMO_MAP_SHARED  (1 << 3)
+#define COSMO_MAP_PRIVATE (1 << 4)
+
+/* msync flags. */
+#define COSMO_MS_ASYNC      1
+#define COSMO_MS_INVALIDATE 2
+#define COSMO_MS_SYNC       4
 
 /* Error numbers (subset, values as in kernel/errno.h). */
 #define COSMO_EPERM   1

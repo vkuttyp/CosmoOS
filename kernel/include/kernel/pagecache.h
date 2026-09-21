@@ -35,6 +35,22 @@ struct pagecache {
     unsigned nr_pages;
     unsigned nr_dirty;
     struct mutex lock;
+    /*
+     * The file's mappings (struct vm_file_map, kernel/vmm.h), under
+     * `lock`: what truncate walks to unmap before it frees, and what
+     * write-back walks to lower a written page's PTEs to read-only.
+     */
+    struct list_node mappings;
+    /*
+     * The bound a fault installs below, together with vn->size. Both
+     * filesystems trim the cache BEFORE they lower the size, so in that
+     * window a fault reading the size alone would install a page past
+     * the new end that nothing then unmaps. pagecache_truncate sets this
+     * to the new size; a pagecache_write that grows the file lifts it
+     * back to UINT64_MAX (docs/audit/next-subsystem-file-regions.md,
+     * "The bound the cache owns").
+     */
+    uint64_t trim_bound;
     /* The last write-back failure and its sequence, recorded by
      * pagecache_sync under `lock` where the failure is seen (the one lock
      * every write-back passes through); read by pagecache_error_since.
@@ -72,6 +88,23 @@ void pagecache_truncate(struct vnode *vn, uint64_t size);
  * without (an unlinked file's, with no reader left) they are not. */
 unsigned pagecache_drop(struct vnode *vn, bool lost);
 
+/*
+ * The cache half of a FILE fault (docs/audit/next-subsystem-file-regions.md,
+ * "The fault, in two phases"). pagecache_lock takes the cache mutex
+ * (after the reclaim every entry to a cache runs); pagecache_fault_page,
+ * under it, returns the frame for `index` with one reference taken for
+ * the caller's mapping (pmm_page_get), marking the entry dirty when
+ * `dirty` -- a shared write. -EFBIG for an index at or past
+ * min(vn->size, trim_bound): the caller ends the access with SIGBUS
+ * rather than inheriting the zero page get() would make. The caller
+ * installs the frame (or drops the reference) and then pagecache_unlock.
+ * The install happens under the mutex so a truncate or a write-back on
+ * the same file is serialised against it.
+ */
+void pagecache_lock(struct vnode *vn);
+void pagecache_unlock(struct vnode *vn);
+int pagecache_fault_page(struct vnode *vn, uint64_t index, bool dirty, struct page **out);
+
 /* Fill `buf` (4 KiB) with page `index` through the cache (used by
  * filesystems that keep directories in file data). */
 int pagecache_get_page(struct vnode *vn, uint64_t index, void *buf);
@@ -83,6 +116,8 @@ struct pagecache_stats {
     uint64_t budget_refusals;  /* misses refused by a mount's page budget (-ENOSPC) */
     uint64_t wb_errors;        /* write-back failures recorded (pagecache_sync) */
     uint64_t dropped_dirty;    /* dirty pages dropped at a vnode's release: data lost */
+    uint64_t pinned_skips;     /* reclaim candidates left alone because a mapping holds the frame */
+    uint64_t exec_syncs;       /* writes into a page some mapping executes: the I-cache synced by the kernel alias */
 };
 void pagecache_get_stats(struct pagecache_stats *out);
 

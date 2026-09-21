@@ -159,6 +159,8 @@ bool selftest_process_efault(const char **reason);    /* -EFAULT through the fix
 bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
 bool selftest_process_oom(const char **reason);       /* injected demand-page failures */
 bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED from user mode */
+bool selftest_vm_file_fault_hold(const char **reason);   /* a FILE fault held between its phases: a racing install, an unmap */
+bool selftest_vm_file_readpage_fail(const char **reason); /* an injected readpage failure under a mapping is SIGBUS */
 bool selftest_process_nproc(const char **reason);     /* NPROC admission under concurrent spawns */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
@@ -210,6 +212,7 @@ bool selftest_wb_error_lost(const char **reason);   /* three refusals: the page 
 bool selftest_read_bench(const char **reason);      /* prints: the object path at 1/4/64 KiB requests, ramfs and cosmofs */
 bool selftest_write_bench(const char **reason);     /* prints: the same for writes on ramfs */
 bool selftest_pagecache(const char **reason);
+bool selftest_pagecache_pinned(const char **reason);  /* a frame a mapping references is not reclaimed */
 bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */
 bool selftest_crc32c(const char **reason);

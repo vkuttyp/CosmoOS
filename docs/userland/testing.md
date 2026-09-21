@@ -31,6 +31,42 @@ an empty `argv` `EINVAL`), `waitpid` with no children (`ECHILD`),
 `ERANGE`, `getppid() == 0`, its own `procinfo` record, `klog_read`,
 `sysctl_get` (`kernel.name`, `hw.ncpu`, `sysctl.names`, `ENOENT`,
 truncation), `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`.
+Since the file-regions unit an `mmap` section (`mmap_selftest`): a
+`MAP_SHARED` mapping of a `/tmp` file is coherent with `read()` and
+`write()` in both directions with no `msync` between; a spawned child
+maps the same file shared and writes a byte the parent reads (**the
+first shared memory between two processes in this system**); a
+`MAP_PRIVATE` mapping's written page is a copy (`vm.file_cow_faults`
++1, the file and the shared mapping untouched) while its unwritten page
+still shows a later `write()`; the offset; `msync`'s rules (`SYNC|ASYNC`
+and an undefined bit `EINVAL`, an unmapped page `ENOMEM`, an unaligned
+address `EINVAL`, an anonymous range 0); the native rules a program can
+probe (neither or both of `SHARED`/`PRIVATE`, `SHARED|ANONYMOUS`, an
+unaligned offset, an undefined bit `EINVAL`; a bad fd `EBADF`; a
+directory `ENODEV`); a read-only fd (`MAP_SHARED|PROT_WRITE` `EACCES`,
+a private writable mapping fine, `mprotect(PROT_WRITE)` of its shared
+mapping `EACCES`, `PROT_NONE` and back allowed); a read/write handle
+duplicated with `COSMO_RIGHT_READ` alone (`cosmo_dup_rights`): the same
+two refusals, the rights and not only the mode deciding; four children judged by
+status -- `mmap-past-end` (a two-page mapping of a five-byte file: the
+second page is `SIGBUS`, 135, not zeros), `mmap-truncate` (three pages
+mapped and installed, the file reopened `O_TRUNC`, the touch is
+`SIGBUS`, not the old bytes), `mmap-as-limit` (`COSMO_RLIMIT_AS` lowered
+to a page: a file mapping is `ENOMEM`), `mmap-mem-limit` (a private page read, then
+`COSMO_RLIMIT_MEM` set to 0, then written: the copy is refused and the
+touch is fatal, 139 -- the check review found missing on the replace
+path), `mmap-cycle` (200 map/write/unmap cycles, shared and private;
+its exit runs the kernel's `file_pages == 0` check by construction); a
+`write()` into a page mapped `PROT_READ|PROT_EXEC` shared runs the
+kernel-alias instruction-cache sync (`vm.cache_exec_syncs` +1; a
+regression check, TCG cannot show coherence); on cosmofs (`vda` at `/mnt`), a write through a
+shared mapping dirties by one fault, `MS_SYNC` writes exactly that page
+(`vm.cache_writebacks` +1), a second `MS_SYNC` writes nothing, a second
+write faults again (the PTE was lowered) and the third `MS_SYNC` writes
+it again; the bench (`USERBENCH: mmap ...`: `read()` of a cached 2 MiB
+file, the first touch of every page through a shared mapping, and the
+dirtying write of every page); and at the end, the files gone,
+`vm.cache_pages` back at its start.
 
 ## `/etc/rc.test`
 

@@ -168,6 +168,17 @@ size_t arch_mmu_large_page_sizes(void);
  * instructions unless SCTLR_EL1.UCI is set, which it is not. */
 void arch_mmu_sync_icache_user(vaddr_t va, size_t len);
 
+/* The same maintenance for a KERNEL address -- a page cache frame's
+ * direct-map alias -- when bytes written through the kernel (a write()
+ * into a file) land in a page some process executes from. By the alias
+ * because the writer need not be that process, whose own alias is not
+ * this context's to walk; on AArch64 the data cache is cleaned by this
+ * VA (a physically-indexed cache reaches the point of unification from
+ * any alias) and then the WHOLE instruction cache is invalidated
+ * (`ic ialluis`), because invalidation by one VA need not reach a VIPT
+ * cache's entries for another alias; then isb. x86-64 nothing. */
+void arch_mmu_sync_icache_kernel(vaddr_t va, size_t len);
+
 /* Lowest kernel-half virtual address; below it is user space. */
 vaddr_t arch_mmu_kernel_base(void);
 /* The near arena: kernel virtual addresses modules are loaded at, chosen

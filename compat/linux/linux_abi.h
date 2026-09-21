@@ -82,6 +82,9 @@ struct lx_rlimit {
 #define LX_MAP_NORESERVE 0x4000
 #define LX_MAP_STACK 0x20000
 #define LX_MAP_POPULATE 0x8000
+#define LX_MS_ASYNC 1
+#define LX_MS_INVALIDATE 2
+#define LX_MS_SYNC 4
 
 /* --- arch_prctl --- */
 #define LX_ARCH_SET_GS 0x1001
