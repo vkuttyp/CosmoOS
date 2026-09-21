@@ -339,8 +339,12 @@ written through it.
 under the cache mutex and is entered under the vnode lock as `file_sync`
 enters it — so it is **two passes**. First, under `space->lock`: check
 the range is wholly mapped (`-ENOMEM` otherwise, before anything is
-written), and release. Then a cursor walk: under `space->lock`, find
-the first FILE region at or after the cursor within the range, take a
+written), and release. Then a cursor walk, the cursor starting at
+`addr`: under `space->lock`, find the FILE region that **contains** the
+cursor (`space_find(cursor)`, which is how an address in the middle of
+a region is resolved everywhere else) or, if the cursor is in an
+anonymous region or a gap, the first FILE region whose base lies after
+it and inside the range; take a
 vnode reference through its record (`vnode_get`, under the lock, so the
 vnode cannot go with a concurrent unmap), set the cursor to the region's
 end, release; `mutex_lock(&vn->lock)`, `pagecache_sync(vn)`,
