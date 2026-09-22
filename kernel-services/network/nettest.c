@@ -7555,6 +7555,14 @@ bool selftest_tap_ready(const char **reason)
     TCHECK(file_read(f, buf, sizeof(buf)) == 0);
     TCHECK(kobject_ready(&f->obj) == COSMO_IO_WRITABLE);
     TCHECK(kobject_set_nonblock(&f->obj, 0) == 1);
+    /* The mode is the open file's: a second open made non-blocking at open
+     * answers so while the first, blocking, does not, and reads 0 at once. */
+    struct file *f2 = NULL;
+    TCHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f2) == 0);
+    bool per_open = kobject_set_nonblock(&f2->obj, -1) == 1 && kobject_set_nonblock(&f->obj, -1) == 0 &&
+                    file_read(f2, buf, sizeof(buf)) == 0;
+    file_put(f2);
+    TCHECK(per_open);
     netif_put(nif);
     nif = NULL;
     file_put(f);
@@ -7582,6 +7590,12 @@ bool selftest_tap_ready(const char **reason)
         TCHECK(held != NULL);
         netif_put(held);
         process_kill(p, COSMO_SIGKILL);
+        /* Bounded: a read the kill cannot end (a mutation) fails here rather
+         * than hanging the boot in process_wait_exit. */
+        end = clock_now_ns() + 3000ull * 1000000ull;
+        while (!completion_done(&p->exited) && clock_now_ns() < end)
+            thread_sleep_ms(1);
+        TCHECK(completion_done(&p->exited));
         int status = process_wait_exit(p);
         TCHECK(status == 128 + COSMO_SIGKILL);
         process_put(p);
@@ -7596,16 +7610,24 @@ bool selftest_tap_ready(const char **reason)
     kinfo("selftest: tap-ready: the tap's file is readable exactly when a frame waits, a blocking read waits for one, "
           "io_poll wakes on a transmit, a killed reader returns -EINTR and releases the tap after");
 out:
-    if (th)
+    /* A reader thread still inside its read (a mutation that lost the wake)
+     * cannot be joined, and the file it reads through must outlive it: both
+     * are left, the file with them. A process a kill could not end is left
+     * too. */
+    if (th && __atomic_load_n(&rd.done, __ATOMIC_ACQUIRE))
         thread_join(th);
+    else if (th)
+        f = NULL;
     if (nif)
         netif_put(nif);
     if (f)
         file_put(f);
     if (p) {
         process_kill(p, COSMO_SIGKILL);
-        process_wait_exit(p);
-        process_put(p);
+        if (completion_done(&p->exited)) {
+            process_wait_exit(p);
+            process_put(p);
+        }
     }
     return ok;
 }
