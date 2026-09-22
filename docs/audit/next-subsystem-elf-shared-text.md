@@ -177,8 +177,8 @@ file some process is executing is refused with `-ETXTBSY`, as POSIX
 describes and as Linux does. Without it this unit makes a program's
 instructions mutable by anyone who can write its file.
 
-**And the count must not be a new counter**, because a counter beside a
-lifetime is a counter that goes stale. The tree already keeps what is
+**And it must not be a counter**, because a counter beside a lifetime
+goes stale. The tree already keeps what is
 needed: every file mapping is a `struct vm_file_map` holding a vnode
 reference, linked onto a per-vnode list under `pagecache_lock(vn)` and
 unlinked under the same lock before `vnode_put`
@@ -193,13 +193,13 @@ its three parts are:
   `vnode -> pagecache -> vm_space`, so a writer may take
   `pagecache_lock(vn)` to ask. Check and write are then atomic with
   respect to a mapping being created, which is the race a separate
-  counter would lose.
+  separate counter would lose.
 - **Release** happens where `m` is unlinked, under that lock and
   *before* `vnode_put` — which is already the order the teardown uses.
   It matters: a mapping that has been unlinked can no longer fault a
-  page in, so the count reaching zero there is the truth rather than an
-  optimistic guess, and a count that lagged the teardown would leave a
-  file permanently busy.
+  page in, so the list going empty there is the truth rather than an
+  optimistic guess, and a release that lagged the teardown would leave
+  a file permanently busy.
 
 Stated as an invariant for the implementation to carry: **a file is
 busy exactly while a text mapping of it is on its page-cache list**, and
@@ -233,7 +233,8 @@ in advance, so that a win there is not read as a win from sharing.
 | `kernel/process/elf.c` | `elf_load_into` takes a vnode; file-backed segments, the private zero tail, the copy path kept for a NULL vnode |
 | `kernel/include/kernel/elf.h` | the signature, and what a shared segment must satisfy |
 | `kernel/process/process.c`, `kernel/process/spawn.c` | pass the `exe` vnode the spawn path already holds |
-| `kernel-services/vfs/*` | the text-mapping count on the vnode and the `-ETXTBSY` check |
+| `kernel/memory/vmm.c` | mark a text mapping where `m` is linked, clear it where it is unlinked, both under `pagecache_lock(vn)` |
+| `kernel-services/vfs/*` | `vnode_text_busy`, and the `-ETXTBSY` check on the write path |
 | `kernel/process/proctest.c` | the tests below |
 | `docs/kernel/process/design.md`, `invariants.md` | how a program is loaded now, and the two rules that keep it safe |
 | `docs/kernel/memory/design.md` | the loader as a `VM_REGION_FILE` caller |
@@ -260,7 +261,7 @@ int elf_load_into(struct vm_space *space, const void *image,
                   const struct elf_info *info, struct vnode *vn);
 ```
 
-### New: the text-mapping count
+### New: asking whether a file is being executed
 
 ```c
 /* Whether any process is executing this file: true while a shared,
@@ -298,7 +299,7 @@ Nothing else is added. `struct vm_space`, `struct vnode` and
 | `elf-data-cow` | a write to the data segment in one process is not seen by the other, and does not reach the file | drop `VM_MAP_SHARED`'s absence — map the writable segment shared: the other process sees the write |
 | `elf-zero-tail` | the bytes between `filesz` and `memsz` read as zero in every process, including the partial last page | skip the tail zeroing: the test reads the file's next bytes |
 | `elf-text-ro` | `mprotect(PROT_WRITE)` on shared text fails (`maxprot`) | widen `maxprot`: it succeeds, and one process can then rewrite another's instructions |
-| `elf-txtbsy` | writing a running program's file fails with `-ETXTBSY`, and succeeds once it exits | remove the count: the write succeeds and the running process's text changes underneath it |
+| `elf-txtbsy` | writing a running program's file fails with `-ETXTBSY`, and succeeds once it exits -- the second half being what proves the mapping list is consulted rather than a flag that never clears | make `vnode_text_busy` return false: the write succeeds and the running process's text changes underneath it |
 
 ## Benchmarks
 
