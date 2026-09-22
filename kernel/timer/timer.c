@@ -516,7 +516,8 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     /* The tick-gap detector: a second without a tick on this CPU is an
      * interrupts-off window neither lockup detector sees (their bar is
      * ten). Named with where the CPU was when interrupts came back. */
-    if (pc->last_tick_ns != 0 && clock_delta_ns(now, pc->last_tick_ns) > NS_PER_SEC)
+    if (pc->last_tick_ns != 0 && clock_delta_ns(now, pc->last_tick_ns) > NS_PER_SEC &&
+        __atomic_load_n(&g_test_cpu_offset_ns[pc->cpu_id], __ATOMIC_ACQUIRE) == 0)   /* a test's injected skew reads as a gap */
         kwarn("timer: cpu %u: no tick for %llu ms; interrupts came back at pc %p (last tick interrupted pc %p, thread '%s')",
               pc->cpu_id, (unsigned long long)(clock_delta_ns(now, pc->last_tick_ns) / 1000000),
               (void *)arch_trap_frame_pc(frame), (void *)pc->last_tick_pc,
