@@ -1068,7 +1068,8 @@ static bool sched_migrate_refuses_pinned(const char **reason)
     wp.go = 0;
     /* On a CPU that is not this thread's: the probe spins with preemption
      * off until told to go, and the teller must be able to run. */
-    struct thread *tv = thread_create_on(window_main, &wp, "mig-window", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
+    struct thread *tv = thread_create_on(window_main, &wp, "mig-window", SCHED_PRIO_DEFAULT,
+                                         CPUMASK_OF(a) | CPUMASK_OF(b));   /* either other CPU: the current check alone refuses the window */
     CHECK(tv != NULL);
     deadline = clock_deadline_ns(2000000000ULL);
     while (!__atomic_load_n(&wp.in_window, __ATOMIC_ACQUIRE) && !clock_deadline_passed(deadline))
@@ -1080,14 +1081,15 @@ static bool sched_migrate_refuses_pinned(const char **reason)
         return false;
     }
     /* BLOCKED and running: not ready. */
-    r = sched_migrate(tv, b);
+    unsigned away = (unsigned)tv->cpu == a ? b : a;
+    r = sched_migrate(tv, away);
     if (r != SCHED_MIGRATE_NOT_READY) {
         kerror("selftest: sched-migrate-refuses: a thread prepared to wait: %s", sched_migrate_result_name(r));
         ok = false;
     }
     /* Woken: READY and queued, still its CPU's current. */
     waitqueue_wake_all(&wp.wq);
-    r = sched_migrate(tv, b);   /* the current check comes before the affinity check: the window, by name */
+    r = sched_migrate(tv, away);   /* its mask admits `away`: only the current check refuses the window */
     if (r != SCHED_MIGRATE_CURRENT) {
         kerror("selftest: sched-migrate-refuses: the woken-before-blocked window: %s (state %d)",
                sched_migrate_result_name(r), (int)tv->state);
