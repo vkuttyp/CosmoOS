@@ -215,7 +215,14 @@ in advance, so that a win there is not read as a win from sharing.
 | `README.md` | Status entry |
 | `tools/elf-share-probe.py` | shipped with this report; the unit's own benchmark replaces it |
 
-## New APIs
+## APIs
+
+**One changed, one new.** `elf_load_into` exists
+(`kernel/include/kernel/elf.h`) and this unit widens its signature; it
+is listed here because callers must change, not because the function is
+new.
+
+### Changed: `elf_load_into` gains a vnode
 
 ```c
 /* Map every segment of a validated image into `space`. With `vn`, the
@@ -227,11 +234,16 @@ int elf_load_into(struct vm_space *space, const void *image,
                   const struct elf_info *info, struct vnode *vn);
 ```
 
+### New: the text-mapping count
+
 ```c
 /* Mappings that share this file's pages as program text. A write to a
  * file with a non-zero count is -ETXTBSY. */
 unsigned vnode_text_mappings(struct vnode *vn);
 ```
+
+Nothing else is added. `struct vm_space`, `struct vnode` and
+`VM_REGION_FILE` are all existing types this unit only uses.
 
 ## Migration plan
 
