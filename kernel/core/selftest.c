@@ -684,6 +684,7 @@ static const struct selftest tests[] = {
     { "io-poll",         selftest_io_poll },
     { "realtime",        selftest_realtime },
     { "process-reject",  selftest_process_reject },
+    { "elf-shared-text", selftest_elf_shared_text },
     { "process-spawn",   selftest_process_spawn },
     { "linux-elf",       selftest_linux_elf },
     { "el2",             selftest_el2_stub },

@@ -90,14 +90,22 @@ static int read_executable(const char *path, struct process_image *img)
         vnode_put(exe);
         return rc;
     }
+    /* The loader maps this file's pages rather than copying them, so the
+     * image keeps a reference of its own for the load's duration
+     * (docs/audit/next-subsystem-elf-shared-text.md). Taken before the
+     * open, which consumes the lookup's. */
+    vnode_get(exe);
     struct file *f;
     rc = vfs_open_vnode(exe, COSMO_O_RDONLY, &f);   /* consumes the reference */
-    if (rc)
+    if (rc) {
+        vnode_put(exe);
         return rc;
+    }
     struct cosmo_stat st;
     file_stat(f, &st);
     if (st.size == 0 || st.size > SPAWN_IMAGE_MAX) {
         file_put(f);
+        vnode_put(exe);
         return -ENOEXEC;
     }
     size_t size = (size_t)st.size;
@@ -105,6 +113,7 @@ static int read_executable(const char *path, struct process_image *img)
                                     VM_PROT_RW);
     if (image == 0) {
         file_put(f);
+        vnode_put(exe);
         return -ENOMEM;
     }
     size_t got = 0;
@@ -113,6 +122,7 @@ static int read_executable(const char *path, struct process_image *img)
         if (n <= 0) {
             vm_kernel_free(image);
             file_put(f);
+            vnode_put(exe);
             return n < 0 ? (int)n : -EIO;
         }
         got += (size_t)n;
@@ -120,6 +130,7 @@ static int read_executable(const char *path, struct process_image *img)
     file_put(f);
     img->data = (const void *)image;
     img->size = size;
+    img->vn = exe;   /* released by release_image */
     return 0;
 }
 
@@ -299,8 +310,12 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
     }
     if (interp.data)
         vm_kernel_free((vaddr_t)interp.data);
+    if (interp.vn)
+        vnode_put(interp.vn);
 out_exe:
     vm_kernel_free((vaddr_t)exe.data);
+    if (exe.vn)
+        vnode_put(exe.vn);
 out_cwd:
     if (attr.cwd)
         vnode_put(attr.cwd);

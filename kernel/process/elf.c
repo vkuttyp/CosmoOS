@@ -145,6 +145,7 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
         seg->memsz = seg_hi - seg_lo;
         seg->offset = ph.p_offset;
         seg->filesz = ph.p_filesz;
+        seg->file_memsz = ph.p_memsz;
         seg->file_vaddr = ph.p_vaddr;
         seg->flags = ph.p_flags & (ELF_PF_R | ELF_PF_W | ELF_PF_X);
 
@@ -209,12 +210,69 @@ static vm_prot_t seg_prot(uint32_t flags)
     return p;
 }
 
-int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info)
+/*
+ * Can this segment be shared from the file rather than copied?
+ *
+ * Three conditions, and each is a rule rather than a preference:
+ *
+ *  - **Not writable.** A writable segment must be private, or one
+ *    process's store reaches the file and every other process running
+ *    the program.
+ *  - **No zero tail** (`file_memsz == filesz`). The bytes a segment
+ *    needs beyond what the file holds are zeroes, and a shared mapping
+ *    has nowhere to put them: writing them would dirty the page cache
+ *    and change the file for everyone. A private mapping has somewhere
+ *    -- its own copy -- which is why the writable case below may have a
+ *    tail.
+ *
+ * Note which size that compares. `memsz` is the *page rounded* span and
+ * is almost never equal to `filesz`; comparing against it rejects every
+ * real text segment, which is what the first version of this did. The
+ * padding between `filesz` and the end of its last page is not a zero
+ * tail: it is the file's next bytes, and mapping them is what every
+ * other system does too.
+ *
+ * `elf_validate` has already required that `vaddr` and `offset` are
+ * congruent modulo the page size, which is what makes any of this a
+ * mapping rather than a rearrangement.
+ */
+static bool seg_shareable(const struct elf_segment *s)
+{
+    return (s->flags & ELF_PF_W) == 0 && s->file_memsz == s->filesz;
+}
+
+int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info,
+                  struct vnode *vn)
 {
     const uint8_t *file = image;
 
     for (unsigned i = 0; i < info->nr_segments; i++) {
         const struct elf_segment *s = &info->segments[i];
+
+        /*
+         * The file's own pages, shared, when this segment qualifies:
+         * one set of frames for every process running the program
+         * (docs/audit/next-subsystem-elf-shared-text.md). `maxprot`
+         * excludes W, which is what stops a later mprotect from turning
+         * shared text writable -- the whole safety argument for sharing
+         * it. The segment's own file offset is page-aligned by the
+         * congruence elf_validate enforced.
+         */
+        if (vn != NULL && seg_shareable(s)) {
+            uint64_t file_off = s->offset - (s->file_vaddr - s->vaddr);
+            /* The pages the file's bytes touch, rounded up. Past the
+             * end of the file the page cache gives zeroes, which is
+             * what the padding of a last partial page should read as. */
+            size_t span = (size_t)(((s->file_vaddr - s->vaddr) + s->filesz + PAGE_SIZE - 1) &
+                                   ~(uint64_t)(PAGE_SIZE - 1));
+            int rc = vm_user_map_file(space, s->vaddr, span, seg_prot(s->flags),
+                                      seg_prot(s->flags), VM_MAP_SHARED, vn, file_off,
+                                      "elf-text");
+            if (rc == 0)
+                continue;
+            /* Fall through to the copy: a file whose pages cannot be
+             * mapped here still has to run. */
+        }
 
         /* Map writable while populating, then set the final protection:
          * the copy goes through the direct map, but a read-only region

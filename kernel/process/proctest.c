@@ -1109,6 +1109,156 @@ bool selftest_linux_elf(const char **reason)
     return true;
 }
 
+/*
+ * Two processes running one program map the same frames for its text.
+ *
+ * Not "the second costs less", which a leak or a smaller stack would
+ * also produce: the same *physical address* for the same virtual
+ * address in two address spaces, which nothing but sharing explains
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * The image is read the way `read_executable` reads it and carries its
+ * vnode, because that -- not the bytes -- is what lets the loader map
+ * instead of copy.
+ */
+static int read_image_with_vnode(const char *path, struct process_image *img)
+{
+    struct vnode *vn = NULL;
+    int rc = vfs_lookup(vfs_root(), path, &vn);
+    if (rc)
+        return rc;
+    struct file *f;
+    vnode_get(vn);
+    rc = vfs_open_vnode(vn, COSMO_O_RDONLY, &f);   /* consumes one reference */
+    if (rc) {
+        vnode_put(vn);
+        return rc;
+    }
+    struct cosmo_stat st;
+    file_stat(f, &st);
+    size_t size = (size_t)st.size;
+    vaddr_t image = vm_kernel_alloc((size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1),
+                                    VM_KALLOC_POPULATE, VM_PROT_RW);
+    if (image == 0) {
+        file_put(f);
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    size_t got = 0;
+    while (got < size) {
+        int64_t n = file_pread(f, (uint8_t *)image + got, size - got, got);
+        if (n <= 0) {
+            vm_kernel_free(image);
+            file_put(f);
+            vnode_put(vn);
+            return n < 0 ? (int)n : -EIO;
+        }
+        got += (size_t)n;
+    }
+    file_put(f);
+    img->data = (const void *)image;
+    img->size = size;
+    img->path = path;
+    img->vn = vn;
+    return 0;
+}
+
+static void free_image_with_vnode(struct process_image *img)
+{
+    if (img->data)
+        vm_kernel_free((vaddr_t)img->data);
+    if (img->vn)
+        vnode_put(img->vn);
+    img->data = NULL;
+    img->vn = NULL;
+}
+
+bool selftest_elf_shared_text(const char **reason)
+{
+    struct process_image img = { 0 };
+    int rc = read_image_with_vnode("/boot/init", &img);
+    if (rc) {
+        kinfo("selftest: elf-shared-text: /boot/init unreadable (%d); skipping", rc);
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        return false;
+    }
+    /* The first executable segment's first page: what two processes
+     * should agree on. */
+    uint64_t text_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++)
+        if ((info.segments[i].flags & ELF_PF_X) && info.segments[i].file_memsz == info.segments[i].filesz) {
+            text_va = info.segments[i].vaddr;
+            break;
+        }
+    if (text_va == 0) {
+        free_image_with_vnode(&img);
+        kinfo("selftest: elf-shared-text: no shareable executable segment; skipping");
+        return true;
+    }
+
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p1 = NULL, *p2 = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
+              process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
+    paddr_t pa1 = 0, pa2 = 0;
+    bool got1 = false, got2 = false;
+    if (ok) {
+        /* Text is demand-paged now, so the page is present only once the
+         * process has executed it. Both of these block on a console read,
+         * so both reach their entry point; wait for the state rather than
+         * sleeping a fixed time, and let the wait expire into a skip
+         * rather than a failure -- an absent page has a benign reading
+         * and this test is about identity, not about presence. */
+        uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
+        while (!clock_deadline_passed(deadline)) {
+            got1 = arch_mmu_query(&p1->space->mmu, (vaddr_t)text_va, &pa1, NULL, NULL, NULL);
+            got2 = arch_mmu_query(&p2->space->mmu, (vaddr_t)text_va, &pa2, NULL, NULL, NULL);
+            if (got1 && got2)
+                break;
+            thread_sleep_ms(5);
+        }
+    }
+    if (p1) {
+        process_kill(p1, COSMO_SIGKILL);
+        process_wait_exit(p1);
+        process_put(p1);
+    }
+    if (p2) {
+        process_kill(p2, COSMO_SIGKILL);
+        process_wait_exit(p2);
+        process_put(p2);
+    }
+    free_image_with_vnode(&img);
+
+    if (!ok) {
+        *reason = "could not create two processes from one image";
+        return false;
+    }
+    if (!got1 || !got2) {
+        /* Demand paging: the page may not be present until it is
+         * touched. Say which, rather than failing on an absence that
+         * has a benign reading. */
+        kinfo("selftest: elf-shared-text: text page not present in %s; skipping the identity check",
+              !got1 && !got2 ? "either space" : (!got1 ? "the first space" : "the second space"));
+        return true;
+    }
+    if (pa1 != pa2) {
+        kerror("selftest: elf-shared-text: va %p maps to %p in one process and %p in the other",
+               (void *)text_va, (void *)pa1, (void *)pa2);
+        *reason = "two processes running one program have separate copies of its text";
+        return false;
+    }
+    kinfo("selftest: elf-shared-text: two processes map va %p to the same frame %p",
+          (void *)text_va, (void *)pa1);
+    return true;
+}
+
 bool selftest_process_spawn(const char **reason)
 {
     char out[64];

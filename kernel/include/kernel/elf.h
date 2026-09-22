@@ -25,6 +25,14 @@ struct elf_segment {
     uint64_t offset;   /* file offset of the first byte */
     uint64_t filesz;
     uint64_t file_vaddr; /* unaligned p_vaddr, where file bytes land */
+    /* p_memsz as the file gave it, *not* page rounded. `memsz` above is
+     * the rounded span and is therefore always >= this; the difference
+     * between them is page padding, which is not the same thing as the
+     * segment's zero tail. A segment has a zero tail -- bytes it needs
+     * that the file does not hold -- exactly when file_memsz > filesz,
+     * and only a segment without one can be shared from the file
+     * (docs/audit/next-subsystem-elf-shared-text.md). */
+    uint64_t file_memsz;
     uint32_t flags;    /* ELF_PF_* */
 };
 
@@ -59,6 +67,21 @@ struct vm_space;
 /* Map every segment of a validated image into `space` and copy its
  * bytes. Returns 0, -ENOMEM, or -EEXIST (overlap with an existing
  * region). On failure the caller destroys the space. */
-int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info);
+/*
+ * Map every segment of a validated image into `space`.
+ *
+ * With `vn`, the segments come from that file's page cache: read-only
+ * ones shared (one set of frames for every process running the program),
+ * writable ones copy-on-write, nothing populated. With NULL, the image's
+ * bytes are copied into anonymous memory as they always were -- the boot
+ * archive has no file to map (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * `off_in_file` is where the image begins inside `vn`, which is 0 for a
+ * whole executable and is why the parameter exists at all: a caller that
+ * maps a segment must add it to the segment's own offset.
+ */
+struct vnode;
+int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info,
+                  struct vnode *vn);
 
 #endif /* KERNEL_ELF_H */
