@@ -303,10 +303,10 @@ ends in one of two ways: a frame, or the kill that makes the wait
 return `-EINTR`; closing the handle from another thread of the same
 process does not end it (it drops one reference; the read holds
 another), which is the same rule every blocking read in this kernel
-follows. Invariant **V26** (vfs): *a device's `ready` answers the
+follows. Invariant **V26** (vfs; **V34** as built, banner item 3): *a device's `ready` answers the
 question its `read_file` would answer with the same non-blocking bit,
 and `poll_wq` is woken by every event that can change that answer.*
-Invariant **N24** (network): *a tap's reader is woken by every frame
+Invariant **N24** (network; **N23** as built): *a tap's reader is woken by every frame
 `tap_transmit` queues, and a reader blocked in the tap's read holds the
 file and therefore the tap, so the tap's release never runs under one.*
 
