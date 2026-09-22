@@ -19,6 +19,11 @@ and the log says what the retry would have done:
 
     NETTEST: retry probe: connect 0 in 2 ms, sent 12, recv 12 -> WOULD HAVE PASSED
 
+Three outcomes, and the third is why the deadline is reported separately:
+the reply came back (a retry repairs this), the connection was reset
+again (it does not), or slirp accepted it and forwarded nothing for five
+seconds (it does not, and that is a different defect from a reset).
+
 The read is non-blocking with a five-second deadline. The failure this
 probe runs after is slirp accepting a connection and never forwarding
 it, so a blocking read is the one thing that could turn a diagnosed
@@ -79,10 +84,26 @@ PROBE = r'''
                     }
                 }
             }
+            /*
+             * Three outcomes, and they are the whole measurement:
+             *
+             *   the reply came back   a retry repairs this flake
+             *   reset again           slirp kills a fresh connection too
+             *   accepted and silent   slirp took it and forwarded nothing,
+             *                         which a retry does NOT repair
+             *
+             * The third is the deadline case (`-EAGAIN` out of the
+             * non-blocking read) and it is the one that would change the
+             * unit's answer, so it must not be printed as a reset
+             * (found in review of this report).
+             */
             bool again_ok = rgot == 12 && memcmp(rbuf, "cosmo world\n", 12) == 0;
+            const char *verdict = again_ok ? "WOULD HAVE PASSED"
+                                : rgot == -EAGAIN ? "accepted and silent for 5 s (a retry would NOT have helped)"
+                                : rrc != 0 ? "the retry's connect failed too"
+                                : "reset again";
             kprintf("NETTEST: retry probe: connect %d in %llu ms, sent %lld, recv %lld -> %s\n",
-                    rrc, (unsigned long long)rms, (long long)rsent, (long long)rgot,
-                    again_ok ? "WOULD HAVE PASSED" : "reset again");
+                    rrc, (unsigned long long)rms, (long long)rsent, (long long)rgot, verdict);
             ksock_put(c2);
         } else {
             kprintf("NETTEST: retry probe: could not create a socket\n");
