@@ -3238,7 +3238,7 @@ See [docs/development.md](docs/development.md).
   host-to-guest frame today; `pselect6` costs 4371 / 4373 ns per call
   on one descriptor against `ppoll`'s 16423 / 14205. Invariants **V34**
   (vfs) and **N23** (network); 375 self-tests on both architectures.
-  Report: `docs/audit/next-subsystem-device-readiness.md` (PR #TBD).
+  Report: `docs/audit/next-subsystem-device-readiness.md` (PR #211).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
