@@ -13,6 +13,7 @@
 #include <kernel/page.h>
 #include <kernel/pmm.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <arch/irqc.h>
 #include <arch/cpu.h>
