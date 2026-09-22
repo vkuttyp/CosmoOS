@@ -1,8 +1,11 @@
 # NEXT SUBSYSTEM — a migration that can land: declared per-CPU claims, a lock order lockdep can see, and a migrator that moves one thread
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report. It takes
-up the scheduler's largest open row in
+and wait for the instruction to build it. That wait is over: the
+instruction was given and the unit is built. **This report is as built**
+(the percpu-migration unit), and the banner below records where the
+build differed from the design; the sections after it are the design as
+reviewed. It takes up the scheduler's largest open row in
 `docs/audit/2026-09-deferred-work-inventory.md` §2.3 -- **no
 migration** -- at the point the previous attempt left it: thread
 migration was built, worked, and was removed because three of four
@@ -18,6 +21,266 @@ that move threads on purpose -- and it runs the whole self-test suite
 under an adversary that migrates threads at random, so that the balancer
 of the following unit lands on a tree that has already survived
 migration rather than one that meets it for the first time.
+
+**What the build changed:**
+
+1. **The fifty identity reads are a handful of definitions, not fifty
+   edits.** `thread_current()` is `raw_this_cpu()->current`, and
+   `might_sleep`, `preemptible`, `preempt_disable`/`enable`,
+   `preempt_point` and the sleeping primitives' interrupt-context
+   asserts read raw; every `process_current`, `io_nonblocking`,
+   `copy_*_user` and signal path went quiet with them. The warn-mode
+   boot listed 138 sites on x86-64 with the check in but those
+   definitions not yet raw, 2 after them (the mutex path's own
+   interrupt-context assert, and `timer_pending_count`), then none.
+2. **Where the check lives.** Both accessors were out-of-line per
+   architecture already, so the architecture's read became
+   `arch_cpu_id_raw` and the checked `arch_cpu_id` is generic
+   (`kernel/core/percpu.c`, `claim_check`, with `percpu_checked()` out of
+   line so its return address is the site); `arch_cpu_id` stays the
+   module export, checked like the kernel's own. The report's
+   `percpu_claim_ok` and the warn-once table are one function under a
+   build knob, `PERCPU_WARN=1`, rather than a step: the sweep ran in that
+   mode and the shipped form is the panic.
+3. **lockdep saves interrupts for the mutex kind only**, and
+   `lockdep_is_held` only when the asker is preemptible: a spinlock's
+   acquisition has preemption off already and its per-CPU stack cannot
+   move. The first version saved for every acquisition; a swing in the
+   NIC bench prompted the narrowing, and the swing then proved to be the
+   host (below), but the narrower form is the right one.
+4. **A thread pins itself to keep a claim across a sleep.**
+   `thread_pin_self()` / `thread_set_affinity_self()` are new (the report
+   said "a thread is created on that CPU", which thread 0 cannot be), and
+   `thread_set_affinity()` widens another thread's mask for the tests.
+   The preempt-wake trio, the sysctl probe, the seven lockup tests and
+   the x86-64 NMI-entry test run pinned through a wrapper; a worker that
+   records the CPU it ran on reads it under `preempt_disable`; the
+   remaining test reads are raw with a reason (a target CPU for an
+   interrupt line, a CPU for a pair of threads to share, "some other
+   CPU"). The ASID tests, the ASID race's two threads and `uaccess-guard`
+   switch address spaces with interrupts off, as the switch path does,
+   reading the CPU's own space where the switch is made.
+5. **The window probe is created on a CPU other than the test thread's.**
+   It spins with preemption off until told to go; created on the test
+   thread's own CPU it starved the teller, which the first AArch64 boot
+   reported as a soft lockup with the probe running and `kmain` ready
+   behind it. `sched_migrate_refuses` pins itself and puts the probe on
+   one of its two other CPUs, and since the current check precedes the
+   affinity check the window is still refused by its own name.
+6. **`sched_migrate_from` and `pick_migratable` as reviewed**; the RR
+   policy offers the tail of its lowest priority level.
+   `sched_migrate_result_name` spells a result; `sched_dump` prints the
+   migration count; `assert_no_rq_lock_held` is a lockdep assertion at
+   both entries.
+7. **The chaos migrator** rotates its target per CPU
+   (`g_chaos_rotor[]`), prints its tally after the self-tests, and the
+   boot test's `--chaos` flag requires the line with a count above zero.
+   `make test-chaos` builds into `$(OUT)-chaos`; the CI job runs before
+   the release step.
+8. **The lockup sampler's fix guards a caller that does not exist.**
+   From the tick it runs in interrupt context, and its self-test callers
+   are pinned now, so reverting its `preempt_disable` trips nothing: the
+   mutation survives, and the check -- not the fix -- is what catches an
+   unpinned caller. Recorded as such below rather than dropped.
+9. **The clock sweep found nothing to convert.** The report's "four
+   plain subtractions outside tests" were the grep's: two were not clock
+   reads at all (`n - start` in the console and checksum code) and two
+   are same-CPU by construction (the tick's own cost, the offset
+   measurement's round trip, both with interrupts off). `timer.h`'s
+   comment now states the rule as this kernel's.
+10. **The AArch64 additions**: `arch_hv_disable` keeps preemption off
+    across its loop; the `el2` test asks through
+    `arch_hv_el2_version_here`, which readies the asking CPU first. The
+    report's one unresolved probe site (a return address outside the
+    kernel's symbol table) did not recur under the shipped check, whose
+    warn-mode boots ended at zero sites on both architectures.
+11. **What the suite under migration found, in the order it found it.**
+    The chaos boot did what it was built for, and its findings are this
+    unit's real result:
+    - *Tests that named "another CPU" as CPU 1.* The TCP timer-free test
+      parked a callback on "CPU 1" with interrupts off and the quiesce
+      tests waited on "CPU 1", both assuming the test thread lives on
+      CPU 0 -- so a migrated test thread queued behind its own parked
+      callback was the hard lockup, and `timer-cancel-sync` measured a
+      cancel of a callback running on its own CPU; `smp-wake` counted no
+      reschedule interrupt for a wake that had become local. Every test
+      that names another CPU now runs pinned and picks that CPU relative
+      to its own (the quiesce, lockup, preempt-wake, block-unregister,
+      lockdep-contention, clock-skew, IPI-storm, Unix close-race and VFS
+      concurrency tests; a helper's "none" is the caller's own CPU, since
+      0 is a valid other CPU now).
+    - **The per-CPU barrier is two instructions.** A ping-pong worker
+      panicked with "wait_for_completion in interrupt context" on a CPU
+      that was in no interrupt: it had loaded the pointer to CPU A's
+      block, the tick preempted it between that load and the field load,
+      the migrator moved it, and on CPU B it read A's `irq_depth`. Every
+      per-CPU access through the pointer is two instructions --
+      `thread_current` and `preempt_disable` itself are that shape -- so
+      the barrier S25 rests on is atomic only if a thread stopped at a
+      point it did not choose never resumes elsewhere. **A thread
+      switched out by preemption is not migratable** until it has run
+      again (`THREAD_FLAG_PREEMPTED`, set and cleared under the run-queue
+      lock; `SCHED_MIGRATE_PREEMPTED`; `pick_migratable` never offers
+      one); a thread that yielded, blocked and was woken, or never ran
+      has nothing in flight and may move. S26 says so; the refusal test
+      covers it with a displaced worker.
+    - *The order test's deliberate inversion was a real deadlock.*
+      `lockdep-rq-order` held run queue 1's lock and took 0's to provoke
+      the report, then spun for it -- while a chaos tick on another CPU
+      held the pair in the right order: every CPU followed into silence
+      (once in three x86-64 chaos boots, no line printed). The test now
+      asks the checker (`spin_lock_check_order`, new) and never takes the
+      second lock.
+    - *The stress's spinners are never movable.* A thread that only ever
+      leaves its CPU by preemption stays flagged, and eight such threads
+      under a random migrator pile onto one CPU faster than 200 ms of
+      slices serve them: "a worker made no progress" once. The spinners
+      yield each round.
+    - *`lockup-soft`* asserted exactly one runnable thread on the victim
+      CPU; a migrator may queue others there. At least one, now.
+    - **The stall that took four instruments: a test's lie, kept past
+      its window by migration.** In four of about twenty chaos boots the
+      USB timeout test's first timed-out read came back after 4.4 s
+      instead of 540 ms, and the IOMMU test twice saw no fault from a
+      device whose transfer never issued. Millisecond stamps put the gap
+      in the block layer's 500 ms scan sleep, which returned four
+      seconds late; a READY-stall scan in the tick said the thread was
+      not queued; a sleep-overshoot check and a tick-gap check were
+      added, and the tick-gap one fired -- on the CPU that
+      `lockup-report-skew` sets five seconds ahead for its window, an
+      injection that reads as a five-second silence. That was the
+      mechanism: a timer armed against the lying clock and expired
+      against the truth fires late by the lie, and a deadline computed
+      there and checked elsewhere is five seconds too far (the IOMMU
+      test's device transfer issues through one). Before migration only
+      the test's own pinned thread could be on the victim CPU during the
+      window. Two changes: timers, deadlines and delays keep time by a
+      clock that never carries the test offset (`clock_time_ns`,
+      internal to `timer.c`; only readings see the lie, which is what
+      the skew tests examine), and the skew test holds its victim CPU
+      with a pinned higher-priority spinner for the window. The four
+      detectors stay in debug builds; the lockup report also prints a
+      silent CPU's held spinlocks now, for the one AArch64 plain boot
+      that hung with two CPUs spinning for locks (three clean plain
+      boots after; unresolved, instrumented).
+    - **The IOMMU test's missing fault: the previous device's storm.**
+      Two of four post-fix AArch64 chaos boots failed `iommu` with "no
+      fault for the device's requester". Its stamps: the USB device's
+      transfer completed normally in 10 ms, but 251 of the 256 faults
+      counted in its window were the NVMe device's retry storm still
+      running, the unit's 256-entry event queue overflowed (its global
+      error 0x4) and the USB device's own events were dropped. In plain
+      boots the storm is over before the test moves on; under migration
+      its timing spreads into the next window. The test now waits for
+      the unit's fault count to hold still before it provokes the next
+      device.
+    - *A silent skip.* With the "other CPU" helpers made relative, CPU 0
+      became a valid other CPU, and `lockup-report-skew` still read
+      `k == 0` as "none" and skipped itself whenever the test thread sat
+      on the last CPU. A skip is a pass that proves nothing; it is `k <
+      0` now, and the skip counts per boot were compared.
+    - *The harness family, four times in thirteen chaos boots* against
+      none of the plain boots of the same tree -- the family's host-side
+      signature, but a guest timeline the family does not have: the
+      twelve bytes queued, retransmitted at most once in the ten seconds
+      before the reset, where the retransmit timer should have fired
+      three times. No detector line. The harness's failure line now
+      prints the connection's retransmit timer state, CPU and expiry and
+      its work item's state on a short line of its own (the long line was
+      being cut by an interleaved print), for the next sighting;
+      recorded in `docs/testing/flakes.md` with that caveat, since a
+      migrator is the one new variable.
+    - *Once each in about fifty chaos boots*: `thrtest`'s `MAP_FIXED`
+      replacement of a thread stack refused with `EEXIST` (not
+      understood; recorded with its line), and `tty-isatty`'s 500 ms
+      wait for a child's release after the reap exceeded (the bound
+      catches a leak, not slowness: two seconds now).
+12. **The numbers.** 380 self-tests on both architectures (five new);
+    lockdep records 220 classes on four CPUs (213, less the one
+    `runqueue` class, plus four run-queue classes and the tests' four new
+    lock names) against a ceiling of 320 (the edge matrix is 200 KiB,
+    debug builds only); `sched-migrate-stress` makes about 3,500 moves in
+    200 ms on x86-64 and 8,000 on AArch64. Invariants S24 (real), S25,
+    S26, Q20; L11 amended.
+
+**Bug-proofs, as run.** Each mutation applied alone on x86-64 (the two
+AArch64-only ones on AArch64), the debug suite booted -- the chaos image
+for the migrator's and the `el2` test's -- the runner checking each run
+booted and the tree restored from HEAD afterwards. Eighteen, of which
+the fifteen from the report, one for the preempted-thread rule the
+chaos boot added, and the two AArch64 ones.
+
+| mutation | what failed |
+| --- | --- |
+| `claim_check` without its `preempt_count` term | the first spinlock acquisition of the boot -- `lock_common` reads its CPU after `preempt_disable` -- is reported: `percpu: a per-CPU answer read where the thread could move` before any self-test runs |
+| every run-queue lock from the one literal `"runqueue"` | the first migration attempt (`lockdep-rq-order`'s `sched_migrate_from(0, 1)`) is a `lockdep: recursive acquisition of one lock class` panic: with one class the order is not even askable |
+| `migrate_locked` without the destination enqueue | `sched-migrate`: "the migrated worker never ran" (first run on cpu 4294967295, expected 2), then the watchdog, since a thread on no queue cannot be joined |
+| `sched_migrate` without the `rq->current` check (and its assertion) | `sched-migrate-refuses`: the window came back as `migrated` instead of `current` -- "a refusal came back under the wrong name". (Before the probe's mask admitted both other CPUs, the affinity check behind it answered `affinity`, which the test also refused: the mask was widened so that only the current check stands between the window and a move) |
+| `sched_migrate_from` taking its two locks in decreasing order | `lockdep-rq-order`: its own `sched_migrate_from(0, 1)` recorded 1 -> 0, so the reversed pair it then takes is not an inversion -- "was not reported as an inversion" |
+| the chaos migrator made a no-op | the tally line reads `chaos migrated 0 threads` and the boot test refuses the run on its required marker |
+| `schedule_internal` reading its block before `arch_irq_save` | S25 panic at the site on the first `schedule()` with a second CPU up (thread `kmain`) |
+| `sched_set_running_current` the same | S25 panic at the site (thread `reaper`) |
+| `quiesce_note_quiescent` publishing with interrupts on | S25 panic at the site (`sync_quiesce_counting`'s call) |
+| lockdep's mutex-kind acquisition check without the interrupt save | S25 panic at `my_cpu()` on the first `mutex_lock` |
+| `lockdep_is_held` without the interrupt save | S25 panic at `my_cpu()` from `sched_migrate`'s own no-lock-held assertion |
+| `user_shootdown` without preemption off | S25 panic at `user_shootdown_targets` on the first user unmap |
+| `arch_mmu_shootdown_cpus` (x86-64) without preemption off | S25 panic at its "not me" read on the first kernel shootdown |
+| `smp_call_function_single` comparing before saving interrupts | S25 panic at the compare (the first cross-CPU call, `smp-call`) |
+| `lockup_sample_all` without preemption off | **survives**: from the tick it runs in interrupt context and its self-test callers are pinned, so the read passes the check either way; the check, not the fix, is what an unpinned caller would meet. Kept as belt and braces, recorded as such |
+| `sched_migrate` without the preempted check (and `pick_migratable` offering preempted threads) | `sched-migrate-refuses`: "a preempted worker: migrated" -- "a refusal came back under the wrong name" |
+| `arch_hv_disable` without preemption off (AArch64) | S25 panic at its "self" read (thread `kmain`, 82 s into the boot, where the hypervisor-disabled test runs it) |
+| the `el2` test asking with a bare `el2_call_raw` (AArch64, chaos image, four boots) | caught three times of four: `el2_call_raw(HV_EL2_CALL_VERSION, 0) == HV_EL2_VERSION` fails when the moving test thread asks on a CPU the run loop has not readied; the one survival is the test thread happening to be on the readied CPU at that moment, which is what the ready-and-ask entry removes |
+
+**The suite under the chaos migrator, at a rate.** `make test-chaos`
+eight times per architecture, the tally line of each:
+
+| boot | result | tick migrations, calls that found nothing, migrations in all |
+| --- | --- | --- |
+| chaos-x86-1 | PASS | 2515 / 19607 / 18333 |
+| chaos-x86-2 | FAIL (hung: the skew test's checker behind the spinner, fixed at 95a7b13f) | (no tally line: the boot did not reach the end of the self-tests) |
+| chaos-x86-3 | PASS | 2531 / 19996 / 12639 |
+| chaos-x86-4 | PASS | 2607 / 21437 / 14613 |
+| chaos-x86-5 | FAIL (`net-harness`: the slirp family's signature, recorded) | 3270 / 24671 / 13852 |
+| chaos-x86-6 | PASS | 2435 / 21030 / 7642 |
+| chaos-x86-7 | PASS | 2526 / 19662 / 13075 |
+| chaos-x86-8 | PASS | 2365 / 20211 / 10404 |
+| chaos-a64-1 | PASS | 2432 / 20758 / 13426 |
+| chaos-a64-2 | PASS | 2359 / 20577 / 11517 |
+| chaos-a64-3 | PASS | 2451 / 20393 / 10909 |
+| chaos-a64-4 | PASS | 2371 / 19877 / 10565 |
+| chaos-a64-5 | FAIL (user mode: `thrtest`'s stack replacement refused with EEXIST once, recorded) | 2353 / 19626 / 12994 |
+| chaos-a64-6 | FAIL (`net-harness`, the family; `tty-isatty`'s 500 ms release bound, widened) | 3300 / 26302 / 19180 |
+| chaos-a64-7 | PASS | 2498 / 19593 / 13297 |
+| chaos-a64-8 | PASS | 2586 / 20798 / 10021 |
+
+Eight per architecture on the finished tree: x86-64 six passes, one hang
+fixed in the same tree (the skew test's checker on the victim CPU, before
+95a7b13f) and one sighting of the harness family; AArch64 six passes and
+two boots with a recorded sighting each. Before this set, the boots that
+found the unit's failures: 23 chaos boots across three earlier chains,
+each failure named above. The 380 kernel self-tests and the user-mode
+sections ran under 2,300 to 3,500 tick migrations per boot.
+
+**Benchmarks, as run** (one plain debug boot per architecture before
+the change and one after, the same host):
+
+| measure | x86-64 before -> after | AArch64 before -> after |
+| --- | --- | --- |
+| `irqrestore-bench`, ns per save/restore pair | 333 -> 212 | 335 -> 179 |
+| tick entry-to-hook, mean ns over 51 ticks | 8,376 -> 17,118 | 13,313 -> 16,156 |
+| `read` 200 KiB at 4 KiB, MiB/s | 66 -> 82 | 86 -> 122 |
+| futex wake, ns, no shared mapping | 4,717 -> 2,709 | 5,268 -> 3,116 |
+| `net-nicbench` ARP round trips/s (eth0) | 12,900 -> 15,651 | 12,006 -> 15,984 |
+| `sched-migrate-stress`, moves in 200 ms | -- -> 3,514 | -- -> 8,261 |
+
+Every difference is inside the swing this host shows between two boots
+of the same tree: the interrupt-restore pair and the file reads got
+faster, the tick-entry mean slower, and the NIC bench's *duration*
+ranged from 1.7 s to 10.5 s across this unit's boots while its ARP
+round-trip rate stayed put -- its UDP phase is paced by QEMU's user
+network backend, not the kernel. The checked accessor's cost is one load
+and a compare where preemption or interrupts are off (nearly every hot
+call), and release builds have the raw read.
 
 ## What is established (before this unit)
 
