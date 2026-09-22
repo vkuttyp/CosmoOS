@@ -656,6 +656,7 @@ bool selftest_sched_spread(const char **reason)
 #include <kernel/lockdep.h>
 #include <arch/irq.h>
 
+#if CONFIG_DEBUG
 /* A thread pinned to `cpu` that reads its CPU through the checked
  * accessor: a one-CPU affinity is a declared claim (S25). */
 struct claim_probe {
@@ -668,6 +669,7 @@ static void claim_probe_main(void *arg)
     p->cpu = arch_cpu_id();   /* checked: the affinity is one CPU */
     thread_exit(0);
 }
+#endif
 
 /*
  * The per-CPU claim check itself: an unpinned, preemptible read of
