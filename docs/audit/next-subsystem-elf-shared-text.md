@@ -193,7 +193,7 @@ its three parts are:
   `vnode -> pagecache -> vm_space`, so a writer may take
   `pagecache_lock(vn)` to ask. Check and write are then atomic with
   respect to a mapping being created, which is the race a separate
-  separate counter would lose.
+  counter would lose.
 - **Release** happens where `m` is unlinked, under that lock and
   *before* `vnode_put` — which is already the order the teardown uses.
   It matters: a mapping that has been unlinked can no longer fault a
