@@ -687,22 +687,22 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         /* Gathered under the lock, printed after it: the run-queue lock is
          * a leaf (S2), and a print takes the console lock, which the
          * thread this tick interrupted may hold. */
-        const char *stalled = NULL, *runner = "-";
+        char stalled[THREAD_NAME_MAX] = "", runner[THREAD_NAME_MAX] = "-";   /* copies: a name lives in a thread another CPU may free */
         int sprio = 0, rprio = 0;
         unsigned sflags = 0;
         uint64_t waited = 0, slice = 0;
         spin_lock(&rq->lock);
-        for (int p = 0; p < SCHED_PRIO_COUNT && stalled == NULL; p++) {
+        for (int p = 0; p < SCHED_PRIO_COUNT && stalled[0] == '\0'; p++) {
             struct thread *t;
             list_for_each_entry(t, &rq->ready[p], rq_link) {
                 uint64_t w = clock_delta_ns(now_ns, t->ready_since_ns);
                 if (w > NS_PER_SEC && t != rq->current) {
-                    stalled = t->name;
+                    strlcpy(stalled, t->name, sizeof(stalled));
                     sprio = t->priority;
                     sflags = t->flags;
                     waited = w;
                     if (rq->current) {
-                        runner = rq->current->name;
+                        strlcpy(runner, rq->current->name, sizeof(runner));
                         rprio = rq->current->priority;
                         slice = rq->current->slice_left_ns;
                     }
@@ -711,7 +711,7 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
             }
         }
         spin_unlock(&rq->lock);
-        if (stalled != NULL)
+        if (stalled[0] != '\0')
             kwarn("sched: stall: '%s' (prio %d, flags 0x%x) READY on cpu %u for %llu ms behind '%s' (prio %d, preempt %d, irq_depth %u, slice %llu us)",
                   stalled, sprio, sflags, rq->cpu, (unsigned long long)(waited / 1000000), runner, rprio,
                   pc->preempt_count, pc->irq_depth, (unsigned long long)(slice / 1000));

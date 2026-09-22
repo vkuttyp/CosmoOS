@@ -160,6 +160,34 @@ struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *n
     return t;
 }
 
+/*
+ * Affinity is written under the run-queue lock of the CPU the thread is
+ * on, which is the lock every reader that decides a move holds
+ * (sched_migrate, pick_migratable): one discipline, no mixed access. A
+ * thread on the move has its `t->cpu` rewritten under both locks, so
+ * the loop re-reads it after locking, as sched_migrate does.
+ */
+static void set_affinity_locked(struct thread *t, cpumask_t affinity)
+{
+    for (;;) {
+        arch_irq_state_t s = arch_irq_save();
+        int cpu = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        KASSERT(cpu >= 0);
+        struct runqueue *rq = sched_runqueue((unsigned)cpu);
+        spin_lock(&rq->lock);
+        if (t->cpu != cpu) {
+            spin_unlock(&rq->lock);
+            arch_irq_restore(s);
+            continue;
+        }
+        KASSERT((affinity & CPUMASK_OF((unsigned)cpu)) != 0);
+        t->affinity = affinity;
+        spin_unlock(&rq->lock);
+        arch_irq_restore(s);
+        return;
+    }
+}
+
 cpumask_t thread_pin_self(void)
 {
     /* Interrupts off from reading the CPU to writing the mask: the mask
@@ -169,24 +197,19 @@ cpumask_t thread_pin_self(void)
     arch_irq_state_t s = arch_irq_save();
     struct thread *t = thread_current();
     cpumask_t old = t->affinity;
-    __atomic_store_n(&t->affinity, CPUMASK_OF(arch_cpu_id()), __ATOMIC_RELEASE);
+    set_affinity_locked(t, CPUMASK_OF(arch_cpu_id()));
     arch_irq_restore(s);
     return old;
 }
 
 void thread_set_affinity_self(cpumask_t affinity)
 {
-    arch_irq_state_t s = arch_irq_save();
-    struct thread *t = thread_current();
-    KASSERT((affinity & CPUMASK_OF(arch_cpu_id())) != 0);
-    __atomic_store_n(&t->affinity, affinity, __ATOMIC_RELEASE);
-    arch_irq_restore(s);
+    set_affinity_locked(thread_current(), affinity);
 }
 
 void thread_set_affinity(struct thread *t, cpumask_t affinity)
 {
-    KASSERT((affinity & CPUMASK_OF((unsigned)__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE))) != 0);
-    __atomic_store_n(&t->affinity, affinity, __ATOMIC_RELEASE);
+    set_affinity_locked(t, affinity);
 }
 
 struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,

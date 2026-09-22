@@ -533,7 +533,7 @@ sweep actually used:
 **Correction, added by the thread-migration unit
 (`docs/audit/next-subsystem-thread-migration.md`).** The worked example
 above is false for the kernel this unit shipped into. A thread is
-assigned a CPU once, at `sched_enqueue_new`, and nothing ever moves it:
+assigned a CPU once, at `sched_enqueue_new`, and nothing ever moves it *(as the tree stood then; the percpu-migration unit moves threads, and the correction below that this section closes with says so)*:
 `sched_wake` returns it to `g_rqs[t->cpu]`, and the only other writes to
 `t->cpu` are the idle and boot threads at init. A sleeping thread wakes
 where it slept, so the 42 sites in the first row of the table below were

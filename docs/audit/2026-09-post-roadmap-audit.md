@@ -60,7 +60,7 @@ The audit found the design sound and the implementation careful at the unit leve
 Cross-cutting facts that the rest of this report depends on:
 
 - **Every process has exactly one thread** (`kernel/process/process.c:420-422`; `clone`/`fork`/`clone3` are `lx_nosys`, `compat/linux/syscalls.c:1279,1338`). Many correct-today designs are correct only for this reason and are flagged as latent.
-- **Threads never migrate between CPUs** (`sched.c:pick_cpu:141-155` runs once at creation; `sched_wake:299-315` re-enqueues on `t->cpu`). *(No longer true since the percpu-migration unit: `sched_migrate` moves READY threads, and every per-CPU claim is declared or checked -- S25.)* Timers, `thread_sleep_ns`, `futex_wait` and run-time accounting silently depend on it.
+- ~~**Threads never migrate between CPUs**~~ *(true at the time of this audit: `pick_cpu` ran once at creation and `sched_wake` re-enqueued on `t->cpu`; since the percpu-migration unit `sched_migrate` moves READY threads, every per-CPU claim is declared or checked -- scheduler S25 -- and the rows below that leaned on the old fact are annotated where they stand.)* Timers, `thread_sleep_ns`, `futex_wait` and run-time accounting silently depend on it.
 - **All locks are spinlocks except six sleeping mutexes** (`g_mounts_lock`, `g_device_mutex`, `g_blk_lock`, `g_netif_lock`, module `g_lock`, hv `g_lock`) plus per-object mutexes in VFS, cosmofs, sockets and hv. There is no lock-order checker and no grace-period primitive of any kind.
 - **The kernel, loader, modules and native userland are all compiled `-mgeneral-regs-only`** (`build/arch/x86_64.mk:10,18`, `build/arch/aarch64.mk:14,22`, `libc/libc.mk:11`). Only Linux-personality binaries and VM guests can execute FPU/SIMD instructions.
 
@@ -179,7 +179,7 @@ This section covers the kernel core: objects, handles, processes, ELF loading, u
 | MEDIUM | Composite handle operations (dup-to-target, spawn validate/install) are non-atomic; TOCTOU once threads exist. | `native.c:806-807`; `syscalls.c:524-525`; `spawn.c:33-50` + `process.c:228-237` |
 | MEDIUM | `read` returns at most 1 KiB per call for every object type (stack bounce buffer); the Linux personality inherits it. | `native.c:36,100-101`; `syscalls.c:176` |
 | MEDIUM | Interrupt slot unregistration has no grace period; `interrupt_register` is check-then-set with only local IRQ disable. | `interrupt.c:50-60,68-89,121-126` |
-| MEDIUM | `timer_cancel` does not wait for a running callback on another CPU; safe today only because timers always run on the arming CPU and threads never migrate. Undocumented load-bearing invariant. | `timer.c:100,119-134`; `wait.c:124-139`; `futex.c:96-97` |
+| MEDIUM | `timer_cancel` does not wait for a running callback on another CPU; ~~safe today only because timers always run on the arming CPU and threads never migrate~~ *(threads migrate since the percpu-migration unit; a timer's queue no longer touches the timer after its callback, so a woken owner may unwind its stack timer at once, and `timer_cancel_sync` is the wait for a running callback)*. Undocumented load-bearing invariant. | `timer.c:100,119-134`; `wait.c:124-139`; `futex.c:96-97` |
 | LOW | `WNOHANG` can observe a zombie before its handles are closed; `sys_exit` racing `process_kill` overwrites the kill status; handles truncated to `int`; refcount has no saturation; `mmap`/`mount`/`umount` ignore unknown flag bits; `socket.proto` ignored; no `_Static_assert` on UAPI struct sizes; `accept` drops an established connection if the peer-address copy faults. | `process.c:460,506,414-417`; `native.c:83,156,394,413,464,507-511`; `object.c:17`; `uapi/cosmo/syscall.h:155,261,274` |
 
 ### 4.3 Kernel object model assessment
@@ -907,7 +907,7 @@ Objects that are reachable from interrupt handlers, timer callbacks, the network
 - `struct netif`: no refcount; `netif_unregister` unlinks and flushes ARP (`netif.c:130-138`); queued mbufs keep `pkt.rcvif` (`netif.c:232`).
 - `struct tcp_pcb`: no refcount; lifetime by state machine plus a `WORK_FREE` deferral and a `sock` back-pointer (`tcp.c:180-229`).
 - Interrupt slots: lock-free publish (`interrupt.c:45-127`); `interrupt_unregister` returns immediately; comment at `interrupt.c:5-9` acknowledges the missing grace period.
-- Timers: per-CPU queues; `timer_cancel` removes a pending timer but cannot wait for a RUNNING callback (`timer.c:119-148`); safe only because timers run on the arming CPU and threads never migrate.
+- Timers: per-CPU queues; `timer_cancel` removes a pending timer but cannot wait for a RUNNING callback (`timer.c:119-148`); ~~safe only because timers run on the arming CPU and threads never migrate~~ *(since the percpu-migration unit: threads migrate, the queue does not touch a timer after its callback, and `timer_cancel_sync` waits)*.
 - Module unload: `shutdown()` then immediate free of text (`module.c:424-433`).
 - Quiescent-state infrastructure that already exists and can be reused: `irq_depth`/`preempt_count` per CPU (`percpu.h:34-51`), the IRQ-return preemption check on both arches, `smp_call_function_single`, `cpu_online_mask`.
 

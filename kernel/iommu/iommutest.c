@@ -163,6 +163,16 @@ bool selftest_iommu(const char **reason)
                 thread_sleep_ms(2);
                 quiet_ns += 2000000;
             }
+            if (quiet_ns < 30ull * 1000000) {
+                /* Closed, not open: a storm still running would recreate
+                 * the overflow this wait exists to prevent. */
+                kerror("selftest: iommu: %s: the previous device's fault storm did not quiesce in 2 s (%llu faults and counting)",
+                       bd->name, (unsigned long long)last);
+                why = "a fault storm did not quiesce before the next device";
+                kfree(sec);
+                blkdev_put(bd);
+                break;
+            }
         }
         iommu_get_stats(&before);
         uint64_t mine0 = 0;

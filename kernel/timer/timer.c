@@ -486,7 +486,19 @@ static void run_expired(struct timer_queue *q, uint64_t now)
             break;
         list_remove(&t->link);
         q->count--;
-        t->state = TIMER_RUNNING;
+        /*
+         * IDLE before the callback, and the timer is not touched again
+         * after it: a callback that wakes the timer's owner lets that
+         * owner run -- on another CPU now that threads migrate (scheduler
+         * S26), so *concurrently with this tail* -- and unwind the frame
+         * a stack timer lives in (thread_sleep_ns, io_poll, futex_wait).
+         * The old tail wrote `t->state` after the callback, which was a
+         * write into a dead frame the moment the owner resumed elsewhere.
+         * `q->running` is the queue's, and carries what timer_cancel_sync
+         * waits for. A callback that re-arms sees IDLE, which timer_start
+         * accepts, as it accepted RUNNING before.
+         */
+        t->state = TIMER_IDLE;
         q->running = t;
         spin_unlock(&q->lock);
 
@@ -494,8 +506,6 @@ static void run_expired(struct timer_queue *q, uint64_t now)
 
         spin_lock(&q->lock);
         q->running = NULL;
-        if (t->state == TIMER_RUNNING)
-            t->state = TIMER_IDLE; /* unless the callback re-armed it */
     }
     spin_unlock(&q->lock);
 }

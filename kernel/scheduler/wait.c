@@ -145,8 +145,10 @@ void thread_sleep_ns(uint64_t ns)
 #endif
     timer_start(&t, ns);
     wait_event(&s.wq, __atomic_load_n(&s.done, __ATOMIC_ACQUIRE));
-    /* The callback has run (done is set after nothing else), so the
-     * timer is idle and the stack objects may go. */
+    /* The callback has run (done is set after nothing else), the timer
+     * queue does not touch the timer after its callback (run_expired),
+     * so the stack objects may go -- even though this thread may be
+     * running on another CPU than the tick that fired it by now. */
 #if CONFIG_DEBUG
     /* The overshoot detector: a sleep that returns more than a second
      * late is named, with the CPU whose queue held its timer and the CPU

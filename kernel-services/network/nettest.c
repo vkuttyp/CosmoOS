@@ -995,6 +995,15 @@ bool selftest_net_harness(const char **reason)
      * unit: `rsts_in` is machine-wide and says a reset happened somewhere,
      * where this names the errno THIS connection died of. */
     int pending = ksock_error(c);
+    /* The connection's timer and work state, read while the socket is
+     * still ours: the put below closes the pcb and frees the socket. */
+    int rx_state = c->tcp ? (int)c->tcp->rexmit.state : -1;
+    unsigned rx_cpu = c->tcp ? c->tcp->rexmit.cpu : 0u;
+    long long rx_in_ms = c->tcp ? (long long)((int64_t)c->tcp->rexmit.expires_ns - (int64_t)clock_now_ns()) / 1000000 : 0;
+    unsigned long long rto_ms = c->tcp ? (unsigned long long)(c->tcp->rto_ns / 1000000) : 0ull;
+    int work_queued = c->tcp ? (int)__atomic_load_n(&c->tcp->work.queued, __ATOMIC_ACQUIRE) : -1;
+    unsigned work_flags = c->tcp ? __atomic_load_n(&c->tcp->work_flags, __ATOMIC_ACQUIRE) : 0u;
+    int pcb_state = c->tcp ? (int)c->tcp->state : -1;
     ksock_put(c);
     if (client_ok) {
         kprintf("NETTEST: client ok\n");
@@ -1012,12 +1021,7 @@ bool selftest_net_harness(const char **reason)
          * thread's print in the logs this is for. */
         kprintf("NETTEST: client state: rexmit timer state %d on cpu %u expiring in %lld ms (rto %llu ms), "
                 "work queued %d flags 0x%x, pcb state %d\n",
-                c->tcp ? (int)c->tcp->rexmit.state : -1, c->tcp ? c->tcp->rexmit.cpu : 0u,
-                c->tcp ? (long long)((int64_t)c->tcp->rexmit.expires_ns - (int64_t)clock_now_ns()) / 1000000 : 0,
-                c->tcp ? (unsigned long long)(c->tcp->rto_ns / 1000000) : 0ull,
-                c->tcp ? (int)__atomic_load_n(&c->tcp->work.queued, __ATOMIC_ACQUIRE) : -1,
-                c->tcp ? __atomic_load_n(&c->tcp->work_flags, __ATOMIC_ACQUIRE) : 0u,
-                c->tcp ? (int)c->tcp->state : -1);
+                rx_state, rx_cpu, rx_in_ms, rto_ms, work_queued, work_flags, pcb_state);
         kprintf("NETTEST: client failed: connect %d in %llu ms, sent %lld in %llu ms, "
                 "recv %lld in %llu ms, pending error %d, "
                 "sndbuf free %u before, %u after send, %u after read "
