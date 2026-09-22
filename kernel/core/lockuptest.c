@@ -263,6 +263,13 @@ static bool selftest_lockup_report_skew_pinned(const char **reason)
 
     /* Five seconds ahead, then long enough for that CPU to take several
      * ticks and stamp last_tick_ns with the skew in it. */
+    /* The victim runs nothing but a spinner of ours for the window: the
+     * skew is a lie told to whatever reads the clock on that CPU, and a
+     * thread the migrator moves there would read it too (S26). Ticks go
+     * on, which is what stamps last_tick_ns with the lie. */
+    struct spinner sp;
+    struct thread *hold = start_spinner(&sp, (unsigned)k, SCHED_PRIO_DEFAULT - 1, false);
+    CHECK(hold != NULL);
     clock_test_set_cpu_offset_ns((unsigned)k, 5ll * 1000 * 1000 * 1000);
     thread_sleep_ms(50);
 
@@ -279,6 +286,7 @@ static bool selftest_lockup_report_skew_pinned(const char **reason)
         lockup_print_samples(m);
 
     clock_test_set_cpu_offset_ns((unsigned)k, 0);
+    stop_spinner(&sp, hold);
 
     uint64_t stamp = s->stamp, now = s->now, age = s->age;
     kfree(s);

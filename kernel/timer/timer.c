@@ -123,6 +123,28 @@ uint64_t clock_now_ns(void)
 }
 
 /*
+ * The clock the kernel keeps time by: the counter and the measured
+ * per-CPU offset, and never the debug builds' injected test offset.
+ *
+ * The test offset (`clock_test_set_cpu_offset_ns`) is a lie told to
+ * *readers* of `clock_now_ns` on one CPU, so that a skewed stamp's
+ * handling can be checked. A timer armed against a lying clock and
+ * expired against the truth fires late by the lie -- five seconds, in
+ * the lockup-report-skew test -- and before threads migrated only the
+ * test's own pinned thread could arm one on the victim CPU during the
+ * window. Now any thread can be there (S26), so timers, deadlines and
+ * delays keep time here, where nothing is injected, and only what reads
+ * the clock as a value sees the test's skew.
+ */
+static uint64_t clock_time_ns(void)
+{
+    uint64_t now = clock_raw_ns();
+    if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[raw_cpu_id()]);   /* raw: the same bounded error as above */
+    return now;
+}
+
+/*
  * See the contract in timer.h. A stamp from the future is residual skew,
  * not an interval: the caller gets zero rather than a number with
  * nineteen digits in it (docs/audit/next-subsystem-cpu-clock.md).
@@ -207,9 +229,9 @@ static void clock_tick_advance(unsigned me)
 static uint64_t deadline_now_ns(void)
 {
     if (clock_is_common())
-        return clock_now_ns();
+        return clock_time_ns();   /* never the test offset: a deadline is a mechanism, not a reading */
     uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
-    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+    return ticks == 0 ? clock_time_ns() : ticks * TICK_NS;
 }
 
 #if CONFIG_DEBUG
@@ -301,8 +323,8 @@ void ndelay(uint64_t ns)
      * and it does not sleep, so the thread it runs on is the thread that
      * finishes it.
      */
-    uint64_t end = clock_now_ns() + ns;
-    while (clock_now_ns() < end)
+    uint64_t end = clock_time_ns() + ns;   /* a delay is a mechanism: never the test offset */
+    while (clock_time_ns() < end)
         arch_cpu_relax();
 }
 
@@ -362,7 +384,7 @@ void timer_start(struct timer *t, uint64_t delay_ns)
      * once -- `preempt`, `sleep` and `completion` returned in single
      * milliseconds. Kept as a note, because the two look interchangeable.
      */
-    uint64_t start = clock_now_ns();
+    uint64_t start = clock_time_ns();   /* the timer clock: never the test offset (see clock_time_ns) */
     uint64_t delay = delay_ns == 0 ? 1 : delay_ns;
     t->expires_ns = start + delay < start ? UINT64_MAX : start + delay;
     t->cpu = arch_cpu_id();
@@ -503,8 +525,8 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     /* The tick sample (kernel/core/lockup.c): what this CPU was doing,
      * and when. Two stores; the frame is already in a register. */
     pc->last_tick_pc = arch_trap_frame_pc(frame);
-    pc->last_tick_ns = now;
-    run_expired(pc->timers, now);
+    pc->last_tick_ns = now;   /* a reading: the skew tests want the lie in this stamp */
+    run_expired(pc->timers, clock_time_ns());   /* the timer clock: armed and expired against the same truth */
 #if CONFIG_SELFTEST
     /* Local by construction, and the only subtraction in the tree that
      * is: both reads are this CPU's, inside one tick, with interrupts
