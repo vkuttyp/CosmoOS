@@ -588,6 +588,9 @@ def main():
                     help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
     ap.add_argument("--chaos", action="store_true",
                     help="a SCHED_CHAOS=1 image: require the migrator's tally line with a count above zero")
+    ap.add_argument("--harness-retry", action="store_true",
+                    help="a HARNESS_BREAK=1 image: require that net-harness's first back-connection "
+                         "attempt was broken on purpose and that a later one carried the exchange")
     ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn"],
                     help="the kernel was built to crash on purpose: require that crash's panic report "
                          "and the failure exit code instead of a clean boot. 'fault' (the default: "
@@ -615,6 +618,16 @@ def main():
         # The migrator must have moved something, or the boot proved
         # nothing about the tree under migration (make test-chaos).
         required = required + [r"^\[ INFO\] sched: chaos migrated [1-9][0-9]* threads from the tick"]
+    if args.harness_retry:
+        # Both halves, or the boot proved nothing: the first attempt was
+        # really broken, and a *later* attempt carried the exchange. The
+        # second pattern excludes attempt 1, so a build whose injection
+        # silently did nothing fails here rather than passing as a normal
+        # boot (make test-harness-retry).
+        required = required + [
+            r"^NETTEST: attempt 1 broken on purpose",
+            r"^NETTEST: client ok \(attempt [2-9] of",
+        ]
 
     here = os.path.dirname(os.path.abspath(__file__))
     runner = os.path.join(here, "..", "..", "scripts", "qemu-run.sh")

@@ -78,6 +78,13 @@ CRASH_TEST ?= 0
 # never the shipped form.
 PERCPU_WARN ?= 0
 
+# HARNESS_BREAK=N makes net-harness's first N back-connection attempts
+# fail on purpose, from inside the guest, so the retry the flake needs is
+# exercised on every boot of that build rather than on one boot in twenty
+# (docs/audit/next-subsystem-nettest-retry.md). `make test-harness-retry`
+# builds and boots it. Debug builds only; never the shipped form.
+HARNESS_BREAK ?= 0
+
 # SCHED_BALANCE=0 removes the balancer: a thread then stays on the CPU
 # that placement chose for it, as it did before that unit
 # (docs/audit/next-subsystem-load-balancer.md). Shipped on; the knob

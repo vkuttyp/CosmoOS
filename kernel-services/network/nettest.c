@@ -900,6 +900,31 @@ static void h_udp_echo_thread(void *arg)
     thread_exit(0);
 }
 
+/*
+ * How many times the guest will run the back-connection exchange.
+ *
+ * Three, and the number comes from the shape of the defect rather than
+ * taste: every recorded sighting is a *single* connection being reset,
+ * never a sequence, and slirp answered a probe through the same instance
+ * in 1 ms while one connection was dead. If a second and a third attempt
+ * both die, what is being measured is no longer the flake this bound was
+ * written for, and the test should say so by failing.
+ */
+#define HARNESS_ATTEMPTS 3u
+
+#if CONFIG_DEBUG
+/*
+ * Break the first N attempts from inside the guest, so the retry path
+ * runs on every boot of a build that asks for it rather than on one boot
+ * in twenty. It shuts the socket down both ways after the connect, which
+ * is the shape the defect leaves behind -- a connection that completed
+ * its handshake and cannot carry the exchange -- without pretending to
+ * reproduce slirp's cause, which is not reproducible from in here.
+ * Set by CONFIG_HARNESS_BREAK (`make test-harness-retry`).
+ */
+static unsigned g_h_break_attempts = CONFIG_HARNESS_BREAK;
+#endif
+
 bool selftest_net_harness(const char **reason)
 {
     char cfg[64];
@@ -932,12 +957,39 @@ bool selftest_net_harness(const char **reason)
     CHECK(thread_create(h_udp_echo_thread, us, "nettest-udp", 32) != NULL);
     kprintf("NETTEST: ready tcp=7 udp=7\n");
 
-    /* Connect back to the harness through the gateway (QEMU forwards
-     * 10.0.2.2 to the host's loopback). */
+    /*
+     * Connect back to the harness through the gateway (QEMU forwards
+     * 10.0.2.2 to the host's loopback), and do it up to
+     * HARNESS_ATTEMPTS times.
+     *
+     * The retry is not for this kernel's benefit. QEMU's user-mode
+     * networking resets the guest's half of one connection while keeping
+     * its own half open, and answers a probe through the same instance a
+     * millisecond later; the guest is correct from first SYN to final
+     * reset, verified against a packet capture. Three units localised
+     * that, and a fourth could only find the same answer, because what
+     * is left is in slirp's source
+     * (docs/audit/next-subsystem-nettest-retry.md).
+     *
+     * So the exchange retries, and three things keep it honest:
+     *
+     *   - the bound is a **failure**, not a fallback: exhausting it
+     *     fails the test exactly as one reset does today, with every
+     *     attempt's full diagnostics;
+     *   - every attempt prints those diagnostics, so a boot that needed
+     *     a second one says what went wrong with the first;
+     *   - both outcome lines name the attempt, so a *passing* boot whose
+     *     first attempt was reset is still a sighting, countable by the
+     *     same grep, and `docs/testing/flakes.md` keeps counting it.
+     *
+     * A retry that hid the flake would be worse than the flake.
+     */
     bool client_ok = false;
-    struct socket *c;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    unsigned attempt = 0;
+    struct socket *c = NULL;
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
+    for (attempt = 1; attempt <= HARNESS_ATTEMPTS && !client_ok; attempt++) {
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     /* Sampled BEFORE the connect. PR #169's window opened after it
      * returned, so a reset arriving during the handshake or before the
      * first sample fell outside it -- which is why one failure showed
@@ -947,6 +999,13 @@ bool selftest_net_harness(const char **reason)
     uint64_t ns0 = clock_now_ns();
     int rc = ksock_connect(c, &host);
     uint64_t connect_ms = (clock_now_ns() - ns0) / 1000000ull;
+#if CONFIG_DEBUG
+    if (rc == 0 && attempt <= __atomic_load_n(&g_h_break_attempts, __ATOMIC_ACQUIRE)) {
+        /* The injected shape: connected, and then unusable. */
+        ksock_shutdown(c, COSMO_SHUT_RDWR);
+        kprintf("NETTEST: attempt %u broken on purpose\n", attempt);
+    }
+#endif
 
     /*
      * This exchange has failed repeatedly, on both architectures and on
@@ -1005,8 +1064,9 @@ bool selftest_net_harness(const char **reason)
     unsigned work_flags = c->tcp ? __atomic_load_n(&c->tcp->work_flags, __ATOMIC_ACQUIRE) : 0u;
     int pcb_state = c->tcp ? (int)c->tcp->state : -1;
     ksock_put(c);
+    c = NULL;
     if (client_ok) {
-        kprintf("NETTEST: client ok\n");
+        kprintf("NETTEST: client ok (attempt %u of %u)\n", attempt, HARNESS_ATTEMPTS);
     } else {
         /* The three samples are labelled by *when*, not by what they are
          * taken to mean. space1 is read after ksock_sendto has released
@@ -1037,7 +1097,11 @@ bool selftest_net_harness(const char **reason)
                 (unsigned long long)(t1.retransmits - t0.retransmits),
                 (unsigned long long)(t1.out_refused - t0.out_refused),
                 (unsigned long long)(t1.rsts_in - t0.rsts_in));
+        kprintf("NETTEST: client attempt %u of %u failed\n", attempt, HARNESS_ATTEMPTS);
     }
+    }   /* for each attempt */
+    if (!client_ok)
+        kprintf("NETTEST: client failed every attempt (%u of %u)\n", HARNESS_ATTEMPTS, HARNESS_ATTEMPTS);
 
     /* Serve echo until the harness sends QUIT (60 s budget). */
     for (unsigned i = 0; i < 6000 && !g_h_quit; i++) {
