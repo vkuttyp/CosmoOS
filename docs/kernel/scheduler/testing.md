@@ -180,7 +180,10 @@ fourth tick, on every CPU, booted through the whole suite and the
 user-mode sections; the boot test requires the tally line
 `sched: chaos migrated N threads from the tick` with `N > 0`. CI runs
 it on both architectures. Thread 0, the self-test thread, is not
-pinned: it moves too.
+pinned: it moves too. A benchmark's rate is not a claim the migrator
+must keep (`net-nicbench` reports rather than asserts its reply rate in
+this build, after CI's slower host moved its sender behind the busy
+receive worker), and a test that names another CPU pins itself.
 
 ## Waits and time bounds
 
