@@ -87,8 +87,8 @@ parses `tcp=<port>`, binds a TCP listener (backlog 4) and a UDP socket
 on port 7 of any address, starts echo threads for both, prints
 `NETTEST: ready tcp=7 udp=7`, connects to `<gateway>:<port>` (the host
 behind QEMU's `10.0.2.2`), sends `cosmo hello\n`, expects
-`cosmo world\n` and prints `NETTEST: client ok` (or `client failed
-(rc)`); then serves echo for up to 60 s until a TCP connection whose
+`cosmo world\n` and prints `NETTEST: client ok (attempt N of 3)`;
+then serves echo for up to 60 s until a TCP connection whose
 first bytes are `QUIT` arrives, prints `NETTEST: done tcp_conns=N
 udp_pkts=N quit=1`, closes everything and checks `client_ok` and the
 quit flag. The watchdog is kicked during the waits.
@@ -966,6 +966,47 @@ says what a fortnight of `TimeoutError` could not: the connection was
 accepted, and the guest's twelve bytes never arrived. The accept
 deadline and the read deadline are separate, and the failure was the
 second.
+
+### The back-connection retries, and says so
+
+The exchange runs up to **three** times, each on a fresh socket
+(`HARNESS_ATTEMPTS`, `docs/audit/next-subsystem-nettest-retry.md`). It
+is not a repair of this kernel: QEMU's user-mode networking resets the
+guest's half of one connection while keeping its own half open, and
+answers a probe through the same instance a millisecond later; the guest
+is correct from first SYN to final reset, verified against a packet
+capture. Three units localised that, and what is left is in slirp's
+source.
+
+Three things keep the retry honest, and all three are checkable in a
+boot log:
+
+- **The bound is a failure.** Exhausting it fails the test exactly as
+  one reset does, and prints
+  `NETTEST: client failed every attempt (3 of 3)`.
+- **Every attempt prints its diagnostics.** A failed attempt prints the
+  full block below and then
+  `NETTEST: client attempt N of 3 failed`, so a boot that needed a
+  second attempt says what went wrong with the first.
+- **Both outcome lines name the attempt.** A passing boot whose first
+  attempt was reset prints `client ok (attempt 2 of 3)`, which is still
+  a sighting: the same grep finds it, and `docs/testing/flakes.md`
+  counts it among the recovered ones. A retry that hid the flake would
+  be worse than the flake.
+
+CI runs it on both architectures, for a reason worth stating: a change
+that broke the retry would otherwise stay green until the flake next
+struck, and *that* failure would be indistinguishable from the flake
+itself — which is the confusion this whole unit exists to end.
+
+`make test-harness-retry` builds a `HARNESS_BREAK=1` image whose first
+attempt is shut down from inside the guest after its connect — the
+shape the defect leaves behind, a handshake that completed and a
+connection that cannot carry the exchange — so the retry runs on every
+boot of that build instead of one boot in twenty. The runner requires
+**both** halves (`--harness-retry`): that an attempt was really broken,
+and that a *later* attempt carried the exchange, so an injection that
+silently did nothing fails rather than passing as an ordinary boot.
 
 **The guest reports its half the same way.** `net-harness` used to print
 `client failed (%d)` with the *connect's* result, so every failure named

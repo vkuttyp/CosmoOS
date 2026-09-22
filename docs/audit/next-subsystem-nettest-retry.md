@@ -1,5 +1,59 @@
 # NEXT SUBSYSTEM — a back-connection that survives one reset: the harness stops being a coin flip on someone else's bug
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The measurement the report promised was not the one that
+>    answered.** The probe hunted a one-in-twenty flake for six boots
+>    and did not catch it. What settled the question instead was the
+>    injected test: with the first attempt shut down from inside the
+>    guest, **the second connection through the same slirp reached the
+>    harness and carried the exchange** — which is the claim a retry
+>    rests on, demonstrated against the real harness rather than
+>    inferred from sighting thirty. The probe ships unchanged, since the
+>    wild case is still worth catching, but the unit does not rest on
+>    it.
+> 2. **The host harness really did need no change**, and the injected
+>    boot is what proves it: PR #177's roster accepted the second
+>    connection and let it win, with nothing altered in
+>    `tests/boot/nettest.py`.
+> 3. **The retry needed its own build, not its own test.** A second
+>    exchange cannot reach the harness in the same boot: the accept loop
+>    runs `while winner is None`, so once the guest's first connection
+>    delivers the request there is no winner-less loop left to accept
+>    another. So `HARNESS_BREAK=N` and `make test-harness-retry`, in the
+>    shape `SCHED_CHAOS` and `CRASH_TEST` already set, rather than a
+>    `net-harness-retry` entry in the self-test table as the report
+>    supposed.
+> 4. **The runner requires both halves.** `--harness-retry` demands that
+>    an attempt was really broken *and* that a later one carried the
+>    exchange, because requiring only the second would pass a build
+>    whose injection silently did nothing — an ordinary boot looks
+>    exactly like a successful retry if you only check that the
+>    exchange succeeded.
+> 5. **The injected failure is not the flake's shape exactly.** A local
+>    shutdown gives `sent -32` (EPIPE) where slirp gives `sent -104`
+>    (ECONNRESET) or a reset connect. It reproduces what the retry has
+>    to survive — a connection that completed its handshake and cannot
+>    carry the exchange — and the report says so rather than claiming
+>    the cause is reproduced.
+>
+> 6. **And it goes in CI**, which the report's plan did not say. Without
+>    a step that exercises the retry, a change that broke it would stay
+>    green until the flake next struck — and that failure would be
+>    indistinguishable from the flake itself, which is the exact
+>    confusion this unit exists to end. One boot per architecture, in
+>    the shape of the chaos job already there.
+>
+> **The mutations**, each run alone on x86-64 with the boot confirmed:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | `HARNESS_ATTEMPTS` 3 → 1 | `make test-harness-retry`: `client failed every attempt (1 of 1)`, and the boot fails exactly as the flake does |
+> | 2 | `HARNESS_BREAK=3`, every attempt broken | `net-harness` fails with `client_ok`, which is what the bound being a failure means |
+>
+> No benchmark: this unit changes no path outside the self-test.
+
 Constitution §68 report. The inventory's `net-harness` row
 (`docs/audit/2026-09-deferred-work-inventory.md` §3) is the longest in
 this repository and ends in a sentence no unit of this kernel can act on:
@@ -193,8 +247,12 @@ being measured is no longer the one this row describes.
   samples, the pcb's pending error, the counters. Three units built that
   block; a retry must not discard it.
 - The boot test's summary line carries the attempt count when it is
-  above one, so `run_boot_test.py` can report it without parsing the
-  guest's log.
+  above one. *(As built: `run_boot_test.py` does parse the guest's log
+  for it -- there is no side channel and inventing one for a diagnostic
+  would be the wrong trade -- and prints
+  `boot-test: net-harness recovered on attempt N of M ... record it` on
+  any passing boot that needed a retry, so a sighting reaches whoever
+  reads the run rather than only the serial log.)*
 - `docs/testing/flakes.md` gains a section for **retried-and-recovered**
   sightings, distinct from the failures, and the tally's headline number
   keeps counting both. A recovered sighting is still a sighting.
@@ -250,19 +308,26 @@ count.
    not a retry. `tools/nettest-retry-probe.py`'s successor injects a
    reset of the first attempt from inside the guest — closing the socket
    under the test — so the retry path runs on *every* boot in that
-   build, not one in twenty.
+   build, not one in twenty. *(As built: a build knob `HARNESS_BREAK`
+   and `make test-harness-retry`, not a successor to the probe, which is
+   kept for the wild case.)*
 3. **The boot test's summary**, then the docs, the inventory row and the
-   README entry.
+   README entry. *(As built, and the summary is a log scan; see
+   above.)*
 4. **Release builds both architectures, `gmake host-test`, every
    mutation alone**, as usual.
 
 ## Tests
 
-| test | what it proves | bug-proof |
+*(As built. There is no `net-harness-retry` entry in the self-test
+table: a second exchange cannot reach the harness in the same boot, so
+the injected case is a **build**, not a test -- banner item 3.)*
+
+| run | what it proves | bug-proof |
 | --- | --- | --- |
-| `net-harness` (existing) | unchanged on the normal path: one attempt, `client ok (attempt 1 of 3)` | — |
-| `net-harness-retry` (new, fault-injected) | the first attempt's socket is reset from inside the guest; the second attempt completes and the boot passes, with the line naming attempt 2 | remove the retry: the test fails exactly as the flake does today |
-| the same, three resets | all three attempts reset → the test fails, with the last attempt's full diagnostics and `3 of 3` | make the bound unbounded: the test hangs rather than failing, which is the opposite of what a bound is for |
+| `net-harness` (existing, every boot) | unchanged on the normal path: one attempt, `client ok (attempt 1 of 3)` | -- |
+| `make test-harness-retry` (`HARNESS_BREAK=1`, CI on both architectures) | the first attempt is shut down from inside the guest after its connect; a later attempt carries the exchange and the boot passes, with `attempt 1 broken on purpose` and `client ok (attempt 2 of 3)`. The runner requires **both** lines | `HARNESS_ATTEMPTS` 3 -> 1: `client failed every attempt (1 of 1)`, and the boot fails exactly as the flake does |
+| `HARNESS_BREAK=3` | every attempt broken -> `net-harness` fails on `client_ok`, which is what the bound being a failure means | this *is* the bound's proof |
 
 The injected reset is the only honest way to test this: waiting for
 slirp to do it is a one-in-twenty event, and a test that runs one boot

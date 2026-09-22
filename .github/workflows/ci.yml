@@ -88,6 +88,17 @@ jobs:
       - name: Boot test under a chaos migrator (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-chaos
 
+      # net-harness retries its back-connection because QEMU's user-mode
+      # networking resets one connection of it on about one boot in
+      # twenty (docs/audit/next-subsystem-nettest-retry.md). Without this
+      # step the retry is never exercised here, and a change that broke
+      # it would stay green until the flake next struck -- at which point
+      # the failure would be indistinguishable from the flake itself.
+      # This boot breaks the first attempt on purpose and requires both
+      # that it broke and that a later attempt carried the exchange.
+      - name: Boot test with the harness's first attempt broken (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-harness-retry
+
       - name: Build and boot test (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 

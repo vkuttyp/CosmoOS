@@ -9,6 +9,7 @@
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
+#   make test-harness-retry  boot with net-harness's first back-connection broken on purpose
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
@@ -25,7 +26,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn test-chaos analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -121,6 +122,18 @@ test-chaos:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos \
 		--image $(OUT)-chaos/cosmoos.img --log $(OUT)-chaos/boot-test-chaos.log \
 		--kernel $(OUT)-chaos/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+
+# Build a kernel whose net-harness back-connection fails on purpose the
+# first time and boot it: the retry that exists for a QEMU defect seen on
+# one boot in twenty, exercised on this one
+# (docs/audit/next-subsystem-nettest-retry.md).
+test-harness-retry:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
+		HARNESS_BREAK=1 OUT=$(OUT)-hbreak image
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --harness-retry \
+		--image $(OUT)-hbreak/cosmoos.img --log $(OUT)-hbreak/boot-test-hbreak.log \
+		--kernel $(OUT)-hbreak/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # Build a deliberately crashing kernel into a sibling output tree and
 # verify that the panic path reports properly and the harness sees FAIL.
