@@ -1100,6 +1100,21 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         kinfo("selftest: sched-balance-hysteresis: fewer than three CPUs; skipping");
         return true;
     }
+#if CONFIG_SCHED_CHAOS
+    /* The evidence here is a worker changing CPU, and under the chaos
+     * migrator a worker changes CPU because the adversary moved it for
+     * no reason -- which is what the adversary is for. The test cannot
+     * tell that from a pull, so it declines to guess. The balancer's
+     * other claims are not affected: `sched-balance-pull` asks that
+     * threads reach idle CPUs, which chaos does not prevent, and
+     * `sched-balance-affinity` asks that a pinned thread stays put,
+     * which chaos also honours. */
+    (void)a_cpu;
+    (void)b_cpu;
+    (void)reason;
+    kinfo("selftest: sched-balance-hysteresis: the chaos migrator moves threads for no reason; skipping");
+    return true;
+#else
     unsigned before = thread_count();
     enum { W = 3 };
     static struct bal_worker w[W];
@@ -1192,7 +1207,8 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
           "through %llu scans and %llu pulls elsewhere",
           a_cpu, load_a, b_cpu, load_b, (unsigned long long)scans, (unsigned long long)(s1.pulls - s0.pulls));
     return true;
-#endif
+#endif /* CONFIG_SCHED_CHAOS */
+#endif /* CONFIG_SCHED_BALANCE */
 }
 
 bool selftest_sched_balance_hysteresis(const char **reason)
