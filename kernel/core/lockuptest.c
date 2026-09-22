@@ -254,7 +254,7 @@ static bool selftest_lockup_report_skew_pinned(const char **reason)
     return true;
 #else
     int k = other_cpu();
-    if (k < 0 || k == 0)
+    if (k < 0)   /* 0 is a valid other CPU now that the choice is relative to the pinned caller */
         return skip("lockup-report-skew");
 
     struct skewcheck *s = kzalloc(sizeof(*s));
