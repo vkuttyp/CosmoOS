@@ -872,11 +872,14 @@ so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
 are not independently re-verified here. The last fifty-eight rows carry
-the instrument's reading, forty-seven of them watched as they happened
-and eleven read from the logs afterwards: PR #167's carries
+the instrument's reading, forty-nine of them watched as they happened
+and nine of `main`'s read from the logs afterwards (**this split is the
+one figure here the table does not encode**: it is which runs were being
+watched when they failed, which no row records, so it is carried forward
+as rows are added rather than recomputed like the rest): PR #167's carries
 the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-seven
 instrumented** occurrences behind the other fifty-seven rows carry the
-guest's side. Rows and occurrences differ because **twelve** rows hold
+guest's side. Rows and occurrences differ because **fourteen** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
 
@@ -924,9 +927,12 @@ returned 12, a segment went out, and the host still saw nothing — so
 "the twelve bytes were never written" does not describe those. **And
 the successful send is not the exception this paragraph once made it
 sound.** Counted across the tally above rather than across the nine rows
-here: twenty occurrences record `sent 12` and forty-six record
-`sent -104`, the remaining rows recording neither. So roughly a third of
-the sightings that name a shape at all have the bytes on the wire, and
+here: of the eighty-two occurrences, twenty record `sent 12`,
+forty-five record `sent -104`, two record `sent -1` (the connect itself
+reset, so nothing was ever sent) and fifteen record no send value at
+all. One row holds one of each, which is why this is counted per
+occurrence and not per row. So roughly a third of
+the sightings that name a send at all have the bytes on the wire, and
 both shapes are current — 2026-09-22 produced each of them. This
 paragraph was written when the successful send was one instance, and
 nothing re-read it against the growing table until then. It
