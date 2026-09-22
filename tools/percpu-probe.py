@@ -43,9 +43,15 @@ struct percpu *arch_percpu_get_raw(void) { return probe_raw_get(); }
 
 static uintptr_t g_probe_sites[512];
 static unsigned g_probe_nsites;
+static bool g_probe_lock;   /* the lookup and the insert are one step: two CPUs meeting one site report it once */
 
 /* Report a per-CPU read made where a migration could invalidate it,
- * once per call site. Every read here is raw: the probe must not probe. */
+ * once per call site. Every read here is raw: the probe must not probe,
+ * and the lock below is a bare test-and-set for the same reason (a
+ * spinlock's own accessor reads would recurse into this function). It
+ * is taken with preemption disabled and only from a context that the
+ * checks above have already shown to be preemptible thread context, so
+ * it cannot be taken twice on one CPU. */
 static void percpu_probe(uintptr_t ip, const char *what)
 {
     struct percpu *pc = probe_raw_get();
@@ -58,13 +64,19 @@ static void percpu_probe(uintptr_t ip, const char *what)
         return;
     if (__builtin_popcountll(cur->affinity) <= 1)
         return;
+    pc->preempt_count++;
+    while (__atomic_test_and_set(&g_probe_lock, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    bool seen = false;
     for (unsigned i = 0; i < g_probe_nsites && i < 512; i++)
         if (g_probe_sites[i] == ip)
-            return;
-    unsigned n = __atomic_fetch_add(&g_probe_nsites, 1u, __ATOMIC_RELAXED);
-    if (n < 512)
-        g_probe_sites[n] = ip;
-    kwarn("PERCPU-PROBE %s ip=%p thread=%s", what, (void *)ip, cur->name);
+            seen = true;
+    if (!seen && g_probe_nsites < 512)
+        g_probe_sites[g_probe_nsites++] = ip;
+    __atomic_clear(&g_probe_lock, __ATOMIC_RELEASE);
+    pc->preempt_count--;
+    if (!seen)
+        kwarn("PERCPU-PROBE %s ip=%p thread=%s", what, (void *)ip, cur->name);
 }
 
 struct percpu *arch_percpu_get(void)
@@ -165,17 +177,39 @@ def symbolize(log, elf):
             rows.append(m.groups())
     if not rows:
         sys.exit("no PERCPU-PROBE lines in the log: was the probe applied and the debug suite booted?")
+    # The kernel reports each site once; a duplicate here means the log
+    # holds two boots, and the tally must not count it twice.
+    seen, unique = set(), []
+    for row in rows:
+        if row[1] not in seen:
+            seen.add(row[1])
+            unique.append(row)
+    if len(unique) != len(rows):
+        print(f"note: {len(rows) - len(unique)} duplicate site(s) in the log, counted once", file=sys.stderr)
     byfile = collections.Counter()
-    for what, ip, thread in rows:
+    unresolved = 0
+    for what, ip, thread in unique:
         addr = hex(int(ip, 16) - 1)   # the call instruction, not the return address
-        out = subprocess.run(["llvm-symbolizer", f"--obj={elf}", "-p", "-i", addr],
-                             capture_output=True, text=True).stdout
-        frames = [f.strip().replace("/cosmo/", "") for f in out.split("\n") if f.strip()] or ["?? at ??:0"]
+        try:
+            r = subprocess.run(["llvm-symbolizer", f"--obj={elf}", "-p", "-i", addr],
+                               capture_output=True, text=True)
+        except FileNotFoundError:
+            sys.exit("llvm-symbolizer not on PATH (the swiftly toolchain has one)")
+        if r.returncode != 0:
+            sys.exit(f"llvm-symbolizer failed on {addr}: {r.stderr.strip()}")
+        frames = [f.strip().replace("/cosmo/", "") for f in r.stdout.split("\n") if f.strip()]
+        if not frames or frames[0].split(" at ")[-1].startswith("??"):
+            # No file for it in the kernel's debug info (a symbol with no
+            # line, a loaded module, a cold section): reported as such,
+            # never as a file.
+            unresolved += 1
+            print(f"{what:9} UNRESOLVED {ip}  [{thread}]")
+            continue
         inner = frames[0]
         outer = " <- ".join(f.split(" at ")[0].replace("(inlined by) ", "") for f in frames[1:])
         print(f"{what:9} {inner}" + (f"  (inlined into {outer})" if outer else "") + f"  [{thread}]")
         byfile[inner.split(" at ")[-1].split(":")[0]] += 1
-    print(f"\n{len(rows)} sites")
+    print(f"\n{len(unique)} sites ({unresolved} unresolved: not in the kernel's symbol table)")
     for f, n in byfile.most_common():
         print(f"{n:4} {f}")
 
