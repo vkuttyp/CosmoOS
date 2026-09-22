@@ -245,7 +245,7 @@ int  file_set_nonblock(struct file *f, int on);       /* 1/0 sets, -1 asks; retu
 int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock);   /* -EAGAIN when set and not ready */
 
 /* kernel/include/kernel/tap.h */
-int tap_recv_wait(struct tap *t, bool nonblock, struct mbuf **out);   /* 0 with *out the frame, or NULL: none (non-blocking) or released; -EINTR when killed waiting */
+int tap_recv_wait(struct tap *t, bool nonblock, struct mbuf **out);   /* 0 with *out the frame, or NULL when non-blocking and none waits; -EINTR when killed waiting */
 unsigned tap_ready(struct tap *t);                                    /* WRITABLE | READABLE with a frame queued */
 struct waitqueue *tap_poll_wq(struct tap *t);                         /* rx_wait */
 
