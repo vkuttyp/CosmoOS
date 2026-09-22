@@ -43,3 +43,6 @@ __pycache__/
 # (docs/kernel-services/virtualization/testing.md). Not committed: it is
 # 34 MB and someone else's binary. The test skips cleanly when absent.
 tests/hv/aarch64/Image
+
+# tools/sched-balance-probe.py snapshots (a run that was not reverted)
+*.sched-balance-probe.orig
