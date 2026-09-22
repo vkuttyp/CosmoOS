@@ -1912,6 +1912,20 @@ boot:
   own unmap should leave nothing to refuse. Not understood; recorded
   with its line, and a second sighting is the time to instrument
   `vm_user_map_anon_replace`.
+- `tcp-pcb-timer-free`: `spins > 0` at line 674 — the cancel that was
+  supposed to wait for a parked callback did not wait at all, and the
+  test failed in 6 ms rather than after the releaser's five-second
+  bound. Once, in the first `make test-chaos` boot of the balancer
+  tree, and **not once in the eight chaos boots that followed** (three
+  with the balancer, three without, and two on AArch64), so it is not
+  the balancer: the run with it disabled is the control and the
+  failure did not follow the variable. The mechanism is unexplained.
+  The test arms the timer on another CPU so the callback runs there,
+  waits for it to enter the hold, and only then closes; for the count
+  to stay zero, no cancel can have found `q->running` set. Recorded
+  with its line, and a second sighting is the time to print which of
+  the four timers was cancelled first and what its queue's `running`
+  was.
 - `tty-isatty`: `process_count() == before` after a 500 ms wait for the
   child's release once its thread is reaped. The reaper's turn came
   later than that once under migration; the bound catches a leak, not

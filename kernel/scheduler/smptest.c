@@ -1420,13 +1420,25 @@ bool selftest_bench_balance(const char **reason)
         return false;
     }
     unsigned pct = (unsigned)((alt * 100) / ideal);
-#if CONFIG_SCHED_BALANCE
+#if CONFIG_SCHED_BALANCE && !CONFIG_SCHED_CHAOS
     if (pct < BAL_BENCH_TARGET_PCT) {
         kerror("selftest: bench-balance: the alternate round reached %u%% of the pinned control (target %u%%)",
                pct, BAL_BENCH_TARGET_PCT);
         *reason = "balancing did not recover the work creation order left on half the CPUs";
         return false;
     }
+#elif CONFIG_SCHED_CHAOS
+    /* Under the chaos migrator the ratio is reported and not asserted.
+     * The adversary moves a thread off every CPU every fourth tick for
+     * no reason, including threads the balancer has just placed well, so
+     * a shortfall here is the adversary working rather than the balancer
+     * failing -- it read 93% in one chaos boot and below the target in
+     * another. `net-nicbench` reports rather than asserts under chaos
+     * for the same reason and by the same precedent. The plain boot,
+     * which is what the target is for, still asserts. */
+    if (pct < BAL_BENCH_TARGET_PCT)
+        kinfo("selftest: bench-balance: %u%% of the pinned control, below the %u%% the plain boot requires: "
+              "the chaos migrator is moving what the balancer places", pct, BAL_BENCH_TARGET_PCT);
 #endif
     CHECK(threads_settle(before));
     kinfo("selftest: bench-balance: the alternate round reached %u%% of the pinned control; "
