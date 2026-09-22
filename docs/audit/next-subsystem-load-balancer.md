@@ -570,7 +570,7 @@ recorded in the report's banner as run:
 
 | claim | before (x86-64) | target |
 | --- | --- | --- |
-| eight created, four run, as placed | 3,924,228 (53% of ideal) | ≥ 85% of the pinned control |
+| eight created, four run, as placed | 3,924,228 (53% of ideal) | ≥ 85% of the control (**as built: of `as-placed-full`, the balanced *unpinned* round, not the pinned one; the banner says why**) |
 | four runners, as placed | 7,182,436 | within 5% of before: balancing an already-balanced machine costs nothing measurable |
 | pulls during the balanced round | n/a | 0 |
 
@@ -578,7 +578,8 @@ The same four rows on AArch64, where the loss measured 40%.
 
 The 85% target is set from what the *random* migrator already achieved
 (88% of its own boot's ideal) minus the period's latency, and it is
-deliberately not 100%: the threads spend the first tick or two of the
+deliberately not 100% (**as built it reads 99-108%, because the control
+changed to one that differs in a single thing**): the threads spend the first tick or two of the
 run where creation order put them, and a balancer that reached 100%
 would be one that moved before it had anything to go on.
 
