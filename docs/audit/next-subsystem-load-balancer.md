@@ -79,14 +79,31 @@
 >
 > **The benchmark as run**, `bench-balance`, three rounds of 500 ms:
 >
-> | boot | the alternate round, as a share of its pinned control |
-> | --- | --- |
-> | x86-64, plain | 99% |
-> | AArch64, plain | 92% |
-> | x86-64, under the chaos migrator | 93% |
-> | AArch64, under the chaos migrator | 99% |
+> The control is `as-placed-full` -- the same count of runnable threads,
+> unpinned, spread because creation order happened to do it -- because
+> that differs from the round under test in exactly one thing. The
+> pinned round was the first control and was wrong: it is spread *and*
+> never moves, so on one AArch64 boot the balanced unpinned round was
+> itself 87% of it, and the benchmark failed at 78% while the threads
+> had in fact reached all four CPUs.
 >
-> against the 53% and 60% the report measured with no balancer at all.
+> | boot | share of the balanced round | share of the pinned round |
+> | --- | --- | --- |
+> | x86-64, plain | 102% | 100% |
+> | AArch64, plain | 101% | 99% |
+> | x86-64, chaos | 99% | 100% |
+> | AArch64, chaos | 108% | 93% |
+> | x86-64, chaos, on CI's slower runner | 104% | 100% |
+>
+> against the 53% and 60% the report measured with no balancer at all --
+> which is the figure the middle column would read there, since the
+> balanced round is what the alternate round fails to become.
+>
+> The rows above 100% are the measurement's noise floor on this host and
+> not a claim that balancing beats a machine that never needed it: the
+> two rounds run the same threads for the same 500 ms and differ only in
+> where creation order put them, so a few percent either way is what an
+> iteration count does between boots.
 >
 > Not done, and deliberately: wake-time re-pick, push balancing,
 > running-thread migration, offline evacuation, NUMA, per-thread
