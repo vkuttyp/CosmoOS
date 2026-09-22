@@ -684,20 +684,37 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
      * is a scheduling stall, and the line names what ran instead. Every
      * 32 ticks, this CPU's own lists, under its own lock. */
     if ((pc->ticks & 31u) == 0) {
+        /* Gathered under the lock, printed after it: the run-queue lock is
+         * a leaf (S2), and a print takes the console lock, which the
+         * thread this tick interrupted may hold. */
+        const char *stalled = NULL, *runner = "-";
+        int sprio = 0, rprio = 0;
+        unsigned sflags = 0;
+        uint64_t waited = 0, slice = 0;
         spin_lock(&rq->lock);
-        for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
+        for (int p = 0; p < SCHED_PRIO_COUNT && stalled == NULL; p++) {
             struct thread *t;
             list_for_each_entry(t, &rq->ready[p], rq_link) {
-                uint64_t waited = clock_delta_ns(now_ns, t->ready_since_ns);
-                if (waited > NS_PER_SEC && t != rq->current)
-                    kwarn("sched: stall: '%s' (prio %d, flags 0x%x) READY on cpu %u for %llu ms behind '%s' (prio %d, preempt %d, irq_depth %u, slice %llu us)",
-                          t->name, t->priority, t->flags, rq->cpu, (unsigned long long)(waited / 1000000),
-                          rq->current ? rq->current->name : "-", rq->current ? rq->current->priority : 0,
-                          pc->preempt_count, pc->irq_depth,
-                          (unsigned long long)(rq->current ? rq->current->slice_left_ns / 1000 : 0));
+                uint64_t w = clock_delta_ns(now_ns, t->ready_since_ns);
+                if (w > NS_PER_SEC && t != rq->current) {
+                    stalled = t->name;
+                    sprio = t->priority;
+                    sflags = t->flags;
+                    waited = w;
+                    if (rq->current) {
+                        runner = rq->current->name;
+                        rprio = rq->current->priority;
+                        slice = rq->current->slice_left_ns;
+                    }
+                    break;
+                }
             }
         }
         spin_unlock(&rq->lock);
+        if (stalled != NULL)
+            kwarn("sched: stall: '%s' (prio %d, flags 0x%x) READY on cpu %u for %llu ms behind '%s' (prio %d, preempt %d, irq_depth %u, slice %llu us)",
+                  stalled, sprio, sflags, rq->cpu, (unsigned long long)(waited / 1000000), runner, rprio,
+                  pc->preempt_count, pc->irq_depth, (unsigned long long)(slice / 1000));
     }
 #endif
 }
