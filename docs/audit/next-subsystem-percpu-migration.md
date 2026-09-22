@@ -191,6 +191,21 @@ migration rather than one that meets it for the first time.
       which on the CI sighting showed the pcb already detached by the
       reset. Recorded in `docs/testing/flakes.md`: the family, at a
       higher rate under the migrator.
+    - **Review found the one the chaos boot had not: a stack timer's
+      frame can go before the queue is done with the timer.** The tick's
+      `run_expired` called the callback and then wrote `t->state` --
+      correct while the timer's owner, woken by that callback, could only
+      run after the tick on the same CPU returned. With migration the
+      owner can be running on another CPU before the callback returns,
+      and `thread_sleep_ns`, `io_poll` and `futex_wait` unwind the frame
+      the timer lives in: a write into a dead frame. The queue now sets
+      the timer IDLE before the callback and never touches it after;
+      `q->running` carries what `timer_cancel_sync` waits for. The same
+      round: the harness's diagnostic read its socket after releasing it,
+      the stall detector kept a name pointer into a thread another CPU
+      may free, affinity was written without the lock its readers hold,
+      the IOMMU wait continued on timeout, and six no-migration
+      sentences remained in the docs -- all fixed.
     - *CI's first chaos boot* (x86-64, a slower host than this one)
       failed `net-nicbench` on its second interface: 64 ARP requests sent
       where 2000 are usual, none counted back in the window, 505 frames

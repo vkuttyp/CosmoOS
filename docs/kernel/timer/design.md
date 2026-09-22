@@ -97,6 +97,14 @@ re-cancels after every wait (a callback may have re-armed); see
 lock, call `fn`, re-take the lock, clear `q->running`, mark IDLE unless
 the callback re-armed. A callback may re-arm its own timer.
 
+### A timer after its callback
+
+`run_expired` sets a timer IDLE before calling its callback and does not
+touch it afterwards (T14): the callback may have woken the timer's
+owner, and with threads migrating that owner may be running on another
+CPU, unwinding the stack frame the timer lives in, before the callback
+even returns. What the tail needs is the queue's (`q->running`).
+
 ### The clock a mechanism keeps time by
 
 `clock_now_ns` is a *reading*: the counter, the measured per-CPU offset,

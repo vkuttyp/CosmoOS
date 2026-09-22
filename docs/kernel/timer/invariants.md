@@ -69,13 +69,26 @@ in interrupt context. Check: review; used by the `timer` and
 `irq-route` tests inside thread 0 before any sleep facility is proven.
 
 **T13. A callback may re-arm its own timer.** `timer_start` accepts a
-timer in state IDLE or RUNNING (RUNNING means "its callback is
-executing"); only PENDING is a double start and panics. After the
-callback returns, `run_expired` sets IDLE only if the state is still
-RUNNING, so a re-armed (PENDING) timer is left on the queue. An earlier
-draft accepted only IDLE, which made the documented periodic pattern
-panic (found in review, PR #3). Check: test `timer`, self-rearming
-callback fires exactly four times and ends IDLE.
+timer in state IDLE or RUNNING; only PENDING is a double start and
+panics. `run_expired` sets a timer IDLE *before* calling its callback
+(it was RUNNING during the callback, and set IDLE after, until the
+percpu-migration unit; see T14), so a callback that re-arms finds IDLE
+and a re-armed (PENDING) timer is left on the queue. An earlier draft
+accepted only IDLE, which made the documented periodic pattern panic
+(found in review, PR #3). Check: test `timer`, self-rearming callback
+fires exactly four times and ends IDLE.
+
+**T14. The queue does not touch a timer after its callback returns.** A
+callback that wakes the timer's owner lets that owner run -- on another
+CPU, concurrently with the tick's tail, now that threads migrate
+(scheduler S26) -- and unwind the frame a stack timer lives in
+(`thread_sleep_ns`, `io_poll`, `futex_wait`). Everything the tail needs
+afterwards is the queue's own (`q->running`, which `timer_cancel_sync`
+waits on); the timer's state is written before the callback (T13). The
+old tail's `t->state = IDLE` after the callback was a write into a dead
+frame the moment the owner resumed elsewhere (found in review of the
+percpu-migration unit). Check: review; `make test-chaos` on both
+architectures, where every sleeper's wake can be followed by a move.
 
 ## Gaps
 
