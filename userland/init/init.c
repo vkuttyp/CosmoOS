@@ -1276,6 +1276,7 @@ static int signal_probe(const char *kind);
 static int mmap_probe(const char *what);
 static int unix_probe(const char *kind);
 static int fifo_probe(const char *kind);
+static int devices_probe(const char *kind);
 
 static int probe(const char *kind)
 {
@@ -1532,6 +1533,8 @@ static int probe(const char *kind)
         return unix_probe(kind + 5);
     if (strncmp(kind, "fifo-", 5) == 0)
         return fifo_probe(kind + 5);
+    if (strncmp(kind, "devices-", 8) == 0)
+        return devices_probe(kind + 8);
     return signal_probe(kind);
 }
 
@@ -4980,6 +4983,162 @@ static void fifo_selftest(void)
     }
 }
 
+/* --- devices that can be waited on: the `devices` section and the children
+ * of it and of the kernel's tap-ready (docs/audit/next-subsystem-device-readiness.md) --- */
+
+#define DEV_ROUNDS 200u
+
+/* An ARP request for the gateway of the tap's subnet. Each open of
+ * /dev/net/tap is its own subnet from the pool 10.0.(3+k).0/24, and the
+ * opener does not learn which: ask every gateway the pool can have, and
+ * the tap's own stack answers exactly one. */
+static size_t dev_arp_request(uint8_t *req, unsigned k)
+{
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
+    uint32_t host_ip = htonl((10u << 24) | (0u << 16) | ((3u + k) << 8) | 1u);
+    uint32_t guest_ip = htonl((10u << 24) | (0u << 16) | ((3u + k) << 8) | 15u);
+    memset(req, 0, 42);
+    memset(req, 0xff, 6);
+    memcpy(req + 6, guest_mac, 6);
+    req[12] = 0x08; req[13] = 0x06;
+    req[15] = 1;
+    req[16] = 0x08;
+    req[18] = 6; req[19] = 4;
+    req[21] = 1;
+    memcpy(req + 22, guest_mac, 6);
+    memcpy(req + 28, &guest_ip, 4);
+    memcpy(req + 38, &host_ip, 4);
+    return 42;
+}
+
+static int dev_ask_gateways(int fd)
+{
+    uint8_t req[42];
+    for (unsigned k = 0; k < 8; k++) {
+        dev_arp_request(req, k);
+        if (write(fd, req, sizeof(req)) != (ssize_t)sizeof(req))
+            return -1;
+    }
+    return 0;
+}
+
+static int dev_is_arp_reply(const uint8_t *fr, ssize_t n)
+{
+    return n >= 42 && fr[12] == 0x08 && fr[13] == 0x06 && fr[21] == 2;
+}
+
+static int devices_probe(const char *kind)
+{
+    if (strcmp(kind, "tapread") == 0) {
+        /* The kernel's tap-ready kills this while the read waits on a tap nobody feeds. */
+        int fd = open("/dev/net/tap", O_RDWR);
+        if (fd < 0)
+            return 10;
+        uint8_t fr[2048];
+        ssize_t n = read(fd, fr, sizeof(fr));
+        return n < 0 ? 11 : 12;   /* neither: killed inside the read */
+    }
+    if (strcmp(kind, "tapshare") == 0) {
+        /* Handle 3 is the parent's open tap file, shared. Make it blocking (the
+         * bit is the open file's, so this switches the parent's view too),
+         * then read: the parent's request and the stack's reply end the wait. */
+        if (cosmo_setnonblock(3, 0) != 0)
+            return 10;
+        uint8_t fr[2048];
+        ssize_t n = read(3, fr, sizeof(fr));
+        if (!dev_is_arp_reply(fr, n))
+            return 11;
+        return 0;
+    }
+    return 99;
+}
+
+static void devices_selftest(void)
+{
+    uint8_t fr[2048];
+    struct cosmo_sqe sq[2];
+    struct cosmo_cqe cq[4];
+
+    int tap = open("/dev/net/tap", O_RDWR | O_NONBLOCK);
+    CHECK(tap >= 0);
+    /* Readiness through the file: writable, not readable; a request makes a reply readable. */
+    CHECK(cosmo_ioready(tap) == COSMO_IO_WRITABLE);
+    CHECK(read(tap, fr, sizeof(fr)) == 0);                       /* non-blocking, none: 0 (the tap's contract) */
+    CHECK(dev_ask_gateways(tap) == 0);
+    long ready = 0;
+    for (unsigned i = 0; i < 200 && !(ready & COSMO_IO_READABLE); i++) {
+        ready = cosmo_ioready(tap);
+        if (!(ready & COSMO_IO_READABLE))
+            usleep(1000);
+    }
+    CHECK(ready == (COSMO_IO_WRITABLE | COSMO_IO_READABLE));
+    ssize_t n = read(tap, fr, sizeof(fr));
+    CHECK(dev_is_arp_reply(fr, n));
+    CHECK(read(tap, fr, sizeof(fr)) == 0);
+    CHECK(cosmo_ioready(tap) == COSMO_IO_WRITABLE);
+    /* The ring: a READ on the tap parks until a frame is transmitted, then
+     * completes with it -- the constitution's "async I/O must work for
+     * devices", shown. */
+    int ring = (int)cosmo_aio_create(8, 0);
+    CHECK(ring >= 0);
+    memset(sq, 0, sizeof(sq));
+    sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .handle = tap, .addr = (uint64_t)fr, .len = sizeof(fr), .user_data = 1 };
+    CHECK(cosmo_aio_submit(ring, sq, 1) == 1);
+    CHECK(cosmo_aio_wait(ring, cq, 4, 0, 0) == 0);                /* parked: nothing completes */
+    CHECK(cosmo_aio_wait(ring, cq, 4, 1, 20000000) == 0);         /* 20 ms: still parked */
+    CHECK(dev_ask_gateways(tap) == 0);
+    long got = cosmo_aio_wait(ring, cq, 4, 1, 2000000000ull);
+    CHECK(got == 1 && cq[0].user_data == 1 && dev_is_arp_reply(fr, (ssize_t)cq[0].result));
+    /* POLL on the device parks too, and completes with the bit. */
+    sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_POLL, .handle = tap, .events = COSMO_IO_READABLE, .user_data = 2 };
+    CHECK(cosmo_aio_submit(ring, sq, 1) == 1);
+    CHECK(cosmo_aio_wait(ring, cq, 4, 1, 20000000) == 0);
+    CHECK(dev_ask_gateways(tap) == 0);
+    got = cosmo_aio_wait(ring, cq, 4, 1, 2000000000ull);
+    CHECK(got == 1 && cq[0].user_data == 2 && cq[0].result == COSMO_IO_READABLE);
+    CHECK(dev_is_arp_reply(fr, read(tap, fr, sizeof(fr))));
+    /* The bench: frame-to-wake latency -- a request written, the time until
+     * the READ parked on the tap completes with the reply -- against the
+     * 2 ms poll interval (floored to a tick) vmctl's loop imposes today. */
+    uint64_t lat = 0;
+    for (unsigned i = 0; i < DEV_ROUNDS; i++) {
+        sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .handle = tap, .addr = (uint64_t)fr, .len = sizeof(fr), .user_data = 3 };
+        CHECK(cosmo_aio_submit(ring, sq, 1) == 1);
+        uint64_t t0 = cosmo_clock_ns();
+        CHECK(dev_ask_gateways(tap) == 0);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 2000000000ull) == 1 && cq[0].user_data == 3);
+        lat += cosmo_clock_since_ns(t0);
+    }
+    CHECK(close(ring) == 0);
+    /* A child given the same open file reads it blocking: its read ends on
+     * the reply to a request this process writes. The mode is the open
+     * file's, so the child's switch is seen here and undone after. */
+    {
+        struct spawn_handle map[] = { { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 2, 2, 0, 0 }, { 3, tap, 0, 0 } };
+        const char *argv[] = { "init", "--probe", "devices-tapshare", NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, map, 4);
+        CHECK(pid > 0);
+        usleep(50000);   /* the child is in its read */
+        CHECK(dev_ask_gateways(tap) == 0);
+        int cst = -1;
+        CHECK(waitpid(pid, &cst, 0) == pid && cst == 0);
+        CHECK(cosmo_setnonblock(tap, 1) == 0);
+    }
+    /* setnonblock: the tap file switches, the console object still does not. */
+    CHECK(cosmo_setnonblock(tap, 1) == 0);
+    CHECK(cosmo_setnonblock(0, 1) == -COSMO_EOPNOTSUPP);
+    /* /dev/console opened: its readiness is the console object's. */
+    int con = open("/dev/console", O_RDWR);
+    CHECK(con >= 0);
+    CHECK(cosmo_ioready(con) == cosmo_ioready(0));
+    CHECK(cosmo_setnonblock(con, 1) == 0 && cosmo_setnonblock(con, 0) == 0);
+    CHECK(close(con) == 0);
+    CHECK(close(tap) == 0);
+    fprintf(stderr, "USERBENCH: devices: %llu ns from a frame written to the ring's read completing on the tap, "
+                    "against a 2 ms poll floored to a tick\n",
+            (unsigned long long)(lat / DEV_ROUNDS));
+}
+
 static const struct selftest_section g_sections[] = {
     { "fs",       fs_selftest },
     { "mmap",     mmap_selftest },
@@ -4987,6 +5146,7 @@ static const struct selftest_section g_sections[] = {
     { "net",      net_selftest },
     { "unix",     unix_selftest },
     { "fifo",     fifo_selftest },
+    { "devices",  devices_selftest },
     { "proc",     proc_selftest },
     { "fpu",      fpu_selftest },
     { "trap",     trap_selftest },

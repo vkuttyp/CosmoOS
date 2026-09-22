@@ -1632,6 +1632,177 @@ static int64_t do_poll(uint64_t ufds, unsigned n, uint64_t timeout_ns)
     return rc;
 }
 
+/*
+ * select and pselect6 (the device-readiness unit): three fd_sets of `nfds`
+ * bits, one io_pollfd per fd that has a read or write bit, io_poll, and
+ * the sets rewritten with what came back. Linux's own sets are: readable
+ * = POLLIN|POLLHUP|POLLERR, writable = POLLOUT|POLLERR, exceptional =
+ * POLLPRI -- and no object in this tree reports a priority event (there
+ * is no urgent-data path; COSMO_IO_ERROR is POLLERR, which select never
+ * puts in the except set), so the except set is polled for nothing and
+ * always comes back clear. A bit for a closed fd is -EBADF, as Linux
+ * answers; nfds above LX_FD_SETSIZE is -EINVAL. The result is the number
+ * of bits set across the three sets.
+ */
+#define LX_FD_WORDS (LX_FD_SETSIZE / 64)
+
+struct lx_fdset_io {
+    uint64_t bits[LX_FD_WORDS];
+    uint64_t uptr;      /* the user's set, or 0 */
+};
+
+static int fdset_in(struct lx_fdset_io *s, uint64_t uptr, unsigned words)
+{
+    memset(s->bits, 0, sizeof(s->bits));
+    s->uptr = uptr;
+    if (uptr == 0 || words == 0)
+        return 0;
+    return copy_from_user(s->bits, uptr, words * sizeof(uint64_t)) ? -EFAULT : 0;
+}
+
+static bool fdset_test(const struct lx_fdset_io *s, unsigned fd)
+{
+    return (s->bits[fd / 64] >> (fd % 64)) & 1u;
+}
+
+static int64_t do_select(int nfds, uint64_t urd, uint64_t uwr, uint64_t uex, uint64_t timeout_ns)
+{
+    if (nfds < 0 || nfds > LX_FD_SETSIZE)
+        return -EINVAL;
+    unsigned words = ((unsigned)nfds + 63) / 64;
+    struct lx_fdset_io rd, wr, ex;
+    int rc = fdset_in(&rd, urd, words);
+    if (rc == 0)
+        rc = fdset_in(&wr, uwr, words);
+    if (rc == 0)
+        rc = fdset_in(&ex, uex, words);
+    if (rc)
+        return rc;
+    /* One entry per fd named in any set. */
+    unsigned n = 0;
+    for (int fd = 0; fd < nfds; fd++)
+        if (fdset_test(&rd, (unsigned)fd) || fdset_test(&wr, (unsigned)fd) || fdset_test(&ex, (unsigned)fd))
+            n++;
+    struct io_pollfd *fds = NULL;
+    int *fdnum = NULL;
+    if (n) {
+        fds = kmalloc(n * sizeof(*fds), KMEM_ZERO);
+        fdnum = kmalloc(n * sizeof(*fdnum), 0);
+        if (fds == NULL || fdnum == NULL) {
+            kfree(fds);
+            kfree(fdnum);
+            return -ENOMEM;
+        }
+    }
+    struct process *p = process_current();
+    unsigned k = 0;
+    int64_t result = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        bool r = fdset_test(&rd, (unsigned)fd), w = fdset_test(&wr, (unsigned)fd), x = fdset_test(&ex, (unsigned)fd);
+        if (!r && !w && !x)
+            continue;
+        unsigned rights;
+        struct kobject *obj = handle_get(&p->handles, fd, &rights);
+        if (obj == NULL || kobject_io_of(obj) == NULL) {
+            if (obj)
+                kobject_put(obj);
+            result = -EBADF;   /* Linux: a bit for a closed fd */
+            break;
+        }
+        fds[k].obj = obj;
+        fds[k].events = (r ? COSMO_IO_READABLE : 0) | (w ? COSMO_IO_WRITABLE : 0);
+        fdnum[k] = fd;
+        k++;
+    }
+    if (result == 0)
+        result = io_poll(fds, k, timeout_ns);
+    /* The sets, rewritten: Linux's readable set is POLLIN|POLLHUP|POLLERR,
+     * its writable set POLLOUT|POLLERR; the except set is always clear. */
+    if (result >= 0) {
+        memset(rd.bits, 0, sizeof(rd.bits));
+        memset(wr.bits, 0, sizeof(wr.bits));
+        memset(ex.bits, 0, sizeof(ex.bits));
+        result = 0;
+        for (unsigned i = 0; i < k; i++) {
+            unsigned ev = fds[i].revents;
+            unsigned fd = (unsigned)fdnum[i];
+            if ((fds[i].events & COSMO_IO_READABLE) && (ev & (COSMO_IO_READABLE | COSMO_IO_HANGUP | COSMO_IO_ERROR))) {
+                rd.bits[fd / 64] |= 1ull << (fd % 64);
+                result++;
+            }
+            if ((fds[i].events & COSMO_IO_WRITABLE) && (ev & (COSMO_IO_WRITABLE | COSMO_IO_ERROR))) {
+                wr.bits[fd / 64] |= 1ull << (fd % 64);
+                result++;
+            }
+        }
+    }
+    for (unsigned i = 0; i < k; i++)
+        kobject_put(fds[i].obj);
+    kfree(fds);
+    kfree(fdnum);
+    if (result >= 0 && words) {
+        if ((rd.uptr && copy_to_user(rd.uptr, rd.bits, words * sizeof(uint64_t))) ||
+            (wr.uptr && copy_to_user(wr.uptr, wr.bits, words * sizeof(uint64_t))) ||
+            (ex.uptr && copy_to_user(ex.uptr, ex.bits, words * sizeof(uint64_t))))
+            result = -EFAULT;
+    }
+    return result;
+}
+
+/* pselect6's sixth argument: Linux's pair { const sigset_t *ss; size_t ss_len }. */
+struct lx_sigset_arg {
+    uint64_t ss;
+    uint64_t ss_len;
+};
+
+static int64_t lx_pselect6(struct syscall_args *a)
+{
+    uint64_t timeout_ns = IO_POLL_FOREVER;
+    if (a->a[4]) {
+        int rc = ns_from_timespec(a->a[4], &timeout_ns);
+        if (rc)
+            return rc;
+    }
+    uint64_t mask = 0, old = 0;
+    bool swap = false;
+    if (a->a[5]) {
+        struct lx_sigset_arg sa;
+        if (copy_from_user(&sa, a->a[5], sizeof(sa)))
+            return -EFAULT;
+        if (sa.ss) {
+            if (sa.ss_len != 8)
+                return -EINVAL;
+            if (copy_from_user(&mask, sa.ss, 8))
+                return -EFAULT;
+            swap = true;
+        }
+    }
+    if (swap) {
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    int64_t rc = do_select((int)a->a[0], a->a[1], a->a[2], a->a[3], timeout_ns);
+    if (swap)
+        signal_set_blocked_saved(old);
+    return rc;
+}
+
+/* The legacy select (x86-64 only): a timeval, which Linux writes the time
+ * left back into and this door leaves as given (documented deviation). */
+static __maybe_unused int64_t lx_select(struct syscall_args *a)
+{
+    uint64_t timeout_ns = IO_POLL_FOREVER;
+    if (a->a[4]) {
+        struct lx_timeval tv;
+        if (copy_from_user(&tv, a->a[4], sizeof(tv)))
+            return -EFAULT;
+        if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
+            return -EINVAL;
+        timeout_ns = (uint64_t)tv.tv_sec * 1000000000ull + (uint64_t)tv.tv_usec * 1000ull;
+    }
+    return do_select((int)a->a[0], a->a[1], a->a[2], a->a[3], timeout_ns);
+}
+
 static __maybe_unused int64_t lx_poll(struct syscall_args *a)
 {
     int timeout_ms = (int)a->a[2];
@@ -2465,6 +2636,10 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_poll] = lx_poll,
 #endif
     [LX_ppoll] = lx_ppoll,
+    [LX_pselect6] = lx_pselect6,
+#ifdef LX_select
+    [LX_select] = lx_select,
+#endif
     [LX_tkill] = lx_tkill,
     [LX_ioctl] = lx_ioctl,
     [LX_pread64] = lx_pread64,

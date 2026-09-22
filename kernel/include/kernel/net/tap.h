@@ -33,6 +33,17 @@ int tap_inject(struct tap *t, const void *frame, uint32_t len);
 /* The next frame the stack transmitted out the tap (the far end's to read),
  * or NULL when none waits. The caller owns it and frees it (m_freem). */
 struct mbuf *tap_recv(struct tap *t);
+/* The same, waiting for one unless `nonblock` (the device-readiness unit):
+ * 0 with *out the frame, or 0 with *out NULL when non-blocking and none
+ * waits; -EINTR when killed waiting. A waiter is woken by every frame
+ * tap_transmit queues; nothing else ends the wait (a reader holds the
+ * tap's file, so the tap cannot be destroyed under it). */
+int tap_recv_wait(struct tap *t, bool nonblock, struct mbuf **out);
+/* Readiness of the far end's channel: WRITABLE always (an injected frame
+ * is delivered or dropped, never refused for room), READABLE with a frame
+ * queued; and the queue a reader sleeps on. */
+unsigned tap_ready(struct tap *t);
+struct waitqueue *tap_poll_wq(struct tap *t);
 
 struct netif *tap_netif(struct tap *t);   /* for tests and lookups */
 

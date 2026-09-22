@@ -115,6 +115,7 @@ struct lx_rlimit {
 #define LX_POLLWRNORM 0x100
 #define LX_POLLRDHUP 0x2000
 #define LX_POLL_MAX 1024
+#define LX_FD_SETSIZE 1024   /* select's fd_set: 16 words of 64 bits */
 struct lx_pollfd {
     int32_t fd;
     int16_t events;

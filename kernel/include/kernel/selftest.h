@@ -165,6 +165,7 @@ bool selftest_process_nproc(const char **reason);     /* NPROC admission under c
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
 bool selftest_tty_ldisc(const char **reason);
+bool selftest_tty_devready(const char **reason);   /* the terminal's files report readiness (the device-readiness unit) */
 
 /* kernel/core/fbtest.c: the framebuffer console, checked by reading the
  * pixels back, and what it costs. */
@@ -298,6 +299,7 @@ bool selftest_net_cksum(const char **reason);
 bool selftest_net_arp(const char **reason);
 bool selftest_tap(const char **reason);
 bool selftest_tap_filter(const char **reason);
+bool selftest_tap_ready(const char **reason);      /* the tap's file can be waited on (the device-readiness unit) */
 bool selftest_net_dhcp(const char **reason);
 bool selftest_net_dns(const char **reason);
 bool selftest_net_dnat(const char **reason);

@@ -67,6 +67,10 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n);
  * one line (or a prefix of it when `len` is smaller), 0 at an EOF mark,
  * -EINTR when the calling process is being killed. */
 int64_t tty_read(struct tty *t, void *buf, size_t len);
+/* The same with the caller's non-blocking bit (a device file's open mode):
+ * -EAGAIN instead of waiting when set and nothing is ready. tty_read is
+ * this with false, the console object's mode. */
+int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock);
 /* A complete line (or an EOF mark) waits: tty_read would not block. Any context. */
 bool tty_has_line(struct tty *t);
 /* Whether a read would return rather than block: something is queued,

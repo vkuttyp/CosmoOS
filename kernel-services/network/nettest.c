@@ -4911,7 +4911,7 @@ bool selftest_net_multiguest(const char **reason)
 
     /* (1) eight opens are eight taps on eight distinct subnets; a ninth is refused. */
     for (unsigned k = 0; k < MG_MAX; k++) {
-        CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f[k]) == 0 && f[k] != NULL);
+        CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[k]) == 0 && f[k] != NULL);
         char name[8];
         ksnprintf(name, sizeof(name), "tap%u", k);
         struct netif *n = netif_find(name);
@@ -4919,7 +4919,7 @@ bool selftest_net_multiguest(const char **reason)
         netif_put(n);
     }
     struct file *ninth = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &ninth) == -ENOSPC && ninth == NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &ninth) == -ENOSPC && ninth == NULL);
 
     /* (2) a frame written to one file reaches only that file's tap: an ARP
      * for tap0's address answered on file 0, nothing on file 1. */
@@ -5000,7 +5000,7 @@ bool selftest_net_multiguest(const char **reason)
     netif_put(kept);
     unsigned nr = nat_pf_list(rules, NAT_PF_MAX);
     CHECK(nr == 1 && rules[0].guest_ip == gb);   /* tap0's guest purged, tap1's kept */
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f[0]) == 0);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[0]) == 0);
     struct netif *again = netif_find("tap0");
     CHECK(again != NULL && again->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
     netif_put(again);
@@ -5061,8 +5061,8 @@ bool selftest_net_firewall(const char **reason)
     /* Two guests through /dev/net/tap, as vmctl opens them (so each attaches
      * to the firewall): A on tap0 (10.0.3.15), B on tap1 (10.0.4.15). */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0a };
     static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0b };
@@ -5211,7 +5211,7 @@ bool selftest_net_firewall(const char **reason)
                               .verdict = FW_ACCEPT, .dst_ip = ga, .dst_port = 5000 };
     CHECK(fw_rule_add(gb, 0, &b_rule) == -ENOENT);       /* an add after teardown is refused */
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
     { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&   /* the reused address inherits nothing: */
           listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);   /* only the fresh seeds */
@@ -5354,8 +5354,8 @@ bool selftest_net_input(const char **reason)
 
     /* Two guests through /dev/net/tap (so each attaches): A on tap0, B on tap1. */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     uint32_t gb = IPV4_ADDR(10, 0, 4, 15), gwb = IPV4_ADDR(10, 0, 4, 1);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0e, 0x00, 0x0a };
@@ -5535,7 +5535,7 @@ bool selftest_net_input(const char **reason)
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     file_put(fb); fb = NULL;
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&
           listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);
 
@@ -5833,7 +5833,7 @@ bool selftest_net_hostinput(const char **reason)
         nettest_seed_arp(tap_netif(u), w[i], wmac[i]);
     /* And one guest through /dev/net/tap (so it attaches): A on tap0. */
     struct file *fa = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0f, 0x00, 0x0a };
     static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
@@ -6699,8 +6699,8 @@ bool selftest_net_hoststate(const char **reason)
      * a masqueraded guest-to-world flow leaves through output_on, not
      * ipv4_output, and loopback never reaches a chain. */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2a };
     static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2b };
@@ -6834,7 +6834,7 @@ bool selftest_net_output(const char **reason)
     CHECK(u != NULL);
     nettest_seed_arp(tap_netif(u), w, wmac);
     struct file *fa = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
 
@@ -7457,3 +7457,155 @@ bool selftest_net_tcpverdict(const char **reason)
     return true;
 }
 
+
+/* --- tap-ready: the tap's file can be waited on (the device-readiness
+ * unit). Opened as a file: readiness, the wait queue, a blocking read that
+ * waits for a frame the stack transmits, io_poll, the non-blocking mode,
+ * and a process killed inside the read. --- */
+
+#include <kernel/bootarchive.h>
+#include <kernel/poll.h>
+#include <kernel/process.h>
+
+struct tapready_reader {
+    struct file *f;
+    uint8_t buf[128];
+    int64_t got;
+    unsigned done;
+};
+
+static void tapready_reader_main(void *arg)
+{
+    struct tapready_reader *r = arg;
+    r->got = file_read(r->f, r->buf, sizeof(r->buf));
+    __atomic_store_n(&r->done, 1, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+static bool tapready_flag_within(const unsigned *flag, unsigned ms)
+{
+    uint64_t end = clock_now_ns() + (uint64_t)ms * 1000000ull;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (clock_now_ns() > end)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
+/* One 64-byte frame transmitted out the tap `nif` (the shape the `tap` test uses). */
+static bool tapready_transmit(struct netif *nif, uint8_t tag)
+{
+    struct mbuf *m = m_getcl();
+    if (m == NULL)
+        return false;
+    memset(m->data, 0, 64);
+    m->data[12] = 0x08;
+    m->data[14] = tag;
+    m->len = m->pkt.len = 64;
+    return netif_transmit(nif, m) == 0;
+}
+
+#define TCHECK(cond)                                                                         \
+    do {                                                                                     \
+        if (!(cond)) {                                                                       \
+            *reason = "tap-ready: " #cond;                                                   \
+            ok = false;                                                                      \
+            goto out;                                                                        \
+        }                                                                                    \
+    } while (0)
+
+bool selftest_tap_ready(const char **reason)
+{
+    bool ok = true;
+    struct file *f = NULL;
+    struct thread *th = NULL;
+    struct process *p = NULL;
+    struct netif *nif = NULL;
+    struct tapready_reader rd = { 0 };
+    uint8_t buf[128];
+    TCHECK(netif_find("tap0") == NULL);   /* no tap open: the probe's will be tap0 */
+
+    TCHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f) == 0);   /* blocking: the device's default */
+    nif = netif_find("tap0");
+    TCHECK(nif != NULL);
+    /* Readiness: writable always, not readable with nothing queued; a queue to wait on. */
+    TCHECK(kobject_ready(&f->obj) == COSMO_IO_WRITABLE);
+    TCHECK(kobject_poll_wq(&f->obj, COSMO_IO_READABLE) != NULL);
+    TCHECK(kobject_poll_wq(&f->obj, COSMO_IO_WRITABLE) == NULL);
+    /* A blocking read waits for a frame, and returns it once the stack transmits one. */
+    rd.f = f;
+    th = thread_create(tapready_reader_main, &rd, "tapready-rd", 32);
+    TCHECK(th != NULL);
+    TCHECK(!tapready_flag_within(&rd.done, 30));
+    TCHECK(tapready_transmit(nif, 0x11));
+    TCHECK(tapready_flag_within(&rd.done, 2000));
+    thread_join(th);
+    th = NULL;
+    TCHECK(rd.got == 64 && rd.buf[14] == 0x11);
+    /* io_poll: nothing ready times out; a transmit wakes it. */
+    struct io_pollfd pf = { .obj = &f->obj, .events = COSMO_IO_READABLE };
+    TCHECK(io_poll(&pf, 1, 20 * 1000000ull) == 0);
+    TCHECK(tapready_transmit(nif, 0x22));
+    TCHECK(io_poll(&pf, 1, 2000 * 1000000ull) == 1 && (pf.revents & COSMO_IO_READABLE));
+    TCHECK(kobject_ready(&f->obj) == (COSMO_IO_WRITABLE | COSMO_IO_READABLE));
+    /* Non-blocking: the frame, then 0 when none waits (the tap unit's contract, kept). */
+    TCHECK(kobject_set_nonblock(&f->obj, 1) == 0);
+    TCHECK(file_read(f, buf, sizeof(buf)) == 64 && buf[14] == 0x22);
+    TCHECK(file_read(f, buf, sizeof(buf)) == 0);
+    TCHECK(kobject_ready(&f->obj) == COSMO_IO_WRITABLE);
+    TCHECK(kobject_set_nonblock(&f->obj, 0) == 1);
+    netif_put(nif);
+    nif = NULL;
+    file_put(f);
+    f = NULL;
+    TCHECK(netif_find("tap0") == NULL);
+
+    /* A process blocked in the tap's read (its own tap, no frame coming) is
+     * killed: the read returns -EINTR, the process exits 137, and the tap
+     * it held goes only after -- the reader held the file. */
+    const void *image;
+    size_t image_size;
+    if (bootarchive_find("init", &image, &image_size)) {
+        const char *argv[] = { "init", "--probe", "devices-tapread", NULL };
+        TCHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+        /* Until its open made a tap and its read is waiting. */
+        uint64_t end = clock_now_ns() + 5000ull * 1000000ull;
+        struct netif *held = NULL;
+        while ((held = netif_find("tap0")) == NULL && clock_now_ns() < end)
+            thread_sleep_ms(1);
+        TCHECK(held != NULL);
+        netif_put(held);
+        thread_sleep_ms(30);
+        TCHECK(!completion_done(&p->exited));
+        held = netif_find("tap0");           /* still held by the blocked reader */
+        TCHECK(held != NULL);
+        netif_put(held);
+        process_kill(p, COSMO_SIGKILL);
+        int status = process_wait_exit(p);
+        TCHECK(status == 128 + COSMO_SIGKILL);
+        process_put(p);
+        p = NULL;
+        end = clock_now_ns() + 2000ull * 1000000ull;
+        while ((held = netif_find("tap0")) != NULL && clock_now_ns() < end) {
+            netif_put(held);
+            thread_sleep_ms(1);
+        }
+        TCHECK(held == NULL);                 /* released after the reader went */
+    }
+    kinfo("selftest: tap-ready: the tap's file is readable exactly when a frame waits, a blocking read waits for one, "
+          "io_poll wakes on a transmit, a killed reader returns -EINTR and releases the tap after");
+out:
+    if (th)
+        thread_join(th);
+    if (nif)
+        netif_put(nif);
+    if (f)
+        file_put(f);
+    if (p) {
+        process_kill(p, COSMO_SIGKILL);
+        process_wait_exit(p);
+        process_put(p);
+    }
+    return ok;
+}

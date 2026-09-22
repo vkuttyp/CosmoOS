@@ -29,11 +29,43 @@
 static struct vnode *g_console_vnode;
 static struct vnode *g_tty_vnode;
 
-static int64_t console_dev_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+static int64_t console_dev_read(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn;
     (void)off;
-    return tty_read(tty_console(), buf, len);
+    return tty_read_nb(tty_console(), buf, len, file_nonblocking(f));
+}
+
+/*
+ * Readiness (the device-readiness unit): what the console object answers,
+ * asked through the file -- readable when a read would return, always
+ * writable, the readers' queue the thing to wait on. The non-blocking
+ * bit is the open file's, per open, which the console object never had
+ * (it is shared by every process that inherited it).
+ */
+static unsigned tty_ready_of(struct tty *t)
+{
+    return COSMO_IO_WRITABLE | (tty_read_ready(t) ? COSMO_IO_READABLE : 0);
+}
+
+static unsigned console_dev_ready(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    (void)f;
+    return tty_ready_of(tty_console());
+}
+
+static struct waitqueue *console_dev_poll_wq(struct vnode *vn, struct file *f, unsigned events)
+{
+    (void)vn;
+    (void)f;
+    return (events & COSMO_IO_READABLE) ? &tty_console()->readers : NULL;   /* always writable */
+}
+
+static int dev_set_nonblock(struct vnode *vn, struct file *f, int on)
+{
+    (void)vn;
+    return file_set_nonblock(f, on);
 }
 
 static int64_t console_dev_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
@@ -52,12 +84,30 @@ static struct tty *controlling_tty(void)
     return (sid != 0 && tty_session_of(t) == sid) ? t : NULL;
 }
 
-static int64_t tty_dev_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+static int64_t tty_dev_read(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn;
     (void)off;
     struct tty *t = controlling_tty();
-    return t ? tty_read(t, buf, len) : -ENXIO;
+    return t ? tty_read_nb(t, buf, len, file_nonblocking(f)) : -ENXIO;
+}
+
+/* No controlling terminal: a read would be -ENXIO, which to a poller is an
+ * error condition and no queue to wait on. */
+static unsigned tty_dev_ready(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    (void)f;
+    struct tty *t = controlling_tty();
+    return t ? tty_ready_of(t) : COSMO_IO_ERROR;
+}
+
+static struct waitqueue *tty_dev_poll_wq(struct vnode *vn, struct file *f, unsigned events)
+{
+    (void)vn;
+    (void)f;
+    struct tty *t = controlling_tty();
+    return (t != NULL && (events & COSMO_IO_READABLE)) ? &t->readers : NULL;
 }
 
 static int64_t tty_dev_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
@@ -70,8 +120,14 @@ static int64_t tty_dev_write(struct vnode *vn, uint64_t off, const void *buf, si
     return (int64_t)len;
 }
 
-static const struct chrdev_ops console_dev_ops = { .read = console_dev_read, .write = console_dev_write };
-static const struct chrdev_ops tty_dev_ops = { .read = tty_dev_read, .write = tty_dev_write };
+static const struct chrdev_ops console_dev_ops = {
+    .read_file = console_dev_read, .write = console_dev_write,
+    .ready = console_dev_ready, .poll_wq = console_dev_poll_wq, .set_nonblock = dev_set_nonblock,
+};
+static const struct chrdev_ops tty_dev_ops = {
+    .read_file = tty_dev_read, .write = tty_dev_write,
+    .ready = tty_dev_ready, .poll_wq = tty_dev_poll_wq, .set_nonblock = dev_set_nonblock,
+};
 
 /* The tty behind one of these nodes, for the terminal system calls;
  * NULL when the vnode is some other character device. `/dev/tty`

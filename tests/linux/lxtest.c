@@ -48,6 +48,37 @@ static int memeq(const void *a, const void *b, size_t n)
     return 1;
 }
 
+/* select's fd_set as 16 words of 64 bits (LX_FD_SETSIZE 1024). */
+static void lx_fdzero(uint64_t *set)
+{
+    for (int i = 0; i < 16; i++)
+        set[i] = 0;
+}
+static void lx_fdset(uint64_t *set, long fd) { set[fd / 64] |= 1ull << (fd % 64); }
+static int lx_fdisset(const uint64_t *set, long fd) { return (set[fd / 64] >> (fd % 64)) & 1u; }
+
+/* An ARP request for the gateway of pool subnet k (10.0.(3+k).1), the shape
+ * the kernel's tap test injects; the tap's stack answers its own. */
+static void lx_arp_request(uint8_t *req, unsigned k)
+{
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
+    for (int i = 0; i < 42; i++)
+        req[i] = 0;
+    for (int i = 0; i < 6; i++)
+        req[i] = 0xff;
+    for (int i = 0; i < 6; i++)
+        req[6 + i] = guest_mac[i];
+    req[12] = 0x08; req[13] = 0x06;
+    req[15] = 1;
+    req[16] = 0x08;
+    req[18] = 6; req[19] = 4;
+    req[21] = 1;
+    for (int i = 0; i < 6; i++)
+        req[22 + i] = guest_mac[i];
+    req[28] = 10; req[29] = 0; req[30] = (uint8_t)(3 + k); req[31] = 15;   /* spa */
+    req[38] = 10; req[39] = 0; req[40] = (uint8_t)(3 + k); req[41] = 1;    /* tpa */
+}
+
 static int streq(const char *a, const char *b)
 {
     while (*a && *a == *b) {
@@ -996,6 +1027,120 @@ int main(int argc, char **argv)
     CHECKV(sc1(LX_close, g_pipe[1]) == 0, 0);
     CHECKV(lx_poll_ms(pf, 1, 0) == 1 && (pf[0].revents & LX_POLLHUP) && (pf[0].revents & LX_POLLIN), pf[0].revents);   /* writer gone */
     sc1(LX_close, g_pipe[0]);
+
+    /* --- select and pselect6 (the device-readiness unit): fd_sets over io_poll --- */
+    {
+        CHECKV(sc2(LX_pipe2, g_pipe, 0) == 0, 0);
+        uint64_t rset[16], wset[16], xset[16];
+        /* the write end ready, the read end not, with a zero timeout */
+        lx_fdzero(rset); lx_fdzero(wset); lx_fdzero(xset);
+        lx_fdset(rset, g_pipe[0]); lx_fdset(wset, g_pipe[1]); lx_fdset(xset, g_pipe[0]);
+        struct lx_timespec szero = { 0, 0 };
+        long sn = sc6(LX_pselect6, g_pipe[1] + 1, rset, wset, xset, &szero, 0);
+        CHECKV(sn == 1 && !lx_fdisset(rset, g_pipe[0]) && lx_fdisset(wset, g_pipe[1]) && !lx_fdisset(xset, g_pipe[0]), sn);
+        CHECKV(sc6(LX_pselect6, 1025, rset, 0, 0, &szero, 0) == -22, 0);           /* nfds > FD_SETSIZE */
+        lx_fdzero(rset); lx_fdset(rset, 60);                                        /* a closed fd's bit */
+        CHECKV(sc6(LX_pselect6, 61, rset, 0, 0, &szero, 0) == -9, 0);               /* EBADF */
+        CHECKV(sc6(LX_pselect6, 5, rset, 0, 0, &szero, 0) == 0, 0);                 /* the same bit above nfds: not looked at */
+        /* an error condition is not an exceptional one: a pipe's write end
+         * with its reader gone is WRITABLE|ERROR, and select's except set
+         * (POLLPRI) never carries it */
+        {
+            int ep[2];
+            CHECKV(sc2(LX_pipe2, ep, 0) == 0, 0);
+            sc1(LX_close, ep[0]);
+            lx_fdzero(xset); lx_fdset(xset, ep[1]);
+            CHECKV(sc6(LX_pselect6, ep[1] + 1, 0, 0, xset, &szero, 0) == 0 && !lx_fdisset(xset, ep[1]), 0);
+            lx_fdzero(wset); lx_fdset(wset, ep[1]);
+            CHECKV(sc6(LX_pselect6, ep[1] + 1, 0, wset, 0, &szero, 0) == 1 && lx_fdisset(wset, ep[1]), 0);   /* writable (POLLERR is in the writable set) */
+            sc1(LX_close, ep[1]);
+        }
+        /* a 20 ms timeout with nothing ready returns 0 after at least 15 ms */
+        lx_fdzero(rset); lx_fdset(rset, g_pipe[0]);
+        struct lx_timespec s20 = { 0, 20000000 }, st0, st1;
+        sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &st0);
+        CHECKV(sc6(LX_pselect6, g_pipe[0] + 1, rset, 0, 0, &s20, 0) == 0, 0);
+        sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &st1);
+        long sdt = (st1.tv_sec - st0.tv_sec) * 1000000000L + (st1.tv_nsec - st0.tv_nsec);
+        CHECKV(sdt >= 15000000 && sdt < 1000000000, sdt);
+        /* a byte written: readable */
+        CHECKV(sc3(LX_write, g_pipe[1], "s", 1) == 1, 0);
+        lx_fdzero(rset); lx_fdset(rset, g_pipe[0]);
+        CHECKV(sc6(LX_pselect6, g_pipe[0] + 1, rset, 0, 0, 0, 0) == 1 && lx_fdisset(rset, g_pipe[0]), 0);
+        char sc;
+        CHECKV(sc3(LX_read, g_pipe[0], &sc, 1) == 1 && sc == 's', sc);
+        /* a mask admitting a pending SIGUSR1: the handler runs, -EINTR, the old mask back */
+        sig_install(10, 0);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &usr1, 0, 8) == 0, 0);
+        int sbefore = g_sig.count;
+        CHECKV(sc2(LX_kill, pid, 10) == 0 && g_sig.count == sbefore, g_sig.count);
+        uint64_t snone = 0;
+        struct { uint64_t ss; uint64_t ss_len; } sarg = { (uint64_t)(uintptr_t)&snone, 8 };
+        lx_fdzero(rset); lx_fdset(rset, g_pipe[0]);
+        CHECKV(sc6(LX_pselect6, g_pipe[0] + 1, rset, 0, 0, 0, &sarg) == -4, 0);
+        CHECKV(g_sig.count == sbefore + 1, g_sig.count);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, 0, &oset, 8) == 0 && (oset & usr1) != 0, oset);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_UNBLOCK, &usr1, 0, 8) == 0, 0);
+        CHECKV(sc4(LX_rt_sigaction, 10, &dfl, 0, 8) == 0, 0);
+#ifdef LX_select
+        /* the legacy select, x86-64: a timeval */
+        struct lx_timeval stv = { 0, 0 };
+        lx_fdzero(rset); lx_fdzero(wset);
+        lx_fdset(rset, g_pipe[0]); lx_fdset(wset, g_pipe[1]);
+        CHECKV(sc6(LX_select, g_pipe[1] + 1, rset, wset, 0, &stv, 0) == 1 && lx_fdisset(wset, g_pipe[1]), 0);
+        struct lx_timeval sbad = { 0, 2000000 };
+        CHECKV(sc6(LX_select, g_pipe[1] + 1, rset, 0, 0, &sbad, 0) == -22, 0);
+#endif
+        /* the writer closed: readable (Linux's readable set includes POLLHUP) */
+        sc1(LX_close, g_pipe[1]);
+        lx_fdzero(rset); lx_fdset(rset, g_pipe[0]);
+        CHECKV(sc6(LX_pselect6, g_pipe[0] + 1, rset, 0, 0, &szero, 0) == 1 && lx_fdisset(rset, g_pipe[0]), 0);
+        sc1(LX_close, g_pipe[0]);
+        /* a select over the tap and a socket: neither ready; an ARP request
+         * written to the tap, and the tap's read bit comes back set alone */
+        long tapfd = sc4(LX_openat, LX_AT_FDCWD, "/dev/net/tap", LX_O_RDWR | LX_O_NONBLOCK, 0);
+        CHECKV(tapfd >= 3, tapfd);
+        long us = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, 0);
+        CHECKV(us >= 3, us);
+        lx_fdzero(rset); lx_fdset(rset, tapfd); lx_fdset(rset, us);
+        long mx = tapfd > us ? tapfd : us;
+        CHECKV(sc6(LX_pselect6, mx + 1, rset, 0, 0, &szero, 0) == 0, 0);
+        for (unsigned k = 0; k < 8; k++) {
+            uint8_t req[42];
+            lx_arp_request(req, k);
+            CHECKV(sc3(LX_write, tapfd, req, 42) == 42, k);
+        }
+        struct lx_timespec s2 = { 2, 0 };
+        lx_fdzero(rset); lx_fdset(rset, tapfd); lx_fdset(rset, us);
+        long tn = sc6(LX_pselect6, mx + 1, rset, 0, 0, &s2, 0);
+        CHECKV(tn == 1 && lx_fdisset(rset, tapfd) && !lx_fdisset(rset, us), tn);
+        uint8_t tfr[2048];
+        long tl = sc3(LX_read, tapfd, tfr, sizeof(tfr));
+        CHECKV(tl >= 42 && tfr[12] == 0x08 && tfr[13] == 0x06 && tfr[21] == 2, tl);
+        /* the bench: pselect6 against ppoll, one descriptor and sixty-four bits' worth, per call */
+        {
+            struct lx_pollfd bp[1] = { { us, LX_POLLIN, 0 } };
+            struct lx_timespec bt0, bt1;
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &bt0);
+            for (int i = 0; i < 2000; i++)
+                sc4(LX_ppoll, bp, 1, &szero, 0);
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &bt1);
+            long ppoll_ns = ((bt1.tv_sec - bt0.tv_sec) * 1000000000L + (bt1.tv_nsec - bt0.tv_nsec)) / 2000;
+            lx_fdzero(rset); lx_fdset(rset, us);
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &bt0);
+            for (int i = 0; i < 2000; i++)
+                sc6(LX_pselect6, us + 1, rset, 0, 0, &szero, 0);
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &bt1);
+            long psel_ns = ((bt1.tv_sec - bt0.tv_sec) * 1000000000L + (bt1.tv_nsec - bt0.tv_nsec)) / 2000;
+            lx_puts("LINUXBENCH: pselect6 ");
+            put_num(psel_ns);
+            lx_puts(" ns per call on one descriptor, ppoll ");
+            put_num(ppoll_ns);
+            lx_puts("\n");
+        }
+        sc1(LX_close, us);
+        sc1(LX_close, tapfd);
+    }
 
     /* --- rlimits (milestone 6): one value, reported as cur == max --- */
     struct lx_rlimit rl;

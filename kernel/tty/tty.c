@@ -459,6 +459,11 @@ static int64_t tty_read_allowed(struct tty *t)
 
 int64_t tty_read(struct tty *t, void *buf, size_t len)
 {
+    return tty_read_nb(t, buf, len, false);
+}
+
+int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock)
+{
     if (len == 0)
         return 0;
     uint8_t *out = buf;
@@ -466,8 +471,8 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         int64_t allowed = tty_read_allowed(t);
         if (allowed != 0)
             return allowed;
-        if (io_nonblocking(false) && !tty_read_ready(t))
-            return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
+        if (io_nonblocking(nonblock) && !tty_read_ready(t))
+            return -EAGAIN;   /* a non-blocking open, or an I/O ring entry: it parks instead of waiting here */
         /* VMIN 0 in non-canonical mode: answer with whatever is there,
          * including nothing. Checked before the wait, which is the only
          * thing that distinguishes it -- and under the lock, because the
