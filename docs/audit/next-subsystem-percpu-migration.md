@@ -180,16 +180,17 @@ migration rather than one that meets it for the first time.
       on the last CPU. A skip is a pass that proves nothing; it is `k <
       0` now, and the skip counts per boot were compared.
     - *The harness family, four times in thirteen chaos boots* against
-      none of the plain boots of the same tree -- the family's host-side
-      signature, but a guest timeline the family does not have: the
-      twelve bytes queued, retransmitted at most once in the ten seconds
-      before the reset, where the retransmit timer should have fired
-      three times. No detector line. The harness's failure line now
-      prints the connection's retransmit timer state, CPU and expiry and
-      its work item's state on a short line of its own (the long line was
-      being cut by an interleaved print), for the next sighting;
-      recorded in `docs/testing/flakes.md` with that caveat, since a
-      migrator is the one new variable.
+      none of the plain boots of the same tree -- and then once in this
+      pull request's own CI, in a plain guard boot. First read as a guest
+      that never retransmitted; read again, the guest's `recv -104 in
+      0 ms` says the reset was already there right after its send, the
+      family's reset arriving after the send instead of before it, with
+      nothing left to retransmit. The harness's failure line now prints
+      the connection's retransmit timer and work state on a short line
+      of its own (the long line was being cut by an interleaved print),
+      which on the CI sighting showed the pcb already detached by the
+      reset. Recorded in `docs/testing/flakes.md`: the family, at a
+      higher rate under the migrator.
     - *Once each in about fifty chaos boots*: `thrtest`'s `MAP_FIXED`
       replacement of a thread stack refused with `EEXIST` (not
       understood; recorded with its line), and `tty-isatty`'s 500 ms
