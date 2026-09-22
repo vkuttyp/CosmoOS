@@ -994,6 +994,11 @@ boot log:
   counts it among the recovered ones. A retry that hid the flake would
   be worse than the flake.
 
+CI runs it on both architectures, for a reason worth stating: a change
+that broke the retry would otherwise stay green until the flake next
+struck, and *that* failure would be indistinguishable from the flake
+itself — which is the confusion this whole unit exists to end.
+
 `make test-harness-retry` builds a `HARNESS_BREAK=1` image whose first
 attempt is shut down from inside the guest after its connect — the
 shape the defect leaves behind, a handshake that completed and a

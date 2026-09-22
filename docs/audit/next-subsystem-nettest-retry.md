@@ -38,6 +38,13 @@
 >    carry the exchange — and the report says so rather than claiming
 >    the cause is reproduced.
 >
+> 6. **And it goes in CI**, which the report's plan did not say. Without
+>    a step that exercises the retry, a change that broke it would stay
+>    green until the flake next struck — and that failure would be
+>    indistinguishable from the flake itself, which is the exact
+>    confusion this unit exists to end. One boot per architecture, in
+>    the shape of the chaos job already there.
+>
 > **The mutations**, each run alone on x86-64 with the boot confirmed:
 >
 > | # | mutation | what failed |
