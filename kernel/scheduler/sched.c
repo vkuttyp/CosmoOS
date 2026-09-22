@@ -703,10 +703,21 @@ static void balance_tick(struct percpu *pc)
         }
         if ((unsigned)r < SCHED_MIGRATE_RESULT_COUNT)
             __atomic_fetch_add(&g_bal_refused[r], 1u, __ATOMIC_RELAXED);
-        /* `SCHED_MIGRATE_GAP` means this CPU's own load rose since the
-         * scan, so no other source is worth trying either. */
-        if (r == SCHED_MIGRATE_GAP)
-            return;
+        if (r == SCHED_MIGRATE_GAP) {
+            /*
+             * The difference had gone under the locks, and that has two
+             * causes with different answers: this CPU got busier, in
+             * which case no source is worth trying, or *that* source got
+             * lighter, in which case another may still be two ahead. The
+             * result alone does not say which, so re-read this CPU's own
+             * load and let it say.
+             */
+            unsigned now = sched_cpu_load(self);
+            if (now > mine) {
+                mine = now;
+                return;
+            }
+        }
     }
 }
 #endif /* CONFIG_SCHED_BALANCE */

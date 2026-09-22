@@ -1447,22 +1447,42 @@ bool selftest_bench_balance(const char **reason)
     const char *err = NULL;
     uint64_t balanced_pulls = 0;
 
-    bal_bench_round("as-placed-full", n, 1, false, n, &balanced_pulls, &err);
+    uint64_t full = bal_bench_round("as-placed-full", n, 1, false, n, &balanced_pulls, &err);
     uint64_t alt = err ? 0 : bal_bench_round("as-placed-alternate", n * 2, 2, false, n, NULL, &err);
-    uint64_t ideal = err ? 0 : bal_bench_round("pinned-alternate", n * 2, 2, true, n, NULL, &err);
+    uint64_t pinned = err ? 0 : bal_bench_round("pinned-alternate", n * 2, 2, true, n, NULL, &err);
     if (err != NULL) {
         *reason = err;
         return false;
     }
-    if (ideal == 0) {
-        *reason = "the pinned control did no work";
+    if (full == 0 || pinned == 0) {
+        *reason = "a control round did no work";
         return false;
     }
-    unsigned pct = (unsigned)((alt * 100) / ideal);
+    /*
+     * The control is `as-placed-full`, not `pinned-alternate`, and the
+     * difference matters. Both controls run the same count of runnable
+     * threads one per CPU; but the pinned one also never moves, never
+     * shares a queue for an instant, and runs threads whose affinity is
+     * a single CPU. Against it the alternate round is charged for being
+     * unpinned as well as for having started badly -- on one AArch64
+     * boot the *balanced* unpinned round was itself only 87% of the
+     * pinned one, so the comparison was measuring two things and
+     * failing on the wrong one.
+     *
+     * `as-placed-full` differs from the alternate round in exactly one
+     * way: whether creation order happened to put the runnable threads
+     * on distinct CPUs. That is what the balancer is for, so that is
+     * the control. The pinned figure is still reported, because a big
+     * gap between it and `as-placed-full` says something too -- that
+     * moving threads at all is costing more than usual on this host.
+     */
+    unsigned pct = (unsigned)((alt * 100) / full);
+    unsigned pinned_pct = (unsigned)((alt * 100) / pinned);
 #if CONFIG_SCHED_BALANCE && !CONFIG_SCHED_CHAOS
     if (pct < BAL_BENCH_TARGET_PCT) {
-        kerror("selftest: bench-balance: the alternate round reached %u%% of the pinned control (target %u%%)",
-               pct, BAL_BENCH_TARGET_PCT);
+        kerror("selftest: bench-balance: the alternate round reached %u%% of the balanced round (target %u%%), "
+               "%u%% of the pinned control",
+               pct, BAL_BENCH_TARGET_PCT, pinned_pct);
         *reason = "balancing did not recover the work creation order left on half the CPUs";
         return false;
     }
@@ -1476,13 +1496,13 @@ bool selftest_bench_balance(const char **reason)
      * for the same reason and by the same precedent. The plain boot,
      * which is what the target is for, still asserts. */
     if (pct < BAL_BENCH_TARGET_PCT)
-        kinfo("selftest: bench-balance: %u%% of the pinned control, below the %u%% the plain boot requires: "
+        kinfo("selftest: bench-balance: %u%% of the balanced round, below the %u%% the plain boot requires: "
               "the chaos migrator is moving what the balancer places", pct, BAL_BENCH_TARGET_PCT);
 #endif
     CHECK(threads_settle(before));
-    kinfo("selftest: bench-balance: the alternate round reached %u%% of the pinned control; "
-          "the balanced round made %llu pulls",
-          pct, (unsigned long long)balanced_pulls);
+    kinfo("selftest: bench-balance: the alternate round reached %u%% of the balanced round and %u%% of the pinned "
+          "control; the balanced round made %llu pulls",
+          pct, pinned_pct, (unsigned long long)balanced_pulls);
     return true;
 }
 
