@@ -110,7 +110,7 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 | `kill` | `kill [-sig | -s sig] pid...` | `sig` numeric or `KILL`, `TERM` (default), `INT`, `HUP`, with or without `SIG` |
 | `dmesg` | `dmesg` | the newest 32 KiB of kernel log lines |
 | `sysctl` | `sysctl -a` or `sysctl name...` | prints `name = value`; names from `sysctl.names` |
-| `vmctl` | `vmctl probe`, `vmctl info`, `vmctl run [-m KIB] [-a GPA] [-e ENTRY] IMAGE` | `probe` prints the `/dev/vmm` line (exit 2 when the backend is `none`); `info` prints `hv.*`; `run` loads a flat image (default 1 MiB of guest memory, image at 0x1000, real-mode entry there) and runs one vCPU until `HLT`, echoing the guest's debug console and reporting other exits; exit 0 on `HLT`, 1 on `MMIO`/`SHUTDOWN`/`FAIL` (`docs/kernel-services/virtualization/api.md`) |
+| `vmctl` | `vmctl probe`, `vmctl info`, `vmctl run [-m KIB] [-a GPA] [-e ENTRY] IMAGE` | `probe` prints the `/dev/vmm` line (exit 2 when the backend is `none`); `info` prints `hv.*`; `run` loads a flat image (default 1 MiB of guest memory, image at 0x1000, real-mode entry there) and runs one vCPU until `HLT`, echoing the guest's debug console and reporting other exits; exit 0 on `HLT`, 1 on `MMIO`/`SHUTDOWN`/`FAIL` (`docs/kernel-services/virtualization/api.md`) | `--net tap` opens `/dev/net/tap` with `O_NONBLOCK` (the device-readiness unit made the tap's read block by default; the supervisor loop polls it, 0 when no frame).
 
 ## Scripts (`/etc`)
 

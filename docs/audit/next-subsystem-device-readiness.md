@@ -1,8 +1,11 @@
 # NEXT SUBSYSTEM — devices that can be waited on: readiness for the terminal and the tap, and `select` for the Linux door
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report. It takes
-up the risk the named-pipes unit
+and wait for the instruction to build it. That wait is over: the
+instruction was given and the unit is built. **This report is as
+built** (the device-readiness unit), and the banner below records where
+the build differed from the design; the sections after it are the
+design as reviewed. It takes up the risk the named-pipes unit
 (`docs/audit/next-subsystem-named-pipes.md`, "Risks") named and declined
 to build: that unit taught a `struct file` to say whether it would block
 and gave `chrdev_ops` the three operations to say it with, and then wired
@@ -11,6 +14,75 @@ no device. This unit wires the two that block, closes the constitution's
 **unverified** (§2.11, Prompt #2 §23), and gives the Linux door the
 `select` that musl's every `select` caller has been getting `-ENOSYS`
 from (§2.6).
+
+**What the build changed:**
+
+1. **A stream's read runs with no open-file lock, and neither does its
+   write.** The `devices` section's child -- given the parent's tap
+   file through the spawn map, blocking in `read` -- deadlocked the
+   parent's `write` on the first run: `file_read` held `f->lock`, the
+   open file's mutex, across the driver, so a reader that waited held it
+   for good and a writer on the same open file waited behind it. The
+   chrdev-vnode-lock unit had made that lock the rule ("two users of
+   one handle are serialised") when no device could wait; the FIFO
+   inherited the hole (a FIFO opened once and shared the same way
+   deadlocks too), and this unit's blocking tap read made it a wall.
+   As built, `file_read` and `file_write` call a stream's driver
+   (`VNODE_CHR`, `VNODE_FIFO`) with no lock held, as the pipe and socket
+   objects are called: the open file's lock is the position's lock and a
+   stream has no position; a stream's per-open state is the driver's to
+   protect, and `fsctl` -- the one device whose per-open result a write
+   replaces and a read copies -- gained its own mutex. Invariant V32's
+   second half is retired in `docs/kernel-services/vfs/invariants.md`,
+   and a twelfth mutation (the lock put back) is the deadlock, reported
+   as a boot timeout because the parent's write has no other way to fail.
+2. **The probe prefix.** The section's children answer to
+   `--probe devices-…`, not `dev-…`: `dev-tty` and `dev-tty-none` are
+   two existing terminal probes, and the shorter prefix took them.
+3. **The invariant numbers.** V34 (vfs) and N23 (network), the next free
+   numbers in each file, where the report said V26 and N24.
+4. **The user-mode gateway.** An opener of `/dev/net/tap` does not learn
+   which pool subnet it got, so the `devices` section and `lxtest` send
+   an ARP request to every gateway the pool can have (`10.0.3.1` to
+   `10.0.10.1`) and read the one reply the tap's own stack sends.
+5. **The kernel tests that read a tap file in a loop open it
+   `O_NONBLOCK`** (fourteen opens in `nettest.c`), since a blocking open's
+   read now waits; `vmctl` likewise, as designed.
+6. **The `pselect6`/`ppoll` bench** lives in `lxtest` as a
+   `LINUXBENCH:` line, since the Linux door is where both calls are.
+7. **The numbers.** Two kernel self-tests, 375 in all on both
+   architectures; the `devices` section (14 sections); `LX_pselect6`
+   270 / 72, `LX_select` 23, `LX_FD_SETSIZE` 1024; no native number
+   moves.
+
+**Bug-proofs, as run.** Each mutation applied alone on x86-64, the
+debug suite booted, the file restored from HEAD, the runner checking
+each run booted; the report's ten, one for the except set, and one for
+the rule the build added.
+
+| mutation | what failed |
+| --- | --- |
+| the terminal file's `ready` not consulting `tty_read_ready` (always readable) | `tty-devready`: `(r0 & READABLE) == (tty_read_ready(con) ? READABLE : 0)` -- readable with nothing typed |
+| the terminal file's `poll_wq` NULL | `tty-devready`: `kobject_poll_wq(&a->obj, READABLE) == &con->readers` -- no queue to wait on |
+| the non-blocking bit a static shared by every open (not the file's flag) | `tap-ready`: `per_open` -- a second open made non-blocking at open did not answer so while the first, blocking, did; then `net-multiguest`'s non-blocking reads blocked and the boot timed out, the named catch already printed |
+| the tap's `ready` READABLE with no frame | `tap-ready`: `kobject_ready(&f->obj) == WRITABLE` with nothing queued; the `devices` section: `ioready(tap) == WRITABLE` before any request, and the ring's `READ` and `POLL` completed with nothing instead of parking; `lxtest`: the `select` over the tap and the socket returned 1 with nothing written |
+| `tap_transmit` not waking `rx_wait` | `tap-ready`: `tapready_flag_within(&rd.done, 2000)` -- the blocked reader never returned; the reader thread and its tap were left behind, and every later opener of `/dev/net/tap` found the pool one slot short (`net-multiguest`'s eighth open `-ENOSPC`, the `devices` section's open `ENOSPC`) |
+| the tap's blocking read returning 0 when none waits (the old contract, whatever the mode) | `tap-ready`: `!tapready_flag_within(&rd.done, 30)` -- the thread's read returned before the transmit; the `devices` section: the child sharing the file exited nonzero (`waitpid … cst == 0` failed), its read having returned nothing |
+| the tap's read an unkillable wait | `tap-ready`: `completion_done(&p->exited)` after the kill, at the 3 s bound -- the process never exited; left behind with its tap, with the same cascade as the lost wake |
+| `pselect6` ignoring the write set | `lxtest`: the write end's 1 was 0 (`sn == 1 && … lx_fdisset(wset, g_pipe[1])`), the pipe-with-reader-gone writable check, and `select`'s |
+| the sets not rewritten with the ready bits | `lxtest`: the read end's bit not set after a write, and not after the writer's close; the tap's read bit not set in the `select` over the tap and the socket |
+| `select` reading the sets past `nfds` | `lxtest`: `pselect6(5, …)` with a closed fd's bit at 60 was `-EBADF` instead of 0 |
+| the except set mapped to ERROR | `lxtest`: a pipe's write end with its reader gone (`WRITABLE\|ERROR`) came back in the except set, where Linux never puts it |
+| a stream's read and write holding the open file's lock (the rule the chrdev-vnode-lock unit had) | the `devices` section: the child blocked in the shared file's read held the lock, the parent's write blocked behind it, and the boot timed out with `section fifo` the last section finished -- the deadlock the rule this unit replaced exists to prevent, reported as a timeout because the parent's write has no other way to fail. (Restoring the lock on the read path alone did not reproduce it; the write path had to hold it too, which is what the old rule did.) |
+
+**Benchmarks, as run** (`USERBENCH: devices`, `LINUXBENCH`): a frame
+written to the tap reaches the ring's `READ` parked on it in 315 us on
+x86-64 and 165 on AArch64 -- against the 2 ms interval, floored to a
+scheduler tick, that `vmctl`'s supervisor loop imposes on every
+host-to-guest frame today, so a tap owner that waits on the device
+instead of polling it would see frames an order of magnitude sooner.
+`pselect6` costs 4371 / 4373 ns per call on one descriptor with a zero
+timeout against `ppoll`'s 16423 / 14205 (x86-64 / AArch64).
 
 ## What is established (before this unit)
 

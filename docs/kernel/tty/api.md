@@ -83,7 +83,13 @@ this one, so neither can disagree with the read. Any context, no lock
 return nothing is taken under the lock inside `tty_read`.
 
 ### `int64_t tty_read(struct tty *t, void *buf, size_t len)`
+### `int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock)`
 - Purpose: deliver one record, or a prefix of it, to a reader.
+  `tty_read` is `tty_read_nb` with `nonblock` false (the console
+  object's mode); the device files pass their open's bit (the
+  device-readiness unit), and a set bit answers `-EAGAIN` where the
+  blocking form would wait -- the same place an I/O-ring entry answers
+  it.
 - Inputs: a kernel buffer (`sys_read` bounces through its 1024-byte
   chunk buffer) and its length; `len == 0` returns 0 at once.
 - Outputs: the number of bytes copied. Copying stops after a `'\n'`
@@ -133,7 +139,12 @@ point of `/dev/tty`.
 
 ### `void tty_dev_init(void)`
 One-time: register `/dev/console` and `/dev/tty`. After the ramfs root
-exists and after `tty_init`.
+exists and after `tty_init`. Both nodes' `chrdev_ops` carry `read_file`
+(the open's non-blocking bit into `tty_read_nb`), `ready` (`WRITABLE`,
+plus `READABLE` when `tty_read_ready`; `ERROR` for `/dev/tty` without a
+controlling terminal), `poll_wq` (the terminal's `readers` for
+`READABLE`, NULL otherwise) and `set_nonblock` (`file_set_nonblock`)
+since the device-readiness unit.
 
 ### `int tty_set_pgrp(struct tty *t, pid_t pgid)`
 Name the terminal's foreground group -- the group `^C` and `^\` signal.

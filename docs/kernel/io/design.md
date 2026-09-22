@@ -218,9 +218,13 @@ onto it; a native `poll` can be added the same way.
 
 - **Files, sockets, pipes, the console** work today through the two
   operations every io type has or gains.
-- **Devices** join when a device object exists as a handle (a block
-  device node would implement `ready` as "queue not full" and `read`/
-  `write` as bios); the ring needs nothing new.
+- **Devices** joined with the device-readiness unit: a character device's
+  file reports readiness through its `chrdev_ops` (`/dev/console`,
+  `/dev/tty`, `/dev/net/tap`), so a `READ` or `POLL` on the tap parks
+  until a frame is transmitted and completes with it -- the `devices`
+  section of `init --selftest` shows it. A block device node would
+  implement `ready` as "queue not full" and `read`/`write` as bios; the
+  ring needs nothing new.
 - **Timers** are a `POLL` with a timeout today; a timer object with
   `ready` = "expired" is the natural addition.
 - **IPC** (pipes) works; channels and events join through `ready`.

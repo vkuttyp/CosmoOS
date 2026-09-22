@@ -101,6 +101,17 @@ process that needs the CPU to get there.
   check.
 - **`tty-isatty`** -- true for the console, **false for `/dev/vmm`**.
   It was true for both until this unit.
+- **`tty-devready`** (the device-readiness unit) -- two opens of
+  `/dev/console` as files: `poll_wq(READABLE)` is the console's
+  `readers` queue and `poll_wq(WRITABLE)` NULL; `ready` agrees with
+  `tty_read_ready` (writable, not readable with nothing typed); the
+  non-blocking bit is per open (one open switched, the other's mode
+  unchanged, the switched one's read `-EAGAIN`); `io_poll` on the file
+  with a 20 ms timeout returns 0 and returns `READABLE` within 2 s when
+  a thread feeds a line 30 ms later; the blocking open reads the line,
+  the non-blocking one then finds `-EAGAIN`; the console object still
+  refuses `set_nonblock`; `/dev/tty` opened from a kernel thread (no
+  session): `ready` is `ERROR`, no queue, read `-ENXIO`.
 - **`tty-pollraw`** -- with `VMIN` 0 and an empty terminal, `ioready`
   reports readable and the read returns 0. Readiness that consulted
   only the queue said "would block" about a read that returns at once,

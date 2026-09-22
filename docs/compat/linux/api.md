@@ -230,6 +230,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 34 | `pause` | `signal_wait` | `-EINTR` |
 | 15 | `rt_sigreturn` | the frame read back from the stack, the FXSAVE image restored, `signal_return` | a frame that cannot be read: `SIGSEGV` on the thread |
 | 131 | `sigaltstack` | the thread's `altstack`; `ss_flags` out reports `SS_ONSTACK`/`SS_DISABLE`/0 for the current `sp` | changing it while on it `-EPERM`; flags other than 0/`SS_DISABLE`/`SS_ONSTACK` (`SS_AUTODISARM` masked) `-EINVAL`; `ss_size` below 2048 `-ENOMEM`; an unreadable range `-EFAULT` |
+| 23 / —, 270 / 72 | `select`, `pselect6` (the device-readiness unit) | three `fd_set`s → one `io_pollfd` per fd with a read or write bit → `io_poll`; the sets rewritten (readable = `READABLE\|HANGUP\|ERROR`, writable = `WRITABLE\|ERROR`), result = bits set | the except set (Linux's `POLLPRI`) is polled for nothing and always clear: no object reports a priority event; a bit for a closed fd `-EBADF`; `nfds` > 1024 `-EINVAL`; `pselect6`'s sigmask pair as `ppoll`'s mask (size 8); `select` does not update its timeval |
 | 7, 271 | `poll`, `ppoll` (milestone 10) | `struct pollfd` ↔ `io_poll` (`kernel/io/poll.c`): `POLLIN`/`POLLRDNORM`/`POLLPRI` ↔ `READABLE`, `POLLOUT`/`POLLWRNORM` ↔ `WRITABLE`, `HANGUP` → `POLLHUP` (and `POLLRDHUP` when asked), `ERROR` → `POLLERR`; a negative fd is ignored; a closed or non-I/O fd is `POLLNVAL` and the call returns at once; `poll`'s timeout in ms (negative: forever), `ppoll`'s `timespec` (NULL: forever) and its mask swapped in for the wait as `rt_sigsuspend` | more than 1024 entries `-EINVAL`; a kill or a deliverable signal `-EINTR` |
 | 24 | `sched_yield` | `sched_yield` | |
 
@@ -387,5 +388,5 @@ loads the incoming one's (milestone 10). A clone's thread pointer is
 | `compat/linux/syscalls.c` | `struct linux_state`, the hooks, the `lx_*` handlers, the table, `personality_linux` |
 | `compat/linux/signal.c`, `linux_internal.h` | signals: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |
-| `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` |
+| `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` and `select`/`pselect6` |
 | `tests/linux/linux.mk` | `make linux-tests` (both architectures): `lxhello`, `lxtest`, `lxsig`, the PIE pair `lxinterp`/`lxdyn`, and `hello_musl` on x86-64 when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |

@@ -218,7 +218,7 @@ flowinfo, 16-byte address, scope) to `struct netaddr` and back (output
 length honoured, full size reported). `setsockopt` returns 0 for
 `SOL_SOCKET` options (`SO_REUSEADDR`, `SO_KEEPALIVE`, `SO_BROADCAST`,
 ...) and `-ENOPROTOOPT` otherwise; `getsockopt` `-ENOPROTOOPT`;
-`poll`/`select`/`epoll_*` `-ENOSYS`; `sendmsg`/`recvmsg`/`socketpair`
+`epoll_*` `-ENOSYS` (`poll`, `ppoll`, `select` and `pselect6` are built); `sendmsg`/`recvmsg`/`socketpair`
 are built since the unix-sockets unit (with `AF_UNIX` and `SCM_RIGHTS`).
 `getsockopt(SO_PEERCRED)` answers on a connected unix stream socket.
 
@@ -391,8 +391,25 @@ Both translate `struct pollfd` to the kernel's `io_poll`
 `POLLOUT` ↔ `WRITABLE`, `POLLHUP` ↔ `HANGUP`, `POLLERR` ↔ `ERROR`;
 `POLLNVAL` for a handle that is not an I/O object, a negative `fd` is
 skipped, the timeout is milliseconds (`-1` for ever) or a timespec.
-`ppoll`'s temporary mask is applied around the wait. `select` and
-`epoll` stay stage 3.
+`ppoll`'s temporary mask is applied around the wait.
+
+### `select` and `pselect6`
+
+(The device-readiness unit.) Three `fd_set`s of `nfds` bits (1024 at
+most, `-EINVAL` above; only the words `nfds` covers are read and
+written) become one `io_pollfd` per fd that has a read or write bit,
+resolved as `poll` resolves handles except that a bit for a closed fd is
+`-EBADF`, as Linux answers; `io_poll` waits; the sets are rewritten with
+Linux's own membership -- readable is `POLLIN|POLLHUP|POLLERR`, writable
+`POLLOUT|POLLERR` -- and the result is the number of bits set. **The
+except set is polled for nothing and always comes back clear**: Linux's
+except set is `POLLPRI`, priority data, and no object in this tree
+reports a priority event (there is no urgent-data path; `COSMO_IO_ERROR`
+is `POLLERR`, which `select` never puts in the except set). `pselect6`'s
+sixth argument is the pair `{ const sigset_t *, size_t }` (size 8, or
+`-EINVAL`), applied and restored as `ppoll`'s mask; `select` (x86-64
+only, 23) takes a timeval it does not write the time left back into
+(Linux does; a documented deviation). `epoll` stays stage 3.
 
 ### Wall clock
 

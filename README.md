@@ -3206,6 +3206,39 @@ See [docs/development.md](docs/development.md).
   the same runs: the same ring, plus the file layer. 373 self-tests on
   both architectures. Report: `docs/audit/next-subsystem-named-pipes.md`
   (PR #209).
+- **Devices that can be waited on: readiness for the terminal and the
+  tap, and `select` for the Linux door.** The named-pipes unit gave a
+  `struct file` and `chrdev_ops` the three readiness operations and
+  wired no device; this unit wires the two that block. `/dev/console`
+  and `/dev/tty` answer what the console object answers
+  (`tty_read_ready`, the readers queue), and `/dev/tty` for a caller
+  with no controlling terminal answers `ERROR`, which is what its
+  read's `ENXIO` looks like to a poller. `/dev/net/tap` gains a wait
+  queue its transmit wakes and **a read that blocks unless the open is
+  non-blocking** -- the one contract change, from "0 when none, the
+  owner polls" to Linux's tun; `vmctl` opens it `O_NONBLOCK` and is
+  otherwise unchanged. A device's per-open non-blocking mode is the
+  open file's `O_NONBLOCK` flag through two small VFS helpers, so
+  nothing is allocated per open. With that, an asynchronous `READ` or
+  `POLL` on the tap parks until a frame is transmitted, which is the
+  constitution's "async I/O must work for devices" shown for the first
+  time. The Linux door gains `select` (x86-64) and `pselect6` over
+  `io_poll` -- musl's `select` is `pselect6`, so every `select` caller
+  had been getting `ENOSYS` -- with Linux's own set membership and one
+  documented deviation: the except set (`POLLPRI`) is always clear,
+  because no object in this tree reports a priority event. Two kernel
+  self-tests (`tty-devready`, `tap-ready`: readiness against the read,
+  a poll woken by a fed line and by a transmitted frame, per-open mode,
+  a process killed inside the tap's read releasing the tap only after),
+  a `devices` section of the user suite, `lxtest` rows including a
+  `select` over the tap and a UDP socket; eleven mutations, each caught
+  by a named check. Bench: a frame written reaches a `READ` parked on
+  the tap in 315 / 165 us on x86-64 / AArch64, against the 2 ms
+  poll interval, floored to a tick, that `vmctl`'s loop imposes on every
+  host-to-guest frame today; `pselect6` costs 4371 / 4373 ns per call
+  on one descriptor against `ppoll`'s 16423 / 14205. Invariants **V34**
+  (vfs) and **N23** (network); 375 self-tests on both architectures.
+  Report: `docs/audit/next-subsystem-device-readiness.md` (PR #TBD).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
