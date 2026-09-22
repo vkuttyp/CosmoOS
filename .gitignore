@@ -49,3 +49,6 @@ tests/hv/aarch64/Image
 
 # tools/nettest-retry-probe.py snapshot (a run that was not reverted)
 *.nettest-retry-probe.orig
+
+# tools/elf-share-probe.py snapshots (a run that was not reverted)
+*.elf-share-probe.orig
