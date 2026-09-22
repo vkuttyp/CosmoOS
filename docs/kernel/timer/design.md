@@ -97,6 +97,28 @@ re-cancels after every wait (a callback may have re-armed); see
 lock, call `fn`, re-take the lock, clear `q->running`, mark IDLE unless
 the callback re-armed. A callback may re-arm its own timer.
 
+### The clock a mechanism keeps time by
+
+`clock_now_ns` is a *reading*: the counter, the measured per-CPU offset,
+and in debug builds the test offset a self-test may inject on one CPU
+(`clock_test_set_cpu_offset_ns`; `clock-skew-detected` puts 2 ms on a
+victim, `lockup-report-skew` five seconds) so that a skewed stamp's
+handling can be checked. A timer, a deadline or a delay is a
+*mechanism*, and keeps time by `clock_time_ns` (internal to `timer.c`):
+the counter and the measured offset, never the test offset. A timer
+armed against a lying clock and expired against the truth fires late by
+the lie; before threads migrated only the injecting test's own pinned
+thread could arm one on the victim during the window, and the chaos
+migrator (scheduler design, "Migration") found the block layer's 500 ms
+scan sleep returning four seconds late on the CPU the lockup skew test
+had lied to. `timer_start`'s start, the tick's `run_expired`,
+`clock_deadline_ns`/`clock_deadline_passed` and `ndelay` use the
+mechanism clock; the tick's `last_tick_ns` stamp, `clock_since_ns` and
+every other reader see the lie, which is what the skew tests examine.
+The skew tests also keep their victim CPU to themselves for the window
+(a pinned higher-priority spinner), so nothing the migrator moves there
+reads it.
+
 ## 4. Sleeping and delays
 
 `thread_sleep_ns(ns)`: embeds a timer in the caller's stack frame, callback
