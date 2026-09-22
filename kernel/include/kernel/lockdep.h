@@ -130,7 +130,7 @@ static inline void lockdep_get_stats(struct lockdep_stats *out) { *out = (struct
  */
 #define might_sleep()                                                                              \
     do {                                                                                           \
-        struct percpu *__pc = this_cpu();                                                          \
+        struct percpu *__pc = raw_this_cpu(); /* identity: zero wherever a sleeper may run */      \
         if (__pc->preempt_count != 0 || __pc->irq_depth != 0) {                                    \
             if (CONFIG_LOCKDEP)                                                                    \
                 lockdep_might_sleep((uintptr_t)__builtin_return_address(0));                       \

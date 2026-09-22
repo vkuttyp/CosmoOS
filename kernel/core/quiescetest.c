@@ -756,7 +756,7 @@ static void call_probe_fn(struct quiesce_head *h)
     struct call_probe *p = (struct call_probe *)h;
     p->runs++;
     p->seen_at = (*p->order)++;
-    p->thread_ctx = this_cpu()->irq_depth == 0 && this_cpu()->preempt_count == 0;
+    p->thread_ctx = preemptible();   /* identity: the two counts, wherever the probe runs */
     __atomic_fetch_add(&g_calls_done, 1u, __ATOMIC_RELEASE);
 }
 

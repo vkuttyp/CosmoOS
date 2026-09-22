@@ -95,7 +95,7 @@ void smp_init(void)
 
 void smp_stop_others(void)
 {
-    cpumask_t online = cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id());
+    cpumask_t online = cpu_online_mask() & ~CPUMASK_OF(raw_cpu_id());   /* the panic path: interrupts are off, and every other CPU stops regardless */
     if (online == 0)
         return;
 
@@ -104,7 +104,7 @@ void smp_stop_others(void)
     /* Give them a moment to acknowledge by going offline; a CPU with
      * interrupts disabled may never answer, which is acceptable here. */
     for (unsigned i = 0; i < 100; i++) {
-        if ((cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id())) == 0)
+        if ((cpu_online_mask() & ~CPUMASK_OF(raw_cpu_id())) == 0)
             return;
         udelay(100);
     }

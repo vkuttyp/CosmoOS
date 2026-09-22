@@ -78,8 +78,7 @@ static struct lockdep_cpu *my_cpu(void)
 /* The thread's mutex stack, or NULL before threads exist. */
 static struct thread *me(void)
 {
-    struct percpu *pc = this_cpu();
-    return pc->current;
+    return raw_this_cpu()->current;   /* identity */
 }
 
 static void print_held(const char *who, const struct lockdep_held *h, unsigned n)
@@ -122,8 +121,8 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
     struct thread *t = me();
     kprintf("\nlockdep: %s\n", g_kind_names[kind]);
     kprintf("  lock '%s'#%u at %p, CPU %u, thread '%s', irq_depth %u, preempt_count %d\n", name ? name : "-",
-            subclass, (void *)ip, arch_cpu_id(), t ? t->name : "(boot)", this_cpu()->irq_depth,
-            this_cpu()->preempt_count);
+            subclass, (void *)ip, raw_cpu_id(), t ? t->name : "(boot)", raw_this_cpu()->irq_depth,
+            raw_this_cpu()->preempt_count);   /* a report */
     if (detail)
         kprintf("  %s\n", detail);
     lockdep_dump_held();
@@ -165,12 +164,10 @@ static int node_of(uint16_t *class_slot, const char *name, unsigned kind, unsign
  * the stack. Edges record "attempted while held", which is the order
  * relation the checker wants whether or not the attempt has completed.
  */
-void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
-                           uintptr_t ip)
+static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
+                          uintptr_t ip)
 {
-    if (g_off)
-        return;
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth is the same wherever the thread runs */
     bool in_irq = pc->irq_depth != 0;
     struct lockdep_cpu *lc = my_cpu();
     struct thread *t = in_irq ? NULL : me();
@@ -261,13 +258,33 @@ void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind
     }
 }
 
+/*
+ * With interrupts off throughout: a mutex acquisition arrives with
+ * preemption on, and this CPU's held-spinlock stack (L11) is this
+ * CPU's only while the thread cannot move (S25). A spinlock's arrives
+ * with preemption already off; the save costs it nothing it notices.
+ */
+void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
+                           uintptr_t ip)
+{
+    if (g_off)
+        return;
+    if (kind == LOCKDEP_KIND_MUTEX) {
+        arch_irq_state_t s = arch_irq_save();
+        acquire_check(class_slot, name, kind, subclass, irqs_on, ip);
+        arch_irq_restore(s);
+    } else {
+        acquire_check(class_slot, name, kind, subclass, irqs_on, ip);
+    }
+}
+
 /* The lock is owned now: push it. */
 void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
                       bool trylock, bool irqs_on, uintptr_t ip)
 {
     if (g_off)
         return;
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity */
     bool in_irq = pc->irq_depth != 0;
     int n = node_of(class_slot, name, kind, subclass, ip);
     if (n < 0)
@@ -336,8 +353,8 @@ void lockdep_might_sleep(uintptr_t ip)
     if (g_off)
         return;
     char detail[96];
-    ksnprintf(detail, sizeof(detail), "preempt_count %d, irq_depth %u", this_cpu()->preempt_count,
-              this_cpu()->irq_depth);
+    ksnprintf(detail, sizeof(detail), "preempt_count %d, irq_depth %u", raw_this_cpu()->preempt_count,
+              raw_this_cpu()->irq_depth);   /* a report */
     report(LOCKDEP_R_SLEEP, NULL, 0, ip, detail, NULL, 0);
 }
 
@@ -361,11 +378,20 @@ bool lockdep_is_held(const void *lock, unsigned kind)
                 return true;
         return false;
     }
+    /* This CPU's stack, read with interrupts off when the asker could
+     * move: a preemptible thread (lockdep_assert_not_held) that moved
+     * between the read and the scan would be scanning another CPU's
+     * stack (S25). A holder of any spinlock has preemption off already. */
+    bool save = raw_this_cpu()->preempt_count == 0;
+    arch_irq_state_t s = save ? arch_irq_save() : 0;
     struct lockdep_cpu *lc = my_cpu();
-    for (unsigned i = 0; i < lc->nr_held; i++)
+    bool held = false;
+    for (unsigned i = 0; i < lc->nr_held && !held; i++)
         if (lc->held[i].lock == lock)
-            return true;
-    return false;
+            held = true;
+    if (save)
+        arch_irq_restore(s);
+    return held;
 }
 
 void lockdep_dump_graph(void)

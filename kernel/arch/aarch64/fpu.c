@@ -190,7 +190,7 @@ bool arch_test_fpu_switch(const char **why)
 {
     struct fpu_probe a = { .seed = 0x11, .rc = -1, .corrupt = 0 };
     struct fpu_probe b = { .seed = 0xA5, .rc = -1, .corrupt = 0 };
-    cpumask_t here = CPUMASK_OF(arch_cpu_id());
+    cpumask_t here = CPUMASK_OF(raw_cpu_id());   /* one CPU for the pair to share; the caller need not stay */
     struct thread *ta = thread_create_on(fpu_probe_thread, &a, "fpu-a", SCHED_PRIO_DEFAULT, here);
     struct thread *tb = thread_create_on(fpu_probe_thread, &b, "fpu-b", SCHED_PRIO_DEFAULT, here);
     if (ta == NULL || tb == NULL) {

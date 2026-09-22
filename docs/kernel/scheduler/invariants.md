@@ -52,22 +52,52 @@ restores the caller's saved state with `arch_irq_restore(s)` after
 Check: test `breakpoint-trap` and every blocking test (a thread that
 returned with interrupts off would never take the next tick).
 
-**S24 (reserved, for a balancer that does not exist yet).** Nothing in
-this kernel holds two run-queue locks today. The first thing that does --
-moving a ready thread from one CPU's queue to another's -- will need a
-rule, because two CPUs balancing towards each other is the textbook
-deadlock, and the rule should be **increasing CPU-id order, always**.
+**S24. Two run-queue locks are taken in increasing CPU-id order,
+always.** Each run queue's lock is its own lockdep class (`runqueue0`,
+`runqueue1`, ..., a static name table in `sched.c`), so a reversed pair is
+a cycle the checker reports; the only holders of two are `sched_migrate`
+and `sched_migrate_from` (`rq_lock_pair`). The first attempt at migration
+(`docs/audit/next-subsystem-thread-migration.md`) found that with every
+queue initialised from the one literal `"runqueue"`, lockdep saw the
+second acquisition as recursion and, once annotated, could not check the
+order at all; a class per instance is what makes this an invariant it
+enforces. Check: `lockdep-rq-order` takes 1 then 0 against a recorded
+0 -> 1 and expects the inversion report.
 
-Two things were learned by building that and taking it out again
-(`docs/audit/next-subsystem-thread-migration.md`), recorded here because
-the next attempt meets them on its first boot:
+**S25. A per-CPU answer is kept only while the thread cannot move:
+preemption disabled, interrupts off, interrupt context, or an affinity of
+one CPU. `preempt_disable()` is the migration barrier.** A thread with
+preemption disabled is never `THREAD_READY` (S1's transitions run through
+`schedule()`, which panics with `preempt_count != 0`), and only READY
+threads move (S26), so an answer read under `preempt_disable` is the CPU
+it is used on. `this_cpu()` and `arch_cpu_id()` check the rule in debug
+builds and panic naming the site; `raw_this_cpu()` and `raw_cpu_id()`
+are for the two reads the rule does not govern -- the current thread and
+an asserted-zero count (the same on any CPU the thread runs on), and a
+diagnostic or statistic (a stale answer is a wrong number, never a wrong
+action) -- and every raw use says which in a comment. The sweep that
+introduced the rule found seventeen sites on x86-64 and the EL2 hand-back
+on AArch64 that had kept a per-CPU answer across a point where a
+migration could move the thread, `schedule_internal` itself among them
+(`docs/audit/next-subsystem-percpu-migration.md`). Check: `percpu-claim`
+(an unpinned preemptible read is reported; the four quiet forms are not);
+every debug boot, since a new site panics.
 
-- Both locks are the `runqueue` **class**, so the second acquisition
-  needs `spin_lock_nested` with a subclass, or lockdep reports a
-  same-class recursion and panics.
-- That annotation says only "this second acquisition is deliberate".
-  **lockdep cannot check the order**, because to it the two locks look
-  alike. Review and this invariant are the only enforcement.
+**S26. Only a READY thread that is not its queue's `current` is
+migrated, and a migration holds both run-queue locks.** A RUNNING thread
+is on its CPU's stack; a BLOCKED thread is on no queue and `sched_wake`
+re-enqueues it on its own `t->cpu`; a thread woken between blocking and
+stopping (S22's window) is READY, queued, and still `rq->current` until
+`sched_set_running_current`, and is refused by identity. Under both locks
+the thread is dequeued, `t->cpu` rewritten, and enqueued at the
+destination, so at every instant no run-queue lock is held a thread is on
+exactly one queue and `t->cpu` names it. `sched_wake`'s unlocked read of
+`t->cpu` stays correct because the thread it can wake is BLOCKED. Check:
+`sched-migrate` (the moved worker's first run is on the destination),
+`sched-migrate-refuses` (each refusal by name, the window built with
+`waitqueue_prepare` and a wake under preemption off), `sched-migrate-stress`
+(3,500 or so moves in 200 ms with every worker inside its mask), and the
+whole suite under `make test-chaos`.
 
 ## Entry conditions
 
@@ -217,6 +247,8 @@ settles after `thread_join`. Check: review; tests use `threads_settle`.
 - Cross-CPU `need_resched` is signalled by `IPI_RESCHEDULE` when the
   target is idle or running lower priority; equal-priority wakes wait
   for the target's slice to end (at most `SCHED_SLICE_NS`).
-- Threads are placed at creation and never migrate.
+- Threads are placed at creation and move only when something calls
+  `sched_migrate`/`sched_migrate_from`: the chaos migrator in a
+  `SCHED_CHAOS=1` build, and the tests. No balancer moves them yet.
 - No priority inheritance: a high-priority thread blocked on a mutex
   held by a low-priority thread waits for that thread's turn.

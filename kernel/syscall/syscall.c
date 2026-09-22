@@ -76,7 +76,7 @@ uint64_t syscall_filtered_count(void)
 
 int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: the two counts below are zero on any CPU a syscall runs on */
     struct process *p = process_current();
 
     KASSERT(arch_irq_enabled());

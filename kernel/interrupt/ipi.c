@@ -133,19 +133,23 @@ void ipi_broadcast_others(enum ipi_kind kind)
 
 uint64_t ipi_count(enum ipi_kind kind)
 {
-    return kind < IPI_KIND_COUNT ? g_counts[arch_cpu_id()][kind] : 0;
+    return kind < IPI_KIND_COUNT ? g_counts[raw_cpu_id()][kind] : 0;   /* a statistic: some CPU's count */
 }
 
 void smp_call_function_single(unsigned cpu, smp_call_fn fn, void *arg)
 {
     KASSERT(fn != NULL);
 
+    /* Interrupts off before asking whether the target is this CPU: a
+     * caller moved between the answer and the call would run `fn` on
+     * the wrong CPU and leave the right one without it (S25). */
+    arch_irq_state_t s = arch_irq_save();
     if (cpu == arch_cpu_id()) {
-        arch_irq_state_t s = arch_irq_save();
         fn(arg);
         arch_irq_restore(s);
         return;
     }
+    arch_irq_restore(s);
     if (!cpu_online(cpu))
         panic("smp_call_function_single: CPU %u is not online", cpu);
     KASSERT(arch_irq_enabled());

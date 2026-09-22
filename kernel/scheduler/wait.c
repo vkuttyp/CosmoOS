@@ -20,7 +20,7 @@ void waitqueue_init(struct waitqueue *wq, const char *name)
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth and the thread are the same wherever it runs */
     if (pc->irq_depth != 0)
         panic("wait_event in interrupt context");
     might_sleep();

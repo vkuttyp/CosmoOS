@@ -42,6 +42,27 @@ static struct thread *rr_pick_next(struct runqueue *rq)
     return list_first_entry(&rq->ready[prio], struct thread, rq_link);
 }
 
+/*
+ * The thread this queue would run last: the lowest priority level that
+ * has one, and the tail of its list. `rq->current` can be in a list --
+ * woken between blocking and stopping, until sched_set_running_current
+ * takes it out -- and must never be offered (S26).
+ */
+static struct thread *rr_pick_migratable(struct runqueue *rq, cpumask_t allowed)
+{
+    uint64_t bits = rq->bitmap;
+    while (bits != 0) {
+        unsigned prio = 63u - (unsigned)__builtin_clzll(bits);
+        struct thread *t;
+        list_for_each_entry_reverse(t, &rq->ready[prio], rq_link) {
+            if (t != rq->current && (t->affinity & allowed) != 0)
+                return t;
+        }
+        bits &= ~((uint64_t)1 << prio);
+    }
+    return NULL;
+}
+
 static void rr_slice_new(struct thread *t)
 {
     t->slice_left_ns = SCHED_SLICE_NS;
@@ -70,4 +91,5 @@ const struct sched_policy sched_policy_rr = {
     .pick_next = rr_pick_next,
     .tick = rr_tick,
     .slice_new = rr_slice_new,
+    .pick_migratable = rr_pick_migratable,
 };

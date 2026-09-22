@@ -140,14 +140,14 @@ bool selftest_irq_msi_overlap(const char **reason)
         return true;
     }
     int rc = irq_request((irq_t)wired, wired_handler, NULL, "selftest-wired", IRQ_TRIGGER_EDGE,
-                         arch_cpu_id());
+                         raw_cpu_id() /* a target CPU for the line, not a claim */);
     if (rc != 0) {
         *reason = "the line the MSI allocator would offer next could not be requested";
         return false;
     }
 
     struct irq_msi_msg msg = { 0, 0 };
-    int vector = irq_request_msi(msi_handler, NULL, "selftest-msi", arch_cpu_id(), 0, &msg);
+    int vector = irq_request_msi(msi_handler, NULL, "selftest-msi", raw_cpu_id() /* a target CPU for the line */, 0, &msg);
     bool took_it = vector >= 0 && msg.data == (uint32_t)wired;
 
     /* The wired line still belongs to its handler: raise it and see. */
@@ -204,7 +204,7 @@ bool selftest_irq_msi_devid(const char **reason)
         return true;
     }
     struct irq_msi_msg msg = { 0, 0 };
-    int vector = irq_request_msi(msi_handler, NULL, "selftest-devid", arch_cpu_id(), 0xFFFFFFFFu, &msg);
+    int vector = irq_request_msi(msi_handler, NULL, "selftest-devid", raw_cpu_id() /* a target */, 0xFFFFFFFFu, &msg);
     if (vector >= 0) {
         irq_release_msi(vector);
         *reason = "a device id the controller cannot describe was given a message anyway";
@@ -212,7 +212,7 @@ bool selftest_irq_msi_devid(const char **reason)
     }
     /* And a device id it can describe still works, so the refusal above
      * is about the id and not about MSIs being unavailable. */
-    vector = irq_request_msi(msi_handler, NULL, "selftest-devid", arch_cpu_id(), 0, &msg);
+    vector = irq_request_msi(msi_handler, NULL, "selftest-devid", raw_cpu_id() /* a target */, 0, &msg);
     CHECK(vector >= 0);
     irq_release_msi(vector);
     kinfo("selftest: irq-msi-devid: device id 0xffffffff refused, 0 accepted");

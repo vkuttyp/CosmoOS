@@ -83,6 +83,13 @@ kernel ABI; nothing here is visible to user space.
   the cache. Interrupt-safe except for the final free, which takes
   `kernel_space.lock` (irqsave, so still callable with interrupts off).
 
+### `cpumask_t thread_pin_self(void)`, `void thread_set_affinity_self(cpumask_t)`, `void thread_set_affinity(struct thread *t, cpumask_t)`
+Pin the calling thread to the CPU it is on (returning the mask it had),
+and put a mask back; a one-CPU affinity is a declared per-CPU claim (S25)
+that outlives a sleep, and a migrator never moves a pinned thread. The
+third widens another thread's mask (tests); it must admit the CPU the
+thread is on, since nothing here moves it.
+
 ### `struct thread *thread_current(void)`
 - `this_cpu()->current`. NULL before `sched_init`.
 
@@ -150,6 +157,31 @@ kernel ABI; nothing here is visible to user space.
   sets `need_resched` when idle is running and the bitmap is non-empty.
   Runs in interrupt context; the policy part under `runqueue.lock`.
 
+### `enum sched_migrate_result sched_migrate(struct thread *t, unsigned cpu)`
+Move `t` to `cpu`'s run queue. Only a READY thread that is not its queue's
+`current` moves (S26); both run-queue locks are taken inside in increasing
+CPU-id order (S24) and released before the return. The result names the
+check that refused: `SCHED_MIGRATED`, `SCHED_MIGRATE_SAME_CPU`,
+`SCHED_MIGRATE_NOT_READY` (RUNNING, BLOCKED, EXITED), `SCHED_MIGRATE_CURRENT`
+(READY and queued but still its CPU's current: the woken-before-blocked
+window), `SCHED_MIGRATE_AFFINITY`, `SCHED_MIGRATE_OFFLINE` (not online, or
+not a CPU). `sched_migrate_result_name` spells it. Re-reads `t->cpu` under
+the first lock and retries if the thread moved meanwhile. **Must not be
+called with a run-queue lock held**; callable with interrupts off and from
+a tick.
+
+### `enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved)`
+The same move for a thread the policy chooses: both locks, then
+`policy->pick_migratable(&rq[from], CPUMASK_OF(to))` under them, then the
+move. `*moved` is the thread on `SCHED_MIGRATED`, NULL otherwise;
+`SCHED_MIGRATE_NOT_READY` means the queue offered nothing. The entry for
+a caller that only knows the queue -- the chaos migrator, and the
+balancer of the next unit -- since there is no selection to hand over.
+
+### `uint64_t sched_migration_count(void)`, `void sched_chaos_stats(uint64_t *migrated, uint64_t *refused)`
+Moves made since boot, every entry counted (printed by `sched_dump`); and,
+in a `SCHED_CHAOS=1` build, the tick migrator's tally.
+
 ### `struct runqueue *sched_runqueue(unsigned cpu)`, `uint64_t sched_switch_count(unsigned cpu)`, `void sched_dump(void)`
 - Diagnostics; `sched_dump` prints per CPU the queue state, `ticks`, and
   the tick sample (`last tick N ms ago pc 0x...`), then `thread_dump_all`,
@@ -165,6 +197,10 @@ kernel ABI; nothing here is visible to user space.
   must take no lock another CPU may hold: print counters. Eight slots.
 
 ### `struct sched_policy` / `sched_policy_rr`
+`pick_migratable(rq, allowed)`: a ready thread on `rq` that is not
+`rq->current` and whose affinity admits a CPU in `allowed`, or NULL;
+called with `rq->lock` held. Round-robin offers the thread it would run
+last (the lowest priority level's tail).
 - Function table `{enqueue, dequeue, pick_next, tick, slice_new}`. All
   entries run under `runqueue.lock`. `pick_next` returning NULL selects
   idle. The only policy is `sched_policy_rr` (`policy_rr.c`): 64 FIFO
@@ -289,13 +325,31 @@ arrays indexed by `cpu_id` (for example `x86_cpu_apic_id`).
   it as CPU 0, `arch_percpu_install`. Must run after `gdt_init` on x86-64
   (loading the GS selector resets the GS base) and before any spinlock.
 - `void percpu_register(struct percpu *pc, unsigned cpu_id)`: SMP.
-- `struct percpu *this_cpu(void)`: `arch_percpu_get()`.
+- `struct percpu *this_cpu(void)`: `arch_percpu_get()`, checked in debug
+  builds: a call where the answer could not be kept (S25 -- preemption on,
+  interrupts on, thread context, an affinity of more than one CPU, more
+  than one CPU) panics naming the call site. `unsigned arch_cpu_id(void)`
+  (`arch/cpu.h`, implemented in `kernel/core/percpu.c` over the
+  architecture's `arch_cpu_id_raw`) is checked the same way, and is the
+  module export.
+- `struct percpu *raw_this_cpu(void)` / `unsigned raw_cpu_id(void)`: the
+  unchecked reads, for an answer that is the same on any CPU that runs
+  the thread or for a diagnostic; every use carries a comment saying
+  which.
+- `void percpu_claim_expect(void)` / `unsigned percpu_claim_expected_hits(void)`
+  (debug): the next violation is counted instead of fatal; one-shot, for
+  the `percpu-claim` self-test.
+- Build knob `PERCPU_WARN=1`: the check warns once per site
+  (`PERCPU-CLAIM ip=... thread=...`) instead of panicking; the sweep's
+  form, never shipped on.
 - `struct percpu *percpu_get(unsigned cpu)`, `unsigned cpu_count(void)`,
   `bool cpu_online(unsigned cpu)`, `cpumask_t cpu_online_mask(void)`.
 - `void preempt_disable(void)` / `void preempt_enable(void)`: nestable
-  counter on `this_cpu()`. `preempt_enable` calls `sched_preempt()` when
+  counter on the raw block. `preempt_enable` calls `sched_preempt()` when
   the count reaches zero with `need_resched` set, `irq_depth == 0`, and
-  interrupts enabled; it asserts the count was positive.
+  interrupts enabled; it asserts the count was positive. Preemption
+  disabled is the migration barrier: the thread cannot become READY and
+  so cannot be moved (S25).
 - `bool preemptible(void)`: `preempt_count == 0 && irq_depth == 0`.
 - `CONFIG_MAX_CPUS` = 64, `cpumask_t` = `uint64_t`, `CPUMASK_ALL`,
   `CPUMASK_OF(c)`.

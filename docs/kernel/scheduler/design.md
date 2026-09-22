@@ -26,6 +26,30 @@ PR. `preempt_disable()`/`preempt_enable()` are increment/decrement of
 `preempt_count`; `preempt_enable` calls `schedule()` when the count
 reaches zero with `need_resched` set and interrupts enabled.
 
+**A per-CPU answer has a rule (S25).** The value either accessor returns
+may be kept only while the thread cannot move: preemption disabled,
+interrupts off, interrupt context, or an affinity of one CPU. Since
+threads migrate (below), a thread that reads its CPU with preemption on
+and uses the answer later may be using another CPU's. In debug builds
+both accessors check the rule and panic naming the call site
+(`kernel/core/percpu.c`, `claim_check`); `PERCPU_WARN=1` turns the panic
+into a once-per-site warning, which is how the sweep that introduced
+the rule listed its sites (113 on x86-64, 133 on AArch64 in one boot
+each; `docs/audit/next-subsystem-percpu-migration.md`). Two reads are
+not claims and use the raw forms `raw_this_cpu()` / `raw_cpu_id()`,
+each with a comment saying which: the current thread (`thread_current`
+is `raw_this_cpu()->current`, since a thread is the same on any CPU
+that runs it) and a count asserted to be zero (`preempt_count`,
+`irq_depth` in `might_sleep` and the sleeping primitives, zero on every
+CPU a preemptible thread can be on); and a diagnostic or statistic,
+where a stale answer is a wrong number and never a wrong action
+(`clock_now_ns`'s per-CPU offset, whose error after a move is bounded
+by the offsets' half-widths, the tick and shootdown counters, the
+block layer's local/remote completion tally). A thread that must keep a
+per-CPU answer across a sleep pins itself (`thread_pin_self`), which the
+check honours as a one-CPU affinity; the tests that name "another CPU
+than mine" do.
+
 `spin_lock` now calls `preempt_disable()` first and `spin_unlock` calls
 `preempt_enable()` last, so no spinlock holder is ever preempted.
 
@@ -198,6 +222,65 @@ spinlock and is in no read-side section.
 `idle_thread_main`: loop `{ if need_resched: schedule(); else
 arch_cpu_wait_for_interrupt(); }`. The idle thread never sits on a run
 queue; `pick_next` returning NULL selects it.
+
+## 3a. Migration
+
+A ready thread can be moved from one CPU's run queue to another's
+(`sched_migrate`, `sched_migrate_from`; `docs/audit/next-subsystem-percpu-
+migration.md`). This is the mechanism only: nothing in the kernel moves
+threads on its own, and the automatic balancer is the following unit.
+
+**What moves.** Only a `THREAD_READY` thread that is not its queue's
+`current` (S26). A running thread executes on its CPU's stack; a blocked
+one is on no queue and wakes on its own `t->cpu` through `sched_wake`;
+and a thread woken between blocking and stopping is both `rq->current`
+and a queue entry until it runs `sched_set_running_current`, so "not in
+a queue" is not the same as "not running" and the primitive refuses
+`rq->current` by identity. The move is a policy `dequeue` from the source,
+`t->cpu` rewritten, a policy `enqueue` at the destination's tail, and a
+reschedule request there if the thread outranks its current; the
+migration count rises.
+
+**Two locks, one order.** Both run-queue locks are held for the whole
+move, taken in increasing CPU-id order (S24) and released before the
+call returns. Each run queue's lock is its own lockdep class
+(`runqueue0`, `runqueue1`, ... from a static name table in `sched.c`),
+so a reversed pair is a cycle lockdep reports; `lockdep-rq-order`
+provokes one. Neither entry may be called with a run-queue lock held --
+`sched_migrate_from` selects *under* both locks through the policy's
+`pick_migratable`, so a caller that only knows the queue (the chaos
+migrator, the balancer to come) has no selection to hand over and nothing
+to revalidate.
+
+**The result says why not.** `enum sched_migrate_result` names the check
+that refused: same CPU, not ready, current (the window above), affinity,
+offline. A caller asks which, never whether.
+
+**`preempt_disable` is the migration barrier.** `schedule()` panics when
+entered with `preempt_count != 0`, so a thread that has disabled
+preemption can never become READY and can never be moved -- which is why
+S25 needs no second counter: a per-CPU answer kept under `preempt_disable`
+is kept on the CPU that gave it. `sched_wake`'s unlocked read of `t->cpu`
+is unchanged, because the thread it can wake is BLOCKED and a blocked
+thread is never moved.
+
+**Where the switch path reads its own block.** `schedule_internal` and
+`sched_set_running_current` disable interrupts *before* reading
+`this_cpu()`: they arrive preemptible, and a tick between the read and
+the run-queue lock could move the caller, which would then switch on the
+state of the CPU it left. The quiesce publish in the switch path is
+inside that window too, and `quiesce_note_quiescent` disables interrupts
+itself for its other callers (Q20).
+
+**The chaos migrator** (`SCHED_CHAOS=1`, debug builds, `make test-chaos`)
+is the adversary the mechanism is tested under: every fourth tick, after
+`sched_tick` has released its own lock, each CPU calls
+`sched_migrate_from(self, next)` for the next online CPU in a rotation,
+moving one thread its queue can spare for no reason but to move it. The
+whole self-test suite and the user-mode sections run with threads moving
+underneath them; the run prints its tally after the self-tests
+(`sched: chaos migrated N threads from the tick ...`) and the boot test
+requires `N > 0`. CI runs it on both architectures.
 
 ## 4. Wait queues
 

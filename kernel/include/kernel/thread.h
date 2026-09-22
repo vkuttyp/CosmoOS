@@ -108,6 +108,17 @@ struct thread {
  * failure. `name` is copied. */
 struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority);
 
+/* Pin the calling thread to the CPU it is on, returning the affinity it
+ * had; `thread_set_affinity_self` puts a mask back (it must admit the
+ * CPU the thread is on, which the one it returned does). A per-CPU claim
+ * that must outlive a sleep is made under a pin: the check (S25) honours
+ * a one-CPU affinity, and a migrator never moves a pinned thread. */
+cpumask_t thread_pin_self(void);
+void thread_set_affinity_self(cpumask_t affinity);
+/* Widen another thread's affinity (tests). `affinity` must admit the CPU
+ * the thread is on: nothing here moves it, `sched_migrate` does. */
+void thread_set_affinity(struct thread *t, cpumask_t affinity);
+
 /* Same, restricted to the CPUs in `affinity` (must include at least one
  * online CPU, else NULL). */
 struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,
@@ -124,7 +135,7 @@ void thread_put(struct thread *t);
 
 static inline struct thread *thread_current(void)
 {
-    return this_cpu()->current;
+    return raw_this_cpu()->current;   /* identity: the thread is the same on any CPU that runs it (S25) */
 }
 
 /* Would an object operation on this thread have to return -EAGAIN rather

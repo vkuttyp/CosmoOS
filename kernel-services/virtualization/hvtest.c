@@ -824,10 +824,12 @@ bool selftest_el2_stub(const char **reason)
     CHECK(stub != 0 && (stub & (PAGE_SIZE - 1)) == 0);
     CHECK(el2_call_raw(0x1234, 0) == -1);            /* a selector nobody knows */
     if (hv_caps()->present) {
-        /* The hypervisor backend owns EL2 on this CPU by now: its own
-         * vectors answer, and the stub's ABI is gone until they hand it
-         * back. That the switch answers at all is the check here. */
-        CHECK(el2_call_raw(HV_EL2_CALL_VERSION, 0) == HV_EL2_VERSION);   /* 4 since the VSE call */
+        /* The hypervisor backend owns EL2 wherever it has readied it: the
+         * probe readied the boot CPU, the run loop readies the CPU that
+         * runs a vCPU, and this thread can be on any CPU (S25) -- so ask
+         * through the entry that readies the asking CPU first. That the
+         * switch answers at all is the check here. */
+        CHECK(arch_hv_el2_version_here() == HV_EL2_VERSION);   /* 4 since the VSE call */
         kinfo("selftest: el2: the EL2 backend owns the vectors (switch v%u), stub page 0x%llx",
               HV_EL2_VERSION, (unsigned long long)stub);
         return true;

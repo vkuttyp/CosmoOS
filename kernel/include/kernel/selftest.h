@@ -121,6 +121,11 @@ bool selftest_lockup_report_skew(const char **reason);  /* the lockup report age
 bool selftest_clock_cost(const char **reason);  /* what the correction costs on the clock path */
 bool selftest_clock_tick_owner(const char **reason);  /* the machine-wide tick survives its owner stopping */
 bool selftest_sched_spread(const char **reason);  /* new threads do not all land on CPU 0 */
+bool selftest_percpu_claim(const char **reason);         /* the per-CPU claim check (S25) */
+bool selftest_lockdep_rq_order(const char **reason);     /* a class per run queue: S24 is checked */
+bool selftest_sched_migrate(const char **reason);        /* one thread, one move */
+bool selftest_sched_migrate_refuses(const char **reason); /* every refusal by name, the window included */
+bool selftest_sched_migrate_stress(const char **reason); /* 200 ms of workers under a migrator */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */

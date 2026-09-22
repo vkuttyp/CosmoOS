@@ -542,7 +542,11 @@ where it slept, so the 42 sites in the first row of the table below were
 The conversions stand — a saturating subtraction costs a compare and is
 correct whether or not the stamp is foreign — and they become *necessary*
 the moment migration lands, which is why that unit re-runs this sweep as
-a gate rather than trusting it. But the rule as stated described a
+a gate rather than trusting it. *(Migration landed with the
+percpu-migration unit, `docs/audit/next-subsystem-percpu-migration.md`:
+a thread preempted between two reads can resume on another CPU, so the
+rule as first stated is now the rule of this kernel. The re-run found
+the two plain subtractions left outside tests same-CPU by construction.)* But the rule as stated described a
 scheduler this kernel did not have, and saying so here is cheaper than
 letting the next reader infer a migration that does not happen.
 

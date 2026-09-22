@@ -139,7 +139,7 @@ bool selftest_lockdep_irq(const char **reason)
     CHECK(interrupt_register((unsigned)vec, irq_lock_handler, NULL, "selftest-lockdep-irq") == 0);
     arch_ipi_bind((unsigned)vec);
     lockdep_expect(LOCKDEP_R_IRQ);
-    arch_ipi_send(arch_cpu_id(), (unsigned)vec);   /* self-IPI: the handler runs here */
+    arch_ipi_send(raw_cpu_id(), (unsigned)vec);   /* self-IPI: the handler runs on the CPU this was read on, and any CPU serves the check */
     uint64_t end = clock_now_ns() + 1000000000ULL;
     while (__atomic_load_n(&g_irq_hits, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
         arch_cpu_relax();

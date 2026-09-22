@@ -157,7 +157,7 @@ static bool skip(const char *test)
 
 /* --- the sample names the spinner --- */
 
-bool selftest_lockup_sample(const char **reason)
+static bool selftest_lockup_sample_pinned(const char **reason)
 {
     int k = other_cpu();
     if (k < 0)
@@ -193,6 +193,18 @@ bool selftest_lockup_sample(const char **reason)
     CHECK(threads_settled(before));
     return true;
 }
+
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_sample(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_sample_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- the report's "last tick N ms ago" when a CPU's clock runs ahead --- */
 
@@ -235,7 +247,7 @@ static void skewcheck_main(void *arg)
  * this that only checked `clock_since_ns` would pass while the report
  * itself still computed the age some other way.
  */
-bool selftest_lockup_report_skew(const char **reason)
+static bool selftest_lockup_report_skew_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
@@ -289,9 +301,21 @@ bool selftest_lockup_report_skew(const char **reason)
 #endif
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_report_skew(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_report_skew_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- a spinner with interrupts masked: the outcome per architecture --- */
 
-bool selftest_lockup_sample_irqoff(const char **reason)
+static bool selftest_lockup_sample_irqoff_pinned(const char **reason)
 {
     int k = other_cpu();
     if (k < 0)
@@ -338,6 +362,18 @@ bool selftest_lockup_sample_irqoff(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_sample_irqoff(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_sample_irqoff_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- one reporter at a time, and nobody waits for it --- */
 
 struct racer {
@@ -364,7 +400,7 @@ static void racer_main(void *arg)
     }
 }
 
-bool selftest_lockup_sample_busy(const char **reason)
+static bool selftest_lockup_sample_busy_pinned(const char **reason)
 {
     unsigned n = cpu_count();
     if (n < 2)
@@ -433,6 +469,18 @@ bool selftest_lockup_sample_busy(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_sample_busy(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_sample_busy_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- soft lockup: no switch while something waits --- */
 
 static void victim_main(void *arg)
@@ -455,7 +503,7 @@ static bool wait_reports(uint64_t *field_now, uint64_t want, bool soft, uint64_t
     }
 }
 
-bool selftest_lockup_soft(const char **reason)
+static bool selftest_lockup_soft_pinned(const char **reason)
 {
     int k = other_cpu();
     if (k < 0)
@@ -495,9 +543,21 @@ bool selftest_lockup_soft(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_soft(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_soft_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- hard lockup: the watched CPU stopped ticking --- */
 
-bool selftest_lockup_hard(const char **reason)
+static bool selftest_lockup_hard_pinned(const char **reason)
 {
     int k = other_cpu();
     if (k < 0)
@@ -554,9 +614,21 @@ bool selftest_lockup_hard(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_hard(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_hard_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- the quiet control: a spinner nobody waits on, and an idle CPU --- */
 
-bool selftest_lockup_quiet(const char **reason)
+static bool selftest_lockup_quiet_pinned(const char **reason)
 {
     int k = other_cpu();
     if (k < 0)
@@ -584,13 +656,26 @@ bool selftest_lockup_quiet(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_lockup_quiet(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockup_quiet_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- the tick's cost, and the two stores' --- */
 
 bool selftest_lockup_tick_bench(const char **reason)
 {
     (void)reason;
-    /* The two stores the tick gained, a million times: their cost per tick. */
-    struct percpu *pc = this_cpu();
+    /* The two stores the tick gained, a million times: their cost per tick.
+     * Raw: a bench on some CPU's two fields, which the tick rewrites anyway. */
+    struct percpu *pc = raw_this_cpu();
     uintptr_t save_pc = pc->last_tick_pc;
     uint64_t save_ns = pc->last_tick_ns;
     uint64_t t0 = clock_now_ns();

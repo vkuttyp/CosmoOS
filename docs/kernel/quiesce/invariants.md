@@ -229,6 +229,16 @@ quiescent point, which on an idle machine means their next tick. The
 wake removes the polling overshoot, roughly halving the latency and
 collapsing its spread; it does not make a grace period cheap.
 
+**Q20. A quiescent-state publish names the CPU it runs on.**
+`quiesce_note_quiescent` reads its CPU id and publishes for it with
+interrupts off, so a caller that arrives preemptible -- the switch path
+(`schedule_internal`, before it takes the run-queue lock) and the
+synchronous grace period -- cannot be moved between the read and the
+publish and declare a CPU quiescent while a reader on that CPU is inside
+a section (scheduler S25). Check: every boot (the accessor check panics on
+a preemptible read); `quiesce-grace` and `quiesce-straggler` under
+`make test-chaos`.
+
 **Q19. A straggler kick is attributed only by the publish in its own trap
 return, and the flag that carries that cannot outlive the trap.** The
 kick (`quiesce.c`, after `2 * TICK_NS` and at most eight rounds) sends

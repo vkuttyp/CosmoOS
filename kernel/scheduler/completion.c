@@ -43,7 +43,7 @@ bool completion_done(struct completion *c)
 
 void wait_for_completion(struct completion *c)
 {
-    if (this_cpu()->irq_depth != 0)
+    if (raw_this_cpu()->irq_depth != 0)   /* identity: zero on any CPU a sleeping caller runs on */
         panic("wait_for_completion in interrupt context");
     might_sleep();
     wait_event(&c->wq, completion_done(c));

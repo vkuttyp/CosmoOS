@@ -515,7 +515,7 @@ static void rx_common(struct netif *nif, struct mbuf *m, int cpu)
     __atomic_fetch_add(&nif->stats.rx_packets, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&nif->stats.rx_bytes, m->pkt.len, __ATOMIC_RELAXED);
     struct net_cpu *c = steer(nif, m, cpu);
-    if (c->id == arch_cpu_id())
+    if (c->id == raw_cpu_id())   /* a statistic: steered to the CPU that received it */
         __atomic_fetch_add(&c->stats.rx_steered_here, 1, __ATOMIC_RELAXED);
     if (!mbufq_enqueue(&c->rxq, m)) {
         __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
@@ -639,7 +639,7 @@ bool net_work_queue(struct net_work *w)
 {
     /* The calling CPU's worker (a timer fires on the CPU that armed it);
      * an item already on some list stays there. */
-    unsigned cpu = arch_cpu_id();
+    unsigned cpu = raw_cpu_id();   /* a preference, not a claim: any ready worker serves the item */
     struct net_cpu *c = &g_cpu[cpu < g_ncpu ? cpu : 0];
     if (!c->ready)
         c = &g_cpu[0];

@@ -723,7 +723,7 @@ void bio_complete(struct bio *bio, int status)
 {
     struct blkdev *bd = bio->dev;
     inflight_remove(bd, bio);
-    if (bio->issue_cpu == arch_cpu_id())
+    if (bio->issue_cpu == raw_cpu_id())   /* a statistic: local vs remote completion, for the bench */
         __atomic_fetch_add(&bd->completed_local, 1, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&bd->completed_remote, 1, __ATOMIC_RELAXED);

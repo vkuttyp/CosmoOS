@@ -88,6 +88,11 @@ int el2_set_stack(uint64_t sp_phys);
 #ifndef __ASSEMBLER__
 /* For tests: the raw call, including selectors the stub refuses. */
 int64_t el2_call_raw(uint64_t selector, uint64_t arg);
+/* The switch's version from EL2 on the calling CPU, its vectors installed
+ * there first (kernel/arch/aarch64/hv_el2.c): the answer a test may check
+ * from any CPU, where a bare `el2_call_raw` reaches the stub on a CPU the
+ * run loop has not readied. -1 when EL2 cannot be readied here. */
+int64_t arch_hv_el2_version_here(void);
 #endif
 
 #endif /* ARCH_EL2_H */

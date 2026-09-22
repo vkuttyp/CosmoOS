@@ -60,7 +60,7 @@ The audit found the design sound and the implementation careful at the unit leve
 Cross-cutting facts that the rest of this report depends on:
 
 - **Every process has exactly one thread** (`kernel/process/process.c:420-422`; `clone`/`fork`/`clone3` are `lx_nosys`, `compat/linux/syscalls.c:1279,1338`). Many correct-today designs are correct only for this reason and are flagged as latent.
-- **Threads never migrate between CPUs** (`sched.c:pick_cpu:141-155` runs once at creation; `sched_wake:299-315` re-enqueues on `t->cpu`). Timers, `thread_sleep_ns`, `futex_wait` and run-time accounting silently depend on it.
+- **Threads never migrate between CPUs** (`sched.c:pick_cpu:141-155` runs once at creation; `sched_wake:299-315` re-enqueues on `t->cpu`). *(No longer true since the percpu-migration unit: `sched_migrate` moves READY threads, and every per-CPU claim is declared or checked -- S25.)* Timers, `thread_sleep_ns`, `futex_wait` and run-time accounting silently depend on it.
 - **All locks are spinlocks except six sleeping mutexes** (`g_mounts_lock`, `g_device_mutex`, `g_blk_lock`, `g_netif_lock`, module `g_lock`, hv `g_lock`) plus per-object mutexes in VFS, cosmofs, sockets and hv. There is no lock-order checker and no grace-period primitive of any kind.
 - **The kernel, loader, modules and native userland are all compiled `-mgeneral-regs-only`** (`build/arch/x86_64.mk:10,18`, `build/arch/aarch64.mk:14,22`, `libc/libc.mk:11`). Only Linux-personality binaries and VM guests can execute FPU/SIMD instructions.
 
@@ -94,7 +94,7 @@ Cross-cutting facts that the rest of this report depends on:
 | Interrupts / IRQ / IPI | Implemented | `kernel/interrupt/*`, `x86/{idt,ioapic,lapic}`, `aarch64/gic.c` | `irq-route`, `smp-call`, `smp-shootdown` | no IST for NMI/#MC; no unregister grace period; single call slot |
 | Timers | Implemented | `kernel/timer/timer.c`, arch timers | `timer`, `smp-ticks` | 250 Hz periodic; no `timer_cancel_sync`; TSC per-CPU unsynchronised |
 | SMP | Implemented | `kernel/core/smp.c`, `arch/*/smp.c`, trampolines | 8 `smp-*` | `CONFIG_MAX_CPUS=64`, xAPIC only, no hotplug |
-| Scheduler | Implemented | `kernel/scheduler/*` | 12 sched tests | no migration/balancing, no PI, no syscall-return preemption |
+| Scheduler | Implemented | `kernel/scheduler/*` | 12 sched tests | ~~no migration/balancing~~ migration primitive + chaos migrator (percpu-migration unit), no balancer yet, no PI, no syscall-return preemption |
 | Processes / ELF / spawn | Implemented | `kernel/process/{process,spawn,elf}.c` | `process-*`, `elf`, USERTEST | one thread per process; unbounded `p_memsz`; all uid 0 |
 | Kobjects / handles | Implemented | `kernel/object/*` | `objects` | 64 slots; rights READ/WRITE only; io-type assumed by cast |
 | Native syscalls | Implemented | `kernel/syscall/{syscall,native,uaccess}.c`, 50 numbers | USERTEST, shelltest | check-then-copy uaccess; `read` ≤ 1 KiB/call |

@@ -13,6 +13,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/printf.h>
 #include <kernel/quiesce.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
@@ -28,11 +29,22 @@
 static struct runqueue g_rqs[CONFIG_MAX_CPUS];
 static const struct sched_policy *g_policy = &sched_policy_rr;
 static bool g_initialized;
+static uint64_t g_migrations;
+
+/*
+ * One lockdep class per run queue. lockdep keys a class by the name
+ * pointer, so every queue initialised from the one literal "runqueue"
+ * was one class, and the order of two of them -- increasing CPU id,
+ * S24 -- was a rule it could not check: a second acquisition read as
+ * recursion. A name per instance, in storage that lives as long as the
+ * queue, makes a reversed pair a cycle it reports. */
+static char g_rq_lock_names[CONFIG_MAX_CPUS][16];
 
 static void rq_init(struct runqueue *rq, unsigned cpu)
 {
     memset(rq, 0, sizeof(*rq));
-    spinlock_init(&rq->lock, "runqueue");
+    ksnprintf(g_rq_lock_names[cpu], sizeof(g_rq_lock_names[cpu]), "runqueue%u", cpu);
+    spinlock_init(&rq->lock, g_rq_lock_names[cpu]);
     for (int p = 0; p < SCHED_PRIO_COUNT; p++)
         list_init(&rq->ready[p]);
     rq->cpu = cpu;
@@ -176,7 +188,7 @@ static unsigned pick_cpu(const struct thread *t)
 {
     unsigned n = cpu_count();
     unsigned start = n ? __atomic_fetch_add(&g_pick_rotor, 1u, __ATOMIC_RELAXED) % n : 0;
-    unsigned best = this_cpu()->cpu_id;
+    unsigned best = raw_cpu_id();   /* a default only: any online CPU in the mask overrides it below */
     unsigned best_load = ~0u;
     for (unsigned i = 0; i < n; i++) {
         unsigned c = (start + i) % n;
@@ -262,20 +274,33 @@ void sched_finish_switch(void)
  */
 static void schedule_internal(bool preempt)
 {
-    struct percpu *pc = this_cpu();
     KASSERT(g_initialized);
-    if (pc->irq_depth != 0)
-        panic("schedule() called from interrupt context (depth %u)", pc->irq_depth);
-    if (pc->preempt_count != 0)
-        panic("schedule() called with preemption disabled (count %d), a spinlock is held",
-              pc->preempt_count);
+    {
+        /* Identity reads: both counts are zero on any CPU a caller that
+         * may switch is running on, and non-zero only where it cannot move. */
+        struct percpu *chk = raw_this_cpu();
+        if (chk->irq_depth != 0)
+            panic("schedule() called from interrupt context (depth %u)", chk->irq_depth);
+        if (chk->preempt_count != 0)
+            panic("schedule() called with preemption disabled (count %d), a spinlock is held",
+                  chk->preempt_count);
+    }
+
+    /* Interrupts off before the per-CPU block is read: a caller arrives
+     * here preemptible, and a tick between reading `pc` and taking its
+     * run-queue lock could move this thread to another CPU, which would
+     * then switch on the state of the CPU it left (S25; the corruption
+     * that removed the first balancer, docs/audit/next-subsystem-percpu-
+     * migration.md). The lock below is the same irqsave lock, split. */
+    arch_irq_state_t s = arch_irq_save();
+    struct percpu *pc = this_cpu();
 
     /* Quiescent: preempt_count is 0 here (asserted above), so no read-side
      * section is open on this CPU (docs/kernel/quiesce/design.md). */
     quiesce_note_quiescent();
 
     struct runqueue *rq = pc->rq;
-    arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+    spin_lock(&rq->lock);
 
     struct thread *prev = rq->current;
     uint64_t now = clock_now_ns();
@@ -307,7 +332,8 @@ static void schedule_internal(bool preempt)
     if (next == prev) {
         prev->state = THREAD_RUNNING;
         prev->last_start_ns = now;
-        spin_unlock_irqrestore(&rq->lock, s);
+        spin_unlock(&rq->lock);
+        arch_irq_restore(s);
         return;
     }
 
@@ -343,14 +369,14 @@ void sched_yield(void)
 
 void sched_preempt(void)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: the asserted counts */
     KASSERT(pc->irq_depth == 0 && pc->preempt_count == 0);
     schedule_internal(true);
 }
 
 void sched_block_current(void)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: the asserted counts */
     if (pc->irq_depth != 0)
         panic("blocking in interrupt context");
     if (pc->preempt_count != 0)
@@ -378,18 +404,186 @@ bool sched_wake(struct thread *t)
 
 void sched_set_running_current(void)
 {
+    /* Interrupts off before the block is read, as in schedule_internal:
+     * the queue this thread may be on is the queue of the CPU it is on
+     * *now*, and a move between the read and the lock would dequeue the
+     * wrong CPU's current thread from the wrong queue (S25). */
+    arch_irq_state_t s = arch_irq_save();
     struct percpu *pc = this_cpu();
     struct runqueue *rq = pc->rq;
     struct thread *cur = pc->current;
 
-    arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+    spin_lock(&rq->lock);
     if (cur->state == THREAD_READY) {
         /* Woken before we blocked: take ourselves off the queue. */
         g_policy->dequeue(rq, cur);
     }
     cur->state = THREAD_RUNNING;
-    spin_unlock_irqrestore(&rq->lock, s);
+    spin_unlock(&rq->lock);
+    arch_irq_restore(s);
 }
+
+/* --- migration --- */
+
+const char *sched_migrate_result_name(enum sched_migrate_result r)
+{
+    switch (r) {
+    case SCHED_MIGRATED: return "migrated";
+    case SCHED_MIGRATE_SAME_CPU: return "same-cpu";
+    case SCHED_MIGRATE_NOT_READY: return "not-ready";
+    case SCHED_MIGRATE_CURRENT: return "current";
+    case SCHED_MIGRATE_AFFINITY: return "affinity";
+    case SCHED_MIGRATE_OFFLINE: return "offline";
+    }
+    return "?";
+}
+
+/* Both run-queue locks, increasing CPU id (S24). Interrupts are off. */
+static void rq_lock_pair(unsigned a, unsigned b)
+{
+    unsigned lo = a < b ? a : b, hi = a < b ? b : a;
+    spin_lock(&g_rqs[lo].lock);
+    spin_lock(&g_rqs[hi].lock);
+}
+
+static void rq_unlock_pair(unsigned a, unsigned b)
+{
+    unsigned lo = a < b ? a : b, hi = a < b ? b : a;
+    spin_unlock(&g_rqs[hi].lock);
+    spin_unlock(&g_rqs[lo].lock);
+}
+
+/* Both locks held, `t` READY on `from`'s queue and not its current. */
+static void migrate_locked(struct thread *t, unsigned from, unsigned to)
+{
+    struct runqueue *rqf = &g_rqs[from], *rqt = &g_rqs[to];
+    KASSERT(t->state == THREAD_READY && t != rqf->current && t->cpu == (int)from);
+    g_policy->dequeue(rqf, t);
+    t->cpu = (int)to;
+    g_policy->enqueue(rqt, t, false);
+    if (rqt->current == NULL || rqt->current == rqt->idle || t->priority < rqt->current->priority)
+        request_resched(rqt);
+    __atomic_fetch_add(&g_migrations, 1u, __ATOMIC_RELAXED);
+}
+
+static void assert_no_rq_lock_held(void)
+{
+#if CONFIG_LOCKDEP
+    for (unsigned c = 0; c < cpu_count(); c++)
+        KASSERT(!lockdep_is_held(&g_rqs[c].lock, LOCKDEP_KIND_SPIN));
+#endif
+}
+
+enum sched_migrate_result sched_migrate(struct thread *t, unsigned to)
+{
+    KASSERT(g_initialized);
+    assert_no_rq_lock_held();
+    if (to >= cpu_count() || !cpu_online(to))
+        return SCHED_MIGRATE_OFFLINE;
+    for (;;) {
+        arch_irq_state_t s = arch_irq_save();
+        int from = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        KASSERT(from >= 0);
+        if ((unsigned)from == to) {
+            arch_irq_restore(s);
+            return SCHED_MIGRATE_SAME_CPU;
+        }
+        rq_lock_pair((unsigned)from, to);
+        if (t->cpu != from) {
+            /* Moved by someone else between the read and the locks:
+             * the queue it is on now is not the one locked. Again. */
+            rq_unlock_pair((unsigned)from, to);
+            arch_irq_restore(s);
+            continue;
+        }
+        enum sched_migrate_result r;
+        if (t->state != THREAD_READY)
+            r = SCHED_MIGRATE_NOT_READY;
+        else if (g_rqs[from].current == t)
+            r = SCHED_MIGRATE_CURRENT;
+        else if ((t->affinity & CPUMASK_OF(to)) == 0)
+            r = SCHED_MIGRATE_AFFINITY;
+        else if (!cpu_online(to))
+            r = SCHED_MIGRATE_OFFLINE;
+        else {
+            migrate_locked(t, (unsigned)from, to);
+            r = SCHED_MIGRATED;
+        }
+        rq_unlock_pair((unsigned)from, to);
+        arch_irq_restore(s);
+        return r;
+    }
+}
+
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved)
+{
+    KASSERT(g_initialized);
+    assert_no_rq_lock_held();
+    *moved = NULL;
+    if (from == to)
+        return SCHED_MIGRATE_SAME_CPU;
+    if (from >= cpu_count() || to >= cpu_count() || !cpu_online(from) || !cpu_online(to))
+        return SCHED_MIGRATE_OFFLINE;
+    arch_irq_state_t s = arch_irq_save();
+    rq_lock_pair(from, to);
+    enum sched_migrate_result r = SCHED_MIGRATE_NOT_READY;
+    struct thread *t = g_policy->pick_migratable(&g_rqs[from], CPUMASK_OF(to));
+    if (t != NULL) {
+        migrate_locked(t, from, to);
+        *moved = t;
+        r = SCHED_MIGRATED;
+    }
+    rq_unlock_pair(from, to);
+    arch_irq_restore(s);
+    return r;
+}
+
+uint64_t sched_migration_count(void)
+{
+    return __atomic_load_n(&g_migrations, __ATOMIC_RELAXED);
+}
+
+#if CONFIG_SCHED_CHAOS
+/*
+ * The chaos migrator (SCHED_CHAOS=1, debug builds): every fourth tick,
+ * each CPU sends one thread its queue can spare to the next online CPU
+ * in a rotation, for no reason but to move it. The whole suite under
+ * migration, from the context the balancer of the next unit will use.
+ */
+static uint64_t g_chaos_migrated, g_chaos_refused;
+static unsigned g_chaos_rotor[CONFIG_MAX_CPUS];
+
+static void chaos_tick(struct percpu *pc)
+{
+    if ((pc->ticks & 3u) != 0)
+        return;
+    unsigned n = cpu_count();
+    if (n < 2)
+        return;
+    unsigned self = pc->cpu_id;
+    unsigned to = self;
+    for (unsigned i = 0; i < n; i++) {
+        unsigned c = (self + 1 + g_chaos_rotor[self]++) % n;
+        if (c != self && cpu_online(c)) {
+            to = c;
+            break;
+        }
+    }
+    if (to == self)
+        return;
+    struct thread *moved;
+    if (sched_migrate_from(self, to, &moved) == SCHED_MIGRATED)
+        __atomic_fetch_add(&g_chaos_migrated, 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&g_chaos_refused, 1u, __ATOMIC_RELAXED);
+}
+
+void sched_chaos_stats(uint64_t *migrated, uint64_t *refused)
+{
+    *migrated = __atomic_load_n(&g_chaos_migrated, __ATOMIC_RELAXED);
+    *refused = __atomic_load_n(&g_chaos_refused, __ATOMIC_RELAXED);
+}
+#endif
 
 /* --- hang watchdog --- */
 
@@ -464,6 +658,9 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         pc->need_resched = true;
     spin_unlock(&rq->lock);
 
+#if CONFIG_SCHED_CHAOS
+    chaos_tick(pc);   /* after the tick's own unlock: the migrator takes both locks itself */
+#endif
 }
 
 uint64_t sched_switch_count(unsigned cpu)
@@ -496,6 +693,7 @@ void sched_dump(void)
                 (unsigned long long)(pc ? clock_delta_ns(now, pc->last_tick_ns) / 1000000 : 0),
                 (void *)(pc ? pc->last_tick_pc : 0));
     }
+    kprintf("migrations %llu\n", (unsigned long long)sched_migration_count());
     thread_dump_all();
     for (unsigned i = 0; i < g_dump_hook_count; i++) {
         kprintf("%s:\n", g_dump_hooks[i].name);

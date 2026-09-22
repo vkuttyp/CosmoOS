@@ -2470,7 +2470,7 @@ static bool steer_hook(struct netif *nif, struct mbuf *m, void *arg)
     uint32_t seq;
     memcpy(&seq, hdr + 54, 4);
     if (f < STEER_FLOWS) {
-        unsigned cpu = arch_cpu_id() + 1;
+        unsigned cpu = raw_cpu_id() + 1;   /* some other CPU than this one was: any other serves */
         if (st->cpu[f] == 0)
             st->cpu[f] = cpu;
         else if (st->cpu[f] != cpu)
@@ -3604,7 +3604,7 @@ bool selftest_net_rxhook_grace(const char **reason)
      * hook, which does not yield, finishes before this thread runs
      * again, and the removal has nothing to wait for. */
     unsigned ncpu = cpu_count();
-    netif_rx_on(lo, m, ncpu > 1 ? (arch_cpu_id() + 1) % ncpu : 0);
+    netif_rx_on(lo, m, ncpu > 1 ? (raw_cpu_id() + 1) % ncpu : 0);   /* some other CPU: any other serves */
     for (unsigned i = 0; i < 1000 && !__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE); i++)
         thread_sleep_ms(1);
     CHECK(__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE) == 1);

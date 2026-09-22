@@ -87,7 +87,7 @@ bool faultinject_should_fail(enum fi_kind kind)
     unsigned every = __atomic_load_n(&r->every, __ATOMIC_ACQUIRE);
     if (every == 0)
         return false;
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth and the thread are the same wherever it runs */
     if (pc->irq_depth != 0)
         return false;
     if (r->only != NULL && r->only != pc->current)

@@ -2202,7 +2202,8 @@ See [docs/development.md](docs/development.md).
   and that is nearly every timing assertion in the suite (**that premise
   was itself wrong, and the thread-migration unit below says so: this
   kernel pins a thread to one CPU for life, so those stamps were
-  same-CPU when they were swept**) -- 42 such
+  same-CPU when they were swept; **and true again since the
+  percpu-migration unit below, which is when threads began to move**) -- 42 such
   sites, 20 shared-state ones, 4 in userland the report had not noticed,
   1 deliberately left plain (the tick cost, where saturating would hide a
   counter going backwards on one CPU) and 4 that are not elapsed times at

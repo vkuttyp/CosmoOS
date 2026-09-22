@@ -21,6 +21,14 @@ then stays there for the rest of its life.**
 > rotate, so a thread is no longer *born* on CPU 0 by default, but
 > nothing moves it afterwards. The measurements below are the state
 > before either change.
+>
+> **Since then** (`docs/audit/next-subsystem-percpu-migration.md`): the
+> corruption this report could not name was `schedule_internal` itself
+> reading its per-CPU block before taking the run-queue lock, with
+> sixteen more sites of the same kind on x86-64 and the EL2 hand-back on
+> AArch64; the rule those sites broke is S25 and the debug accessors
+> check it. A migration primitive exists and the suite runs under a
+> chaos migrator. The balancer this report designed is the unit after.
 
 Two facts, each small, and together a machine that uses one of its four
 CPUs.

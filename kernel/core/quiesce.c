@@ -57,7 +57,13 @@ static struct waitqueue g_gp_wq = WAITQUEUE_INIT(g_gp_wq);
 
 void quiesce_note_quiescent(void)
 {
+    /* The CPU named is the CPU publishing: a caller with interrupts on
+     * (the switch path, the synchronous grace period) could be moved
+     * between reading its id and the publish, and would then declare a
+     * CPU quiescent while a reader on it is inside a section (S25). */
+    arch_irq_state_t s = arch_irq_save();
     (void)quiesce_core_publish(&g_state, arch_cpu_id());
+    arch_irq_restore(s);
     /* No wake here: see quiesce_note_quiescent_preemptible. This is
      * called from inside the scheduler, including the AP bring-up path
      * that holds a run-queue lock with interrupts off (sched.c), and a
@@ -155,7 +161,7 @@ void quiesce_read_unlock_debug(void)
  * quiesce-wake did exactly that and failed on other threads' work. */
 static unsigned sync_quiesce_counting(unsigned *timeouts)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: zero on any CPU a sleeping caller runs on */
     if (pc->irq_depth != 0)
         panic("synchronize_quiesce in interrupt context");
     might_sleep();   /* a spinlock or a read-side section is held: a report with the stacks */

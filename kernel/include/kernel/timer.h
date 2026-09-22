@@ -71,14 +71,17 @@ uint64_t clock_now_ns(void);
  * diagnostic that sends its reader somewhere. Use this wherever the
  * stamp's CPU is not certainly this one; it costs a compare.
  *
- * **Which stamps those are is about to widen.** A stamp in shared state
- * is foreign today. A `t0` in a local variable is not, because a thread
- * is assigned a CPU once and never moves, so it wakes from a sleep where
- * it slept -- and the sweep that converted those sites did so on a rule
- * that describes the kernel this is becoming
- * (`docs/audit/next-subsystem-thread-migration.md`). Once threads
- * migrate they are all foreign, which is what that unit's step 6 exists
- * to re-check.
+ * **Every stamp a thread keeps across a point where it could be moved
+ * is foreign.** Threads migrate (`sched_migrate`; scheduler S26): a
+ * thread preempted between two reads can resume on another CPU, so a
+ * `t0` in a local variable is a foreign stamp unless both reads happen
+ * with interrupts off or preemption disabled, as the tick's own do. The
+ * sweep that converted the tree's subtractions did so on this rule while
+ * it was still only the rule of the kernel this was becoming
+ * (`docs/audit/next-subsystem-thread-migration.md`); the migration unit
+ * re-checked it (`docs/audit/next-subsystem-percpu-migration.md`) and
+ * found the two plain subtractions that remain are same-CPU by
+ * construction (the tick's cost, the offset measurement's round trip).
  *
  * **This is for time already spent, not for a moment to wait until.** A
  * deadline is a different problem with a different answer: saturating

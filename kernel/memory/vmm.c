@@ -981,7 +981,13 @@ static cpumask_t user_shootdown_targets(struct vm_space *space)
 
 static void user_shootdown(struct vm_space *space, vaddr_t va, size_t len)
 {
+    /* Preemption off from the mask to the return: the mask names this
+     * CPU as the one that flushes locally, and a sender that moved in
+     * between would flush the wrong one (S25; design.md §6.4 covers a
+     * CPU that joins the space meanwhile, not a sender that leaves). */
+    preempt_disable();
     arch_mmu_shootdown_cpus(&space->mmu, va, len, user_shootdown_targets(space));
+    preempt_enable();
 }
 
 void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages)
@@ -1096,7 +1102,8 @@ void vm_space_destroy(struct vm_space *space)
      * space keeps its translations; what must be true is that this CPU
      * is not running it *now*.
      */
-    KASSERT(this_cpu()->cur_space != space);
+    /* Raw: whichever CPU runs this thread has the thread's own space loaded, so this says "not my space" anywhere. */
+    KASSERT(raw_this_cpu()->cur_space != space);
 
     for (;;) {
         arch_irq_state_t s = spin_lock_irqsave(&space->lock);

@@ -106,10 +106,18 @@ uint64_t clock_now_ns(void)
      * them would not have been safe.
      */
     uint64_t now = clock_raw_ns();
+    /* Raw, and the one place a stale id changes a value: a thread moved
+     * between reading its id and reading the counter adds the CPU it
+     * left's offset to the CPU it is on's counter. The error is the
+     * difference of two offsets, bounded by their half-widths -- the
+     * residual skew this tree already tolerates (clock_since_ns) -- and
+     * a checked read here would put every clock_now_ns caller under
+     * preemption off for nothing better than that. */
+    unsigned cpu = raw_cpu_id();
     if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
-        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[arch_cpu_id()]);
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[cpu]);
 #if CONFIG_DEBUG
-    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[arch_cpu_id()], __ATOMIC_ACQUIRE));
+    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[cpu], __ATOMIC_ACQUIRE));
 #endif
     return now;
 }
@@ -307,7 +315,7 @@ void udelay(uint64_t us)
 
 static struct timer_queue *local_queue(void)
 {
-    return this_cpu()->timers;
+    return this_cpu()->timers;   /* checked: every caller arms or cancels with interrupts off */
 }
 
 void timer_setup(struct timer *t, timer_fn fn, void *arg)
@@ -501,7 +509,7 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 
 uint64_t timer_tick_cost_ns(void)
 {
-    return this_cpu()->tick_cost_ns;
+    return raw_this_cpu()->tick_cost_ns;   /* a statistic: some CPU's, for a bench line */
 }
 
 void timer_set_tick_hook(timer_tick_hook_fn hook)
@@ -792,12 +800,12 @@ void clock_measure_offsets(void)
 
 uint64_t timer_ticks(void)
 {
-    return this_cpu()->ticks;
+    return raw_this_cpu()->ticks;   /* a statistic: some CPU's tick count, for diagnostics */
 }
 
 unsigned timer_pending_count(void)
 {
-    struct timer_queue *q = local_queue();
+    struct timer_queue *q = raw_this_cpu()->timers;   /* a statistic: some CPU's queue, counted under its lock */
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
     unsigned n = q->count;
     spin_unlock_irqrestore(&q->lock, s);

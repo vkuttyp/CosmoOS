@@ -297,11 +297,16 @@ void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t l
 
 void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, size_t len, cpumask_t cpus)
 {
+    /* Preemption off from "not me" to the local flush: the CPU excluded
+     * from the interrupts must be the CPU that flushes itself (S25). The
+     * wait below spins with interrupts on, which preemption off allows. */
+    preempt_disable();
     cpumask_t others = cpus & cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id());
     unsigned targets = (unsigned)__builtin_popcountll(others);
 
     if (targets == 0) {
         arch_mmu_invalidate(ctx, va, len);
+        preempt_enable();
         return;
     }
 
@@ -333,11 +338,12 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
     }
     g_shootdown_stats[arch_cpu_id()].acks_received += targets;
     spin_unlock(&g_shootdown_lock);
+    preempt_enable();
 }
 
 void arch_mmu_shootdown_stats(struct arch_mmu_shootdown_stats *out)
 {
-    *out = g_shootdown_stats[arch_cpu_id()];
+    *out = g_shootdown_stats[raw_cpu_id()];   /* a statistic: some CPU's counters */
 }
 
 int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t len,
@@ -528,7 +534,7 @@ static uint64_t g_activate_flushes[CONFIG_MAX_CPUS];
 
 uint64_t arch_mmu_activate_flushes(void)
 {
-    return g_activate_flushes[arch_cpu_id()];
+    return g_activate_flushes[raw_cpu_id()];   /* a statistic: some CPU's count */
 }
 
 void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)

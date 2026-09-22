@@ -315,7 +315,7 @@ static uint64_t fpu_bench_pair(bool own)
 {
     struct fpu_bench a = { .own = own, .rounds = FPU_BENCH_SWITCHES };
     struct fpu_bench b = { .own = own, .rounds = FPU_BENCH_SWITCHES };
-    cpumask_t here = CPUMASK_OF(arch_cpu_id());
+    cpumask_t here = CPUMASK_OF(raw_cpu_id());   /* one CPU for the pair to share; the caller need not stay */
     uint64_t t0 = clock_now_ns();
     struct thread *ta = thread_create_on(fpu_bench_thread, &a, "fpu-bench-a", SCHED_PRIO_DEFAULT, here);
     struct thread *tb = thread_create_on(fpu_bench_thread, &b, "fpu-bench-b", SCHED_PRIO_DEFAULT, here);
@@ -481,6 +481,11 @@ static const struct selftest tests[] = {
     { "clock-cost", selftest_clock_cost },
     { "clock-tick-owner", selftest_clock_tick_owner },
     { "sched-spread",    selftest_sched_spread },
+    { "percpu-claim",    selftest_percpu_claim },
+    { "lockdep-rq-order", selftest_lockdep_rq_order },
+    { "sched-migrate",   selftest_sched_migrate },
+    { "sched-migrate-refuses", selftest_sched_migrate_refuses },
+    { "sched-migrate-stress", selftest_sched_migrate_stress },
     { "nvme",            selftest_nvme },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },
@@ -794,6 +799,16 @@ int selftest_run_all(void)
         kprintf("SELFTEST: PASS (%zu tests)\n", ARRAY_SIZE(tests));
     else
         kprintf("SELFTEST: FAIL (%d of %zu)\n", failed, ARRAY_SIZE(tests));
+
+#if CONFIG_SCHED_CHAOS
+    /* The boot test requires this line, with a count above zero: a
+     * chaos boot that moved nothing proved nothing (test-chaos). */
+    uint64_t chaos_moved, chaos_refused;
+    sched_chaos_stats(&chaos_moved, &chaos_refused);
+    kinfo("sched: chaos migrated %llu threads from the tick, %llu calls found nothing to move; %llu migrations in all",
+          (unsigned long long)chaos_moved, (unsigned long long)chaos_refused,
+          (unsigned long long)sched_migration_count());
+#endif
 
     return failed;
 }

@@ -16,7 +16,14 @@ const char *arch_name(void);
 /* Human-readable processor description, NUL-terminated, truncated to len. */
 void arch_cpu_brand_string(char *buf, size_t len);
 
-/* Logical CPU index of the caller. Always 0 until SMP bring-up. */
+/* Logical CPU index of the caller. Always 0 until SMP bring-up.
+ *
+ * `arch_cpu_id_raw` is the architecture's read, unchecked. `arch_cpu_id`
+ * (kernel/core/percpu.c) is the same read and, in debug builds, the
+ * check that the answer can be kept: invariant S25 in
+ * docs/kernel/scheduler/invariants.md. Code wants `arch_cpu_id`, or
+ * `raw_cpu_id` (percpu.h) with a reason. */
+unsigned arch_cpu_id_raw(void);
 unsigned arch_cpu_id(void);
 
 /* Spin-wait hint. */

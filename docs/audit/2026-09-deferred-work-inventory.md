@@ -151,8 +151,16 @@ AHCI are the two entries from that list now built.
 
 - only `policy_rr.c` exists; CFS-like fairness, real-time, deadline,
   interactive scheduling and CPU isolation are future policies.
-- **no migration** (a thread stays on the CPU chosen at creation;
-  confirmed 2026-09-14). ~~no load balancing~~ — **placement is fixed**
+- ~~**no migration** (a thread stays on the CPU chosen at creation;
+  confirmed 2026-09-14)~~ — **a migration primitive exists and the
+  suite runs under it** (`docs/audit/next-subsystem-percpu-migration.md`):
+  `sched_migrate`/`sched_migrate_from` move a READY thread between run
+  queues under both locks in increasing CPU-id order, each run queue's
+  lock is its own lockdep class so that order is checked (S24), every
+  per-CPU read is a declared claim the debug accessors enforce (S25), and
+  `make test-chaos` boots the whole suite with a migrator in the tick.
+  **No balancer moves threads on its own yet**: that is the next unit,
+  on a tree that has already survived migration. ~~no load balancing~~ — **placement is fixed**
   (`docs/audit/next-subsystem-thread-migration.md`): `pick_cpu` rotates
   its ties, so a thread created on an idle machine is no longer always
   born on CPU 0, which was the measured cause of 8 of 14 threads and 94%
@@ -167,10 +175,16 @@ AHCI are the two entries from that list now built.
   unlocked `t->cpu` read, `list_remove` leaving a stale node, per-CPU
   fault accounting, and per-CPU interrupt routing. Found on the way:
   lockdep cannot check a two-run-queue lock order (one class), and
-  `rq->current` can be in a ready list. **And the tree holds per-CPU
+  `rq->current` can be in a ready list. ~~**And the tree holds per-CPU
   assumptions nothing declares** — `el2` asserts the hypervisor backend
   owns EL2 "on this CPU" from an unpinned thread — so migration needs an
-  audit of those before it can land, not just a working balancer.
+  audit of those before it can land, not just a working balancer.~~
+  **That audit is done** (the percpu-migration unit): a probe in the two
+  accessors named 113 sites on x86-64 and 133 on AArch64; seventeen were
+  claims a migration would break, `schedule_internal` reading its own
+  per-CPU block before the run-queue lock first among them -- the
+  corruption above, named -- plus the EL2 hand-back; all are fixed, and
+  the accessors now panic in debug builds on a new one.
 - no priority inheritance in `mutex.c`.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
