@@ -1149,6 +1149,11 @@ static void stress_spinner(void *arg)
         w->rounds++;
         for (unsigned i = 0; i < 64; i++)
             arch_cpu_relax();
+        /* A yield each round: a thread that only ever leaves its CPU by
+         * preemption is never movable (S26), and eight such threads under
+         * a random migrator pile onto one CPU faster than 200 ms of slices
+         * can serve them -- a starved spinner, not a defect. */
+        sched_yield();
     }
     thread_exit(0);
 }
