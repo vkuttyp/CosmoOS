@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Sixty-eight, to 2026-09-21**, across CI and this developer's machine, on
+**Sixty-nine, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -845,6 +845,7 @@ of this section said eight and then listed nine:
 | PR #209's own CI run | observed, aarch64, the plain debug boot (`84df382`, run 35631426307, the named-pipes build, whose diff touches no inet path): `connect 0 in 638 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:38752 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 115.0s; the self-test blew its budget at 21128 ms against 8000 ms, which is the waiting. Row one |
 | PR #209's own CI run, a later commit, twice in one run — x86-64 and aarch64 | observed on both architectures of one run (`fd8beaa`, run 35634418562, a **documentation-only** commit: five files of prose restating one rule), each the plain debug boot: x86-64 `connect 0 in 926 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`, host side `127.0.0.1:43012 accepted at 82.8s, 0 byte(s)`, probe 1 ms / 1 ms, gave up at 102.8s; aarch64 `connect 0 in 891 ms`, the same returns and counters, host side `127.0.0.1:56710 accepted at 95.1s, 0 byte(s)`, probe 2 ms / 2 ms, gave up at 115.1s; both `[deadline, ESTABLISHED]`. Row one on both, the third run to show it on both architectures at once (PR #193's and `2f79ea5`'s before it), and this PR's second and third sightings |
 | PR #209's own CI run, a fourth sighting -- the GICv3 boot | observed, aarch64, the **GICv3** boot (`make test-gic`) rather than the plain one (`69fceeb`, run 35636508451, a commit that adds one diagnostic line to a hypervisor self-test and a paragraph to this file): `connect 0 in 1274 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:33110 accepted at 94.9s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`, gave up at 114.9s. Row one; the plain boot of the same job had passed. Four sightings on one PR's six runs, none of whose diffs touch the network |
+| PR #210's own CI run -- **x86-64** | observed, x86-64, the plain debug boot (`94afdf9`, run 35674822582, a one-document branch: the device-readiness report): `connect 0 in 1166 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:54818 accepted at 93.3s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 113.3s. Row one |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -855,15 +856,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty-five entries, sixty-eight occurrences -- and the table is the tally,
+Fifty-six entries, sixty-nine occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty rows carry
-the instrument's reading, forty-three of them watched as they happened
+are not independently re-verified here. The last fifty-one rows carry
+the instrument's reading, forty-four of them watched as they happened
 and seven of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **fifty-nine
-instrumented** occurrences behind the other forty-nine rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty
+instrumented** occurrences behind the other fifty rows carry the
 guest's side. Rows and occurrences differ because **twelve** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
