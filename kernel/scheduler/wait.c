@@ -3,6 +3,7 @@
  */
 
 #include <kernel/lockdep.h>
+#include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
