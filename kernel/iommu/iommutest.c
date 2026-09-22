@@ -145,6 +145,25 @@ bool selftest_iommu(const char **reason)
         uint64_t bad = IOMMU_IOVA_HI - PAGE_SIZE;      /* the last page: the allocator hands out the lowest */
         uint8_t *sec = kmalloc(512, 0);
         struct iommu_stats before;
+        /* The previous device's fault storm must be over first: a device
+         * retries its faulting DMA a few hundred times, the unit's event
+         * queue holds 256, and a storm still running when the next
+         * device faults overflows it and drops that device's events (the
+         * chaos migrator found the storm spilling into the next window
+         * in one AArch64 boot in two). Wait for the count to hold still. */
+        {
+            uint64_t quiet_ns = 0, last = 0;
+            uint64_t t_q = clock_now_ns();
+            while (quiet_ns < 30ull * 1000000 && clock_since_ns(t_q) < 2000ull * 1000000) {
+                iommu_get_stats(&before);
+                if (before.faults != last) {
+                    last = before.faults;
+                    quiet_ns = 0;
+                }
+                thread_sleep_ms(2);
+                quiet_ns += 2000000;
+            }
+        }
         iommu_get_stats(&before);
         uint64_t mine0 = 0;
         for (unsigned k = 0; k < before.nr_requesters; k++)
