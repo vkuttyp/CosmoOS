@@ -481,6 +481,7 @@ static const struct selftest tests[] = {
     { "clock-cost", selftest_clock_cost },
     { "clock-tick-owner", selftest_clock_tick_owner },
     { "sched-spread",    selftest_sched_spread },
+    { "sched-load",      selftest_sched_load },
     { "percpu-claim",    selftest_percpu_claim },
     { "lockdep-rq-order", selftest_lockdep_rq_order },
     { "sched-migrate",   selftest_sched_migrate },

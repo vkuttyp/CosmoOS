@@ -879,6 +879,123 @@ static bool wait_ready_on(struct thread *t, unsigned cpu)
 }
 
 /*
+ * What a CPU is carrying, and that placement can see it.
+ *
+ * `rq->nr_running` counts the ready list and `schedule` dequeues what it
+ * runs, so a CPU saturated by one compute-bound thread reports the same
+ * zero as a CPU asleep in idle. `sched_cpu_load` adds the running thread
+ * unless it is the idle thread, and `pick_cpu` reads that instead.
+ *
+ * The proof is deterministic in both directions, which is why it creates
+ * exactly `cpu_count()` threads. `pick_cpu` takes the least loaded CPU
+ * and rotates ties on a global counter, so when every CPU ties, that
+ * many consecutive creations start the scan on every CPU in turn --
+ * including the busy one, which then wins its own tie. With the load
+ * fixed, the busy CPU is never the minimum while any CPU reads zero, so
+ * it takes none of them. Reading `nr_running` again makes it tie, and
+ * exactly one of the batch lands on it.
+ *
+ * Each created thread blocks before the next is created (as
+ * `sched-spread` does), so the queues drain between placements and the
+ * only standing load is the spinner's and this test thread's own.
+ */
+static bool sched_load_pinned(const char **reason)
+{
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
+    unsigned n = cpu_count();
+    unsigned busy, spare;
+    if (!two_other_cpus(here, &busy, &spare)) {
+        kinfo("selftest: sched-load: fewer than three CPUs; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+
+    /* A thread that runs and never queues anything behind it: the whole
+     * difference between the two definitions of load. */
+    struct mig_spinner sp = { 0 };
+    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "load-spin", SCHED_PRIO_DEFAULT, CPUMASK_OF(busy));
+    CHECK(ts != NULL);
+
+    bool ok = true;
+    const char *why = NULL;
+    /* Wait for it to be the running thread there, not merely placed. */
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!clock_deadline_passed(deadline) && sched_cpu_load(busy) == 0)
+        thread_sleep_ms(1);
+
+    unsigned busy_load = sched_cpu_load(busy);
+    unsigned spare_load = sched_cpu_load(spare);
+    if (busy_load == 0) {
+        why = "a CPU running a compute-bound thread reported no load";
+        ok = false;
+    } else if (spare_load != 0) {
+        /* Another test's thread on the spare CPU would make this a
+         * measurement of the suite rather than of the load: say so
+         * rather than fail, since nothing here controls that. */
+        kinfo("selftest: sched-load: cpu %u was not idle (load %u); the placement half is skipped",
+              spare, spare_load);
+    }
+
+    unsigned on_busy = 0, made = 0;
+    static struct placed p[CONFIG_MAX_CPUS];
+    struct thread *t[CONFIG_MAX_CPUS];
+    if (ok && spare_load == 0) {
+        for (unsigned i = 0; i < n && ok; i++) {
+            memset(&p[i], 0, sizeof(p[i]));
+            completion_init(&p[i].started, "load-place");
+            completion_init(&p[i].release, "load-place-rel");
+            t[i] = thread_create(placed_main, &p[i], "load-place", SCHED_PRIO_DEFAULT);
+            if (t[i] == NULL) {
+                why = "a placement probe could not be created";
+                ok = false;
+                break;
+            }
+            made++;
+            wait_for_completion(&p[i].started);
+            for (unsigned k = 0; k < 2000 && __atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED; k++)
+                thread_sleep_ms(1);
+            if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+                why = "a placement probe never reached THREAD_BLOCKED";
+                ok = false;
+            }
+        }
+        for (unsigned i = 0; i < made; i++)
+            if (p[i].cpu == busy)
+                on_busy++;
+        for (unsigned i = 0; i < made; i++)
+            complete(&p[i].release);
+        for (unsigned i = 0; i < made; i++)
+            thread_join(t[i]);
+    }
+
+    __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(ts);
+
+    if (!ok) {
+        *reason = why;
+        return false;
+    }
+    if (spare_load == 0 && on_busy != 0) {
+        kerror("selftest: sched-load: %u of %u new threads were placed on cpu %u, which was running a thread (load %u)",
+               on_busy, made, busy, busy_load);
+        *reason = "placement chose a CPU that was already running a thread over an idle one";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-load: a CPU running one thread reports load %u and an idle one %u; %u threads placed, none on the busy CPU",
+          busy_load, spare_load, made);
+    return true;
+}
+
+bool selftest_sched_load(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = sched_load_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+/*
  * One thread, one move: a worker held READY on CPU A behind a
  * higher-priority spinner is moved to B by sched_migrate, runs next on
  * B (its first recorded CPU is B), and the migration count rose.

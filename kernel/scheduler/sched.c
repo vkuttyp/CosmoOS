@@ -184,6 +184,36 @@ void sched_start_cpu(void)
  */
 static unsigned g_pick_rotor;
 
+/*
+ * What a CPU is carrying: the threads queued on it plus the one it is
+ * running, unless that one is its idle thread, which is not work.
+ *
+ * `nr_running` alone cannot answer this. It counts the ready list, and
+ * `schedule` dequeues the thread it runs -- so a CPU spinning flat out
+ * on a single compute-bound thread reports zero, and so does a CPU
+ * asleep in `idle_main`. Every reader that wants "which CPU has the
+ * least to do" was reading a number that cannot tell those two apart
+ * (docs/audit/next-subsystem-load-balancer.md).
+ *
+ * **A hint, deliberately.** For another CPU's queue this reads two
+ * fields without that queue's lock, so the answer can be stale before
+ * it is used. That is sound for the two callers -- placement, which is
+ * choosing between roughly-equal CPUs anyway, and the balancer, whose
+ * move re-decides everything under both locks -- and it is why the
+ * comparison against `idle` is an identity test on a pointer and never
+ * a dereference: `rq->current` belongs to another CPU and may name a
+ * thread that exits a moment later.
+ */
+unsigned sched_cpu_load(unsigned cpu)
+{
+    if (cpu >= CONFIG_MAX_CPUS)
+        return 0;
+    const struct runqueue *rq = &g_rqs[cpu];
+    unsigned queued = __atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED);
+    const struct thread *cur = __atomic_load_n(&rq->current, __ATOMIC_RELAXED);
+    return queued + (cur != NULL && cur != rq->idle ? 1u : 0u);
+}
+
 static unsigned pick_cpu(const struct thread *t)
 {
     unsigned n = cpu_count();
@@ -194,7 +224,7 @@ static unsigned pick_cpu(const struct thread *t)
         unsigned c = (start + i) % n;
         if (!(t->affinity & CPUMASK_OF(c)) || !cpu_online(c))
             continue;
-        unsigned load = g_rqs[c].nr_running;
+        unsigned load = sched_cpu_load(c);
         if (load < best_load) {
             best_load = load;
             best = c;

@@ -116,6 +116,18 @@ uint64_t sched_migration_count(void);
 void sched_chaos_stats(uint64_t *migrated, uint64_t *refused);
 #endif
 
+/*
+ * Runnable threads on `cpu`: those queued, plus the one running unless
+ * it is that CPU's idle thread. `rq->nr_running` counts only the ready
+ * list, so it reads zero both for an idle CPU and for one saturated by
+ * a single thread; this is the number that tells them apart.
+ *
+ * Read without that CPU's run-queue lock, so it is a hint: use it to
+ * choose, never to conclude. A migration decided from it re-checks
+ * everything under both locks (`sched_migrate_from`).
+ */
+unsigned sched_cpu_load(unsigned cpu);
+
 struct runqueue *sched_runqueue(unsigned cpu);
 
 /* Diagnostics. */
