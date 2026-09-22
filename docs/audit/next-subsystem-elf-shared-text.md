@@ -80,6 +80,17 @@ So **49 of the 89 pages each copy costs are byte-identical read-only
 pages of one file**, and 27 more are eagerly allocated for a segment
 whose file content is twenty-four bytes.
 
+**AArch64 is the same shape**, which is what says this is the loader and
+not an accident of one toolchain: 38 pages of text and 12 of rodata,
+both with `filesz == memsz`, and again a writable segment of 27 pages
+holding twenty-four bytes of file — 50 shareable of 77.
+
+| | x86-64 | AArch64 |
+| --- | --- | --- |
+| image pages | 76 | 77 |
+| shareable (read-only, no zero tail) | 49 | 50 |
+| writable segment's file bytes | 24 | 24 |
+
 ## Current implementation
 
 ```c
