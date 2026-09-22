@@ -52,3 +52,4 @@ tests/hv/aarch64/Image
 
 # tools/elf-share-probe.py snapshots (a run that was not reverted)
 *.elf-share-probe.orig
+*.elf-share-probe.applied

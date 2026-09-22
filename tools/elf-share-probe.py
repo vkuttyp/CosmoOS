@@ -27,9 +27,12 @@ Usage:
     gmake test && grep ELFSHARE out/x86_64-debug/boot-test.log
     python3 tools/elf-share-probe.py revert
 
-`apply` refuses a file with uncommitted changes; `revert` restores its
-own snapshot and never runs `git checkout`, so it can only undo what it
-did.
+`apply` refuses a file with uncommitted changes. `revert` restores its
+own snapshot, never runs `git checkout`, and **refuses outright if any
+instrumented file has changed since the apply** -- it records what it
+wrote and compares before restoring anything, because a snapshot that
+overwrites later edits is the same data loss the snapshot was meant to
+prevent.
 
 **The boot it runs in is a measuring boot, not a passing one.** The
 probe spawns four copies of `init --block`, which hold the console, and
@@ -39,6 +42,7 @@ above are still the numbers -- but do not read the boot's verdict as a
 regression.
 """
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -49,6 +53,11 @@ SELFTEST_C = 'kernel/core/selftest.c'
 SELFTEST_H = 'kernel/include/kernel/selftest.h'
 FILES = [TEST, SELFTEST_C, SELFTEST_H]
 BACKUP = '.elf-share-probe.orig'
+STAMP = '.elf-share-probe.applied'
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
 
 PROBE = r'''
 /* --- ELF SHARE PROBE (tools/elf-share-probe.py; not for merge) --- */
@@ -143,6 +152,12 @@ def apply_():
     for path, text in staged.items():
         shutil.copyfile(path, path + BACKUP)
         open(path, 'w').write(text)
+        # What this tool wrote, so `revert` can tell its own work from
+        # anyone else's. Without it a revert restores the snapshot over
+        # edits made after the apply, which is the same data loss the
+        # snapshot was introduced to avoid (found in review of this
+        # report).
+        open(path + STAMP, 'w').write(_digest(text))
     print("applied: build and boot, then grep ELFSHARE in the boot log")
 
 
@@ -150,9 +165,25 @@ def revert():
     missing = [f for f in FILES if not os.path.exists(f + BACKUP)]
     if len(missing) == len(FILES):
         sys.exit("no snapshots found: nothing to revert")
+    # Refuse before restoring anything: a partial revert is worse than
+    # none. A file that no longer matches what `apply` wrote has been
+    # edited since, and this tool has no business overwriting that.
+    edited = []
+    for f in FILES:
+        if not os.path.exists(f + BACKUP):
+            continue
+        want = open(f + STAMP).read().strip() if os.path.exists(f + STAMP) else None
+        if want is None or _digest(open(f).read()) != want:
+            edited.append(f)
+    if edited:
+        sys.exit("changed since apply, so this would discard work that is not mine:\n  " +
+                 "\n  ".join(edited) +
+                 "\nThe originals are beside them as *%s. Merge or delete them by hand." % BACKUP)
     for f in FILES:
         if os.path.exists(f + BACKUP):
             shutil.move(f + BACKUP, f)
+        if os.path.exists(f + STAMP):
+            os.remove(f + STAMP)
     print("reverted")
 
 

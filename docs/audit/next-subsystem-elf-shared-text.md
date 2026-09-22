@@ -172,12 +172,38 @@ This is a **behaviour change and the unit's real risk**. Today a process
 holds a copy, so writing to `/bin/sh` cannot affect a running shell.
 With shared text it can: the pages are the file's.
 
-The report proposes the interlock rather than the silence: a vnode gains
-a count of the mappings that share its text, and a write to a file with
-a non-zero count is refused with `-ETXTBSY`, as POSIX describes and as
-Linux does. It is a small counter and a check at one place, and without
-it this unit makes a program's instructions mutable by anyone who can
-write its file.
+The report proposes the interlock rather than the silence: a write to a
+file some process is executing is refused with `-ETXTBSY`, as POSIX
+describes and as Linux does. Without it this unit makes a program's
+instructions mutable by anyone who can write its file.
+
+**And the count must not be a new counter**, because a counter beside a
+lifetime is a counter that goes stale. The tree already keeps what is
+needed: every file mapping is a `struct vm_file_map` holding a vnode
+reference, linked onto a per-vnode list under `pagecache_lock(vn)` and
+unlinked under the same lock before `vnode_put`
+(`kernel/memory/vmm.c`). So the rule is a property of that list, and
+its three parts are:
+
+- **Registration** happens where `m` is linked, under
+  `pagecache_lock(vn)`, and marks the mapping as text — shared, and
+  executable in its `maxprot`.
+- **The check** happens under the same lock. The write path already
+  holds `vn->lock`, and the documented order is
+  `vnode -> pagecache -> vm_space`, so a writer may take
+  `pagecache_lock(vn)` to ask. Check and write are then atomic with
+  respect to a mapping being created, which is the race a separate
+  counter would lose.
+- **Release** happens where `m` is unlinked, under that lock and
+  *before* `vnode_put` — which is already the order the teardown uses.
+  It matters: a mapping that has been unlinked can no longer fault a
+  page in, so the count reaching zero there is the truth rather than an
+  optimistic guess, and a count that lagged the teardown would leave a
+  file permanently busy.
+
+Stated as an invariant for the implementation to carry: **a file is
+busy exactly while a text mapping of it is on its page-cache list**, and
+both the answer and the write are taken under that list's lock.
 
 ### 5. Demand paging comes for free, and is measured separately
 
@@ -237,9 +263,11 @@ int elf_load_into(struct vm_space *space, const void *image,
 ### New: the text-mapping count
 
 ```c
-/* Mappings that share this file's pages as program text. A write to a
- * file with a non-zero count is -ETXTBSY. */
-unsigned vnode_text_mappings(struct vnode *vn);
+/* Whether any process is executing this file: true while a shared,
+ * executable mapping of it is on its page-cache mapping list. Called
+ * with pagecache_lock(vn) held, by a writer that already holds
+ * vn->lock. A write to a busy file is -ETXTBSY. */
+bool vnode_text_busy(struct vnode *vn);
 ```
 
 Nothing else is added. `struct vm_space`, `struct vnode` and
@@ -324,7 +352,14 @@ unit's benchmark is the after, in the same boot where possible.
   argument: 49 pages per process, on a machine whose free-frame count
   the probe prints in five digits.
 - **Refuse to write a running program's file by locking it at spawn**,
-  rather than counting mappings. A lock held for a process's lifetime is
-  a different object with a different failure mode (what releases it if
-  the process is killed?); the count is derived from the mappings
-  themselves and cannot outlive them.
+  rather than deriving it from the mappings. A lock held for a process's
+  lifetime is a different object with a different failure mode (what
+  releases it if the process is killed?); the mapping list is torn down
+  by the same path that tears down the address space, so it cannot
+  outlive what it describes.
+- **A counter on the vnode, incremented by the loader.** It was the
+  report's first proposal and it is wrong: a counter beside a lifetime
+  drifts from it. A writer can race its increment, and a decrement that
+  does not follow the region's teardown leaves the file busy forever.
+  The mapping list already has the lifetime and the lock; the answer
+  should be read from it (found in review of this report).
