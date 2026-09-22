@@ -3241,7 +3241,7 @@ See [docs/development.md](docs/development.md).
   `sched-migrate`, `sched-migrate-refuses`, `sched-migrate-stress`: about
   3,500 moves in 200 ms on x86-64, 8,000 on AArch64), 380 self-tests on
   both architectures. Not in this unit: the balancer, which is the next.
-  (PR #NNN)
+  (PR #213)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
