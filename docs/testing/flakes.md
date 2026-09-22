@@ -856,7 +856,7 @@ of this section said eight and then listed nine:
 | The balancer report's measuring boot | observed, x86-64, this developer's machine, a boot carrying `tools/sched-balance-probe.py`: the shape where the guest **sent** the bytes: `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. The probe touches the scheduler's tick and nothing in the network stack, and the next boot of the same tree passed. |
 | `main` @ e2f3d2b6 | observed, aarch64, the **protection-capable** boot (run 35719533086, the percpu-migration unit's own merge to `main`): again the shape where the guest **sent** the bytes, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`, rexmit timer state 0 on cpu 0. The x86-64 job of the same run passed. |
 | PR #214's own CI run | observed, aarch64, the **protection-capable** boot (run 35724183483, `12d666b9`, a **documentation-and-tool-only** branch): the same shape again, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. |
-| PR #215's own CI run | observed, aarch64, the **plain debug** boot (run 35725274548, this very record's branch, documentation-only): the **other** shape, `connect 0 in 1379 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +3` **`retransmits +1`**. The record of the flake was failed by the flake, and by its other half. |
+| PR #215's own CI run | observed, aarch64, the **plain debug** boot (run 35725274548, this very record's branch at `34f46c96`, a revision that changed documentation only): the **other** shape, `connect 0 in 1379 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +3` **`retransmits +1`**. The record of the flake was failed by the flake, and by its other half. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -1913,15 +1913,18 @@ cost — the instrument-before-theory point again. Not repaired here; it
 belongs to the vGIC tests.
 
 **It recurred on 2026-09-22**, the same check and the same step, on
-PR #215's aarch64 GICv3 boot (run 35726616478) — a
-**documentation-only** branch, which rules out the change under test as
-it did the first time:
+PR #215's aarch64 GICv3 boot (run 35726616478). That revision
+(`34f46c96`) changed **documentation only**, which rules out the change
+under test as it did the first time — the instrument described below
+was added to the same branch afterwards, in response to this sighting,
+so the branch as merged is not documentation-only and the revision that
+failed was:
 
 ```text
 SELFTEST: el2-guest-irq-queue ... FAIL: check failed: x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 at line 1159 (8 ms)
 ```
 
-Two sightings, both aarch64 CI, both the GIC boot, both on branches
+Two sightings, both aarch64 CI, both the GIC boot, both on revisions
 that touch nothing in the hypervisor. So the instrument the paragraph
 above asked for is built: `CHECK_HC(x, n)` in
 `kernel-services/virtualization/hvtest.c` prints the exit kind, the
