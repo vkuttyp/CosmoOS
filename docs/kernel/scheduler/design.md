@@ -231,7 +231,14 @@ migration.md`). This is the mechanism only: nothing in the kernel moves
 threads on its own, and the automatic balancer is the following unit.
 
 **What moves.** Only a `THREAD_READY` thread that is not its queue's
-`current` (S26). A running thread executes on its CPU's stack; a blocked
+`current` and was not preempted (S26). A thread switched out by
+preemption -- an interrupt return or `preempt_enable` -- stopped at a
+point it did not choose and may be between the two instructions of a
+per-CPU access (the pointer to its CPU's block, then the field;
+`thread_current` and `preempt_disable` are that shape), so it must resume
+on the CPU it left: `schedule_internal` flags it `THREAD_FLAG_PREEMPTED`
+until it runs again, and no migrator moves it. A thread that yielded,
+blocked and was woken, or never ran has nothing in flight and may move. A running thread executes on its CPU's stack; a blocked
 one is on no queue and wakes on its own `t->cpu` through `sched_wake`;
 and a thread woken between blocking and stopping is both `rq->current`
 and a queue entry until it runs `sched_set_running_current`, so "not in
@@ -260,7 +267,10 @@ offline. A caller asks which, never whether.
 entered with `preempt_count != 0`, so a thread that has disabled
 preemption can never become READY and can never be moved -- which is why
 S25 needs no second counter: a per-CPU answer kept under `preempt_disable`
-is kept on the CPU that gave it. `sched_wake`'s unlocked read of `t->cpu`
+is kept on the CPU that gave it. The barrier is itself two instructions
+(load the block's pointer, increment the count), which is why a thread
+preempted between them is never moved (above): the chaos boot found one
+that was, reading another CPU's `irq_depth` after the move. `sched_wake`'s unlocked read of `t->cpu`
 is unchanged, because the thread it can wake is BLOCKED and a blocked
 thread is never moved.
 

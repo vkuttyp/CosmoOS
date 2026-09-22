@@ -78,10 +78,13 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame);
  * Migration: move one ready thread from one CPU's run queue to another's
  * (docs/kernel/scheduler/design.md, "Migration"; invariants S24-S26).
  *
- * Only a THREAD_READY thread that is not its queue's `current` moves --
- * a running thread is on its CPU's stack, a blocked one is on no queue
- * and wakes on its own `t->cpu`, and a woken-before-blocked thread is
- * both current and queued until it runs `sched_set_running_current`.
+ * Only a THREAD_READY thread that is not its queue's `current` and was
+ * not preempted moves -- a running thread is on its CPU's stack, a
+ * blocked one is on no queue and wakes on its own `t->cpu`, a
+ * woken-before-blocked thread is both current and queued until it runs
+ * `sched_set_running_current`, and a preempted thread stopped where the
+ * tick found it, perhaps between the two instructions of a per-CPU
+ * access (THREAD_FLAG_PREEMPTED).
  * Both run-queue locks are taken inside, in increasing CPU-id order
  * (S24), and released before the return. **Neither entry may be called
  * with a run-queue lock held.** Callable with interrupts off or from a

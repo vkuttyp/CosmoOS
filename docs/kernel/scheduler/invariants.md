@@ -83,12 +83,24 @@ migration could move the thread, `schedule_internal` itself among them
 (an unpinned preemptible read is reported; the four quiet forms are not);
 every debug boot, since a new site panics.
 
-**S26. Only a READY thread that is not its queue's `current` is
-migrated, and a migration holds both run-queue locks.** A RUNNING thread
-is on its CPU's stack; a BLOCKED thread is on no queue and `sched_wake`
-re-enqueues it on its own `t->cpu`; a thread woken between blocking and
-stopping (S22's window) is READY, queued, and still `rq->current` until
-`sched_set_running_current`, and is refused by identity. Under both locks
+**S26. Only a READY thread that is not its queue's `current` and was
+not preempted is migrated, and a migration holds both run-queue locks.**
+A RUNNING thread is on its CPU's stack; a BLOCKED thread is on no queue
+and `sched_wake` re-enqueues it on its own `t->cpu`; a thread woken
+between blocking and stopping (S22's window) is READY, queued, and still
+`rq->current` until `sched_set_running_current`, and is refused by
+identity. **A thread switched out by preemption stopped at a point it
+did not choose**: it may hold the pointer to its CPU's block and be
+about to read or write a field of it -- every per-CPU access is two
+instructions, `preempt_disable` itself included, so the barrier S25
+rests on is atomic only if such a thread resumes where it stopped.
+`schedule_internal` marks it `THREAD_FLAG_PREEMPTED` and clears the mark
+when it is switched in; `sched_migrate` refuses it (`preempted`) and
+`pick_migratable` never offers it. A thread that yielded, blocked and
+was woken, or never ran stopped at a call of its own with nothing in
+flight, and may move. Found by the chaos boot: a worker migrated between
+the two loads read another CPU's `irq_depth` and panicked as "in
+interrupt context". Under both locks
 the thread is dequeued, `t->cpu` rewritten, and enqueued at the
 destination, so at every instant no run-queue lock is held a thread is on
 exactly one queue and `t->cpu` names it. `sched_wake`'s unlocked read of

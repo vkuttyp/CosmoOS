@@ -164,8 +164,10 @@ CPU-id order (S24) and released before the return. The result names the
 check that refused: `SCHED_MIGRATED`, `SCHED_MIGRATE_SAME_CPU`,
 `SCHED_MIGRATE_NOT_READY` (RUNNING, BLOCKED, EXITED), `SCHED_MIGRATE_CURRENT`
 (READY and queued but still its CPU's current: the woken-before-blocked
-window), `SCHED_MIGRATE_AFFINITY`, `SCHED_MIGRATE_OFFLINE` (not online, or
-not a CPU). `sched_migrate_result_name` spells it. Re-reads `t->cpu` under
+window), `SCHED_MIGRATE_PREEMPTED` (READY by preemption, possibly mid-way
+through a per-CPU access; movable once it has run again),
+`SCHED_MIGRATE_AFFINITY`, `SCHED_MIGRATE_OFFLINE` (not online, or not a
+CPU). `sched_migrate_result_name` spells it. Re-reads `t->cpu` under
 the first lock and retries if the thread moved meanwhile. **Must not be
 called with a run-queue lock held**; callable with interrupts off and from
 a tick.
@@ -198,7 +200,8 @@ in a `SCHED_CHAOS=1` build, the tick migrator's tally.
 
 ### `struct sched_policy` / `sched_policy_rr`
 `pick_migratable(rq, allowed)`: a ready thread on `rq` that is not
-`rq->current` and whose affinity admits a CPU in `allowed`, or NULL;
+`rq->current`, was not preempted, and whose affinity admits a CPU in
+`allowed`, or NULL;
 called with `rq->lock` held. Round-robin offers the thread it would run
 last (the lowest priority level's tail).
 - Function table `{enqueue, dequeue, pick_next, tick, slice_new}`. All
