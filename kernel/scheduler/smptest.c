@@ -399,7 +399,7 @@ static void cross_waiter(void *arg)
     cw->on_cpu = arch_cpu_id();
 }
 
-bool selftest_smp_wake(const char **reason)
+static bool selftest_smp_wake_pinned(const char **reason)
 {
     unsigned before = thread_count();
     if (online_count() < 2) {
@@ -407,7 +407,15 @@ bool selftest_smp_wake(const char **reason)
         return true;
     }
 
-    unsigned target = 1;
+    /* A CPU other than this one, which the wrapper pins: the wake must
+     * cross CPUs for the reschedule IPI it counts to be sent at all. */
+    unsigned here = arch_cpu_id(), target = here;
+    for (unsigned i = 1; i < cpu_count(); i++)
+        if (cpu_online((here + i) % cpu_count())) {
+            target = (here + i) % cpu_count();
+            break;
+        }
+    CHECK(target != here);
     struct cross_wake cw;
     semaphore_init(&cw.sem, 0, "cross-wake");
     cw.woke_at = 0;
@@ -448,6 +456,17 @@ bool selftest_smp_wake(const char **reason)
     CHECK(threads_settle(before));
     return true;
 }
+
+/* Pinned for the whole test: the target is "another CPU than mine", a
+ * claim that must outlive the test's sleeps (S25). */
+bool selftest_smp_wake(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_smp_wake_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- every CPU's tick advances --- */
 
