@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Seventy-nine, to 2026-09-22**, across CI and this developer's machine, on
+**Eighty-three, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -854,6 +854,10 @@ of this section said eight and then listed nine:
 | PR #213's own CI run | observed, x86-64, the **protection-capable** boot (`test-guard`, `7e0c5147`, run 35709652208): `connect 0 in 1252 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40428 accepted at 74.7s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`; the new state line: `rexmit timer state -1 ... pcb state -1` -- the pcb was already detached by the reset when the harness looked. |
 | PR #213's own CI run, again | observed, aarch64, the **GICv3** boot (`test-gic`, `439d543c`, run 35715715021): the family's signature, host side `127.0.0.1:40928 accepted at 102.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`. |
 | The balancer report's measuring boot | observed, x86-64, this developer's machine, a boot carrying `tools/sched-balance-probe.py`: the shape where the guest **sent** the bytes: `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. The probe touches the scheduler's tick and nothing in the network stack, and the next boot of the same tree passed. |
+| `main` @ e2f3d2b6 | observed, aarch64, the **protection-capable** boot (run 35719533086, the percpu-migration unit's own merge to `main`): again the shape where the guest **sent** the bytes, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`, rexmit timer state 0 on cpu 0. The x86-64 job of the same run passed. |
+| PR #214's own CI run | observed, aarch64, the **protection-capable** boot (run 35724183483, `12d666b9`, a **documentation-and-tool-only** branch): the same shape again, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. |
+| PR #215's own CI run | observed, aarch64, the **plain debug** boot (run 35725274548, this very record's branch at `34f46c96`, a revision that changed documentation only): the **other** shape, `connect 0 in 1379 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +3` **`retransmits +1`**. The record of the flake was failed by the flake, and by its other half. |
+| PR #215's own CI run, again | observed, aarch64, the **protection-capable** boot (run 35731929745, `7d161b0a`): `connect 0 in 670 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0`. The `el2-guest-irq-queue` fix in the same revision held on that boot; this is the other flake. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -864,16 +868,19 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Sixty-four entries, seventy-nine occurrences -- and the table is the tally,
+Sixty-eight entries, eighty-three occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty-five rows carry
-the instrument's reading, forty-seven of them watched as they happened
-and eight of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-four
-instrumented** occurrences behind the other fifty-four rows carry the
-guest's side. Rows and occurrences differ because **twelve** rows hold
+are not independently re-verified here. The last fifty-nine rows carry
+the instrument's reading, fifty of them watched as they happened
+and nine of `main`'s read from the logs afterwards (**this split is the
+one figure here the table does not encode**: it is which runs were being
+watched when they failed, which no row records, so it is carried forward
+as rows are added rather than recomputed like the rest): PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-eight
+instrumented** occurrences behind the other fifty-eight rows carry the
+guest's side. Rows and occurrences differ because **fourteen** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
 
@@ -916,10 +923,20 @@ the connection was already reset.
 | PR #177, aarch64 (protection CPU) | **`12`** | `+4` | **12** | `+1` |
 
 Two things this does and does not say. It **does** rule out the send
-path as the defect: in one instance `ksock_sendto` returned 12, a
-segment went out, and the host still saw nothing — so "the twelve bytes
-were never written" describes every instrumented sighting but that
-one. It
+path as the defect: in two of the nine rows above `ksock_sendto`
+returned 12, a segment went out, and the host still saw nothing — so
+"the twelve bytes were never written" does not describe those. **And
+the successful send is not the exception this paragraph once made it
+sound.** Counted across the tally above rather than across the nine rows
+here: of the eighty-three occurrences, twenty record `sent 12`,
+forty-six record `sent -104`, two record `sent -1` (the connect itself
+reset, so nothing was ever sent) and fifteen record no send value at
+all. One row holds one of each, which is why this is counted per
+occurrence and not per row. So roughly a third of
+the sightings that name a send at all have the bytes on the wire, and
+both shapes are current — 2026-09-22 produced each of them. This
+paragraph was written when the successful send was one instance, and
+nothing re-read it against the growing table until then. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
@@ -1895,6 +1912,55 @@ One sighting, no rate. If it recurs, the check should print `x.kind`
 and `x.hypercall.nr`, which would settle which of the two it is at no
 cost — the instrument-before-theory point again. Not repaired here; it
 belongs to the vGIC tests.
+
+**It recurred on 2026-09-22**, the same check and the same step, on
+PR #215's aarch64 GICv3 boot (run 35726616478). That revision
+(`34f46c96`) changed **documentation only**, which rules out the change
+under test as it did the first time — the instrument described below
+was added to the same branch afterwards, in response to this sighting,
+so the branch as merged is not documentation-only and the revision that
+failed was:
+
+```text
+SELFTEST: el2-guest-irq-queue ... FAIL: check failed: x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 at line 1159 (8 ms)
+```
+
+Two sightings, both aarch64 CI, both the GIC boot, both on revisions
+that touch nothing in the hypervisor. So the instrument the paragraph
+above asked for is built: `CHECK_HC(x, n)` in
+`kernel-services/virtualization/hvtest.c` prints the exit kind, the
+hypercall number and its first argument before it fails, and the
+fifty-one plain hypercall expectations in that file go through it. The
+next sighting will say which of the two candidates it is instead of
+only that it was not hypercall 2.
+
+**And the next sighting, hours later, was diagnosed by it.** PR #215's
+aarch64 GICv3 boot again (run 35730173247):
+
+```text
+[ERROR] selftest: hv: line 1185: expected hypercall 2, got exit kind 4 hypercall nr 42 a0 0
+SELFTEST: el2-guest-irq-queue ... FAIL: unexpected vm exit at line 1185
+```
+
+Kind 4 **is** `COSMO_VM_EXIT_HYPERCALL`, so it was not a different kind
+of exit. It was hypercall **42**: the guest took the second instance of
+INTID 42 instead of reaching the heartbeat at the top of its loop. That
+is the first of the two candidates named above, and it is not a defect
+in the vGIC -- once the guest deactivates the first instance the second
+is pending and unmasked, so taking it immediately is correct. Whether
+the heartbeat happens first is a matter of how the run is scheduled.
+
+So the test was asserting a timing accident. It now runs until the
+second instance arrives, allowing heartbeats on the way and requiring
+42 to read as pending at each of them, then requires the guest back at
+its heartbeat with nothing pending -- the substance, which is that the
+second instance is kept and delivered exactly once, without the
+ordering that was never guaranteed. It reports how many heartbeats
+intervened, so the two orderings stay visible.
+
+Three sightings, one instrument, one diagnosis, one fix. The
+instrument stays: the fifty-one hypercall expectations in that file
+now name what they got.
 
 
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
