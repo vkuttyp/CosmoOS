@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Eighty-one, to 2026-09-22**, across CI and this developer's machine, on
+**Eighty-two, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -855,7 +855,8 @@ of this section said eight and then listed nine:
 | PR #213's own CI run, again | observed, aarch64, the **GICv3** boot (`test-gic`, `439d543c`, run 35715715021): the family's signature, host side `127.0.0.1:40928 accepted at 102.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`. |
 | The balancer report's measuring boot | observed, x86-64, this developer's machine, a boot carrying `tools/sched-balance-probe.py`: the shape where the guest **sent** the bytes: `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. The probe touches the scheduler's tick and nothing in the network stack, and the next boot of the same tree passed. |
 | `main` @ e2f3d2b6 | observed, aarch64, the **protection-capable** boot (run 35719533086, the percpu-migration unit's own merge to `main`): again the shape where the guest **sent** the bytes, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`, rexmit timer state 0 on cpu 0. The x86-64 job of the same run passed. |
-| PR #214's own CI run | observed, aarch64, the **protection-capable** boot (run 35724183483, `12d666b9`, a **documentation-and-tool-only** branch): the same shape a third time in one day, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. |
+| PR #214's own CI run | observed, aarch64, the **protection-capable** boot (run 35724183483, `12d666b9`, a **documentation-and-tool-only** branch): the same shape again, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. |
+| PR #215's own CI run | observed, aarch64, the **plain debug** boot (run 35725274548, this very record's branch, documentation-only): the **other** shape, `connect 0 in 1379 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +3` **`retransmits +1`**. The record of the flake was failed by the flake, and by its other half. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -866,15 +867,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Sixty-six entries, eighty-one occurrences -- and the table is the tally,
+Sixty-seven entries, eighty-two occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty-seven rows carry
+are not independently re-verified here. The last fifty-eight rows carry
 the instrument's reading, forty-seven of them watched as they happened
-and ten read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-six
-instrumented** occurrences behind the other fifty-six rows carry the
+and eleven read from the logs afterwards: PR #167's carries
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-seven
+instrumented** occurrences behind the other fifty-seven rows carry the
 guest's side. Rows and occurrences differ because **twelve** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
@@ -921,10 +922,14 @@ Two things this does and does not say. It **does** rule out the send
 path as the defect: in two of the nine rows above `ksock_sendto`
 returned 12, a segment went out, and the host still saw nothing — so
 "the twelve bytes were never written" does not describe those. **And
-that shape is no longer the exception**: all three sightings of
-2026-09-22 (rows seventy-nine to eighty-one) have `sent 12`, so a
-reading of this table that treats the successful send as a one-off is
-reading it as it stood at PR #177. It
+the successful send is not the exception this paragraph once made it
+sound.** Counted across the tally above rather than across the nine rows
+here: twenty occurrences record `sent 12` and forty-six record
+`sent -104`, the remaining rows recording neither. So roughly a third of
+the sightings that name a shape at all have the bytes on the wire, and
+both shapes are current — 2026-09-22 produced each of them. This
+paragraph was written when the successful send was one instance, and
+nothing re-read it against the growing table until then. It
 does **not** establish a retransmission bug, although `retransmits +0`
 with twelve bytes outstanding is row three of the four-outcome table in
 `docs/audit/next-subsystem-twelve-bytes.md`. That row assumed no reset.
