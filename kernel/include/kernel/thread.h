@@ -75,6 +75,7 @@ struct thread {
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
     uint64_t last_start_ns;             /* (rq) */
+    uint64_t ready_since_ns;            /* (rq) when it was last enqueued: the stall detector's stamp (debug) */
     uint64_t switches;                  /* (rq) times switched in */
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */

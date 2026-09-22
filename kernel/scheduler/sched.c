@@ -679,6 +679,27 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
 #if CONFIG_SCHED_CHAOS
     chaos_tick(pc);   /* after the tick's own unlock: the migrator takes both locks itself */
 #endif
+#if CONFIG_DEBUG
+    /* The stall detector: a thread READY on this queue for over a second
+     * is a scheduling stall, and the line names what ran instead. Every
+     * 32 ticks, this CPU's own lists, under its own lock. */
+    if ((pc->ticks & 31u) == 0) {
+        spin_lock(&rq->lock);
+        for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
+            struct thread *t;
+            list_for_each_entry(t, &rq->ready[p], rq_link) {
+                uint64_t waited = clock_delta_ns(now_ns, t->ready_since_ns);
+                if (waited > NS_PER_SEC && t != rq->current)
+                    kwarn("sched: stall: '%s' (prio %d, flags 0x%x) READY on cpu %u for %llu ms behind '%s' (prio %d, preempt %d, irq_depth %u, slice %llu us)",
+                          t->name, t->priority, t->flags, rq->cpu, (unsigned long long)(waited / 1000000),
+                          rq->current ? rq->current->name : "-", rq->current ? rq->current->priority : 0,
+                          pc->preempt_count, pc->irq_depth,
+                          (unsigned long long)(rq->current ? rq->current->slice_left_ns / 1000 : 0));
+            }
+        }
+        spin_unlock(&rq->lock);
+    }
+#endif
 }
 
 uint64_t sched_switch_count(unsigned cpu)

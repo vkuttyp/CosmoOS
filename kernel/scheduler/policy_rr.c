@@ -11,6 +11,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
+#include <kernel/timer.h>
 
 static void rr_enqueue(struct runqueue *rq, struct thread *t, bool at_head)
 {
@@ -22,6 +23,9 @@ static void rr_enqueue(struct runqueue *rq, struct thread *t, bool at_head)
         list_push_back(&rq->ready[t->priority], &t->rq_link);
     rq->bitmap |= (uint64_t)1 << t->priority;
     rq->nr_running++;
+#if CONFIG_DEBUG
+    t->ready_since_ns = clock_now_ns();
+#endif
 }
 
 static void rr_dequeue(struct runqueue *rq, struct thread *t)
