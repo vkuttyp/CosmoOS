@@ -1075,8 +1075,10 @@ See [docs/development.md](docs/development.md).
   `tap_inject` hands one to `netif_rx`, and the stack does the rest (it
   ARPs on the tap, answers what is addressed to its IP). The owner reaches
   it through `/dev/net/tap`, a character device: read one frame the stack
-  sent, write one from the guest (read returns 0 when none waits, so the
-  owner polls it like the console; no new syscall). This unit backed it with
+  sent, write one from the guest (read returned 0 when none waited, so the
+  owner polled it like the console; since the device-readiness unit a
+  blocking open's read waits for a frame and `vmctl` opens it
+  `O_NONBLOCK` to keep polling; no new syscall). This unit backed it with
   one persistent `tap0` on `10.0.3.0/24` (a tap per open came later -- see the
   multi-guest entry); a tap is marked never-default (`NETIF_NODEFAULT`),
   so even left up it is never the machine's route to the world. `vmctl --net tap` points the virtio-net wire at the

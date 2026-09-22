@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Seventy-one, to 2026-09-22**, across CI and this developer's machine, on
+**Seventy-two, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -848,6 +848,7 @@ of this section said eight and then listed nine:
 | PR #210's own CI run -- **x86-64** | observed, x86-64, the plain debug boot (`94afdf9`, run 35674822582, a one-document branch: the device-readiness report): `connect 0 in 1166 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:54818 accepted at 93.3s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 113.3s. Row one |
 | `main` @ `eadba84` | observed, aarch64, the **GICv3** boot of the named-pipes merge's `main` run on 2026-09-22 (35674273649), read from the logs afterwards: `connect 0 in 1475 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:37448 accepted at 94.1s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.1s; the plain boot of the same job had passed. Row one, and the second sighting in a GICv3 boot (PR #209's fourth was the first) |
 | this developer's machine, the device-readiness build | observed, x86-64, the plain debug boot on 2026-09-22 (the clean run before that unit's mutation runs, on `6b3ee0a` plus a test-only commit): `connect 0 in 574 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:50389 accepted at 78.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 12 ms, echo 3 ms`, gave up at 98.4s. Row one, off CI |
+| PR #211's own CI run | observed, aarch64, the **GICv3** boot (`74e208d`, run 35680602142, the device-readiness build; its diff touches the tap's read path and no inet code): `connect 0 in 1178 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40702 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s; the plain boot of the same job had passed. Row one, the third in a GICv3 boot |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -858,15 +859,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty-eight entries, seventy-one occurrences -- and the table is the tally,
+Fifty-nine entries, seventy-two occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty-three rows carry
-the instrument's reading, forty-five of them watched as they happened
+are not independently re-verified here. The last fifty-four rows carry
+the instrument's reading, forty-six of them watched as they happened
 and eight of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-two
-instrumented** occurrences behind the other fifty-two rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-three
+instrumented** occurrences behind the other fifty-three rows carry the
 guest's side. Rows and occurrences differ because **twelve** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.

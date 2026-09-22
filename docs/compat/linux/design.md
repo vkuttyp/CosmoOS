@@ -407,9 +407,15 @@ except set is `POLLPRI`, priority data, and no object in this tree
 reports a priority event (there is no urgent-data path; `COSMO_IO_ERROR`
 is `POLLERR`, which `select` never puts in the except set). `pselect6`'s
 sixth argument is the pair `{ const sigset_t *, size_t }` (size 8, or
-`-EINVAL`), applied and restored as `ppoll`'s mask; `select` (x86-64
-only, 23) takes a timeval it does not write the time left back into
-(Linux does; a documented deviation). `epoll` stays stage 3.
+`-EINVAL`), applied and restored as `ppoll`'s mask; neither call writes
+the time left back into the timeout it was given (Linux's raw `select`
+and `pselect6` both do; POSIX leaves it unspecified and musl's wrappers
+do not rely on it -- a documented deviation); `select` (x86-64 only,
+23) takes a timeval, clamped as the timespec is (beyond 2^62 ns is
+"never", so a huge wait cannot wrap into a short one). An fd in the
+except set alone is checked for existence and not polled (its HANGUP or
+ERROR would otherwise end the wait with 0 bits, a timeout that never
+waited). `epoll` stays stage 3.
 
 ### Wall clock
 

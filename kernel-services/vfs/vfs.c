@@ -1211,12 +1211,12 @@ static bool vnode_is_stream(const struct vnode *vn)
 
 bool file_nonblocking(const struct file *f)
 {
-    return (__atomic_load_n(&f->flags, __ATOMIC_RELAXED) & COSMO_O_NONBLOCK) != 0;
+    return (file_flags(f) & COSMO_O_NONBLOCK) != 0;
 }
 
 int file_set_nonblock(struct file *f, int on)
 {
-    unsigned old = __atomic_load_n(&f->flags, __ATOMIC_RELAXED);
+    unsigned old = file_flags(f);
     if (on >= 0) {
         if (on)
             old = __atomic_fetch_or(&f->flags, COSMO_O_NONBLOCK, __ATOMIC_RELAXED);
@@ -1452,7 +1452,7 @@ int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)
 int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
 {
     struct vnode *vn = f->vn;
-    if ((f->flags & COSMO_O_ACCMODE) == COSMO_O_WRONLY)
+    if ((file_flags(f) & COSMO_O_ACCMODE) == COSMO_O_WRONLY)
         return -EBADF;
     if (vn->type == VNODE_DIR)
         return -EISDIR;
@@ -1493,7 +1493,7 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
 int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
 {
     struct vnode *vn = f->vn;
-    if ((f->flags & COSMO_O_ACCMODE) == COSMO_O_RDONLY)
+    if ((file_flags(f) & COSMO_O_ACCMODE) == COSMO_O_RDONLY)
         return -EBADF;
     if (vn->type == VNODE_DIR)
         return -EISDIR;
@@ -1533,7 +1533,7 @@ int64_t file_write(struct file *f, const void *buf, size_t len)
         return file_pwrite(f, buf, len, 0);
     mutex_lock(&f->lock);
     uint64_t off = f->pos;
-    if (f->flags & COSMO_O_APPEND)
+    if (file_flags(f) & COSMO_O_APPEND)
         off = f->vn->size;
     int64_t n = file_pwrite(f, buf, len, off);
     if (n > 0)

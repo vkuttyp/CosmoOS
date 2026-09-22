@@ -361,6 +361,10 @@ int file_flush(struct file *f);
  * allocated per open; the FIFO keeps its own record for its side. */
 bool file_nonblocking(const struct file *f);
 int file_set_nonblock(struct file *f, int on);   /* 1/0 sets, -1 asks; returns the previous value */
+/* Every reader of an open file's flags goes through this: the non-blocking
+ * bit is switched with an atomic read-modify-write while I/O runs, and a
+ * plain read beside that is a data race by the letter. */
+static inline unsigned file_flags(const struct file *f) { return __atomic_load_n(&f->flags, __ATOMIC_RELAXED); }
 static inline void file_get(struct file *f) { kobject_get(&f->obj); }
 static inline void file_put(struct file *f) { kobject_put(&f->obj); }
 /* True if the kobject is a file (for handle-based system calls). */

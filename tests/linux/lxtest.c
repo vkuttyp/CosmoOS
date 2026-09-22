@@ -304,6 +304,17 @@ static int t_late_writer(void *arg)
     return 0;
 }
 
+#ifdef LX_select
+/* Half a second later: long enough to outlast a timeout that wrapped to 290 ms. */
+static int t_later_writer(void *arg)
+{
+    (void)arg;
+    nap_ms(500);
+    sc3(LX_write, g_pipe[1], "w", 1);
+    return 0;
+}
+#endif
+
 static int t_waiter(void *arg)
 {
     int i = (int)(uintptr_t)arg;
@@ -1039,6 +1050,16 @@ int main(int argc, char **argv)
         long sn = sc6(LX_pselect6, g_pipe[1] + 1, rset, wset, xset, &szero, 0);
         CHECKV(sn == 1 && !lx_fdisset(rset, g_pipe[0]) && lx_fdisset(wset, g_pipe[1]) && !lx_fdisset(xset, g_pipe[0]), sn);
         CHECKV(sc6(LX_pselect6, 1025, rset, 0, 0, &szero, 0) == -22, 0);           /* nfds > FD_SETSIZE */
+        /* the fault paths: an unreadable set, an unwritable one, an unreadable
+         * sigmask pair, a sigmask of the wrong size */
+        CHECKV(sc6(LX_pselect6, 8, 1, 0, 0, &szero, 0) == -14, 0);
+        CHECKV(sc6(LX_pselect6, 8, 0, 0, 0, &szero, 1) == -14, 0);
+        {
+            struct { uint64_t ss; uint64_t ss_len; } sbadlen = { (uint64_t)(uintptr_t)&szero, 4 };
+            CHECKV(sc6(LX_pselect6, g_pipe[1] + 1, 0, wset, 0, &szero, &sbadlen) == -22, 0);
+            struct { uint64_t ss; uint64_t ss_len; } sbadptr = { 1, 8 };
+            CHECKV(sc6(LX_pselect6, g_pipe[1] + 1, 0, wset, 0, &szero, &sbadptr) == -14, 0);
+        }
         lx_fdzero(rset); lx_fdset(rset, 60);                                        /* a closed fd's bit */
         CHECKV(sc6(LX_pselect6, 61, rset, 0, 0, &szero, 0) == -9, 0);               /* EBADF */
         CHECKV(sc6(LX_pselect6, 5, rset, 0, 0, &szero, 0) == 0, 0);                 /* the same bit above nfds: not looked at */
@@ -1051,6 +1072,15 @@ int main(int argc, char **argv)
             sc1(LX_close, ep[0]);
             lx_fdzero(xset); lx_fdset(xset, ep[1]);
             CHECKV(sc6(LX_pselect6, ep[1] + 1, 0, 0, xset, &szero, 0) == 0 && !lx_fdisset(xset, ep[1]), 0);
+            /* and an except-only fd with an error condition does not end the
+             * wait early: a 20 ms timeout still takes at least 15 ms */
+            struct lx_timespec x20 = { 0, 20000000 }, xt0, xt1;
+            lx_fdzero(xset); lx_fdset(xset, ep[1]);
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &xt0);
+            CHECKV(sc6(LX_pselect6, ep[1] + 1, 0, 0, xset, &x20, 0) == 0, 0);
+            sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &xt1);
+            long xdt = (xt1.tv_sec - xt0.tv_sec) * 1000000000L + (xt1.tv_nsec - xt0.tv_nsec);
+            CHECKV(xdt >= 15000000 && xdt < 1000000000, xdt);
             lx_fdzero(wset); lx_fdset(wset, ep[1]);
             CHECKV(sc6(LX_pselect6, ep[1] + 1, 0, wset, 0, &szero, 0) == 1 && lx_fdisset(wset, ep[1]), 0);   /* writable (POLLERR is in the writable set) */
             sc1(LX_close, ep[1]);
@@ -1090,6 +1120,18 @@ int main(int argc, char **argv)
         CHECKV(sc6(LX_select, g_pipe[1] + 1, rset, wset, 0, &stv, 0) == 1 && lx_fdisset(wset, g_pipe[1]), 0);
         struct lx_timeval sbad = { 0, 2000000 };
         CHECKV(sc6(LX_select, g_pipe[1] + 1, rset, 0, 0, &sbad, 0) == -22, 0);
+        /* a timeval whose seconds times 1e9 wraps 64 bits to 290 ms must not
+         * become a 290 ms wait: a writer 500 ms out still ends it with 1 */
+        {
+            struct lx_timeval shuge = { 18446744074LL, 0 };
+            long tlw2 = lx_clone(t_later_writer, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, &ptid, &g_tidword[0], g_tcb);
+            CHECKV(tlw2 > 0, tlw2);
+            lx_fdzero(rset); lx_fdset(rset, g_pipe[0]);
+            CHECKV(sc6(LX_select, g_pipe[0] + 1, rset, 0, 0, &shuge, 0) == 1 && lx_fdisset(rset, g_pipe[0]), 0);
+            CHECKV(lx_join(&g_tidword[0]) == 0, 0);
+            char wc;
+            CHECKV(sc3(LX_read, g_pipe[0], &wc, 1) == 1 && wc == 'w', wc);
+        }
 #endif
         /* the writer closed: readable (Linux's readable set includes POLLHUP) */
         sc1(LX_close, g_pipe[1]);

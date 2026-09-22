@@ -292,8 +292,10 @@ void tty_session_exit(pid_t sid)
 {
     struct tty *t = tty_console();
     pid_t hangup = 0;
+    bool ended = false;
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     if (t->sid == sid) {
+        ended = true;
         hangup = t->fg_pgid;
         t->sid = 0;
         t->fg_pgid = 0;
@@ -314,6 +316,11 @@ void tty_session_exit(pid_t sid)
     spin_unlock_irqrestore(&t->lock, s);
     if (hangup != 0)
         tty_signal_group(t, hangup, SIGHUP);
+    /* A poller of /dev/tty sleeps on `readers`; its answer just became
+     * ERROR (no controlling terminal), so it is told -- whether or not a
+     * foreground group was there to hang up (the device-readiness unit). */
+    if (ended)
+        waitqueue_wake_all(&t->readers);
 }
 
 void tty_get_termios(struct tty *t, struct cosmo_termios *out)

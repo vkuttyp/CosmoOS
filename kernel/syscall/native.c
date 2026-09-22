@@ -377,7 +377,7 @@ static int mmap_file_check(int fd, bool shared, bool write, struct file **fp, vm
     }
     /* The handle's rights bound the file's mode: a handle duplicated
      * without WRITE cannot map for writing what the file allows. */
-    bool writable = (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE);
+    bool writable = (file_flags(f) & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE);
     if (shared && write && !writable) {
         file_put(f);
         return -EACCES;

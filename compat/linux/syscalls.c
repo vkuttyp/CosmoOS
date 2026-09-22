@@ -1678,10 +1678,14 @@ static int64_t do_select(int nfds, uint64_t urd, uint64_t uwr, uint64_t uex, uin
         rc = fdset_in(&ex, uex, words);
     if (rc)
         return rc;
-    /* One entry per fd named in any set. */
+    /* One entry per fd with a read or write bit. An fd in the except set
+     * alone is checked for existence and not polled: with no event of
+     * interest, io_poll would still end the wait on its HANGUP or ERROR
+     * and select would report 0 bits at once -- a timeout that never
+     * waited. */
     unsigned n = 0;
     for (int fd = 0; fd < nfds; fd++)
-        if (fdset_test(&rd, (unsigned)fd) || fdset_test(&wr, (unsigned)fd) || fdset_test(&ex, (unsigned)fd))
+        if (fdset_test(&rd, (unsigned)fd) || fdset_test(&wr, (unsigned)fd))
             n++;
     struct io_pollfd *fds = NULL;
     int *fdnum = NULL;
@@ -1708,6 +1712,10 @@ static int64_t do_select(int nfds, uint64_t urd, uint64_t uwr, uint64_t uex, uin
                 kobject_put(obj);
             result = -EBADF;   /* Linux: a bit for a closed fd */
             break;
+        }
+        if (!r && !w) {
+            kobject_put(obj);   /* except only: exists, and that is all select can say of it */
+            continue;
         }
         fds[k].obj = obj;
         fds[k].events = (r ? COSMO_IO_READABLE : 0) | (w ? COSMO_IO_WRITABLE : 0);
@@ -1798,7 +1806,12 @@ static __maybe_unused int64_t lx_select(struct syscall_args *a)
             return -EFAULT;
         if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
             return -EINVAL;
-        timeout_ns = (uint64_t)tv.tv_sec * 1000000000ull + (uint64_t)tv.tv_usec * 1000ull;
+        /* Clamped as ns_from_timespec clamps: beyond 2^62 ns is "never", and
+         * the multiplication below must not wrap a huge wait into a short one. */
+        if ((uint64_t)tv.tv_sec >= (1ull << 62) / 1000000000ull)
+            timeout_ns = 1ull << 62;
+        else
+            timeout_ns = (uint64_t)tv.tv_sec * 1000000000ull + (uint64_t)tv.tv_usec * 1000ull;
     }
     return do_select((int)a->a[0], a->a[1], a->a[2], a->a[3], timeout_ns);
 }

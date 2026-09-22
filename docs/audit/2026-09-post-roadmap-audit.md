@@ -596,7 +596,7 @@ Status: full = Linux semantics for the supported argument space; partial = works
 | open, creat, openat | 2, 85, 257 | partial | flags whitelisted; O_CLOEXEC/NONBLOCK/NOCTTY/NOFOLLOW dropped (`convert.c:29-32`); dirfd must be AT_FDCWD or path absolute (`check_dirfd:121-126`) |
 | close | 3 | full | |
 | stat, lstat, fstat, newfstatat | 4, 6, 5, 262 | partial | lstat = stat; 144 B layout correct; st_dev/rdev 0; atime = mtime (`convert.c:37-62`) |
-| poll, select, ppoll, pselect6, epoll_* | 7, 23, 271, 270, 213/232/233/281/291 | missing | musl DNS (`res_msend`) needs poll |
+| poll, select, ppoll, pselect6, epoll_* | 7, 23, 271, 270, 213/232/233/281/291 | missing at the audit; `poll`/`ppoll` built (milestone 10), `select`/`pselect6` built (the device-readiness unit), `epoll_*` still missing | musl DNS (`res_msend`) needs poll |
 | lseek | 8 | full | ESPIPE on non-files (`:294-308`) |
 | mmap | 9 | partial | anonymous only; file-backed → ENODEV (`:664`); MAP_FIXED unmap result ignored (`:684`); MAP_SHARED ≡ PRIVATE; W^X → EINVAL |
 | mprotect | 10 | partial | whole-region only (`vmm.c:vm_user_protect`) — breaks RELRO |

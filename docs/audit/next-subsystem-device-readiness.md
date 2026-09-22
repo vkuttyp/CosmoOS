@@ -54,6 +54,22 @@ from (§2.6).
    architectures; the `devices` section (14 sections); `LX_pselect6`
    270 / 72, `LX_select` 23, `LX_FD_SETSIZE` 1024; no native number
    moves.
+8. **Review fixes.** An fd in the except set alone is checked for
+   existence and no longer polled (with no event of interest, `io_poll`
+   ended the wait on its HANGUP or ERROR and `select` reported 0 bits at
+   once -- a timeout that never waited; `lxtest` now times an
+   except-only wait). `tty_session_exit` wakes the terminal's `readers`,
+   so a poller of `/dev/tty` learns its answer became ERROR when the
+   session ends (a kernel-thread sleeper on `readers` in
+   `tty-devready`). Every reader of an open file's flags goes through
+   `file_flags`, an atomic load, since the non-blocking bit is switched
+   with an atomic read-modify-write beside them. `select`'s timeval is
+   clamped as the timespec is, so a huge `tv_sec` cannot wrap into a
+   short wait (an `lxtest` row with a wait that wraps to 290 ms and a
+   writer 500 ms out). Neither `select` nor `pselect6` writes the time
+   left back (documented; Linux's raw calls do). `lxtest` also covers
+   the fault paths (an unreadable set, an unwritable set, an unreadable
+   sigmask pair, a wrong sigmask size).
 
 **Bug-proofs, as run.** Each mutation applied alone on x86-64, the
 debug suite booted, the file restored from HEAD, the runner checking

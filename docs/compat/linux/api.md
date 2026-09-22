@@ -149,8 +149,10 @@ interrupts enabled and may block; every user pointer passes through
 `uaccess` (`copy_from_user`, `copy_to_user`, `strncpy_from_user`,
 `user_range_ok`); every handle passes through the process's handle table
 with rights (a Linux fd *is* a native handle: 0/1/2 are the console or
-whatever `spawn` mapped). 103 numbers have an entry: 90 are translated,
-13 return `-ENOSYS` explicitly (listed at the end); everything else
+whatever `spawn` mapped). The table has 129 entries (a few of them
+x86-64-only numbers): 123 are translated, 6 return `-ENOSYS` explicitly
+(listed at the end; the counts are of the table's initialisers in
+`compat/linux/syscalls.c`, as of the device-readiness unit); everything else
 returns `-ENOSYS` through `lx_unknown`, which increments
 `linux_state.unknown_syscalls` and logs the first eight per process at
 DEBUG (`linux: pid N: unimplemented system call NR`).
@@ -230,7 +232,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 34 | `pause` | `signal_wait` | `-EINTR` |
 | 15 | `rt_sigreturn` | the frame read back from the stack, the FXSAVE image restored, `signal_return` | a frame that cannot be read: `SIGSEGV` on the thread |
 | 131 | `sigaltstack` | the thread's `altstack`; `ss_flags` out reports `SS_ONSTACK`/`SS_DISABLE`/0 for the current `sp` | changing it while on it `-EPERM`; flags other than 0/`SS_DISABLE`/`SS_ONSTACK` (`SS_AUTODISARM` masked) `-EINVAL`; `ss_size` below 2048 `-ENOMEM`; an unreadable range `-EFAULT` |
-| 23 / —, 270 / 72 | `select`, `pselect6` (the device-readiness unit) | three `fd_set`s → one `io_pollfd` per fd with a read or write bit → `io_poll`; the sets rewritten (readable = `READABLE\|HANGUP\|ERROR`, writable = `WRITABLE\|ERROR`), result = bits set | the except set (Linux's `POLLPRI`) is polled for nothing and always clear: no object reports a priority event; a bit for a closed fd `-EBADF`; `nfds` > 1024 `-EINVAL`; `pselect6`'s sigmask pair as `ppoll`'s mask (size 8); `select` does not update its timeval |
+| 23 / —, 270 / 72 | `select`, `pselect6` (the device-readiness unit) | three `fd_set`s → one `io_pollfd` per fd with a read or write bit → `io_poll`; the sets rewritten (readable = `READABLE\|HANGUP\|ERROR`, writable = `WRITABLE\|ERROR`), result = bits set | the except set (Linux's `POLLPRI`) is polled for nothing and always clear: no object reports a priority event; a bit for a closed fd `-EBADF`; `nfds` > 1024 `-EINVAL`; `pselect6`'s sigmask pair as `ppoll`'s mask (size 8); neither writes the time left back (Linux does); an except-only fd is validated, not polled; `select`'s timeval clamped past 2^62 ns |
 | 7, 271 | `poll`, `ppoll` (milestone 10) | `struct pollfd` ↔ `io_poll` (`kernel/io/poll.c`): `POLLIN`/`POLLRDNORM`/`POLLPRI` ↔ `READABLE`, `POLLOUT`/`POLLWRNORM` ↔ `WRITABLE`, `HANGUP` → `POLLHUP` (and `POLLRDHUP` when asked), `ERROR` → `POLLERR`; a negative fd is ignored; a closed or non-I/O fd is `POLLNVAL` and the call returns at once; `poll`'s timeout in ms (negative: forever), `ppoll`'s `timespec` (NULL: forever) and its mask swapped in for the wait as `rt_sigsuspend` | more than 1024 entries `-EINVAL`; a kill or a deliverable signal `-EINTR` |
 | 24 | `sched_yield` | `sched_yield` | |
 
@@ -276,10 +278,10 @@ as Linux does.
 `fork` 57, `vfork` 58, `execve` 59, `sysinfo` 99, `rseq` 334,
 `clone3` 435 (x86-64 numbers; the AArch64
 rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
-known and refused, so they are not counted as unknown. `select` 23,
-`mremap` 25 has a number in the tables but no entry: it goes through
-`lx_unknown`; `sendmsg` 46 and `recvmsg` 47 have entries since the
-unix-sockets unit. `msync` 26 has an entry since
+known and refused, so they are not counted as unknown. `mremap` 25 has
+a number in the tables but no entry: it goes through `lx_unknown`;
+`sendmsg` 46 and `recvmsg` 47 have entries since the unix-sockets unit,
+`select` 23 and `pselect6` 270 / 72 since the device-readiness unit. `msync` 26 has an entry since
 the file-regions unit (the `mmap` row above).
 
 ## Symbolic links

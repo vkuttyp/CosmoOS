@@ -114,9 +114,9 @@ static unsigned peer_gen(const struct fifo *fifo, unsigned side)
 
 int fifo_open(struct fifo *fifo, struct file *f)
 {
-    unsigned acc = f->flags & COSMO_O_ACCMODE;
+    unsigned acc = file_flags(f) & COSMO_O_ACCMODE;
     unsigned side = acc == COSMO_O_RDONLY ? FIFO_RD : acc == COSMO_O_WRONLY ? FIFO_WR : FIFO_RD | FIFO_WR;
-    bool nonblock = (f->flags & COSMO_O_NONBLOCK) != 0;
+    bool nonblock = (file_flags(f) & COSMO_O_NONBLOCK) != 0;
     struct fifo_open *fo = kzalloc(sizeof(*fo));
     if (fo == NULL)
         return -ENOMEM;

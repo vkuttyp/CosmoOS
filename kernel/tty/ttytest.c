@@ -154,6 +154,8 @@ bool selftest_tty_ldisc(const char **reason)
 
 #include <kernel/object.h>
 #include <kernel/poll.h>
+#include <kernel/sched.h>
+#include <kernel/spinlock.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
 
@@ -170,6 +172,31 @@ static void devready_feeder_main(void *arg)
     thread_exit(0);
 }
 
+/* Sleeps on the console's readers until its session is gone. */
+struct devready_sleeper {
+    struct tty *tty;
+    unsigned done;
+};
+
+static void devready_sleeper_main(void *arg)
+{
+    struct devready_sleeper *sl = arg;
+    (void)wait_event_killable(&sl->tty->readers, __atomic_load_n(&sl->tty->sid, __ATOMIC_ACQUIRE) == 0);
+    __atomic_store_n(&sl->done, 1, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+static bool flag_within_ms(const unsigned *flag, unsigned ms)
+{
+    uint64_t end = clock_now_ns() + (uint64_t)ms * 1000000ull;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (clock_now_ns() > end)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
 #define DCHECK(cond)                                                                         \
     do {                                                                                     \
         if (!(cond)) {                                                                       \
@@ -184,6 +211,7 @@ bool selftest_tty_devready(const char **reason)
     bool ok = true;
     struct file *a = NULL, *b = NULL, *t = NULL;
     struct thread *th = NULL;
+    struct devready_sleeper sl = { 0 };   /* .tty set when the session case starts */
     struct tty *con = tty_console();
     char buf[64];
 
@@ -233,10 +261,34 @@ bool selftest_tty_devready(const char **reason)
     DCHECK(kobject_ready(&t->obj) == COSMO_IO_ERROR);
     DCHECK(kobject_poll_wq(&t->obj, COSMO_IO_READABLE) == NULL);
     DCHECK(file_read(t, buf, sizeof(buf)) == -ENXIO);
+    /* A poller of /dev/tty sleeps on the terminal's readers; the session
+     * ending wakes it, or it would sleep on past its answer turning ERROR.
+     * The console is given a session under its lock (no process can from
+     * here), a thread sleeps on `readers` for the session to end, and
+     * tty_session_exit for that session ends it within its bound. */
+    DCHECK(tty_session_of(con) == 0);   /* nobody's yet */
+    {
+        arch_irq_state_t s = spin_lock_irqsave(&con->lock);
+        con->sid = 4242;
+        con->fg_pgid = 0;   /* no group to hang up */
+        spin_unlock_irqrestore(&con->lock, s);
+    }
+    sl.tty = con;
+    th = thread_create(devready_sleeper_main, &sl, "devready-sess", 32);
+    DCHECK(th != NULL);
+    DCHECK(!flag_within_ms(&sl.done, 30));
+    tty_session_exit(4242);
+    bool woken = flag_within_ms(&sl.done, 2000);
+    if (woken) {
+        thread_join(th);
+        th = NULL;
+    }
+    DCHECK(woken);   /* a sleeper the session's end did not wake is left asleep, not joined */
+    DCHECK(tty_session_of(con) == 0);
     kinfo("selftest: tty-devready: /dev/console reports the terminal's readiness, its mode is per open, /dev/tty without a session is an error");
 out:
-    if (th)
-        thread_join(th);
+    if (th && (__atomic_load_n(&sl.done, __ATOMIC_ACQUIRE) || sl.tty == NULL))
+        thread_join(th);   /* the feeder always finishes; the sleeper only if woken */
     if (a) file_put(a);
     if (b) file_put(b);
     if (t) file_put(t);
