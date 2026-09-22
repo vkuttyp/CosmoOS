@@ -74,7 +74,9 @@ from (§2.6).
 **Bug-proofs, as run.** Each mutation applied alone on x86-64, the
 debug suite booted, the file restored from HEAD, the runner checking
 each run booted; the report's ten, one for the except set, and one for
-the rule the build added.
+the rule the build added. The five whose code the review round changed
+(the shared bit, the four `select` ones) were rerun on the fixed tree
+after a clean boot of it.
 
 | mutation | what failed |
 | --- | --- |
@@ -88,7 +90,7 @@ the rule the build added.
 | `pselect6` ignoring the write set | `lxtest`: the write end's 1 was 0 (`sn == 1 && … lx_fdisset(wset, g_pipe[1])`), the pipe-with-reader-gone writable check, and `select`'s |
 | the sets not rewritten with the ready bits | `lxtest`: the read end's bit not set after a write, and not after the writer's close; the tap's read bit not set in the `select` over the tap and the socket |
 | `select` reading the sets past `nfds` | `lxtest`: `pselect6(5, …)` with a closed fd's bit at 60 was `-EBADF` instead of 0 |
-| the except set mapped to ERROR | `lxtest`: a pipe's write end with its reader gone (`WRITABLE\|ERROR`) came back in the except set, where Linux never puts it |
+| the except set mapped to ERROR (and except-only fds polled, as the first build did) | `lxtest`: a pipe's write end with its reader gone (`WRITABLE\|ERROR`) came back in the except set, where Linux never puts it, and the except-only wait on it returned at once (`xdt` 1 ms against a 20 ms timeout). This mutation went dead once the review fix stopped polling except-only fds -- its first rerun passed the whole suite -- and was rewritten to poll them as the original defect did; the surviving run was the signal, not the proof |
 | a stream's read and write holding the open file's lock (the rule the chrdev-vnode-lock unit had) | the `devices` section: the child blocked in the shared file's read held the lock, the parent's write blocked behind it, and the boot timed out with `section fifo` the last section finished -- the deadlock the rule this unit replaced exists to prevent, reported as a timeout because the parent's write has no other way to fail. (Restoring the lock on the read path alone did not reproduce it; the write path had to hold it too, which is what the old rule did.) |
 
 **Benchmarks, as run** (`USERBENCH: devices`, `LINUXBENCH`): a frame
