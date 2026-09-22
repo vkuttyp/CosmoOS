@@ -36,6 +36,32 @@
 #define STR_(x) #x
 #define STR(x) STR_(x)
 
+/*
+ * The guest exited, but not the way the step expected.
+ *
+ * Under plain CHECK the message says only that the condition was false,
+ * so a failure cannot say whether the wrong hypercall arrived or a
+ * different kind of exit did -- which is exactly what left
+ * `el2-guest-irq-queue`'s first sighting undiagnosable
+ * (docs/testing/flakes.md). The file said to print the exit if it ever
+ * recurred; it recurred on 2026-09-22, so this prints it. Reading the
+ * hypercall fields for another kind of exit is reading a union member
+ * that was zeroed by the caller's memset, which is what makes them
+ * worth printing at all.
+ */
+#define CHECK_HC(xx, n)                                                        \
+    do {                                                                       \
+        if (!((xx).kind == COSMO_VM_EXIT_HYPERCALL && (xx).hypercall.nr == (n))) { \
+            kerror("selftest: hv: line " STR(__LINE__) ": expected hypercall %u, "  \
+                   "got exit kind %d hypercall nr %llu a0 %llu",                \
+                   (unsigned)(n), (int)(xx).kind,                              \
+                   (unsigned long long)(xx).hypercall.nr,                      \
+                   (unsigned long long)(xx).hypercall.a0);                     \
+            *reason = "unexpected vm exit at line " STR(__LINE__);             \
+            return false;                                                      \
+        }                                                                      \
+    } while (0)
+
 #define LOAD_GPA 0x1000ull
 #define MEM_LEN  (1ull << 20)
 
@@ -954,7 +980,7 @@ bool selftest_el2_guest_irq(const char **reason)
 
     /* The guest sets up its interface and says it is ready. */
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
 
     /* Nothing has been offered yet, so nothing is pending. */
     struct cosmo_vcpu_regs regs;
@@ -985,7 +1011,7 @@ bool selftest_el2_guest_irq(const char **reason)
      * list register is free again and the interrupt is not redelivered:
      * one injection, one delivery. */
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
     CHECK(lr_free(lr0, elrsr));
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
@@ -994,7 +1020,7 @@ bool selftest_el2_guest_irq(const char **reason)
      * not merely emptied once. */
     CHECK(vcpu_inject(v, 43) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 43);
+    CHECK_HC(x, 43);
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-irq: a guest took INTID 42 and then 43, acknowledged and completed");
     return true;
@@ -1022,7 +1048,7 @@ bool selftest_el2_guest_irq_masked(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
 
     /* Mask IRQ in the guest, behind its back. */
     struct cosmo_vcpu_regs regs;
@@ -1034,7 +1060,7 @@ bool selftest_el2_guest_irq_masked(const char **reason)
     CHECK(vcpu_run(v, &x) == 0);
     /* It did not take it: the guest reached its heartbeat instead of its
      * handler, and the list register is still Pending. */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     uint64_t lr0 = 0, elrsr = 0;
     CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
     CHECK((lr0 >> 62) == 1);                 /* Pending */
@@ -1044,7 +1070,7 @@ bool selftest_el2_guest_irq_masked(const char **reason)
     regs.pstate &= ~(uint64_t)(1u << 7);
     CHECK(vcpu_set_regs(v, &regs) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);
+    CHECK_HC(x, 42);
 
     /*
      * And it is delivered *once*. An interrupt that waited in the list
@@ -1058,9 +1084,9 @@ bool selftest_el2_guest_irq_masked(const char **reason)
      */
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
     CHECK(vcpu_run(v, &x) == 0);                 /* the EOI, then the heartbeat */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_run(v, &x) == 0);                 /* and not INTID 42 a second time */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-irq-masked: held while PSTATE.I was set, delivered once when it cleared");
     return true;
@@ -1092,19 +1118,19 @@ bool selftest_el2_guest_irq_private(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
 
     /* A PPI: the number the virtual timer will use when it exists. */
     CHECK(vcpu_inject(v, 27) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 27);
+    CHECK_HC(x, 27);
     CHECK(vcpu_run(v, &x) == 0);                         /* the EOI, then the heartbeat */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
 
     /* And an SGI, the lowest number there is. */
     CHECK(vcpu_inject(v, 0) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0);
+    CHECK_HC(x, 0);
 
     /* Past the end is still refused. */
     CHECK(vcpu_inject(v, 1020) == -EINVAL);
@@ -1145,23 +1171,23 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
 
     /* --- the same INTID twice, the second while the first is Active --- */
     CHECK(vcpu_inject(v, 42) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);   /* acknowledged */
+    CHECK_HC(x, 42);   /* acknowledged */
     CHECK(vcpu_inject(v, 42) == 0);                                     /* again, while Active */
     CHECK(vcpu_run(v, &x) == 0);
     /* The guest completed the first and went back to its heartbeat. The
      * second injection must still be pending: the completion of one
      * instance is not the delivery of the next. */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);   /* and now it arrives */
+    CHECK_HC(x, 42);   /* and now it arrives */
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
 
     /* --- a resident interrupt taken while a lower number is offered --- */
@@ -1170,7 +1196,7 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     CHECK(vcpu_set_regs(v, &regs) == 0);
     CHECK(vcpu_inject(v, 42) == 0);
     CHECK(vcpu_run(v, &x) == 0);                    /* 42 goes into the register, unheeded */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_inject(v, 5) == 0);                  /* now a lower number is the offer */
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 5);
     regs.pstate &= ~(uint64_t)(1u << 7);            /* unmask */
@@ -1178,12 +1204,12 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     CHECK(vcpu_run(v, &x) == 0);
     /* The guest takes the resident 42, not the offered 5, and 42 is what
      * must be cleared. */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);
+    CHECK_HC(x, 42);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 5);
     CHECK(vcpu_run(v, &x) == 0);                    /* the EOI frees the register */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 5);    /* then 5, once */
+    CHECK_HC(x, 5);    /* then 5, once */
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-irq-queue: a second instance is not swallowed, and a resident "
@@ -1209,9 +1235,9 @@ bool selftest_el2_guest_timer_isolated(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     CHECK(vcpu_run(v, &x) == 0);                                    /* armed, then the heartbeat */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
 
     /* The guest armed its timer -- its saved state says so -- and the
      * host's CNTV_CTL as that run's *exit* left it is disarmed. Read
@@ -1248,7 +1274,7 @@ bool selftest_el2_guest_timer_offset(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     uint64_t t_vm_a = x.hypercall.a0;                               /* the guest's CNTVCT */
 
     /* A second vCPU of the same VM, made later: same clock. */
@@ -1260,7 +1286,7 @@ bool selftest_el2_guest_timer_offset(const char **reason)
     regs.pc = LOAD_GPA;
     CHECK(vcpu_set_regs(v1, &regs) == 0);
     CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     uint64_t t_vm_a_cpu1 = x.hypercall.a0;
     uint64_t off0 = 0, off1 = 0, c = 0;
     CHECK(arch_hv_vcpu_timer_state(v0->arch, &c, &off0));
@@ -1276,7 +1302,7 @@ bool selftest_el2_guest_timer_offset(const char **reason)
     struct vcpu *vb;
     CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm_b, &vb) == 0);
     CHECK(vcpu_run(vb, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     uint64_t t_vm_b = x.hypercall.a0;
     uint64_t offb = 0;
     CHECK(arch_hv_vcpu_timer_state(vb->arch, &c, &offb));
@@ -1338,7 +1364,7 @@ bool selftest_el2_guest_phys_timer(const char **reason)
     CHECK(vcpu_set_regs(v, &regs) == 0);
 
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+    CHECK_HC(x, 9);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.x[3] == 0x1234);    /* the guest got the answer, not the clock */
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-phys-timer: CNTPCT_EL0 read and CNTP_CTL_EL0 write both trapped");
@@ -1370,7 +1396,7 @@ bool selftest_el2_guest_timer(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     uint64_t armed_at = x.hypercall.a0;
 
     /* Heartbeats until the handler speaks; bounded, because a timer that
@@ -1398,7 +1424,7 @@ bool selftest_el2_guest_timer(const char **reason)
      * clock is past the deadline; and the timer, masked, does not fire
      * again. */
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     /* Printed before the check, because CI has seen this check fail once
      * with nothing to read (docs/testing/flakes.md, "el2-guest-timer's
      * heartbeat read a clock not past the arming"): the next sighting
@@ -1408,7 +1434,7 @@ bool selftest_el2_guest_timer(const char **reason)
               (unsigned long long)x.hypercall.a0, (unsigned long long)armed_at, (unsigned long long)off);
     CHECK(x.hypercall.a0 > armed_at);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-timer: INTID %u after %u heartbeat(s), handler saw CNTV_CTL 0x%llx", intid,
           beats, (unsigned long long)ctl);
@@ -1441,7 +1467,7 @@ bool selftest_el2_guest_timer_ontime(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);                                    /* armed */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     uint64_t armed_at = x.hypercall.a0, cval = x.hypercall.a1;
     uint64_t asked_ticks = cval - armed_at;                         /* ~15 ms of guest ticks */
 
@@ -1531,7 +1557,7 @@ bool selftest_el2_guest_gicd_probe(const char **reason)
     CHECK((regs.x[5] & 0xFFu) == 0 && (regs.x[5] & (1ull << 31)) != 0);   /* MPIDR: vCPU 0 */
 
     CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK_HC(x, 7);
     uint64_t rtyper1 = x.hypercall.a3;
     CHECK((rtyper1 >> 32) == 1);                   /* frame 1 carries Aff0 = 1 */
     CHECK(((rtyper1 >> 8) & 0xFFFFu) == 1);
@@ -1580,7 +1606,7 @@ bool selftest_el2_guest_gic_config(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 3);
+    CHECK_HC(x, 3);
     CHECK(x.hypercall.a0 == (1ull << 8));                       /* SPI 40 enabled: word 1, bit 8 */
     CHECK(x.hypercall.a1 == 0xA0u);                            /* its priority, lane 0 of its word */
     CHECK(x.hypercall.a2 == (1ull << 27));                      /* PPI 27 enabled in vCPU 1's frame */
@@ -1594,14 +1620,14 @@ bool selftest_el2_guest_gic_config(const char **reason)
     /* vCPU 0 looks: the SPI's enable is the VM's and it sees it; the
      * PPI's is vCPU 1's frame's and its own frame shows none. */
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK_HC(x, 7);
     CHECK(vcpu_get_regs(v0, &regs) == 0);
     CHECK(regs.x[6] == (1ull << 8));
     CHECK(regs.x[7] == 0);
 
     /* Clearing through ICENABLER clears what ISENABLER set, and only that. */
     CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 4);
+    CHECK_HC(x, 4);
     CHECK(x.hypercall.a0 == 0);
     CHECK(x.hypercall.a2 == (1ull << 27));
 
@@ -1661,7 +1687,7 @@ bool selftest_el2_guest_gic_timer(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);     /* configured, ready */
+    CHECK_HC(x, 1);     /* configured, ready */
 
     /* Phase A: the timer, through the redistributor the guest enabled it in. */
     unsigned beats = 0;
@@ -1722,19 +1748,19 @@ bool selftest_el2_guest_sgi(const char **reason)
 
     /* vCPU 0 sends and says so; the write did not reach its owner. */
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+    CHECK_HC(x, 9);
 
     /* vCPU 1 takes it: INTID 3, in a handler running as Aff0 = 1. */
     unsigned beats = 0;
     CHECK(run_until(v1, &x, 3, (1ull << 2), 100, &beats));
     CHECK((x.hypercall.a0 & 0xFFu) == 1);
     CHECK(vcpu_run(v1, &x) == 0);                                   /* completes, back to its heartbeat */
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
 
     /* vCPU 0 was not a target and never sees it. */
     for (unsigned i = 0; i < 20; i++) {
         CHECK(vcpu_run(v0, &x) == 0);
-        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+        CHECK_HC(x, 2);
     }
     kobject_put(&v1->obj);
     drop_guest(vm, v0);
@@ -1776,7 +1802,7 @@ bool selftest_el2_guest_gicd_isolated(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(va, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 3);
+    CHECK_HC(x, 3);
     CHECK(x.hypercall.a0 == (1ull << (spare % 32)));
     CHECK(regs.x[8] == (uint64_t)spare);
 
@@ -1789,7 +1815,7 @@ bool selftest_el2_guest_gicd_isolated(const char **reason)
     regs.x[8] = (uint64_t)spare;
     CHECK(vcpu_set_regs(vb, &regs) == 0);
     CHECK(vcpu_run(vb, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK_HC(x, 7);
     CHECK(vcpu_get_regs(vb, &regs) == 0);
     CHECK(regs.x[6] == 0);                                  /* the SPI: not enabled here */
     CHECK(regs.x[7] == 0);                                  /* the PPI: not here either */
@@ -1859,7 +1885,7 @@ bool selftest_el2_mmio_device(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* seven loads, no exit */
+    CHECK_HC(x, 1);   /* seven loads, no exit */
     CHECK(x.hypercall.a0 == 0xF3ull);                                   /* ldrb  w */
     CHECK(x.hypercall.a1 == 0xF2F3ull);                                 /* ldrh  w */
     CHECK(x.hypercall.a2 == 0xF0F1F2F3ull);                             /* ldr   w */
@@ -1878,7 +1904,7 @@ bool selftest_el2_mmio_device(const char **reason)
     CHECK(x.mmio.size == 8 && x.mmio.reg == 9 && x.mmio.sf);
     x.mmio.value = 0x1122334455667788ull;
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0);
     CHECK(regs.x[9] == 0x1122334455667788ull);
     drop_guest(vm, v);
@@ -1906,7 +1932,7 @@ bool selftest_el2_guest_uart(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* six stores, no exit */
+    CHECK_HC(x, 1);   /* six stores, no exit */
     CHECK(x.hypercall.a0 == 0x90u);                                     /* FR: TXFE and RXFE, throughout */
     CHECK(x.hypercall.a1 == 0x11u && x.hypercall.a2 == 0x10u);         /* PeriphID0, PeriphID1: a PL011 */
     CHECK(x.hypercall.a3 == 0xB1u);                                    /* PCellID3 */
@@ -1940,7 +1966,7 @@ bool selftest_el2_guest_uart_rx(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     for (unsigned i = 0; i < 5; i++) {                                 /* nothing typed: nothing arrives */
         CHECK(vcpu_run(v, &x) == 0);
         CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 && x.hypercall.a0 == 0);
@@ -1990,7 +2016,7 @@ bool selftest_el2_guest_uart_level(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     CHECK(vm_console_write(vm, "ab", 2) == 2);
     CHECK(run_until(v, &x, 33, (1ull << 2), 100, NULL));
     CHECK(x.hypercall.a1 == 'a');
@@ -2008,7 +2034,7 @@ bool selftest_el2_guest_uart_level(const char **reason)
     /* The wake-up. */
     CHECK(make_guest("tests/hv/guest_uart_wfi.bin", &vm, &v) == 0);
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     struct timer t;
     g_wake_vm = vm;
     g_wake_at = 0;
@@ -2187,7 +2213,7 @@ bool selftest_el2_guest_uart_race(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* vCPU 0 routes SPI 33 to itself */
+    CHECK_HC(x, 1);   /* vCPU 0 routes SPI 33 to itself */
 
     /* Phase one: one vCPU, the hypervisor's own ordering under test. */
     unsigned c1 = 0, i1 = 0, s1 = 0;
@@ -2198,7 +2224,7 @@ bool selftest_el2_guest_uart_race(const char **reason)
 
     /* Phase two: the sibling joins (and routes the SPI to itself, last). */
     CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK_HC(x, 1);
     unsigned c2 = 0, i2 = 0, s2 = 0;
     CHECK(uart_race_phase(reason, vm, v0, v1, 300, &c2, &i2, &s2, &sib));
     CHECK(c2 + sib.consumed == 300);
@@ -2501,7 +2527,7 @@ bool selftest_el2_vm_raise_spi(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* GIC up, SPI 50 enabled */
+    CHECK_HC(x, 1);   /* GIC up, SPI 50 enabled */
 
     /* Raised through the distributor, the guest takes it. */
     CHECK(vm_raise_spi(vm, 50) == 0);
@@ -2521,7 +2547,7 @@ bool selftest_el2_vm_raise_spi(const char **reason)
     CHECK(vm_raise_spi(vm, 51) == 0);
     for (unsigned i = 0; i < 20; i++) {
         CHECK(vcpu_run(v, &x) == 0);
-        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+        CHECK_HC(x, 2);
         CHECK(x.hypercall.a0 == 1);                                   /* still 1: SPI 51 was gated */
     }
     vm_lower_spi(vm, 51);

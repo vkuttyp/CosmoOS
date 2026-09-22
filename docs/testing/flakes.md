@@ -1912,6 +1912,27 @@ and `x.hypercall.nr`, which would settle which of the two it is at no
 cost — the instrument-before-theory point again. Not repaired here; it
 belongs to the vGIC tests.
 
+**It recurred on 2026-09-22**, the same check and the same step, on
+PR #215's aarch64 GICv3 boot (run 35726616478) — a
+**documentation-only** branch, which rules out the change under test as
+it did the first time:
+
+```text
+SELFTEST: el2-guest-irq-queue ... FAIL: check failed: x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 at line 1159 (8 ms)
+```
+
+Two sightings, both aarch64 CI, both the GIC boot, both on branches
+that touch nothing in the hypervisor. So the instrument the paragraph
+above asked for is built: `CHECK_HC(x, n)` in
+`kernel-services/virtualization/hvtest.c` prints the exit kind, the
+hypercall number and its first argument before it fails, and the
+fifty-one plain hypercall expectations in that file go through it. The
+next sighting will say which of the two candidates it is instead of
+only that it was not hypercall 2.
+
+Nothing is repaired: the instrument is the whole of this change, and
+the next sighting is the one that gets a diagnosis.
+
 
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
 
