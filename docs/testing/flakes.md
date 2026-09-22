@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Eighty-three, to 2026-09-22**, across CI and this developer's machine, on
+**Eighty-four, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -858,6 +858,7 @@ of this section said eight and then listed nine:
 | PR #214's own CI run | observed, aarch64, the **protection-capable** boot (run 35724183483, `12d666b9`, a **documentation-and-tool-only** branch): the same shape again, `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. |
 | PR #215's own CI run | observed, aarch64, the **plain debug** boot (run 35725274548, this very record's branch at `34f46c96`, a revision that changed documentation only): the **other** shape, `connect 0 in 1379 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +3` **`retransmits +1`**. The record of the flake was failed by the flake, and by its other half. |
 | PR #215's own CI run, again | observed, aarch64, the **protection-capable** boot (run 35731929745, `7d161b0a`): `connect 0 in 670 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0`. The `el2-guest-irq-queue` fix in the same revision held on that boot; this is the other flake. |
+| PR #216's own CI run | observed, x86-64, the **chaos migrator** boot (run 35734557638, `d3ca6d6c`, the balancer build): `connect 0 in 637 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +2`. The balance benchmark in that same boot read 104%, so the boot was healthy apart from this. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -868,18 +869,18 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Sixty-eight entries, eighty-three occurrences -- and the table is the tally,
+Sixty-nine entries, eighty-four occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty-nine rows carry
-the instrument's reading, fifty of them watched as they happened
+are not independently re-verified here. The last sixty rows carry
+the instrument's reading, fifty-one of them watched as they happened
 and nine of `main`'s read from the logs afterwards (**this split is the
 one figure here the table does not encode**: it is which runs were being
 watched when they failed, which no row records, so it is carried forward
 as rows are added rather than recomputed like the rest): PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-eight
-instrumented** occurrences behind the other fifty-eight rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-nine
+instrumented** occurrences behind the other fifty-nine rows carry the
 guest's side. Rows and occurrences differ because **fourteen** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.
@@ -928,8 +929,8 @@ returned 12, a segment went out, and the host still saw nothing — so
 "the twelve bytes were never written" does not describe those. **And
 the successful send is not the exception this paragraph once made it
 sound.** Counted across the tally above rather than across the nine rows
-here: of the eighty-three occurrences, twenty record `sent 12`,
-forty-six record `sent -104`, two record `sent -1` (the connect itself
+here: of the eighty-four occurrences, twenty record `sent 12`,
+forty-seven record `sent -104`, two record `sent -1` (the connect itself
 reset, so nothing was ever sent) and fifteen record no send value at
 all. One row holds one of each, which is why this is counted per
 occurrence and not per row. So roughly a third of

@@ -46,3 +46,6 @@ tests/hv/aarch64/Image
 
 # tools/sched-balance-probe.py snapshots (a run that was not reverted)
 *.sched-balance-probe.orig
+
+# tools/nettest-retry-probe.py snapshot (a run that was not reverted)
+*.nettest-retry-probe.orig
