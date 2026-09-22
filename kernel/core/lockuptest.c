@@ -273,8 +273,13 @@ static bool selftest_lockup_report_skew_pinned(const char **reason)
     clock_test_set_cpu_offset_ns((unsigned)k, 5ll * 1000 * 1000 * 1000);
     thread_sleep_ms(50);
 
+    /* The checker runs on this thread's own CPU (pinned by the wrapper),
+     * which is not the victim's: it must read an unskewed clock, and it
+     * must not queue behind the spinner holding the victim. It was CPU 0
+     * by habit, and CPU 0 can be the victim now that the choice is
+     * relative. */
     struct thread *t = thread_create_on(skewcheck_main, s, "lockup-skew", SCHED_PRIO_DEFAULT,
-                                        cpu_online(0) ? CPUMASK_OF(0) : CPUMASK_ALL & ~CPUMASK_OF((unsigned)k));
+                                        CPUMASK_OF(arch_cpu_id()));
     bool spawned = t != NULL;
     if (spawned)
         thread_join(t);
