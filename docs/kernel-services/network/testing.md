@@ -330,6 +330,18 @@ allows a duplicate binding (the duplicate is then accepted).
 
 ## Autoconfiguration (DHCP and DNS)
 
+**`tap-ready`** (the device-readiness unit): `/dev/net/tap` opened as a
+file with the device's default (blocking) mode: `ready` is `WRITABLE`
+alone, `poll_wq(READABLE)` non-NULL and `poll_wq(WRITABLE)` NULL; a
+thread's blocking read is still inside the read after 30 ms and returns
+a 64-byte frame once `netif_transmit` queues one on `tap0`; `io_poll`
+with a 20 ms timeout returns 0, and 1 with `READABLE` after a transmit;
+`ready` then shows the frame; switched non-blocking, the read returns the
+frame and then 0 with none queued; the file put, `tap0` is gone; a
+process (`init --probe devices-tapread`) that opens its own tap and blocks
+in the read is found holding `tap0`, killed, exits 137, and `tap0` is
+released after. N23.
+
 **`tap-filter`**: the tap input filter that the DHCP server rides. A frame
 of a private ethertype is claimed and answered out the tap (the stack never
 sees it); an ARP request is *not* claimed and the stack answers it; clearing

@@ -20,6 +20,7 @@
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/mutex.h>
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/string.h>
@@ -33,6 +34,7 @@
 
 /* The result of this file's last command, read back until the next one. */
 struct fsctl_open {
+    struct mutex lock;   /* the result, replaced by a write and copied by a read (the file lock no longer serialises a stream's callers) */
     void *result;
     size_t len;
 };
@@ -50,6 +52,7 @@ static int fsctl_open_file(struct vnode *vn, struct file *f)
     struct fsctl_open *o = kmalloc(sizeof(*o), KMEM_ZERO);
     if (o == NULL)
         return -ENOMEM;
+    mutex_init(&o->lock, "fsctl-open");
     f->priv = o;
     return 0;
 }
@@ -68,9 +71,12 @@ static void fsctl_release(struct vnode *vn, struct file *f)
 /* Replace this file's result. Takes ownership of `buf`. */
 static void fsctl_set_result(struct fsctl_open *o, void *buf, size_t len)
 {
-    kfree(o->result);
+    mutex_lock(&o->lock);
+    void *old = o->result;
     o->result = buf;
     o->len = len;
+    mutex_unlock(&o->lock);
+    kfree(old);
 }
 
 /* What passes a filesystem offers. */
@@ -308,12 +314,20 @@ static int64_t fsctl_read_file(struct vnode *vn, struct file *f, uint64_t off,
 {
     (void)vn; (void)off;
     struct fsctl_open *o = f->priv;
-    if (o == NULL || o->result == NULL)
+    if (o == NULL)
         return 0;
-    if (len < o->len)
-        return -ERANGE;   /* a result is read whole or not at all */
-    memcpy(buf, o->result, o->len);
-    return (int64_t)o->len;
+    mutex_lock(&o->lock);
+    int64_t n = 0;
+    if (o->result == NULL) {
+        n = 0;
+    } else if (len < o->len) {
+        n = -ERANGE;   /* a result is read whole or not at all */
+    } else {
+        memcpy(buf, o->result, o->len);
+        n = (int64_t)o->len;
+    }
+    mutex_unlock(&o->lock);
+    return n;
 }
 
 static const struct chrdev_ops fsctl_ops = {

@@ -189,6 +189,23 @@ inherits, or an open file on one of these nodes -- because a program
 that opened `/dev/tty` precisely *because* it had closed handle 0 would
 otherwise be told the thing it just opened is not a terminal.
 
+**The files can be waited on** (the device-readiness unit). Both nodes'
+`chrdev_ops` have `ready`, `poll_wq` and `set_nonblock`: `ready` is what
+the console object answers -- `WRITABLE`, plus `READABLE` when
+`tty_read_ready` -- and `poll_wq` is the terminal's `readers` queue for
+`READABLE` (NULL otherwise: a writer never waits), so `poll`, `select`,
+`SYS_ioready` and the asynchronous ring on an opened `/dev/tty` tell the
+truth where they used to say "always readable". `/dev/tty` for a caller
+whose session has no terminal answers `ERROR` and no queue, which is
+what its read's `-ENXIO` looks like to a poller. The non-blocking mode
+is **per open**: the open file's `COSMO_O_NONBLOCK` bit (`open` stores
+it, `SYS_setnonblock` switches it through `file_set_nonblock`), which
+`read_file` hands to `tty_read_nb`; a non-blocking open's read is
+`-EAGAIN` where a blocking one waits. The console *object* (the
+inherited handles) keeps its contract -- readiness, and no switch --
+because it is shared by every process that inherited it and a bit on
+it would be everybody's.
+
 ### Reading from the background
 
 `tty_read` refuses a reader whose process group is not the terminal's

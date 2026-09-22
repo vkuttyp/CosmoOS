@@ -354,6 +354,17 @@ int file_sync(struct file *f);
  * neighbour's), once. Its result is close's result; the handle closes
  * regardless. */
 int file_flush(struct file *f);
+/* A device's per-open non-blocking mode is the open file's COSMO_O_NONBLOCK
+ * bit, stored by open and switched by SYS_setnonblock through the device's
+ * set_nonblock (the device-readiness unit): a device's read_file asks
+ * file_nonblocking(f), its set_nonblock is file_set_nonblock. Nothing is
+ * allocated per open; the FIFO keeps its own record for its side. */
+bool file_nonblocking(const struct file *f);
+int file_set_nonblock(struct file *f, int on);   /* 1/0 sets, -1 asks; returns the previous value */
+/* Every reader of an open file's flags goes through this: the non-blocking
+ * bit is switched with an atomic read-modify-write while I/O runs, and a
+ * plain read beside that is a data race by the letter. */
+static inline unsigned file_flags(const struct file *f) { return __atomic_load_n(&f->flags, __ATOMIC_RELAXED); }
 static inline void file_get(struct file *f) { kobject_get(&f->obj); }
 static inline void file_put(struct file *f) { kobject_put(&f->obj); }
 /* True if the kobject is a file (for handle-based system calls). */

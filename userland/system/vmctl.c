@@ -1170,7 +1170,7 @@ static int run_machine(int argc, char **argv)
         const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };   /* locally administered */
         memcpy(g_vnet.mac, mac, 6);
         if (strcmp(net, "tap") == 0) {
-            g_vnet.tap_fd = open("/dev/net/tap", O_RDWR);
+            g_vnet.tap_fd = open("/dev/net/tap", O_RDWR | O_NONBLOCK);   /* the loop polls: 0 when no frame */
             if (g_vnet.tap_fd < 0) {
                 fprintf(stderr, "vmctl: /dev/net/tap: %s\n", strerror(errno));
                 return 1;

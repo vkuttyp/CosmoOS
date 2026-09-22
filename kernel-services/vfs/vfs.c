@@ -1209,6 +1209,23 @@ static bool vnode_is_stream(const struct vnode *vn)
     return vn->type == VNODE_CHR || vn->type == VNODE_FIFO;
 }
 
+bool file_nonblocking(const struct file *f)
+{
+    return (file_flags(f) & COSMO_O_NONBLOCK) != 0;
+}
+
+int file_set_nonblock(struct file *f, int on)
+{
+    unsigned old = file_flags(f);
+    if (on >= 0) {
+        if (on)
+            old = __atomic_fetch_or(&f->flags, COSMO_O_NONBLOCK, __ATOMIC_RELAXED);
+        else
+            old = __atomic_fetch_and(&f->flags, ~COSMO_O_NONBLOCK, __ATOMIC_RELAXED);
+    }
+    return (old & COSMO_O_NONBLOCK) ? 1 : 0;
+}
+
 struct file *file_from_kobject(struct kobject *obj)
 {
     return obj->type == &file_type.base ? container_of(obj, struct file, obj) : NULL;
@@ -1435,7 +1452,7 @@ int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)
 int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
 {
     struct vnode *vn = f->vn;
-    if ((f->flags & COSMO_O_ACCMODE) == COSMO_O_WRONLY)
+    if ((file_flags(f) & COSMO_O_ACCMODE) == COSMO_O_WRONLY)
         return -EBADF;
     if (vn->type == VNODE_DIR)
         return -EISDIR;
@@ -1452,13 +1469,18 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
          * ops->open from file_run_open and ops->release from
          * file_release (docs/audit/next-subsystem-chrdev-vnode-lock.md).
          *
-         * What the driver does get is f->lock, the open file's own: two
-         * users of one handle are serialised, two handles on one device
-         * are not. Asserted rather than assumed, because the vnode lock
-         * had been standing in for it and one caller (the AIO ring's
-         * PREAD/PWRITE) was relying on that without knowing. */
+         * Nor f->lock, the open file's own, since the device-readiness
+         * unit: a stream's read may wait (a FIFO for bytes, the tap for a
+         * frame, the terminal for a line), and a reader that held the
+         * open file's lock while it waited deadlocked a writer on the
+         * same open file -- a child given the parent's handle, blocked in
+         * read, and the parent's write blocked behind it for good. The
+         * open file's lock is the position's lock, and a stream has no
+         * position; a stream's per-open state is the driver's to protect
+         * (fsctl keeps its own mutex over its result). file_read and
+         * file_write therefore call a stream's driver with no lock held,
+         * as the pipe and socket objects are called. */
         lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
-        lockdep_assert_held(&f->lock, LOCKDEP_KIND_MUTEX);
         return vn->ops->read_file ? vn->ops->read_file(vn, f, off, buf, len)
              : vn->ops->read      ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
     }
@@ -1471,7 +1493,7 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
 int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
 {
     struct vnode *vn = f->vn;
-    if ((f->flags & COSMO_O_ACCMODE) == COSMO_O_RDONLY)
+    if ((file_flags(f) & COSMO_O_ACCMODE) == COSMO_O_RDONLY)
         return -EBADF;
     if (vn->type == VNODE_DIR)
         return -EISDIR;
@@ -1480,9 +1502,8 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
     if (len == 0)
         return 0;
     if (vnode_is_stream(vn)) {
-        /* As in file_pread: the driver runs with no filesystem lock. */
+        /* As in file_pread: the driver runs with no filesystem lock and no file lock. */
         lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
-        lockdep_assert_held(&f->lock, LOCKDEP_KIND_MUTEX);
         return vn->ops->write_file ? vn->ops->write_file(vn, f, off, buf, len)
              : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     }
@@ -1496,9 +1517,11 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
 
 int64_t file_read(struct file *f, void *buf, size_t len)
 {
+    if (vnode_is_stream(f->vn))
+        return file_pread(f, buf, len, 0);   /* no position, and no lock a waiting read could hold */
     mutex_lock(&f->lock);
     int64_t n = file_pread(f, buf, len, f->pos);
-    if (n > 0 && !vnode_is_stream(f->vn))
+    if (n > 0)
         f->pos += (uint64_t)n;
     mutex_unlock(&f->lock);
     return n;
@@ -1506,12 +1529,14 @@ int64_t file_read(struct file *f, void *buf, size_t len)
 
 int64_t file_write(struct file *f, const void *buf, size_t len)
 {
+    if (vnode_is_stream(f->vn))
+        return file_pwrite(f, buf, len, 0);
     mutex_lock(&f->lock);
     uint64_t off = f->pos;
-    if (f->flags & COSMO_O_APPEND)
+    if (file_flags(f) & COSMO_O_APPEND)
         off = f->vn->size;
     int64_t n = file_pwrite(f, buf, len, off);
-    if (n > 0 && !vnode_is_stream(f->vn))
+    if (n > 0)
         f->pos = off + (uint64_t)n;
     mutex_unlock(&f->lock);
     return n;

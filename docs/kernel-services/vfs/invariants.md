@@ -476,21 +476,31 @@ holding that lock stops every other opener. **Checked by**
 dispatches, which runs in every translation unit's debug build for every
 character device including ones not written yet; and behaviourally by
 `vfs-chr-write-during-blocked-read`, which writes to a device while
-another thread is blocked reading the same node. The rule has a second half, and it is asserted too: a character device's
-callbacks run with **`f->lock`**, the open file's own, so two users of
-one handle are serialised while two handles on one device are not. Every
-path into `file_pread`/`file_pwrite` holds it — `file_read` and
-`file_write` take it, and the AIO ring's `PREAD`/`PWRITE` now does as
-well. It did not, and got away with it only because `vn->lock` was
-serialising two rings on one device by accident.
+another thread is blocked reading the same node. The rule had a second
+half, retired by the device-readiness unit: a character device's
+callbacks ran with **`f->lock`**, the open file's own, so that two users
+of one handle were serialised. That half deadlocked the moment a
+stream's read could wait -- a reader blocked in `read` held the open
+file's lock, and a writer on the *same open file* (a child given the
+parent's handle) blocked behind it for good; a FIFO opened once and
+shared the same way had the same hole. Since that unit `file_read` and
+`file_write` call a stream's driver (`VNODE_CHR`, `VNODE_FIFO`) with
+**no lock held at all**, as the pipe and socket objects are called: the
+open file's lock is the file position's lock, a stream has no position,
+and a stream's per-open state is the driver's to protect (`fsctl`'s
+result, replaced by a write and copied by a read, has its own mutex;
+the tap's and the terminal's per-open state is one atomic bit). The
+AIO ring's `PREAD`/`PWRITE` still hold `f->lock` around their loop,
+which is the position's, and never wait inside it.
 
 Gaps: the assertions are `((void)0)` in release builds, as every
-`KASSERT` here is, and the behavioural test runs in both. And **no test
-drives the AIO ring against a character device** — the tree has no
-in-kernel AIO test at all — so that caller's serialisation rests on the
-assertion and on being consistent with every other caller, not on a test
-that walks it. Both assertions do execute on every character-device read
-and write the suite performs.
+`KASSERT` here is, and the behavioural test runs in both. The ring
+*is* driven against a character device since the device-readiness unit
+(the `devices` section of `init --selftest` parks a `READ` and a `POLL`
+on `/dev/net/tap` and completes them on a transmitted frame), though
+from user mode; the tree still has no in-kernel AIO test. The remaining
+assertion (no `vn->lock` across a driver) executes on every
+character-device read and write the suite performs.
 
 **V29. A symbolic link is bounded by the resolution that expands it.**
 One resolution expands at most `VFS_MAX_SYMLINKS` (8) links and walks at
@@ -559,6 +569,25 @@ file whose own failure does not advance `wb_seq_seen` reports it twice;
 an opener starting at sequence 0 hears an error older than itself; a
 `handle_close` without the flush returns 0; a drop without the count
 leaves `dropped_dirty` unchanged.
+
+**V34. A device's `ready` answers the question its `read_file` would
+answer with the same non-blocking bit, and its `poll_wq` is woken by
+every event that can change that answer.** (The device-readiness unit.)
+The terminal's files answer with `tty_read_ready`, the same predicate
+`tty_read_nb` decides `-EAGAIN` by, and name the `readers` queue every
+line completion wakes; the tap's file answers with its transmit queue's
+length and names the queue every successful enqueue wakes; the
+non-blocking bit both consult is the open file's `COSMO_O_NONBLOCK`
+flag, one place for the read and the switch. A device with none of the
+three keeps the file type's defaults, which are true of a device that
+never blocks (`/dev/vmm`, `/dev/fsctl`, `/dev/net/tapctl`). **Checked
+by** `tty-devready` (readiness against `tty_read_ready`, the poll queue's
+identity, a poll woken by a fed line, per-open mode) and `tap-ready`
+(readiness against the queue, a poll woken by a transmit), and by the
+`devices` section of `init --selftest` through the system calls and
+the asynchronous ring. Its mutations: the terminal always readable, its
+poll queue NULL, the tap readable with no frame, the non-blocking bit a
+static shared by every open.
 
 **V33. A page cache frame a mapping holds is neither reclaimed nor freed
 under it, and the cache tells every mapping before it frees or cleans a

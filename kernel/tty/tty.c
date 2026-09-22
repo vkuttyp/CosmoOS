@@ -292,8 +292,10 @@ void tty_session_exit(pid_t sid)
 {
     struct tty *t = tty_console();
     pid_t hangup = 0;
+    bool ended = false;
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     if (t->sid == sid) {
+        ended = true;
         hangup = t->fg_pgid;
         t->sid = 0;
         t->fg_pgid = 0;
@@ -314,6 +316,11 @@ void tty_session_exit(pid_t sid)
     spin_unlock_irqrestore(&t->lock, s);
     if (hangup != 0)
         tty_signal_group(t, hangup, SIGHUP);
+    /* A poller of /dev/tty sleeps on `readers`; its answer just became
+     * ERROR (no controlling terminal), so it is told -- whether or not a
+     * foreground group was there to hang up (the device-readiness unit). */
+    if (ended)
+        waitqueue_wake_all(&t->readers);
 }
 
 void tty_get_termios(struct tty *t, struct cosmo_termios *out)
@@ -459,6 +466,11 @@ static int64_t tty_read_allowed(struct tty *t)
 
 int64_t tty_read(struct tty *t, void *buf, size_t len)
 {
+    return tty_read_nb(t, buf, len, false);
+}
+
+int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock)
+{
     if (len == 0)
         return 0;
     uint8_t *out = buf;
@@ -466,8 +478,8 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         int64_t allowed = tty_read_allowed(t);
         if (allowed != 0)
             return allowed;
-        if (io_nonblocking(false) && !tty_read_ready(t))
-            return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
+        if (io_nonblocking(nonblock) && !tty_read_ready(t))
+            return -EAGAIN;   /* a non-blocking open, or an I/O ring entry: it parks instead of waiting here */
         /* VMIN 0 in non-canonical mode: answer with whatever is there,
          * including nothing. Checked before the wait, which is the only
          * thing that distinguishes it -- and under the lock, because the

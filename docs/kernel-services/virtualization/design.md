@@ -888,8 +888,10 @@ drops when full.
 
 The owner reaches the tap through **`/dev/net/tap`**, a character device
 (as `/dev/vmm` is): `read` returns one frame the stack transmitted out the
-tap (0 when none waits, a frame never being zero-length, so the owner polls
-it in its run loop as it drains the console), `write` injects one from the
+tap (waiting for one unless the open is non-blocking, since the
+device-readiness unit; `vmctl` opens it `O_NONBLOCK` and gets 0 when none
+waits, a frame never being zero-length, so it polls the tap in its run
+loop as it drains the console), `write` injects one from the
 guest. Each open of `/dev/net/tap` is one guest: the open hook creates a tap
 of its own from a pool (`tap<k>` on `10.0.(3+k).0/24`, up to
 `TAP_MAX_GUESTS`; the ninth concurrent open gets `-ENOSPC`), and the release

@@ -20,8 +20,11 @@
 #include <kernel/net/tapsvc.h>
 #include <uapi/cosmo/netctl.h>
 #include <kernel/netif.h>
+#include <kernel/sched.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/vfs.h>
+#include <kernel/wait.h>
 
 /* The UAPI's snapshot bounds are promises about these tables; keep them true. */
 _Static_assert(COSMO_NETCTL_MAX_FORWARDS == NAT_PF_MAX, "netctl.h forward bound drifted from NAT_PF_MAX");
@@ -42,6 +45,7 @@ _Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "cosmo_netctl_fil
 struct tap {
     struct netif nif;
     struct mbufq txq;      /* stack -> far end: frames transmitted out the tap */
+    struct waitqueue rx_wait;   /* the far end's readers, woken per frame queued (the device-readiness unit) */
     tap_input_fn in_filter;   /* claims far-end frames before the stack (tapsvc: DHCP) */
     void *in_arg;
 };
@@ -54,6 +58,8 @@ static int tap_transmit(struct netif *nif, struct mbuf *m)
     struct tap *t = container_of(nif, struct tap, nif);
     if (!mbufq_enqueue(&t->txq, m))
         m_freem(m);        /* "sent" and dropped */
+    else
+        waitqueue_wake_all(&t->rx_wait);   /* a reader blocked, a poller, the ring: a frame waits (no sleeping lock) */
     return 0;
 }
 
@@ -82,6 +88,7 @@ struct tap *tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8
     t->nif.flags = NETIF_NODEFAULT;
     t->nif.ops = &tap_ops;
     mbufq_init(&t->txq, TAP_TXQ_MAX, "tap-tx");
+    waitqueue_init(&t->rx_wait, "tap-rx");
     if (netif_register(&t->nif) != 0) {
         kfree(t);
         return NULL;
@@ -123,6 +130,31 @@ int tap_inject(struct tap *t, const void *frame, uint32_t len)
 struct mbuf *tap_recv(struct tap *t)
 {
     return mbufq_dequeue(&t->txq);
+}
+
+int tap_recv_wait(struct tap *t, bool nonblock, struct mbuf **out)
+{
+    struct mbuf *m = mbufq_dequeue(&t->txq);
+    while (m == NULL && !nonblock) {
+        /* No lock across the wait; the queue's own lock orders the dequeue
+         * against the enqueue, and the wake comes after the enqueue. */
+        int rc = wait_event_killable(&t->rx_wait, mbufq_len(&t->txq) > 0);
+        if (rc)
+            return rc;
+        m = mbufq_dequeue(&t->txq);   /* another reader may have taken it: wait again */
+    }
+    *out = m;
+    return 0;
+}
+
+unsigned tap_ready(struct tap *t)
+{
+    return COSMO_IO_WRITABLE | (mbufq_len(&t->txq) > 0 ? COSMO_IO_READABLE : 0);
+}
+
+struct waitqueue *tap_poll_wq(struct tap *t)
+{
+    return &t->rx_wait;
 }
 
 struct netif *tap_netif(struct tap *t)
@@ -227,13 +259,18 @@ static void tap_chr_release(struct vnode *vn, struct file *f)
     f->priv = NULL;
 }
 
-/* Read one frame the stack transmitted out this owner's tap, or 0 when none
- * waits (a frame is never zero-length; the owner polls). Never blocks. */
+/* Read one frame the stack transmitted out this owner's tap. A blocking
+ * open waits for one (killable); a non-blocking open -- or a read from
+ * inside the I/O ring -- returns 0 when none waits (a frame is never
+ * zero-length, so 0 is unambiguous; vmctl's poll loop relies on it). */
 static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
     struct tap_open *o = f->priv;
-    struct mbuf *m = tap_recv(o->tap);
+    struct mbuf *m = NULL;
+    int rc = tap_recv_wait(o->tap, io_nonblocking(file_nonblocking(f)), &m);
+    if (rc)
+        return rc;
     if (m == NULL)
         return 0;
     uint32_t fl = m_length(m);
@@ -255,9 +292,32 @@ static int64_t tap_chr_write_file(struct vnode *vn, struct file *f, uint64_t off
     return rc ? rc : (int64_t)len;
 }
 
+/* Readiness through the file (the device-readiness unit): the tap's, and
+ * the open file's non-blocking bit as the per-open mode. */
+static unsigned tap_chr_ready(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    struct tap_open *o = f->priv;
+    return tap_ready(o->tap);
+}
+
+static struct waitqueue *tap_chr_poll_wq(struct vnode *vn, struct file *f, unsigned events)
+{
+    (void)vn;
+    struct tap_open *o = f->priv;
+    return (events & COSMO_IO_READABLE) ? tap_poll_wq(o->tap) : NULL;   /* always writable */
+}
+
+static int tap_chr_set_nonblock(struct vnode *vn, struct file *f, int on)
+{
+    (void)vn;
+    return file_set_nonblock(f, on);
+}
+
 static const struct chrdev_ops tap_chr_ops = {
     .open = tap_chr_open, .release = tap_chr_release,
     .read_file = tap_chr_read_file, .write_file = tap_chr_write_file,
+    .ready = tap_chr_ready, .poll_wq = tap_chr_poll_wq, .set_nonblock = tap_chr_set_nonblock,
 };
 
 /* --- /dev/net/tapctl: the owner's runtime network-control channel -------- */

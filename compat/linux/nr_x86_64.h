@@ -15,6 +15,7 @@
 #define LX_lstat 6
 #define LX_poll 7
 #define LX_ppoll 271
+#define LX_pselect6 270
 #define LX_lseek 8
 #define LX_mmap 9
 #define LX_mprotect 10

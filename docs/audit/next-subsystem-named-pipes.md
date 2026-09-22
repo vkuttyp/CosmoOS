@@ -392,7 +392,7 @@ sentence.
 
 ## Risks
 
-**The existing devices stay as they are.** `/dev/tty`, `/dev/net/tap`
+**The existing devices stay as they are** (retired: the device-readiness unit, `docs/audit/next-subsystem-device-readiness.md`, wired `/dev/console`, `/dev/tty` and `/dev/net/tap`; `/dev/vmm` never blocks). `/dev/tty`, `/dev/net/tap`
 and `/dev/vmm` get the ability to report readiness and not the code that
 does; each has its own notion of "would block" and its own tests, and
 wiring them is three small units (the tap's is the useful one: a

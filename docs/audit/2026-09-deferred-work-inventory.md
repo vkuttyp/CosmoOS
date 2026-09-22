@@ -206,8 +206,10 @@ IPv6 routing beyond loopback and ND against a real peer.
   everything (compat/linux/syscalls.c:1918-1930). ~~`sched_getaffinity`~~
   is built (`:1661`); ~~`readlink` (no symlinks)~~ is built with
   symlinks (PR #142). Found on the re-check and not previously listed:
-  `pselect6` -- musl's `select` is `pselect6` on both architectures, so
-  every `select` caller gets `-ENOSYS`; `sysinfo` (`lx_nosys`); and a
+  ~~`pselect6` -- musl's `select` is `pselect6` on both architectures, so
+  every `select` caller gets `-ENOSYS`~~ **BUILT (the device-readiness
+  unit, `docs/audit/next-subsystem-device-readiness.md`: `select` 23 and
+  `pselect6` 270/72 over `io_poll`)**; `sysinfo` (`lx_nosys`); and a
   real directory fd -- `check_dirfd` returns `-ENOSYS` for any `dirfd`
   but `AT_FDCWD` (`:133-137`), so an `openat` relative to an opened
   directory fails. Each is a small unit; the three together are the
@@ -288,7 +290,7 @@ above; the built ones are kept here so the coverage is visible.
 | "eventually create a hardware test matrix" (AMD, Intel, Apple Silicon) | §61 constitution / Prompt #2 §61 | open (2.10) |
 | fault injection: "packet duplication, packet reordering, corrupted metadata, CPU starvation, interrupt storms, device reset, VM exit storms" | Prompt #2 §47 | built: allocation, block submit/complete, demand-page, demand-copy, USB CSW (`kernel/core/faultinject.c`), a reordering test, the torn-write replay, an IPI storm test; **open: packet duplication as an injection, CPU starvation, device reset, VM-exit storms** |
 | "Design future support for device add, remove, driver bind, unbind, device reset" | Prompt #2 §41 | built: add/remove for USB and AHCI; driver bind and unbind through the device model -- `driver_register` probes matching devices, `driver_unregister` runs remove and clears bindings (kernel/device/device.c:222-260, tests in `docs/kernel/device/testing.md`). Open: binding or unbinding one device independently of registering its driver, and a generic device reset operation (3) |
-| async I/O "must work for files, sockets, devices, timers, IPC, VM operations" | Prompt #2 §23 | the ring drives any object with a readiness operation and has its own alarm timer; VM operations and a timer as a submittable object are not shown by any test -- unverified |
+| async I/O "must work for files, sockets, devices, timers, IPC, VM operations" | Prompt #2 §23 | the ring drives any object with a readiness operation and has its own alarm timer; **devices shown since the device-readiness unit** (`docs/audit/next-subsystem-device-readiness.md`: a `READ` and a `POLL` on `/dev/net/tap` park and complete on a transmitted frame, the `devices` section); VM operations and a timer as a submittable object are not shown by any test -- unverified |
 | quiesce performance "16 CPUs, 64 CPUs, 256 CPUs where test infrastructure permits" | Prompt #3 §24 | measured at 1 and 4 CPUs only (lifetime report §6) |
 | "TSan-compatible host models where possible" | Prompt #3 §23 | not done (4) |
 | the populate loops that hold the space lock across every page "until milestone 5 adds preemption points" | lifetime report §7.2 | milestone 5 landed; whether it shortened those sections is **not verified** here (`VM_KALLOC_POPULATE` still exists) -- a report touching them checks first |

@@ -147,3 +147,150 @@ bool selftest_tty_ldisc(const char **reason)
     CHECK(st.eofs == 1 && st.lines_in > 0);
     return true;
 }
+
+/* --- tty-devready: the terminal's files report readiness (the
+ * device-readiness unit). Through the /dev/console file: what the console
+ * object answers, per open non-blocking, and /dev/tty with no session. --- */
+
+#include <kernel/object.h>
+#include <kernel/poll.h>
+#include <kernel/sched.h>
+#include <kernel/spinlock.h>
+#include <kernel/timer.h>
+#include <kernel/vfs.h>
+
+struct devready_feeder {
+    struct tty *tty;
+    unsigned delay_ms;
+};
+
+static void devready_feeder_main(void *arg)
+{
+    struct devready_feeder *fd = arg;
+    thread_sleep_ms(fd->delay_ms);
+    feed(fd->tty, "devready line\n");
+    thread_exit(0);
+}
+
+/* Sleeps on the console's readers until its session is gone. */
+struct devready_sleeper {
+    struct tty *tty;
+    unsigned done;
+};
+
+static void devready_sleeper_main(void *arg)
+{
+    struct devready_sleeper *sl = arg;
+    (void)wait_event_killable(&sl->tty->readers, __atomic_load_n(&sl->tty->sid, __ATOMIC_ACQUIRE) == 0);
+    __atomic_store_n(&sl->done, 1, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+static bool flag_within_ms(const unsigned *flag, unsigned ms)
+{
+    uint64_t end = clock_now_ns() + (uint64_t)ms * 1000000ull;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (clock_now_ns() > end)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
+#define DCHECK(cond)                                                                         \
+    do {                                                                                     \
+        if (!(cond)) {                                                                       \
+            *reason = "tty-devready: " #cond;                                                \
+            ok = false;                                                                      \
+            goto out;                                                                        \
+        }                                                                                    \
+    } while (0)
+
+bool selftest_tty_devready(const char **reason)
+{
+    bool ok = true;
+    struct file *a = NULL, *b = NULL, *t = NULL;
+    struct thread *th = NULL;
+    struct devready_sleeper sl = { 0 };   /* .tty set when the session case starts */
+    struct tty *con = tty_console();
+    char buf[64];
+
+    /* Two opens of /dev/console: readiness is the terminal's, the mode is each open's. */
+    DCHECK(vfs_open(NULL, "/dev/console", COSMO_O_RDWR, 0, &a) == 0);
+    DCHECK(vfs_open(NULL, "/dev/console", COSMO_O_RDWR, 0, &b) == 0);
+    DCHECK(kobject_poll_wq(&a->obj, COSMO_IO_READABLE) == &con->readers);
+    DCHECK(kobject_poll_wq(&a->obj, COSMO_IO_WRITABLE) == NULL);       /* never blocks a writer */
+    /* Nothing typed: not readable, and the answer agrees with the console object's. */
+    unsigned r0 = kobject_ready(&a->obj);
+    DCHECK((r0 & COSMO_IO_WRITABLE) != 0);
+    DCHECK((r0 & COSMO_IO_READABLE) == (tty_read_ready(con) ? COSMO_IO_READABLE : 0));
+    if (r0 & COSMO_IO_READABLE) {
+        /* Something was already queued (a harness that types early): drain it so the
+         * waits below start from an empty terminal. */
+        DCHECK(kobject_set_nonblock(&a->obj, 1) == 0);
+        while (file_read(a, buf, sizeof(buf)) > 0)
+            ;
+        DCHECK(kobject_set_nonblock(&a->obj, 0) == 1);
+        DCHECK((kobject_ready(&a->obj) & COSMO_IO_READABLE) == 0);
+    }
+    /* Per open: switch one, the other keeps waiting. */
+    DCHECK(kobject_set_nonblock(&a->obj, -1) == 0 && kobject_set_nonblock(&b->obj, -1) == 0);
+    DCHECK(kobject_set_nonblock(&a->obj, 1) == 0);
+    DCHECK(kobject_set_nonblock(&a->obj, -1) == 1 && kobject_set_nonblock(&b->obj, -1) == 0);
+    DCHECK(file_read(a, buf, sizeof(buf)) == -EAGAIN);                  /* non-blocking, nothing typed */
+    /* A poll with nothing typed times out; one with a line on the way wakes. */
+    struct io_pollfd pf = { .obj = &a->obj, .events = COSMO_IO_READABLE };
+    DCHECK(io_poll(&pf, 1, 20 * 1000000ull) == 0);
+    struct devready_feeder fdr = { .tty = con, .delay_ms = 30 };
+    th = thread_create(devready_feeder_main, &fdr, "devready-feed", 32);
+    DCHECK(th != NULL);
+    uint64_t t0 = clock_now_ns();
+    DCHECK(io_poll(&pf, 1, 2000 * 1000000ull) == 1);
+    DCHECK((pf.revents & COSMO_IO_READABLE) != 0);
+    DCHECK(clock_since_ns(t0) < 1500 * 1000000ull);
+    thread_join(th);
+    th = NULL;
+    DCHECK(kobject_ready(&b->obj) & COSMO_IO_READABLE);                /* the other open sees the same terminal */
+    int64_t n = file_read(b, buf, sizeof(buf));                          /* blocking open: takes the line */
+    DCHECK(n == 14 && memcmp(buf, "devready line\n", 14) == 0);
+    DCHECK(file_read(a, buf, sizeof(buf)) == -EAGAIN);                  /* the non-blocking one finds it gone */
+    /* The console object itself is still not switchable (it is everybody's). */
+    DCHECK(kobject_set_nonblock(console_object(), -1) == -EOPNOTSUPP);
+    /* /dev/tty from a kernel thread: no session, no terminal -- ERROR, no queue, -ENXIO. */
+    DCHECK(vfs_open(NULL, "/dev/tty", COSMO_O_RDWR, 0, &t) == 0);
+    DCHECK(kobject_ready(&t->obj) == COSMO_IO_ERROR);
+    DCHECK(kobject_poll_wq(&t->obj, COSMO_IO_READABLE) == NULL);
+    DCHECK(file_read(t, buf, sizeof(buf)) == -ENXIO);
+    /* A poller of /dev/tty sleeps on the terminal's readers; the session
+     * ending wakes it, or it would sleep on past its answer turning ERROR.
+     * The console is given a session under its lock (no process can from
+     * here), a thread sleeps on `readers` for the session to end, and
+     * tty_session_exit for that session ends it within its bound. */
+    DCHECK(tty_session_of(con) == 0);   /* nobody's yet */
+    {
+        arch_irq_state_t s = spin_lock_irqsave(&con->lock);
+        con->sid = 4242;
+        con->fg_pgid = 0;   /* no group to hang up */
+        spin_unlock_irqrestore(&con->lock, s);
+    }
+    sl.tty = con;
+    th = thread_create(devready_sleeper_main, &sl, "devready-sess", 32);
+    DCHECK(th != NULL);
+    DCHECK(!flag_within_ms(&sl.done, 30));
+    tty_session_exit(4242);
+    bool woken = flag_within_ms(&sl.done, 2000);
+    if (woken) {
+        thread_join(th);
+        th = NULL;
+    }
+    DCHECK(woken);   /* a sleeper the session's end did not wake is left asleep, not joined */
+    DCHECK(tty_session_of(con) == 0);
+    kinfo("selftest: tty-devready: /dev/console reports the terminal's readiness, its mode is per open, /dev/tty without a session is an error");
+out:
+    if (th && (__atomic_load_n(&sl.done, __ATOMIC_ACQUIRE) || sl.tty == NULL))
+        thread_join(th);   /* the feeder always finishes; the sleeper only if woken */
+    if (a) file_put(a);
+    if (b) file_put(b);
+    if (t) file_put(t);
+    return ok;
+}

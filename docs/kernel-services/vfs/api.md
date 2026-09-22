@@ -326,14 +326,17 @@ parent must exist and be a ramfs directory): `struct chrdev_ops { int64_t
 (*read)(struct vnode *, uint64_t off, void *, size_t); int64_t
 (*write)(struct vnode *, uint64_t off, const void *, size_t); }` receives
 the node's reads and writes **with no filesystem lock held** — the
-driver does its own locking (invariant V32); what it does get is the
-open file's own lock, so two users of one handle are serialised and two
-handles on one device are not (a NULL operation is `-ENOTSUP`); `priv` is returned by **`void *ramfs_chr_priv(const struct
+driver does its own locking (invariant V32) -- and, since the
+device-readiness unit, with no open-file lock either: a stream's read
+may wait, and a waiting reader that held `f->lock` deadlocked a writer
+on the same open file, so two users of one handle are *not* serialised
+by the VFS and a device's per-open state is its own to protect (a NULL
+operation is `-ENOTSUP`); `priv` is returned by **`void *ramfs_chr_priv(const struct
 vnode *)`**. `out` may be NULL, else it receives a reference. Errors:
 `-EINVAL` (no name, name too long), `-ENAMETOOLONG`, path errors,
 `-ENOTDIR` (parent not a ramfs directory), `-EEXIST`, `-ENOMEM`. The
 first user is `/dev/vmm` (`docs/kernel-services/virtualization/`); the
-console is still a kobject handed to processes at spawn, not a node. Since the named-pipes unit `chrdev_ops` also has the optional `ready(vn, f)`, `poll_wq(vn, f, events)` and `set_nonblock(vn, f, on)`, which ramfs's character ops forward to the file kobject type's delegation; a device without them keeps the file's defaults (always ready, never changes, `-EOPNOTSUPP`). No existing device sets them yet.
+console is still a kobject handed to processes at spawn, not a node. Since the named-pipes unit `chrdev_ops` also has the optional `ready(vn, f)`, `poll_wq(vn, f, events)` and `set_nonblock(vn, f, on)`, which ramfs's character ops forward to the file kobject type's delegation; a device without them keeps the file's defaults (always ready, never changes, `-EOPNOTSUPP`). `/dev/console`, `/dev/tty` and `/dev/net/tap` set all three (the device-readiness unit); `/dev/vmm`, `/dev/fsctl` and `/dev/net/tapctl` never block and keep the defaults. A device's per-open non-blocking mode is the open file's `COSMO_O_NONBLOCK` bit: **`bool file_nonblocking(const struct file *f)`** reads it and **`int file_set_nonblock(struct file *f, int on)`** (1/0 sets, -1 asks; returns the previous value) is what a device's `set_nonblock` is, so nothing is allocated per open (the FIFO keeps its own record, for its side).
 
 **`vfs_mount_count`, `vfs_vnode_count`, `vfs_dump`** Diagnostics.
 

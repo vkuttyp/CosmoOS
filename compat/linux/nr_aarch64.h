@@ -15,6 +15,7 @@
 #define LX_close 57
 #define LX_fstat 80
 #define LX_ppoll 73
+#define LX_pselect6 72
 #define LX_lseek 62
 #define LX_mmap 222
 #define LX_mprotect 226

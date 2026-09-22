@@ -31,6 +31,22 @@ Run by `init --selftest` on every debug boot (the boot test requires
 `aio_create` and `aio_submit` are in the fuzzer's table (52 of 63 calls
 exercised); `aio_wait` is excluded as a blocking call.
 
+## The `devices` section (`init --selftest`, the device-readiness unit)
+
+`/dev/net/tap` opened `O_RDWR|O_NONBLOCK`: `ioready` is `WRITABLE`
+alone and a read returns 0; ARP requests for the pool's eight gateways
+are written and the tap's own stack answers one, so `ioready` shows
+`READABLE` within a bounded wait and the reply is read; a `READ`
+submitted to a ring parks (`aio_wait` with `min` 0 returns nothing,
+with `min` 1 and 20 ms returns 0) and completes with the reply once the
+requests are written; a `POLL` on the tap parks and completes with
+`READABLE`; the bench below; a child given the same open file through
+the spawn map switches it blocking (`setnonblock` is per open file, so
+the switch is the parent's too) and its read ends on the reply to the
+parent's request; `setnonblock` on the tap is 0 and on handle 0 still
+`EOPNOTSUPP`; an opened `/dev/console` reports what handle 0 reports and
+switches both ways.
+
 ## Kernel
 
 No kernel-mode self-test drives the ring: its execution paths copy to

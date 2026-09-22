@@ -788,6 +788,26 @@ filter are gone before the tap they point at, and no flow survives for a
 reused subnet. A tap exists exactly while an owner holds the channel;
 `vmctl`, which opens once per run, is unchanged, and two runs are two guests.
 
+**The channel can be waited on** (the device-readiness unit). `struct tap`
+has a wait queue, `rx_wait`, that `tap_transmit` wakes after every frame
+it queues (a non-sleeping wake, safe in the transmit's read-side
+section) -- and nothing else wakes: a reader blocked in the file's read
+holds the file, the file holds the tap through its `tap_open`, so the
+tap's release never runs under a blocked reader and has nobody to wake
+(**N23**). The file's `chrdev_ops` carry `ready` (`WRITABLE` always -- an
+injected frame is delivered or dropped, never refused for room --
+`READABLE` with a frame queued), `poll_wq` (`rx_wait` for `READABLE`)
+and `set_nonblock` (the open file's `COSMO_O_NONBLOCK` bit). **A read
+blocks unless the open is non-blocking**: this is the one contract the
+unit changed. The tap unit's read returned 0 when no frame waited
+because the owner had no way to wait; now a blocking open's read sleeps
+on `rx_wait` (killable: `-EINTR`) until a frame is queued, and a
+non-blocking open's -- or a read from inside the I/O ring -- returns 0
+when none waits, kept as 0 rather than `-EAGAIN` because a frame is
+never zero-length and `vmctl`'s poll loop relies on it. `vmctl` opens
+`/dev/net/tap` with `O_NONBLOCK`; the kernel tests that read a tap file
+in a loop open it so too.
+
 **`tapsvc` per tap.** The singleton is now an instance (`struct tapsvc`)
 allocated per tap: its own DHCP binding (a guest slot on its own subnet) and
 its own DNS proxy, whose socket is bound to *that tap's gateway* — a proxy on

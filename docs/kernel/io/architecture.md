@@ -52,8 +52,8 @@ the synchronous system calls use.
   (design.md).
 - Asynchronous completion of block I/O behind files: the page cache is
   synchronous; a file entry completes at submission after its disk I/O.
-- `poll`/`select`/`epoll` for the Linux personality (stage 3; they can
-  be built on `ready` and `poll_wq`).
+- `epoll` for the Linux personality (stage 3; `poll`, `ppoll`, `select`
+  and `pselect6` are built on `io_poll`, which is `ready` and `poll_wq`).
 - Cancellation of a parked entry other than by closing the ring.
 
 ## Interfaces at a glance

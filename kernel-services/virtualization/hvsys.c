@@ -84,7 +84,7 @@ int64_t sys_vm_create(struct syscall_args *a)
     if (obj == NULL)
         return -EBADF;
     struct file *f = file_from_kobject(obj);
-    bool ok = f != NULL && hv_is_vmm_vnode(f->vn) && (f->flags & COSMO_O_ACCMODE) != COSMO_O_RDONLY;
+    bool ok = f != NULL && hv_is_vmm_vnode(f->vn) && (file_flags(f) & COSMO_O_ACCMODE) != COSMO_O_RDONLY;
     kobject_put(obj);
     if (!ok)
         return -EPERM;

@@ -340,6 +340,28 @@ RFC 1122 §4.2.3.9 forbids aborting a connection on a soft one and
 `pcb->error` already carries the verdict the segments themselves give —
 so an errno only ICMP could supply never reaches a stream socket.
 
+**N23. A tap's reader is woken by every frame `tap_transmit` queues,
+and a reader blocked in the tap's read holds the file and therefore the
+tap, so the tap's release never runs under one.** `tap_transmit` wakes
+`rx_wait` after `mbufq_enqueue` succeeds (and only then: a dropped frame
+wakes nobody, there is nothing to read); `tap_recv_wait` re-checks the
+queue's length under the wait's own discipline and dequeues again after
+a wake, so two readers racing for one frame leave one waiting rather
+than one holding NULL. The release path (`tap_chr_release`) runs from
+`file_release`, which runs when the file's last reference drops, and a
+read in progress holds a reference the system call took from
+`handle_lookup` -- so the only ways out of a blocked read are a frame
+or the kill that returns `-EINTR`, and closing the handle from another
+thread of the process drops a reference the read does not hold.
+**Checked by** `tap-ready`: a thread's blocking read waits 30 ms with
+nothing queued and returns the frame a `netif_transmit` queues; `io_poll`
+on the file times out at 20 ms and returns `READABLE` on a transmit; a
+process blocked in its own tap's read is killed, exits 137, and `tap0`
+exists until after it exits and not after that. Its mutations: the wake
+removed (the reader and the poll both time out), the read never waiting
+(the thread's read returns before the transmit), the wait made unkillable
+(the killed process never exits).
+
 **N22. A `struct netif *` that outlives the lock that found it holds a
 reference.** ARP and ND entries store the interface a resolution is for
 (`arp.c`, `ipv6.c`). Their ageing passes copy that pointer into a retry

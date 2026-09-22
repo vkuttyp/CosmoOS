@@ -97,7 +97,11 @@ per read and per write:
 
 - `read` returns the next frame the stack transmitted out the tap (a
   frame bound for the guest), or blocks / returns `EAGAIN` when none
-  waits.
+  waits. (As built by this unit the read never blocked and returned 0
+  when none waited, the owner polling; the device-readiness unit,
+  `docs/audit/next-subsystem-device-readiness.md`, made a blocking
+  open's read wait for a frame and kept 0 for a non-blocking open's,
+  which is how `vmctl` opens it.)
 - `write` injects one frame from the guest into the stack (`netif_rx`).
 
 It is a `KOBJECT_TYPE_IO` object, so it works with the readiness and
