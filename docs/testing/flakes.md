@@ -1582,6 +1582,22 @@ or merely the thing that goes quiet. The sequence is deterministic
 enough to try on purpose: a background `sleep` timed to exit
 mid-keystroke. Still not a list entry; still re-run first.
 
+## `net-harness` printed `ready` and nothing else, once, on this machine
+
+**2026-09-22, x86-64, the plain debug boot on this developer's machine**,
+a mutation run of the device-readiness unit (the mutation touches
+`do_select` alone): the guest printed `NETTEST: ready tcp=7 udp=7` after
+`net-nicbench` and then nothing for the remaining 125 s -- no
+`client failed` line, no `client ok`, no kernel line -- and the host
+harness printed no accept line either; the boot timed out at 201 s
+with the key harness reporting the guest never asked for keys. That is
+not the reset the tally above counts (the guest's client never spoke),
+and it is not the aarch64 shape that stops before the self-tests. The
+same mutated build's next run reached `net-harness` and passed it. One
+sighting, under a host also building for the other architecture;
+recorded rather than filed, and the thing to read on a second one is
+whether the host-side harness ever accepted the back-connection.
+
 ## `quiesce-kick-spinner` is upset by any test that creates threads
 
 **2026-09-20, found while building the `MAP_FIXED` replacement unit,
