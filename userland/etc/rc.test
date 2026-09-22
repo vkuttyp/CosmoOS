@@ -18,6 +18,18 @@ rm /tmp/shtest/copy/c && FAILS=1
 cat /tmp/shtest/moved | cat > /tmp/shtest/d || FAILS=1
 rm -r /tmp/shtest/copy || FAILS=1
 ls /tmp/shtest/copy && FAILS=1
+# A named pipe (the named-pipes unit): a producer and a consumer started
+# together meet on the name. The two commands of a pipeline start
+# together, and neither uses the pipeline's pipe: the inner shell opens
+# the FIFO for writing (this shell opens a command's redirections itself
+# before it spawns, so the redirection sits inside `sh -c`, or the
+# script's shell would be the one waiting) and waits for cat's open;
+# cat prints the line, then sees end of file when echo closes. (A
+# trailing `&` would not do either: without job control this shell runs
+# a background job in the foreground.) The harness requires the line
+# (FIFO_MARKER in tests/boot/run_boot_test.py).
+mkfifo /tmp/shtest/fifo || FAILS=1
+sh -c "echo via-fifo > /tmp/shtest/fifo" | cat /tmp/shtest/fifo
 false && FAILS=1
 true || FAILS=1
 # An AND-OR list is LEFT-associative: `A && B || C` is `(A && B) || C`,

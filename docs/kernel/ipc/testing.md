@@ -25,6 +25,31 @@ after `tty-ldisc` and before the process tests.
 | `pipe_stats` | `created` grew by 4, `alive` is back to its start (I1) |
 
 The test logs `selftest: ipc-pipe: 1024 KiB streamed, 400 records`.
+It is unchanged by the named-pipes unit, which is the proof that the
+ring's split from the ends changed nothing for the anonymous pipe.
+
+**`ipc-fifo`** (`kernel/ipc/fifotest.c`, the named-pipes unit): the FIFO
+as a program reaches it -- a node from `vfs_mknod`, files from
+`vfs_open`, readiness through the file kobject's type -- with
+`fifo_count` and `pipe_stats.alive` compared before and after (I9).
+
+| Step | Proves |
+|---|---|
+| `vfs_mknod(VNODE_FIFO)`: the node is `VNODE_FIFO`, mode 0644, `stat` says `COSMO_DT_FIFO`; `VNODE_REG` `-EINVAL`; on `/proc` `-EOPNOTSUPP`; again `-EEXIST`; `fifo_count` unchanged | a node with no opens has no ring |
+| a thread opens `O_RDONLY`: still inside the open after 30 ms, the ring made; the test opens `O_WRONLY`: both return | the reader waits for a writer |
+| `poll_wq` non-NULL; nothing readable; the writer `WRITABLE`; `hello` written: `READABLE`, read back; `bye` written, the writer put: `READABLE\|HANGUP`, `bye` read, then 0; `seek` `-ESPIPE`; the reader put: `fifo_count` back | bytes, the file's readiness, end of file after the last writer's bytes, the ring freed by the last release |
+| a thread opens `O_WRONLY`: waits; the test opens `O_RDONLY`: both return; the reader put: the writer is `WRITABLE\|ERROR` and writes `-EPIPE` | the writer waits for a reader; the last reader's close |
+| `O_WRONLY\|O_NONBLOCK` with no reader `-ENXIO`, `fifo_count` unchanged; `O_RDONLY\|O_NONBLOCK` at once, reads 0, `READABLE\|HANGUP`; a writer arrives: nothing ready, `-EAGAIN`; bytes across | the non-blocking open rules; a refused open leaves nothing |
+| a second, blocking reader: `set_nonblock` switched on it and off on the first, each answering for itself; the second reads `-EAGAIN` | non-blocking mode is per open |
+| two readers and two writers: one writer put is not end of file, the second is for both readers; a new writer finds the remaining reader; the last reader put: `-EPIPE` | the counts follow each close |
+| `O_RDWR`: no wait, writes and reads its own bytes, `READABLE\|WRITABLE` then `WRITABLE` | `O_RDWR` counts as both sides |
+| `unlink` with a reader and a writer open: bytes still cross, a new open `-ENOENT`, both put: `fifo_count` back | the name goes, the ring stays with its opens |
+| `init --probe fifo-block-read` as a process: its `open(O_RDONLY)` makes the ring (`fifo_count` +1) and waits; `process_kill(SIGKILL)`, status 137; `fifo_count` back; `O_WRONLY\|O_NONBLOCK` `-ENXIO`; a thread's `O_WRONLY` still waits and returns when a reader opens | a killed open undoes its count and its ring (I9); the opener it woke is not stranded |
+| `pipe_stats.alive` | back to its start |
+
+The killed opener is a process because a kernel thread has nobody to
+kill it: `wait_event_killable` returns `-EINTR` only for a thread with a
+process.
 
 ## User-mode checks (`userland/init/init.c`, `proc_selftest`)
 
@@ -124,6 +149,22 @@ with the sender's abstract name back and `MSG_TRUNC`,
 `ESOCKTNOSUPPORT`, and the bench. `lxtest` covers the Linux door
 (`docs/compat/linux/testing.md`). The mutations run are in the report's
 as-built banner.
+
+The `fifo` section (the named-pipes unit): `mkfifo` makes a `DT_FIFO`
+of mode 0644, again `EEXIST`, `cosmo_mknod` of a `DT_SOCK` `EINVAL`,
+`mkfifo` on `/proc` `EOPNOTSUPP`; `O_WRONLY|O_NONBLOCK` with no reader
+`ENXIO`; a non-blocking reader reads 0 and `ioready` is
+`READABLE|HANGUP`, a writer arrives and it is 0 then `EAGAIN`, the
+writer `WRITABLE`, two bytes make it `READABLE`; `fstat` `S_ISFIFO`,
+`lseek` `ESPIPE`; a second reader switched non-blocking with
+`cosmo_setnonblock` while the first is switched back, each answering
+for itself; the last writer closed: the blocking read returns 0; a
+child (`--probe fifo-writer`) writes three lines across the blocking
+open and the parent reads them and end of file; the last reader closed:
+`EPIPE`; `unlink`; and the bench, a one-byte round trip to a child
+(`--probe fifo-pingpong`) over two FIFOs. The shell test's line
+(`docs/userland/testing.md`) and the `lxtest` rows
+(`docs/compat/linux/testing.md`) drive the other two doors.
 
 ## Gaps and planned tests
 

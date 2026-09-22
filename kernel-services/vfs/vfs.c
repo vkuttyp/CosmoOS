@@ -1167,12 +1167,47 @@ static int file_obj_flush(struct kobject *obj)
     return file_flush(container_of(obj, struct file, obj));
 }
 
+/*
+ * Readiness through the vnode, when it has an opinion (a FIFO, a device
+ * that implements it); otherwise a file is always ready, never changes
+ * and cannot be made non-blocking, which is the truth of a regular
+ * file and was the file type's only answer before the named-pipes unit.
+ */
+static unsigned file_obj_ready(struct kobject *obj)
+{
+    struct file *f = container_of(obj, struct file, obj);
+    if (f->vn->ops->ready)
+        return f->vn->ops->ready(f->vn, f);
+    return COSMO_IO_READABLE | COSMO_IO_WRITABLE;
+}
+
+static struct waitqueue *file_obj_poll_wq(struct kobject *obj, unsigned events)
+{
+    struct file *f = container_of(obj, struct file, obj);
+    return f->vn->ops->poll_wq ? f->vn->ops->poll_wq(f->vn, f, events) : NULL;
+}
+
+static int file_obj_set_nonblock(struct kobject *obj, int on)
+{
+    struct file *f = container_of(obj, struct file, obj);
+    return f->vn->ops->set_nonblock ? f->vn->ops->set_nonblock(f->vn, f, on) : -EOPNOTSUPP;
+}
+
 static const struct kobject_io_type file_type = {
     .base = { .name = "file", .release = file_release, .flags = KOBJECT_TYPE_IO },
     .read = file_obj_read,
     .write = file_obj_write,
     .flush = file_obj_flush,
+    .ready = file_obj_ready,
+    .poll_wq = file_obj_poll_wq,
+    .set_nonblock = file_obj_set_nonblock,
 };
+
+/* A stream: no position, no seek, the driver's own read and write. */
+static bool vnode_is_stream(const struct vnode *vn)
+{
+    return vn->type == VNODE_CHR || vn->type == VNODE_FIFO;
+}
 
 struct file *file_from_kobject(struct kobject *obj)
 {
@@ -1406,8 +1441,9 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
         return -EISDIR;
     if (len == 0)
         return 0;
-    if (vn->type == VNODE_CHR) {
-        /* No vn->lock across a driver. It guards nothing on this path --
+    if (vnode_is_stream(vn)) {
+        /* No vn->lock across a driver (a FIFO's ring is one too).
+         * It guards nothing on this path --
          * the arm below touches no vnode field -- and a device may sleep
          * for an unbounded time inside it (tty_read waits for a line),
          * while this is the lock every other opener of the node needs:
@@ -1443,7 +1479,7 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
         return -EROFS;
     if (len == 0)
         return 0;
-    if (vn->type == VNODE_CHR) {
+    if (vnode_is_stream(vn)) {
         /* As in file_pread: the driver runs with no filesystem lock. */
         lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
         lockdep_assert_held(&f->lock, LOCKDEP_KIND_MUTEX);
@@ -1462,7 +1498,7 @@ int64_t file_read(struct file *f, void *buf, size_t len)
 {
     mutex_lock(&f->lock);
     int64_t n = file_pread(f, buf, len, f->pos);
-    if (n > 0 && f->vn->type != VNODE_CHR)
+    if (n > 0 && !vnode_is_stream(f->vn))
         f->pos += (uint64_t)n;
     mutex_unlock(&f->lock);
     return n;
@@ -1475,7 +1511,7 @@ int64_t file_write(struct file *f, const void *buf, size_t len)
     if (f->flags & COSMO_O_APPEND)
         off = f->vn->size;
     int64_t n = file_pwrite(f, buf, len, off);
-    if (n > 0 && f->vn->type != VNODE_CHR)
+    if (n > 0 && !vnode_is_stream(f->vn))
         f->pos = off + (uint64_t)n;
     mutex_unlock(&f->lock);
     return n;
@@ -1483,7 +1519,7 @@ int64_t file_write(struct file *f, const void *buf, size_t len)
 
 int64_t file_seek(struct file *f, int64_t off, int whence)
 {
-    if (f->vn->type == VNODE_CHR)
+    if (vnode_is_stream(f->vn))
         return -ESPIPE;
     mutex_lock(&f->lock);
     int64_t base;
@@ -1735,7 +1771,7 @@ int vfs_unlink(struct vnode *start, const char *path)
 
 int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out)
 {
-    if (type != VNODE_SOCK)
+    if (type != VNODE_SOCK && type != VNODE_FIFO)
         return -EINVAL;
     struct vnode *parent;
     char last[VFS_NAME_MAX + 1];

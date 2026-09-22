@@ -326,8 +326,9 @@ the state is in the filesystem. A central manager would need a control
 channel, and when `svc` was built the two Unix answers to that -- a
 named pipe and a unix socket -- were both things this kernel did not
 have (`mknod` was not in `vnode_ops`, and sockets were AF_INET). The
-unix-sockets unit has since built the second and the `mknod` the first
-needs; `svc`'s shape stands on its own reasons. Inventing a third would mean
+unix-sockets unit has since built the second and the named-pipes unit
+the first (`mkfifo`, and a FIFO in the shell test); `svc`'s shape
+stands on its own reasons. Inventing a third would mean
 building an IPC mechanism in order to build a service manager, which is
 backwards. It also means a supervisor that dies takes one service with
 it rather than all of them, and that `svc` is an ordinary program with

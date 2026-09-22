@@ -120,8 +120,14 @@ What it covers, in order: `mkdir -p` of a nested path; `>` and `>>`;
 one-, two- and three-stage pipelines through `cat`; `cat` of the
 results (the log shows `hello` and `hello` then `world`); `cp` into a
 directory and `cp -r`; `ls` of the copy; `mv`; `rm` of a moved-away
-file fails; `rm -r`; `ls` of a removed directory fails; `false && ...`
-and `true || ...`; `false; echo "status $?"` (prints `status 1`);
+file fails; `rm -r`; `ls` of a removed directory fails; a named pipe
+(the named-pipes unit): `mkfifo`, then `sh -c "echo via-fifo > fifo" |
+cat fifo` -- the two commands of a pipeline start together and meet on
+the name, the inner shell's open waiting for `cat`'s, and the log shows
+`via-fifo` (a required marker; the redirection sits inside `sh -c`
+because this shell opens a command's redirections before it spawns,
+and a trailing `&` runs in the foreground without job control);
+`false && ...` and `true || ...`; `false; echo "status $?"` (prints `status 1`);
 `2>` capture of `cat`'s error and its display; `sh -c "exit 3"` (prints
 `exit 3`); a missing command (prints `notfound 127`); variables
 (`X=42; echo "var $X ${X}1 $$"`); `export` visible in a child `sh -c`;

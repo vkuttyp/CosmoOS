@@ -5,7 +5,7 @@
 ### VFS core (`kernel/include/kernel/vfs.h`)
 
 ```c
-enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK };
+enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK, VNODE_FIFO };
 
 struct vnode {
     struct kobject obj;             /* vnode_type; release() is the eviction path */
@@ -497,7 +497,10 @@ the store.
 ```
 
 `O_RDONLY 0`, `O_WRONLY 1`, `O_RDWR 2`, `O_CREAT 0x40`, `O_EXCL 0x80`,
-`O_TRUNC 0x200`, `O_APPEND 0x400`, `O_DIRECTORY 0x10000`.
+`O_TRUNC 0x200`, `O_APPEND 0x400`, `O_NONBLOCK 0x800` (the named-pipes
+unit: a FIFO's open rules and the open's mode; a regular file ignores
+it), `O_DIRECTORY 0x10000`. `mknod(path, mode, type)` is 100 (the
+named-pipes unit; `type` is `COSMO_DT_FIFO`).
 `struct cosmo_stat { ino, type, mode, nlink, uid, gid, size, mtime_ns, ctime_ns }`;
 `struct cosmo_dirent { ino, type, reclen, name[] }` records packed into
 the `getdents` buffer (at least `sizeof(struct cosmo_dirent) + 2` bytes;
@@ -553,7 +556,7 @@ Vnode ~400 bytes plus page cache entries; ramfs stores every file page
 resident; cosmofs keeps 64 metadata buffers (256 KiB) and a bitmap of
 `nblocks/8` bytes (256 bytes for the 8 MiB test disk) per mount.
 
-## Socket nodes
+## Socket and FIFO nodes
 
 A unix socket's name in the filesystem is a `VNODE_SOCK` (the
 unix-sockets unit, `docs/kernel/ipc/design.md`): a node with no contents
@@ -568,6 +571,23 @@ removes the name and leaves the socket and its connections alone;
 on-disk type for a socket and leaves it NULL, so `bind` on a cosmofs
 path is `-EOPNOTSUPP` -- socket names live under the ramfs root, which
 is where Unix keeps them too.
+
+A named pipe is a `VNODE_FIFO` (the named-pipes unit,
+`docs/kernel/ipc/design.md`, "Named pipes"), made by `SYS_mknod`
+through the same `mknod` operation, owned by the caller, mode as given.
+Unlike a socket's name it is opened: `vfs_open` applies the file's
+permission checks and the node's per-open hooks (`open` waits for the
+other side by POSIX's rules or refuses `-ENXIO`, `release` takes the
+open's count back), `file_pread`/`file_pwrite` route to `read_file`/
+`write_file` as for a character device (no vnode lock across the ring,
+no position, `lseek` `-ESPIPE`), and the file's readiness comes from
+the vnode's optional `ready`/`poll_wq`/`set_nonblock` -- three
+operations `struct vnode_ops` and `chrdev_ops` gained in that unit,
+which the file kobject type delegates to when present (a file without
+them is always ready, never changes and cannot be made non-blocking,
+as before). `open` keeps `COSMO_O_NONBLOCK` in `file->flags`. ramfs
+allocates the node's `struct fifo` at `mknod` and frees it at evict;
+cosmofs and procfs refuse the type as they refuse a socket's.
 
 ## Error handling
 

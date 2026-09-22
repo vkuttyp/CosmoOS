@@ -8,8 +8,10 @@ covered.
 is freed exactly when both end counters are zero.** `readers` and
 `writers` count live end *objects*, not handles: `dup` and `spawn` add
 kobject references to an end, and only the end's release (last
-reference) decrements the counter. `pipe_free` runs from whichever
-release sees both counters at zero. Check: `ipc-pipe` compares
+reference) decrements the counter. `pipe_ring_free` (and the pair's
+free) runs from whichever release sees both counters at zero; since the
+named-pipes unit the ring is shared with FIFOs, whose counts are opens
+(I9), and the rule here is the anonymous pipe's. Check: `ipc-pipe` compares
 `pipe_stats.alive` before and after four pipes; `init --selftest` closes
 ends in every order. Gap: no debug poisoning of freed pipes.
 
@@ -56,9 +58,9 @@ test kills a blocked *writer*.
 
 ## Gaps (documented, not invariants)
 
-- No named pipes, `poll`, `splice`, message boundaries or priorities
-  (non-blocking mode and readiness exist since milestone 8:
-  `docs/kernel-services/network/invariants.md` N19).
+- No `splice`, message boundaries or priorities (non-blocking mode and
+  readiness exist since milestone 8: `docs/kernel-services/network/invariants.md`
+  N19; named pipes since the named-pipes unit, I9).
 - No global limit on pipes; a process is bounded by its 64-slot handle
   table (32 pipes, about 520 KiB of rings).
 - Channels, events and shared memory are not written; the futex
@@ -115,3 +117,19 @@ this rule cannot break without a collector is refused). **Checked by**
 every `unix-*` self-test's count before and after, `unix-handles` (the
 reference a message holds, seen and returned), `unix-close-race` (the
 connector released by the listener's close), and the userland cases.
+
+**I9. A FIFO's ring exists exactly while an open of it does, its
+reader and writer counts equal the live opens of each side, and the
+pipe's end-of-file and `-EPIPE` rules follow from those counts alone.**
+The first open makes the ring, the last release frees it; the open
+hook adds the open's count(s) and the release hook takes them back,
+both under the fifo's lock outside the ring's; and an open that fails
+-- killed while it waits, refused with `-ENXIO`, out of memory -- takes
+back its count and any ring it made before it returns, because the VFS
+runs the release hook only for an open that succeeded. So `fifo_count`
+returns to its value after every case, an unlinked FIFO's opens keep
+their ring until the last of them closes, and a node is evicted with no
+ring (asserted in `fifo_free`). **Checked by** `ipc-fifo`: the count
+before and after every case, the killed process's open, the refused
+non-blocking writer, the two-reader/two-writer sequence; and the
+`fifo` section's cases through the doors.

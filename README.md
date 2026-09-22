@@ -648,8 +648,9 @@ See [docs/development.md](docs/development.md).
   (`/run/svc/<name>.pid`, `/var/log/svc/<name>`). A central manager
   would need a control channel, and the two Unix answers — a named pipe
   and a unix socket — were both things this kernel did not have then
-  (the unix socket exists since the unix-sockets unit; `svc`'s shape
-  stands on its own reasons);
+  (both exist now: the unix socket since the unix-sockets unit, the
+  named pipe since the named-pipes unit; `svc`'s shape stands on its
+  own reasons);
   building an IPC mechanism in order to build a service manager is
   backwards. A definition is `key value` lines, and an **unknown key is
   an error**, because a typo in `root` or `user` would otherwise leave a
@@ -3166,6 +3167,45 @@ See [docs/development.md](docs/development.md).
   AArch64 against 140 / 181 over two pipes. Invariant **I8**; 372
   self-tests on both architectures. Report:
   `docs/audit/next-subsystem-unix-sockets.md` (PR #207).
+- **Named pipes: a pipe with a name, and files that can be waited
+  on.** The other half of the sentence the unix-sockets unit left: a
+  `VNODE_FIFO` node made by the new `SYS_mknod` (100) through the same
+  `mknod` vnode operation (ramfs; cosmofs and procfs refuse), behind
+  which sits the pipe's ring -- split from its two end objects, which
+  became one client of it, with `ipc-pipe` unchanged as the proof. The
+  ring is made by the first open and freed by the last release, and
+  its reader and writer counts are the live **opens** of each side, so
+  the pipe's own end-of-file and `EPIPE` rules follow from them
+  (invariant **I9**). Open is POSIX's: read-only waits for a writer
+  (one that opened since the reader joined, even if it has closed
+  again by the time the reader runs: the other side's open generation,
+  not its count, which lost exactly that writer),
+  write-only for a reader, `O_NONBLOCK` (`0x0800`, new to the native
+  `open`) makes the first return at once and the second `ENXIO`,
+  `O_RDWR` never blocks; the wait is killable, and an open that fails
+  -- killed, refused, out of memory -- takes back its count and any
+  ring it made, because the VFS runs release only for an open that
+  succeeded. Non-blocking mode is per open, as POSIX has it. For it,
+  **a `struct file` can now say whether it would block**: three
+  optional `vnode_ops` (`ready`, `poll_wq`, `set_nonblock`) that the
+  file kobject type delegates to, so `ioready`, `setnonblock`, `poll`
+  and the async ring work on a FIFO handle; `chrdev_ops` gained the
+  same three and no existing device sets them yet. The Linux door's
+  `mknodat` (`S_IFIFO`; `S_IFSOCK` `EINVAL`, the rest `EPERM`) and an
+  `O_NONBLOCK` that reaches the kernel; libc `mkfifo`; a `mkfifo`
+  coreutil and a FIFO in the shell test (a pipeline whose two commands
+  meet on the name, since this shell runs `&` in the foreground without
+  job control and opens redirections before it spawns). One kernel
+  self-test (`ipc-fifo`: both open orders from a second thread, the
+  non-blocking rules, per-open mode, two readers and two writers, an
+  unlinked FIFO, and a real process killed inside its open, the ring
+  counted before and after every case), a `fifo` section of the user
+  suite, `lxtest` rows; nine mutations, each caught by a named check.
+  Bench: a one-byte round trip to a child costs 167 / 197 us over
+  two FIFOs on x86-64 / AArch64 against 150 / 182 over two pipes in
+  the same runs: the same ring, plus the file layer. 373 self-tests on
+  both architectures. Report: `docs/audit/next-subsystem-named-pipes.md`
+  (PR #209).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

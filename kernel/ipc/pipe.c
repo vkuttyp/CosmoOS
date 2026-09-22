@@ -1,10 +1,13 @@
 /*
- * pipe.c - Anonymous pipes (docs/kernel/ipc/design.md).
+ * pipe.c - The pipe's ring, and anonymous pipes over it
+ * (docs/kernel/ipc/design.md).
  *
- * One spinlock per pipe, never held while blocking or while touching user
+ * One spinlock per ring, never held while blocking or while touching user
  * memory (the system-call layer copies through a kernel buffer). Waits are
  * killable: a blocked reader or writer whose process is killed returns
- * -EINTR.
+ * -EINTR. The ring counts readers and writers and does not know who they
+ * are: the anonymous pipe's two end objects count themselves here, a
+ * named pipe (fifo.c) counts its opens.
  */
 
 #include <kernel/errno.h>
@@ -18,23 +21,6 @@
 
 #include <uapi/cosmo/syscall.h>
 
-struct pipe;
-
-struct pipe_end {
-    struct kobject obj;
-    struct pipe *pipe;
-    bool nonblock;                 /* this end's mode, shared by every handle to it */
-};
-
-struct pipe {
-    spinlock_t lock;
-    uint8_t *buf;
-    unsigned head, tail, used;
-    unsigned readers, writers;     /* live end objects */
-    struct waitqueue rd_wq, wr_wq;
-    struct pipe_end rd, wr;
-};
-
 static struct pipe_stats g_stats;
 static spinlock_t g_stats_lock = SPINLOCK_INIT("pipe-stats");
 
@@ -45,48 +31,38 @@ static void stat_add(uint64_t *f, int64_t d)
     spin_unlock_irqrestore(&g_stats_lock, s);
 }
 
-static void pipe_free(struct pipe *p)
+/* --- the ring ------------------------------------------------------------- */
+
+struct pipe *pipe_ring_alloc(void)
+{
+    struct pipe *p = kzalloc(sizeof(*p));
+    if (p == NULL)
+        return NULL;
+    p->buf = kmalloc(PIPE_SIZE, 0);
+    if (p->buf == NULL) {
+        kfree(p);
+        return NULL;
+    }
+    spinlock_init(&p->lock, "pipe");
+    waitqueue_init(&p->rd_wq, "pipe-rd");
+    waitqueue_init(&p->wr_wq, "pipe-wr");
+    stat_add(&g_stats.created, 1);
+    stat_add(&g_stats.alive, 1);
+    return p;
+}
+
+void pipe_ring_free(struct pipe *p)
 {
     kfree(p->buf);
     kfree(p);
     stat_add(&g_stats.alive, -1);
 }
 
-/* --- the end objects ------------------------------------------------------ */
-
-static void read_end_release(struct kobject *obj)
+int64_t pipe_ring_read(struct pipe *p, void *buf, size_t len, bool nonblock)
 {
-    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
-    struct pipe *p = e->pipe;
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    p->readers--;
-    bool last = p->readers == 0 && p->writers == 0;
-    spin_unlock_irqrestore(&p->lock, s);
-    waitqueue_wake_all(&p->wr_wq);   /* writers learn -EPIPE */
-    if (last)
-        pipe_free(p);
-}
-
-static void write_end_release(struct kobject *obj)
-{
-    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
-    struct pipe *p = e->pipe;
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    p->writers--;
-    bool last = p->readers == 0 && p->writers == 0;
-    spin_unlock_irqrestore(&p->lock, s);
-    waitqueue_wake_all(&p->rd_wq);   /* readers learn EOF */
-    if (last)
-        pipe_free(p);
-}
-
-static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
-{
-    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
-    struct pipe *p = e->pipe;
     if (len == 0)
         return 0;
-    if (!io_nonblocking(__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED))) {
+    if (!io_nonblocking(nonblock)) {
         int rc = wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0);
         if (rc)
             return rc;
@@ -112,15 +88,13 @@ static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
     return (int64_t)n;   /* 0 only when drained and no writer remains */
 }
 
-static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
+int64_t pipe_ring_write(struct pipe *p, const void *buf, size_t len, bool nonblock)
 {
-    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
-    struct pipe *p = e->pipe;
     if (p->readers == 0)
         return -EPIPE;
     if (len == 0)
         return 0;
-    bool nonblock = io_nonblocking(__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED));
+    nonblock = io_nonblocking(nonblock);
     size_t done = 0;
     while (done < len) {
         size_t left = len - done;
@@ -157,22 +131,8 @@ static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
     return (int64_t)done;
 }
 
-static int pipe_stat(struct kobject *obj, struct cosmo_stat *st)
+unsigned pipe_ring_ready_rd(struct pipe *p)
 {
-    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
-    memset(st, 0, sizeof(*st));
-    st->type = COSMO_DT_FIFO;
-    st->mode = 0600;
-    st->nlink = 1;
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    st->size = p->used;
-    spin_unlock_irqrestore(&p->lock, s);
-    return 0;
-}
-
-static unsigned pipe_read_ready(struct kobject *obj)
-{
-    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
     unsigned r = 0;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     if (p->used > 0)
@@ -183,9 +143,8 @@ static unsigned pipe_read_ready(struct kobject *obj)
     return r;
 }
 
-static unsigned pipe_write_ready(struct kobject *obj)
+unsigned pipe_ring_ready_wr(struct pipe *p)
 {
-    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
     unsigned r = 0;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     if (PIPE_SIZE - p->used >= PIPE_BUF)
@@ -196,16 +155,89 @@ static unsigned pipe_write_ready(struct kobject *obj)
     return r;
 }
 
+/* --- the anonymous pipe: two end objects over one ring -------------------- */
+
+struct pipe_pair;
+
+struct pipe_end {
+    struct kobject obj;
+    struct pipe_pair *pair;
+    bool nonblock;                 /* this end's mode, shared by every handle to it */
+};
+
+struct pipe_pair {
+    struct pipe *ring;
+    struct pipe_end rd, wr;        /* each one reader or one writer while it lives */
+};
+
+static struct pipe *ring_of(struct kobject *obj)
+{
+    return container_of(obj, struct pipe_end, obj)->pair->ring;
+}
+
+/* An end's release takes its count off the ring under the ring's lock;
+ * whichever release sees both counts at zero frees the ring and the
+ * pair (the other end is already gone, so nothing reaches either). */
+static void end_release(struct kobject *obj, bool reader)
+{
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    struct pipe_pair *pair = e->pair;
+    struct pipe *p = pair->ring;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (reader)
+        p->readers--;
+    else
+        p->writers--;
+    bool last = p->readers == 0 && p->writers == 0;
+    spin_unlock_irqrestore(&p->lock, s);
+    waitqueue_wake_all(reader ? &p->wr_wq : &p->rd_wq);   /* writers learn -EPIPE; readers EOF */
+    if (last) {
+        pipe_ring_free(p);
+        kfree(pair);
+    }
+}
+
+static void read_end_release(struct kobject *obj) { end_release(obj, true); }
+static void write_end_release(struct kobject *obj) { end_release(obj, false); }
+
+static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
+{
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    return pipe_ring_read(e->pair->ring, buf, len, __atomic_load_n(&e->nonblock, __ATOMIC_RELAXED));
+}
+
+static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
+{
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    return pipe_ring_write(e->pair->ring, buf, len, __atomic_load_n(&e->nonblock, __ATOMIC_RELAXED));
+}
+
+static int pipe_stat(struct kobject *obj, struct cosmo_stat *st)
+{
+    struct pipe *p = ring_of(obj);
+    memset(st, 0, sizeof(*st));
+    st->type = COSMO_DT_FIFO;
+    st->mode = 0600;
+    st->nlink = 1;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    st->size = p->used;
+    spin_unlock_irqrestore(&p->lock, s);
+    return 0;
+}
+
+static unsigned pipe_read_ready(struct kobject *obj) { return pipe_ring_ready_rd(ring_of(obj)); }
+static unsigned pipe_write_ready(struct kobject *obj) { return pipe_ring_ready_wr(ring_of(obj)); }
+
 static struct waitqueue *pipe_read_poll_wq(struct kobject *obj, unsigned events)
 {
     (void)events;
-    return &container_of(obj, struct pipe_end, obj)->pipe->rd_wq;
+    return &ring_of(obj)->rd_wq;
 }
 
 static struct waitqueue *pipe_write_poll_wq(struct kobject *obj, unsigned events)
 {
     (void)events;
-    return &container_of(obj, struct pipe_end, obj)->pipe->wr_wq;
+    return &ring_of(obj)->wr_wq;
 }
 
 static int pipe_set_nonblock(struct kobject *obj, int on)
@@ -239,27 +271,22 @@ static const struct kobject_io_type pipe_write_type = {
 
 int pipe_create(struct kobject **read_end, struct kobject **write_end)
 {
-    struct pipe *p = kzalloc(sizeof(*p));
-    if (p == NULL)
+    struct pipe_pair *pair = kzalloc(sizeof(*pair));
+    if (pair == NULL)
         return -ENOMEM;
-    p->buf = kmalloc(PIPE_SIZE, 0);
-    if (p->buf == NULL) {
-        kfree(p);
+    pair->ring = pipe_ring_alloc();
+    if (pair->ring == NULL) {
+        kfree(pair);
         return -ENOMEM;
     }
-    spinlock_init(&p->lock, "pipe");
-    waitqueue_init(&p->rd_wq, "pipe-rd");
-    waitqueue_init(&p->wr_wq, "pipe-wr");
-    kobject_init(&p->rd.obj, &pipe_read_type.base);
-    kobject_init(&p->wr.obj, &pipe_write_type.base);
-    p->rd.pipe = p;
-    p->wr.pipe = p;
-    p->readers = 1;
-    p->writers = 1;
-    stat_add(&g_stats.created, 1);
-    stat_add(&g_stats.alive, 1);
-    *read_end = &p->rd.obj;
-    *write_end = &p->wr.obj;
+    kobject_init(&pair->rd.obj, &pipe_read_type.base);
+    kobject_init(&pair->wr.obj, &pipe_write_type.base);
+    pair->rd.pair = pair;
+    pair->wr.pair = pair;
+    pair->ring->readers = 1;
+    pair->ring->writers = 1;
+    *read_end = &pair->rd.obj;
+    *write_end = &pair->wr.obj;
     return 0;
 }
 

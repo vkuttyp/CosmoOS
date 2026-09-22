@@ -12,8 +12,10 @@ handles, specified in `docs/kernel/syscall/api.md`.
   layer copies through a kernel bounce buffer first).
 - Waits are `wait_event_killable`: a blocked reader or writer whose
   process is killed returns `-EINTR`.
-- The two ends are kobjects; handles reference the ends, never the pipe.
-  The pipe is freed when both end counters reach zero.
+- The two ends are kobjects; handles reference the ends, never the ring.
+  The ring is freed when both counts reach zero -- for an anonymous
+  pipe with the last end, for a named pipe with the last release of an
+  open (`kernel/fifo.h` below).
 
 ## kernel/pipe.h
 
@@ -25,9 +27,26 @@ handles, specified in `docs/kernel/syscall/api.md`.
 | `PIPE_BUF` | 4096 | a `pipe_write` of at most this many bytes is never interleaved with another writer's |
 
 ### `struct pipe_stats { uint64_t created, alive, bytes; }`
-Pipes created since boot, pipes not yet freed, bytes moved through
-`pipe_read`. `void pipe_get_stats(struct pipe_stats *out)` snapshots
-them under the statistics lock.
+Rings created since boot (anonymous and named), rings not yet freed,
+bytes moved through `pipe_ring_read`. `void pipe_get_stats(struct
+pipe_stats *out)` snapshots them under the statistics lock.
+
+### The ring (since the named-pipes unit)
+
+`struct pipe` is the ring alone -- `lock`, `buf`, `head`, `tail`,
+`used`, `readers`, `writers`, `rd_wq`, `wr_wq` -- and is a public
+structure: a client changes the counts under `lock` and wakes the queue
+the other side sleeps on (`wr_wq` when a reader goes, `rd_wq` when a
+writer goes). **`struct pipe *pipe_ring_alloc(void)`** gives a ring with
+no readers and no writers (`-ENOMEM` as NULL); **`void
+pipe_ring_free(struct pipe *p)`** takes one whose counts are both zero.
+**`int64_t pipe_ring_read(p, buf, len, bool nonblock)`** and
+**`pipe_ring_write(p, buf, len, bool nonblock)`** are the stream, with
+the contract of the end operations below and `nonblock` the caller's
+mode (the thread's I/O-ring mode is applied inside). **`unsigned
+pipe_ring_ready_rd(p)`** / **`pipe_ring_ready_wr(p)`** are the two
+readiness answers below. The anonymous pipe's ends are one client;
+`kernel/ipc/fifo.c` is the other.
 
 ### `int pipe_create(struct kobject **read_end, struct kobject **write_end)`
 - Purpose: allocate a pipe (`struct pipe` plus a `PIPE_SIZE` buffer from
@@ -73,6 +92,49 @@ yet (else the partial count); the same holds while the calling thread
 executes an I/O ring entry (`io_nonblocking`, `docs/kernel/io/api.md`).
 **`poll_wq(end, events)`**: the read end's `rd_wq`, the write end's
 `wr_wq`, whatever `events` asks.
+
+## kernel/fifo.h (the named-pipes unit)
+
+A `struct fifo` belongs to a `VNODE_FIFO` node; the filesystem that
+holds the node owns it (ramfs: made at `mknod`, freed at evict) and its
+vnode operations call these with the open file. The fifo does not know
+which filesystem holds it.
+
+- **`struct fifo *fifo_alloc(void)`**: a fifo with no ring and no opens
+  (NULL when out of memory). **`void fifo_free(struct fifo *)`**: no
+  open may remain; a live ring is a panic (an open outlived its node).
+- **`int fifo_open(struct fifo *, struct file *f)`**: POSIX's open rules
+  from `f->flags` -- `O_RDONLY` waits for a writer, `O_WRONLY` for a
+  reader (for the other side's open generation to move past what it
+  was when this open joined: a peer that opened and closed meanwhile
+  counts), `O_NONBLOCK` makes the first return at once and the second
+  `-ENXIO` without a reader, `O_RDWR` counts as both and never blocks;
+  killable (`-EINTR`). Adds the open's count(s) to the ring (making the
+  ring if it is the first open) and sets `f->priv`. **An open that
+  fails leaves the fifo as it found it.**
+- **`void fifo_release(struct fifo *, struct file *f)`**: takes the
+  open's count(s) back, wakes the other side (readers learn end of
+  file, writers `-EPIPE`), frees the ring when it was the last open.
+- **`int64_t fifo_read(fifo, f, buf, len)`** / **`fifo_write(...)`**:
+  `pipe_ring_read`/`write` with the open's non-blocking bit.
+- **`unsigned fifo_ready(fifo, f)`**: the read side's readiness for a
+  read-only open, the write side's for a write-only one, both for
+  `O_RDWR`. **`struct waitqueue *fifo_poll_wq(fifo, f, events)`**: the
+  side's queue; for `O_RDWR`, `wr_wq` when `events` asks for WRITABLE
+  alone, else `rd_wq`. **`int fifo_set_nonblock(fifo, f, on)`**: the
+  open's bit (0/1; -1 asks), returning the previous value -- per open.
+- **`unsigned fifo_count(void)`**: live rings held by fifos (the leak
+  test).
+
+The user ABI: **`SYS_mknod(path, mode, type)`** (100; `type` must be
+`COSMO_DT_FIFO`, a `COSMO_DT_SOCK` name without a socket behind it is
+a dead name and is `-EINVAL`; the filesystem's errors, `-EEXIST`,
+`-EOPNOTSUPP` where there is no `mknod`), **`COSMO_O_NONBLOCK`**
+(`0x0800`) on `open`, and `read`, `write`, `close`, `fstat`
+(`COSMO_DT_FIFO`, the node's mode), `ioready`, `setnonblock`, `lseek`
+(`-ESPIPE`) on the handle; libc `mkfifo(path, mode)`, `O_NONBLOCK`; the
+Linux door's `mknodat` (`S_IFIFO`; `S_IFSOCK` `-EINVAL`, anything else
+`-EPERM`) and `open`'s `O_NONBLOCK` (`docs/compat/linux/api.md`).
 
 **Release of the read end**: `readers--`, wake the writers (they see
 `-EPIPE`), free the pipe when both counts are 0. **Release of the write
@@ -204,6 +266,9 @@ missing `read` operation would.
 |---|---|
 | write with no read end | `-EPIPE` (no signal; the writer sees the error) |
 | read with no write end and an empty ring | 0 (end of file) |
+| a FIFO opened write-only with `O_NONBLOCK` and no reader | `-ENXIO`; no count and no ring left behind |
+| a FIFO's blocking open killed while it waits | `-EINTR`; the count and the ring it made are taken back |
+| `mknod` of a name that exists, or on a filesystem without `mknod` | `-EEXIST`, `-EOPNOTSUPP` |
 | reader or writer killed while blocked | `-EINTR`, or the partial count for a write that had progressed |
 | out of memory | `pipe_create` `-ENOMEM`; `sys_pipe` returns it |
 | handle table full | `-EMFILE`, both ends released |

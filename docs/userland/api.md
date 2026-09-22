@@ -16,8 +16,8 @@ below are meant to stay; the exit statuses follow Unix convention.
 | `etc/rc` | `/etc/rc` | 0644 | `userland/etc/rc` |
 | `etc/rc.test` | `/etc/rc.test` (self-test builds only, `SELFTEST=1`; its Linux and virtualization sections report `skipped` when the x86-only fixtures are absent) | 0644 | `userland/etc/rc.test` |
 
-`USER_BIN_PROGRAMS` (sh echo cat ls cp mv rm mkdir rmdir pwd true
-false sleep) and `USER_SBIN_PROGRAMS` (mount umount ps kill dmesg
+`USER_BIN_PROGRAMS` (sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd
+true false sleep) and `USER_SBIN_PROGRAMS` (mount umount ps kill dmesg
 sysctl vmctl) in `userland/userland.mk` generate the entries; the kernel's
 `ramfs_populate_boot` places `bin/`, `sbin/` and `etc/` entries at the
 root and everything else under `/boot`.
@@ -91,6 +91,7 @@ stage is skipped with status 1.
 | `mv` | `mv source target` | `rename`; on `EXDEV` copies and unlinks (files only); into a directory by base name |
 | `rm` | `rm [-r|-rf] paths...` | refuses a directory without `-r` |
 | `mkdir` | `mkdir [-p] dirs...` | mode 0755 |
+| `mkfifo` | `mkfifo names...` | a named pipe, mode 0644 (the named-pipes unit) |
 | `rmdir` | `rmdir dirs...` | |
 | `pwd` | `pwd` | `getcwd` |
 | `true`, `false` | | 0 and 1 |

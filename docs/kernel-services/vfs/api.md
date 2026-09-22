@@ -20,16 +20,20 @@ walked before the last one), `VNODE_HASH` 64 (per-mount vnode buckets).
 
 ### Types
 
-- `enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK }`:
-  the values equal `COSMO_DT_REG/DIR/CHR/LNK/SOCK` so `stat` and
+- `enum vnode_type { VNODE_REG, VNODE_DIR, VNODE_CHR, VNODE_LNK, VNODE_SOCK, VNODE_FIFO }`:
+  the values equal `COSMO_DT_REG/DIR/CHR/LNK/SOCK/FIFO` so `stat` and
   `getdents` report them directly. A `VNODE_SOCK` is a unix socket's
   name (the unix-sockets unit): made by `bind` through `vfs_mknod`,
   connected to rather than opened (`open` answers `-ENXIO`), removed by
-  `unlink`.
+  `unlink`. A `VNODE_FIFO` is a named pipe (the named-pipes unit): made
+  by `SYS_mknod` through `vfs_mknod`, opened under POSIX's FIFO rules,
+  read and written through the node's `read_file`/`write_file` like a
+  character device (`docs/kernel/ipc/design.md`, "Named pipes").
 - `struct vnode_ops`: the filesystem's per-vnode callbacks (`lookup`,
-  `create`, `mkdir`, `mknod` (optional: a `VNODE_SOCK`; a filesystem
-  without it refuses with `-EOPNOTSUPP` -- cosmofs has no on-disk type
-  for one, so socket names live on ramfs), `unlink`, `rmdir`,
+  `create`, `mkdir`, `mknod` (optional: a `VNODE_SOCK` or a
+  `VNODE_FIFO`; a filesystem without it refuses with `-EOPNOTSUPP` --
+  cosmofs has no on-disk type for either, so socket names and FIFOs
+  live on ramfs), `unlink`, `rmdir`,
   `rename`, `readdir`, `readpage`,
   `writepage`, `truncate`, `read`/`write` for `VNODE_CHR`, `sync`,
   `evict`). They are called with the vnode locks the VFS holds: the
@@ -214,11 +218,12 @@ file object exists. Returns a referenced `struct file`.
 for a missing parent, `-ENOTDIR`, `-EROFS`, `-ENOTSUP`.
 
 **`int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out)`**
-Makes a special node -- `VNODE_SOCK` only -- at `path`, under the same
-parent rules as `create` (write and search permission on the directory,
-`-EROFS`): `-EEXIST` when the name exists, `-EOPNOTSUPP` when the
-filesystem has no `mknod`; the new node referenced in `*out`. The unix
-socket's `bind` is its caller.
+Makes a special node -- `VNODE_SOCK` or `VNODE_FIFO`, anything else
+`-EINVAL` -- at `path`, under the same parent rules as `create` (write
+and search permission on the directory, `-EROFS`): `-EEXIST` when the
+name exists, `-EOPNOTSUPP` when the filesystem has no `mknod`; the new
+node referenced in `*out`. The unix socket's `bind` and `SYS_mknod`
+(a FIFO) are its callers.
 
 **`int vfs_unlink(struct vnode *start, const char *path)`** Removes a
 non-directory (`-EISDIR` for a directory, `-EBUSY` for a mountpoint or a
@@ -328,7 +333,7 @@ vnode *)`**. `out` may be NULL, else it receives a reference. Errors:
 `-EINVAL` (no name, name too long), `-ENAMETOOLONG`, path errors,
 `-ENOTDIR` (parent not a ramfs directory), `-EEXIST`, `-ENOMEM`. The
 first user is `/dev/vmm` (`docs/kernel-services/virtualization/`); the
-console is still a kobject handed to processes at spawn, not a node.
+console is still a kobject handed to processes at spawn, not a node. Since the named-pipes unit `chrdev_ops` also has the optional `ready(vn, f)`, `poll_wq(vn, f, events)` and `set_nonblock(vn, f, on)`, which ramfs's character ops forward to the file kobject type's delegation; a device without them keeps the file's defaults (always ready, never changes, `-EOPNOTSUPP`). No existing device sets them yet.
 
 **`vfs_mount_count`, `vfs_vnode_count`, `vfs_dump`** Diagnostics.
 
@@ -538,10 +543,11 @@ Numbers 0–10 are unchanged (Phase 4). New:
 | 20 | `sync` | — | 0 | a filesystem's error |
 | 21 | `mount` | `const char *source, const char *target, const char *fstype, unsigned flags` | 0 | `EPERM` (uid ≠ 0), `ENODEV` (unknown device or filesystem), `EBUSY`, `EIO`, path errors |
 | 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY`, path errors |
+| 100 | `mknod` | `const char *path, uint32_t mode, uint32_t type` | 0 | `EINVAL` (`type` is not `COSMO_DT_FIFO`: a socket's name is made by `bind`), path errors, `EEXIST`, `EOPNOTSUPP` (no `mknod`: cosmofs, procfs), `EROFS` |
 
 These are the namespace's numbers; `SYS_COUNT` was 23 when they were
-added and is 92 now, the last three being the symbolic-link calls
-above. Paths are copied with `strncpy_from_user` up to
+added and is 101 now, 89-91 being the symbolic-link calls above and
+100 `mknod` (the named-pipes unit). Paths are copied with `strncpy_from_user` up to
 `VFS_PATH_MAX`; an empty path is `-ENOENT`; an unreadable pointer is
 `-EFAULT`. `open` installs the file with `HANDLE_RIGHT_READ` for
 `O_RDONLY`/`O_RDWR` and `HANDLE_RIGHT_WRITE` for `O_WRONLY`/`O_RDWR`, so
@@ -553,7 +559,9 @@ or `none`/empty for a memory filesystem, and honours
 
 Flags and constants: `COSMO_O_RDONLY 0`, `O_WRONLY 1`, `O_RDWR 2`,
 `O_ACCMODE 3`, `O_CREAT 0x40`, `O_EXCL 0x80`, `O_TRUNC 0x200`,
-`O_APPEND 0x400`, `O_DIRECTORY 0x10000`; `COSMO_SEEK_SET/CUR/END` 0/1/2;
+`O_APPEND 0x400`, `O_NONBLOCK 0x800` (kept in the file's flags; a
+FIFO's open and its per-open mode read it, a regular file ignores it),
+`O_DIRECTORY 0x10000`; `COSMO_SEEK_SET/CUR/END` 0/1/2;
 `COSMO_DT_UNKNOWN/REG/DIR/CHR` 0/1/2/3; `COSMO_MOUNT_RDONLY 1`.
 
 ```c
@@ -568,7 +576,7 @@ New errno values exported to user space: `COSMO_EXDEV 18`, `ENODEV 19`,
 ### User-side wrappers (`libc/include/cosmo/syscall.h`)
 
 `cosmo_open`, `cosmo_close`, `cosmo_stat`, `cosmo_fstat`, `cosmo_lseek`,
-`cosmo_mkdir`, `cosmo_unlink`, `cosmo_rmdir`, `cosmo_rename`,
+`cosmo_mkdir`, `cosmo_mknod`, `cosmo_unlink`, `cosmo_rmdir`, `cosmo_rename`,
 `cosmo_getdents`, `cosmo_sync`, `cosmo_mount`, `cosmo_umount`: thin
 inline wrappers over `cosmo_syscallN`, returning the kernel's value
 (negative errno on failure). `userland/init/init.c` (`fs_selftest`) is

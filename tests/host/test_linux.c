@@ -35,7 +35,7 @@ int main(void)
     CHECK(lx_open_flags(LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC | LX_O_CLOEXEC, &n) == 0 &&
           n == (COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC));
     CHECK(lx_open_flags(LX_O_RDWR | LX_O_APPEND | LX_O_EXCL | LX_O_DIRECTORY | LX_O_NONBLOCK, &n) == 0 &&
-          n == (COSMO_O_RDWR | COSMO_O_APPEND | COSMO_O_EXCL | COSMO_O_DIRECTORY));
+          n == (COSMO_O_RDWR | COSMO_O_APPEND | COSMO_O_EXCL | COSMO_O_DIRECTORY | COSMO_O_NONBLOCK));   /* O_NONBLOCK reaches the kernel since the named-pipes unit */
     CHECK(lx_open_flags(3, &n) < 0);            /* bad access mode */
     CHECK(lx_open_flags(0x80000000u, &n) < 0);  /* unknown flag */
 

@@ -11,5 +11,7 @@
 #define O_TRUNC COSMO_O_TRUNC
 #define O_APPEND COSMO_O_APPEND
 #define O_DIRECTORY COSMO_O_DIRECTORY
+#define O_NOFOLLOW COSMO_O_NOFOLLOW
+#define O_NONBLOCK COSMO_O_NONBLOCK
 int open(const char *path, int flags, ...);
 #endif

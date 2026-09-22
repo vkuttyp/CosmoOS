@@ -1,14 +1,113 @@
 # NEXT SUBSYSTEM — named pipes: a pipe with a name, and files that can be waited on
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report. It closes
-the other half of the sentence the unix-sockets unit
-(`docs/audit/next-subsystem-unix-sockets.md`) left open in the
+and wait for the instruction to build it. That wait is over: the
+instruction was given and the unit is built. **This report is as
+built** (the named-pipes unit), and the banner below records where the
+build differed from the design; the sections after it are the design
+as reviewed. It closes the other half of the sentence the unix-sockets
+unit (`docs/audit/next-subsystem-unix-sockets.md`) left open in the
 deferred-work inventory (§1.3): "no named pipes and ~~no unix
 sockets~~". That unit said a FIFO would be short -- `mknod` and a node
 type are half of it, the pipe's ring the other half -- and this report
-holds it to that, with one addition the FIFO forces and the tree has
+held it to that, with one addition the FIFO forces and the tree has
 wanted anyway: a `struct file` that can say whether it would block.
+
+**What the build changed:**
+
+1. **A blocking open waits for the other side's generation, not its
+   count.** The design had a read-only open wait until `writers > 0`.
+   The `fifo` section's writer child found what that misses on its
+   first run under load: the child opened, wrote its lines and closed
+   before the woken reader got to run, so the reader re-evaluated its
+   condition, found `writers == 0` again and slept for good. As built,
+   `struct fifo` counts opens ever per side (`r_gen`, `w_gen`, under the
+   fifo's lock beside the counts) and an opener that finds no peer
+   waits for the *other* side's generation to move past what it was
+   when this open joined -- a writer that came and went has still had
+   the FIFO open, and the reader returns to read its bytes and end of
+   file. Linux keeps the same two counters for the same reason. The
+   non-blocking write-only refusal still asks the count (`readers ==
+   0` now is `-ENXIO`).
+2. **The fifo does not know its filesystem.** The design's
+   `fifo_node_ops_template` and `fifo_open(vn, f)` would have had
+   `kernel/ipc/fifo.c` reach into ramfs's node to find its `struct
+   fifo`. As built the fifo's operations take the `struct fifo *`
+   (`fifo_open(fifo, f)`, ...), ramfs allocates it at `mknod`
+   (`fifo_alloc`), frees it at evict (`fifo_free`, which panics on a
+   live ring) and wraps each operation in its own `ramfs_fifo_ops`; a
+   second filesystem with FIFOs would do the same. `fifo_counts` was
+   not built; the tests observe the counts through behaviour.
+3. **The ring's statistics count rings.** `pipe_stats.created` and
+   `alive` are rings, anonymous and named; the anonymous pipe is a
+   `struct pipe_pair` (the ring pointer and the two embedded ends),
+   freed with the ring by whichever end's release is last.
+4. **The shell test's line is a pipeline, not a background job.** This
+   shell runs `&` in the foreground when it has no job control (a
+   script has none, and it says so) and opens a command's redirections
+   itself before it spawns, so both `echo > fifo & cat fifo` and `echo
+   > fifo | cat fifo` block the script's own shell in the writer's
+   open. As built: `sh -c "echo via-fifo > /tmp/shtest/fifo" | cat
+   /tmp/shtest/fifo` -- the pipeline starts both, neither uses its
+   pipe, the inner shell's open waits for `cat`'s, and the harness
+   requires the `via-fifo` line (`FIFO_MARKER`).
+5. **The killed opener is a process, and the `O_RDWR` open is a
+   thread.** A kernel thread has nobody to kill it (`wait_event_killable`
+   returns `-EINTR` only for a thread with a process), so `ipc-fifo`
+   runs `init --probe fifo-block-read` as a real process, kills it
+   inside its open and reads the counts after. The `O_RDWR` open runs
+   from the opener thread with a bounded wait, so a mutation that makes
+   it block fails a check rather than hanging the boot.
+6. **No native `fcntl`.** The native door's per-open switch is
+   `cosmo_setnonblock` (`SYS_setnonblock`, which the file type now
+   delegates); `fcntl(F_SETFL, O_NONBLOCK)` is the Linux door's, and
+   `lxtest` drives it.
+7. **The numbers.** `SYS_mknod` 100, `SYS_COUNT` 101,
+   `COSMO_O_NONBLOCK` `0x0800`; one kernel self-test (`ipc-fifo`), 373
+   in all on both architectures; the `fifo` section (13 sections);
+   invariant **I9** (`docs/kernel/ipc/invariants.md`); Linux `mknodat`
+   259 / 33.
+8. **Review fixes.** `fifo_count`'s counter is atomic (each fifo has
+   its own lock, so two FIFOs' opens on two CPUs could lose an update);
+   an open allocates a ring only when the fifo has none, dropping the
+   lock to allocate and looking again, so a second open of an active
+   FIFO allocates nothing and cannot fail for a ring it would not use;
+   and `fifo_counts`, declared and unused, is gone. The Linux door
+   also gained the legacy `mknod` (133, x86-64 only; AArch64 has the
+   `*at` form alone) beside `mknodat`, as `mkdir` sits beside
+   `mkdirat`; CosmoReview asked for it under the number 25, which is
+   `mremap`.
+
+**Bug-proofs, as run.** Each mutation applied alone on x86-64, the
+debug suite booted, the file restored from HEAD; the report's nine.
+One mutation (the ring kept) did not compile on its first application
+-- the block it removed was the function's only use of a parameter --
+and its "result" was the previous run's log until the runner was made
+to check that each run booted; it was rerun alone. Three of the
+failures below end in `fifo_free`'s assertion rather than the harness's
+verdict line, because the test's cleanup unlinks the node while the
+mutation has left a ring alive; the test prints its failed check before
+that cleanup for exactly this reason.
+
+| mutation | what failed |
+| --- | --- |
+| the reader's open not waiting for a writer | `ipc-fifo`: `!flag_within(&o.done, 30)` -- the reader thread's open returned with nobody on the other side; the `fifo` section's writer child then reached its parent's read out of order (`got == 14` failed) |
+| `O_NONBLOCK` write-only not refused (and not waiting either) | `ipc-fifo`: `open_at(FIFO_PATH, O_WR \| O_NB, &wf) == -ENXIO` -- the open succeeded; the `fifo` section: `open(O_WRONLY \| O_NONBLOCK)` succeeded where `ENXIO` was expected, and `ioready` of the reader lacked `HANGUP` (a writer had been counted) |
+| the ring's `writers` not decremented at release | `ipc-fifo`: `kobject_ready(&rf->obj) == (READABLE \| HANGUP)` after the last writer's put -- no end of file; the test's cleanup then unlinked the node and `fifo_free` asserted, the ring alive with a count nobody held |
+| the ring kept past the last release | `ipc-fifo`: `fifo_count() == f0` after the first case's last put -- the ring stayed; the cleanup's unlink hit the same assertion |
+| the file type's `ready` not delegated | `ipc-fifo`: `(kobject_ready(&rf->obj) & (READABLE \| HANGUP)) == 0` -- a FIFO with no bytes reported readable; the `fifo` section: every `cosmo_ioready` check |
+| `set_nonblock` shared across opens (the bit in the fifo, seeded by the latest open) | `ipc-fifo`: `kobject_set_nonblock(&rf->obj, -1) == 1 && kobject_set_nonblock(&rf2->obj, -1) == 0` -- the second open's blocking mode had turned the first's off |
+| `O_RDWR` counted as one side (a reader) | `ipc-fifo`: `flag_within(&o.done, 2000)` -- the `O_RDWR` open waited for a writer that never comes; the opener thread is left in its open, which is why the test never joins one that has not finished |
+| the anonymous pipe's read end forgetting its count (the split's own risk) | `ipc-pipe`: `obj_write(wr, "x", 1) == -EPIPE` after the read end's put -- the write succeeded; `unix-handles`: `sockets or pipes leaked`; the `proc` section: `write(p[1])` `EPIPE` expected |
+| a failed open not undoing its count | `ipc-fifo`: `fifo_count() == f0` after the killed process's open -- its ring stayed with its reader count; the cleanup's unlink hit the assertion |
+
+**Benchmarks, as run** (`USERBENCH: fifo`, one-byte round trips to a
+child over two FIFOs, 2000 of them, against the two-pipe figure the
+`unix` section prints in the same run): x86-64 167 us against
+150; AArch64 197 against 182. The same ring, plus the file
+layer -- `file_read`'s mutex, the vnode-ops call and the per-open
+record -- which is the gap the report said would be worth a sentence,
+and is that sentence.
 
 ## What is established (before this unit)
 
@@ -111,7 +210,12 @@ give end-of-file when the last writer has closed and the ring is empty
 `-EPIPE` when no reader remains.
 
 **Open's rules are POSIX's.** `open(O_RDONLY)` blocks until a writer has
-the FIFO open; `open(O_WRONLY)` blocks until a reader has; each wakes the
+the FIFO open; `open(O_WRONLY)` blocks until a reader has (**as built,
+banner item 1:** until the other side has *opened since this open
+joined* -- its open generation moved -- so a writer that came and went
+before the woken reader ran still counts, and the reader returns to
+read its bytes and end of file; waiting on the live count instead lost
+that writer); each wakes the
 other side's openers; `O_NONBLOCK` makes a read-only open return at once
 and a write-only open fail with `-ENXIO` when no reader is there;
 `O_RDWR` counts as both and never blocks (Linux's behaviour, and the

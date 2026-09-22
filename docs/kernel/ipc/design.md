@@ -21,11 +21,18 @@ struct pipe_end {
 };
 ```
 
-The two ends are embedded in the pipe; the pipe itself is freed when
-both ends have been released (`readers == 0 && writers == 0`). An end's
-`release` decrements its counter under the lock, wakes the opposite wait
-queue, and frees the pipe if it was the last end. Handles reference the
-end objects, never the pipe.
+Since the named-pipes unit the ring (`struct pipe`: the lock, the
+buffer, the indices, the two counts and the two queues) is split from
+the ends: the anonymous pipe is a `struct pipe_pair` -- a pointer to a
+ring and the two embedded `struct pipe_end` objects -- and the ring's
+four operations (`pipe_ring_read/write/ready_rd/ready_wr`) take the
+ring and a non-blocking flag. `readers` and `writers` count live readers
+and writers, whatever they are: the ends count themselves (one each
+while the end lives), a FIFO counts its opens. The pair is freed when
+both counts reach zero: an end's `release` decrements its count under
+the ring's lock, wakes the opposite wait queue, and frees the ring and
+the pair if it was the last. Handles reference the end objects, never
+the ring.
 
 ## Algorithms
 
@@ -37,11 +44,14 @@ kobjects. `sys_pipe` installs them with `HANDLE_RIGHT_READ` and
 `HANDLE_RIGHT_WRITE` respectively; on a failed second install it closes
 the first handle and the objects release normally.
 
-### pipe_read(end, buf, len)
+### pipe_ring_read(p, buf, len, nonblock)
+
+`pipe_read(end)` is this with the end's non-blocking bit; a FIFO's
+`read_file` is this with the open's.
 
 ```text
 if len == 0: return 0
-wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0)   -> -EINTR when killed
+if not io_nonblocking(nonblock): wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0)   -> -EINTR when killed
 lock
 n = min(len, used); copy out of the ring (two memcpy at most); head/used update
 unlock
@@ -52,7 +62,7 @@ return n           (0 only when used == 0 && writers == 0: end of file)
 A reader returns whatever is available (short reads are normal); it
 never waits for `len` bytes.
 
-### pipe_write(end, buf, len)
+### pipe_ring_write(p, buf, len, nonblock)
 
 ```text
 if p->readers == 0: return -EPIPE
@@ -86,8 +96,8 @@ follow-up (the pipe layer itself honours `PIPE_BUF`).
 ### Release
 
 ```text
-pipe_read_release(obj):  lock; readers--; wake_all(wr_wq); last = readers == 0 && writers == 0; unlock; if last free
-pipe_write_release(obj): lock; writers--; wake_all(rd_wq); last = ...; unlock; if last free
+end_release(obj, reader): lock ring; reader ? readers-- : writers--; last = readers == 0 && writers == 0; unlock
+                          wake_all(reader ? wr_wq : rd_wq); if last: pipe_ring_free(ring); kfree(pair)
 ```
 
 Waking after the decrement lets a blocked reader see `writers == 0`
@@ -96,6 +106,60 @@ Waking after the decrement lets a blocked reader see `writers == 0`
 ### fstat
 
 `type = COSMO_DT_FIFO`, `size = used`, mode 0600, `nlink` 1.
+
+## Named pipes (kernel/ipc/fifo.c)
+
+A named pipe is the same ring behind a filesystem node: a `VNODE_FIFO`
+made by `vfs_mknod` (the `mknod` vnode operation the unix-sockets unit
+added; ramfs implements it, cosmofs and procfs have none and refuse
+`-EOPNOTSUPP`), owned by the caller, mode as given. The node's ramfs
+record holds a `struct fifo` -- a spinlock, a ring pointer (NULL while
+nobody has the FIFO open) and an openers' wait queue -- allocated at
+`mknod` and freed at evict, which asserts the ring is gone. The ring is
+made by the first open and freed by the last release: a FIFO's data
+does not outlive its openers. Its `readers` and `writers` are the live
+**opens** of each side, counted in the open hook and taken back in the
+release hook, and the ring's own rules then give end of file when the
+last writer has closed and the ring is empty (bytes written before the
+close are read first) and `-EPIPE` when no reader remains. The ring
+pointer and the counts change together, under one lock order: the
+fifo's lock outside the ring's.
+
+**Open** is POSIX's: `O_RDONLY` waits for a writer, `O_WRONLY` for a
+reader -- precisely, an open that finds no peer waits until the *other
+side's open generation* (`r_gen`/`w_gen` in the fifo, opens ever per
+side, kept beside the counts) has moved past what it was when this
+open joined, not until the peer's count is nonzero: a writer that
+opened, wrote and closed before the woken reader got to run has still
+had the FIFO open, and the reader returns to read its bytes and end of
+file (waiting on the count lost exactly that writer; Linux keeps the
+same two counters). Each open wakes the other side's openers on the
+fifo's queue, and the wait is on that queue with no lock held;
+with `O_NONBLOCK` a read-only open returns at once and a write-only one
+is `-ENXIO` when no reader is there; `O_RDWR` counts as both sides and
+never blocks. The wait is killable. **An open that fails undoes
+itself**: the VFS runs the release hook only for an open that
+succeeded, so the open hook takes back the count it added -- killed
+(`-EINTR`), refused (`-ENXIO`), out of memory -- and frees the ring if
+it made it and is the last, waking the other side's openers whose
+condition it changed. Per-open state is a `struct fifo_open { ring,
+side, nonblock }` in `file->priv`: `read_file`/`write_file` call the
+ring with the open's flag, so a FIFO's non-blocking mode is **per
+open**, as POSIX has it (the anonymous pipe's shared-per-end bit stays
+as documented). `unlink` while open removes the name and nothing else:
+the opens keep their ring, a new open finds `-ENOENT`, the last
+release frees the ring and the node goes with it.
+
+**Files learned readiness for it.** `struct vnode_ops` has three
+optional operations, `ready(vn, f)`, `poll_wq(vn, f, events)` and
+`set_nonblock(vn, f, on)`, and the file kobject type delegates to them
+when present and answers as before when not (always readable and
+writable; NULL, readiness never changes; `-EOPNOTSUPP`). The FIFO
+implements all three over the ring's readiness, its two queues and the
+open's bit; `chrdev_ops` gained the same three, so a device whose
+`read_file` blocks can say so -- no existing device does yet. `open`
+takes `COSMO_O_NONBLOCK` (`0x0800`, Linux's value) and keeps it in
+`file->flags`, where the FIFO's open reads it.
 
 ## Ownership and lifetime
 
@@ -266,8 +330,10 @@ queue and the queue lock has been dropped.
 ## Future extensibility
 
 - `poll` over the readiness operation once a wait primitive exists.
-- Named pipes: a `VNODE_FIFO` whose open returns the ends -- `mknod`
-  and the socket node are half of it now.
+- The existing devices (`/dev/tty`, `/dev/net/tap`, `/dev/vmm`) can
+  now report readiness through `chrdev_ops` and do not yet; each is its
+  own small unit (the tap's is the useful one: `select` over the tap
+  and a socket).
 - Messages with handles exist as unix sockets; events, shared memory
   join `kernel/ipc/` as separate files with their own kobject types; the
   object model needs nothing new for them.

@@ -570,6 +570,32 @@ int main(int argc, char **argv)
     CHECKV(sc1(LX_close, dfd) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/moved", 0) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir", LX_AT_REMOVEDIR) == 0, 0);
+
+    /* --- named pipes (the named-pipes unit): mknodat makes a FIFO and
+     * nothing else; the open rules; bytes; fstat; O_NONBLOCK by fcntl --- */
+    CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxfifo", LX_S_IFIFO | 0644, 0) == 0, 0);
+    CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxchr", LX_S_IFCHR | 0644, 0) == -1, 0);       /* EPERM */
+    CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxsockn", LX_S_IFSOCK | 0644, 0) == -22, 0);   /* EINVAL: bind makes those */
+#ifdef LX_mknod
+    CHECKV(sc3(LX_mknod, "/tmp/lxfifo", LX_S_IFIFO | 0644, 0) == -17, 0);   /* the legacy form, x86-64: EEXIST */
+#endif
+    CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxfifo", LX_O_WRONLY | LX_O_NONBLOCK, 0) == -6, 0);   /* ENXIO: no reader */
+    long fr = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxfifo", LX_O_RDONLY | LX_O_NONBLOCK, 0);
+    CHECKV(fr >= 3, fr);
+    long fw = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxfifo", LX_O_WRONLY | LX_O_NONBLOCK, 0);
+    CHECKV(fw >= 3, fw);
+    char fbuf[16];
+    CHECKV(sc3(LX_read, fr, fbuf, 4) == -11, 0);   /* EAGAIN: empty, a writer present */
+    CHECKV(sc3(LX_write, fw, "fifo", 4) == 4, 0);
+    CHECKV(sc3(LX_read, fr, fbuf, 16) == 4 && memeq(fbuf, "fifo", 4), 0);
+    CHECKV(sc2(LX_fstat, fr, &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFIFO, st.st_mode);
+    CHECKV(sc3(LX_fcntl, fr, LX_F_GETFL, 0) & LX_O_NONBLOCK, 0);
+    CHECKV(sc3(LX_fcntl, fr, LX_F_SETFL, 0) == 0 && !(sc3(LX_fcntl, fr, LX_F_GETFL, 0) & LX_O_NONBLOCK), 0);
+    CHECKV(sc3(LX_fcntl, fr, LX_F_SETFL, LX_O_NONBLOCK) == 0 && sc3(LX_read, fr, fbuf, 4) == -11, 0);
+    sc1(LX_close, fw);
+    CHECKV(sc3(LX_read, fr, fbuf, 4) == 0, 0);   /* the last writer closed: end of file */
+    sc1(LX_close, fr);
+    CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxfifo", 0) == 0, 0);
     CHECKV(sc1(LX_chdir, "/tmp") == 0, 0);
     CHECKV(sc2(LX_getcwd, buf, sizeof(buf)) == 5 && streq(buf, "/tmp"), 0);   /* length includes the NUL */
     CHECKV(sc1(LX_chdir, "/") == 0, 0);

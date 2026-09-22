@@ -50,11 +50,14 @@ gone.
   reference count follows; closing the last handle to an end releases
   it, which wakes the other side.
 - **`fstat`** on either end reports `COSMO_DT_FIFO`.
+- **Named pipes** (`fifo.c`, the named-pipes unit): the same ring behind
+  a `VNODE_FIFO` node made by `mknod`, its counts the opens of each
+  side, POSIX's open rules, a per-open non-blocking bit, and the three
+  readiness operations files gained for it (`design.md`, "Named pipes").
 
 ## Non-responsibilities
 
-- Named pipes (FIFOs in the filesystem), `poll`/
-  `select`, `splice`, message boundaries, priorities.
+- `splice`, message boundaries, priorities.
 - Events, shared memory: later entries in this directory. Messages
   with handle passing exist as unix domain sockets (`unix.c`, the
   unix-sockets unit); futexes as `futex.c`.
@@ -66,6 +69,9 @@ gone.
 | Interface | Header | Used by |
 |---|---|---|
 | `pipe_create(struct kobject **rd, struct kobject **wr)`, `pipe_stats` | `kernel/pipe.h` | `sys_pipe`, self-tests |
+| `struct pipe` (the ring), `pipe_ring_alloc/free/read/write/ready_rd/ready_wr` | `kernel/pipe.h` | the anonymous pipe's ends, `fifo.c` |
+| `fifo_alloc/free/open/release/read/write/ready/poll_wq/set_nonblock`, `fifo_count` | `kernel/fifo.h` | ramfs's `VNODE_FIFO` vnode ops, `ipc-fifo` |
+| `SYS_mknod` (100), `COSMO_O_NONBLOCK` | `uapi/cosmo/syscall.h` | libc `mkfifo`, `open` |
 | `pipe_read`/`pipe_write` kobject types with `read`/`write`/`stat` | `kernel/object.h` (`kobject_io_type`) | `sys_read`, `sys_write`, `sys_fstat` |
 | `SYS_pipe` (35) | `uapi/cosmo/syscall.h` | libc `pipe()` |
 | `unix_*` (`kernel/unix.h`): the `COSMO_AF_UNIX` transport behind `struct socket` | `kernel/unix.h` | `kernel-services/network/socket.c`, both doors |

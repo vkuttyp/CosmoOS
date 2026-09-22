@@ -36,6 +36,7 @@ enum vnode_type {
     VNODE_CHR = COSMO_DT_CHR,
     VNODE_LNK = COSMO_DT_LNK,
     VNODE_SOCK = COSMO_DT_SOCK,   /* a unix socket's name: made by bind through mknod; open() is -ENXIO */
+    VNODE_FIFO = COSMO_DT_FIFO,   /* a named pipe: the pipe's ring behind a node (kernel/ipc/fifo.c) */
 };
 
 /* How many symbolic links one path resolution may expand before it is
@@ -60,9 +61,10 @@ struct vnode_ops {
      * returns the bytes copied, or -errno. */
     int (*readlink)(struct vnode *vn, char *buf, size_t len);
     int (*mkdir)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
-    /* A special node -- today VNODE_SOCK, a unix socket's name. Optional:
-     * a filesystem without it refuses with -EOPNOTSUPP (cosmofs has no
-     * on-disk type for one). Under dir->lock, like create. */
+    /* A special node -- VNODE_SOCK, a unix socket's name, or VNODE_FIFO,
+     * a named pipe. Optional: a filesystem without it refuses with
+     * -EOPNOTSUPP (cosmofs has no on-disk type for one). Under dir->lock,
+     * like create. */
     int (*mknod)(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
                  struct vnode **out);
     int (*unlink)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
@@ -96,6 +98,14 @@ struct vnode_ops {
     int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
     int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);      /* VNODE_CHR */
     int64_t (*write)(struct vnode *vn, uint64_t off, const void *buf, size_t len);
+    /* Optional readiness, for a file that can block (a FIFO, a device):
+     * the file kobject type delegates SYS_ioready, poll, the async ring
+     * and SYS_setnonblock to these. Without them a file is always
+     * readable and writable, never changes, and cannot be made
+     * non-blocking (-EOPNOTSUPP) -- right for a regular file. */
+    unsigned (*ready)(struct vnode *vn, struct file *f);
+    struct waitqueue *(*poll_wq)(struct vnode *vn, struct file *f, unsigned events);
+    int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
     int (*sync)(struct vnode *vn);
     void (*evict)(struct vnode *vn);
 };
@@ -209,7 +219,7 @@ struct file {
     struct kobject obj;
     struct vnode *vn;
     uint64_t pos;
-    unsigned flags;           /* O_* */
+    unsigned flags;           /* O_*, including O_NONBLOCK as given at open */
     struct mutex lock;
     void *priv;               /* a device's per-open instance (chrdev open/release) */
     bool dev_open;            /* the vnode's open hook ran and succeeded; release will run */
@@ -303,7 +313,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
 int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out);
 int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode);
 int vfs_unlink(struct vnode *start, const char *path);
-/* Make a special node (VNODE_SOCK) at `path`: -EEXIST if the name exists,
+/* Make a special node (VNODE_SOCK or VNODE_FIFO) at `path`: -EEXIST if the name exists,
  * -EOPNOTSUPP if the filesystem has no mknod, -EACCES without write
  * permission on the directory; the new node referenced in *out. */
 int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out);
@@ -365,6 +375,11 @@ struct chrdev_ops {
     void (*release)(struct vnode *vn, struct file *f);
     int64_t (*read_file)(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len);
     int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
+    /* Optional readiness (the named-pipes unit): a device whose read_file
+     * can block may say so. No existing device sets them yet. */
+    unsigned (*ready)(struct vnode *vn, struct file *f);
+    struct waitqueue *(*poll_wq)(struct vnode *vn, struct file *f, unsigned events);
+    int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
 };
 int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
 void *ramfs_chr_priv(const struct vnode *vn);

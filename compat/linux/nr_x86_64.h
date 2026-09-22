@@ -70,6 +70,7 @@
 #define LX_chdir 80
 #define LX_rename 82
 #define LX_mkdir 83
+#define LX_mknod 133
 #define LX_rmdir 84
 #define LX_creat 85
 #define LX_unlink 87
@@ -116,6 +117,7 @@
 #define LX_tgkill 234
 #define LX_openat 257
 #define LX_mkdirat 258
+#define LX_mknodat 259
 #define LX_newfstatat 262
 #define LX_unlinkat 263
 #define LX_renameat 264
