@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Seventy-eight, to 2026-09-22**, across CI and this developer's machine, on
+**Seventy-nine, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -853,6 +853,7 @@ of this section said eight and then listed nine:
 | this developer's machine, the percpu-migration build, **under the chaos migrator**, twice more | observed, one x86-64 and one AArch64 `make test-chaos` boot of the final tree on 2026-09-22 (`7b6b8b79` and the commit before): `connect 0 in 905 ms` / `connect 0 in 867 ms`, `sent 12 in 0 ms`, `recv -104`, `outstanding 12 then 12`, `segs_out +3` **`retransmits +0`** `rsts_in +1`; host side accepted, `0 byte(s)`, `[deadline]`. Four of thirteen chaos boots against none of the plain ones on this tree. First read as a guest that never retransmitted; read again, `recv -104 in 0 ms` says the reset was already there when the guest asked, right after its send -- the family's reset, arriving after the send instead of before it, and nothing left to retransmit. The harness's failure line now prints the connection's retransmit timer and work state on a short line of its own (`NETTEST: client state:`), which on the CI sighting below showed the pcb already detached by the reset. The family, at a higher rate under the migrator. |
 | PR #213's own CI run | observed, x86-64, the **protection-capable** boot (`test-guard`, `7e0c5147`, run 35709652208): `connect 0 in 1252 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40428 accepted at 74.7s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`; the new state line: `rexmit timer state -1 ... pcb state -1` -- the pcb was already detached by the reset when the harness looked. |
 | PR #213's own CI run, again | observed, aarch64, the **GICv3** boot (`test-gic`, `439d543c`, run 35715715021): the family's signature, host side `127.0.0.1:40928 accepted at 102.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`. |
+| The balancer report's measuring boot | observed, x86-64, this developer's machine, a boot carrying `tools/sched-balance-probe.py`: the shape where the guest **sent** the bytes: `sent 12 in 0 ms, recv -104 in 0 ms, pending error -104, ... segs_out +3 retransmits +0 rsts_in +1`. The probe touches the scheduler's tick and nothing in the network stack, and the next boot of the same tree passed. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -863,15 +864,15 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Sixty-three entries, seventy-eight occurrences -- and the table is the tally,
+Sixty-four entries, seventy-nine occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
-are not independently re-verified here. The last fifty-four rows carry
-the instrument's reading, forty-six of them watched as they happened
+are not independently re-verified here. The last fifty-five rows carry
+the instrument's reading, forty-seven of them watched as they happened
 and eight of `main`'s read from the logs afterwards: PR #167's carries
-the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-three
-instrumented** occurrences behind the other fifty-three rows carry the
+the host's `accepted at 92.0s, 0 of 12 bytes`, and the **sixty-four
+instrumented** occurrences behind the other fifty-four rows carry the
 guest's side. Rows and occurrences differ because **twelve** rows hold
 more than one sighting; the shapes table below is per *sighting* and
 is the one to count from.

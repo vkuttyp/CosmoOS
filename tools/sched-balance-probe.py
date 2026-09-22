@@ -8,7 +8,11 @@ docs/audit/next-subsystem-load-balancer.md were obtained, and how they
 can be obtained again on another machine or after a change.
 
   apply    patch the tree (run queue probe + imbalance bench)
-  revert   git checkout the files it touched
+  revert   restore the snapshots `apply` took
+
+`apply` refuses to run when any file it patches has uncommitted changes,
+and `revert` restores only its own snapshots -- it never runs `git
+checkout`, so it cannot discard work it did not create.
 
     python3 tools/sched-balance-probe.py apply
     gmake test              # x86-64; ARCH=aarch64 for the other
@@ -37,6 +41,8 @@ only difference being where they were placed before anyone knew which of
 them would run.
 """
 
+import os
+import shutil
 import subprocess
 import sys
 
@@ -107,7 +113,7 @@ BENCH = r'''
 /* --- IMBALANCE BENCH (tools/sched-balance-probe.py; not for merge) --- */
 struct bwork {
     struct completion started, release, done;
-    volatile unsigned stop;
+    unsigned stop;          /* atomics only: written here, read on another CPU */
     unsigned runs;
     uint64_t iters;
     unsigned cpu;
@@ -122,7 +128,7 @@ static void bwork_main(void *arg)
     wait_for_completion(&w->release);
     w->cpu = raw_cpu_id();
     uint64_t n = 0;
-    while (!w->stop) {
+    while (__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE) == 0) {
         for (volatile unsigned k = 0; k < 64; k++)
             ;
         n++;
@@ -131,14 +137,24 @@ static void bwork_main(void *arg)
     complete(&w->done);
 }
 
-static uint64_t bench_round2(const char *label, unsigned n_created, unsigned stride, bool pin_round, unsigned ncpu)
+/* Two per CPU is the widest round below, and the machine's CPU count is
+ * what the workload is defined in terms of: a fixed cap smaller than
+ * that would quietly measure a different benchmark on a bigger machine
+ * (found in review of this report). */
+#define NB (CONFIG_MAX_CPUS * 2u)
+
+static bool bench_round2(const char **reason, const char *label, unsigned n_created,
+                         unsigned stride, bool pin_round, unsigned ncpu)
 {
-    enum { NB = 16 };
     static struct bwork w[NB];
-    struct thread *t[NB];
+    static struct thread *t[NB];
     unsigned made = 0;
     unsigned n_workers = n_created;
-    for (unsigned i = 0; i < n_workers && i < NB; i++) {
+    if (n_workers > NB) {
+        *reason = "the bench wants more workers than it has room for";
+        return false;
+    }
+    for (unsigned i = 0; i < n_workers; i++) {
         memset(&w[i], 0, sizeof(w[i]));
         completion_init(&w[i].started, "bw-start");
         completion_init(&w[i].release, "bw-rel");
@@ -150,9 +166,25 @@ static uint64_t bench_round2(const char *label, unsigned n_created, unsigned str
         made++;
         wait_for_completion(&w[i].started);
         /* And until it is observably off its run queue, as sched-spread
-         * does: the completion says "running", not "blocked". */
+         * does: the completion says "running", not "blocked". A worker
+         * still runnable when the next is created breaks the one shape
+         * this bench depends on -- each thread placed against a machine
+         * whose queues have drained -- so the wait expiring fails the
+         * bench rather than measuring something else under its name. */
         for (unsigned k = 0; k < 2000 && __atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED; k++)
             thread_sleep_ms(1);
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+            kprintf("BALBENCH %s: worker %u never blocked; the round is void\n", label, i);
+            for (unsigned j = 0; j <= i; j++)
+                complete(&w[j].release);
+            for (unsigned j = 0; j <= i; j++) {
+                __atomic_store_n(&w[j].stop, 1u, __ATOMIC_RELEASE);
+            }
+            for (unsigned j = 0; j <= i; j++)
+                thread_join(t[j]);
+            *reason = "a bench worker never reached THREAD_BLOCKED";
+            return false;
+        }
     }
     unsigned runners = 0;
     for (unsigned i = 0; i < made; i += stride) {
@@ -162,7 +194,7 @@ static uint64_t bench_round2(const char *label, unsigned n_created, unsigned str
     }
     thread_sleep_ms(500);
     for (unsigned i = 0; i < made; i++)
-        w[i].stop = 1;
+        __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < made; i += stride)
         wait_for_completion(&w[i].done);
     unsigned hist[CONFIG_MAX_CPUS] = {0};
@@ -184,7 +216,7 @@ static uint64_t bench_round2(const char *label, unsigned n_created, unsigned str
             (unsigned long long)total, (unsigned long long)lo, (unsigned long long)hi);
     for (unsigned i = 0; i < made; i++)
         thread_join(t[i]);
-    return total;
+    return true;
 }
 
 bool selftest_bench_imbalance(const char **reason);
@@ -195,44 +227,95 @@ bool selftest_bench_imbalance(const char **reason)
         kinfo("selftest: bench-imbalance: one CPU; skipping");
         return true;
     }
-    (void)reason;
-    bench_round2("as-placed-full", n, 1, false, n);
-    bench_round2("pinned-full", n, 1, true, n);
-    bench_round2("as-placed-alternate", n * 2, 2, false, n);
-    bench_round2("pinned-alternate", n * 2, 2, true, n);
-    return true;
+    return bench_round2(reason, "as-placed-full", n, 1, false, n) &&
+           bench_round2(reason, "pinned-full", n, 1, true, n) &&
+           bench_round2(reason, "as-placed-alternate", n * 2, 2, false, n) &&
+           bench_round2(reason, "pinned-alternate", n * 2, 2, true, n);
 }
 /* --- end imbalance bench --- */
 
 '''
 
 
-def patch(path, old, new, count=1):
-    s = open(path).read()
-    if s.count(old) != count:
-        sys.exit("anchor not found (%d) in %s: %r" % (s.count(old), path, old[:60]))
-    open(path, 'w').write(s.replace(old, new, count))
+BACKUP = '.sched-balance-probe.orig'
+
+
+def edited(text, edits):
+    """Every anchor checked against `text` before any of them is applied."""
+    for old, new in edits:
+        if text.count(old) != 1:
+            return None, "anchor appears %d times, expected once: %r" % (text.count(old), old[:60])
+        text = text.replace(old, new, 1)
+    return text, None
+
+
+def dirty_files():
+    out = subprocess.run(['git', 'status', '--porcelain', '--'] + FILES,
+                         capture_output=True, text=True, check=True).stdout
+    return [line[3:] for line in out.splitlines() if line.strip()]
 
 
 def apply():
     tick = "void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)\n{"
-    patch(SCHED, tick, PROBE + tick)
     call = "    spin_lock(&rq->lock);\n    struct thread *cur = rq->current;"
-    patch(SCHED, call, "    balance_probe_tick(pc, rq);\n" + call)
-    patch(SELFTEST, "    return failed;\n}", "    balance_probe_report();\n\n    return failed;\n}")
-    patch(SCHED_H, "void sched_dump(void);", "void balance_probe_report(void);\nvoid sched_dump(void);")
     anchor = "bool selftest_sched_spread(const char **reason)"
-    patch(SMPTEST, anchor, BENCH + anchor)
     decl = "bool selftest_sched_spread(const char **reason);"
-    patch(SELFTEST_H, decl, "bool selftest_bench_imbalance(const char **reason);\n" + decl)
-    patch(SELFTEST, '{ "sched-spread",    selftest_sched_spread },',
-          '{ "sched-spread",    selftest_sched_spread },\n    { "bench-imbalance", selftest_bench_imbalance },')
+    plan = {
+        SCHED: [(tick, PROBE + tick), (call, "    balance_probe_tick(pc, rq);\n" + call)],
+        SELFTEST: [("    return failed;\n}", "    balance_probe_report();\n\n    return failed;\n}"),
+                   ('{ "sched-spread",    selftest_sched_spread },',
+                    '{ "sched-spread",    selftest_sched_spread },\n'
+                    '    { "bench-imbalance", selftest_bench_imbalance },')],
+        SCHED_H: [("void sched_dump(void);", "void balance_probe_report(void);\nvoid sched_dump(void);")],
+        SMPTEST: [(anchor, BENCH + anchor)],
+        SELFTEST_H: [(decl, "bool selftest_bench_imbalance(const char **reason);\n" + decl)],
+    }
+
+    # A probe that cleans up after itself must not be able to throw away
+    # work it did not create: `revert` restores the snapshots this takes,
+    # never the index, so it can only ever undo what `apply` did. A file
+    # already modified is refused outright -- the snapshot would carry the
+    # modification and the measurement would not be of this tree.
+    for path in FILES:
+        if os.path.exists(path + BACKUP):
+            sys.exit("%s%s exists: a previous run was not reverted. Revert first." % (path, BACKUP))
+    dirty = dirty_files()
+    if dirty:
+        sys.exit("uncommitted changes in files this probe patches: %s\n"
+                 "Commit or stash them first; cleanup restores files wholesale." % ", ".join(dirty))
+
+    # Every anchor in every file resolved before a single byte is written,
+    # so a moved anchor leaves the tree untouched rather than half
+    # instrumented (found in review of this report).
+    staged = {}
+    for path, edits in plan.items():
+        text, err = edited(open(path).read(), edits)
+        if err:
+            sys.exit("%s: %s" % (path, err))
+        staged[path] = text
+
+    written = []
+    try:
+        for path, text in staged.items():
+            shutil.copyfile(path, path + BACKUP)
+            written.append(path)
+            open(path, 'w').write(text)
+    except Exception as exc:                       # a failed write leaves nothing behind
+        for path in written:
+            if os.path.exists(path + BACKUP):
+                shutil.move(path + BACKUP, path)
+        sys.exit("apply failed, tree restored: %s" % exc)
     print("applied: build and boot, then grep BALPROBE/BALBENCH in the boot log")
 
 
 def revert():
-    subprocess.run(['git', 'checkout', '--'] + FILES, check=True)
-    print("reverted")
+    missing = [p for p in FILES if not os.path.exists(p + BACKUP)]
+    if len(missing) == len(FILES):
+        sys.exit("no snapshots found: nothing to revert")
+    for path in FILES:
+        if os.path.exists(path + BACKUP):
+            shutil.move(path + BACKUP, path)
+    print("reverted" + (" (%d file(s) had no snapshot)" % len(missing) if missing else ""))
 
 
 if __name__ == '__main__':

@@ -100,8 +100,12 @@ decided by the order the threads happened to be created in.
 ### Measured
 
 `tools/sched-balance-probe.py` applies two measurements to a checkout
-and removes them again. Both were run on this machine (QEMU TCG, four
-CPUs, debug builds) on `e2f3d2b6`.
+and removes them again. It refuses to patch a file that has uncommitted
+changes, resolves every anchor before it writes any of them, and
+restores its own snapshots rather than running `git checkout`, so it can
+only ever undo what it did (all three found in review of this report).
+Both measurements were run on this machine — QEMU TCG, four CPUs, debug
+builds — on `e2f3d2b6`.
 
 **The bench.** It creates twice as many threads as there are CPUs, one
 at a time, each blocking before the next is created — the shape
@@ -114,44 +118,61 @@ work, same 500 ms, spread by construction.
 
 | round | x86-64 placement | x86-64 iterations | AArch64 placement | AArch64 iterations |
 | --- | --- | --- | --- | --- |
-| four runners, as placed | 1/1/1/1 | 6,759,353 | 1/1/1/1 | 8,732,514 |
-| four runners, pinned one per CPU | 1/1/1/1 | 6,941,566 | 1/1/1/1 | 8,951,647 |
-| **eight created, four run, as placed** | **0/2/0/2** | **3,699,171** | **2/0/2/0** | **4,756,452** |
-| eight created, four run, pinned one per CPU | 1/1/1/1 | 6,594,128 | 1/1/1/1 | 8,947,749 |
+| four runners, as placed | 1/1/1/1 | 7,182,436 | 1/1/1/1 | 7,350,393 |
+| four runners, pinned one per CPU | 1/1/1/1 | 7,509,249 | 1/1/1/1 | 7,437,879 |
+| **eight created, four run, as placed** | **0/2/0/2** | **3,924,228** | **2/0/2/0** | **4,508,441** |
+| eight created, four run, pinned one per CPU | 1/1/1/1 | 7,459,492 | 1/1/1/1 | 7,544,666 |
 
 Four runnable threads, four idle CPUs, and **two of the four CPUs never
-run any of them**. The machine does 56% of the work it could on x86-64
-and 53% on AArch64 — a 44% and a 47% loss — and it stays that way for
-the whole run, because nothing moves.
+run any of them**. The machine does 53% of the work it could on x86-64
+and 60% on AArch64, and it stays that way for the whole run, because
+nothing moves.
+
+**Two boots per architecture, and the ratio is the stable part, not the
+rate.** An earlier pair of boots read 56% and 53%, so the loss across
+the four runs is between 40% and 47% — this is QEMU TCG on a laptop, and
+an iteration count is not a number to quote to three digits. What does
+not vary is the shape: every one of the four boots put the four runnable
+threads on two CPUs and left two idle, and every one of them lost
+something close to half the machine.
 
 The simple case is fine, and that matters: when every created thread
-runs, the rotation spreads them and the two rows agree within 3%. The
-defect is not that placement is bad. It is that placement is a decision
-about which threads exist, and the question is which threads *run*.
+runs, the rotation spreads them one per CPU and the two rows agree
+within 5%. The defect is not that placement is bad. It is that placement
+is a decision about which threads exist, and the question is which
+threads *run*.
 
 **What random movement already recovers.** The same bench under the
 chaos migrator, which moves one thread off every CPU every fourth tick
 with no policy whatsoever:
 
-| round (x86-64, same boot) | iterations | of that boot's ideal |
-| --- | --- | --- |
-| eight created, four run, as placed | 5,214,600 | 88% |
-| eight created, four run, pinned one per CPU | 5,914,755 | (the ideal) |
+| round (x86-64, same boot) | placement | iterations | of that boot's ideal |
+| --- | --- | --- | --- |
+| eight created, four run, as placed | 1/1/1/1 | 7,063,092 | 94% |
+| eight created, four run, pinned one per CPU | 1/1/1/1 | 7,523,324 | (the ideal) |
 
-Against 56% of ideal with nothing moving. **Random migration recovers
-more than half of the loss**, which is the strongest available argument
-that a directed one recovers most of the rest: the threads are
-interchangeable and the destinations are idle, so almost any movement is
-an improvement.
+Against 53% with nothing moving — and the placement column is the reason
+why: the histogram is sampled once the threads are released, and by then
+the migrator has already spread them one per CPU. An earlier chaos boot
+read 88% the same way.
 
-**And what movement costs.** In that same chaos boot the two rounds that
-were *already* balanced lost 8% and 14% against the plain boot. The
-pinned round's own threads cannot have moved, so most of that is the
-migrator's per-tick work and the movement of every *other* thread in the
-system. It is an upper bound on the cost of balancing without
-hysteresis, it is not small, and it is why the design below has a
-difference threshold and a period rather than a rule that fires whenever
-two queues are unequal.
+**Random migration recovers most of the loss**, which is the strongest
+available argument that a directed one recovers the rest: the threads
+are interchangeable and the destinations are idle, so almost any
+movement is an improvement. It is also the ceiling this unit should be
+measured against rather than 100%, since a migrator that moves on every
+fourth tick is spending far more than a balancer will.
+
+**And what movement costs.** In those same chaos boots the two rounds
+that were *already* balanced lost 6% and 2% in one boot and 8% and 14%
+in the other, against the plain boots. The pinned round's own threads
+cannot have moved, so what that figure contains is the migrator's
+per-tick work and the movement of every *other* thread in the system,
+not the cost of moving the threads being measured. Take it as a range
+rather than a number: somewhere between a few percent and fifteen, it is
+not nothing, and it is why the design below has a difference threshold
+and a period rather than a rule that fires whenever two queues are
+unequal.
 
 **The standing opportunity, on the suite itself.** The probe counts, per
 CPU per tick, ticks where this CPU was idle with an empty queue while
@@ -159,8 +180,8 @@ another CPU had a thread queued behind the one it was running:
 
 | | cpu 0 | cpu 1 | cpu 2 | cpu 3 |
 | --- | --- | --- | --- | --- |
-| x86-64, share of ticks | 3.3% | 4.5% | 8.2% | 4.8% |
-| AArch64, share of ticks | 6.1% | 3.6% | 5.7% | 7.4% |
+| x86-64, share of ticks | 9.3% | 4.8% | 6.9% | 3.7% |
+| AArch64, share of ticks | 2.6% | 7.3% | 7.3% | 9.1% |
 
 A few percent, not a few tenths — and this is the self-test suite, which
 is mostly one thread deep by construction. The suite is not the
@@ -433,11 +454,11 @@ recorded in the report's banner as run:
 
 | claim | before (x86-64) | target |
 | --- | --- | --- |
-| eight created, four run, as placed | 3,699,171 (56% of ideal) | ≥ 85% of the pinned control |
-| four runners, as placed | 6,759,353 | within 5% of before: balancing an already-balanced machine costs nothing measurable |
+| eight created, four run, as placed | 3,924,228 (53% of ideal) | ≥ 85% of the pinned control |
+| four runners, as placed | 7,182,436 | within 5% of before: balancing an already-balanced machine costs nothing measurable |
 | pulls during the balanced round | n/a | 0 |
 
-The same four rows on AArch64, where the loss measured 47%.
+The same four rows on AArch64, where the loss measured 40%.
 
 The 85% target is set from what the *random* migrator already achieved
 (88% of its own boot's ideal) minus the period's latency, and it is
