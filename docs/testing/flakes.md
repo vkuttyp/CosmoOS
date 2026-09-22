@@ -860,6 +860,34 @@ of this section said eight and then listed nine:
 | PR #215's own CI run, again | observed, aarch64, the **protection-capable** boot (run 35731929745, `7d161b0a`): `connect 0 in 670 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0`. The `el2-guest-irq-queue` fix in the same revision held on that boot; this is the other flake. |
 | PR #216's own CI run | observed, x86-64, the **chaos migrator** boot (run 35734557638, `d3ca6d6c`, the balancer build): `connect 0 in 637 ms, sent -104 in 0 ms, recv -1 in 0 ms, pending error -104, outstanding 0 then 0, segs_out +2`. The balance benchmark in that same boot read 104%, so the boot was healthy apart from this. |
 
+### Recovered sightings: the retry does not stop the count
+
+Since `docs/audit/next-subsystem-nettest-retry.md`, the guest's
+back-connection runs the exchange up to three times, so **most
+occurrences of this flake now end in a passing boot**. They are still
+occurrences, and the reason this section exists is that a flake which
+stops being visible is a flake that stops being fixed.
+
+A recovered sighting prints, in the boot log:
+
+```text
+NETTEST: client attempt 1 of 3 failed
+NETTEST: client ok (attempt 2 of 3)
+```
+
+so `grep 'client ok (attempt [2-9]'` finds every one of them, and the
+failed attempt's full diagnostic block is above it. **Add them to the
+table above like any other sighting**, with `recovered` in the row, and
+they count towards the same total: the number at the head of this
+section is occurrences of the *defect*, not of the red CI run it used to
+cause. A row that says `recovered` and a row that says nothing are both
+one sighting.
+
+The distinction worth recording per row is how far the guest got before
+the reset, which the failed attempt's line still carries — `sent 12`,
+`sent -104`, or a reset `connect` — since that is what the shapes table
+below counts.
+
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
 row that merely *mentions* either -- "twice on one PR", or a note about

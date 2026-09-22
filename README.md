@@ -3281,6 +3281,31 @@ See [docs/development.md](docs/development.md).
   balancer; the pinned figure is reported beside it and is not what the
   assertion is against).
   (PR #216)
+- **A back-connection that survives one reset.** `net-harness` failed
+  seven CI jobs on 2026-09-22 alone, across four pull requests and
+  `main`, two of which changed only documentation -- and the defect is
+  not in this kernel. QEMU's user-mode networking resets the guest's
+  half of one connection while keeping its own half open and answering a
+  probe through the same instance a millisecond later; the guest is
+  correct from first SYN to final reset, verified against a packet
+  capture. Three units localised it and what is left is in slirp's
+  source (`docs/audit/next-subsystem-nettest-retry.md`). So the guest's
+  back-connection now runs the exchange up to three times on fresh
+  sockets. The bound is a **failure**, not a fallback: exhausting it
+  fails the test exactly as one reset did, printing
+  `client failed every attempt (3 of 3)`. Every attempt prints the full
+  diagnostic block the earlier units built, and both outcome lines name
+  the attempt -- `client ok (attempt 2 of 3)` -- so a recovered boot is
+  still a sighting the same grep finds, and `docs/testing/flakes.md`
+  counts it among the recovered ones rather than losing it. A retry that
+  hid the flake would be worse than the flake. The host harness needed
+  no change: since PR #177 it accepts eight connections and picks the
+  one that delivers the request. `make test-harness-retry` builds a
+  `HARNESS_BREAK=1` image whose first attempt is shut down from inside
+  the guest after its connect, so the retry runs on every boot of that
+  build instead of one in twenty, and the runner requires both halves --
+  that an attempt was broken and that a later one carried the exchange.
+  (PR #218)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
