@@ -878,6 +878,308 @@ static bool wait_ready_on(struct thread *t, unsigned cpu)
     return false;
 }
 
+/* ======================================================================
+ * The balancer
+ * ====================================================================== */
+
+/*
+ * A worker that counts while it runs and records the CPU it is on, so a
+ * test can see both that it moved and that it got time once it did.
+ */
+struct bal_worker {
+    struct completion started, release;
+    unsigned stop;              /* atomics only: set from another CPU */
+    unsigned runs;              /* released to spin, rather than left blocked */
+    uint64_t iters;
+    unsigned cpu;               /* where it was last seen running */
+};
+
+static void bal_worker_main(void *arg)
+{
+    struct bal_worker *w = arg;
+    complete(&w->started);
+    wait_for_completion(&w->release);
+    uint64_t n = 0;
+    while (__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE) == 0) {
+        preempt_disable();
+        __atomic_store_n(&w->cpu, arch_cpu_id(), __ATOMIC_RELAXED);
+        preempt_enable();
+        for (volatile unsigned k = 0; k < 256; k++)
+            ;
+        n++;
+    }
+    __atomic_store_n(&w->iters, n, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+/*
+ * Create `count` workers one at a time, each observably blocked before
+ * the next is created, so each is placed against queues that have
+ * drained. This is `sched-spread`'s shape and it is the only one that
+ * places threads by the rotation rather than by the load the previous
+ * creation just added.
+ */
+static bool bal_create_blocked(struct bal_worker *w, struct thread **t, unsigned count, const char **reason)
+{
+    for (unsigned i = 0; i < count; i++) {
+        memset(&w[i], 0, sizeof(w[i]));
+        completion_init(&w[i].started, "bal-start");
+        completion_init(&w[i].release, "bal-rel");
+        t[i] = thread_create(bal_worker_main, &w[i], "bal-worker", SCHED_PRIO_DEFAULT);
+        if (t[i] == NULL) {
+            *reason = "a balance worker could not be created";
+            return false;
+        }
+        wait_for_completion(&w[i].started);
+        for (unsigned k = 0; k < 2000 && __atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED; k++)
+            thread_sleep_ms(1);
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+            *reason = "a balance worker never reached THREAD_BLOCKED";
+            return false;
+        }
+    }
+    return true;
+}
+
+static void bal_stop_all(struct bal_worker *w, struct thread **t, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++)
+        __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < count; i++)
+        if (!w[i].runs)
+            complete(&w[i].release);
+    for (unsigned i = 0; i < count; i++)
+        thread_join(t[i]);
+}
+
+/* How many distinct CPUs the released workers were last seen on. */
+static unsigned bal_cpus_used(const struct bal_worker *w, unsigned count, unsigned stride)
+{
+    cpumask_t seen = 0;
+    for (unsigned i = 0; i < count; i += stride)
+        seen |= CPUMASK_OF(__atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED));
+    unsigned n = 0;
+    for (unsigned c = 0; c < cpu_count(); c++)
+        if (seen & CPUMASK_OF(c))
+            n++;
+    return n;
+}
+
+/*
+ * The defect this unit exists for, as a test.
+ *
+ * Twice as many threads as CPUs, created one at a time so the rotation
+ * places them one per CPU; then every other one is released. The
+ * runnable set is therefore two threads on each of half the CPUs, with
+ * the other half idle -- and before the balancer that is where they
+ * stayed, which measured as 53% of the machine
+ * (docs/audit/next-subsystem-load-balancer.md).
+ *
+ * The claim is that the idle CPUs pull: within a bounded wait, the
+ * released workers are running on as many CPUs as there are workers.
+ */
+static bool sched_balance_pull_pinned(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 2) {
+        kinfo("selftest: sched-balance-pull: one CPU; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    unsigned count = n * 2, runners = n;
+    static struct bal_worker w[CONFIG_MAX_CPUS * 2];
+    static struct thread *t[CONFIG_MAX_CPUS * 2];
+    if (!bal_create_blocked(w, t, count, reason))
+        return false;
+
+    for (unsigned i = 0; i < count; i += 2) {
+        w[i].runs = 1;
+        complete(&w[i].release);
+    }
+
+    /* Wait for the spread rather than for a fixed time: the claim is
+     * that it happens, and a settle-then-count would be the shape this
+     * tree keeps a file about (docs/testing/flakes.md). */
+    uint64_t deadline = clock_deadline_ns(3000ull * 1000000ull);
+    unsigned used = 0;
+    while (!clock_deadline_passed(deadline)) {
+        used = bal_cpus_used(w, count, 2);
+        if (used >= runners)
+            break;
+        thread_sleep_ms(5);
+    }
+    used = bal_cpus_used(w, count, 2);
+    bal_stop_all(w, t, count);
+
+    if (used < runners) {
+        kerror("selftest: sched-balance-pull: %u runnable threads used %u of %u CPUs after 3 s",
+               runners, used, n);
+        *reason = "runnable threads stayed on the CPUs creation order gave them";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-balance-pull: %u threads created, %u released, spread over %u of %u CPUs",
+          count, runners, used, n);
+    return true;
+}
+
+bool selftest_sched_balance_pull(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = sched_balance_pull_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+/*
+ * A difference of one moves nothing, and a balanced machine moves
+ * nothing at all.
+ *
+ * One worker released per CPU is the steady state of a machine with
+ * exactly as much work as it has CPUs: every load is 1, no difference
+ * reaches two, and the balancer must make no pull for as long as it
+ * lasts. This is the thrash test, and it is what the difference
+ * threshold buys; with a threshold of one, a pull on every scan.
+ *
+ * The count is the machine's own (`sched_balance_stats`), taken before
+ * and after, so it measures the balancer rather than a sample of it.
+ */
+static bool sched_balance_hysteresis_pinned(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 3) {
+        kinfo("selftest: sched-balance-hysteresis: fewer than three CPUs; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    /* One per CPU, minus the one this pinned test thread is occupying:
+     * with the test thread counted, every CPU carries exactly one. */
+    unsigned count = n - 1;
+    static struct bal_worker w[CONFIG_MAX_CPUS];
+    static struct thread *t[CONFIG_MAX_CPUS];
+    if (!bal_create_blocked(w, t, count, reason))
+        return false;
+    for (unsigned i = 0; i < count; i++) {
+        w[i].runs = 1;
+        complete(&w[i].release);
+    }
+    /* Let them find their CPUs first: the pulls that spread them are
+     * the balancer working, not thrash. */
+    thread_sleep_ms(200);
+
+    struct sched_balance_stats a, b;
+    sched_balance_stats(&a);
+    thread_sleep_ms(500);          /* ~125 ticks: 7 periodic looks per CPU, and every tick on any idle one */
+    sched_balance_stats(&b);
+    unsigned used = bal_cpus_used(w, count, 1);
+    bal_stop_all(w, t, count);
+
+    uint64_t pulls = b.pulls - a.pulls, scans = b.scans - a.scans;
+    if (scans == 0) {
+        *reason = "the balancer did not look at all during the window";
+        return false;
+    }
+    if (pulls != 0) {
+        kerror("selftest: sched-balance-hysteresis: %llu pulls in %llu scans with one thread per CPU",
+               (unsigned long long)pulls, (unsigned long long)scans);
+        *reason = "the balancer moved threads on a balanced machine";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-balance-hysteresis: %u threads on %u CPUs, %llu scans, no pulls",
+          count, used, (unsigned long long)scans);
+    return true;
+}
+
+bool selftest_sched_balance_hysteresis(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = sched_balance_hysteresis_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+/*
+ * A pinned thread is never pulled, however unbalanced that leaves the
+ * machine.
+ *
+ * Two workers pinned to one CPU with every other CPU idle is the most
+ * inviting imbalance there is -- load 2 against 0 -- and the balancer
+ * must leave it alone, because the affinity says so. The primitive
+ * already refuses this (`sched-migrate-refuses`); what this adds is
+ * that the balancer does not reach around it, and the refusal it
+ * records says `affinity`.
+ */
+static bool sched_balance_affinity_pinned(const char **reason)
+{
+    unsigned n = cpu_count();
+    unsigned here = arch_cpu_id();
+    unsigned a_cpu, b_cpu;
+    if (n < 3 || !two_other_cpus(here, &a_cpu, &b_cpu)) {
+        kinfo("selftest: sched-balance-affinity: fewer than three CPUs; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    static struct bal_worker w[2];
+    struct thread *t[2];
+    bool ok = true;
+    for (unsigned i = 0; i < 2 && ok; i++) {
+        memset(&w[i], 0, sizeof(w[i]));
+        completion_init(&w[i].started, "bal-aff-start");
+        completion_init(&w[i].release, "bal-aff-rel");
+        w[i].runs = 1;
+        t[i] = thread_create_on(bal_worker_main, &w[i], "bal-pinned", SCHED_PRIO_DEFAULT, CPUMASK_OF(a_cpu));
+        if (t[i] == NULL)
+            ok = false;
+        else
+            wait_for_completion(&w[i].started);
+    }
+    if (!ok) {
+        for (unsigned i = 0; i < 2; i++)
+            if (t[i] != NULL) {
+                __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
+                complete(&w[i].release);
+                thread_join(t[i]);
+            }
+        *reason = "a pinned worker could not be created";
+        return false;
+    }
+    for (unsigned i = 0; i < 2; i++)
+        complete(&w[i].release);
+
+    thread_sleep_ms(500);   /* every idle CPU looks on every one of ~125 ticks */
+    unsigned off = 0;
+    for (unsigned i = 0; i < 2; i++)
+        if (__atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED) != a_cpu)
+            off++;
+    int cpu0 = __atomic_load_n(&t[0]->cpu, __ATOMIC_ACQUIRE);
+    int cpu1 = __atomic_load_n(&t[1]->cpu, __ATOMIC_ACQUIRE);
+    for (unsigned i = 0; i < 2; i++)
+        __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < 2; i++)
+        thread_join(t[i]);
+
+    if (off != 0 || cpu0 != (int)a_cpu || cpu1 != (int)a_cpu) {
+        kerror("selftest: sched-balance-affinity: pinned to cpu %u, ran on %u/%u, queues %d/%d",
+               a_cpu, __atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED),
+               __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED), cpu0, cpu1);
+        *reason = "the balancer moved a thread away from the only CPU its affinity allows";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-balance-affinity: two threads pinned to cpu %u stayed there with %u CPUs idle",
+          a_cpu, n - 2);
+    return true;
+}
+
+bool selftest_sched_balance_affinity(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = sched_balance_affinity_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 /*
  * What a CPU is carrying, and that placement can see it.
  *
