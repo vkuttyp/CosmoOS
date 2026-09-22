@@ -82,15 +82,21 @@ themselves, and nothing checks it.
 
 **Measured for this report: what a checked accessor would find.** To
 size the audit rather than guess at it, one x86-64 debug boot was run
-with a probe in the two accessors (reverted; the script is kept for the
-build): a call from thread context, preemption enabled, interrupts
+with a probe in the two accessors. The probe is `tools/percpu-probe.py`,
+added by this report: `apply --arch <arch>` patches the working copy
+(the two accessors, and `thread_current`, `preempt_disable` and
+`preempt_enable` onto a raw read), one `make test ARCH=<arch>` boots the
+debug suite, `symbolize <log> <kernel.elf>` turns the reported return
+addresses into sites with their inline chains, and `git checkout --
+kernel` takes the patch out. A call from thread context, preemption enabled, interrupts
 enabled, in a thread whose affinity admits more than one CPU, on a
 machine with more than one CPU, was reported once per call site with
 its return address, and the 113 sites it named were symbolised and
 read. Reads of the current thread through the per-CPU pointer
 (`thread_current`, `preempt_disable`, `preempt_enable`) were excluded in
 the probe itself, because a thread's identity is the same on every CPU
-that runs it. The 113 divide as follows.
+that runs it. The 113 divide as follows; the AArch64 boot of the same
+probe is reported after the table.
 
 | kind | sites | what they are |
 | --- | --- | --- |
@@ -156,9 +162,32 @@ The seventeen, with the mechanism each becomes under migration:
    to the lock path from an inlined neighbour; the build identifies them
    before classifying them.
 
-That the x86-64 probe does not see the `el2` case is expected: the
-hypervisor backend is AArch64, and an AArch64 boot of the probe is the
-build's first step, so the list above is a floor. The clock unit's
+**The same probe on AArch64** (one boot, the full suite passing, 375
+self-tests) names 133 sites. Every class in the table appears again,
+and the additions are these: **the EL2 hand-back** -- `arch_hv_disable`
+(`kernel/arch/aarch64/hv_el2.c:345-358`) reads "self", then for each
+readied CPU hands EL2 back locally if it is self and by a cross-CPU
+call otherwise, and `el2_hand_back` (`:328`) reads the CPU again to
+index `g_el2_ready[]`; read A, migrate, and when the loop reaches A the
+local call runs on B, so B is handed back (or nothing is) and A keeps
+the switch's vectors with its ready flag set -- which is the class the
+migration report predicted from the `el2` test, found in production
+code by the probe (two sites, real, the eighteenth mechanism); the
+shootdown sender's AArch64 lines (`mmu.c:465`, the exclusion; `:467-468`
+and `:503`, statistics); twelve reads in the ASID self-tests and the
+space-switch path they call from thread context (`vm_space_switch`,
+`asid_switch_prepare`, `arch_mmu_activate_flushes`: test claims, since
+in production that path runs inside the switch with interrupts off);
+two in `selftest_irq_msi_overlap`; and one clock read in the xHCI
+thread. x86-64 alone has `gdt_ist_top`, in a test. A first AArch64 boot
+of the probe ended in the hard-lockup detector's host-starvation report
+(`docs/testing/flakes.md`, "Lockup reports under load") after 249
+tests and 101 sites, all of them in the second boot's 133; it is a
+probed tree and is not recorded as a flake.
+
+What no probe sees is a claim made *without* reading an accessor: the
+`el2` test's is one (it asks EL2 directly with an `hvc`), and the
+report's list of that kind is by reading, not by measurement. The clock unit's
 comment in `kernel/include/kernel/timer.h:74-81` ("once threads migrate
 they are all foreign, which is what that unit's step 6 exists to
 re-check") and the README's account of it describe the sweep this unit
@@ -305,18 +334,24 @@ made; none changes behaviour on a tree where nothing migrates.
   right.
 - **The two `lock_common` attributions** are identified and fixed or
   declared.
-- **`el2`**: the self-test's claim becomes "on the CPU that asks": it
-  disables preemption, calls the backend's own ready-and-ask entry (the
-  form the run loop uses under `arch_irq_save` at `hv_el2.c:310`), and
-  re-enables. The lazily filled `g_el2_ready[]` stays lazy, because the
-  run loop fills it on whatever CPU runs a vCPU and that is right.
+- **The EL2 hand-back, and the `el2` test.** `arch_hv_disable`
+  disables preemption from reading "self" to the end of its loop (the
+  local hand-back is an `hvc`, the remote ones are synchronous calls
+  that spin for their target, both allowed with preemption off), so the
+  CPU it hands back locally is the one it read. The self-test's claim
+  becomes "on the CPU that asks": it disables preemption, calls the
+  backend's own ready-and-ask entry (the form the run loop uses under
+  `arch_irq_save` at `hv_el2.c:310`), and re-enables. The lazily filled
+  `g_el2_ready[]` stays lazy, because the run loop fills it on whatever
+  CPU runs a vCPU and that is right.
 - **Tests** declare their claim: a worker that records "which CPU ran me"
   reads under `preempt_disable`; a test that wants "another CPU than
   mine" for the whole test pins itself with the affinity it can already
   ask for at creation, or reads raw and says the answer may be stale.
 
-The AArch64 probe boot may add to this list; the build's banner records
-the final count against the seventeen.
+The build's banner records the final count against the seventeen and
+the hand-back, since the probe runs again on the branch point before
+anything is fixed.
 
 ### 3. A lockdep class per run queue, so S24 becomes a checked order
 
@@ -377,6 +412,29 @@ scans its lists from the lowest priority up, so the thread it offers is
 the one the queue would run last. `sched_migration_count()` reports the
 moves made since boot, for tests and `sched_dump`.
 
+**Neither entry may be called with a run-queue lock held**, and the
+caller never selects under a lock it then hands over. A caller that
+knows the thread calls `sched_migrate(t, cpu)`. A caller that only
+knows the queue -- the chaos migrator, and the balancer after it --
+calls the second entry:
+
+```c
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved);
+```
+
+which takes both locks in increasing CPU-id order, calls
+`pick_migratable(&g_rqs[from], CPUMASK_OF(to))` *under them*, moves what
+it returns by the same steps, and reports `SCHED_MIGRATE_NOT_READY`
+with `*moved == NULL` when the queue had nothing that may leave. There
+is no hand-off between selection and move, so there is nothing to
+revalidate; the two-lock region is the only place a thread is chosen
+and the only place it moves. The tick releases the run-queue lock it
+holds for the policy's `tick` callback (`sched_tick`, `sched.c:458-465`)
+before anything in this unit runs, and `sched_migrate_from` asserts the
+rule with the same check the accessors use: interrupts off or preemption
+disabled is required, a run-queue lock held is a lockdep recursion
+report.
+
 `sched_wake`'s unlocked read of `t->cpu` stays: a thread it can wake is
 `THREAD_BLOCKED`, and a blocked thread is never moved (S26, below).
 
@@ -384,12 +442,14 @@ moves made since boot, for tests and `sched_dump`.
 
 A compile-time knob, `SCHED_CHAOS=1` (`CONFIG_SCHED_CHAOS`, debug
 builds), arms a migrator in the tick: every fourth tick (16 ms at
-250 Hz), each CPU offers one migratable thread from its own queue --
-`pick_migratable(rq, online & ~self)` -- to the next online CPU in a
-rotation that its affinity admits, through `sched_migrate`. From the
-tick, with interrupts off, holding two run-queue locks in order: the
-same context as the balancer the next unit will build, and a stricter
-adversary than it, because it moves threads for no reason. The count of
+250 Hz), after `sched_tick` has released its own run-queue lock, each
+CPU calls `sched_migrate_from(self, next)` with `next` the next online
+CPU in a rotation, so one thread its affinity admits leaves this queue
+for that one. From the tick, with interrupts off, holding no lock of
+its own: the two run-queue locks are taken inside the call, in order,
+and released before it returns -- the same context as the balancer the
+next unit will build, and a stricter adversary than it, because it
+moves threads for no reason. The count of
 moves is printed at the end of the suite (`sched: chaos migrated N
 threads, M refused`) so a run proves it exercised, and the boot test
 requires `N > 0`.
@@ -436,8 +496,11 @@ banner by count.
 
 `sched_migrate` holds both run-queue locks for the whole move, so a
 thread is in exactly one queue at every instant a lock is not held, and
-`t->cpu` names it. A ready thread's context is saved and nothing on the
-old CPU refers to it once it is dequeued; the thread's timers, if any,
+`t->cpu` names it; the chaos migrator and the stress test's migrator
+select inside that same region through `sched_migrate_from`, so no
+thread is chosen under one lock and moved under another. A ready
+thread's context is saved and nothing on the old CPU refers to it once
+it is dequeued; the thread's timers, if any,
 belong to the CPU that armed them and wake it through `sched_wake` on
 whatever `t->cpu` is then, which is why blocked threads are never moved
 (they may be on a timer queue's list, and the callback finds them by
@@ -453,8 +516,9 @@ has not dequeued.
 | --- | --- |
 | `kernel/include/kernel/percpu.h`, `kernel/core/percpu.c` | the rule in a comment; `raw_this_cpu`, `raw_cpu_id`; the debug predicate `percpu_claim_ok` and the check (`percpu_claim_expect` seam for the test); `thread_current`, `preempt_disable`/`enable` on the raw form |
 | `kernel/include/arch/percpu.h`, `kernel/include/arch/cpu.h`, `kernel/arch/x86_64/percpu.c`, `kernel/arch/aarch64/percpu.c` | the raw reads become `arch_percpu_get_raw` / `arch_cpu_id_raw`; the checked names wrap them in debug builds |
-| `kernel/scheduler/sched.c` | `schedule_internal` and `sched_set_running_current` read their block with interrupts off; `sched_migrate`; `sched_migration_count`; the chaos tick hook under `CONFIG_SCHED_CHAOS`; run-queue lock names from the static table; raw reads declared (`pick_cpu`, `request_resched`) |
-| `kernel/include/kernel/sched.h`, `kernel/scheduler/sched_internal.h`, `kernel/scheduler/policy_rr.c` | `enum sched_migrate_result`, `sched_migrate`, `pick_migratable` in the policy and its RR implementation |
+| `kernel/scheduler/sched.c` | `schedule_internal` and `sched_set_running_current` read their block with interrupts off; `sched_migrate`, `sched_migrate_from`; `sched_migration_count`; the chaos tick hook (after the tick's own unlock) under `CONFIG_SCHED_CHAOS`; run-queue lock names from the static table; raw reads declared (`pick_cpu`, `request_resched`) |
+| `kernel/include/kernel/sched.h`, `kernel/scheduler/sched_internal.h`, `kernel/scheduler/policy_rr.c` | `enum sched_migrate_result`, `sched_migrate`, `sched_migrate_from`, `pick_migratable` in the policy and its RR implementation |
+| `tools/percpu-probe.py` | **added by this report**: the measuring probe (`apply`, `symbolize`); it patches a working copy and is never committed applied |
 | `kernel/core/quiesce.c` | the publish under saved interrupts; the sync path's reads declared |
 | `kernel/core/lockdep.c`, `kernel/include/kernel/lockdep_core.h` | held-stack reads under the raw lock for the mutex kind; `LOCKDEP_MAX_CLASSES` 320 |
 | `kernel/memory/vmm.c`, `kernel/arch/x86_64/mmu.c`, `kernel/arch/aarch64/mmu.c` | the shootdown sender under `preempt_disable`; stats reads raw |
@@ -485,8 +549,9 @@ void percpu_claim_expect(void);      /* test seam: the next violation is counted
 unsigned percpu_claim_expected_hits(void);
 #endif
 
-/* sched.h */
+/* sched.h -- neither entry may be called with a run-queue lock held */
 enum sched_migrate_result sched_migrate(struct thread *t, unsigned cpu);
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved);
 uint64_t sched_migration_count(void);
 /* struct sched_policy gains: */
 struct thread *(*pick_migratable)(struct runqueue *rq, cpumask_t allowed);
@@ -500,9 +565,11 @@ No syscall, no user-visible change. `lockdep_core.h`:
 
 ## Migration plan
 
-1. **The probe, on both architectures**, in warn-once form, and the
-   final list of sites with their classification in the banner. This
-   step changes no behaviour and is where the AArch64 additions appear.
+1. **The probe, on both architectures** (`tools/percpu-probe.py`, this
+   report's runs re-done on the branch point), and the final list of
+   sites with their classification in the banner. This step changes no
+   behaviour and is where any site the report's runs did not reach
+   appears.
 2. **The seventeen (or more), fixed**, each with the boot that named it
    re-run clean; the identity and diagnostic reads made raw with their
    reasons. Boots both architectures, the check still warning.
@@ -511,8 +578,9 @@ No syscall, no user-visible change. `lockdep_core.h`:
 4. **Per-instance run-queue classes**, the ceiling raised, S24 rewritten,
    `lockdep-rq-order` added (it takes two run-queue locks in the wrong
    order through a test hook and expects the report).
-5. **`sched_migrate` and `pick_migratable`**, with `sched-migrate` and
-   `sched-migrate-refuses`; then `sched-migrate-stress`.
+5. **`sched_migrate`, `sched_migrate_from` and `pick_migratable`**, with
+   `sched-migrate` and `sched-migrate-refuses`; then
+   `sched-migrate-stress`.
 6. **The chaos migrator**, `make test-chaos`, the CI job; eight boots
    per architecture, the tally recorded. Any failure here is a finding
    about the tree, fixed under this unit, not a flake to record.
@@ -533,8 +601,9 @@ request, since a scheduler change is exactly the kind that passes
 | `lockdep-rq-order` | taking run queue 1's lock then run queue 0's, through a test hook, is reported as a cycle against the recorded order 0→1 | initialise every run-queue lock from the one literal again: the acquisition reads as recursion (a different report kind) or, once annotated, as nothing, and the expected cycle never arrives |
 | `sched-migrate` | a worker pinned to no CPU, made READY on CPU A by being preempted by a higher-priority spinner there, is moved to B by `sched_migrate` (`SCHED_MIGRATED`), runs next on B (it records `raw_cpu_id()` under `preempt_disable` each time it runs), and `sched_migration_count` rose by one | skip the enqueue on the destination: the thread is on no queue, never runs again, and the test's bounded wait names it and its state |
 | `sched-migrate-refuses` | each refusal by its name: a thread pinned to A → `AFFINITY`; a blocked thread → `NOT_READY`; the target offline → `OFFLINE`; A to A → `SAME_CPU`; and **the window**: a worker calls `waitqueue_prepare` (BLOCKED, still running), signals the test, and spins on a flag; the test wakes it (READY, queued, still `rq->current`) and asks to migrate it → `CURRENT`; then releases the flag and the worker finishes its wait normally | remove the `rq->current` identity check: the running worker's queue entry moves to B while it executes on A; `sched_set_running_current` on A fails to find it (the test checks the state and both queues under the locks before anything can switch) |
-| `sched-migrate-stress` | for 200 ms: eight spinners, eight sleepers on 1 ms timers, four wait-queue ping-pong pairs, two mutex contenders, and one migrator thread that moves any migratable thread it finds to a random admitted CPU; every worker's counter advanced, every affinity was honoured (each worker checks `raw_cpu_id() & affinity` under `preempt_disable` each round), lockdep is clean, `threads_settle` holds, and the migration count is at least 100 | take the two locks in decreasing order in `sched_migrate`: the migrator and the chaos tick cross, lockdep reports the cycle (it can now); and with the shootdown fix reverted, the stress's file-mapped worker reads a stale page (a mutation the probe boot and this test hold together) |
-| `sched-spread`, `smp-*`, the whole suite under `test-chaos` | unchanged assertions, with threads moving underneath them; the chaos count at the end is > 0 | with the `schedule_internal` fix reverted, the chaos boot fails in the switch (the previous unit's seven-test failure, now with a named cause); with the quiesce fix reverted, `quiesce-grace`'s guarded object is freed under a reader |
+| `sched-migrate-stress` | for 200 ms: eight spinners, eight sleepers on 1 ms timers, four wait-queue ping-pong pairs, two mutex contenders, and one migrator thread that calls `sched_migrate_from(a, b)` for random online pairs; every worker's counter advanced, every affinity was honoured (each worker checks `raw_cpu_id() & affinity` under `preempt_disable` each round), lockdep is clean, `threads_settle` holds, and the migration count is at least 100 | take the two locks in decreasing order in `sched_migrate_from`: two migrations in opposite directions cross, lockdep reports the cycle (it can now) |
+| **the seventeen and the hand-back, each fix reverted** (one mutation per site) | not a test but the check: with `percpu-claim`'s seam disarmed, a debug boot that reaches the site panics naming it, because every one of the seventeen fixes works by making the read happen where the rule holds, and reverting the fix puts the read back where it does not | the site's fix reverted; a "fix" that instead switches the site to the raw accessor is caught by review, not by the check, which is why every raw use carries its reason (§1). Where a behavioural test also exists it is named beside the site in the banner (`quiesce-grace` for the publish, the chaos boot for the switch path) |
+| `sched-spread`, `smp-*`, the whole suite under `test-chaos` | unchanged assertions, with threads moving underneath them; the chaos count at the end is > 0 | the migrator's `sched_migrate_from` call made a no-op: the count is zero and the boot test fails on the summary line; with the check compiled out *and* the `schedule_internal` fix reverted, the chaos boot fails in the switch (the previous unit's seven-test failure, now with a named cause) |
 
 **Vacuity, named in advance.** `sched-migrate` must not pass because
 the worker was *created* on B: the worker's first recorded CPU is A and
