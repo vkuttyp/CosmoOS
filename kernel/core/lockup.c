@@ -19,6 +19,7 @@
  * answers -- a diagnostic that manufactures the stall it diagnoses.
  */
 
+#include <kernel/lockdep.h>
 #include <kernel/lockup.h>
 
 #include <kernel/ipi.h>
@@ -222,6 +223,7 @@ void lockup_print_samples(cpumask_t answered)
             kprintf("cpu %u: no answer in %llu ms; last tick %llu ms ago at pc %p\n", c,
                     (unsigned long long)(LOCKUP_SAMPLE_TIMEOUT_NS / 1000000), (unsigned long long)(age / 1000000),
                     (void *)pc->last_tick_pc);
+            lockdep_dump_held_cpu(c);   /* what it holds, read racily: a deadlock between two silent CPUs shows its pair */
         }
     }
     __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE);

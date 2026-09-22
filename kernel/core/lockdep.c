@@ -102,6 +102,22 @@ void lockdep_dump_held(void)
         print_held(t->name, t->held_mutex, t->nr_held_mutex);
 }
 
+/* Another CPU's spinlock stack, read racily from here: a lockup report
+ * names what a CPU that does not answer is holding, so a deadlock between
+ * two of them shows its pair. */
+void lockdep_dump_held_cpu(unsigned cpu)
+{
+    if (cpu >= CONFIG_MAX_CPUS)
+        return;
+    struct lockdep_cpu *lc = &g_cpus[cpu];
+    unsigned n = lc->nr_held;
+    if (n > LOCKDEP_MAX_HELD)
+        n = LOCKDEP_MAX_HELD;
+    char who[16];
+    ksnprintf(who, sizeof(who), "cpu %u", cpu);
+    print_held(who, lc->held, n);
+}
+
 /* --- reports ---------------------------------------------------------------- */
 
 /* Panics unless the report was expected by a self-test, in which case it

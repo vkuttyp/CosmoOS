@@ -83,6 +83,8 @@ bool lockdep_is_held(const void *lock, unsigned kind);
 
 /* Print the held stacks (the panic report calls this). */
 void lockdep_dump_held(void);
+/* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
+void lockdep_dump_held_cpu(unsigned cpu);
 
 void lockdep_get_stats(struct lockdep_stats *out);
 
@@ -115,6 +117,7 @@ static inline void lockdep_release(const void *lock, unsigned kind, uintptr_t ip
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}
+static inline void lockdep_dump_held_cpu(unsigned cpu) { (void)cpu; }
 static inline void lockdep_dump_graph(void) {}
 static inline void lockdep_get_stats(struct lockdep_stats *out) { *out = (struct lockdep_stats){ 0 }; }
 #define lockdep_assert_held(lock, kind)     ((void)0)
