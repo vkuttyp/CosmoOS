@@ -1047,6 +1047,17 @@ bool selftest_sched_balance_pull(const char **reason)
 static bool sched_balance_hysteresis_pinned(const char **reason)
 {
     unsigned n = cpu_count();
+#if !CONFIG_SCHED_BALANCE
+    /* This test's claim is about what the balancer does, so with the
+     * balancer compiled out there is nothing to claim. `sched-balance-
+     * pull`'s claim is about the machine -- that runnable threads reach
+     * idle CPUs -- so it does *not* skip here, and failing it is what a
+     * SCHED_BALANCE=0 boot is for. */
+    (void)n;
+    (void)reason;
+    kinfo("selftest: sched-balance-hysteresis: balancer compiled out; skipping");
+    return true;
+#else
     if (n < 3) {
         kinfo("selftest: sched-balance-hysteresis: fewer than three CPUs; skipping");
         return true;
@@ -1089,6 +1100,7 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
     kinfo("selftest: sched-balance-hysteresis: %u threads on %u CPUs, %llu scans, no pulls",
           count, used, (unsigned long long)scans);
     return true;
+#endif
 }
 
 bool selftest_sched_balance_hysteresis(const char **reason)
