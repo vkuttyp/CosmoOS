@@ -359,10 +359,10 @@ void timer_start(struct timer *t, uint64_t delay_ns)
     struct timer_queue *q = local_queue();
     spin_lock(&q->lock);
 
-    /* IDLE is the normal case. RUNNING means the callback is executing
-     * and is re-arming its own timer, which is allowed: run_expired
-     * leaves a timer alone after the callback when it is no longer
-     * RUNNING. PENDING is a double start and a bug. */
+    /* IDLE is the normal case, and is what a callback re-arming its own
+     * timer sees too: run_expired sets IDLE before calling it and does
+     * not touch the timer afterwards (T13, T14). PENDING is a double
+     * start and a bug. */
     if (t->state == TIMER_PENDING)
         panic("timer_start: timer %p is already pending", (void *)t);
 
@@ -495,8 +495,9 @@ static void run_expired(struct timer_queue *q, uint64_t now)
          * The old tail wrote `t->state` after the callback, which was a
          * write into a dead frame the moment the owner resumed elsewhere.
          * `q->running` is the queue's, and carries what timer_cancel_sync
-         * waits for. A callback that re-arms sees IDLE, which timer_start
-         * accepts, as it accepted RUNNING before.
+         * waits for; there is no RUNNING state any more, since a state the
+         * queue would have to clear afterwards is exactly what it must not
+         * write. A callback that re-arms sees IDLE.
          */
         t->state = TIMER_IDLE;
         q->running = t;

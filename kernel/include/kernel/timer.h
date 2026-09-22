@@ -18,7 +18,7 @@
 #define NS_PER_SEC 1000000000ULL
 #define TICK_NS (NS_PER_SEC / CONFIG_HZ)
 
-enum timer_state { TIMER_IDLE, TIMER_PENDING, TIMER_RUNNING };
+enum timer_state { TIMER_IDLE, TIMER_PENDING };   /* "its callback is executing" is the queue's fact (q->running), not the timer's state */
 
 struct timer;
 typedef void (*timer_fn)(struct timer *t, void *arg);
@@ -241,8 +241,10 @@ const char *clock_name(void);
 void timer_setup(struct timer *t, timer_fn fn, void *arg);
 void timer_start(struct timer *t, uint64_t delay_ns);
 /* True if the timer was pending and is now cancelled. Any context. On
- * return the callback will not START; it may still be RUNNING on the
- * timer's CPU, so the timer and its argument must stay alive. */
+ * return the callback will not START; it may still be executing on the
+ * timer's CPU (the queue's `running`), so the timer and its argument
+ * must stay alive until it has returned or signalled -- the queue itself
+ * touches the timer only before the callback (T14). */
 bool timer_cancel(struct timer *t);
 
 /* Cancel and wait until the callback is not running anywhere: on return

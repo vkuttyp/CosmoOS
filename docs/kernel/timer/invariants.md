@@ -25,18 +25,22 @@ until it fires or is cancelled.** `timer_start` records `t->cpu`;
 CPU. Check: review; test `timer`.
 
 **T4. `timer_start` on a `TIMER_PENDING` timer panics.** A double arm
-would link the node twice. IDLE is the normal case; RUNNING is accepted
-so a callback can re-arm its own timer (T13). Check: assert.
+would link the node twice. IDLE is the normal case, and is what a
+callback re-arming its own timer sees (T13). Check: assert.
 
-**T5. A timer's memory is owned by the caller and must outlive any
-PENDING or RUNNING state.** `timer_cancel` returning false for a
-RUNNING timer means the callback may still be executing. Check:
-review; `thread_sleep_ns` waits for the callback's flag before its
-stack timer goes out of scope (test `sleep`).
+**T5. A timer's memory is owned by the caller and must outlive its
+PENDING state and its executing callback.** `timer_cancel` returning
+false means the callback may be executing (the queue's `running`, which
+`timer_cancel_sync` waits on); the queue touches the timer only before
+the callback (T14), so an owner the callback signals may let the memory
+go the moment the signal arrives. Check: review; `thread_sleep_ns`
+waits for the callback's flag before its stack timer goes out of scope
+(test `sleep`), and does so from another CPU under `make test-chaos`.
 
 **T6. Callbacks run in interrupt context with the queue lock released
 and interrupts disabled.** `run_expired` unlocks around each `fn`, marks
-the timer RUNNING before and IDLE after unless the callback re-armed it.
+the timer IDLE before it and touches it no more (T14); `q->running`
+spans the call.
 Callbacks may only call interrupt-safe functions. Check: review; test
 `timer` (callback runs, state returns to IDLE), test `sleep` (callback
 performs `waitqueue_wake_all`).
@@ -71,8 +75,9 @@ in interrupt context. Check: review; used by the `timer` and
 **T13. A callback may re-arm its own timer.** `timer_start` accepts a
 timer in state IDLE or RUNNING; only PENDING is a double start and
 panics. `run_expired` sets a timer IDLE *before* calling its callback
-(it was RUNNING during the callback, and set IDLE after, until the
-percpu-migration unit; see T14), so a callback that re-arms finds IDLE
+(there was a RUNNING state, held during the callback and cleared after
+it, until the percpu-migration unit removed it; see T14), so a callback
+that re-arms finds IDLE
 and a re-armed (PENDING) timer is left on the queue. An earlier draft
 accepted only IDLE, which made the documented periodic pattern panic
 (found in review, PR #3). Check: test `timer`, self-rearming callback
@@ -94,6 +99,6 @@ architectures, where every sleeper's wake can be followed by a move.
 
 - No cross-CPU TSC synchronisation check (SMP PR, or a switch to the
   HPET/ACPI PM timer as a fallback clock source).
-- (closed by the lifetime pass) `timer_cancel_sync` waits for a RUNNING callback; the old gap read: `timer_cancel` cannot wait for a RUNNING callback (`timer_cancel_sync`
+- (closed by the lifetime pass) `timer_cancel_sync` waits for an executing callback; the old gap read: `timer_cancel` cannot wait for a RUNNING callback (`timer_cancel_sync`
   planned).
 - The queue is a sorted list; insertion is O(n).
