@@ -1,11 +1,123 @@
 # NEXT SUBSYSTEM — a balancer that pulls, and a load that can see the thread already running
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **A thread that is time-slicing can never be pulled**, and the
+>    report did not know it. Two compute-bound threads sharing a CPU
+>    alternate by preemption, so whichever is in the queue always carries
+>    `THREAD_FLAG_PREEMPTED` and S26 forbids moving it. The balancer
+>    therefore corrects an imbalance *as work becomes runnable* -- a
+>    wake, a yield, a new thread -- and cannot correct one that has
+>    settled into alternation. The benchmark works because its threads
+>    are woken: the idle CPUs take them before they have ever run. Found
+>    by `sched-balance-hysteresis`, which passed under a deliberately
+>    broken threshold because the thread it wanted moved could not move
+>    at all. Documented as a gap in the scheduler's invariants; lifting
+>    it means letting a preempted thread move, which is what S25's
+>    barrier forbids, so it is a unit and not a tuning change.
+> 2. **The hysteresis test's first version asserted on a machine-wide
+>    counter** -- zero pulls while it held one thread per CPU -- and
+>    failed, correctly: the rest of the kernel is running, and a netrx
+>    worker waking makes some CPU carry two for a moment. A pull then is
+>    the balancer being right. The test now builds the imbalance to
+>    order (three threads, two on A and one on B, each created pinned
+>    then widened to exactly {A, B}) and watches its own workers' CPUs.
+> 3. **And its workers had to yield, but only some of them.** A's pair
+>    yield so the one in A's queue is movable at all (item 1); B's worker
+>    must not, because a yield leaves a window in which its CPU reads as
+>    idle, and a 2 against a 0 is a difference of two the balancer is
+>    right to act on. Holding B steadily at one is what makes the
+>    threshold the only thing under test: sixteen moves at a threshold of
+>    one, none at two.
+> 4. **`sched_cpu_load` had to be built before the balancer**, as the
+>    plan said, and its own test needed two mutations rather than one:
+>    the load reverted to `nr_running` (the direct claim) and placement
+>    reverted to `nr_running` while the load stayed correct (the
+>    placement claim). The second is what proves `pick_cpu` reads it.
+> 5. **The refusal histogram cannot show `preempted`.** The balancer
+>    calls `sched_migrate_from`, whose policy hook skips preempted
+>    threads and reports an empty queue as `SCHED_MIGRATE_NOT_READY`, so
+>    "nothing it could spare" and "nothing at all" arrive under one name.
+>    Recorded in the API page rather than changed, since separating them
+>    means a new result from the policy hook.
+> 6. **`SCHED_MIGRATE_RESULT_COUNT` made the compiler enforce the
+>    pairing**: adding it to the enum broke the exhaustive switch in
+>    `sched_migrate_result_name` until the sentinel was named there, so
+>    a future result cannot be added to the enum and forgotten in the
+>    array.
+> 7. **The measured numbers were re-taken with the tool as shipped.**
+>    The loss is 40-47% across four boots rather than a single figure,
+>    and the chaos boots' cost on already-balanced rounds is 2-14%: on
+>    this host an iteration rate varies between boots and only the ratio
+>    is stable. The report's tables say so.
+>
+> 8. **Two tests had to learn what the chaos migrator is for.**
+>    `sched-balance-hysteresis` skips under `SCHED_CHAOS`: its evidence
+>    is a worker changing CPU, and there a worker changes CPU because
+>    the adversary moved it. `bench-balance` reports its ratio under
+>    chaos instead of asserting it, as `net-nicbench` already did: the
+>    adversary moves threads the balancer has just placed well, and the
+>    round read 93% in one chaos boot and below the target in another.
+>    The plain boot, which is what the target was measured for, still
+>    asserts.
+> 9. **One failure that was not the balancer**, and the control said so.
+>    `tcp-pcb-timer-free` failed once in the first chaos boot of this
+>    tree and not once in the eight that followed, three of them with
+>    the balancer compiled out. Recorded in `docs/testing/flakes.md`
+>    with what to print on a second sighting.
+>
+> **The mutations**, each run alone on x86-64 with the boot confirmed:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | `sched_cpu_load` returns `nr_running` again | `sched-load`: "a CPU running a compute-bound thread reported no load" |
+> | 2 | `pick_cpu` reads `nr_running`, the load left correct | `sched-load`: "1 of 4 new threads were placed on cpu 1, which was running a thread (load 1)" |
+> | 3 | `SCHED_BALANCE=0` | `sched-balance-pull`: "4 runnable threads used 2 of 4 CPUs after 3 s" -- the measured defect returning |
+> | 4 | the threshold lowered from two to one | `sched-balance-hysteresis`: "16 moves of three threads held two-to-one across cpu 0 and cpu 1, in 225 scans" |
+> | 5 | `rr_pick_migratable` drops its affinity test | `sched-balance-affinity`: "pinned to cpu 0, ran on 0/3". `sched-migrate-refuses` still passed under it, so the balancer's test is not redundant |
+>
+> **The benchmark as run**, `bench-balance`, three rounds of 500 ms:
+>
+> The control is `as-placed-full` -- the same count of runnable threads,
+> unpinned, spread because creation order happened to do it -- because
+> that differs from the round under test in exactly one thing. The
+> pinned round was the first control and was wrong: it is spread *and*
+> never moves, so on one AArch64 boot the balanced unpinned round was
+> itself 87% of it, and the benchmark failed at 78% while the threads
+> had in fact reached all four CPUs.
+>
+> | boot | share of the balanced round | share of the pinned round |
+> | --- | --- | --- |
+> | x86-64, plain | 102% | 100% |
+> | AArch64, plain | 101% | 99% |
+> | x86-64, chaos | 99% | 100% |
+> | AArch64, chaos | 108% | 93% |
+> | x86-64, chaos, on CI's slower runner | 104% | 100% |
+>
+> against the 53% and 60% the report measured with no balancer at all --
+> which is the figure the middle column would read there, since the
+> balanced round is what the alternate round fails to become.
+>
+> The rows above 100% are the measurement's noise floor on this host and
+> not a claim that balancing beats a machine that never needed it: the
+> two rounds run the same threads for the same 500 ms and differ only in
+> where creation order put them, so a few percent either way is what an
+> iteration count does between boots.
+>
+> Not done, and deliberately: wake-time re-pick, push balancing,
+> running-thread migration, offline evacuation, NUMA, per-thread
+> utilisation, and the affinity gap below.
+
 Constitution §68 report. The scheduler's open row in
 `docs/audit/2026-09-deferred-work-inventory.md` §2.3 reads, since the
 previous unit closed the rest of it:
 
 > **No balancer moves threads on its own yet**: that is the next unit, on
 > a tree that has already survived migration.
+
+*(Quoted as the inventory read when this report was written; the row is
+struck through now and names what replaced it.)*
 
 This is that unit. It is a policy on a mechanism that already exists,
 and it is deliberately small: a load that counts the thread a CPU is
@@ -90,6 +202,10 @@ a thread because something asked for it to be elsewhere. This unit does
 not close it (below), but it is the first caller that could.
 
 ### Nothing ever revisits either decision
+
+*(Everything from here to the banner's end is the report as proposed,
+in the present tense it was written in. The balancer exists now; the
+banner above says what the build changed.)*
 
 There is no balancer, no re-pick at wake-up, and no evacuation. A
 misplacement is permanent. On a machine with four CPUs and four
@@ -454,7 +570,7 @@ recorded in the report's banner as run:
 
 | claim | before (x86-64) | target |
 | --- | --- | --- |
-| eight created, four run, as placed | 3,924,228 (53% of ideal) | ≥ 85% of the pinned control |
+| eight created, four run, as placed | 3,924,228 (53% of ideal) | ≥ 85% of the control (**as built: of `as-placed-full`, the balanced *unpinned* round, not the pinned one; the banner says why**) |
 | four runners, as placed | 7,182,436 | within 5% of before: balancing an already-balanced machine costs nothing measurable |
 | pulls during the balanced round | n/a | 0 |
 
@@ -462,7 +578,8 @@ The same four rows on AArch64, where the loss measured 40%.
 
 The 85% target is set from what the *random* migrator already achieved
 (88% of its own boot's ideal) minus the period's latency, and it is
-deliberately not 100%: the threads spend the first tick or two of the
+deliberately not 100% (**as built it reads 99-108%, because the control
+changed to one that differs in a single thing**): the threads spend the first tick or two of the
 run where creation order put them, and a balancer that reached 100%
 would be one that moved before it had anything to go on.
 

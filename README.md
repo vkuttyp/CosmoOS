@@ -3242,6 +3242,45 @@ See [docs/development.md](docs/development.md).
   3,500 moves in 200 ms on x86-64, 8,000 on AArch64), 380 self-tests on
   both architectures. Not in this unit: the balancer, which is the next.
   (PR #213)
+- **A balancer that pulls, and a load that can see the thread already
+  running.** The migration primitive moved threads only when a test or
+  the chaos migrator asked; nothing in a shipped build moved one. This
+  unit is the policy (`docs/audit/next-subsystem-load-balancer.md`).
+  Measured first: twice as many threads as CPUs, created one at a time
+  so the rotation places them one per CPU, then every other one released
+  -- the runnable set lands two-deep on half the CPUs, the other half
+  stays idle for the whole run, and the machine does 53% of the work it
+  could on x86-64 and 60% on AArch64 (40-47% lost across four boots).
+  `sched_cpu_load(c)` is that queue's `nr_running` plus the thread it is
+  running unless that is its idle thread (S29): `nr_running` counts the
+  ready list and `schedule` dequeues what it runs, so a CPU saturated by
+  one thread reported the same zero as an idle one, to `pick_cpu` as
+  much as to anyone. Balancing is a **pull** (S27) from `sched_tick`
+  after its own unlock: an idle CPU with an empty queue looks every
+  tick, a busy one every `SCHED_BALANCE_TICKS` (16, 64 ms), and one
+  thread moves when the busiest CPU is at least two ahead (S28) -- one
+  is the steady state of an odd thread count, and a CPU running one
+  thread with an empty queue is at load 1, so its thread is never
+  dragged to an idle CPU to arrive cold. The scan reads other queues
+  without their locks and is a hint; `sched_migrate_from` re-decides
+  under both locks and picks the thread itself. **It cannot move a
+  thread that is time-slicing**: two compute-bound threads on one CPU
+  alternate by preemption, so the one in the queue always carries
+  `THREAD_FLAG_PREEMPTED` and S26 forbids moving it -- found by the
+  hysteresis test, which passed under a deliberately broken threshold
+  because the thread it wanted moved could never move. So the balancer
+  corrects an imbalance as work becomes runnable, not once it has
+  settled into alternation. `SCHED_BALANCE=0` compiles it out and is how
+  the tests prove it; the boot prints its tally and `sched_dump`'s
+  per-CPU line carries the load. Four tests and a benchmark
+  (`sched-load`, `sched-balance-pull`, `sched-balance-hysteresis`,
+  `sched-balance-affinity`, `bench-balance`: the alternate round reaches
+  99-108% of the *balanced* round -- the same threads unpinned, spread
+  because creation order happened to do it, which differs from it in
+  exactly one thing -- against the 53% the report measured without the
+  balancer; the pinned figure is reported beside it and is not what the
+  assertion is against).
+  (PR #216)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

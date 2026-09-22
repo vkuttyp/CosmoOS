@@ -184,6 +184,36 @@ void sched_start_cpu(void)
  */
 static unsigned g_pick_rotor;
 
+/*
+ * What a CPU is carrying: the threads queued on it plus the one it is
+ * running, unless that one is its idle thread, which is not work.
+ *
+ * `nr_running` alone cannot answer this. It counts the ready list, and
+ * `schedule` dequeues the thread it runs -- so a CPU spinning flat out
+ * on a single compute-bound thread reports zero, and so does a CPU
+ * asleep in `idle_main`. Every reader that wants "which CPU has the
+ * least to do" was reading a number that cannot tell those two apart
+ * (docs/audit/next-subsystem-load-balancer.md).
+ *
+ * **A hint, deliberately.** For another CPU's queue this reads two
+ * fields without that queue's lock, so the answer can be stale before
+ * it is used. That is sound for the two callers -- placement, which is
+ * choosing between roughly-equal CPUs anyway, and the balancer, whose
+ * move re-decides everything under both locks -- and it is why the
+ * comparison against `idle` is an identity test on a pointer and never
+ * a dereference: `rq->current` belongs to another CPU and may name a
+ * thread that exits a moment later.
+ */
+unsigned sched_cpu_load(unsigned cpu)
+{
+    if (cpu >= CONFIG_MAX_CPUS)
+        return 0;
+    const struct runqueue *rq = &g_rqs[cpu];
+    unsigned queued = __atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED);
+    const struct thread *cur = __atomic_load_n(&rq->current, __ATOMIC_RELAXED);
+    return queued + (cur != NULL && cur != rq->idle ? 1u : 0u);
+}
+
 static unsigned pick_cpu(const struct thread *t)
 {
     unsigned n = cpu_count();
@@ -194,7 +224,7 @@ static unsigned pick_cpu(const struct thread *t)
         unsigned c = (start + i) % n;
         if (!(t->affinity & CPUMASK_OF(c)) || !cpu_online(c))
             continue;
-        unsigned load = g_rqs[c].nr_running;
+        unsigned load = sched_cpu_load(c);
         if (load < best_load) {
             best_load = load;
             best = c;
@@ -449,6 +479,8 @@ const char *sched_migrate_result_name(enum sched_migrate_result r)
     case SCHED_MIGRATE_PREEMPTED: return "preempted";
     case SCHED_MIGRATE_AFFINITY: return "affinity";
     case SCHED_MIGRATE_OFFLINE: return "offline";
+    case SCHED_MIGRATE_GAP: return "gap-closed";
+    case SCHED_MIGRATE_RESULT_COUNT: break;   /* not a result: the array size */
     }
     return "?";
 }
@@ -533,7 +565,14 @@ enum sched_migrate_result sched_migrate(struct thread *t, unsigned to)
     }
 }
 
-enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved)
+/* Both queues' locks are held, so these two reads are exact rather than
+ * the hint `sched_cpu_load` gives an unlocked caller. */
+static unsigned load_locked(const struct runqueue *rq)
+{
+    return rq->nr_running + (rq->current != NULL && rq->current != rq->idle ? 1u : 0u);
+}
+
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigned min_gap, struct thread **moved)
 {
     KASSERT(g_initialized);
     assert_no_rq_lock_held();
@@ -545,6 +584,15 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct 
     arch_irq_state_t s = arch_irq_save();
     rq_lock_pair(from, to);
     enum sched_migrate_result r = SCHED_MIGRATE_NOT_READY;
+    /* The caller scanned with an unlocked hint; a wake on the
+     * destination since then can have closed the difference the move was
+     * for, and moving anyway is the thrash the threshold exists to
+     * prevent. Re-ask here, where both numbers are exact. */
+    if (min_gap != 0 && load_locked(&g_rqs[from]) < load_locked(&g_rqs[to]) + min_gap) {
+        rq_unlock_pair(from, to);
+        arch_irq_restore(s);
+        return SCHED_MIGRATE_GAP;
+    }
     struct thread *t = g_policy->pick_migratable(&g_rqs[from], CPUMASK_OF(to));
     if (t != NULL) {
         migrate_locked(t, from, to);
@@ -559,6 +607,135 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct 
 uint64_t sched_migration_count(void)
 {
     return __atomic_load_n(&g_migrations, __ATOMIC_RELAXED);
+}
+
+#if CONFIG_SCHED_BALANCE
+/*
+ * The balancer: a CPU takes work, it never gives it away.
+ *
+ * **A pull, not a push.** The CPU that decides is the CPU that receives,
+ * because it is the one with time to spend deciding and the one whose
+ * queue the thread lands on. A push would have the busiest CPU -- the
+ * one with least to spare -- scanning, and writing into a queue whose
+ * owner is running.
+ *
+ * **Two moments.** An idle CPU looks every tick: it has nothing to lose,
+ * the scan is a handful of loads, and this is the moment the defect this
+ * unit was written for is visible (four runnable threads on two CPUs
+ * while two sit idle for half a second;
+ * docs/audit/next-subsystem-load-balancer.md). A CPU that is running
+ * something looks every SCHED_BALANCE_TICKS, so an imbalance between two
+ * busy CPUs is still corrected when no CPU is free.
+ *
+ * **A difference of two.** One is the steady state of an odd thread
+ * count, and chasing it moves a thread back and forth forever. Two is
+ * also the smallest difference that means a thread is *waiting*: a CPU
+ * running one thread with an empty queue is at 1, so its thread is never
+ * dragged to an idle CPU to arrive cold and do the work it was already
+ * doing. Moving one thread shrinks the difference by two, which is why a
+ * single pull per look settles rather than oscillates.
+ *
+ * **The scan is a hint** (`sched_cpu_load`): it reads other queues
+ * without their locks. Everything it concludes is re-decided under both
+ * locks by `sched_migrate_from`, which selects the thread itself through
+ * the policy -- so a stale reading costs a wasted scan and can cost
+ * nothing else.
+ */
+static uint64_t g_bal_scans, g_bal_pulls, g_bal_none;
+static uint64_t g_bal_refused[SCHED_MIGRATE_RESULT_COUNT];
+
+static void balance_tick(struct percpu *pc)
+{
+    unsigned n = cpu_count();
+    if (n < 2)
+        return;
+    struct runqueue *rq = pc->rq;
+    unsigned self = pc->cpu_id;
+
+    /* This CPU's own fields, read in its own tick with interrupts off:
+     * another CPU can still enqueue here, and a reading that is one
+     * wake-up stale only decides whether to look. */
+    unsigned mine = sched_cpu_load(self);
+    bool idle_here = mine == 0 && rq->current == rq->idle;
+    if (!idle_here && (pc->ticks % SCHED_BALANCE_TICKS) != 0)
+        return;
+
+    __atomic_fetch_add(&g_bal_scans, 1u, __ATOMIC_RELAXED);
+
+    /*
+     * The busiest CPU may have nothing it can give: its only spare
+     * thread may be preempted (S26 forbids moving it), or pinned
+     * elsewhere. Giving up then would leave this CPU idle while a CPU
+     * of equal load two places along has a thread it could hand over,
+     * and an idle CPU that keeps choosing the same unusable source is
+     * idle for as long as that source stays busiest.
+     *
+     * So try the busiest few, in order, stopping at the first that gives
+     * a thread. `BALANCE_TRIES` bounds the work: the scan is O(cpus) and
+     * this repeats it at most three times, in a tick.
+     */
+    enum { BALANCE_TRIES = 3 };
+    cpumask_t tried = 0;
+    for (unsigned attempt = 0; attempt < BALANCE_TRIES; attempt++) {
+        unsigned busiest = self, busiest_load = mine;
+        for (unsigned c = 0; c < n; c++) {
+            if (c == self || !cpu_online(c) || (tried & CPUMASK_OF(c)))
+                continue;
+            unsigned load = sched_cpu_load(c);
+            if (load > busiest_load) {
+                busiest_load = load;
+                busiest = c;
+            }
+        }
+        if (busiest == self || busiest_load < mine + 2) {
+            /* Nothing left that is far enough ahead. */
+            if (attempt == 0)
+                __atomic_fetch_add(&g_bal_none, 1u, __ATOMIC_RELAXED);
+            return;
+        }
+        tried |= CPUMASK_OF(busiest);
+
+        struct thread *moved = NULL;
+        enum sched_migrate_result r = sched_migrate_from(busiest, self, 2, &moved);
+        if (r == SCHED_MIGRATED) {
+            __atomic_fetch_add(&g_bal_pulls, 1u, __ATOMIC_RELAXED);
+            return;
+        }
+        if ((unsigned)r < SCHED_MIGRATE_RESULT_COUNT)
+            __atomic_fetch_add(&g_bal_refused[r], 1u, __ATOMIC_RELAXED);
+        if (r == SCHED_MIGRATE_GAP) {
+            /*
+             * The difference had gone under the locks, and that has two
+             * causes with different answers: this CPU got busier, in
+             * which case no source is worth trying, or *that* source got
+             * lighter, in which case another may still be two ahead. The
+             * result alone does not say which, so re-read this CPU's own
+             * load and let it say.
+             */
+            unsigned now = sched_cpu_load(self);
+            bool busier = now > mine;
+            /* Adopt the fresher reading either way. If this CPU got
+             * *lighter* -- another CPU pulled from it while this look was
+             * in progress -- keeping the old higher number would hold the
+             * next candidate to a threshold this CPU no longer has. */
+            mine = now;
+            if (busier)
+                return;
+        }
+    }
+}
+#endif /* CONFIG_SCHED_BALANCE */
+
+void sched_balance_stats(struct sched_balance_stats *out)
+{
+    memset(out, 0, sizeof(*out));
+#if CONFIG_SCHED_BALANCE
+    out->scans = __atomic_load_n(&g_bal_scans, __ATOMIC_RELAXED);
+    out->pulls = __atomic_load_n(&g_bal_pulls, __ATOMIC_RELAXED);
+    out->no_candidate = __atomic_load_n(&g_bal_none, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < SCHED_MIGRATE_RESULT_COUNT; i++)
+        out->refused[i] = __atomic_load_n(&g_bal_refused[i], __ATOMIC_RELAXED);
+#endif
 }
 
 #if CONFIG_SCHED_CHAOS
@@ -590,7 +767,7 @@ static void chaos_tick(struct percpu *pc)
     if (to == self)
         return;
     struct thread *moved;
-    if (sched_migrate_from(self, to, &moved) == SCHED_MIGRATED)
+    if (sched_migrate_from(self, to, 0, &moved) == SCHED_MIGRATED)   /* chaos asks for no gap: it moves for no reason */
         __atomic_fetch_add(&g_chaos_migrated, 1u, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&g_chaos_refused, 1u, __ATOMIC_RELAXED);
@@ -676,6 +853,9 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         pc->need_resched = true;
     spin_unlock(&rq->lock);
 
+#if CONFIG_SCHED_BALANCE
+    balance_tick(pc);   /* after the tick's own unlock: the pull takes both locks itself */
+#endif
 #if CONFIG_SCHED_CHAOS
     chaos_tick(pc);   /* after the tick's own unlock: the migrator takes both locks itself */
 #endif
@@ -740,9 +920,9 @@ void sched_dump(void)
         /* The tick sample and its age (kernel/core/lockup.c): a CPU whose
          * last tick is seconds old is not taking interrupts, and its
          * other fields are as old as that. */
-        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
+        kprintf("cpu %u: %s current '%s' queued %u load %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
                 c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
-                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
+                rq->nr_running, sched_cpu_load(c), (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
                 (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
                 (unsigned long long)(pc ? pc->ticks : 0),

@@ -481,6 +481,11 @@ static const struct selftest tests[] = {
     { "clock-cost", selftest_clock_cost },
     { "clock-tick-owner", selftest_clock_tick_owner },
     { "sched-spread",    selftest_sched_spread },
+    { "sched-load",      selftest_sched_load },
+    { "sched-balance-pull", selftest_sched_balance_pull },
+    { "sched-balance-hysteresis", selftest_sched_balance_hysteresis },
+    { "sched-balance-affinity", selftest_sched_balance_affinity },
+    { "bench-balance",   selftest_bench_balance },
     { "percpu-claim",    selftest_percpu_claim },
     { "lockdep-rq-order", selftest_lockdep_rq_order },
     { "sched-migrate",   selftest_sched_migrate },
@@ -799,6 +804,25 @@ int selftest_run_all(void)
         kprintf("SELFTEST: PASS (%zu tests)\n", ARRAY_SIZE(tests));
     else
         kprintf("SELFTEST: FAIL (%d of %zu)\n", failed, ARRAY_SIZE(tests));
+
+#if CONFIG_SCHED_BALANCE
+    {
+        /* What the balancer did over the whole boot: the pulls are the
+         * point, the refusals say which check the primitive applied, and
+         * `no_candidate` dominating is the healthy shape on a machine
+         * that is mostly balanced already. */
+        struct sched_balance_stats bs;
+        sched_balance_stats(&bs);
+        kinfo("sched: balance pulled %llu threads in %llu scans, %llu found nothing far enough ahead; "
+              "refused not-ready %llu current %llu preempted %llu affinity %llu",
+              (unsigned long long)bs.pulls, (unsigned long long)bs.scans,
+              (unsigned long long)bs.no_candidate,
+              (unsigned long long)bs.refused[SCHED_MIGRATE_NOT_READY],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_CURRENT],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_PREEMPTED],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_AFFINITY]);
+    }
+#endif
 
 #if CONFIG_SCHED_CHAOS
     /* The boot test requires this line, with a count above zero: a

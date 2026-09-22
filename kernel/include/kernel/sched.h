@@ -99,22 +99,69 @@ enum sched_migrate_result {
     SCHED_MIGRATE_PREEMPTED,     /* READY by preemption: may be mid-way through a per-CPU access */
     SCHED_MIGRATE_AFFINITY,      /* cpu not in t->affinity */
     SCHED_MIGRATE_OFFLINE,       /* cpu not online, or not a CPU */
+    SCHED_MIGRATE_GAP,           /* under the locks, the load difference the caller asked for was gone */
+    SCHED_MIGRATE_RESULT_COUNT,  /* not a result: the size of an array indexed by one */
 };
 const char *sched_migrate_result_name(enum sched_migrate_result r);
 
 /* Move `t` to `cpu`. */
 enum sched_migrate_result sched_migrate(struct thread *t, unsigned cpu);
-/* Move a thread of the policy's choosing from CPU `from`'s queue to
+/*
+ * Move a thread of the policy's choosing from CPU `from`'s queue to
  * `to`'s: the selection and the move under both locks, no hand-off.
- * `*moved` names the thread on SCHED_MIGRATED, NULL otherwise. */
-enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved);
+ * `*moved` names the thread on SCHED_MIGRATED, NULL otherwise.
+ *
+ * `min_gap` is re-checked **under both locks**, where the two loads are
+ * exact: the move happens only if `load(from) >= load(to) + min_gap`,
+ * and `SCHED_MIGRATE_GAP` says it did not. A caller that decided from
+ * `sched_cpu_load`, which is an unlocked hint, hands its threshold here
+ * rather than trusting the sample it scanned with -- a wake on the
+ * destination between the scan and the locks can close the difference
+ * the pull was for. 0 asks for no such check.
+ */
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigned min_gap, struct thread **moved);
 /* Moves made since boot (every entry, the chaos migrator included). */
 uint64_t sched_migration_count(void);
+
+/*
+ * Balancing (docs/kernel/scheduler/design.md, "Balancing"; S27-S29).
+ *
+ * A CPU pulls work to itself from the busiest other CPU: every tick
+ * while it is idle with an empty queue, and every SCHED_BALANCE_TICKS
+ * otherwise, taking one thread when the busiest CPU's load is at least
+ * two more than its own. Runs from the tick, after it has released its
+ * own run-queue lock, through `sched_migrate_from`.
+ *
+ * A difference of one is the steady state of an odd thread count and
+ * moving on it thrashes; a difference of two is the smallest that says
+ * a thread is waiting somewhere while this CPU has room for it.
+ */
+#define SCHED_BALANCE_TICKS 16u
+
+struct sched_balance_stats {
+    uint64_t scans;          /* times a CPU looked */
+    uint64_t pulls;          /* threads taken */
+    uint64_t no_candidate;   /* looked; no CPU was far enough ahead */
+    uint64_t refused[SCHED_MIGRATE_RESULT_COUNT];   /* the primitive's answer, by reason */
+};
+void sched_balance_stats(struct sched_balance_stats *out);
 #if CONFIG_SCHED_CHAOS
 /* The chaos migrator's tally (debug builds with SCHED_CHAOS=1): moves
  * made from the tick, and calls that found nothing to move. */
 void sched_chaos_stats(uint64_t *migrated, uint64_t *refused);
 #endif
+
+/*
+ * Runnable threads on `cpu`: those queued, plus the one running unless
+ * it is that CPU's idle thread. `rq->nr_running` counts only the ready
+ * list, so it reads zero both for an idle CPU and for one saturated by
+ * a single thread; this is the number that tells them apart.
+ *
+ * Read without that CPU's run-queue lock, so it is a hint: use it to
+ * choose, never to conclude. A migration decided from it re-checks
+ * everything under both locks (`sched_migrate_from`).
+ */
+unsigned sched_cpu_load(unsigned cpu);
 
 struct runqueue *sched_runqueue(unsigned cpu);
 

@@ -228,7 +228,7 @@ queue; `pick_next` returning NULL selects it.
 A ready thread can be moved from one CPU's run queue to another's
 (`sched_migrate`, `sched_migrate_from`; `docs/audit/next-subsystem-percpu-
 migration.md`). This is the mechanism only: nothing in the kernel moves
-threads on its own, and the automatic balancer is the following unit.
+threads on its own; the policy that does is section 3b below.
 
 **What moves.** Only a `THREAD_READY` thread that is not its queue's
 `current` and was not preempted (S26). A thread switched out by
@@ -256,7 +256,7 @@ so a reversed pair is a cycle lockdep reports; `lockdep-rq-order`
 provokes one. Neither entry may be called with a run-queue lock held --
 `sched_migrate_from` selects *under* both locks through the policy's
 `pick_migratable`, so a caller that only knows the queue (the chaos
-migrator, the balancer to come) has no selection to hand over and nothing
+migrator, the balancer) has no selection to hand over and nothing
 to revalidate.
 
 **The result says why not.** `enum sched_migrate_result` names the check
@@ -291,6 +291,62 @@ whole self-test suite and the user-mode sections run with threads moving
 underneath them; the run prints its tally after the self-tests
 (`sched: chaos migrated N threads from the tick ...`) and the boot test
 requires `N > 0`. CI runs it on both architectures.
+
+## 3b. Balancing
+
+A ready thread moves because a CPU decided to take it
+(`docs/audit/next-subsystem-load-balancer.md`). The mechanism is §3a's;
+this is the policy on top of it, and it is deliberately small.
+
+**Load is what a CPU is carrying** (S29): `sched_cpu_load(c)` is that
+queue's `nr_running` plus the thread it is running, unless that thread
+is its idle thread. `nr_running` alone counts the ready list and
+`schedule` dequeues what it runs, so a CPU saturated by one thread
+reports the same zero as a CPU asleep -- which is the number `pick_cpu`
+used to read. `pick_cpu` reads the load now, so placement can tell a
+busy CPU from an idle one.
+
+The load is read without the target queue's lock. It is a hint: it
+compares `rq->current` with `rq->idle` by identity and never
+dereferences it, and every decision taken from it is re-made under both
+locks inside `sched_migrate_from`, which also chooses the thread. A
+stale reading costs a scan.
+
+**A pull, from two moments** (S27). The CPU that decides is the CPU that
+receives. An idle CPU with an empty queue looks on every tick -- it has
+nothing else to do, and this is the moment the imbalance this unit was
+built for appears. A CPU that is running something looks every
+`SCHED_BALANCE_TICKS` (16, so 64 ms at `CONFIG_HZ` 250), so two busy
+CPUs still even out when no CPU is free. Both run from `sched_tick`
+after it releases its own run-queue lock, the context the chaos migrator
+already runs in.
+
+**A difference of two, one thread at a time** (S28), **re-checked under
+the locks.** The scan is unlocked, so the difference it saw can be gone
+by the time both queues are held -- a wake on this CPU closes it. The
+threshold is passed to `sched_migrate_from`, which re-asks where both
+numbers are exact and answers `SCHED_MIGRATE_GAP` if it has gone. And
+when the busiest CPU has nothing it can give -- its spare thread
+preempted, or pinned elsewhere -- the next busiest is tried, up to
+three, so an idle CPU is not held idle by one unusable source.
+One is the steady state of an odd thread count; chasing it thrashes. Two is also the
+smallest difference that means a thread is waiting: a CPU running one
+thread with an empty queue is at 1, so its thread is never dragged to an
+idle CPU to arrive cold. A pull shrinks the difference by two, so one
+per look settles.
+
+**What it cannot do.** It cannot move a thread that is time-slicing.
+Two compute-bound threads on one CPU alternate by preemption, so the one
+in the queue always carries `THREAD_FLAG_PREEMPTED` and S26 forbids
+moving it -- it may have stopped between the two instructions of a
+per-CPU access. So the balancer corrects an imbalance as work *becomes*
+runnable, and not one that has already settled into alternation. The
+benchmark works because its threads are woken: the idle CPUs take them
+before they have ever been preempted.
+
+`SCHED_BALANCE=0` compiles it out, which is how the tests prove it; the
+boot prints what it did (`sched: balance pulled N threads in M scans`),
+and `sched_dump`'s per-CPU line carries the load.
 
 ## 4. Wait queues
 
