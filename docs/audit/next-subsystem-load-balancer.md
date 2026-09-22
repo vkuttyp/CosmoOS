@@ -84,6 +84,7 @@
 > | x86-64, plain | 99% |
 > | AArch64, plain | 92% |
 > | x86-64, under the chaos migrator | 93% |
+> | AArch64, under the chaos migrator | 99% |
 >
 > against the 53% and 60% the report measured with no balancer at all.
 >
