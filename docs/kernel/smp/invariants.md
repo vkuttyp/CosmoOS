@@ -125,7 +125,7 @@ permanently. Check: review; no interleaved lines in the self-test logs.
 
 ## Gaps (documented, not invariants)
 
-- `pick_cpu` balances at creation only; a thread moves afterwards only when something calls `sched_migrate` (the chaos migrator, the tests), and no balancer does yet (scheduler S24-S26).
+- `pick_cpu` places at creation, reading `sched_cpu_load` so a CPU already running a thread is not mistaken for an idle one; afterwards the balancer pulls a thread to an idle or lighter CPU when the busiest is two or more ahead (scheduler S24-S29), and the chaos migrator and the tests also call `sched_migrate` directly.
 - No CPU offlining or hotplug; `IPI_HALT` is one-way.
 - Shootdown targets every online CPU because all kernel mappings are
   global; per-space filtering arrives with user address spaces.

@@ -228,7 +228,7 @@ queue; `pick_next` returning NULL selects it.
 A ready thread can be moved from one CPU's run queue to another's
 (`sched_migrate`, `sched_migrate_from`; `docs/audit/next-subsystem-percpu-
 migration.md`). This is the mechanism only: nothing in the kernel moves
-threads on its own, and the automatic balancer is the following unit.
+threads on its own; the policy that does is section 3b below.
 
 **What moves.** Only a `THREAD_READY` thread that is not its queue's
 `current` and was not preempted (S26). A thread switched out by
@@ -256,7 +256,7 @@ so a reversed pair is a cycle lockdep reports; `lockdep-rq-order`
 provokes one. Neither entry may be called with a run-queue lock held --
 `sched_migrate_from` selects *under* both locks through the policy's
 `pick_migratable`, so a caller that only knows the queue (the chaos
-migrator, the balancer to come) has no selection to hand over and nothing
+migrator, the balancer) has no selection to hand over and nothing
 to revalidate.
 
 **The result says why not.** `enum sched_migrate_result` names the check
@@ -321,8 +321,15 @@ CPUs still even out when no CPU is free. Both run from `sched_tick`
 after it releases its own run-queue lock, the context the chaos migrator
 already runs in.
 
-**A difference of two, one thread at a time** (S28). One is the steady
-state of an odd thread count; chasing it thrashes. Two is also the
+**A difference of two, one thread at a time** (S28), **re-checked under
+the locks.** The scan is unlocked, so the difference it saw can be gone
+by the time both queues are held -- a wake on this CPU closes it. The
+threshold is passed to `sched_migrate_from`, which re-asks where both
+numbers are exact and answers `SCHED_MIGRATE_GAP` if it has gone. And
+when the busiest CPU has nothing it can give -- its spare thread
+preempted, or pinned elsewhere -- the next busiest is tried, up to
+three, so an idle CPU is not held idle by one unusable source.
+One is the steady state of an odd thread count; chasing it thrashes. Two is also the
 smallest difference that means a thread is waiting: a CPU running one
 thread with an empty queue is at 1, so its thread is never dragged to an
 idle CPU to arrive cold. A pull shrinks the difference by two, so one

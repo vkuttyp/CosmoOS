@@ -172,13 +172,22 @@ the first lock and retries if the thread moved meanwhile. **Must not be
 called with a run-queue lock held**; callable with interrupts off and from
 a tick.
 
-### `enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved)`
+### `enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigned min_gap, struct thread **moved)`
 The same move for a thread the policy chooses: both locks, then
 `policy->pick_migratable(&rq[from], CPUMASK_OF(to))` under them, then the
 move. `*moved` is the thread on `SCHED_MIGRATED`, NULL otherwise;
 `SCHED_MIGRATE_NOT_READY` means the queue offered nothing. The entry for
 a caller that only knows the queue -- the chaos migrator and the
 balancer -- since there is no selection to hand over.
+
+`min_gap` is re-checked **under both locks**, where the two loads are
+exact: the move happens only if `load(from) >= load(to) + min_gap`, and
+`SCHED_MIGRATE_GAP` says it did not. A caller that decided from
+`sched_cpu_load` -- an unlocked hint -- hands its threshold here rather
+than trusting the sample it scanned with, because a wake on the
+destination between the scan and the locks can close the difference the
+pull was for. The balancer passes 2; the chaos migrator and the
+migration tests pass 0, since they move for no reason on purpose.
 
 ### `unsigned sched_cpu_load(unsigned cpu)`
 Runnable threads on `cpu`: its queue's `nr_running` plus the thread it is
@@ -201,7 +210,9 @@ Note that `refused[SCHED_MIGRATE_PREEMPTED]` stays zero: the by-thread
 entry returns that, but the balancer uses `sched_migrate_from`, whose
 policy hook skips preempted threads and reports an empty queue as
 `SCHED_MIGRATE_NOT_READY`. So "nothing it could spare" and "nothing at
-all" arrive under the same name.
+all" arrive under the same name. `refused[SCHED_MIGRATE_GAP]` counts
+the pulls that were decided from a stale scan and abandoned once the
+locked loads disagreed.
 
 ### `uint64_t sched_migration_count(void)`, `void sched_chaos_stats(uint64_t *migrated, uint64_t *refused)`
 Moves made since boot, every entry counted (printed by `sched_dump`); and,

@@ -1897,6 +1897,37 @@ cost — the instrument-before-theory point again. Not repaired here; it
 belongs to the vGIC tests.
 
 
+## `mmu: TLB shootdown acknowledged by 2 of 3 CPUs`
+
+**2026-09-22, x86-64, this developer's machine**, one plain debug boot
+of the balancer tree, at 73 s:
+
+```text
+SELFTEST: net-hostinput    ... FAIL: ... at line 6189 (3030 ms)
+SELFTEST: net-hoststate    ... FAIL: ... at line 6786 (3664 ms)
+SELFTEST: net-output       ... FAIL: check failed: n >= ETH_HLEN + 20 + 8 at line 7042 (2991 ms)
+KERNEL PANIC: mmu: TLB shootdown of 0xffffc000104df000+0x4000 acknowledged by 2 of 3 CPUs
+```
+
+The next boot of the same tree passed, and so did every other boot of
+it. **Not attributed to the balancer**, and the reason is the bound:
+the shootdown waits a full second
+(`kernel/arch/x86_64/mmu.c`), and no run-queue lock this tree takes is
+held for anything approaching that — so "a CPU was spinning on a lock
+the balancer now takes" does not explain it. What does fit is the three
+host-networking tests failing immediately before, each after three
+seconds of not receiving a frame: the host was not scheduling this
+machine's vCPU threads, and one of them missed the second.
+
+Worth keeping anyway, because the balancer did change something real
+here: **the tick now spins on other CPUs' run-queue locks**, which it
+never did before this unit — `balance_tick` calls `sched_migrate_from`,
+which takes a pair with interrupts off. The hold is bounded and short,
+but if this panic is ever seen again on a quiet host, the first thing
+to try is a `spin_trylock` pair in the balancer, so a contended queue
+is skipped until the next tick rather than waited for. A policy has no
+business waiting for a lock.
+
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
 
 Two sightings from `make test-chaos` on the percpu-migration tree,

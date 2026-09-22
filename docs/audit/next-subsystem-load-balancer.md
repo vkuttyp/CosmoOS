@@ -99,6 +99,9 @@ previous unit closed the rest of it:
 > **No balancer moves threads on its own yet**: that is the next unit, on
 > a tree that has already survived migration.
 
+*(Quoted as the inventory read when this report was written; the row is
+struck through now and names what replaced it.)*
+
 This is that unit. It is a policy on a mechanism that already exists,
 and it is deliberately small: a load that counts the thread a CPU is
 running, two moments at which a CPU looks for work to take, a rule for
@@ -182,6 +185,10 @@ a thread because something asked for it to be elsewhere. This unit does
 not close it (below), but it is the first caller that could.
 
 ### Nothing ever revisits either decision
+
+*(Everything from here to the banner's end is the report as proposed,
+in the present tense it was written in. The balancer exists now; the
+banner above says what the build changed.)*
 
 There is no balancer, no re-pick at wake-up, and no evacuation. A
 misplacement is permanent. On a machine with four CPUs and four
