@@ -78,6 +78,12 @@ CRASH_TEST ?= 0
 # never the shipped form.
 PERCPU_WARN ?= 0
 
+# SCHED_BALANCE=0 removes the balancer: a thread then stays on the CPU
+# that placement chose for it, as it did before that unit
+# (docs/audit/next-subsystem-load-balancer.md). Shipped on; the knob
+# exists so the tests that prove the balancer can turn it off.
+SCHED_BALANCE ?= 1
+
 # SCHED_CHAOS=1 (debug builds) arms a migrator in the tick that moves a
 # ready thread to another CPU every few ticks for no reason: the whole
 # suite under migration. `make test-chaos` builds and boots it.

@@ -99,6 +99,7 @@ enum sched_migrate_result {
     SCHED_MIGRATE_PREEMPTED,     /* READY by preemption: may be mid-way through a per-CPU access */
     SCHED_MIGRATE_AFFINITY,      /* cpu not in t->affinity */
     SCHED_MIGRATE_OFFLINE,       /* cpu not online, or not a CPU */
+    SCHED_MIGRATE_RESULT_COUNT,  /* not a result: the size of an array indexed by one */
 };
 const char *sched_migrate_result_name(enum sched_migrate_result r);
 
@@ -110,6 +111,29 @@ enum sched_migrate_result sched_migrate(struct thread *t, unsigned cpu);
 enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved);
 /* Moves made since boot (every entry, the chaos migrator included). */
 uint64_t sched_migration_count(void);
+
+/*
+ * Balancing (docs/kernel/scheduler/design.md, "Balancing"; S27-S29).
+ *
+ * A CPU pulls work to itself from the busiest other CPU: every tick
+ * while it is idle with an empty queue, and every SCHED_BALANCE_TICKS
+ * otherwise, taking one thread when the busiest CPU's load is at least
+ * two more than its own. Runs from the tick, after it has released its
+ * own run-queue lock, through `sched_migrate_from`.
+ *
+ * A difference of one is the steady state of an odd thread count and
+ * moving on it thrashes; a difference of two is the smallest that says
+ * a thread is waiting somewhere while this CPU has room for it.
+ */
+#define SCHED_BALANCE_TICKS 16u
+
+struct sched_balance_stats {
+    uint64_t scans;          /* times a CPU looked */
+    uint64_t pulls;          /* threads taken */
+    uint64_t no_candidate;   /* looked; no CPU was far enough ahead */
+    uint64_t refused[SCHED_MIGRATE_RESULT_COUNT];   /* the primitive's answer, by reason */
+};
+void sched_balance_stats(struct sched_balance_stats *out);
 #if CONFIG_SCHED_CHAOS
 /* The chaos migrator's tally (debug builds with SCHED_CHAOS=1): moves
  * made from the tick, and calls that found nothing to move. */

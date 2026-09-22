@@ -801,6 +801,25 @@ int selftest_run_all(void)
     else
         kprintf("SELFTEST: FAIL (%d of %zu)\n", failed, ARRAY_SIZE(tests));
 
+#if CONFIG_SCHED_BALANCE
+    {
+        /* What the balancer did over the whole boot: the pulls are the
+         * point, the refusals say which check the primitive applied, and
+         * `no_candidate` dominating is the healthy shape on a machine
+         * that is mostly balanced already. */
+        struct sched_balance_stats bs;
+        sched_balance_stats(&bs);
+        kinfo("sched: balance pulled %llu threads in %llu scans, %llu found nothing far enough ahead; "
+              "refused not-ready %llu current %llu preempted %llu affinity %llu",
+              (unsigned long long)bs.pulls, (unsigned long long)bs.scans,
+              (unsigned long long)bs.no_candidate,
+              (unsigned long long)bs.refused[SCHED_MIGRATE_NOT_READY],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_CURRENT],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_PREEMPTED],
+              (unsigned long long)bs.refused[SCHED_MIGRATE_AFFINITY]);
+    }
+#endif
+
 #if CONFIG_SCHED_CHAOS
     /* The boot test requires this line, with a count above zero: a
      * chaos boot that moved nothing proved nothing (test-chaos). */

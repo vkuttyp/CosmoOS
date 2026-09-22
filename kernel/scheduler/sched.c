@@ -479,6 +479,7 @@ const char *sched_migrate_result_name(enum sched_migrate_result r)
     case SCHED_MIGRATE_PREEMPTED: return "preempted";
     case SCHED_MIGRATE_AFFINITY: return "affinity";
     case SCHED_MIGRATE_OFFLINE: return "offline";
+    case SCHED_MIGRATE_RESULT_COUNT: break;   /* not a result: the array size */
     }
     return "?";
 }
@@ -589,6 +590,94 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct 
 uint64_t sched_migration_count(void)
 {
     return __atomic_load_n(&g_migrations, __ATOMIC_RELAXED);
+}
+
+#if CONFIG_SCHED_BALANCE
+/*
+ * The balancer: a CPU takes work, it never gives it away.
+ *
+ * **A pull, not a push.** The CPU that decides is the CPU that receives,
+ * because it is the one with time to spend deciding and the one whose
+ * queue the thread lands on. A push would have the busiest CPU -- the
+ * one with least to spare -- scanning, and writing into a queue whose
+ * owner is running.
+ *
+ * **Two moments.** An idle CPU looks every tick: it has nothing to lose,
+ * the scan is a handful of loads, and this is the moment the defect this
+ * unit was written for is visible (four runnable threads on two CPUs
+ * while two sit idle for half a second;
+ * docs/audit/next-subsystem-load-balancer.md). A CPU that is running
+ * something looks every SCHED_BALANCE_TICKS, so an imbalance between two
+ * busy CPUs is still corrected when no CPU is free.
+ *
+ * **A difference of two.** One is the steady state of an odd thread
+ * count, and chasing it moves a thread back and forth forever. Two is
+ * also the smallest difference that means a thread is *waiting*: a CPU
+ * running one thread with an empty queue is at 1, so its thread is never
+ * dragged to an idle CPU to arrive cold and do the work it was already
+ * doing. Moving one thread shrinks the difference by two, which is why a
+ * single pull per look settles rather than oscillates.
+ *
+ * **The scan is a hint** (`sched_cpu_load`): it reads other queues
+ * without their locks. Everything it concludes is re-decided under both
+ * locks by `sched_migrate_from`, which selects the thread itself through
+ * the policy -- so a stale reading costs a wasted scan and can cost
+ * nothing else.
+ */
+static uint64_t g_bal_scans, g_bal_pulls, g_bal_none;
+static uint64_t g_bal_refused[SCHED_MIGRATE_RESULT_COUNT];
+
+static void balance_tick(struct percpu *pc)
+{
+    unsigned n = cpu_count();
+    if (n < 2)
+        return;
+    struct runqueue *rq = pc->rq;
+    unsigned self = pc->cpu_id;
+
+    /* This CPU's own fields, read in its own tick with interrupts off:
+     * another CPU can still enqueue here, and a reading that is one
+     * wake-up stale only decides whether to look. */
+    unsigned mine = sched_cpu_load(self);
+    bool idle_here = mine == 0 && rq->current == rq->idle;
+    if (!idle_here && (pc->ticks % SCHED_BALANCE_TICKS) != 0)
+        return;
+
+    unsigned busiest = self, busiest_load = mine;
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self || !cpu_online(c))
+            continue;
+        unsigned load = sched_cpu_load(c);
+        if (load > busiest_load) {
+            busiest_load = load;
+            busiest = c;
+        }
+    }
+    __atomic_fetch_add(&g_bal_scans, 1u, __ATOMIC_RELAXED);
+    if (busiest == self || busiest_load < mine + 2) {
+        __atomic_fetch_add(&g_bal_none, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+
+    struct thread *moved = NULL;
+    enum sched_migrate_result r = sched_migrate_from(busiest, self, &moved);
+    if (r == SCHED_MIGRATED)
+        __atomic_fetch_add(&g_bal_pulls, 1u, __ATOMIC_RELAXED);
+    else if ((unsigned)r < SCHED_MIGRATE_RESULT_COUNT)
+        __atomic_fetch_add(&g_bal_refused[r], 1u, __ATOMIC_RELAXED);
+}
+#endif /* CONFIG_SCHED_BALANCE */
+
+void sched_balance_stats(struct sched_balance_stats *out)
+{
+    memset(out, 0, sizeof(*out));
+#if CONFIG_SCHED_BALANCE
+    out->scans = __atomic_load_n(&g_bal_scans, __ATOMIC_RELAXED);
+    out->pulls = __atomic_load_n(&g_bal_pulls, __ATOMIC_RELAXED);
+    out->no_candidate = __atomic_load_n(&g_bal_none, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < SCHED_MIGRATE_RESULT_COUNT; i++)
+        out->refused[i] = __atomic_load_n(&g_bal_refused[i], __ATOMIC_RELAXED);
+#endif
 }
 
 #if CONFIG_SCHED_CHAOS
@@ -706,6 +795,9 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         pc->need_resched = true;
     spin_unlock(&rq->lock);
 
+#if CONFIG_SCHED_BALANCE
+    balance_tick(pc);   /* after the tick's own unlock: the pull takes both locks itself */
+#endif
 #if CONFIG_SCHED_CHAOS
     chaos_tick(pc);   /* after the tick's own unlock: the migrator takes both locks itself */
 #endif
@@ -770,9 +862,9 @@ void sched_dump(void)
         /* The tick sample and its age (kernel/core/lockup.c): a CPU whose
          * last tick is seconds old is not taking interrupts, and its
          * other fields are as old as that. */
-        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
+        kprintf("cpu %u: %s current '%s' queued %u load %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
                 c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
-                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
+                rq->nr_running, sched_cpu_load(c), (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
                 (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
                 (unsigned long long)(pc ? pc->ticks : 0),
