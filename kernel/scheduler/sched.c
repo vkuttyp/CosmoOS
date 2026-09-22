@@ -472,7 +472,8 @@ static void rq_unlock_pair(unsigned a, unsigned b)
 static void migrate_locked(struct thread *t, unsigned from, unsigned to)
 {
     struct runqueue *rqf = &g_rqs[from], *rqt = &g_rqs[to];
-    KASSERT(t->state == THREAD_READY && t != rqf->current && t->cpu == (int)from);
+    KASSERT(t->state == THREAD_READY && t != rqf->current && t->cpu == (int)from &&
+            (t->flags & THREAD_FLAG_PREEMPTED) == 0);
     g_policy->dequeue(rqf, t);
     t->cpu = (int)to;
     g_policy->enqueue(rqt, t, false);
@@ -516,6 +517,8 @@ enum sched_migrate_result sched_migrate(struct thread *t, unsigned to)
             r = SCHED_MIGRATE_NOT_READY;
         else if (g_rqs[from].current == t)
             r = SCHED_MIGRATE_CURRENT;
+        else if (t->flags & THREAD_FLAG_PREEMPTED)
+            r = SCHED_MIGRATE_PREEMPTED;
         else if ((t->affinity & CPUMASK_OF(to)) == 0)
             r = SCHED_MIGRATE_AFFINITY;
         else if (!cpu_online(to))

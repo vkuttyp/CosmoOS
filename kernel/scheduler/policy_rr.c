@@ -60,7 +60,7 @@ static struct thread *rr_pick_migratable(struct runqueue *rq, cpumask_t allowed)
         unsigned prio = 63u - (unsigned)__builtin_clzll(bits);
         struct thread *t;
         list_for_each_entry_reverse(t, &rq->ready[prio], rq_link) {
-            if (t != rq->current && (t->affinity & allowed) != 0)
+            if (t != rq->current && (t->flags & THREAD_FLAG_PREEMPTED) == 0 && (t->affinity & allowed) != 0)
                 return t;
         }
         bits &= ~((uint64_t)1 << prio);
