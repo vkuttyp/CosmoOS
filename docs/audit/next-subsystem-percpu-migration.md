@@ -213,7 +213,13 @@ migration rather than one that meets it for the first time.
       moved behind the high-priority receive worker that its own traffic
       keeps busy. A benchmark's rate is not a claim the migrator must
       keep: in the chaos build the bench reports the shortfall and does
-      not assert it; the plain boot still does.
+      not assert it; the plain boot still does. The same shape then came
+      once in a *plain* CI boot (the guard-capable CPU, slower still:
+      64 sent, none back, 2,659 dropped at the queue), which named the
+      bench's own design rather than the migrator: its UDP phase sends
+      ten thousand datagrams whose echoes are still flooding back during
+      the next interface's ARP round. The bench now waits for each
+      interface's receive count to hold still before the next round.
     - *Once each in about fifty chaos boots*: `thrtest`'s `MAP_FIXED`
       replacement of a thread stack refused with `EEXIST` (not
       understood; recorded with its line), and `tty-isatty`'s 500 ms

@@ -3298,6 +3298,27 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
         return false;
     if (!nicbench_udp(reason, nif, &sends_s, &ns_send, &frames, &accepted))
         return false;
+    /* Let this interface's echoes come home before the next interface's
+     * round: the UDP phase sends ten thousand datagrams whose replies are
+     * still arriving for most of a second on a slow host, and the next
+     * interface's ARP replies then queue behind them on the same receive
+     * worker -- CI's guard-capable boot saw 64 requests sent, none
+     * counted back in the window and 2,659 frames dropped at the queue.
+     * Wait for this interface's receive count to hold still. */
+    {
+        uint64_t last = nif->stats.rx_packets, quiet_ns = 0;
+        uint64_t t_q = clock_deadline_ns(3000ull * 1000000ull);
+        while (quiet_ns < 30ull * 1000000 && !clock_deadline_passed(t_q)) {
+            thread_sleep_ms(5);
+            uint64_t now = nif->stats.rx_packets;
+            if (now != last) {
+                last = now;
+                quiet_ns = 0;
+            } else {
+                quiet_ns += 5000000;
+            }
+        }
+    }
     unsigned share = ns_send ? (unsigned)((cksum_ns * 100) / ns_send) : 0;
     kinfo("selftest: net-nicbench: %s (caps 0x%x): arp %u rt/s (%llu ns per round trip); udp %u sends/s (%llu ns per send, "
           "%llu of %u frames left the driver); sw checksum of 1 KiB %llu ns = %u%% of a send",
