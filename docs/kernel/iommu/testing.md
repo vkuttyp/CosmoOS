@@ -77,7 +77,14 @@ skipping` when nothing registered. Otherwise, in order:
    window (nothing maps it; the allocator hands out the lowest
    addresses). The unit's fault counter must rise within 500 ms (the
    fault interrupt is asynchronous), and a following `blk_read` of
-   sector 0 must succeed: the device survives its own refused DMA. The
+   sector 0 must succeed: the device survives its own refused DMA.
+   Before each device is provoked the test waits for the unit's fault
+   count to hold still (30 ms quiet, bounded at 2 s): a device retries
+   its refused DMA a few hundred times, the SMMU's event queue holds
+   256 entries, and a storm still running when the next device faults
+   overflows the queue and drops that device's events -- which the chaos
+   migrator (`make test-chaos`) produced in one AArch64 boot in two by
+   spreading the storm's timing into the next window. The
    command's status is deliberately not asserted — QEMU's controller
    completes an Identify whose payload the IOMMU dropped with status 0.
 
