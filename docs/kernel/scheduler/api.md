@@ -177,8 +177,31 @@ The same move for a thread the policy chooses: both locks, then
 `policy->pick_migratable(&rq[from], CPUMASK_OF(to))` under them, then the
 move. `*moved` is the thread on `SCHED_MIGRATED`, NULL otherwise;
 `SCHED_MIGRATE_NOT_READY` means the queue offered nothing. The entry for
-a caller that only knows the queue -- the chaos migrator, and the
-balancer of the next unit -- since there is no selection to hand over.
+a caller that only knows the queue -- the chaos migrator and the
+balancer -- since there is no selection to hand over.
+
+### `unsigned sched_cpu_load(unsigned cpu)`
+Runnable threads on `cpu`: its queue's `nr_running` plus the thread it is
+running, unless that is its idle thread (S29). `nr_running` alone counts
+the ready list, so an idle CPU and one saturated by a single thread both
+report zero. Read **without** that CPU's run-queue lock, so it is a hint
+for choosing, never a fact to conclude from: it compares `rq->current`
+with `rq->idle` by identity and never dereferences it, and any move
+decided from it is re-decided under both locks by `sched_migrate_from`.
+`pick_cpu` and the balancer are the callers.
+
+### `void sched_balance_stats(struct sched_balance_stats *out)`
+What the balancer has done since boot: `scans` (times a CPU looked),
+`pulls` (threads taken), `no_candidate` (looked, nothing was two or more
+ahead), and `refused[]` indexed by `enum sched_migrate_result`. The boot
+prints it after the self-tests. Zero everywhere in a `SCHED_BALANCE=0`
+build, where `balance_tick` does not exist.
+
+Note that `refused[SCHED_MIGRATE_PREEMPTED]` stays zero: the by-thread
+entry returns that, but the balancer uses `sched_migrate_from`, whose
+policy hook skips preempted threads and reports an empty queue as
+`SCHED_MIGRATE_NOT_READY`. So "nothing it could spare" and "nothing at
+all" arrive under the same name.
 
 ### `uint64_t sched_migration_count(void)`, `void sched_chaos_stats(uint64_t *migrated, uint64_t *refused)`
 Moves made since boot, every entry counted (printed by `sched_dump`); and,

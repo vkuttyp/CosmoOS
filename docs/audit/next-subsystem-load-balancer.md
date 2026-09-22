@@ -1,5 +1,61 @@
 # NEXT SUBSYSTEM — a balancer that pulls, and a load that can see the thread already running
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **A thread that is time-slicing can never be pulled**, and the
+>    report did not know it. Two compute-bound threads sharing a CPU
+>    alternate by preemption, so whichever is in the queue always carries
+>    `THREAD_FLAG_PREEMPTED` and S26 forbids moving it. The balancer
+>    therefore corrects an imbalance *as work becomes runnable* -- a
+>    wake, a yield, a new thread -- and cannot correct one that has
+>    settled into alternation. The benchmark works because its threads
+>    are woken: the idle CPUs take them before they have ever run. Found
+>    by `sched-balance-hysteresis`, which passed under a deliberately
+>    broken threshold because the thread it wanted moved could not move
+>    at all. Documented as a gap in the scheduler's invariants; lifting
+>    it means letting a preempted thread move, which is what S25's
+>    barrier forbids, so it is a unit and not a tuning change.
+> 2. **The hysteresis test's first version asserted on a machine-wide
+>    counter** -- zero pulls while it held one thread per CPU -- and
+>    failed, correctly: the rest of the kernel is running, and a netrx
+>    worker waking makes some CPU carry two for a moment. A pull then is
+>    the balancer being right. The test now builds the imbalance to
+>    order (three threads, two on A and one on B, each created pinned
+>    then widened to exactly {A, B}) and watches its own workers' CPUs.
+> 3. **And its workers had to yield, but only some of them.** A's pair
+>    yield so the one in A's queue is movable at all (item 1); B's worker
+>    must not, because a yield leaves a window in which its CPU reads as
+>    idle, and a 2 against a 0 is a difference of two the balancer is
+>    right to act on. Holding B steadily at one is what makes the
+>    threshold the only thing under test: sixteen moves at a threshold of
+>    one, none at two.
+> 4. **`sched_cpu_load` had to be built before the balancer**, as the
+>    plan said, and its own test needed two mutations rather than one:
+>    the load reverted to `nr_running` (the direct claim) and placement
+>    reverted to `nr_running` while the load stayed correct (the
+>    placement claim). The second is what proves `pick_cpu` reads it.
+> 5. **The refusal histogram cannot show `preempted`.** The balancer
+>    calls `sched_migrate_from`, whose policy hook skips preempted
+>    threads and reports an empty queue as `SCHED_MIGRATE_NOT_READY`, so
+>    "nothing it could spare" and "nothing at all" arrive under one name.
+>    Recorded in the API page rather than changed, since separating them
+>    means a new result from the policy hook.
+> 6. **`SCHED_MIGRATE_RESULT_COUNT` made the compiler enforce the
+>    pairing**: adding it to the enum broke the exhaustive switch in
+>    `sched_migrate_result_name` until the sentinel was named there, so
+>    a future result cannot be added to the enum and forgotten in the
+>    array.
+> 7. **The measured numbers were re-taken with the tool as shipped.**
+>    The loss is 40-47% across four boots rather than a single figure,
+>    and the chaos boots' cost on already-balanced rounds is 2-14%: on
+>    this host an iteration rate varies between boots and only the ratio
+>    is stable. The report's tables say so.
+>
+> Not done, and deliberately: wake-time re-pick, push balancing,
+> running-thread migration, offline evacuation, NUMA, per-thread
+> utilisation, and the affinity gap below.
+
 Constitution §68 report. The scheduler's open row in
 `docs/audit/2026-09-deferred-work-inventory.md` §2.3 reads, since the
 previous unit closed the rest of it:

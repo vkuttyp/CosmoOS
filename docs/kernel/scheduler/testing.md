@@ -166,6 +166,24 @@ join; the queue is empty.
 | `sched-migrate-refuses` | each refusal by name: a worker pinned to A -> `affinity`; to A itself -> `same-cpu`; to `cpu_count()` -> `offline`; the running spinner -> `not-ready`; a thread that has run `waitqueue_prepare` (BLOCKED, still running) -> `not-ready`; the same thread woken (READY, queued, still `rq->current`, held there by `preempt_disable`) -> `current`; a worker that has run on A and is then displaced by a higher-priority spinner pinned to A (READY, queued, not current) -> `preempted` |
 | `sched-migrate-stress` | 200 ms: eight spinners, eight 1 ms sleepers, four completion ping-pong pairs, two mutex contenders, and a migrator calling `sched_migrate_from` on random CPU pairs; every worker progressed, none ever found itself outside its mask (checked under `preempt_disable` each round), at least 100 migrations happened (about 3,500 on four CPUs) |
 
+## Balancing (`kernel/scheduler/smptest.c`)
+
+| test | asserts |
+|---|---|
+| `sched-load` | a CPU running one compute-bound thread reports load 1 while an idle one reports 0 (S29), and `cpu_count()` threads created one at a time -- each blocking before the next, so each is placed against drained queues -- put none of them on the busy CPU. Deterministic in both directions: `pick_cpu` rotates ties, so when every CPU ties (which is what `nr_running` produces) that many consecutive creations start the scan on each CPU in turn and exactly one lands on the busy one |
+| `sched-balance-pull` | twice as many threads as CPUs, created one at a time so the rotation puts them one per CPU, then every other one released: the runnable set starts two-deep on half the CPUs with the other half idle, and within a bounded wait it is running on as many CPUs as there are runnable threads. This is the defect the unit exists for. It waits for the spread rather than sleeping and counting |
+| `sched-balance-hysteresis` | three threads held two-to-one across two CPUs, each created pinned and then widened to exactly {A, B}, do not move through hundreds of scans (S28). The imbalance is built to order and the workers' own CPUs are the evidence, because a machine-wide pull count is something every other thread in the kernel can move. A's pair yield so that the one in A's queue is movable at all; B's worker does not, because a yield leaves a window where its CPU reads as idle and a 2 against a 0 is a difference of two the balancer is right to act on |
+| `sched-balance-affinity` | two threads pinned to one CPU with every other CPU idle -- load 2 against 0, the most inviting imbalance there is -- stay where they are. The primitive already refuses this; what this adds is that the balancer does not reach around it, and `sched-migrate-refuses` still passes when the policy's affinity test is deleted, so this test is not redundant |
+| `bench-balance` | three rounds of 500 ms: the balanced machine, the alternate case above, and the same count pinned one per CPU as the control. The alternate round must reach 85% of the control, and reaches about 99%. The control runs in the same boot as the round it controls, because an iteration rate on this host varies between boots and only the ratio is stable |
+
+`SCHED_BALANCE=0` compiles the balancer out and is how these are proved.
+`sched-balance-pull` then fails -- its claim is about the machine, and
+its failure is the measured defect -- while `sched-balance-hysteresis`
+skips, because its claim is about what the balancer does and there is
+nothing to claim. The other two proofs are mutations: the threshold
+lowered from two to one (sixteen moves where there were none), and the
+policy's affinity test deleted (a pinned thread pulled away).
+
 Every test that reads "my CPU" and keeps it across a sleep -- the
 preempt-wake trio, the lockup tests, the NMI entry test -- runs pinned
 (`thread_pin_self` in a wrapper), and every worker that records the CPU

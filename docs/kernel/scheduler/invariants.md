@@ -254,13 +254,55 @@ priority `SCHED_PRIO_DEFAULT - 8`) performs the final `thread_put`. The
 `rq_link` is reused for the reap list. `thread_count()` therefore
 settles after `thread_join`. Check: review; tests use `threads_settle`.
 
+**S27. Balancing is a pull: a CPU moves work to its own queue and never
+away from it.** The CPU that decides is the CPU that receives, so the
+scanning is paid for by the CPU with time to spare and the enqueue lands
+on the queue that is about to consume it. An overloaded CPU never hands
+work out. Check: review; `sched-balance-pull` (idle CPUs take the work
+creation order left elsewhere); the `balance_tick` call site takes only
+`sched_migrate_from(busiest, self)`.
+
+**S28. A pull needs the busiest CPU to be at least two ahead.** A
+difference of one is the steady state of an odd thread count, and moving
+on it costs a cold cache to produce the mirror image of the same
+imbalance. Two is also the smallest difference that means a thread is
+*waiting* rather than running: a CPU with one thread and an empty queue
+is at load 1, so its thread is never dragged to an idle CPU to arrive
+cold and do the work it was already doing. One thread moves per look,
+which shrinks the difference by two. Check: `sched-balance-hysteresis`
+(two threads on one CPU against one on another, both movable, nothing
+moves through hundreds of scans; sixteen moves when the threshold is
+lowered to one).
+
+**S29. Load counts the thread a CPU is running.** `sched_cpu_load(c)` is
+`nr_running` plus the running thread unless it is that CPU's idle
+thread. `nr_running` alone counts the ready list, and `schedule`
+dequeues what it runs, so a CPU saturated by one compute-bound thread
+and a CPU asleep in idle both report zero -- which is what `pick_cpu`
+was reading. The load is read without the target's run-queue lock and is
+a **hint**: it compares `rq->current` against `rq->idle` by identity and
+never dereferences it, because that thread belongs to another CPU. Every
+decision taken from it is re-made under both locks by
+`sched_migrate_from`. Check: `sched-load` (a CPU running one thread
+reports 1 while an idle one reports 0, and placement prefers the idle
+one; both halves fail when the load is `nr_running` again).
+
 ## Gaps (documented, not invariants)
 
 - Cross-CPU `need_resched` is signalled by `IPI_RESCHEDULE` when the
   target is idle or running lower priority; equal-priority wakes wait
   for the target's slice to end (at most `SCHED_SLICE_NS`).
-- Threads are placed at creation and move only when something calls
-  `sched_migrate`/`sched_migrate_from`: the chaos migrator in a
-  `SCHED_CHAOS=1` build, and the tests. No balancer moves them yet.
+- **A thread time-slicing with another on the same CPU is never
+  moved.** Two compute-bound threads sharing a CPU alternate by
+  preemption, so whichever of them is in the queue always carries
+  `THREAD_FLAG_PREEMPTED` and S26 forbids moving it. The balancer
+  therefore corrects an imbalance *as work becomes runnable* -- a wake,
+  a yield, a new thread -- and cannot correct one that has already
+  settled into two threads alternating on one CPU while another is idle.
+  Found by `sched-balance-hysteresis`, which passed under a deliberately
+  broken threshold because the thread it was trying to have moved could
+  never be moved at all. Lifting it means letting a preempted thread
+  move, which is exactly what S25's barrier forbids, so it is a
+  different unit and not a tuning change.
 - No priority inheritance: a high-priority thread blocked on a mutex
   held by a low-priority thread waits for that thread's turn.

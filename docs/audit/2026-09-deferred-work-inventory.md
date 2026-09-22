@@ -159,8 +159,13 @@ AHCI are the two entries from that list now built.
   lock is its own lockdep class so that order is checked (S24), every
   per-CPU read is a declared claim the debug accessors enforce (S25), and
   `make test-chaos` boots the whole suite with a migrator in the tick.
-  **No balancer moves threads on its own yet**: that is the next unit,
-  on a tree that has already survived migration. ~~no load balancing~~ — **placement is fixed**
+  ~~**No balancer moves threads on its own yet**~~ — **a balancer
+  pulls** (`docs/audit/next-subsystem-load-balancer.md`): load counts
+  the thread a CPU is running (S29), an idle CPU looks every tick and a
+  busy one every 16, and a pull happens when the busiest CPU is two or
+  more ahead (S27, S28). It cannot move a thread that is time-slicing
+  with another, because such a thread is always preempted and S26
+  forbids that; it corrects an imbalance as work becomes runnable. ~~no load balancing~~ — **placement is fixed**
   (`docs/audit/next-subsystem-thread-migration.md`): `pick_cpu` rotates
   its ties, so a thread created on an idle machine is no longer always
   born on CPU 0, which was the measured cause of 8 of 14 threads and 94%
