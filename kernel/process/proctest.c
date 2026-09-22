@@ -13,6 +13,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/object.h>
+#include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -1171,6 +1172,47 @@ static void free_image_with_vnode(struct process_image *img)
         vnode_put(img->vn);
     img->data = NULL;
     img->vn = NULL;
+}
+
+bool selftest_elf_share_cost(const char **reason);
+bool selftest_elf_share_cost(const char **reason)
+{
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-share-cost: /boot/init unreadable; skipping");
+        return true;
+    }
+    enum { COPIES = 3 };
+    struct process *p[COPIES] = { NULL };
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct pmm_stats st;
+    unsigned made = 0;
+    uint64_t cost[COPIES] = { 0 };
+    for (unsigned i = 0; i < COPIES; i++) {
+        pmm_get_stats(&st);
+        uint64_t before = st.free_pages;
+        if (process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p[i]) != 0)
+            break;
+        made++;
+        thread_sleep_ms(80);
+        pmm_get_stats(&st);
+        cost[i] = before - st.free_pages;
+    }
+    for (unsigned i = 0; i < made; i++) {
+        process_kill(p[i], COSMO_SIGKILL);
+        process_wait_exit(p[i]);
+        process_put(p[i]);
+    }
+    free_image_with_vnode(&img);
+    if (made < 2) {
+        *reason = "could not create two processes";
+        return false;
+    }
+    kinfo("selftest: elf-share-cost: pages per copy %llu, %llu, %llu (the report measured 89 with no sharing)",
+          (unsigned long long)cost[0], (unsigned long long)cost[1],
+          (unsigned long long)(made > 2 ? cost[2] : 0));
+    (void)reason;
+    return true;
 }
 
 bool selftest_elf_shared_text(const char **reason)

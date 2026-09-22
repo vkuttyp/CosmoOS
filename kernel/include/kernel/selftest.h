@@ -172,6 +172,7 @@ bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED fro
 bool selftest_vm_file_fault_hold(const char **reason);   /* a FILE fault held between its phases: a racing install, an unmap */
 bool selftest_vm_file_readpage_fail(const char **reason); /* an injected readpage failure under a mapping is SIGBUS */
 bool selftest_process_nproc(const char **reason);     /* NPROC admission under concurrent spawns */
+bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_shared_text(const char **reason);   /* one program, one set of text frames */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
