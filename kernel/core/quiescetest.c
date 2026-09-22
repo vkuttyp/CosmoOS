@@ -40,12 +40,17 @@
 #define MAGIC_LIVE 0x4c495645u
 #define MAGIC_DEAD 0x44454144u
 
+/* A CPU other than the caller's, online; 0 when there is none. Every
+ * caller runs pinned, so its own CPU is a declared claim (S25). */
 static unsigned other_cpu(void)
 {
-    for (unsigned c = 1; c < cpu_count(); c++)
+    unsigned me = arch_cpu_id(), n = cpu_count();
+    for (unsigned i = 1; i < n; i++) {
+        unsigned c = (me + i) % n;
         if (cpu_online(c))
             return c;
-    return 0;
+    }
+    return me;   /* none: this CPU itself, since 0 is a valid other CPU now */
 }
 
 /* Spin without sleeping until `*flag` is non-zero or `ms` elapse. */
@@ -121,7 +126,7 @@ static void straggler_main(void *arg)
     quiesce_read_unlock();
 }
 
-bool selftest_quiesce_straggler(const char **reason)
+static bool selftest_quiesce_straggler_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     /* The per-waiter kick count is a debug-build thing, and the
@@ -134,7 +139,7 @@ bool selftest_quiesce_straggler(const char **reason)
 #else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         /* Said rather than skipped silently: a property about two CPUs
          * needs two CPUs, and a test that quietly does nothing on the
          * machine CI runs is worse than no test. */
@@ -188,6 +193,19 @@ bool selftest_quiesce_straggler(const char **reason)
     return true;
 #endif
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_straggler(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_straggler_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 
 /* --- quiesce-kick-population: the population the kick was said to help --- */
@@ -277,7 +295,7 @@ static void kick_adversary_main(void *arg)
 }
 #endif /* CONFIG_DEBUG */
 
-bool selftest_quiesce_kick_population(const char **reason)
+static bool selftest_quiesce_kick_population_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
@@ -286,7 +304,7 @@ bool selftest_quiesce_kick_population(const char **reason)
 #else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: quiesce-kick-population: one CPU, nothing to kick");
         return true;
     }
@@ -398,6 +416,19 @@ bool selftest_quiesce_kick_population(const char **reason)
 #endif
 }
 
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_kick_population(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_kick_population_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- quiesce-kick-spinner: the negative control, and the IPI kind --- */
 
 /*
@@ -475,7 +506,7 @@ static void kick_waiter_main(void *arg)
 }
 #endif /* CONFIG_DEBUG */
 
-bool selftest_quiesce_kick_spinner(const char **reason)
+static bool selftest_quiesce_kick_spinner_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
@@ -484,7 +515,7 @@ bool selftest_quiesce_kick_spinner(const char **reason)
 #else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: quiesce-kick-spinner: one CPU, nothing to straggle");
         return true;
     }
@@ -529,6 +560,19 @@ bool selftest_quiesce_kick_spinner(const char **reason)
 #endif
 }
 
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_kick_spinner(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_kick_spinner_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- quiesce-straggler-system: the stall is the waiter's, not the machine's --- */
 
 struct bystander {
@@ -559,7 +603,7 @@ static void bystander_main(void *arg)
  * spins inside a read section, this CPU waits for it, and a third does
  * ordinary work throughout -- which must keep completing.
  */
-bool selftest_quiesce_straggler_system(const char **reason)
+static bool selftest_quiesce_straggler_system_pinned(const char **reason)
 {
     unsigned threads0 = thread_count();
     if (cpu_count() < 3) {
@@ -567,15 +611,21 @@ bool selftest_quiesce_straggler_system(const char **reason)
         return true;
     }
     unsigned spin_cpu = 0, work_cpu = 0;
-    for (unsigned c = 1; c < cpu_count(); c++) {
+    bool have_spin = false, have_work = false;
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        if (c == arch_cpu_id())   /* pinned by the wrapper: the spinner and the worker go elsewhere */
+            continue;
         if (!cpu_online(c))
             continue;
-        if (spin_cpu == 0)
+        if (!have_spin) {
             spin_cpu = c;
-        else if (work_cpu == 0)
+            have_spin = true;
+        } else if (!have_work) {
             work_cpu = c;
+            have_work = true;
+        }
     }
-    if (spin_cpu == 0 || work_cpu == 0) {
+    if (!have_spin || !have_work) {
         kinfo("selftest: quiesce-straggler-system: fewer than three CPUs online");
         return true;
     }
@@ -608,6 +658,19 @@ bool selftest_quiesce_straggler_system(const char **reason)
           work_after - work_before, work_cpu, spin_cpu);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_straggler_system(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_straggler_system_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /*
  * An idle CPU needs no kick, and this test exists to say that the case
@@ -684,7 +747,7 @@ static void grace_reader_main(void *arg)
     quiesce_read_unlock();
 }
 
-bool selftest_quiesce_grace(const char **reason)
+static bool selftest_quiesce_grace_pinned(const char **reason)
 {
     unsigned threads0 = thread_count();
     struct quiesce_stats before, after;
@@ -700,7 +763,7 @@ bool selftest_quiesce_grace(const char **reason)
     CHECK(after.synchronizes == before.synchronizes + 1);
 
     unsigned cpu = other_cpu();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: quiesce-grace: one CPU, solo grace period in %llu us", (unsigned long long)(solo_ns / 1000));
         return true;
     }
@@ -737,6 +800,19 @@ bool selftest_quiesce_grace(const char **reason)
           r.hold_ms, (unsigned long long)(grace_ns / 1000000), (unsigned long long)(solo_ns / 1000));
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_grace(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_grace_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- quiesce-call: deferred callbacks run once, in order, in thread context --- */
 
@@ -827,7 +903,7 @@ static void irq_probe_handler(unsigned vector, struct arch_trap_frame *frame, vo
     __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
 }
 
-bool selftest_irq_sync(const char **reason)
+static bool selftest_irq_sync_pinned(const char **reason)
 {
     struct irq_probe *p = kzalloc(sizeof(*p));
     CHECK(p != NULL);
@@ -843,7 +919,7 @@ bool selftest_irq_sync(const char **reason)
     struct quiesce_stats before, after;
     quiesce_get_stats(&before);
 
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         /* Self-IPI: the handler runs before arch_ipi_send's caller can
          * proceed far (interrupts are enabled here). */
         arch_ipi_send(0, (unsigned)vec);
@@ -878,6 +954,19 @@ bool selftest_irq_sync(const char **reason)
     arch_vector_free((unsigned)vec);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_irq_sync(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_irq_sync_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- timer-cancel-sync: the wait outlasts a running callback; re-arming loses --- */
 
@@ -916,7 +1005,7 @@ static void timer_arm_main(void *arg)
     timer_start(&p->t, MS(2));
 }
 
-bool selftest_timer_cancel_sync(const char **reason)
+static bool selftest_timer_cancel_sync_pinned(const char **reason)
 {
     unsigned threads0 = thread_count();
     struct timer_probe *p = kzalloc(sizeof(*p));
@@ -934,7 +1023,7 @@ bool selftest_timer_cancel_sync(const char **reason)
     unsigned cpu = other_cpu();
     struct quiesce_stats before, after;
     quiesce_get_stats(&before);
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         /* One CPU: a callback cannot be running while we hold the queue
          * lock; the sync form is free. Let one fire and cancel after. */
         p->hold_ms = 1;
@@ -985,6 +1074,19 @@ bool selftest_timer_cancel_sync(const char **reason)
     return true;
 }
 
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_timer_cancel_sync(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_timer_cancel_sync_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- quiesce-stress: readers on every other CPU against a churning pointer --- */
 
 struct stress_obj {
@@ -1034,7 +1136,7 @@ static void stress_free_fn(struct quiesce_head *h)
     __atomic_fetch_add(&g_stress_freed, 1u, __ATOMIC_RELEASE);
 }
 
-bool selftest_quiesce_stress(const char **reason)
+static bool selftest_quiesce_stress_pinned(const char **reason)
 {
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
@@ -1048,8 +1150,8 @@ bool selftest_quiesce_stress(const char **reason)
     first->magic = MAGIC_LIVE;
     sh.cur = first;
 
-    for (unsigned c = 1; c < cpu_count(); c++) {
-        if (!cpu_online(c))
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        if (c == arch_cpu_id() || !cpu_online(c))   /* pinned: the readers are the others */
             continue;
         readers[nr] = (struct stress_reader){ .sh = &sh };
         th[nr] = thread_create_on(stress_reader_main, &readers[nr], "qstress", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
@@ -1107,6 +1209,19 @@ bool selftest_quiesce_stress(const char **reason)
           nr, reads, syncs, calls);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_quiesce_stress(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_quiesce_stress_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /*
  * A grace period ends by being woken, not by waiting out a deadline

@@ -21,6 +21,7 @@
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
 #include <uapi/cosmo/syscall.h>
+#include <arch/cpu.h>
 
 #define CHECK(cond)                                                                          \
     do {                                                                                     \
@@ -542,18 +543,21 @@ static void pause_ms(unsigned ms)
 
 static unsigned other_cpu_unix(void)
 {
-    for (unsigned c = 1; c < cpu_count(); c++)
+    unsigned me = arch_cpu_id(), n = cpu_count();   /* pinned caller: a declared claim (S25) */
+    for (unsigned i = 1; i < n; i++) {
+        unsigned c = (me + i) % n;
         if (cpu_online(c))
             return c;
-    return 0;
+    }
+    return me;   /* none: this CPU itself, since 0 is a valid other CPU now */
 }
 
-bool selftest_unix_close_race(const char **reason)
+static bool selftest_unix_close_race_pinned(const char **reason)
 {
     bool ok = true;
     unsigned socks0 = unix_socket_count();
     unsigned cpu = other_cpu_unix();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: unix-close-race: one CPU, nothing to race");
         return true;
     }
@@ -652,6 +656,19 @@ out:
               "accepter (-EINVAL) each released from CPU %u", cpu);
     return ok;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_unix_close_race(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_unix_close_race_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- unix-poll: readiness through the object's type ---------------------- */
 

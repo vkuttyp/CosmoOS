@@ -245,15 +245,15 @@ static void cont_timer(struct timer *t, void *arg)
     __atomic_store_n(&g_cont_timer_ran, 1u, __ATOMIC_RELEASE);
 }
 
-bool selftest_lockdep_contention(const char **reason)
+static bool selftest_lockdep_contention_pinned(const char **reason)
 {
-    unsigned other = 0;
-    for (unsigned c = 1; c < cpu_count(); c++)
-        if (cpu_online(c)) {
-            other = c;
+    unsigned other = 0, me = arch_cpu_id();   /* pinned by the wrapper */
+    for (unsigned i = 1; i < cpu_count(); i++)
+        if (cpu_online((me + i) % cpu_count())) {
+            other = (me + i) % cpu_count();
             break;
         }
-    if (other == 0) {
+    if (other == me) {
         kinfo("selftest: lockdep-contention: one CPU, nothing to contend with");
         return true;
     }
@@ -281,6 +281,19 @@ bool selftest_lockdep_contention(const char **reason)
     CHECK(lockdep_expected_hits() == 0);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_lockdep_contention(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockdep_contention_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 #else
 

@@ -592,10 +592,13 @@ static void fake_bio_done(struct bio *bio)
  * with the tests that use them. */
 static unsigned other_cpu_for_blk(void)
 {
-    for (unsigned c = 1; c < cpu_count(); c++)
+    unsigned me = arch_cpu_id(), n = cpu_count();   /* pinned caller: a declared claim (S25) */
+    for (unsigned i = 1; i < n; i++) {
+        unsigned c = (me + i) % n;
         if (cpu_online(c))
             return c;
-    return 0;
+    }
+    return me;   /* none: this CPU itself, since 0 is a valid other CPU now */
 }
 
 /* A second CPU that is neither 0 nor `avoid`, for a test that needs two
@@ -603,9 +606,12 @@ static unsigned other_cpu_for_blk(void)
  * has only the one. */
 static unsigned other_cpu_than(unsigned avoid)
 {
-    for (unsigned c = 1; c < cpu_count(); c++)
+    unsigned me = arch_cpu_id(), n = cpu_count();   /* pinned caller (S25) */
+    for (unsigned i = 1; i < n; i++) {
+        unsigned c = (me + i) % n;
         if (c != avoid && cpu_online(c))
             return c;
+    }
     return avoid;
 }
 
@@ -809,7 +815,7 @@ static void submitter_main(void *arg)
  * some accepted and some refused, every bio completed exactly once, and
  * nothing reached the driver after the unregister returned.
  */
-bool selftest_blk_submit_unregister(const char **reason)
+static bool selftest_blk_submit_unregister_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     /* The hook that holds the window open is a debug-build thing, and a
@@ -820,7 +826,7 @@ bool selftest_blk_submit_unregister(const char **reason)
 #else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu_for_blk();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: blk-submit-unregister: one CPU, no submitter to race");
         return true;
     }
@@ -875,6 +881,19 @@ bool selftest_blk_submit_unregister(const char **reason)
 #endif
 }
 
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_blk_submit_unregister(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_blk_submit_unregister_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 struct releaser {
     volatile unsigned stop;
 };
@@ -918,7 +937,7 @@ static void releaser_main(void *arg)
  * and depends on no clock at all
  * (docs/audit/next-subsystem-cpu-clock.md, step 5).
  */
-bool selftest_blk_unregister_drain(const char **reason)
+static bool selftest_blk_unregister_drain_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
@@ -927,7 +946,7 @@ bool selftest_blk_unregister_drain(const char **reason)
 #else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu_for_blk();
-    if (cpu == 0) {
+    if (cpu == arch_cpu_id()) {   /* none other: pinned, so a claim */
         kinfo("selftest: blk-unregister-drain: one CPU, nothing to park");
         return true;
     }
@@ -984,6 +1003,19 @@ bool selftest_blk_unregister_drain(const char **reason)
     return true;
 #endif
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_blk_unregister_drain(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_blk_unregister_drain_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- a live virtio device removed with I/O outstanding ---------------------
  *
@@ -1620,14 +1652,14 @@ out:
 }
 #endif /* CONFIG_DEBUG */
 
-bool selftest_virtio_remove_inflight(const char **reason)
+static bool selftest_virtio_remove_inflight_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
     kinfo("selftest: virtio-remove-inflight: no test hooks in this build; skipping");
     return true;
 #else
-    if (other_cpu_for_blk() == 0) {
+    if (other_cpu_for_blk() == arch_cpu_id()) {
         kinfo("selftest: virtio-remove-inflight: one CPU, no submitter to race");
         return true;
     }
@@ -1723,6 +1755,19 @@ out:
     return ok;
 #endif
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_virtio_remove_inflight(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_virtio_remove_inflight_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 bool selftest_blk_lifetime(const char **reason)
 {

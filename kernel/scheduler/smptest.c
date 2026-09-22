@@ -96,7 +96,7 @@ static void storm_call(void *arg)
     __atomic_fetch_add((unsigned *)arg, 1u, __ATOMIC_RELAXED);
 }
 
-bool selftest_smp_ipi_storm(const char **reason)
+static bool selftest_smp_ipi_storm_pinned(const char **reason)
 {
     unsigned online = online_count();
     if (online < 2) {
@@ -108,8 +108,9 @@ bool selftest_smp_ipi_storm(const char **reason)
     unsigned nw = 0;
     g_storm_stop = false;
     g_storm_gen = 0;
-    for (unsigned c = 1; c < cpu_count(); c++) {
-        if (!cpu_online(c))
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper: the waiters and the calls go to the others */
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        if (c == here || !cpu_online(c))
             continue;
         w[nw] = thread_create_on(storm_waiter, NULL, "storm", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
         CHECK(w[nw] != NULL);
@@ -121,8 +122,8 @@ bool selftest_smp_ipi_storm(const char **reason)
     unsigned calls = 0, rounds = 0;
     uint64_t end = clock_now_ns() + MS(300);
     while (clock_now_ns() < end) {
-        for (unsigned c = 1; c < cpu_count(); c++) {
-            if (cpu_online(c))
+        for (unsigned c = 0; c < cpu_count(); c++) {
+            if (c != here && cpu_online(c))
                 smp_call_function_single(c, storm_call, &calls);
         }
         rounds++;
@@ -141,6 +142,19 @@ bool selftest_smp_ipi_storm(const char **reason)
           g_storm_gen);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_smp_ipi_storm(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_smp_ipi_storm_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- every reported CPU is online --- */
 

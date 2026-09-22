@@ -3209,6 +3209,39 @@ See [docs/development.md](docs/development.md).
   the same runs: the same ring, plus the file layer. 373 self-tests on
   both architectures. Report: `docs/audit/next-subsystem-named-pipes.md`
   (PR #209).
+- **A migration that can land: declared per-CPU claims, a lock order
+  lockdep can see, and a migrator that moves one thread.** Thread
+  migration was built and removed once because the tree held per-CPU
+  assumptions nothing declared; this unit is the prerequisite, not the
+  balancer (`docs/audit/next-subsystem-percpu-migration.md`). The rule
+  (scheduler S25): a per-CPU answer is kept only while the thread cannot
+  move -- preemption disabled, interrupts off, interrupt context, or an
+  affinity of one CPU -- and `preempt_disable()` is the migration
+  barrier, since a thread with preemption disabled is never READY and
+  only READY threads move. Debug builds check the rule in `this_cpu()`
+  and `arch_cpu_id()` and panic naming the call site; `raw_this_cpu()` /
+  `raw_cpu_id()` are for the current thread, an asserted-zero count, or a
+  diagnostic, each with its reason; `PERCPU_WARN=1` lists every site
+  once instead (the sweep's form). The sweep named 113 sites on x86-64
+  and 133 on AArch64; seventeen were claims a migration would break,
+  `schedule_internal` reading its own per-CPU block before the run-queue
+  lock first among them -- the corruption that removed the first
+  balancer, named -- and the EL2 hand-back on AArch64; all are fixed by
+  making the read happen where the rule holds. Each run queue's lock is
+  its own lockdep class (a static name table), so two of them in
+  increasing CPU-id order is an order lockdep checks (S24, real now).
+  `sched_migrate(t, cpu)` and `sched_migrate_from(from, to, &moved)`
+  move a READY, non-current thread under both locks and say *which*
+  check refused; the woken-before-blocked window (READY, queued, still
+  `rq->current`) is refused by identity (S26). `make test-chaos` boots a
+  `SCHED_CHAOS=1` debug kernel whose tick moves a ready thread to
+  another CPU every fourth tick, on every CPU, through the whole suite
+  and the user-mode sections, requiring its tally line; CI runs it on
+  both architectures. Five tests (`percpu-claim`, `lockdep-rq-order`,
+  `sched-migrate`, `sched-migrate-refuses`, `sched-migrate-stress`: about
+  3,500 moves in 200 ms on x86-64, 8,000 on AArch64), 380 self-tests on
+  both architectures. Not in this unit: the balancer, which is the next.
+  (PR #NNN)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

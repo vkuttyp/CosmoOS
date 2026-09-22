@@ -599,7 +599,7 @@ static void tcp_releaser_main(void *arg)
 }
 #endif /* CONFIG_DEBUG */
 
-bool selftest_tcp_pcb_timer_free(const char **reason)
+static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
 {
 #if !CONFIG_DEBUG
     (void)reason;
@@ -617,16 +617,21 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
      * cannot live here either. It needs a third. Putting it beside the
      * callback is what hung the first version of this test.
      */
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper: this thread stays off both CPUs below */
     unsigned cpu = 0, rel_cpu = 0;
-    for (unsigned c = 1; c < cpu_count(); c++) {
-        if (!cpu_online(c))
+    bool have_cpu = false, have_rel = false;
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        if (c == here || !cpu_online(c))
             continue;
-        if (cpu == 0)
+        if (!have_cpu) {
             cpu = c;
-        else if (rel_cpu == 0)
+            have_cpu = true;
+        } else if (!have_rel) {
             rel_cpu = c;
+            have_rel = true;
+        }
     }
-    if (cpu == 0 || rel_cpu == 0) {
+    if (!have_cpu || !have_rel) {
         kinfo("selftest: tcp-pcb-timer-free: needs three CPUs (callback, closer, releaser), have %u", cpu_count());
         return true;
     }
@@ -683,6 +688,19 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
     return true;
 #endif
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a callback or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_tcp_pcb_timer_free(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_tcp_pcb_timer_free_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 bool selftest_net_lo_tcp(const char **reason)
 {
