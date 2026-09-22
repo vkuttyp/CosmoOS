@@ -52,6 +52,41 @@
 >    this host an iteration rate varies between boots and only the ratio
 >    is stable. The report's tables say so.
 >
+> 8. **Two tests had to learn what the chaos migrator is for.**
+>    `sched-balance-hysteresis` skips under `SCHED_CHAOS`: its evidence
+>    is a worker changing CPU, and there a worker changes CPU because
+>    the adversary moved it. `bench-balance` reports its ratio under
+>    chaos instead of asserting it, as `net-nicbench` already did: the
+>    adversary moves threads the balancer has just placed well, and the
+>    round read 93% in one chaos boot and below the target in another.
+>    The plain boot, which is what the target was measured for, still
+>    asserts.
+> 9. **One failure that was not the balancer**, and the control said so.
+>    `tcp-pcb-timer-free` failed once in the first chaos boot of this
+>    tree and not once in the eight that followed, three of them with
+>    the balancer compiled out. Recorded in `docs/testing/flakes.md`
+>    with what to print on a second sighting.
+>
+> **The mutations**, each run alone on x86-64 with the boot confirmed:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | `sched_cpu_load` returns `nr_running` again | `sched-load`: "a CPU running a compute-bound thread reported no load" |
+> | 2 | `pick_cpu` reads `nr_running`, the load left correct | `sched-load`: "1 of 4 new threads were placed on cpu 1, which was running a thread (load 1)" |
+> | 3 | `SCHED_BALANCE=0` | `sched-balance-pull`: "4 runnable threads used 2 of 4 CPUs after 3 s" -- the measured defect returning |
+> | 4 | the threshold lowered from two to one | `sched-balance-hysteresis`: "16 moves of three threads held two-to-one across cpu 0 and cpu 1, in 225 scans" |
+> | 5 | `rr_pick_migratable` drops its affinity test | `sched-balance-affinity`: "pinned to cpu 0, ran on 0/3". `sched-migrate-refuses` still passed under it, so the balancer's test is not redundant |
+>
+> **The benchmark as run**, `bench-balance`, three rounds of 500 ms:
+>
+> | boot | the alternate round, as a share of its pinned control |
+> | --- | --- |
+> | x86-64, plain | 99% |
+> | AArch64, plain | 92% |
+> | x86-64, under the chaos migrator | 93% |
+>
+> against the 53% and 60% the report measured with no balancer at all.
+>
 > Not done, and deliberately: wake-time re-pick, push balancing,
 > running-thread migration, offline evacuation, NUMA, per-thread
 > utilisation, and the affinity gap below.
