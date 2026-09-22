@@ -713,10 +713,14 @@ static void balance_tick(struct percpu *pc)
              * load and let it say.
              */
             unsigned now = sched_cpu_load(self);
-            if (now > mine) {
-                mine = now;
+            bool busier = now > mine;
+            /* Adopt the fresher reading either way. If this CPU got
+             * *lighter* -- another CPU pulled from it while this look was
+             * in progress -- keeping the old higher number would hold the
+             * next candidate to a threshold this CPU no longer has. */
+            mine = now;
+            if (busier)
                 return;
-            }
         }
     }
 }

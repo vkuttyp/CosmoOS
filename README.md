@@ -3275,7 +3275,11 @@ See [docs/development.md](docs/development.md).
   per-CPU line carries the load. Four tests and a benchmark
   (`sched-load`, `sched-balance-pull`, `sched-balance-hysteresis`,
   `sched-balance-affinity`, `bench-balance`: the alternate round reaches
-  99% of a pinned control against 53% without the balancer).
+  99-108% of the *balanced* round -- the same threads unpinned, spread
+  because creation order happened to do it, which differs from it in
+  exactly one thing -- against the 53% the report measured without the
+  balancer; the pinned figure is reported beside it and is not what the
+  assertion is against).
   (PR #216)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
