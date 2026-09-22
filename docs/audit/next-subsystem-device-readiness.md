@@ -151,8 +151,9 @@ inherited it and a bit on it would be everybody's.
 
 `struct tap` gains a wait queue, `rx_wait`, woken by `tap_transmit`
 after it enqueues a frame (`waitqueue_wake_all` takes no sleeping lock,
-so it is safe in the read-side section the transmit runs in) and by
-the tap's release. `tap_chr_ops` gains `ready` -- `WRITABLE`, plus
+so it is safe in the read-side section the transmit runs in) -- and by
+nothing else: the tap's release never runs while a reader is blocked
+(Lifetime, below). `tap_chr_ops` gains `ready` -- `WRITABLE`, plus
 `READABLE` when `txq` holds a frame -- `poll_wq` (`&t->rx_wait` for
 READABLE, NULL otherwise: an injected frame is never refused for want of
 room, it is delivered to the stack or dropped as a NIC drops) and
