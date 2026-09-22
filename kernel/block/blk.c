@@ -295,8 +295,8 @@ static void blk_timeout_thread(void *arg)
              */
             __atomic_store_n(&bd->recovering, true, __ATOMIC_RELEASE);
             for (unsigned i = 0; i < n; i++) {
-                kwarn("blk: %s: request timed out after %llu ms", bd->name,
-                      (unsigned long long)(bd->timeout_ns / 1000000));
+                kwarn("blk: %s: request timed out after %llu ms (at %llu ms)", bd->name,
+                      (unsigned long long)(bd->timeout_ns / 1000000), (unsigned long long)(now / 1000000));
                 bd->ops->timeout(bd, expired[i]);
             }
             __atomic_store_n(&bd->recovering, false, __ATOMIC_RELEASE);

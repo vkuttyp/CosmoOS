@@ -2230,8 +2230,11 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
         STEP(rt != NULL);
         faultinject_set(kind, 1, 1, NULL);   /* the next CSW, once */
         uint64_t t0 = clock_now_ns();
+        kdebug("selftest: %s: round %u read submitted at %llu ms", tag, round, (unsigned long long)(t0 / 1000000));
         int rc = blk_read(bd, 0, 8, buf);
         uint64_t dt = clock_since_ns(t0);
+        kdebug("selftest: %s: round %u read returned %d at %llu ms", tag, round, rc,
+               (unsigned long long)(clock_now_ns() / 1000000));
         total_dt += dt;
         faultinject_clear(kind);
         if (rc != -ETIMEDOUT)
@@ -2240,6 +2243,10 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
                    (unsigned long long)bd->timeouts);
         STEP(rc == -ETIMEDOUT);
         STEP(bd->timeouts == timeouts0 + 1);
+        if (dt >= 3000ull * 1000000ull)
+            kerror("selftest: %s: the read took %llu ms to return -ETIMEDOUT (bound 3000 ms; timeouts %llu -> %llu)",
+                   tag, (unsigned long long)(dt / 1000000), (unsigned long long)timeouts0,
+                   (unsigned long long)bd->timeouts);
         STEP(dt < 3000ull * 1000000ull);
         if (rt)
             thread_join(rt);

@@ -535,7 +535,9 @@ static bool selftest_lockup_soft_pinned(const char **reason)
     CHECK(fired);
     CHECK(s1.soft_reports == s0.soft_reports + 1);
     CHECK(s1.soft_cpu == (unsigned)k);
-    CHECK(s1.soft_runnable == 1);
+    /* At least the victim this test queued behind the spinner: a migrator
+     * may have queued others there too (S26), and that is not a defect. */
+    CHECK(s1.soft_runnable >= 1);
     CHECK(in_fn(s1.soft_pc, (const void *)spin_here, SPIN_FN_BOUND));
     CHECK(s2.soft_reports == s1.soft_reports);
     CHECK(s2.hard_reports == s0.hard_reports);
