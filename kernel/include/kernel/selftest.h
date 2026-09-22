@@ -123,6 +123,7 @@ bool selftest_clock_tick_owner(const char **reason);  /* the machine-wide tick s
 bool selftest_sched_balance_pull(const char **reason);        /* idle CPUs take work that is waiting */
 bool selftest_sched_balance_hysteresis(const char **reason);  /* a balanced machine moves nothing */
 bool selftest_sched_balance_affinity(const char **reason);    /* a pinned thread is never pulled */
+bool selftest_bench_balance(const char **reason);             /* what balancing recovers, measured */
 bool selftest_sched_load(const char **reason);   /* load counts the running thread; placement sees it */
 bool selftest_sched_spread(const char **reason);  /* new threads do not all land on CPU 0 */
 bool selftest_percpu_claim(const char **reason);         /* the per-CPU claim check (S25) */
