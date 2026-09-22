@@ -20,6 +20,15 @@ check compiles to nothing. Each entry follows constitution section 52.
   there.
 - Behaviour otherwise identical to the plain forms.
 
+### `void spin_lock_check_order(spinlock_t *lock)`
+lockdep's acquisition check for taking `lock` here -- the order and
+interrupt-safety questions, and their reports -- without acquiring it.
+For a self-test that wants an inversion report on purpose: taking the
+reversed pair for real spins for a lock that a correct-order holder on
+another CPU may be waiting to pair with, which is the deadlock the report
+is about (`lockdep-rq-order` hung every CPU that way under the chaos
+migrator). Nothing in release builds.
+
 ### `might_sleep()`
 - Purpose: declare that the calling function may block. Reports (debug) or
   panics (release) when `preempt_count != 0` or `irq_depth != 0`.

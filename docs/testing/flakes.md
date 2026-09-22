@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Seventy-two, to 2026-09-22**, across CI and this developer's machine, on
+**Seventy-four, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -849,6 +849,7 @@ of this section said eight and then listed nine:
 | `main` @ `eadba84` | observed, aarch64, the **GICv3** boot of the named-pipes merge's `main` run on 2026-09-22 (35674273649), read from the logs afterwards: `connect 0 in 1475 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:37448 accepted at 94.1s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.1s; the plain boot of the same job had passed. Row one, and the second sighting in a GICv3 boot (PR #209's fourth was the first) |
 | this developer's machine, the device-readiness build | observed, x86-64, the plain debug boot on 2026-09-22 (the clean run before that unit's mutation runs, on `6b3ee0a` plus a test-only commit): `connect 0 in 574 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:50389 accepted at 78.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 12 ms, echo 3 ms`, gave up at 98.4s. Row one, off CI |
 | PR #211's own CI run | observed, aarch64, the **GICv3** boot (`74e208d`, run 35680602142, the device-readiness build; its diff touches the tap's read path and no inet code): `connect 0 in 1178 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40702 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s; the plain boot of the same job had passed. Row one, the third in a GICv3 boot |
+| this developer's machine, the percpu-migration build, **under the chaos migrator**, twice | observed, x86-64, two of the first four `make test-chaos` boots of the final tree on 2026-09-22 (`c3beadc6` and before): `connect 0 in 1200 ms` / `connect 0 in 1309 ms`, `sent 12 in 0 ms`, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:59577 accepted at 83.7s, 0 byte(s)` / `127.0.0.1:59768 accepted at 79.7s, 0 byte(s)`, `[deadline]`, `slirp probe: connect 7 ms, echo 2 ms`. The guest's timeline is the family's (a SYN retransmitted after a second, the data segment lost, a reset), no guest-side detector fired (the READY-stall, sleep-overshoot and tick-gap detectors were in the image), and the plain debug boot of the same tree passed -- but two in four is above the family's rate, and a migrator that moves the retransmit timer's waker and the receive worker between CPUs is the one new variable. Recorded as the family with that caveat; a sighting on a plain boot of this tree would make it the tree's. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -859,7 +860,7 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty-nine entries, seventy-two occurrences -- and the table is the tally,
+Sixty entries, seventy-four occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
