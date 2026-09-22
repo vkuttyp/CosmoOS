@@ -219,7 +219,10 @@ migration rather than one that meets it for the first time.
       bench's own design rather than the migrator: its UDP phase sends
       ten thousand datagrams whose echoes are still flooding back during
       the next interface's ARP round. The bench now waits for each
-      interface's receive count to hold still before the next round.
+      interface's receive count to hold still before the next round, and
+      fails rather than proceeds if it has not within three seconds
+      (review's finding: a bounded wait that continues on expiry is a
+      wait that pretends).
     - *Once each in about fifty chaos boots*: `thrtest`'s `MAP_FIXED`
       replacement of a thread stack refused with `EEXIST` (not
       understood; recorded with its line), and `tty-isatty`'s 500 ms

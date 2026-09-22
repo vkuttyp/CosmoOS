@@ -3304,13 +3304,22 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
      * interface's ARP replies then queue behind them on the same receive
      * worker -- CI's guard-capable boot saw 64 requests sent, none
      * counted back in the window and 2,659 frames dropped at the queue.
-     * Wait for this interface's receive count to hold still. */
+     * Wait for this interface's receive count to hold still; the count is
+     * the receive path's atomic (netif.c rx_common), read the same way. A
+     * stream still moving after three seconds is not quiet, and the bench
+     * says so rather than starting the next round over it. */
     {
-        uint64_t last = nif->stats.rx_packets, quiet_ns = 0;
+        uint64_t last = __atomic_load_n(&nif->stats.rx_packets, __ATOMIC_RELAXED), quiet_ns = 0;
         uint64_t t_q = clock_deadline_ns(3000ull * 1000000ull);
-        while (quiet_ns < 30ull * 1000000 && !clock_deadline_passed(t_q)) {
+        while (quiet_ns < 30ull * 1000000) {
+            if (clock_deadline_passed(t_q)) {
+                kinfo("selftest: net-nicbench: %s: receive stream still moving after 3 s (rx %llu)",
+                      nif->name, (unsigned long long)last);
+                *reason = "the receive stream did not go quiet between interfaces";
+                return false;
+            }
             thread_sleep_ms(5);
-            uint64_t now = nif->stats.rx_packets;
+            uint64_t now = __atomic_load_n(&nif->stats.rx_packets, __ATOMIC_RELAXED);
             if (now != last) {
                 last = now;
                 quiet_ns = 0;
