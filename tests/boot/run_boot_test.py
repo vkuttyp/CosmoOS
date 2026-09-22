@@ -970,6 +970,17 @@ def main():
         print_symbols(table)
         return 1
 
+    # A boot that recovered on a later attempt passed, and is still an
+    # occurrence of the flake that made it retry
+    # (docs/audit/next-subsystem-nettest-retry.md). The guest says so in
+    # the serial log; say it here too, because a run's summary is what
+    # anyone reads, and a sighting nobody reads is a sighting lost.
+    recovered = re.search(r"^NETTEST: client ok \(attempt ([2-9]) of (\d+)\)", text, re.M)
+    if recovered:
+        print(f"boot-test: net-harness recovered on attempt {recovered.group(1)} "
+              f"of {recovered.group(2)} -- a sighting of the QEMU reset "
+              f"(docs/testing/flakes.md); record it")
+
     print(f"boot-test: PASS in {elapsed:.1f}s (log: {args.log})")
     print_symbols(table)
     return 0
