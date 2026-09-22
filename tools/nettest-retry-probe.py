@@ -3,8 +3,8 @@
 nettest-retry-probe.py -- does a second connection through the same
 slirp succeed when the first one is reset?
 
-`net-harness` fails several times a week on CI and about one local boot
-in twenty (docs/testing/flakes.md, "The count"). The defect is localised
+`net-harness` failed seven CI jobs on 2026-09-22 alone and reproduces on
+about one local boot in twenty (docs/testing/flakes.md, "The count"). The defect is localised
 and is not in this kernel: QEMU's user-mode networking resets the
 guest's half of one connection while keeping its own half open, and
 answers a probe through the same instance milliseconds later
@@ -18,6 +18,11 @@ failure path -- it does not change the verdict, so the boot still fails
 and the log says what the retry would have done:
 
     NETTEST: retry probe: connect 0 in 2 ms, sent 12, recv 12 -> WOULD HAVE PASSED
+
+The read is non-blocking with a five-second deadline. The failure this
+probe runs after is slirp accepting a connection and never forwarding
+it, so a blocking read is the one thing that could turn a diagnosed
+failure into a hung boot with no answer at all.
 
 Usage:
 
@@ -55,8 +60,24 @@ PROBE = r'''
             char rbuf[32];
             if (rrc == 0) {
                 rsent = ksock_sendto(c2, "cosmo hello\n", 12, NULL);
-                if (rsent == 12)
-                    rgot = ksock_recvfrom(c2, rbuf, sizeof(rbuf), NULL);
+                if (rsent == 12) {
+                    /* Bounded, and the bound matters more here than in
+                     * the test it imitates: the failure this probe runs
+                     * after is *slirp accepting a connection and never
+                     * forwarding it*, so a blocking read is exactly the
+                     * thing that would hang. Non-blocking plus a
+                     * five-second deadline, which is half the harness's
+                     * own receive budget (found in review of this
+                     * report). */
+                    ksock_set_nonblock(c2, true);
+                    uint64_t rdl = clock_deadline_ns(5000ull * 1000000ull);
+                    for (;;) {
+                        rgot = ksock_recvfrom(c2, rbuf, sizeof(rbuf), NULL);
+                        if (rgot != -EAGAIN || clock_deadline_passed(rdl))
+                            break;
+                        thread_sleep_ms(5);
+                    }
+                }
             }
             bool again_ok = rgot == 12 && memcmp(rbuf, "cosmo world\n", 12) == 0;
             kprintf("NETTEST: retry probe: connect %d in %llu ms, sent %lld, recv %lld -> %s\n",

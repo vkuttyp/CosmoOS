@@ -17,8 +17,9 @@ QEMU's user-mode networking resets the guest's half of one connection
 while keeping its own half open, and answers a probe through the same
 instance a millisecond later.
 
-**Nothing is left to diagnose here, and the test still fails several
-times a day.** This unit is the other half of the answer: not to find
+**Nothing is left to diagnose here, and the test keeps failing** -- seven
+CI jobs on 2026-09-22 alone, and eighty-four occurrences recorded since
+the count began. This unit is the other half of the answer: not to find
 the bug, which is not ours, but to stop a test of *this* kernel from
 reporting someone else's intermittent defect as a failure of ours —
 while keeping every sighting counted, because a flake that stops being
@@ -68,7 +69,7 @@ place this number lives):
 | local reproduction rate, x86-64 | about one boot in twenty |
 
 **On 2026-09-22 alone**, seven CI jobs failed on this one test, across
-four branches:
+five sources -- four pull requests and `main`:
 
 | run | branch | what the branch changed |
 | --- | --- | --- |
@@ -103,10 +104,18 @@ fails and the log says what a retry would have done:
 NETTEST: retry probe: connect 0 in 2 ms, sent 12, recv 12 -> WOULD HAVE PASSED
 ```
 
-Its result is in the banner when this report is built. *(As written, the
-probe had been applied and boots were running; the flake reproduces
-about one boot in twenty, so this is a measurement the implementation
-completes rather than one the report can promise.)*
+**The line above is the probe's output format, not a result.** At the
+time of writing the probe is applied and boots are running; the flake
+reproduces about one boot in twenty, so this is a measurement the
+implementation completes and records in its banner, not one this report
+can promise. If thirty boots pass without a reproduction, the banner
+says that instead, and the unit rests on sighting thirty's 1 ms probe
+through the same slirp rather than on a direct measurement.
+
+The read is non-blocking with a five-second deadline, because the
+failure it runs after is slirp accepting a connection and never
+forwarding it: a blocking read there would turn a diagnosed failure into
+a hung boot with no answer at all (found in review of this report).
 
 ## Current implementation
 
