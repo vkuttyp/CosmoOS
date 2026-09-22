@@ -110,9 +110,9 @@ bool selftest_uaccess_guard(const char **reason)
     CHECK(arch_mmu_query(&sp->mmu, VA, &pa, NULL, NULL, NULL));
     memset(phys_to_virt(pa), 0x5A, PAGE_SIZE);
 
-    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
     uint8_t in = 0, out = 0;
     arch_irq_state_t s = arch_irq_save();
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;   /* read where the switch is made (S25) */
     vm_space_switch(restore, sp);
     arch_user_access_begin();
     size_t left_in = arch_copy_user_raw(&in, (const void *)(uintptr_t)VA, 1);

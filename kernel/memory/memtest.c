@@ -989,11 +989,13 @@ bool selftest_asid_isolation(const char **reason)
     CHECK(arch_mmu_query(&b->mmu, VA, &pa, NULL, NULL, NULL));
     memset(phys_to_virt(pa), 0xBB, PAGE_SIZE);
 
-    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
-    struct vm_space *cur = restore;
     unsigned wrong = 0, faults = 0;
 
+    /* Interrupts off before the CPU's own space is read: it is the space
+     * of the CPU the switches below are made on (S25). */
     arch_irq_state_t s = arch_irq_save();
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    struct vm_space *cur = restore;
     for (unsigned i = 0; i < 20; i++) {
         uint8_t v = 0;
         vm_space_switch(cur, a);
@@ -1066,12 +1068,12 @@ bool selftest_asid_rollover(const char **reason)
      * the rollover. */
     CHECK(asid_test_set_bits(8));
 
-    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
-    uint32_t tag_a = 0, tag_b = 0;
+        uint32_t tag_a = 0, tag_b = 0;
     uint8_t va = 0, vb = 0;
     size_t fa = 1, fb = 1;
 
     arch_irq_state_t s = arch_irq_save();
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;   /* read where the switch is made (S25) */
     vm_space_switch(restore, a);
     tag_a = a->mmu.asid;
     fa = user_read_byte(&va, VA);
@@ -1138,13 +1140,13 @@ bool selftest_asid_destroy_reuse(const char **reason)
     memset(phys_to_virt(pa), 0xBB, PAGE_SIZE);
 
     CHECK(asid_test_set_bits(8));
-    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
-    uint32_t tag_old = 0, tag_new = 0;
+        uint32_t tag_old = 0, tag_new = 0;
     uint8_t v1 = 0, v2 = 0;
     size_t f1 = 1, f2 = 1;
 
     /* The old space runs and this CPU caches its page under its tag. */
     arch_irq_state_t s = arch_irq_save();
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;   /* read where the switch is made (S25) */
     vm_space_switch(restore, old_sp);
     tag_old = old_sp->mmu.asid;
     f1 = user_read_byte(&v1, VA);
@@ -1223,7 +1225,11 @@ static void asid_race_thread(void *arg)
         __atomic_fetch_add(r->arrived, 1u, __ATOMIC_ACQ_REL);
         while (__atomic_load_n(r->round, __ATOMIC_ACQUIRE) != i)
             arch_cpu_relax();
+        /* As the switch path calls it: interrupts off, so the CPU whose
+         * tag state it reads is the CPU it runs on (S25). */
+        arch_irq_state_t s = arch_irq_save();
         asid_switch_prepare(r->ctx);
+        arch_irq_restore(s);
     }
     thread_exit(0);
 }
@@ -1238,8 +1244,11 @@ bool selftest_asid_race(const char **reason)
         kinfo("selftest: asid-race: one CPU online; the race needs two");
         return true;
     }
-    /* Anywhere but here, so the two callers are genuinely concurrent. */
-    cpumask_t others = cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id());
+    /* Anywhere but here, so the two callers are genuinely concurrent: a
+     * preference read raw -- if this thread moves, the two are still on
+     * different CPUs at the time it matters, or the race is simply run
+     * on the same CPU once, which the rounds absorb. */
+    cpumask_t others = cpu_online_mask() & ~CPUMASK_OF(raw_cpu_id());
     static struct arch_mmu_context ctx;
     static volatile uint32_t round, arrived;
     round = 0;
@@ -1261,7 +1270,11 @@ bool selftest_asid_race(const char **reason)
         while (__atomic_load_n(&arrived, __ATOMIC_ACQUIRE) < 2u * i)
             arch_cpu_relax();
         __atomic_store_n(&round, i, __ATOMIC_RELEASE);   /* both go */
-        asid_switch_prepare(&ctx);
+        {
+            arch_irq_state_t s = arch_irq_save();   /* as the switch path calls it (S25) */
+            asid_switch_prepare(&ctx);
+            arch_irq_restore(s);
+        }
         while (__atomic_load_n(&arrived, __ATOMIC_ACQUIRE) < 2u * i)
             arch_cpu_relax();
         asid_get_stats(&b);
@@ -1327,6 +1340,10 @@ bool selftest_asid_quiet(const char **reason)
     CHECK(vm_user_map_anon(a, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "quiet") == 0);
     CHECK(vm_user_map_anon(b, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "quiet") == 0);
 
+    /* Interrupts off across every switch below: the switch path runs
+     * this way, and a space switched in from thread context could be
+     * left on a CPU this thread has moved away from (S25). */
+    arch_irq_state_t s = arch_irq_save();
     struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
     struct asid_stats st0, st1;
 
@@ -1376,6 +1393,7 @@ bool selftest_asid_quiet(const char **reason)
         cur = sp;
     }
     vm_space_switch(cur, restore);
+    arch_irq_restore(s);
     uint64_t hw1 = arch_mmu_activate_flushes();
     preempt_enable();
     asid_get_stats(&st1);

@@ -8,6 +8,7 @@
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
+#   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
@@ -24,7 +25,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn test-chaos analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -107,6 +108,19 @@ ifeq ($(ARCH),aarch64)
 else
 	@echo "test-gic: $(ARCH) has no GIC; nothing to do"
 endif
+
+# The whole suite under a chaos migrator: a debug kernel whose tick moves
+# a ready thread to another CPU every few ticks for no reason
+# (SCHED_CHAOS=1, docs/kernel/scheduler/design.md "Migration"), built
+# into a sibling output tree. The harness requires the migrator to have
+# moved something.
+test-chaos:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
+		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos \
+		--image $(OUT)-chaos/cosmoos.img --log $(OUT)-chaos/boot-test-chaos.log \
+		--kernel $(OUT)-chaos/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # Build a deliberately crashing kernel into a sibling output tree and
 # verify that the panic path reports properly and the harness sees FAIL.

@@ -164,7 +164,7 @@ static bool on_ist(uintptr_t frame, uintptr_t top)
     return frame < top && frame >= top - IST_STACK_SIZE;
 }
 
-bool arch_test_paranoid_entry(const char **why)
+static bool arch_test_paranoid_entry_pinned(const char **why)
 {
     struct paranoid_probe p = { 0 };
     struct percpu *me = this_cpu();
@@ -202,6 +202,18 @@ bool arch_test_paranoid_entry(const char **why)
         *why = NULL;
     return ok;
 }
+
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool arch_test_paranoid_entry(const char **why)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = arch_test_paranoid_entry_pinned(why);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- arch/trap.h --- */
 

@@ -533,7 +533,7 @@ sweep actually used:
 **Correction, added by the thread-migration unit
 (`docs/audit/next-subsystem-thread-migration.md`).** The worked example
 above is false for the kernel this unit shipped into. A thread is
-assigned a CPU once, at `sched_enqueue_new`, and nothing ever moves it:
+assigned a CPU once, at `sched_enqueue_new`, and nothing ever moves it *(as the tree stood then; the percpu-migration unit moves threads, and the correction below that this section closes with says so)*:
 `sched_wake` returns it to `g_rqs[t->cpu]`, and the only other writes to
 `t->cpu` are the idle and boot threads at init. A sleeping thread wakes
 where it slept, so the 42 sites in the first row of the table below were
@@ -542,7 +542,11 @@ where it slept, so the 42 sites in the first row of the table below were
 The conversions stand — a saturating subtraction costs a compare and is
 correct whether or not the stamp is foreign — and they become *necessary*
 the moment migration lands, which is why that unit re-runs this sweep as
-a gate rather than trusting it. But the rule as stated described a
+a gate rather than trusting it. *(Migration landed with the
+percpu-migration unit, `docs/audit/next-subsystem-percpu-migration.md`:
+a thread preempted between two reads can resume on another CPU, so the
+rule as first stated is now the rule of this kernel. The re-run found
+the two plain subtractions left outside tests same-CPU by construction.)* But the rule as stated described a
 scheduler this kernel did not have, and saying so here is cheaper than
 letting the next reader infer a migration that does not happen.
 

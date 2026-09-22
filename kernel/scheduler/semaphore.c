@@ -27,7 +27,7 @@ bool semaphore_trydown(struct semaphore *s)
 
 void semaphore_down(struct semaphore *s)
 {
-    if (this_cpu()->irq_depth != 0)
+    if (raw_this_cpu()->irq_depth != 0)   /* identity: zero on any CPU a sleeping caller runs on */
         panic("semaphore_down in interrupt context");
     might_sleep();
     for (;;) {

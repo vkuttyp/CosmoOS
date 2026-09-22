@@ -43,6 +43,12 @@ enum thread_state {
 
 #define THREAD_FLAG_IDLE  (1u << 0)  /* a CPU's idle thread */
 #define THREAD_FLAG_BOOT  (1u << 1)  /* thread 0: stack is the boot stack */
+/* Switched out by preemption -- an interrupt return or preempt_enable --
+ * at a point of its code it did not choose, so it may be between the two
+ * instructions of a per-CPU access (the pointer to its CPU's block, then
+ * the field) and must resume on the CPU it left: not migratable until it
+ * runs again (S26). Set and cleared under the run-queue lock. */
+#define THREAD_FLAG_PREEMPTED (1u << 2)
 
 struct waitqueue;
 struct process;
@@ -69,6 +75,7 @@ struct thread {
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
     uint64_t last_start_ns;             /* (rq) */
+    uint64_t ready_since_ns;            /* (rq) when it was last enqueued: the stall detector's stamp (debug) */
     uint64_t switches;                  /* (rq) times switched in */
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */
@@ -108,6 +115,17 @@ struct thread {
  * failure. `name` is copied. */
 struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority);
 
+/* Pin the calling thread to the CPU it is on, returning the affinity it
+ * had; `thread_set_affinity_self` puts a mask back (it must admit the
+ * CPU the thread is on, which the one it returned does). A per-CPU claim
+ * that must outlive a sleep is made under a pin: the check (S25) honours
+ * a one-CPU affinity, and a migrator never moves a pinned thread. */
+cpumask_t thread_pin_self(void);
+void thread_set_affinity_self(cpumask_t affinity);
+/* Widen another thread's affinity (tests). `affinity` must admit the CPU
+ * the thread is on: nothing here moves it, `sched_migrate` does. */
+void thread_set_affinity(struct thread *t, cpumask_t affinity);
+
 /* Same, restricted to the CPUs in `affinity` (must include at least one
  * online CPU, else NULL). */
 struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,
@@ -124,7 +142,7 @@ void thread_put(struct thread *t);
 
 static inline struct thread *thread_current(void)
 {
-    return this_cpu()->current;
+    return raw_this_cpu()->current;   /* identity: the thread is the same on any CPU that runs it (S25) */
 }
 
 /* Would an object operation on this thread have to return -EAGAIN rather

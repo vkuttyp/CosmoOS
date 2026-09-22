@@ -2,6 +2,7 @@
  * vfstest.c - Self-tests for CRC32C, the page cache and the VFS on ramfs.
  */
 
+#include <arch/cpu.h>
 #include <kernel/blk.h>
 #include <kernel/completion.h>
 #include <kernel/cosmofs.h>
@@ -669,12 +670,12 @@ bool selftest_mountns(const char **reason)
     return true;
 }
 
-bool selftest_vfs_concurrency(const char **reason)
+static bool selftest_vfs_concurrency_pinned(const char **reason)
 {
-    unsigned other = 0;
-    for (unsigned c = 1; c < cpu_count(); c++)
-        if (cpu_online(c)) {
-            other = c;
+    unsigned other = 0, me = arch_cpu_id();   /* pinned by the wrapper */
+    for (unsigned i = 1; i < cpu_count(); i++)
+        if (cpu_online((me + i) % cpu_count())) {
+            other = (me + i) % cpu_count();
             break;
         }
     unsigned vnodes0 = vfs_vnode_count();
@@ -735,6 +736,19 @@ bool selftest_vfs_concurrency(const char **reason)
           rn.ops, rm.ops, o1.ops, o2.ops, other);
     return true;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_vfs_concurrency(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_vfs_concurrency_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- the ramfs page budget and the global page-cache limit with reclaim --- */
 

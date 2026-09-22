@@ -346,6 +346,11 @@ void arch_hv_disable(void)
 {
     if (!el2_available())
         return;
+    /* Preemption off across the loop: the CPU handed back locally must be
+     * the one read as "self", or that CPU keeps the switch's vectors with
+     * its ready flag set (S25). The local hand-back is an HVC and the
+     * remote ones spin for their target, both allowed here. */
+    preempt_disable();
     unsigned self = this_cpu()->cpu_id;
     for (unsigned cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++) {
         if (!g_el2_ready[cpu])
@@ -355,6 +360,21 @@ void arch_hv_disable(void)
         else
             smp_call_function_single(cpu, el2_hand_back, NULL);
     }
+    preempt_enable();
+}
+
+/*
+ * The switch's version, asked of EL2 on the calling CPU with the
+ * switch's vectors installed there first: the answer a self-test may
+ * check from any CPU, where a bare `el2_call_raw` is answered by the
+ * stub on a CPU the run loop has not readied (S25).
+ */
+int64_t arch_hv_el2_version_here(void)
+{
+    arch_irq_state_t s = arch_irq_save();
+    int64_t v = el2_ready_here() ? el2_call_raw(HV_EL2_CALL_VERSION, 0) : -1;
+    arch_irq_restore(s);
+    return v;
 }
 
 static int el2_probe(struct hv_caps *out)

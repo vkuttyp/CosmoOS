@@ -65,7 +65,7 @@ starts its own timer (BSP in `timer_init`, APs in the SMP PR).
 ## 3. Timer queue
 
 ```c
-enum timer_state { TIMER_IDLE, TIMER_PENDING, TIMER_RUNNING };
+enum timer_state { TIMER_IDLE, TIMER_PENDING };   /* executing is the queue's fact: q->running */
 
 struct timer {
     struct list_node link;
@@ -79,23 +79,55 @@ struct timer {
 struct timer_queue { spinlock_t lock; struct list_node pending; unsigned count; struct timer *running; };
 ```
 
-`timer_start(t, delay_ns)`: panics if state is PENDING (RUNNING is
-allowed so a callback can re-arm its own timer); sets expiry =
+`timer_start(t, delay_ns)`: panics if state is PENDING (a callback
+re-arming its own timer finds IDLE); sets expiry =
 now + delay; inserts sorted (ascending) into the local CPU's queue;
 state PENDING. Runs with interrupts disabled around the queue lock and
 records `t->cpu`.
 
 `timer_cancel(t)`: locks the queue of `t->cpu`; if PENDING, unlinks and
-returns true; if RUNNING (its callback is executing on another CPU) it
-returns false and the caller must not free the timer until
+returns true; otherwise it returns false, and if the callback is
+executing on another CPU (`q->running == t`) the caller must not free
+the timer until it has returned or signalled, or until
 `timer_cancel_sync(t)`, which spins while `q->running == t` and
 re-cancels after every wait (a callback may have re-armed); see
 `docs/kernel/quiesce/design.md`, "timer_cancel_sync".
 
 `timer_run_expired(q, now)`: under the lock, pop entries while
-`head.expires_ns <= now`, mark RUNNING and `q->running = t`, release the
-lock, call `fn`, re-take the lock, clear `q->running`, mark IDLE unless
-the callback re-armed. A callback may re-arm its own timer.
+`head.expires_ns <= now`, mark IDLE and `q->running = t`, release the
+lock, call `fn`, re-take the lock, clear `q->running` -- and touch the
+timer no more (T14; "A timer after its callback" below). A callback may
+re-arm its own timer.
+
+### A timer after its callback
+
+`run_expired` sets a timer IDLE before calling its callback and does not
+touch it afterwards (T14): the callback may have woken the timer's
+owner, and with threads migrating that owner may be running on another
+CPU, unwinding the stack frame the timer lives in, before the callback
+even returns. What the tail needs is the queue's (`q->running`).
+
+### The clock a mechanism keeps time by
+
+`clock_now_ns` is a *reading*: the counter, the measured per-CPU offset,
+and in debug builds the test offset a self-test may inject on one CPU
+(`clock_test_set_cpu_offset_ns`; `clock-skew-detected` puts 2 ms on a
+victim, `lockup-report-skew` five seconds) so that a skewed stamp's
+handling can be checked. A timer, a deadline or a delay is a
+*mechanism*, and keeps time by `clock_time_ns` (internal to `timer.c`):
+the counter and the measured offset, never the test offset. A timer
+armed against a lying clock and expired against the truth fires late by
+the lie; before threads migrated only the injecting test's own pinned
+thread could arm one on the victim during the window, and the chaos
+migrator (scheduler design, "Migration") found the block layer's 500 ms
+scan sleep returning four seconds late on the CPU the lockup skew test
+had lied to. `timer_start`'s start, the tick's `run_expired`,
+`clock_deadline_ns`/`clock_deadline_passed` and `ndelay` use the
+mechanism clock; the tick's `last_tick_ns` stamp, `clock_since_ns` and
+every other reader see the lie, which is what the skew tests examine.
+The skew tests also keep their victim CPU to themselves for the window
+(a pinned higher-priority spinner), so nothing the migrator moves there
+reads it.
 
 ## 4. Sleeping and delays
 
@@ -125,6 +157,6 @@ unsigned arch_timer_vector(void);            /* vector the tick arrives on */
 |---|---|
 | PIT never flips within ~1 s of TSC spinning | panic "timer calibration timed out" |
 | implausible frequencies | panic |
-| timer_start on PENDING/RUNNING timer | panic |
+| timer_start on a PENDING timer | panic |
 | timer freed while PENDING | undetectable; convention + KASSERT on state in debug |
 | tick before timer_init | vector has no handler → arch_trap_unhandled logs spurious |

@@ -13,6 +13,7 @@
 #include <kernel/page.h>
 #include <kernel/pmm.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <arch/irqc.h>
 #include <arch/cpu.h>
@@ -359,7 +360,9 @@ static void smmu_gerror_irq(unsigned vector, struct arch_trap_frame *frame, void
     (void)frame;
     struct smmu *u = arg;
     uint32_t err = rd32(u, SMMU_GERROR);
-    kwarn("iommu: %s: global error 0x%x", u->unit.name, err);
+    kwarn("iommu: %s: global error 0x%x (at %llu ms; eventq cons %u prod %u)", u->unit.name, err,
+          (unsigned long long)(clock_now_ns() / 1000000), u->eventq_cons,
+          rd32(u, SMMU_EVENTQ_PROD) & ((QUEUE_ENTRIES << 1) - 1));
     wr32(u, SMMU_GERRORN, err);   /* acknowledge everything reported */
 }
 

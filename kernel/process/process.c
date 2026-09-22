@@ -1430,7 +1430,7 @@ unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct c
 
 struct process *process_current(void)
 {
-    struct thread *t = this_cpu()->current;
+    struct thread *t = raw_this_cpu()->current;   /* identity: the thread is the same on any CPU that runs it */
     return t ? t->proc : NULL;
 }
 

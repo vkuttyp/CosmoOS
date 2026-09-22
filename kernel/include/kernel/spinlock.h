@@ -49,6 +49,11 @@ void spin_unlock(spinlock_t *lock);
  * the same class (subclass 1..3; docs/kernel/lockdep/invariants.md lists
  * every use). */
 void spin_lock_nested(spinlock_t *lock, unsigned subclass);
+/* lockdep's order check for acquiring `lock` here, without acquiring it:
+ * a self-test provokes an inversion report without ever spinning for a
+ * lock a correct-order holder on another CPU may be waiting to pair with
+ * (the deadlock the report is about). Nothing in release builds. */
+void spin_lock_check_order(spinlock_t *lock);
 arch_irq_state_t spin_lock_irqsave_nested(spinlock_t *lock, unsigned subclass);
 
 /* Try once; true if acquired. */

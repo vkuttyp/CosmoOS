@@ -18,7 +18,7 @@
 #define NS_PER_SEC 1000000000ULL
 #define TICK_NS (NS_PER_SEC / CONFIG_HZ)
 
-enum timer_state { TIMER_IDLE, TIMER_PENDING, TIMER_RUNNING };
+enum timer_state { TIMER_IDLE, TIMER_PENDING };   /* "its callback is executing" is the queue's fact (q->running), not the timer's state */
 
 struct timer;
 typedef void (*timer_fn)(struct timer *t, void *arg);
@@ -71,14 +71,17 @@ uint64_t clock_now_ns(void);
  * diagnostic that sends its reader somewhere. Use this wherever the
  * stamp's CPU is not certainly this one; it costs a compare.
  *
- * **Which stamps those are is about to widen.** A stamp in shared state
- * is foreign today. A `t0` in a local variable is not, because a thread
- * is assigned a CPU once and never moves, so it wakes from a sleep where
- * it slept -- and the sweep that converted those sites did so on a rule
- * that describes the kernel this is becoming
- * (`docs/audit/next-subsystem-thread-migration.md`). Once threads
- * migrate they are all foreign, which is what that unit's step 6 exists
- * to re-check.
+ * **Every stamp a thread keeps across a point where it could be moved
+ * is foreign.** Threads migrate (`sched_migrate`; scheduler S26): a
+ * thread preempted between two reads can resume on another CPU, so a
+ * `t0` in a local variable is a foreign stamp unless both reads happen
+ * with interrupts off or preemption disabled, as the tick's own do. The
+ * sweep that converted the tree's subtractions did so on this rule while
+ * it was still only the rule of the kernel this was becoming
+ * (`docs/audit/next-subsystem-thread-migration.md`); the migration unit
+ * re-checked it (`docs/audit/next-subsystem-percpu-migration.md`) and
+ * found the two plain subtractions that remain are same-CPU by
+ * construction (the tick's cost, the offset measurement's round trip).
  *
  * **This is for time already spent, not for a moment to wait until.** A
  * deadline is a different problem with a different answer: saturating
@@ -238,8 +241,10 @@ const char *clock_name(void);
 void timer_setup(struct timer *t, timer_fn fn, void *arg);
 void timer_start(struct timer *t, uint64_t delay_ns);
 /* True if the timer was pending and is now cancelled. Any context. On
- * return the callback will not START; it may still be RUNNING on the
- * timer's CPU, so the timer and its argument must stay alive. */
+ * return the callback will not START; it may still be executing on the
+ * timer's CPU (the queue's `running`), so the timer and its argument
+ * must stay alive until it has returned or signalled -- the queue itself
+ * touches the timer only before the callback (T14). */
 bool timer_cancel(struct timer *t);
 
 /* Cancel and wait until the callback is not running anywhere: on return

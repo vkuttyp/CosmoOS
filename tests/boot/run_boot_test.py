@@ -586,6 +586,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=180.0, help="seconds before the run is killed")
     ap.add_argument("--expect-selftest", choices=["auto", "yes", "no"], default="auto",
                     help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
+    ap.add_argument("--chaos", action="store_true",
+                    help="a SCHED_CHAOS=1 image: require the migrator's tally line with a count above zero")
     ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn"],
                     help="the kernel was built to crash on purpose: require that crash's panic report "
                          "and the failure exit code instead of a clean boot. 'fault' (the default: "
@@ -609,6 +611,10 @@ def main():
     else:
         required, forbidden = REQUIRED_MARKERS, FORBIDDEN_MARKERS
         expected_exit = EXIT_SUCCESS_VALUE
+    if args.chaos:
+        # The migrator must have moved something, or the boot proved
+        # nothing about the tree under migration (make test-chaos).
+        required = required + [r"^\[ INFO\] sched: chaos migrated [1-9][0-9]* threads from the tick"]
 
     here = os.path.dirname(os.path.abspath(__file__))
     runner = os.path.join(here, "..", "..", "scripts", "qemu-run.sh")

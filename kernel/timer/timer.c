@@ -106,11 +106,41 @@ uint64_t clock_now_ns(void)
      * them would not have been safe.
      */
     uint64_t now = clock_raw_ns();
+    /* Raw, and the one place a stale id changes a value: a thread moved
+     * between reading its id and reading the counter adds the CPU it
+     * left's offset to the CPU it is on's counter. The error is the
+     * difference of two offsets, bounded by their half-widths -- the
+     * residual skew this tree already tolerates (clock_since_ns) -- and
+     * a checked read here would put every clock_now_ns caller under
+     * preemption off for nothing better than that. */
+    unsigned cpu = raw_cpu_id();
     if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
-        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[arch_cpu_id()]);
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[cpu]);
 #if CONFIG_DEBUG
-    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[arch_cpu_id()], __ATOMIC_ACQUIRE));
+    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[cpu], __ATOMIC_ACQUIRE));
 #endif
+    return now;
+}
+
+/*
+ * The clock the kernel keeps time by: the counter and the measured
+ * per-CPU offset, and never the debug builds' injected test offset.
+ *
+ * The test offset (`clock_test_set_cpu_offset_ns`) is a lie told to
+ * *readers* of `clock_now_ns` on one CPU, so that a skewed stamp's
+ * handling can be checked. A timer armed against a lying clock and
+ * expired against the truth fires late by the lie -- five seconds, in
+ * the lockup-report-skew test -- and before threads migrated only the
+ * test's own pinned thread could arm one on the victim CPU during the
+ * window. Now any thread can be there (S26), so timers, deadlines and
+ * delays keep time here, where nothing is injected, and only what reads
+ * the clock as a value sees the test's skew.
+ */
+static uint64_t clock_time_ns(void)
+{
+    uint64_t now = clock_raw_ns();
+    if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[raw_cpu_id()]);   /* raw: the same bounded error as above */
     return now;
 }
 
@@ -199,9 +229,9 @@ static void clock_tick_advance(unsigned me)
 static uint64_t deadline_now_ns(void)
 {
     if (clock_is_common())
-        return clock_now_ns();
+        return clock_time_ns();   /* never the test offset: a deadline is a mechanism, not a reading */
     uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
-    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+    return ticks == 0 ? clock_time_ns() : ticks * TICK_NS;
 }
 
 #if CONFIG_DEBUG
@@ -293,8 +323,8 @@ void ndelay(uint64_t ns)
      * and it does not sleep, so the thread it runs on is the thread that
      * finishes it.
      */
-    uint64_t end = clock_now_ns() + ns;
-    while (clock_now_ns() < end)
+    uint64_t end = clock_time_ns() + ns;   /* a delay is a mechanism: never the test offset */
+    while (clock_time_ns() < end)
         arch_cpu_relax();
 }
 
@@ -307,7 +337,7 @@ void udelay(uint64_t us)
 
 static struct timer_queue *local_queue(void)
 {
-    return this_cpu()->timers;
+    return this_cpu()->timers;   /* checked: every caller arms or cancels with interrupts off */
 }
 
 void timer_setup(struct timer *t, timer_fn fn, void *arg)
@@ -329,10 +359,10 @@ void timer_start(struct timer *t, uint64_t delay_ns)
     struct timer_queue *q = local_queue();
     spin_lock(&q->lock);
 
-    /* IDLE is the normal case. RUNNING means the callback is executing
-     * and is re-arming its own timer, which is allowed: run_expired
-     * leaves a timer alone after the callback when it is no longer
-     * RUNNING. PENDING is a double start and a bug. */
+    /* IDLE is the normal case, and is what a callback re-arming its own
+     * timer sees too: run_expired sets IDLE before calling it and does
+     * not touch the timer afterwards (T13, T14). PENDING is a double
+     * start and a bug. */
     if (t->state == TIMER_PENDING)
         panic("timer_start: timer %p is already pending", (void *)t);
 
@@ -354,7 +384,7 @@ void timer_start(struct timer *t, uint64_t delay_ns)
      * once -- `preempt`, `sleep` and `completion` returned in single
      * milliseconds. Kept as a note, because the two look interchangeable.
      */
-    uint64_t start = clock_now_ns();
+    uint64_t start = clock_time_ns();   /* the timer clock: never the test offset (see clock_time_ns) */
     uint64_t delay = delay_ns == 0 ? 1 : delay_ns;
     t->expires_ns = start + delay < start ? UINT64_MAX : start + delay;
     t->cpu = arch_cpu_id();
@@ -456,7 +486,20 @@ static void run_expired(struct timer_queue *q, uint64_t now)
             break;
         list_remove(&t->link);
         q->count--;
-        t->state = TIMER_RUNNING;
+        /*
+         * IDLE before the callback, and the timer is not touched again
+         * after it: a callback that wakes the timer's owner lets that
+         * owner run -- on another CPU now that threads migrate (scheduler
+         * S26), so *concurrently with this tail* -- and unwind the frame
+         * a stack timer lives in (thread_sleep_ns, io_poll, futex_wait).
+         * The old tail wrote `t->state` after the callback, which was a
+         * write into a dead frame the moment the owner resumed elsewhere.
+         * `q->running` is the queue's, and carries what timer_cancel_sync
+         * waits for; there is no RUNNING state any more, since a state the
+         * queue would have to clear afterwards is exactly what it must not
+         * write. A callback that re-arms sees IDLE.
+         */
+        t->state = TIMER_IDLE;
         q->running = t;
         spin_unlock(&q->lock);
 
@@ -464,8 +507,6 @@ static void run_expired(struct timer_queue *q, uint64_t now)
 
         spin_lock(&q->lock);
         q->running = NULL;
-        if (t->state == TIMER_RUNNING)
-            t->state = TIMER_IDLE; /* unless the callback re-armed it */
     }
     spin_unlock(&q->lock);
 }
@@ -482,11 +523,22 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     clock_tick_advance(pc->cpu_id);
 
     uint64_t now = clock_now_ns();
+#if CONFIG_DEBUG
+    /* The tick-gap detector: a second without a tick on this CPU is an
+     * interrupts-off window neither lockup detector sees (their bar is
+     * ten). Named with where the CPU was when interrupts came back. */
+    if (pc->last_tick_ns != 0 && clock_delta_ns(now, pc->last_tick_ns) > NS_PER_SEC &&
+        __atomic_load_n(&g_test_cpu_offset_ns[pc->cpu_id], __ATOMIC_ACQUIRE) == 0)   /* a test's injected skew reads as a gap */
+        kwarn("timer: cpu %u: no tick for %llu ms; interrupts came back at pc %p (last tick interrupted pc %p, thread '%s')",
+              pc->cpu_id, (unsigned long long)(clock_delta_ns(now, pc->last_tick_ns) / 1000000),
+              (void *)arch_trap_frame_pc(frame), (void *)pc->last_tick_pc,
+              pc->current ? pc->current->name : "-");
+#endif
     /* The tick sample (kernel/core/lockup.c): what this CPU was doing,
      * and when. Two stores; the frame is already in a register. */
     pc->last_tick_pc = arch_trap_frame_pc(frame);
-    pc->last_tick_ns = now;
-    run_expired(pc->timers, now);
+    pc->last_tick_ns = now;   /* a reading: the skew tests want the lie in this stamp */
+    run_expired(pc->timers, clock_time_ns());   /* the timer clock: armed and expired against the same truth */
 #if CONFIG_SELFTEST
     /* Local by construction, and the only subtraction in the tree that
      * is: both reads are this CPU's, inside one tick, with interrupts
@@ -501,7 +553,7 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 
 uint64_t timer_tick_cost_ns(void)
 {
-    return this_cpu()->tick_cost_ns;
+    return raw_this_cpu()->tick_cost_ns;   /* a statistic: some CPU's, for a bench line */
 }
 
 void timer_set_tick_hook(timer_tick_hook_fn hook)
@@ -792,12 +844,12 @@ void clock_measure_offsets(void)
 
 uint64_t timer_ticks(void)
 {
-    return this_cpu()->ticks;
+    return raw_this_cpu()->ticks;   /* a statistic: some CPU's tick count, for diagnostics */
 }
 
 unsigned timer_pending_count(void)
 {
-    struct timer_queue *q = local_queue();
+    struct timer_queue *q = raw_this_cpu()->timers;   /* a statistic: some CPU's queue, counted under its lock */
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
     unsigned n = q->count;
     spin_unlock_irqrestore(&q->lock, s);

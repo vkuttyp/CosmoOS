@@ -3,6 +3,7 @@
  */
 
 #include <kernel/lockdep.h>
+#include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
@@ -20,7 +21,7 @@ void waitqueue_init(struct waitqueue *wq, const char *name)
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
 {
-    struct percpu *pc = this_cpu();
+    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth and the thread are the same wherever it runs */
     if (pc->irq_depth != 0)
         panic("wait_event in interrupt context");
     might_sleep();
@@ -139,10 +140,25 @@ void thread_sleep_ns(uint64_t ns)
     waitqueue_init(&s.wq, "sleep");
     s.done = false;
     timer_setup(&t, sleep_fired, &s);
+#if CONFIG_DEBUG
+    uint64_t t0 = clock_now_ns();
+#endif
     timer_start(&t, ns);
     wait_event(&s.wq, __atomic_load_n(&s.done, __ATOMIC_ACQUIRE));
-    /* The callback has run (done is set after nothing else), so the
-     * timer is idle and the stack objects may go. */
+    /* The callback has run (done is set after nothing else), the timer
+     * queue does not touch the timer after its callback (run_expired),
+     * so the stack objects may go -- even though this thread may be
+     * running on another CPU than the tick that fired it by now. */
+#if CONFIG_DEBUG
+    /* The overshoot detector: a sleep that returns more than a second
+     * late is named, with the CPU whose queue held its timer and the CPU
+     * it woke on (a diagnostic: both reads raw). */
+    uint64_t took = clock_since_ns(t0);
+    if (took > ns + NS_PER_SEC)
+        kwarn("sched: sleep of %llu ms took %llu ms: '%s' armed on cpu %u, woke on cpu %u (t->cpu %d)",
+              (unsigned long long)(ns / 1000000), (unsigned long long)(took / 1000000), thread_current()->name,
+              t.cpu, raw_cpu_id(), thread_current()->cpu);
+#endif
 }
 
 int thread_sleep_ns_killable(uint64_t ns)

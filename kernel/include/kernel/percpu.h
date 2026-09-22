@@ -82,10 +82,59 @@ void percpu_init_boot(void);
 /* Register a CPU's instance (SMP bring-up). Index must be < CONFIG_MAX_CPUS. */
 void percpu_register(struct percpu *pc, unsigned cpu_id);
 
+/*
+ * Which CPU am I on? Two answers, one rule (docs/kernel/scheduler/
+ * invariants.md, S25):
+ *
+ *   A per-CPU answer may be kept only while the thread cannot move:
+ *   preemption disabled, interrupts off, interrupt context, or an
+ *   affinity of one CPU. `preempt_disable()` is the migration barrier --
+ *   a thread that holds it is never THREAD_READY and is never moved.
+ *
+ * `this_cpu()` and `arch_cpu_id()` are the checked forms: in debug
+ * builds they panic, naming the call site, when the rule does not hold
+ * where they are called (kernel/core/percpu.c). `raw_this_cpu()` and
+ * `raw_cpu_id()` are the unchecked forms for the two kinds of read the
+ * rule does not govern, and every use of them says which in a comment:
+ *
+ *   - an answer that is the same on any CPU that runs this thread: the
+ *     thread itself (`->current`), and `preempt_count`/`irq_depth` read
+ *     to assert they are zero, which in a preemptible context they are
+ *     everywhere;
+ *   - a diagnostic or a statistic, where a stale answer is a wrong
+ *     number and never a wrong action.
+ *
+ * A thread that must keep a per-CPU answer across a sleep is created on
+ * that CPU (`thread_create_on` with one bit): the check honours a
+ * one-CPU affinity.
+ */
+static inline struct percpu *raw_this_cpu(void)
+{
+    return arch_percpu_get();
+}
+
+static inline unsigned raw_cpu_id(void)
+{
+    return raw_this_cpu()->cpu_id;
+}
+
+#if CONFIG_DEBUG
+/* Out of line so that its return address is the call site it names. */
+struct percpu *percpu_checked(void);
+static inline struct percpu *this_cpu(void)
+{
+    return percpu_checked();
+}
+
+/* Self-tests: the next violation counts instead of panicking. One-shot. */
+void percpu_claim_expect(void);
+unsigned percpu_claim_expected_hits(void);
+#else
 static inline struct percpu *this_cpu(void)
 {
     return arch_percpu_get();
 }
+#endif
 
 /* Instance for CPU `cpu`, or NULL if never registered. */
 struct percpu *percpu_get(unsigned cpu);
@@ -100,7 +149,7 @@ cpumask_t cpu_online_mask(void);
  * pending; it never reschedules from interrupt context. */
 static inline void preempt_disable(void)
 {
-    this_cpu()->preempt_count++;
+    raw_this_cpu()->preempt_count++;   /* the barrier itself: raw by definition */
     barrier();
 }
 
@@ -122,7 +171,9 @@ uint64_t preempt_point_count(unsigned cpu);
 
 static inline bool preemptible(void)
 {
-    struct percpu *pc = this_cpu();
+    /* Raw: both counts are zero on every CPU a preemptible thread can be
+     * running on, and non-zero only where it cannot move. */
+    struct percpu *pc = raw_this_cpu();
     return pc->preempt_count == 0 && pc->irq_depth == 0;
 }
 

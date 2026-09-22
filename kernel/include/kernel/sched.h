@@ -35,6 +35,11 @@ struct sched_policy {
     struct thread *(*pick_next)(struct runqueue *rq);   /* NULL: run idle */
     void (*tick)(struct runqueue *rq, struct thread *current, uint64_t elapsed_ns);
     void (*slice_new)(struct thread *t);
+    /* A ready thread on `rq` that may leave for some CPU in `allowed`:
+     * not `rq->current`, its affinity admitting one of them; NULL when
+     * none may. Called with `rq->lock` held. The policy chooses which of
+     * the eligible it offers (round-robin: the one it would run last). */
+    struct thread *(*pick_migratable)(struct runqueue *rq, cpumask_t allowed);
 };
 
 extern const struct sched_policy sched_policy_rr;
@@ -68,6 +73,48 @@ void sched_block_current(void);
 /* Tick hook: slice accounting for the current thread on this CPU. */
 struct arch_trap_frame;
 void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame);
+
+/*
+ * Migration: move one ready thread from one CPU's run queue to another's
+ * (docs/kernel/scheduler/design.md, "Migration"; invariants S24-S26).
+ *
+ * Only a THREAD_READY thread that is not its queue's `current` and was
+ * not preempted moves -- a running thread is on its CPU's stack, a
+ * blocked one is on no queue and wakes on its own `t->cpu`, a
+ * woken-before-blocked thread is both current and queued until it runs
+ * `sched_set_running_current`, and a preempted thread stopped where the
+ * tick found it, perhaps between the two instructions of a per-CPU
+ * access (THREAD_FLAG_PREEMPTED).
+ * Both run-queue locks are taken inside, in increasing CPU-id order
+ * (S24), and released before the return. **Neither entry may be called
+ * with a run-queue lock held.** Callable with interrupts off or from a
+ * tick. The result says which check refused, so a caller asks *which*,
+ * never *whether*.
+ */
+enum sched_migrate_result {
+    SCHED_MIGRATED,              /* moved: t->cpu == cpu, queued there */
+    SCHED_MIGRATE_SAME_CPU,      /* already there */
+    SCHED_MIGRATE_NOT_READY,     /* RUNNING (no queue entry), BLOCKED, EXITED; or the queue offered nothing */
+    SCHED_MIGRATE_CURRENT,       /* READY but rq->current: the woken-before-blocked window */
+    SCHED_MIGRATE_PREEMPTED,     /* READY by preemption: may be mid-way through a per-CPU access */
+    SCHED_MIGRATE_AFFINITY,      /* cpu not in t->affinity */
+    SCHED_MIGRATE_OFFLINE,       /* cpu not online, or not a CPU */
+};
+const char *sched_migrate_result_name(enum sched_migrate_result r);
+
+/* Move `t` to `cpu`. */
+enum sched_migrate_result sched_migrate(struct thread *t, unsigned cpu);
+/* Move a thread of the policy's choosing from CPU `from`'s queue to
+ * `to`'s: the selection and the move under both locks, no hand-off.
+ * `*moved` names the thread on SCHED_MIGRATED, NULL otherwise. */
+enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, struct thread **moved);
+/* Moves made since boot (every entry, the chaos migrator included). */
+uint64_t sched_migration_count(void);
+#if CONFIG_SCHED_CHAOS
+/* The chaos migrator's tally (debug builds with SCHED_CHAOS=1): moves
+ * made from the tick, and calls that found nothing to move. */
+void sched_chaos_stats(uint64_t *migrated, uint64_t *refused);
+#endif
 
 struct runqueue *sched_runqueue(unsigned cpu);
 

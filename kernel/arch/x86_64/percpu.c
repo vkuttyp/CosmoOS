@@ -36,14 +36,13 @@ struct percpu *arch_percpu_get(void)
     return pc;
 }
 
-unsigned arch_cpu_id(void)
+unsigned arch_cpu_id_raw(void)
 {
     unsigned id;
     __asm__ volatile("mov %%gs:%c1, %0" : "=r"(id) : "i"(__builtin_offsetof(struct percpu, cpu_id)));
     return id;
 }
 
-/* Module ABI export: a multi-queue driver picks the queue of the CPU it runs on. */
+/* Module ABI export (`arch_cpu_id` itself is exported by kernel/core/percpu.c). */
 #include <kernel/module.h>
-EXPORT_SYMBOL(arch_cpu_id);
-EXPORT_SYMBOL(arch_percpu_get);   /* this_cpu() and preemptible() inline to it: a module may ask whether it may sleep */
+EXPORT_SYMBOL(arch_percpu_get);   /* raw_this_cpu() and preemptible() inline to it: a module may ask whether it may sleep */

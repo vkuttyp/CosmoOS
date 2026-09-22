@@ -40,7 +40,7 @@ bool mutex_trylock(struct mutex *m)
 static void lock_common(struct mutex *m, unsigned subclass, uintptr_t ip)
 {
     struct thread *cur = thread_current();
-    if (this_cpu()->irq_depth != 0)
+    if (raw_this_cpu()->irq_depth != 0)   /* identity: zero on any CPU a sleeping caller runs on */
         panic("mutex_lock('%s') in interrupt context", m->name);
     /* Checked on every acquisition, not only when the mutex is contended
      * and wait_event would notice: a sleeping lock taken under a spinlock

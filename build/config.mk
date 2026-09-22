@@ -72,6 +72,17 @@ PKG_TRUST_PUB ?= $(firstword $(KEYRING_PUBS))
 # Never enable in a build you intend to run for real.
 CRASH_TEST ?= 0
 
+# PERCPU_WARN=1 turns the debug builds' per-CPU claim check (S25) from a
+# panic into a once-per-site warning, so one boot lists every site that
+# reads a per-CPU answer where the thread could move. The sweep's tool;
+# never the shipped form.
+PERCPU_WARN ?= 0
+
+# SCHED_CHAOS=1 (debug builds) arms a migrator in the tick that moves a
+# ready thread to another CPU every few ticks for no reason: the whole
+# suite under migration. `make test-chaos` builds and boots it.
+SCHED_CHAOS ?= 0
+
 # Output tree. Never inside the source directories.
 OUT ?= $(ROOT)/out/$(ARCH)-$(BUILD)
 

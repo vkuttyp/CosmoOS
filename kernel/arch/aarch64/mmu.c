@@ -387,7 +387,7 @@ static uint64_t g_activate_flushes[CONFIG_MAX_CPUS];
 
 uint64_t arch_mmu_activate_flushes(void)
 {
-    return g_activate_flushes[arch_cpu_id()];
+    return g_activate_flushes[raw_cpu_id()];   /* a statistic: some CPU's count */
 }
 
 unsigned arch_mmu_asid_bits(void)
@@ -462,12 +462,18 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
     /* The DSB that completes the broadcast is the acknowledgement of every
      * target: the stats report one shootdown with as many acks as the
      * mask names, the same accounting as the IPI implementation. */
+    /* Preemption off from "not me" to the flush, as the IPI
+     * implementation: the broadcast makes the flush right on every CPU
+     * regardless, but the accounting names this CPU and the rule (S25)
+     * is one rule. */
+    preempt_disable();
     unsigned others = (unsigned)__builtin_popcountll(cpus & cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id()));
     if (others > 0) {
         g_stats[arch_cpu_id()].initiated++;
         g_stats[arch_cpu_id()].acks_received += others;
     }
     arch_mmu_invalidate(ctx, va, len);
+    preempt_enable();
 }
 
 void arch_mmu_invalidate_asid(const struct arch_mmu_context *ctx, cpumask_t cpus)
@@ -500,7 +506,7 @@ void arch_mmu_shootdown_ipi_handler(void)
 
 void arch_mmu_shootdown_stats(struct arch_mmu_shootdown_stats *out)
 {
-    *out = g_stats[arch_cpu_id()];
+    *out = g_stats[raw_cpu_id()];   /* a statistic: some CPU's counters */
 }
 
 size_t arch_mmu_large_page_sizes(void)

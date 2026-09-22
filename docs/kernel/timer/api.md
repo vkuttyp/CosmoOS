@@ -91,16 +91,18 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
   sorted insert (ascending expiry, FIFO on ties).
 - **Interrupt context**: allowed (a callback may re-arm its own timer).
 - **Failure modes**: panics if `t->state == TIMER_PENDING` (double start)
-  or `fn` is NULL. `TIMER_RUNNING` is accepted: a callback may re-arm its
-  own timer.
+  or `fn` is NULL. A callback may re-arm its own timer: it finds IDLE,
+  since the queue sets IDLE before calling it (T13).
 - **Ownership**: the caller owns `t` and must not free it while PENDING
-  or RUNNING.
+  or while its callback is executing; the queue touches it only before
+  the callback (T14).
 
 ### `bool timer_cancel(struct timer *t)`
 - **Purpose**: remove a PENDING timer from the queue of `t->cpu`.
-- **Outputs**: true if it was pending (now IDLE); false if it was IDLE or
-  RUNNING. A RUNNING timer's callback may still be executing on its CPU;
-  the caller must not free it until `timer_cancel_sync`.
+- **Outputs**: true if it was pending (now IDLE); false if it was not.
+  False may mean the callback is executing on its CPU (the queue's
+  `running`); the caller must not free the timer until the callback has
+  returned or signalled, or until `timer_cancel_sync`.
 - **Interrupt context**: yes.
 
 ### `bool timer_cancel_sync(struct timer *t)` *(exported)*

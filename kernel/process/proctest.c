@@ -241,9 +241,13 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
     CHECK(clock_since_ns(t0) < 15000000000ULL);
     process_put(p);
 
-    /* The process object is released once its thread is reaped. */
-    uint64_t deadline = clock_now_ns() + 500000000ULL;
-    while (process_count() != before && clock_now_ns() < deadline)
+    /* The process object is released once its thread is reaped. The
+     * bound catches a leak, not slowness: under the chaos migrator
+     * (`make test-chaos`) the reaper's turn came later than 500 ms once
+     * in about fifty boots, so it is two seconds (LOAD-SENSITIVE,
+     * docs/testing/flakes.md). */
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (process_count() != before && !clock_deadline_passed(deadline))
         sched_yield();
     CHECK(process_count() == before);
     *status_out = status;

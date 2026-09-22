@@ -555,7 +555,14 @@ mask costs IPIs and never correctness.
 
 `arch_mmu_shootdown_cpus(ctx, va, len, cpus)` invalidates on exactly the
 CPUs in `cpus`; `arch_mmu_shootdown` remains the all-online form for
-the kernel space. The VMM calls the mask form for user spaces after every
+the kernel space. **The sender does not leave either**: from computing
+"the others" (everyone in the mask but me) to its own local flush it runs
+with preemption disabled, on both architectures, and `user_shootdown`
+keeps it disabled from reading the mask to the return -- a sender moved
+in between would exclude the CPU it left from the interrupts and then
+flush the CPU it arrived on, leaving the first with the stale
+translation (scheduler S25). The rule above covers a CPU that *joins* the
+space during the shootdown; this covers the sender. The VMM calls the mask form for user spaces after every
 PTE change that can leave a stale translation (unmap, protect), reading
 `tlb_cpus` after a full fence that orders the PTE write before the
 mask read. A CPU switching into the space either has its bit visible to

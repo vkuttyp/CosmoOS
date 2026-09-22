@@ -397,7 +397,7 @@ static int create_ioq(struct nvme_ctrl *c, struct nvme_queue *q)
 
 static struct nvme_queue *queue_for_this_cpu(struct nvme_ctrl *c)
 {
-    return c->ioq[arch_cpu_id() % c->nr_ioq];
+    return c->ioq[raw_cpu_id() % c->nr_ioq];   /* a preference: every queue has its own lock, any CPU may use any */
 }
 
 static int nvme_submit(struct blkdev *bd, struct bio *bio)

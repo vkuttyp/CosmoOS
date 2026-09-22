@@ -15,6 +15,7 @@
 #include <kernel/vmm.h>
 
 #include <arch/context.h>
+#include <arch/cpu.h>
 #include <arch/irq.h>
 
 #include "sched_internal.h"
@@ -157,6 +158,58 @@ struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *n
     t->arg = arg;
     arch_context_init(&t->ctx, t->stack_base + t->stack_size, thread_trampoline);
     return t;
+}
+
+/*
+ * Affinity is written under the run-queue lock of the CPU the thread is
+ * on, which is the lock every reader that decides a move holds
+ * (sched_migrate, pick_migratable): one discipline, no mixed access. A
+ * thread on the move has its `t->cpu` rewritten under both locks, so
+ * the loop re-reads it after locking, as sched_migrate does.
+ */
+static void set_affinity_locked(struct thread *t, cpumask_t affinity)
+{
+    for (;;) {
+        arch_irq_state_t s = arch_irq_save();
+        int cpu = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        KASSERT(cpu >= 0);
+        struct runqueue *rq = sched_runqueue((unsigned)cpu);
+        spin_lock(&rq->lock);
+        if (t->cpu != cpu) {
+            spin_unlock(&rq->lock);
+            arch_irq_restore(s);
+            continue;
+        }
+        KASSERT((affinity & CPUMASK_OF((unsigned)cpu)) != 0);
+        t->affinity = affinity;
+        spin_unlock(&rq->lock);
+        arch_irq_restore(s);
+        return;
+    }
+}
+
+cpumask_t thread_pin_self(void)
+{
+    /* Interrupts off from reading the CPU to writing the mask: the mask
+     * must name the CPU this thread is on when it takes effect, and a
+     * running thread with interrupts off cannot be moved (it is
+     * `rq->current`, and only READY threads move). */
+    arch_irq_state_t s = arch_irq_save();
+    struct thread *t = thread_current();
+    cpumask_t old = t->affinity;
+    set_affinity_locked(t, CPUMASK_OF(arch_cpu_id()));
+    arch_irq_restore(s);
+    return old;
+}
+
+void thread_set_affinity_self(cpumask_t affinity)
+{
+    set_affinity_locked(thread_current(), affinity);
+}
+
+void thread_set_affinity(struct thread *t, cpumask_t affinity)
+{
+    set_affinity_locked(t, affinity);
 }
 
 struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,

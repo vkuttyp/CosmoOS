@@ -784,7 +784,7 @@ the reports, the inventory row, this file twice, and a comment in
 together. Anything that needs the number refers to this section rather
 than repeating it.
 
-**Seventy-two, to 2026-09-22**, across CI and this developer's machine, on
+**Seventy-eight, to 2026-09-22**, across CI and this developer's machine, on
 both architectures. Counted rather than asserted, because the first version
 of this section said eight and then listed nine:
 
@@ -849,6 +849,10 @@ of this section said eight and then listed nine:
 | `main` @ `eadba84` | observed, aarch64, the **GICv3** boot of the named-pipes merge's `main` run on 2026-09-22 (35674273649), read from the logs afterwards: `connect 0 in 1475 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:37448 accepted at 94.1s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 2 ms`, gave up at 114.1s; the plain boot of the same job had passed. Row one, and the second sighting in a GICv3 boot (PR #209's fourth was the first) |
 | this developer's machine, the device-readiness build | observed, x86-64, the plain debug boot on 2026-09-22 (the clean run before that unit's mutation runs, on `6b3ee0a` plus a test-only commit): `connect 0 in 574 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +2 retransmits +0 rsts_in +1`; host side `127.0.0.1:50389 accepted at 78.4s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 12 ms, echo 3 ms`, gave up at 98.4s. Row one, off CI |
 | PR #211's own CI run | observed, aarch64, the **GICv3** boot (`74e208d`, run 35680602142, the device-readiness build; its diff touches the tap's read path and no inet code): `connect 0 in 1178 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40702 accepted at 95.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 2 ms, echo 1 ms`, gave up at 115.0s; the plain boot of the same job had passed. Row one, the third in a GICv3 boot |
+| this developer's machine, the percpu-migration build, **under the chaos migrator**, twice | observed, x86-64, two of the first four `make test-chaos` boots of the final tree on 2026-09-22 (`c3beadc6` and before): `connect 0 in 1200 ms` / `connect 0 in 1309 ms`, `sent 12 in 0 ms`, `recv -104`, `pending error -104`, `outstanding 12 then 12`, `segs_out +4` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:59577 accepted at 83.7s, 0 byte(s)` / `127.0.0.1:59768 accepted at 79.7s, 0 byte(s)`, `[deadline]`, `slirp probe: connect 7 ms, echo 2 ms`. The guest's timeline is the family's (a SYN retransmitted after a second, the data segment lost, a reset), no guest-side detector fired (the READY-stall, sleep-overshoot and tick-gap detectors were in the image), and the plain debug boot of the same tree passed -- but two in four is above the family's rate, and a migrator that moves the retransmit timer's waker and the receive worker between CPUs is the one new variable. Recorded as the family with that caveat; a sighting on a plain boot of this tree would make it the tree's. |
+| this developer's machine, the percpu-migration build, **under the chaos migrator**, twice more | observed, one x86-64 and one AArch64 `make test-chaos` boot of the final tree on 2026-09-22 (`7b6b8b79` and the commit before): `connect 0 in 905 ms` / `connect 0 in 867 ms`, `sent 12 in 0 ms`, `recv -104`, `outstanding 12 then 12`, `segs_out +3` **`retransmits +0`** `rsts_in +1`; host side accepted, `0 byte(s)`, `[deadline]`. Four of thirteen chaos boots against none of the plain ones on this tree. First read as a guest that never retransmitted; read again, `recv -104 in 0 ms` says the reset was already there when the guest asked, right after its send -- the family's reset, arriving after the send instead of before it, and nothing left to retransmit. The harness's failure line now prints the connection's retransmit timer and work state on a short line of its own (`NETTEST: client state:`), which on the CI sighting below showed the pcb already detached by the reset. The family, at a higher rate under the migrator. |
+| PR #213's own CI run | observed, x86-64, the **protection-capable** boot (`test-guard`, `7e0c5147`, run 35709652208): `connect 0 in 1252 ms`, `sent -104`, `recv -1`, `pending error -104`, `outstanding 0 then 0`, `segs_out +3` **`retransmits +1`** `rsts_in +1`; host side `127.0.0.1:40428 accepted at 74.7s, 0 byte(s)`, `[deadline, ESTABLISHED]`, `slirp probe: connect 1 ms, echo 1 ms`; the new state line: `rexmit timer state -1 ... pcb state -1` -- the pcb was already detached by the reset when the harness looked. |
+| PR #213's own CI run, again | observed, aarch64, the **GICv3** boot (`test-gic`, `439d543c`, run 35715715021): the family's signature, host side `127.0.0.1:40928 accepted at 102.0s, 0 byte(s)`, `[deadline, ESTABLISHED]`. |
 
 **A row's prose must not borrow the words the tally counts.** The
 multiplicity of a row is read from "twice" and "three times" in it, so a
@@ -859,7 +863,7 @@ happened while sighting forty-nine was being written, at 50 and then at
 second" or "this PR's second" in prose and leave the two words to the
 count.
 
-Fifty-nine entries, seventy-two occurrences -- and the table is the tally,
+Sixty-three entries, seventy-eight occurrences -- and the table is the tally,
 so a sighting recorded only in prose below is a sighting this section
 has lost (it happened once more on 2026-09-21, and the row is above).
 The first five rows are inherited from the row that recorded them and
@@ -1891,3 +1895,23 @@ and `x.hypercall.nr`, which would settle which of the two it is at no
 cost — the instrument-before-theory point again. Not repaired here; it
 belongs to the vGIC tests.
 
+
+## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
+
+Two sightings from `make test-chaos` on the percpu-migration tree,
+2026-09-22, each once in about fifty chaos boots and never in a plain
+boot:
+
+- `THREADTEST: FAIL 2` on AArch64: `thrtest: FAIL env_reader start at
+  line 1169: rc -17`, the `EEXIST` that `cosmo_thread_start`'s
+  `MAP_FIXED` replacement of its stack reservation used to lose before
+  the map-fixed unit made replacement one operation. The reservation was
+  taken and the replacement refused in the same call, with the process's
+  churn thread growing the environment concurrently; the fixed path's
+  own unmap should leave nothing to refuse. Not understood; recorded
+  with its line, and a second sighting is the time to instrument
+  `vm_user_map_anon_replace`.
+- `tty-isatty`: `process_count() == before` after a 500 ms wait for the
+  child's release once its thread is reaped. The reaper's turn came
+  later than that once under migration; the bound catches a leak, not
+  slowness, and is two seconds now (`LOAD-SENSITIVE`).

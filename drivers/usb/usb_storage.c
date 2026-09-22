@@ -449,10 +449,14 @@ static void usbs_timeout(struct blkdev *bd, struct bio *victim)
     s->bio = NULL;
     s->recovering = true;   /* the slot is this path's until the device is back */
     spin_unlock_irqrestore(&s->lock, f);
-    kwarn("usb-storage: %s: command timed out in phase %u; resetting", bd->name, phase);
+    kwarn("usb-storage: %s: command timed out in phase %u; resetting (at %llu ms)", bd->name, phase,
+          (unsigned long long)(clock_now_ns() / 1000000));
     if (cur != NULL)
         (void)usb_cancel(cur, -ETIMEDOUT);
-    (void)usbs_reset_recovery(s);
+    kdebug("usb-storage: %s: transfer cancelled at %llu ms", bd->name, (unsigned long long)(clock_now_ns() / 1000000));
+    int rrc = usbs_reset_recovery(s);
+    kdebug("usb-storage: %s: reset recovery done (%d) at %llu ms", bd->name, rrc,
+           (unsigned long long)(clock_now_ns() / 1000000));
     f = spin_lock_irqsave(&s->lock);
     s->cur = NULL;
     s->recovering = false;

@@ -19,6 +19,7 @@
  * answers -- a diagnostic that manufactures the stall it diagnoses.
  */
 
+#include <kernel/lockdep.h>
 #include <kernel/lockup.h>
 
 #include <kernel/ipi.h>
@@ -85,12 +86,18 @@ int lockup_reporter(void)
 
 bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)
 {
+    /* From the tick this runs with interrupts off; a self-test calls it
+     * from a thread, and "me" -- excluded from the targets, and the
+     * sample recorded locally -- must be one CPU throughout (S25). The
+     * wait spins with interrupts on, which preemption off allows. */
+    preempt_disable();
     unsigned me = arch_cpu_id();
     int expected = 0;
     *answered = 0;
     if (!__atomic_compare_exchange_n(&g_reporter, &expected, (int)me + 1, false, __ATOMIC_ACQ_REL,
                                      __ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&g_samples_busy, 1, __ATOMIC_RELAXED);
+        preempt_enable();
         return false;
     }
     __atomic_fetch_add(&g_samples, 1, __ATOMIC_RELAXED);
@@ -134,6 +141,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
         arch_cpu_relax();
     }
     *answered = got | CPUMASK_OF(me);
+    preempt_enable();
     return true;
 }
 
@@ -215,6 +223,7 @@ void lockup_print_samples(cpumask_t answered)
             kprintf("cpu %u: no answer in %llu ms; last tick %llu ms ago at pc %p\n", c,
                     (unsigned long long)(LOCKUP_SAMPLE_TIMEOUT_NS / 1000000), (unsigned long long)(age / 1000000),
                     (void *)pc->last_tick_pc);
+            lockdep_dump_held_cpu(c);   /* what it holds, read racily: a deadlock between two silent CPUs shows its pair */
         }
     }
     __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE);

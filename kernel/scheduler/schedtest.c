@@ -231,7 +231,7 @@ bool selftest_irq_route(const char **reason)
     irq_t gsi = irq_legacy_to_gsi((unsigned)isa, &flags);
 
     g_pit_hits = 0;
-    int rc = irq_request(gsi, pit_handler, NULL, "selftest-pit", flags, arch_cpu_id());
+    int rc = irq_request(gsi, pit_handler, NULL, "selftest-pit", flags, raw_cpu_id());   /* a target for the line, not a claim about this thread */
     if (rc == -ENODEV) {
         arch_test_periodic_irq_stop();
         kinfo("selftest: no I/O APIC covers GSI %u; skipping IRQ routing", gsi);
@@ -267,7 +267,7 @@ struct basic_state {
 static void basic_entry(void *arg)
 {
     struct basic_state *st = arg;
-    st->on_cpu = arch_cpu_id();
+    st->on_cpu = raw_cpu_id();   /* recorded for the log, relied on by nothing */
     st->ran = 1;
     thread_exit(7);
 }
@@ -293,7 +293,7 @@ bool selftest_thread(const char **reason)
     struct thread *self = thread_current();
     CHECK(self != NULL && (self->flags & THREAD_FLAG_BOOT));
     CHECK(self->state == THREAD_RUNNING);
-    CHECK(sched_switch_count(arch_cpu_id()) >= 2);
+    CHECK(sched_switch_count(raw_cpu_id()) >= 2);   /* a statistic: some CPU's switches */
     return true;
 }
 
@@ -396,17 +396,17 @@ static void wake_probe_entry(void *arg)
     w->woke_at = clock_now_ns();
 }
 
-bool selftest_preempt_wake(const char **reason)
+static bool selftest_preempt_wake_pinned(const char **reason)
 {
     unsigned before = thread_count();
-    CHECK(arch_cpu_id() == 0);   /* thread 0 lives here, and the waiter is pinned here */
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper: the waiter goes where this thread stays */
     struct wake_probe w;
     semaphore_init(&w.sem, 0, "preempt-wake");
     w.after = 0;
     w.saw = 2;
     w.woke_at = 0;
     struct thread *t = thread_create_on(wake_probe_entry, &w, "wake-probe", SCHED_PRIO_DEFAULT - 16,
-                                        CPUMASK_OF(0));
+                                        CPUMASK_OF(here));
     CHECK(t != NULL);
     /* Post only once it is blocked: a post that finds no waiter wakes
      * nobody and the sentinel would then fail this for the wrong reason
@@ -429,6 +429,18 @@ bool selftest_preempt_wake(const char **reason)
     CHECK(threads_settle(before));
     return true;
 }
+
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_preempt_wake(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_preempt_wake_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /* --- the other shape: a direct sched_wake, no wait-queue wake ---
  *
@@ -456,10 +468,10 @@ static void direct_probe_entry(void *arg)
     d->woke_at = clock_now_ns();
 }
 
-bool selftest_preempt_wake_direct(const char **reason)
+static bool selftest_preempt_wake_direct_pinned(const char **reason)
 {
     unsigned before = thread_count();
-    CHECK(arch_cpu_id() == 0);
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
     struct direct_probe d;
     waitqueue_init(&d.wq, "preempt-wake-direct");
     d.go = 0;
@@ -467,7 +479,7 @@ bool selftest_preempt_wake_direct(const char **reason)
     d.saw = 2;
     d.woke_at = 0;
     struct thread *t = thread_create_on(direct_probe_entry, &d, "direct-probe", SCHED_PRIO_DEFAULT - 16,
-                                        CPUMASK_OF(0));
+                                        CPUMASK_OF(here));
     CHECK(t != NULL);
     uint64_t deadline = clock_now_ns() + MS(1000);
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
@@ -488,6 +500,18 @@ bool selftest_preempt_wake_direct(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_preempt_wake_direct(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_preempt_wake_direct_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 /* --- the post inside a bare interrupts-off region ---
  *
  * The post's own unlock restores interrupts to *off* (the caller had
@@ -496,17 +520,17 @@ bool selftest_preempt_wake_direct(const char **reason)
  * lives in the restore and not in `spin_unlock_irqrestore`. The store
  * comes after the restore: inside the region nothing can run.
  */
-bool selftest_preempt_wake_locked(const char **reason)
+static bool selftest_preempt_wake_locked_pinned(const char **reason)
 {
     unsigned before = thread_count();
-    CHECK(arch_cpu_id() == 0);
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
     struct wake_probe w;
     semaphore_init(&w.sem, 0, "preempt-wake-locked");
     w.after = 0;
     w.saw = 2;
     w.woke_at = 0;
     struct thread *t = thread_create_on(wake_probe_entry, &w, "wake-probe-locked", SCHED_PRIO_DEFAULT - 16,
-                                        CPUMASK_OF(0));
+                                        CPUMASK_OF(here));
     CHECK(t != NULL);
     uint64_t deadline = clock_now_ns() + MS(1000);
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
@@ -528,6 +552,18 @@ bool selftest_preempt_wake_locked(const char **reason)
     return true;
 }
 
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+bool selftest_preempt_wake_locked(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_preempt_wake_locked_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+
 #if CONFIG_SELFTEST
 /*
  * The debug probe behind `init --selftest`'s preempt-wake-syscall step:
@@ -540,14 +576,14 @@ bool selftest_preempt_wake_locked(const char **reason)
  * report described two sequence numbers; the one flag says the same
  * thing. Privilege is checked by the caller in native.c.
  */
-int sched_preempt_probe_sysctl(char *out, size_t n)
+static int sched_preempt_probe_sysctl_pinned(char *out, size_t n)
 {
     struct wake_probe w;
     semaphore_init(&w.sem, 0, "preempt-probe");
     w.after = 0;
     w.saw = 2;
     w.woke_at = 0;
-    unsigned cpu = arch_cpu_id();   /* threads do not migrate: the caller stays here */
+    unsigned cpu = arch_cpu_id();   /* pinned by the wrapper: the caller stays here */
     struct thread *t = thread_create_on(wake_probe_entry, &w, "preempt-probe", SCHED_PRIO_DEFAULT - 16,
                                         CPUMASK_OF(cpu));
     if (t == NULL)
@@ -565,6 +601,18 @@ int sched_preempt_probe_sysctl(char *out, size_t n)
     return ksnprintf(out, n, "saw=%u latency_us=%llu", w.saw,
                      (unsigned long long)((w.woke_at - sent) / 1000));
 }
+
+/* Pinned to the CPU it starts on for the whole test: the CPUs it names
+ * as "here" and "another" are claims about this thread's CPU that must
+ * outlive its sleeps (S25). The pin is the affinity the check honours. */
+int sched_preempt_probe_sysctl(char *out, size_t n)
+{
+    cpumask_t saved = thread_pin_self();
+    int r = sched_preempt_probe_sysctl_pinned(out, n);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 #endif
 
 /* --- the cost of the restore point: a million save/restore pairs --- */
@@ -580,7 +628,7 @@ bool selftest_irqrestore_bench(const char **reason)
     uint64_t dt = clock_since_ns(t0);
     kinfo("selftest: irqrestore-bench: %u save/restore pairs in %llu us, %llu ns a pair; restore-point preemptions so far on this CPU: %llu",
           N, (unsigned long long)(dt / 1000), (unsigned long long)(dt / N),
-          (unsigned long long)preempt_point_count(arch_cpu_id()));
+          (unsigned long long)preempt_point_count(raw_cpu_id()));   /* a statistic */
     return true;
 }
 

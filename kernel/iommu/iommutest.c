@@ -145,6 +145,35 @@ bool selftest_iommu(const char **reason)
         uint64_t bad = IOMMU_IOVA_HI - PAGE_SIZE;      /* the last page: the allocator hands out the lowest */
         uint8_t *sec = kmalloc(512, 0);
         struct iommu_stats before;
+        /* The previous device's fault storm must be over first: a device
+         * retries its faulting DMA a few hundred times, the unit's event
+         * queue holds 256, and a storm still running when the next
+         * device faults overflows it and drops that device's events (the
+         * chaos migrator found the storm spilling into the next window
+         * in one AArch64 boot in two). Wait for the count to hold still. */
+        {
+            uint64_t quiet_ns = 0, last = 0;
+            uint64_t t_q = clock_now_ns();
+            while (quiet_ns < 30ull * 1000000 && clock_since_ns(t_q) < 2000ull * 1000000) {
+                iommu_get_stats(&before);
+                if (before.faults != last) {
+                    last = before.faults;
+                    quiet_ns = 0;
+                }
+                thread_sleep_ms(2);
+                quiet_ns += 2000000;
+            }
+            if (quiet_ns < 30ull * 1000000) {
+                /* Closed, not open: a storm still running would recreate
+                 * the overflow this wait exists to prevent. */
+                kerror("selftest: iommu: %s: the previous device's fault storm did not quiesce in 2 s (%llu faults and counting)",
+                       bd->name, (unsigned long long)last);
+                why = "a fault storm did not quiesce before the next device";
+                kfree(sec);
+                blkdev_put(bd);
+                break;
+            }
+        }
         iommu_get_stats(&before);
         uint64_t mine0 = 0;
         for (unsigned k = 0; k < before.nr_requesters; k++)
@@ -157,7 +186,10 @@ bool selftest_iommu(const char **reason)
              * QEMU's controllers report success for a transfer whose data
              * never arrived. What must hold is that the write did not reach
              * memory and that the unit said so, naming this requester. */
-            (void)bd->ops->debug_dma(bd, bad);
+            uint64_t t_dma = clock_now_ns();
+            int dma_rc = bd->ops->debug_dma(bd, bad);
+            kdebug("selftest: iommu: %s: debug_dma returned %d in %llu us (sid %04x had %llu event(s) before)", bd->name,
+                   dma_rc, (unsigned long long)(clock_since_ns(t_dma) / 1000), sid, (unsigned long long)mine0);
             uint64_t mine = mine0;
             for (unsigned ms = 0; ms < 500 && mine == mine0; ms++) {    /* the fault interrupt is asynchronous */
                 iommu_get_stats(&s1);
@@ -167,8 +199,12 @@ bool selftest_iommu(const char **reason)
                 if (mine == mine0)
                     thread_sleep_ms(1);
             }
-            if (mine == mine0)
+            if (mine == mine0) {
+                iommu_get_stats(&s1);
+                kerror("selftest: iommu: %s: no event for sid %04x after the wait; the unit counts %llu faults in all (%llu before this device)",
+                       bd->name, sid, (unsigned long long)s1.faults, (unsigned long long)before.faults);
                 why = "the unit reported no fault for the device's requester";
+            }
             else if (sec == NULL || blk_read(bd, 0, 1, sec) != 0)
                 why = "the device did not survive the fault";   /* mapped DMA still works */
             else

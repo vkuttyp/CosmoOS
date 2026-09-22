@@ -40,18 +40,22 @@ raw lock. The field exists in every build so the module ABI has one layout:
 
 The graph and the class table are one `struct lockdep_state` behind pure
 inline functions in `lockdep_core.h` (class lookup, edge add, reachability),
-so the host test drives them under the sanitizers. The bitmap is 640 nodes ×
-80 bytes = 50 KiB.
+so the host test drives them under the sanitizers. The bitmap is 1280 nodes
+(320 classes × 4 subclasses) × 160 bytes = 200 KiB, debug builds only.
 
 ## Classes and nodes
 
-A class is a lock's initialisation name: the string literal passed to
+A class is a lock's initialisation name: the pointer passed to
 `SPINLOCK_INIT`, `spinlock_init` or `mutex_init`. Locks initialised from one
 site share the name pointer and are one class (every `vnode->lock`, every
-`socket->lock`, every run queue); the linker merges identical literals from
-different sites, which is what the rule wants (two locks named `"tcp"` are
-the same class). A dynamically built name is not a valid class key and the
-tree has none.
+`socket->lock`); the linker merges identical literals from different sites,
+which is what the rule wants (two locks named `"tcp"` are the same class).
+A name built at run time is a valid key only in storage that lives as long
+as the lock and is never rebuilt: the run queues use one, a static table of
+`"runqueue0"`, `"runqueue1"`, ... in `sched.c`, so that each queue's lock is
+its own class and the increasing-CPU-id order of two of them (scheduler S24)
+is an order this checker sees. A name on the stack or in a freed buffer is
+not a valid key, and the tree has none.
 
 A node is (class, subclass). Subclass 0 is the default. A lock taken while
 another lock of the same class is held is a **recursive acquisition** report

@@ -82,6 +82,12 @@ jobs:
       - name: Boot test on a protection-capable CPU (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
 
+      # The same suite with a migrator in the tick moving ready threads
+      # between CPUs for no reason (docs/kernel/scheduler/design.md,
+      # "Migration"): every concurrency test, with threads moving under it.
+      - name: Boot test under a chaos migrator (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-chaos
+
       - name: Build and boot test (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 

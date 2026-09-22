@@ -156,6 +156,35 @@ join; the queue is empty.
 - Stress: thousands of short-lived threads, thread creation from inside
   threads, and randomised sleep/wake interleavings.
 
+## Migration (`kernel/scheduler/smptest.c`)
+
+| test | asserts |
+|---|---|
+| `percpu-claim` | with the expectation armed, an unpinned preemptible `arch_cpu_id()` and `this_cpu()` are each reported once; the same reads under `preempt_disable`, under `arch_irq_save`, under a self-pin, and from a thread created on one CPU are not, and the test names which quiet form spoke if one does |
+| `lockdep-rq-order` | after a migration attempt from 0 to 1 recorded `runqueue0 -> runqueue1`, holding 1 and asking the checker about 0 (`spin_lock_check_order`, never taking it) is reported as an inversion (S24 is a checked order). It asks rather than takes because under the chaos migrator a tick on another CPU holds the pair in the right order at the same moment, and the test's spin for the second lock was that deadlock |
+| `sched-migrate` | a worker held READY on CPU A behind a higher-priority pinned spinner, its mask widened to {A, B}, is moved to B by `sched_migrate` and its *first* recorded CPU is B; the migration count rose. The test thread pins itself, so A and B are two other CPUs (three online needed, else skipped) |
+| `sched-migrate-refuses` | each refusal by name: a worker pinned to A -> `affinity`; to A itself -> `same-cpu`; to `cpu_count()` -> `offline`; the running spinner -> `not-ready`; a thread that has run `waitqueue_prepare` (BLOCKED, still running) -> `not-ready`; the same thread woken (READY, queued, still `rq->current`, held there by `preempt_disable`) -> `current`; a worker that has run on A and is then displaced by a higher-priority spinner pinned to A (READY, queued, not current) -> `preempted` |
+| `sched-migrate-stress` | 200 ms: eight spinners, eight 1 ms sleepers, four completion ping-pong pairs, two mutex contenders, and a migrator calling `sched_migrate_from` on random CPU pairs; every worker progressed, none ever found itself outside its mask (checked under `preempt_disable` each round), at least 100 migrations happened (about 3,500 on four CPUs) |
+
+Every test that reads "my CPU" and keeps it across a sleep -- the
+preempt-wake trio, the lockup tests, the NMI entry test -- runs pinned
+(`thread_pin_self` in a wrapper), and every worker that records the CPU
+it ran on reads it under `preempt_disable`; the rest read raw with a
+reason. A test that switches address spaces from thread context (the
+ASID tests, `uaccess-guard`) reads the CPU's current space and switches
+with interrupts off, as the switch path does.
+
+**The suite under migration: `make test-chaos`.** A `SCHED_CHAOS=1`
+debug image whose tick moves one ready thread to another CPU every
+fourth tick, on every CPU, booted through the whole suite and the
+user-mode sections; the boot test requires the tally line
+`sched: chaos migrated N threads from the tick` with `N > 0`. CI runs
+it on both architectures. Thread 0, the self-test thread, is not
+pinned: it moves too. A benchmark's rate is not a claim the migrator
+must keep (`net-nicbench` reports rather than asserts its reply rate in
+this build, after CI's slower host moved its sender behind the busy
+receive worker), and a test that names another CPU pins itself.
+
 ## Waits and time bounds
 
 A test waits for the property, never for an interval: a bounded deadline

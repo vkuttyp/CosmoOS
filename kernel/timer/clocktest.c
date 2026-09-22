@@ -368,7 +368,7 @@ bool selftest_clock_scope_aarch64(const char **reason)
  * made those subtractions saturate. This test would have been a hazard
  * on the tree as it stood an hour ago.
  */
-bool selftest_clock_skew_detected(const char **reason)
+static bool selftest_clock_skew_detected_pinned(const char **reason)
 {
     /*
      * Tested against a bound this test sets, not against whatever the
@@ -382,8 +382,9 @@ bool selftest_clock_skew_detected(const char **reason)
      * detected, and is it weighed against the advertised bound --
      * does not depend on the machine promising anything.
      */
-    unsigned victim = CONFIG_MAX_CPUS;
-    for (unsigned c = 1; c < cpu_count(); c++) {
+    unsigned victim = CONFIG_MAX_CPUS, me = arch_cpu_id();   /* pinned by the wrapper: the skew goes on another CPU */
+    for (unsigned i = 1; i < cpu_count(); i++) {
+        unsigned c = (me + i) % cpu_count();
         if (cpu_online(c)) {
             victim = c;
             break;
@@ -446,6 +447,19 @@ bool selftest_clock_skew_detected(const char **reason)
     }
     return ok;
 }
+
+/* Pinned for the whole test: "another CPU than mine" is a claim about
+ * this thread's CPU that must outlive its sleeps (S25); a holder or a
+ * spinner parked on that other CPU must never find this thread queued
+ * behind it. */
+bool selftest_clock_skew_detected(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_clock_skew_detected_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 
 /*
  * The machine-wide tick, and the handover that keeps it from stalling.

@@ -142,7 +142,8 @@ invalidates locally, increments the ack counter. Not for other callers.
 ### `struct thread *thread_create_on(entry, arg, name, priority, cpumask_t affinity)`
 - **Purpose**: `thread_create` restricted to the CPUs in `affinity`.
 - **Outputs**: the thread is placed on the least loaded online CPU in the
-  mask at creation and never migrates.
+  mask at creation; a migrator (`sched_migrate`, scheduler S26) may move
+  it later, and only within the mask.
 - **Failure modes**: NULL if the mask contains no online CPU or on
   allocation failure. `thread_create` is `thread_create_on(...,
   CPUMASK_ALL)`.
