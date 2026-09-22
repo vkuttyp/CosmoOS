@@ -1012,7 +1012,8 @@ bool selftest_net_harness(const char **reason)
                 "sndbuf free %u before, %u after send, %u after read "
                 "(outstanding %d then %d), state %d, "
                 "segs_out +%llu retransmits +%llu refused +%llu rsts_in +%llu "
-                "(counters from before the connect)\n",
+                "(counters from before the connect); rexmit timer state %d on cpu %u expiring in %lld ms "
+                "(rto %llu ms), work queued %d flags 0x%x, pcb state %d\n",
                 rc, (unsigned long long)connect_ms,
                 (long long)sent, (unsigned long long)send_ms,
                 (long long)got, (unsigned long long)recv_ms, pending,
@@ -1021,7 +1022,13 @@ bool selftest_net_harness(const char **reason)
                 (unsigned long long)(t1.segs_out - t0.segs_out),
                 (unsigned long long)(t1.retransmits - t0.retransmits),
                 (unsigned long long)(t1.out_refused - t0.out_refused),
-                (unsigned long long)(t1.rsts_in - t0.rsts_in));
+                (unsigned long long)(t1.rsts_in - t0.rsts_in),
+                c->tcp ? (int)c->tcp->rexmit.state : -1, c->tcp ? c->tcp->rexmit.cpu : 0u,
+                c->tcp ? (long long)((int64_t)c->tcp->rexmit.expires_ns - (int64_t)clock_now_ns()) / 1000000 : 0,
+                c->tcp ? (unsigned long long)(c->tcp->rto_ns / 1000000) : 0ull,
+                c->tcp ? (int)__atomic_load_n(&c->tcp->work.queued, __ATOMIC_ACQUIRE) : -1,
+                c->tcp ? __atomic_load_n(&c->tcp->work_flags, __ATOMIC_ACQUIRE) : 0u,
+                c->tcp ? (int)c->tcp->state : -1);
     }
 
     /* Serve echo until the harness sends QUIT (60 s budget). */
