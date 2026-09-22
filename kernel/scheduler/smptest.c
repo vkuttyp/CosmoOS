@@ -800,8 +800,12 @@ bool selftest_lockdep_rq_order(const char **reason)
     lockdep_expect(LOCKDEP_R_INVERSION);
     arch_irq_state_t s = arch_irq_save();
     spin_lock(&rq1->lock);
-    spin_lock(&rq0->lock);   /* the reversed pair: reported, the expectation consumes it */
-    spin_unlock(&rq0->lock);
+    /* The reversed pair, asked of the checker without taking the second
+     * lock: reported, the expectation consumes it. Taking it for real
+     * spun against a chaos tick on another CPU holding the pair in the
+     * right order -- the very deadlock the report is about -- and hung
+     * every CPU with interrupts off. */
+    spin_lock_check_order(&rq0->lock);
     spin_unlock(&rq1->lock);
     arch_irq_restore(s);
     if (lockdep_expected_hits() != hits + 1) {

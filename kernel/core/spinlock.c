@@ -81,6 +81,16 @@ void spin_lock_nested(spinlock_t *lock, unsigned subclass)
     lock_common(lock, subclass, (uintptr_t)__builtin_return_address(0));
 }
 
+void spin_lock_check_order(spinlock_t *lock)
+{
+#if CONFIG_LOCKDEP
+    lockdep_acquire_check(&lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, arch_irq_enabled(),
+                          (uintptr_t)__builtin_return_address(0));
+#else
+    (void)lock;
+#endif
+}
+
 bool spin_trylock(spinlock_t *lock)
 {
     preempt_disable();
