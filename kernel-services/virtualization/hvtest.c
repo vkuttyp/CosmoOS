@@ -1178,14 +1178,43 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     CHECK(vcpu_run(v, &x) == 0);
     CHECK_HC(x, 42);   /* acknowledged */
     CHECK(vcpu_inject(v, 42) == 0);                                     /* again, while Active */
-    CHECK(vcpu_run(v, &x) == 0);
-    /* The guest completed the first and went back to its heartbeat. The
-     * second injection must still be pending: the completion of one
-     * instance is not the delivery of the next. */
-    CHECK_HC(x, 2);
-    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
-    CHECK(vcpu_run(v, &x) == 0);
-    CHECK_HC(x, 42);   /* and now it arrives */
+    /*
+     * The claim is that the second instance is *kept*: the completion of
+     * one instance is not the delivery of the next, and the second is
+     * delivered afterwards exactly once.
+     *
+     * It is not a claim about where the guest is when that happens. Once
+     * the guest deactivates the first instance the second is pending and
+     * unmasked, so it may be taken immediately -- before the guest
+     * reaches the heartbeat at the top of its loop -- or after one or
+     * more heartbeats, depending only on how the run is scheduled. This
+     * test asserted the second ordering and flaked on the first, twice
+     * on aarch64 CI, and the instrument built after the second sighting
+     * named it on the third: `expected hypercall 2, got exit kind 4
+     * hypercall nr 42` (docs/testing/flakes.md).
+     *
+     * So: run until the second instance arrives, allowing heartbeats on
+     * the way and requiring 42 to read as pending at each of them.
+     */
+    unsigned heartbeats = 0;
+    bool second_arrived = false;
+    for (unsigned i = 0; i < 8 && !second_arrived; i++) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42) {
+            second_arrived = true;
+        } else {
+            CHECK_HC(x, 2);   /* anything else fails here, naming what came */
+            heartbeats++;
+            CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
+        }
+    }
+    if (!second_arrived) {
+        *reason = "the second injection of the same INTID was never delivered";
+        return false;
+    }
+    kinfo("selftest: hv: the second instance of INTID 42 arrived after %u heartbeat(s)", heartbeats);
+    /* And exactly once: the guest is back at its heartbeat with nothing
+     * pending and no third delivery. */
     CHECK(vcpu_run(v, &x) == 0);
     CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);

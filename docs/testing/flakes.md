@@ -1933,8 +1933,33 @@ fifty-one plain hypercall expectations in that file go through it. The
 next sighting will say which of the two candidates it is instead of
 only that it was not hypercall 2.
 
-Nothing is repaired: the instrument is the whole of this change, and
-the next sighting is the one that gets a diagnosis.
+**And the next sighting, hours later, was diagnosed by it.** PR #215's
+aarch64 GICv3 boot again (run 35730173247):
+
+```text
+[ERROR] selftest: hv: line 1185: expected hypercall 2, got exit kind 4 hypercall nr 42 a0 0
+SELFTEST: el2-guest-irq-queue ... FAIL: unexpected vm exit at line 1185
+```
+
+Kind 4 **is** `COSMO_VM_EXIT_HYPERCALL`, so it was not a different kind
+of exit. It was hypercall **42**: the guest took the second instance of
+INTID 42 instead of reaching the heartbeat at the top of its loop. That
+is the first of the two candidates named above, and it is not a defect
+in the vGIC -- once the guest deactivates the first instance the second
+is pending and unmasked, so taking it immediately is correct. Whether
+the heartbeat happens first is a matter of how the run is scheduled.
+
+So the test was asserting a timing accident. It now runs until the
+second instance arrives, allowing heartbeats on the way and requiring
+42 to read as pending at each of them, then requires the guest back at
+its heartbeat with nothing pending -- the substance, which is that the
+second instance is kept and delivered exactly once, without the
+ordering that was never guaranteed. It reports how many heartbeats
+intervened, so the two orderings stay visible.
+
+Three sightings, one instrument, one diagnosis, one fix. The
+instrument stays: the fifty-one hypercall expectations in that file
+now name what they got.
 
 
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
