@@ -43,6 +43,12 @@ enum thread_state {
 
 #define THREAD_FLAG_IDLE  (1u << 0)  /* a CPU's idle thread */
 #define THREAD_FLAG_BOOT  (1u << 1)  /* thread 0: stack is the boot stack */
+/* Switched out by preemption -- an interrupt return or preempt_enable --
+ * at a point of its code it did not choose, so it may be between the two
+ * instructions of a per-CPU access (the pointer to its CPU's block, then
+ * the field) and must resume on the CPU it left: not migratable until it
+ * runs again (S26). Set and cleared under the run-queue lock. */
+#define THREAD_FLAG_PREEMPTED (1u << 2)
 
 struct waitqueue;
 struct process;

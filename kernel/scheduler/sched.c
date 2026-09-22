@@ -308,6 +308,18 @@ static void schedule_internal(bool preempt)
      * which need not be this one. */
     prev->run_time_ns += clock_delta_ns(now, prev->last_start_ns);
 
+    /*
+     * A thread switched out by preemption stopped at a point it did not
+     * choose: it may hold the pointer to this CPU's block and be about
+     * to read or write a field of it -- `preempt_disable` itself is the
+     * pointer, then the count. Such a thread must resume here, so it is
+     * marked and no migrator moves it until it has run again (S26). A
+     * thread that yields or blocks stopped at a call of its own, with no
+     * such access in flight, and may move.
+     */
+    if (preempt && prev != rq->idle)
+        prev->flags |= THREAD_FLAG_PREEMPTED;
+
     if (prev->state == THREAD_EXITED) {
         KASSERT(!preempt);
         rq->prev_exited = prev;
@@ -331,6 +343,7 @@ static void schedule_internal(bool preempt)
 
     if (next == prev) {
         prev->state = THREAD_RUNNING;
+        prev->flags &= ~THREAD_FLAG_PREEMPTED;
         prev->last_start_ns = now;
         spin_unlock(&rq->lock);
         arch_irq_restore(s);
@@ -338,6 +351,7 @@ static void schedule_internal(bool preempt)
     }
 
     next->state = THREAD_RUNNING;
+    next->flags &= ~THREAD_FLAG_PREEMPTED;   /* it runs again: whatever it had in flight completes here */
     next->cpu = (int)rq->cpu;
     next->last_start_ns = now;
     next->switches++;
@@ -432,6 +446,7 @@ const char *sched_migrate_result_name(enum sched_migrate_result r)
     case SCHED_MIGRATE_SAME_CPU: return "same-cpu";
     case SCHED_MIGRATE_NOT_READY: return "not-ready";
     case SCHED_MIGRATE_CURRENT: return "current";
+    case SCHED_MIGRATE_PREEMPTED: return "preempted";
     case SCHED_MIGRATE_AFFINITY: return "affinity";
     case SCHED_MIGRATE_OFFLINE: return "offline";
     }
@@ -457,7 +472,8 @@ static void rq_unlock_pair(unsigned a, unsigned b)
 static void migrate_locked(struct thread *t, unsigned from, unsigned to)
 {
     struct runqueue *rqf = &g_rqs[from], *rqt = &g_rqs[to];
-    KASSERT(t->state == THREAD_READY && t != rqf->current && t->cpu == (int)from);
+    KASSERT(t->state == THREAD_READY && t != rqf->current && t->cpu == (int)from &&
+            (t->flags & THREAD_FLAG_PREEMPTED) == 0);
     g_policy->dequeue(rqf, t);
     t->cpu = (int)to;
     g_policy->enqueue(rqt, t, false);
@@ -501,6 +517,8 @@ enum sched_migrate_result sched_migrate(struct thread *t, unsigned to)
             r = SCHED_MIGRATE_NOT_READY;
         else if (g_rqs[from].current == t)
             r = SCHED_MIGRATE_CURRENT;
+        else if (t->flags & THREAD_FLAG_PREEMPTED)
+            r = SCHED_MIGRATE_PREEMPTED;
         else if ((t->affinity & CPUMASK_OF(to)) == 0)
             r = SCHED_MIGRATE_AFFINITY;
         else if (!cpu_online(to))

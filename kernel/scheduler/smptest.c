@@ -1027,6 +1027,38 @@ static bool sched_migrate_refuses_pinned(const char **reason)
         return false;
     }
 
+    /* A preempted thread: a worker that has run on a, then a higher
+     * priority spinner pinned to a takes the CPU from it. READY, queued,
+     * not current -- and refused, because it stopped where the tick
+     * found it, perhaps between the two instructions of a per-CPU read. */
+    struct mig_worker pw = { .cpu = ~0u };
+    struct thread *tp = thread_create_on(mig_worker_main, &pw, "mig-preempted", SCHED_PRIO_DEFAULT,
+                                         CPUMASK_OF(a) | CPUMASK_OF(b));
+    CHECK(tp != NULL);
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (pw.runs == 0 && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    struct mig_spinner sp2 = { 0 };
+    unsigned on = pw.cpu;   /* where it runs; the spinner goes there */
+    struct thread *ts2 = on == a || on == b ? thread_create_on(mig_spinner_main, &sp2, "mig-spin2", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(on)) : NULL;
+    bool preempted = ts2 != NULL && wait_ready_on(tp, on);
+    if (preempted) {
+        r = sched_migrate(tp, on == a ? b : a);
+        if (r != SCHED_MIGRATE_PREEMPTED) {
+            kerror("selftest: sched-migrate-refuses: a preempted worker: %s", sched_migrate_result_name(r));
+            ok = false;
+        }
+    }
+    __atomic_store_n(&pw.release, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sp2.stop, 1u, __ATOMIC_RELEASE);
+    if (ts2)
+        thread_join(ts2);
+    thread_join(tp);
+    if (!preempted) {
+        *reason = "the worker never ran, or was never preempted on its CPU";
+        return false;
+    }
+
     /* A blocked thread, and then the window: the probe prepares to wait
      * (BLOCKED, still running), and is then woken (READY, queued, still
      * its CPU's current). */
@@ -1038,7 +1070,7 @@ static bool sched_migrate_refuses_pinned(const char **reason)
      * off until told to go, and the teller must be able to run. */
     struct thread *tv = thread_create_on(window_main, &wp, "mig-window", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
     CHECK(tv != NULL);
-    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    deadline = clock_deadline_ns(2000000000ULL);
     while (!__atomic_load_n(&wp.in_window, __ATOMIC_ACQUIRE) && !clock_deadline_passed(deadline))
         thread_sleep_ms(1);
     if (!wp.in_window) {
@@ -1068,7 +1100,7 @@ static bool sched_migrate_refuses_pinned(const char **reason)
         return false;
     }
     CHECK(threads_settle(before));
-    kinfo("selftest: sched-migrate-refuses: affinity, same-cpu, offline, not-ready (running and blocked) and current (the window) each refused by name");
+    kinfo("selftest: sched-migrate-refuses: affinity, same-cpu, offline, not-ready (running and blocked), preempted and current (the window) each refused by name");
     return true;
 }
 

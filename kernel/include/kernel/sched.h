@@ -93,6 +93,7 @@ enum sched_migrate_result {
     SCHED_MIGRATE_SAME_CPU,      /* already there */
     SCHED_MIGRATE_NOT_READY,     /* RUNNING (no queue entry), BLOCKED, EXITED; or the queue offered nothing */
     SCHED_MIGRATE_CURRENT,       /* READY but rq->current: the woken-before-blocked window */
+    SCHED_MIGRATE_PREEMPTED,     /* READY by preemption: may be mid-way through a per-CPU access */
     SCHED_MIGRATE_AFFINITY,      /* cpu not in t->affinity */
     SCHED_MIGRATE_OFFLINE,       /* cpu not online, or not a CPU */
 };
