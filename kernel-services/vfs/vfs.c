@@ -1508,6 +1508,22 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
              : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     }
     mutex_lock(&vn->lock);
+    /*
+     * A file somebody is executing does not change underneath them.
+     * Shared text means the running program's instructions *are* these
+     * pages, so a write here would rewrite them in every process at
+     * once; POSIX names the refusal and this is where it belongs, under
+     * the lock the write itself holds, with the cache lock taken inside
+     * it (the order is vnode -> pagecache)
+     * (docs/audit/next-subsystem-elf-shared-text.md).
+     */
+    pagecache_lock(vn);
+    bool busy = pagecache_text_busy(vn);
+    pagecache_unlock(vn);
+    if (busy) {
+        mutex_unlock(&vn->lock);
+        return -ETXTBSY;
+    }
     int64_t n = pagecache_write(vn, off, buf, len);
     if (n > 0)
         vn->mtime_ns = vfs_now_ns();   /* vnode state, so it stays inside */

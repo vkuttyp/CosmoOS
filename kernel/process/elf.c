@@ -266,7 +266,7 @@ int elf_load_into(struct vm_space *space, const void *image, const struct elf_in
             size_t span = (size_t)(((s->file_vaddr - s->vaddr) + s->filesz + PAGE_SIZE - 1) &
                                    ~(uint64_t)(PAGE_SIZE - 1));
             int rc = vm_user_map_file(space, s->vaddr, span, seg_prot(s->flags),
-                                      seg_prot(s->flags), VM_MAP_SHARED, vn, file_off,
+                                      seg_prot(s->flags), VM_MAP_SHARED | VM_MAP_TEXT, vn, file_off,
                                       "elf-text");
             if (rc == 0)
                 continue;

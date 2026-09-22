@@ -50,6 +50,12 @@ struct vm_file_map {
     size_t size;
     uint64_t off;            /* file offset of `base` (page aligned) */
     bool shared;             /* MAP_SHARED: the cache's frames, writes reach the file */
+    /* This mapping is a program's text, because the loader said so
+     * (VM_MAP_TEXT). Set once at creation and never changed, so the question
+     * "is anyone executing this file" is answered by the presence of
+     * such a mapping on the vnode's list rather than by a counter kept
+     * beside it (docs/audit/next-subsystem-elf-shared-text.md). */
+    bool text;
     vm_prot_t maxprot;       /* the most vm_user_protect may grant */
     unsigned regions;
     struct list_node link;   /* pagecache.mappings */
@@ -210,6 +216,19 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
  */
 #define VM_MAP_SHARED  (1u << 0)
 #define VM_MAP_REPLACE (1u << 1)
+/*
+ * This mapping is a program's text, made by the loader: the file is
+ * "busy" while it exists and a write to it is -ETXTBSY
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * Only `elf_load_into` passes it, and that is the point. "Shared and
+ * executable" is not the same question: a program may map a file
+ * executable and write to it on purpose -- the page cache syncs the
+ * instruction cache for exactly that case -- and refusing those writes
+ * broke that behaviour and its test. What must not change underneath a
+ * process is the program it is *running*.
+ */
+#define VM_MAP_TEXT    (1u << 2)
 int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
                      unsigned flags, struct vnode *vn, uint64_t off, const char *name);
 

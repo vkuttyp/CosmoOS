@@ -1631,6 +1631,24 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     m->size = size;
     m->off = off;
     m->shared = (flags & VM_MAP_SHARED) != 0;
+    /*
+     * Text, for the -ETXTBSY interlock, and only when the loader says
+     * so. Two narrower rules were tried first and both were wrong:
+     *
+     *  - `maxprot & EXEC` -- maxprot is permissive by default (RWX for a
+     *    shared mapping of a writable file), so *every* shared file
+     *    mapping counted as text and ordinary writes were refused;
+     *  - `prot & EXEC` -- a program may map a file executable and write
+     *    to it deliberately, and the page cache syncs the instruction
+     *    cache for exactly that case. Refusing those writes broke that
+     *    behaviour and the test that proves it.
+     *
+     * What must not change underneath a process is the program it is
+     * *running*, which only the loader can identify. Set here, where the
+     * record is built and before it is linked, so the answer and the
+     * mapping have one lifetime.
+     */
+    m->text = (flags & VM_MAP_TEXT) != 0;
     m->maxprot = maxprot;
     m->regions = 1;
     if (m->shared)
