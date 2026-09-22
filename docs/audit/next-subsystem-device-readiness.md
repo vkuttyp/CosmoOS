@@ -162,8 +162,8 @@ room, it is delivered to the stack or dropped as a NIC drops) and
 the one contract change: the tap unit's read returned 0 when no frame
 waited, because the owner had no way to wait. Now it has, and the
 device behaves as Linux's `/dev/net/tun` does: a blocking open's read
-sleeps on `rx_wait` (killable) until a frame is queued or the tap is
-released (0, end of file); a non-blocking open's read returns 0 when
+sleeps on `rx_wait` (killable: `-EINTR` when the process is killed)
+until a frame is queued; a non-blocking open's read returns 0 when
 none waits, as today -- kept as 0 rather than `-EAGAIN` because the tap
 unit documented it, `vmctl` relies on it, and a frame is never
 zero-length so 0 is unambiguous. `vmctl` opens `/dev/net/tap` with
@@ -177,12 +177,22 @@ follow-up this unit measures and does not take (Risks).
 timeval)` (23), both over `do_select`: the three sets, each `nfds` bits
 of a 1024-bit `fd_set` (only the words `nfds` covers are read and
 written), become one `io_pollfd` per set bit -- READABLE for a read
-bit, WRITABLE for a write bit, ERROR for an except bit -- resolved as
-`do_poll` resolves handles (a bit for a closed fd is `-EBADF`, as Linux
-answers); `io_poll` waits with the timeout (`-EINVAL` for a negative
-one, NULL means forever); the sets are rewritten with the bits that
-came back ready, HANGUP counting as readable and ERROR as its bit; the
-result is the number of bits set across the three sets. `pselect6`'s
+bit, WRITABLE for a write bit -- resolved as `do_poll` resolves handles
+(a bit for a closed fd is `-EBADF`, as Linux answers); `io_poll` waits
+with the timeout (`-EINVAL` for a negative one, NULL means forever);
+the sets are rewritten with the bits that came back ready, HANGUP and
+ERROR counting as readable and writable, which is how Linux's `select`
+reports `POLLHUP` and `POLLERR` (the condition is reported by the read
+or write that follows); the result is the number of bits set across
+the three sets. **`exceptfds` is polled for nothing and always comes
+back clear.** Linux's except set is `POLLPRI` -- priority data, TCP
+urgent data in practice -- and no object in this tree reports a
+priority event: there is no urgent-data path, and `COSMO_IO_ERROR` is
+`POLLERR`, which `select` never puts in the except set. Mapping the
+except bits to ERROR would put an ordinary socket error where Linux
+puts out-of-band data; leaving them clear is the contract a tree with
+no priority events can keep, and it is written in the door's table as
+a deviation. `pselect6`'s
 sixth argument is Linux's pair `{ const sigset_t *, size_t }`, applied
 and restored as `ppoll` applies its mask; `select` does not update the
 timeout it was given (Linux does; documented deviation), and `nfds`
@@ -192,15 +202,22 @@ above 1024 is `-EINVAL`. `lx_select` exists only where the number does.
 
 Nothing new is allocated per open: the non-blocking bit lives in the
 `struct file` the VFS already owns, the tap's queue lives in the tap the
-open already owns and dies with it (the release wakes `rx_wait` so a
-reader blocked on a tap being torn down returns 0 rather than sleeping
-on freed memory -- the reader holds the file, the file holds the tap
-through its `tap_open`, so the queue outlives every waiter). Invariant
-**V26** (vfs): *a device's `ready` answers the question its `read_file`
-would answer with the same non-blocking bit, and `poll_wq` is woken by
-every event that can change that answer.* Invariant **N24** (network):
-*a tap's reader is woken by every frame `tap_transmit` queues and by the
-tap's release, and a blocked reader never outlives the tap.*
+open already owns and dies with it. A reader blocked in `read` holds
+the file (the system call took the reference from `handle_lookup`), the
+file holds the tap through its `tap_open`, and the release hook runs
+only when the file's last reference drops -- so no release can run
+under a blocked reader, the queue outlives every waiter by
+construction, and the release has nobody to wake. A blocked reader
+ends in one of two ways: a frame, or the kill that makes the wait
+return `-EINTR`; closing the handle from another thread of the same
+process does not end it (it drops one reference; the read holds
+another), which is the same rule every blocking read in this kernel
+follows. Invariant **V26** (vfs): *a device's `ready` answers the
+question its `read_file` would answer with the same non-blocking bit,
+and `poll_wq` is woken by every event that can change that answer.*
+Invariant **N24** (network): *a tap's reader is woken by every frame
+`tap_transmit` queues, and a reader blocked in the tap's read holds the
+file and therefore the tap, so the tap's release never runs under one.*
 
 ## Affected files
 
@@ -251,8 +268,8 @@ that polled one and then read could only be helped by. `select` and
 | test | what it proves |
 | --- | --- |
 | `tty-devready` (kernel) | an opened `/dev/console` file: `ready` has no READABLE with nothing typed and READABLE after `tty_input` of a line; `poll_wq(READABLE)` is the terminal's readers queue; `io_poll` on the file with a 20 ms timeout returns 0, and returns 1 when a second thread injects a line; `set_nonblock` per open (two opens of the node, one switched, the other not: `read` `-EAGAIN` on one, the other's `ready` unchanged); the console object (handle 0's kobject) still refuses `set_nonblock`; `/dev/tty` opened from a kernel thread with no session: `ready` reports ERROR and `read` `-ENXIO` |
-| `tap-ready` (kernel) | a tap created and opened as a file (the `tap` test's shape through `vfs_open` of `/dev/net/tap`): `ready` is WRITABLE alone; `poll_wq` non-NULL; a thread's blocking `read` waits (30 ms) and returns the frame once `netif_transmit` queues one; `io_poll` on the file returns 1 after a transmit; non-blocking `read` returns 0 with none queued; a reader blocked in `read` returns 0 when the file's last reference releases the tap from another thread (V26/N24); `netif` count before and after |
-| `init --selftest`, section `devices` (native) | `/dev/net/tap` opened `O_RDWR\|O_NONBLOCK`: `ioready` WRITABLE only; an ARP request for the gateway written; `ioready` READABLE within a bounded wait and the reply read (the tapsvc answers it); a second open without `O_NONBLOCK` in a child (`--probe`) blocks in `read` until the parent's frame arrives; **the ring**: an `AIO PREAD` on the tap parks (a `cosmo_aio_wait` with `min` 0 returns nothing) and completes with the reply after the request is written -- the constitution's devices row, shown; `setnonblock` on the tap file 0, on handle 0 still `EOPNOTSUPP`; `/dev/console` opened: `ioready` matches handle 0's |
+| `tap-ready` (kernel) | a tap created and opened as a file (the `tap` test's shape through `vfs_open` of `/dev/net/tap`): `ready` is WRITABLE alone; `poll_wq` non-NULL; a thread's blocking `read` waits (30 ms) and returns the frame once `netif_transmit` queues one; `io_poll` on the file returns 1 after a transmit; non-blocking `read` returns 0 with none queued; a process (`init --probe`, as `ipc-fifo` does it) blocked in the tap's read is killed and returns `-EINTR`, exit status 137, and the tap and its `netif` are released only after -- the reader held them (N24); `netif` count before and after |
+| `init --selftest`, section `devices` (native) | `/dev/net/tap` opened `O_RDWR\|O_NONBLOCK`: `ioready` WRITABLE only; an ARP request for the gateway written; `ioready` READABLE within a bounded wait and the reply read (the tapsvc answers it); a child (`--probe`) given **the same open file** through the spawn map (each open of `/dev/net/tap` is its own tap and subnet, so a second open would see nothing of the first's frames) blocks in a `read` on it -- `O_NONBLOCK` cleared on that handle with `setnonblock`, which is per open file and so shared by both -- until the parent writes a request and the reply arrives; the parent reads nothing meanwhile (the child took the frame); **the ring**: an `AIO PREAD` on the tap parks (a `cosmo_aio_wait` with `min` 0 returns nothing) and completes with the reply after the request is written -- the constitution's devices row, shown; `setnonblock` on the tap file 0, on handle 0 still `EOPNOTSUPP`; `/dev/console` opened: `ioready` matches handle 0's |
 | `lxtest` rows | `pselect6` on a pipe pair: the write end ready (1), the read end not with a zero timeout (0); after a write, readable; `nfds` 1025 `-EINVAL`; a bit for a closed fd `-EBADF`; a 20 ms timeout with nothing ready returns 0 after at least 15 ms; a sigmask admitting a pending `SIGUSR1` runs the handler and returns `-EINTR` with the old mask back; `select` (x86-64) on the same pair; **a `select` over `/dev/net/tap` and a UDP socket**: neither ready, an ARP frame written to the tap, `select` returns 1 with the tap's read bit set and the socket's clear |
 | the `net` section, `el2-tap-host`, `vmctl --net tap` | unchanged: `vmctl`'s non-blocking open keeps its poll loop's contract |
 
@@ -274,12 +291,14 @@ booted, the file restored:
 - the tap's blocking read returning 0 when none waits (the old
   contract, ignoring the bit) → `tap-ready`: the thread's read returned
   before the transmit; the child probe returns early.
-- the tap's release not waking `rx_wait` → `tap-ready`: the reader
-  blocked across the release never returns (caught by the bounded
-  join, the thread left behind).
+- the tap's read not killable (an unkillable wait) → `tap-ready`: the
+  killed process never exits (caught by the bounded `process_wait_exit`).
 - `pselect6` ignoring the write set → `lxtest`: the write end's 1 is 0.
 - the sets not rewritten with the ready bits → `lxtest`: the tap's read
   bit not set on return.
+- the except set mapped to ERROR → `lxtest`: a socket with a pending
+  error (`SO_ERROR` set by a refused connect) reports in the except set,
+  where Linux never puts it.
 - `select` reading the sets past `nfds` → `lxtest`: a bit above `nfds`
   for a closed fd must not be `-EBADF`.
 
