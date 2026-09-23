@@ -117,11 +117,22 @@ static int dirfd_rights(int wide)
     if (o < 0)
         return 31;
     sc1(LX_close, o);
+    /* A child directory opened through the base carries no right the
+     * base lacks (review: the directory's READ|WRITE used to be granted
+     * whatever the base held). */
+    long sd = sc4(LX_openat, 5, "sub", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+    if (sd < 0)
+        return 37;
     if (wide) {
         if (sc3(LX_mkdirat, 5, "x", 0755) != 0)
             return 40;
         if (sc3(LX_unlinkat, 5, "x", LX_AT_REMOVEDIR) != 0)
             return 41;
+        if (sc3(LX_mkdirat, sd, "y", 0755) != 0)
+            return 42;
+        if (sc3(LX_unlinkat, sd, "y", LX_AT_REMOVEDIR) != 0)
+            return 43;
+        sc1(LX_close, sd);
         lx_puts("LXCWD: wide ok\n");
         return 0;
     }
@@ -135,6 +146,11 @@ static int dirfd_rights(int wide)
         return 35;
     if (sc3(LX_symlinkat, "f", 5, "lnk") != -9)
         return 36;
+    if (sc3(LX_mkdirat, sd, "x", 0755) != -9)
+        return 38;
+    if (sc4(LX_openat, 5, "f", LX_O_WRONLY, 0) != -9)   /* writing is putting data in through the base */
+        return 39;
+    sc1(LX_close, sd);
     lx_puts("LXCWD: narrow ok\n");
     return 0;
 }

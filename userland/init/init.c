@@ -1532,6 +1532,7 @@ static int probe(const char *kind)
          * at fd 5, READ only or with the caller's own rights. */
         int wide = kind[6] == 'w';
         (void)cosmo_mkdir("/tmp/dnw", 0755);
+        (void)cosmo_mkdir("/tmp/dnw/sub", 0755);
         long fh = cosmo_open("/tmp/dnw/f", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
         if (fh < 0)
             return 80;
@@ -1557,9 +1558,11 @@ static int probe(const char *kind)
         if (status == 0 && cosmo_stat("/tmp/dnw/f", &st) != 0)
             status = 83;
         if (status == 0 && (cosmo_stat("/tmp/dnw/x", &st) == 0 || cosmo_stat("/tmp/dnw/g", &st) == 0 ||
-                            cosmo_stat("/tmp/dnw/new", &st) == 0 || cosmo_stat("/tmp/dnw/lnk", &st) == 0))
+                            cosmo_stat("/tmp/dnw/new", &st) == 0 || cosmo_stat("/tmp/dnw/lnk", &st) == 0 ||
+                            cosmo_stat("/tmp/dnw/sub/x", &st) == 0 || cosmo_stat("/tmp/dnw/sub/y", &st) == 0))
             status = 84;
         (void)cosmo_unlink("/tmp/dnw/f");
+        (void)cosmo_rmdir("/tmp/dnw/sub");
         (void)cosmo_rmdir("/tmp/dnw");
         return status;
     }

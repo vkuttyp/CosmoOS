@@ -145,20 +145,33 @@ static int get_path(uint64_t uptr, char *buf)
  * under the walk (V35). With `basepath`, also the base's name, from the
  * same snapshot: the cwd's path, or the directory file's recorded one
  * (empty if it has none), for a caller that must record a new name.
+ * With `have`, the base's own rights, which bound what a handle derived
+ * through it may carry (review: a READ-only base must not yield a child
+ * directory handle with WRITE).
  *
  * This replaces a check that answered every real descriptor -ENOSYS on
  * the premise that the VFS could not resolve from one. It always could:
  * every entry point takes a start.
  */
-static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnode **out, char *basepath, size_t n)
+static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnode **out, char *basepath, size_t n,
+                   unsigned *have)
 {
     if ((int)dirfd == LX_AT_FDCWD || path[0] == '/') {
         *out = basepath ? process_cwd_snapshot(basepath, n) : process_cwd_get();
+        if (have)
+            *have = HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;   /* the process's own names */
         return 0;
     }
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)dirfd, rights);
+    unsigned held;
+    struct kobject *obj = handle_get(&process_current()->handles, (int)dirfd, &held);
     if (obj == NULL)
         return -EBADF;
+    if ((held & rights) != rights) {
+        kobject_put(obj);
+        return -EBADF;
+    }
+    if (have)
+        *have = held;
     struct file *f = file_from_kobject(obj);
     if (f == NULL) {
         kobject_put(obj);
@@ -345,8 +358,12 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     struct file *f;
     char base[VFS_PATH_MAX];
     struct vnode *start;
-    unsigned need = HANDLE_RIGHT_READ | ((flags & COSMO_O_CREAT) ? HANDLE_RIGHT_WRITE : 0);
-    rc = at_base(dirfd, path, need, &start, base, sizeof(base));
+    /* Creating, truncating or opening for writing puts data in through
+     * the base: it needs WRITE, as an entry change does. */
+    unsigned acc = flags & COSMO_O_ACCMODE, have;
+    bool writes = (flags & (COSMO_O_CREAT | COSMO_O_TRUNC)) || acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR;
+    unsigned need = HANDLE_RIGHT_READ | (writes ? HANDLE_RIGHT_WRITE : 0);
+    rc = at_base(dirfd, path, need, &start, base, sizeof(base), &have);
     if (rc)
         return rc;
     rc = vfs_open(start, path, flags, mode & 07777u, &f);
@@ -360,7 +377,7 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
         if (path_normalize(base, path, abs, sizeof(abs)) == 0)
             file_set_dir_path(f, abs);
     }
-    unsigned rights = HANDLE_RIGHT_OWNER, acc = flags & COSMO_O_ACCMODE;   /* as the native open: the file is the caller's to dup and pass */
+    unsigned rights = HANDLE_RIGHT_OWNER;   /* as the native open: the file is the caller's to dup and pass */
     if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_READ;
     if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR)
@@ -371,6 +388,9 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
      * is still -EISDIR. */
     if (f->vn->type == VNODE_DIR)
         rights |= HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
+    /* Rights only shrink on the way down: what is derived through a
+     * descriptor carries no data right the descriptor lacks (P31). */
+    rights &= have | ~(HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
     int h = handle_install(&process_current()->handles, &f->obj, rights);
     file_put(f);
     return h;
@@ -456,7 +476,7 @@ static int64_t readlink_common(int64_t dirfd, uint64_t upath, uint64_t ubuf, siz
     if (len > VFS_PATH_MAX)
         len = VFS_PATH_MAX;
     struct vnode *start;
-    rc = at_base(dirfd, path, HANDLE_RIGHT_READ, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     char *buf = kmalloc(len, 0);
@@ -494,7 +514,7 @@ static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     rc = vfs_symlink(start, path, target);
@@ -534,7 +554,7 @@ static int64_t lx_newfstatat(struct syscall_args *a)
         return rc ? rc : stat_out(&st, a->a[2]);
     }
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     struct cosmo_stat st;
@@ -618,7 +638,7 @@ static int64_t lx_mkdirat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u);
@@ -642,7 +662,7 @@ static int64_t do_mknod(int64_t dirfd, const char *path, uint32_t mode)
         return -EPERM;
     }
     struct vnode *start;
-    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     struct vnode *vn;
@@ -680,7 +700,7 @@ static int64_t lx_unlinkat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     rc = (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(start, path) : vfs_unlink(start, path);
@@ -695,7 +715,7 @@ static int64_t lx_faccessat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);
     if (rc)
         return rc;
     struct cosmo_stat st;
@@ -729,10 +749,10 @@ static int64_t lx_renameat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *ostart, *nstart;
-    rc = at_base((int64_t)a->a[0], oldp, HANDLE_RIGHT_WRITE, &ostart, NULL, 0);   /* both directories change */
+    rc = at_base((int64_t)a->a[0], oldp, HANDLE_RIGHT_WRITE, &ostart, NULL, 0, NULL);   /* both directories change */
     if (rc)
         return rc;
-    rc = at_base((int64_t)a->a[2], newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0);
+    rc = at_base((int64_t)a->a[2], newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0, NULL);
     if (rc) {
         vnode_put(ostart);
         return rc;
