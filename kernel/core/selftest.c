@@ -684,11 +684,6 @@ static const struct selftest tests[] = {
     { "io-poll",         selftest_io_poll },
     { "realtime",        selftest_realtime },
     { "process-reject",  selftest_process_reject },
-    { "elf-shared-text", selftest_elf_shared_text },
-    { "elf-share-cost",  selftest_elf_share_cost },
-    { "elf-text-ro",     selftest_elf_text_ro },
-    { "elf-data-private", selftest_elf_data_private },
-    { "elf-txtbsy",      selftest_elf_txtbsy },
     { "process-spawn",   selftest_process_spawn },
     { "linux-elf",       selftest_linux_elf },
     { "el2",             selftest_el2_stub },
@@ -763,6 +758,18 @@ static const struct selftest tests[] = {
     /* Last: what the harness typed at the keyboard while everything
      * above ran (kernel/device/hidtest.c). */
     { "hid-keyboard",    selftest_hid_keyboard },
+    /* After the tests that read or write the console.
+     *
+     * These spawn real programs, and a spawned program prints. Run
+     * earlier they made `hid-keyboard` read their output instead of the
+     * line it sent, and left `process-spawn` racing their teardown --
+     * a test that perturbs what it shares the machine with is measuring
+     * the machine (docs/audit/next-subsystem-elf-shared-text.md). */
+    { "elf-shared-text", selftest_elf_shared_text },
+    { "elf-share-cost",  selftest_elf_share_cost },
+    { "elf-text-ro",     selftest_elf_text_ro },
+    { "elf-data-private", selftest_elf_data_private },
+    { "elf-txtbsy",      selftest_elf_txtbsy },
 };
 
 int selftest_run_all(void)

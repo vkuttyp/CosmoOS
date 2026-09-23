@@ -40,7 +40,16 @@
 >    is 70% now, above the working case's floor and far above the 53%
 >    that no balancing produces.
 >
-> 7. **One mutation survives, and it is equivalent rather than
+> 7. **A stale object outlived a mutation's revert, and cost an
+>    afternoon.** `shutil.move` preserves mtime, so a restored source
+>    can be older than the object built from the mutated one; `make`
+>    then rebuilds nothing and the mutated kernel keeps booting. The
+>    symptom was a safety test failing intermittently while the property
+>    it tests, asked directly a line earlier, held. **A test that fails
+>    while its own precondition reports success is a test running
+>    against a different binary than it thinks**, and that is worth
+>    reaching for before any theory about the kernel.
+> 8. **One mutation survives, and it is equivalent rather than
 >    uncaught.** Deleting the "not writable" half of `seg_shareable`
 >    changes nothing for the binary under test: its only writable
 >    segment also has a zero tail, so the *other* half of the condition
@@ -59,12 +68,19 @@
 > | 1 | the file-backed path disabled | `elf-shared-text`: "two processes running one program have separate copies of its text" | `elf-text-ro` -- with no sharing the text is an anonymous copy, whose protection *can* be changed |
 > | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 7) | -- |
 > | 3 | text mapped with `W` in its `maxprot` | `elf-text-ro`: "shared text could be made writable" | `process-spawn`, which spawns a child; this mutation changes how *every* program loads |
-> | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | `elf-text-ro` — **not explained.** This mutation touches only the write path and cannot affect `maxprot`. Recorded rather than smoothed over |
-> | 5 | the zero tail populated again | `process-spawn` | `elf-txtbsy` — also not explained by the change itself; this mutation makes every process 26 pages larger, and the tests that spawn children are the ones that moved |
+> | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | — |
+> | 5 | the zero tail populated again | `process-spawn`, which spawns a child; every process is 26 pages larger | — |
 >
-> Two of those second failures are not accounted for, and saying so is
-> the point: a mutation table that reports only what it predicted is a
-> table that was not read.
+> **The second failures were the mutation runner, not the kernel**, and
+> finding that out is the most useful thing in this section. Its
+> `revert` restored each file with `shutil.move`, which preserves the
+> original timestamp -- so the restored source was *older* than the
+> object built from the mutated one, `make` skipped it, and **the
+> mutated kernel survived the revert into every later boot**. That is
+> why `elf-txtbsy` failed intermittently for an afternoon while the
+> interlock, asked directly in the same test, answered "busy": the
+> check was in the source and not in the image. The runner touches what
+> it restores now, and the table above is from runs after that.
 >
 > **Measured, per additional process running `init`:**
 >
