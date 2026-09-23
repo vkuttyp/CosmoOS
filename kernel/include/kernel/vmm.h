@@ -386,6 +386,9 @@ struct vm_stats {
     uint64_t regions;
     uint64_t anon_pages;       /* frames populated for ANON regions */
     uint64_t faults_handled;   /* demand-zero populations */
+    /* Atomic: counted under many spaces' locks. A thread reached the
+     * anonymous fault with another thread's page already installed. */
+    uint64_t anon_fault_retries;
     uint64_t fixups;           /* kernel-mode faults resumed at an exception fixup */
     /* FILE regions (docs/audit/next-subsystem-file-regions.md). Atomic:
      * they are counted under many spaces' locks. */
@@ -411,6 +414,22 @@ void vm_get_stats(struct vm_stats *out);
  */
 void vm_test_file_hold_arm(void);
 unsigned vm_test_file_hold_state(void);
+
+/*
+ * The same seam for an ANONYMOUS fault, which cannot be held mid-service
+ * because it holds the space lock throughout. Armed on ONE page, the
+ * next anonymous fault on that page taken with interrupts enabled waits
+ * BEFORE it installs, still holding the fault flags the hardware gave
+ * it, until another thread installs that same page. The held thread then
+ * resumes believing the page absent, which is the race the fault's
+ * present-check answers. Arming by address is what makes the seam
+ * deterministic: a process takes anonymous faults for its stack and heap
+ * all the time, and any of them would otherwise be the held one. State:
+ * 0 idle, 1 armed, 2 held; readable as sysctl debug.anon_fault_hold.
+ * CONFIG_DEBUG only.
+ */
+void vm_test_anon_hold_arm(vaddr_t va);
+unsigned vm_test_anon_hold_state(void);
 void vm_dump(struct vm_space *space);
 
 #endif /* KERNEL_VMM_H */

@@ -758,6 +758,95 @@ bool selftest_vm_replace_race(const char **reason)
     return true;
 }
 
+/*
+ * Two threads fault the SAME anonymous page (docs/kernel/memory/design.md
+ * "Two threads, one absent page"). The fault flags a thread carries are
+ * the hardware's snapshot from the moment the trap was taken, so both
+ * threads say "not present"; the second to reach the install finds the
+ * first's page already standing there. Before the ELF loader began
+ * demand-paging a segment's zero tail the collision was hard to reach,
+ * because a multi-threaded program's bss was populated at load time;
+ * it panicked with -EEXIST when it was reached.
+ *
+ * The seam makes it deterministic and event-driven: thread A is held on
+ * one named page with its stale flags in hand until this thread installs
+ * that very page, and only then resumes.
+ */
+struct anon_race {
+    volatile uint32_t *word;
+    uint32_t seen;
+    bool ran;
+};
+
+static void anon_race_toucher(void *arg)
+{
+    struct anon_race *a = arg;
+    a->seen = *a->word;   /* the held fault: absent when it started, present when it resumes */
+    a->ran = true;
+}
+
+bool selftest_vm_anon_fault_race(const char **reason)
+{
+#if CONFIG_DEBUG
+    struct vm_stats vs0, vs1;
+
+    vaddr_t lazy = vm_kernel_alloc(2 * PAGE_SIZE, VM_KALLOC_GUARD, VM_PROT_RW);
+    CHECK(lazy != 0);
+    volatile uint32_t *w = (volatile uint32_t *)(lazy + 64);
+    CHECK(!vm_query(lazy, NULL, NULL, NULL, NULL));   /* nothing populated yet */
+
+    vm_get_stats(&vs0);
+    vm_test_anon_hold_arm(lazy);
+    struct anon_race a = { .word = w, .seen = 0xFFFFFFFF, .ran = false };
+    struct thread *ta = thread_create(anon_race_toucher, &a, "vm-anon-race", SCHED_PRIO_DEFAULT);
+    CHECK(ta != NULL);
+
+    /* Wait for A to BE held rather than for a stretch of time: the
+     * proof is that the collision happened, so it is the collision
+     * that is waited on. */
+    for (unsigned spins = 0; vm_test_anon_hold_state() != 2; spins++) {
+        if (spins > 2000000) {
+            thread_join(ta);
+            vm_kernel_free(lazy);
+            *reason = "the toucher never reached the held fault";
+            return false;
+        }
+        sched_yield();
+    }
+
+    *w = 0xA55AF00D;   /* this thread's fault installs the page and releases A */
+    CHECK(thread_join(ta) == 0);
+    CHECK(a.ran);
+
+    /*
+     * Three claims. A resumed and installed NOTHING: one page was
+     * populated between the two faults, not two -- so the word this
+     * thread wrote is still there, rather than zeroed by a second frame
+     * mapped over it. And the fault counted itself as a retry.
+     */
+    CHECK(vm_test_anon_hold_state() == 0);
+    CHECK(*w == 0xA55AF00D);
+    vm_get_stats(&vs1);
+    CHECK(vs1.faults_handled - vs0.faults_handled == 1);
+    CHECK(vs1.anon_fault_retries - vs0.anon_fault_retries == 1);
+    /* Exactly one page of the region is populated: the collision added
+     * no frame. A free-page baseline cannot say this here -- the
+     * toucher thread's own stack moves it -- so the region is asked
+     * about itself. */
+    CHECK(vm_query(lazy, NULL, NULL, NULL, NULL));
+    CHECK(!vm_query(lazy + PAGE_SIZE, NULL, NULL, NULL, NULL));
+
+    vm_kernel_free(lazy);
+    kinfo("selftest: vm-anon-fault-race: a fault held on an absent page resumes onto another thread's "
+          "install, adding no second frame (A read 0x%08x)", a.seen);
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: vm-anon-fault-race: the seam is compiled out of this build");
+    return true;
+#endif
+}
+
 /* --- resource limits at the VMM and handle-table level (docs/kernel/security/design.md §2) --- */
 
 #include <kernel/handle.h>

@@ -3333,7 +3333,15 @@ See [docs/development.md](docs/development.md).
   tests: one physical frame for two address spaces, the per-copy cost,
   `PROT_WRITE` refused on shared text with the zero tail reading as
   zero, and a write refused while a program runs and allowed once it
-  exits. (PR #220)
+  exits. Demand-paging the zero tail also gave a multi-threaded program
+  its first pages two threads could fault at once, and the anonymous
+  fault panicked when they did: the flags a fault carries are the
+  hardware's snapshot from when the trap was raised, so both threads
+  believed the page absent and the loser mapped over the winner. The
+  page table is the authority now -- asked under the space lock
+  immediately before the install, exactly as the file-backed fault has
+  always re-found its region (invariant **M45**, test
+  `vm-anon-fault-race`). (PR #221)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

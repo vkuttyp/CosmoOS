@@ -345,6 +345,31 @@ The demand-zero path is the one that will later grow anonymous private
 memory and CoW; its structure (lookup → kind switch → populate) is the
 skeleton for that.
 
+#### Two threads, one absent page
+
+Step 3 above reads "fault is not-present", and that is a fact about the
+past. The fault flags are the snapshot the hardware took when it raised
+the trap, and between that instant and the moment the handler holds the
+space lock another thread of the same space can fault the same address
+and install it. Both threads then arrive at the install saying the page
+is absent, and only one of them is right.
+
+So the flags are not the authority on presence: the page table is. Under
+the space lock, immediately before installing, the handler asks
+`arch_mmu_query` whether something already stands at the address. If it
+does, this fault was served by somebody else -- nothing is allocated,
+nothing is mapped, `anon_fault_retries` counts it, and the faulting
+instruction simply runs again and succeeds. Mapping over the winner's
+page would return `-EEXIST`, which this path used to treat as impossible
+and panic on.
+
+The collision became reachable when the ELF loader stopped populating a
+segment's zero tail at load time and began demand-paging it (docs/kernel/process/design.md, "Creation from an ELF image"): a
+multi-threaded program's `bss` is the natural place for two threads to
+touch one absent page at once, and until then it had no absent pages at
+all. The FILE arm has always had the equivalent check, because its two
+phases drop the lock between them and it could never assume otherwise.
+
 ## 4. Kernel heap
 
 ### 4.1 Slab caches (`slab.c`)

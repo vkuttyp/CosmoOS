@@ -434,6 +434,10 @@ static const struct selftest tests[] = {
      * fixed; it is written up in docs/testing/flakes.md.
      */
     { "vm-replace-race", selftest_vm_replace_race },
+    /* With the memory tests, not with the process tests: its claims
+     * are counts of faults and of free pages, so it wants the machine
+     * as quiet as the rest of this group has it. */
+    { "vm-anon-fault-race", selftest_vm_anon_fault_race },
     { "lockdep-order",   selftest_lockdep_order },
     { "lockdep-recursion", selftest_lockdep_recursion },
     { "lockdep-irq",     selftest_lockdep_irq },

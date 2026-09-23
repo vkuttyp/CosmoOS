@@ -76,15 +76,37 @@
 >    Making it decisive needs a binary with a writable segment and no
 >    `.bss`, which is a synthetic ELF and is not built here.
 >
+> 10. **Demand-paging the zero tail exposed a race the anonymous fault
+>    had always had.** Once a segment's `bss` stopped being populated at
+>    load time, a multi-threaded program had absent pages two of its
+>    threads could touch at once -- and `thrtest` panicked, rarely,
+>    with `cannot map ... in region 'elf-bss' (-17)`. The fault flags a
+>    thread carries are the hardware's snapshot from when the trap was
+>    raised, so both threads say "not present" and the second to reach
+>    the install maps over the first's page. The page table is the
+>    authority, not the flags: the anonymous arm now asks
+>    `arch_mmu_query` under the space lock immediately before
+>    installing, and a page already there means the fault was served by
+>    somebody else -- nothing allocated, nothing mapped,
+>    `vm.anon_fault_retries` counted, the instruction runs again. The
+>    FILE arm has always had this check because its phases drop the
+>    lock between them; the anonymous arm assumed `-EEXIST` was
+>    impossible and panicked on it. Invariant **M45**, proved by
+>    `vm-anon-fault-race` over a new address-armed hold seam. **The
+>    lesson**: this unit did not introduce the bug, it removed the only
+>    reason the bug was unreachable, and a change that makes something
+>    lazy should be read as a change that makes its races live.
+>
 > **The mutations**, each applied alone, each boot confirmed:
 >
 > | # | mutation | the failure it was for | also failed |
 > | --- | --- | --- | --- |
 > | 1 | the file-backed path disabled | `elf-shared-text`: "two processes running one program have separate copies of its text" | `elf-text-ro` -- with no sharing the text is an anonymous copy, whose protection *can* be changed |
-> | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 7) | -- |
+> | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 9) | -- |
 > | 3 | text mapped with `W` in its `maxprot` | `elf-text-ro`: "shared text could be made writable" | `process-spawn`, which spawns a child; this mutation changes how *every* program loads |
 > | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | — |
 > | 5 | the zero tail populated again | `elf-share-cost`: "a copy cost 40 pages, over the bound of 32" | — |
+| 6 | the anonymous fault's presence check removed | `vm-anon-fault-race`: `KERNEL PANIC: cannot map ... in region 'kalloc' (-17)` | — |
 >
 > `elf-share-cost` grew that bound *because* this mutation survived
 > without one: the cost was a log line, and a log line catches nothing.

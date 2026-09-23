@@ -588,6 +588,93 @@ static inline void file_hold_seam(struct vm_space *space) { (void)space; }
 static inline void file_hold_release(struct vm_space *space) { (void)space; }
 #endif
 
+/* --- the debug seam: an ANON fault held before it installs --- */
+
+/*
+ * The anonymous arm services a fault under the space lock in one
+ * stretch, so it cannot be held in the middle the way a FILE fault is.
+ * What this seam holds is the fault BEFORE it installs, with the fault
+ * flags the hardware already gave it -- which is the whole point: while
+ * it waits, another thread installs that very page, and the held thread
+ * then resumes still believing the page is absent. That is the race the
+ * present-check stands against, and it is why the seam must resume into
+ * the same fault rather than return and take a fresh one.
+ */
+#if CONFIG_DEBUG
+static struct {
+    unsigned state;               /* 0 idle, 1 armed, 2 held */
+    vaddr_t va;                   /* the one page this seam is about */
+    struct vm_space *space;       /* held: whose fault */
+    struct thread *holder;
+    struct completion released;
+    spinlock_t lock;
+} g_anon_hold = { .lock = SPINLOCK_INIT("vm-anon-hold") };
+
+void vm_test_anon_hold_arm(vaddr_t va)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_anon_hold.lock);
+    completion_init(&g_anon_hold.released, "vm-anon-hold");
+    g_anon_hold.va = page_align_down(va);
+    g_anon_hold.space = NULL;
+    g_anon_hold.holder = NULL;
+    g_anon_hold.state = 1;
+    spin_unlock_irqrestore(&g_anon_hold.lock, s);
+}
+
+unsigned vm_test_anon_hold_state(void)
+{
+    return __atomic_load_n(&g_anon_hold.state, __ATOMIC_ACQUIRE);
+}
+
+/* True when this fault has become the held one; the caller must then
+ * drop the space lock and call anon_hold_wait(). */
+static bool anon_hold_take(struct vm_space *space, vaddr_t va)
+{
+    if (__atomic_load_n(&g_anon_hold.state, __ATOMIC_ACQUIRE) != 1)
+        return false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_anon_hold.lock);
+    bool take = g_anon_hold.state == 1 && g_anon_hold.va == va;
+    if (take) {
+        g_anon_hold.state = 2;
+        g_anon_hold.space = space;
+        g_anon_hold.holder = thread_current();
+    }
+    spin_unlock_irqrestore(&g_anon_hold.lock, s);
+    return take;
+}
+
+static void anon_hold_wait(void)
+{
+    wait_for_completion(&g_anon_hold.released);
+    arch_irq_state_t s = spin_lock_irqsave(&g_anon_hold.lock);
+    g_anon_hold.state = 0;
+    g_anon_hold.space = NULL;
+    g_anon_hold.holder = NULL;
+    spin_unlock_irqrestore(&g_anon_hold.lock, s);
+}
+
+/* The event that releases a held fault: another thread of the same space
+ * installed THE armed page -- the collision itself, not any nearby
+ * fault. Called with no lock held. */
+static void anon_hold_release(struct vm_space *space, vaddr_t va)
+{
+    if (__atomic_load_n(&g_anon_hold.state, __ATOMIC_ACQUIRE) != 2)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_anon_hold.lock);
+    bool fire = g_anon_hold.state == 2 && g_anon_hold.space == space && g_anon_hold.va == va &&
+                g_anon_hold.holder != thread_current();
+    spin_unlock_irqrestore(&g_anon_hold.lock, s);
+    if (fire)
+        complete(&g_anon_hold.released);
+}
+#else
+void vm_test_anon_hold_arm(vaddr_t va) { (void)va; }
+unsigned vm_test_anon_hold_state(void) { return 0; }
+static inline bool anon_hold_take(struct vm_space *space, vaddr_t va) { (void)space; (void)va; return false; }
+static inline void anon_hold_wait(void) {}
+static inline void anon_hold_release(struct vm_space *space, vaddr_t va) { (void)space; (void)va; }
+#endif
+
 /* --- the FILE fault, phases two and three --- */
 
 /*
@@ -862,6 +949,42 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
 
         if (r != NULL && r->kind == VM_REGION_ANON && !(fl & (VM_FAULT_PRESENT | VM_FAULT_RESERVED)) &&
             access_allowed(r, fl)) {
+            /*
+             * The fault flags are the hardware's snapshot from the moment
+             * the trap was taken, so "not present" is what WAS true, not
+             * what is true now. Two threads of one process faulting the
+             * same anonymous page both arrive here saying not-present;
+             * the second takes the lock after the first has installed the
+             * page. The PTE is the authority, so it is asked under the
+             * lock: a page already standing here means another thread
+             * served this fault, and the instruction simply runs again.
+             * Mapping over it would return -EEXIST, which this path used
+             * to panic on -- reachable since the ELF loader began
+             * demand-paging the zero tail of a segment (the bss) instead
+             * of populating it at load time.
+             */
+            /* Held only for a fault taken with interrupts enabled:
+             * waiting sleeps, and a fault taken with them masked is a
+             * context that must not. The region is found again on the
+             * way out, because the wait let the world move. */
+            if (arch_trap_frame_irqs_enabled(frame) && anon_hold_take(space, page)) {
+                spin_unlock_irqrestore(&space->lock, s);
+                arch_irq_enable();
+                anon_hold_wait();
+                arch_irq_disable();
+                s = spin_lock_irqsave(&space->lock);
+                r = space_find(space, addr);
+                if (r == NULL || r->kind != VM_REGION_ANON || (r->flags & VM_REGION_QUIESCED) ||
+                    !access_allowed(r, fl)) {
+                    spin_unlock_irqrestore(&space->lock, s);
+                    return;   /* the world changed; the instruction runs again */
+                }
+            }
+            if (arch_mmu_query(&space->mmu, page, NULL, NULL, NULL, NULL)) {
+                spin_unlock_irqrestore(&space->lock, s);
+                __atomic_fetch_add(&g_stats.anon_fault_retries, 1, __ATOMIC_RELAXED);
+                return;
+            }
             struct page *frame_page = NULL;
             /* A page already attached with PROT_NONE cannot reach here (its
              * region's prot forbids the access); a fresh page is allocated.
@@ -890,6 +1013,7 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
                 g_stats.anon_pages++;
             g_stats.faults_handled++;
             spin_unlock_irqrestore(&space->lock, s);
+            anon_hold_release(space, page);   /* a fault held on THIS page waits for exactly this */
             return;
         }
 
