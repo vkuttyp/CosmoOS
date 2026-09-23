@@ -25,7 +25,20 @@
 >    registered beside `vm-file-fault-hold` rather than with the early
 >    memory tests. Its claims are the scratch space's own counts, so the
 >    placement in the suite does not matter to them.
-> 4. **Two of three boots on the way failed three host-networking tests**
+> 4. **Review found two defects the build had introduced**, both at the
+>    seam between choosing and what used to check a given base.
+>    (a) The fit compared `cursor + size + PAGE_SIZE` against the top of
+>    the user window, and a page-aligned hint near the top of the address
+>    space wrapped that sum below it: a region outside the window was
+>    chosen and inserted. A given base had always been checked by the
+>    map's `user_range_valid`; a chosen one no longer passed through it.
+>    The fit now refuses a `from` at or above the window and compares by
+>    subtraction, and `map_anon` asserts the answer is valid.
+>    (b) The file form inserted its claimed region and only then set
+>    `r->fmap`; `msync` and the futex-key lookup dereference the `fmap` of
+>    any FILE region and do not look at the claim. The record is now
+>    whole before the placing hold publishes it.
+> 5. **Two of three boots on the way failed three host-networking tests**
 >    (`net-hostinput`, `net-hoststate`, `net-output`) with the host's
 >    load average near seven and no emulator of this tree running --
 >    the starvation pattern `docs/testing/flakes.md` records from
@@ -40,6 +53,7 @@
 > | 2 | the file form split the same way | `mmap-place-race` file: 1081 of 2400 inserted, **1319 EEXIST** | the anonymous pass and both door racers |
 > | 3 | the native door left on the old pair | the native racer: **278** of 600 EEXIST | `mmap-place-race` (both forms) and `lxtest` |
 > | 4 | the Linux door left on the old pair | `lxtest`: **238** EEXIST | `mmap-place-race` and the native racer |
+> | 5 | the fit's window guard removed and its comparison put back to the wrapping sum (review's finding (a)) | `KERNEL PANIC: assertion failed: user_range_valid(base, size) ... (map_anon)`, reached by init's `mmap` with a hint above the window -- the assertion is the second line of defence and fired first; a release build, which compiles it out, is caught by the same check's user half (the returned address must be inside the window) and by `mmap-place-race`'s `-ENOMEM` claims | the four placement racers |
 >
 > Every mutation lost between 40 and 58 per cent of its placements --
 > the report's measurement, reproduced by the tests themselves -- so the

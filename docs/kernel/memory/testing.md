@@ -434,7 +434,14 @@ an overlapping one cannot. Every claim is about the scratch space's own
 counts, never a machine-wide counter. It is registered with the process
 tests because the file form needs a filesystem.
 
-It is a **rate-based** proof and says so: the defect cannot be held open
+It begins with two deterministic checks: a `from` at the very top of
+the address space, and one a page below the top of the user window,
+both answer `-ENOMEM` and insert nothing -- the fit once wrapped its sum
+on a hint like that and chose a base outside the window (found in
+review). init's `mmap` section asks the same through the door: a hint
+above the window is placed inside it, in real memory.
+
+The race half is a **rate-based** proof and says so: the defect cannot be held open
 with a seam, because the repair removes the gap a seam would sit in.
 What makes the rate decisive is its size -- split back into a find and a
 map, the same threads lose about half their placements (the report's
