@@ -2065,13 +2065,42 @@ to try is a `spin_trylock` pair in the balancer, so a contended queue
 is skipped until the next tick rather than waited for. A policy has no
 business waiting for a lock.
 
-## Under the chaos migrator: `sched-balance-pull` on CI, twice on 2026-09-23
+## `tcp-pcb-timer-free` held a stranger's callback
+
+2026-09-23, x86-64, one debug boot of the dirfd unit's branch (which
+touches no network code). The log kept beside that unit's session notes
+is `tcp-timer-free-nospin.serial`:
+
+```
+[ WARN] timer: cpu 0: no tick for 4995 ms; interrupts came back at pc ... (last tick interrupted pc ..., thread 'netrx/0')
+SELFTEST: tcp-pcb-timer-free ... FAIL: check failed: spins > 0 at line 723 (5005 ms)
+```
+
+**This is not PR #225's deadlock**: the releaser existed, released at
+its five-second deadline, and the boot went on. What failed is the
+claim that a cancel waited: the test's `tcp_close` found no callback
+inside its pcb to wait for. The reason is in how the hold is armed:
+`tcp_test_hold_callback(true)` holds **the next TCP timer callback of
+any pcb** (`timer_kick`'s check has no pcb in it), and the tests before
+this one -- `net-tcpverdict` and its neighbours -- leave connections
+whose timers are still live. One of those fired first, on CPU 0, above
+`netrx/0`, and spun there for five seconds (the tick warning is that
+spin); the test's own rexmit timer was never held, so its close had
+nothing to cancel against. The same shape the anonymous-fault and
+held-walk seams were built to avoid: **arm by identity, not "the next
+one anywhere"**. The repair, for the unit that owns the test: arm the
+hold for the test's own pcb, and have `timer_kick` take it only for that
+pcb. Not attributable to the dirfd branch; the rerun of the same tree
+passed.
+
+## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
 CPUs creation order gave them (3005 ms)`, in the x86-64 job's chaos boot
-only: once on `main` itself (run 35827861816, the ELF shared-text merge)
-and once on PR #225's first run (35842572114), whose change is in a TCP
-test that runs minutes later. The scheduler testing doc already says this
+only: once on `main` itself (run 35827861816, the ELF shared-text merge),
+once on PR #225's first run (35842572114), whose change is in a TCP
+test that runs minutes later, and once on PR #229 (35882609779), whose
+change is in the Linux door's path calls. The scheduler testing doc already says this
 is the one balancer test that still asserts, and that under a chaos
 migrator its claim is about the machine rather than the balancer
 (`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the

@@ -262,6 +262,7 @@ swaps the directory by absolute paths.
 | --- | --- | --- |
 | `capture` | a held walk resolves against the directory it captured: `f` exists only in `d1`, B moves the process to `d2`, A's open **succeeds** | `held`, `held_matches_old`, count 3 before the put (ramfs's pin, the process's, the walk's), `released_after_put`, not dead |
 | `outlive` | the walk's reference outlives the swap: B unlinks `d1/f`, removes `d1` and moves away; A's open is `-ENOENT` and the process lives | `held`, `held_matches_old`, count **2** before the put (the pin is gone: the process's and the walk's), `released_after_put`, `resumed_dead` |
+| `failswap` (native only) | a swapper that fails releases the walk held for it: A is held first, then B's `chdir` to an absent directory fails after registering as the swapper | `held`, then **not** `walk_timed_out` and **not** `released_after_put` -- the walk was released by the failure, and the record says no put happened (the dirfd unit's review) |
 | `swapfirst` (native only) | the swapper waits **before** it publishes: B is started first and A only once `debug.cwd_hold` reads 4 -- the swapper is inside `chdir` and waiting -- so the order the other passes cannot produce is produced on purpose | as `capture`, and `held_matches_old` is the decisive claim: a `chdir` that published before waiting would have installed `d2` under a walk that had yet to capture `d1` |
 
 Every pass also asserts `swapper_was_held`, both timeouts and

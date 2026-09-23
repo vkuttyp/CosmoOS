@@ -2069,3 +2069,41 @@ bool selftest_pagecache_pinned(const char **reason)
     kinfo("selftest: pagecache-pinned: a referenced frame survives reclaim and goes when the reference does");
     return true;
 }
+
+
+/*
+ * renameat's two starts (docs/audit/next-subsystem-dirfd.md): a rename
+ * whose two paths resolve from two different directories, each given as
+ * a relative name. The result is checked by absolute path, because a
+ * rename that used the first start for both names would also succeed --
+ * into the wrong directory.
+ */
+bool selftest_vfs_rename2(const char **reason)
+{
+    struct cosmo_stat st;
+    struct file *f;
+    CHECK(vfs_mkdir(NULL, "/tmp/rn2a", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/rn2b", 0755) == 0);
+    CHECK(vfs_open(NULL, "/tmp/rn2a/f", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    file_put(f);
+    struct vnode *a, *b;
+    CHECK(vfs_lookup(NULL, "/tmp/rn2a", &a) == 0);
+    CHECK(vfs_lookup(NULL, "/tmp/rn2b", &b) == 0);
+    int rc = vfs_rename2(a, "f", b, "g");
+    int rc_back = rc == 0 ? vfs_stat(NULL, "/tmp/rn2b/g", &st) : rc;
+    int rc_gone = vfs_stat(NULL, "/tmp/rn2a/f", &st);
+    int rc_wrong = vfs_stat(NULL, "/tmp/rn2a/g", &st);
+    vnode_put(a);
+    vnode_put(b);
+    (void)vfs_unlink(NULL, "/tmp/rn2b/g");
+    (void)vfs_unlink(NULL, "/tmp/rn2a/g");
+    (void)vfs_unlink(NULL, "/tmp/rn2a/f");
+    CHECK(vfs_rmdir(NULL, "/tmp/rn2a") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/rn2b") == 0);
+    CHECK(rc == 0);
+    CHECK(rc_back == 0);          /* it is where the second start named it */
+    CHECK(rc_gone == -ENOENT);
+    CHECK(rc_wrong == -ENOENT);   /* and not beside the first */
+    kinfo("selftest: vfs-rename2: a rename between two directories reached from two starts lands in the second");
+    return true;
+}

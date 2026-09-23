@@ -127,6 +127,30 @@ arrived, makes a system call and prints `lxdyn: ok`.
 rather than held to exit),
 `writev`, `exit_group`: the sequence a real Linux libc needs.
 
+**Directory descriptors** (the dirfd unit,
+`docs/audit/next-subsystem-dirfd.md`), in `lxtest` while it holds a
+descriptor for `/tmp/lxdir`: `openat`, `newfstatat`, `faccessat`,
+`mkdirat`, `symlinkat` and `readlinkat` (and `readlinkat` of an absent
+name answering `-ENOENT`, not `ENOSYS`), `mknodat`, `unlinkat`, and
+`renameat` from one descriptor to another and back -- **every effect
+cross-checked by absolute path**, because an `*at` call that quietly
+resolved from the working directory would still succeed and only the
+absolute check says which directory it acted in. Then a regular file as
+a base is `-ENOTDIR` and a closed descriptor `-EBADF`; `fchdir(dfd)`
+makes `getcwd` answer `/tmp/lxdir`, a relative open find `moved`, and
+`chdir("..")` land in `/tmp`; `fchdir` of a regular file is `-ENOTDIR`;
+a directory opened through a symbolic link resolves lookups but has no
+coherent name, so `fchdir` refuses it (`-ENOENT`) and `getcwd` is
+unchanged. **Rights** (`dirfd-rights`, a kernel test driving
+`init --probe dirfd-narrow` and `dirfd-wide`): `lxcwd narrow` and
+`lxcwd wide` receive the same directory at fd 5, `READ` only or with
+init's own rights; lookups work in both, and so does opening the child
+directory `sub` through it. Under the first, every change of an entry
+(`mkdirat`, `unlinkat`, `renameat`, a creating `openat`, `symlinkat`),
+an `O_WRONLY` open of `f`, and a `mkdirat` through `sub` are `-EBADF`,
+and init finds none of their effects afterwards; under the second,
+`mkdirat` and `unlinkat` succeed both at fd 5 and through `sub`.
+
 `lxcwd` (`tests/linux/lxcwd.c`, the cwd-hold unit,
 `docs/audit/next-subsystem-cwd-hold.md`): the held-walk racer at the
 Linux door, and the first test of the cwd use-after-free there. Not run

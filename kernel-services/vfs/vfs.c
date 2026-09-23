@@ -255,6 +255,27 @@ void vfs_cwd_hold_swap_wait(void)
     spin_unlock_irqrestore(&g_cwd_hold.lock, s);
 }
 
+void vfs_cwd_hold_swapper_leave(void)
+{
+    if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
+        return;   /* the cheap answer for every call that never registered */
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    /* Asked again under the lock: another thread may have registered in
+     * between, and its registration and its held walk are not this
+     * failure's to clear (found in review). */
+    if (g_cwd_hold.swapper != thread_current()) {
+        spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+        return;
+    }
+    bool release = g_cwd_hold.state == 2 && !g_cwd_hold.put_done;
+    g_cwd_hold.swapper = NULL;
+    if (release)
+        g_cwd_hold.put_done = true;   /* released_after_put stays false: the record says no put happened */
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+    if (release)
+        waitqueue_wake_all(&g_cwd_hold.held_wq);
+}
+
 void vfs_cwd_hold_before_put(struct vnode *old)
 {
     if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
@@ -302,6 +323,7 @@ void vfs_cwd_hold_swapper_enter(void) {}
 void vfs_cwd_hold_swap_wait(void) {}
 void vfs_cwd_hold_before_put(struct vnode *old) { (void)old; }
 void vfs_cwd_hold_after_put(struct vnode *old) { (void)old; }
+void vfs_cwd_hold_swapper_leave(void) {}
 static inline int cwd_hold_walk(struct vnode *start) { (void)start; return 0; }
 #endif
 
@@ -1102,6 +1124,7 @@ static bool dot_name(const char *name, size_t len)
  * path).
  */
 struct walk {
+    bool no_links;  /* any symbolic link met is -ELOOP: a name that must mean itself */
     unsigned links;
     char *buf;      /* 2 * VFS_PATH_MAX, or NULL */
     char *cur;      /* the half holding the path being walked */
@@ -1122,7 +1145,7 @@ static void walk_fini(struct walk *w)
  */
 static int walk_expand(struct walk *w, struct vnode *link, const char *rest, const char **out, bool *absolute)
 {
-    if (w->links >= VFS_MAX_SYMLINKS)
+    if (w->no_links || w->links >= VFS_MAX_SYMLINKS)
         return -ELOOP;
     if (link->ops->readlink == NULL)
         return -EIO;   /* a link this filesystem cannot read is not a link */
@@ -1390,8 +1413,42 @@ static void file_release(struct kobject *obj)
         pagecache_sync(f->vn);
         mutex_unlock(&f->vn->lock);
     }
+    if (f->dir_path)
+        kfree(f->dir_path);
     vnode_put(f->vn);
     kfree(f);
+}
+
+void file_set_dir_path(struct file *f, const char *abs)
+{
+    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || abs == NULL || abs[0] != '/')
+        return;
+    /*
+     * The name must name this directory. `abs` is a lexical normalisation
+     * of what the caller asked for, and the walk that opened the file may
+     * have followed a symbolic link or met `..` differently -- so the name
+     * is walked again from the caller's root with no link allowed, and
+     * recorded only if it arrives at this very vnode. A directory reached
+     * through a link has no coherent name to give fchdir, and fchdir
+     * refuses it rather than publish one directory's name with another's
+     * vnode (found in review).
+     */
+    struct walk w = { .no_links = true };
+    struct vnode *check = NULL;
+    int rc = resolve(NULL, abs, &w, RESOLVE_FOLLOW, &check);
+    walk_fini(&w);
+    if (rc)
+        return;
+    bool same = check == f->vn;
+    vnode_put(check);
+    if (!same)
+        return;
+    size_t n = strnlen(abs, VFS_PATH_MAX - 1) + 1;
+    char *p = kmalloc(n, 0);
+    if (p == NULL)
+        return;
+    strlcpy(p, abs, n);
+    f->dir_path = p;
 }
 
 static int64_t file_obj_read(struct kobject *obj, void *buf, size_t len)
@@ -2178,13 +2235,20 @@ int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
 
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
 {
+    return vfs_rename2(start, oldpath, start, newpath);
+}
+
+/* Two starts, for renameat's two descriptors. The checks below are made
+ * on the two parents, however they were reached. */
+int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath)
+{
     struct vnode *odir, *ndir;
     char oname[VFS_NAME_MAX + 1], nname[VFS_NAME_MAX + 1];
     size_t olen, nlen;
-    int rc = parent_for_mutation(start, oldpath, oname, &odir, &olen);
+    int rc = parent_for_mutation(ostart, oldpath, oname, &odir, &olen);
     if (rc)
         return rc;
-    rc = parent_for_mutation(start, newpath, nname, &ndir, &nlen);
+    rc = parent_for_mutation(nstart, newpath, nname, &ndir, &nlen);
     if (rc) {
         vnode_put(odir);
         return rc;

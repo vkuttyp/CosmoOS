@@ -512,6 +512,7 @@ static const struct selftest tests[] = {
     { "pagecache",       selftest_pagecache },
     { "pagecache-pinned", selftest_pagecache_pinned },
     { "vfs-ramfs",       selftest_vfs_ramfs },
+    { "vfs-rename2",     selftest_vfs_rename2 },
     { "vfs-symlink",     selftest_vfs_symlink },
     { "vfs-symlink-walk", selftest_vfs_symlink_walk },
     { "vfs-symlink-loop", selftest_vfs_symlink_loop },
@@ -760,6 +761,7 @@ static const struct selftest tests[] = {
     { "vm-file-readpage-fail", selftest_vm_file_readpage_fail },
     { "cwd-hold-native", selftest_cwd_hold_native },
     { "cwd-hold-linux",  selftest_cwd_hold_linux },
+    { "dirfd-rights",    selftest_dirfd_rights },
     { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
     /* Last: what the harness typed at the keyboard while everything

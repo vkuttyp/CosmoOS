@@ -171,7 +171,8 @@ bool selftest_process_oom(const char **reason);       /* injected demand-page fa
 bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED from user mode */
 bool selftest_vm_anon_fault_race(const char **reason);   /* two threads, one absent anonymous page */
 bool selftest_cwd_hold_native(const char **reason);    /* a held walk: the cwd reference proved, native door */
-bool selftest_cwd_hold_linux(const char **reason);     /* the same through the Linux door */
+bool selftest_cwd_hold_linux(const char **reason);
+bool selftest_dirfd_rights(const char **reason);        /* a narrowed directory handle stays narrowed (P31) */     /* the same through the Linux door */
 bool selftest_mmap_place_race(const char **reason);    /* concurrent placements, both forms (M46) */
 bool selftest_vm_file_fault_hold(const char **reason);   /* a FILE fault held between its phases: a racing install, an unmap */
 bool selftest_vm_file_readpage_fail(const char **reason); /* an injected readpage failure under a mapping is SIGBUS */
@@ -225,6 +226,7 @@ bool selftest_virtio_console(const char **reason);
 
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
+bool selftest_vfs_rename2(const char **reason);   /* renameat's two starts (P31) */
 bool selftest_vfs_symlink(const char **reason);
 bool selftest_vfs_symlink_walk(const char **reason);
 bool selftest_vfs_symlink_loop(const char **reason);
