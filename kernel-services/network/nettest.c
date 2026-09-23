@@ -681,7 +681,14 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
      */
     struct tcp_releaser rel = { 0 };
     struct thread *rt = thread_create_on(tcp_releaser_main, &rel, "tcprel", SCHED_PRIO_DEFAULT, CPUMASK_OF(rel_cpu));
-    CHECK(rt != NULL);
+    if (rt == NULL) {
+        /* No timer is armed yet: disarm and close both, then fail
+         * (found in review: the decoy leaked here, and so did the pcb). */
+        tcp_test_hold_callback(NULL);
+        tcp_close(decoy);
+        tcp_close(pcb);
+        CHECK(rt != NULL);
+    }
 
     /* Arm the rexmit timer *from* the other CPU, because a timer lands on
      * the queue of the CPU that starts it and this window needs the
@@ -697,6 +704,7 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
         thread_join(rt);
         tcp_test_hold_callback(NULL);
         tcp_close(decoy);
+        tcp_close(pcb);
         CHECK(at != NULL);
     }
 
@@ -709,6 +717,7 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
             thread_join(at);
             tcp_test_hold_callback(NULL);
             tcp_close(decoy);
+            tcp_close(pcb);   /* cancels its timer, whatever state it is in */
             *reason = "the timer callback never entered the hold";
             return false;
         }
