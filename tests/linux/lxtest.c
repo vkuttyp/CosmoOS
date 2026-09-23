@@ -360,6 +360,17 @@ static int t_flag_waiter(void *arg)
     return 0;
 }
 
+/* Two threads placing pages at once through the Linux door (M46). */
+#define LX_PLACE_ROUNDS 300
+static long g_place[2][LX_PLACE_ROUNDS];
+static int t_place(void *arg)
+{
+    long *out = g_place[(int)(uintptr_t)arg];
+    for (int i = 0; i < LX_PLACE_ROUNDS; i++)
+        out[i] = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+    return 0;
+}
+
 /* Join like a libc: wait while the CHILD_CLEARTID word is nonzero. */
 static int lx_join(int32_t *word)
 {
@@ -969,6 +980,32 @@ int main(int argc, char **argv)
     CHECKV(g_read_rc[1] == 4, g_read_rc[1]);                              /* restarted, completed */
     sc1(LX_close, g_pipe[0]);
     sc1(LX_close, g_pipe[1]);
+    /* Placement is one operation (M46): two threads mmap(NULL) at once and
+     * none is told EEXIST, which Linux never answers and which a find then
+     * a map under two holds of the space lock answered about half the
+     * time (docs/audit/next-subsystem-mmap-place.md). */
+    {
+        long p0 = lx_clone(t_place, g_stacks[2] + sizeof(g_stacks[2]), (void *)0, THREAD_FLAGS, &ptid, &g_tidword[2], g_tcb);
+        long p1 = lx_clone(t_place, g_stacks[3] + sizeof(g_stacks[3]), (void *)1, THREAD_FLAGS, &ptid, &g_tidword[3], g_tcb);
+        CHECKV(p0 > 0 && p1 > 0, p0 > 0 ? p1 : p0);
+        if (p0 > 0)
+            CHECKV(lx_join(&g_tidword[2]) == 0, 0);
+        if (p1 > 0)
+            CHECKV(lx_join(&g_tidword[3]) == 0, 0);
+        long eexist = 0, other = 0;
+        for (int t = 0; t < 2; t++)
+            for (int i = 0; i < LX_PLACE_ROUNDS; i++) {
+                long v = g_place[t][i];
+                if (v == -17)
+                    eexist++;
+                else if (v < 0 && v > -4096)
+                    other++;
+                else
+                    sc2(LX_munmap, v, 4096);
+            }
+        CHECKV(eexist == 0, eexist);
+        CHECKV(other == 0, other);
+    }
     /* Requeue: two waiters on A (WAIT_BITSET, absolute realtime deadline)
      * move to B; only a wake on B releases them. */
     g_wait_rc[0] = g_wait_rc[1] = 99;

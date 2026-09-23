@@ -4144,6 +4144,29 @@ static int probe_status(const char *what)
  * file, a truncate under a mapping, msync and the re-dirtying fault,
  * the rights, the native rules, the leak cycle, and the bench.
  */
+/* Two threads placing pages at once through the native door (M46). */
+#define PLACE_ROUNDS 300
+struct place_arg {
+    void *got[PLACE_ROUNDS];
+    unsigned ok, eexist, other;
+};
+
+static void *place_thread(void *arg)
+{
+    struct place_arg *a = arg;
+    for (unsigned i = 0; i < PLACE_ROUNDS; i++) {
+        void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        a->got[i] = p;
+        if (p != MAP_FAILED)
+            a->ok++;
+        else if (errno == EEXIST)
+            a->eexist++;
+        else
+            a->other++;
+    }
+    return NULL;
+}
+
 static void mmap_selftest(void)
 {
     const size_t P = 4096;
@@ -4530,6 +4553,35 @@ static void mmap_selftest(void)
         }
         free(buf);
         CHECK(cosmo_close(bh) == 0 && cosmo_unlink("/tmp/mm-bench") == 0);
+    }
+
+    /*
+     * Two threads asking for a placement at once (invariant M46,
+     * docs/audit/next-subsystem-mmap-place.md). A request that names no
+     * address has one failure, ENOMEM; EEXIST means the kernel proposed a
+     * range and then refused it, which a find-then-map under two holds of
+     * the space lock did to about half of all concurrent placements. At
+     * that rate three hundred rounds from each thread cannot miss it.
+     */
+    {
+        static struct place_arg pa[2];
+        cosmo_thread_t pt[2];
+        memset(pa, 0, sizeof(pa));
+        int started[2];
+        for (unsigned i = 0; i < 2; i++)
+            started[i] = cosmo_thread_start(&pt[i], place_thread, &pa[i], 64 * 1024) == 0;
+        CHECK(started[0] && started[1]);
+        for (unsigned i = 0; i < 2; i++)
+            if (started[i])
+                (void)cosmo_thread_join(&pt[i], NULL);
+        unsigned ok = pa[0].ok + pa[1].ok, ee = pa[0].eexist + pa[1].eexist, other = pa[0].other + pa[1].other;
+        printf("usertest: mmap placement: %u placed from two threads, %u EEXIST, %u other\n", ok, ee, other);
+        CHECK(ee == 0);
+        CHECK(other == 0);
+        for (unsigned i = 0; i < 2; i++)
+            for (unsigned j = 0; j < PLACE_ROUNDS; j++)
+                if (pa[i].got[j] != MAP_FAILED && pa[i].got[j] != NULL)
+                    CHECK(munmap(pa[i].got[j], P) == 0);
     }
 
     CHECK(munmap(sh, 3 * P) == 0);

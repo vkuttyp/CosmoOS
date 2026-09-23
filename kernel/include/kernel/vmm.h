@@ -171,6 +171,20 @@ void vm_space_destroy(struct vm_space *space);
 int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
                      const char *name);
 
+/*
+ * The same, at a base the kernel chooses: first fit at or above `from`,
+ * inserted under the same hold of the space lock that chose it, so no
+ * other placement can be handed the range in between (invariant M46,
+ * docs/audit/next-subsystem-mmap-place.md). *base is the address.
+ * -ENOMEM if no gap of that size exists above `from` (the caller may try
+ * a lower one) or COSMO_RLIMIT_AS refuses; never -EEXIST. The file form
+ * is the same for vm_user_map_file, VM_MAP_REPLACE excepted.
+ */
+int vm_user_map_anon_free(struct vm_space *space, uint64_t from, size_t size, vm_prot_t prot, unsigned flags,
+                          const char *name, uint64_t *base);
+int vm_user_map_file_free(struct vm_space *space, uint64_t from, size_t size, vm_prot_t prot, vm_prot_t maxprot,
+                          unsigned flags, struct vnode *vn, uint64_t off, const char *name, uint64_t *base);
+
 /* Unmap every page of [base, base+size), splitting regions at the ends.
  * VM_UNMAP_STRICT: every page must be mapped, else -EINVAL and nothing
  * changes (the native munmap). Without it unmapped pages are skipped
@@ -325,7 +339,10 @@ void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t
 void vm_space_switch(struct vm_space *prev, struct vm_space *next);
 
 /* Lowest free range of `size` bytes at or above `from` inside
- * [USER_LO, USER_HI) with a guard gap; 0 if none. */
+ * [USER_LO, USER_HI) with a guard gap; 0 if none. ADVISORY: true when the
+ * lock is released and not after. A caller that maps what this returns in
+ * a space another thread can place into must use the _free forms above
+ * (M46); see the comment at the definition for the two that may not. */
 uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
 
 /* True if every page of [addr, addr+len) is inside one or more regions

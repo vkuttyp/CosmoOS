@@ -755,6 +755,7 @@ static const struct selftest tests[] = {
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },
     { "process-rlimit",  selftest_process_rlimit },
+    { "mmap-place-race", selftest_mmap_place_race },
     { "vm-file-fault-hold", selftest_vm_file_fault_hold },
     { "vm-file-readpage-fail", selftest_vm_file_readpage_fail },
     { "cwd-hold-native", selftest_cwd_hold_native },

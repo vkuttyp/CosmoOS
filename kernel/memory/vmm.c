@@ -1371,12 +1371,55 @@ static void region_split(struct vm_region *r, struct vm_region *spare, vaddr_t a
     list_insert_after(&r->link, &spare->link);
 }
 
-int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
-                     const char *name)
+/*
+ * Lowest free range of `size` bytes at or above `from` inside
+ * [USER_LO, USER_HI), keeping one unmapped page between user regions; 0
+ * if none. Lock held: the answer is only worth anything while it is, which
+ * is why the placing callers insert before they let go (M46).
+ */
+static uint64_t range_first_fit_locked(struct vm_space *space, uint64_t from, size_t size)
+{
+    if (from < VM_USER_LO)
+        from = VM_USER_LO;
+    from = page_align_up(from);
+    vaddr_t cursor = (vaddr_t)from;
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        vaddr_t rlo, rhi;
+        region_footprint(r, &rlo, &rhi);
+        rhi += PAGE_SIZE; /* keep one unmapped page between user regions */
+        if (rhi <= cursor)
+            continue;
+        if (rlo >= cursor && rlo - cursor >= size + PAGE_SIZE)
+            return cursor;
+        if (rhi > cursor)
+            cursor = rhi;
+    }
+    if (cursor + size + PAGE_SIZE <= VM_USER_HI)
+        return cursor;
+    return 0;
+}
+
+/*
+ * The anonymous map, at a given base or -- with `placed` -- at a base it
+ * chooses. Choosing happens inside the hold that inserts: first fit from
+ * `from`, the region's base set, the insert made, before the lock is
+ * released, so no other placement can be handed the range in between
+ * (M46). The two used to be two holds (vm_user_find_free, then this), and
+ * about half of all concurrent placements then lost with -EEXIST for a
+ * request that named no address (docs/audit/next-subsystem-mmap-place.md,
+ * "Measured").
+ */
+static int map_anon(struct vm_space *space, uint64_t base, uint64_t from, size_t size, vm_prot_t prot,
+                    unsigned flags, const char *name, uint64_t *placed)
 {
     KASSERT(space->user);
-    if (!user_range_valid(base, size))
+    if (placed) {
+        if (!is_page_aligned(size) || size == 0)
+            return -EINVAL;
+    } else if (!user_range_valid(base, size)) {
         return -EINVAL;
+    }
     if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
         return -EINVAL;
 
@@ -1393,12 +1436,25 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
         kmem_cache_free(g_region_cache, r);
         return -ENOMEM;
     }
+    if (placed) {
+        base = range_first_fit_locked(space, from, size);
+        if (base == 0) {
+            spin_unlock_irqrestore(&space->lock, s);
+            kmem_cache_free(g_region_cache, r);
+            return -ENOMEM;   /* no gap above `from`: the caller may try a lower one */
+        }
+        r->base = (vaddr_t)base;
+    }
     int rc = space_insert(space, r);
     if (rc) {
+        /* Never for a placement: the range was free under this hold. */
+        KASSERT(!placed);
         spin_unlock_irqrestore(&space->lock, s);
         kmem_cache_free(g_region_cache, r);
         return rc;
     }
+    if (placed)
+        *placed = base;
     space->mapped_pages += npages;
 
     if ((flags & VM_REGION_POPULATED) && prot != VM_PROT_NONE) {
@@ -1430,6 +1486,18 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
     for (unsigned i = 0; i < nf; i++)
         kmem_cache_free(g_region_cache, freed[i]);
     return 0;
+}
+
+int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
+                     const char *name)
+{
+    return map_anon(space, base, 0, size, prot, flags, name, NULL);
+}
+
+int vm_user_map_anon_free(struct vm_space *space, uint64_t from, size_t size, vm_prot_t prot, unsigned flags,
+                          const char *name, uint64_t *base)
+{
+    return map_anon(space, 0, from, size, prot, flags, name, base);
 }
 
 /* Every page of [base, base+size) lies in some region. Lock held. */
@@ -1746,11 +1814,31 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
     return map_replace(space, fresh);
 }
 
-int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
-                     unsigned flags, struct vnode *vn, uint64_t off, const char *name)
+/*
+ * The file map, at a given base or -- with `placed` -- at one it chooses.
+ * A chosen base has to exist before the record goes on the vnode's list,
+ * because a truncate or an instruction-cache sync reads `m->base` off that
+ * list. So a placement is made first, under one hold of the space lock:
+ * first fit, the region inserted CLAIMED (VM_REGION_QUIESCED -- a fault
+ * there installs nothing and retries, which is what map_replace does for
+ * the same reason), the pages counted. Then the record is linked exactly
+ * as for a given base, and the claim is dropped; a refusal takes the
+ * region out again. Every reader of the list rechecks that the space's
+ * region points at this record, so one that meets it early sees a
+ * claimed region and skips it (M46).
+ */
+static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t size, vm_prot_t prot,
+                    vm_prot_t maxprot, unsigned flags, struct vnode *vn, uint64_t off, const char *name,
+                    uint64_t *placed)
 {
     KASSERT(space->user);
-    if (!user_range_valid(base, size) || !is_page_aligned(off) || off + size < off)
+    if (placed) {
+        if (!is_page_aligned(size) || size == 0 || (flags & VM_MAP_REPLACE))
+            return -EINVAL;
+    } else if (!user_range_valid(base, size)) {
+        return -EINVAL;
+    }
+    if (!is_page_aligned(off) || off + size < off)
         return -EINVAL;
     prot &= ~VM_PROT_USER;
     maxprot &= ~VM_PROT_USER;
@@ -1768,6 +1856,29 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
         if (r)
             kmem_cache_free(g_region_cache, r);
         return -ENOMEM;
+    }
+    uint64_t npages = size / PAGE_SIZE;
+    if (placed) {
+        arch_irq_state_t ps = spin_lock_irqsave(&space->lock);
+        int prc = 0;
+        if (space->mapped_pages + npages > space->limit_mapped_pages)   /* COSMO_RLIMIT_AS */
+            prc = -ENOMEM;
+        else if ((base = range_first_fit_locked(space, from, size)) == 0)
+            prc = -ENOMEM;   /* no gap above `from`: the caller may try a lower one */
+        if (prc == 0) {
+            r->base = (vaddr_t)base;
+            r->flags |= VM_REGION_QUIESCED;
+            int irc = space_insert(space, r);
+            KASSERT(irc == 0);   /* the range was free under this hold */
+            (void)irc;
+            space->mapped_pages += npages;
+        }
+        spin_unlock_irqrestore(&space->lock, ps);
+        if (prc) {
+            kfree(m);
+            kmem_cache_free(g_region_cache, r);
+            return prc;
+        }
     }
     vnode_get(vn);
     m->vn = vn;
@@ -1843,6 +1954,14 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     pagecache_unlock(vn);
     if (text_lock)
         mutex_unlock(&vn->lock);
+    if (clash && placed) {
+        /* The claimed region comes out of the space again: nothing can
+         * have faulted into it, a claim installs nothing. */
+        arch_irq_state_t ps = spin_lock_irqsave(&space->lock);
+        list_remove(&r->link);
+        space->mapped_pages -= npages;
+        spin_unlock_irqrestore(&space->lock, ps);
+    }
     if (clash) {
         /* Undo what was counted before the record was built: the
          * refusal happens after `shared_maps` was incremented, and a
@@ -1860,7 +1979,15 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     if (flags & VM_MAP_REPLACE)
         return map_replace(space, r);   /* owns `r` either way */
 
-    uint64_t npages = size / PAGE_SIZE;
+    if (placed) {
+        /* Linked: drop the claim, and faults may install from here. */
+        arch_irq_state_t ps = spin_lock_irqsave(&space->lock);
+        r->flags &= ~VM_REGION_QUIESCED;
+        spin_unlock_irqrestore(&space->lock, ps);
+        *placed = base;
+        return 0;
+    }
+
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
     int rc = 0;
     if (space->mapped_pages + npages > space->limit_mapped_pages)   /* COSMO_RLIMIT_AS */
@@ -1873,6 +2000,18 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     if (rc)
         region_put(r);   /* unlinks the record and drops the vnode */
     return rc;
+}
+
+int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
+                     unsigned flags, struct vnode *vn, uint64_t off, const char *name)
+{
+    return map_file(space, base, 0, size, prot, maxprot, flags, vn, off, name, NULL);
+}
+
+int vm_user_map_file_free(struct vm_space *space, uint64_t from, size_t size, vm_prot_t prot, vm_prot_t maxprot,
+                          unsigned flags, struct vnode *vn, uint64_t off, const char *name, uint64_t *base)
+{
+    return map_file(space, 0, from, size, prot, maxprot, flags, vn, off, name, base);
 }
 
 int vm_user_msync(struct vm_space *space, uint64_t base, size_t size)
@@ -2222,34 +2361,23 @@ unsigned vm_user_region_count(struct vm_space *space)
     return n;
 }
 
+/*
+ * Advisory: the answer is true when the lock is released and not after.
+ * A caller that will map what this returns, in a space another thread of
+ * the same process can place into, must use vm_user_map_anon_free or
+ * vm_user_map_file_free instead, which choose and insert under one hold
+ * (invariant M46, docs/audit/next-subsystem-mmap-place.md). Two callers
+ * may use it: process creation placing an ET_DYN interpreter, before the
+ * process has a second thread, and memtest's filler racer, whose purpose
+ * is to take what it is offered and see what happens.
+ */
 uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size)
 {
     KASSERT(space->user);
     if (!is_page_aligned(size) || size == 0)
         return 0;
-    if (from < VM_USER_LO)
-        from = VM_USER_LO;
-    from = page_align_up(from);
-
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
-    vaddr_t cursor = (vaddr_t)from;
-    struct vm_region *r;
-    uint64_t result = 0;
-    list_for_each_entry(r, &space->regions, link) {
-        vaddr_t rlo, rhi;
-        region_footprint(r, &rlo, &rhi);
-        rhi += PAGE_SIZE; /* keep one unmapped page between user regions */
-        if (rhi <= cursor)
-            continue;
-        if (rlo >= cursor && rlo - cursor >= size + PAGE_SIZE) {
-            result = cursor;
-            break;
-        }
-        if (rhi > cursor)
-            cursor = rhi;
-    }
-    if (result == 0 && cursor + size + PAGE_SIZE <= VM_USER_HI)
-        result = cursor;
+    uint64_t result = range_first_fit_locked(space, from, size);
     spin_unlock_irqrestore(&space->lock, s);
     return result;
 }
