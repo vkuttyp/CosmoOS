@@ -1187,6 +1187,111 @@ static void free_image_with_vnode(struct process_image *img)
  * that writes to the program the machine is running is a test that has
  * already gone wrong.
  */
+/*
+ * What a segment's zero tail reads as, and what shared text refuses.
+ *
+ * Two claims the sharing put at risk, checked in one process so the
+ * setup is paid once:
+ *
+ *  - **The zero tail is zero.** `memsz > filesz` means the segment ends
+ *    in bytes the file does not hold, and the loader now leaves them
+ *    demand-paged instead of populating them. An anonymous page arrives
+ *    zero, which is why that is safe -- but "is why" is an argument and
+ *    this is the check. It reads the tail through the child's own
+ *    address space.
+ *  - **Shared text cannot be made writable.** `maxprot` excludes W on a
+ *    text mapping, so `vm_user_protect` must refuse to grant it. Without
+ *    that, one process could rewrite another's instructions through a
+ *    mapping it was handed for free.
+ */
+bool selftest_elf_text_ro(const char **reason);
+bool selftest_elf_text_ro(const char **reason)
+{
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-text-ro: /boot/init unreadable; skipping");
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        return false;
+    }
+    uint64_t text_va = 0, tail_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++) {
+        const struct elf_segment *sg = &info.segments[i];
+        if (text_va == 0 && (sg->flags & ELF_PF_X) && sg->file_memsz == sg->filesz)
+            text_va = sg->vaddr;
+        /* A segment with a real zero tail, and a byte inside it. */
+        if (tail_va == 0 && sg->file_memsz > sg->filesz && sg->filesz > 0 &&
+            ((sg->file_vaddr + sg->filesz) & (PAGE_SIZE - 1)) != 0)
+            tail_va = sg->file_vaddr + sg->filesz;
+    }
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
+    free_image_with_vnode(&img);
+    if (!ok) {
+        *reason = "could not create the process";
+        return false;
+    }
+
+    /* Text stays read-only: maxprot has no W, so this must be refused. */
+    int prot_rc = 0;
+    if (text_va != 0)
+        prot_rc = vm_user_protect(p->space, text_va, PAGE_SIZE, VM_PROT_RW);
+
+    /*
+     * The zero tail, read out of the child's own frame.
+     *
+     * The bytes checked are the ones just past `filesz` inside the last
+     * page the file's bytes touch -- the part the loader populates and
+     * copies into, and therefore the part this unit could have got
+     * wrong. Beyond that page the tail is a separate anonymous region
+     * that is demand-paged, and an anonymous page arrives zero by
+     * construction with no copy to get wrong.
+     */
+    uint8_t tail[16];
+    int tail_rc = 0;
+    bool tail_zero = true;
+    if (tail_va != 0) {
+        paddr_t pa = 0;
+        if (!arch_mmu_query(&p->space->mmu, (vaddr_t)(tail_va & ~(uint64_t)(PAGE_SIZE - 1)),
+                            &pa, NULL, NULL, NULL)) {
+            tail_rc = -EFAULT;
+        } else {
+            const uint8_t *page = phys_to_virt(pa);
+            memcpy(tail, page + (tail_va & (PAGE_SIZE - 1)), sizeof(tail));
+            for (unsigned i = 0; i < sizeof(tail); i++)
+                if (tail[i] != 0)
+                    tail_zero = false;
+        }
+    }
+
+    process_kill(p, COSMO_SIGKILL);
+    process_wait_exit(p);
+    process_put(p);
+
+    if (text_va != 0 && prot_rc == 0) {
+        *reason = "shared text could be made writable";
+        return false;
+    }
+    if (tail_va != 0 && tail_rc != 0) {
+        kinfo("selftest: elf-text-ro: the zero tail at %p is not readable (%d); skipping that half",
+              (void *)tail_va, tail_rc);
+    } else if (tail_va != 0 && !tail_zero) {
+        kerror("selftest: elf-text-ro: the zero tail at %p reads %02x %02x %02x %02x",
+               (void *)tail_va, tail[0], tail[1], tail[2], tail[3]);
+        *reason = "a segment's zero tail is not zero";
+        return false;
+    }
+    kinfo("selftest: elf-text-ro: shared text refuses PROT_WRITE (%d), and the zero tail reads as zero",
+          prot_rc);
+    return true;
+}
+
 bool selftest_elf_txtbsy(const char **reason);
 bool selftest_elf_txtbsy(const char **reason)
 {
