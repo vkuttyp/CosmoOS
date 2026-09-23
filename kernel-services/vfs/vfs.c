@@ -16,10 +16,13 @@
 #include <kernel/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
+#include <kernel/wait.h>
 
 #include "vfs_internal.h"
 
@@ -68,8 +71,225 @@ static void vnode_release(struct kobject *obj)
     }
     if (vn->ops && vn->ops->evict)
         vn->ops->evict(vn);
+#if CONFIG_DEBUG
+    /* A freed vnode that still looks like a directory hides a
+     * use-after-free; one full of 0x5a does not. The pmm poisons freed
+     * frames for the same reason (kernel/memory/pmm.c) and the slab
+     * poisons nothing, so the cwd-ref unit's regression test passed on a
+     * broken kernel every time until this line existed
+     * (docs/audit/next-subsystem-cwd-hold.md, "Measured"). */
+    memset(vn, 0x5a, sizeof(*vn));
+#endif
     kfree(vn);
 }
+
+/* --- the held-walk seam (docs/audit/next-subsystem-cwd-hold.md) --------- */
+
+#if CONFIG_DEBUG
+#define CWD_HOLD_POISON_WORD 0x5a5a5a5au
+static struct {
+    unsigned state;               /* 0 idle, 1 armed, 2 held, 3 released */
+    char name[PROCESS_NAME_MAX];  /* the process this arm is for */
+    struct process *proc;         /* bound at the first hold */
+    struct thread *holder;        /* the held walk's thread */
+    struct thread *swapper;       /* the thread inside process_chdir */
+    struct vnode *held_vn;        /* the pointer the held walk read */
+    bool put_done;                /* the swapper has put the old directory */
+    bool wq_ready;
+    struct waitqueue held_wq;     /* the walk waits here for put_done */
+    struct waitqueue swap_wq;     /* the swapper waits here for the hold */
+    struct vfs_cwd_hold_record rec;
+    spinlock_t lock;
+} g_cwd_hold = { .lock = SPINLOCK_INIT("vfs-cwd-hold") };
+
+void vfs_test_cwd_hold_arm(const char *process_name)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    if (!g_cwd_hold.wq_ready) {
+        waitqueue_init(&g_cwd_hold.held_wq, "vfs-cwd-hold-walk");
+        waitqueue_init(&g_cwd_hold.swap_wq, "vfs-cwd-hold-swap");
+        g_cwd_hold.wq_ready = true;
+    }
+    strlcpy(g_cwd_hold.name, process_name, sizeof(g_cwd_hold.name));
+    g_cwd_hold.proc = NULL;
+    g_cwd_hold.holder = NULL;
+    g_cwd_hold.swapper = NULL;
+    g_cwd_hold.held_vn = NULL;
+    g_cwd_hold.put_done = false;
+    memset(&g_cwd_hold.rec, 0, sizeof(g_cwd_hold.rec));
+    g_cwd_hold.state = 1;
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+}
+
+unsigned vfs_test_cwd_hold_state(void)
+{
+    return __atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE);
+}
+
+void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    if (out)
+        *out = g_cwd_hold.rec;
+    bool parked = g_cwd_hold.state == 2 && !g_cwd_hold.put_done;
+    g_cwd_hold.state = 0;
+    g_cwd_hold.put_done = true;   /* nothing stays parked past a disarm */
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+    if (parked)
+        waitqueue_wake_all(&g_cwd_hold.held_wq);
+}
+
+/* Whether the seam is about the calling process: armed or held, and the
+ * name matches (or, once bound, the process is the bound one). Called
+ * with the lock held. */
+static bool cwd_hold_mine_locked(void)
+{
+    if (g_cwd_hold.state != 1 && g_cwd_hold.state != 2)
+        return false;
+    struct process *p = process_current();
+    if (p == NULL)
+        return false;
+    if (g_cwd_hold.proc)
+        return p == g_cwd_hold.proc;
+    return strcmp(p->name, g_cwd_hold.name) == 0;
+}
+
+/*
+ * The walk half. `start` is the pointer the caller read and has not yet
+ * dereferenced. Returns 0 to proceed, -EINTR if the held wait was
+ * interrupted by a kill.
+ */
+static int cwd_hold_walk(struct vnode *start)
+{
+    if (__atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) != 1)
+        return 0;   /* the one load every relative walk pays in a debug build */
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    bool take = g_cwd_hold.state == 1 && cwd_hold_mine_locked() && thread_current() != g_cwd_hold.swapper;
+    if (take) {
+        g_cwd_hold.state = 2;
+        g_cwd_hold.proc = process_current();
+        g_cwd_hold.holder = thread_current();
+        g_cwd_hold.held_vn = start;
+        g_cwd_hold.rec.held = true;
+        g_cwd_hold.rec.ref_at_hold = kobject_refcount(&start->obj);
+        g_cwd_hold.rec.t_hold_ns = clock_now_ns();
+    }
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+    if (!take)
+        return 0;
+    waitqueue_wake_all(&g_cwd_hold.swap_wq);
+
+    int rc = wait_event_killable_timeout(&g_cwd_hold.held_wq,
+                                         __atomic_load_n(&g_cwd_hold.put_done, __ATOMIC_ACQUIRE), 5000000000ULL);
+    /*
+     * The liveness check, on the pointer read before the wait and with
+     * nothing but the code under test keeping it alive. VNODE_DEAD is
+     * not judged: an unlinked directory a walk still references is what
+     * pass 2 produces on a correct kernel.
+     */
+    uint32_t ref = kobject_refcount(&start->obj);
+    if (start->type != VNODE_DIR || ref == 0 || ref == CWD_HOLD_POISON_WORD)
+        panic("cwd walk resumed on a freed directory (pid %d): type %#x refcount %#x",
+              process_current() ? process_current()->pid : -1, (unsigned)start->type, ref);
+    s = spin_lock_irqsave(&g_cwd_hold.lock);
+    g_cwd_hold.rec.ref_at_resume = ref;
+    /* Against what the swapper saw immediately before its put, not
+     * against the count at the hold: in pass 2 the swapper's own rmdir
+     * drops the directory's pin between the two, and a derivation from
+     * the hold read one lower than it should and failed a correct
+     * kernel (found by the build). */
+    g_cwd_hold.rec.released_after_put = g_cwd_hold.rec.ref_before_put != 0 &&
+                                        ref + 1 == g_cwd_hold.rec.ref_before_put;
+    g_cwd_hold.rec.resumed_dead = (start->flags & VNODE_DEAD) != 0;
+    if (rc == -EINTR)
+        g_cwd_hold.rec.interrupted = true;
+    else if (rc == -ETIMEDOUT)
+        g_cwd_hold.rec.walk_timed_out = true;
+    if (g_cwd_hold.state == 2)
+        g_cwd_hold.state = 3;
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+    return rc == -EINTR ? -EINTR : 0;
+}
+
+void vfs_cwd_hold_swapper_enter(void)
+{
+    if (__atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) == 0)
+        return;
+    /*
+     * A chdir in a single-threaded process has no walk to race: there is
+     * no other thread whose pointer it could pull from under. It
+     * registers nothing and waits for nothing. Found by the build: the
+     * racer's own setup chdir, made before its threads exist, was the
+     * first chdir the seam saw, waited its whole bound for a hold that
+     * could not come, and wrote that timeout into the record.
+     */
+    struct process *p = process_current();
+    if (p == NULL || __atomic_load_n(&p->nr_threads, __ATOMIC_ACQUIRE) < 2)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    if (cwd_hold_mine_locked()) {
+        g_cwd_hold.swapper = thread_current();
+        if (g_cwd_hold.state == 2 && g_cwd_hold.holder == thread_current())
+            g_cwd_hold.rec.swapper_was_held = true;   /* a held walk that reached chdir: its own timeout let it */
+    }
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+}
+
+void vfs_cwd_hold_swap_wait(void)
+{
+    if (__atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
+        return;
+    g_cwd_hold.rec.t_swap_wait_ns = clock_now_ns();
+    int rc = wait_event_killable_timeout(&g_cwd_hold.swap_wq,
+                                         __atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) == 2, 2000000000ULL);
+    g_cwd_hold.rec.t_swap_done_ns = clock_now_ns();
+    g_cwd_hold.rec.swap_rc = rc;
+    if (rc == 0)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    if (rc == -EINTR)
+        g_cwd_hold.rec.interrupted = true;
+    else
+        g_cwd_hold.rec.swap_timed_out = true;
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+}
+
+void vfs_cwd_hold_before_put(struct vnode *old)
+{
+    if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    if (g_cwd_hold.state == 2 && old) {
+        g_cwd_hold.rec.held_matches_old = (g_cwd_hold.held_vn == old);
+        g_cwd_hold.rec.ref_before_put = kobject_refcount(&old->obj);
+    }
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+}
+
+void vfs_cwd_hold_after_put(void)
+{
+    if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    bool release = g_cwd_hold.state == 2;
+    if (release)
+        g_cwd_hold.put_done = true;
+    spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+    if (release)
+        waitqueue_wake_all(&g_cwd_hold.held_wq);
+}
+#else
+void vfs_test_cwd_hold_arm(const char *process_name) { (void)process_name; }
+unsigned vfs_test_cwd_hold_state(void) { return 0; }
+void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out) { if (out) memset(out, 0, sizeof(*out)); }
+void vfs_cwd_hold_swapper_enter(void) {}
+void vfs_cwd_hold_swap_wait(void) {}
+void vfs_cwd_hold_before_put(struct vnode *old) { (void)old; }
+void vfs_cwd_hold_after_put(void) {}
+static inline int cwd_hold_walk(struct vnode *start) { (void)start; return 0; }
+#endif
+
 
 static const struct kobject_type vnode_type = {
     .name = "vnode",
@@ -945,6 +1165,13 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
          * leading slash. */
         cur = vfs_current_root();
     } else {
+        /* The one line every relative walk from every caller shares, and
+         * the first dereference of the caller's starting directory: the
+         * held-walk seam sits in front of it, with the pointer read and
+         * nothing yet taken. */
+        int hrc = cwd_hold_walk(start);
+        if (hrc)
+            return hrc;
         cur = start;
         vnode_get(cur);
     }

@@ -2217,6 +2217,7 @@ static const char *const sysctl_names[] = {
     "debug.preempt_probe",
     "debug.file_fault_hold",
     "debug.anon_fault_hold",
+    "debug.cwd_hold",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -2298,6 +2299,13 @@ static int sysctl_value(const char *name, char *out, size_t n)
     if (strcmp(name, "debug.anon_fault_hold") == 0) {
 #if CONFIG_DEBUG
         return ksnprintf(out, n, "%u", vm_test_anon_hold_state());
+#else
+        return -ENOENT;
+#endif
+    }
+    if (strcmp(name, "debug.cwd_hold") == 0) {
+#if CONFIG_DEBUG
+        return ksnprintf(out, n, "%u", vfs_test_cwd_hold_state());
 #else
         return -ENOENT;
 #endif

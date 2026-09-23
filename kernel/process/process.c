@@ -1301,6 +1301,7 @@ int process_chdir(const char *path)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
+    vfs_cwd_hold_swapper_enter();   /* the seam must never hold the thread that releases */
     /*
      * One snapshot for both: the base this normalises against and the
      * directory this looks up in must be the same directory, or what gets
@@ -1330,6 +1331,10 @@ int process_chdir(const char *path)
         vnode_put(vn);
         return rc;
     }
+    /* Before the publish, not before the put: a held walk must have
+     * captured the directory this replaces, not the one it installs
+     * (docs/audit/next-subsystem-cwd-hold.md, "The swap half"). */
+    vfs_cwd_hold_swap_wait();
     arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
     struct vnode *old = cur->cwd_locked;
     cur->cwd_locked = vn;
@@ -1339,8 +1344,10 @@ int process_chdir(const char *path)
      * Outside the lock, and safe to be the last reference now: every walk
      * that started while this was the cwd took a reference of its own.
      */
+    vfs_cwd_hold_before_put(old);
     if (old)
         vnode_put(old);
+    vfs_cwd_hold_after_put();
     return 0;
 }
 
