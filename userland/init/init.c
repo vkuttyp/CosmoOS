@@ -1527,6 +1527,22 @@ static int probe(const char *kind)
         *(volatile char *)fresh = 1;   /* the demand fault fails: fatal */
         return 9;
     }
+    if (strncmp(kind, "cwd-hold-linux:", 15) == 0) {
+        /* The held-walk racer at the Linux door
+         * (docs/audit/next-subsystem-cwd-hold.md). A kernel-created
+         * process is always native, so the kernel test spawns this
+         * probe and this probe spawns the Linux program; the seam is
+         * armed for the program's name, "lxcwd", not for init. Absolute
+         * path, and this process makes no relative walk of its own. */
+        const char *argv[] = { "lxcwd", kind + 15, NULL };
+        long pid = cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/tests/linux/lxcwd", .argv = argv });
+        if (pid <= 0)
+            return 90;
+        int status = -1;
+        if (cosmo_wait((int)pid, &status, 0) != pid)
+            return 91;
+        return status;
+    }
     if (strncmp(kind, "mmap-", 5) == 0)
         return mmap_probe(kind + 5);
     if (strncmp(kind, "unix-", 5) == 0)

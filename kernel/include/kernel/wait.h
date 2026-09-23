@@ -140,6 +140,46 @@ bool wait_timeout_expired(const struct wait_timeout *wt);
         __ok;                                                                  \
     })
 
+/*
+ * wait_event_killable_timeout(wq, cond, ns) -- the two above composed:
+ * evaluates to 0 when the condition became true, -ETIMEDOUT at the
+ * deadline, -EINTR when the calling process is being killed. Added for
+ * the VFS's held-walk seam (docs/audit/next-subsystem-cwd-hold.md),
+ * which parks a thread inside a system call and must let it leave with
+ * a dying process as any blocked system call does; the bound is for a
+ * caller that is wrong, not for one that is dying.
+ */
+#define wait_event_killable_timeout(wq, cond, ns)                              \
+    ({                                                                         \
+        int __rc = 0;                                                          \
+        if (!(cond)) {                                                         \
+            struct wait_entry __we;                                            \
+            struct wait_timeout __wt;                                          \
+            struct timer __t;                                                  \
+            wait_entry_init(&__we);                                            \
+            wait_timeout_init(&__wt, (wq));                                    \
+            timer_setup(&__t, wait_timeout_fired, &__wt);                      \
+            timer_start(&__t, (ns));                                           \
+            for (;;) {                                                         \
+                waitqueue_prepare((wq), &__we);                                \
+                if (cond)                                                      \
+                    break;                                                     \
+                if (process_kill_pending()) {                                  \
+                    __rc = -EINTR;                                             \
+                    break;                                                     \
+                }                                                              \
+                if (wait_timeout_expired(&__wt)) {                             \
+                    __rc = -ETIMEDOUT;                                         \
+                    break;                                                     \
+                }                                                              \
+                sched_block_current();                                         \
+            }                                                                  \
+            waitqueue_finish((wq), &__we);                                     \
+            timer_cancel_sync(&__t);                                           \
+        }                                                                      \
+        __rc;                                                                  \
+    })
+
 /* Sleep for at least `ns` (granularity: one tick). */
 void thread_sleep_ns(uint64_t ns);
 /* Same, but returns -EINTR early when the calling process is being killed. */

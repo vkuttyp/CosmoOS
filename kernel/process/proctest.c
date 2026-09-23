@@ -14,6 +14,7 @@
 #include <kernel/log.h>
 #include <kernel/object.h>
 #include <kernel/pmm.h>
+#include <kernel/printf.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -1887,4 +1888,146 @@ bool selftest_process_spawn(const char **reason)
     if (!kill_module(spin_argv, COSMO_SIGKILL, reason))
         return false;
     return true;
+}
+
+
+/*
+ * The held-walk proofs (docs/audit/next-subsystem-cwd-hold.md): the
+ * cwd-ref fix's regression test, made a proof at both doors. The seam is
+ * armed for the racer's process name, the racer is spawned once per pass,
+ * and what the seam recorded is read back after it exits. Every claim is
+ * a field the seam derived from what it saw -- `released_after_put` is
+ * the releasing side finding the count one lower than before its put --
+ * and not a flag the code under test set about itself.
+ */
+#if CONFIG_DEBUG
+static bool run_archived(const char *archive_path, const char *name, const char *const argv[], int *status_out,
+                         const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find(archive_path, &image, &image_size)) {
+        *status_out = -1;
+        return true;
+    }
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, name, argv, NULL, NULL, &p) == 0);
+    CHECK(p != NULL);
+    uint64_t t0 = clock_now_ns();
+    int status = process_wait_exit(p);
+    CHECK(clock_since_ns(t0) < 15000000000ULL);
+    process_put(p);
+    *status_out = status;
+    return true;
+}
+
+static bool cwd_hold_check(const char *door, const char *pass, int status, const struct vfs_cwd_hold_record *r,
+                           const char **reason)
+{
+    bool outlive = pass[0] == 'o';
+    kinfo("selftest: cwd-hold-%s %s: status %d held %d matches_old %d ref hold %u put %u resume %u "
+          "released_after_put %d dead %d swapper_held %d timeouts %d/%d intr %d",
+          door, pass, status, r->held, r->held_matches_old, r->ref_at_hold, r->ref_before_put, r->ref_at_resume,
+          r->released_after_put, r->resumed_dead, r->swapper_was_held, r->walk_timed_out, r->swap_timed_out,
+          r->interrupted);
+    kinfo("selftest: cwd-hold-%s %s: ref at release %u; swap_rc %d; swap wait %+lld us .. %+lld us from the hold",
+          door, pass, r->ref_at_release, r->swap_rc, (long long)((int64_t)(r->t_swap_wait_ns - r->t_hold_ns) / 1000),
+          (long long)((int64_t)(r->t_swap_done_ns - r->t_hold_ns) / 1000));
+    CHECK(status == 0);
+    CHECK(r->held);                     /* a walk was held: the racer reached the seam */
+    CHECK(r->held_matches_old);         /* holding the directory the swapper replaced, not the one it installed;
+                                           * decisive in the swapfirst pass, where the swapper is provably ahead */
+    CHECK(!r->swapper_was_held);        /* the racer made no relative walk on its swapper */
+    CHECK(!r->walk_timed_out && !r->swap_timed_out && !r->interrupted);
+    CHECK(r->released_after_put);       /* the put preceded the release: the count fell by one */
+    if (outlive) {
+        /* rmdir dropped ramfs's pin, so before the put the directory has
+         * exactly the process's reference and the walk's. Without the
+         * fix it has one, the put frees it, and the boot panics. */
+        CHECK(r->ref_before_put == 2);
+        CHECK(r->resumed_dead);
+    } else {
+        CHECK(r->ref_before_put == 3);  /* ramfs's pin, the process's, the walk's */
+        CHECK(!r->resumed_dead);
+    }
+    return true;
+}
+#endif
+
+bool selftest_cwd_hold_native(const char **reason)
+{
+#if CONFIG_DEBUG
+    /* Every pass runs before any is judged: a failing first pass must
+     * not hide what the second finds, which under the door mutations is
+     * the walk resuming on the poison. `swapfirst` is native-only: it
+     * starts the walker once debug.cwd_hold says the swapper is already
+     * waiting inside chdir, and a Linux program has no sysctl. */
+    static const char *const passes[] = { "capture", "outlive", "swapfirst" };
+    bool all = true;
+    for (unsigned i = 0; i < 3; i++) {
+        const char *argv[] = { "cwdtest", "--held", passes[i], NULL };
+        struct vfs_cwd_hold_record r;
+        int status;
+        vfs_test_cwd_hold_arm("cwdtest");
+        bool ok = run_archived("tests/native/cwdtest", "cwdtest", argv, &status, reason);
+        vfs_test_cwd_hold_disarm(&r);   /* on every exit, including a failed spawn */
+        if (!ok)
+            return false;
+        if (status == -1) {
+            kinfo("selftest: cwd-hold-native: no cwdtest in the boot archive; skipping");
+            return true;
+        }
+        if (!cwd_hold_check("native", passes[i], status, &r, reason))
+            all = false;
+    }
+    if (!all)
+        return false;
+    kinfo("selftest: cwd-hold-native: a held walk resolved against the directory it captured, and its "
+          "reference outlived the swap that removed it");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: cwd-hold-native: the seam is compiled out of this build");
+    return true;
+#endif
+}
+
+bool selftest_cwd_hold_linux(const char **reason)
+{
+#if CONFIG_DEBUG
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("tests/linux/lxcwd", &image, &image_size)) {
+        kinfo("selftest: cwd-hold-linux: no lxcwd in the boot archive; skipping");
+        return true;
+    }
+    static const char *const passes[] = { "capture", "outlive" };
+    bool all = true;
+    for (unsigned i = 0; i < 2; i++) {
+        char probe[40];
+        ksnprintf(probe, sizeof(probe), "cwd-hold-linux:%s", passes[i]);
+        const char *argv[] = { "init", "--probe", probe, NULL };
+        struct vfs_cwd_hold_record r;
+        int status;
+        /* Armed for the Linux program's name: init spawns it and makes no
+         * relative walk of its own in between. */
+        vfs_test_cwd_hold_arm("lxcwd");
+        bool ok = run_module(argv, &status, reason);
+        vfs_test_cwd_hold_disarm(&r);
+        if (!ok)
+            return false;
+        if (status == -1)
+            return true;
+        if (!cwd_hold_check("linux", passes[i], status, &r, reason))
+            all = false;
+    }
+    if (!all)
+        return false;
+    kinfo("selftest: cwd-hold-linux: the same two proofs through the Linux door");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: cwd-hold-linux: the seam is compiled out of this build");
+    return true;
+#endif
 }

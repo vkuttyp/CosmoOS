@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -375,8 +376,166 @@ static int make_layout(void)
     return 0;
 }
 
-int main(void)
+/* --- --held: the held-walk racer (docs/audit/next-subsystem-cwd-hold.md) --
+ *
+ * Two threads and one pass. The kernel test arms the seam for the process
+ * name "cwdtest" before spawning this, so the seam, not this program,
+ * orders the race: A's relative open is held with its pointer in hand,
+ * B's chdir waits for that hold before it publishes, and A resumes only
+ * once B has put the old directory.
+ *
+ *   capture  "f" exists only in d1; B moves the process to d2. A's open
+ *            must succeed: the walk resolved against the directory it
+ *            captured, not the one the process has now.
+ *   outlive  B unlinks d1/f and rmdirs d1 -- BY ABSOLUTE PATH, because a
+ *            relative unlink is a relative walk and the seam would hold B,
+ *            the releaser -- then moves away. A's open must fail ENOENT
+ *            and this process must be alive to say so. With the reference
+ *            removed at open, the kernel panics by name instead.
+ *
+ * Everything but A's one open is absolute, so the seam holds exactly the
+ * walk it is for. The four steps in main() are untouched by this.
+ */
+#define H_ROOT "/tmp/cwdh"
+#define H_D1 H_ROOT "/d1"
+#define H_D2 H_ROOT "/d2"
+#define H_F1 H_D1 "/f"
+
+static volatile int h_open_fd, h_open_errno, h_swap_rc;
+static int h_outlive, h_swapfirst;
+
+/* debug.cwd_hold: 0 idle, 1 armed, 2 held, 3 released, 4 the swapper is waiting. */
+static long held_state(void)
 {
+    char buf[16];
+    long n = cosmo_sysctl("debug.cwd_hold", buf, sizeof(buf) - 1);
+    if (n < 0)
+        return -1;
+    buf[n < (long)sizeof(buf) - 1 ? n : (long)sizeof(buf) - 1] = 0;
+    return atol(buf);
+}
+
+static void *held_opener(void *arg)
+{
+    (void)arg;
+    int fd = open("f", O_RDONLY);   /* the one relative walk: the held one */
+    h_open_fd = fd;
+    h_open_errno = fd < 0 ? errno : 0;
+    if (fd >= 0)
+        close(fd);
+    return NULL;
+}
+
+static void *held_swapper(void *arg)
+{
+    (void)arg;
+    if (h_outlive) {
+        if (unlink(H_F1) != 0) { h_swap_rc = 21; return NULL; }
+        if (rmdir(H_D1) != 0)  { h_swap_rc = 22; return NULL; }
+    }
+    if (chdir(H_D2) != 0)      { h_swap_rc = 23; return NULL; }
+    h_swap_rc = 0;
+    return NULL;
+}
+
+static void held_cleanup(void)
+{
+    (void)chdir("/");
+    (void)unlink(H_F1);
+    (void)rmdir(H_D1);
+    (void)rmdir(H_D2);
+    (void)rmdir(H_ROOT);
+}
+
+static int held_main(const char *pass)
+{
+    h_outlive = pass[0] == 'o';
+    h_swapfirst = pass[0] == 's';
+    if (!h_outlive && !h_swapfirst && pass[0] != 'c')
+        return 2;
+    (void)mkdir(H_ROOT, 0755);
+    (void)mkdir(H_D1, 0755);
+    (void)mkdir(H_D2, 0755);
+    int fd = open(H_F1, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return 10;
+    close(fd);
+    if (chdir(H_D1) != 0)
+        return 11;
+    h_open_fd = -1000;
+    h_swap_rc = -1;
+    cosmo_thread_t a, b;
+    if (h_swapfirst) {
+        /*
+         * The swapper first, and the walker only once the seam says the
+         * swapper is already waiting inside chdir. This is the order
+         * under which a chdir that published BEFORE waiting would
+         * install d2 under a walk that has yet to capture d1 -- the
+         * design error review found in the report -- and the order the
+         * other two passes cannot produce, because A's open reaches the
+         * seam first by construction. The wait is on the seam's own
+         * state, never on time.
+         */
+        if (cosmo_thread_start(&b, held_swapper, NULL, 32u * 1024u) != 0) {
+            held_cleanup();
+            return 13;
+        }
+        for (unsigned spins = 0; held_state() != 4; spins++) {
+            if (spins > 200000) {
+                (void)cosmo_thread_join(&b, NULL);
+                held_cleanup();
+                printf("cwdtest: --held swapfirst: the swapper never reached its wait (state %ld)\n", held_state());
+                return 17;
+            }
+            cosmo_yield();
+        }
+        if (cosmo_thread_start(&a, held_opener, NULL, 32u * 1024u) != 0) {
+            (void)cosmo_thread_join(&b, NULL);
+            held_cleanup();
+            return 12;
+        }
+    } else {
+        if (cosmo_thread_start(&a, held_opener, NULL, 32u * 1024u) != 0) {
+            held_cleanup();
+            return 12;
+        }
+        if (cosmo_thread_start(&b, held_swapper, NULL, 32u * 1024u) != 0) {
+            (void)cosmo_thread_join(&a, NULL);
+            held_cleanup();
+            return 13;
+        }
+    }
+    (void)cosmo_thread_join(&a, NULL);
+    (void)cosmo_thread_join(&b, NULL);
+    int ofd = h_open_fd, oerr = h_open_errno, src = h_swap_rc;
+    held_cleanup();
+    if (src != 0) {
+        printf("cwdtest: --held %s: swapper failed %d\n", pass, src);
+        return src;
+    }
+    if (h_outlive) {
+        if (ofd >= 0 || oerr != ENOENT) {
+            printf("cwdtest: --held outlive: open gave fd %d errno %d, wanted ENOENT\n", ofd, oerr);
+            return 15;
+        }
+        printf("cwdtest: --held outlive ok\n");
+        return 0;
+    }
+    if (ofd < 0) {
+        printf("cwdtest: --held %s: open failed, errno %d\n", pass, oerr);
+        return 16;
+    }
+    printf("cwdtest: --held %s ok\n", pass);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc >= 3 && strcmp(argv[1], "--held") == 0) {
+        int rc = held_main(argv[2]);
+        fflush(stdout);
+        return rc;
+    }
     printf("cwdtest: start\n");
     fflush(stdout);
     CHECK(make_layout() == 0);

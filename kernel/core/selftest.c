@@ -757,6 +757,8 @@ static const struct selftest tests[] = {
     { "process-rlimit",  selftest_process_rlimit },
     { "vm-file-fault-hold", selftest_vm_file_fault_hold },
     { "vm-file-readpage-fail", selftest_vm_file_readpage_fail },
+    { "cwd-hold-native", selftest_cwd_hold_native },
+    { "cwd-hold-linux",  selftest_cwd_hold_linux },
     { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
     /* Last: what the harness typed at the keyboard while everything

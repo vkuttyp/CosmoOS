@@ -247,6 +247,44 @@ self-tests and the user-mode suite both run as root; and no test fires
 first and the door that reaches it is a relative path resolved from
 inside the mount.
 
+### The held walk (`docs/audit/next-subsystem-cwd-hold.md`; debug builds)
+
+Two kernel tests, `cwd-hold-native` and `cwd-hold-linux`, each spawning
+a two-thread racer once per pass with the seam armed for the racer's
+process name, and reading back what the seam recorded. The native racer
+is `cwdtest --held <pass>` (`userland/tests/cwdtest.c`); the Linux one is
+`tests/linux/lxcwd.c`, spawned through `init --probe cwd-hold-linux:<pass>`
+because a kernel-created process is always native. In each, thread A
+makes the one relative walk in the program (`open("f")`) and thread B
+swaps the directory by absolute paths.
+
+| pass | what it proves | the record's claims |
+| --- | --- | --- |
+| `capture` | a held walk resolves against the directory it captured: `f` exists only in `d1`, B moves the process to `d2`, A's open **succeeds** | `held`, `held_matches_old`, count 3 before the put (ramfs's pin, the process's, the walk's), `released_after_put`, not dead |
+| `outlive` | the walk's reference outlives the swap: B unlinks `d1/f`, removes `d1` and moves away; A's open is `-ENOENT` and the process lives | `held`, `held_matches_old`, count **2** before the put (the pin is gone: the process's and the walk's), `released_after_put`, `resumed_dead` |
+| `swapfirst` (native only) | the swapper waits **before** it publishes: B is started first and A only once `debug.cwd_hold` reads 4 -- the swapper is inside `chdir` and waiting -- so the order the other passes cannot produce is produced on purpose | as `capture`, and `held_matches_old` is the decisive claim: a `chdir` that published before waiting would have installed `d2` under a walk that had yet to capture `d1` |
+
+Every pass also asserts `swapper_was_held`, both timeouts and
+`interrupted` false, so a racer that never reached the seam, held the
+wrong directory or held its own swapper fails by name. Every pass runs
+before any is judged, so a failing first pass cannot hide what the
+second finds. The claims are derived by the seam from counts it read,
+not flags the code under test set: `released_after_put` is the count the
+releasing side reads at the instant it releases being one below what it
+read before its put.
+
+Three things the build found, all now in the seam. A `chdir` made by a
+single-threaded process registers no swapper: the racer's own setup
+`chdir` had waited its whole bound for a hold that could not come. The
+release order is read at the release and not on the walk's resume: a
+walk woken a few instructions before the put loses the race to it every
+time, so the resume-side derivation let the release-before-put mutation
+survive. And no racer had the swapper arrive first, so the
+wait-after-publish mutation survived too until `swapfirst` made that
+order happen on purpose, gated on the seam's own state and never on time.
+The `swapfirst` pass is native-only because the Linux program has no
+sysctl to read the state from.
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

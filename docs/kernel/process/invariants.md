@@ -488,6 +488,15 @@ The census, so that the next field added is classified when it is added:
 | `handles` | yes | its own table lock; `handle_lookup` returns a referenced object the caller releases |
 | `space` | not swapped | its own lock |
 | `syscall_mask` | narrows only | read without the lock, **but not for the reason the comment used to give**: writes take `p->lock` and are per-word atomic stores, this is a per-word atomic load, and a reader sees one whole word |
+
+**Checked by** `cwd-hold-native` and `cwd-hold-linux`
+(`docs/audit/next-subsystem-cwd-hold.md`), which hold a relative walk
+with its cwd pointer in hand until the process's `chdir` has published
+and put, at both doors, and read back that the swapper saw the walk's
+reference before its put; with the reference removed at either door's
+`open` the walk resumes on a poisoned vnode and the kernel panics by
+name. `cwdtest`'s four original steps remain the regression test they
+were labelled.
 | `cred`, `rlim` | yes | `p->lock` |
 
 **The path and the path's name are one snapshot, never two.** Taking them

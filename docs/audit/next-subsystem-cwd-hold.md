@@ -1,5 +1,82 @@
 # NEXT SUBSYSTEM — a held walk: the working-directory race becomes a proof
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The swap half needed a rule the report did not have.** The racer's
+>    own setup `chdir`, made before its threads existed, was the first
+>    `chdir` the seam saw: it registered as the swapper, waited its whole
+>    two-second bound for a hold that could not come, and wrote that
+>    timeout into the record — so both doors "failed" on `swap_timed_out`
+>    while the real swap took eighty microseconds (the instrumented
+>    record said so; the theory did not). A `chdir` in a single-threaded
+>    process now registers nothing: there is no other thread whose walk
+>    it could pull from under.
+> 2. **`released_after_put` was derived from the wrong reading, twice.**
+>    First from the count at the hold, which the `outlive` pass's own
+>    `rmdir` lowers by one between the hold and the put, so a correct
+>    kernel failed. Then from the count the *walk* read on resume, which
+>    let the release-before-put mutation **survive**: a walk woken a few
+>    instructions before the put loses the race to it every time, so the
+>    two orders read the same. It is now read by the **releasing** side at
+>    the instant it releases — one below what it read before its put —
+>    which is ordering-sensitive and race-free, and the mutation dies at
+>    both doors in every pass.
+> 3. **The wait-after-publish mutation survived too**, and for a reason
+>    the report should have seen: in every racer thread A reaches the
+>    seam before thread B reaches `chdir`, by construction, so the order
+>    the rule exists for never happened. A third native pass,
+>    `swapfirst`, starts the swapper first and starts the walker only once
+>    `debug.cwd_hold` reads **4** — a new state, "armed and the swapper is
+>    waiting inside `chdir`" — never on time. Under the mutation the
+>    walker captures `d2`, `held_matches_old` is false and the open is
+>    `-ENOENT`; on a correct kernel the pass is indistinguishable from
+>    `capture`. Native only: a Linux program has no sysctl to read the
+>    state from, and the doc says so.
+> 4. **The door mutations were caught earlier than predicted, by the
+>    count.** With the reference removed at either door's `open`, the
+>    `capture` pass sees **two** references before the put where a correct
+>    kernel sees three (ramfs's pin, the process's, the walk's) — the walk
+>    holds none — and the other door's passes stay green, which is what
+>    "separately proved" means. The `outlive` pass then ends the boot as
+>    the report said: `KERNEL PANIC: cwd walk resumed on a freed directory
+>    (pid N): type 0x5a5a5a5a refcount 0x5a5a5a5a`. Every pass now runs
+>    before any is judged, so the first pass's failure cannot hide the
+>    second's panic.
+> 5. **Without the poison, the refcount check is what fires**: `type 0x2
+>    refcount 0x0`. The poison is not what makes the proof; it is what
+>    makes the *old* test a sometimes-detector, and what makes the panic
+>    name a poisoned object rather than one that merely reads as
+>    unreferenced.
+> 6. **Two sightings of `tcp-pcb-timer-free` on the way**, in the same
+>    slot right after `net-lo-udp`, on this branch's own x86-64 boots:
+>    the hard lockup the report's measurement met, and once a `TLB
+>    shootdown acknowledged by 2 of 3 CPUs`. Both fit one mechanism —
+>    the callback spinning in interrupt context above the armer thread
+>    that started its 1 ms timer on the same CPU, with the test blocked in
+>    `thread_join(armer)` and the releaser never created. Recorded in
+>    `docs/testing/flakes.md`; the fix is another unit's and is proposed
+>    there, not made here.
+> 7. **The Linux door needed a native parent.** A kernel-created process
+>    is always native (`process.c`: "kernel-created processes are always
+>    native"), so `cwd-hold-linux` spawns `init --probe cwd-hold-linux:<pass>`
+>    and init spawns `lxcwd`; the seam is armed for the name `lxcwd`.
+>
+> **The mutations**, each applied alone on x86-64, each boot confirmed
+> booted, run twice — the second round after items 2 and 3:
+>
+> | # | mutation | what failed (round 2) | round 1 |
+> | --- | --- | --- | --- |
+> | 1 | the reference removed at the native `open` | `capture`: `ref_before_put == 3` fails (2: the walk holds none); `outlive`: `KERNEL PANIC: cwd walk resumed on a freed directory (pid 197): type 0x5a5a5a5a refcount 0x5a5a5a5a`. The Linux door's passes are untouched | caught in `capture` by the count; the test stopped there |
+> | 2 | the reference removed at the Linux door's `do_open` | the mirror image: native's three passes green, Linux `capture` fails on the count, Linux `outlive` panics by name (pid 202) | the same, stopped at `capture` |
+> | 3 | the release moved before the put | `released_after_put` false in **every** pass at **both** doors | **survived**: derived on the walk's resume, which loses the race to the put |
+> | 4 | the swapper's wait moved after the publish | `swapfirst`: status 16 (the open failed `-ENOENT`), `held_matches_old` 0, `ref_before_put` 2 — the walker captured `d2`. `capture` and `outlive` pass, as they must: A is ahead in both | **survived**: no racer had the swapper ahead |
+> | 5 | the poison removed, with mutation 1 kept | `KERNEL PANIC: cwd walk resumed on a freed directory (pid 197): type 0x2 refcount 0x0` — the refcount check, as predicted | — |
+>
+> **As run**: the seam idle adds one load to every relative walk in a
+> debug build and nothing to a release build; the racers take 25–90 ms
+> per door in the boot. No benchmark, as the report said.
+
 Constitution §68 report. It takes the inventory's §1.3 row *"the cwd-ref
 fix is a regression test, not a proof; the seam that would prove it is
 named and not built"* (`docs/audit/2026-09-deferred-work-inventory.md`),

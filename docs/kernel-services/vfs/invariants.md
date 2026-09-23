@@ -589,6 +589,26 @@ the asynchronous ring. Its mutations: the terminal always readable, its
 poll queue NULL, the tap readable with no frame, the non-blocking bit a
 static shared by every open.
 
+**V35. A walk's starting directory is the caller's to keep alive, and
+the walk keeps it for exactly as long as it is inside.** `walk_parent`
+borrows `start` and takes its own reference at its first step, so the
+caller must hold one across the call -- which for a relative path is the
+reference `process_cwd_get()` took under the process lock (P29). Freed
+vnodes are poisoned in debug builds (`0x5a`, in `vnode_release`), so a
+walk that outlives its caller's reference reads a poisoned object rather
+than a plausible directory. **Checked by** `cwd-hold-native` and
+`cwd-hold-linux` (`docs/audit/next-subsystem-cwd-hold.md`): a walk held
+with its pointer in hand until the process's `chdir` has published and
+put; on a correct kernel the swapper sees two references before its put
+in the pass that removed the directory -- the process's and the walk's
+-- and the walk resumes on a dead, live directory and answers `-ENOENT`;
+and in the pass where the swapper is provably inside `chdir` before the
+walker starts, the held walk still holds the directory being replaced.
+Its mutations: the reference removed at the native `open` or at the
+Linux door's `do_open` (the walk resumes on the poison and the kernel
+panics by name), the release moved before the put, the swapper's wait
+moved after the publish, the poison removed.
+
 **V33. A page cache frame a mapping holds is neither reclaimed nor freed
 under it, and the cache tells every mapping before it frees or cleans a
 page.** Since the file-regions unit (`docs/kernel/memory/design.md` §7)
