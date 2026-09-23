@@ -144,9 +144,12 @@ coherent name, so `fchdir` refuses it (`-ENOENT`) and `getcwd` is
 unchanged. **Rights** (`dirfd-rights`, a kernel test driving
 `init --probe dirfd-narrow` and `dirfd-wide`): `lxcwd narrow` and
 `lxcwd wide` receive the same directory at fd 5, `READ` only or with
-init's own rights; lookups work in both, and every change of an entry
-(`mkdirat`, `unlinkat`, `renameat`, a creating `openat`, `symlinkat`)
-is `-EBADF` under the first and succeeds under the second.
+init's own rights; lookups work in both, and so does opening the child
+directory `sub` through it. Under the first, every change of an entry
+(`mkdirat`, `unlinkat`, `renameat`, a creating `openat`, `symlinkat`),
+an `O_WRONLY` open of `f`, and a `mkdirat` through `sub` are `-EBADF`,
+and init finds none of their effects afterwards; under the second,
+`mkdirat` and `unlinkat` succeed both at fd 5 and through `sub`.
 
 `lxcwd` (`tests/linux/lxcwd.c`, the cwd-hold unit,
 `docs/audit/next-subsystem-cwd-hold.md`): the held-walk racer at the

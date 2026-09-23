@@ -3422,12 +3422,14 @@ See [docs/development.md](docs/development.md).
   references the descriptor's directory before letting go of the
   descriptor (V35), demanding the handle's `READ` right to look a name up
   and `WRITE` to change an entry, so a directory handle delegated
-  read-only stays read-only (a directory opened at either door carries
-  both); `renameat` resolves its two names from two directories through
+  read-only stays read-only -- including what is opened through it (a
+  directory opened at either door carries both, masked by the rights of
+  the descriptor it was opened through); `renameat` resolves its two names from two directories through
   `vfs_rename2`; a directory file remembers the path it was opened by, at
   both doors, **only if that name walked with no symbolic link reaches the
   same directory**, and `fchdir` publishes the name with the vnode as
-  `chdir` does. Review of the first build found the missing rights, the
+  `chdir` does. Review of the first build found the missing rights, a
+  child directory opened through a narrowed one regaining them, the
   incoherent name and a failed `chdir` stranding the held-walk seam's
   swapper; each has a test. Invariant **P31**; `lxtest` checks every call
   against a real descriptor by where its effect lands, not merely that it

@@ -25,7 +25,7 @@
 >    resolving and then calling `do_open`; `do_open` now takes the
 >    descriptor and resolves itself, so `open`, `creat` and `openat` are
 >    one function with three entry points.
-> 5. **Review found three defects in the first build, each now tested.**
+> 5. **Review found four defects in the first build, each now tested.**
 >    (a) *The resolver demanded no handle right.* The report had copied
 >    Linux, where a directory descriptor's access mode does not govern the
 >    `*at` calls; but this system's handles are capabilities, and a
@@ -58,6 +58,18 @@
 >    registration, in one place per call; `cwd-hold`'s new `failswap` pass
 >    holds a walk, fails the other thread's `chdir`, and requires the walk
 >    released with no timeout and no put recorded.
+>    (d) *A narrowed directory could be widened through a child.* (a)
+>    fixed the calls that change an entry, but `openat` gave any
+>    directory it opened `READ|WRITE`, so a program holding a `READ`-only
+>    handle to `/tmp/dnw` could open `sub` (a lookup, which `READ`
+>    allows) and create entries in it. `at_base` now reports the base's
+>    rights, `do_open` masks the new handle's `READ`/`WRITE` by them --
+>    rights only shrink on the way down -- and an `openat` that writes
+>    (write-mode, creating or truncating) demands `WRITE` of the base, as
+>    an entry change does. `dirfd-rights` gained the case: `/tmp/dnw/sub`
+>    opened through the narrowed handle refuses `mkdirat` (and an
+>    `O_WRONLY` open of `f` is refused), and the full-rights control
+>    creates and removes `sub/y` through it.
 > 6. **The first `fchdir` mutation boot died at 10.7 s of an NMI panic**,
 >    long before any Linux test, with the host's load average at 40 from
 >    a virtual machine outside this work. It said nothing about the
@@ -72,11 +84,13 @@
 > | 2 | the resolver accepting a regular file | **survived, equivalent**: the VFS refuses a non-directory start with the same `-ENOTDIR` (item 3) |
 > | 3 | `fchdir` publishing the vnode and keeping the old name | `lxtest`: `getcwd` after `fchdir` answered `/`, and after `chdir("..")` still not `/tmp` -- the published-together rule of P27 |
 > | 4 | `vfs_rename2` resolving both names from the first start | `vfs-rename2`: the file was not where the second start named it; `lxtest`: `sub/m2` absent by absolute path and the rename back failed |
-> | 5 | the old refusal restored (`ENOSYS` for any real descriptor) | `lxtest`: 20 checks, every `*at` call against the descriptor |
+> | 5 | the old refusal restored (`ENOSYS` for any real descriptor) | `lxtest`: 26 checks (20 before review (b) added the link cases), every `*at` call against the descriptor; `dirfd-rights`: both runs' first lookup `-ENOSYS` (status 138) |
 > | 6 | the resolver demanding no right (review (a)) | `dirfd-rights`: the narrowed run's `mkdirat` succeeded (status 32); the full-rights control still passed |
 > | 7 | the coherence walk allowed to follow links (review (b)) | `lxtest`: `fchdir` of the directory opened through a link succeeded and `getcwd` answered the link's spelling |
 > | 8 | the coherence walk's vnode comparison removed (review (b)) | **survived at first**: a name through a link already fails the linkless walk, so no test had the shape only the comparison refuses. `lxtest` now opens `/tmp/lxdeep/..` (a link to a deeper directory, then `..`): physically `/tmp/lxdir`, lexically `/tmp`, which walks cleanly to the wrong directory. With the case, the mutation fails it: `fchdir` succeeded and `getcwd` answered `/tmp` |
 > | 9 | a failing swapper left registered (review (c)) | `cwd-hold-native` `failswap`: the held walk waited out its bound (`walk_timed_out`) |
+| 10 | a handle opened through a descriptor not masked by the descriptor's rights (review (d)) | `dirfd-rights`: the narrowed run's `mkdirat` through `sub` succeeded (status 38); the control then failed too (84), because the narrowed run's stray `sub/x` kept its own cleanup from removing `sub` |
+| 11 | a write-mode `openat` of an existing file demanding only `READ` of the base (review (d)) | `dirfd-rights`: the narrowed run's `O_WRONLY` open of `f` succeeded (status 39); the control still passed |
 
 Constitution §68 report. It takes up the third of the three Linux
 personality gaps the deferred-work inventory lists together in §2.6 —
