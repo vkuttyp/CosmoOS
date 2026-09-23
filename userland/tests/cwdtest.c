@@ -402,7 +402,7 @@ static int make_layout(void)
 #define H_F1 H_D1 "/f"
 
 static volatile int h_open_fd, h_open_errno, h_swap_rc;
-static int h_outlive, h_swapfirst;
+static int h_outlive, h_swapfirst, h_failswap;
 
 /* debug.cwd_hold: 0 idle, 1 armed, 2 held, 3 released, 4 the swapper is waiting. */
 static long held_state(void)
@@ -429,6 +429,12 @@ static void *held_opener(void *arg)
 static void *held_swapper(void *arg)
 {
     (void)arg;
+    if (h_failswap) {
+        /* A chdir that fails after registering as the swapper: the held
+         * walk must be released by the failure, not by its bound. */
+        h_swap_rc = (chdir(H_ROOT "/absent") != 0 && errno == ENOENT) ? 0 : 24;
+        return NULL;
+    }
     if (h_outlive) {
         if (unlink(H_F1) != 0) { h_swap_rc = 21; return NULL; }
         if (rmdir(H_D1) != 0)  { h_swap_rc = 22; return NULL; }
@@ -451,7 +457,8 @@ static int held_main(const char *pass)
 {
     h_outlive = pass[0] == 'o';
     h_swapfirst = pass[0] == 's';
-    if (!h_outlive && !h_swapfirst && pass[0] != 'c')
+    h_failswap = pass[0] == 'f';
+    if (!h_outlive && !h_swapfirst && !h_failswap && pass[0] != 'c')
         return 2;
     (void)mkdir(H_ROOT, 0755);
     (void)mkdir(H_D1, 0755);
@@ -493,6 +500,27 @@ static int held_main(const char *pass)
             (void)cosmo_thread_join(&b, NULL);
             held_cleanup();
             return 12;
+        }
+    } else if (h_failswap) {
+        /* The walker first and held; then a swapper whose chdir fails
+         * (the dirfd unit's review: a failed chdir left the seam's
+         * swapper registered and the held walk waiting out its bound). */
+        if (cosmo_thread_start(&a, held_opener, NULL, 32u * 1024u) != 0) {
+            held_cleanup();
+            return 12;
+        }
+        for (unsigned spins = 0; held_state() != 2; spins++) {
+            if (spins > 200000) {
+                (void)cosmo_thread_join(&a, NULL);
+                held_cleanup();
+                return 18;
+            }
+            cosmo_yield();
+        }
+        if (cosmo_thread_start(&b, held_swapper, NULL, 32u * 1024u) != 0) {
+            (void)cosmo_thread_join(&a, NULL);
+            held_cleanup();
+            return 13;
         }
     } else {
         if (cosmo_thread_start(&a, held_opener, NULL, 32u * 1024u) != 0) {

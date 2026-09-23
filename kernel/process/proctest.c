@@ -1935,6 +1935,15 @@ static bool cwd_hold_check(const char *door, const char *pass, int status, const
           (long long)((int64_t)(r->t_swap_done_ns - r->t_hold_ns) / 1000));
     CHECK(status == 0);
     CHECK(r->held);                     /* a walk was held: the racer reached the seam */
+    if (pass[0] == 'f') {
+        /* failswap: the swapper's chdir failed after it registered. The
+         * held walk was released by that failure -- no timeout -- and the
+         * record says no put preceded the release, because none happened. */
+        CHECK(!r->walk_timed_out && !r->interrupted);
+        CHECK(!r->released_after_put);
+        CHECK(!r->swapper_was_held);
+        return true;
+    }
     CHECK(r->held_matches_old);         /* holding the directory the swapper replaced, not the one it installed;
                                            * decisive in the swapfirst pass, where the swapper is provably ahead */
     CHECK(!r->swapper_was_held);        /* the racer made no relative walk on its swapper */
@@ -1962,9 +1971,9 @@ bool selftest_cwd_hold_native(const char **reason)
      * the walk resuming on the poison. `swapfirst` is native-only: it
      * starts the walker once debug.cwd_hold says the swapper is already
      * waiting inside chdir, and a Linux program has no sysctl. */
-    static const char *const passes[] = { "capture", "outlive", "swapfirst" };
+    static const char *const passes[] = { "capture", "outlive", "swapfirst", "failswap" };
     bool all = true;
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < 4; i++) {
         const char *argv[] = { "cwdtest", "--held", passes[i], NULL };
         struct vfs_cwd_hold_record r;
         int status;

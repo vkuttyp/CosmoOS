@@ -110,8 +110,9 @@ static void cleanup(void)
 static int dirfd_rights(int wide)
 {
     static char sb[256];
-    if (sc4(LX_newfstatat, 5, "f", sb, 0) != 0)
-        return 30;
+    long st0 = sc4(LX_newfstatat, 5, "f", sb, 0);
+    if (st0 != 0)
+        return st0 < 0 && st0 > -100 ? (int)(100 - st0) : 30;   /* 100 + errno, so the parent sees which */
     long o = sc4(LX_openat, 5, "f", LX_O_RDONLY, 0);
     if (o < 0)
         return 31;

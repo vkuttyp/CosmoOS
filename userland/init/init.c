@@ -1546,7 +1546,8 @@ static int probe(const char *kind)
         };
         const char *argv[] = { "lxcwd", wide ? "wide" : "narrow", NULL };
         long pid = cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/tests/linux/lxcwd", .argv = argv,
-                                                      .handles = hm, .nr_handles = 3 });
+                                                      .handles = hm, .nr_handles = 3,
+                                                      .flags = COSMO_SPAWN_HANDLE_RIGHTS });   /* the map carries rights */
         cosmo_close((int)dh);
         int status = -1;
         if (pid <= 0 || cosmo_wait((int)pid, &status, 0) != pid)
