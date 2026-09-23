@@ -60,3 +60,5 @@ tests/hv/aarch64/Image
 *.cwd-race-probe.applied
 *.mmap-place-probe.orig
 *.mmap-place-probe.applied
+*.dirfd-probe.orig
+*.dirfd-probe.applied

@@ -239,7 +239,10 @@ IPv6 routing beyond loopback and ND against a real peer.
   `pselect6` 270/72 over `io_poll`)**; `sysinfo` (`lx_nosys`); and a
   real directory fd -- `check_dirfd` returns `-ENOSYS` for any `dirfd`
   but `AT_FDCWD` (`:133-137`), so an `openat` relative to an opened
-  directory fails. Each is a small unit; the three together are the
+  directory fails (**taken up by `docs/audit/next-subsystem-dirfd.md`**,
+  not struck until it lands; measured by `tools/dirfd-probe.py`: all nine
+  `*at` calls and `fchdir` answer `ENOSYS` to a real descriptor, both
+  architectures). Each is a small unit; the three together are the
   next Linux-personality candidate.
 - `/proc` and `/sys` compatibility for Linux binaries (the native `/proc`
   holds process facts only); running a real distribution userland
