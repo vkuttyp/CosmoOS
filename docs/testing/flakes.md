@@ -2117,17 +2117,36 @@ context with interrupts masked cannot acknowledge a shootdown, and the
 shootdown gives up after one second where the lockup detector gives up
 after ten: two symptoms of one CPU in one state, and which one fires is
 only which bound is reached first. Reading the test with both in hand
-names the mechanism, still as a guess until the one-line instrument
-above confirms it: the armer thread, pinned to `cpu`, arms a **1 ms**
+named the mechanism: the armer thread, pinned to `cpu`, arms a **1 ms**
 timer and must then exit on that CPU before the next tick; when it does
 not, the callback fires above the still-live armer and spins there, the
-test thread's `thread_join(armer)` -- which comes *before* the releaser
-is created -- never returns, and nothing exists that can release the
+test thread's `thread_join(armer)` -- which came *before* the releaser
+was created -- never returns, and nothing exists that can release the
 callback. The idle CPUs are the test thread in its join and the
-releaser that was never made. The repair, for the unit that owns this
-test: create the releaser before arming the timer, join the armer only
-after the release, and have the armer linger one tick on purpose so
-the placement that hangs is the one every run exercises.
+releaser that was never made.
+
+**Reproduced deterministically, and fixed (PR #225).** The mechanism was
+made the adversary: the armer lingers two ticks on its CPU after arming,
+so the callback parks in interrupt context above it in every run. With
+the test's original order that boot hung in this slot and the detector
+named it exactly as sighting one did:
+
+```
+SELFTEST: net-lo-udp       ... ok (64 ms)
+[ WARN] hard lockup: cpu 0 no tick for 10000 ms; last tick 10018 ms ago at pc 0xffffffff800da966 (seen from cpu 3)
+cpu 0: arch_cpu_relax <- timer_kick <- run_expired <- trap <- ... <- thread_trampoline   (8 samples, identical)
+cpu 1, 2, 3: idle_main
+```
+
+-- the callback above the armer's own thread (`thread_trampoline` at
+the bottom of the stack), the test thread in `thread_join(armer)`, no
+releaser. The fix creates the releaser before the timer is armed and
+joins the armer only after the release; with the join alone moved back,
+the test fails by name in five seconds (`spins > 0`, once the releaser's
+deadline lets the callback go) instead of hanging. The callback records
+its CPU and the test asserts it is the armer's and prints all three
+placements. Green on both architectures since, with the hostile
+placement every time.
 
 Not on the list: not a bound, and not attributable to either unit's
 mutation -- the spinning path holds no vnode and makes no system call.

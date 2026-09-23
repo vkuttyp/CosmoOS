@@ -586,6 +586,19 @@ from a third. Putting the releaser beside the callback deadlocked the
 machine on the first run, and the reason is written where the CPUs are
 chosen rather than left for the next person.
 
+> **Corrected since (PR #225).** There was a second way to deadlock it,
+> and it took two sightings on one day to find: the armer arms a **1 ms**
+> timer and must then exit on its CPU before the next tick, and when it
+> did not, the callback parked in interrupt context *above the armer*,
+> the test's `thread_join(armer)` -- which came before the releaser was
+> created -- never returned, and nothing in the machine could let the
+> callback go. A hard lockup at ten seconds once, an unanswered TLB
+> shootdown at one second once (`docs/testing/flakes.md`). The releaser
+> is now created before the timer is armed, the armer is joined only
+> after the release, the armer lingers two ticks on purpose so the
+> hostile placement is the one every run exercises, and the callback
+> records the CPU it ran on, which the test asserts is the armer's.
+
 > **Built since** (the virtio-removal unit,
 > `docs/audit/next-subsystem-virtio-remove-inflight.md`): the machine
 > now carries a virtio-blk that exists to be removed, and
