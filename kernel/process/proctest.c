@@ -1204,6 +1204,103 @@ static void free_image_with_vnode(struct process_image *img)
  *    that, one process could rewrite another's instructions through a
  *    mapping it was handed for free.
  */
+/*
+ * A writable segment is private, and the test exists because a mutation
+ * survived without it.
+ *
+ * Deleting the `not writable` half of `seg_shareable` -- sharing the
+ * data segment too -- passed every other test in this unit: the text
+ * frames still matched, the cost still fell, the interlock still
+ * worked. What it would have broken is the thing no other test looks
+ * at: one process's store reaching another's memory, and the file.
+ *
+ * So this writes a byte through one process's data segment and reads it
+ * through another's. They must disagree.
+ */
+bool selftest_elf_data_private(const char **reason);
+bool selftest_elf_data_private(const char **reason)
+{
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-data-private: /boot/init unreadable; skipping");
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        return false;
+    }
+    /* A byte inside a writable segment's *file* part, which both
+     * processes load from the same bytes and must not then share. */
+    uint64_t data_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++) {
+        const struct elf_segment *sg = &info.segments[i];
+        if ((sg->flags & ELF_PF_W) && sg->filesz > 0) {
+            data_va = sg->file_vaddr;
+            break;
+        }
+    }
+    if (data_va == 0) {
+        free_image_with_vnode(&img);
+        kinfo("selftest: elf-data-private: no writable segment with file bytes; skipping");
+        return true;
+    }
+
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p1 = NULL, *p2 = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
+              process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
+    free_image_with_vnode(&img);
+
+    uint8_t before2 = 0, after2 = 0, after1 = 0;
+    bool measured = false;
+    if (ok) {
+        paddr_t pa1 = 0, pa2 = 0;
+        vaddr_t page = (vaddr_t)(data_va & ~(uint64_t)(PAGE_SIZE - 1));
+        unsigned in_page = (unsigned)(data_va & (PAGE_SIZE - 1));
+        if (arch_mmu_query(&p1->space->mmu, page, &pa1, NULL, NULL, NULL) &&
+            arch_mmu_query(&p2->space->mmu, page, &pa2, NULL, NULL, NULL)) {
+            uint8_t *f1 = (uint8_t *)phys_to_virt(pa1) + in_page;
+            uint8_t *f2 = (uint8_t *)phys_to_virt(pa2) + in_page;
+            before2 = *f2;
+            *f1 = (uint8_t)(*f1 ^ 0xA5);   /* a store in the first process's data */
+            after1 = *f1;
+            after2 = *f2;
+            measured = true;
+        }
+    }
+    if (p1) {
+        process_kill(p1, COSMO_SIGKILL);
+        process_wait_exit(p1);
+        process_put(p1);
+    }
+    if (p2) {
+        process_kill(p2, COSMO_SIGKILL);
+        process_wait_exit(p2);
+        process_put(p2);
+    }
+    if (!ok) {
+        *reason = "could not create two processes from one image";
+        return false;
+    }
+    if (!measured) {
+        kinfo("selftest: elf-data-private: the data page is not present in both; skipping");
+        return true;
+    }
+    if (after2 != before2) {
+        kerror("selftest: elf-data-private: a store in one process changed the other's data byte "
+               "(%02x -> %02x) at %p",
+               before2, after2, (void *)data_va);
+        *reason = "two processes share a writable segment";
+        return false;
+    }
+    kinfo("selftest: elf-data-private: a store in one process's data (now %02x) left the other's at %02x",
+          after1, after2);
+    return true;
+}
+
 bool selftest_elf_text_ro(const char **reason);
 bool selftest_elf_text_ro(const char **reason)
 {
@@ -1339,9 +1436,15 @@ bool selftest_elf_txtbsy(const char **reason)
     /* While it runs: refused, by name. */
     uint8_t byte = 0x90;
     int64_t busy_rc = 0, free_rc = 0;
+    bool alive = false;
     if (ok) {
+        /* The precondition, established rather than assumed: this test
+         * asserts what happens while a program is *running*, and a
+         * child that has already exited holds no mapping, so the write
+         * would succeed for a reason that is not the defect. */
+        alive = !completion_done(&p->exited);
         struct file *w = NULL;
-        if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+        if (alive && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
             busy_rc = file_pwrite(w, &byte, 1, 0);
             file_put(w);
         }
@@ -1365,6 +1468,10 @@ bool selftest_elf_txtbsy(const char **reason)
     if (!ok) {
         *reason = "could not run the copy";
         return false;
+    }
+    if (!alive) {
+        kinfo("selftest: elf-txtbsy: the child exited before the write; skipping");
+        return true;
     }
     if (busy_rc != -ETXTBSY) {
         kerror("selftest: elf-txtbsy: writing a running program returned %lld, wanted %d",

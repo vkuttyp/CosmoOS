@@ -687,6 +687,7 @@ static const struct selftest tests[] = {
     { "elf-shared-text", selftest_elf_shared_text },
     { "elf-share-cost",  selftest_elf_share_cost },
     { "elf-text-ro",     selftest_elf_text_ro },
+    { "elf-data-private", selftest_elf_data_private },
     { "elf-txtbsy",      selftest_elf_txtbsy },
     { "process-spawn",   selftest_process_spawn },
     { "linux-elf",       selftest_linux_elf },
