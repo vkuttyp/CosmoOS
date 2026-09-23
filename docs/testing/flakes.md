@@ -282,6 +282,13 @@ locking, a shell parser fix and documentation; it cannot slow a lockup
 sample either. Four in three days now, and re-running remains the
 right first move.
 
+**A fifth on 2026-09-23**, on PR #226's first CI run, `build, boot,
+analyze (aarch64)`, the plain debug boot — at `lockuptest.c:478`, the
+three-CPU variant's `el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 ms` this time
+rather than the two-CPU one, on a branch of one report, one probe script
+and two Markdown edits. Same family, same answer: re-run. The number is
+now five in six days, every one on a tree that could not have caused it.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
