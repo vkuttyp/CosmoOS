@@ -1174,6 +1174,109 @@ static void free_image_with_vnode(struct process_image *img)
     img->vn = NULL;
 }
 
+/*
+ * A file being executed does not change underneath the process running
+ * it, and stops being busy when that process is gone.
+ *
+ * Both halves matter. The refusal alone would pass with a flag that is
+ * set once and never cleared; the second write, after the process has
+ * exited, is what says the answer is read from the mappings rather than
+ * remembered (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * It runs on a copy in /tmp rather than on /boot/init, because a test
+ * that writes to the program the machine is running is a test that has
+ * already gone wrong.
+ */
+bool selftest_elf_txtbsy(const char **reason);
+bool selftest_elf_txtbsy(const char **reason)
+{
+    struct process_image src = { 0 };
+    if (read_image_with_vnode("/boot/init", &src) != 0) {
+        kinfo("selftest: elf-txtbsy: /boot/init unreadable; skipping");
+        return true;
+    }
+    /* A copy of the program, which this test may write to. */
+    const char *path = "/tmp/elf-txtbsy.bin";
+    struct file *f = NULL;
+    int rc = vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0755, &f);
+    if (rc != 0) {
+        free_image_with_vnode(&src);
+        kinfo("selftest: elf-txtbsy: cannot create %s (%d); skipping", path, rc);
+        return true;
+    }
+    size_t off = 0;
+    bool wrote = true;
+    while (off < src.size && wrote) {
+        int64_t n = file_pwrite(f, (const uint8_t *)src.data + off, src.size - off, off);
+        if (n <= 0)
+            wrote = false;
+        else
+            off += (size_t)n;
+    }
+    file_put(f);
+    free_image_with_vnode(&src);
+    if (!wrote) {
+        vfs_unlink(NULL, path);
+        *reason = "could not write the copy this test runs on";
+        return false;
+    }
+
+    struct process_image img = { 0 };
+    if (read_image_with_vnode(path, &img) != 0) {
+        vfs_unlink(NULL, path);
+        *reason = "the copy is unreadable";
+        return false;
+    }
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
+
+    /* While it runs: refused, by name. */
+    uint8_t byte = 0x90;
+    int64_t busy_rc = 0, free_rc = 0;
+    if (ok) {
+        struct file *w = NULL;
+        if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+            busy_rc = file_pwrite(w, &byte, 1, 0);
+            file_put(w);
+        }
+        process_kill(p, COSMO_SIGKILL);
+        process_wait_exit(p);
+        process_put(p);
+    }
+    /* And once it is gone: allowed. The image's own reference is
+     * dropped first -- it is a reference to the vnode, not a mapping,
+     * but releasing it here keeps the second write's meaning clean. */
+    free_image_with_vnode(&img);
+    if (ok) {
+        struct file *w = NULL;
+        if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+            free_rc = file_pwrite(w, &byte, 1, 0);
+            file_put(w);
+        }
+    }
+    vfs_unlink(NULL, path);
+
+    if (!ok) {
+        *reason = "could not run the copy";
+        return false;
+    }
+    if (busy_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: writing a running program returned %lld, wanted %d",
+               (long long)busy_rc, -ETXTBSY);
+        *reason = "a file being executed could be written";
+        return false;
+    }
+    if (free_rc != 1) {
+        kerror("selftest: elf-txtbsy: writing after the process exited returned %lld, wanted 1",
+               (long long)free_rc);
+        *reason = "a file stayed busy after the process running it exited";
+        return false;
+    }
+    kinfo("selftest: elf-txtbsy: a write to a running program is -ETXTBSY, and succeeds once it exits");
+    return true;
+}
+
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_share_cost(const char **reason)
 {
