@@ -494,9 +494,10 @@ because pass 2 resumes on a dead, live directory by design.
 | both, the order | the seam released the walk only after the put | the swap half completes before `vnode_put(old)`: `released_after_put` false, the test fails by name |
 | both, the poison | the liveness check sees the free | the poison removed with the native mutation kept: the resumed walk reads a freed but intact vnode. The refcount check is expected to catch it anyway (`kobject_release_final` leaves the count at zero), so this row is run to *record* which check fired rather than to predict one; if neither does, the poison is the only thing standing between the proof and the cwd-ref unit's false pass, and the banner says so |
 
-Every pass asserts `held`, `held_matches_old`, and `swapper_was_held`,
-both timeouts and `interrupted` false, so a racer that never reached the seam — or reached
-it holding the wrong directory — is a failure and not a pass.
+Every pass asserts `held` and `held_matches_old` true, and
+`swapper_was_held`, both timeouts and `interrupted` false, so a racer
+that never reached the seam — or reached it holding the wrong directory,
+or held its own swapper — is a failure and not a pass.
 
 ## Benchmarks
 
