@@ -364,6 +364,8 @@ compare on the relative-path walk and a `memset` per vnode free.
 
 ## New APIs
 
+### New
+
 ```c
 /* kernel/include/kernel/vfs.h -- CONFIG_DEBUG only; no-ops otherwise.
  *
@@ -387,8 +389,16 @@ struct vfs_cwd_hold_record {
 void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out);   /* every exit of the test; returns what happened */
 ```
 
-Nothing else is added. `kobject_refcount` exists and is what the record
-reads.
+Three entry points and one struct; nothing else is added.
+
+### Existing, relied on
+
+Named here so that nobody proposes them twice: `kobject_refcount`
+(`kernel/object/object.c`) is what the record reads;
+`wait_event_killable` and `process_kill_pending` (`kernel/wait.h`,
+`process.c`) are what make both waits leave with a dying process;
+`VNODE_DEAD` is the flag `remove_entry` already sets on a removed
+directory, which the liveness check reads alongside the poison.
 
 ## Migration plan
 
