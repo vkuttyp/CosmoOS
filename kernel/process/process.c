@@ -1347,7 +1347,7 @@ int process_chdir(const char *path)
     vfs_cwd_hold_before_put(old);
     if (old)
         vnode_put(old);
-    vfs_cwd_hold_after_put();
+    vfs_cwd_hold_after_put(old);
     return 0;
 }
 

@@ -1627,9 +1627,11 @@ See [docs/development.md](docs/development.md).
   as zero frees in the first three test steps and 228 in the fourth. And
   the frame poisoner it named cannot see a `kzalloc`'d vnode.
   **The test is a regression, not a proof**, which is said plainly: every
-  reverted-fix run passed, including one with each freed vnode poisoned,
-  because the walk is short and never inside the few instructions where
-  the free lands. Two of the test's own designs could not have failed
+  reverted-fix run passed. (That entry also said a run with each freed
+  vnode poisoned passed, and explained it by the walk never being inside
+  the few instructions where the free lands. The cwd-hold unit below
+  measured otherwise: with the poison at `vnode_release`, the test
+  catches the bug in some boots -- a rate, not a proof, and not never.) Two of the test's own designs could not have failed
   either -- `../X` discards the component the paths differ in, names
   differing in one byte cannot show a tear, and the coherence step's
   sibling moves could not express the two-acquisition defect at all since
@@ -3345,6 +3347,36 @@ See [docs/development.md](docs/development.md).
   immediately before the install, exactly as the file-backed fault has
   always re-found its region (invariant **M45**, test
   `vm-anon-fault-race`). (PR #221)
+- **A held walk: the working-directory race becomes a proof**
+  (`docs/audit/next-subsystem-cwd-hold.md`). The cwd-ref unit fixed a
+  use-after-free with a reference taken for the length of the walk, and
+  guarded it with a test that passed when the fix was removed -- a
+  window a few instructions wide against a whole path walk. Measured
+  first: with the bug put back at the native `open` and every freed
+  vnode poisoned, the test catches it in **one x86-64 boot of five** and
+  no AArch64 boot of three, which corrects that unit's record that a
+  poisoned run passes, and says why: nothing in the tree poisoned a
+  freed vnode, so a walk that outlived its reference read a plausible
+  directory. Now it reads `0x5a`, in debug builds, as freed frames
+  already do. And the interleaving is no longer left to chance: a seam
+  in `walk_parent`'s relative branch -- the one line every relative walk
+  from every caller shares, since `vfs_open` never enters `resolve()` --
+  holds a walk of the armed process with its pointer in hand until that
+  process's `chdir` has published and put, with `chdir` waiting for the
+  hold **before** it publishes so the held walk has necessarily captured
+  the directory being replaced. Both waits are killable and bounded. The
+  swapper records the old directory's count before its put: **two** in
+  the pass that removed the directory (the process's and the walk's) on
+  a correct kernel, one with the fix removed, where the walk then resumes
+  on the poison and the kernel panics by name. Two racers, one per door
+  -- the Linux door had no test of this at all -- each run once per pass
+  with the seam rearmed, every claim a count the seam read rather than a
+  flag the code under test set. Two things the build found and the seam
+  now knows: a `chdir` in a single-threaded process has no walk to race
+  and registers no swapper, and the release order is derived against
+  the swapper's pre-put count because the removing pass's `rmdir` drops
+  the directory's pin in between. Invariant **V35**; P29 gains its
+  proof. (PR #224)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

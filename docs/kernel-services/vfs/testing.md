@@ -247,6 +247,36 @@ self-tests and the user-mode suite both run as root; and no test fires
 first and the door that reaches it is a relative path resolved from
 inside the mount.
 
+### The held walk (`docs/audit/next-subsystem-cwd-hold.md`; debug builds)
+
+Two kernel tests, `cwd-hold-native` and `cwd-hold-linux`, each spawning
+a two-thread racer once per pass with the seam armed for the racer's
+process name, and reading back what the seam recorded. The native racer
+is `cwdtest --held <pass>` (`userland/tests/cwdtest.c`); the Linux one is
+`tests/linux/lxcwd.c`, spawned through `init --probe cwd-hold-linux:<pass>`
+because a kernel-created process is always native. In each, thread A
+makes the one relative walk in the program (`open("f")`) and thread B
+swaps the directory by absolute paths.
+
+| pass | what it proves | the record's claims |
+| --- | --- | --- |
+| `capture` | a held walk resolves against the directory it captured: `f` exists only in `d1`, B moves the process to `d2`, A's open **succeeds** | `held`, `held_matches_old`, count 3 before the put (ramfs's pin, the process's, the walk's), `released_after_put`, not dead |
+| `outlive` | the walk's reference outlives the swap: B unlinks `d1/f`, removes `d1` and moves away; A's open is `-ENOENT` and the process lives | `held`, `held_matches_old`, count **2** before the put (the pin is gone: the process's and the walk's), `released_after_put`, `resumed_dead` |
+
+Every pass also asserts `swapper_was_held`, both timeouts and
+`interrupted` false, so a racer that never reached the seam, held the
+wrong directory or held its own swapper fails by name. The claims are
+derived by the seam from counts it read, not flags the code under test
+set: `released_after_put` is the count at resume being one below what
+the swapper saw before its put.
+
+Two things the build found, both now in the seam: a `chdir` made by a
+single-threaded process registers no swapper (the racer's own setup
+`chdir` had waited its whole bound for a hold that could not come), and
+the release order is derived against the swapper's pre-put count rather
+than the count at the hold, because the `outlive` pass's `rmdir` drops the
+directory's pin between the two.
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

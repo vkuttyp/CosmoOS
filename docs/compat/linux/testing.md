@@ -127,6 +127,18 @@ arrived, makes a system call and prints `lxdyn: ok`.
 rather than held to exit),
 `writev`, `exit_group`: the sequence a real Linux libc needs.
 
+`lxcwd` (`tests/linux/lxcwd.c`, the cwd-hold unit,
+`docs/audit/next-subsystem-cwd-hold.md`): the held-walk racer at the
+Linux door, and the first test of the cwd use-after-free there. Not run
+from `rc.linux`: the kernel test `cwd-hold-linux` arms the seam for the
+name `lxcwd` and spawns it through `init --probe cwd-hold-linux:<pass>`,
+because a kernel-created process is always native. Two `clone`d threads
+in the `lxtest` shape: A `openat(AT_FDCWD, "f")`, the program's one
+relative walk; B, by absolute paths only, `chdir`s to `d2` (`capture`:
+A's open must succeed) or first `unlinkat`s `d1/f` and `unlinkat(AT_REMOVEDIR)`s
+`d1` (`outlive`: A's open must be `-ENOENT` and the process must live).
+Prints `LXCWD: <pass> ok`; exit codes above 10 name the failing step.
+
 ## `/etc/rc.test`, Linux section
 
 After the package section, `rc.test` runs `/etc/rc.linux` when

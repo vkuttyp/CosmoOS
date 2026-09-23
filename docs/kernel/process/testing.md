@@ -773,10 +773,21 @@ parent's entry, so steps 1 to 3 free nothing (measured: zero). Three
 threads — mover, remover, walker — reach 228 frees and ~900–1250 walks
 inside the victim.
 
-**This is a regression, not a proof**, and the difference is recorded
-rather than blurred. Every reverted-fix run passed, including one with
-every freed vnode poisoned with `0xAA` before `kfree`: the walk is short
-and in memory and is never inside the few instructions where the free
-lands. What would prove it is a kernel-side seam of the kind the
-condition-variable unit used, and that is named in the audit report rather
-than built here.
+**Steps 1–4 are a regression test, not a proof**, and the difference is
+recorded rather than blurred. The cwd-ref unit recorded that every
+reverted-fix run passed, "including one with every freed vnode poisoned
+with `0xAA` before `kfree`", and concluded the walk is never inside the
+few instructions where the free lands. **The second half was wrong.**
+With the poison in `vnode_release` -- the one place every vnode free
+passes through -- step 4 caught the reverted fix in one x86-64 boot of
+five (`#GP` in `kobject_get`, `RAX=5a5a5a5a5a5a5a5a`), and in none of
+three AArch64 boots (`docs/audit/next-subsystem-cwd-hold.md`, "Measured").
+A rate is what a regression test gives; whatever the earlier `memset`
+poisoned, it was not what the walk read.
+
+**`cwdtest --held <pass>` is the proof**, driven by the kernel test
+`cwd-hold-native` with the held-walk seam armed for the process name
+(`docs/kernel-services/vfs/testing.md`, "The held walk"): two threads,
+one pass, A's relative `open("f")` held with its pointer in hand until
+B's `chdir` has published and put, the order enforced by the seam. Its
+twin at the Linux door is `tests/linux/lxcwd.c` under `cwd-hold-linux`.

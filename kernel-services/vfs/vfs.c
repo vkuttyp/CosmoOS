@@ -88,7 +88,7 @@ static void vnode_release(struct kobject *obj)
 #if CONFIG_DEBUG
 #define CWD_HOLD_POISON_WORD 0x5a5a5a5au
 static struct {
-    unsigned state;               /* 0 idle, 1 armed, 2 held, 3 released */
+    unsigned state;               /* 0 idle, 1 armed, 2 held, 3 released, 4 armed and the swapper is waiting */
     char name[PROCESS_NAME_MAX];  /* the process this arm is for */
     struct process *proc;         /* bound at the first hold */
     struct thread *holder;        /* the held walk's thread */
@@ -144,7 +144,7 @@ void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out)
  * with the lock held. */
 static bool cwd_hold_mine_locked(void)
 {
-    if (g_cwd_hold.state != 1 && g_cwd_hold.state != 2)
+    if (g_cwd_hold.state != 1 && g_cwd_hold.state != 2 && g_cwd_hold.state != 4)
         return false;
     struct process *p = process_current();
     if (p == NULL)
@@ -161,10 +161,12 @@ static bool cwd_hold_mine_locked(void)
  */
 static int cwd_hold_walk(struct vnode *start)
 {
-    if (__atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) != 1)
+    unsigned st = __atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE);
+    if (st != 1 && st != 4)
         return 0;   /* the one load every relative walk pays in a debug build */
     arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
-    bool take = g_cwd_hold.state == 1 && cwd_hold_mine_locked() && thread_current() != g_cwd_hold.swapper;
+    bool take = (g_cwd_hold.state == 1 || g_cwd_hold.state == 4) && cwd_hold_mine_locked() &&
+                thread_current() != g_cwd_hold.swapper;
     if (take) {
         g_cwd_hold.state = 2;
         g_cwd_hold.proc = process_current();
@@ -192,14 +194,7 @@ static int cwd_hold_walk(struct vnode *start)
         panic("cwd walk resumed on a freed directory (pid %d): type %#x refcount %#x",
               process_current() ? process_current()->pid : -1, (unsigned)start->type, ref);
     s = spin_lock_irqsave(&g_cwd_hold.lock);
-    g_cwd_hold.rec.ref_at_resume = ref;
-    /* Against what the swapper saw immediately before its put, not
-     * against the count at the hold: in pass 2 the swapper's own rmdir
-     * drops the directory's pin between the two, and a derivation from
-     * the hold read one lower than it should and failed a correct
-     * kernel (found by the build). */
-    g_cwd_hold.rec.released_after_put = g_cwd_hold.rec.ref_before_put != 0 &&
-                                        ref + 1 == g_cwd_hold.rec.ref_before_put;
+    g_cwd_hold.rec.ref_at_resume = ref;   /* recorded; not what released_after_put is derived from */
     g_cwd_hold.rec.resumed_dead = (start->flags & VNODE_DEAD) != 0;
     if (rc == -EINTR)
         g_cwd_hold.rec.interrupted = true;
@@ -241,6 +236,11 @@ void vfs_cwd_hold_swap_wait(void)
         __atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
         return;
     g_cwd_hold.rec.t_swap_wait_ns = clock_now_ns();
+    /* Visible to the racer as debug.cwd_hold == 4: "the swapper is
+     * inside chdir and waiting", which the swap-first pass uses to start
+     * its walker only once the swapper is provably ahead of it. */
+    unsigned want = 1;
+    __atomic_compare_exchange_n(&g_cwd_hold.state, &want, 4u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     int rc = wait_event_killable_timeout(&g_cwd_hold.swap_wq,
                                          __atomic_load_n(&g_cwd_hold.state, __ATOMIC_ACQUIRE) == 2, 2000000000ULL);
     g_cwd_hold.rec.t_swap_done_ns = clock_now_ns();
@@ -267,14 +267,29 @@ void vfs_cwd_hold_before_put(struct vnode *old)
     spin_unlock_irqrestore(&g_cwd_hold.lock, s);
 }
 
-void vfs_cwd_hold_after_put(void)
+void vfs_cwd_hold_after_put(struct vnode *old)
 {
     if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
         return;
     arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
     bool release = g_cwd_hold.state == 2;
-    if (release)
+    if (release) {
+        /*
+         * The ordering claim, read by the side that releases, at the
+         * instant it releases: the count is one below what this thread
+         * read before its put exactly when the put has happened. Derived
+         * on the walk's side instead, from the count it read on resume,
+         * the release-before-put mutation SURVIVED -- the woken walk
+         * loses the race to the put a few instructions later every
+         * time. `old` is alive here on a correct kernel because the held
+         * walk holds it; on a broken one that walk is about to panic on
+         * this same object.
+         */
+        g_cwd_hold.rec.ref_at_release = old ? kobject_refcount(&old->obj) : 0;
+        g_cwd_hold.rec.released_after_put = g_cwd_hold.rec.ref_before_put != 0 &&
+                                            g_cwd_hold.rec.ref_at_release + 1 == g_cwd_hold.rec.ref_before_put;
         g_cwd_hold.put_done = true;
+    }
     spin_unlock_irqrestore(&g_cwd_hold.lock, s);
     if (release)
         waitqueue_wake_all(&g_cwd_hold.held_wq);
@@ -286,7 +301,7 @@ void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out) { if (out) memset
 void vfs_cwd_hold_swapper_enter(void) {}
 void vfs_cwd_hold_swap_wait(void) {}
 void vfs_cwd_hold_before_put(struct vnode *old) { (void)old; }
-void vfs_cwd_hold_after_put(void) {}
+void vfs_cwd_hold_after_put(struct vnode *old) { (void)old; }
 static inline int cwd_hold_walk(struct vnode *start) { (void)start; return 0; }
 #endif
 

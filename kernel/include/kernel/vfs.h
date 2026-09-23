@@ -436,27 +436,30 @@ void vfs_dump(void);
  * bounded, and a timeout is recorded, never hidden.
  *
  * What the seam records is derived from what it can observe, not
- * declared by the code under test: `released_after_put` is the walk
- * finding the directory's count one lower on resume than the swapper
- * saw immediately before its put, which a release that preceded the
- * put cannot produce.
+ * declared by the code under test: `released_after_put` is the count
+ * the releasing side reads at the instant it releases being one lower
+ * than what it read before its put -- read by the releaser, at the
+ * release, because a walk woken before the put loses the race to it
+ * every time and a count read on resume cannot tell the orders apart
+ * (the release-before-put mutation survived that derivation).
  */
 struct vfs_cwd_hold_record {
     bool held;                 /* a walk was held */
     bool held_matches_old;     /* the held walk's directory is the one the swapper replaced */
-    bool released_after_put;   /* refcount at resume == ref_before_put - 1: the put preceded the release */
+    bool released_after_put;   /* refcount at the release == ref_before_put - 1: the put preceded the release */
     bool resumed_dead;         /* the directory was VNODE_DEAD when the walk resumed (pass 2 expects it) */
     bool swapper_was_held;     /* the swapper's own relative walk was what got held: a wrong racer, named */
     bool walk_timed_out, swap_timed_out;
     bool interrupted;          /* a killable wait returned -EINTR: the racer was dying */
     uint32_t ref_at_hold;      /* the directory's refcount when the walk was held */
     uint32_t ref_before_put;   /* what the swapper saw before its put: 2 with the fix, 1 without (pass 2) */
+    uint32_t ref_at_release;   /* what the releaser saw at the instant it released */
     uint32_t ref_at_resume;    /* what the walk saw when it resumed */
     int swap_rc;               /* the swapper's wait: 0, -ETIMEDOUT, -EINTR */
     uint64_t t_hold_ns, t_swap_wait_ns, t_swap_done_ns;   /* clock_now_ns at the hold, and around the swapper's wait */
 };
 void vfs_test_cwd_hold_arm(const char *process_name);
-unsigned vfs_test_cwd_hold_state(void);                             /* 0 idle, 1 armed, 2 held, 3 released */
+unsigned vfs_test_cwd_hold_state(void);                             /* 0 idle, 1 armed, 2 held, 3 released, 4 swapper waiting */
 void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out);     /* after every pass and on every exit */
 
 /* The swap half, called by process_chdir in this order: enter before its
@@ -465,6 +468,6 @@ void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out);     /* after eve
 void vfs_cwd_hold_swapper_enter(void);
 void vfs_cwd_hold_swap_wait(void);
 void vfs_cwd_hold_before_put(struct vnode *old);
-void vfs_cwd_hold_after_put(void);
+void vfs_cwd_hold_after_put(struct vnode *old);
 
 #endif /* KERNEL_VFS_H */

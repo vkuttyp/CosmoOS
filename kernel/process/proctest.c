@@ -1930,12 +1930,13 @@ static bool cwd_hold_check(const char *door, const char *pass, int status, const
           door, pass, status, r->held, r->held_matches_old, r->ref_at_hold, r->ref_before_put, r->ref_at_resume,
           r->released_after_put, r->resumed_dead, r->swapper_was_held, r->walk_timed_out, r->swap_timed_out,
           r->interrupted);
-    kinfo("selftest: cwd-hold-%s %s: swap_rc %d; hold at +%lld us, swap wait +%lld us .. +%lld us (from the hold)",
-          door, pass, r->swap_rc, 0LL, (long long)((int64_t)(r->t_swap_wait_ns - r->t_hold_ns) / 1000),
+    kinfo("selftest: cwd-hold-%s %s: ref at release %u; swap_rc %d; swap wait %+lld us .. %+lld us from the hold",
+          door, pass, r->ref_at_release, r->swap_rc, (long long)((int64_t)(r->t_swap_wait_ns - r->t_hold_ns) / 1000),
           (long long)((int64_t)(r->t_swap_done_ns - r->t_hold_ns) / 1000));
     CHECK(status == 0);
     CHECK(r->held);                     /* a walk was held: the racer reached the seam */
-    CHECK(r->held_matches_old);         /* holding the directory the swapper replaced, not the one it installed */
+    CHECK(r->held_matches_old);         /* holding the directory the swapper replaced, not the one it installed;
+                                           * decisive in the swapfirst pass, where the swapper is provably ahead */
     CHECK(!r->swapper_was_held);        /* the racer made no relative walk on its swapper */
     CHECK(!r->walk_timed_out && !r->swap_timed_out && !r->interrupted);
     CHECK(r->released_after_put);       /* the put preceded the release: the count fell by one */
@@ -1956,8 +1957,14 @@ static bool cwd_hold_check(const char *door, const char *pass, int status, const
 bool selftest_cwd_hold_native(const char **reason)
 {
 #if CONFIG_DEBUG
-    static const char *const passes[] = { "capture", "outlive" };
-    for (unsigned i = 0; i < 2; i++) {
+    /* Every pass runs before any is judged: a failing first pass must
+     * not hide what the second finds, which under the door mutations is
+     * the walk resuming on the poison. `swapfirst` is native-only: it
+     * starts the walker once debug.cwd_hold says the swapper is already
+     * waiting inside chdir, and a Linux program has no sysctl. */
+    static const char *const passes[] = { "capture", "outlive", "swapfirst" };
+    bool all = true;
+    for (unsigned i = 0; i < 3; i++) {
         const char *argv[] = { "cwdtest", "--held", passes[i], NULL };
         struct vfs_cwd_hold_record r;
         int status;
@@ -1971,8 +1978,10 @@ bool selftest_cwd_hold_native(const char **reason)
             return true;
         }
         if (!cwd_hold_check("native", passes[i], status, &r, reason))
-            return false;
+            all = false;
     }
+    if (!all)
+        return false;
     kinfo("selftest: cwd-hold-native: a held walk resolved against the directory it captured, and its "
           "reference outlived the swap that removed it");
     return true;
@@ -1993,6 +2002,7 @@ bool selftest_cwd_hold_linux(const char **reason)
         return true;
     }
     static const char *const passes[] = { "capture", "outlive" };
+    bool all = true;
     for (unsigned i = 0; i < 2; i++) {
         char probe[40];
         ksnprintf(probe, sizeof(probe), "cwd-hold-linux:%s", passes[i]);
@@ -2009,8 +2019,10 @@ bool selftest_cwd_hold_linux(const char **reason)
         if (status == -1)
             return true;
         if (!cwd_hold_check("linux", passes[i], status, &r, reason))
-            return false;
+            all = false;
     }
+    if (!all)
+        return false;
     kinfo("selftest: cwd-hold-linux: the same two proofs through the Linux door");
     return true;
 #else

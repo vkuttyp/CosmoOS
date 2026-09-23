@@ -556,6 +556,15 @@ Vnode ~400 bytes plus page cache entries; ramfs stores every file page
 resident; cosmofs keeps 64 metadata buffers (256 KiB) and a bitmap of
 `nblocks/8` bytes (256 bytes for the 8 MiB test disk) per mount.
 
+**A freed vnode is poisoned in debug builds** (`vnode_release` fills it
+with `0x5a` before `kfree`), as the pmm already poisons freed frames. The
+slab poisons nothing, so without this a vnode freed under a walk kept
+looking like a directory until its memory was reused, and the cwd-ref
+unit's use-after-free test passed on a broken kernel every time
+(`docs/audit/next-subsystem-cwd-hold.md`, "Measured"). With it the same
+test caught the bug in one boot of five; the held-walk seam below is
+what makes it every boot.
+
 ## Socket and FIFO nodes
 
 A unix socket's name in the filesystem is a `VNODE_SOCK` (the
@@ -716,6 +725,34 @@ corrupted superblock slot is ignored in favour of the other). Host
 tests: CRC32C vectors, inode/dirent layout sizes, extent mapping
 arithmetic. Init: every new system call on ramfs, then `mount("vda",
 "/mnt", "cosmofs")` and a read of the file the kernel test left.
+
+**The held-walk seam** (`docs/audit/next-subsystem-cwd-hold.md`;
+`CONFIG_DEBUG` only, every entry point a no-op otherwise). The fix for
+the cwd use-after-free -- a reference taken under the process lock for
+the length of the walk (P29) -- has a window a few instructions wide
+against a whole path walk, and a racer lands in it in some boots and not
+others. The seam makes the interleaving certain. Armed by
+`vfs_test_cwd_hold_arm(name)` for a process *name*, it holds the next
+relative walk made by a process of that name at the one line every
+relative walk from every caller shares -- `walk_parent`'s relative
+branch, before `vnode_get(cur)`, with the pointer read and nothing yet
+taken -- until that process's `chdir` has published its new directory
+and put the old one. The order is enforced here, not arranged by the
+test: `process_chdir` registers as the swapper before its own lookup
+(so the seam never holds the thread that releases), waits for the hold
+after the lookup and **before** it publishes (a swapper that reaches
+`chdir` first must not install the new directory under a walk that has
+yet to capture the old one), records the old directory's count before
+the put, and releases after it. The walk on resume checks the directory
+is live -- `VNODE_DIR`, count nonzero, count not the poison word;
+`VNODE_DEAD` is recorded, not judged, because an unlinked directory a
+walk still references is exactly what the proof produces -- and derives
+that the put preceded the release from its count being one below what
+the swapper saw. Both waits are killable and bounded (five and two
+seconds); a timeout is recorded and fails the test by name. One arm
+serves one hold. A `chdir` in a single-threaded process registers no
+swapper: there is no other thread whose walk it could pull from under.
+`debug.cwd_hold` reads the state (0 idle, 1 armed, 2 held, 3 released).
 
 ## Future extensibility
 
