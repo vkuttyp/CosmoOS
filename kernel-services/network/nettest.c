@@ -678,7 +678,14 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
      * is joined only after the release, below. */
     struct tcp_armer arm = { .pcb = pcb };
     struct thread *at = thread_create_on(tcp_armer_main, &arm, "tcparm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
-    CHECK(at != NULL);
+    if (at == NULL) {
+        /* The releaser holds a pointer into this frame; no return leaves
+         * it running (found in review). */
+        __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
+        thread_join(rt);
+        tcp_test_hold_callback(false);
+        CHECK(at != NULL);
+    }
 
     uint64_t deadline = clock_now_ns() + 2000000000ULL;
     while (!tcp_test_callback_entered()) {
@@ -700,17 +707,26 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
     tcp_close(pcb);
     __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
 
+    /* Both threads joined BEFORE anything is judged: a failing check
+     * returns from this frame, and the releaser reads `rel` in it (found
+     * in review). The armer is joinable now because the close released
+     * the callback it was under. */
+    thread_join(rt);
+    thread_join(at);
+    /* Read before the hold is dropped: tcp_test_hold_callback(false)
+     * resets these counters. */
     unsigned spins = timer_test_cancel_spins();
+    unsigned checked = tcp_test_callback_checked();
+    unsigned saw_dead = tcp_test_callback_saw_dead();
+    tcp_test_hold_callback(false);
+
     CHECK(spins > 0);                              /* a cancel really waited */
-    CHECK(tcp_test_callback_checked() >= 1);       /* and the callback checked after the hold */
-    CHECK(tcp_test_callback_saw_dead() == 0);      /* the claim: it never saw the poison */
+    CHECK(checked >= 1);                           /* and the callback checked after the hold */
+    CHECK(saw_dead == 0);                          /* the claim: it never saw the poison */
     /* The placement, asserted rather than assumed: the callback ran on
      * the armer's CPU, and neither on this thread's nor the releaser's. */
     CHECK(cb_cpu == cpu);
 
-    thread_join(rt);
-    thread_join(at);   /* after the release: until then it may be under the callback */
-    tcp_test_hold_callback(false);
     uint64_t settle = clock_now_ns() + 500000000ULL;
     while (thread_count() != threads0 && clock_now_ns() < settle)
         sched_yield();

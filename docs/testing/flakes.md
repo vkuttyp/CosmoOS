@@ -2023,6 +2023,18 @@ to try is a `spin_trylock` pair in the balancer, so a contended queue
 is skipped until the next tick rather than waited for. A policy has no
 business waiting for a lock.
 
+## Under the chaos migrator: `sched-balance-pull` on CI, twice on 2026-09-23
+
+`SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
+CPUs creation order gave them (3005 ms)`, in the x86-64 job's chaos boot
+only: once on `main` itself (run 35827861816, the ELF shared-text merge)
+and once on PR #225's first run (35842572114), whose change is in a TCP
+test that runs minutes later. The scheduler testing doc already says this
+is the one balancer test that still asserts, and that under a chaos
+migrator its claim is about the machine rather than the balancer
+(`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the
+balancer unit owns the decision whether it asserts under chaos at all.
+
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
 
 Two sightings from `make test-chaos` on the percpu-migration tree,
