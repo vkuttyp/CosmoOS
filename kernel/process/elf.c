@@ -258,7 +258,7 @@ int elf_load_into(struct vm_space *space, const void *image, const struct elf_in
          * it. The segment's own file offset is page-aligned by the
          * congruence elf_validate enforced.
          */
-        if (false && vn != NULL && seg_shareable(s)) {
+        if (vn != NULL && seg_shareable(s)) {
             uint64_t file_off = s->offset - (s->file_vaddr - s->vaddr);
             /* The pages the file's bytes touch, rounded up. Past the
              * end of the file the page cache gives zeroes, which is
