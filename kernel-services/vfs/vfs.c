@@ -258,8 +258,15 @@ void vfs_cwd_hold_swap_wait(void)
 void vfs_cwd_hold_swapper_leave(void)
 {
     if (__atomic_load_n(&g_cwd_hold.swapper, __ATOMIC_ACQUIRE) != thread_current())
-        return;
+        return;   /* the cheap answer for every call that never registered */
     arch_irq_state_t s = spin_lock_irqsave(&g_cwd_hold.lock);
+    /* Asked again under the lock: another thread may have registered in
+     * between, and its registration and its held walk are not this
+     * failure's to clear (found in review). */
+    if (g_cwd_hold.swapper != thread_current()) {
+        spin_unlock_irqrestore(&g_cwd_hold.lock, s);
+        return;
+    }
     bool release = g_cwd_hold.state == 2 && !g_cwd_hold.put_done;
     g_cwd_hold.swapper = NULL;
     if (release)
