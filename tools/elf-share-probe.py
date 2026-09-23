@@ -182,6 +182,7 @@ def revert():
     for f in FILES:
         if os.path.exists(f + BACKUP):
             shutil.move(f + BACKUP, f)
+            os.utime(f, None)   # newer than the mutated object, so make rebuilds it
         if os.path.exists(f + STAMP):
             os.remove(f + STAMP)
     print("reverted")

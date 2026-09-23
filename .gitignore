@@ -56,3 +56,5 @@ tests/hv/aarch64/Image
 
 # mutation-runner snapshots (scratch; never committed)
 *.mutorig
+*.cwd-race-probe.orig
+*.cwd-race-probe.applied
