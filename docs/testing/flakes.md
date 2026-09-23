@@ -282,15 +282,23 @@ locking, a shell parser fix and documentation; it cannot slow a lockup
 sample either. Four in three days now, and re-running remains the
 right first move.
 
+**A fifth on 2026-09-23**, on PR #226's first CI run, `build, boot,
+analyze (aarch64)`, the plain debug boot — at `lockuptest.c:478`, the
+three-CPU variant's `el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 ms` this time
+rather than the two-CPU one, on a branch of one report, one probe script
+and two Markdown edits. Same family, same answer: re-run. The number is
+now five in six days, every one on a tree that could not have caused it.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
 it to the list would mean widening the bound, and that is the trade the
 list exists to refuse when the bound is the property: a lockup sample
 that answers late is a lockup sample that did not work. What is recorded
-instead is the rate — three in two days, at least one on a tree that
-cannot have caused it — because the next unit to hit this should know it
-is not the first, and that re-running is the right first move.
+instead is the rate — five in six days as of 2026-09-23, every one on a
+tree that cannot have caused it — because the next unit to hit this
+should know it is not the first, and that re-running is the right first
+move.
 
 Three CI runs of one branch, 2026-09-17, failed three *different* tests.
 The branch was the VMState-layout unit: a compile-time assertion in a
@@ -392,9 +400,8 @@ this test does on purpose. The retry the MAP_FIXED unit removed was
 absorbing this race too, without anyone knowing it existed.
 
 Not a flake: a placement and its insertion must be one critical section
-at both doors, and a proof for it can be built the way the held-walk
-seam was. Named as the next candidate in the deferred-work inventory's
-sense rather than fixed here.
+at both doors. **Taken up by `docs/audit/next-subsystem-mmap-place.md`**,
+whose probe measures the collision rate at the kernel's own boundary.
 
 Two things are still worth keeping. The **printf is not honest under
 this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
