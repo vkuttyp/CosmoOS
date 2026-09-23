@@ -205,22 +205,31 @@ static void pcb_get(struct tcp_pcb *pcb)
 #define TCP_PCB_LIVE 0x5450434Bu   /* 'TPCK' */
 #define TCP_PCB_DEAD 0x44454144u   /* 'DEAD' */
 
-static unsigned g_test_hold_cb;      /* hold the next callback */
+static struct tcp_pcb *g_test_hold_cb;   /* hold this pcb's next callback; NULL: none */
+static unsigned g_test_cb_passed;    /* other pcbs' callbacks let through while armed */
 static unsigned g_test_cb_entered;   /* it is inside, before its pcb_get */
 static unsigned g_test_cb_release;   /* let it go */
 static unsigned g_test_cb_saw_dead;  /* it found the poison: the bug */
 static unsigned g_test_cb_checked;   /* liveness checks that passed after the hold */
 static unsigned g_test_cb_cpu;       /* the CPU the held callback ran on */
 
-void tcp_test_hold_callback(bool on)
+/* Armed by identity: a callback is held only if it is `pcb`'s. The
+ * first version held the next callback of *any* pcb, and a connection
+ * an earlier test left behind fired first and was held in the test's
+ * place (docs/testing/flakes.md, "tcp-pcb-timer-free held a stranger's
+ * callback"). The caller's reference keeps `pcb` alive while armed, so
+ * no other pcb can share its address. */
+void tcp_test_hold_callback(struct tcp_pcb *pcb)
 {
+    __atomic_store_n(&g_test_cb_passed, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_entered, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_saw_dead, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_checked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_cpu, ~0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_hold_cb, on ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_cb, pcb, __ATOMIC_RELEASE);
 }
+unsigned tcp_test_callback_passed(void) { return __atomic_load_n(&g_test_cb_passed, __ATOMIC_ACQUIRE); }
 bool tcp_test_callback_entered(void) { return __atomic_load_n(&g_test_cb_entered, __ATOMIC_ACQUIRE) != 0; }
 void tcp_test_release_callback(void) { __atomic_store_n(&g_test_cb_release, 1u, __ATOMIC_RELEASE); }
 unsigned tcp_test_callback_saw_dead(void) { return __atomic_load_n(&g_test_cb_saw_dead, __ATOMIC_ACQUIRE); }
@@ -396,8 +405,8 @@ static void timer_kick(struct tcp_pcb *pcb, unsigned flag)
     __atomic_fetch_or(&pcb->work_flags, flag, __ATOMIC_RELAXED);
 #if CONFIG_DEBUG
     {
-        unsigned want = 1;
-        if (__atomic_compare_exchange_n(&g_test_hold_cb, &want, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        struct tcp_pcb *want = pcb;
+        if (__atomic_compare_exchange_n(&g_test_hold_cb, &want, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             /* Before pcb_get: for this interval nothing but
              * timer_cancel_sync refusing to return keeps the pcb alive. */
             __atomic_store_n(&g_test_cb_cpu, arch_cpu_id(), __ATOMIC_RELEASE);
@@ -408,6 +417,8 @@ static void timer_kick(struct tcp_pcb *pcb, unsigned flag)
                 __atomic_fetch_add(&g_test_cb_saw_dead, 1u, __ATOMIC_ACQ_REL);
             else
                 __atomic_fetch_add(&g_test_cb_checked, 1u, __ATOMIC_ACQ_REL);
+        } else if (want != NULL) {
+            __atomic_fetch_add(&g_test_cb_passed, 1u, __ATOMIC_ACQ_REL);   /* armed, for another pcb */
         }
     }
 #endif

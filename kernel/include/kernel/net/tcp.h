@@ -166,12 +166,13 @@ struct tcp_pcb {
 
 #if CONFIG_DEBUG
 /*
- * Hold the next timer callback *before* it takes its reference on the
- * pcb, which is the only placement that tests synchronous cancellation
+ * Hold a given pcb's next timer callback *before* it takes its
+ * reference on the pcb, which is the only placement that tests synchronous cancellation
  * rather than reference counting
  * (docs/audit/next-subsystem-lifetime-windows.md).
  */
-void tcp_test_hold_callback(bool on);
+void tcp_test_hold_callback(struct tcp_pcb *pcb);   /* hold only `pcb`'s next callback; NULL disarms */
+unsigned tcp_test_callback_passed(void);            /* other pcbs' callbacks let through while armed */
 bool tcp_test_callback_entered(void);
 void tcp_test_release_callback(void);
 unsigned tcp_test_callback_saw_dead(void);

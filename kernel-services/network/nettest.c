@@ -568,12 +568,19 @@ struct tcp_releaser {
 
 struct tcp_armer {
     struct tcp_pcb *pcb;
+    struct tcp_pcb *decoy;
 };
 
 static void tcp_armer_main(void *arg)
 {
     struct tcp_armer *a = arg;
-    tcp_test_arm_rexmit(a->pcb, 1000000ULL);   /* 1 ms, on this CPU's queue */
+    /* A stranger first: the decoy's timer fires a tick before the test
+     * pcb's, while the hold is armed. That is the sighting's shape -- a
+     * connection an earlier test left behind fired first and was held
+     * in the test's place -- made certain rather than waited for. The
+     * hold, armed by identity, must let it through. */
+    tcp_test_arm_rexmit(a->decoy, 1000000ULL);             /* 1 ms, on this CPU's queue */
+    tcp_test_arm_rexmit(a->pcb, 1000000ULL + TICK_NS);     /* a tick later, same queue */
     /*
      * Stay alive on this CPU past the tick that fires the timer, on
      * purpose. The callback then parks in interrupt context ABOVE this
@@ -587,7 +594,7 @@ static void tcp_armer_main(void *arg)
      * rerun; the releaser now exists before the timer is armed, and this
      * thread is joined only after the release.
      */
-    uint64_t until = clock_now_ns() + 2 * TICK_NS;
+    uint64_t until = clock_now_ns() + 1000000ULL + 3 * TICK_NS;
     while (clock_now_ns() < until)
         arch_cpu_relax();
 }
@@ -654,9 +661,14 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
 
     struct tcp_pcb *pcb = tcp_pcb_new(COSMO_AF_INET);
     CHECK(pcb != NULL);
+    struct tcp_pcb *decoy = tcp_pcb_new(COSMO_AF_INET);
+    if (decoy == NULL) {
+        tcp_close(pcb);
+        CHECK(decoy != NULL);
+    }
 
     timer_test_reset_cancel_spins();
-    tcp_test_hold_callback(true);
+    tcp_test_hold_callback(pcb);
 
     /*
      * The releaser FIRST, before anything can park: it is the one thread
@@ -676,14 +688,15 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
      * callback somewhere other than the closer. The armer lingers past
      * the tick on purpose (see it), so the callback parks above it; it
      * is joined only after the release, below. */
-    struct tcp_armer arm = { .pcb = pcb };
+    struct tcp_armer arm = { .pcb = pcb, .decoy = decoy };
     struct thread *at = thread_create_on(tcp_armer_main, &arm, "tcparm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
     if (at == NULL) {
         /* The releaser holds a pointer into this frame; no return leaves
          * it running (found in review). */
         __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
         thread_join(rt);
-        tcp_test_hold_callback(false);
+        tcp_test_hold_callback(NULL);
+        tcp_close(decoy);
         CHECK(at != NULL);
     }
 
@@ -694,7 +707,8 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
             __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
             thread_join(rt);
             thread_join(at);
-            tcp_test_hold_callback(false);
+            tcp_test_hold_callback(NULL);
+            tcp_close(decoy);
             *reason = "the timer callback never entered the hold";
             return false;
         }
@@ -713,13 +727,16 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
      * the callback it was under. */
     thread_join(rt);
     thread_join(at);
-    /* Read before the hold is dropped: tcp_test_hold_callback(false)
+    /* Read before the hold is dropped: tcp_test_hold_callback(NULL)
      * resets these counters. */
     unsigned spins = timer_test_cancel_spins();
     unsigned checked = tcp_test_callback_checked();
     unsigned saw_dead = tcp_test_callback_saw_dead();
-    tcp_test_hold_callback(false);
+    unsigned passed = tcp_test_callback_passed();
+    tcp_test_hold_callback(NULL);
+    tcp_close(decoy);
 
+    CHECK(passed >= 1);                            /* the decoy fired while armed, and was let through */
     CHECK(spins > 0);                              /* a cancel really waited */
     CHECK(checked >= 1);                           /* and the callback checked after the hold */
     CHECK(saw_dead == 0);                          /* the claim: it never saw the poison */
@@ -733,8 +750,9 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
     CHECK(thread_count() == threads0);
 
     kinfo("selftest: tcp-pcb-timer-free: a cancel spun %u time(s) for a callback holding the pcb, which stayed live "
-          "through the interval; callback on cpu %u above its armer, closer on %u, releaser on %u",
-          spins, cb_cpu, here, rel_cpu);
+          "through the interval; callback on cpu %u above its armer, closer on %u, releaser on %u; "
+          "%u other callback(s) let through",
+          spins, cb_cpu, here, rel_cpu, passed);
     return true;
 #endif
 }
