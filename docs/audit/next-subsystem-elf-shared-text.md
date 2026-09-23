@@ -40,7 +40,22 @@
 >    is 70% now, above the working case's floor and far above the 53%
 >    that no balancing produces.
 >
-> 7. **A stale object outlived a mutation's revert, and cost an
+> 7. **The interlock had three holes, and review found all of them.**
+>    `file_pwrite` is not the only way to change a file. An `O_TRUNC`
+>    open and `vfs_truncate` remove the very pages a program is
+>    executing, and a store through a writable `MAP_SHARED` mapping
+>    dirties the page cache's own frame -- the frame the text mapping
+>    *is* -- without a write ever reaching the VFS. And the loader
+>    linked its text mapping holding no `vn->lock`, so a mapping could
+>    appear between a writer's check and its write, which is exactly
+>    the atomicity this report claimed. All three are closed: both
+>    truncate paths ask the same question the write does, a writable
+>    shared mapping and a text mapping of one file are refused in
+>    either order, and the text link takes `vn->lock`. **The lesson is
+>    the shape of the mistake**: an interlock placed on one syscall
+>    guards that syscall, not the file, and the invariant has to name
+>    every door or it is not an invariant.
+> 8. **A stale object outlived a mutation's revert, and cost an
 >    afternoon.** `shutil.move` preserves mtime, so a restored source
 >    can be older than the object built from the mutated one; `make`
 >    then rebuilds nothing and the mutated kernel keeps booting. The
@@ -49,7 +64,7 @@
 >    while its own precondition reports success is a test running
 >    against a different binary than it thinks**, and that is worth
 >    reaching for before any theory about the kernel.
-> 8. **One mutation survives, and it is equivalent rather than
+> 9. **One mutation survives, and it is equivalent rather than
 >    uncaught.** Deleting the "not writable" half of `seg_shareable`
 >    changes nothing for the binary under test: its only writable
 >    segment also has a zero tail, so the *other* half of the condition

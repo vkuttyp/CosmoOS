@@ -70,15 +70,14 @@ struct vm_space;
 /*
  * Map every segment of a validated image into `space`.
  *
- * With `vn`, the segments come from that file's page cache: read-only
- * ones shared (one set of frames for every process running the program),
- * writable ones copy-on-write, nothing populated. With NULL, the image's
- * bytes are copied into anonymous memory as they always were -- the boot
- * archive has no file to map (docs/audit/next-subsystem-elf-shared-text.md).
- *
- * `off_in_file` is where the image begins inside `vn`, which is 0 for a
- * whole executable and is why the parameter exists at all: a caller that
- * maps a segment must add it to the segment's own offset.
+ * With `vn`, a segment that is **not writable and has no zero tail**
+ * comes from that file's page cache, shared and demand-paged: one set of
+ * frames for every process running the program. Every other segment --
+ * writable, or with a zero tail, or from an image with no file at all
+ * (the boot archive) -- is copied into anonymous memory as it always
+ * was, except that the tail beyond the file's bytes is left
+ * demand-paged rather than populated
+ * (docs/audit/next-subsystem-elf-shared-text.md).
  */
 struct vnode;
 int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info,

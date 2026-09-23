@@ -445,8 +445,15 @@ image came from, a `PT_LOAD` that is not writable and has no zero tail
 (`file_memsz == filesz`) is mapped `VM_MAP_SHARED | VM_MAP_TEXT` over
 that file's page cache, with `maxprot` excluding `W` -- so every process
 running the program shares one set of frames and no `mprotect` can make
-them writable. Such a mapping makes the file **busy**: `file_pwrite`
-answers `-ETXTBSY` while one exists. Busy is a property of the page
+them writable. Such a mapping makes the file **busy**, and busy means
+*nothing changes its contents*: `file_pwrite`, an `O_TRUNC` open and
+`vfs_truncate` all answer `-ETXTBSY` while one exists, and a writable
+`MAP_SHARED` mapping of it is refused -- a store through one would
+dirty the very frame another process is executing without a write ever
+reaching the VFS, so the pair is refused in either order. The scope is
+exact and worth stating: a file whose text was **copied** rather than
+shared is not busy, and does not need to be, because a write to it
+cannot reach the running program. Busy is a property of the page
 cache's mapping list, not a counter beside it -- the record is linked
 there when the mapping is made and unlinked before its vnode reference
 goes, so the answer cannot outlive the mappings or lag their teardown --
@@ -457,9 +464,9 @@ makes the answer and the write atomic against a mapping being created.
 program that maps a file executable and writes to it deliberately is a
 different thing, and the page cache syncs the instruction cache for it.
 Check: `elf-shared-text` (one physical frame for two spaces),
-`elf-text-ro` (`PROT_WRITE` refused), `elf-txtbsy` (refused while
-running, allowed once it exits), `elf-share-cost` (16 pages per copy
-against 89).
+`elf-text-ro` (`PROT_WRITE` refused), `elf-txtbsy` (a write **and a truncate** refused while
+running, the write allowed once it exits), `elf-share-cost` (16 pages
+per copy against 89, bounded at 32).
 
 **P29. A system call may not dereference a mutable per-process pointer
 without taking a reference under the process lock.**

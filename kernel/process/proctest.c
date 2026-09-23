@@ -1509,6 +1509,7 @@ bool selftest_elf_txtbsy(const char **reason)
     uint8_t byte = 0x90;
     int64_t busy_rc = 0, free_rc = 0;
     bool alive = false, same_vnode = false, direct_busy = false;
+    int trunc_rc = -ETXTBSY;   /* untested unless the child runs */
     if (ok) {
         /*
          * The precondition, *observed* exactly.
@@ -1560,6 +1561,12 @@ bool selftest_elf_txtbsy(const char **reason)
         pagecache_lock(img.vn);
         direct_busy = pagecache_text_busy(img.vn);
         pagecache_unlock(img.vn);
+        /* And the other way to change a file's contents: a truncate
+         * removes the very pages the program is executing, which the
+         * write's refusal alone would not have stopped (found in
+         * review of this unit). */
+        if (alive)
+            trunc_rc = vfs_truncate(NULL, path, 0);
         struct file *w = NULL;
         if (alive && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
             /* The vnode the write lands on, against the one the mapping
@@ -1607,6 +1614,13 @@ bool selftest_elf_txtbsy(const char **reason)
         elf_settle_processes(procs0);
         return false;
     }
+    if (trunc_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: truncating a running program returned %d, wanted %d",
+               trunc_rc, -ETXTBSY);
+        *reason = "a file being executed could be truncated";
+        elf_settle_processes(procs0);
+        return false;
+    }
     if (free_rc != 1) {
         kerror("selftest: elf-txtbsy: writing after the process exited returned %lld, wanted 1",
                (long long)free_rc);
@@ -1614,7 +1628,8 @@ bool selftest_elf_txtbsy(const char **reason)
         elf_settle_processes(procs0);
         return false;
     }
-    kinfo("selftest: elf-txtbsy: a write to a running program is -ETXTBSY, and succeeds once it exits");
+    kinfo("selftest: elf-txtbsy: a write and a truncate of a running program are both -ETXTBSY, "
+          "and the write succeeds once it exits");
     elf_settle_processes(procs0);
     return true;
 }

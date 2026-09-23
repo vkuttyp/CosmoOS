@@ -1655,11 +1655,56 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
         __atomic_fetch_add(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);   /* the futex classifies only in a space that shares */
     r->fmap = m;
 
-    /* On the vnode's list before the region can take a fault, so a
-     * truncate or a write-back never misses a page this mapping holds. */
+    /*
+     * On the vnode's list before the region can take a fault, so a
+     * truncate or a write-back never misses a page this mapping holds.
+     *
+     * **Text takes `vn->lock` to do it**, and that is what makes the
+     * `-ETXTBSY` interlock exact rather than nearly exact. A writer
+     * holds `vn->lock` across its busy check *and* its write
+     * (`file_pwrite`), so without this a text mapping could be linked
+     * between the two and the write would land in a file a process had
+     * just begun executing. Taking it here means the loader waits for
+     * any write in progress, and a write that starts later sees the
+     * mapping. The order is the documented one, vnode -> pagecache, and
+     * only the loader passes VM_MAP_TEXT -- it holds no vnode lock
+     * (found in review of this unit).
+     */
+    bool text_lock = (flags & VM_MAP_TEXT) != 0;
+    if (text_lock)
+        mutex_lock(&vn->lock);
     pagecache_lock(vn);
-    list_push_back(&vn->pc.mappings, &m->link);
+    /*
+     * Text and a writable shared mapping of the same file cannot
+     * coexist, in either order.
+     *
+     * `file_pwrite` is not the only way to change a file: a store
+     * through a writable `MAP_SHARED` mapping dirties the page cache's
+     * own frame, and the text mapping *is* that frame -- so one process
+     * could rewrite another's executing instructions without a write
+     * ever reaching the VFS. Refusing the pair is what makes the
+     * interlock about the file rather than about one syscall
+     * (found in review of this unit).
+     */
+    bool clash = false;
+    struct vm_file_map *other;
+    list_for_each_entry(other, &vn->pc.mappings, link) {
+        if (text_lock ? (other->shared && (other->maxprot & VM_PROT_WRITE))
+                      : (other->text && m->shared && (maxprot & VM_PROT_WRITE)))
+            clash = true;
+    }
+    if (!clash)
+        list_push_back(&vn->pc.mappings, &m->link);
     pagecache_unlock(vn);
+    if (text_lock)
+        mutex_unlock(&vn->lock);
+    if (clash) {
+        r->fmap = NULL;
+        vnode_put(vn);
+        kfree(m);
+        kmem_cache_free(g_region_cache, r);
+        return -ETXTBSY;
+    }
 
     if (flags & VM_MAP_REPLACE)
         return map_replace(space, r);   /* owns `r` either way */
