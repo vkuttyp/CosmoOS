@@ -772,6 +772,7 @@ bool selftest_vm_replace_race(const char **reason)
  * one named page with its stale flags in hand until this thread installs
  * that very page, and only then resumes.
  */
+#if CONFIG_DEBUG
 struct anon_race {
     volatile uint32_t *word;
     uint32_t seen;
@@ -784,6 +785,7 @@ static void anon_race_toucher(void *arg)
     a->seen = *a->word;   /* the held fault: absent when it started, present when it resumes */
     a->ran = true;
 }
+#endif
 
 bool selftest_vm_anon_fault_race(const char **reason)
 {

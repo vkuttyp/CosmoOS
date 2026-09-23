@@ -345,7 +345,7 @@ The demand-zero path is the one that will later grow anonymous private
 memory and CoW; its structure (lookup → kind switch → populate) is the
 skeleton for that.
 
-#### Two threads, one absent page
+### 3.5 Two threads, one absent page
 
 Step 3 above reads "fault is not-present", and that is a fact about the
 past. The fault flags are the snapshot the hardware took when it raised
