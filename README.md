@@ -3381,6 +3381,18 @@ See [docs/development.md](docs/development.md).
   swapper is waiting inside `chdir`. A `chdir` in a single-threaded
   process registers no swapper, because it has no walk to race.
   Invariant **V35**; P29 gains its proof. (PR #224)
+- **`tcp-pcb-timer-free` could park its callback above its own armer,
+  with nothing left to release it.** Twice on 2026-09-23, in the same
+  slot after `net-lo-udp`: a hard lockup at ten seconds once, a TLB
+  shootdown unanswered at one second once. The armer arms a 1 ms timer
+  and must exit on its CPU before the next tick; when it did not, the
+  callback spun in interrupt context above it, the test's join of the
+  armer -- made before the releaser existed -- never returned, and the
+  releaser was never made. Made deterministic by having the armer linger
+  two ticks on purpose, which reproduced the hard lockup to the line on
+  the first boot; fixed by creating the releaser before arming and
+  joining the armer after the release, with the callback's CPU recorded
+  and asserted. (PR #225)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

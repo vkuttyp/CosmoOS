@@ -369,6 +369,33 @@ carries a comment about — the one that moved `thrtest` ahead of the
 hypervisor section. It is not; that condition is real but is not
 this.)
 
+**A fourth sighting, 2026-09-23, after the punch was gone** -- and it is
+a *different* race, on the same line. x86-64, one debug boot of a
+documentation-only rebase (PR #225's), `env-grow-under-readers`:
+
+```
+thrtest: FAIL env_reader start at line 1169: rc -17
+```
+
+`MAP_FIXED` replaces now (PR #193), libc's stack fill can no longer
+lose to a hole, and the sixteen-attempt retry that masked losses is
+gone -- so an `EEXIST` out of a thread start has exactly one source
+left, and reading `sys_mmap` finds it: the **non-fixed** path calls
+`vm_user_find_free`, which takes and releases the space lock, and then
+`vm_user_map_anon`, which takes it again to `space_insert`
+(`kernel/syscall/native.c`, the `else` branch; the Linux `mmap` in
+`compat/linux/syscalls.c` is the same two calls). Two threads asking for
+an anonymous placement at once can both be handed the same hole, and
+the loser's insert is `-EEXIST`. `env_churn` mallocs beside a thread
+start that reserves, which is two `mmap(NULL, …)` racing, which is what
+this test does on purpose. The retry the MAP_FIXED unit removed was
+absorbing this race too, without anyone knowing it existed.
+
+Not a flake: a placement and its insertion must be one critical section
+at both doors, and a proof for it can be built the way the held-walk
+seam was. Named as the next candidate in the deferred-work inventory's
+sense rather than fixed here.
+
 Two things are still worth keeping. The **printf is not honest under
 this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
 started, so the line said "3 readers over 400 growths, 0 misses" on a
@@ -2023,6 +2050,18 @@ to try is a `spin_trylock` pair in the balancer, so a contended queue
 is skipped until the next tick rather than waited for. A policy has no
 business waiting for a lock.
 
+## Under the chaos migrator: `sched-balance-pull` on CI, twice on 2026-09-23
+
+`SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
+CPUs creation order gave them (3005 ms)`, in the x86-64 job's chaos boot
+only: once on `main` itself (run 35827861816, the ELF shared-text merge)
+and once on PR #225's first run (35842572114), whose change is in a TCP
+test that runs minutes later. The scheduler testing doc already says this
+is the one balancer test that still asserts, and that under a chaos
+migrator its claim is about the machine rather than the balancer
+(`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the
+balancer unit owns the decision whether it asserts under chaos at all.
+
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
 
 Two sightings from `make test-chaos` on the percpu-migration tree,
@@ -2117,17 +2156,36 @@ context with interrupts masked cannot acknowledge a shootdown, and the
 shootdown gives up after one second where the lockup detector gives up
 after ten: two symptoms of one CPU in one state, and which one fires is
 only which bound is reached first. Reading the test with both in hand
-names the mechanism, still as a guess until the one-line instrument
-above confirms it: the armer thread, pinned to `cpu`, arms a **1 ms**
+named the mechanism: the armer thread, pinned to `cpu`, arms a **1 ms**
 timer and must then exit on that CPU before the next tick; when it does
 not, the callback fires above the still-live armer and spins there, the
-test thread's `thread_join(armer)` -- which comes *before* the releaser
-is created -- never returns, and nothing exists that can release the
+test thread's `thread_join(armer)` -- which came *before* the releaser
+was created -- never returns, and nothing exists that can release the
 callback. The idle CPUs are the test thread in its join and the
-releaser that was never made. The repair, for the unit that owns this
-test: create the releaser before arming the timer, join the armer only
-after the release, and have the armer linger one tick on purpose so
-the placement that hangs is the one every run exercises.
+releaser that was never made.
+
+**Reproduced deterministically, and fixed (PR #225).** The mechanism was
+made the adversary: the armer lingers two ticks on its CPU after arming,
+so the callback parks in interrupt context above it in every run. With
+the test's original order that boot hung in this slot and the detector
+named it exactly as sighting one did:
+
+```
+SELFTEST: net-lo-udp       ... ok (64 ms)
+[ WARN] hard lockup: cpu 0 no tick for 10000 ms; last tick 10018 ms ago at pc 0xffffffff800da966 (seen from cpu 3)
+cpu 0: arch_cpu_relax <- timer_kick <- run_expired <- trap <- ... <- thread_trampoline   (8 samples, identical)
+cpu 1, 2, 3: idle_main
+```
+
+-- the callback above the armer's own thread (`thread_trampoline` at
+the bottom of the stack), the test thread in `thread_join(armer)`, no
+releaser. The fix creates the releaser before the timer is armed and
+joins the armer only after the release; with the join alone moved back,
+the test fails by name in five seconds (`spins > 0`, once the releaser's
+deadline lets the callback go) instead of hanging. The callback records
+its CPU and the test asserts it is the armer's and prints all three
+placements. Green on both architectures since, with the hostile
+placement every time.
 
 Not on the list: not a bound, and not attributable to either unit's
 mutation -- the spinning path holds no vnode and makes no system call.

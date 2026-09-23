@@ -176,6 +176,7 @@ bool tcp_test_callback_entered(void);
 void tcp_test_release_callback(void);
 unsigned tcp_test_callback_saw_dead(void);
 unsigned tcp_test_callback_checked(void);
+unsigned tcp_test_callback_cpu(void);   /* where the held callback ran: the placement is the whole hazard */
 void tcp_test_arm_rexmit(struct tcp_pcb *pcb, uint64_t ns);
 #endif
 

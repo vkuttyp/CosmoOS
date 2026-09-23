@@ -574,6 +574,22 @@ static void tcp_armer_main(void *arg)
 {
     struct tcp_armer *a = arg;
     tcp_test_arm_rexmit(a->pcb, 1000000ULL);   /* 1 ms, on this CPU's queue */
+    /*
+     * Stay alive on this CPU past the tick that fires the timer, on
+     * purpose. The callback then parks in interrupt context ABOVE this
+     * thread, which is the placement that hung the boot twice on
+     * 2026-09-23 (docs/testing/flakes.md, "tcp-pcb-timer-free's held
+     * callback parked on a CPU nobody could release it from"): the test
+     * used to join this thread before it created the releaser, so a
+     * 1 ms timer that fired before this thread had finished exiting left
+     * nothing in the machine that could let the callback go. Making the
+     * placement certain is what makes the fix a proof rather than a
+     * rerun; the releaser now exists before the timer is armed, and this
+     * thread is joined only after the release.
+     */
+    uint64_t until = clock_now_ns() + 2 * TICK_NS;
+    while (clock_now_ns() < until)
+        arch_cpu_relax();
 }
 
 /* Lets the parked callback go, but only once a cancel is demonstrably
@@ -642,49 +658,83 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
     timer_test_reset_cancel_spins();
     tcp_test_hold_callback(true);
 
+    /*
+     * The releaser FIRST, before anything can park: it is the one thread
+     * that can end a hold, and it must exist whatever CPU the callback
+     * lands on and whatever this thread is blocked in. The first version
+     * created it only after joining the armer, and a callback that fired
+     * above the still-live armer took the armer, the join, and the
+     * releaser that was never made with it -- a hard lockup at ten
+     * seconds or an unanswered shootdown at one (flakes.md).
+     */
+    struct tcp_releaser rel = { 0 };
+    struct thread *rt = thread_create_on(tcp_releaser_main, &rel, "tcprel", SCHED_PRIO_DEFAULT, CPUMASK_OF(rel_cpu));
+    CHECK(rt != NULL);
+
     /* Arm the rexmit timer *from* the other CPU, because a timer lands on
      * the queue of the CPU that starts it and this window needs the
-     * callback somewhere other than the closer. */
+     * callback somewhere other than the closer. The armer lingers past
+     * the tick on purpose (see it), so the callback parks above it; it
+     * is joined only after the release, below. */
     struct tcp_armer arm = { .pcb = pcb };
     struct thread *at = thread_create_on(tcp_armer_main, &arm, "tcparm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
-    CHECK(at != NULL);
-    thread_join(at);
+    if (at == NULL) {
+        /* The releaser holds a pointer into this frame; no return leaves
+         * it running (found in review). */
+        __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
+        thread_join(rt);
+        tcp_test_hold_callback(false);
+        CHECK(at != NULL);
+    }
 
     uint64_t deadline = clock_now_ns() + 2000000000ULL;
     while (!tcp_test_callback_entered()) {
         if (clock_now_ns() > deadline) {
             tcp_test_release_callback();
+            __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
+            thread_join(rt);
+            thread_join(at);
             tcp_test_hold_callback(false);
             *reason = "the timer callback never entered the hold";
             return false;
         }
         sched_yield();
     }
-
-    struct tcp_releaser rel = { 0 };
-    struct thread *rt = thread_create_on(tcp_releaser_main, &rel, "tcprel", SCHED_PRIO_DEFAULT, CPUMASK_OF(rel_cpu));
-    CHECK(rt != NULL);
+    unsigned cb_cpu = tcp_test_callback_cpu();
 
     /* The close cancels all four timers; the first must wait for the
      * callback that is inside the object. */
     tcp_close(pcb);
     __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
 
-    unsigned spins = timer_test_cancel_spins();
-    CHECK(spins > 0);                              /* a cancel really waited */
-    CHECK(tcp_test_callback_checked() >= 1);       /* and the callback checked after the hold */
-    CHECK(tcp_test_callback_saw_dead() == 0);      /* the claim: it never saw the poison */
-
+    /* Both threads joined BEFORE anything is judged: a failing check
+     * returns from this frame, and the releaser reads `rel` in it (found
+     * in review). The armer is joinable now because the close released
+     * the callback it was under. */
     thread_join(rt);
+    thread_join(at);
+    /* Read before the hold is dropped: tcp_test_hold_callback(false)
+     * resets these counters. */
+    unsigned spins = timer_test_cancel_spins();
+    unsigned checked = tcp_test_callback_checked();
+    unsigned saw_dead = tcp_test_callback_saw_dead();
     tcp_test_hold_callback(false);
+
+    CHECK(spins > 0);                              /* a cancel really waited */
+    CHECK(checked >= 1);                           /* and the callback checked after the hold */
+    CHECK(saw_dead == 0);                          /* the claim: it never saw the poison */
+    /* The placement, asserted rather than assumed: the callback ran on
+     * the armer's CPU, and neither on this thread's nor the releaser's. */
+    CHECK(cb_cpu == cpu);
+
     uint64_t settle = clock_now_ns() + 500000000ULL;
     while (thread_count() != threads0 && clock_now_ns() < settle)
         sched_yield();
     CHECK(thread_count() == threads0);
 
     kinfo("selftest: tcp-pcb-timer-free: a cancel spun %u time(s) for a callback holding the pcb, which stayed live "
-          "through the interval",
-          spins);
+          "through the interval; callback on cpu %u above its armer, closer on %u, releaser on %u",
+          spins, cb_cpu, here, rel_cpu);
     return true;
 #endif
 }
