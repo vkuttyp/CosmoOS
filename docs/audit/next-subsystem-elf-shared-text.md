@@ -40,6 +40,18 @@
 >    is 70% now, above the working case's floor and far above the 53%
 >    that no balancing produces.
 >
+> 7. **One mutation survives, and it is equivalent rather than
+>    uncaught.** Deleting the "not writable" half of `seg_shareable`
+>    changes nothing for the binary under test: its only writable
+>    segment also has a zero tail, so the *other* half of the condition
+>    already refuses it and the deleted one is never the deciding test.
+>    `elf-data-private` asserts the property directly instead -- a store
+>    in one process's data segment does not reach another's -- and it
+>    was written because that mutation survived, which is what a
+>    surviving mutation is for even when it turns out to be equivalent.
+>    Making it decisive needs a binary with a writable segment and no
+>    `.bss`, which is a synthetic ELF and is not built here.
+>
 > **Measured, per additional process running `init`:**
 >
 > | | x86-64 | AArch64 |
