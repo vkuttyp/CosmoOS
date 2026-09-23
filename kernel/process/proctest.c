@@ -2103,6 +2103,21 @@ static bool place_race_one(struct vnode *vn, const char *what, const char **reas
 
 bool selftest_mmap_place_race(const char **reason)
 {
+    /* A `from` at or near the top of the address space: the fit used to
+     * wrap `cursor + size + PAGE_SIZE` below the window and choose a base
+     * outside it (found in review). No gap there is the only answer. */
+    {
+        struct vm_space *sp = NULL;
+        CHECK(vm_space_create_user(&sp) == 0);
+        uint64_t b = 0;
+        int hi1 = vm_user_map_anon_free(sp, 0xfffffffffffff000ULL, PAGE_SIZE, VM_PROT_RW, 0, "hi", &b);
+        int hi2 = vm_user_map_anon_free(sp, VM_USER_HI - PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, 0, "hi", &b);
+        uint64_t pages = sp->mapped_pages;
+        vm_space_destroy(sp);
+        CHECK(hi1 == -ENOMEM);
+        CHECK(hi2 == -ENOMEM);   /* one page and its guard do not fit above the last page */
+        CHECK(pages == 0);
+    }
     if (!place_race_one(NULL, "anon", reason))
         return false;
     struct file *f = NULL;

@@ -1381,6 +1381,16 @@ static uint64_t range_first_fit_locked(struct vm_space *space, uint64_t from, si
 {
     if (from < VM_USER_LO)
         from = VM_USER_LO;
+    /*
+     * Every comparison below is against VM_USER_HI by subtraction, never
+     * by adding to a cursor: a page-aligned hint near the top of the
+     * address space made `cursor + size + PAGE_SIZE` wrap below the
+     * window and a region outside it was chosen and inserted (found in
+     * review). The placing callers used to be saved by the map's own
+     * user_range_valid, which a chosen base no longer passes through.
+     */
+    if (from >= VM_USER_HI || size > VM_USER_HI - VM_USER_LO)
+        return 0;
     from = page_align_up(from);
     vaddr_t cursor = (vaddr_t)from;
     struct vm_region *r;
@@ -1391,11 +1401,11 @@ static uint64_t range_first_fit_locked(struct vm_space *space, uint64_t from, si
         if (rhi <= cursor)
             continue;
         if (rlo >= cursor && rlo - cursor >= size + PAGE_SIZE)
-            return cursor;
+            return user_range_valid(cursor, size) ? cursor : 0;
         if (rhi > cursor)
             cursor = rhi;
     }
-    if (cursor + size + PAGE_SIZE <= VM_USER_HI)
+    if (cursor < VM_USER_HI && VM_USER_HI - cursor >= size + PAGE_SIZE)
         return cursor;
     return 0;
 }
@@ -1444,6 +1454,7 @@ static int map_anon(struct vm_space *space, uint64_t base, uint64_t from, size_t
             return -ENOMEM;   /* no gap above `from`: the caller may try a lower one */
         }
         r->base = (vaddr_t)base;
+        KASSERT(user_range_valid(base, size));   /* range_first_fit_locked answers inside the window or 0 */
     }
     int rc = space_insert(space, r);
     if (rc) {
@@ -1858,28 +1869,6 @@ static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t
         return -ENOMEM;
     }
     uint64_t npages = size / PAGE_SIZE;
-    if (placed) {
-        arch_irq_state_t ps = spin_lock_irqsave(&space->lock);
-        int prc = 0;
-        if (space->mapped_pages + npages > space->limit_mapped_pages)   /* COSMO_RLIMIT_AS */
-            prc = -ENOMEM;
-        else if ((base = range_first_fit_locked(space, from, size)) == 0)
-            prc = -ENOMEM;   /* no gap above `from`: the caller may try a lower one */
-        if (prc == 0) {
-            r->base = (vaddr_t)base;
-            r->flags |= VM_REGION_QUIESCED;
-            int irc = space_insert(space, r);
-            KASSERT(irc == 0);   /* the range was free under this hold */
-            (void)irc;
-            space->mapped_pages += npages;
-        }
-        spin_unlock_irqrestore(&space->lock, ps);
-        if (prc) {
-            kfree(m);
-            kmem_cache_free(g_region_cache, r);
-            return prc;
-        }
-    }
     vnode_get(vn);
     m->vn = vn;
     m->space = space;
@@ -1910,6 +1899,43 @@ static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t
     if (m->shared)
         __atomic_fetch_add(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);   /* the futex classifies only in a space that shares */
     r->fmap = m;
+
+    /*
+     * A chosen base: the placement, now that the region is whole. It is
+     * published only once `r->fmap` is set and the record filled,
+     * because msync and the futex-key lookup dereference `r->fmap` of
+     * any FILE region they meet and do not look at the claim -- an
+     * earlier version inserted first and set `fmap` after, and review
+     * found the window. Claimed until the record is on the vnode's list,
+     * for the readers of that list (see map_file's header).
+     */
+    if (placed) {
+        arch_irq_state_t ps = spin_lock_irqsave(&space->lock);
+        int prc = 0;
+        if (space->mapped_pages + npages > space->limit_mapped_pages)   /* COSMO_RLIMIT_AS */
+            prc = -ENOMEM;
+        else if ((base = range_first_fit_locked(space, from, size)) == 0)
+            prc = -ENOMEM;   /* no gap above `from`: the caller may try a lower one */
+        if (prc == 0) {
+            r->base = (vaddr_t)base;
+            m->base = (vaddr_t)base;
+            r->flags |= VM_REGION_QUIESCED;
+            int irc = space_insert(space, r);
+            KASSERT(irc == 0);   /* the range was free under this hold */
+            (void)irc;
+            space->mapped_pages += npages;
+        }
+        spin_unlock_irqrestore(&space->lock, ps);
+        if (prc) {
+            r->fmap = NULL;
+            if (m->shared)
+                __atomic_fetch_sub(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);
+            vnode_put(vn);
+            kfree(m);
+            kmem_cache_free(g_region_cache, r);
+            return prc;
+        }
+    }
 
     /*
      * On the vnode's list before the region can take a fault, so a

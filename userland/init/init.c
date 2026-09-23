@@ -4582,6 +4582,15 @@ static void mmap_selftest(void)
             for (unsigned j = 0; j < PLACE_ROUNDS; j++)
                 if (pa[i].got[j] != MAP_FAILED && pa[i].got[j] != NULL)
                     CHECK(munmap(pa[i].got[j], P) == 0);
+        /* A hint above the user window is a hint, not a demand: the
+         * kernel places elsewhere, inside the window. The fit used to
+         * wrap on it and hand back an address outside (found in review). */
+        void *hi = mmap((void *)0xfffffffffffff000ULL, P, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        CHECK(hi != MAP_FAILED && (uintptr_t)hi < 0x0000800000000000ULL);
+        if (hi != MAP_FAILED) {
+            *(volatile char *)hi = 1;   /* and it is real memory */
+            CHECK(munmap(hi, P) == 0);
+        }
     }
 
     CHECK(munmap(sh, 3 * P) == 0);
