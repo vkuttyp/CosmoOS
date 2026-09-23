@@ -369,6 +369,33 @@ carries a comment about — the one that moved `thrtest` ahead of the
 hypervisor section. It is not; that condition is real but is not
 this.)
 
+**A fourth sighting, 2026-09-23, after the punch was gone** -- and it is
+a *different* race, on the same line. x86-64, one debug boot of a
+documentation-only rebase (PR #225's), `env-grow-under-readers`:
+
+```
+thrtest: FAIL env_reader start at line 1169: rc -17
+```
+
+`MAP_FIXED` replaces now (PR #193), libc's stack fill can no longer
+lose to a hole, and the sixteen-attempt retry that masked losses is
+gone -- so an `EEXIST` out of a thread start has exactly one source
+left, and reading `sys_mmap` finds it: the **non-fixed** path calls
+`vm_user_find_free`, which takes and releases the space lock, and then
+`vm_user_map_anon`, which takes it again to `space_insert`
+(`kernel/syscall/native.c`, the `else` branch; the Linux `mmap` in
+`compat/linux/syscalls.c` is the same two calls). Two threads asking for
+an anonymous placement at once can both be handed the same hole, and
+the loser's insert is `-EEXIST`. `env_churn` mallocs beside a thread
+start that reserves, which is two `mmap(NULL, …)` racing, which is what
+this test does on purpose. The retry the MAP_FIXED unit removed was
+absorbing this race too, without anyone knowing it existed.
+
+Not a flake: a placement and its insertion must be one critical section
+at both doors, and a proof for it can be built the way the held-walk
+seam was. Named as the next candidate in the deferred-work inventory's
+sense rather than fixed here.
+
 Two things are still worth keeping. The **printf is not honest under
 this failure**: it reports `3 readers` from `ENV_READERS` whatever actually
 started, so the line said "3 readers over 400 growths, 0 misses" on a
