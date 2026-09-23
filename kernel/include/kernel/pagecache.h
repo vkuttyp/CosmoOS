@@ -101,6 +101,12 @@ unsigned pagecache_drop(struct vnode *vn, bool lost);
  * The install happens under the mutex so a truncate or a write-back on
  * the same file is serialised against it.
  */
+/* Whether a program's text is mapped from this file: true while a
+ * shared, executable mapping of it is on the cache's list. Call with
+ * the cache lock held; a write to a busy file is -ETXTBSY
+ * (docs/audit/next-subsystem-elf-shared-text.md). */
+bool pagecache_text_busy(struct vnode *vn);
+
 void pagecache_lock(struct vnode *vn);
 void pagecache_unlock(struct vnode *vn);
 int pagecache_fault_page(struct vnode *vn, uint64_t index, bool dirty, struct page **out);

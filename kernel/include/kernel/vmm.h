@@ -50,6 +50,12 @@ struct vm_file_map {
     size_t size;
     uint64_t off;            /* file offset of `base` (page aligned) */
     bool shared;             /* MAP_SHARED: the cache's frames, writes reach the file */
+    /* This mapping is a program's text, because the loader said so
+     * (VM_MAP_TEXT). Set once at creation and never changed, so the question
+     * "is anyone executing this file" is answered by the presence of
+     * such a mapping on the vnode's list rather than by a counter kept
+     * beside it (docs/audit/next-subsystem-elf-shared-text.md). */
+    bool text;
     vm_prot_t maxprot;       /* the most vm_user_protect may grant */
     unsigned regions;
     struct list_node link;   /* pagecache.mappings */
@@ -210,6 +216,19 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
  */
 #define VM_MAP_SHARED  (1u << 0)
 #define VM_MAP_REPLACE (1u << 1)
+/*
+ * This mapping is a program's text, made by the loader: the file is
+ * "busy" while it exists and a write to it is -ETXTBSY
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * Only `elf_load_into` passes it, and that is the point. "Shared and
+ * executable" is not the same question: a program may map a file
+ * executable and write to it on purpose -- the page cache syncs the
+ * instruction cache for exactly that case -- and refusing those writes
+ * broke that behaviour and its test. What must not change underneath a
+ * process is the program it is *running*.
+ */
+#define VM_MAP_TEXT    (1u << 2)
 int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
                      unsigned flags, struct vnode *vn, uint64_t off, const char *name);
 
@@ -367,6 +386,9 @@ struct vm_stats {
     uint64_t regions;
     uint64_t anon_pages;       /* frames populated for ANON regions */
     uint64_t faults_handled;   /* demand-zero populations */
+    /* Atomic: counted under many spaces' locks. A thread reached the
+     * anonymous fault with another thread's page already installed. */
+    uint64_t anon_fault_retries;
     uint64_t fixups;           /* kernel-mode faults resumed at an exception fixup */
     /* FILE regions (docs/audit/next-subsystem-file-regions.md). Atomic:
      * they are counted under many spaces' locks. */
@@ -392,6 +414,27 @@ void vm_get_stats(struct vm_stats *out);
  */
 void vm_test_file_hold_arm(void);
 unsigned vm_test_file_hold_state(void);
+
+/*
+ * The same seam for an ANONYMOUS fault, which cannot be held mid-service
+ * because it holds the space lock throughout. Armed on ONE page, the
+ * next anonymous fault on that page taken with interrupts enabled waits
+ * BEFORE it installs, still holding the fault flags the hardware gave
+ * it, until another thread installs that same page. The held thread then
+ * resumes believing the page absent, which is the race the fault's
+ * present-check answers. Arming by address is what makes the seam
+ * deterministic: a process takes anonymous faults for its stack and heap
+ * all the time, and any of them would otherwise be the held one. State:
+ * 0 idle, 1 armed, 2 held; readable as sysctl debug.anon_fault_hold.
+ * CONFIG_DEBUG only.
+ */
+void vm_test_anon_hold_arm(vaddr_t va);
+unsigned vm_test_anon_hold_state(void);
+/* Drops an armed-but-untaken seam and returns the state it found. A
+ * taken seam holds a sleeping thread and is released only by the
+ * install it waits for, so a caller giving up disarms first and then
+ * touches the page. */
+unsigned vm_test_anon_hold_disarm(void);
 void vm_dump(struct vm_space *space);
 
 #endif /* KERNEL_VMM_H */

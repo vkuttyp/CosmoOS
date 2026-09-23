@@ -142,7 +142,15 @@ AHCI are the two entries from that list now built.
   copy-on-write in the VMM's *must* list, not its "eventually" list. A
   shared futex across processes was named in that report as deferred
   and is built since (the shared-futex unit, above); `memfd`/`shm_open`
-  and the loader's segments remain deferred; the description of the
+  remains deferred; ~~the loader's segments~~ **BUILT (the elf-shared-text
+  unit, `docs/audit/next-subsystem-elf-shared-text.md`)**: a `PT_LOAD`
+  that is not writable and has no zero tail is mapped shared over the
+  file's page cache, so every process running a program shares one set
+  of text frames, and the segment's zero tail is demand-paged rather
+  than populated -- 89 pages per additional copy of `init` before, 16
+  after, on both architectures. A file being executed is busy
+  (`-ETXTBSY`), derived from the page cache's mapping list rather than a
+  counter (invariant **P30**); the description of the
   two doors above is the record of what was wrong, and what they do now
   is in `docs/kernel/syscall/api.md` and `docs/compat/linux/api.md`.
 - ASLR and KASLR: none; no randomised load base, stack or `brk`.

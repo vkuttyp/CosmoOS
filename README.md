@@ -3306,6 +3306,45 @@ See [docs/development.md](docs/development.md).
   build instead of one in twenty, and the runner requires both halves --
   that an attempt was broken and that a later one carried the exchange.
   (PR #218)
+- **A program's text belongs to the file, not to each process that runs
+  it.** The loader mapped every `PT_LOAD` as anonymous populated memory
+  and copied the image in, so two processes running one binary held two
+  complete copies of its text and every page of every segment was
+  allocated whether or not it was ever touched
+  (`docs/audit/next-subsystem-elf-shared-text.md`). Measured on `init`
+  by spawning copies and subtracting free-frame counts: **89 pages per
+  copy, the fourth costing exactly what the first did**. A `PT_LOAD`
+  that is not writable and has no zero tail now comes from the file's
+  page cache, shared, so every process running the program maps the same
+  frames -- with `maxprot` excluding `W`, which is what stops a later
+  `mprotect` from making shared text writable. The segment's zero tail
+  is demand-paged rather than populated, because an anonymous page
+  arrives zero. **89 pages per copy became 40, then 16**, identically on
+  both architectures. Shared text makes a running program's instructions
+  the file's, so a write to a file being executed is `-ETXTBSY`
+  (invariant **P30**) -- and *busy* is a property of the page cache's
+  mapping list, not a counter beside it: the record is linked there when
+  the mapping is made and unlinked before its vnode reference goes, and
+  the check is taken under that list's lock by a writer already holding
+  the vnode's, so the answer and the write are atomic against a mapping
+  being created. `VM_MAP_TEXT` is passed by the loader and by nothing
+  else, because a program that maps a file executable and writes to it
+  deliberately is a different thing the page cache already serves. Four
+  tests: one physical frame for two address spaces, the per-copy cost,
+  `PROT_WRITE` refused on shared text with the zero tail reading as
+  zero, and all three doors a file's contents can change through -- a
+  write, a truncate, and a writable shared mapping -- refused while a
+  program runs and allowed once it exits, with a private writable
+  mapping allowed throughout as the control and the text mapping
+  refused in the other order too. Demand-paging the zero tail also gave a multi-threaded program
+  its first pages two threads could fault at once, and the anonymous
+  fault panicked when they did: the flags a fault carries are the
+  hardware's snapshot from when the trap was raised, so both threads
+  believed the page absent and the loser mapped over the winner. The
+  page table is the authority now -- asked under the space lock
+  immediately before the install, exactly as the file-backed fault has
+  always re-found its region (invariant **M45**, test
+  `vm-anon-fault-race`). (PR #221)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

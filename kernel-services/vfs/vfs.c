@@ -1204,6 +1204,24 @@ static const struct kobject_io_type file_type = {
 };
 
 /* A stream: no position, no seek, the driver's own read and write. */
+/*
+ * Is this file's text shared with a process that is executing it?
+ *
+ * Every path that changes a regular file's contents asks this, not just
+ * the write: a truncate removes or zeroes the very pages a running
+ * program is executing, which is the same harm by another name. Called
+ * with `vn->lock` held, and takes the cache lock inside it -- the
+ * documented order is vnode -> pagecache
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ */
+static bool text_busy_locked(struct vnode *vn)
+{
+    pagecache_lock(vn);
+    bool busy = pagecache_text_busy(vn);
+    pagecache_unlock(vn);
+    return busy;
+}
+
 static bool vnode_is_stream(const struct vnode *vn)
 {
     return vn->type == VNODE_CHR || vn->type == VNODE_FIFO;
@@ -1409,7 +1427,10 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
     }
     if ((flags & COSMO_O_TRUNC) && vn->type == VNODE_REG && acc != COSMO_O_RDONLY) {
         mutex_lock(&vn->lock);
-        rc = vn->ops->truncate ? vn->ops->truncate(vn, 0) : -ENOTSUP;
+        /* Truncating a running program removes the pages it is
+         * executing: the same harm the write refuses. */
+        rc = text_busy_locked(vn) ? -ETXTBSY
+           : vn->ops->truncate    ? vn->ops->truncate(vn, 0) : -ENOTSUP;
         mutex_unlock(&vn->lock);
         if (rc) {
             vnode_put(vn);
@@ -1508,6 +1529,19 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
              : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     }
     mutex_lock(&vn->lock);
+    /*
+     * A file somebody is executing does not change underneath them.
+     * Shared text means the running program's instructions *are* these
+     * pages, so a write here would rewrite them in every process at
+     * once; POSIX names the refusal and this is where it belongs, under
+     * the lock the write itself holds, with the cache lock taken inside
+     * it (the order is vnode -> pagecache)
+     * (docs/audit/next-subsystem-elf-shared-text.md).
+     */
+    if (text_busy_locked(vn)) {
+        mutex_unlock(&vn->lock);
+        return -ETXTBSY;
+    }
     int64_t n = pagecache_write(vn, off, buf, len);
     if (n > 0)
         vn->mtime_ns = vfs_now_ns();   /* vnode state, so it stays inside */
@@ -1890,7 +1924,10 @@ int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
     rc = vfs_permission(vn, VFS_MAY_WRITE);
     if (rc == 0) {
         mutex_lock(&vn->lock);
-        rc = vn->ops->truncate ? vn->ops->truncate(vn, size) : -ENOTSUP;
+        /* As in the write and the O_TRUNC open: a running program's
+         * pages are not the caller's to remove. */
+        rc = text_busy_locked(vn) ? -ETXTBSY
+           : vn->ops->truncate    ? vn->ops->truncate(vn, size) : -ENOTSUP;
         mutex_unlock(&vn->lock);
     }
     vnode_put(vn);

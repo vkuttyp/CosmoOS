@@ -13,6 +13,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/object.h>
+#include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -1106,6 +1107,763 @@ bool selftest_linux_elf(const char **reason)
         CHECK(!info.cosmo_note);
         CHECK(info.phdr_vaddr == 0x400040);
     }
+    return true;
+}
+
+/*
+ * Leave the machine as it was found: wait for the process table to come
+ * back to where it started before returning. Killing a child and
+ * joining it is not the same as the child being *gone*, and the tests
+ * that run next -- `process-spawn` among them -- ask whether a freshly
+ * spawned child is alive after fifty milliseconds. Two of this unit's
+ * boots failed there, on the slower architecture, because these tests
+ * were still being torn down.
+ */
+static void elf_settle_processes(unsigned before)
+{
+    uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
+    while (process_count() != before && !clock_deadline_passed(deadline))
+        thread_sleep_ms(5);
+}
+
+/*
+ * A note on the children these tests run.
+ *
+ * They spin (`init --spin`) rather than block on the console. A child
+ * that blocks reads the console, the suite contends for it, and two
+ * unrelated tests -- `process-spawn` and `hid-keyboard` -- failed
+ * because these tests were holding it. A test that perturbs what it
+ * shares the machine with is measuring the machine, not the change.
+ */
+
+/*
+ * Two processes running one program map the same frames for its text.
+ *
+ * Not "the second costs less", which a leak or a smaller stack would
+ * also produce: the same *physical address* for the same virtual
+ * address in two address spaces, which nothing but sharing explains
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * The image is read the way `read_executable` reads it and carries its
+ * vnode, because that -- not the bytes -- is what lets the loader map
+ * instead of copy.
+ */
+static int read_image_with_vnode(const char *path, struct process_image *img)
+{
+    struct vnode *vn = NULL;
+    int rc = vfs_lookup(vfs_root(), path, &vn);
+    if (rc)
+        return rc;
+    struct file *f;
+    vnode_get(vn);
+    rc = vfs_open_vnode(vn, COSMO_O_RDONLY, &f);   /* consumes one reference */
+    if (rc) {
+        vnode_put(vn);
+        return rc;
+    }
+    struct cosmo_stat st;
+    file_stat(f, &st);
+    size_t size = (size_t)st.size;
+    vaddr_t image = vm_kernel_alloc((size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1),
+                                    VM_KALLOC_POPULATE, VM_PROT_RW);
+    if (image == 0) {
+        file_put(f);
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    size_t got = 0;
+    while (got < size) {
+        int64_t n = file_pread(f, (uint8_t *)image + got, size - got, got);
+        if (n <= 0) {
+            vm_kernel_free(image);
+            file_put(f);
+            vnode_put(vn);
+            return n < 0 ? (int)n : -EIO;
+        }
+        got += (size_t)n;
+    }
+    file_put(f);
+    img->data = (const void *)image;
+    img->size = size;
+    img->path = path;
+    img->vn = vn;
+    return 0;
+}
+
+static void free_image_with_vnode(struct process_image *img)
+{
+    if (img->data)
+        vm_kernel_free((vaddr_t)img->data);
+    if (img->vn)
+        vnode_put(img->vn);
+    img->data = NULL;
+    img->vn = NULL;
+}
+
+/*
+ * A file being executed does not change underneath the process running
+ * it, and stops being busy when that process is gone.
+ *
+ * Both halves matter. The refusal alone would pass with a flag that is
+ * set once and never cleared; the second write, after the process has
+ * exited, is what says the answer is read from the mappings rather than
+ * remembered (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * It runs on a copy in /tmp rather than on /boot/init, because a test
+ * that writes to the program the machine is running is a test that has
+ * already gone wrong.
+ */
+/*
+ * What a segment's zero tail reads as, and what shared text refuses.
+ *
+ * Two claims the sharing put at risk, checked in one process so the
+ * setup is paid once:
+ *
+ *  - **The zero tail is zero.** `memsz > filesz` means the segment ends
+ *    in bytes the file does not hold, and the loader now leaves them
+ *    demand-paged instead of populating them. An anonymous page arrives
+ *    zero, which is why that is safe -- but "is why" is an argument and
+ *    this is the check. It reads the tail through the child's own
+ *    address space.
+ *  - **Shared text cannot be made writable.** `maxprot` excludes W on a
+ *    text mapping, so `vm_user_protect` must refuse to grant it. Without
+ *    that, one process could rewrite another's instructions through a
+ *    mapping it was handed for free.
+ */
+/*
+ * A writable segment is private, and the test exists because a mutation
+ * survived without it.
+ *
+ * Deleting the `not writable` half of `seg_shareable` -- sharing the
+ * data segment too -- passed every other test in this unit: the text
+ * frames still matched, the cost still fell, the interlock still
+ * worked. What it would have broken is the thing no other test looks
+ * at: one process's store reaching another's memory, and the file.
+ *
+ * So this writes a byte through one process's data segment and reads it
+ * through another's. They must disagree.
+ */
+bool selftest_elf_data_private(const char **reason);
+bool selftest_elf_data_private(const char **reason)
+{
+    unsigned procs0 = process_count();
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-data-private: /boot/init unreadable; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    /* A byte inside a writable segment's *file* part, which both
+     * processes load from the same bytes and must not then share. */
+    uint64_t data_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++) {
+        const struct elf_segment *sg = &info.segments[i];
+        if ((sg->flags & ELF_PF_W) && sg->filesz > 0) {
+            data_va = sg->file_vaddr;
+            break;
+        }
+    }
+    if (data_va == 0) {
+        free_image_with_vnode(&img);
+        kinfo("selftest: elf-data-private: no writable segment with file bytes; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p1 = NULL, *p2 = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
+              process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
+    free_image_with_vnode(&img);
+
+    uint8_t before2 = 0, after2 = 0, after1 = 0;
+    bool measured = false;
+    if (ok) {
+        paddr_t pa1 = 0, pa2 = 0;
+        vaddr_t page = (vaddr_t)(data_va & ~(uint64_t)(PAGE_SIZE - 1));
+        unsigned in_page = (unsigned)(data_va & (PAGE_SIZE - 1));
+        if (arch_mmu_query(&p1->space->mmu, page, &pa1, NULL, NULL, NULL) &&
+            arch_mmu_query(&p2->space->mmu, page, &pa2, NULL, NULL, NULL)) {
+            uint8_t *f1 = (uint8_t *)phys_to_virt(pa1) + in_page;
+            uint8_t *f2 = (uint8_t *)phys_to_virt(pa2) + in_page;
+            before2 = *f2;
+            *f1 = (uint8_t)(*f1 ^ 0xA5);   /* a store in the first process's data */
+            after1 = *f1;
+            after2 = *f2;
+            measured = true;
+        }
+    }
+    if (p1) {
+        process_kill(p1, COSMO_SIGKILL);
+        process_wait_exit(p1);
+        process_put(p1);
+    }
+    if (p2) {
+        process_kill(p2, COSMO_SIGKILL);
+        process_wait_exit(p2);
+        process_put(p2);
+    }
+    if (!ok) {
+        *reason = "could not create two processes from one image";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (!measured) {
+        kinfo("selftest: elf-data-private: the data page is not present in both; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    if (after2 != before2) {
+        kerror("selftest: elf-data-private: a store in one process changed the other's data byte "
+               "(%02x -> %02x) at %p",
+               before2, after2, (void *)data_va);
+        *reason = "two processes share a writable segment";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-data-private: a store in one process's data (now %02x) left the other's at %02x",
+          after1, after2);
+    elf_settle_processes(procs0);
+    return true;
+}
+
+bool selftest_elf_text_ro(const char **reason);
+bool selftest_elf_text_ro(const char **reason)
+{
+    unsigned procs0 = process_count();
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-text-ro: /boot/init unreadable; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    uint64_t text_va = 0, tail_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++) {
+        const struct elf_segment *sg = &info.segments[i];
+        if (text_va == 0 && (sg->flags & ELF_PF_X) && sg->file_memsz == sg->filesz)
+            text_va = sg->vaddr;
+        /* A segment with a real zero tail, and a byte inside it. */
+        if (tail_va == 0 && sg->file_memsz > sg->filesz && sg->filesz > 0 &&
+            ((sg->file_vaddr + sg->filesz) & (PAGE_SIZE - 1)) != 0)
+            tail_va = sg->file_vaddr + sg->filesz;
+    }
+    static const char *const argv[] = { "init", "--block", NULL };
+    struct process *p = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
+    free_image_with_vnode(&img);
+    if (!ok) {
+        *reason = "could not create the process";
+        elf_settle_processes(procs0);
+        return false;
+    }
+
+    /* Text stays read-only: maxprot has no W, so this must be refused. */
+    int prot_rc = 0;
+    if (text_va != 0)
+        prot_rc = vm_user_protect(p->space, text_va, PAGE_SIZE, VM_PROT_RW);
+
+    /*
+     * The zero tail, read out of the child's own frame.
+     *
+     * The bytes checked are the ones just past `filesz` inside the last
+     * page the file's bytes touch -- the part the loader populates and
+     * copies into, and therefore the part this unit could have got
+     * wrong. Beyond that page the tail is a separate anonymous region
+     * that is demand-paged, and an anonymous page arrives zero by
+     * construction with no copy to get wrong.
+     */
+    uint8_t tail[16];
+    int tail_rc = 0;
+    bool tail_zero = true;
+    if (tail_va != 0) {
+        paddr_t pa = 0;
+        if (!arch_mmu_query(&p->space->mmu, (vaddr_t)(tail_va & ~(uint64_t)(PAGE_SIZE - 1)),
+                            &pa, NULL, NULL, NULL)) {
+            tail_rc = -EFAULT;
+        } else {
+            const uint8_t *page = phys_to_virt(pa);
+            memcpy(tail, page + (tail_va & (PAGE_SIZE - 1)), sizeof(tail));
+            for (unsigned i = 0; i < sizeof(tail); i++)
+                if (tail[i] != 0)
+                    tail_zero = false;
+        }
+    }
+
+    process_kill(p, COSMO_SIGKILL);
+    process_wait_exit(p);
+    process_put(p);
+
+    if (text_va != 0 && prot_rc == 0) {
+        *reason = "shared text could be made writable";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (tail_va != 0 && tail_rc != 0) {
+        kinfo("selftest: elf-text-ro: the zero tail at %p is not readable (%d); skipping that half",
+              (void *)tail_va, tail_rc);
+    } else if (tail_va != 0 && !tail_zero) {
+        kerror("selftest: elf-text-ro: the zero tail at %p reads %02x %02x %02x %02x",
+               (void *)tail_va, tail[0], tail[1], tail[2], tail[3]);
+        *reason = "a segment's zero tail is not zero";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-text-ro: shared text refuses PROT_WRITE (%d), and the zero tail reads as zero",
+          prot_rc);
+    elf_settle_processes(procs0);
+    return true;
+}
+
+bool selftest_elf_txtbsy(const char **reason);
+bool selftest_elf_txtbsy(const char **reason)
+{
+    unsigned procs0 = process_count();
+    struct process_image src = { 0 };
+    if (read_image_with_vnode("/boot/init", &src) != 0) {
+        kinfo("selftest: elf-txtbsy: /boot/init unreadable; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    /* A copy of the program, which this test may write to. */
+    const char *path = "/tmp/elf-txtbsy.bin";
+    struct file *f = NULL;
+    int rc = vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0755, &f);
+    if (rc != 0) {
+        free_image_with_vnode(&src);
+        kinfo("selftest: elf-txtbsy: cannot create %s (%d); skipping", path, rc);
+        elf_settle_processes(procs0);
+        return true;
+    }
+    size_t off = 0;
+    bool wrote = true;
+    while (off < src.size && wrote) {
+        int64_t n = file_pwrite(f, (const uint8_t *)src.data + off, src.size - off, off);
+        if (n <= 0)
+            wrote = false;
+        else
+            off += (size_t)n;
+    }
+    file_put(f);
+    free_image_with_vnode(&src);
+    if (!wrote) {
+        vfs_unlink(NULL, path);
+        *reason = "could not write the copy this test runs on";
+        elf_settle_processes(procs0);
+        return false;
+    }
+
+    struct process_image img = { 0 };
+    if (read_image_with_vnode(path, &img) != 0) {
+        vfs_unlink(NULL, path);
+        *reason = "the copy is unreadable";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    /* Where this program's shared text lands, so the wait below can see
+     * the child running out of the file rather than merely existing. */
+    uint64_t text_va = 0;
+    {
+        struct elf_info info;
+        const char *why = NULL;
+        if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) == 0)
+            for (unsigned i = 0; i < info.nr_segments; i++)
+                if ((info.segments[i].flags & ELF_PF_X) &&
+                    info.segments[i].file_memsz == info.segments[i].filesz) {
+                    text_va = info.segments[i].vaddr;
+                    break;
+                }
+    }
+
+    /*
+     * A child that spins, not one that blocks on the console.
+     *
+     * `--block` waits on a console read, and the suite contends for the
+     * console: this child was exiting early, its mapping going with it,
+     * and the write then succeeded because nothing was executing the
+     * file -- which is not the defect this test is about. It failed
+     * that way under mutations that cannot touch the interlock, which
+     * is how a flake says it is a flake. A spinning child holds its
+     * text for as long as this test needs it.
+     */
+    static const char *const argv[] = { "init", "--spin", NULL };
+    struct process *p = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
+
+    /* While it runs: refused, by name. */
+    uint8_t byte = 0x90;
+    int64_t busy_rc = 0, free_rc = 0;
+    bool alive = false, same_vnode = false, direct_busy = false;
+    int trunc_rc = -ETXTBSY;   /* untested unless the child runs */
+    /* The mapping door, in both orders. Defaults are the wanted values,
+     * so a skip (the child's text was not shared) reports nothing. */
+    int wshared_rc = -ETXTBSY, wpriv_rc = 0, text_after_w_rc = -ETXTBSY;
+    if (ok) {
+        /*
+         * The precondition, *observed* exactly.
+         *
+         * This test asserts what happens while a program is running
+         * **from a file's shared text**, so neither "the child exists"
+         * nor "the child's text page is present" is enough: an
+         * anonymous copy satisfies both. Two proxies were tried and
+         * both let the test fail intermittently, including under
+         * mutations that cannot touch the interlock -- which is how a
+         * flake announces itself rather than a defect.
+         *
+         * What is checked instead is the thing itself: a second process
+         * from the same image maps the same *frame*. That is true only
+         * if the loader shared the file's pages, which is the condition
+         * the refusal below depends on. If it did not -- the mapping
+         * can fall back to a copy -- this skips and says so, rather
+         * than reporting the interlock broken.
+         */
+        struct process *p2 = NULL;
+        if (text_va != 0 &&
+            process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0) {
+            uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
+            while (!clock_deadline_passed(deadline)) {
+                paddr_t a1 = 0, a2 = 0;
+                if (arch_mmu_query(&p->space->mmu, (vaddr_t)text_va, &a1, NULL, NULL, NULL) &&
+                    arch_mmu_query(&p2->space->mmu, (vaddr_t)text_va, &a2, NULL, NULL, NULL)) {
+                    alive = (a1 == a2);
+                    break;
+                }
+                thread_sleep_ms(5);
+            }
+            process_kill(p2, COSMO_SIGKILL);
+            process_wait_exit(p2);
+            process_put(p2);
+        }
+        /* And still running when the write happens: the precondition
+         * above was observed a moment earlier, and a moment is enough
+         * for a child to die. */
+        if (alive && completion_done(&p->exited))
+            alive = false;
+        /*
+         * Ask the interlock directly, on the vnode the mapping was made
+         * from, so a failure below separates the two things it could
+         * mean: no mapping to refuse, or a write path that did not ask.
+         * That distinction is what found the real cause of this test's
+         * early flakiness -- a stale object file, not the kernel.
+         */
+        pagecache_lock(img.vn);
+        direct_busy = pagecache_text_busy(img.vn);
+        pagecache_unlock(img.vn);
+        /* And the other way to change a file's contents: a truncate
+         * removes the very pages the program is executing, which the
+         * write's refusal alone would not have stopped (found in
+         * review of this unit). */
+        if (alive)
+            trunc_rc = vfs_truncate(NULL, path, 0);
+        /*
+         * The third door, and the one no write ever passes through: a
+         * store through a writable MAP_SHARED mapping dirties the page
+         * cache's own frame, and the text mapping IS that frame. This
+         * is the first of the two orders -- text first, then the
+         * writable shared mapping -- and the private mapping beside it
+         * is the control: it differs in the sharing alone, so a
+         * refusal of both would mean the check is about writability
+         * rather than about the frame.
+         */
+        if (alive) {
+            struct vm_space *sp = NULL;
+            if (vm_space_create_user(&sp) == 0) {
+                const uint64_t A = 0x0000340000000000ULL;
+                wshared_rc = vm_user_map_file(sp, A, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                              VM_MAP_SHARED, img.vn, 0, "w-shared");
+                if (wshared_rc == 0)
+                    (void)vm_user_unmap(sp, A, PAGE_SIZE, 0);
+                wpriv_rc = vm_user_map_file(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                            0, img.vn, 0, "w-private");
+                vm_space_destroy(sp);
+            }
+        }
+        struct file *w = NULL;
+        if (alive && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+            /* The vnode the write lands on, against the one the mapping
+             * was made from: if a second lookup of one path can produce
+             * a second vnode, the interlock is asking the wrong list
+             * and the failure below would otherwise say only "allowed". */
+            same_vnode = (w->vn == img.vn);
+            busy_rc = file_pwrite(w, &byte, 1, 0);
+            file_put(w);
+        }
+        process_kill(p, COSMO_SIGKILL);
+        process_wait_exit(p);
+        process_put(p);
+    }
+    /* And once it is gone: allowed. The image's own reference is
+     * dropped first -- it is a reference to the vnode, not a mapping,
+     * but releasing it here keeps the second write's meaning clean. */
+    free_image_with_vnode(&img);
+    if (ok) {
+        struct file *w = NULL;
+        if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+            free_rc = file_pwrite(w, &byte, 1, 0);
+            file_put(w);
+        }
+    }
+    /*
+     * The second order, now that nothing is executing the file: a
+     * writable shared mapping stands first, and the TEXT mapping is
+     * what is refused. An interlock that only looked one way would let
+     * this one through and leave the two mappings coexisting, which is
+     * the state the whole rule exists to prevent.
+     */
+    if (ok && alive) {
+        struct vnode *vn = NULL;
+        if (vfs_lookup(NULL, path, &vn) == 0) {
+            struct vm_space *sp = NULL;
+            if (vm_space_create_user(&sp) == 0) {
+                const uint64_t A = 0x0000340000000000ULL;
+                if (vm_user_map_file(sp, A, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                     VM_MAP_SHARED, vn, 0, "w-shared") == 0)
+                    text_after_w_rc = vm_user_map_file(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_READ,
+                                                       VM_PROT_READ, VM_MAP_SHARED | VM_MAP_TEXT,
+                                                       vn, 0, "text");
+                vm_space_destroy(sp);
+            }
+            vnode_put(vn);
+        }
+    }
+    vfs_unlink(NULL, path);
+
+    if (!ok) {
+        *reason = "could not run the copy";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (!alive) {
+        kinfo("selftest: elf-txtbsy: this copy's text was not shared from the file, so there is "
+              "nothing for the interlock to refuse; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    if (busy_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: writing a running program returned %lld, wanted %d "
+               "(the write's vnode %s the mapping's; asked directly, the file %s busy)",
+               (long long)busy_rc, -ETXTBSY, same_vnode ? "is" : "IS NOT",
+               direct_busy ? "IS" : "is not");
+        *reason = "a file being executed could be written";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (trunc_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: truncating a running program returned %d, wanted %d",
+               trunc_rc, -ETXTBSY);
+        *reason = "a file being executed could be truncated";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (wshared_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: a writable shared mapping of a running program returned %d, wanted %d",
+               wshared_rc, -ETXTBSY);
+        *reason = "a running program's text could be mapped writable and shared";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (wpriv_rc != 0) {
+        kerror("selftest: elf-txtbsy: a PRIVATE writable mapping of a running program returned %d, wanted 0",
+               wpriv_rc);
+        *reason = "the refusal is about writability, not about the shared frame";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (text_after_w_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: a text mapping made after a writable shared one returned %d, wanted %d",
+               text_after_w_rc, -ETXTBSY);
+        *reason = "the two mappings are refused in one order only";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (free_rc != 1) {
+        kerror("selftest: elf-txtbsy: writing after the process exited returned %lld, wanted 1",
+               (long long)free_rc);
+        *reason = "a file stayed busy after the process running it exited";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-txtbsy: a write, a truncate and a writable shared mapping of a running "
+          "program are all -ETXTBSY -- a private one is not -- the text mapping is refused after a "
+          "writable shared one too, and the write succeeds once it exits");
+    elf_settle_processes(procs0);
+    return true;
+}
+
+/* What one more process running an already-running program may cost.
+ * 16 measured; the bound leaves room without letting the sharing or the
+ * demand paging quietly stop working. */
+#define ELF_COST_MAX_PAGES 32u
+
+bool selftest_elf_share_cost(const char **reason);
+bool selftest_elf_share_cost(const char **reason)
+{
+    unsigned procs0 = process_count();
+    struct process_image img = { 0 };
+    if (read_image_with_vnode("/boot/init", &img) != 0) {
+        kinfo("selftest: elf-share-cost: /boot/init unreadable; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+    enum { COPIES = 3 };
+    struct process *p[COPIES] = { NULL };
+    static const char *const argv[] = { "init", "--spin", NULL };
+    struct pmm_stats st;
+    unsigned made = 0;
+    uint64_t cost[COPIES] = { 0 };
+    for (unsigned i = 0; i < COPIES; i++) {
+        pmm_get_stats(&st);
+        uint64_t before = st.free_pages;
+        if (process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p[i]) != 0)
+            break;
+        made++;
+        thread_sleep_ms(80);
+        pmm_get_stats(&st);
+        cost[i] = before - st.free_pages;
+    }
+    for (unsigned i = 0; i < made; i++) {
+        process_kill(p[i], COSMO_SIGKILL);
+        process_wait_exit(p[i]);
+        process_put(p[i]);
+    }
+    free_image_with_vnode(&img);
+    if (made < 2) {
+        *reason = "could not create two processes";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    /*
+     * And a bound, so the number is a claim rather than a log line.
+     *
+     * Measured at 16 pages per copy on both architectures, against 89
+     * before this unit. Thirty-two leaves room for a process's own
+     * fixed cost to grow without pretending the sharing still works:
+     * turning either half off puts it back over forty -- populating the
+     * zero tail alone costs 26 pages, and it was an unnoticed
+     * equivalent mutant until this bound existed
+     * (docs/audit/next-subsystem-elf-shared-text.md).
+     */
+    if (cost[made - 1] > ELF_COST_MAX_PAGES) {
+        kerror("selftest: elf-share-cost: a copy cost %llu pages, over the bound of %u",
+               (unsigned long long)cost[made - 1], ELF_COST_MAX_PAGES);
+        *reason = "a process costs more than a shared, demand-paged image should";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-share-cost: pages per copy %llu, %llu, %llu (bound %u; the report measured 89 with no sharing)",
+          (unsigned long long)cost[0], (unsigned long long)cost[1],
+          (unsigned long long)(made > 2 ? cost[2] : 0), ELF_COST_MAX_PAGES);
+    (void)reason;
+    elf_settle_processes(procs0);
+    return true;
+}
+
+bool selftest_elf_shared_text(const char **reason)
+{
+    unsigned procs0 = process_count();
+    struct process_image img = { 0 };
+    int rc = read_image_with_vnode("/boot/init", &img);
+    if (rc) {
+        kinfo("selftest: elf-shared-text: /boot/init unreadable (%d); skipping", rc);
+        elf_settle_processes(procs0);
+        return true;
+    }
+    struct elf_info info;
+    const char *why = NULL;
+    if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
+        free_image_with_vnode(&img);
+        *reason = "the boot image does not validate";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    /* The first executable segment's first page: what two processes
+     * should agree on. */
+    uint64_t text_va = 0;
+    for (unsigned i = 0; i < info.nr_segments; i++)
+        if ((info.segments[i].flags & ELF_PF_X) && info.segments[i].file_memsz == info.segments[i].filesz) {
+            text_va = info.segments[i].vaddr;
+            break;
+        }
+    if (text_va == 0) {
+        free_image_with_vnode(&img);
+        kinfo("selftest: elf-shared-text: no shareable executable segment; skipping");
+        elf_settle_processes(procs0);
+        return true;
+    }
+
+    static const char *const argv[] = { "init", "--spin", NULL };
+    struct process *p1 = NULL, *p2 = NULL;
+    bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
+              process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
+    paddr_t pa1 = 0, pa2 = 0;
+    bool got1 = false, got2 = false;
+    if (ok) {
+        /* Text is demand-paged now, so the page is present only once the
+         * process has executed it. Both of these block on a console read,
+         * so both reach their entry point; wait for the state rather than
+         * sleeping a fixed time, and let the wait expire into a skip
+         * rather than a failure -- an absent page has a benign reading
+         * and this test is about identity, not about presence. */
+        uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
+        while (!clock_deadline_passed(deadline)) {
+            got1 = arch_mmu_query(&p1->space->mmu, (vaddr_t)text_va, &pa1, NULL, NULL, NULL);
+            got2 = arch_mmu_query(&p2->space->mmu, (vaddr_t)text_va, &pa2, NULL, NULL, NULL);
+            if (got1 && got2)
+                break;
+            thread_sleep_ms(5);
+        }
+    }
+    if (p1) {
+        process_kill(p1, COSMO_SIGKILL);
+        process_wait_exit(p1);
+        process_put(p1);
+    }
+    if (p2) {
+        process_kill(p2, COSMO_SIGKILL);
+        process_wait_exit(p2);
+        process_put(p2);
+    }
+    free_image_with_vnode(&img);
+
+    if (!ok) {
+        *reason = "could not create two processes from one image";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (!got1 || !got2) {
+        /* Demand paging: the page may not be present until it is
+         * touched. Say which, rather than failing on an absence that
+         * has a benign reading. */
+        kinfo("selftest: elf-shared-text: text page not present in %s; skipping the identity check",
+              !got1 && !got2 ? "either space" : (!got1 ? "the first space" : "the second space"));
+        elf_settle_processes(procs0);
+        return true;
+    }
+    if (pa1 != pa2) {
+        kerror("selftest: elf-shared-text: va %p maps to %p in one process and %p in the other",
+               (void *)text_va, (void *)pa1, (void *)pa2);
+        *reason = "two processes running one program have separate copies of its text";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-shared-text: two processes map va %p to the same frame %p",
+          (void *)text_va, (void *)pa1);
+    elf_settle_processes(procs0);
     return true;
 }
 

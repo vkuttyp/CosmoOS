@@ -2209,13 +2209,14 @@ static const char *const sysctl_names[] = {
     "kernel.hostname",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
-    "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys",
+    "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys", "vm.anon_fault_retries",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
     "sysctl.names",
     "debug.faultinject",
     "debug.preempt_probe",
     "debug.file_fault_hold",
+    "debug.anon_fault_hold",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -2277,6 +2278,11 @@ static int sysctl_value(const char *name, char *out, size_t n)
             return -ENOENT;
         return ksnprintf(out, n, "%llu", (unsigned long long)v);
     }
+    if (strcmp(name, "vm.anon_fault_retries") == 0) {
+        struct vm_stats st;
+        vm_get_stats(&st);
+        return ksnprintf(out, n, "%llu", (unsigned long long)st.anon_fault_retries);
+    }
     if (strcmp(name, "vm.futex_shared_keys") == 0) {
         struct vm_stats st;
         vm_get_stats(&st);
@@ -2285,6 +2291,13 @@ static int sysctl_value(const char *name, char *out, size_t n)
     if (strcmp(name, "debug.file_fault_hold") == 0) {
 #if CONFIG_DEBUG
         return ksnprintf(out, n, "%u", vm_test_file_hold_state());
+#else
+        return -ENOENT;
+#endif
+    }
+    if (strcmp(name, "debug.anon_fault_hold") == 0) {
+#if CONFIG_DEBUG
+        return ksnprintf(out, n, "%u", vm_test_anon_hold_state());
 #else
         return -ENOENT;
 #endif

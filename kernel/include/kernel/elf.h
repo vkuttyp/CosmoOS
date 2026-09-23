@@ -25,6 +25,14 @@ struct elf_segment {
     uint64_t offset;   /* file offset of the first byte */
     uint64_t filesz;
     uint64_t file_vaddr; /* unaligned p_vaddr, where file bytes land */
+    /* p_memsz as the file gave it, *not* page rounded. `memsz` above is
+     * the rounded span and is therefore always >= this; the difference
+     * between them is page padding, which is not the same thing as the
+     * segment's zero tail. A segment has a zero tail -- bytes it needs
+     * that the file does not hold -- exactly when file_memsz > filesz,
+     * and only a segment without one can be shared from the file
+     * (docs/audit/next-subsystem-elf-shared-text.md). */
+    uint64_t file_memsz;
     uint32_t flags;    /* ELF_PF_* */
 };
 
@@ -59,6 +67,20 @@ struct vm_space;
 /* Map every segment of a validated image into `space` and copy its
  * bytes. Returns 0, -ENOMEM, or -EEXIST (overlap with an existing
  * region). On failure the caller destroys the space. */
-int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info);
+/*
+ * Map every segment of a validated image into `space`.
+ *
+ * With `vn`, a segment that is **not writable and has no zero tail**
+ * comes from that file's page cache, shared and demand-paged: one set of
+ * frames for every process running the program. Every other segment --
+ * writable, or with a zero tail, or from an image with no file at all
+ * (the boot archive) -- is copied into anonymous memory as it always
+ * was, except that the tail beyond the file's bytes is left
+ * demand-paged rather than populated
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ */
+struct vnode;
+int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info,
+                  struct vnode *vn);
 
 #endif /* KERNEL_ELF_H */

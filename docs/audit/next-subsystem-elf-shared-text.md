@@ -1,5 +1,149 @@
 # NEXT SUBSYSTEM — a program's text belongs to the file, not to each process that runs it
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The qualification compared the wrong size, and the first version
+>    shared nothing.** `struct elf_segment`'s `memsz` is the *page
+>    rounded* span, so `filesz == memsz` is false for every real text
+>    segment and the test reported "no shareable executable segment".
+>    The file's own `p_memsz` is kept as `file_memsz` now and that is
+>    what the rule uses. The padding between `filesz` and the end of its
+>    last page is not a zero tail: it is the file's next bytes.
+> 2. **"Shared and executable in its `maxprot`" was the wrong
+>    discriminator for text**, and the boot said so. `maxprot` is
+>    permissive by default -- RWX for a shared mapping of a writable
+>    file -- so every shared file mapping counted as text and ordinary
+>    writes to ordinary mapped files were refused.
+> 3. **Narrowing it to the actual `prot` was still wrong.** A program
+>    may map a file executable and write to it on purpose, and the page
+>    cache syncs the instruction cache for exactly that case; refusing
+>    those writes broke that behaviour and the test that proves it. The
+>    discriminator is `VM_MAP_TEXT`, passed by `elf_load_into` and by
+>    nothing else: what must not change underneath a process is the
+>    program it is *running*, and only the loader can identify that.
+> 4. **The writable segment is not a private file mapping**, as the
+>    report proposed, and the reason is that the win was somewhere else.
+>    Its file content is twenty-four bytes; what cost 27 pages was the
+>    zero tail being populated. The copy path is split where the pages
+>    the file's bytes touch end, and the tail beyond them is left
+>    demand-paged -- an anonymous page arrives zero, which is what a
+>    zero tail needs, with no copy to get wrong. **That is where most of
+>    the saving came from: 40 pages became 16.**
+> 5. **`ETXTBSY` had to be added in three places**, not one: the
+>    kernel's errno list, the user ABI's, and libc's.
+> 6. **Found in the previous unit, and fixed here because it failed a
+>    boot of this one:** `bench-balance` asserted 85% and read 84% on a
+>    boot where the threads had spread to all four CPUs. Two 500 ms
+>    samples of the same work differ by more than fifteen points on this
+>    host, so that threshold separated noise rather than behaviour. It
+>    is 70% now, above the working case's floor and far above the 53%
+>    that no balancing produces.
+>
+> 7. **The interlock had three holes, and review found all of them.**
+>    `file_pwrite` is not the only way to change a file. An `O_TRUNC`
+>    open and `vfs_truncate` remove the very pages a program is
+>    executing, and a store through a writable `MAP_SHARED` mapping
+>    dirties the page cache's own frame -- the frame the text mapping
+>    *is* -- without a write ever reaching the VFS. And the loader
+>    linked its text mapping holding no `vn->lock`, so a mapping could
+>    appear between a writer's check and its write, which is exactly
+>    the atomicity this report claimed. All three are closed: both
+>    truncate paths ask the same question the write does, a writable
+>    shared mapping and a text mapping of one file are refused in
+>    either order, and the text link takes `vn->lock`. **The lesson is
+>    the shape of the mistake**: an interlock placed on one syscall
+>    guards that syscall, not the file, and the invariant has to name
+>    every door or it is not an invariant. A later review round found
+>    that door still untested, which is its own version of the same
+>    mistake -- the rule was written down and left unproved -- so
+>    `elf-txtbsy` now exercises both orders of the clash, with a
+>    private writable mapping beside them as the control that differs
+>    in the sharing alone.
+> 8. **A stale object outlived a mutation's revert, and cost an
+>    afternoon.** `shutil.move` preserves mtime, so a restored source
+>    can be older than the object built from the mutated one; `make`
+>    then rebuilds nothing and the mutated kernel keeps booting. The
+>    symptom was a safety test failing intermittently while the property
+>    it tests, asked directly a line earlier, held. **A test that fails
+>    while its own precondition reports success is a test running
+>    against a different binary than it thinks**, and that is worth
+>    reaching for before any theory about the kernel.
+> 9. **One mutation survives, and it is equivalent rather than
+>    uncaught.** Deleting the "not writable" half of `seg_shareable`
+>    changes nothing for the binary under test: its only writable
+>    segment also has a zero tail, so the *other* half of the condition
+>    already refuses it and the deleted one is never the deciding test.
+>    `elf-data-private` asserts the property directly instead -- a store
+>    in one process's data segment does not reach another's -- and it
+>    was written because that mutation survived, which is what a
+>    surviving mutation is for even when it turns out to be equivalent.
+>    Making it decisive needs a binary with a writable segment and no
+>    `.bss`, which is a synthetic ELF and is not built here.
+>
+> 10. **Demand-paging the zero tail exposed a race the anonymous fault
+>    had always had.** Once a segment's `bss` stopped being populated at
+>    load time, a multi-threaded program had absent pages two of its
+>    threads could touch at once -- and `thrtest` panicked, rarely,
+>    with `cannot map ... in region 'elf-bss' (-17)`. The fault flags a
+>    thread carries are the hardware's snapshot from when the trap was
+>    raised, so both threads say "not present" and the second to reach
+>    the install maps over the first's page. The page table is the
+>    authority, not the flags: the anonymous arm now asks
+>    `arch_mmu_query` under the space lock immediately before
+>    installing, and a page already there means the fault was served by
+>    somebody else -- nothing allocated, nothing mapped,
+>    `vm.anon_fault_retries` counted, the instruction runs again. The
+>    FILE arm has always had this check because its phases drop the
+>    lock between them; the anonymous arm assumed `-EEXIST` was
+>    impossible and panicked on it. Invariant **M45**, proved by
+>    `vm-anon-fault-race` over a new address-armed hold seam. **The
+>    lesson**: this unit did not introduce the bug, it removed the only
+>    reason the bug was unreachable, and a change that makes something
+>    lazy should be read as a change that makes its races live.
+>
+> **The mutations**, each applied alone, each boot confirmed:
+>
+> | # | mutation | the failure it was for | also failed |
+> | --- | --- | --- | --- |
+> | 1 | the file-backed path disabled | `elf-shared-text`: "two processes running one program have separate copies of its text" | `elf-text-ro` -- with no sharing the text is an anonymous copy, whose protection *can* be changed |
+> | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 9) | -- |
+> | 3 | text mapped with `W` in its `maxprot` | `elf-text-ro`: "shared text could be made writable" | `process-spawn`, which spawns a child; this mutation changes how *every* program loads |
+> | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | — |
+> | 5 | the zero tail populated again | `elf-share-cost`: "a copy cost 40 pages, over the bound of 32" | — |
+| 6 | the anonymous fault's presence check removed | `vm-anon-fault-race`: `KERNEL PANIC: cannot map ... in region 'kalloc' (-17)` | — |
+| 7 | the clash's writable-shared direction removed | `elf-txtbsy`: "a writable shared mapping of a running program returned 0, wanted -26" | — |
+| 8 | the clash's text-after-writable direction removed | `elf-txtbsy`: "a text mapping made after a writable shared one returned 0, wanted -26" | — |
+>
+> `elf-share-cost` grew that bound *because* this mutation survived
+> without one: the cost was a log line, and a log line catches nothing.
+> Sixteen measured, thirty-two allowed, forty when either half of the
+> unit is turned off.
+>
+> **The second failures were the mutation runner, not the kernel**, and
+> finding that out is the most useful thing in this section. Its
+> `revert` restored each file with `shutil.move`, which preserves the
+> original timestamp -- so the restored source was *older* than the
+> object built from the mutated one, `make` skipped it, and **the
+> mutated kernel survived the revert into every later boot**. That is
+> why `elf-txtbsy` failed intermittently for an afternoon while the
+> interlock, asked directly in the same test, answered "busy": the
+> check was in the source and not in the image. The runner touches what
+> it restores now, and the table above is from runs after that.
+>
+> **Measured, per additional process running `init`:**
+>
+> | | x86-64 | AArch64 |
+> | --- | --- | --- |
+> | before this unit | 89 pages | 89 pages |
+> | read-only segments shared | 40 | 40 |
+> | zero tail demand-paged | **16** | **16** |
+>
+> against a target of 45. Not done, and deliberately: `memfd`/`shm_open`
+> (the inventory row's other half), a private file mapping for writable
+> segments (item 4), and the boot-archive door, which has no file and
+> still copies.
+
 Constitution §68 report. The inventory's memory row
 (`docs/audit/2026-09-deferred-work-inventory.md` §2.2) closed most of
 itself with the file-regions and shared-futex units, and left two things
@@ -132,39 +276,53 @@ into the boot archive.
 
 ### 1. Segments come from the file when there is a file
 
-`elf_load_into` grows a vnode parameter. When it is non-NULL each
-`PT_LOAD` becomes a `VM_REGION_FILE` at the segment's file offset;
-when it is NULL the loader copies as it does today, and the boot-archive
-door keeps working unchanged.
+*As built.* `elf_load_into` grew a vnode parameter. When it is non-NULL
+each **qualifying** `PT_LOAD` becomes a `VM_REGION_FILE` at the
+segment's file offset -- the report first said "each", and the build
+shares only what `seg_shareable` accepts, falling back to the copy for
+everything else and for a failed mapping. When the vnode is NULL the
+loader copies as it did before, and the boot-archive door works
+unchanged.
 
 The congruence `elf_validate` already enforces — `vaddr ≡ offset (mod
 PAGE_SIZE)` — is what makes this a mapping rather than a rearrangement.
 
-### 2. Read-only segments are shared; writable ones are private
+### 2. Read-only segments are shared; writable ones are copied
+
+*As built.* The report proposed a private copy-on-write file mapping for
+the writable segment. The build does not do that, and item 4 of the
+banner says why: that segment's file content is twenty-four bytes, so
+the mapping bought nothing and the 27 pages were its **zero tail** being
+populated. It stays an anonymous copy, with the tail demand-paged.
 
 | segment | mapping | why |
 | --- | --- | --- |
-| `R`, `R X` | `VM_MAP_SHARED`, `maxprot` without `W` | the frames are the page cache's, one set for every process; `maxprot` is what stops a later `mprotect` from turning shared text writable |
-| `RW` | private (copy-on-write) | a write must not reach the file or another process |
+| `R`, `R X`, no zero tail | `VM_MAP_SHARED \| VM_MAP_TEXT`, `maxprot` without `W` | the frames are the page cache's, one set for every process; `maxprot` is what stops a later `mprotect` from turning shared text writable |
+| `RW`, or any segment with a zero tail | anonymous: the file's bytes copied into a `VM_REGION_POPULATED` part, the tail beyond them demand-paged | a write must not reach the file or another process, and an anonymous page arrives zero, which is exactly what a tail needs |
 
-The `maxprot` rule is the whole safety argument for sharing text, and it
-is already built and tested.
+The `maxprot` rule is the whole safety argument for sharing text.
+`VM_MAP_TEXT` is passed by the loader and by nothing else, because a
+program that maps a file executable and writes to it deliberately is a
+different thing the page cache already serves.
 
 ### 3. The zero tail, which is where this goes wrong if it is rushed
 
 `memsz > filesz` means the segment ends in zeroes that are not in the
 file. Two cases, and only one is a problem:
 
-- **A private segment** (`RW`): map the file part copy-on-write, map the
-  rest anonymous, and zero the tail of the last file page *in the
-  private copy*. Writing there faults in a private page first, so
-  nothing reaches the file.
+- **A copied segment** (`RW`, or any segment with a tail): *as built*,
+  the region is split where the pages the file's bytes touch end. The
+  first part is `VM_REGION_POPULATED` and is copied into through the
+  direct map; the rest is left demand-paged, because an anonymous page
+  arrives zero and there is then no tail to zero and no copy to get
+  wrong. **That split is where most of the saving came from.**
 - **A shared segment** (`R`, `R X`): there must be no tail to zero.
-  This is not an assumption — `elf_validate` can require
-  `filesz == memsz` for any segment the loader intends to share, and
-  refuse to share one that has a tail (falling back to a copy for it).
-  The measured binary satisfies it: text and rodata both have
-  `filesz == memsz`.
+  *As built* the rule lives in `seg_shareable` in the loader rather
+  than in `elf_validate`, which is where it can fall back per segment,
+  and it compares the file's own `p_memsz` -- kept as `file_memsz` --
+  because `struct elf_segment`'s `memsz` is page rounded and comparing
+  that rejects every real text segment (banner item 1). The measured
+  binary satisfies it: text and rodata both have `filesz == p_memsz`.
 
 ### 4. A running program's file can now change underneath it
 
@@ -172,10 +330,14 @@ This is a **behaviour change and the unit's real risk**. Today a process
 holds a copy, so writing to `/bin/sh` cannot affect a running shell.
 With shared text it can: the pages are the file's.
 
-The report proposes the interlock rather than the silence: a write to a
-file some process is executing is refused with `-ETXTBSY`, as POSIX
-describes and as Linux does. Without it this unit makes a program's
-instructions mutable by anyone who can write its file.
+The report proposed the interlock rather than the silence, and it is
+built: a write to a file some process is executing is refused with
+`-ETXTBSY`, as POSIX describes and as Linux does. Without it this unit
+would make a program's instructions mutable by anyone who can write its
+file. *As built* the refusal covers every door, not just `file_pwrite`:
+an `O_TRUNC` open, `vfs_truncate`, and a writable `MAP_SHARED` mapping
+of the same file, which are the three holes review found (banner item
+7).
 
 **And it must not be a counter**, because a counter beside a lifetime
 goes stale. The tree already keeps what is
@@ -186,8 +348,10 @@ unlinked under the same lock before `vnode_put`
 its three parts are:
 
 - **Registration** happens where `m` is linked, under
-  `pagecache_lock(vn)`, and marks the mapping as text — shared, and
-  executable in its `maxprot`.
+  `pagecache_lock(vn)`, and marks the mapping as text. *As built* the
+  mark is `VM_MAP_TEXT`, a flag the loader passes; "shared and
+  executable in its `maxprot`" was tried first and refused ordinary
+  writes to ordinary mapped files (banner items 2 and 3).
 - **The check** happens under the same lock. The write path already
   holds `vn->lock`, and the documented order is
   `vnode -> pagecache -> vm_space`, so a writer may take
@@ -207,9 +371,12 @@ both the answer and the write are taken under that list's lock.
 
 ### 5. Demand paging comes for free, and is measured separately
 
-Nothing is populated. The first instruction faults its page in. The
-report expects this to dominate the spawn-latency benchmark and says so
-in advance, so that a win there is not read as a win from sharing.
+*As built*, a **shared** segment populates nothing and the first
+instruction faults its page in; a **copied** segment still populates the
+pages the file's bytes touch, because the copy has to go somewhere, and
+only the tail beyond them is demand-paged. The report expected demand
+paging to dominate the spawn-latency benchmark and said so in advance,
+so that a win there would not be read as a win from sharing.
 
 ### 6. What it does not do
 
@@ -230,14 +397,17 @@ in advance, so that a win there is not read as a win from sharing.
 
 | file | change |
 | --- | --- |
-| `kernel/process/elf.c` | `elf_load_into` takes a vnode; file-backed segments, the private zero tail, the copy path kept for a NULL vnode |
+| `kernel/process/elf.c` | `elf_load_into` takes a vnode; `seg_shareable` and file-backed text, the copy path split at the end of the file's pages, the copy kept for a NULL vnode |
 | `kernel/include/kernel/elf.h` | the signature, and what a shared segment must satisfy |
 | `kernel/process/process.c`, `kernel/process/spawn.c` | pass the `exe` vnode the spawn path already holds |
-| `kernel/memory/vmm.c` | mark a text mapping where `m` is linked, clear it where it is unlinked, both under `pagecache_lock(vn)` |
-| `kernel-services/vfs/*` | `vnode_text_busy`, and the `-ETXTBSY` check on the write path |
-| `kernel/process/proctest.c` | the tests below |
+| `kernel/memory/vmm.c` | mark a text mapping where `m` is linked, clear it where it is unlinked, both under `pagecache_lock(vn)`; refuse a writable shared mapping and a text mapping of one file in either order; **and** ask the page table, not the fault's flags, whether an anonymous page is already there |
+| `kernel-services/vfs/*` | `pagecache_text_busy` and `text_busy_locked`, and the `-ETXTBSY` check on the write path, the `O_TRUNC` open and `vfs_truncate` |
+| `kernel/process/proctest.c` | the four ELF tests below |
+| `kernel/memory/memtest.c`, `kernel/core/selftest.c` | `vm-anon-fault-race` and its registration (banner item 10) |
+| `kernel/include/kernel/vmm.h`, `kernel/syscall/native.c` | the address-armed hold seam, `anon_fault_retries`, `vm.anon_fault_retries` and `debug.anon_fault_hold` |
+| `kernel/include/kernel/errno.h`, `kernel/include/uapi/cosmo/syscall.h`, `libc/include/errno.h` | `ETXTBSY` in all three errno lists (banner item 5) |
 | `docs/kernel/process/design.md`, `invariants.md` | how a program is loaded now, and the two rules that keep it safe |
-| `docs/kernel/memory/design.md` | the loader as a `VM_REGION_FILE` caller |
+| `docs/kernel/memory/design.md`, `invariants.md`, `testing.md` | the loader as a `VM_REGION_FILE` caller, §3.5 and invariant **M45**, and the `vm-anon-fault-race` entry |
 | `docs/audit/2026-09-deferred-work-inventory.md` | §2.2's remaining half struck through |
 | `README.md` | Status entry |
 | `tools/elf-share-probe.py` | shipped with this report; the unit's own benchmark replaces it |
@@ -251,24 +421,46 @@ new.
 
 ### Changed: `elf_load_into` gains a vnode
 
+*As built* (the report's draft said "writable ones copy-on-write ... and
+nothing is populated", and neither survived the build):
+
 ```c
-/* Map every segment of a validated image into `space`. With `vn`, the
- * segments come from that file's page cache -- read-only ones shared,
- * writable ones copy-on-write -- and nothing is populated. With NULL,
+/* Map every segment of a validated image into `space`. With `vn`, a
+ * segment that is not writable and has no zero tail comes from that
+ * file's page cache, shared and marked VM_MAP_TEXT; every other
+ * segment, and any segment whose mapping fails, is copied. With NULL,
  * the image's bytes are copied as before (the boot archive, which has
- * no file). */
+ * no file). A copied segment is split where the pages the file's bytes
+ * touch end: the first part is populated and copied into, the tail
+ * beyond it is demand-paged. */
 int elf_load_into(struct vm_space *space, const void *image,
                   const struct elf_info *info, struct vnode *vn);
 ```
 
 ### New: asking whether a file is being executed
 
+*As built* it is `pagecache_text_busy`, where the mapping list lives,
+with a `text_busy_locked` helper in the VFS for the three callers that
+already hold `vn->lock`:
+
 ```c
-/* Whether any process is executing this file: true while a shared,
- * executable mapping of it is on its page-cache mapping list. Called
- * with pagecache_lock(vn) held, by a writer that already holds
- * vn->lock. A write to a busy file is -ETXTBSY. */
-bool vnode_text_busy(struct vnode *vn);
+/* Whether any process is executing this file: true while a VM_MAP_TEXT
+ * mapping of it is on its page-cache mapping list. Takes the cache
+ * lock; called by a writer that already holds vn->lock, which is the
+ * documented order. A write, an O_TRUNC open or a truncate of a busy
+ * file is -ETXTBSY. */
+bool pagecache_text_busy(struct vnode *vn);
+```
+
+The build added one more, for the test that came out of banner item 10:
+
+```c
+/* Hold the next anonymous fault on THIS page, before it installs,
+ * until another thread installs that page. Disarm reports the state it
+ * found and drops only an armed-but-untaken seam. CONFIG_DEBUG only. */
+void vm_test_anon_hold_arm(vaddr_t va);
+unsigned vm_test_anon_hold_state(void);
+unsigned vm_test_anon_hold_disarm(void);
 ```
 
 Nothing else is added. `struct vm_space`, `struct vnode` and
@@ -276,41 +468,62 @@ Nothing else is added. `struct vm_space`, `struct vnode` and
 
 ## Migration plan
 
+*As built*, with step 3 replaced by what the measurement asked for:
+
 1. **`elf_load_into`'s vnode parameter, NULL at every call site.** No
    behaviour change; the copy path is what runs. Boot both architectures.
-2. **Shared read-only segments**, with the `filesz == memsz` requirement
-   and the fallback. The probe's numbers must drop for copies 2 and
-   after, and the frame-identity test below is what proves it is
-   sharing rather than merely costing less.
-3. **Private writable segments and the zero tail**, with the COW test.
+2. **Shared read-only segments**, with the no-zero-tail requirement and
+   the fallback. The probe's numbers must drop for copies 2 and after,
+   and the frame-identity test is what proves it is sharing rather than
+   merely costing less. **89 pages became 40.**
+3. ~~Private writable segments and the zero tail, with the COW test.~~
+   **The zero tail demand-paged instead**, with `elf-data-private` and
+   `elf-text-ro` proving isolation and the zero read directly. The
+   writable segment's file content is twenty-four bytes; the tail was
+   the cost. **40 pages became 16.**
 4. **`-ETXTBSY`**, with its test, before anything ships: shared text
    without it is a mutable-instructions bug wearing a memory
-   improvement's clothes.
-5. **Demand paging** (drop `VM_REGION_POPULATED`), measured separately.
+   improvement's clothes. Review then widened it from the write path to
+   every door (banner item 7).
+5. **The anonymous fault's presence check**, which step 3 made
+   necessary (banner item 10).
 6. **Docs, inventory, README, banner; release builds, `gmake host-test`,
    every mutation alone.**
 
 ## Tests
 
+*As built.* The report drafted six tests under names the build did not
+keep; these are the five that were written, plus the one banner item 10
+required. `elf-zero-tail` has no separate test because there is no tail
+zeroing left to get wrong -- the tail is an anonymous page, which
+arrives zero -- and `elf-text-ro` asserts that read directly.
+
 | test | what it proves | bug-proof |
 | --- | --- | --- |
 | `elf-shared-text` | two processes running one binary map the **same frames** for its text: `arch_mmu_query` on both spaces returns one physical address | revert to the anonymous copy: the addresses differ |
-| `elf-text-cost` | the second copy costs measurably fewer pages than the first, by the free-frame count, and the difference is the read-only segments' size | as above |
-| `elf-data-cow` | a write to the data segment in one process is not seen by the other, and does not reach the file | drop `VM_MAP_SHARED`'s absence — map the writable segment shared: the other process sees the write |
-| `elf-zero-tail` | the bytes between `filesz` and `memsz` read as zero in every process, including the partial last page | skip the tail zeroing: the test reads the file's next bytes |
-| `elf-text-ro` | `mprotect(PROT_WRITE)` on shared text fails (`maxprot`) | widen `maxprot`: it succeeds, and one process can then rewrite another's instructions |
-| `elf-txtbsy` | writing a running program's file fails with `-ETXTBSY`, and succeeds once it exits -- the second half being what proves the mapping list is consulted rather than a flag that never clears | make `vnode_text_busy` return false: the write succeeds and the running process's text changes underneath it |
+| `elf-share-cost` | a further process costs at most `ELF_COST_MAX_PAGES` (32) pages, measured by free-frame counts; the report measured 89 with no sharing, the build 16 | populate the zero tail again: the cost is 40, over the bound |
+| `elf-data-private` | a store in one process's data segment does not reach another's | written *because* the `seg_shareable` mutation survived as equivalent (banner item 9); it asserts the property rather than the condition |
+| `elf-text-ro` | `mprotect(PROT_WRITE)` on shared text fails (`maxprot`), and the zero tail reads as zero | widen `maxprot`: it succeeds, and one process can then rewrite another's instructions |
+| `elf-txtbsy` | all three doors: a write and a truncate of a running program's file are `-ETXTBSY` and the write succeeds once it exits (the second half proving the mapping list is consulted rather than a flag that never clears); a writable `MAP_SHARED` mapping of it is refused while a **private** writable one is allowed; and with nothing executing the file, a writable shared mapping made first refuses the **text** mapping | make the interlock always answer "not busy": the write succeeds and the running process's text changes underneath it. Each direction of the mapping clash was mutated separately (rows 7 and 8) |
+| `vm-anon-fault-race` | a fault held on an absent anonymous page resumes onto another thread's install and adds no second frame, counting the retry | remove the presence check: `KERNEL PANIC: cannot map ... (-17)` |
 
 ## Benchmarks
 
-| claim | before (x86-64, `init`) | target |
-| --- | --- | --- |
-| pages per additional copy | 89 | ≤ 45, the read-only 49 removed |
-| pages populated at load | 76 | the touched set only, reported |
-| spawn latency | eager copy of 76 pages | reported before and after, and attributed to demand paging rather than to sharing |
+*As run*, by `elf-share-cost` in the boot itself, on both architectures:
 
-The same rows on AArch64. The probe's own output is the before; the
-unit's benchmark is the after, in the same boot where possible.
+| claim | before (`init`) | target | as built |
+| --- | --- | --- | --- |
+| pages per additional copy | 89 | ≤ 45 | **16**, identical on x86-64 and AArch64 |
+| where the saving came from | -- | the read-only 49 removed | 49 from sharing (89 → 40), then 24 from the zero tail (40 → 16) |
+
+The second row is the finding the target did not anticipate: **most of
+the saving was not the sharing.** The report aimed at the read-only
+segments and got 40; the writable segment's zero tail, populated at load
+time for no reason, was worth nearly as much again.
+
+Spawn latency was not reported separately. The boot's own timings did
+not move outside their run-to-run spread, so there is no attribution to
+make and a number here would be noise presented as a result.
 
 ## Risks
 
@@ -322,12 +535,18 @@ unit's benchmark is the after, in the same boot where possible.
   writable shared mapping.** It is built and tested, and this unit adds
   a test of its own rather than trusting that.
 - **A segment with a zero tail must not be shared.** The check is
-  `filesz == memsz` and the fallback is the copy path, so a binary that
-  does not satisfy it loads exactly as it does today.
+  `filesz == file_memsz` -- the file's own `p_memsz`, not the page
+  rounded one (banner item 1) -- and the fallback is the copy path, so a
+  binary that does not satisfy it loads exactly as it does today.
 - **Demand paging changes when faults happen**, including inside the
   first instruction fetch. The tests that measure spawn latency will
   move; the report expects that and asks for the attribution rather than
-  the number alone.
+  the number alone. **This is the risk that came true, in a form the
+  report did not name**: making the zero tail lazy gave a
+  multi-threaded program its first pages two threads could fault at
+  once, and the anonymous fault panicked when they did (banner item
+  10). The lesson is that a change making something lazy is a change to
+  which races are live.
 - **The page cache now holds pages that processes are executing.**
   Eviction must not take a mapped page, which the file-regions unit
   already settled; this unit adds the loader as a second caller of the

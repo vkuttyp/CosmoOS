@@ -297,6 +297,30 @@ static void sync_exec_mappings(struct pagecache *pc, struct pc_entry *e)
     }
 }
 
+/*
+ * Is any process executing this file?
+ *
+ * True while a text mapping of it is on this cache's list, which is the
+ * whole definition: the record is linked here when the mapping is made
+ * and unlinked before its vnode reference goes, so the answer cannot
+ * outlive the mappings it describes or lag behind their teardown. A
+ * counter kept beside them could do both
+ * (docs/audit/next-subsystem-elf-shared-text.md).
+ *
+ * Called with the cache lock held -- by a writer that already holds
+ * vn->lock, which the order vnode -> pagecache -> vm_space permits --
+ * so the answer and the write that follows it are atomic against a
+ * mapping being created.
+ */
+bool pagecache_text_busy(struct vnode *vn)
+{
+    struct vm_file_map *m;
+    list_for_each_entry(m, &vn->pc.mappings, link)
+        if (m->text)
+            return true;
+    return false;
+}
+
 /* A write dirties the page: off the LRU until pagecache_sync cleans it. */
 static void mark_dirty(struct pagecache *pc, struct pc_entry *e)
 {

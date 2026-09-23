@@ -421,6 +421,28 @@ test for `mmu.c` against a fake direct map, and SMP stress with Phase 3.
 `mmap` section of `init --selftest` (`docs/userland/testing.md`); the
 kernel half is three self-tests.
 
+### `SELFTEST: vm-anon-fault-race` (`selftest_vm_anon_fault_race`, `kernel/memory/memtest.c`; debug builds)
+
+Two threads on one absent anonymous page (M45). The seam is armed on a
+single address -- `vm_test_anon_hold_arm(va)`, read back as
+`debug.anon_fault_hold` -- because a running space takes anonymous
+faults for its stack and heap constantly and any of them would otherwise
+become the held one. A helper thread reads a word in a freshly allocated
+lazy kernel region and is held there, before its install, still carrying
+the flags the hardware gave it; the test thread waits for the seam to
+say "held" (the collision itself, never a stretch of time), then writes
+`0xA55AF00D` to the same word, which faults, installs the page and
+releases the helper.
+
+Three claims when the helper is joined: the word still reads
+`0xA55AF00D`, so the resumed fault mapped no second, zeroed frame over
+it; `faults_handled` advanced by one across both faults and the
+region's second page is still unpopulated, so one frame was added and
+not two; and `anon_fault_retries` advanced by one, so the fault knew it
+had lost the race rather than merely surviving it. Removing the
+presence check turns the run into `KERNEL PANIC: cannot map ... in
+region 'kalloc' (-17)`.
+
 ### `SELFTEST: vm-file-fault-hold` (`selftest_vm_file_fault_hold`, `kernel/process/proctest.c`; debug builds)
 
 The two-phase fault's seam: armed with `vm_test_file_hold_arm`, the next

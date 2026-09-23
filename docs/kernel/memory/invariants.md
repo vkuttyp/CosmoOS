@@ -479,3 +479,18 @@ range is replaced by a mapping of another file: the retry reads the
 other file's byte and `vm.file_fault_retries` counts one), the `mmap`
 section's past-the-end and truncate-under-a-mapping children (`SIGBUS`,
 not zeros and not the old bytes).
+
+**M45. A fault's "not present" is a fact about the past; the page table
+decides.** The flags the hardware hands a fault were taken when the trap
+was raised, so two threads of one space can both reach the anonymous
+install believing the same page absent. Presence is therefore read from
+the page table under the space lock, immediately before the install: a
+page already standing at the address means another thread served this
+fault, so nothing is allocated and nothing is mapped, `vm.anon_fault_retries`
+counts it, and the instruction runs again. The FILE arm has always
+re-found its region for the same reason (M44); the anonymous arm needed
+it once the ELF loader began demand-paging a segment's zero tail, which
+is where two threads first met on one absent page. Checked by:
+`vm-anon-fault-race` (a fault held on a named absent page until another
+thread installs it: the held fault adds no second frame, the word the
+other thread wrote survives, and the retry is counted).

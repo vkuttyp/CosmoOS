@@ -95,12 +95,39 @@ attributes):
 2. Allocate `struct process`, `vm_space_create_user(&space)` (fresh MMU
    context whose kernel half copies the kernel root's PML4 entries
    256–511, see §5).
-3. For each `PT_LOAD`: `vm_user_map_anon(space, vaddr_page, size_pages,
-   prot, "elf-seg")` with `VM_REGION_POPULATED`, then copy `p_filesz`
-   bytes from the image through the direct map into the new frames and
-   leave the rest zero. Copying happens through the frames' direct-map
-   addresses, never through the user mapping, so it needs neither the
-   user CR3 nor STAC.
+3. For each `PT_LOAD`, one of two paths
+   (`docs/audit/next-subsystem-elf-shared-text.md`):
+
+   **From the file, shared**, when the loader was given the vnode the
+   image came from and the segment qualifies: not writable, and no zero
+   tail (`p_memsz == p_filesz`). `vm_user_map_file(..., VM_MAP_SHARED |
+   VM_MAP_TEXT, vn, off, "elf-text")` puts the page cache's own frames
+   in the address space, so every process running the program shares
+   them, and nothing is populated. `maxprot` is the segment's own
+   protection and therefore excludes `W`: that is what stops a later
+   `mprotect` from turning shared text writable, and it is the whole
+   safety argument for sharing it.
+
+   Note *which* size the qualification compares. `struct elf_segment`'s
+   `memsz` is the **page rounded** span, so comparing it against
+   `filesz` rejects every real text segment; the file's own `p_memsz` is
+   kept as `file_memsz` and that is what is used. The padding between
+   `filesz` and the end of its last page is not a zero tail -- it is the
+   file's next bytes, and mapping them is ordinary.
+
+   **Copied**, otherwise -- a writable segment, one with a zero tail, or
+   an image with no file (the boot archive). The region is split where
+   the pages the file's bytes touch end: the first part is
+   `vm_user_map_anon(..., VM_REGION_POPULATED, "elf-segment")` and is
+   copied into through the direct map, never through the user mapping,
+   so it needs neither the user CR3 nor STAC; the rest is
+   `vm_user_map_anon(..., 0, "elf-bss")`, left demand-paged, because an
+   anonymous page arrives zero and that is exactly what a zero tail
+   needs.
+
+   Measured on `init`, per additional process running it: 89 pages
+   before this unit, 40 once the read-only segments are shared, 16 once
+   the tail is no longer populated. Both architectures agree.
 4. Stack: `vm_user_map_anon(space, USER_STACK_TOP - USER_STACK_SIZE,
    USER_STACK_SIZE, RW, "stack")` with a guard page below, lazily
    populated except the top two pages (`INITIAL_STACK_PAGES`), which

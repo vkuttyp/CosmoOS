@@ -693,6 +693,7 @@ struct cosmo_dirent {
 #define COSMO_EISDIR  21
 #define COSMO_EFBIG   27
 #define COSMO_EROFS   30
+#define COSMO_ETXTBSY 26   /* a write to a file being executed */
 #define COSMO_ENOTEMPTY 39
 #define COSMO_ENAMETOOLONG 36
 #define COSMO_ELOOP   40   /* too many symbolic links in one resolution */

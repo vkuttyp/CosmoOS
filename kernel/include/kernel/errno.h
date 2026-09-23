@@ -31,6 +31,7 @@
 #define EPIPE     32  /* broken pipe */
 #define ESPIPE    29  /* not seekable */
 #define EROFS     30  /* read-only device */
+#define ETXTBSY   26  /* text file busy: a write to a file being executed */
 #define ERANGE    34  /* result out of range */
 #define ENAMETOOLONG 36 /* string too long */
 #define ENOSYS    38  /* not implemented */

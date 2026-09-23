@@ -242,6 +242,12 @@ struct process_image {
     const void *data;
     size_t size;
     const char *path;
+    /* The file the bytes came from, when there is one, referenced by
+     * the caller for the load's duration. The loader maps segments from
+     * its page cache instead of copying them
+     * (docs/audit/next-subsystem-elf-shared-text.md). NULL for an image
+     * that is only bytes -- the boot archive's. */
+    struct vnode *vn;
 };
 int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name,
                                const char *const argv[], const char *const envp[],

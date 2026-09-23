@@ -402,7 +402,7 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
                             const char *const envp[], const struct process_spawn_attr *attr, struct process **out)
 {
-    struct process_image exe = { .data = image, .size = size, .path = name ? name : "?" };
+    struct process_image exe = { .data = image, .size = size, .path = name ? name : "?", .vn = NULL };
     return process_create_from_images(&exe, NULL, name, argv, envp, attr, out);
 }
 
@@ -566,7 +566,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         goto fail;
     apply_space_limits(p);
 
-    rc = elf_load_into(p->space, exe->data, &info);
+    rc = elf_load_into(p->space, exe->data, &info, exe->vn);
     if (rc) {
         kwarn("process: '%s' load failed (%d)", p->name, rc);
         goto fail;
@@ -586,7 +586,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
             elf_rebase(&iinfo, base);
             p->interp_base = base;
         }
-        rc = elf_load_into(p->space, interp->data, &iinfo);
+        rc = elf_load_into(p->space, interp->data, &iinfo, interp->vn);
         if (rc) {
             kwarn("process: '%s' interpreter load failed (%d)", p->name, rc);
             goto fail;
