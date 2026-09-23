@@ -464,9 +464,12 @@ makes the answer and the write atomic against a mapping being created.
 program that maps a file executable and writes to it deliberately is a
 different thing, and the page cache syncs the instruction cache for it.
 Check: `elf-shared-text` (one physical frame for two spaces),
-`elf-text-ro` (`PROT_WRITE` refused), `elf-txtbsy` (a write **and a truncate** refused while
-running, the write allowed once it exits), `elf-share-cost` (16 pages
-per copy against 89, bounded at 32).
+`elf-text-ro` (`PROT_WRITE` refused), `elf-txtbsy` (a write, a truncate
+**and a writable `MAP_SHARED` mapping** refused while running, a private
+writable mapping allowed beside them as the control, the text mapping
+refused after a writable shared one so that "either order" is proved
+rather than asserted, and the write allowed once it exits),
+`elf-share-cost` (16 pages per copy against 89, bounded at 32).
 
 **P29. A system call may not dereference a mutable per-process pointer
 without taking a reference under the process lock.**

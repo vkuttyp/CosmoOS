@@ -3332,8 +3332,11 @@ See [docs/development.md](docs/development.md).
   deliberately is a different thing the page cache already serves. Four
   tests: one physical frame for two address spaces, the per-copy cost,
   `PROT_WRITE` refused on shared text with the zero tail reading as
-  zero, and a write refused while a program runs and allowed once it
-  exits. Demand-paging the zero tail also gave a multi-threaded program
+  zero, and all three doors a file's contents can change through -- a
+  write, a truncate, and a writable shared mapping -- refused while a
+  program runs and allowed once it exits, with a private writable
+  mapping allowed throughout as the control and the text mapping
+  refused in the other order too. Demand-paging the zero tail also gave a multi-threaded program
   its first pages two threads could fault at once, and the anonymous
   fault panicked when they did: the flags a fault carries are the
   hardware's snapshot from when the trap was raised, so both threads

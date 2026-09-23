@@ -54,7 +54,12 @@
 >    either order, and the text link takes `vn->lock`. **The lesson is
 >    the shape of the mistake**: an interlock placed on one syscall
 >    guards that syscall, not the file, and the invariant has to name
->    every door or it is not an invariant.
+>    every door or it is not an invariant. A later review round found
+>    that door still untested, which is its own version of the same
+>    mistake -- the rule was written down and left unproved -- so
+>    `elf-txtbsy` now exercises both orders of the clash, with a
+>    private writable mapping beside them as the control that differs
+>    in the sharing alone.
 > 8. **A stale object outlived a mutation's revert, and cost an
 >    afternoon.** `shutil.move` preserves mtime, so a restored source
 >    can be older than the object built from the mutated one; `make`
@@ -107,6 +112,8 @@
 > | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | — |
 > | 5 | the zero tail populated again | `elf-share-cost`: "a copy cost 40 pages, over the bound of 32" | — |
 | 6 | the anonymous fault's presence check removed | `vm-anon-fault-race`: `KERNEL PANIC: cannot map ... in region 'kalloc' (-17)` | — |
+| 7 | the clash's writable-shared direction removed | `elf-txtbsy`: "a writable shared mapping of a running program returned 0, wanted -26" | — |
+| 8 | the clash's text-after-writable direction removed | `elf-txtbsy`: "a text mapping made after a writable shared one returned 0, wanted -26" | — |
 >
 > `elf-share-cost` grew that bound *because* this mutation survived
 > without one: the cost was a log line, and a log line catches nothing.
@@ -497,7 +504,7 @@ arrives zero -- and `elf-text-ro` asserts that read directly.
 | `elf-share-cost` | a further process costs at most `ELF_COST_MAX_PAGES` (32) pages, measured by free-frame counts; the report measured 89 with no sharing, the build 16 | populate the zero tail again: the cost is 40, over the bound |
 | `elf-data-private` | a store in one process's data segment does not reach another's | written *because* the `seg_shareable` mutation survived as equivalent (banner item 9); it asserts the property rather than the condition |
 | `elf-text-ro` | `mprotect(PROT_WRITE)` on shared text fails (`maxprot`), and the zero tail reads as zero | widen `maxprot`: it succeeds, and one process can then rewrite another's instructions |
-| `elf-txtbsy` | writing a running program's file fails with `-ETXTBSY`, and succeeds once it exits -- the second half being what proves the mapping list is consulted rather than a flag that never clears | make the interlock always answer "not busy": the write succeeds and the running process's text changes underneath it |
+| `elf-txtbsy` | all three doors: a write and a truncate of a running program's file are `-ETXTBSY` and the write succeeds once it exits (the second half proving the mapping list is consulted rather than a flag that never clears); a writable `MAP_SHARED` mapping of it is refused while a **private** writable one is allowed; and with nothing executing the file, a writable shared mapping made first refuses the **text** mapping | make the interlock always answer "not busy": the write succeeds and the running process's text changes underneath it. Each direction of the mapping clash was mutated separately (rows 7 and 8) |
 | `vm-anon-fault-race` | a fault held on an absent anonymous page resumes onto another thread's install and adds no second frame, counting the retry | remove the presence check: `KERNEL PANIC: cannot map ... (-17)` |
 
 ## Benchmarks
