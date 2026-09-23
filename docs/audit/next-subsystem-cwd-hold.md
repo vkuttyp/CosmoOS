@@ -136,12 +136,24 @@ and puts the old vnode *outside* the lock with the comment "safe to be
 the last reference now: every walk that started while this was the cwd
 took a reference of its own". That comment is the claim under test.
 
-**The walk.** `vfs_lookup(start, path, out)` → `lookup_flags` →
-`resolve()` (`kernel-services/vfs/vfs.c:1055`), which begins
-`struct vnode *base = start; /* borrowed from the caller ... */` and
-hands it to `walk_parent`. The first dereference of the cwd is there.
-A relative path is the only kind that consults `start`; an absolute one
-begins at the root whatever `start` is.
+**The walk.** Three callers walk a path: `resolve()` (behind
+`vfs_lookup`), `vfs_open()`, and the parent-lookup used by `mkdir`,
+`unlink` and their kin — and **`vfs_open` does not go through
+`resolve`**; it calls `walk_parent` itself (`vfs.c:1309`). What every
+one of them shares is `walk_parent` (`vfs.c:933`), whose relative branch
+is the first and only place a walk consumes its starting directory:
+
+```c
+    } else {
+        cur = start;
+        vnode_get(cur);      /* the cwd pointer, dereferenced here */
+    }
+```
+
+A relative path is the only kind that reaches that branch; an absolute
+one takes `vfs_current_root()` whatever `start` is. So the seam has one
+possible home, and it is that line — not `resolve()`, which the report's
+first draft named and which the racer's `open` never enters.
 
 **The free.** `vnode_put` on the last reference unhashes the vnode under
 the mount lock and calls `vnode_release`, which drops the page cache,
@@ -200,9 +212,12 @@ pointer is consumed rather than in `process.c` where it is produced —
 because the bug-proof removes the reference *at a call site*, and a seam
 inside `process_cwd_get()` would never see the mutated path.
 
-**The walk half**, at the top of `resolve()`: if the seam is armed for
-this process, the path is relative, `start` is non-NULL, and the calling
-thread is not the registered swapper, this walk becomes the held one.
+**The walk half**, in `walk_parent`'s relative branch, immediately before
+`vnode_get(cur)` — the one line every relative walk from every caller
+passes through (see "The walk" above; `vfs_open` never enters
+`resolve`). If the seam is armed for this process, the calling thread is
+not the registered swapper, and `start` is non-NULL, this walk becomes
+the held one.
 It records `start`, its refcount, and the thread, sets state **held**,
 and waits — a **killable** wait on a wait queue with a bounded deadline,
 because that is how this kernel's threads leave a dying process: "every
@@ -211,47 +226,82 @@ other thread leaves at its next return to user mode or killable wait"
 would hold up the exit of the very process it is testing. A walk woken by
 a kill returns `-EINTR` from the lookup, which is what any killable wait
 in a system call returns, and the record says it was interrupted. When
-it resumes normally it performs **the liveness check**: `start` is not `VNODE_DEAD`-poisoned,
-its refcount is above zero and its type is `VNODE_DIR`. A freed vnode
-fails all three under the poison below, and the failure is a named
-panic — `cwd walk resumed on a freed directory (pid %d)` — rather than a
-wild fault somewhere inside `walk_parent`. Then the walk proceeds exactly
-as it would have.
+it resumes normally it performs **the liveness check**, stated exactly
+because pass 2 below resumes on a directory that is *dead* and must not
+trip it:
 
-**The swap half**, in `process_chdir()`, in two touches. Before its own
-lookup it registers the calling thread as the swapper (so the walk half
-never holds it — a `chdir` with a relative path also resolves through
-`resolve()`, and holding the thread that is supposed to do the releasing
-is a deadlock, not a rule to write in the test). Immediately before
-`vnode_put(old)` it waits, bounded, for state **held**; records the old
-vnode's refcount; puts; records that the put has happened; and completes
-the held walk.
+```
+live(vn) :=  vn->type == VNODE_DIR
+          && kobject_refcount(vn) != 0
+          && kobject_refcount(vn) != 0x5a5a5a5a     /* the poison word */
+```
+
+`VNODE_DEAD` is **not** part of the predicate. It means "unlinked, no new
+lookups" (`walk_parent` answers `-ENOENT` for a dead directory), and a
+dead directory a walk still references is exactly what pass 2 produces
+on a correct kernel; the seam *records* the flag rather than judging it.
+A freed vnode fails the predicate on its type under the poison below
+(the type reads `0x5a5a5a5a`, not `VNODE_DIR`) and on its refcount
+without it (`kobject_release_final` leaves the count at zero). The
+failure is a named panic — `cwd walk resumed on a freed directory
+(pid %d)` — rather than a wild fault in `vnode_get`. Then the walk
+proceeds exactly as it would have.
+
+**The swap half**, in `process_chdir()`, in three touches. Before its
+own lookup it registers the calling thread as the swapper (so the walk
+half never holds it — a `chdir` with a relative path also walks, and
+holding the thread that is supposed to do the releasing is a deadlock,
+not a rule to write in the test). **After its lookup and before it
+publishes** — outside `p->lock`, with the new directory in hand — it
+waits, bounded, for state **held**. Then it publishes as it does today,
+and immediately before `vnode_put(old)` records whether the held walk's
+pointer *is* `old`, records `old`'s refcount, puts, records that the put
+has happened, and completes the held walk.
+
+The wait sits before the publish and not before the put, and review of
+this report's first draft is why: with the wait after the publish, a
+swapper that reaches `chdir` first installs `d2`, the walker then
+captures `d2` and is held on it, and the swapper puts `d1` — a race
+between two threads that the seam was supposed to order, and one that
+makes pass 1 fail on a correct kernel. Waiting before the publish means
+the walk that is held has necessarily captured the directory about to be
+replaced, and `held_matches_old` in the record is the assertion that it
+did rather than an assumption that it must have.
 
 So the order the race needs is *enforced by the seam*, not arranged by
-the test: the swapper cannot put until the walk holds the pointer, and
-the walk cannot resume until the put has happened. No thread in the
+the test: the swapper cannot publish until a walk holds the old pointer,
+cannot put until it has published, and the walk cannot resume until the
+put has happened. No thread in the
 racer sleeps, spins on a sysctl, or guesses. That is the one respect in
 which this seam departs from the file-fault one, whose probe program
 polls `debug.file_fault_hold`: a program under the Linux door has no
 sysctl to poll, and an order enforced in the kernel serves both doors
 with one racer each.
 
-**What the seam records**, for the kernel test to read back after the
-child exits: whether a walk was held; the refcount it saw at hold; the
-refcount the swapper saw before its put; whether the put preceded the
-release (the correct order — a mutation that releases first would make
-the whole proof vacuous, and the test asserts this flag rather than
-trusting the seam); whether either wait timed out. On a correct kernel
+**What the seam records**, for the kernel test to read back after each
+pass: whether a walk was held; whether the held pointer was the directory
+the swapper replaced; the refcount at hold; the refcount the swapper saw
+before its put; whether the put preceded the release (the correct order
+— a mutation that releases first would make the whole proof vacuous, and
+the test asserts this flag rather than trusting the seam); whether the
+resumed directory was `VNODE_DEAD`; whether either wait timed out or was
+interrupted. On a correct kernel
 the refcount before the put is **two** (the process's and the walk's)
 and the vnode survives; with the fix removed it is **one**, the put
 frees it, and the resumed walk panics on the poison.
 
 **State**: 0 idle, 1 armed, 2 held, 3 released; readable as
-`debug.cwd_hold`. Arming by **process name** rather than pid, because the
-pid is known only after the spawn returns and by then the child may be
-running — the child cannot wait for an arm it has no door to observe. A
-name is known before the spawn, and the seam binds to the first process
-of that name whose walk it holds.
+`debug.cwd_hold`. **One arm serves one hold.** The state machine ends at
+*released* and does not rearm itself, so a racer that ran both passes
+under one arm would run the second — the one about lifetime —
+uninstrumented, with a record that still described the first. The
+kernel test therefore spawns the racer **once per pass**, arms before
+each spawn, and reads a record per pass (`--held capture`,
+`--held outlive`). Arming by **process name** rather than pid, because
+the pid is known only after the spawn returns and by then the child may
+be running — the child cannot wait for an arm it has no door to observe.
+A name is known before the spawn, and the seam binds to the first
+process of that name whose walk it holds.
 
 **Both waits are bounded** (the held walk at five seconds, the swapper at
 two) **and killable**. A timeout is recorded and *fails the test*, so a
@@ -275,9 +325,9 @@ in every boot.
 
 ### 3. Two racers, one per door
 
-Each is a two-thread program and runs two passes; the kernel test spawns
-it with the seam armed for its name, waits for it, and reads the seam's
-record.
+Each is a two-thread program that runs the one pass its argument names;
+the kernel test spawns it once per pass with the seam armed for its
+name, waits for it, and reads that pass's record.
 
 **Pass 1 — the walk resolves against the directory it started in.**
 Thread A opens `f`, which exists only in the current directory `d1`;
@@ -298,15 +348,15 @@ the vnode survives, A's open is `-ENOENT` (the directory is dead, not
 freed). With the fix removed at that door's `open`, refcount one, the put
 frees, the poison lands, and the resumed walk panics by name.
 
-**Native**: `userland/tests/cwdtest.c` gains a `--held` mode running the
-two passes and nothing else, so the kernel test has a child that does
-one thing; the four existing steps stay as they are and keep their
-"regression" label in the testing doc.
+**Native**: `userland/tests/cwdtest.c` gains `--held capture` and
+`--held outlive`, each running its pass and nothing else, so the kernel
+test has a child that does one thing per spawn; the four existing steps
+stay as they are and keep their "regression" label in the testing doc.
 
 **Linux**: `tests/linux/lxcwd.c`, freestanding like `lxtest`, threads by
 `clone(CLONE_VM|CLONE_THREAD|...)` as `lxtest` already does, relative
 `openat(AT_FDCWD, "f")`, `chdir`, `unlinkat`, `unlinkat(AT_REMOVEDIR)`.
-Same two passes, same exit codes.
+Same two passes, one per invocation, same exit codes.
 
 ### 4. The §70 gate
 
@@ -347,8 +397,8 @@ compare on the relative-path walk and a `memset` per vnode free.
 
 | file | change |
 | --- | --- |
-| `kernel-services/vfs/vfs.c` | the seam's walk half at the top of `resolve()`; `vnode_release` poisons under `CONFIG_DEBUG`; `vfs_test_cwd_hold_*` |
-| `kernel/process/process.c` | the swap half in `process_chdir`: register as swapper before the lookup, wait-put-release around `vnode_put(old)` |
+| `kernel-services/vfs/vfs.c` | the seam's walk half in `walk_parent`'s relative branch, before `vnode_get(cur)` — the one line every caller's relative walk shares; `vnode_release` poisons under `CONFIG_DEBUG`; `vfs_test_cwd_hold_*` |
+| `kernel/process/process.c` | the swap half in `process_chdir`: register as swapper before the lookup, wait for the hold **before publishing**, then record-put-release around `vnode_put(old)` |
 | `kernel/include/kernel/vfs.h` | the seam's API and its record struct; a comment on the poison |
 | `kernel/syscall/native.c` | `debug.cwd_hold` |
 | `userland/tests/cwdtest.c` | `--held`: the two passes |
@@ -370,23 +420,27 @@ compare on the relative-path walk and a `memset` per vnode free.
 /* kernel/include/kernel/vfs.h -- CONFIG_DEBUG only; no-ops otherwise.
  *
  * Hold the next relative-path walk made by a process of this name
- * before it dereferences its starting directory, until that process's
- * chdir has put the old directory. The order is enforced here, not
- * arranged by the test: the chdir waits for the walk to be held, the
- * walk waits for the put. Both waits are bounded and a timeout is
- * recorded, never hidden. */
+ * before it dereferences its starting directory (walk_parent's relative
+ * branch), until that process's chdir has published its new directory
+ * and put the old one. The order is enforced here, not arranged by the
+ * test: the chdir waits for the walk to be held BEFORE it publishes,
+ * the walk waits for the put. One arm, one hold; arm again for the next
+ * pass. Both waits are killable and bounded; a timeout is recorded,
+ * never hidden. */
 void vfs_test_cwd_hold_arm(const char *process_name);
 unsigned vfs_test_cwd_hold_state(void);           /* 0 idle, 1 armed, 2 held, 3 released */
 
 struct vfs_cwd_hold_record {
     bool held;                 /* a walk was held */
+    bool held_matches_old;     /* the held walk's directory is the one the swapper replaced */
     bool released_after_put;   /* the swapper put before it released -- the order the proof needs */
+    bool resumed_dead;         /* the directory was VNODE_DEAD when the walk resumed (pass 2 expects it) */
     bool walk_timed_out, swap_timed_out;
     bool interrupted;          /* a killable wait returned -EINTR: the racer was dying */
     uint32_t ref_at_hold;      /* the directory's refcount when the walk was held */
     uint32_t ref_before_put;   /* what the swapper saw before its put: 2 with the fix, 1 without */
 };
-void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out);   /* every exit of the test; returns what happened */
+void vfs_test_cwd_hold_disarm(struct vfs_cwd_hold_record *out);   /* after every pass and on every exit; returns what happened */
 ```
 
 Three entry points and one struct; nothing else is added.
@@ -398,18 +452,19 @@ Named here so that nobody proposes them twice: `kobject_refcount`
 `wait_event_killable` and `process_kill_pending` (`kernel/wait.h`,
 `process.c`) are what make both waits leave with a dying process;
 `VNODE_DEAD` is the flag `remove_entry` already sets on a removed
-directory, which the liveness check reads alongside the poison.
+directory; the seam records it and the liveness check does not judge it,
+because pass 2 resumes on a dead, live directory by design.
 
 ## Migration plan
 
 1. **The poison**, alone, both architectures booted. It changes nothing
    observable on a correct kernel and every existing test must agree.
-2. **The seam**, unarmed. Every existing test must agree; `resolve()`'s
-   idle cost is one load.
-3. **The native racer and `cwd-hold-native`.** Then the bug-proof: the
-   probe's mutation at the native `open`, which must turn the boot into
-   the named panic. If it does not, the seam is wrong and nothing else
-   proceeds.
+2. **The seam**, unarmed. Every existing test must agree; the idle cost
+   in `walk_parent` is one load.
+3. **The native racer and `cwd-hold-native`**, one spawn per pass. Then
+   the bug-proof: the probe's mutation at the native `open`, which must
+   turn the boot into the named panic. If it does not, the seam is wrong
+   and nothing else proceeds.
 4. **The Linux racer and `cwd-hold-linux`**, and the same mutation at
    the Linux door's `do_open`.
 5. **The order mutation**: release before put. The test must fail on
@@ -423,14 +478,15 @@ directory, which the liveness check reads alongside the poison.
 
 | test | what it proves | bug-proof |
 | --- | --- | --- |
-| `cwd-hold-native`, pass 1 | a held walk resolves against the directory it captured: `open("f")` succeeds after the process has moved to a directory without `f` | the seam releases before the swapper publishes (a wrong seam): the open fails `-ENOENT` |
-| `cwd-hold-native`, pass 2 | the walk's reference outlives the swap: refcount **2** before the put, the directory survives, the open is `-ENOENT` and the process lives; `released_after_put` is true | the reference removed at the native `open` (the probe's mutation): refcount 1, `KERNEL PANIC: cwd walk resumed on a freed directory` |
+| `cwd-hold-native`, pass 1 (`capture`) | a held walk resolves against the directory it captured: `open("f")` succeeds after the process has moved to a directory without `f`, **and** the record says `held_matches_old` — the walk held `d1`, not `d2` | the swapper does not wait before publishing (the first draft's design): the walker can capture `d2`, `held_matches_old` is false and the open is `-ENOENT`, and the test fails by name. The open's success alone cannot be the proof: once a walk has captured `d1`, nothing the seam does afterwards changes what it opens, which is why the record carries the ordering and the test asserts it |
+| `cwd-hold-native`, pass 2 (`outlive`) | the walk's reference outlives the swap: refcount **2** before the put, the directory survives dead (`resumed_dead`), the open is `-ENOENT` and the process lives; `held_matches_old` and `released_after_put` are true | the reference removed at the native `open` (the probe's mutation): refcount 1, `KERNEL PANIC: cwd walk resumed on a freed directory` |
 | `cwd-hold-linux`, both passes | the same at the Linux door | the reference removed at `do_open` (which serves the Linux `open` and `openat` both): the same panic; **and** the native mutation alone must leave this test green, which is what says the two doors are separately proved |
 | both, the order | the seam released the walk only after the put | the swap half completes before `vnode_put(old)`: `released_after_put` false, the test fails by name |
 | both, the poison | the liveness check sees the free | the poison removed with the native mutation kept: the resumed walk reads a freed but intact vnode. The refcount check is expected to catch it anyway (`kobject_release_final` leaves the count at zero), so this row is run to *record* which check fired rather than to predict one; if neither does, the poison is the only thing standing between the proof and the cwd-ref unit's false pass, and the banner says so |
 
-Every test asserts `held` and both timeouts false, so a racer that never
-reached the seam is a failure and not a pass.
+Every pass asserts `held`, `held_matches_old`, and both timeouts and
+`interrupted` false, so a racer that never reached the seam — or reached
+it holding the wrong directory — is a failure and not a pass.
 
 ## Benchmarks
 
@@ -447,10 +503,10 @@ Reported as run in the banner, not promised.
   waiting on a hold that belongs to the first. The racers have two
   threads by construction, and the refusal is what makes that a checked
   property rather than a convention.
-- **A `chdir` whose path is relative on the swapper thread** resolves
-  through `resolve()` and must not be held: handled by the swapper
-  registration, not by asking the test to use absolute paths — though the
-  racer does, because it should.
+- **A `chdir` whose path is relative on the swapper thread** walks
+  through the same `walk_parent` branch and must not be held: handled by
+  the swapper registration, not by asking the test to use absolute paths
+  — though the racer does, because it should.
 - **The Linux racer's `clone`** is the milestone-10 shape `lxtest` uses;
   if the freestanding program cannot express pass 2's `unlinkat` and
   `rmdir` simply, the pass is written with the raw syscall numbers the

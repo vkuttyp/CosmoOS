@@ -11,7 +11,10 @@ Its test, `userland/tests/cwdtest.c` step 4, moves the process in and out
 of a directory another thread keeps removing while a third walks a path
 inside it -- and that unit's own record says every reverted-fix run
 passed. The window is a few instructions on one side and a whole path
-walk on the other, and no arrangement of threads lands in it.
+walk on the other. With the poison below, the test lands in it in some
+boots and not others (one of five x86-64 boots that reached it, none of
+three AArch64, on 2026-09-23) -- a rate, which is what this probe
+measures and what a proof replaces.
 
 This measures that. It puts the bug back at ONE site -- the native
 `open`, which is what the walker in step 4 calls -- and poisons every
@@ -22,10 +25,12 @@ patience allows, and count:
     boot-test: PASS ...                       the test did not see the bug
     cwdtest: NNN walks in the victim          how often the window was open
 
-A boot that PASSES with the bug present is the number this probe exists
-to record. It is not a claim that the fix is wrong; it is the evidence
-that the test is a regression test and not a proof, which is what the
-held-walk unit is for.
+Both outcomes are the measurement: a PASS with the bug present is a boot
+the test could not see it in, a `#GP` in `kobject_get` with
+`RAX=5a5a5a5a5a5a5a5a` is a boot it did. Neither is a claim that the fix
+is wrong; together they are the evidence that the test is a regression
+test that catches the bug intermittently and not a proof, which is what
+the held-walk unit is for.
 
 Usage:
 
