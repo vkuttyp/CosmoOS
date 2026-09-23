@@ -69,7 +69,12 @@
 > | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 7) | -- |
 > | 3 | text mapped with `W` in its `maxprot` | `elf-text-ro`: "shared text could be made writable" | `process-spawn`, which spawns a child; this mutation changes how *every* program loads |
 > | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | — |
-> | 5 | the zero tail populated again | `process-spawn`, which spawns a child; every process is 26 pages larger | — |
+> | 5 | the zero tail populated again | `elf-share-cost`: "a copy cost 40 pages, over the bound of 32" | — |
+>
+> `elf-share-cost` grew that bound *because* this mutation survived
+> without one: the cost was a log line, and a log line catches nothing.
+> Sixteen measured, thirty-two allowed, forty when either half of the
+> unit is turned off.
 >
 > **The second failures were the mutation runner, not the kernel**, and
 > finding that out is the most useful thing in this section. Its

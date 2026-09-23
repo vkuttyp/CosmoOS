@@ -1619,6 +1619,11 @@ bool selftest_elf_txtbsy(const char **reason)
     return true;
 }
 
+/* What one more process running an already-running program may cost.
+ * 16 measured; the bound leaves room without letting the sharing or the
+ * demand paging quietly stop working. */
+#define ELF_COST_MAX_PAGES 32u
+
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_share_cost(const char **reason)
 {
@@ -1656,9 +1661,27 @@ bool selftest_elf_share_cost(const char **reason)
         elf_settle_processes(procs0);
         return false;
     }
-    kinfo("selftest: elf-share-cost: pages per copy %llu, %llu, %llu (the report measured 89 with no sharing)",
+    /*
+     * And a bound, so the number is a claim rather than a log line.
+     *
+     * Measured at 16 pages per copy on both architectures, against 89
+     * before this unit. Thirty-two leaves room for a process's own
+     * fixed cost to grow without pretending the sharing still works:
+     * turning either half off puts it back over forty -- populating the
+     * zero tail alone costs 26 pages, and it was an unnoticed
+     * equivalent mutant until this bound existed
+     * (docs/audit/next-subsystem-elf-shared-text.md).
+     */
+    if (cost[made - 1] > ELF_COST_MAX_PAGES) {
+        kerror("selftest: elf-share-cost: a copy cost %llu pages, over the bound of %u",
+               (unsigned long long)cost[made - 1], ELF_COST_MAX_PAGES);
+        *reason = "a process costs more than a shared, demand-paged image should";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    kinfo("selftest: elf-share-cost: pages per copy %llu, %llu, %llu (bound %u; the report measured 89 with no sharing)",
           (unsigned long long)cost[0], (unsigned long long)cost[1],
-          (unsigned long long)(made > 2 ? cost[2] : 0));
+          (unsigned long long)(made > 2 ? cost[2] : 0), ELF_COST_MAX_PAGES);
     (void)reason;
     elf_settle_processes(procs0);
     return true;
