@@ -1699,7 +1699,13 @@ int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot
     if (text_lock)
         mutex_unlock(&vn->lock);
     if (clash) {
+        /* Undo what was counted before the record was built: the
+         * refusal happens after `shared_maps` was incremented, and a
+         * count left behind outlives the mapping and panics
+         * `vm_space_destroy`, which checks it. */
         r->fmap = NULL;
+        if (m->shared)
+            __atomic_fetch_sub(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);
         vnode_put(vn);
         kfree(m);
         kmem_cache_free(g_region_cache, r);
