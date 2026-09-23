@@ -2056,3 +2056,51 @@ boot:
   child's release once its thread is reaped. The reaper's turn came
   later than that once under migration; the bound catches a leak, not
   slowness, and is two seconds now (`LOAD-SENSITIVE`).
+
+## `tcp-pcb-timer-free`'s held callback parked on a CPU nobody could release it from
+
+Seen once, 2026-09-23, on this machine, x86-64, during the cwd-hold
+report's measurement boots (`tools/cwd-race-probe.py` applied: an unowned
+cwd read in `sys_open` and a poison on freed vnodes -- neither on any path
+below). The log is kept beside the report's session notes as
+`lockup-timer-kick-boot6.log`.
+
+**What it looked like.** `SELFTEST: net-lo-udp ... ok` and then, ten
+seconds later with no further test line:
+
+```
+[ WARN] hard lockup: cpu 3 no tick for 10000 ms; last tick 10014 ms ago at pc 0xffffffff800da920 (seen from cpu 2)
+cpu 3: pc arch_cpu_relax  #1 timer_kick (tcp.c)  #2 run_expired (timer.c:508)  #3 x86_trap_dispatch   -- 8 samples, 250 us apart, identical
+cpu 0, 1, 2: idle_main -> arch_cpu_wait_for_interrupt
+```
+
+The next test in the table after `net-lo-udp` is `tcp-pcb-timer-free`,
+whose first act is `tcp_test_hold_callback(true)`: the next TCP timer
+callback parks inside `timer_kick` and spins on `g_test_cb_release`
+(`tcp.c:397`). CPU 3 is that callback. It is **not** the host-starvation
+false positive this file describes above: the samples show the CPU
+executing, in the same two frames, eight times.
+
+**What makes it a hang rather than a slow test.** The other three CPUs
+are halted. The test's own thread, which after the callback enters
+should be creating the releaser and calling `tcp_close`, is nowhere;
+neither is a releaser (`tcp_releaser_main`, which would let the callback
+go after five seconds even if no cancel ever spun). The test chooses
+`cpu` (where the callback should land) and `rel_cpu` as the first two
+online CPUs other than its own, and its comment says the hazard it knows:
+"putting [the releaser] beside the callback is what hung the first
+version". The picture here is the *other* placement: **the callback
+landed on the test thread's own CPU**, in interrupt context above it, so
+the thread that would create the releaser never ran again. Why the timer
+fired there rather than on `cpu`, where the armer thread was pinned, is
+not established -- a re-armed timer keeping its first queue, or the pcb's
+timer having been started on this CPU before the test's armer touched it,
+are guesses and are written here as guesses.
+
+**What would settle it** costs one line: the hold seam records
+`arch_cpu_id()` when the callback enters, and the test prints it beside
+`cpu`, `rel_cpu` and its own. A second sighting then names the placement
+instead of inferring it from three idle CPUs.
+
+Not on the list: not a bound, and not attributable to the probe's
+mutation -- the spinning path holds no vnode and makes no system call.
