@@ -3420,12 +3420,18 @@ See [docs/development.md](docs/development.md).
   architectures, which is every tree walker failing the moment it
   descends. One resolver replaces the refusal at nine sites and
   references the descriptor's directory before letting go of the
-  descriptor (V35); `renameat` resolves its two names from two
-  directories through `vfs_rename2`; a directory file remembers the path
-  it was opened by, at both doors, and `fchdir` publishes that name with
-  the vnode as `chdir` does. Invariant **P31**; `lxtest` checks every
-  call against a real descriptor by where its effect lands, not merely
-  that it succeeded. (PR #229)
+  descriptor (V35), demanding the handle's `READ` right to look a name up
+  and `WRITE` to change an entry, so a directory handle delegated
+  read-only stays read-only (a directory opened at either door carries
+  both); `renameat` resolves its two names from two directories through
+  `vfs_rename2`; a directory file remembers the path it was opened by, at
+  both doors, **only if that name walked with no symbolic link reaches the
+  same directory**, and `fchdir` publishes the name with the vnode as
+  `chdir` does. Review of the first build found the missing rights, the
+  incoherent name and a failed `chdir` stranding the held-walk seam's
+  swapper; each has a test. Invariant **P31**; `lxtest` checks every call
+  against a real descriptor by where its effect lands, not merely that it
+  succeeded. (PR #229)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

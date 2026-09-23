@@ -138,7 +138,15 @@ resolved from the working directory would still succeed and only the
 absolute check says which directory it acted in. Then a regular file as
 a base is `-ENOTDIR` and a closed descriptor `-EBADF`; `fchdir(dfd)`
 makes `getcwd` answer `/tmp/lxdir`, a relative open find `moved`, and
-`chdir("..")` land in `/tmp`; `fchdir` of a regular file is `-ENOTDIR`.
+`chdir("..")` land in `/tmp`; `fchdir` of a regular file is `-ENOTDIR`;
+a directory opened through a symbolic link resolves lookups but has no
+coherent name, so `fchdir` refuses it (`-ENOENT`) and `getcwd` is
+unchanged. **Rights** (`dirfd-rights`, a kernel test driving
+`init --probe dirfd-narrow` and `dirfd-wide`): `lxcwd narrow` and
+`lxcwd wide` receive the same directory at fd 5, `READ` only or with
+init's own rights; lookups work in both, and every change of an entry
+(`mkdirat`, `unlinkat`, `renameat`, a creating `openat`, `symlinkat`)
+is `-EBADF` under the first and succeeds under the second.
 
 `lxcwd` (`tests/linux/lxcwd.c`, the cwd-hold unit,
 `docs/audit/next-subsystem-cwd-hold.md`): the held-walk racer at the

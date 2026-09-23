@@ -693,6 +693,23 @@ int main(int argc, char **argv)
         if (dl >= 0)
             sc1(LX_close, dl);
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdlink", 0) == 0, 0);
+        /* `..` after a link: /tmp/lxdeep -> /tmp/lxdir/deep, so opening
+         * "/tmp/lxdeep/.." reaches /tmp/lxdir physically while the name
+         * normalises lexically to "/tmp". The name walks cleanly with no
+         * link -- to a DIFFERENT directory -- so only the same-vnode
+         * comparison refuses it. Without this case that comparison had no
+         * test (its mutation survived). */
+        CHECKV(sc3(LX_mkdirat, dfd, "deep", 0755) == 0, 0);
+        CHECKV(sc3(LX_symlinkat, "/tmp/lxdir/deep", LX_AT_FDCWD, "/tmp/lxdeep") == 0, 0);
+        long dd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdeep/..", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+        CHECKV(dd >= 3, dd);
+        CHECKV(sc4(LX_newfstatat, dd, "moved", sb, 0) == 0, 0);             /* it IS /tmp/lxdir */
+        CHECKV(sc1(LX_fchdir, dd) == -2, 0);                                  /* and "/tmp" is not its name */
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 2 && streq(cw, "/"), 0);
+        if (dd >= 0)
+            sc1(LX_close, dd);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdeep", 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, dfd, "deep", LX_AT_REMOVEDIR) == 0, 0);
     }
     CHECKV(sc1(LX_close, dfd) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/moved", 0) == 0, 0);

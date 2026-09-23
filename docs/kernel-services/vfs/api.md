@@ -260,7 +260,10 @@ the two parents, however they were reached.
 unit) Record a directory file's normalised absolute path, which
 `fchdir` publishes as the working directory's name. A no-op for a file
 that is not a directory, an already-named one, a path that is not
-absolute, or an allocation failure; set before the file is installed in
+absolute, **a name that does not name this directory** -- it is walked
+again from the caller's root with no symbolic link allowed and recorded
+only if the walk arrives at this vnode -- or an allocation failure; set
+before the file is installed in
 a handle table and never changed, so a reader holding a reference needs
 no lock. Both doors' opens call it for a directory. The name goes stale
 on a rename of the directory or any ancestor (P27's gap).

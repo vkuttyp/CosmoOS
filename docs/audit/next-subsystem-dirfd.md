@@ -25,7 +25,37 @@
 >    resolving and then calling `do_open`; `do_open` now takes the
 >    descriptor and resolves itself, so `open`, `creat` and `openat` are
 >    one function with three entry points.
-> 5. **The first `fchdir` mutation boot died at 10.7 s of an NMI panic**,
+> 5. **Review found three defects in the first build, each now tested.**
+>    (a) *The resolver demanded no handle right.* The report had copied
+>    Linux, where a directory descriptor's access mode does not govern the
+>    `*at` calls; but this system's handles are capabilities, and a
+>    directory handle delegated with its rights narrowed could then
+>    create, remove and rename entries through a Linux program. The
+>    resolver now demands `READ` to look a name up and `WRITE` to change
+>    an entry (a creating `openat` included, and both directories of a
+>    `renameat`), and a directory opened at either door carries both --
+>    which is what lets a program open a directory read-only and then
+>    `unlinkat` in it, as Linux programs do. `dirfd-rights` hands a
+>    Linux program the same directory twice, `READ` only and with the
+>    parent's rights: under the first every change is `-EBADF` and
+>    nothing changes, under the second the same changes succeed.
+>    (b) *A recorded name did not always name its directory.* The name is
+>    a lexical normalisation; the walk that opened the directory may have
+>    followed a symbolic link. `file_set_dir_path` now walks the name
+>    again from the caller's root with **no link allowed** (a new
+>    `no_links` flag on the walk, refused in `walk_expand`) and records it
+>    only if it arrives at the same vnode; otherwise `fchdir` refuses the
+>    directory with `-ENOENT`. `lxtest` opens `/tmp/lxdir` through a link:
+>    a lookup through it resolves, `fchdir` is refused, `getcwd` unchanged.
+>    `chdir` through a link keeps its lexical name, as before this unit;
+>    that is recorded in the inventory rather than changed here.
+>    (c) *A failed `fchdir` or `chdir` left the held-walk seam's swapper
+>    registered*, so a walk held for it waited out its five-second bound.
+>    `vfs_cwd_hold_swapper_leave` releases it on every failure after the
+>    registration, in one place per call; `cwd-hold`'s new `failswap` pass
+>    holds a walk, fails the other thread's `chdir`, and requires the walk
+>    released with no timeout and no put recorded.
+> 6. **The first `fchdir` mutation boot died at 10.7 s of an NMI panic**,
 >    long before any Linux test, with the host's load average at 40 from
 >    a virtual machine outside this work. It said nothing about the
 >    mutation and was rerun.
@@ -40,6 +70,9 @@
 > | 3 | `fchdir` publishing the vnode and keeping the old name | `lxtest`: `getcwd` after `fchdir` answered `/`, and after `chdir("..")` still not `/tmp` -- the published-together rule of P27 |
 > | 4 | `vfs_rename2` resolving both names from the first start | `vfs-rename2`: the file was not where the second start named it; `lxtest`: `sub/m2` absent by absolute path and the rename back failed |
 > | 5 | the old refusal restored (`ENOSYS` for any real descriptor) | `lxtest`: 20 checks, every `*at` call against the descriptor |
+> | 6 | the resolver demanding no right (review (a)) | `dirfd-rights`: the narrowed run's `mkdirat` succeeded (status 32); the full-rights control still passed |
+> | 7 | a directory's name recorded without the coherence walk (review (b)) | `lxtest`: `fchdir` of the directory opened through a link succeeded and `getcwd` answered the link's spelling |
+> | 8 | a failing swapper left registered (review (c)) | `cwd-hold-native` `failswap`: the held walk waited out its bound (`walk_timed_out`) |
 
 Constitution §68 report. It takes up the third of the three Linux
 personality gaps the deferred-work inventory lists together in §2.6 —
@@ -164,9 +197,12 @@ static int at_base(int64_t dirfd, const char *path, struct vnode **out);
 ```
 
 It replaces `check_dirfd` at all nine sites, and each passes its result
-where it passes `process_cwd_get()` today. The descriptor is looked up
-with no rights demanded, as Linux does — a directory opened read-only,
-or for search only, is a valid base — and its vnode is referenced
+where it passes `process_cwd_get()` today. *As built, after review*,
+the descriptor is looked up demanding the handle right the call needs --
+`READ` to look a name up, `WRITE` to change an entry -- and a directory
+opened at either door carries both (banner item 5); the draft's "no
+rights demanded, as Linux does" would have let a narrowed, delegated
+handle mutate. Its vnode is referenced
 before the handle's reference is dropped, so a sibling thread closing
 the descriptor mid-call cannot free the base under the walk. That is the
 cwd-ref rule applied to a second kind of base, and the held-walk seam
@@ -303,7 +339,7 @@ int process_fchdir(struct vnode *dir, const char *path);
 | test | what it proves | bug-proof |
 | --- | --- | --- |
 | `lxtest`, directory descriptors | each of the nine calls resolves a relative path from a real descriptor: `openat` opens `moved`, `newfstatat` and `faccessat` find it, `mkdirat`/`unlinkat`/`mknodat`/`symlinkat`/`readlinkat` act inside the directory and the result is visible by absolute path, `renameat` across two descriptors | `at_base` answering the cwd for every descriptor: every call acts in the wrong directory and the absolute-path cross-check fails. The cross-check is what makes the test about *which* directory, not merely about a success |
-| `lxtest`, refusals | a regular file as `dirfd` is `-ENOTDIR`; a closed descriptor is `-EBADF`; `AT_FDCWD` and absolute paths are unchanged | `at_base` accepting a regular file: the walk fails later with a different errno, and the check names it |
+| `lxtest`, refusals | a regular file as `dirfd` is `-ENOTDIR`; a closed descriptor is `-EBADF`; `AT_FDCWD` and absolute paths are unchanged | `at_base` accepting a regular file: *as built*, the walk fails later with the **same** `-ENOTDIR` (banner item 3), so the mutation is equivalent -- the check stays as the named early refusal and for `fchdir`, which makes no walk |
 | `lxtest`, `fchdir` | after `fchdir(dfd)`, `getcwd` answers `/tmp/lxdir` and a relative `open` finds `moved`; a relative `chdir("..")` then answers `/tmp` | `fchdir` publishing the vnode without the path: `getcwd` answers the old directory while opens resolve in the new one — the published-together rule P27 exists for |
 | `vfs-rename2` | a rename between two directories reached from two different starts; `-EXDEV` and `-EINVAL` still found on the parents | `vfs_rename2` passing `ostart` for both lookups: the new name lands in the wrong directory |
 
