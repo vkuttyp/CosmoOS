@@ -93,7 +93,12 @@ PROBE = r'''    /* --- DIRFD PROBE (tools/dirfd-probe.py; not for merge) --- */
         DIRFD_SAY("mknodat", nd);
         if (nd == 0)
             sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/fifo", 0);
-        long ud = sc3(LX_unlinkat, dfd, "sub", LX_AT_REMOVEDIR);
+        /* Remove `sub` only if this run made it: an existing directory of
+         * that name is not the probe's to delete. Otherwise measure
+         * unlinkat against a name that is not there, which a working door
+         * answers -ENOENT and which can touch nothing (found in review). */
+        long ud = md == 0 ? sc3(LX_unlinkat, dfd, "sub", LX_AT_REMOVEDIR)
+                          : sc3(LX_unlinkat, dfd, "absent-sub", LX_AT_REMOVEDIR);
         DIRFD_SAY("unlinkat", ud);
         if (md == 0 && ud != 0)
             sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/sub", LX_AT_REMOVEDIR);

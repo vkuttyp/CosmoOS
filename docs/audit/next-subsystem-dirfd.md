@@ -71,8 +71,8 @@ benchmark that runs minutes before `lxtest`; the probe's lines and
 
 - **Real programs use the `*at` family with real descriptors**, and not
   as an optimisation: it is how a program walks a tree without racing a
-  rename of an ancestor. musl's `nftw`, `fts`-style walkers, `rm -r` in
-  every coreutils and busybox, `find -delete`, and any program that
+  rename of an ancestor. `nftw` and `fts`-style walkers in a Linux
+  program's own libc, `rm -r` in every coreutils and busybox, `find -delete`, and any program that
   opens a directory and then works inside it. On this system each of
   them fails the moment it descends, with an errno that says the call
   does not exist.
@@ -160,8 +160,8 @@ process lock, exactly as `process_chdir` does. A directory opened with
 no recorded path (none exists today; the rule is written for the future
 case) is refused `-ENOENT` rather than given an invented name.
 
-The limitation is P27's, stated there already: a renamed ancestor is not
-noticed by the string. The vnode is authoritative for resolution and the
+The limitation is P27's, stated there already: a rename of the
+directory or of any ancestor is not noticed by the string. The vnode is authoritative for resolution and the
 string for display, for a descriptor as for `chdir`.
 
 Native opens record the path too, because a Linux program can receive a
@@ -273,10 +273,10 @@ that already walks a directory. Stated rather than measured.
 
 ## Risks
 
-- **The recorded path goes stale on a rename of an ancestor**, as
-  `chdir`'s does (P27's gap). Resolution is by vnode and is right; only
-  `getcwd`'s answer after `fchdir` can be stale, and only for a
-  directory renamed after it was opened.
+- **The recorded path goes stale on a rename of the directory or of any
+  ancestor**, as `chdir`'s does (P27's gap). Resolution is by vnode and
+  is right; only `getcwd`'s answer after `fchdir` can be stale, and only
+  when that rename happened after the directory was opened.
 - **A descriptor survives a narrowing of the process's root.** Linux
   behaves the same, and this system's handle-inheritance rules already
   treat an inherited handle as a capability; the report names it rather
