@@ -3393,6 +3393,23 @@ See [docs/development.md](docs/development.md).
   the first boot; fixed by creating the releaser before arming and
   joining the armer after the release, with the callback's CPU recorded
   and asserted. (PR #225)
+- **A placement is inserted under the hold that chose it.** `mmap(NULL,
+  ...)` at either door chose a range under one hold of the space lock and
+  inserted it under another, and the range belonged to nobody in
+  between. Measured by running the syscall's own two calls from kernel
+  threads on one space: **about half of all concurrent placements lost**,
+  on both architectures, with `-EEXIST` for a request that named no
+  address -- which is how a `thrtest` thread start failed on a
+  documentation-only rebase, once the `MAP_FIXED` unit had removed the
+  libc retry that used to absorb it. Both doors now choose and insert in
+  one hold (`vm_user_map_anon_free`, `vm_user_map_file_free`), two
+  attempts from the hint and then the base with `-ENOMEM` the only
+  answer that moves between them; the file form inserts its region
+  claimed before its record goes on the vnode's list, because truncate
+  reads the base from there. `vm_user_find_free` stays, advisory, for
+  the two callers that may use it. Invariant **M46**, the fixed path's
+  M40 made whole; `mmap-place-race` and a racer at each door, rate-based
+  and said so, at a rate that cannot hide. (PR #227)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
