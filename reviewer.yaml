@@ -1,0 +1,184 @@
+# What this repository tells its reviewer about itself.
+#
+# CosmoReview (https://github.com/vkuttyp/CosmoReview) reviews every pull request here. Until now it did so with no
+# configuration at all, and said so at the bottom of each review: its deterministic rules for locks, allocators,
+# sleeping functions and invariants need this repository's own vocabulary, and without it those rules run against
+# empty lists and can find nothing. Nothing below is assumed by the engine; every name in it is one this tree uses.
+
+repository:
+  name: CosmoOS
+  default_branch: main
+  adapter: cosmoos
+
+languages: [c, asm, shell, markdown, python, yaml, json, make, ld]
+
+ignore:
+  - out/
+  - build-cache/
+  - generated/
+  - toolchain/
+
+architecture:
+  root: prompts/
+  docs: docs/
+
+classification:
+  tests: ["tests/**", "**/*test.c", "**/test_*.c", "userland/tests/**"]
+  docs: ["docs/**", "**/*.md", "prompts/**"]
+
+impact:
+  paths:
+    kernel/core/: 5
+    kernel/memory/: 5
+    kernel/scheduler/: 5
+    kernel/interrupt/: 5
+    kernel-services/: 4
+    drivers/: 4
+    boot/: 3
+    libc/: 2
+    userland/: 1
+  architecture_paths: [kernel/arch/, boot/uefi/arch/]
+
+llm:
+  # One analyst call in flight, and eight attempts at a busy provider.
+  #
+  # The reviewer's default is three at a time, and the account it runs on allows three requests a minute for the
+  # whole organisation. On the report for #219 that produced 226 refusals in ninety minutes, and every analyst call
+  # that ran out of attempts fell through to the spare model — so the review of that change was written by the
+  # fallback, which is not what anyone chose. An analyst call takes about sixteen seconds here; one at a time is
+  # already most of what the provider allows.
+  parallelism: 1
+  attempts: 8
+
+review:
+  # Seven analysts one at a time, then verification and the summary. The default fifteen minutes is a budget written
+  # for three in flight.
+  timeout_seconds: 1800
+
+# The deterministic rules' vocabulary. Names come from kernel/include/kernel/{spinlock,mutex,semaphore,kmalloc,pmm,
+# irq,timer,waitqueue}.h and kernel-services/net/mbuf.h.
+analysis:
+  locks:
+    - { acquire: spin_lock,                release: spin_unlock,             kind: spinlock }
+    - { acquire: spin_lock_nested,         release: spin_unlock,             kind: spinlock }
+    - { acquire: spin_lock_irqsave,        release: spin_unlock_irqrestore,  kind: spinlock, disables_irq: true }
+    - { acquire: spin_lock_irqsave_nested, release: spin_unlock_irqrestore,  kind: spinlock, disables_irq: true }
+    - { acquire: mutex_lock,               release: mutex_unlock,            kind: mutex,     sleeps: true }
+    - { acquire: mutex_lock_nested,        release: mutex_unlock,            kind: mutex,     sleeps: true }
+    - { acquire: semaphore_down,           release: semaphore_up,            kind: semaphore, sleeps: true }
+    # Regions with no lock object of their own still have an identity the rules can order.
+    - { acquire: arch_irq_save,            release: arch_irq_restore,        kind: irq-disabled,        disables_irq: true, identity: irqs }
+    - { acquire: arch_irq_disable,         release: arch_irq_enable,         kind: irq-disabled,        disables_irq: true, identity: irqs }
+    - { acquire: preempt_disable,          release: preempt_enable,          kind: preemption-disabled, identity: preemption }
+
+  # A change that sleeps on a queue is shown who wakes it, and one that wakes a queue is shown who sleeps on it.
+  waits:
+    - { wait: wait_event,          wake: waitqueue_wake_all }
+    - { wait: wait_event_killable, wake: waitqueue_wake_all }
+    - { wait: wait_event_timeout,  wake: waitqueue_wake_all }
+    - { wait: wait_event,          wake: waitqueue_wake_one }
+    - { wait: wait_event_killable, wake: waitqueue_wake_one }
+    - { wait: wait_event_timeout,  wake: waitqueue_wake_one }
+
+  sleeping_functions: [mutex_lock, mutex_lock_nested, semaphore_down, schedule, sched_yield, thread_sleep_ns,
+                       thread_sleep_ms, thread_sleep_ns_killable, wait_event, wait_event_killable, wait_for_completion,
+                       kmalloc, kzalloc, krealloc, might_sleep, irq_request, irq_release]
+
+  allocators:
+    - { name: kmalloc,         free: kfree }
+    - { name: kzalloc,         free: kfree }
+    - { name: krealloc,        free: kfree }
+    - { name: pmm_alloc_page,  free: pmm_free_page }
+    - { name: pmm_alloc_pages, free: pmm_free_pages }
+    - { name: m_getcl,         free: m_freem }
+    # m_free releases one mbuf and m_freem a whole chain: both end an mbuf's life.
+    - { name: m_get,           free: m_free }
+    - { name: m_get,           free: m_freem }
+    - { name: dma_alloc,       free: dma_free, free_argument: 2 }
+
+  # timer_cancel() does not wait for a running callback; timer_cancel_sync() does.
+  async_handlers:
+    - { kind: timer, arm: timer_start, cancel: timer_cancel, cancel_sync: timer_cancel_sync }
+  references:
+    - { get: kobject_get, put: kobject_put }
+    - { get: vnode_get,   put: vnode_put }
+  dma:
+    - { map: dma_map, unmap: dma_unmap, buffer_argument: 1, handle_argument: 1 }
+  publish:
+    - { add: list_push_back,     remove: list_remove, object_argument: 1 }
+    - { add: list_push_front,    remove: list_remove, object_argument: 1 }
+    - { add: list_insert_after,  remove: list_remove, object_argument: 1 }
+    - { add: list_insert_before, remove: list_remove, object_argument: 1 }
+
+  irq_registrations:
+    - { name: irq_request,     handler_argument: 1 }
+    - { name: irq_request_msi, handler_argument: 1 }
+  irq_handler_patterns: ["*_irq_handler", "*_isr", "*_irq"]
+
+  # Functions whose name or leading comment says they run with a lock already held.
+  lock_required_patterns: ["*_locked"]
+  lock_required_comments: ["lock held", "holds the lock", "caller holds", "with the lock"]
+
+  # Functions where the object is not shared yet, or no longer is: their accesses neither count towards a field's
+  # guard nor are reported against it.
+  private_object_patterns: ["*_init", "*_init_*", "init_*", "*_create", "*create_*", "*_new", "*_alloc", "alloc_*",
+                            "*_setup", "*_bootstrap", "*_reset", "*_free", "free_*", "*_destroy", "*_release",
+                            "*_released", "*_put", "*_fini", "*_teardown", "*_exit", "*_drain"]
+  guard_exempt_paths: ["*test.c", "tests/*"]
+
+  # An allocation that is already zeroed is what kzalloc saves; `$` is the allocation and `_` any argument.
+  helpers:
+    - { prefer: kzalloc, instead_of: ["kmalloc", "memset($, 0, _)"], within: 4, description: "an allocation that is already zeroed" }
+  # ramblk_release() frees the whole ramdisk through its embedded blkdev: a failure path that calls it is done.
+  ownership_transfers: [ramblk_release]
+
+  architecture:
+    generic_paths: [kernel/core/, kernel/memory/, kernel/scheduler/, kernel/process/, kernel/syscall/,
+                    kernel/interrupt/, kernel-services/, drivers/]
+    arch_paths: [kernel/arch/]
+    portability_paths: [kernel/include/arch/]
+    invariant_id: ARCH-001
+
+  # thread_exit disables interrupts and schedules away for good: blocking under an IRQ-disabled region by design.
+  # The rest are the primitives themselves, which cannot be held to the rules they implement.
+  exempt_functions: [thread_exit, arch_irq_save, arch_irq_restore, arch_irq_disable, arch_irq_enable,
+                     preempt_disable, preempt_enable, spin_lock, spin_unlock, spin_lock_irqsave,
+                     spin_unlock_irqrestore, spin_lock_nested, spin_lock_irqsave_nested, spin_trylock,
+                     mutex_lock, mutex_unlock, mutex_lock_nested, mutex_trylock, semaphore_down, semaphore_up,
+                     lock_common]
+  # The lock implementations, the lockdep self-test that inverts orders on purpose, and userland/, which uses
+  # pthread primitives this vocabulary does not describe.
+  exempt_paths: [kernel/core/spinlock.c, kernel/core/mutex.c, kernel/core/lockdep.c, kernel/core/lockdeptest.c,
+                 tests/, userland/]
+
+  rule_invariants:
+    SLEEP-IN-ATOMIC: KERNEL-LOCK-001
+    IRQ-CONTEXT: KERNEL-LOCK-001
+    LOCK-ORDER: KERNEL-LOCK-001
+    ATOMIC-CONTEXT: KERNEL-LOCK-001
+    UNGUARDED-FIELD: KERNEL-LOCK-001
+    DOUBLE-FREE: MEMORY-001
+    USE-AFTER-FREE: MEMORY-001
+    FREE-AFTER-ASYNC-CANCEL: MEMORY-001
+    FREE-WHILE-ARMED: MEMORY-001
+    DOUBLE-PUT: MEMORY-001
+    FREE-HELD-REFERENCE: MEMORY-001
+    PUBLISH-THEN-FREE: MEMORY-001
+    UNCHECKED-ALLOCATION: MEMORY-001
+    LEAK-ON-ERROR-PATH: MEMORY-001
+    DMA-ACTIVE-FREE: DMA-001
+
+invariants:
+  - id: KERNEL-LOCK-001
+    category: concurrency
+    description: Sleeping locks must never be acquired while holding an IRQ-disabled spinlock.
+  - id: MEMORY-001
+    category: lifetime
+    description: Kernel objects must not be freed while references remain.
+  - id: DMA-001
+    category: drivers
+    description: Device-visible buffers must satisfy DMA ownership rules.
+  - id: ARCH-001
+    category: architecture
+    description: Generic kernel code must not depend directly on architecture-specific state.
+    paths: ["kernel/core/**", "kernel/memory/**", "kernel/scheduler/**", "kernel-services/**"]
