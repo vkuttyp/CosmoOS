@@ -620,6 +620,67 @@ int main(int argc, char **argv)
     }
     CHECKV(seen == 7, seen);
     CHECKV(sc3(LX_getdents64, dfd, dents, sizeof(dents)) == 0, 0);
+    /*
+     * A directory descriptor names a directory (P31,
+     * docs/audit/next-subsystem-dirfd.md). Every *at call resolves a
+     * relative path from `dfd`, and every effect is cross-checked by
+     * ABSOLUTE path: an *at call that quietly resolved from the working
+     * directory ("/") instead would still succeed, and only the absolute
+     * check says which directory it acted in.
+     */
+    {
+        static char sb[256], lb[64];
+        long o = sc4(LX_openat, dfd, "moved", LX_O_RDONLY, 0);
+        CHECKV(o >= 3, o);
+        if (o >= 0)
+            sc1(LX_close, o);
+        CHECKV(sc4(LX_newfstatat, dfd, "moved", sb, 0) == 0, 0);
+        CHECKV(sc3(LX_faccessat, dfd, "moved", 0) == 0, 0);
+        CHECKV(sc3(LX_mkdirat, dfd, "sub", 0755) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/sub", sb, 0) == 0, 0);
+        CHECKV(sc3(LX_symlinkat, "moved", dfd, "lnk") == 0, 0);
+        long rl = sc4(LX_readlinkat, dfd, "lnk", lb, sizeof(lb));
+        CHECKV(rl == 5 && lb[0] == 'm' && lb[4] == 'd', rl);
+        CHECKV(sc4(LX_readlinkat, LX_AT_FDCWD, "/tmp/lxdir/lnk", lb, sizeof(lb)) == 5, 0);
+        CHECKV(sc4(LX_readlinkat, dfd, "absent", lb, sizeof(lb)) == -2, 0);   /* ENOENT, not ENOSYS */
+        CHECKV(sc4(LX_mknodat, dfd, "fifo", LX_S_IFIFO | 0644, 0) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/fifo", sb, 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, dfd, "fifo", 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, dfd, "lnk", 0) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/lnk", sb, LX_AT_SYMLINK_NOFOLLOW) == -2, 0);
+        /* renameat across two descriptors: moved -> sub/m2 -> back */
+        long dfd2 = sc4(LX_openat, dfd, "sub", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+        CHECKV(dfd2 >= 3, dfd2);
+        CHECKV(sc4(LX_renameat, dfd, "moved", dfd2, "m2") == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/sub/m2", sb, 0) == 0, 0);
+        CHECKV(sc4(LX_renameat, dfd2, "m2", dfd, "moved") == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/moved", sb, 0) == 0, 0);
+        if (dfd2 >= 0)
+            sc1(LX_close, dfd2);
+        CHECKV(sc3(LX_unlinkat, dfd, "sub", LX_AT_REMOVEDIR) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxdir/sub", sb, 0) == -2, 0);
+        /* Refusals: a regular file is not a directory, a closed one is nothing. */
+        long rf = sc4(LX_openat, dfd, "moved", LX_O_RDONLY, 0);
+        CHECKV(sc4(LX_openat, rf, "x", LX_O_RDONLY, 0) == -20, 0);             /* ENOTDIR */
+        sc1(LX_close, rf);
+        CHECKV(sc4(LX_openat, rf, "x", LX_O_RDONLY, 0) == -9, 0);              /* EBADF */
+        /* fchdir: the name comes with the directory, and the next relative
+         * chdir normalises against it. */
+        CHECKV(sc1(LX_fchdir, dfd) == 0, 0);
+        static char cw[64];
+        long gl = sc2(LX_getcwd, cw, sizeof(cw));
+        CHECKV(gl == 11 && streq(cw, "/tmp/lxdir"), gl);
+        long rel = sc4(LX_openat, LX_AT_FDCWD, "moved", LX_O_RDONLY, 0);
+        CHECKV(rel >= 3, rel);
+        if (rel >= 0)
+            sc1(LX_close, rel);
+        CHECKV(sc1(LX_chdir, "..") == 0, 0);
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 5 && streq(cw, "/tmp"), 0);
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
+        long rf2 = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdir/moved", LX_O_RDONLY, 0);
+        CHECKV(sc1(LX_fchdir, rf2) == -20, 0);                                  /* not a directory */
+        sc1(LX_close, rf2);
+    }
     CHECKV(sc1(LX_close, dfd) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/moved", 0) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir", LX_AT_REMOVEDIR) == 0, 0);

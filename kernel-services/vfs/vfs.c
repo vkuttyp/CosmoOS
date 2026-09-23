@@ -1390,8 +1390,22 @@ static void file_release(struct kobject *obj)
         pagecache_sync(f->vn);
         mutex_unlock(&f->vn->lock);
     }
+    if (f->dir_path)
+        kfree(f->dir_path);
     vnode_put(f->vn);
     kfree(f);
+}
+
+void file_set_dir_path(struct file *f, const char *abs)
+{
+    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || abs == NULL || abs[0] != '/')
+        return;
+    size_t n = strnlen(abs, VFS_PATH_MAX - 1) + 1;
+    char *p = kmalloc(n, 0);
+    if (p == NULL)
+        return;
+    strlcpy(p, abs, n);
+    f->dir_path = p;
 }
 
 static int64_t file_obj_read(struct kobject *obj, void *buf, size_t len)
@@ -2178,13 +2192,20 @@ int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
 
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
 {
+    return vfs_rename2(start, oldpath, start, newpath);
+}
+
+/* Two starts, for renameat's two descriptors. The checks below are made
+ * on the two parents, however they were reached. */
+int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath)
+{
     struct vnode *odir, *ndir;
     char oname[VFS_NAME_MAX + 1], nname[VFS_NAME_MAX + 1];
     size_t olen, nlen;
-    int rc = parent_for_mutation(start, oldpath, oname, &odir, &olen);
+    int rc = parent_for_mutation(ostart, oldpath, oname, &odir, &olen);
     if (rc)
         return rc;
-    rc = parent_for_mutation(start, newpath, nname, &ndir, &nlen);
+    rc = parent_for_mutation(nstart, newpath, nname, &ndir, &nlen);
     if (rc) {
         vnode_put(odir);
         return rc;

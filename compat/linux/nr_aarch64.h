@@ -62,6 +62,7 @@
 #define LX_fdatasync 83
 #define LX_getcwd 17
 #define LX_chdir 49
+#define LX_fchdir 50
 #define LX_umask 166
 #define LX_gettimeofday 169
 #define LX_getrlimit 163

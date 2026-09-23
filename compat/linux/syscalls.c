@@ -129,13 +129,46 @@ static int get_path(uint64_t uptr, char *buf)
     return buf[0] == '\0' ? -ENOENT : 0;
 }
 
-/* Only AT_FDCWD is a directory handle the kernel can resolve from; a
- * real dirfd would need openat semantics the VFS does not offer yet. */
-static int check_dirfd(int64_t dirfd, const char *path)
+/*
+ * The directory a relative path in an *at call resolves from, referenced
+ * (docs/audit/next-subsystem-dirfd.md, invariant P31). AT_FDCWD, or an
+ * absolute path -- which ignores its base -- gives the working directory;
+ * any other descriptor must be an open directory: -EBADF if no handle,
+ * -ENOTDIR if not a directory. No rights are demanded, as Linux demands
+ * none. The directory is referenced before the handle's reference goes,
+ * so a sibling thread closing the descriptor mid-call cannot free the base
+ * under the walk (V35). With `basepath`, also the base's name, from the
+ * same snapshot: the cwd's path, or the directory file's recorded one
+ * (empty if it has none), for a caller that must record a new name.
+ *
+ * This replaces a check that answered every real descriptor -ENOSYS on
+ * the premise that the VFS could not resolve from one. It always could:
+ * every entry point takes a start.
+ */
+static int at_base(int64_t dirfd, const char *path, struct vnode **out, char *basepath, size_t n)
 {
-    if ((int)dirfd == LX_AT_FDCWD || path[0] == '/')
+    if ((int)dirfd == LX_AT_FDCWD || path[0] == '/') {
+        *out = basepath ? process_cwd_snapshot(basepath, n) : process_cwd_get();
         return 0;
-    return -ENOSYS;
+    }
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)dirfd, 0);
+    if (obj == NULL)
+        return -EBADF;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL) {
+        kobject_put(obj);
+        return -ENOTDIR;   /* a socket or a pipe end is open and is not a directory */
+    }
+    if (f->vn->type != VNODE_DIR) {
+        file_put(f);
+        return -ENOTDIR;
+    }
+    vnode_get(f->vn);
+    *out = f->vn;
+    if (basepath)
+        strlcpy(basepath, f->dir_path ? f->dir_path : "", n);
+    file_put(f);
+    return 0;
 }
 
 static struct file *file_of(int h, unsigned rights)
@@ -295,7 +328,7 @@ static int64_t rw_vec(struct syscall_args *a, bool write)
 static int64_t lx_readv(struct syscall_args *a) { return rw_vec(a, false); }
 static int64_t lx_writev(struct syscall_args *a) { return rw_vec(a, true); }
 
-static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
+static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t mode)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(upath, path);
@@ -305,11 +338,22 @@ static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
     if (lx_open_flags(lxflags, &flags) < 0)
         return -EINVAL;
     struct file *f;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_open(cwd, path, flags, mode & 07777u, &f);
-    vnode_put(cwd);
+    char base[VFS_PATH_MAX];
+    struct vnode *start;
+    rc = at_base(dirfd, path, &start, base, sizeof(base));
     if (rc)
         return rc;
+    rc = vfs_open(start, path, flags, mode & 07777u, &f);
+    vnode_put(start);
+    if (rc)
+        return rc;
+    /* A directory remembers its name, for fchdir (P31); a base with no
+     * name gives it none, and fchdir then refuses it. */
+    if (f->vn->type == VNODE_DIR && base[0] == '/') {
+        char abs[VFS_PATH_MAX];
+        if (path_normalize(base, path, abs, sizeof(abs)) == 0)
+            file_set_dir_path(f, abs);
+    }
     unsigned rights = HANDLE_RIGHT_OWNER, acc = flags & COSMO_O_ACCMODE;   /* as the native open: the file is the caller's to dup and pass */
     if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_READ;
@@ -320,21 +364,17 @@ static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
     return h;
 }
 
-static __maybe_unused int64_t lx_open(struct syscall_args *a) { return do_open(a->a[0], (unsigned)a->a[1], (uint32_t)a->a[2]); }
+static __maybe_unused int64_t lx_open(struct syscall_args *a)
+{
+    return do_open(LX_AT_FDCWD, a->a[0], (unsigned)a->a[1], (uint32_t)a->a[2]);
+}
 static __maybe_unused int64_t lx_creat(struct syscall_args *a)
 {
-    return do_open(a->a[0], LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, (uint32_t)a->a[1]);
+    return do_open(LX_AT_FDCWD, a->a[0], LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, (uint32_t)a->a[1]);
 }
 static int64_t lx_openat(struct syscall_args *a)
 {
-    char path[VFS_PATH_MAX];
-    int rc = get_path(a->a[1], path);
-    if (rc)
-        return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
-    if (rc)
-        return rc;
-    return do_open(a->a[1], (unsigned)a->a[2], (uint32_t)a->a[3]);
+    return do_open((int64_t)a->a[0], a->a[1], (unsigned)a->a[2], (uint32_t)a->a[3]);
 }
 
 static int64_t lx_close(struct syscall_args *a) { return handle_close(&process_current()->handles, (int)a->a[0]); }
@@ -393,7 +433,7 @@ static __maybe_unused int64_t lx_lstat(struct syscall_args *a)
 
 /* readlink(2) and readlinkat(2): the bytes, never terminated, truncated
  * to the caller's buffer. */
-static int64_t readlink_common(uint64_t upath, uint64_t ubuf, size_t len)
+static int64_t readlink_common(int64_t dirfd, uint64_t upath, uint64_t ubuf, size_t len)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(upath, path);
@@ -403,12 +443,17 @@ static int64_t readlink_common(uint64_t upath, uint64_t ubuf, size_t len)
         return -EINVAL;
     if (len > VFS_PATH_MAX)
         len = VFS_PATH_MAX;
+    struct vnode *start;
+    rc = at_base(dirfd, path, &start, NULL, 0);
+    if (rc)
+        return rc;
     char *buf = kmalloc(len, 0);
-    if (buf == NULL)
+    if (buf == NULL) {
+        vnode_put(start);
         return -ENOMEM;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_readlink(cwd, path, buf, len);
-    vnode_put(cwd);
+    }
+    rc = vfs_readlink(start, path, buf, len);
+    vnode_put(start);
     if (rc > 0 && copy_to_user(ubuf, buf, (size_t)rc) != 0)
         rc = -EFAULT;
     kfree(buf);
@@ -417,22 +462,17 @@ static int64_t readlink_common(uint64_t upath, uint64_t ubuf, size_t len)
 
 static __maybe_unused int64_t lx_readlink(struct syscall_args *a)
 {
-    return readlink_common(a->a[0], a->a[1], (size_t)a->a[2]);
+    return readlink_common(LX_AT_FDCWD, a->a[0], a->a[1], (size_t)a->a[2]);
 }
 
 static int64_t lx_readlinkat(struct syscall_args *a)
 {
-    char path[VFS_PATH_MAX];
-    int rc = strncpy_from_user(path, a->a[1], VFS_PATH_MAX);
-    if (rc < 0)
-        return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
-    if (rc)
-        return rc;
-    return readlink_common(a->a[1], a->a[2], (size_t)a->a[3]);
+    return readlink_common((int64_t)a->a[0], a->a[1], a->a[2], (size_t)a->a[3]);
 }
 
-static int64_t symlink_common(uint64_t utarget, uint64_t upath)
+/* The link is made relative to `dirfd`; its target is stored verbatim and
+ * resolved when the link is followed, as Linux does. */
+static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
 {
     char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
     int rc = strncpy_from_user(target, utarget, sizeof(target));
@@ -441,27 +481,23 @@ static int64_t symlink_common(uint64_t utarget, uint64_t upath)
     rc = get_path(upath, path);
     if (rc)
         return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_symlink(cwd, path, target);
-    vnode_put(cwd);
+    struct vnode *start;
+    rc = at_base(dirfd, path, &start, NULL, 0);
+    if (rc)
+        return rc;
+    rc = vfs_symlink(start, path, target);
+    vnode_put(start);
     return rc;
 }
 
 static __maybe_unused int64_t lx_symlink(struct syscall_args *a)
 {
-    return symlink_common(a->a[0], a->a[1]);
+    return symlink_common(a->a[0], LX_AT_FDCWD, a->a[1]);
 }
 
 static int64_t lx_symlinkat(struct syscall_args *a)
 {
-    char path[VFS_PATH_MAX];
-    int rc = strncpy_from_user(path, a->a[2], VFS_PATH_MAX);
-    if (rc < 0)
-        return rc;
-    rc = check_dirfd((int64_t)a->a[1], path);
-    if (rc)
-        return rc;
-    return symlink_common(a->a[0], a->a[2]);
+    return symlink_common(a->a[0], (int64_t)a->a[1], a->a[2]);
 }
 
 static int64_t lx_fstat(struct syscall_args *a)
@@ -485,14 +521,14 @@ static int64_t lx_newfstatat(struct syscall_args *a)
         rc = syscall_handle_stat((int)a->a[0], &st);
         return rc ? rc : stat_out(&st, a->a[2]);
     }
-    rc = check_dirfd((int64_t)a->a[0], path);
+    struct vnode *start;
+    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
     if (rc)
         return rc;
     struct cosmo_stat st;
-    struct vnode *cwd = process_cwd_get();
     /* AT_SYMLINK_NOFOLLOW was read and dropped until links existed. */
-    rc = (flags & LX_AT_SYMLINK_NOFOLLOW) ? vfs_lstat(cwd, path, &st) : vfs_stat(cwd, path, &st);
-    vnode_put(cwd);
+    rc = (flags & LX_AT_SYMLINK_NOFOLLOW) ? vfs_lstat(start, path, &st) : vfs_stat(start, path, &st);
+    vnode_put(start);
     return rc ? rc : stat_out(&st, a->a[2]);
 }
 
@@ -569,12 +605,12 @@ static int64_t lx_mkdirat(struct syscall_args *a)
     int rc = get_path(a->a[1], path);
     if (rc)
         return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
+    struct vnode *start;
+    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
     if (rc)
         return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_mkdir(cwd, path, (uint32_t)a->a[2] & 07777u);
-    vnode_put(cwd);
+    rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u);
+    vnode_put(start);
     return rc;
 }
 
@@ -582,7 +618,7 @@ static int64_t lx_mkdirat(struct syscall_args *a)
  * (S_IFIFO); a socket's name is made by bind (S_IFSOCK -EINVAL, as the
  * native mknod says); every other type is -EPERM, Linux's answer to a
  * caller without CAP_MKNOD. */
-static int64_t do_mknod(const char *path, uint32_t mode)
+static int64_t do_mknod(int64_t dirfd, const char *path, uint32_t mode)
 {
     int rc;
     switch (mode & LX_S_IFMT) {
@@ -593,10 +629,13 @@ static int64_t do_mknod(const char *path, uint32_t mode)
     default:
         return -EPERM;
     }
-    struct vnode *cwd = process_cwd_get();
+    struct vnode *start;
+    rc = at_base(dirfd, path, &start, NULL, 0);
+    if (rc)
+        return rc;
     struct vnode *vn;
-    rc = vfs_mknod(cwd, path, mode & 07777u, VNODE_FIFO, &vn);
-    vnode_put(cwd);
+    rc = vfs_mknod(start, path, mode & 07777u, VNODE_FIFO, &vn);
+    vnode_put(start);
     if (rc == 0)
         vnode_put(vn);
     return rc;
@@ -608,10 +647,7 @@ static int64_t lx_mknodat(struct syscall_args *a)
     int rc = get_path(a->a[1], path);
     if (rc)
         return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
-    if (rc)
-        return rc;
-    return do_mknod(path, (uint32_t)a->a[2]);
+    return do_mknod((int64_t)a->a[0], path, (uint32_t)a->a[2]);
 }
 
 /* The legacy mknod (x86-64 only; AArch64 has the *at form alone), as
@@ -622,7 +658,7 @@ static __maybe_unused int64_t lx_mknod(struct syscall_args *a)
     int rc = get_path(a->a[0], path);
     if (rc)
         return rc;
-    return do_mknod(path, (uint32_t)a->a[1]);
+    return do_mknod(LX_AT_FDCWD, path, (uint32_t)a->a[1]);
 }
 
 static int64_t lx_unlinkat(struct syscall_args *a)
@@ -631,12 +667,12 @@ static int64_t lx_unlinkat(struct syscall_args *a)
     int rc = get_path(a->a[1], path);
     if (rc)
         return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
+    struct vnode *start;
+    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
     if (rc)
         return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(cwd, path) : vfs_unlink(cwd, path);
-    vnode_put(cwd);
+    rc = (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(start, path) : vfs_unlink(start, path);
+    vnode_put(start);
     return rc;
 }
 
@@ -646,15 +682,13 @@ static int64_t lx_faccessat(struct syscall_args *a)
     int rc = get_path(a->a[1], path);
     if (rc)
         return rc;
-    rc = check_dirfd((int64_t)a->a[0], path);
+    struct vnode *start;
+    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
     if (rc)
         return rc;
     struct cosmo_stat st;
-    if (rc)
-        return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_stat(cwd, path, &st);
-    vnode_put(cwd);
+    rc = vfs_stat(start, path, &st);
+    vnode_put(start);
     return rc;
 }
 
@@ -682,14 +716,18 @@ static int64_t lx_renameat(struct syscall_args *a)
     rc = get_path(a->a[3], newp);
     if (rc)
         return rc;
-    rc = check_dirfd((int64_t)a->a[0], oldp);
-    if (rc == 0)
-        rc = check_dirfd((int64_t)a->a[2], newp);
+    struct vnode *ostart, *nstart;
+    rc = at_base((int64_t)a->a[0], oldp, &ostart, NULL, 0);
     if (rc)
         return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_rename(cwd, oldp, newp);
-    vnode_put(cwd);
+    rc = at_base((int64_t)a->a[2], newp, &nstart, NULL, 0);
+    if (rc) {
+        vnode_put(ostart);
+        return rc;
+    }
+    rc = vfs_rename2(ostart, oldp, nstart, newp);
+    vnode_put(ostart);
+    vnode_put(nstart);
     return rc;
 }
 
@@ -698,6 +736,23 @@ static int64_t lx_chdir(struct syscall_args *a)
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
     return rc ? rc : process_chdir(path);
+}
+
+/* fchdir: the directory a descriptor names becomes the working directory,
+ * with the name the directory file recorded when it was opened (P31). */
+static int64_t lx_fchdir(struct syscall_args *a)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
+        return -EBADF;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL) {
+        kobject_put(obj);
+        return -ENOTDIR;
+    }
+    int rc = process_fchdir(f->vn, f->dir_path);
+    file_put(f);
+    return rc;
 }
 
 static int64_t lx_getcwd(struct syscall_args *a)
@@ -2706,6 +2761,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_fdatasync] = lx_fsync,
     [LX_getcwd] = lx_getcwd,
     [LX_chdir] = lx_chdir,
+    [LX_fchdir] = lx_fchdir,
 #ifdef LX_rename
     [LX_rename] = lx_rename,
 #endif

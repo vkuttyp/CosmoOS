@@ -512,6 +512,7 @@ static const struct selftest tests[] = {
     { "pagecache",       selftest_pagecache },
     { "pagecache-pinned", selftest_pagecache_pinned },
     { "vfs-ramfs",       selftest_vfs_ramfs },
+    { "vfs-rename2",     selftest_vfs_rename2 },
     { "vfs-symlink",     selftest_vfs_symlink },
     { "vfs-symlink-walk", selftest_vfs_symlink_walk },
     { "vfs-symlink-loop", selftest_vfs_symlink_loop },

@@ -306,6 +306,11 @@ void process_return_to_user(struct arch_trap_frame *frame);
 
 /* Working directory. */
 int process_chdir(const char *path);
+/* fchdir: make `dir` (the caller keeps its own reference) the working
+ * directory with `path` as its name, both published under the process
+ * lock as chdir publishes them. -ENOTDIR, -EACCES without search
+ * permission; -ENOENT when there is no name to give it (P31). */
+int process_fchdir(struct vnode *dir, const char *path);
 
 /*
  * The calling process's current directory, **referenced**. The caller

@@ -225,6 +225,14 @@ struct file {
     bool dev_open;            /* the vnode's open hook ran and succeeded; release will run */
     uint32_t wb_seq_seen;     /* the write-back failure sequence this file has been told about
                                  (pagecache.wb_seq at open; advanced by each report) */
+    /* A directory file's normalised absolute path, as the door that
+     * opened it resolved it; NULL for anything else. Set once, before the
+     * file is installed in a handle table, and never changed, so a reader
+     * holding a reference needs no lock. What fchdir publishes as the
+     * working directory's name (docs/audit/next-subsystem-dirfd.md, P31);
+     * stale after a rename of the directory or of any ancestor, as the
+     * cwd's own name is (P27). */
+    char *dir_path;
 };
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -319,6 +327,13 @@ int vfs_unlink(struct vnode *start, const char *path);
 int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out);
 int vfs_rmdir(struct vnode *start, const char *path);
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
+/* renameat: the two paths resolve from two starts. vfs_rename(s, a, b)
+ * is vfs_rename2(s, a, s, b). */
+int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath);
+/* Record a directory file's path (a no-op for anything else, or on
+ * allocation failure: the file then has no name to give fchdir, which
+ * refuses it rather than invent one). Before the file is shared. */
+void file_set_dir_path(struct file *f, const char *abs);
 /* Set a regular file's length, dropping what is above it and reading as
  * zeros below a length it grew to. O_TRUNC is this with a size of zero;
  * this is the rest of it, which a filesystem that stores several blocks

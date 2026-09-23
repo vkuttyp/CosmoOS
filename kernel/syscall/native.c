@@ -622,11 +622,20 @@ static int64_t sys_open(struct syscall_args *a)
         return rc;
     uint32_t mode = (uint32_t)a->a[2];
     struct file *f;
-    struct vnode *cwd = process_cwd_get();
+    char base[VFS_PATH_MAX];
+    struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
     rc = vfs_open(cwd, path, flags, mode, &f);
     vnode_put(cwd);
     if (rc)
         return rc;
+    /* A directory remembers the path it was opened by, normalised against
+     * the same snapshot it was looked up from, so a Linux program handed
+     * this handle can fchdir into it (P31). */
+    if (f->vn->type == VNODE_DIR) {
+        char abs[VFS_PATH_MAX];
+        if (path_normalize(base, path, abs, sizeof(abs)) == 0)
+            file_set_dir_path(f, abs);
+    }
     /* The access mode decides read and write; opening a file is what
      * makes the caller its owner, so it may also copy, pass on and
      * administer the handle. */

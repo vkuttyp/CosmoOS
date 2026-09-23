@@ -69,6 +69,7 @@
 #define LX_fdatasync 75
 #define LX_getcwd 79
 #define LX_chdir 80
+#define LX_fchdir 81
 #define LX_rename 82
 #define LX_mkdir 83
 #define LX_mknod 133

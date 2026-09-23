@@ -1297,6 +1297,8 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
     return vn;
 }
 
+static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
+
 int process_chdir(const char *path)
 {
     struct process *cur = process_current();
@@ -1322,11 +1324,22 @@ int process_chdir(const char *path)
         vnode_put(cwd);
     if (rc)
         return rc;
+    return cwd_publish(cur, vn, newpath);
+}
+
+/*
+ * The one publish both chdir and fchdir make: `vn` (a reference this
+ * consumes) and `newpath` become the working directory together, under
+ * the process lock, and the old one is put outside it. The checks are
+ * here so the two doors cannot disagree about them.
+ */
+static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath)
+{
     if (vn->type != VNODE_DIR) {
         vnode_put(vn);
         return -ENOTDIR;
     }
-    rc = vfs_permission(vn, VFS_MAY_EXEC);   /* search permission on the new directory */
+    int rc = vfs_permission(vn, VFS_MAY_EXEC);   /* search permission on the new directory */
     if (rc) {
         vnode_put(vn);
         return rc;
@@ -1349,6 +1362,22 @@ int process_chdir(const char *path)
         vnode_put(old);
     vfs_cwd_hold_after_put(old);
     return 0;
+}
+
+int process_fchdir(struct vnode *dir, const char *path)
+{
+    struct process *cur = process_current();
+    KASSERT(cur != NULL);
+    if (dir->type != VNODE_DIR)
+        return -ENOTDIR;   /* before the name: a regular file has none, and that is not why it fails */
+    if (path == NULL || path[0] != '/')
+        return -ENOENT;   /* no name to publish, and inventing one is worse than refusing */
+    char newpath[sizeof(cur->cwd_path_locked)];
+    if (strlcpy(newpath, path, sizeof(newpath)) >= sizeof(newpath))
+        return -ENAMETOOLONG;
+    vfs_cwd_hold_swapper_enter();
+    vnode_get(dir);
+    return cwd_publish(cur, dir, newpath);
 }
 
 /*
