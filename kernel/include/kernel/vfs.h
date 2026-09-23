@@ -484,5 +484,10 @@ void vfs_cwd_hold_swapper_enter(void);
 void vfs_cwd_hold_swap_wait(void);
 void vfs_cwd_hold_before_put(struct vnode *old);
 void vfs_cwd_hold_after_put(struct vnode *old);
+/* A chdir or fchdir that registered as the swapper and then failed:
+ * deregister, and release a walk held for it -- nothing will be put, and
+ * a held walk must not wait out its bound for a swap that is not coming
+ * (found in review of the dirfd unit). */
+void vfs_cwd_hold_swapper_leave(void);
 
 #endif /* KERNEL_VFS_H */

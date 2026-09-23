@@ -1298,12 +1298,21 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
 }
 
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
+static int chdir_inner(struct process *cur, const char *path);
 
 int process_chdir(const char *path)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
     vfs_cwd_hold_swapper_enter();   /* the seam must never hold the thread that releases */
+    int rc = chdir_inner(cur, path);
+    if (rc)
+        vfs_cwd_hold_swapper_leave();   /* every failure after the enter, one place */
+    return rc;
+}
+
+static int chdir_inner(struct process *cur, const char *path)
+{
     /*
      * One snapshot for both: the base this normalises against and the
      * directory this looks up in must be the same directory, or what gets
@@ -1377,7 +1386,10 @@ int process_fchdir(struct vnode *dir, const char *path)
         return -ENAMETOOLONG;
     vfs_cwd_hold_swapper_enter();
     vnode_get(dir);
-    return cwd_publish(cur, dir, newpath);
+    int rc = cwd_publish(cur, dir, newpath);
+    if (rc)
+        vfs_cwd_hold_swapper_leave();
+    return rc;
 }
 
 /*

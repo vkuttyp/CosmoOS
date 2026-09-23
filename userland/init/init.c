@@ -1527,6 +1527,41 @@ static int probe(const char *kind)
         *(volatile char *)fresh = 1;   /* the demand fault fails: fatal */
         return 9;
     }
+    if (strcmp(kind, "dirfd-narrow") == 0 || strcmp(kind, "dirfd-wide") == 0) {
+        /* The dirfd unit's rights test: /tmp/dnw handed to a Linux program
+         * at fd 5, READ only or with the caller's own rights. */
+        int wide = kind[6] == 'w';
+        (void)cosmo_mkdir("/tmp/dnw", 0755);
+        long fh = cosmo_open("/tmp/dnw/f", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        if (fh < 0)
+            return 80;
+        cosmo_close((int)fh);
+        long dh = cosmo_open("/tmp/dnw", COSMO_O_RDONLY | COSMO_O_DIRECTORY, 0);
+        if (dh < 0)
+            return 81;
+        struct cosmo_spawn_handle hm[] = {
+            { .child = 1, .parent = 1, .rights = COSMO_RIGHTS_SAME },
+            { .child = 2, .parent = 2, .rights = COSMO_RIGHTS_SAME },
+            { .child = 5, .parent = (int)dh, .rights = wide ? COSMO_RIGHTS_SAME : COSMO_RIGHT_READ },
+        };
+        const char *argv[] = { "lxcwd", wide ? "wide" : "narrow", NULL };
+        long pid = cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/tests/linux/lxcwd", .argv = argv,
+                                                      .handles = hm, .nr_handles = 3 });
+        cosmo_close((int)dh);
+        int status = -1;
+        if (pid <= 0 || cosmo_wait((int)pid, &status, 0) != pid)
+            status = 82;
+        /* What the child could not change is unchanged, seen from here. */
+        struct cosmo_stat st;
+        if (status == 0 && cosmo_stat("/tmp/dnw/f", &st) != 0)
+            status = 83;
+        if (status == 0 && (cosmo_stat("/tmp/dnw/x", &st) == 0 || cosmo_stat("/tmp/dnw/g", &st) == 0 ||
+                            cosmo_stat("/tmp/dnw/new", &st) == 0 || cosmo_stat("/tmp/dnw/lnk", &st) == 0))
+            status = 84;
+        (void)cosmo_unlink("/tmp/dnw/f");
+        (void)cosmo_rmdir("/tmp/dnw");
+        return status;
+    }
     if (strncmp(kind, "cwd-hold-linux:", 15) == 0) {
         /* The held-walk racer at the Linux door
          * (docs/audit/next-subsystem-cwd-hold.md). A kernel-created

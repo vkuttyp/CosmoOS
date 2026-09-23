@@ -100,11 +100,51 @@ static void cleanup(void)
     (void)sc3(LX_unlinkat, LX_AT_FDCWD, ROOT, LX_AT_REMOVEDIR);
 }
 
+/*
+ * narrow / wide (the dirfd unit): a native parent hands this program a
+ * handle to /tmp/dnw at fd 5 -- READ only for `narrow`, the parent's own
+ * rights for `wide`, the one difference between the two runs. A lookup
+ * needs READ and works in both; changing an entry needs WRITE, so it is
+ * -EBADF under the narrowed handle and succeeds under the full one.
+ */
+static int dirfd_rights(int wide)
+{
+    static char sb[256];
+    if (sc4(LX_newfstatat, 5, "f", sb, 0) != 0)
+        return 30;
+    long o = sc4(LX_openat, 5, "f", LX_O_RDONLY, 0);
+    if (o < 0)
+        return 31;
+    sc1(LX_close, o);
+    if (wide) {
+        if (sc3(LX_mkdirat, 5, "x", 0755) != 0)
+            return 40;
+        if (sc3(LX_unlinkat, 5, "x", LX_AT_REMOVEDIR) != 0)
+            return 41;
+        lx_puts("LXCWD: wide ok\n");
+        return 0;
+    }
+    if (sc3(LX_mkdirat, 5, "x", 0755) != -9)
+        return 32;
+    if (sc3(LX_unlinkat, 5, "f", 0) != -9)
+        return 33;
+    if (sc4(LX_renameat, 5, "f", 5, "g") != -9)
+        return 34;
+    if (sc4(LX_openat, 5, "new", LX_O_WRONLY | LX_O_CREAT, 0644) != -9)
+        return 35;
+    if (sc3(LX_symlinkat, "f", 5, "lnk") != -9)
+        return 36;
+    lx_puts("LXCWD: narrow ok\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
         return 2;
     const char *pass = argv[1];
+    if (pass[0] == 'n' || pass[0] == 'w')
+        return dirfd_rights(pass[0] == 'w');
     if (pass[0] == 'o')
         g_outlive = 1;
     else if (pass[0] != 'c')

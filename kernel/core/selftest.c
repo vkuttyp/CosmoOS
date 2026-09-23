@@ -761,6 +761,7 @@ static const struct selftest tests[] = {
     { "vm-file-readpage-fail", selftest_vm_file_readpage_fail },
     { "cwd-hold-native", selftest_cwd_hold_native },
     { "cwd-hold-linux",  selftest_cwd_hold_linux },
+    { "dirfd-rights",    selftest_dirfd_rights },
     { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
     /* Last: what the harness typed at the keyboard while everything

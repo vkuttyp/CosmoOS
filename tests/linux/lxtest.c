@@ -680,6 +680,19 @@ int main(int argc, char **argv)
         long rf2 = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdir/moved", LX_O_RDONLY, 0);
         CHECKV(sc1(LX_fchdir, rf2) == -20, 0);                                  /* not a directory */
         sc1(LX_close, rf2);
+        /* A directory reached through a symbolic link: the vnode resolves
+         * (a relative lookup through it works), but the spelling names the
+         * link, not the directory, so there is no coherent name to publish
+         * and fchdir refuses rather than pair one with the other. */
+        CHECKV(sc3(LX_symlinkat, "/tmp/lxdir", LX_AT_FDCWD, "/tmp/lxdlink") == 0, 0);
+        long dl = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdlink", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+        CHECKV(dl >= 3, dl);
+        CHECKV(sc4(LX_newfstatat, dl, "moved", sb, 0) == 0, 0);
+        CHECKV(sc1(LX_fchdir, dl) == -2, 0);                                    /* ENOENT: no coherent name */
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 2 && streq(cw, "/"), 0);      /* and nothing was published */
+        if (dl >= 0)
+            sc1(LX_close, dl);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdlink", 0) == 0, 0);
     }
     CHECKV(sc1(LX_close, dfd) == 0, 0);
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdir/moved", 0) == 0, 0);

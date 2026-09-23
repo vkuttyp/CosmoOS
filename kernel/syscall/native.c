@@ -645,6 +645,11 @@ static int64_t sys_open(struct syscall_args *a)
         rights |= HANDLE_RIGHT_READ;
     if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_WRITE;
+    /* As the Linux door: a directory handle carries WRITE, the right to
+     * change its entries through a Linux program's *at calls, which a
+     * delegation narrows by giving READ alone (P31). */
+    if (f->vn->type == VNODE_DIR)
+        rights |= HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
     int h = handle_install(&process_current()->handles, &f->obj, rights);
     file_put(f);   /* the table holds its own reference */
     return h;

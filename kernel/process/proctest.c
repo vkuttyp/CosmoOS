@@ -2133,3 +2133,33 @@ bool selftest_mmap_place_race(const char **reason)
           "in both forms");
     return true;
 }
+
+
+/*
+ * A directory handle's rights bound what a Linux program can do through
+ * it (P31, docs/audit/next-subsystem-dirfd.md; found in review). init
+ * hands lxcwd a handle to /tmp/dnw at fd 5 twice, differing in one thing:
+ * READ only, then the parent's own rights. Under READ a lookup works and
+ * every change of an entry is -EBADF; under the full rights the same
+ * change succeeds -- which is what says the refusal is the right and not
+ * something else about the directory.
+ */
+bool selftest_dirfd_rights(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("tests/linux/lxcwd", &image, &image_size)) {
+        kinfo("selftest: dirfd-rights: no lxcwd in the boot archive; skipping");
+        return true;
+    }
+    static const char *const narrow_argv[] = { "init", "--probe", "dirfd-narrow", NULL };
+    static const char *const wide_argv[] = { "init", "--probe", "dirfd-wide", NULL };
+    int narrow = -1, wide = -1;
+    if (!run_module(narrow_argv, &narrow, reason) || !run_module(wide_argv, &wide, reason))
+        return false;
+    kinfo("selftest: dirfd-rights: narrowed handle status %d, full handle status %d", narrow, wide);
+    CHECK(narrow == 0);   /* lookups worked, every change was -EBADF, nothing changed */
+    CHECK(wide == 0);     /* the control: the same changes succeed with WRITE */
+    kinfo("selftest: dirfd-rights: a read-only directory handle stays read-only through the *at calls");
+    return true;
+}

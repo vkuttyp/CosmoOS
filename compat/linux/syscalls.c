@@ -133,9 +133,14 @@ static int get_path(uint64_t uptr, char *buf)
  * The directory a relative path in an *at call resolves from, referenced
  * (docs/audit/next-subsystem-dirfd.md, invariant P31). AT_FDCWD, or an
  * absolute path -- which ignores its base -- gives the working directory;
- * any other descriptor must be an open directory: -EBADF if no handle,
- * -ENOTDIR if not a directory. No rights are demanded, as Linux demands
- * none. The directory is referenced before the handle's reference goes,
+ * any other descriptor must be an open directory: -EBADF if no handle or
+ * not the right the call needs, -ENOTDIR if not a directory. The right
+ * is the handle's capability, not the directory's permission bits: READ
+ * to look a name up, WRITE to add, remove or rename an entry -- so a
+ * directory handle delegated read-only stays read-only (found in review:
+ * the first build demanded none). A directory opened at either door
+ * carries both, which is what Linux's open-a-directory-read-only then
+ * unlinkat relies on. The directory is referenced before the handle's reference goes,
  * so a sibling thread closing the descriptor mid-call cannot free the base
  * under the walk (V35). With `basepath`, also the base's name, from the
  * same snapshot: the cwd's path, or the directory file's recorded one
@@ -145,13 +150,13 @@ static int get_path(uint64_t uptr, char *buf)
  * the premise that the VFS could not resolve from one. It always could:
  * every entry point takes a start.
  */
-static int at_base(int64_t dirfd, const char *path, struct vnode **out, char *basepath, size_t n)
+static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnode **out, char *basepath, size_t n)
 {
     if ((int)dirfd == LX_AT_FDCWD || path[0] == '/') {
         *out = basepath ? process_cwd_snapshot(basepath, n) : process_cwd_get();
         return 0;
     }
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)dirfd, 0);
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)dirfd, rights);
     if (obj == NULL)
         return -EBADF;
     struct file *f = file_from_kobject(obj);
@@ -340,7 +345,8 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     struct file *f;
     char base[VFS_PATH_MAX];
     struct vnode *start;
-    rc = at_base(dirfd, path, &start, base, sizeof(base));
+    unsigned need = HANDLE_RIGHT_READ | ((flags & COSMO_O_CREAT) ? HANDLE_RIGHT_WRITE : 0);
+    rc = at_base(dirfd, path, need, &start, base, sizeof(base));
     if (rc)
         return rc;
     rc = vfs_open(start, path, flags, mode & 07777u, &f);
@@ -359,6 +365,12 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
         rights |= HANDLE_RIGHT_READ;
     if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_WRITE;
+    /* A directory opens read-only and is written through by the *at
+     * calls: its handle carries WRITE, the right to change its entries,
+     * which a delegation may narrow away (P31). Writing to it as a file
+     * is still -EISDIR. */
+    if (f->vn->type == VNODE_DIR)
+        rights |= HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
     int h = handle_install(&process_current()->handles, &f->obj, rights);
     file_put(f);
     return h;
@@ -444,7 +456,7 @@ static int64_t readlink_common(int64_t dirfd, uint64_t upath, uint64_t ubuf, siz
     if (len > VFS_PATH_MAX)
         len = VFS_PATH_MAX;
     struct vnode *start;
-    rc = at_base(dirfd, path, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_READ, &start, NULL, 0);
     if (rc)
         return rc;
     char *buf = kmalloc(len, 0);
@@ -482,7 +494,7 @@ static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base(dirfd, path, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
     if (rc)
         return rc;
     rc = vfs_symlink(start, path, target);
@@ -522,7 +534,7 @@ static int64_t lx_newfstatat(struct syscall_args *a)
         return rc ? rc : stat_out(&st, a->a[2]);
     }
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0);
     if (rc)
         return rc;
     struct cosmo_stat st;
@@ -606,7 +618,7 @@ static int64_t lx_mkdirat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
     if (rc)
         return rc;
     rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u);
@@ -630,7 +642,7 @@ static int64_t do_mknod(int64_t dirfd, const char *path, uint32_t mode)
         return -EPERM;
     }
     struct vnode *start;
-    rc = at_base(dirfd, path, &start, NULL, 0);
+    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
     if (rc)
         return rc;
     struct vnode *vn;
@@ -668,7 +680,7 @@ static int64_t lx_unlinkat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0);
     if (rc)
         return rc;
     rc = (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(start, path) : vfs_unlink(start, path);
@@ -683,7 +695,7 @@ static int64_t lx_faccessat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *start;
-    rc = at_base((int64_t)a->a[0], path, &start, NULL, 0);
+    rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0);
     if (rc)
         return rc;
     struct cosmo_stat st;
@@ -717,10 +729,10 @@ static int64_t lx_renameat(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *ostart, *nstart;
-    rc = at_base((int64_t)a->a[0], oldp, &ostart, NULL, 0);
+    rc = at_base((int64_t)a->a[0], oldp, HANDLE_RIGHT_WRITE, &ostart, NULL, 0);   /* both directories change */
     if (rc)
         return rc;
-    rc = at_base((int64_t)a->a[2], newp, &nstart, NULL, 0);
+    rc = at_base((int64_t)a->a[2], newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0);
     if (rc) {
         vnode_put(ostart);
         return rc;
@@ -742,7 +754,7 @@ static int64_t lx_chdir(struct syscall_args *a)
  * with the name the directory file recorded when it was opened (P31). */
 static int64_t lx_fchdir(struct syscall_args *a)
 {
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], HANDLE_RIGHT_READ);
     if (obj == NULL)
         return -EBADF;
     struct file *f = file_from_kobject(obj);
