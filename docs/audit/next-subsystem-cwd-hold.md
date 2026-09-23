@@ -337,7 +337,16 @@ This is the positive half: the walk used the directory it captured, not
 the one the process has now.
 
 **Pass 2 — the reference outlives the swap.** From inside `d1`, thread A
-opens `f`; thread B removes `f`, `rmdir`s `d1` (allowed: `remove_entry`
+opens `f`; thread B removes `f` and `rmdir`s `d1` **by absolute path**
+— a relative `unlink` from B would itself be a relative walk, and if it
+came before A's `open` the seam would hold B, the thread that is supposed
+to release, before B ever reached `chdir` and registered as the swapper
+(found in review). The absolute path never enters `walk_parent`'s
+relative branch. And the seam checks the rule rather than trusting it:
+a held B times out, proceeds to `chdir`, and the swap half finds the
+held thread is itself, which the record reports as `swapper_was_held`
+and the test asserts false — so the mistake fails by name. B `rmdir`s
+`d1` (allowed: `remove_entry`
 refuses a mountpoint, a mount root and a sticky entry, `ramfs_rmdir`
 refuses a directory that is not empty — which is why `f` goes first —
 and nothing refuses a directory for being somebody's cwd; a `VNODE_DEAD`
@@ -412,7 +421,7 @@ compare on the relative-path walk and a `memset` per vnode free.
 | `README.md` | Status entry |
 | `tools/cwd-race-probe.py` | shipped with this report; `tools/elf-share-probe.py`'s revert now touches what it restores, the same fix |
 
-## New APIs
+## APIs
 
 ### New
 
@@ -433,6 +442,7 @@ unsigned vfs_test_cwd_hold_state(void);           /* 0 idle, 1 armed, 2 held, 3 
 struct vfs_cwd_hold_record {
     bool held;                 /* a walk was held */
     bool held_matches_old;     /* the held walk's directory is the one the swapper replaced */
+    bool swapper_was_held;     /* the swapper's own relative walk was what got held: a wrong racer, named */
     bool released_after_put;   /* the swapper put before it released -- the order the proof needs */
     bool resumed_dead;         /* the directory was VNODE_DEAD when the walk resumed (pass 2 expects it) */
     bool walk_timed_out, swap_timed_out;
@@ -484,8 +494,8 @@ because pass 2 resumes on a dead, live directory by design.
 | both, the order | the seam released the walk only after the put | the swap half completes before `vnode_put(old)`: `released_after_put` false, the test fails by name |
 | both, the poison | the liveness check sees the free | the poison removed with the native mutation kept: the resumed walk reads a freed but intact vnode. The refcount check is expected to catch it anyway (`kobject_release_final` leaves the count at zero), so this row is run to *record* which check fired rather than to predict one; if neither does, the poison is the only thing standing between the proof and the cwd-ref unit's false pass, and the banner says so |
 
-Every pass asserts `held`, `held_matches_old`, and both timeouts and
-`interrupted` false, so a racer that never reached the seam — or reached
+Every pass asserts `held`, `held_matches_old`, and `swapper_was_held`,
+both timeouts and `interrupted` false, so a racer that never reached the seam — or reached
 it holding the wrong directory — is a failure and not a pass.
 
 ## Benchmarks
