@@ -130,7 +130,9 @@ static int read_executable(const char *path, struct process_image *img)
     file_put(f);
     img->data = (const void *)image;
     img->size = size;
-    img->vn = exe;   /* released by release_image */
+    img->vn = exe;   /* released at out_exe / the interp block in process_spawn,
+                      * on every path out, whether or not the loader shared
+                      * anything: a mapping that shares takes its own. */
     return 0;
 }
 

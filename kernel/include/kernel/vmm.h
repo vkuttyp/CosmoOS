@@ -430,6 +430,11 @@ unsigned vm_test_file_hold_state(void);
  */
 void vm_test_anon_hold_arm(vaddr_t va);
 unsigned vm_test_anon_hold_state(void);
+/* Drops an armed-but-untaken seam and returns the state it found. A
+ * taken seam holds a sleeping thread and is released only by the
+ * install it waits for, so a caller giving up disarms first and then
+ * touches the page. */
+unsigned vm_test_anon_hold_disarm(void);
 void vm_dump(struct vm_space *space);
 
 #endif /* KERNEL_VMM_H */

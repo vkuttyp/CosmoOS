@@ -643,6 +643,26 @@ static bool anon_hold_take(struct vm_space *space, vaddr_t va)
     return take;
 }
 
+/*
+ * Disarm a seam nobody has taken yet. A seam that IS taken (state 2)
+ * cannot be dropped this way: a thread is asleep inside it, and the
+ * only thing that wakes it is the install it is waiting for. So a test
+ * abandoning the race disarms FIRST -- so its own touch is not caught
+ * -- and then touches the page, which installs it and releases any
+ * holder. Returns the state it found.
+ */
+unsigned vm_test_anon_hold_disarm(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_anon_hold.lock);
+    unsigned was = g_anon_hold.state;
+    if (was == 1) {
+        g_anon_hold.state = 0;
+        g_anon_hold.va = 0;
+    }
+    spin_unlock_irqrestore(&g_anon_hold.lock, s);
+    return was;
+}
+
 static void anon_hold_wait(void)
 {
     wait_for_completion(&g_anon_hold.released);
@@ -670,6 +690,7 @@ static void anon_hold_release(struct vm_space *space, vaddr_t va)
 #else
 void vm_test_anon_hold_arm(vaddr_t va) { (void)va; }
 unsigned vm_test_anon_hold_state(void) { return 0; }
+unsigned vm_test_anon_hold_disarm(void) { return 0; }
 static inline bool anon_hold_take(struct vm_space *space, vaddr_t va) { (void)space; (void)va; return false; }
 static inline void anon_hold_wait(void) {}
 static inline void anon_hold_release(struct vm_space *space, vaddr_t va) { (void)space; (void)va; }

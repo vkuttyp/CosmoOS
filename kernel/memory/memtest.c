@@ -801,13 +801,30 @@ bool selftest_vm_anon_fault_race(const char **reason)
     vm_test_anon_hold_arm(lazy);
     struct anon_race a = { .word = w, .seen = 0xFFFFFFFF, .ran = false };
     struct thread *ta = thread_create(anon_race_toucher, &a, "vm-anon-race", SCHED_PRIO_DEFAULT);
-    CHECK(ta != NULL);
+    if (ta == NULL) {
+        vm_test_anon_hold_disarm();
+        vm_kernel_free(lazy);
+        *reason = "the toucher thread could not be created";
+        return false;
+    }
 
-    /* Wait for A to BE held rather than for a stretch of time: the
+    /*
+     * Wait for A to BE held rather than for a stretch of time: the
      * proof is that the collision happened, so it is the collision
-     * that is waited on. */
+     * that is waited on.
+     *
+     * Giving up has to leave the seam idle, and review found that it
+     * did not: the seam is global and the address is about to be freed,
+     * so an armed seam left behind would hold some later allocation's
+     * first touch forever. Disarm first, so this thread's own touch is
+     * not the one caught, then touch -- which installs the page and
+     * releases A if A was held after all, one instruction past the
+     * check.
+     */
     for (unsigned spins = 0; vm_test_anon_hold_state() != 2; spins++) {
         if (spins > 2000000) {
+            vm_test_anon_hold_disarm();
+            *w = 0;
             thread_join(ta);
             vm_kernel_free(lazy);
             *reason = "the toucher never reached the held fault";
