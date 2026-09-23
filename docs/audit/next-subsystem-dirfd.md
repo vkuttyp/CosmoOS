@@ -47,6 +47,9 @@
 >    only if it arrives at the same vnode; otherwise `fchdir` refuses the
 >    directory with `-ENOENT`. `lxtest` opens `/tmp/lxdir` through a link:
 >    a lookup through it resolves, `fchdir` is refused, `getcwd` unchanged.
+>    A second case, `/tmp/lxdeep/..` through a link to a deeper
+>    directory, is the one only the vnode comparison refuses; it was added
+>    when that comparison's mutation survived (row 8).
 >    `chdir` through a link keeps its lexical name, as before this unit;
 >    that is recorded in the inventory rather than changed here.
 >    (c) *A failed `fchdir` or `chdir` left the held-walk seam's swapper
@@ -71,8 +74,9 @@
 > | 4 | `vfs_rename2` resolving both names from the first start | `vfs-rename2`: the file was not where the second start named it; `lxtest`: `sub/m2` absent by absolute path and the rename back failed |
 > | 5 | the old refusal restored (`ENOSYS` for any real descriptor) | `lxtest`: 20 checks, every `*at` call against the descriptor |
 > | 6 | the resolver demanding no right (review (a)) | `dirfd-rights`: the narrowed run's `mkdirat` succeeded (status 32); the full-rights control still passed |
-> | 7 | a directory's name recorded without the coherence walk (review (b)) | `lxtest`: `fchdir` of the directory opened through a link succeeded and `getcwd` answered the link's spelling |
-> | 8 | a failing swapper left registered (review (c)) | `cwd-hold-native` `failswap`: the held walk waited out its bound (`walk_timed_out`) |
+> | 7 | the coherence walk allowed to follow links (review (b)) | `lxtest`: `fchdir` of the directory opened through a link succeeded and `getcwd` answered the link's spelling |
+> | 8 | the coherence walk's vnode comparison removed (review (b)) | **survived at first**: a name through a link already fails the linkless walk, so no test had the shape only the comparison refuses. `lxtest` now opens `/tmp/lxdeep/..` (a link to a deeper directory, then `..`): physically `/tmp/lxdir`, lexically `/tmp`, which walks cleanly to the wrong directory. With the case, the mutation fails it: `fchdir` succeeded and `getcwd` answered `/tmp` |
+> | 9 | a failing swapper left registered (review (c)) | `cwd-hold-native` `failswap`: the held walk waited out its bound (`walk_timed_out`) |
 
 Constitution §68 report. It takes up the third of the three Linux
 personality gaps the deferred-work inventory lists together in §2.6 —
