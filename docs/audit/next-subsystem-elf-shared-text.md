@@ -52,6 +52,20 @@
 >    Making it decisive needs a binary with a writable segment and no
 >    `.bss`, which is a synthetic ELF and is not built here.
 >
+> **The mutations**, each applied alone, each boot confirmed:
+>
+> | # | mutation | the failure it was for | also failed |
+> | --- | --- | --- | --- |
+> | 1 | the file-backed path disabled | `elf-shared-text`: "two processes running one program have separate copies of its text" | `elf-text-ro` -- with no sharing the text is an anonymous copy, whose protection *can* be changed |
+> | 2 | `seg_shareable` drops "not writable" | nothing: equivalent for this binary (item 7) | -- |
+> | 3 | text mapped with `W` in its `maxprot` | `elf-text-ro`: "shared text could be made writable" | `process-spawn`, which spawns a child; this mutation changes how *every* program loads |
+> | 4 | the interlock always answers "not busy" | `elf-txtbsy`: "a file being executed could be written" | `elf-text-ro` — **not explained.** This mutation touches only the write path and cannot affect `maxprot`. Recorded rather than smoothed over |
+> | 5 | the zero tail populated again | `process-spawn` | `elf-txtbsy` — also not explained by the change itself; this mutation makes every process 26 pages larger, and the tests that spawn children are the ones that moved |
+>
+> Two of those second failures are not accounted for, and saying so is
+> the point: a mutation table that reports only what it predicted is a
+> table that was not read.
+>
 > **Measured, per additional process running `init`:**
 >
 > | | x86-64 | AArch64 |
