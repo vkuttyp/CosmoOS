@@ -3434,6 +3434,17 @@ See [docs/development.md](docs/development.md).
   swapper; each has a test. Invariant **P31**; `lxtest` checks every call
   against a real descriptor by where its effect lands, not merely that it
   succeeded. (PR #229)
+- **`tcp-pcb-timer-free` holds only its own connection's callback.** Its
+  test hook held the next TCP timer callback of *any* connection, and
+  once, on the dirfd unit's branch, a connection an earlier test had
+  left behind fired first and was held in the test's place: the test's
+  close had nothing to wait for and the test failed after five seconds
+  with its CPU's tick stalled. `tcp_test_hold_callback` now takes the
+  pcb to hold, `timer_kick` holds only that pcb's callback and counts
+  any other it lets through, and the test arms a decoy connection's
+  timer one tick before its own on every boot, so the sighting's shape
+  is certain rather than waited for. With the hook back to "any pcb",
+  the decoy is held and the test fails. (PR #230)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

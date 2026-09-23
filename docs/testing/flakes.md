@@ -2093,6 +2093,15 @@ hold for the test's own pcb, and have `timer_kick` take it only for that
 pcb. Not attributable to the dirfd branch; the rerun of the same tree
 passed.
 
+**Repaired (PR #230).** `tcp_test_hold_callback(pcb)` arms the hold for
+one pcb, and `timer_kick` takes it only for that pcb, counting every
+other callback it lets through while armed. The test now makes the
+sighting's shape certain: its armer starts a **decoy** pcb's rexmit
+timer a tick before the test pcb's, on the same CPU, and the test
+asserts the decoy was let through (`passed >= 1`) before any claim about
+the cancel. Mutation, alone, booted: restore "any pcb" and the decoy is
+the one held -- `passed >= 1` fails on x86-64 in 18 ms.
+
 ## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
