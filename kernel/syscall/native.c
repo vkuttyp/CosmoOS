@@ -468,14 +468,27 @@ static int64_t sys_mmap(struct syscall_args *a)
             goto out;
         }
     } else {
+        /*
+         * The kernel chooses: first fit from the hint, then from the
+         * base, each attempt one operation that chooses and inserts under
+         * a single hold of the space lock (M46). This was a find and then
+         * a map, two holds, and two threads placing at once were handed
+         * the same hole about half the time -- the loser got -EEXIST for
+         * a request that named no address, which reached userland as a
+         * thread start failing (docs/audit/next-subsystem-mmap-place.md).
+         * -ENOMEM from the first attempt means "no gap there" and nothing
+         * else, so it is the only answer that tries the second.
+         */
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
-        base = vm_user_find_free(p->space, from, len);
-        if (base == 0 && from != USER_MMAP_BASE)
-            base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
-        if (base == 0) {
-            rc = -ENOMEM;
-            goto out;
+        for (;;) {
+            rc = f ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, shared ? VM_MAP_SHARED : 0, f->vn,
+                                           off, "mmap-file", &base)
+                   : vm_user_map_anon_free(p->space, from, len, vprot, 0, "mmap", &base);
+            if (rc != -ENOMEM || from == USER_MMAP_BASE)
+                break;
+            from = USER_MMAP_BASE;
         }
+        goto out;
     }
 
     rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, shared ? VM_MAP_SHARED : 0, f->vn, off,

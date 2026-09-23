@@ -370,6 +370,42 @@ touch one absent page at once, and until then it had no absent pages at
 all. The FILE arm has always had the equivalent check, because its two
 phases drop the lock between them and it could never assume otherwise.
 
+### 3.6 A placement is one operation
+
+A user mapping whose address the kernel chooses -- `mmap(NULL, ...)` at
+either door, every `malloc` growth, every thread-stack reservation -- is
+chosen and inserted under **one** hold of the space lock
+(`vm_user_map_anon_free`, `vm_user_map_file_free`). First fit from the
+caller's hint, a guard page between regions; the search is
+`range_first_fit_locked`, and the insert follows before the lock is
+released. Both doors make at most two attempts, from the hint and then
+from `USER_MMAP_BASE`, and only `-ENOMEM` -- "no gap there" -- moves from
+the first to the second.
+
+It used to be two holds, `vm_user_find_free` and then the map, and the
+range belonged to nobody in between. Two threads placing at once were
+handed the same hole about half the time, and the loser's insert
+answered `-EEXIST` to a request that named no address
+(`docs/audit/next-subsystem-mmap-place.md`, "Measured"). The fixed path
+had been made one operation a unit earlier (§6, M40); this is the other
+half of the same rule.
+
+The file form has a detail the anonymous one does not. Its record goes
+onto the vnode's mapping list, which truncate and the instruction-cache
+sync read `m->base` from, so the base must exist before the record is
+linked. The region is therefore inserted **claimed**
+(`VM_REGION_QUIESCED`, as `map_replace` does) in the placing hold, the
+record is linked, and the claim is dropped; a text/writable-shared
+refusal takes the region out again. Every reader of the list rechecks
+that the space's region still points at the record, and a claimed
+region installs nothing, so a reader that meets it early skips it.
+
+`vm_user_find_free` remains, and says it is advisory: its answer is true
+when the lock is released and not after. Its two callers may use it --
+process creation placing an ET_DYN interpreter, before the process has a
+second thread, and memtest's filler racer, which exists to take what it
+is offered.
+
 ## 4. Kernel heap
 
 ### 4.1 Slab caches (`slab.c`)

@@ -1023,16 +1023,17 @@ static int64_t lx_mmap(struct syscall_args *a)
                : vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
         goto out;
     }
+    /* As the native door: each attempt chooses and inserts under one hold
+     * (M46), because Linux never answers mmap(NULL, ...) with EEXIST and
+     * two holds did about half the time two threads placed at once. */
     uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
-    base = vm_user_find_free(p->space, from, len);
-    if (base == 0 && from != USER_MMAP_BASE)
-        base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
-    if (base == 0) {
-        rc = -ENOMEM;
-        goto out;
+    for (;;) {
+        rc = f ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, fflags, f->vn, off, "mmap-file", &base)
+               : vm_user_map_anon_free(p->space, from, len, vprot, 0, "mmap", &base);
+        if (rc != -ENOMEM || from == USER_MMAP_BASE)
+            break;
+        from = USER_MMAP_BASE;
     }
-    rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, fflags, f->vn, off, "mmap-file")
-           : vm_user_map_anon(p->space, base, len, vprot, 0, "mmap");
 out:
     if (f)
         file_put(f);

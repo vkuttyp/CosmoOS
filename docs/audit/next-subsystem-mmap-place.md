@@ -1,5 +1,65 @@
 # NEXT SUBSYSTEM — a placement is inserted under the hold that chose it
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The file form needed an order the report did not spell out.**
+>    `vm_user_map_file` links its record onto the vnode's mapping list
+>    *before* it inserts the region, and truncate and the
+>    instruction-cache sync read `m->base` off that list. With the base
+>    chosen inside the insert, the record would have been on the list
+>    with a base that was not yet true. So the placed form inserts the
+>    region first, **claimed** (`VM_REGION_QUIESCED`, which `map_replace`
+>    already uses for the same reason: a fault there installs nothing and
+>    retries), links the record, and drops the claim; a text /
+>    writable-shared refusal takes the region out again. Every reader of
+>    the list rechecks that the space's region points at the record, so
+>    one that meets it early skips it.
+> 2. **One hold, one walk.** The report left open whether the find and
+>    the insert would be one list walk or two; they are two under one
+>    hold, `range_first_fit_locked` and then `space_insert`, because the
+>    insert's walk is also the one that orders the list, and folding the
+>    two saves nothing worth a second copy of either.
+> 3. **The test moved to the process tests.** `mmap-place-race` covers
+>    both forms, and the file form needs a filesystem, so it is
+>    registered beside `vm-file-fault-hold` rather than with the early
+>    memory tests. Its claims are the scratch space's own counts, so the
+>    placement in the suite does not matter to them.
+> 4. **Review found two defects the build had introduced**, both at the
+>    seam between choosing and what used to check a given base.
+>    (a) The fit compared `cursor + size + PAGE_SIZE` against the top of
+>    the user window, and a page-aligned hint near the top of the address
+>    space wrapped that sum below it: a region outside the window was
+>    chosen and inserted. A given base had always been checked by the
+>    map's `user_range_valid`; a chosen one no longer passed through it.
+>    The fit now refuses a `from` at or above the window and compares by
+>    subtraction, and `map_anon` asserts the answer is valid.
+>    (b) The file form inserted its claimed region and only then set
+>    `r->fmap`; `msync` and the futex-key lookup dereference the `fmap` of
+>    any FILE region and do not look at the claim. The record is now
+>    whole before the placing hold publishes it.
+> 5. **Two of three boots on the way failed three host-networking tests**
+>    (`net-hostinput`, `net-hoststate`, `net-output`) with the host's
+>    load average near seven and no emulator of this tree running --
+>    the starvation pattern `docs/testing/flakes.md` records from
+>    2026-09-22. Both passed on an immediate rerun of the same tree.
+>
+> **The mutations**, each applied alone on x86-64, each boot confirmed
+> booted:
+>
+> | # | mutation | what failed | what stayed green, as it must |
+> | --- | --- | --- | --- |
+> | 1 | the anonymous form split back into a find and a map | `mmap-place-race` anon: 1001 of 2400 inserted, **1399 EEXIST**; the native racer: 278 of 600 EEXIST; `lxtest`: 278 EEXIST -- both doors use this form | -- |
+> | 2 | the file form split the same way | `mmap-place-race` file: 1081 of 2400 inserted, **1319 EEXIST** | the anonymous pass and both door racers |
+> | 3 | the native door left on the old pair | the native racer: **278** of 600 EEXIST | `mmap-place-race` (both forms) and `lxtest` |
+> | 4 | the Linux door left on the old pair | `lxtest`: **238** EEXIST | `mmap-place-race` and the native racer |
+> | 5 | the fit's window guard removed and its comparison put back to the wrapping sum (review's finding (a)) | `KERNEL PANIC: assertion failed: user_range_valid(base, size) ... (map_anon)`, reached by init's `mmap` with a hint above the window -- the assertion is the second line of defence and fired first; a release build, which compiles it out, is caught by the same check's user half (the returned address must be inside the window) and by `mmap-place-race`'s `-ENOMEM` claims | the four placement racers |
+>
+> Every mutation lost between 40 and 58 per cent of its placements --
+> the report's measurement, reproduced by the tests themselves -- so the
+> rate-based proofs are decisive in every run, not in most.
+
+
 Constitution §68 report. It takes up a defect the tree found on
 2026-09-23 and recorded in `docs/testing/flakes.md` ("`thrtest` cannot
 start a thread", the fourth sighting), and adds it to the deferred-work

@@ -107,8 +107,15 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * overwrite. CI caught it three times on aarch64, and a bounded
      * retry shipped to make losing harmless. `MAP_FIXED` now replaces
      * as POSIX says (docs/audit/next-subsystem-map-fixed.md), the
-     * punch is gone, and the retry with it: there is nothing left to
-     * lose.
+     * punch is gone, and the retry with it.
+     *
+     * The retry had been absorbing a second race nobody knew about: the
+     * reservation itself, an mmap(NULL, ...), was a find and a map under
+     * two holds of the space lock, and a sibling thread's malloc could be
+     * handed the same hole. With the retry gone a thread start failed
+     * with EEXIST. The kernel chooses and inserts in one hold now
+     * (docs/audit/next-subsystem-mmap-place.md, invariant M46), and that
+     * -- not a retry here -- is what leaves nothing to lose.
      */
     char *base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (base == MAP_FAILED)

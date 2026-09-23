@@ -172,6 +172,7 @@ bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED fro
 bool selftest_vm_anon_fault_race(const char **reason);   /* two threads, one absent anonymous page */
 bool selftest_cwd_hold_native(const char **reason);    /* a held walk: the cwd reference proved, native door */
 bool selftest_cwd_hold_linux(const char **reason);     /* the same through the Linux door */
+bool selftest_mmap_place_race(const char **reason);    /* concurrent placements, both forms (M46) */
 bool selftest_vm_file_fault_hold(const char **reason);   /* a FILE fault held between its phases: a racing install, an unmap */
 bool selftest_vm_file_readpage_fail(const char **reason); /* an injected readpage failure under a mapping is SIGBUS */
 bool selftest_process_nproc(const char **reason);     /* NPROC admission under concurrent spawns */

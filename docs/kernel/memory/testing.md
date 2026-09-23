@@ -421,6 +421,35 @@ test for `mmu.c` against a fake direct map, and SMP stress with Phase 3.
 `mmap` section of `init --selftest` (`docs/userland/testing.md`); the
 kernel half is three self-tests.
 
+### `SELFTEST: mmap-place-race` (`selftest_mmap_place_race`, `kernel/process/proctest.c`)
+
+Placement is one operation (M46,
+`docs/audit/next-subsystem-mmap-place.md`). Four kernel threads place
+600 pages each into one scratch user space at once, first through
+`vm_user_map_anon_free` and then through `vm_user_map_file_free` over a
+one-page `ramfs` file. Every placement must be inserted, none may answer
+`-EEXIST`, and the space's `mapped_pages` must equal the number of
+placements -- each insert succeeding is what makes them distinct, since
+an overlapping one cannot. Every claim is about the scratch space's own
+counts, never a machine-wide counter. It is registered with the process
+tests because the file form needs a filesystem.
+
+It begins with two deterministic checks: a `from` at the very top of
+the address space, and one a page below the top of the user window,
+both answer `-ENOMEM` and insert nothing -- the fit once wrapped its sum
+on a hint like that and chose a base outside the window (found in
+review). init's `mmap` section asks the same through the door: a hint
+above the window is placed inside it, in real memory.
+
+The race half is a **rate-based** proof and says so: the defect cannot be held open
+with a seam, because the repair removes the gap a seam would sit in.
+What makes the rate decisive is its size -- split back into a find and a
+map, the same threads lose about half their placements (the report's
+table, both architectures) -- so 2400 placements per form cannot miss
+it. Its twins at the doors are the `mmap` section of `init --selftest`
+and `lxtest`, two threads placing 300 pages each through each door; a
+door left on the old pair is caught by its own racer and not the other.
+
 ### `SELFTEST: vm-anon-fault-race` (`selftest_vm_anon_fault_race`, `kernel/memory/memtest.c`; debug builds)
 
 Two threads on one absent anonymous page (M45). The seam is armed on a

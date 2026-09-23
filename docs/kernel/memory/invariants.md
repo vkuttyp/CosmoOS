@@ -494,3 +494,16 @@ is where two threads first met on one absent page. Checked by:
 `vm-anon-fault-race` (a fault held on a named absent page until another
 thread installs it: the held fault adds no second frame, the word the
 other thread wrote survives, and the retry is counted).
+
+**M46. A placement the kernel chooses is inserted under the hold that
+chose it.** Neither door's non-fixed `mmap` path answers `-EEXIST`: an
+address the kernel proposes is an address it has taken. The choice
+(`range_first_fit_locked`) and the insert happen in one hold of
+`space->lock` (`vm_user_map_anon_free`, `vm_user_map_file_free`); the
+file form inserts its region claimed before linking its record, so
+`m->base` is never read off the vnode's list before it is true. M40 is
+the fixed path's half of the same rule. Checked by: `mmap-place-race`
+(four kernel threads placing into one scratch space through both forms:
+every placement inserted, none `-EEXIST`, and the space's page count
+equal to the placements), the `mmap` section of `init --selftest` and
+`lxtest` (two threads placing at once through each door, no `EEXIST`).

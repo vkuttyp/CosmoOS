@@ -2031,3 +2031,105 @@ bool selftest_cwd_hold_linux(const char **reason)
     return true;
 #endif
 }
+
+
+/*
+ * Placement is one operation (invariant M46,
+ * docs/audit/next-subsystem-mmap-place.md). Four kernel threads place
+ * pages into one scratch user space at once, through both forms; every
+ * placement must be inserted. The claim is about THIS space's own counts
+ * -- how many placements succeeded and how many pages the space holds --
+ * never a machine-wide counter. Split back into a find and a map, the
+ * same threads lose about half their placements with -EEXIST (the
+ * report's measurement), so a rate that high cannot hide in these rounds.
+ */
+#define PLACE_THREADS 4u
+#define PLACE_ROUNDS 600u
+struct place_racer {
+    struct vm_space *sp;
+    struct vnode *vn;   /* NULL: the anonymous form */
+    unsigned ok, eexist, other;
+};
+
+static void place_racer_main(void *arg)
+{
+    struct place_racer *r = arg;
+    for (unsigned i = 0; i < PLACE_ROUNDS; i++) {
+        uint64_t base = 0;
+        int rc = r->vn ? vm_user_map_file_free(r->sp, USER_MMAP_BASE, PAGE_SIZE, VM_PROT_READ, VM_PROT_READ, 0,
+                                               r->vn, 0, "place-file", &base)
+                       : vm_user_map_anon_free(r->sp, USER_MMAP_BASE, PAGE_SIZE, VM_PROT_RW, 0, "place", &base);
+        if (rc == 0 && base >= USER_MMAP_BASE)
+            r->ok++;
+        else if (rc == -EEXIST)
+            r->eexist++;
+        else
+            r->other++;
+    }
+}
+
+static bool place_race_one(struct vnode *vn, const char *what, const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    struct place_racer rr[PLACE_THREADS];
+    struct thread *th[PLACE_THREADS];
+    for (unsigned i = 0; i < PLACE_THREADS; i++) {
+        rr[i] = (struct place_racer){ .sp = sp, .vn = vn };
+        th[i] = thread_create(place_racer_main, &rr[i], "place", SCHED_PRIO_DEFAULT);
+    }
+    unsigned made = 0, ok = 0, eexist = 0, other = 0;
+    for (unsigned i = 0; i < PLACE_THREADS; i++) {   /* every slot: a failed create leaves a NULL */
+        if (th[i] == NULL)
+            continue;
+        thread_join(th[i]);
+        made++;
+        ok += rr[i].ok;
+        eexist += rr[i].eexist;
+        other += rr[i].other;
+    }
+    uint64_t pages = sp->mapped_pages;
+    vm_space_destroy(sp);
+    kinfo("selftest: mmap-place-race %s: %u threads x %u placements: %u inserted, %u EEXIST, %u other; "
+          "the space holds %llu pages",
+          what, made, PLACE_ROUNDS, ok, eexist, other, (unsigned long long)pages);
+    CHECK(made >= 2);                            /* a race needs two */
+    CHECK(eexist == 0);                          /* the claim: a proposed range is a taken range */
+    CHECK(other == 0);
+    CHECK(ok == made * PLACE_ROUNDS);
+    CHECK(pages == (uint64_t)made * PLACE_ROUNDS);   /* one page each, all distinct: every insert succeeded */
+    return true;
+}
+
+bool selftest_mmap_place_race(const char **reason)
+{
+    /* A `from` at or near the top of the address space: the fit used to
+     * wrap `cursor + size + PAGE_SIZE` below the window and choose a base
+     * outside it (found in review). No gap there is the only answer. */
+    {
+        struct vm_space *sp = NULL;
+        CHECK(vm_space_create_user(&sp) == 0);
+        uint64_t b = 0;
+        int hi1 = vm_user_map_anon_free(sp, 0xfffffffffffff000ULL, PAGE_SIZE, VM_PROT_RW, 0, "hi", &b);
+        int hi2 = vm_user_map_anon_free(sp, VM_USER_HI - PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, 0, "hi", &b);
+        uint64_t pages = sp->mapped_pages;
+        vm_space_destroy(sp);
+        CHECK(hi1 == -ENOMEM);
+        CHECK(hi2 == -ENOMEM);   /* one page and its guard do not fit above the last page */
+        CHECK(pages == 0);
+    }
+    if (!place_race_one(NULL, "anon", reason))
+        return false;
+    struct file *f = NULL;
+    CHECK(vfs_open(NULL, "/tmp/mm-place", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    static const char page[16] = "placement";
+    CHECK(file_pwrite(f, page, sizeof(page), 0) == (int64_t)sizeof(page));
+    bool ok = place_race_one(f->vn, "file", reason);
+    file_put(f);
+    CHECK(vfs_unlink(NULL, "/tmp/mm-place") == 0);
+    if (!ok)
+        return false;
+    kinfo("selftest: mmap-place-race: concurrent placements are each inserted under the hold that chose them, "
+          "in both forms");
+    return true;
+}
