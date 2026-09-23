@@ -295,9 +295,10 @@ milliseconds of slack, and the slack is what a loaded host eats. Adding
 it to the list would mean widening the bound, and that is the trade the
 list exists to refuse when the bound is the property: a lockup sample
 that answers late is a lockup sample that did not work. What is recorded
-instead is the rate — three in two days, at least one on a tree that
-cannot have caused it — because the next unit to hit this should know it
-is not the first, and that re-running is the right first move.
+instead is the rate — five in six days as of 2026-09-23, every one on a
+tree that cannot have caused it — because the next unit to hit this
+should know it is not the first, and that re-running is the right first
+move.
 
 Three CI runs of one branch, 2026-09-17, failed three *different* tests.
 The branch was the VMState-layout unit: a compile-time assertion in a
