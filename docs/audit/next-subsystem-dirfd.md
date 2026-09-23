@@ -1,5 +1,46 @@
 # NEXT SUBSYSTEM — a directory descriptor names a directory
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **`fchdir` checks the type before the name.** A regular file has no
+>    recorded path, so the first build answered `fchdir` of one with
+>    `-ENOENT` -- true, and the wrong reason. `process_fchdir` now says
+>    `-ENOTDIR` first. `lxtest` caught it on the first boot.
+> 2. **The publish is shared.** `process_chdir`'s tail -- type,
+>    search permission, the held-walk seam's wait, the publish under the
+>    process lock, the put outside it -- is `cwd_publish`, and `fchdir`
+>    calls the same function, so the two doors cannot disagree about any
+>    of it.
+> 3. **The regular-file check in the resolver is defence in depth, and
+>    its mutation is equivalent.** The report predicted that accepting a
+>    regular file as a base would fail "later with a different errno". It
+>    fails later with the *same* one: the VFS refuses a walk whose start
+>    is not a directory (`-ENOTDIR` from `resolve` and `walk_parent`'s
+>    callers), so removing the resolver's check changes nothing a caller
+>    can see. The check stays because it names the refusal before a walk
+>    starts and because `fchdir`, which makes no walk, needs its own; the
+>    row below records the mutation as surviving, and why.
+> 4. **`openat` needed no path of its own.** The report had `lx_openat`
+>    resolving and then calling `do_open`; `do_open` now takes the
+>    descriptor and resolves itself, so `open`, `creat` and `openat` are
+>    one function with three entry points.
+> 5. **The first `fchdir` mutation boot died at 10.7 s of an NMI panic**,
+>    long before any Linux test, with the host's load average at 40 from
+>    a virtual machine outside this work. It said nothing about the
+>    mutation and was rerun.
+>
+> **The mutations**, each applied alone on x86-64, each boot confirmed
+> booted:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | every descriptor resolved as the working directory | `lxtest`: the relative `openat` and `newfstatat`/`faccessat` of `moved` (`-ENOENT` in `/`), and the absolute cross-check of `mkdirat`'s `sub` -- 11 checks. The cross-checks are what say *which* directory |
+> | 2 | the resolver accepting a regular file | **survived, equivalent**: the VFS refuses a non-directory start with the same `-ENOTDIR` (item 3) |
+> | 3 | `fchdir` publishing the vnode and keeping the old name | `lxtest`: `getcwd` after `fchdir` answered `/`, and after `chdir("..")` still not `/tmp` -- the published-together rule of P27 |
+> | 4 | `vfs_rename2` resolving both names from the first start | `vfs-rename2`: the file was not where the second start named it; `lxtest`: `sub/m2` absent by absolute path and the rename back failed |
+> | 5 | the old refusal restored (`ENOSYS` for any real descriptor) | `lxtest`: 20 checks, every `*at` call against the descriptor |
+
 Constitution §68 report. It takes up the third of the three Linux
 personality gaps the deferred-work inventory lists together in §2.6 —
 *"a real directory fd — `check_dirfd` returns `-ENOSYS` for any `dirfd`

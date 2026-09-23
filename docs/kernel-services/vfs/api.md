@@ -249,7 +249,21 @@ in address order. An existing target of the same kind is replaced (an
 empty directory only; `-EISDIR`/`-ENOTDIR` for a kind mismatch,
 `-ENOTEMPTY`). Moving a directory beneath itself is `-EINVAL`; mount
 roots and mountpoints are `-EBUSY`. Renaming an entry onto itself is a
-no-op success.
+no-op success. It is `vfs_rename2(start, oldpath, start, newpath)`.
+
+**`int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath)`**
+(the dirfd unit) The same rename with its two names resolved from two
+starts, for `renameat`'s two descriptors. Every check above is made on
+the two parents, however they were reached.
+
+**`void file_set_dir_path(struct file *f, const char *abs)`** (the dirfd
+unit) Record a directory file's normalised absolute path, which
+`fchdir` publishes as the working directory's name. A no-op for a file
+that is not a directory, an already-named one, a path that is not
+absolute, or an allocation failure; set before the file is installed in
+a handle table and never changed, so a reader holding a reference needs
+no lock. Both doors' opens call it for a directory. The name goes stale
+on a rename of the directory or any ancestor (P27's gap).
 
 **`int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st)`**
 and **`void vnode_stat(struct vnode *vn, struct cosmo_stat *st)`** Fill

@@ -439,6 +439,24 @@ failing it -- which is what the rule exists to prevent.
 
 ## Per-process state under more than one thread
 
+**P31. A relative path in an `*at` call resolves from the directory its
+descriptor names, referenced for the walk.** (The dirfd unit,
+`docs/audit/next-subsystem-dirfd.md`.) `at_base` in the Linux door:
+`AT_FDCWD` names the working directory and an absolute path ignores its
+base; any other descriptor must be an open directory (`-EBADF` for no
+handle, `-ENOTDIR` for anything else), is looked up demanding no rights,
+and its vnode is referenced before the handle's reference is dropped, so
+a sibling thread closing it mid-call cannot free the base under the walk
+(V35). `ENOSYS` is an answer no `*at` call gives. A directory file
+records the normalised absolute path it was opened by -- at both doors,
+because a Linux program can inherit a native handle -- and `fchdir`
+publishes vnode and name together through the same `cwd_publish` `chdir`
+uses; the name is stale after a rename of the directory or any ancestor,
+as P27 says of `chdir`'s. Check: `lxtest`'s directory-descriptor block
+(each of the nine calls against a real descriptor, every effect
+cross-checked by absolute path; `-ENOTDIR` and `-EBADF`; `fchdir` then
+`getcwd` and a relative open and `chdir("..")`), `vfs-rename2`.
+
 **P30. A program's read-only segments come from its file, and a file
 being executed does not change.** When the loader is given the vnode an
 image came from, a `PT_LOAD` that is not writable and has no zero tail

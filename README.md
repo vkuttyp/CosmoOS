@@ -3410,6 +3410,22 @@ See [docs/development.md](docs/development.md).
   the two callers that may use it. Invariant **M46**, the fixed path's
   M40 made whole; `mmap-place-race` and a racer at each door, rate-based
   and said so, at a rate that cannot hide. (PR #227)
+- **A directory descriptor names a directory.** Every `*at` call in the
+  Linux personality answered a real directory descriptor with `ENOSYS`,
+  on the stated premise that the VFS could not resolve from one -- it
+  always could, every entry point takes a start -- and `fchdir` was not
+  in the table. Measured before the change: `openat`, `newfstatat`,
+  `faccessat`, `readlinkat`, `symlinkat`, `mkdirat`, `mknodat`,
+  `unlinkat`, `renameat` and `fchdir` all refused, on both
+  architectures, which is every tree walker failing the moment it
+  descends. One resolver replaces the refusal at nine sites and
+  references the descriptor's directory before letting go of the
+  descriptor (V35); `renameat` resolves its two names from two
+  directories through `vfs_rename2`; a directory file remembers the path
+  it was opened by, at both doors, and `fchdir` publishes that name with
+  the vnode as `chdir` does. Invariant **P31**; `lxtest` checks every
+  call against a real descriptor by where its effect lands, not merely
+  that it succeeded. (PR #229)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

@@ -166,22 +166,23 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 19, 20 | `readv`, `writev` | up to `IOV_MAX` 1024 iovecs, each through the `read`/`write` path; stops at the first short transfer; returns the partial count if an error follows progress | zero-length iovecs skipped |
 | 2 | `open` | `lx_open_flags` → `vfs_open(cwd, path, flags, mode & 07777)`; handle rights from the access mode | `O_NONBLOCK` reaches the kernel since the named-pipes unit (a FIFO's open rules and per-open mode; a regular file ignores it); `O_CLOEXEC O_NOCTTY O_LARGEFILE` accepted and dropped; any other unknown flag `-EINVAL` |
 | 85 | `creat` | `open(O_WRONLY|O_CREAT|O_TRUNC)` | |
-| 257 | `openat` | as `open` after `check_dirfd` | `dirfd` must be `AT_FDCWD` (-100) unless the path is absolute; otherwise `-ENOSYS` |
+| 257 | `openat` | as `open`, from the directory `at_base` resolves (the dirfd unit): `AT_FDCWD` or an absolute path gives the cwd, any other descriptor must be an open directory; a directory it opens records its normalised path, for `fchdir` | `-EBADF` for no such handle, `-ENOTDIR` for one that is not a directory; no rights demanded, as Linux demands none |
 | 3 | `close` | `handle_close` | |
 | 8 | `lseek` | `file_seek` (`SEEK_*` coincide) | `-ESPIPE` for a handle that is not a file (pipe, socket, console) |
 | 4, 6, 5 | `stat`, `lstat`, `fstat` | `vfs_stat` / `syscall_handle_stat` → `lx_stat_from_native` (144 bytes) | `lstat` is the non-following one since the symlink unit, and reports `S_IFLNK`; `st_dev`, `st_rdev` 0; `st_atime` = `st_mtime`; `fstat` works on every I/O object (pipes report `S_IFIFO`, sockets `S_IFSOCK`, the console `S_IFCHR`) |
-| 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `check_dirfd` then `stat`, or `lstat` with `AT_SYMLINK_NOFOLLOW` (0x100) | other flags ignored |
+| 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `at_base` then `stat`, or `lstat` with `AT_SYMLINK_NOFOLLOW` (0x100) | other flags ignored |
 | 217 | `getdents64` | `file_readdir` into a kernel buffer of `len - len/4` bytes, `lx_dirents_from_native` into a second buffer of `len`, copied out | `len` clamped to 64 KiB, `-EINVAL` below 32; `d_off` is the offset of the next record in *this* buffer, not a seekable cookie |
-| 83, 258 | `mkdir`, `mkdirat` | `vfs_mkdir(cwd, path, mode & 07777)` | `mkdirat`: `check_dirfd` |
-| 133 / —, 259 / 33 | `mknod`, `mknodat` | (the named-pipes unit) `S_IFIFO` → `vfs_mknod(cwd, path, mode & 07777, VNODE_FIFO)`; `mknod` is x86-64's legacy form (AArch64 has only `mknodat`) | `S_IFSOCK` `-EINVAL` (a socket's name is made by `bind`); any other type `-EPERM`, Linux's answer to a caller without `CAP_MKNOD`; `dev` ignored; `check_dirfd` |
+| 83, 258 | `mkdir`, `mkdirat` | `vfs_mkdir(cwd, path, mode & 07777)` | `mkdirat`: from `at_base` |
+| 133 / —, 259 / 33 | `mknod`, `mknodat` | (the named-pipes unit) `S_IFIFO` → `vfs_mknod(cwd, path, mode & 07777, VNODE_FIFO)`; `mknod` is x86-64's legacy form (AArch64 has only `mknodat`) | `S_IFSOCK` `-EINVAL` (a socket's name is made by `bind`); any other type `-EPERM`, Linux's answer to a caller without `CAP_MKNOD`; `dev` ignored; `mknodat` from `at_base` |
 | 84 | `rmdir` | `vfs_rmdir` | |
-| 87, 263 | `unlink`, `unlinkat` | `vfs_unlink`; `unlinkat` with `AT_REMOVEDIR` (0x200) → `vfs_rmdir` | `check_dirfd` |
-| 82, 264 | `rename`, `renameat` | `vfs_rename` | `check_dirfd` on both dirfds |
-| 88, 266 | `symlink`, `symlinkat` | `vfs_symlink(cwd, path, target)` | `symlinkat`: `check_dirfd`; `-EPERM` on a filesystem without links, `-EOPNOTSUPP` on a cosmofs older than format version 8 |
-| 89, 267 | `readlink`, `readlinkat` | `vfs_readlink` into a kernel buffer, then to the caller | the bytes are **not** terminated; `-EINVAL` if the last component is not a link; `readlinkat`: `check_dirfd` |
+| 87, 263 | `unlink`, `unlinkat` | `vfs_unlink`; `unlinkat` with `AT_REMOVEDIR` (0x200) → `vfs_rmdir` | `unlinkat` from `at_base` |
+| 82, 264 | `rename`, `renameat` | `vfs_rename`; `renameat` → `vfs_rename2(ostart, old, nstart, new)`, each start from `at_base` | the two names resolve from two directories (the dirfd unit) |
+| 88, 266 | `symlink`, `symlinkat` | `vfs_symlink(cwd, path, target)` | `symlinkat`: the link from `at_base`, the target stored verbatim; `-EPERM` on a filesystem without links, `-EOPNOTSUPP` on a cosmofs older than format version 8 |
+| 89, 267 | `readlink`, `readlinkat` | `vfs_readlink` into a kernel buffer, then to the caller | the bytes are **not** terminated; `-EINVAL` if the last component is not a link; `readlinkat`: from `at_base` |
 | 80 | `chdir` | `process_chdir` | |
+| 81 / 50 | `fchdir` | (the dirfd unit) `process_fchdir(f->vn, f->dir_path)`: the descriptor's directory and the name its file recorded at open, published together as `chdir` publishes them | `-EBADF`, `-ENOTDIR` (checked before the name), `-ENOENT` for a directory file with no recorded name rather than an invented one; the name goes stale on a rename of the directory or any ancestor, as `chdir`'s does |
 | 79 | `getcwd` | copies `cwd_path` with its NUL; returns the length **including** the NUL (Linux's raw syscall behaviour) | `-ERANGE` when it does not fit |
-| 21, 269 | `access`, `faccessat` | existence only (`vfs_stat`) | mode ignored (no permission enforcement yet); `check_dirfd` |
+| 21, 269 | `access`, `faccessat` | existence only (`vfs_stat`) | mode ignored (no permission enforcement yet); `faccessat` from `at_base` |
 | 74, 75 | `fsync`, `fdatasync` | `file_sync` | identical |
 | 162 | `sync` | `vfs_sync` | |
 | 95 | `umask` | returns 022 | nothing stored |

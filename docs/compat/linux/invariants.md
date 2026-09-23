@@ -246,8 +246,12 @@ kernel's `unistd.h` tables.
 - No `fork`, `execve`, `select`/`epoll`, shared
   file mappings, real-time signal queues. (Job control arrived with the
   job-control unit, `wait4` included.)
-- `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
-  unless the path is absolute; the VFS has no `openat` semantics yet.
+- ~~`dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
+  unless the path is absolute~~ -- **resolved by the dirfd unit**
+  (`docs/audit/next-subsystem-dirfd.md`, invariant **P31**): every
+  `*at` call resolves from the directory its descriptor names, and
+  `fchdir` exists. `renameat2` is still absent (its flags are semantics
+  this VFS does not have).
 - `uname` reports a kernel release that is not the kernel's; `ioctl`
   answers only the three terminal requests, so a Linux libc sees the
   console as a terminal but gets `-ENOTTY` for everything else
