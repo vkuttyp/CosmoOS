@@ -100,12 +100,14 @@ bool selftest_mmap_place_probe(const char **reason)
                 made++;
         }
         unsigned ok = 0, ee = 0, other = 0, nofree = 0;
-        for (unsigned i = 0; i < made; i++) {
-            thread_join(th[i]);
-            ok += rr[i].ok;
-            ee += rr[i].eexist;
-            other += rr[i].other;
-            nofree += rr[i].nofree;
+        for (unsigned i = 0; i < n; i++) {   /* every slot: a failed create leaves a NULL, not a gap */
+            if (th[i]) {
+                thread_join(th[i]);
+                ok += rr[i].ok;
+                ee += rr[i].eexist;
+                other += rr[i].other;
+                nofree += rr[i].nofree;
+            }
         }
         kprintf("MMAPPLACE threads %u rounds 2000 each: ok %u eexist %u other %u nofree %u\n", made, ok, ee, other,
                 nofree);

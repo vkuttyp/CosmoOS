@@ -1,9 +1,9 @@
 # NEXT SUBSYSTEM — a placement is inserted under the hold that chose it
 
-Constitution §68 report. It takes a defect the tree found on 2026-09-23
-and recorded in `docs/testing/flakes.md` ("`thrtest` cannot start a
-thread", the fourth sighting), and adds it to the deferred-work
-inventory's §3 as the row this report closes.
+Constitution §68 report. It takes up a defect the tree found on
+2026-09-23 and recorded in `docs/testing/flakes.md` ("`thrtest` cannot
+start a thread", the fourth sighting), and adds it to the deferred-work
+inventory's §3 as a row marked *taken up*; the build strikes it.
 
 ## Problem
 
@@ -206,14 +206,24 @@ placement. Not measured as a win; measured to show it is not a loss.
 | `tests/linux/lxtest.c` | the same through the Linux door |
 | `docs/kernel/memory/design.md`, `invariants.md` (**M46**), `testing.md` | as built |
 | `docs/testing/flakes.md` | the `thrtest` entry: the fourth sighting's row closed |
-| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row this report adds, struck |
+| `docs/audit/2026-09-deferred-work-inventory.md` | the §3 row this report adds as *taken up*; the build strikes it |
 | `README.md` | Status entry |
 | `tools/mmap-place-probe.py` | shipped with this report |
 
-## New APIs
+## APIs
+
+### New
 
 `vm_user_map_anon_free` and `vm_user_map_file_free`, above. Nothing
-else. `vm_user_find_free` is unchanged in signature and behaviour.
+else is added.
+
+### Existing, relied on
+
+`vm_user_find_free` is unchanged in signature and behaviour. It stays
+because two callers may use it — the interpreter's base at process
+creation, before the process has a second thread, and the MAP_FIXED
+unit's filler racer, whose purpose is to take what it is offered — and
+its comment will say that its answer is advisory.
 
 ## Migration plan
 
