@@ -392,9 +392,8 @@ this test does on purpose. The retry the MAP_FIXED unit removed was
 absorbing this race too, without anyone knowing it existed.
 
 Not a flake: a placement and its insertion must be one critical section
-at both doors, and a proof for it can be built the way the held-walk
-seam was. Named as the next candidate in the deferred-work inventory's
-sense rather than fixed here.
+at both doors. **Taken up by `docs/audit/next-subsystem-mmap-place.md`**,
+whose probe measures the collision rate at the kernel's own boundary.
 
 Two things are still worth keeping. The **printf is not honest under
 this failure**: it reports `3 readers` from `ENV_READERS` whatever actually

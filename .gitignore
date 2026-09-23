@@ -58,3 +58,5 @@ tests/hv/aarch64/Image
 *.mutorig
 *.cwd-race-probe.orig
 *.cwd-race-probe.applied
+*.mmap-place-probe.orig
+*.mmap-place-probe.applied
