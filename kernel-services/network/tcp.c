@@ -210,6 +210,7 @@ static unsigned g_test_cb_entered;   /* it is inside, before its pcb_get */
 static unsigned g_test_cb_release;   /* let it go */
 static unsigned g_test_cb_saw_dead;  /* it found the poison: the bug */
 static unsigned g_test_cb_checked;   /* liveness checks that passed after the hold */
+static unsigned g_test_cb_cpu;       /* the CPU the held callback ran on */
 
 void tcp_test_hold_callback(bool on)
 {
@@ -217,12 +218,14 @@ void tcp_test_hold_callback(bool on)
     __atomic_store_n(&g_test_cb_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_saw_dead, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_cb_checked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_cb_cpu, ~0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_hold_cb, on ? 1u : 0u, __ATOMIC_RELEASE);
 }
 bool tcp_test_callback_entered(void) { return __atomic_load_n(&g_test_cb_entered, __ATOMIC_ACQUIRE) != 0; }
 void tcp_test_release_callback(void) { __atomic_store_n(&g_test_cb_release, 1u, __ATOMIC_RELEASE); }
 unsigned tcp_test_callback_saw_dead(void) { return __atomic_load_n(&g_test_cb_saw_dead, __ATOMIC_ACQUIRE); }
 unsigned tcp_test_callback_checked(void) { return __atomic_load_n(&g_test_cb_checked, __ATOMIC_ACQUIRE); }
+unsigned tcp_test_callback_cpu(void) { return __atomic_load_n(&g_test_cb_cpu, __ATOMIC_ACQUIRE); }
 
 /* Arm the pcb's rexmit timer. Must be called from the CPU the callback
  * should run on: a timer lands on the queue of the CPU that starts it,
@@ -397,6 +400,7 @@ static void timer_kick(struct tcp_pcb *pcb, unsigned flag)
         if (__atomic_compare_exchange_n(&g_test_hold_cb, &want, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             /* Before pcb_get: for this interval nothing but
              * timer_cancel_sync refusing to return keeps the pcb alive. */
+            __atomic_store_n(&g_test_cb_cpu, arch_cpu_id(), __ATOMIC_RELEASE);
             __atomic_store_n(&g_test_cb_entered, 1u, __ATOMIC_RELEASE);
             while (!__atomic_load_n(&g_test_cb_release, __ATOMIC_ACQUIRE))
                 arch_cpu_relax();
