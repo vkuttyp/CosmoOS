@@ -35,9 +35,10 @@ slower.
 ## What it costs
 
 Each review takes five to ten minutes and spends a real share of this machine's Claude Code session window: the
-analysts run on the subscription, one call at a time, and `reviewer.yaml` here sets the pace deliberately. Run it
-when a change is ready to be read, not after every edit. Say so before starting one, because the person may be
-using that window for something else.
+analysts run on the subscription, one call at a time. That pace is set by `parallelism: 1` in the reviewer's own
+configuration, `~/dev/CosmoReview/reviewer.yaml` — it lives with the reviewer, not in this repository, so there is
+nothing to add here and nothing here to change. Run a review when a change is ready to be read, not after every
+edit. Say so before starting one, because the person may be using that window for something else.
 
 ## Reading the result
 
