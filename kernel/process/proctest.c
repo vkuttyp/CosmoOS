@@ -1897,7 +1897,7 @@ bool selftest_process_spawn(const char **reason)
  * armed for the racer's process name, the racer is spawned once per pass,
  * and what the seam recorded is read back after it exits. Every claim is
  * a field the seam derived from what it saw -- `released_after_put` is
- * the walk finding the count one lower on resume than at the hold --
+ * the releasing side finding the count one lower than before its put --
  * and not a flag the code under test set about itself.
  */
 #if CONFIG_DEBUG
