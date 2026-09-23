@@ -3306,6 +3306,34 @@ See [docs/development.md](docs/development.md).
   build instead of one in twenty, and the runner requires both halves --
   that an attempt was broken and that a later one carried the exchange.
   (PR #218)
+- **A program's text belongs to the file, not to each process that runs
+  it.** The loader mapped every `PT_LOAD` as anonymous populated memory
+  and copied the image in, so two processes running one binary held two
+  complete copies of its text and every page of every segment was
+  allocated whether or not it was ever touched
+  (`docs/audit/next-subsystem-elf-shared-text.md`). Measured on `init`
+  by spawning copies and subtracting free-frame counts: **89 pages per
+  copy, the fourth costing exactly what the first did**. A `PT_LOAD`
+  that is not writable and has no zero tail now comes from the file's
+  page cache, shared, so every process running the program maps the same
+  frames -- with `maxprot` excluding `W`, which is what stops a later
+  `mprotect` from making shared text writable. The segment's zero tail
+  is demand-paged rather than populated, because an anonymous page
+  arrives zero. **89 pages per copy became 40, then 16**, identically on
+  both architectures. Shared text makes a running program's instructions
+  the file's, so a write to a file being executed is `-ETXTBSY`
+  (invariant **P30**) -- and *busy* is a property of the page cache's
+  mapping list, not a counter beside it: the record is linked there when
+  the mapping is made and unlinked before its vnode reference goes, and
+  the check is taken under that list's lock by a writer already holding
+  the vnode's, so the answer and the write are atomic against a mapping
+  being created. `VM_MAP_TEXT` is passed by the loader and by nothing
+  else, because a program that maps a file executable and writes to it
+  deliberately is a different thing the page cache already serves. Four
+  tests: one physical frame for two address spaces, the per-copy cost,
+  `PROT_WRITE` refused on shared text with the zero tail reading as
+  zero, and a write refused while a program runs and allowed once it
+  exits. (PR #220)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

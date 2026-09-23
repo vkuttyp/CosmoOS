@@ -1,5 +1,58 @@
 # NEXT SUBSYSTEM — a program's text belongs to the file, not to each process that runs it
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The qualification compared the wrong size, and the first version
+>    shared nothing.** `struct elf_segment`'s `memsz` is the *page
+>    rounded* span, so `filesz == memsz` is false for every real text
+>    segment and the test reported "no shareable executable segment".
+>    The file's own `p_memsz` is kept as `file_memsz` now and that is
+>    what the rule uses. The padding between `filesz` and the end of its
+>    last page is not a zero tail: it is the file's next bytes.
+> 2. **"Shared and executable in its `maxprot`" was the wrong
+>    discriminator for text**, and the boot said so. `maxprot` is
+>    permissive by default -- RWX for a shared mapping of a writable
+>    file -- so every shared file mapping counted as text and ordinary
+>    writes to ordinary mapped files were refused.
+> 3. **Narrowing it to the actual `prot` was still wrong.** A program
+>    may map a file executable and write to it on purpose, and the page
+>    cache syncs the instruction cache for exactly that case; refusing
+>    those writes broke that behaviour and the test that proves it. The
+>    discriminator is `VM_MAP_TEXT`, passed by `elf_load_into` and by
+>    nothing else: what must not change underneath a process is the
+>    program it is *running*, and only the loader can identify that.
+> 4. **The writable segment is not a private file mapping**, as the
+>    report proposed, and the reason is that the win was somewhere else.
+>    Its file content is twenty-four bytes; what cost 27 pages was the
+>    zero tail being populated. The copy path is split where the pages
+>    the file's bytes touch end, and the tail beyond them is left
+>    demand-paged -- an anonymous page arrives zero, which is what a
+>    zero tail needs, with no copy to get wrong. **That is where most of
+>    the saving came from: 40 pages became 16.**
+> 5. **`ETXTBSY` had to be added in three places**, not one: the
+>    kernel's errno list, the user ABI's, and libc's.
+> 6. **Found in the previous unit, and fixed here because it failed a
+>    boot of this one:** `bench-balance` asserted 85% and read 84% on a
+>    boot where the threads had spread to all four CPUs. Two 500 ms
+>    samples of the same work differ by more than fifteen points on this
+>    host, so that threshold separated noise rather than behaviour. It
+>    is 70% now, above the working case's floor and far above the 53%
+>    that no balancing produces.
+>
+> **Measured, per additional process running `init`:**
+>
+> | | x86-64 | AArch64 |
+> | --- | --- | --- |
+> | before this unit | 89 pages | 89 pages |
+> | read-only segments shared | 40 | 40 |
+> | zero tail demand-paged | **16** | **16** |
+>
+> against a target of 45. Not done, and deliberately: `memfd`/`shm_open`
+> (the inventory row's other half), a private file mapping for writable
+> segments (item 4), and the boot-archive door, which has no file and
+> still copies.
+
 Constitution §68 report. The inventory's memory row
 (`docs/audit/2026-09-deferred-work-inventory.md` §2.2) closed most of
 itself with the file-regions and shared-futex units, and left two things
