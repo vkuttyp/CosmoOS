@@ -3371,12 +3371,16 @@ See [docs/development.md](docs/development.md).
   on the poison and the kernel panics by name. Two racers, one per door
   -- the Linux door had no test of this at all -- each run once per pass
   with the seam rearmed, every claim a count the seam read rather than a
-  flag the code under test set. Two things the build found and the seam
-  now knows: a `chdir` in a single-threaded process has no walk to race
-  and registers no swapper, and the release order is derived against
-  the swapper's pre-put count because the removing pass's `rmdir` drops
-  the directory's pin in between. Invariant **V35**; P29 gains its
-  proof. (PR #224)
+  flag the code under test set. **Two mutations survived the first round
+  and both said the test was weak, not the rule dead**: the release
+  order derived on the walk's resume could not tell a release a few
+  instructions before the put from one after it, because the woken walk
+  loses that race every time, so the releasing side now reads the count
+  at the instant it releases; and no racer had the swapper arrive first,
+  so a third pass starts the walker only once the seam itself says the
+  swapper is waiting inside `chdir`. A `chdir` in a single-threaded
+  process registers no swapper, because it has no walk to race.
+  Invariant **V35**; P29 gains its proof. (PR #224)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

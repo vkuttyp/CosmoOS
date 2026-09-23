@@ -746,13 +746,18 @@ yet to capture the old one), records the old directory's count before
 the put, and releases after it. The walk on resume checks the directory
 is live -- `VNODE_DIR`, count nonzero, count not the poison word;
 `VNODE_DEAD` is recorded, not judged, because an unlinked directory a
-walk still references is exactly what the proof produces -- and derives
-that the put preceded the release from its count being one below what
-the swapper saw. Both waits are killable and bounded (five and two
-seconds); a timeout is recorded and fails the test by name. One arm
-serves one hold. A `chdir` in a single-threaded process registers no
-swapper: there is no other thread whose walk it could pull from under.
-`debug.cwd_hold` reads the state (0 idle, 1 armed, 2 held, 3 released).
+walk still references is exactly what the proof produces. That the put
+preceded the release is read by the **releasing** side at the instant it
+releases -- the count one below what it read before its put -- because
+a walk woken before the put loses the race to it every time, and a count
+read on resume cannot tell the two orders apart (the release-before-put
+mutation survived that derivation). Both waits are killable and bounded
+(five and two seconds); a timeout is recorded and fails the test by name.
+One arm serves one hold. A `chdir` in a single-threaded process registers
+no swapper: there is no other thread whose walk it could pull from under.
+`debug.cwd_hold` reads the state (0 idle, 1 armed, 2 held, 3 released,
+4 armed with the swapper waiting inside `chdir`) -- the last is what lets
+a racer start its walker only once the swapper is provably ahead of it.
 
 ## Future extensibility
 

@@ -262,20 +262,28 @@ swaps the directory by absolute paths.
 | --- | --- | --- |
 | `capture` | a held walk resolves against the directory it captured: `f` exists only in `d1`, B moves the process to `d2`, A's open **succeeds** | `held`, `held_matches_old`, count 3 before the put (ramfs's pin, the process's, the walk's), `released_after_put`, not dead |
 | `outlive` | the walk's reference outlives the swap: B unlinks `d1/f`, removes `d1` and moves away; A's open is `-ENOENT` and the process lives | `held`, `held_matches_old`, count **2** before the put (the pin is gone: the process's and the walk's), `released_after_put`, `resumed_dead` |
+| `swapfirst` (native only) | the swapper waits **before** it publishes: B is started first and A only once `debug.cwd_hold` reads 4 -- the swapper is inside `chdir` and waiting -- so the order the other passes cannot produce is produced on purpose | as `capture`, and `held_matches_old` is the decisive claim: a `chdir` that published before waiting would have installed `d2` under a walk that had yet to capture `d1` |
 
 Every pass also asserts `swapper_was_held`, both timeouts and
 `interrupted` false, so a racer that never reached the seam, held the
-wrong directory or held its own swapper fails by name. The claims are
-derived by the seam from counts it read, not flags the code under test
-set: `released_after_put` is the count at resume being one below what
-the swapper saw before its put.
+wrong directory or held its own swapper fails by name. Every pass runs
+before any is judged, so a failing first pass cannot hide what the
+second finds. The claims are derived by the seam from counts it read,
+not flags the code under test set: `released_after_put` is the count the
+releasing side reads at the instant it releases being one below what it
+read before its put.
 
-Two things the build found, both now in the seam: a `chdir` made by a
-single-threaded process registers no swapper (the racer's own setup
-`chdir` had waited its whole bound for a hold that could not come), and
-the release order is derived against the swapper's pre-put count rather
-than the count at the hold, because the `outlive` pass's `rmdir` drops the
-directory's pin between the two.
+Three things the build found, all now in the seam. A `chdir` made by a
+single-threaded process registers no swapper: the racer's own setup
+`chdir` had waited its whole bound for a hold that could not come. The
+release order is read at the release and not on the walk's resume: a
+walk woken a few instructions before the put loses the race to it every
+time, so the resume-side derivation let the release-before-put mutation
+survive. And no racer had the swapper arrive first, so the
+wait-after-publish mutation survived too until `swapfirst` made that
+order happen on purpose, gated on the seam's own state and never on time.
+The `swapfirst` pass is native-only because the Linux program has no
+sysctl to read the state from.
 
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 

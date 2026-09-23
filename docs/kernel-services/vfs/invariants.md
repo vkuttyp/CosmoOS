@@ -601,7 +601,9 @@ than a plausible directory. **Checked by** `cwd-hold-native` and
 with its pointer in hand until the process's `chdir` has published and
 put; on a correct kernel the swapper sees two references before its put
 in the pass that removed the directory -- the process's and the walk's
--- and the walk resumes on a dead, live directory and answers `-ENOENT`.
+-- and the walk resumes on a dead, live directory and answers `-ENOENT`;
+and in the pass where the swapper is provably inside `chdir` before the
+walker starts, the held walk still holds the directory being replaced.
 Its mutations: the reference removed at the native `open` or at the
 Linux door's `do_open` (the walk resumes on the poison and the kernel
 panics by name), the release moved before the put, the swapper's wait

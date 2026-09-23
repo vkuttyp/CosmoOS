@@ -137,7 +137,9 @@ in the `lxtest` shape: A `openat(AT_FDCWD, "f")`, the program's one
 relative walk; B, by absolute paths only, `chdir`s to `d2` (`capture`:
 A's open must succeed) or first `unlinkat`s `d1/f` and `unlinkat(AT_REMOVEDIR)`s
 `d1` (`outlive`: A's open must be `-ENOENT` and the process must live).
-Prints `LXCWD: <pass> ok`; exit codes above 10 name the failing step.
+The native racer's third pass, `swapfirst`, is not here: it gates the
+walker on `debug.cwd_hold`, and a Linux program has no sysctl. Prints
+`LXCWD: <pass> ok`; exit codes above 10 name the failing step.
 
 ## `/etc/rc.test`, Linux section
 

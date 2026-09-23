@@ -788,6 +788,7 @@ poisoned, it was not what the walk read.
 **`cwdtest --held <pass>` is the proof**, driven by the kernel test
 `cwd-hold-native` with the held-walk seam armed for the process name
 (`docs/kernel-services/vfs/testing.md`, "The held walk"): two threads,
-one pass, A's relative `open("f")` held with its pointer in hand until
-B's `chdir` has published and put, the order enforced by the seam. Its
-twin at the Linux door is `tests/linux/lxcwd.c` under `cwd-hold-linux`.
+one pass of three (`capture`, `outlive`, `swapfirst`), A's relative
+`open("f")` held with its pointer in hand until B's `chdir` has published
+and put, the order enforced by the seam. Its twin at the Linux door is
+`tests/linux/lxcwd.c` under `cwd-hold-linux`, with the first two passes.

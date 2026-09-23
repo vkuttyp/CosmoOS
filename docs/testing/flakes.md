@@ -2102,5 +2102,32 @@ are guesses and are written here as guesses.
 `cpu`, `rel_cpu` and its own. A second sighting then names the placement
 instead of inferring it from three idle CPUs.
 
-Not on the list: not a bound, and not attributable to the probe's
+**A second sighting the same day**, on the cwd-hold unit's own branch,
+x86-64, one debug boot of six, in the same slot -- `SELFTEST: net-lo-udp
+... ok` and then:
+
+```
+KERNEL PANIC: mmu: TLB shootdown of 0xffffc000104af000+0x4000 acknowledged by 2 of 3 CPUs
+```
+
+with no failing test before it (which distinguishes it from the
+2026-09-22 sighting of this panic recorded above, where three
+host-networking tests had failed first). A CPU spinning in interrupt
+context with interrupts masked cannot acknowledge a shootdown, and the
+shootdown gives up after one second where the lockup detector gives up
+after ten: two symptoms of one CPU in one state, and which one fires is
+only which bound is reached first. Reading the test with both in hand
+names the mechanism, still as a guess until the one-line instrument
+above confirms it: the armer thread, pinned to `cpu`, arms a **1 ms**
+timer and must then exit on that CPU before the next tick; when it does
+not, the callback fires above the still-live armer and spins there, the
+test thread's `thread_join(armer)` -- which comes *before* the releaser
+is created -- never returns, and nothing exists that can release the
+callback. The idle CPUs are the test thread in its join and the
+releaser that was never made. The repair, for the unit that owns this
+test: create the releaser before arming the timer, join the armer only
+after the release, and have the armer linger one tick on purpose so
+the placement that hangs is the one every run exercises.
+
+Not on the list: not a bound, and not attributable to either unit's
 mutation -- the spinning path holds no vnode and makes no system call.
