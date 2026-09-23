@@ -1510,6 +1510,9 @@ bool selftest_elf_txtbsy(const char **reason)
     int64_t busy_rc = 0, free_rc = 0;
     bool alive = false, same_vnode = false, direct_busy = false;
     int trunc_rc = -ETXTBSY;   /* untested unless the child runs */
+    /* The mapping door, in both orders. Defaults are the wanted values,
+     * so a skip (the child's text was not shared) reports nothing. */
+    int wshared_rc = -ETXTBSY, wpriv_rc = 0, text_after_w_rc = -ETXTBSY;
     if (ok) {
         /*
          * The precondition, *observed* exactly.
@@ -1567,6 +1570,29 @@ bool selftest_elf_txtbsy(const char **reason)
          * review of this unit). */
         if (alive)
             trunc_rc = vfs_truncate(NULL, path, 0);
+        /*
+         * The third door, and the one no write ever passes through: a
+         * store through a writable MAP_SHARED mapping dirties the page
+         * cache's own frame, and the text mapping IS that frame. This
+         * is the first of the two orders -- text first, then the
+         * writable shared mapping -- and the private mapping beside it
+         * is the control: it differs in the sharing alone, so a
+         * refusal of both would mean the check is about writability
+         * rather than about the frame.
+         */
+        if (alive) {
+            struct vm_space *sp = NULL;
+            if (vm_space_create_user(&sp) == 0) {
+                const uint64_t A = 0x0000340000000000ULL;
+                wshared_rc = vm_user_map_file(sp, A, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                              VM_MAP_SHARED, img.vn, 0, "w-shared");
+                if (wshared_rc == 0)
+                    (void)vm_user_unmap(sp, A, PAGE_SIZE, 0);
+                wpriv_rc = vm_user_map_file(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                            0, img.vn, 0, "w-private");
+                vm_space_destroy(sp);
+            }
+        }
         struct file *w = NULL;
         if (alive && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
             /* The vnode the write lands on, against the one the mapping
@@ -1590,6 +1616,29 @@ bool selftest_elf_txtbsy(const char **reason)
         if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
             free_rc = file_pwrite(w, &byte, 1, 0);
             file_put(w);
+        }
+    }
+    /*
+     * The second order, now that nothing is executing the file: a
+     * writable shared mapping stands first, and the TEXT mapping is
+     * what is refused. An interlock that only looked one way would let
+     * this one through and leave the two mappings coexisting, which is
+     * the state the whole rule exists to prevent.
+     */
+    if (ok && alive) {
+        struct vnode *vn = NULL;
+        if (vfs_lookup(NULL, path, &vn) == 0) {
+            struct vm_space *sp = NULL;
+            if (vm_space_create_user(&sp) == 0) {
+                const uint64_t A = 0x0000340000000000ULL;
+                if (vm_user_map_file(sp, A, PAGE_SIZE, VM_PROT_RW, VM_PROT_RW,
+                                     VM_MAP_SHARED, vn, 0, "w-shared") == 0)
+                    text_after_w_rc = vm_user_map_file(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_READ,
+                                                       VM_PROT_READ, VM_MAP_SHARED | VM_MAP_TEXT,
+                                                       vn, 0, "text");
+                vm_space_destroy(sp);
+            }
+            vnode_put(vn);
         }
     }
     vfs_unlink(NULL, path);
@@ -1621,6 +1670,27 @@ bool selftest_elf_txtbsy(const char **reason)
         elf_settle_processes(procs0);
         return false;
     }
+    if (wshared_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: a writable shared mapping of a running program returned %d, wanted %d",
+               wshared_rc, -ETXTBSY);
+        *reason = "a running program's text could be mapped writable and shared";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (wpriv_rc != 0) {
+        kerror("selftest: elf-txtbsy: a PRIVATE writable mapping of a running program returned %d, wanted 0",
+               wpriv_rc);
+        *reason = "the refusal is about writability, not about the shared frame";
+        elf_settle_processes(procs0);
+        return false;
+    }
+    if (text_after_w_rc != -ETXTBSY) {
+        kerror("selftest: elf-txtbsy: a text mapping made after a writable shared one returned %d, wanted %d",
+               text_after_w_rc, -ETXTBSY);
+        *reason = "the two mappings are refused in one order only";
+        elf_settle_processes(procs0);
+        return false;
+    }
     if (free_rc != 1) {
         kerror("selftest: elf-txtbsy: writing after the process exited returned %lld, wanted 1",
                (long long)free_rc);
@@ -1628,8 +1698,9 @@ bool selftest_elf_txtbsy(const char **reason)
         elf_settle_processes(procs0);
         return false;
     }
-    kinfo("selftest: elf-txtbsy: a write and a truncate of a running program are both -ETXTBSY, "
-          "and the write succeeds once it exits");
+    kinfo("selftest: elf-txtbsy: a write, a truncate and a writable shared mapping of a running "
+          "program are all -ETXTBSY -- a private one is not -- the text mapping is refused after a "
+          "writable shared one too, and the write succeeds once it exits");
     elf_settle_processes(procs0);
     return true;
 }
