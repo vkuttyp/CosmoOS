@@ -274,13 +274,45 @@ int elf_load_into(struct vm_space *space, const void *image, const struct elf_in
              * mapped here still has to run. */
         }
 
+        /*
+         * The copy path, for a segment that cannot come from the file:
+         * writable, or with a zero tail, or from an image that has no
+         * file at all.
+         *
+         * It is split in two, and the split is where the pages this
+         * segment's *file bytes* touch end. The first part is populated
+         * and copied into, as it always was. The second is the segment's
+         * zero tail -- `.bss`, usually almost all of it -- and it is
+         * left demand-paged: an anonymous page arrives zero, which is
+         * exactly what a zero tail needs, so populating it eagerly buys
+         * nothing and costs a frame per page whether the program touches
+         * it or not. For the binary this unit was measured on the tail
+         * is 26 of the segment's 27 pages
+         * (docs/audit/next-subsystem-elf-shared-text.md).
+         */
+        uint64_t file_end = s->filesz ? ((s->file_vaddr + s->filesz + PAGE_SIZE - 1) &
+                                         ~(uint64_t)(PAGE_SIZE - 1))
+                                      : s->vaddr;
+        if (file_end > s->vaddr + s->memsz)
+            file_end = s->vaddr + s->memsz;
+        size_t copied_span = (size_t)(file_end - s->vaddr);
+
         /* Map writable while populating, then set the final protection:
          * the copy goes through the direct map, but a read-only region
          * would still be recorded read-only and query would disagree. */
-        int rc = vm_user_map_anon(space, s->vaddr, (size_t)s->memsz, VM_PROT_RW, VM_REGION_POPULATED,
+        int rc;
+        if (copied_span > 0) {
+            rc = vm_user_map_anon(space, s->vaddr, copied_span, VM_PROT_RW, VM_REGION_POPULATED,
                                   "elf-segment");
-        if (rc)
-            return rc;
+            if (rc)
+                return rc;
+        }
+        if (file_end < s->vaddr + s->memsz) {
+            rc = vm_user_map_anon(space, file_end, (size_t)(s->vaddr + s->memsz - file_end),
+                                  seg_prot(s->flags), 0, "elf-bss");
+            if (rc)
+                return rc;
+        }
 
         /* Copy file bytes frame by frame through the direct map. */
         uint64_t src_off = s->offset;
@@ -299,9 +331,11 @@ int elf_load_into(struct vm_space *space, const void *image, const struct elf_in
             remaining -= n;
         }
 
-        rc = vm_user_protect(space, s->vaddr, (size_t)s->memsz, seg_prot(s->flags));
-        if (rc)
-            return rc;
+        if (copied_span > 0) {
+            rc = vm_user_protect(space, s->vaddr, copied_span, seg_prot(s->flags));
+            if (rc)
+                return rc;
+        }
     }
     return 0;
 }
