@@ -1111,6 +1111,16 @@ bool selftest_linux_elf(const char **reason)
 }
 
 /*
+ * A note on the children these tests run.
+ *
+ * They spin (`init --spin`) rather than block on the console. A child
+ * that blocks reads the console, the suite contends for it, and two
+ * unrelated tests -- `process-spawn` and `hid-keyboard` -- failed
+ * because these tests were holding it. A test that perturbs what it
+ * shares the machine with is measuring the machine, not the change.
+ */
+
+/*
  * Two processes running one program map the same frames for its text.
  *
  * Not "the second costs less", which a leak or a smaller stack would
@@ -1429,22 +1439,88 @@ bool selftest_elf_txtbsy(const char **reason)
         *reason = "the copy is unreadable";
         return false;
     }
-    static const char *const argv[] = { "init", "--block", NULL };
+    /* Where this program's shared text lands, so the wait below can see
+     * the child running out of the file rather than merely existing. */
+    uint64_t text_va = 0;
+    {
+        struct elf_info info;
+        const char *why = NULL;
+        if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) == 0)
+            for (unsigned i = 0; i < info.nr_segments; i++)
+                if ((info.segments[i].flags & ELF_PF_X) &&
+                    info.segments[i].file_memsz == info.segments[i].filesz) {
+                    text_va = info.segments[i].vaddr;
+                    break;
+                }
+    }
+
+    /*
+     * A child that spins, not one that blocks on the console.
+     *
+     * `--block` waits on a console read, and the suite contends for the
+     * console: this child was exiting early, its mapping going with it,
+     * and the write then succeeded because nothing was executing the
+     * file -- which is not the defect this test is about. It failed
+     * that way under mutations that cannot touch the interlock, which
+     * is how a flake says it is a flake. A spinning child holds its
+     * text for as long as this test needs it.
+     */
+    static const char *const argv[] = { "init", "--spin", NULL };
     struct process *p = NULL;
     bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
 
     /* While it runs: refused, by name. */
     uint8_t byte = 0x90;
     int64_t busy_rc = 0, free_rc = 0;
-    bool alive = false;
+    bool alive = false, same_vnode = false;
     if (ok) {
-        /* The precondition, established rather than assumed: this test
-         * asserts what happens while a program is *running*, and a
-         * child that has already exited holds no mapping, so the write
-         * would succeed for a reason that is not the defect. */
-        alive = !completion_done(&p->exited);
+        /*
+         * The precondition, *observed* exactly.
+         *
+         * This test asserts what happens while a program is running
+         * **from a file's shared text**, so neither "the child exists"
+         * nor "the child's text page is present" is enough: an
+         * anonymous copy satisfies both. Two proxies were tried and
+         * both let the test fail intermittently, including under
+         * mutations that cannot touch the interlock -- which is how a
+         * flake announces itself rather than a defect.
+         *
+         * What is checked instead is the thing itself: a second process
+         * from the same image maps the same *frame*. That is true only
+         * if the loader shared the file's pages, which is the condition
+         * the refusal below depends on. If it did not -- the mapping
+         * can fall back to a copy -- this skips and says so, rather
+         * than reporting the interlock broken.
+         */
+        struct process *p2 = NULL;
+        if (text_va != 0 &&
+            process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0) {
+            uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
+            while (!clock_deadline_passed(deadline)) {
+                paddr_t a1 = 0, a2 = 0;
+                if (arch_mmu_query(&p->space->mmu, (vaddr_t)text_va, &a1, NULL, NULL, NULL) &&
+                    arch_mmu_query(&p2->space->mmu, (vaddr_t)text_va, &a2, NULL, NULL, NULL)) {
+                    alive = (a1 == a2);
+                    break;
+                }
+                thread_sleep_ms(5);
+            }
+            process_kill(p2, COSMO_SIGKILL);
+            process_wait_exit(p2);
+            process_put(p2);
+        }
+        /* And still running when the write happens: the precondition
+         * above was observed a moment earlier, and a moment is enough
+         * for a child to die. */
+        if (alive && completion_done(&p->exited))
+            alive = false;
         struct file *w = NULL;
         if (alive && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+            /* The vnode the write lands on, against the one the mapping
+             * was made from: if a second lookup of one path can produce
+             * a second vnode, the interlock is asking the wrong list
+             * and the failure below would otherwise say only "allowed". */
+            same_vnode = (w->vn == img.vn);
             busy_rc = file_pwrite(w, &byte, 1, 0);
             file_put(w);
         }
@@ -1470,12 +1546,14 @@ bool selftest_elf_txtbsy(const char **reason)
         return false;
     }
     if (!alive) {
-        kinfo("selftest: elf-txtbsy: the child exited before the write; skipping");
+        kinfo("selftest: elf-txtbsy: this copy's text was not shared from the file, so there is "
+              "nothing for the interlock to refuse; skipping");
         return true;
     }
     if (busy_rc != -ETXTBSY) {
-        kerror("selftest: elf-txtbsy: writing a running program returned %lld, wanted %d",
-               (long long)busy_rc, -ETXTBSY);
+        kerror("selftest: elf-txtbsy: writing a running program returned %lld, wanted %d "
+               "(the write's vnode %s the mapping's)",
+               (long long)busy_rc, -ETXTBSY, same_vnode ? "is" : "IS NOT");
         *reason = "a file being executed could be written";
         return false;
     }
@@ -1499,7 +1577,7 @@ bool selftest_elf_share_cost(const char **reason)
     }
     enum { COPIES = 3 };
     struct process *p[COPIES] = { NULL };
-    static const char *const argv[] = { "init", "--block", NULL };
+    static const char *const argv[] = { "init", "--spin", NULL };
     struct pmm_stats st;
     unsigned made = 0;
     uint64_t cost[COPIES] = { 0 };
@@ -1559,7 +1637,7 @@ bool selftest_elf_shared_text(const char **reason)
         return true;
     }
 
-    static const char *const argv[] = { "init", "--block", NULL };
+    static const char *const argv[] = { "init", "--spin", NULL };
     struct process *p1 = NULL, *p2 = NULL;
     bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
               process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
