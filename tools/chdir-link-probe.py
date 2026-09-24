@@ -24,6 +24,12 @@ that names some other directory:
     CLPROBE native dotdot cwd=/tmp same=0
     CLPROBE linux link cwd=/tmp/clink same=1 physical=0
     CLPROBE linux dotdot cwd=/tmp same=0
+    CLPROBE native proc-dotdot rc=-1 errno=2
+
+The last line is a second defect the first run of this probe led to:
+`chdir("..")` from `/proc/<pid>` is `ENOENT`, because the VFS resolves
+`..` by asking the filesystem and `proc_pid_lookup` answers only
+`status` and `limits`.
 
 `physical=0` on the first line says the name reaches the right directory
 only by following the link again (`lstat` of it is a link, not a
@@ -69,6 +75,12 @@ NATIVE_PROBE = r'''    /* --- CLPROBE (tools/chdir-link-probe.py; not for merge)
         if (chdir("..") == 0 && getcwd(buf, sizeof(buf))) {
             int same = stat(".", &a) == 0 && stat(buf, &b) == 0 && a.st_ino == b.st_ino;
             fprintf(stderr, "CLPROBE native dotdot cwd=%s same=%d\n", buf, same);
+        }
+        /* `..` from a procfs process directory: the VFS asks the
+         * filesystem, and proc_pid_lookup knows only status and limits. */
+        if (chdir("/proc/self") == 0) {
+            int rc = chdir("..");
+            fprintf(stderr, "CLPROBE native proc-dotdot rc=%d errno=%d\n", rc, rc ? errno : 0);
         }
         (void)chdir("/");
         (void)unlink("/tmp/clink");
