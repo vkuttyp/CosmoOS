@@ -21,13 +21,14 @@ time the CPU itself did not run -- a host descheduling the virtual CPU),
 and replaces the three-CPU part's single sample with repeated samples of
 the same shape, printing each one that exceeds the bound and a summary:
 
-    LBPROBE over: el E us, largest gap G us, el minus gap R us (arch)
+    LBPROBE over: el E us, largest gap G us, lost in gaps over 1 ms L us, ran R us (arch)
     LBPROBE summary: S samples, over the bound O, el min/median/max A/B/C us,
       largest gap max G us, targets answered by nmi N (arch)
 
-`el minus gap` is the time the sampler spent when it was running: about
-5000 us where the targets cannot answer (they time out), about 0 where
-they can (x86-64 answers through NMI even with interrupts masked). The
+`ran` is el less every gap over 1 ms -- the time the sampler spent when
+its CPU was running: about 5000 us where the targets cannot answer (they
+time out), about 0 where they can (x86-64 answers through NMI even with
+interrupts masked). The
 test's own checks are left out for the probe; the boot runs on.
 
 Run it quiet and under host load (the adversary: more busy processes on
@@ -75,7 +76,7 @@ S_ANCHOR_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
 '''
 S_PROBE_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
     cpumask_t got = 0;
-    uint64_t lbp_prev = clock_now_ns(), lbp_gap = 0;   /* LBPROBE */
+    uint64_t lbp_prev = clock_now_ns(), lbp_gap = 0, lbp_lost = 0;   /* LBPROBE */
     for (;;) {
         for (unsigned c = 0; c < cpu_count(); c++) {
             if ((targets & CPUMASK_OF(c)) && !(got & CPUMASK_OF(c)) &&
@@ -85,16 +86,20 @@ S_PROBE_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
         uint64_t lbp_now = clock_now_ns();
         if (lbp_now - lbp_prev > lbp_gap)
             lbp_gap = lbp_now - lbp_prev;
+        if (lbp_now - lbp_prev > 1000000)   /* a gap over 1 ms: time this CPU did not run */
+            lbp_lost += lbp_now - lbp_prev;
         lbp_prev = lbp_now;
         if (got == targets || lbp_now >= deadline)
             break;
         arch_cpu_relax();
     }
     __atomic_store_n(&g_lbprobe_gap_ns, lbp_gap, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_lbprobe_lost_ns, lbp_lost, __ATOMIC_RELAXED);
 '''
 S_PROBE_DECL = '''extern uint64_t g_lbprobe_gap_ns;   /* LBPROBE (tools/lockup-busy-probe.py; not for merge) */
+extern uint64_t g_lbprobe_lost_ns;
 void lbprobe_release(void);
-uint64_t g_lbprobe_gap_ns;
+uint64_t g_lbprobe_gap_ns, g_lbprobe_lost_ns;
 /* The slot a successful sample holds is released by lockup_print_samples;
  * the probe releases it without printing every sample it takes. */
 void lbprobe_release(void) { __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE); }
@@ -115,12 +120,12 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
 #else
 #define LBP_ARCH "x86_64"
 #endif
-        extern uint64_t g_lbprobe_gap_ns;
+        extern uint64_t g_lbprobe_gap_ns, g_lbprobe_lost_ns;
         extern void lbprobe_release(void);
         enum { LBP_N = 200 };
         static uint64_t lbp_el[LBP_N];
         unsigned lbp_over = 0, lbp_nmi = 0, lbp_n = 0;
-        uint64_t lbp_maxgap = 0, lbp_start = clock_now_ns();
+        uint64_t lbp_maxgap = 0, lbp_maxran = 0, lbp_start = clock_now_ns();
         bool ok = true;
         uint64_t el = 0;
         while (lbp_n < LBP_N && clock_now_ns() - lbp_start < 3000000000ull) {
@@ -135,15 +140,19 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
             }
             lbprobe_release();
             uint64_t gap = __atomic_load_n(&g_lbprobe_gap_ns, __ATOMIC_RELAXED);
+            uint64_t lost = __atomic_load_n(&g_lbprobe_lost_ns, __ATOMIC_RELAXED);
+            uint64_t ran = el > lost ? el - lost : 0;   /* the time the sampler spent running */
+            if (ran > lbp_maxran)
+                lbp_maxran = ran;
             if ((m & CPUMASK_OF(a)) && (m & CPUMASK_OF(b)))
                 lbp_nmi++;   /* both masked targets answered: through NMI */
             if (gap > lbp_maxgap)
                 lbp_maxgap = gap;
             if (el >= LOCKUP_SAMPLE_TIMEOUT_NS + 2 * 1000 * 1000) {
                 lbp_over++;
-                kinfo("LBPROBE over: el %llu us, largest gap %llu us, el minus gap %lld us (%s)",
+                kinfo("LBPROBE over: el %llu us, largest gap %llu us, lost in gaps over 1 ms %llu us, ran %llu us (%s)",
                       (unsigned long long)(el / 1000), (unsigned long long)(gap / 1000),
-                      (long long)((int64_t)el - (int64_t)gap) / 1000, LBP_ARCH);
+                      (unsigned long long)(lost / 1000), (unsigned long long)(ran / 1000), LBP_ARCH);
             }
             lbp_el[lbp_n++] = el;
         }
@@ -154,10 +163,10 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
                 lbp_el[j - 1] = x;
             }
         kinfo("LBPROBE summary: %u samples, over the bound %u, el min/median/max %llu/%llu/%llu us, "
-              "largest gap max %llu us, targets answered by nmi %u (%s)",
+              "largest gap max %llu us, ran max %llu us, targets answered by nmi %u (%s)",
               lbp_n, lbp_over, (unsigned long long)(lbp_el[0] / 1000),
               (unsigned long long)(lbp_el[lbp_n / 2] / 1000), (unsigned long long)(lbp_el[lbp_n - 1] / 1000),
-              (unsigned long long)(lbp_maxgap / 1000), lbp_nmi, LBP_ARCH);
+              (unsigned long long)(lbp_maxgap / 1000), (unsigned long long)(lbp_maxran / 1000), lbp_nmi, LBP_ARCH);
         el = 0;   /* the probe reports; the test's check is not the question */
 '''
 
