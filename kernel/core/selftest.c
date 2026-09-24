@@ -487,6 +487,7 @@ static const struct selftest tests[] = {
     { "sched-spread",    selftest_sched_spread },
     { "sched-load",      selftest_sched_load },
     { "sched-balance-pull", selftest_sched_balance_pull },
+    { "sched-balance-pair", selftest_sched_balance_pair },
     { "sched-balance-hysteresis", selftest_sched_balance_hysteresis },
     { "sched-balance-affinity", selftest_sched_balance_affinity },
     { "bench-balance",   selftest_bench_balance },
