@@ -30,10 +30,11 @@ asks QEMU over QMP for every vCPU's registers and for the console
 PL011's status registers (never its data register, which a read would
 consume).
 
-**It reproduces, on this machine, quiet or loaded.** Of eight aarch64
-release boots, six stalled (quiet and under host load alike), and three
-more of three when the dump was being fixed: nine of eleven. The shape is
-the CI shape exactly:
+**It reproduces, on this machine, quiet or loaded: 13 stalls in 20
+aarch64 release boots** with the probe applied -- none in the first
+three, six of the next eight (quiet and under host load alike), and
+seven of the nine run while the stall dump itself was being fixed. The
+shape is the CI shape exactly:
 
 ```
 cosmo$ sleep 1 &
@@ -90,7 +91,7 @@ window: a character that arrives during the drain is read by it, and one
 that arrives after the drain's last read raises an interrupt nothing
 clears. The same probe, with only those two statements swapped: **no
 stall in six of six boots**, every one running all 25 cycles (128
-prompts), against nine stalls in eleven boots without it.
+prompts), against 13 stalls in 20 boots without it.
 
 ### Why it matters
 
@@ -98,8 +99,8 @@ prompts), against nine stalls in eleven boots without it.
   user's side, of the whole machine -- and it happened on `main`.
 - **It is the console**: the one input path every aarch64 user has.
 - **Three sightings over four days were recorded and re-run**, because
-  the failure looked like a harness flake. It reproduces nine times in
-  eleven once provoked.
+  the failure looked like a harness flake. It reproduces 13 times in 20
+  once provoked.
 
 ## Current implementation
 
@@ -198,7 +199,7 @@ One PR: the reorder, the test, the harness cycles, the documents.
 | test | checks | mutation it must catch |
 | --- | --- | --- |
 | `console-rx-clear` (new, aarch64) | a byte looped into the FIFO between the drain and the clear reaches the tty | the old order (drain, then clear): the byte is never read |
-| shell harness burst cycles | a line typed as a background job exits echoes and runs | the old order: the probe's nine-in-eleven |
+| shell harness burst cycles | a line typed as a background job exits echoes and runs | the old order: the probe's 13 in 20 |
 
 ## Benchmarks
 

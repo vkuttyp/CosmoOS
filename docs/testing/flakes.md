@@ -1709,8 +1709,8 @@ mid-keystroke. Still not a list entry; still re-run first.
 #231, a report): the echo of `echo after-interrupt-ok` stopped at
 `cosmo$ echo after-interru`, right after the `^C`'d `sleep`. **Taken up
 by `docs/audit/next-subsystem-console-rx.md`**, which provoked it on
-purpose (`tools/console-stall-probe.py`: nine stalls in eleven aarch64
-release boots) and looked from outside: the guest idle and ticking, the
+purpose (`tools/console-stall-probe.py`: 13 stalls in 20 aarch64 release
+boots) and looked from outside: the guest idle and ticking, the
 PL011's receive FIFO full with its interrupt enabled and none pending.
 `rx_irq` drains the FIFO and then clears the receive interrupt, so a
 character arriving between the two has its interrupt cleared and is
