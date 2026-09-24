@@ -47,7 +47,6 @@ static bool g_expected;                     /* a test asked for the report it is
 static struct lockup_stats g_stats;         /* the reports' facts: under g_stats_lock */
 static uint64_t g_samples, g_samples_busy;   /* the sample counters: atomic, outside the lock */
 static uint64_t g_samples_waits;             /* deadlines armed: the bound is total, so one per sample */
-static bool g_ipi_only;                      /* test hook: no NMI (lockup_test_ipi_only) */
 /* Every report writes its fields and bumps its counter under this leaf
  * lock, and the reader takes it too, so a snapshot is one report's, never
  * two watchers' fields mixed (a soft and a hard report may land in the
@@ -88,6 +87,16 @@ int lockup_reporter(void)
 
 bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)
 {
+    return lockup_sample_all_info(self, timeout_ns, 0, answered, NULL);
+}
+
+bool lockup_sample_all_info(const struct arch_trap_frame *self, uint64_t timeout_ns, unsigned flags,
+                            cpumask_t *answered, struct lockup_sample_info *info)
+{
+    struct lockup_sample_info local = { 0 };
+    if (info == NULL)
+        info = &local;
+    *info = (struct lockup_sample_info){ 0 };
     /* From the tick this runs with interrupts off; a self-test calls it
      * from a thread, and "me" -- excluded from the targets, and the
      * sample recorded locally -- must be one CPU throughout (S25). The
@@ -96,6 +105,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     unsigned me = arch_cpu_id();
     int expected = 0;
     *answered = 0;
+    info->claims++;   /* one attempt: the slot is never spun for */
     if (!__atomic_compare_exchange_n(&g_reporter, &expected, (int)me + 1, false, __ATOMIC_ACQ_REL,
                                      __ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&g_samples_busy, 1, __ATOMIC_RELAXED);
@@ -115,7 +125,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
             continue;
         struct percpu *pc = percpu_get(c);
         __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
-        if (__atomic_load_n(&g_ipi_only, __ATOMIC_ACQUIRE) || !arch_ipi_send_nmi(c))
+        if ((flags & LOCKUP_SAMPLE_IPI_ONLY) || !arch_ipi_send_nmi(c))
             ipi_send(c, IPI_SAMPLE);
     }
 
@@ -130,8 +140,11 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
      * on one CPU; a diagnostic that is occasionally wrong about a
      * nanosecond is better than one that is regularly wrong about a
      * CPU. */
-    uint64_t deadline = clock_now_ns() + timeout_ns;
+    uint64_t armed = clock_now_ns();
+    uint64_t deadline = armed + timeout_ns;
     __atomic_fetch_add(&g_samples_waits, 1, __ATOMIC_RELAXED);   /* the one wait, counted where it is armed */
+    info->waits++;
+    info->wait_ns = deadline - armed;   /* the interval actually armed, read back from the deadline */
     cpumask_t got = 0;
     for (;;) {
         for (unsigned c = 0; c < cpu_count(); c++) {
@@ -356,11 +369,6 @@ void lockup_get_stats(struct lockup_stats *out)
     out->samples = __atomic_load_n(&g_samples, __ATOMIC_RELAXED);
     out->samples_busy = __atomic_load_n(&g_samples_busy, __ATOMIC_RELAXED);
     out->samples_waits = __atomic_load_n(&g_samples_waits, __ATOMIC_RELAXED);
-}
-
-void lockup_test_ipi_only(bool on)
-{
-    __atomic_store_n(&g_ipi_only, on, __ATOMIC_RELEASE);
 }
 
 void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)

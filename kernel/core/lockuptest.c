@@ -392,6 +392,7 @@ bool selftest_lockup_sample_irqoff(const char **reason)
 struct racer {
     volatile bool *go;
     unsigned *returned;          /* shared: racers whose sample call has returned */
+    struct lockup_sample_info info;   /* what this racer's sample did */
     bool ok;
     bool saw_loser;              /* winner only: the loser returned while this held the slot */
     cpumask_t mask;
@@ -409,7 +410,7 @@ static void racer_main(void *arg)
     while (!*r->go)
         arch_cpu_relax();
     uint64_t t0 = clock_now_ns();
-    r->ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &r->mask);
+    r->ok = lockup_sample_all_info(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, 0, &r->mask, &r->info);
     r->elapsed_ns = clock_since_ns(t0);
     __atomic_fetch_add(r->returned, 1u, __ATOMIC_ACQ_REL);
     if (r->ok) {
@@ -456,7 +457,9 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
     const struct racer *loser = r[0].ok ? &r[1] : &r[0];
     const struct racer *winner = r[0].ok ? &r[0] : &r[1];
     CHECK(loser->mask == 0);
-    CHECK(winner->saw_loser);                    /* refused while the slot was held: at once, by order */
+    CHECK(winner->saw_loser);                    /* refused while the slot was held: by order */
+    CHECK(loser->info.claims == 1);              /* and at once: one attempt at the slot, never retried */
+    CHECK(loser->info.waits == 0);               /* sending nothing, waiting for nothing */
     CHECK(loser->elapsed_ns < SAMPLE_HANG_NS);   /* guards against a hang, not measures */
     CHECK(winner->elapsed_ns < SAMPLE_HANG_NS);
     CHECK(s1.samples == s0.samples + 1 && s1.samples_busy == s0.samples_busy + 1);
@@ -480,17 +483,13 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
         struct thread *ta = start_spinner(&sa, a, SCHED_PRIO_DEFAULT, true);
         struct thread *tb = start_spinner(&sb, b, SCHED_PRIO_DEFAULT, true);
         CHECK(ta != NULL && tb != NULL);
-        struct lockup_stats w0, w1;
-        lockup_test_ipi_only(true);
-        lockup_get_stats(&w0);
+        /* This sample's own report: no global state, so no other sample's
+         * count mixes in and no real report is sent without its NMI. */
+        struct lockup_sample_info info;
         uint64_t t0 = clock_now_ns();
         cpumask_t m = 0;
-        bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
+        bool ok = lockup_sample_all_info(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, LOCKUP_SAMPLE_IPI_ONLY, &m, &info);
         uint64_t el = clock_since_ns(t0);
-        /* Read while the slot is still held: it is exclusive, so no other
-         * sample can have armed a wait between these two reads. */
-        lockup_get_stats(&w1);
-        lockup_test_ipi_only(false);
         if (ok)
             lockup_print_samples(m);   /* releases the slot, before any check can return */
         /* Both stop before either is joined: a join frees a stack, and
@@ -501,7 +500,8 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
         thread_join(ta);
         thread_join(tb);
         CHECK(ok);
-        CHECK(w1.samples_waits == w0.samples_waits + 1);            /* one wait for both: the bound is total */
+        CHECK(info.waits == 1);                                     /* one wait for both: the bound is total */
+        CHECK(info.wait_ns == LOCKUP_SAMPLE_TIMEOUT_NS);            /* ... armed for the timeout asked, not a multiple */
         CHECK((m & (CPUMASK_OF(a) | CPUMASK_OF(b))) == 0);         /* neither answered: it waited out its timeout */
         CHECK(el < SAMPLE_HANG_NS);                                 /* a guard against a wait that never stops */
         kinfo("selftest: lockup-sample-busy: two targets that could not answer, one wait (%llu us)",
