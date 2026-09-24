@@ -82,11 +82,15 @@ say which version measured them.
    `NOT_READY` now.)
 
 2. **The pair, made on purpose** (`PPROBE`): two workers pinned to one
-   CPU for 50 ms, until the queued one has been preempted, then widened
-   to every CPU; once spinning, once yielding. Deterministic, and the
-   same in all eight boots that ran it -- both architectures, plain and
-   chaos, both versions of the probe (the corrected one waits to *see*
-   the queued spinner preempted before widening, and saw it every time):
+   CPU; the probe waits (up to 1 s) for the pair's premise -- for a
+   spinning pair, the queued one seen READY with `PREEMPTED`; for a
+   yielding pair, both switched in more than once -- then widens both to
+   every CPU and waits up to 1 s for them to run on two CPUs. A pair
+   whose premise is not seen is reported inconclusive, not measured.
+   (The first version slept 50 ms instead of observing the premise; the
+   corrected one saw it in every run.) Deterministic, and the same in all
+   eight boots that ran it -- both architectures, plain and chaos, both
+   versions of the probe:
 
    ```
    PPROBE spinning pair on cpu 0: queued one preempted at widen 1; separated NO after 1003 ms; balancer pulls +0, refused not-ready +502
@@ -188,11 +192,14 @@ balancer's limit rather than a property any test asserts.
 `sched-balance-pair` makes the probe's item 2 a test, both halves:
 
 - **A yielding pair is separated.** Two yielding workers pinned to one
-  CPU (not the test thread's), released, allowed to alternate for 50 ms,
-  then widened to every CPU: within a bound, they run on two different
-  CPUs.
-- **A spinning pair is not**, in the same window, and the queued one was
-  preempted when widened. This is S26 observed from outside: were a
+  CPU (not the test thread's) and released; once each has been switched
+  in more than once -- observed, within a bound -- both are widened to
+  every CPU, and within a bound they run on two different CPUs.
+- **A spinning pair is not.** The same, except that the premise
+  observed before the widen is the queued one READY with `PREEMPTED`;
+  the pair must still share one CPU at the end of the same window. A
+  premise not seen within its bound fails the test as a broken premise,
+  distinctly from either claim. This is S26 observed from outside: were a
   migrator ever to take a preempted thread, this half would see the pair
   separated. It is also what makes the first half mean something -- the
   only difference between the two halves is the yield.
