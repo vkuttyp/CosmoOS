@@ -41,6 +41,19 @@
 >    banner, before any walk -- with the host's load average at ten. The
 >    rerun of the same image booted fully; not attributable to the
 >    change.
+> 6. **Review found two defects, each now tested.** (a) *An overflow
+>    outlived the restart.* A name that overflowed its buffer and was
+>    then restarted at `/` by an absolute link kept `name_long`, so a
+>    short, correct final name was reported `-ENAMETOOLONG` (a `chdir`
+>    or spawn failed, a directory file went unnamed). `name_reset` clears
+>    it; `vfs-lookup-named` walks `a/b/toroot` (`toroot` an absolute link
+>    to `/tmp`) into a ten-byte buffer, which `/tmp/ln/a/b` overflows and
+>    `/tmp` fits. (b) *`/proc/self` had size 0*, where a link's size is
+>    its target's length and a reader may size its `readlink` buffer
+>    from `lstat`. The lookup sets it from the looker's pid; `init`
+>    checks `st_size` against what `readlink` returned. Review also
+>    found `process/design.md` and the dirfd unit's README entry still
+>    describing the lexical names.
 >
 > **The mutations**, each applied alone on x86-64, each boot confirmed
 > booted:
@@ -58,7 +71,9 @@
 > | 9 | `/proc/self` a directory resolved at lookup again | `init`: `lstat` not a link, `readlink` `EINVAL`, the name `/proc/self` not `/proc/<pid>`, both children |
 > | 10 | the open's last component not named | `lxtest`: `fchdir(dfd)` answered `/tmp`, and both link cases |
 > | 11 | a last-component link's spelling appended at the open | **survived at first** (item 2); with `/tmp/lxdrel`, `lxtest`'s `getcwd` after `fchdir` |
-> | -- | the naming walk's vnode comparison removed (first build) | **survived**: unreachable without a race; the build removed the second walk instead (item 1) |
+> | 12 | a restart at `/` keeping the overflow flag (review (a)) | `vfs-lookup-named`: `reset_named` |
+| 13 | `/proc/self`'s size left 0 (review (b)) | `init`: `ls.st_size == ln` |
+| -- | the naming walk's vnode comparison removed (first build) | **survived**: unreachable without a race; the build removed the second walk instead (item 1) |
 
 > Constitution §68 report. Takes up the deferred-work inventory's row
 > (section 3) "`chdir` through a symbolic link publishes the link's
