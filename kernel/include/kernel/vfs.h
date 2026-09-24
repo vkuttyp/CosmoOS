@@ -313,9 +313,23 @@ int vfs_permission(const struct vnode *vn, unsigned mask);
  * calling process's root, so a link is bounded by the root a leading
  * slash is bounded by. */
 int vfs_lookup(struct vnode *start, const char *path, struct vnode **out);
+/* vfs_lookup, and the traversed name of what it reached (P32): made of
+ * the components entered as directories, links replaced by where they
+ * led, `..` removing a component, relative to the caller's root.
+ * `startname` names `start` and is ignored for an absolute path; a
+ * relative walk from a start with no name is -ENOENT. -ENAMETOOLONG
+ * when the name would not fit `n`. */
+int vfs_lookup_named(struct vnode *start, const char *startname, const char *path, struct vnode **out,
+                     char *name, size_t n);
 /* The same, stopping at a link named by the last component. */
 int vfs_lookup_nofollow(struct vnode *start, const char *path, struct vnode **out);
 int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out);
+/* vfs_open, and the traversed name of what it opened (P32), from its own
+ * walk -- so the name is of the very vnode the file holds. `name` is
+ * left empty, and the open still succeeds, for a relative path from a
+ * start with no name or a name that does not fit `n`. */
+int vfs_open_named(struct vnode *start, const char *startname, const char *path, unsigned flags, uint32_t mode,
+                   struct file **out, char *name, size_t n);
 /* An open file over an already resolved vnode (the reference is consumed,
  * also on failure). No permission check: the caller made its own (exec). */
 int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out);
@@ -330,10 +344,11 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
 /* renameat: the two paths resolve from two starts. vfs_rename(s, a, b)
  * is vfs_rename2(s, a, s, b). */
 int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath);
-/* Record a directory file's path (a no-op for anything else, or on
- * allocation failure: the file then has no name to give fchdir, which
- * refuses it rather than invent one). Before the file is shared. */
-void file_set_dir_path(struct file *f, const char *abs);
+/* Record a directory file's name for fchdir: the open's own traversed
+ * name (vfs_open_named, P32). A no-op for anything else, an empty name,
+ * or an allocation failure: the file then has no name to give fchdir,
+ * which refuses it rather than invent one. Before the file is shared. */
+void file_set_dir_path(struct file *f, const char *name);
 /* Set a regular file's length, dropping what is above it and reading as
  * zeros below a length it grew to. O_TRUNC is this with a size of zero;
  * this is the rest of it, which a filesystem that stores several blocks

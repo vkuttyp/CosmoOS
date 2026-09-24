@@ -255,9 +255,9 @@ directory it got from `process_cwd_get()` — **referenced for the length
 of the walk**, never the raw field, which is P29 and which this
 invariant's own wording ("passes `process_current()->cwd`") described
 accurately until threads made it a defect. `chdir` verifies the target is
-a directory before swapping vnode and normalised string together under
-`process.lock`, and takes the base it normalises against from the *same*
-snapshot it looks up in; a child inherits both (or the `cwd` named in the
+a directory before swapping vnode and name together under
+`process.lock`, the name being the path the walk took (P32), and takes
+the base it names from from the *same* snapshot it looks up in; a child inherits both (or the `cwd` named in the
 spawn request). Check: `init --selftest` (`mkdir` relative to `/tmp`,
 `chdir("cwdtest/../cwdtest/.")` gives `/tmp/cwdtest`, `..` gives `/tmp`,
 `ENOTDIR`, `ENOENT`, `ERANGE`; a child's `cd` leaves the parent's cwd);
@@ -439,6 +439,34 @@ failing it -- which is what the rule exists to prevent.
 
 ## Per-process state under more than one thread
 
+**P32. A published directory name is the path the walk took.** (The
+cwd-name unit, `docs/audit/next-subsystem-cwd-name.md`.) The name
+`chdir` publishes, the one a spawned child is given for its `cwd`, and
+the one a directory file records for `fchdir` are each the traversed
+name of the walk that reached the vnode (`vfs_lookup_named`): the
+components entered as directories, links replaced by where they led --
+an absolute target restarting at `/`, a relative one continuing from the
+directory it was found in -- and `..` removing a component, relative to
+the caller's root and never above it. So the name, walked again, reaches
+the same directory, until a rename moves it (P27's gap). The names used
+to be lexical normalisations of the argument (`path_normalize`), which
+through a link named another directory: after `chdir` through a link
+and `chdir("..")`, `getcwd` named `/tmp` while the process stood in
+`/tmp/clp`, at both doors (`tools/chdir-link-probe.py`). No name in the
+tree means different directories to different walkers: procfs's `self`
+is a symbolic link to the reader's pid, so a walk through it is named
+by pid. A directory file's name comes from its open's own walk
+(`vfs_open_named`), never from a second walk that a rename could send
+elsewhere. Check: `vfs-lookup-named` (fifteen walks through absolute,
+relative and chained links and across a mount, each name walked again
+to the same vnode; a start with no name, a name that does not fit);
+`init`'s working-directory checks (six `chdir`s through links, each name
+checked against `stat(".")`; children spawned with a `cwd` through a
+relative link, inheriting `/proc/<pid>`, and given `/proc/self`, each
+checking its own name; `..` from `/proc/self`); `lxtest`'s six `chdir`s
+and its `fchdir` of directories opened through an absolute and a
+relative link.
+
 **P31. A relative path in an `*at` call resolves from the directory its
 descriptor names, referenced for the walk.** (The dirfd unit,
 `docs/audit/next-subsystem-dirfd.md`.) `at_base` in the Linux door:
@@ -454,17 +482,19 @@ narrowed directory cannot be widened by opening a child -- and its
 vnode is referenced before the handle's reference is dropped, so
 a sibling thread closing it mid-call cannot free the base under the walk
 (V35). `ENOSYS` is an answer no `*at` call gives. A directory file
-records the normalised absolute path it was opened by -- at both doors,
-because a Linux program can inherit a native handle -- **only if walking
-that name from the root with no symbolic link arrives at the same
-directory**, and `fchdir` publishes vnode and name together through the
+records **the name its open's own walk took to it** (`vfs_open_named`,
+P32) -- at both doors, because a Linux program can inherit a native
+handle -- so the name is of the very vnode the file holds (the dirfd
+unit recorded the lexical name only if it walked there with no symbolic
+link, and refused every directory opened through one), and `fchdir` publishes vnode and name together through the
 same `cwd_publish` `chdir` uses (and refuses, `-ENOENT`, a directory
-with no coherent name); the name is stale after a rename of the directory or any ancestor,
+with no name -- which since P32 means only one opened by a relative path from a directory
+that had none, or whose name did not fit); the name is stale after a rename of the directory or any ancestor,
 as P27 says of `chdir`'s. Check: `lxtest`'s directory-descriptor block
 (each of the nine calls against a real descriptor, every effect
 cross-checked by absolute path; `-ENOTDIR` and `-EBADF`; `fchdir` then
 `getcwd` and a relative open and `chdir("..")`; a directory opened
-through a link refused by `fchdir`), `vfs-rename2`, `dirfd-rights` (a
+through a link `fchdir`s with its own path), `vfs-rename2`, `dirfd-rights` (a
 `READ`-only delegated directory handle refuses every change, a write
 open, and a change through a child directory opened from it; the
 full-rights control makes them), `cwd-hold`'s `failswap` pass.

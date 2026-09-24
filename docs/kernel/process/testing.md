@@ -115,6 +115,18 @@ use the raw wrappers to test kernel error codes exactly.
   `chdir("..")` → `/tmp`; `chdir("/boot/init")` → `ENOTDIR`;
   `chdir("/nope")` → `ENOENT`; `getcwd` into 4 bytes → `ERANGE`;
   `rmdir("cwdtest")`, `chdir("/")`.
+- **the working directory's name** (P32, the cwd-name unit): six
+  `chdir`s through `/tmp/ncnl` (an absolute link to `/tmp/ncn/deep`) and
+  `/tmp/ncnr` (a relative one) -- the link, `..`, `/tmp`, the relative
+  link, `/tmp/ncnl/..`, `deep/../../ncnl` -- each followed by `getcwd`
+  against the expected path and `stat(".")` against `stat(getcwd())`;
+  a child spawned with `cwd` `tmp/ncnr` runs `init --probe
+  cwd-is:/tmp/ncn/deep`, which checks its own name the same way;
+  `lstat("/proc/self")` is a link and `readlink` answers the pid;
+  `chdir("/proc/self")` publishes `/proc/<pid>`, a child inheriting it
+  and a child spawned with `cwd` `/proc/self` both get the parent's
+  `/proc/<pid>` (checked by `cwd-is:`), and `chdir("..")` from there is
+  `/proc`.
 - **introspection**: `getppid() == 0`; `procinfo` lists its own pid with
   name `init` and one thread; `klog_read` returns more than 100 bytes
   containing a log line; `sysctl_get("kernel.name")` is `CosmoOS`

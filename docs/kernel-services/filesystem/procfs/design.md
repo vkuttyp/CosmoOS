@@ -32,7 +32,7 @@ is readable by anything.
 ```text
   /proc/<pid>/status     one `key: value` line per fact
   /proc/<pid>/limits     one line per resource limit
-  /proc/self/            the caller's own, resolved per lookup
+  /proc/self             a link to the reader's own directory
 ```
 
 Three files rather than thirty. Each new file is a promise to keep
@@ -59,11 +59,18 @@ domain's processes exist at all, and an unprivileged viewer sees only
 processes of its own real uid. A pid that fails either test is `ENOENT`
 -- not `EACCES`, which would confirm it exists.
 
-`/proc/self` is resolved at lookup time to the calling process, which is
-how a process reads its own facts without knowing its pid. It is a
-directory rather than a symbolic link because this VFS has no symbolic
-links, and inventing them for one path would be the tail wagging the
-dog.
+`/proc/self` is a symbolic link to the reading process's directory,
+its target (the pid, relative) rendered at each `readlink` -- which is
+how a process reads its own facts without knowing its pid. It was a
+directory resolved to the caller at lookup, from before this VFS had
+symbolic links. As a directory, a walk through it was named `self`, a
+name that means a different directory to every process that walks it:
+a child inheriting a working directory entered through `/proc/self`
+held its parent's vnode under a name that, walked by the child, reached
+its own (the cwd-name unit, P32). As a link the walk names it by pid.
+A process directory answers `..` with `/proc`, which its listing always
+named; until the same unit the lookup refused it, so `chdir("..")` from
+one was `ENOENT`.
 
 ## Each open is a snapshot
 

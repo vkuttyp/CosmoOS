@@ -3427,8 +3427,9 @@ See [docs/development.md](docs/development.md).
   the descriptor it was opened through); `renameat` resolves its two names from two directories through
   `vfs_rename2`; a directory file remembers the path it was opened by, at
   both doors, **only if that name walked with no symbolic link reaches the
-  same directory**, and `fchdir` publishes the name with the vnode as
-  `chdir` does. Review of the first build found the missing rights, a
+  same directory** (since the cwd-name unit, PR #232, the name its open's
+  own walk took, so a directory opened through a link has one), and
+  `fchdir` publishes the name with the vnode as `chdir` does. Review of the first build found the missing rights, a
   child directory opened through a narrowed one regaining them, the
   incoherent name and a failed `chdir` stranding the held-walk seam's
   swapper; each has a test. Invariant **P31**; `lxtest` checks every call
@@ -3445,6 +3446,22 @@ See [docs/development.md](docs/development.md).
   timer one tick before its own on every boot, so the sighting's shape
   is certain rather than waited for. With the hook back to "any pcb",
   the decoy is held and the test fails. (PR #230)
+- **A working directory's name is the path the walk took.** `chdir`
+  published a lexical normalisation of its argument with the vnode the
+  walk reached; through a symbolic link the two named different
+  directories, and after `chdir` through a link and `chdir("..")`
+  `getcwd` answered `/tmp` while the process stood in `/tmp/clp` --
+  measured at both doors on both architectures
+  (`tools/chdir-link-probe.py`). The walk now keeps the name it took
+  when asked (`vfs_lookup_named`): each component entered as a
+  directory, links replaced by where they led, `..` removing one. `chdir`,
+  a spawn's `cwd` and a directory file's name for `fchdir` all publish
+  it, so `fchdir` of a directory opened through a link now succeeds with
+  its own path where the dirfd unit refused it. The same probe found
+  `chdir("..")` from `/proc/<pid>` was `ENOENT`; procfs's process
+  directories answer `..` now, and `/proc/self` is a symbolic link to the
+  reader's pid, so no name in the tree means different directories to
+  different processes. Invariant **P32**. (PR #232)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

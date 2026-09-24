@@ -1,5 +1,80 @@
 # NEXT SUBSYSTEM — a working directory's name is the path the walk took
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **A directory file is named by its open's own walk, not a second
+>    one.** §2 had `file_set_dir_path(f, start, startname, path)` walk
+>    the path again and record the name only if that walk reached the
+>    file's vnode. The first build did that, and the mutation removing
+>    the comparison **survived**: the two walks differ only when a
+>    rename lands between them, which no test can arrange without a
+>    seam. The build removed the race instead of testing it:
+>    `vfs_open_named` returns the traversed name kept by the open's own
+>    walk (`vfs_open` and it share `open_walk`), so the name is of the
+>    very vnode the file holds, and `file_set_dir_path(f, name)` just
+>    stores it. The open never fails for the name's sake; a relative
+>    path from a base with no name, or a name that does not fit, leaves
+>    the file unnamed, and `fchdir` refuses it as before.
+> 2. **An absolute link hides a spelling left in the name; a relative
+>    one shows it.** The mutation appending a last-component link's own
+>    name before expanding it survived at the open: every test opened a
+>    directory through an *absolute* link, whose restart at `/` erases
+>    whatever the name held. A relative link continues from the name as
+>    it stands. `lxtest` now also opens `/tmp/lxdrel` (a link to
+>    `lxdir`) and `fchdir`s it; `vfs-lookup-named` gained `rel` as the
+>    last component (fifteen walks), and the same mutation in `resolve`
+>    is caught by it.
+> 3. **The spawn checks are made by the child, at the native door.**
+>    The test table put them in the kernel's `process-spawn`; they are in
+>    `init`, where each child runs `init --probe cwd-is:<name>` and checks
+>    its own `getcwd` against the name *and* `stat(".")` against
+>    `stat(name)` -- which a comparison of strings in the parent could
+>    not. The first version of those checks used `spawnve_in`, which sets
+>    a child's **root**, not its working directory; the children were
+>    rooted at the directory and answered `/`. A test fault, fixed by
+>    spawning with `.cwd`.
+> 4. **`/proc/self`'s link is relative** (`"42"`), so the walk continues
+>    from `/proc` and names it `/proc/42`; `lstat` answers a link and
+>    `readlink` the pid, both checked.
+> 5. **The first x86-64 boot printed nothing** -- not even the kernel's
+>    banner, before any walk -- with the host's load average at ten. The
+>    rerun of the same image booted fully; not attributable to the
+>    change.
+> 6. **Review found two defects, each now tested.** (a) *An overflow
+>    outlived the restart.* A name that overflowed its buffer and was
+>    then restarted at `/` by an absolute link kept `name_long`, so a
+>    short, correct final name was reported `-ENAMETOOLONG` (a `chdir`
+>    or spawn failed, a directory file went unnamed). `name_reset` clears
+>    it; `vfs-lookup-named` walks `a/b/toroot` (`toroot` an absolute link
+>    to `/tmp`) into a ten-byte buffer, which `/tmp/ln/a/b` overflows and
+>    `/tmp` fits. (b) *`/proc/self` had size 0*, where a link's size is
+>    its target's length and a reader may size its `readlink` buffer
+>    from `lstat`. The lookup sets it from the looker's pid; `init`
+>    checks `st_size` against what `readlink` returned. Review also
+>    found `docs/kernel/process/design.md` and the dirfd unit's README entry still
+>    describing the lexical names.
+>
+> **The mutations**, each applied alone on x86-64, each boot confirmed
+> booted:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | `..` appended like any component | `vfs-lookup-named` (9 cases: `a/b/..` named `/tmp/ln/a/b/..`, ...), `init`'s and `lxtest`'s sequences, and `init`'s older `cwdtest/../cwdtest/.` check |
+> | 2 | an absolute link mid-path keeps the name it had | `vfs-lookup-named` `abs/..` (named `/tmp/ln/tmp/ln/a`); both doors' sequences |
+> | 3 | a relative link mid-path resets the name to `/` | `vfs-lookup-named` `rel/..` (named `/a`) |
+> | 4 | a mid-path link's spelling appended before its expansion | `vfs-lookup-named` `rel/..` (named `/tmp/ln/rel/a`) |
+> | 5 | a last-component link's spelling appended in `resolve` | `vfs-lookup-named` `rel`, `a/up`, `m/out`; both doors' sequences |
+> | 6 | `chdir` publishing the lexical name again | `init`: six names and their inode checks, the `/proc/self` name and the children; `lxtest`: 8 checks |
+> | 7 | spawn giving the child the lexical name again | `init`: both spawned children (`cwd-is:` status 11) |
+> | 8 | procfs's process directory refusing `..` again | `init`: `chdir("..")` from `/proc/<pid>` (`ENOENT`) |
+> | 9 | `/proc/self` a directory resolved at lookup again | `init`: `lstat` not a link, `readlink` `EINVAL`, the name `/proc/self` not `/proc/<pid>`, both children |
+> | 10 | the open's last component not named | `lxtest`: `fchdir(dfd)` answered `/tmp`, and both link cases |
+> | 11 | a last-component link's spelling appended at the open | **survived at first** (item 2); with `/tmp/lxdrel`, `lxtest`'s `getcwd` after `fchdir` |
+> | 12 | a restart at `/` keeping the overflow flag (review (a)) | `vfs-lookup-named`: `reset_named` |
+> | 13 | `/proc/self`'s size left 0 (review (b)) | `init`: `ls.st_size == ln` |
+> | -- | the naming walk's vnode comparison removed (first build) | **survived**: unreachable without a race; the build removed the second walk instead (item 1) |
+
 > Constitution §68 report. Takes up the deferred-work inventory's row
 > (section 3) "`chdir` through a symbolic link publishes the link's
 > spelling with the target's vnode", found in review of the dirfd unit
@@ -116,7 +191,7 @@ those checks, and both boots pass with it applied.
 - **procfs has a directory you cannot leave by `..`.** Small, and
   reachable by any process that looks at its own `/proc/self`.
 
-## Current implementation
+## Current implementation (before this unit; the banner says what changed)
 
 **The walk.** `resolve` (kernel-services/vfs/vfs.c) walks a path from a
 `start` vnode, or from the caller's root for an absolute path. It calls

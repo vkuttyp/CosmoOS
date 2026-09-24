@@ -680,32 +680,43 @@ int main(int argc, char **argv)
         long rf2 = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdir/moved", LX_O_RDONLY, 0);
         CHECKV(sc1(LX_fchdir, rf2) == -20, 0);                                  /* not a directory */
         sc1(LX_close, rf2);
-        /* A directory reached through a symbolic link: the vnode resolves
-         * (a relative lookup through it works), but the spelling names the
-         * link, not the directory, so there is no coherent name to publish
-         * and fchdir refuses rather than pair one with the other. */
+        /* A directory reached through a symbolic link: its name is the one
+         * the walk took (P32), so fchdir publishes the directory's own
+         * path, not the link's spelling. The dirfd unit refused this
+         * (-ENOENT, no coherent name); the cwd-name unit gave it one. */
         CHECKV(sc3(LX_symlinkat, "/tmp/lxdir", LX_AT_FDCWD, "/tmp/lxdlink") == 0, 0);
         long dl = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdlink", LX_O_RDONLY | LX_O_DIRECTORY, 0);
         CHECKV(dl >= 3, dl);
         CHECKV(sc4(LX_newfstatat, dl, "moved", sb, 0) == 0, 0);
-        CHECKV(sc1(LX_fchdir, dl) == -2, 0);                                    /* ENOENT: no coherent name */
-        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 2 && streq(cw, "/"), 0);      /* and nothing was published */
+        CHECKV(sc1(LX_fchdir, dl) == 0, 0);
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 11 && streq(cw, "/tmp/lxdir"), 0);   /* the directory, not the link */
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
         if (dl >= 0)
             sc1(LX_close, dl);
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdlink", 0) == 0, 0);
+        /* The same through a relative link: an absolute target restarts
+         * the name at `/`, which would hide a link's spelling left in it;
+         * a relative one continues from the name as it stands. */
+        CHECKV(sc3(LX_symlinkat, "lxdir", LX_AT_FDCWD, "/tmp/lxdrel") == 0, 0);
+        long dr = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdrel", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+        CHECKV(dr >= 3, dr);
+        CHECKV(sc1(LX_fchdir, dr) == 0, 0);
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 11 && streq(cw, "/tmp/lxdir"), 0);
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
+        if (dr >= 0)
+            sc1(LX_close, dr);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdrel", 0) == 0, 0);
         /* `..` after a link: /tmp/lxdeep -> /tmp/lxdir/deep, so opening
-         * "/tmp/lxdeep/.." reaches /tmp/lxdir physically while the name
-         * normalises lexically to "/tmp". The name walks cleanly with no
-         * link -- to a DIFFERENT directory -- so only the same-vnode
-         * comparison refuses it. Without this case that comparison had no
-         * test (its mutation survived). */
+         * "/tmp/lxdeep/.." reaches /tmp/lxdir, and that is its name; a
+         * lexical normalisation said "/tmp", a different directory. */
         CHECKV(sc3(LX_mkdirat, dfd, "deep", 0755) == 0, 0);
         CHECKV(sc3(LX_symlinkat, "/tmp/lxdir/deep", LX_AT_FDCWD, "/tmp/lxdeep") == 0, 0);
         long dd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdeep/..", LX_O_RDONLY | LX_O_DIRECTORY, 0);
         CHECKV(dd >= 3, dd);
         CHECKV(sc4(LX_newfstatat, dd, "moved", sb, 0) == 0, 0);             /* it IS /tmp/lxdir */
-        CHECKV(sc1(LX_fchdir, dd) == -2, 0);                                  /* and "/tmp" is not its name */
-        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 2 && streq(cw, "/"), 0);
+        CHECKV(sc1(LX_fchdir, dd) == 0, 0);
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 11 && streq(cw, "/tmp/lxdir"), 0);   /* not "/tmp" */
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
         if (dd >= 0)
             sc1(LX_close, dd);
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdeep", 0) == 0, 0);
@@ -742,6 +753,43 @@ int main(int argc, char **argv)
     CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxfifo", 0) == 0, 0);
     CHECKV(sc1(LX_chdir, "/tmp") == 0, 0);
     CHECKV(sc2(LX_getcwd, buf, sizeof(buf)) == 5 && streq(buf, "/tmp"), 0);   /* length includes the NUL */
+    /* The name chdir publishes is the path the walk took (P32,
+     * docs/audit/next-subsystem-cwd-name.md): through a link it is the
+     * directory's own path, and `..` after it is that directory's parent.
+     * A lexical name said /tmp/lxcnl, then /tmp -- while the process
+     * stood in /tmp/lxcn. Each name is checked against where the process
+     * is, by inode. */
+    {
+        static struct lx_stat here, named;
+        static char cn[64];
+        CHECKV(sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxcn", 0755) == 0, 0);
+        CHECKV(sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxcn/deep", 0755) == 0, 0);
+        CHECKV(sc3(LX_symlinkat, "/tmp/lxcn/deep", LX_AT_FDCWD, "/tmp/lxcnl") == 0, 0);   /* absolute target */
+        CHECKV(sc3(LX_symlinkat, "lxcn/deep", LX_AT_FDCWD, "/tmp/lxcnr") == 0, 0);        /* relative target */
+        static const struct {
+            const char *to;
+            const char *name;
+        } steps[] = {
+            { "/tmp/lxcnl", "/tmp/lxcn/deep" },   /* through an absolute link */
+            { "..", "/tmp/lxcn" },                /* the directory's parent, not the link's */
+            { "/tmp", "/tmp" },
+            { "lxcnr", "/tmp/lxcn/deep" },        /* a relative link, from a relative chdir */
+            { "/tmp/lxcnl/..", "/tmp/lxcn" },     /* `..` after a link in one path */
+            { "deep/../../lxcnl", "/tmp/lxcn/deep" },
+        };
+        for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+            CHECKV(sc1(LX_chdir, steps[i].to) == 0, i);
+            CHECKV(sc2(LX_getcwd, cn, sizeof(cn)) > 0 && streq(cn, steps[i].name), i);
+            CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, ".", &here, 0) == 0 &&
+                       sc4(LX_newfstatat, LX_AT_FDCWD, cn, &named, 0) == 0 && here.st_ino == named.st_ino,
+                   i);
+        }
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxcnr", 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxcnl", 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxcn/deep", LX_AT_REMOVEDIR) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxcn", LX_AT_REMOVEDIR) == 0, 0);
+    }
     CHECKV(sc1(LX_chdir, "/") == 0, 0);
     CHECKV(sc0(LX_umask) == 022, 0);
 

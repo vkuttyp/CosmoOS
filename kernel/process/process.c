@@ -1320,15 +1320,13 @@ static int chdir_inner(struct process *cur, const char *path)
      */
     char base[sizeof(cur->cwd_path_locked)];
     struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
+    /* The name published is the one the walk took (P32), not a lexical
+     * normalisation of the argument: through a symbolic link the two name
+     * different directories, and `..` after it made getcwd name one the
+     * process was not in (docs/audit/next-subsystem-cwd-name.md). */
     char newpath[sizeof(cur->cwd_path_locked)];
-    int rc = path_normalize(base, path, newpath, sizeof(newpath));
-    if (rc) {
-        if (cwd)
-            vnode_put(cwd);
-        return rc;
-    }
     struct vnode *vn;
-    rc = vfs_lookup(cwd, path, &vn);
+    int rc = vfs_lookup_named(cwd, base, path, &vn, newpath, sizeof(newpath));
     if (cwd)
         vnode_put(cwd);
     if (rc)

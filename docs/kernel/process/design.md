@@ -524,12 +524,17 @@ that a killed network client dies too.
 
 `cwd` starts as the root (kernel-created processes) or the parent's
 (`spawn`; the request may name another directory, resolved relative to
-the parent's cwd). Every path system call passes `cur->cwd` as the
-`start` vnode for relative paths (`vfs_*` already take a start vnode;
-absolute paths ignore it). `chdir(path)`: resolve, must be a directory,
-compute the new normalised path (`normalize_path(cwd_path, path)`:
-split on `/`, drop `.` and empty components, pop on `..`, bounded by
-`VFS_PATH_MAX`), swap the reference under `process.lock`. `getcwd`
+the parent's cwd and named as `chdir` names it). Every path system call
+passes the referenced cwd from `process_cwd_get()` as the `start` vnode
+for relative paths (`vfs_*` already take a start vnode; absolute paths
+ignore it). `chdir(path)`: one `vfs_lookup_named` from a snapshot of
+the cwd and its name yields the directory and **the path the walk
+took** -- the components it entered, links replaced by where they led,
+`..` removing one, bounded by `VFS_PATH_MAX` (P32); it must be a
+directory; vnode and name are swapped together under `process.lock`.
+Until the cwd-name unit the name was a lexical normalisation of the
+argument (`path_normalize`), which through a symbolic link named another
+directory. `getcwd`
 copies `cwd_path`. The string is authoritative for display; the vnode
 for resolution (so a renamed ancestor is not noticed by `getcwd`, as on
 Unix systems that cache the path; recorded).

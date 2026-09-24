@@ -207,10 +207,9 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
          */
         char base[sizeof(cur->cwd_path_locked)];
         struct vnode *cur_cwd = process_cwd_snapshot(base, sizeof(base));
-        rc = path_normalize(base, cwd, cwd_path, sizeof(cwd_path));
+        /* The child is given the name the walk took (P32). */
         struct vnode *vn = NULL;
-        if (rc == 0)
-            rc = vfs_lookup(cur_cwd, cwd, &vn);
+        rc = vfs_lookup_named(cur_cwd, base, cwd, &vn, cwd_path, sizeof(cwd_path));
         if (cur_cwd)
             vnode_put(cur_cwd);
         if (rc)

@@ -139,9 +139,18 @@ absolute check says which directory it acted in. Then a regular file as
 a base is `-ENOTDIR` and a closed descriptor `-EBADF`; `fchdir(dfd)`
 makes `getcwd` answer `/tmp/lxdir`, a relative open find `moved`, and
 `chdir("..")` land in `/tmp`; `fchdir` of a regular file is `-ENOTDIR`;
-a directory opened through a symbolic link resolves lookups but has no
-coherent name, so `fchdir` refuses it (`-ENOENT`) and `getcwd` is
-unchanged. **Rights** (`dirfd-rights`, a kernel test driving
+a directory opened through a symbolic link -- an absolute one, and a
+relative one, whose spelling a restart at `/` would not erase --
+resolves lookups and `fchdir`s with its own path (`getcwd` answers
+`/tmp/lxdir`, not the link), and so does `/tmp/lxdeep/..` (a link to a deeper directory, then
+`..`), which a lexical name called `/tmp` -- the dirfd unit refused both
+(`-ENOENT`, no coherent name); the cwd-name unit named them. **The
+working directory's name** (the cwd-name unit, P32): after
+`chdir("/tmp")`, six `chdir`s through `/tmp/lxcnl` (an absolute link to
+`/tmp/lxcn/deep`) and `/tmp/lxcnr` (a relative one) -- the link, `..`,
+back to `/tmp`, the relative link, `/tmp/lxcnl/..` and
+`deep/../../lxcnl` -- each followed by `getcwd` against the expected
+path and `newfstatat` of `.` and of that name agreeing on the inode. **Rights** (`dirfd-rights`, a kernel test driving
 `init --probe dirfd-narrow` and `dirfd-wide`): `lxcwd narrow` and
 `lxcwd wide` receive the same directory at fd 5, `READ` only or with
 init's own rights; lookups work in both, and so does opening the child

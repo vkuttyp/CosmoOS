@@ -294,13 +294,20 @@ branch changes `mmap`'s placement, which the lockup sample never calls;
 its own racer printed `600 placed from two threads, 0 EEXIST` in the
 same boot. Re-run.
 
+**A seventh on 2026-09-24**, locally, x86-64 debug, on the cwd-name
+branch (PR #232), `lockuptest.c:478` again (241 ms), with the host's
+load average near ten from other work. That branch changes path naming
+and procfs, which the lockup sample never calls; the two mutation boots
+run straight after it on the same host passed the test, and so did the
+re-run of the unmutated tree. The first sighting on x86-64.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
 it to the list would mean widening the bound, and that is the trade the
 list exists to refuse when the bound is the property: a lockup sample
 that answers late is a lockup sample that did not work. What is recorded
-instead is the rate — six in six days as of 2026-09-23, every one on a
+instead is the rate — seven in seven days as of 2026-09-24, every one on a
 tree that cannot have caused it — because the next unit to hit this
 should know it is not the first, and that re-running is the right first
 move.
@@ -2128,14 +2135,17 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
-## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23
+## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23, and once on the 24th
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
 CPUs creation order gave them (3005 ms)`, in the x86-64 job's chaos boot
 only: once on `main` itself (run 35827861816, the ELF shared-text merge),
 once on PR #225's first run (35842572114), whose change is in a TCP
 test that runs minutes later, and once on PR #229 (35882609779), whose
-change is in the Linux door's path calls. The scheduler testing doc already says this
+change is in the Linux door's path calls. **A fourth on 2026-09-24**, the
+first on aarch64: PR #232's run 35948747763 (3009 ms), on a
+documentation-only commit whose two predecessors, carrying the same code,
+passed every boot including this one. The scheduler testing doc already says this
 is the one balancer test that still asserts, and that under a chaos
 migrator its claim is about the machine rather than the balancer
 (`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the
