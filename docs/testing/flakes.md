@@ -301,13 +301,23 @@ and procfs, which the lockup sample never calls; the two mutation boots
 run straight after it on the same host passed the test, and so did the
 re-run of the unmutated tree. The first sighting on x86-64.
 
+**An eighth and a ninth on CI**: PR #229's run 35875986810 (aarch64, the
+test-guard boot, 101 ms) and PR #235's run 35970620814 (aarch64, the
+harness-retry boot, 88 ms), both at `:478`, neither branch touching the
+detector. **Taken up by `docs/audit/next-subsystem-lockup-bound.md`**,
+which measured the bound under host load (`tools/lockup-busy-probe.py`):
+quiet, the sampler takes 5.00-5.12 ms; loaded, it reproduces these
+failures, and the excess is time the virtual CPU did not run -- in most
+cases one gap between two clock reads holding all of it. The unit
+replaces the wall-clock bound with a count of the waits a sample arms.
+
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
 milliseconds of slack, and the slack is what a loaded host eats. Adding
 it to the list would mean widening the bound, and that is the trade the
 list exists to refuse when the bound is the property: a lockup sample
 that answers late is a lockup sample that did not work. What is recorded
-instead is the rate — seven in seven days as of 2026-09-24, every one on a
+instead is the rate — nine in eight days as of 2026-09-24, every one on a
 tree that cannot have caused it — because the next unit to hit this
 should know it is not the first, and that re-running is the right first
 move.
