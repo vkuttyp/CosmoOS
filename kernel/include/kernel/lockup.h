@@ -73,6 +73,7 @@ struct lockup_stats {
     cpumask_t hard_answered;        /* ... and who answered the sample it took (0: slot busy) */
     uint64_t samples;               /* requests that got the slot */
     uint64_t samples_busy;          /* requests refused because a report was in progress */
+    uint64_t samples_waits;         /* deadlines lockup_sample_all armed: one per sample, however many CPUs fail to answer */
 };
 void lockup_get_stats(struct lockup_stats *out);
 
@@ -81,6 +82,13 @@ void lockup_get_stats(struct lockup_stats *out);
  * forbidden marker for a real one does not match it. Zero restores a
  * default. */
 void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected);
+
+/* Test hook: sample with the ordinary interrupt instead of the NMI, so a
+ * CPU with interrupts masked cannot answer on any architecture (x86-64
+ * answers an NMI even masked, which left the sampler's timeout untested
+ * there; docs/audit/next-subsystem-lockup-bound.md). Set around one
+ * sample and cleared after it. */
+void lockup_test_ipi_only(bool on);
 
 #define LOCKUP_SOFT_NS_DEFAULT (10ull * 1000 * 1000 * 1000)
 #define LOCKUP_HARD_NS_DEFAULT (10ull * 1000 * 1000 * 1000)

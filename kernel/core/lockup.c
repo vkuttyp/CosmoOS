@@ -46,6 +46,8 @@ static uint64_t g_hard_ns = LOCKUP_HARD_NS_DEFAULT;
 static bool g_expected;                     /* a test asked for the report it is about to see */
 static struct lockup_stats g_stats;         /* the reports' facts: under g_stats_lock */
 static uint64_t g_samples, g_samples_busy;   /* the sample counters: atomic, outside the lock */
+static uint64_t g_samples_waits;             /* deadlines armed: the bound is total, so one per sample */
+static bool g_ipi_only;                      /* test hook: no NMI (lockup_test_ipi_only) */
 /* Every report writes its fields and bumps its counter under this leaf
  * lock, and the reader takes it too, so a snapshot is one report's, never
  * two watchers' fields mixed (a soft and a hard report may land in the
@@ -113,7 +115,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
             continue;
         struct percpu *pc = percpu_get(c);
         __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
-        if (!arch_ipi_send_nmi(c))
+        if (__atomic_load_n(&g_ipi_only, __ATOMIC_ACQUIRE) || !arch_ipi_send_nmi(c))
             ipi_send(c, IPI_SAMPLE);
     }
 
@@ -129,6 +131,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
      * nanosecond is better than one that is regularly wrong about a
      * CPU. */
     uint64_t deadline = clock_now_ns() + timeout_ns;
+    __atomic_fetch_add(&g_samples_waits, 1, __ATOMIC_RELAXED);   /* the one wait, counted where it is armed */
     cpumask_t got = 0;
     for (;;) {
         for (unsigned c = 0; c < cpu_count(); c++) {
@@ -352,6 +355,12 @@ void lockup_get_stats(struct lockup_stats *out)
     spin_unlock_irqrestore(&g_stats_lock, st);
     out->samples = __atomic_load_n(&g_samples, __ATOMIC_RELAXED);
     out->samples_busy = __atomic_load_n(&g_samples_busy, __ATOMIC_RELAXED);
+    out->samples_waits = __atomic_load_n(&g_samples_waits, __ATOMIC_RELAXED);
+}
+
+void lockup_test_ipi_only(bool on)
+{
+    __atomic_store_n(&g_ipi_only, on, __ATOMIC_RELEASE);
 }
 
 void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)
