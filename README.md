@@ -3475,6 +3475,19 @@ See [docs/development.md](docs/development.md).
   fires the guard for the first time, with a held maintenance pass
   keeping the first unmount in its drain and a second from inside
   refused `-EBUSY` at once. P27 names the two calls. (PR #234)
+- **The balancer's test asserts what the balancer promises.**
+  `sched-balance-pull` failed five CI runs in two days under the chaos
+  migrator, on branches that did not touch the scheduler. Measured: every
+  spread takes under 40 ms and a miss never recovers; the miss is two
+  spinning workers alternating on one CPU, and a spinning pair built on
+  purpose is never separated -- an idle CPU is refused some five hundred
+  times a second, because S26 forbids moving a thread preempted mid-way
+  through who knows what -- while a yielding pair is separated in
+  milliseconds. The test had been asserting a race: that the balancer
+  pulls a spinner before its first preemption, which one chaos move lost
+  by the rules. Its released workers now yield, so it asserts the
+  contract, and `sched-balance-pair` asserts both halves of the
+  mechanism. No kernel code changed. (PR #236)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

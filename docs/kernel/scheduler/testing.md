@@ -171,7 +171,8 @@ join; the queue is empty.
 | test | asserts |
 |---|---|
 | `sched-load` | a CPU running one compute-bound thread reports load 1 while an idle one reports 0 (S29), and `cpu_count()` threads created one at a time -- each blocking before the next, so each is placed against drained queues -- put none of them on the busy CPU. Deterministic in both directions: `pick_cpu` rotates ties, so when every CPU ties (which is what `nr_running` produces) that many consecutive creations start the scan on each CPU in turn and exactly one lands on the busy one |
-| `sched-balance-pull` | twice as many threads as CPUs, created one at a time so the rotation puts them one per CPU, then every other one released: the runnable set starts two-deep on half the CPUs with the other half idle, and within a bounded wait it is running on as many CPUs as there are runnable threads. This is the defect the unit exists for. It waits for the spread rather than sleeping and counting |
+| `sched-balance-pull` | twice as many threads as CPUs, created one at a time so the rotation puts them one per CPU, then every other one released: the runnable set starts two-deep on half the CPUs with the other half idle, and within a bounded wait it is running on as many CPUs as there are runnable threads. This is the defect the unit exists for. It waits for the spread rather than sleeping and counting. **The released workers yield** (the balance-movable unit, `docs/audit/next-subsystem-balance-movable.md`): the claim is the balancer's contract -- an idle CPU pulls a *movable* runnable thread -- and not the race before a spinner's first preemption, which one chaos move lost by S26's rules five times on CI. A yield keeps a worker on its CPU, so without a balancer they still stay two-deep |
+| `sched-balance-pair` | the pair, made on purpose: two workers pinned to one CPU (not the test thread's), their premise **observed** (a yielding pair's two each switched in more than once; a spinning pair's queued one READY and `PREEMPTED`), then widened to every CPU. The yielding pair is separated within a bound; the spinning pair still shares one CPU at the end of the same bound -- S26 seen from outside, and the reason the pull test's workers yield. The halves differ in the yield alone, so each is the other's control. A premise not seen within 1 s is its own failure, distinct from either claim |
 | `sched-balance-hysteresis` | three threads held two-to-one across two CPUs, each created pinned and then widened to exactly {A, B}, do not move through hundreds of scans (S28). The imbalance is built to order and the workers' own CPUs are the evidence, because a machine-wide pull count is something every other thread in the kernel can move. A's pair yield so that the one in A's queue is movable at all; B's worker does not, because a yield leaves a window where its CPU reads as idle and a 2 against a 0 is a difference of two the balancer is right to act on |
 | `sched-balance-affinity` | two threads pinned to one CPU with every other CPU idle -- load 2 against 0, the most inviting imbalance there is -- stay where they are. The primitive already refuses this; what this adds is that the balancer does not reach around it, and `sched-migrate-refuses` still passes when the policy's affinity test is deleted, so this test is not redundant |
 | `bench-balance` | **reports, does not assert** (see below). Three rounds of 500 ms: the balanced machine (`as-placed-full`), the alternate case above, and the same count pinned one per CPU. **The control is the balanced round, not the pinned one**: both run the same count of runnable threads one per CPU, but the pinned round also never moves and never shares a queue for an instant, so measuring against it charges the alternate round for being unpinned as well as for starting badly -- on one AArch64 boot the balanced unpinned round was itself 87% of the pinned one and the benchmark failed at 78% while the threads had in fact reached all four CPUs. `as-placed-full` differs in exactly one thing: whether creation order happened to spread the runnable threads. The alternate round reads 99-108% when the balancer catches its window, and the row **reports** rather than requiring it (see below); the pinned figure is reported beside it, because a gap between the two says moving threads is costing more than usual on that host. Every control runs in the same boot as the round it controls, because an iteration rate here varies between boots and only the ratio is stable |
@@ -186,12 +187,19 @@ measured the miss -- placement `0/2/1/1`, one pull, 62% of the balanced
 round, one CPU idle for half a second with nothing able to fix it. The
 ratio is therefore how often the window is caught, which is a rate.
 `sched-balance-pull` is the test that still asserts, and it can,
-because it waits for the spread instead of sampling throughput once.
+because it waits for the spread instead of sampling throughput once --
+and, since the balance-movable unit, because its released workers yield,
+so the window is not what it asserts: a spinner the chaos migrator moves
+onto a busy CPU before the balancer pulls it would otherwise make a pair
+no migrator may separate (measured: an idle CPU refused some five
+hundred times a second, `sched-balance-pair`'s spinning half).
 
-`SCHED_BALANCE=0` compiles the balancer out and is how these are proved.
-`sched-balance-pull` then fails -- its claim is about the machine, and
-its failure is the measured defect -- while `sched-balance-hysteresis`
-skips, because its claim is about what the balancer does and there is
+`SCHED_BALANCE=0` compiles the balancer out and is how these are proved,
+**in the plain image**: under the chaos migrator, chaos can do the
+balancer's work and spread the workers itself. `sched-balance-pull` then
+fails -- its claim is about the machine, and its failure is the measured
+defect -- and so does `sched-balance-pair`'s yielding half (never
+separated), while `sched-balance-hysteresis` skips, because its claim is about what the balancer does and there is
 nothing to claim. The other two proofs are mutations: the threshold
 lowered from two to one (sixteen moves where there were none), and the
 policy's affinity test deleted (a pinned thread pulled away).
