@@ -94,7 +94,7 @@ deadline), and the host's scheduling -- and only the last one varies.
 
 - **It is the most frequent failure left.** Nine sightings in eight
   days, every one a re-run, on branches that did not touch the
-  detector.
+  detector -- and a tenth on this report's own CI run (101 ms, aarch64).
 - **The property it guards is real and has no other check.** A
   per-target wait would make the hard-lockup report, which samples every
   CPU from an NMI or a tick, take one timeout per wedged CPU. Loosening

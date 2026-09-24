@@ -311,7 +311,9 @@ failures, and the excess is time the virtual CPU did not run -- in most
 cases one gap between two clock reads holding all of it. The unit
 proposes replacing the wall-clock bound with a count of the waits a
 sample arms. **Until that is built the test still checks the bound, and
-re-running remains the answer.**
+re-running remains the answer.** A tenth sighting came on that report's
+own CI run (PR #238, run 36000131643, aarch64, the harness-retry boot,
+101 ms) -- a branch of one report, one probe script and this file.
 
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two
@@ -319,7 +321,7 @@ milliseconds of slack, and the slack is what a loaded host eats. Adding
 it to the list would mean widening the bound, and that is the trade the
 list exists to refuse when the bound is the property: a lockup sample
 that answers late is a lockup sample that did not work. What is recorded
-instead is the rate — nine in eight days as of 2026-09-24, every one on a
+instead is the rate — ten in eight days as of 2026-09-24, every one on a
 tree that cannot have caused it — because the next unit to hit this
 should know it is not the first, and that re-running is the right first
 move.
