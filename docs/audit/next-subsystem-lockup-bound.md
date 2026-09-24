@@ -169,7 +169,7 @@ per target and fails it; no clock is involved.
 
 ### 2. The masked targets cannot answer, on both architectures
 
-A debug-build knob, `lockup_test_ipi_only(true)`, makes the sampler send
+A debug-build knob (as built: in every build, banner item 1), `lockup_test_ipi_only(true)`, makes the sampler send
 the ordinary interrupt instead of the NMI. With it set, a CPU spinning
 with interrupts masked cannot answer on x86-64 either, and the
 three-CPU part checks that **neither masked target answered** (their
@@ -209,8 +209,9 @@ of wall-clock time, and the half that x86-64 skipped now exercised.
 exclusive slot, so it is this sample's alone. The ordering check uses
 two flags the racers already share.
 
-**Ownership and lifetime.** The knob is a debug-only global the test
-sets and clears; release builds compile it out.
+**Ownership and lifetime.** The knob is a global the test sets and
+clears (as built, in every build beside `lockup_set_thresholds`; only a
+self-test calls it, and release boots run none: banner item 1).
 
 **Security.** None.
 
@@ -224,7 +225,7 @@ loser that waits: each fails one named check.
 
 | file | change |
 | --- | --- |
-| kernel/core/lockup.c | count the waits armed (`samples_waits`); the debug `lockup_test_ipi_only` knob |
+| kernel/core/lockup.c | count the waits armed (`samples_waits`); the `lockup_test_ipi_only` test knob (every build, as `lockup_set_thresholds`) |
 | kernel/include/kernel/lockup.h | the stat and the knob |
 | kernel/core/lockuptest.c | `lockup-sample-busy`'s checks as above |
 | docs | the lockup detector's invariants and testing docs; `docs/testing/flakes.md` (the entry marked resolved once the build lands; until then it says re-running is still the answer); the inventory; README Status |
@@ -237,7 +238,7 @@ loser that waits: each fails one named check.
 /* struct lockup_stats */
 uint64_t samples_waits;   /* deadlines armed by samples: one per sample */
 
-/* Debug builds: sample with the ordinary interrupt, not the NMI, so a CPU
+/* Test hook (as built, every build): sample with the ordinary interrupt, not the NMI, so a CPU
  * with interrupts masked cannot answer on any architecture (tests). */
 void lockup_test_ipi_only(bool on);
 ```
@@ -254,7 +255,7 @@ documents.
 | three-CPU sample: `samples_waits` rose by exactly one, read before the slot is released | `el < 5 ms + 2 ms` (`:478`) | a wait per target: the count rises by two |
 | three-CPU sample, IPI only: neither masked target answered | (nothing: on x86-64 the targets answered by NMI) | the knob ignored: on x86-64 both answer |
 | three-CPU sample returns within 1 s | -- (a guard) | a wait loop that ignores its deadline |
-| two-CPU part: the loser returned while the winner still held the slot | `loser < 1 ms` | the loser waiting for the slot |
+| two-CPU part: the loser returned while the winner still held the slot | `loser < 1 ms` | the loser waiting for the slot (as built: waiting *and taking* it is caught first by "exactly one winner"; waiting and then being refused is this check's -- banner item 3, rows 3 and 4) |
 | two-CPU part: the winner's sample returns within 1 s | `winner < 5 ms + 2 ms` | -- (a guard) |
 
 Each mutation run alone, on both architectures, each boot confirmed
@@ -274,7 +275,7 @@ None.
   quiet-boot measurement above (5.00-5.12 ms, 400 samples) is recorded
   as the reference if anyone changes it.
 - **The knob changes how x86-64 samples during the test.** Only around
-  the one sample, only in debug builds, cleared on every exit; the
+  the one sample, cleared after it, called only by the self-test; the
   hard-lockup path that relies on the NMI is untouched and still tested
   by `lockup-sample-irqoff`.
 
