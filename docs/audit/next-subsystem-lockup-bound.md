@@ -1,5 +1,37 @@
 # NEXT SUBSYSTEM — a sampler's bound is a count of waits, not a stopwatch
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The knob is in every build, not debug builds only.** §2 called
+>    `lockup_test_ipi_only` a debug-build knob. It sits beside
+>    `lockup_set_thresholds`, the detector's existing test hook, which
+>    is not guarded either; nothing but a self-test calls either, and
+>    the release boot runs no self-tests.
+> 2. **With the knob, x86-64 waits out the timeout for the first time**:
+>    5032 us for two targets that could not answer, where it had taken
+>    microseconds because the NMI answered.
+> 3. **The loser's order needed its own mutation.** A loser that waits
+>    for the slot and then takes it is caught by "exactly one winner",
+>    which comes first, so it says nothing about the new order check. A
+>    loser that waits for the slot to free and is refused *late* passes
+>    "exactly one winner" -- and fails the order check, on both
+>    architectures (row 4). That is the regression the old 1 ms
+>    stopwatch stood in for.
+> 4. **Under the same host load that broke the old bound** (12 busy
+>    loops, load average 143 and 186), two aarch64 boots passed. Two
+>    boots are not a rate; the claim is structural -- no check left can
+>    be broken by elapsed time short of the 1 s guards.
+>
+> **The mutations**, each applied alone, each boot confirmed booted:
+>
+> | # | mutation | x86-64 | aarch64 |
+> | --- | --- | --- | --- |
+> | 1 | a wait per target (one deadline per target, counted where armed) | `samples_waits` rose by two | same |
+> | 2 | the knob ignored (NMI sent anyway) | both targets answered by NMI | **equivalent**: no NMI to send |
+> | 3 | the loser waits for the slot and takes it | "exactly one winner" (both got it in turn) | same |
+> | 4 | the loser waits for the slot to free, then is refused | the order: the winner's guard expired before the loser returned | same |
+
 > Constitution §68 report. Takes up `lockup-sample-busy`'s failures at
 > `lockuptest.c:478` (and earlier at `:399`), the most frequent failure
 > left on CI: seven recorded sightings in seven days

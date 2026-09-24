@@ -310,8 +310,11 @@ quiet, the sampler takes 5.00-5.12 ms; loaded, it reproduces these
 failures, and the excess is time the virtual CPU did not run -- in most
 cases one gap between two clock reads holding all of it. The unit
 proposes replacing the wall-clock bound with a count of the waits a
-sample arms. **Until that is built the test still checks the bound, and
-re-running remains the answer.** A tenth sighting came on that report's
+sample arms. **Resolved (PR #239)**: the test now checks the count of
+waits the sample armed and that neither target answered, with the
+targets made unable to answer on both architectures; the only time
+bounds left are 1 s hang guards. (Before the build, the test still
+checked the bound and re-running was the answer.) A tenth sighting came on that report's
 own CI run (PR #238, run 36000131643, aarch64, the harness-retry boot,
 101 ms) -- a branch of one report, one probe script and this file.
 
@@ -2154,6 +2157,16 @@ makes it so. The log has no dump of what the target was running, so
 this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
+
+## `sched-migrate-stress`: a worker made no progress, 2026-09-24
+
+`SELFTEST: sched-migrate-stress ... FAIL: a worker made no progress
+under migration (260 ms)`, on CI: PR #238's run 36002630250, aarch64,
+the harness-retry boot -- a branch of one report, one probe script and
+this file. The test sleeps a fixed 200 ms and then requires every one
+of its workers to have made a round: the "N things after a fixed
+settle" shape, which a host stall of 200 ms defeats. The re-run passed.
+First sighting.
 
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 

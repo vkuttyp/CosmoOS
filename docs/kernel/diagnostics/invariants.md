@@ -134,9 +134,14 @@ x86-64); by review of `lockup_answer` and the paranoid path.
 and returns `false` at once when it is taken; it never spins for it,
 because the holder may be waiting with interrupts off and a second CPU
 spinning with its own interrupts off would stop its own ticks. The wait
-for the targets is one total bound, not one per target. **Checked by**
-`lockup-sample-busy` (the loser refused within a millisecond, sending
-nothing; two masked targets cost one bound, not two).
+for the targets is one total bound, not one per target -- **counted**:
+`samples_waits` rises by one per sample, however many CPUs fail to
+answer. **Checked by** `lockup-sample-busy` (the loser refused while the
+winner still held the slot, sending nothing; two targets made unable to
+answer on both architectures -- masked, and the NMI suppressed by
+`lockup_test_ipi_only` -- cost one wait, not two). Not by a stopwatch:
+the wall-clock bound that used to carry this failed on host stalls, not
+on the sampler (the lockup-bound unit).
 
 ## I-DIAG-20: A registered NMI handler sees every NMI
 

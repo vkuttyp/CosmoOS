@@ -184,9 +184,19 @@ Design: `design.md`, "lockup.c". Kernel-internal; no user interface.
 
 ### `void lockup_get_stats(struct lockup_stats *out)` / `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)`
 - Diagnostics and the test hook: report counters and the last reports'
-  facts; thresholds (0 restores 10 s) and whether the next report is
-  expected (its line then says so, and the harness's forbidden marker
-  does not match it).
+  facts (`samples_waits`: the deadlines `lockup_sample_all` armed, one
+  per sample -- the bound is total); thresholds (0 restores 10 s) and
+  whether the next report is expected (its line then says so, and the
+  harness's forbidden marker does not match it).
+
+### `void lockup_test_ipi_only(bool on)`
+- Test hook, in every build like `lockup_set_thresholds` (nothing but a
+  self-test calls either, and release boots run no self-tests):
+  `lockup_sample_all` sends the ordinary
+  `IPI_SAMPLE` instead of the NMI, so a CPU with interrupts masked cannot
+  answer on x86-64 either. Set around one sample and cleared after it;
+  `lockup_sample_cpu` and the detectors are unaffected by design, since
+  only the sampler's timeout is under test.
 
 ## `kernel/shutdown.h`
 
