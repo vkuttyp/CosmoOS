@@ -26,6 +26,22 @@
 >    holding. The probe used the weaker premise too; it could only have
 >    produced a false *separation*, and every spinning pair it measured
 >    stayed together, so its figures stand.
+> 4. **After merge: a worker that had not yet run read as "on CPU 0".**
+>    `sched-balance-pair` failed once on aarch64 with the spinning pair
+>    "separated" -- and an instrumented run of 25 rounds found three such
+>    rounds, each "after 0 ms" with **no migration at all** (the kernel's
+>    migration count and the balancer's pulls unchanged, both workers on
+>    the pair's CPU). A worker's `cpu` was zeroed at creation and first
+>    written in its loop, so a worker that had not reached its loop read
+>    as CPU 0, and with the pair on CPU 1 the test saw two CPUs. The
+>    premise let it through because a switch count cannot say a worker
+>    has run since its release: it is switched in to start, and again if
+>    preempted before it waits. Fixed in PR #237: `cpu` starts as
+>    `BAL_CPU_UNSEEN`; the premise is that both workers have written the
+>    pair's CPU (which a worker does only after its release); "apart"
+>    needs two real CPUs; and the pull test's counter skips a worker that
+>    has not run, which would otherwise have counted CPU 0 -- a false
+>    *pass*. Sixty instrumented rounds on aarch64 then: none apart.
 >
 > **The proofs**, each run alone, each boot confirmed booted, on x86-64:
 >

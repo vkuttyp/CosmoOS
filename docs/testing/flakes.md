@@ -2141,6 +2141,25 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
+## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
+
+Local, aarch64 debug, both on the balance-pair fix's branch, which changes
+only `smptest.c`'s two balance tests:
+
+- `quiesce-straggler ... FAIL: check failed: kicks >= 1` (line 173), in
+  the chaos boot. The test holds a reader for 30 ms and requires the
+  waiter to have kicked its CPU at least once; no kick means the reader
+  was already done when the wait began -- the waiting thread delayed
+  past 30 ms after the reader entered, the host-time family
+  `lockup-sample-busy` belongs to. First sighting.
+- `signal-group ... FAIL: check failed: process_count() == before`
+  (line 254, 2477 ms), in a plain boot that also ran a scratch loop of
+  thirty extra balance rounds. A settle on an exact count; first
+  sighting.
+
+Recorded, not attributed: neither test touches the scheduler's balance
+tests, and the next boots of the same tree passed both.
+
 ## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23, and twice on the 24th
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
