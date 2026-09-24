@@ -163,7 +163,9 @@ inventory row describes. A kernel test drives it deterministically:
    `unmounting` and waits for the pass. The test waits until it reads
    `unmounting` set (under the mountpoint's lock) -- the order is
    enforced by that observation, not a sleep.
-3. The test unmounts `vfs_umount_at(root, ".")` -- from inside -- and
+3. The test unmounts `vfs_umount_at(root, ".")` -- from inside (**as
+   built, `d/..`**: `.` from the wrong start also answers `-EBUSY`;
+   banner item 1) -- and
    requires `-EBUSY` **while the pass is still held**: the guard answers
    at once. It runs in a second thread with a bound, because without
    the guard it would block in the same drain, and the test must be
