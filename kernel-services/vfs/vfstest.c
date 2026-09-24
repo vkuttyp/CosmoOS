@@ -2129,6 +2129,7 @@ bool selftest_vfs_lookup_named(const char **reason)
     CHECK(vfs_symlink(NULL, "/tmp/ln/chain", "abs") == 0);
     CHECK(vfs_symlink(NULL, "/tmp/ln/a/up", "../m/in") == 0);   /* relative, into the mount */
     CHECK(vfs_symlink(NULL, "/tmp/ln/m/out", "../a") == 0);     /* relative, out of it through its root */
+    CHECK(vfs_symlink(NULL, "/tmp/ln/a/b/toroot", "/tmp") == 0);   /* absolute, to a short name */
     struct vnode *ln;
     CHECK(vfs_lookup(NULL, "/tmp/ln", &ln) == 0);
 
@@ -2181,12 +2182,22 @@ bool selftest_vfs_lookup_named(const char **reason)
     int rc_long = vfs_lookup_named(NULL, NULL, "/tmp/ln/a/b", &vn, name, 8);
     if (vn)
         vnode_put(vn);
+    /* An overflow before an absolute link is no part of the name after
+     * it: "/tmp/ln/a/b" does not fit ten bytes, the link restarts at `/`,
+     * and "/tmp" does (found in review: the flag outlived the reset). */
+    vn = NULL;
+    char small[10];
+    int rc_reset = vfs_lookup_named(ln, "/tmp/ln", "a/b/toroot", &vn, small, sizeof(small));
+    bool reset_named = rc_reset == 0 && strcmp(small, "/tmp") == 0;
+    if (vn)
+        vnode_put(vn);
     vnode_put(ln);
 
     (void)vfs_unlink(NULL, "/tmp/ln/m/out");
     (void)vfs_rmdir(NULL, "/tmp/ln/m/in");
     CHECK(vfs_umount("/tmp/ln/m") == 0);
     (void)vfs_unlink(NULL, "/tmp/ln/a/up");
+    (void)vfs_unlink(NULL, "/tmp/ln/a/b/toroot");
     (void)vfs_unlink(NULL, "/tmp/ln/chain");
     (void)vfs_unlink(NULL, "/tmp/ln/rel");
     (void)vfs_unlink(NULL, "/tmp/ln/abs");
@@ -2199,6 +2210,7 @@ bool selftest_vfs_lookup_named(const char **reason)
     CHECK(mismatch == ~0u);   /* and walked again, it reaches the same vnode */
     CHECK(rc_noname == -ENOENT);
     CHECK(rc_long == -ENAMETOOLONG);
+    CHECK(reset_named);
     kinfo("selftest: vfs-lookup-named: %u walks named by the path they took, through links and a mount",
           (unsigned)(sizeof(cases) / sizeof(cases[0])));
     return true;

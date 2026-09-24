@@ -1114,6 +1114,7 @@ static void proc_selftest(void)
         CHECK(lstat("/proc/self", &ls) == 0 && S_ISLNK(ls.st_type));
         ssize_t ln = readlink("/proc/self", lb, sizeof(lb) - 1);
         CHECK(ln > 0 && (lb[ln] = '\0', strcmp(lb, want + 6) == 0));
+        CHECK(ls.st_size == (uint64_t)ln);   /* a link's size is its target's length */
         CHECK(chdir("/proc/self") == 0 && getcwd(buf, sizeof(buf)) && strcmp(buf, want) == 0);
         char probe[48];
         snprintf(probe, sizeof(probe), "cwd-is:%s", want);

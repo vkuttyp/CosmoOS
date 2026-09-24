@@ -3427,8 +3427,9 @@ See [docs/development.md](docs/development.md).
   the descriptor it was opened through); `renameat` resolves its two names from two directories through
   `vfs_rename2`; a directory file remembers the path it was opened by, at
   both doors, **only if that name walked with no symbolic link reaches the
-  same directory**, and `fchdir` publishes the name with the vnode as
-  `chdir` does. Review of the first build found the missing rights, a
+  same directory** (since the cwd-name unit, PR #232, the name its open's
+  own walk took, so a directory opened through a link has one), and
+  `fchdir` publishes the name with the vnode as `chdir` does. Review of the first build found the missing rights, a
   child directory opened through a narrowed one regaining them, the
   incoherent name and a failed `chdir` stranding the held-walk seam's
   swapper; each has a test. Invariant **P31**; `lxtest` checks every call

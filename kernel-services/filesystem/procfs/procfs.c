@@ -316,11 +316,17 @@ static const struct vnode_ops proc_self_ops = {
 static int proc_root_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     if (len == 4 && memcmp(name, "self", 4) == 0) {
-        if (process_current() == NULL)
+        struct process *me = process_current();
+        if (me == NULL)
             return -ENOENT;
         struct vnode *vn = proc_vnode(dir->mnt, PROC_SELF_INO, VNODE_LNK, 0777, &proc_self_ops);
         if (vn == NULL)
             return -ENOMEM;
+        /* A link's size is its target's length, which lstat reports and a
+         * reader may size its readlink buffer from (found in review). The
+         * vnode is not hashed, so this is the looker's own pid. */
+        char pid[12];
+        vn->size = (uint64_t)ksnprintf(pid, sizeof(pid), "%u", (unsigned)me->pid);
         *out = vn;
         return 0;
     }

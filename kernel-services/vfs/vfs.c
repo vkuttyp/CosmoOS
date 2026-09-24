@@ -1161,6 +1161,7 @@ static void name_reset(struct walk *w)
     w->name[0] = '/';
     w->name[1] = '\0';
     w->name_len = 1;
+    w->name_long = false;   /* what overflowed before the restart is no part of the name (found in review) */
 }
 
 static void name_step(struct walk *w, const char *comp, size_t len)
