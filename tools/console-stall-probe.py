@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""
+console-stall-probe.py -- what stops when the aarch64 console goes quiet mid-line?
+
+Three sightings (docs/testing/flakes.md, "An aarch64 release boot whose
+console stopped mid-line after an interrupt"): in the aarch64 release
+boot, right after a job event -- a ^C'd `sleep` reaped, a background
+`sleep` finishing -- the echo of the next line the harness types stops
+partway (`cosmo$ echo after-interru`), and nothing more comes for the
+rest of the boot. Echo is the terminal's work, not the shell's, so either
+the serial receive path stopped delivering or the guest stopped.
+
+This probe asks which, by making the event happen many times and, when a
+stall comes, looking at the guest from outside:
+
+1. It injects into `tests/boot/shelltest.py` a prefix of CYCLES cycles
+   of the two shapes seen: `sleep 1`, ^C after 0.5 s, then a typed line;
+   and `sleep 1 &`, a pause timed so the job exits around the moment the
+   next line arrives, then a long typed line.
+2. When a prompt does not come, before giving up it records whether the
+   guest still answers -- it sends Enter and ^C and waits three seconds
+   for any new output -- and asks QEMU, over QMP, for every vCPU's
+   registers (`info registers -a`), which it writes beside the log.
+3. `symbolize` turns the program counters in that dump into function
+   names against the kernel's ELF.
+
+The run_boot_test.py half sets QEMU_QMP for the shell harness's boots so
+the socket exists. Usage:
+
+    python3 tools/console-stall-probe.py apply [CYCLES]      # default 25
+    gmake ARCH=aarch64 BUILD=release test                    # repeat as needed
+    python3 tools/console-stall-probe.py symbolize out/aarch64-release/boot-test.log.regs out/aarch64-release/kernel/kernel.elf
+    python3 tools/console-stall-probe.py revert
+
+Each boot prints `CSPROBE:` lines into the harness's failure list and the
+log: `CSPROBE stall at command K: guest answered Enter/^C: yes|no (+N
+bytes)` and `CSPROBE registers written to <path>`. A boot with no stall
+passes, having run every cycle.
+
+`apply` refuses a file with uncommitted changes, refuses to overwrite a
+backup an earlier run left, and edits nothing if an anchor is missing,
+restoring every file on a failure part-way; `revert` checks every file's
+hash first (accepting one an earlier attempt already restored), restores
+all from copies, and removes the backups only once every file is
+restored.
+"""
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+SHELL = 'tests/boot/shelltest.py'
+BOOT = 'tests/boot/run_boot_test.py'
+BACKUP = '.console-stall-probe.orig'
+STAMP = '.console-stall-probe.applied'
+
+S_ANCHOR_CMDS = 'COMMANDS = [\n'
+S_ANCHOR_RUN = '''            for cmd, _ in COMMANDS:
+                if cmd == SUSPEND:'''
+S_PROBE_RUN = '''            for cmd, _ in COMMANDS:
+                if isinstance(cmd, tuple) and cmd[0] == "__SLEEP__":   # CSPROBE: a pause, not a keystroke
+                    time.sleep(cmd[1])
+                    continue
+                if cmd == SUSPEND:'''
+S_ANCHOR_FAIL = '''                if not self._wait_prompt(log_path, proc, deadline, prompts):
+                    self.error = f"no prompt before command {prompts} ({cmd!r})"
+                    return'''
+S_PROBE_FAIL = '''                if not self._wait_prompt(log_path, proc, deadline, prompts):
+                    self.error = f"no prompt before command {prompts} ({cmd!r})"
+                    self._csprobe(log_path, proc, prompts)   # CSPROBE
+                    return'''
+S_ANCHOR_FAILURES = '''    def failures(self, lines):
+        out = []
+        if self.error:
+            out.append(f"shell harness: {self.error}")'''
+S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: does the guest still answer, and where is every vCPU?
+        import json, socket
+        notes = self.results.setdefault("csprobe", [])
+        try:
+            before = os.path.getsize(log_path)
+        except OSError:
+            before = 0
+        try:
+            proc.stdin.write(b"\\r")
+            proc.stdin.flush()
+            time.sleep(1.0)
+            proc.stdin.write(b"\\x03")
+            proc.stdin.flush()
+        except OSError:
+            pass
+        time.sleep(3.0)
+        try:
+            after = os.path.getsize(log_path)
+        except OSError:
+            after = before
+        notes.append(f"CSPROBE stall at command {k}: guest answered Enter/^C: {'yes' if after > before else 'no'} (+{after - before} bytes)")
+        path = os.environ.get("QEMU_QMP")
+        if not path:
+            notes.append("CSPROBE no QMP socket")
+            return
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect(path)
+            f = s.makefile("rwb")
+            f.readline()   # greeting
+            for msg in ({"execute": "qmp_capabilities"},
+                        {"execute": "human-monitor-command", "arguments": {"command-line": "info registers -a"}},
+                        {"execute": "human-monitor-command", "arguments": {"command-line": "info registers -a"}}):
+                f.write((json.dumps(msg) + "\\n").encode())
+                f.flush()
+                while True:
+                    reply = json.loads(f.readline())
+                    if "event" not in reply:
+                        break
+                if msg["execute"] == "human-monitor-command":
+                    out = log_path + ".regs"
+                    with open(out, "a") as o:
+                        o.write("==== sample\\n" + reply.get("return", str(reply)) + "\\n")
+                    time.sleep(0.5)   # two samples, half a second apart: spinning or moving
+            s.close()
+            notes.append(f"CSPROBE registers written to {log_path}.regs")
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"CSPROBE QMP failed: {e!r}")
+
+    def failures(self, lines):
+        out = []
+        out.extend(self.results.get("csprobe", []))   # CSPROBE
+        if self.error:
+            out.append(f"shell harness: {self.error}")'''
+
+B_ANCHOR = '''        from shelltest import ShellTest
+        shelltest = ShellTest()
+'''
+B_PROBE = '''        from shelltest import ShellTest
+        shelltest = ShellTest()
+        if "QEMU_QMP" not in env:   # CSPROBE: a QMP socket for the stall dump
+            import tempfile
+            env["QEMU_QMP"] = os.path.join(tempfile.mkdtemp(prefix="cosmo-csp-"), "qmp.sock")
+            os.environ["QEMU_QMP"] = env["QEMU_QMP"]
+'''
+
+
+def cycles_prefix(n):
+    out = ["COMMANDS = [\n", "    # --- CSPROBE (tools/console-stall-probe.py; not for merge) ---\n"]
+    for i in range(n):
+        out.append(f'    ("sleep 1", []), (INTERRUPT, []), ("echo csprobe-after-interrupt-{i:03d}-abcdefghijklmnopqrstuvwxyz", []),\n')
+        # The background job exits one second after its start; the next
+        # line goes out at 0.85-1.15 s, walking across that moment.
+        pause = 0.85 + 0.3 * ((i * 7) % n) / max(n - 1, 1)
+        out.append(f'    ("sleep 1 &", []), (("__SLEEP__", {pause:.3f}), []), ("echo csprobe-after-background-{i:03d}-abcdefghijklmnopqrstuvwxyz", []),\n')
+    out.append("    # --- end CSPROBE ---\n")
+    return "".join(out)
+
+
+def sha(p):
+    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
+
+
+def files(n):
+    return [
+        (SHELL, [(S_ANCHOR_CMDS, cycles_prefix(n)), (S_ANCHOR_RUN, S_PROBE_RUN), (S_ANCHOR_FAIL, S_PROBE_FAIL),
+                 (S_ANCHOR_FAILURES, S_PROBE_FAILURES)]),
+        (BOOT, [(B_ANCHOR, B_PROBE)]),
+    ]
+
+
+def apply():
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    if os.path.exists(STAMP):
+        sys.exit('already applied')
+    fl = files(n)
+    for path, edits in fl:
+        if os.path.exists(path + BACKUP):
+            sys.exit(f'{path + BACKUP} exists from an earlier run; restore or remove it by hand first')
+        if not os.path.isfile(path):
+            sys.exit(f'{path} not found: run from the top of the tree')
+        if subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True).stdout.strip():
+            sys.exit(f'{path} has uncommitted changes')
+        s = open(path).read()
+        for a, _ in edits:
+            if s.count(a) != 1:
+                sys.exit(f'{path}: anchor not found exactly once: {a[:50]!r}')
+    done, stamp = [], []
+    try:
+        for path, edits in fl:
+            shutil.copyfile(path, path + BACKUP)
+            done.append(path)
+            s = open(path).read()
+            for a, b in edits:
+                s = s.replace(a, b)
+            open(path, 'w').write(s)
+            stamp.append(f'{path} {sha(path)}')
+        open(STAMP, 'w').write('\n'.join(stamp) + '\n')
+    except BaseException:
+        for path in done:
+            shutil.move(path + BACKUP, path)
+            os.utime(path, None)
+        if os.path.exists(STAMP):
+            os.remove(STAMP)
+        raise
+    print(f'applied ({n} cycles)')
+
+
+def revert():
+    if not os.path.exists(STAMP):
+        sys.exit('not applied')
+    paths = []
+    for line in open(STAMP).read().split('\n'):
+        if line:
+            path, digest = line.split()
+            paths.append(path)
+            restored = os.path.exists(path + BACKUP) and sha(path) == sha(path + BACKUP)
+            if sha(path) != digest and not restored:
+                sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
+    for path in paths:
+        shutil.copyfile(path + BACKUP, path)
+        os.utime(path, None)
+    for path in paths:
+        os.remove(path + BACKUP)
+    os.remove(STAMP)
+    print('reverted')
+
+
+def symbolize():
+    # symbolize REGS ELF: every PC in the dump, with its function.
+    regs, elf = sys.argv[2], sys.argv[3]
+    text = open(regs).read()
+    pcs = re.findall(r'\b(?:PC|RIP)\s*=\s*([0-9a-fA-F]+)', text)
+    tool = shutil.which('llvm-symbolizer') or shutil.which('/opt/homebrew/opt/llvm/bin/llvm-symbolizer')
+    cpu = 0
+    for block in text.split('==== sample'):
+        if not block.strip():
+            continue
+        print('---- sample')
+        for i, pc in enumerate(re.findall(r'\b(?:PC|RIP)\s*=\s*([0-9a-fA-F]+)', block)):
+            fn = '?'
+            if tool:
+                r = subprocess.run([tool, '--obj', elf, '--functions=short', '0x' + pc], capture_output=True, text=True)
+                fn = ' '.join(r.stdout.split()[:2])
+            print(f'  cpu {i}: pc {pc}  {fn}')
+    del pcs, cpu
+
+
+if __name__ == '__main__':
+    {'apply': apply, 'revert': revert, 'symbolize': symbolize}.get(sys.argv[1] if len(sys.argv) > 1 else '',
+                                                                     lambda: sys.exit(__doc__))()
