@@ -1,5 +1,38 @@
 # NEXT SUBSYSTEM — mount and unmount name what the caller's path names
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The guard test's second path is `d/..`, not `.`.** §2 had the
+>    second unmount use `.` from the mount's root. The mutation making
+>    `vfs_umount_at` ignore its start **passed** that test: `.` resolved
+>    from the global root reaches the root filesystem, which is refused
+>    `-EBUSY` too ("the root filesystem stays") -- the guard's errno from
+>    the wrong check. The test now puts a directory `d` in the mount and
+>    unmounts `d/..` from its root: it names that root only from there,
+>    and from anywhere else it is `-ENOENT`. With it, the mutation fails
+>    the test on `second.rc == -EBUSY`.
+> 2. **`init`'s `umount(".")` from inside the mount proves nothing on
+>    its own**, for the same reason: before the fix it was `-EBUSY` as
+>    the root filesystem, after it as a busy mount. It stays, commented
+>    as such; the claim is carried by the inode checks around it (which
+>    directory the mount covers, and that the relative unmount uncovers
+>    it).
+> 3. **An `irq-route` failure** (`hits >= 5`) in one mutation boot -- a
+>    mutation of `vfs_umount_at`, which no interrupt path calls -- is that
+>    test's known load-sensitive count; recorded in
+>    `docs/testing/flakes.md` as its second sighting.
+>
+> **The mutations**, each applied alone on x86-64, each boot confirmed
+> booted:
+>
+> | # | mutation | what failed |
+> | --- | --- | --- |
+> | 1 | the guard removed | `vfs-umount-once`: the second unmount waited in the drain (`second_answered`, after the 2 s bound) |
+> | 2 | `sys_mount` resolving from the root again | `init`: the mount covered `/mrel`, not `/tmp/mrel`, and every check after it |
+> | 3 | `sys_umount` resolving from the root again | `init`: `umount("mrel")` failed, `/tmp/mrel` stayed covered |
+> | 4 | `vfs_umount_at` ignoring its start | **passed `vfs-umount-once` at first** (item 1); with `d/..`, `second.rc == -EBUSY` fails (`-ENOENT`); `init` as row 3 |
+
 > Constitution §68 report. Found while taking up the deferred-work
 > inventory's row (section 3) "`vfs_umount2`'s one-unmount-at-a-time
 > guard is unfired by any test ... reachable by a relative path resolved

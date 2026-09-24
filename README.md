@@ -3462,6 +3462,19 @@ See [docs/development.md](docs/development.md).
   directories answer `..` now, and `/proc/self` is a symbolic link to the
   reader's pid, so no name in the tree means different directories to
   different processes. Invariant **P32**. (PR #232)
+- **Mount and unmount name what the caller's path names.** Every path
+  call resolves a relative path from the working directory except two:
+  `mount` and `umount` resolved their target from the root, so from
+  `/tmp` a mount on `mrel` covered `/mrel` -- measured on both
+  architectures (`tools/mount-rel-probe.py`) -- and the matching unmount
+  removed the same wrong mount, so return codes looked fine. Found while
+  taking up an inventory row that wanted a test for the
+  one-unmount-at-a-time guard "through a relative path from inside the
+  mount": that path did not exist. `vfs_mount_at` and `vfs_umount_at`
+  take a start and the two calls pass the cwd; `vfs-umount-once` then
+  fires the guard for the first time, with a held maintenance pass
+  keeping the first unmount in its drain and a second from inside
+  refused `-EBUSY` at once. P27 names the two calls. (PR #234)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
