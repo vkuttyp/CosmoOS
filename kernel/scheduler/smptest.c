@@ -893,8 +893,18 @@ struct bal_worker {
     unsigned runs;              /* released to spin, rather than left blocked */
     unsigned yielding;          /* give the CPU up voluntarily: see below */
     uint64_t iters;
-    unsigned cpu;               /* where it was last seen running */
+    unsigned cpu;               /* where it was last seen running; BAL_CPU_UNSEEN until it has run its loop */
 };
+
+/*
+ * A worker's `cpu` before its first loop iteration. Zero would name CPU 0,
+ * and a worker that has not yet run would then read as "on CPU 0":
+ * sched-balance-pair saw its spinning pair "separated after 0 ms" with no
+ * migration at all, one worker still at its initial 0 while the other had
+ * written the pair's CPU (found after the balance-movable unit merged).
+ * Set by the tests that read `cpu` as evidence before anything settles.
+ */
+#define BAL_CPU_UNSEEN (~0u)
 
 static void bal_worker_main(void *arg)
 {
@@ -943,6 +953,7 @@ static bool bal_create_blocked(struct bal_worker *w, struct thread **t, unsigned
     *made = 0;
     for (unsigned i = 0; i < count; i++) {
         memset(&w[i], 0, sizeof(w[i]));
+        w[i].cpu = BAL_CPU_UNSEEN;
         completion_init(&w[i].started, "bal-start");
         completion_init(&w[i].release, "bal-rel");
         t[i] = thread_create(bal_worker_main, &w[i], "bal-worker", SCHED_PRIO_DEFAULT);
@@ -977,8 +988,11 @@ static void bal_stop_all(struct bal_worker *w, struct thread **t, unsigned count
 static unsigned bal_cpus_used(const struct bal_worker *w, unsigned count, unsigned stride)
 {
     cpumask_t seen = 0;
-    for (unsigned i = 0; i < count; i += stride)
-        seen |= CPUMASK_OF(__atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED));
+    for (unsigned i = 0; i < count; i += stride) {
+        unsigned c = __atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED);
+        if (c != BAL_CPU_UNSEEN)   /* not yet run: on no CPU, rather than CPU 0 */
+            seen |= CPUMASK_OF(c);
+    }
     unsigned n = 0;
     for (unsigned c = 0; c < cpu_count(); c++)
         if (seen & CPUMASK_OF(c))
@@ -1104,6 +1118,7 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
     enum pair_result r = PAIR_NO_WORKER;
     for (unsigned i = 0; i < 2; i++) {
         memset(&w[i], 0, sizeof(w[i]));
+        w[i].cpu = BAL_CPU_UNSEEN;
         completion_init(&w[i].started, "pair-start");
         completion_init(&w[i].release, "pair-rel");
         w[i].runs = 1;
@@ -1123,10 +1138,13 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
     bool premise = false;
     uint64_t deadline = clock_deadline_ns(1000ull * 1000000ull);
     while (!premise && !clock_deadline_passed(deadline)) {
-        /* Both have run since their release (a thread's first switch-in is
-         * its start, before it blocks on the release). */
-        bool both_ran = __atomic_load_n(&t[0]->switches, __ATOMIC_RELAXED) > 1 &&
-                        __atomic_load_n(&t[1]->switches, __ATOMIC_RELAXED) > 1;
+        /* Both have run their loop since their release: each has written
+         * the pair's CPU, which a worker does only after the release. A
+         * switch count cannot say this -- a worker is switched in to start
+         * and again if preempted before it waits, so its count can pass one
+         * before it is released (the second finding after merge). */
+        bool both_ran = __atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED) == c &&
+                        __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED) == c;
         if (yielding) {
             premise = both_ran;
         } else {
@@ -1163,7 +1181,9 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
     deadline = clock_deadline_ns(1000ull * 1000000ull);
     r = PAIR_TOGETHER;
     while (!clock_deadline_passed(deadline)) {
-        if (__atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED) != __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED)) {
+        unsigned c0 = __atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED);
+        unsigned c1 = __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED);
+        if (c0 != BAL_CPU_UNSEEN && c1 != BAL_CPU_UNSEEN && c0 != c1) {   /* two real CPUs */
             r = PAIR_APART;
             break;
         }

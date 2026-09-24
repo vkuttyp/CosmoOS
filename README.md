@@ -3488,6 +3488,15 @@ See [docs/development.md](docs/development.md).
   by the rules. Its released workers now yield, so it asserts the
   contract, and `sched-balance-pair` asserts both halves of the
   mechanism. No kernel code changed. (PR #236)
+- **`sched-balance-pair` read a worker that had not run as "on CPU 0".**
+  After #236 merged, the test failed once on aarch64 with its spinning
+  pair "separated": an instrumented run found three such rounds in 25,
+  each after 0 ms and with no migration at all. A worker's recorded CPU
+  started at zero and was first written in its loop, so a worker still
+  on its way there looked like one on CPU 0. It now starts at a value no
+  CPU has, the premise waits for both workers to have written the
+  pair's CPU, and the pull test's counter skips an unrun worker (which
+  had been a possible false pass). Sixty rounds then: none apart. (PR #237)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
