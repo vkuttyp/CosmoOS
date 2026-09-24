@@ -1705,6 +1705,18 @@ or merely the thing that goes quiet. The sequence is deterministic
 enough to try on purpose: a background `sleep` timed to exit
 mid-keystroke. Still not a list entry; still re-run first.
 
+**A third, on `main` itself, 2026-09-24** (run 35942625646, the merge of
+#231, a report): the echo of `echo after-interrupt-ok` stopped at
+`cosmo$ echo after-interru`, right after the `^C`'d `sleep`. **Taken up
+by `docs/audit/next-subsystem-console-rx.md`**, which provoked it on
+purpose (`tools/console-stall-probe.py`: 13 stalls in 20 aarch64 release
+boots) and looked from outside: the guest idle and ticking, the
+PL011's receive FIFO full with its interrupt enabled and none pending.
+`rx_irq` drains the FIFO and then clears the receive interrupt, so a
+character arriving between the two has its interrupt cleared and is
+never read, and QEMU's PL011 raises nothing for the characters after it.
+Clearing first: no stall in six boots. Until the build lands, re-run.
+
 ## `net-harness` printed `ready` and nothing else, once, on this machine
 
 **2026-09-22, x86-64, the plain debug boot on this developer's machine**,
