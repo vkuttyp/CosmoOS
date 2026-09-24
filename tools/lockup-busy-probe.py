@@ -92,7 +92,9 @@ S_PROBE_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
     }
     __atomic_store_n(&g_lbprobe_gap_ns, lbp_gap, __ATOMIC_RELAXED);
 '''
-S_PROBE_DECL = '''uint64_t g_lbprobe_gap_ns;   /* LBPROBE (tools/lockup-busy-probe.py; not for merge) */
+S_PROBE_DECL = '''extern uint64_t g_lbprobe_gap_ns;   /* LBPROBE (tools/lockup-busy-probe.py; not for merge) */
+void lbprobe_release(void);
+uint64_t g_lbprobe_gap_ns;
 /* The slot a successful sample holds is released by lockup_print_samples;
  * the probe releases it without printing every sample it takes. */
 void lbprobe_release(void) { __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE); }
