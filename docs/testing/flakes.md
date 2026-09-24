@@ -2135,7 +2135,7 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
-## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23, and once on the 24th
+## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23, and twice on the 24th
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
 CPUs creation order gave them (3005 ms)`, in the x86-64 job's chaos boot
@@ -2145,7 +2145,13 @@ test that runs minutes later, and once on PR #229 (35882609779), whose
 change is in the Linux door's path calls. **A fourth on 2026-09-24**, the
 first on aarch64: PR #232's run 35948747763 (3009 ms), on a
 documentation-only commit whose two predecessors, carrying the same code,
-passed every boot including this one. The scheduler testing doc already says this
+passed every boot including this one. **A fifth the same day**, aarch64
+again: PR #233's run 35953787997 (3016 ms), a branch of one report, one
+probe script and one inventory line -- no kernel code at all. Five in two
+days, the last two in a row on aarch64: the rate is rising, and a test
+that fails this often on trees that cannot cause it is costing every
+unit a CI round. The decision the balancer unit owns -- whether this
+test asserts under the chaos migrator at all -- is due. The scheduler testing doc already says this
 is the one balancer test that still asserts, and that under a chaos
 migrator its claim is about the machine rather than the balancer
 (`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the
