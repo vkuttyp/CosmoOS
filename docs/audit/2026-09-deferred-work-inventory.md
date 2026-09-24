@@ -198,6 +198,12 @@ AHCI are the two entries from that list now built.
   per-CPU block before the run-queue lock first among them -- the
   corruption above, named -- plus the EL2 hand-back; all are fixed, and
   the accessors now panic in debug builds on a new one.
+  **The balancer's one asserting test lost a race under chaos**: taken
+  up by `docs/audit/next-subsystem-balance-movable.md`
+  (`tools/balance-chaos-probe.py`): a pair of spinners on one CPU is
+  never separated -- five hundred refused pulls a second, by S26 -- and
+  one chaos move of a released spinner onto a busy CPU makes that pair,
+  so `sched-balance-pull` asserted the window rather than the contract.
 - no priority inheritance in `mutex.c`.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
