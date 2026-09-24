@@ -247,8 +247,9 @@ configured) -- records its own sample from `self` (a handler's frame) or
 its own walk (a thread), and waits **once, for every target together**,
 until each target's `sample.seq` equals the request or the total bound
 passes (5 ms in the watchdog and the detectors, whether 3 CPUs or 63 are
-asked) -- one deadline, counted where it is armed (`samples_waits`), which
-is how the test checks it without a clock (a guest's wall clock measures
+asked) -- one deadline, reported per call where it is armed
+(`lockup_sample_all_info`: claims, waits, the interval), which is how the
+test checks it without a clock (a guest's wall clock measures
 its host: the lockup-bound unit). The slot is held until `lockup_print_samples` returns, so no
 later request overwrites a buffer under the printer.
 

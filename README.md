@@ -3504,11 +3504,13 @@ See [docs/development.md](docs/development.md).
   quiet, one sample takes 5.00-5.12 ms; under host load the excess is
   time the virtual CPU did not run, most of it in one gap between two
   clock reads. And on x86-64 the "masked" targets answered by NMI, so the
-  claim had never been exercised there. The sampler now counts the waits
-  it arms (`samples_waits`), a test hook sends the ordinary interrupt so
-  masked targets cannot answer on either architecture, the loser's
-  "refused at once" is an order (it returned while the winner held the
-  slot), and the remaining time bounds are 1 s hang guards. (PR #239)
+  claim had never been exercised there. The sampler now reports, per
+  call, what it did -- claim attempts, waits armed, the interval armed
+  (`lockup_sample_all_info`) -- and can be asked, for that call alone, to
+  send the ordinary interrupt so masked targets cannot answer on either
+  architecture; the test checks one wait of exactly the timeout, and the
+  loser's "refused at once" as an order plus a single claim attempt. The
+  remaining time bounds are 1 s hang guards. (PR #239)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

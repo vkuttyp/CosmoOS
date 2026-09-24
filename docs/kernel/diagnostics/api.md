@@ -184,19 +184,22 @@ Design: `design.md`, "lockup.c". Kernel-internal; no user interface.
 
 ### `void lockup_get_stats(struct lockup_stats *out)` / `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)`
 - Diagnostics and the test hook: report counters and the last reports'
-  facts (`samples_waits`: the deadlines `lockup_sample_all` armed, one
-  per sample -- the bound is total); thresholds (0 restores 10 s) and
+  facts (`samples_waits`: a machine-wide tally of the deadlines
+  `lockup_sample_all` armed, one per sample -- the bound is total; the
+  test reads the per-call report below, not this); thresholds (0 restores 10 s) and
   whether the next report is expected (its line then says so, and the
   harness's forbidden marker does not match it).
 
-### `void lockup_test_ipi_only(bool on)`
-- Test hook, in every build like `lockup_set_thresholds` (nothing but a
-  self-test calls either, and release boots run no self-tests):
-  `lockup_sample_all` sends the ordinary
-  `IPI_SAMPLE` instead of the NMI, so a CPU with interrupts masked cannot
-  answer on x86-64 either. Set around one sample and cleared after it;
-  `lockup_sample_cpu` and the detectors are unaffected by design, since
-  only the sampler's timeout is under test.
+### `bool lockup_sample_all_info(const struct arch_trap_frame *self, uint64_t timeout_ns, unsigned flags, cpumask_t *answered, struct lockup_sample_info *info)`
+- `lockup_sample_all` (which is this with no flags and no report) for a
+  caller that checks the sampler by what it did rather than by a clock.
+  `flags`: `LOCKUP_SAMPLE_IPI_ONLY` sends the ordinary `IPI_SAMPLE`
+  instead of the NMI, so a CPU with interrupts masked cannot answer on
+  x86-64 either -- **for this call only**: no global state, so no other
+  sample and no real report is affected. `info` (may be NULL) reports
+  this call's `claims` (slot claims attempted: one, since it never spins
+  for the slot), `waits` (deadlines armed: one, the bound is total) and
+  `wait_ns` (the interval armed, read back from the deadline).
 
 ## `kernel/shutdown.h`
 

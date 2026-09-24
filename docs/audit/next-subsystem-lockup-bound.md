@@ -3,44 +3,47 @@
 > **BUILT.** This is the report as written, with an as-built banner.
 > What the build changed, and what it found:
 >
-> 1. **The knob is in every build, not debug builds only.** §2 called
->    `lockup_test_ipi_only` a debug-build knob. It sits beside
->    `lockup_set_thresholds`, the detector's existing test hook, which
->    is not guarded either; nothing but a self-test calls either, and
->    the release boot runs no self-tests.
-> 2. **With the knob, x86-64 waits out the timeout for the first time**:
->    5032 us for two targets that could not answer, where it had taken
->    microseconds because the NMI answered.
-> 3. **The loser's order needed its own mutation.** A loser that waits
->    for the slot and then takes it is caught by "exactly one winner",
->    which comes first, so it says nothing about the new order check. A
->    loser that waits for the slot to free and is refused *late* passes
->    "exactly one winner" -- and fails the order check, on both
->    architectures (row 4). That is the regression the old 1 ms
->    stopwatch stood in for.
-> 4. **Under the same host load that broke the old bound** (12 busy
->    loops, load average 143 and 186), two aarch64 boots passed. Two
->    boots are not a rate; the claim is structural -- no check left can
->    be broken by elapsed time short of the 1 s guards.
+> 1. **Per call, not global** (found in review). §1 and §2 had a global
+>    counter the test read around its sample, and a global knob,
+>    `lockup_test_ipi_only`. Review found both wrong: the knob, while
+>    set, would have made a *real* report send IPIs and miss a masked
+>    CPU on x86-64; and the counter's first read came before the test
+>    held the exclusive slot, so another sample in between would have
+>    failed it. As built, `lockup_sample_all_info(self, timeout, flags,
+>    &answered, &info)` takes `LOCKUP_SAMPLE_IPI_ONLY` for that call
+>    alone and reports what that sample did: the slot `claims` it
+>    attempted, the `waits` it armed, and the interval `wait_ns` it armed,
+>    read back from the deadline. `lockup_sample_all` is it with no
+>    flags. `samples_waits` stays, as a machine-wide tally the test does
+>    not read.
+> 2. **Two checks the count alone missed** (found in review): a loser
+>    that *retries* the claim for a while and then refuses passes the
+>    order check, and one wait armed for ten times the timeout passes a
+>    count of one. As built the loser must have made exactly one claim,
+>    and the wait must have been armed for exactly the timeout asked.
+> 3. **With the IPI-only flag, x86-64 waits out the timeout for the
+>    first time**: about 5 ms for two targets that could not answer,
+>    where it had taken microseconds because the NMI answered.
+> 4. **The loser's order needed its own mutation.** A loser that waits
+>    for the slot and takes it is caught first by "exactly one winner";
+>    one that waits for the slot to free and is refused *late* is the
+>    order check's alone (row 4).
+> 5. **Under the same host load that broke the old bound** (12 busy
+>    loops, load average 143 and 186), two aarch64 boots of the first
+>    build passed. Two boots are not a rate; the claim is structural --
+>    nothing left is broken by elapsed time short of the 1 s guards.
 >
-> **The mutations**, each applied alone, each boot confirmed booted:
+> **The mutations**, each applied alone to the build as merged, each
+> boot confirmed booted:
 >
 > | # | mutation | x86-64 | aarch64 |
 > | --- | --- | --- | --- |
-> | 1 | a wait per target (one deadline per target, counted where armed) | `samples_waits` rose by two | same |
-> | 2 | the knob ignored (NMI sent anyway) | both targets answered by NMI | **equivalent**: no NMI to send |
-> | 3 | the loser waits for the slot and takes it | "exactly one winner" (both got it in turn) | same |
-> | 4 | the loser waits for the slot to free, then is refused | the order: the winner's guard expired before the loser returned | same |
-
-> Constitution §68 report. Takes up `lockup-sample-busy`'s failures at
-> `lockuptest.c:478` (and earlier at `:399`), the most frequent failure
-> left on CI: seven recorded sightings in seven days
-> (`docs/testing/flakes.md`, "`lockup-sample`"), two more on CI since
-> (runs 35970620814 and 35875986810), every one on a tree that does not
-> touch the sampler. That entry keeps the bound on purpose -- "a lockup
-> sample that answers late is a lockup sample that did not work" -- and
-> asks everyone to re-run. This report measures what the bound
-> measures, and finds it is the host.
+> | 1 | a wait per target (one deadline per target) | `info.waits == 1` | same |
+> | 2 | the IPI-only flag ignored (NMI sent anyway) | neither-answered: both answered by NMI | **equivalent**: no NMI to send |
+> | 3 | the loser waits for the slot and takes it | "exactly one winner" | same (first build) |
+> | 4 | the loser waits for the slot to free, then is refused | the order (`saw_loser`) | same |
+> | 5 | the loser retries the claim for 300 ms, then refuses | `loser->info.claims == 1` | same |
+> | 6 | the deadline armed for ten times the timeout | `info.wait_ns == LOCKUP_SAMPLE_TIMEOUT_NS` | same |
 
 ## Problem
 
@@ -165,11 +168,14 @@ reads the count before its own sample and again **before releasing the
 slot** -- the slot is exclusive, so between those two reads no other
 caller can have sampled -- and requires exactly one wait for a sample
 whose two targets could not answer. A per-target implementation arms one
-per target and fails it; no clock is involved.
+per target and fails it; no clock is involved. (**As built, the count is
+this call's own, reported by `lockup_sample_all_info`**: the first of the
+two reads described here came before the test held the slot, so it was
+not covered by the slot's exclusion -- banner item 1.)
 
 ### 2. The masked targets cannot answer, on both architectures
 
-A debug-build knob (as built: in every build, banner item 1), `lockup_test_ipi_only(true)`, makes the sampler send
+A debug-build knob (**as built: a per-call flag, `LOCKUP_SAMPLE_IPI_ONLY`, banner item 1**), `lockup_test_ipi_only(true)`, makes the sampler send
 the ordinary interrupt instead of the NMI. With it set, a CPU spinning
 with interrupts masked cannot answer on x86-64 either, and the
 three-CPU part checks that **neither masked target answered** (their
@@ -209,9 +215,8 @@ of wall-clock time, and the half that x86-64 skipped now exercised.
 exclusive slot, so it is this sample's alone. The ordering check uses
 two flags the racers already share.
 
-**Ownership and lifetime.** The knob is a global the test sets and
-clears (as built, in every build beside `lockup_set_thresholds`; only a
-self-test calls it, and release boots run none: banner item 1).
+**Ownership and lifetime.** As built there is no knob and no global
+state: the flag and the report belong to one call (banner item 1).
 
 **Security.** None.
 
@@ -225,7 +230,7 @@ loser that waits: each fails one named check.
 
 | file | change |
 | --- | --- |
-| kernel/core/lockup.c | count the waits armed (`samples_waits`); the `lockup_test_ipi_only` test knob (every build, as `lockup_set_thresholds`) |
+| kernel/core/lockup.c | count the waits armed (`samples_waits`); as built, `lockup_sample_all_info` with its flag and per-call report (banner item 1) |
 | kernel/include/kernel/lockup.h | the stat and the knob |
 | kernel/core/lockuptest.c | `lockup-sample-busy`'s checks as above |
 | docs | the lockup detector's invariants and testing docs; `docs/testing/flakes.md` (the entry marked resolved once the build lands; until then it says re-running is still the answer); the inventory; README Status |
@@ -238,7 +243,8 @@ loser that waits: each fails one named check.
 /* struct lockup_stats */
 uint64_t samples_waits;   /* deadlines armed by samples: one per sample */
 
-/* Test hook (as built, every build): sample with the ordinary interrupt, not the NMI, so a CPU
+/* As built, not this: a per-call flag, LOCKUP_SAMPLE_IPI_ONLY, on lockup_sample_all_info (banner item 1).
+ * Proposed: sample with the ordinary interrupt, not the NMI, so a CPU
  * with interrupts masked cannot answer on any architecture (tests). */
 void lockup_test_ipi_only(bool on);
 ```
@@ -252,8 +258,8 @@ documents.
 
 | check | replaces | mutation it must catch |
 | --- | --- | --- |
-| three-CPU sample: `samples_waits` rose by exactly one, read before the slot is released | `el < 5 ms + 2 ms` (`:478`) | a wait per target: the count rises by two |
-| three-CPU sample, IPI only: neither masked target answered | (nothing: on x86-64 the targets answered by NMI) | the knob ignored: on x86-64 both answer |
+| three-CPU sample: `samples_waits` rose by exactly one, read before the slot is released (as built: `info.waits == 1` and `info.wait_ns` equal to the timeout, per call) | `el < 5 ms + 2 ms` (`:478`) | a wait per target: the count rises by two |
+| three-CPU sample, IPI only (as built: `LOCKUP_SAMPLE_IPI_ONLY` on that call): neither masked target answered | (nothing: on x86-64 the targets answered by NMI) | the knob ignored: on x86-64 both answer |
 | three-CPU sample returns within 1 s | -- (a guard) | a wait loop that ignores its deadline |
 | two-CPU part: the loser returned while the winner still held the slot | `loser < 1 ms` | the loser waiting for the slot (as built: waiting *and taking* it is caught first by "exactly one winner"; waiting and then being refused is this check's -- banner item 3, rows 3 and 4) |
 | two-CPU part: the winner's sample returns within 1 s | `winner < 5 ms + 2 ms` | -- (a guard) |
