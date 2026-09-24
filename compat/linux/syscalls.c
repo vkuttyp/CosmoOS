@@ -366,15 +366,16 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     rc = at_base(dirfd, path, need, &start, base, sizeof(base), &have);
     if (rc)
         return rc;
-    rc = vfs_open(start, path, flags, mode & 07777u, &f);
-    /* A directory remembers the name the walk took to it, for fchdir
+    /* A directory remembers the name its own walk took to it, for fchdir
      * (P31, P32); a relative path from a base with no name gives it
      * none, and fchdir then refuses it. */
-    if (rc == 0 && f->vn->type == VNODE_DIR)
-        file_set_dir_path(f, start, base, path);
+    char name[VFS_PATH_MAX];
+    rc = vfs_open_named(start, base, path, flags, mode & 07777u, &f, name, sizeof(name));
     vnode_put(start);
     if (rc)
         return rc;
+    if (f->vn->type == VNODE_DIR)
+        file_set_dir_path(f, name);
     unsigned rights = HANDLE_RIGHT_OWNER;   /* as the native open: the file is the caller's to dup and pass */
     if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_READ;

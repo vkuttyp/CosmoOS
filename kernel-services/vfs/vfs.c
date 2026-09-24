@@ -1502,36 +1502,18 @@ static void file_release(struct kobject *obj)
     kfree(f);
 }
 
-void file_set_dir_path(struct file *f, struct vnode *start, const char *startname, const char *path)
+void file_set_dir_path(struct file *f, const char *name)
 {
-    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || path == NULL)
+    /* The name is the open's own traversed name (vfs_open_named, P32):
+     * the path its walk took to this very vnode. */
+    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || name == NULL || name[0] != '/')
         return;
-    /*
-     * The name is the traversed name of the same path from the same
-     * base (P32): what the walk entered, links replaced by where they
-     * led. It is recorded only if that walk reaches this very vnode --
-     * a rename between the open's walk and this one can make them
-     * differ, and then the directory has no name and fchdir refuses it
-     * rather than publish one directory's name with another's vnode.
-     */
-    char *buf = kmalloc(VFS_PATH_MAX, 0);
-    if (buf == NULL)
+    size_t n = strlen(name) + 1;
+    char *p = kmalloc(n, 0);
+    if (p == NULL)
         return;
-    struct vnode *check = NULL;
-    int rc = vfs_lookup_named(start, startname, path, &check, buf, VFS_PATH_MAX);
-    if (rc == 0) {
-        bool same = check == f->vn;
-        vnode_put(check);
-        if (same) {
-            size_t n = strlen(buf) + 1;
-            char *p = kmalloc(n, 0);
-            if (p != NULL) {
-                memcpy(p, buf, n);
-                f->dir_path = p;
-            }
-        }
-    }
-    kfree(buf);
+    memcpy(p, name, n);
+    f->dir_path = p;
 }
 
 static int64_t file_obj_read(struct kobject *obj, void *buf, size_t len)
@@ -1661,7 +1643,9 @@ static struct file *file_alloc(struct vnode *vn, unsigned flags)
     return f;
 }
 
-int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out)
+/* vfs_open's walk, which keeps the traversed name when `w` asks for one. */
+static int open_walk(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out,
+                     struct walk *w)
 {
     unsigned acc = flags & COSMO_O_ACCMODE;
     if (acc == COSMO_O_ACCMODE)
@@ -1676,7 +1660,6 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
      * so a chain ending in a link cannot outrun it, and every exit runs
      * one cleanup.
      */
-    struct walk w = { 0 };
     struct vnode *base = start;   /* borrowed from the caller ... */
     bool base_owned = false;      /* ... until an expansion makes it ours */
     struct vnode *vn = NULL;
@@ -1688,7 +1671,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         char last[VFS_NAME_MAX + 1];
         size_t len;
         bool trailing = false;
-        rc = walk_parent(base, path, &w, last, &parent, &len, &trailing);
+        rc = walk_parent(base, path, w, last, &parent, &len, &trailing);
         if (base_owned) {
             vnode_put(base);   /* walk_parent took its own reference */
             base = NULL;
@@ -1712,6 +1695,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
             rc = step(parent, last, len, &vn);   /* consumes the reference */
             if (rc)
                 goto out;
+            name_step(w, last, len);
             break;                               /* "." and ".." are directories */
         }
 
@@ -1746,6 +1730,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         }
         if (vn->type != VNODE_LNK) {
             vnode_put(parent);
+            name_step(w, last, len);
             break;
         }
         if (flags & COSMO_O_NOFOLLOW) {
@@ -1757,7 +1742,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         }
         const char *expanded;
         bool absolute = false;
-        rc = walk_expand(&w, vn, NULL, &expanded, &absolute);
+        rc = walk_expand(w, vn, NULL, &expanded, &absolute);
         vnode_put(vn);
         vn = NULL;
         if (rc) {
@@ -1772,7 +1757,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         }
         path = expanded;
     }
-    walk_fini(&w);
+    walk_fini(w);
 
     if (flags & COSMO_O_DIRECTORY) {
         if (vn->type != VNODE_DIR) {
@@ -1832,9 +1817,48 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
     return 0;
 
 out:
-    walk_fini(&w);
+    walk_fini(w);
     if (base_owned)
         vnode_put(base);
+    return rc;
+}
+
+int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out)
+{
+    struct walk w = { 0 };
+    return open_walk(start, path, flags, mode, out, &w);
+}
+
+int vfs_open_named(struct vnode *start, const char *startname, const char *path, unsigned flags, uint32_t mode,
+                   struct file **out, char *name, size_t n)
+{
+    /*
+     * The open's own walk names what it opened (P32): one walk, so the
+     * name is of the very vnode the file holds -- a second walk to name
+     * it could meet a rename in between and name another directory.
+     * The open never fails for the name's sake: a relative path from a
+     * start with no name, or a name that does not fit, leaves `name`
+     * empty.
+     */
+    struct walk w = { 0 };
+    name[0] = '\0';
+    if (n >= 2) {
+        bool seeded = true;
+        if (path != NULL && path[0] != '/' && start != NULL)
+            seeded = startname != NULL && startname[0] == '/' && strlcpy(name, startname, n) < n;
+        else
+            strlcpy(name, "/", n);
+        if (seeded) {
+            w.name = name;
+            w.name_len = strlen(name);
+            w.name_cap = n;
+        } else {
+            name[0] = '\0';
+        }
+    }
+    int rc = open_walk(start, path, flags, mode, out, &w);
+    if (rc == 0 && w.name_long)
+        name[0] = '\0';
     return rc;
 }
 
