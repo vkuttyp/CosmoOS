@@ -1072,18 +1072,31 @@ bool selftest_sched_balance_pull(const char **reason)
  * test a race. The two halves differ in the yield alone, so each is the
  * other's control; the spinning half is also S26 observed from outside.
  *
- * The premise is observed, not slept for: before the widen, the spinning
- * pair's queued worker must be seen READY and PREEMPTED, and the yielding
- * pair's two must each have been switched in more than once. A premise not
+ * The premise is observed, not slept for: before the widen, both workers
+ * of either pair must have run since their release, and a spinning pair
+ * must have settled into alternating -- neither queued without the
+ * PREEMPTED mark. A premise not
  * seen is its own failure, distinct from either claim.
  */
 enum pair_result { PAIR_APART, PAIR_TOGETHER, PAIR_NO_PREMISE, PAIR_NO_WORKER };
 
-static enum pair_result balance_pair(unsigned yielding, unsigned *cpu_out, uint64_t *took_ms)
+/* An online CPU other than this one, or `self` if there is none: a CPU
+ * registered at boot need not have come up, and pinning to it would fail
+ * the test without testing anything (found in review). */
+static unsigned pair_cpu(unsigned self)
 {
-    unsigned n = cpu_count(), self = arch_cpu_id();
-    unsigned c = (self + 1) % n;   /* not the test thread's CPU */
-    *cpu_out = c;
+    unsigned n = cpu_count();
+    for (unsigned i = 1; i < n; i++) {
+        unsigned c = (self + i) % n;
+        if (cpu_online(c))
+            return c;
+    }
+    return self;
+}
+
+static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *took_ms)
+{
+    unsigned n = cpu_count();
     *took_ms = 0;
     static struct bal_worker w[2];
     struct thread *t[2] = { NULL, NULL };
@@ -1110,14 +1123,29 @@ static enum pair_result balance_pair(unsigned yielding, unsigned *cpu_out, uint6
     bool premise = false;
     uint64_t deadline = clock_deadline_ns(1000ull * 1000000ull);
     while (!premise && !clock_deadline_passed(deadline)) {
+        /* Both have run since their release (a thread's first switch-in is
+         * its start, before it blocks on the release). */
+        bool both_ran = __atomic_load_n(&t[0]->switches, __ATOMIC_RELAXED) > 1 &&
+                        __atomic_load_n(&t[1]->switches, __ATOMIC_RELAXED) > 1;
         if (yielding) {
-            premise = __atomic_load_n(&t[0]->switches, __ATOMIC_RELAXED) > 1 &&
-                      __atomic_load_n(&t[1]->switches, __ATOMIC_RELAXED) > 1;
+            premise = both_ran;
         } else {
+            /*
+             * Settled into alternating: both have run, and neither is
+             * queued unmarked. "One queued PREEMPTED" is not enough -- the
+             * build's own finding: another thread on this CPU can preempt
+             * the first before the second ever runs, and a thread that has
+             * never run is movable by S26's own terms, so the pair then
+             * separates legitimately. Spinners never give the CPU up, so
+             * once this holds it keeps holding: the queued one is always
+             * the one just preempted.
+             */
+            bool queued_unmarked = false;
             for (unsigned i = 0; i < 2; i++)
                 if (__atomic_load_n(&t[i]->state, __ATOMIC_RELAXED) == THREAD_READY &&
-                    (__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
-                    premise = true;
+                    !(__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+                    queued_unmarked = true;
+            premise = both_ran && !queued_unmarked;
         }
         if (!premise)
             thread_sleep_ms(2);
@@ -1125,9 +1153,10 @@ static enum pair_result balance_pair(unsigned yielding, unsigned *cpu_out, uint6
     if (!premise)
         goto out;
 
-    cpumask_t all = 0;
+    cpumask_t all = 0;   /* every online CPU: somewhere to go */
     for (unsigned k = 0; k < n; k++)
-        all |= CPUMASK_OF(k);
+        if (cpu_online(k))
+            all |= CPUMASK_OF(k);
     for (unsigned i = 0; i < 2; i++)
         thread_set_affinity(t[i], all);
     uint64_t start = clock_now_ns();
@@ -1151,14 +1180,15 @@ out:
 
 static bool sched_balance_pair_pinned(const char **reason)
 {
-    if (cpu_count() < 2) {
-        kinfo("selftest: sched-balance-pair: one CPU; skipping");
+    unsigned c = pair_cpu(arch_cpu_id());
+    if (c == arch_cpu_id()) {
+        kinfo("selftest: sched-balance-pair: no second online CPU; skipping");
         return true;
     }
-    unsigned before = thread_count(), yc, sc;
+    unsigned before = thread_count(), yc = c, sc = c;
     uint64_t yms, sms;
-    enum pair_result y = balance_pair(1, &yc, &yms);
-    enum pair_result sp = balance_pair(0, &sc, &sms);
+    enum pair_result y = balance_pair(1, c, &yms);
+    enum pair_result sp = balance_pair(0, c, &sms);
     kinfo("selftest: sched-balance-pair: yielding pair on cpu %u %s after %llu ms; spinning pair on cpu %u %s",
           yc, y == PAIR_APART ? "separated" : "NOT separated", (unsigned long long)yms, sc,
           sp == PAIR_TOGETHER ? "stayed together (S26)" : "did not stay together");

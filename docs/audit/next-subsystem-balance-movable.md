@@ -13,6 +13,19 @@
 > 2. **The pair test's two halves run one after the other on the same
 >    CPU**, the yielding pair first, within the test's own watchdog
 >    (about a second: the spinning half waits out its bound by design).
+> 3. **"One queued PREEMPTED" was too weak a premise for the spinning
+>    pair**, and the build found it the hard way: one x86-64 boot in nine
+>    saw the spinning pair separated after 18 ms, on an unmutated tree.
+>    Another thread on the pair's CPU can preempt the first worker before
+>    the second has ever run; the first is then queued with the mark, the
+>    premise holds -- and the second, READY and never run, carries no
+>    mark and is movable by S26's own terms, so a pull separates the pair
+>    legitimately. The premise is now that the pair has *settled*: both
+>    have run since their release and neither is queued without the
+>    mark. Spinners never give the CPU up, so once that holds it keeps
+>    holding. The probe used the weaker premise too; it could only have
+>    produced a false *separation*, and every spinning pair it measured
+>    stayed together, so its figures stand.
 >
 > **The proofs**, each run alone, each boot confirmed booted, on x86-64:
 >
@@ -107,8 +120,9 @@ say which version measured them.
 
 2. **The pair, made on purpose** (`PPROBE`): two workers pinned to one
    CPU; the probe waits (up to 1 s) for the pair's premise -- for a
-   spinning pair, the queued one seen READY with `PREEMPTED`; for a
-   yielding pair, both switched in more than once -- then widens both to
+   spinning pair, the queued one seen READY with `PREEMPTED` (as built,
+   the stronger *settled* premise: banner item 3); for a yielding pair,
+   both switched in more than once -- then widens both to
    every CPU and waits up to 1 s for them to run on two CPUs. A pair
    whose premise is not seen is reported inconclusive, not measured.
    (The first version slept 50 ms instead of observing the premise; the
@@ -220,7 +234,8 @@ balancer's limit rather than a property any test asserts.
   in more than once -- observed, within a bound -- both are widened to
   every CPU, and within a bound they run on two different CPUs.
 - **A spinning pair is not.** The same, except that the premise
-  observed before the widen is the queued one READY with `PREEMPTED`;
+  observed before the widen is the pair settled into alternating: both
+  have run and neither is queued without `PREEMPTED` (banner item 3);
   the pair must still share one CPU at the end of the same window. A
   premise not seen within its bound fails the test as a broken premise,
   distinctly from either claim. This is S26 observed from outside: were a
