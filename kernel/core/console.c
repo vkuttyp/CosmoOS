@@ -65,6 +65,16 @@ void console_write(const char *s, size_t len)
     spin_unlock_irqrestore(&g_console_lock, st);
 }
 
+arch_irq_state_t console_hold(void)
+{
+    return spin_lock_irqsave(&g_console_lock);
+}
+
+void console_release(arch_irq_state_t st)
+{
+    spin_unlock_irqrestore(&g_console_lock, st);
+}
+
 void console_puts(const char *s)
 {
     console_write(s, strlen(s));

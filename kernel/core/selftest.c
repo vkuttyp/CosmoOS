@@ -660,6 +660,7 @@ static const struct selftest tests[] = {
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */
     { "tty-ldisc",       selftest_tty_ldisc },
+    { "console-rx-clear", selftest_console_rx_clear },
     { "fb-console",      selftest_fb_console },
     { "fb-bench",        selftest_fb_bench },
     /* After the hotplug tests: unplugging the hub takes the keyboard

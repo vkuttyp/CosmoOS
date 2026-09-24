@@ -13,6 +13,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/log.h>
+#include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/tty.h>
 #include <kernel/vmm.h>
@@ -28,12 +29,15 @@ extern uint64_t aarch64_hhdm_base;
 #define UART_LCR_H 0x02C
 #define UART_CR    0x030
 #define UART_IMSC  0x038
+#define UART_RIS   0x03C
 #define UART_MIS   0x040
 #define UART_ICR   0x044
 
 #define FR_TXFF (1u << 5)
 #define FR_RXFE (1u << 4)
+#define FR_BUSY (1u << 3)
 #define CR_UARTEN (1u << 0)
+#define CR_LBE    (1u << 7)
 #define CR_TXE    (1u << 8)
 #define CR_RXE    (1u << 9)
 #define LCR_WLEN8 (3u << 5)
@@ -42,6 +46,7 @@ extern uint64_t aarch64_hhdm_base;
 #define IMSC_RTIM (1u << 6)
 
 static volatile uint32_t *g_regs;
+static bool g_rx_ready;   /* the receive interrupt is requested and enabled */
 static paddr_t g_base = VIRT_PL011_BASE;
 static unsigned g_intid = VIRT_PL011_INTID;
 
@@ -122,16 +127,33 @@ static void read_spcr(void)
         g_intid = gsiv;
 }
 
-static void rx_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
+/*
+ * Clear, then drain (docs/audit/next-subsystem-console-rx.md). The other
+ * order -- drain until empty, then clear -- lost the console for good: a
+ * character arriving between the last "empty" read and the clear raised
+ * the receive interrupt and had it cleared at once, stayed in the FIFO,
+ * and QEMU's PL011 raises the interrupt only when the FIFO count reaches
+ * its trigger level (one), so nothing after it raised anything either.
+ * Cleared first, a character arriving during the drain is read by it, and
+ * one arriving after the drain's last read raises an interrupt nothing
+ * clears. `after_drain` is the test's hook at exactly that moment.
+ */
+static void rx_service(struct tty *t, void (*after_drain)(void))
 {
-    (void)vector;
-    (void)frame;
-    struct tty *t = arg;
+    wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
     while ((rd(UART_FR) & FR_RXFE) == 0) {
         uint8_t c = (uint8_t)rd(UART_DR);
         tty_input(t, &c, 1);
     }
-    wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
+    if (after_drain != NULL)
+        after_drain();
+}
+
+static void rx_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    rx_service(arg, NULL);
 }
 
 void arch_console_input_init(void)
@@ -150,5 +172,73 @@ void arch_console_input_init(void)
         kwarn("pl011: cannot enable INTID %u (%d); console input disabled", g_intid, rc);
         return;
     }
+    g_rx_ready = true;
     kinfo("serial: console input on IRQ %u", g_intid);
+}
+
+/* --- console-rx-clear: the race, made to happen ---------------------------
+ *
+ * A byte put into the receive FIFO after the service's drain -- the
+ * moment the old order cleared its interrupt -- must leave the receive
+ * interrupt pending. The PL011's loopback (CR.LBE) routes a transmitted
+ * byte into its own receive FIFO, so the test's hook at that moment
+ * transmits one. The GIC line is disabled for the test and every console
+ * writer is held off (console_hold), so the UART carries nothing but that
+ * byte; the raw interrupt status, not the handler, is the evidence.
+ */
+#define RIS_RXRIS (1u << 4)
+
+#define CHECK(cond)                                                          \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            *reason = "check failed: " #cond;                                \
+            return false;                                                    \
+        }                                                                    \
+    } while (0)
+
+static void rx_test_send(void)
+{
+    /* In loopback: into this UART's own receive FIFO. QEMU also sends it
+     * down the line, so a carriage return -- invisible in a log. */
+    wr(UART_DR, (uint32_t)'\r');
+}
+
+bool selftest_console_rx_clear(const char **reason)
+{
+    if (!g_rx_ready) {
+        kinfo("selftest: console-rx-clear: no console receive interrupt; skipping");
+        return true;
+    }
+    CHECK(irq_disable(g_intid) == 0);
+    arch_irq_state_t st = console_hold();   /* nothing may log until console_release */
+    while (rd(UART_FR) & FR_BUSY)
+        ;                                   /* the last line out, before loopback */
+    uint32_t cr = rd(UART_CR);
+    while ((rd(UART_FR) & FR_RXFE) == 0)
+        (void)rd(UART_DR);
+    wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
+    wr(UART_CR, cr | CR_LBE);
+
+    rx_service(tty_console(), rx_test_send);   /* drains nothing; the hook's byte arrives after */
+
+    bool arrived = false;
+    for (unsigned i = 0; i < 100000 && !arrived; i++)
+        arrived = (rd(UART_FR) & FR_RXFE) == 0;
+    uint32_t ris = rd(UART_RIS);
+
+    while ((rd(UART_FR) & FR_RXFE) == 0)
+        (void)rd(UART_DR);                  /* the test's byte is not input */
+    wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
+    wr(UART_CR, cr);
+    console_release(st);
+    CHECK(irq_enable(g_intid) == 0);
+
+    if (!arrived) {
+        /* Said, not passed: without loopback nothing here was tested. */
+        kinfo("selftest: console-rx-clear: this PL011 has no loopback (the byte never arrived); skipping");
+        return true;
+    }
+    CHECK(ris & RIS_RXRIS);   /* the byte that arrived after the drain still has its interrupt */
+    kinfo("selftest: console-rx-clear: a byte arriving after the drain left its receive interrupt pending");
+    return true;
 }
