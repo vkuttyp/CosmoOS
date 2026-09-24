@@ -227,6 +227,7 @@ bool selftest_virtio_console(const char **reason);
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
 bool selftest_vfs_rename2(const char **reason);   /* renameat's two starts (P31) */
+bool selftest_vfs_lookup_named(const char **reason);   /* the traversed name (P32) */
 bool selftest_vfs_symlink(const char **reason);
 bool selftest_vfs_symlink_walk(const char **reason);
 bool selftest_vfs_symlink_loop(const char **reason);

@@ -2107,3 +2107,98 @@ bool selftest_vfs_rename2(const char **reason)
     kinfo("selftest: vfs-rename2: a rename between two directories reached from two starts lands in the second");
     return true;
 }
+
+/*
+ * The traversed name (P32, docs/audit/next-subsystem-cwd-name.md): a
+ * table of walks, each name checked for its text and then walked again
+ * from the root to the same vnode. The tree has an absolute link, a
+ * relative one, a chain, a relative link into a mount, and one inside
+ * the mount that leaves it through `..` -- the shapes where a lexical
+ * name and the walk part company.
+ */
+bool selftest_vfs_lookup_named(const char **reason)
+{
+    CHECK(vfs_mkdir(NULL, "/tmp/ln", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/ln/a", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/ln/a/b", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/ln/m", 0755) == 0);
+    CHECK(vfs_mount("/tmp/ln/m", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/ln/m/in", 0755) == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/ln/abs", "/tmp/ln/a/b") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/ln/rel", "a/b") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/ln/chain", "abs") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/ln/a/up", "../m/in") == 0);   /* relative, into the mount */
+    CHECK(vfs_symlink(NULL, "/tmp/ln/m/out", "../a") == 0);     /* relative, out of it through its root */
+    struct vnode *ln;
+    CHECK(vfs_lookup(NULL, "/tmp/ln", &ln) == 0);
+
+    static const struct {
+        bool from_ln;   /* relative to /tmp/ln, or from the root */
+        const char *path;
+        const char *want;
+    } cases[] = {
+        { false, "/tmp/ln/a/b", "/tmp/ln/a/b" },
+        { true, "a/./b", "/tmp/ln/a/b" },
+        { true, "a/b/..", "/tmp/ln/a" },
+        { false, "/..", "/" },
+        { true, "../../..", "/" },
+        { true, "abs", "/tmp/ln/a/b" },       /* an absolute link, last */
+        { true, "abs/..", "/tmp/ln/a" },      /* ... mid-path: the target's parent, not /tmp/ln */
+        { true, "rel/..", "/tmp/ln/a" },      /* a relative link */
+        { true, "chain", "/tmp/ln/a/b" },     /* two links */
+        { true, "a/up", "/tmp/ln/m/in" },     /* a relative link into a mount */
+        { true, "m/in/..", "/tmp/ln/m" },
+        { true, "m/..", "/tmp/ln" },          /* `..` from a mount root leaves through the mountpoint */
+        { true, "m/out", "/tmp/ln/a" },       /* a link inside the mount, out through its root */
+        { true, "a/b/", "/tmp/ln/a/b" },
+    };
+    char name[VFS_PATH_MAX];
+    unsigned bad = ~0u, mismatch = ~0u;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct vnode *vn = NULL, *again = NULL;
+        int rc = vfs_lookup_named(cases[i].from_ln ? ln : NULL, "/tmp/ln", cases[i].path, &vn, name, sizeof(name));
+        if (rc != 0 || strcmp(name, cases[i].want) != 0) {
+            kinfo("selftest: vfs-lookup-named: case %u (%s): rc %d, name '%s', want '%s'", i, cases[i].path, rc,
+                  rc == 0 ? name : "", cases[i].want);
+            if (bad == ~0u)
+                bad = i;
+        } else if (vfs_lookup(NULL, name, &again) != 0 || again != vn) {
+            if (mismatch == ~0u)
+                mismatch = i;   /* the name does not reach what the walk reached */
+        }
+        if (again)
+            vnode_put(again);
+        if (vn)
+            vnode_put(vn);
+    }
+    /* A relative walk from a start with no name; a name that does not fit. */
+    struct vnode *vn = NULL;
+    int rc_noname = vfs_lookup_named(ln, NULL, "a", &vn, name, sizeof(name));
+    if (vn)
+        vnode_put(vn);
+    vn = NULL;
+    int rc_long = vfs_lookup_named(NULL, NULL, "/tmp/ln/a/b", &vn, name, 8);
+    if (vn)
+        vnode_put(vn);
+    vnode_put(ln);
+
+    (void)vfs_unlink(NULL, "/tmp/ln/m/out");
+    (void)vfs_rmdir(NULL, "/tmp/ln/m/in");
+    CHECK(vfs_umount("/tmp/ln/m") == 0);
+    (void)vfs_unlink(NULL, "/tmp/ln/a/up");
+    (void)vfs_unlink(NULL, "/tmp/ln/chain");
+    (void)vfs_unlink(NULL, "/tmp/ln/rel");
+    (void)vfs_unlink(NULL, "/tmp/ln/abs");
+    CHECK(vfs_rmdir(NULL, "/tmp/ln/m") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/ln/a/b") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/ln/a") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/ln") == 0);
+
+    CHECK(bad == ~0u);        /* every name is the path the walk took */
+    CHECK(mismatch == ~0u);   /* and walked again, it reaches the same vnode */
+    CHECK(rc_noname == -ENOENT);
+    CHECK(rc_long == -ENAMETOOLONG);
+    kinfo("selftest: vfs-lookup-named: %u walks named by the path they took, through links and a mount",
+          (unsigned)(sizeof(cases) / sizeof(cases[0])));
+    return true;
+}

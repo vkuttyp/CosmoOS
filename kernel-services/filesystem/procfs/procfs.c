@@ -28,12 +28,13 @@
  * the filesystem holds no table that could disagree with the process
  * table.
  */
-enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3 };
+enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3, PROC_SELF = 4 };
 
 #define PROC_INO(pid, kind) (((uint64_t)(pid) << 8) | (uint64_t)(kind))
 #define PROC_INO_PID(ino)   ((pid_t)((ino) >> 8))
 #define PROC_INO_KIND(ino)  ((enum proc_kind)((ino) & 0xff))
 #define PROC_ROOT_INO       PROC_INO(0, PROC_ROOT)
+#define PROC_SELF_INO       PROC_INO(0, PROC_SELF)
 
 /* Rendered text is at most this; a status block is a few hundred bytes
  * and a limits block is one line per resource. */
@@ -208,6 +209,14 @@ static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct v
 static int proc_pid_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     pid_t pid = PROC_INO_PID(dir->ino);
+    /* The VFS resolves `..` by asking the filesystem; a process's
+     * directory sits in /proc, which its own listing already names as
+     * `..` (docs/audit/next-subsystem-cwd-name.md, the second defect). */
+    if (len == 2 && name[0] == '.' && name[1] == '.') {
+        vnode_get(dir->mnt->root);
+        *out = dir->mnt->root;
+        return 0;
+    }
     if (len == 6 && memcmp(name, "status", 6) == 0)
         return proc_file(dir->mnt, pid, PROC_STATUS, out);
     if (len == 6 && memcmp(name, "limits", 6) == 0)
@@ -275,16 +284,45 @@ static pid_t parse_pid(const char *name, size_t len)
     return v > 0 ? v : -1;
 }
 
+/*
+ * `self` is a symbolic link to the reader's own directory, its target
+ * rendered at each read -- which is how a process reads its own facts
+ * without knowing its pid. It was a directory resolved to the caller at
+ * lookup, from before this VFS had links; as one, a walk through it
+ * named the directory `self`, a name that means a different directory
+ * to every process that walks it, so a child inheriting it would hold
+ * its parent's vnode under its own name (P32,
+ * docs/audit/next-subsystem-cwd-name.md). As a link the walk names it
+ * by pid, like any other.
+ */
+static int proc_self_readlink(struct vnode *vn, char *buf, size_t len)
+{
+    (void)vn;
+    struct process *me = process_current();
+    if (me == NULL)
+        return -ENOENT;
+    char pid[12];
+    int n = ksnprintf(pid, sizeof(pid), "%u", (unsigned)me->pid);
+    if ((size_t)n > len)
+        n = (int)len;
+    memcpy(buf, pid, (size_t)n);   /* relative: the reader's directory beside this link */
+    return n;
+}
+
+static const struct vnode_ops proc_self_ops = {
+    .readlink = proc_self_readlink,
+};
+
 static int proc_root_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
-    /* `self` is resolved to the caller here, which is how a process
-     * reads its own facts without knowing its pid. A directory rather
-     * than a symbolic link because this VFS has none. */
     if (len == 4 && memcmp(name, "self", 4) == 0) {
-        struct process *me = process_current();
-        if (me == NULL)
+        if (process_current() == NULL)
             return -ENOENT;
-        return proc_pid_dir(dir->mnt, me->pid, out);
+        struct vnode *vn = proc_vnode(dir->mnt, PROC_SELF_INO, VNODE_LNK, 0777, &proc_self_ops);
+        if (vn == NULL)
+            return -ENOMEM;
+        *out = vn;
+        return 0;
     }
     pid_t pid = parse_pid(name, len);
     if (pid < 0)
@@ -316,7 +354,8 @@ static int proc_root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb,
 
     while (*pos < nr_fixed) {
         uint64_t i = *pos;
-        int rc = cb(arg, fixed[i].name, fixed[i].len, dir->ino, VNODE_DIR);
+        int rc = i == 2 ? cb(arg, fixed[i].name, fixed[i].len, PROC_SELF_INO, VNODE_LNK)
+                        : cb(arg, fixed[i].name, fixed[i].len, dir->ino, VNODE_DIR);
         if (rc)
             return rc;
         (*pos)++;

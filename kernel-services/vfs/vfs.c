@@ -1124,7 +1124,12 @@ static bool dot_name(const char *name, size_t len)
  * path).
  */
 struct walk {
-    bool no_links;  /* any symbolic link met is -ELOOP: a name that must mean itself */
+    /* The traversed name (P32): the absolute name, relative to the
+     * caller's root, of the directory the walk is in. NULL when the
+     * caller did not ask; `name_long` once it would not fit. */
+    char *name;
+    size_t name_len, name_cap;
+    bool name_long;
     unsigned links;
     char *buf;      /* 2 * VFS_PATH_MAX, or NULL */
     char *cur;      /* the half holding the path being walked */
@@ -1138,6 +1143,51 @@ static void walk_fini(struct walk *w)
 }
 
 /*
+ * The traversed name follows the walk's own rules, applied to a string
+ * (docs/audit/next-subsystem-cwd-name.md, section 1): an absolute start
+ * or an absolute link target is `/`; a component entered as anything
+ * but a followed link is appended, `.` adding nothing and `..` removing
+ * the last component (and staying at `/`). A link is never appended: a
+ * relative target continues from the directory the link was found in,
+ * which is the name as it stands. `..` removing a component is right
+ * because the name holds no link -- the directory before its last
+ * component is the one `..` reaches, a mount root's included, whose
+ * mountpoint is the component removed.
+ */
+static void name_reset(struct walk *w)
+{
+    if (w->name == NULL)
+        return;
+    w->name[0] = '/';
+    w->name[1] = '\0';
+    w->name_len = 1;
+}
+
+static void name_step(struct walk *w, const char *comp, size_t len)
+{
+    if (w->name == NULL || (len == 1 && comp[0] == '.'))
+        return;
+    if (len == 2 && comp[0] == '.' && comp[1] == '.') {
+        size_t at = w->name_len;
+        while (at > 1 && w->name[at - 1] != '/')
+            at--;
+        w->name_len = at > 1 ? at - 1 : 1;   /* the separator goes too, unless it is the root */
+        w->name[w->name_len] = '\0';
+        return;
+    }
+    size_t sep = w->name_len > 1 ? 1 : 0;
+    if (w->name_len + sep + len + 1 > w->name_cap) {
+        w->name_long = true;   /* reported by the caller, which asked for it */
+        return;
+    }
+    if (sep)
+        w->name[w->name_len++] = '/';
+    memcpy(w->name + w->name_len, comp, len);
+    w->name_len += len;
+    w->name[w->name_len] = '\0';
+}
+
+/*
  * Replace the path being walked with `link`'s target followed by `rest`.
  * Returns the new path through `out` and whether it is absolute; the
  * caller decides where to continue from. -ELOOP past the budget,
@@ -1145,7 +1195,7 @@ static void walk_fini(struct walk *w)
  */
 static int walk_expand(struct walk *w, struct vnode *link, const char *rest, const char **out, bool *absolute)
 {
-    if (w->no_links || w->links >= VFS_MAX_SYMLINKS)
+    if (w->links >= VFS_MAX_SYMLINKS)
         return -ELOOP;
     if (link->ops->readlink == NULL)
         return -EIO;   /* a link this filesystem cannot read is not a link */
@@ -1202,6 +1252,7 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
          * root below the global one cannot name its way out with a
          * leading slash. */
         cur = vfs_current_root();
+        name_reset(w);
     } else {
         /* The one line every relative walk from every caller shares, and
          * the first dereference of the caller's starting directory: the
@@ -1278,8 +1329,9 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
             if (absolute) {
                 vnode_put(linkdir);
                 cur = vfs_current_root();
+                name_reset(w);
             } else {
-                cur = linkdir;   /* keeps linkdir's reference */
+                cur = linkdir;   /* keeps linkdir's reference; the name stays the directory's */
             }
             path = expanded;
             while (*path == '/')
@@ -1287,6 +1339,7 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
             continue;
         }
         vnode_put(linkdir);
+        name_step(w, path, len);
         cur = child;
         path = next;
     }
@@ -1355,6 +1408,7 @@ static int resolve(struct vnode *start, const char *path, struct walk *w, unsign
         }
         if (vn->type != VNODE_LNK || !(flags & RESOLVE_FOLLOW)) {
             vnode_put(parent);
+            name_step(w, name, len);
             /* `name/` names a directory, whatever the name resolved to. */
             if (trailing && vn->type != VNODE_DIR) {
                 vnode_put(vn);
@@ -1395,6 +1449,35 @@ int vfs_lookup(struct vnode *start, const char *path, struct vnode **out)
     return lookup_flags(start, path, RESOLVE_FOLLOW, out);
 }
 
+int vfs_lookup_named(struct vnode *start, const char *startname, const char *path, struct vnode **out,
+                     char *name, size_t n)
+{
+    if (name == NULL || n < 2)
+        return -EINVAL;
+    if (path != NULL && path[0] != '/' && start != NULL) {
+        /* A relative walk continues from its start's name, which must be
+         * one: a directory that recorded none cannot name what is below it. */
+        if (startname == NULL || startname[0] != '/')
+            return -ENOENT;
+        if (strlcpy(name, startname, n) >= n)
+            return -ENAMETOOLONG;
+    } else {
+        name[0] = '/';   /* walk_parent resets it too; this is the empty-path case */
+        name[1] = '\0';
+    }
+    struct walk w = { .name = name, .name_len = strlen(name), .name_cap = n };
+    int rc = resolve(start, path, &w, RESOLVE_FOLLOW, out);
+    walk_fini(&w);
+    if (rc)
+        return rc;
+    if (w.name_long) {
+        vnode_put(*out);
+        *out = NULL;
+        return -ENAMETOOLONG;
+    }
+    return 0;
+}
+
 int vfs_lookup_nofollow(struct vnode *start, const char *path, struct vnode **out)
 {
     return lookup_flags(start, path, 0, out);
@@ -1419,36 +1502,36 @@ static void file_release(struct kobject *obj)
     kfree(f);
 }
 
-void file_set_dir_path(struct file *f, const char *abs)
+void file_set_dir_path(struct file *f, struct vnode *start, const char *startname, const char *path)
 {
-    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || abs == NULL || abs[0] != '/')
+    if (f->vn->type != VNODE_DIR || f->dir_path != NULL || path == NULL)
         return;
     /*
-     * The name must name this directory. `abs` is a lexical normalisation
-     * of what the caller asked for, and the walk that opened the file may
-     * have followed a symbolic link or met `..` differently -- so the name
-     * is walked again from the caller's root with no link allowed, and
-     * recorded only if it arrives at this very vnode. A directory reached
-     * through a link has no coherent name to give fchdir, and fchdir
-     * refuses it rather than publish one directory's name with another's
-     * vnode (found in review).
+     * The name is the traversed name of the same path from the same
+     * base (P32): what the walk entered, links replaced by where they
+     * led. It is recorded only if that walk reaches this very vnode --
+     * a rename between the open's walk and this one can make them
+     * differ, and then the directory has no name and fchdir refuses it
+     * rather than publish one directory's name with another's vnode.
      */
-    struct walk w = { .no_links = true };
+    char *buf = kmalloc(VFS_PATH_MAX, 0);
+    if (buf == NULL)
+        return;
     struct vnode *check = NULL;
-    int rc = resolve(NULL, abs, &w, RESOLVE_FOLLOW, &check);
-    walk_fini(&w);
-    if (rc)
-        return;
-    bool same = check == f->vn;
-    vnode_put(check);
-    if (!same)
-        return;
-    size_t n = strnlen(abs, VFS_PATH_MAX - 1) + 1;
-    char *p = kmalloc(n, 0);
-    if (p == NULL)
-        return;
-    strlcpy(p, abs, n);
-    f->dir_path = p;
+    int rc = vfs_lookup_named(start, startname, path, &check, buf, VFS_PATH_MAX);
+    if (rc == 0) {
+        bool same = check == f->vn;
+        vnode_put(check);
+        if (same) {
+            size_t n = strlen(buf) + 1;
+            char *p = kmalloc(n, 0);
+            if (p != NULL) {
+                memcpy(p, buf, n);
+                f->dir_path = p;
+            }
+        }
+    }
+    kfree(buf);
 }
 
 static int64_t file_obj_read(struct kobject *obj, void *buf, size_t len)

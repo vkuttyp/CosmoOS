@@ -1070,6 +1070,65 @@ static void proc_selftest(void)
     CHECK(rmdir("cwdtest") == 0);
     CHECK(chdir("/") == 0);
 
+    /* The name chdir publishes is the path the walk took (P32,
+     * docs/audit/next-subsystem-cwd-name.md): through a link, the
+     * directory's own path; `..` after it, that directory's parent. A
+     * lexical name said /tmp/ncnl and then /tmp while the process stood
+     * in /tmp/ncn. Every name is checked against where the process is. */
+    {
+        CHECK(mkdir("/tmp/ncn", 0755) == 0 && mkdir("/tmp/ncn/deep", 0755) == 0);
+        CHECK(symlink("/tmp/ncn/deep", "/tmp/ncnl") == 0);   /* absolute target */
+        CHECK(symlink("ncn/deep", "/tmp/ncnr") == 0);        /* relative target */
+        static const struct {
+            const char *to;
+            const char *name;
+        } steps[] = {
+            { "/tmp/ncnl", "/tmp/ncn/deep" },
+            { "..", "/tmp/ncn" },
+            { "/tmp", "/tmp" },
+            { "ncnr", "/tmp/ncn/deep" },
+            { "/tmp/ncnl/..", "/tmp/ncn" },
+            { "deep/../../ncnl", "/tmp/ncn/deep" },
+        };
+        struct stat here, named;
+        for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+            CHECK(chdir(steps[i].to) == 0);
+            CHECK(getcwd(buf, sizeof(buf)) && strcmp(buf, steps[i].name) == 0);
+            CHECK(stat(".", &here) == 0 && stat(buf, &named) == 0 && here.st_ino == named.st_ino);
+        }
+        /* A child given a cwd through a relative link gets the path the
+         * walk took, resolved from this process's directory. */
+        CHECK(chdir("/") == 0);
+        const char *cn_argv[] = { "init", "--probe", "cwd-is:/tmp/ncn/deep", NULL };
+        int cst = -1;
+        pid_t cp = (pid_t)cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/init", .argv = cn_argv, .cwd = "tmp/ncnr" });
+        CHECK(cp > 1 && waitpid(cp, &cst, 0) == cp && cst == 0);
+
+        /* /proc/self is a link to this process's directory, so the walk
+         * names it by pid, and `..` from a process directory is /proc. A
+         * child inheriting that directory inherits a name that means it,
+         * not the child's own (review of the report). */
+        char want[32], lb[32];
+        snprintf(want, sizeof(want), "/proc/%d", (int)getpid());
+        struct stat ls;
+        CHECK(lstat("/proc/self", &ls) == 0 && S_ISLNK(ls.st_type));
+        ssize_t ln = readlink("/proc/self", lb, sizeof(lb) - 1);
+        CHECK(ln > 0 && (lb[ln] = '\0', strcmp(lb, want + 6) == 0));
+        CHECK(chdir("/proc/self") == 0 && getcwd(buf, sizeof(buf)) && strcmp(buf, want) == 0);
+        char probe[48];
+        snprintf(probe, sizeof(probe), "cwd-is:%s", want);
+        const char *inh_argv[] = { "init", "--probe", probe, NULL };
+        cp = spawnve("/boot/init", inh_argv, NULL, NULL, 0);   /* inherits this directory */
+        CHECK(cp > 1 && waitpid(cp, &cst, 0) == cp && cst == 0);
+        cp = (pid_t)cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/init", .argv = inh_argv, .cwd = "/proc/self" });   /* named by this walker */
+        CHECK(cp > 1 && waitpid(cp, &cst, 0) == cp && cst == 0);
+        CHECK(chdir("..") == 0 && getcwd(buf, sizeof(buf)) && strcmp(buf, "/proc") == 0);
+
+        CHECK(chdir("/") == 0);
+        CHECK(unlink("/tmp/ncnr") == 0 && unlink("/tmp/ncnl") == 0);
+        CHECK(rmdir("/tmp/ncn/deep") == 0 && rmdir("/tmp/ncn") == 0);
+    }
+
     /* Introspection. */
     CHECK(getppid() == 0);                                 /* spawned by the kernel */
     struct cosmo_procinfo pi[16];
@@ -1331,6 +1390,20 @@ static int probe(const char *kind)
     if (strcmp(kind, "hold") == 0) {
         cosmo_sleep_ns(30000000);   /* stay alive long enough to be counted */
         return 0;
+    }
+    if (strncmp(kind, "cwd-is:", 7) == 0) {
+        /* The name this process was given names where it stands (P32):
+         * getcwd is the expected name, and that name reaches the
+         * directory "." is, by inode. */
+        char here[256];
+        struct stat a, b;
+        if (getcwd(here, sizeof(here)) == NULL)
+            return 10;
+        if (strcmp(here, kind + 7) != 0)
+            return 11;
+        if (stat(".", &a) != 0 || stat(here, &b) != 0)
+            return 12;
+        return a.st_ino == b.st_ino ? 0 : 13;
     }
     if (strncmp(kind, "uid-is:", 7) == 0) {
         unsigned want = (unsigned)strtoul(kind + 7, NULL, 10);
