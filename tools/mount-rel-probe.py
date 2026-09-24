@@ -23,8 +23,10 @@ inode from the directory it covers):
 The first line is the defect: the caller asked for the `mrel` beside it
 and got the one under `/`. The last repeats the mount with `/mrel`
 removed: `ENOENT`, with `/tmp/mrel` present in the caller's own
-directory. It changes nothing it does not undo: both directories are
-unmounted if mounted and removed, and the caller returns to `/`.
+directory. It undoes only what it did: a directory is removed only if
+this run created it, a mount unmounted only if this run made it, and the
+absent case is skipped (and says so) if `/mrel` existed before the probe,
+since it would have to remove it. The caller returns to `/`.
 
 Usage:
 
@@ -50,36 +52,46 @@ STAMP = '.mount-rel-probe.applied'
 ANCHOR = '    CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);\n    CHECK(cosmo_rmdir("/tmp/flagm") == 0);\n'
 PROBE = r'''    /* --- MRPROBE (tools/mount-rel-probe.py; not for merge) --- */
     {
+        /* Undo only what this run did: a directory is removed only if this
+         * run created it, a mount unmounted only if this run made it. */
         struct cosmo_stat t0, r0, t1, r1;
-        (void)cosmo_mkdir("/tmp/mrel", 0755);
-        (void)cosmo_mkdir("/mrel", 0755);
+        int made_t = cosmo_mkdir("/tmp/mrel", 0755) == 0;
+        int made_r = cosmo_mkdir("/mrel", 0755) == 0;
         int ok = cosmo_stat("/tmp/mrel", &t0) == 0 && cosmo_stat("/mrel", &r0) == 0;
         if (ok && chdir("/tmp") == 0) {
             long m = cosmo_mount("none", "mrel", "ramfs", 0);
             (void)cosmo_stat("/tmp/mrel", &t1);
             (void)cosmo_stat("/mrel", &r1);
-            fprintf(stderr, "MRPROBE mount rc=%ld covers_tmp_mrel=%d covers_root_mrel=%d\n", m,
-                    t1.ino != t0.ino, r1.ino != r0.ino);
-            long u = cosmo_umount("mrel");
+            int on_t = m == 0 && t1.ino != t0.ino, on_r = m == 0 && r1.ino != r0.ino;
+            fprintf(stderr, "MRPROBE mount rc=%ld covers_tmp_mrel=%d covers_root_mrel=%d\n", m, on_t, on_r);
+            long u = m == 0 ? cosmo_umount("mrel") : -1;
             (void)cosmo_stat("/tmp/mrel", &t1);
             (void)cosmo_stat("/mrel", &r1);
             fprintf(stderr, "MRPROBE umount rc=%ld tmp_mrel_mounted=%d root_mrel_mounted=%d\n", u,
                     t1.ino != t0.ino, r1.ino != r0.ino);
-            /* Whatever is still mounted, by absolute name. */
-            (void)cosmo_umount("/tmp/mrel");
-            (void)cosmo_umount("/mrel");
-            (void)cosmo_rmdir("/mrel");
-            long a = cosmo_mount("none", "mrel", "ramfs", 0);
-            fprintf(stderr, "MRPROBE absent mount rc=%ld\n", a);
-            if (a == 0)
-                (void)cosmo_umount("mrel");
+            if (t1.ino != t0.ino)
+                (void)cosmo_umount("/tmp/mrel");   /* this run's mount, still there */
+            if (r1.ino != r0.ino)
+                (void)cosmo_umount("/mrel");
+            if (made_r) {
+                /* The absent case needs /mrel gone, which only this run may do. */
+                (void)cosmo_rmdir("/mrel");
+                made_r = 0;
+                long a = cosmo_mount("none", "mrel", "ramfs", 0);
+                fprintf(stderr, "MRPROBE absent mount rc=%ld\n", a);
+                if (a == 0)
+                    (void)cosmo_umount("/tmp/mrel");   /* the only mrel left for it to cover */
+            } else {
+                fprintf(stderr, "MRPROBE absent skipped: /mrel existed before the probe\n");
+            }
             (void)chdir("/");
         } else {
             fprintf(stderr, "MRPROBE setup failed\n");
         }
-        (void)cosmo_umount("/tmp/mrel");
-        (void)cosmo_rmdir("/tmp/mrel");
-        (void)cosmo_rmdir("/mrel");
+        if (made_t)
+            (void)cosmo_rmdir("/tmp/mrel");
+        if (made_r)
+            (void)cosmo_rmdir("/mrel");
     }
 '''
 

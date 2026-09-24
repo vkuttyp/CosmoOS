@@ -179,7 +179,7 @@ reasons its own directory gives (`ENOENT` for a name that is not there,
 | kernel/syscall/native.c | `sys_mount` and `sys_umount` pass the referenced cwd |
 | kernel-services/vfs/vfstest.c | `vfs-umount-once` (the guard) |
 | userland/init/init.c | the relative mount and unmount checks |
-| docs | P27; the VFS API (`vfs_mount_at`, `vfs_umount_at`) and syscall table rows; testing docs; the inventory row rewritten and struck; README Status |
+| docs | P27; the VFS API (`vfs_mount_at`, `vfs_umount_at`) and syscall table rows; testing docs; the inventory row (marked taken up by this report; the implementation rewrites it to what is built and strikes the superseded text); README Status |
 
 ## APIs
 
