@@ -256,17 +256,38 @@ no-op success. It is `vfs_rename2(start, oldpath, start, newpath)`.
 starts, for `renameat`'s two descriptors. Every check above is made on
 the two parents, however they were reached.
 
-**`void file_set_dir_path(struct file *f, const char *abs)`** (the dirfd
-unit) Record a directory file's normalised absolute path, which
-`fchdir` publishes as the working directory's name. A no-op for a file
-that is not a directory, an already-named one, a path that is not
-absolute, **a name that does not name this directory** -- it is walked
-again from the caller's root with no symbolic link allowed and recorded
-only if the walk arrives at this vnode -- or an allocation failure; set
-before the file is installed in
-a handle table and never changed, so a reader holding a reference needs
-no lock. Both doors' opens call it for a directory. The name goes stale
-on a rename of the directory or any ancestor (P27's gap).
+**`int vfs_lookup_named(struct vnode *start, const char *startname, const char *path, struct vnode **out, char *name, size_t n)`**
+(the cwd-name unit) `vfs_lookup`, and the **traversed name** of what it
+reached (P32): the walk seeds a name with `startname` for a relative
+path, or `/`, and keeps it as it goes -- a component entered as anything
+but a followed link is appended, `.` adds nothing, `..` removes the last
+component (staying at `/`), an absolute link target resets to `/`, a
+relative one keeps the name of the directory it was found in. The rules
+are the walk's own, so the name is relative to the caller's root and
+never rises above it. `-EINVAL` for `n < 2`; `-ENOENT` for a relative
+walk from a start with no name (`startname` NULL or not absolute);
+`-ENAMETOOLONG` when the name would not fit `n` (the vnode is put). A
+walk that asks for no name is unchanged.
+
+**`int vfs_open_named(struct vnode *start, const char *startname, const char *path, unsigned flags, uint32_t mode, struct file **out, char *name, size_t n)`**
+(the cwd-name unit) `vfs_open`, and the traversed name of what it opened,
+kept by the open's **own** walk (`vfs_open` and it share `open_walk`) --
+so the name is of the very vnode the file holds, with no second walk a
+rename could send elsewhere. The open never fails for the name's sake:
+`name` is left empty for a relative path from a start with no name, or a
+name that does not fit `n`.
+
+**`void file_set_dir_path(struct file *f, const char *name)`**
+(the dirfd unit; since the cwd-name unit, the open's own traversed name)
+Record a directory file's name, which `fchdir` publishes. A no-op for a
+file that is not a directory, an already-named one, an empty or relative
+name, or an allocation failure; set before the file is installed in a
+handle table and never changed, so a reader holding a reference needs
+no lock. Both doors' opens call it for a directory, with the name
+`vfs_open_named` returned. A directory opened
+through a symbolic link has a name -- its own path, not the link's (the
+dirfd unit refused it one). The name goes stale on a rename of the
+directory or any ancestor (P27's gap).
 
 **`int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st)`**
 and **`void vnode_stat(struct vnode *vn, struct cosmo_stat *st)`** Fill

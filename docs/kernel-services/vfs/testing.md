@@ -286,6 +286,13 @@ order happen on purpose, gated on the seam's own state and never on time.
 The `swapfirst` pass is native-only because the Linux program has no
 sysctl to read the state from.
 
+### Starts and names (`docs/audit/next-subsystem-dirfd.md`, `docs/audit/next-subsystem-cwd-name.md`)
+
+| test | checks |
+| --- | --- |
+| `vfs-rename2` | a rename whose two names resolve from two starts lands where the second start names it, and not beside the first (P31) |
+| `vfs-lookup-named` | the traversed name (P32): fifteen walks under `/tmp/ln` -- plain components, `.`, `..` including at `/` and above the start, an absolute link as the last component and mid-path (`abs/..` is the target's parent, not `/tmp/ln`), a relative link as the last component (the one shape where a link's spelling left in the name is not erased by a restart at `/`) and mid-path, a chain of two, a relative link into a ramfs mounted at `/tmp/ln/m`, `..` out of that mount's root, a link inside the mount leaving it through its root, a trailing slash -- each name compared with the expected text and then walked again from the root to the same vnode; a relative walk from a start with no name is `-ENOENT`, a name that does not fit `-ENAMETOOLONG` |
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

@@ -256,14 +256,20 @@ fault_addr, code (1 unmapped, 2 protection), sender_pid, sender_uid }`.
 
 ### `int process_chdir(const char *path)`
 - Purpose: change the calling process's working directory.
-- Effects: `path_normalize(cwd_path, path)` computes the new absolute
-  string (`-ENAMETOOLONG`), `vfs_lookup(cur->cwd, path)` must yield a
-  directory (`-ENOENT`, `-ENOTDIR`, ...); the vnode reference and the
-  string are swapped under `process.lock`. Every path system call passes
-  `process_current()->cwd` as the VFS start vnode.
+- Effects: `vfs_lookup_named(cwd, cwd_path, path)` on one snapshot of
+  both yields the new directory and its **traversed name** -- the path
+  the walk took, links replaced by where they led (P32; `-ENAMETOOLONG`
+  when it does not fit, `-ENOENT`, `-ENOTDIR`, ...); `cwd_publish` swaps
+  the vnode reference and that name under `process.lock`. Until the
+  cwd-name unit the string was `path_normalize(cwd_path, path)`, which
+  through a symbolic link named a different directory from the vnode.
+  Every path system call passes the referenced cwd from
+  `process_cwd_get()` as the VFS start vnode (P29). A spawn's `cwd` is
+  named the same way.
 
 ### `int path_normalize(const char *base, const char *rel, char *out, size_t n)`
-- Pure string function: joins `rel` to the absolute `base` (or takes
+- No longer names a working directory (P32); kept for its own table.
+  Pure string function: joins `rel` to the absolute `base` (or takes
   `rel` alone when absolute), drops `.` and empty components, resolves
   `..` (never above the root), produces `/x/y` or `/`. `-ENAMETOOLONG`
   when `n` is too small. Tested by `process-spawn`.

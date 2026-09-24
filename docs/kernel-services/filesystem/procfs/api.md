@@ -10,8 +10,8 @@ off one.
 | Path | Type | Contents |
 | --- | --- | --- |
 | `/proc` | dir | `.`, `..`, `self`, and one directory per visible pid |
-| `/proc/self` | dir | the calling process's, resolved at lookup |
-| `/proc/<pid>` | dir | `.`, `..`, `status`, `limits` |
+| `/proc/self` | symbolic link | to the reading process's directory: `readlink` answers its pid, relative |
+| `/proc/<pid>` | dir | `.`, `..` (which a walk can take: `/proc`), `status`, `limits` |
 | `/proc/<pid>/status` | file, 0444 | `key: value` lines, below |
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
 
