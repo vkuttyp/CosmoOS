@@ -1,5 +1,42 @@
 # NEXT SUBSYSTEM — the balancer's test asserts what the balancer promises
 
+> **BUILT.** This is the report as written, with an as-built banner.
+> What the build changed, and what it found:
+>
+> 1. **The S26 proof needed all of S26 removed.** The report's proof --
+>    `pick_migratable` ignoring `PREEMPTED` -- never reached the new
+>    test: `migrate_locked` asserts the same rule, and the boot panicked
+>    at 16 s on it, in both images. That is a catch, by the assertion.
+>    To show `sched-balance-pair`'s spinning half carries the claim, the
+>    rule was removed in both places at once; then the spinning pair was
+>    separated and `sched-balance-pair` failed, alone, in both images.
+> 2. **The pair test's two halves run one after the other on the same
+>    CPU**, the yielding pair first, within the test's own watchdog
+>    (about a second: the spinning half waits out its bound by design).
+> 3. **"One queued PREEMPTED" was too weak a premise for the spinning
+>    pair**, and the build found it the hard way: one x86-64 boot in nine
+>    saw the spinning pair separated after 18 ms, on an unmutated tree.
+>    Another thread on the pair's CPU can preempt the first worker before
+>    the second has ever run; the first is then queued with the mark, the
+>    premise holds -- and the second, READY and never run, carries no
+>    mark and is movable by S26's own terms, so a pull separates the pair
+>    legitimately. The premise is now that the pair has *settled*: both
+>    have run since their release and neither is queued without the
+>    mark. Spinners never give the CPU up, so once that holds it keeps
+>    holding. The probe used the weaker premise too; it could only have
+>    produced a false *separation*, and every spinning pair it measured
+>    stayed together, so its figures stand.
+>
+> **The proofs**, each run alone, each boot confirmed booted, on x86-64:
+>
+> | # | proof | image | what failed |
+> | --- | --- | --- | --- |
+> | 1 | `SCHED_BALANCE=0` | plain | `sched-balance-pull` (4 runnable threads on 2 of 4 CPUs after 3 s) and `sched-balance-pair`'s yielding half (not separated) |
+> | 2 | `pick_migratable` ignoring `PREEMPTED` | plain, chaos | the boot, at 16 s: `migrate_locked`'s S26 assertion |
+> | 3 | S26 removed entirely (the policy's check and the assertion's clause) | plain, chaos | `sched-balance-pair`: the spinning pair separated -- the only failing test |
+>
+> Both tests pass in both images on both architectures.
+
 > Constitution §68 report. Takes up `sched-balance-pull`'s failures under
 > the chaos migrator -- five on CI in two days, the last two in a row on
 > aarch64, every one on a tree that could not have caused it
@@ -83,8 +120,9 @@ say which version measured them.
 
 2. **The pair, made on purpose** (`PPROBE`): two workers pinned to one
    CPU; the probe waits (up to 1 s) for the pair's premise -- for a
-   spinning pair, the queued one seen READY with `PREEMPTED`; for a
-   yielding pair, both switched in more than once -- then widens both to
+   spinning pair, the queued one seen READY with `PREEMPTED` (as built,
+   the stronger *settled* premise: banner item 3); for a yielding pair,
+   both switched in more than once -- then widens both to
    every CPU and waits up to 1 s for them to run on two CPUs. A pair
    whose premise is not seen is reported inconclusive, not measured.
    (The first version slept 50 ms instead of observing the premise; the
@@ -196,7 +234,8 @@ balancer's limit rather than a property any test asserts.
   in more than once -- observed, within a bound -- both are widened to
   every CPU, and within a bound they run on two different CPUs.
 - **A spinning pair is not.** The same, except that the premise
-  observed before the widen is the queued one READY with `PREEMPTED`;
+  observed before the widen is the pair settled into alternating: both
+  have run and neither is queued without `PREEMPTED` (banner item 3);
   the pair must still share one CPU at the end of the same window. A
   premise not seen within its bound fails the test as a broken premise,
   distinctly from either claim. This is S26 observed from outside: were a
@@ -257,7 +296,7 @@ One PR: the pull test's workers, the pair test, the documents.
 | test | checks | proof it must fail |
 | --- | --- | --- |
 | `sched-balance-pull` (changed) | as now, with the released workers yielding | `SCHED_BALANCE=0`: the workers stay two-deep on half the CPUs |
-| `sched-balance-pair` (new) | a yielding pair built on one CPU is separated within a bound; a spinning pair in the same window is not, its queued one preempted at the widen | `SCHED_BALANCE=0`: the yielding pair is never separated; `pick_migratable` ignoring `PREEMPTED` (the S26 check removed): the spinning pair is separated |
+| `sched-balance-pair` (new) | a yielding pair built on one CPU, both workers seen to have run, is separated within a bound; a spinning pair is not, widened only once it has *settled* -- both have run since release and neither is queued without `PREEMPTED` (as built: banner item 3; "its queued one preempted" was too weak, since a worker that has never run is movable) -- and a premise not seen within its bound fails as its own reason | `SCHED_BALANCE=0`: the yielding pair is never separated; `pick_migratable` ignoring `PREEMPTED` (the S26 check removed): the spinning pair is separated (**as built**: that alone panics on `migrate_locked`'s assertion first; with the rule removed in both places, the spinning pair is separated -- banner item 1) |
 
 Each proof run alone, the runner confirming each boot booted. The
 `SCHED_BALANCE=0` proofs run in the **plain image only**: in the chaos

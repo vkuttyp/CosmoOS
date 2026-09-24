@@ -301,7 +301,14 @@ one; both halves fail when the load is `nr_running` again).
   settled into two threads alternating on one CPU while another is idle.
   Found by `sched-balance-hysteresis`, which passed under a deliberately
   broken threshold because the thread it was trying to have moved could
-  never be moved at all. Lifting it means letting a preempted thread
+  never be moved at all. Measured by the balance-movable unit
+  (`tools/balance-chaos-probe.py`): such a pair, widened to every CPU,
+  is never separated while an idle CPU's pulls are refused some five
+  hundred times a second (`NOT_READY`: a queue whose only spare thread is
+  preempted offers none), and a yielding pair is separated in
+  milliseconds. Checked by `sched-balance-pair`, which asserts both; with
+  S26 removed entirely -- the policy's check and `migrate_locked`'s
+  assertion -- its spinning half fails, and it alone. Lifting it means letting a preempted thread
   move, which is exactly what S25's barrier forbids, so it is a
   different unit and not a tuning change.
 - No priority inheritance: a high-priority thread blocked on a mutex

@@ -121,6 +121,7 @@ bool selftest_lockup_report_skew(const char **reason);  /* the lockup report age
 bool selftest_clock_cost(const char **reason);  /* what the correction costs on the clock path */
 bool selftest_clock_tick_owner(const char **reason);  /* the machine-wide tick survives its owner stopping */
 bool selftest_sched_balance_pull(const char **reason);        /* idle CPUs take work that is waiting */
+bool selftest_sched_balance_pair(const char **reason);        /* a movable pair is separated, a preempted one is not (S26) */
 bool selftest_sched_balance_hysteresis(const char **reason);  /* a balanced machine moves nothing */
 bool selftest_sched_balance_affinity(const char **reason);    /* a pinned thread is never pulled */
 bool selftest_bench_balance(const char **reason);             /* what balancing recovers, measured */

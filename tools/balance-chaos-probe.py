@@ -41,9 +41,9 @@ success so the rest of the boot runs:
          (a preempted thread queued on the shared CPU at onset: Q), longest M ms
 
 3. PPROBE, in `sched-balance-affinity`: the pair, made on purpose. Two
-   workers pinned to one CPU; the probe waits (up to 1 s) until it sees
-   the queued one PREEMPTED -- or, for a yielding pair, until both have
-   run -- then widens both to every CPU and waits up to 1 s for them to
+   workers pinned to one CPU; the probe waits (up to 1 s) until the pair
+   has settled -- both have run and, for a spinning pair, the queued one
+   is PREEMPTED and neither is queued unmarked -- then widens both to every CPU and waits up to 1 s for them to
    run on two CPUs. A pair whose premise was never seen is reported
    inconclusive rather than measured.
 
@@ -293,8 +293,7 @@ static void pprobe_one(unsigned yielding)
         kinfo("PPROBE %s pair: a worker could not be created; nothing measured", yielding ? "yielding" : "spinning");
         goto out;
     }
-    /* The premise, observed rather than assumed: a spinning pair's queued
-     * one preempted; a yielding pair's two each switched in more than once. */
+    /* The premise, observed rather than assumed: the pair has settled (below). */
     bool premise = false;
     uint64_t t0 = clock_now_ns();
     while (!premise && clock_now_ns() - t0 < 1000000000ull) {
@@ -305,7 +304,15 @@ static void pprobe_one(unsigned yielding)
                 preempted++;
         bool both_ran = __atomic_load_n(&t[0]->switches, __ATOMIC_RELAXED) > 1 &&
                         __atomic_load_n(&t[1]->switches, __ATOMIC_RELAXED) > 1;
-        premise = yielding ? both_ran : preempted > 0;
+        /* A spinning pair must have SETTLED: both ran, neither queued
+         * unmarked -- a worker that has never run is movable (the
+         * balance-movable unit's build found "one preempted" too weak). */
+        bool queued_unmarked = false;
+        for (unsigned i = 0; i < 2; i++)
+            if (__atomic_load_n(&t[i]->state, __ATOMIC_RELAXED) == THREAD_READY &&
+                !(__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+                queued_unmarked = true;
+        premise = yielding ? both_ran : (both_ran && preempted > 0 && !queued_unmarked);
         if (!premise)
             thread_sleep_ms(2);
     }

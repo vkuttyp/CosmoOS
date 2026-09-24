@@ -2163,6 +2163,18 @@ migrator its claim is about the machine rather than the balancer
 (`docs/kernel/scheduler/testing.md`). Recorded as a sighting; the
 balancer unit owns the decision whether it asserts under chaos at all.
 
+**Resolved (PR #236, the balance-movable unit,
+`docs/audit/next-subsystem-balance-movable.md`).** Not a flake of the
+host but a race the test asserted and the rules let chaos lose: a
+spinning worker is movable only until its first preemption, and one
+chaos move of a released spinner onto a busy CPU makes a pair S26
+forbids any migrator to separate -- measured deterministically, an idle
+CPU refused some five hundred times a second. The test keeps asserting
+under chaos: its released workers now yield, so it asserts the
+balancer's contract (an idle CPU pulls a *movable* thread), and
+`sched-balance-pair` asserts both halves of the mechanism. The balancer
+compiled out still fails it, in the plain image.
+
 ## Under the chaos migrator: `thrtest`'s stack replacement and `tty-isatty`'s release
 
 Two sightings from `make test-chaos` on the percpu-migration tree,
