@@ -93,6 +93,9 @@ S_PROBE_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
     __atomic_store_n(&g_lbprobe_gap_ns, lbp_gap, __ATOMIC_RELAXED);
 '''
 S_PROBE_DECL = '''uint64_t g_lbprobe_gap_ns;   /* LBPROBE (tools/lockup-busy-probe.py; not for merge) */
+/* The slot a successful sample holds is released by lockup_print_samples;
+ * the probe releases it without printing every sample it takes. */
+void lbprobe_release(void) { __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE); }
 
 ''' + S_ANCHOR_DECL
 
@@ -111,6 +114,7 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
 #define LBP_ARCH "x86_64"
 #endif
         extern uint64_t g_lbprobe_gap_ns;
+        extern void lbprobe_release(void);
         enum { LBP_N = 200 };
         static uint64_t lbp_el[LBP_N];
         unsigned lbp_over = 0, lbp_nmi = 0, lbp_n = 0;
@@ -120,8 +124,14 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
         while (lbp_n < LBP_N && clock_now_ns() - lbp_start < 3000000000ull) {
             uint64_t t0 = clock_now_ns();
             cpumask_t m = 0;
-            ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m) && ok;
+            bool got = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
             el = clock_since_ns(t0);
+            if (!got) {
+                ok = false;
+                kinfo("LBPROBE sample refused: the slot was busy");
+                break;
+            }
+            lbprobe_release();
             uint64_t gap = __atomic_load_n(&g_lbprobe_gap_ns, __ATOMIC_RELAXED);
             if ((m & CPUMASK_OF(a)) && (m & CPUMASK_OF(b)))
                 lbp_nmi++;   /* both masked targets answered: through NMI */
