@@ -2260,6 +2260,7 @@ bool selftest_vfs_umount_once(const char **reason)
     unsigned mounts0 = vfs_mount_count();
     CHECK(vfs_mkdir(NULL, "/tmp/um", 0755) == 0);
     CHECK(vfs_mount("/tmp/um", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/um/d", 0755) == 0);
     struct vnode *root;
     CHECK(vfs_lookup(NULL, "/tmp/um", &root) == 0);
     struct mount *mnt = root->mnt, *held = NULL;
@@ -2280,8 +2281,11 @@ bool selftest_vfs_umount_once(const char **reason)
             thread_sleep_ms(1);
     }
 
-    /* The second, from inside: "." from the mount's root. */
-    struct umount_once second = { .start = root, .path = "." };
+    /* The second, from inside: "d/.." from the mount's root, a path that
+     * names that root only from there -- resolved from anywhere else it
+     * is -ENOENT (there is no `d`), not the -EBUSY the root filesystem
+     * gives "." (found by a mutation that ignored the start and passed). */
+    struct umount_once second = { .start = root, .path = "d/.." };
     struct thread *tb = seen ? thread_create(umount_once_main, &second, "umount-second", SCHED_PRIO_DEFAULT) : NULL;
     bool second_answered = tb != NULL && umount_once_wait(&second.done, 2000);
     bool first_waiting = !__atomic_load_n(&first.done, __ATOMIC_ACQUIRE);   /* still in its drain */
@@ -2293,7 +2297,8 @@ bool selftest_vfs_umount_once(const char **reason)
     thread_join(ta);
     if (tb)
         thread_join(tb);
-    (void)vfs_umount("/tmp/um");   /* a no-op unless the first failed */
+    (void)vfs_rmdir(NULL, "/tmp/um/d");   /* only if the first failed: its mount is gone otherwise */
+    (void)vfs_umount("/tmp/um");          /* likewise */
     (void)vfs_rmdir(NULL, "/tmp/um");
 
     CHECK(seen);                        /* the first unmount reached its drain */
