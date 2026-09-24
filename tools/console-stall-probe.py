@@ -63,6 +63,7 @@ S_ANCHOR_RUN = '''            for cmd, _ in COMMANDS:
 S_PROBE_RUN = '''            for cmd, _ in COMMANDS:
                 if isinstance(cmd, tuple) and cmd[0] == "__SLEEP__":   # CSPROBE: a pause, not a keystroke
                     time.sleep(cmd[1])
+                    self.results["sent"].append(cmd)   # accounted, so the harness does not call it unsent
                     continue
                 if cmd == SUSPEND:'''
 S_ANCHOR_FAIL = '''                if not self._wait_prompt(log_path, proc, deadline, prompts):
