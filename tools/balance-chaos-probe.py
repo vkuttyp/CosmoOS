@@ -134,7 +134,7 @@ static bool bprobe_pinned(void)
 
 '''
 ANCHOR_CALL = '    bool r = sched_balance_pull_pinned(reason);\n'
-PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    bool r = bprobe_pinned();   /* BPROBE */\n'
+PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n'
 
 EDITS = [(ANCHOR_FN, PROBE_FN + ANCHOR_FN), (ANCHOR_CALL, PROBE_CALL)]
 
