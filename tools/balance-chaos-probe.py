@@ -16,7 +16,13 @@ two compute-bound threads sharing a CPU are always preempted).
 
 This replaces the test's body, for the probe only, with repeated rounds
 of the same scenario inside the self-test watchdog: up to 40 rounds or
-6 s, each with a 1.5 s bound. Per boot it prints
+3 s, each with a 1.5 s bound. It then asks the same of USER threads:
+`init --probe spin:N` (added to init for the probe) runs N native
+threads spinning in user mode, and the kernel side samples every 10 ms
+for 4 s whether two share a CPU and for how long:
+
+    UPROBE summary: N user spinners on N CPUs, S samples, shared in K;
+      sharings P (queued one preempted at onset: Q), longest M ms Per boot it prints
 
     BPROBE round R spread in M ms
     BPROBE round R MISS after 1500 ms: cpus used U of N
@@ -121,7 +127,7 @@ static bool bprobe_pinned(void)
         return true;
     uint64_t start = clock_now_ns(), slowest = 0;
     unsigned rounds = 0, spread = 0, missed = 0;
-    while (rounds < 40 && clock_now_ns() - start < 6000000000ull) {
+    while (rounds < 40 && clock_now_ns() - start < 3000000000ull) {
         uint64_t took = 0;
         if (bprobe_round(rounds, 1500, &took))
             spread++;
@@ -136,11 +142,116 @@ static bool bprobe_pinned(void)
     return true;
 }
 
+/* The same question for USER threads: `init --probe spin:N` runs N native
+ * threads that spin in user mode forever. Sampled every 10 ms for 4 s:
+ * how often two of them share a CPU, how long each sharing lasts, and
+ * whether the queued one of a pair is PREEMPTED. */
+static void uprobe(void)
+{
+    unsigned n = cpu_count();
+    const void *image;
+    size_t size;
+    if (n < 2 || !bootarchive_find("init", &image, &size))
+        return;
+    char kind[16];
+    ksnprintf(kind, sizeof(kind), "spin:%u", n);
+    const char *argv[] = { "init", "--probe", kind, NULL };
+    struct process *p = NULL;
+    if (process_create_from_elf(image, size, argv[0], argv, NULL, NULL, &p) != 0) {
+        kinfo("UPROBE spawn failed");
+        return;
+    }
+    uint64_t t0 = clock_now_ns();
+    while (__atomic_load_n(&p->nr_threads, __ATOMIC_RELAXED) < n && clock_now_ns() - t0 < 2000000000ull)
+        thread_sleep_ms(5);
+    unsigned pairs = 0, samples = 0, shared_samples = 0, preempted_pairs = 0;
+    uint64_t run_start = 0, longest = 0;
+    bool in_run = false;
+    uint64_t start = clock_now_ns();
+    while (clock_now_ns() - start < 4000000000ull) {
+        cpumask_t seen = 0;
+        unsigned threads = 0;
+        bool preempted_queued = false;
+        unsigned per_cpu[CONFIG_MAX_CPUS] = { 0 };
+        arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+        struct thread *t;
+        list_for_each_entry(t, &p->threads, proc_link) {
+            int c = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
+            if (c >= 0 && (unsigned)c < n) {
+                seen |= CPUMASK_OF((unsigned)c);
+                per_cpu[c]++;
+            }
+            if (__atomic_load_n(&t->state, __ATOMIC_RELAXED) == THREAD_READY &&
+                (__atomic_load_n(&t->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+                preempted_queued = true;
+            threads++;
+        }
+        spin_unlock_irqrestore(&p->lock, s);
+        unsigned distinct = 0;
+        for (unsigned c = 0; c < n; c++)
+            if (seen & CPUMASK_OF(c))
+                distinct++;
+        samples++;
+        bool shared = threads >= n && distinct < n;
+        uint64_t now = clock_now_ns();
+        if (shared) {
+            shared_samples++;
+            if (!in_run) {
+                in_run = true;
+                run_start = now;
+                pairs++;
+                if (preempted_queued)
+                    preempted_pairs++;
+            }
+        } else if (in_run) {
+            in_run = false;
+            if (now - run_start > longest)
+                longest = now - run_start;
+        }
+        thread_sleep_ms(10);
+    }
+    if (in_run && clock_now_ns() - run_start > longest)
+        longest = clock_now_ns() - run_start;
+    kinfo("UPROBE summary: %u user spinners on %u CPUs, %u samples, shared in %u; sharings %u (queued one preempted at onset: %u), "
+          "longest %llu ms%s (chaos=%d)", n, n, samples, shared_samples, pairs, preempted_pairs,
+          (unsigned long long)(longest / 1000000ull), in_run ? ", still sharing at the end" : "", CONFIG_SCHED_CHAOS ? 1 : 0);
+    signal_send(p, SIGKILL, NULL);
+    (void)process_wait_exit(p);
+    process_put(p);
+}
+
 '''
 ANCHOR_CALL = '    bool r = sched_balance_pull_pinned(reason);\n'
-PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n'
+PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n    uprobe();\n'
 
-EDITS = [(ANCHOR_FN, PROBE_FN + ANCHOR_FN), (ANCHOR_CALL, PROBE_CALL)]
+ANCHOR_INC = '#include <kernel/acpi.h>\n'
+PROBE_INC = '#include <kernel/acpi.h>\n#include <kernel/bootarchive.h>   /* BPROBE */\n#include <kernel/process.h>\n#include <kernel/signal.h>\n'
+
+INIT = 'userland/init/init.c'
+INIT_ANCHOR = '    if (strncmp(kind, "cwd-is:", 7) == 0) {\n'
+INIT_PROBE = '''    if (strncmp(kind, "spin:", 5) == 0) {   /* UPROBE (tools/balance-chaos-probe.py; not for merge) */
+        unsigned n = (unsigned)strtoul(kind + 5, NULL, 10);
+        static cosmo_thread_t st[64];
+        for (unsigned i = 1; i < n && i < 64; i++)
+            if (cosmo_thread_start(&st[i], uprobe_spin, NULL, 16 * 1024) != 0)
+                return 90;
+        uprobe_spin(NULL);
+        return 0;
+    }
+'''
+INIT_FN_ANCHOR = 'static int filter_case(const char *kind)\n'
+INIT_FN = '''static void *uprobe_spin(void *arg)   /* UPROBE */
+{
+    for (volatile unsigned long k = 0;; k++)
+        ;
+    return arg;
+}
+
+'''
+
+EDITS = [(ANCHOR_INC, PROBE_INC), (ANCHOR_FN, PROBE_FN + ANCHOR_FN), (ANCHOR_CALL, PROBE_CALL)]
+INIT_EDITS = [(INIT_FN_ANCHOR, INIT_FN + INIT_FN_ANCHOR), (INIT_ANCHOR, INIT_PROBE + INIT_ANCHOR)]
+FILES = [(TARGET, EDITS), (INIT, INIT_EDITS)]
 
 
 def sha(p):
@@ -150,21 +261,28 @@ def sha(p):
 def apply():
     if os.path.exists(STAMP):
         sys.exit('already applied')
-    if subprocess.run(['git', 'status', '--porcelain', '--', TARGET], capture_output=True, text=True).stdout.strip():
-        sys.exit(f'{TARGET} has uncommitted changes')
-    s = open(TARGET).read()
-    for a, _ in EDITS:
-        if s.count(a) != 1:
-            sys.exit(f'{TARGET}: anchor not found exactly once: {a[:50]!r}')
-    shutil.copyfile(TARGET, TARGET + BACKUP)
+    for path, edits in FILES:
+        if subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True).stdout.strip():
+            sys.exit(f'{path} has uncommitted changes')
+        s = open(path).read()
+        for a, _ in edits:
+            if s.count(a) != 1:
+                sys.exit(f'{path}: anchor not found exactly once: {a[:50]!r}')
+    done, stamp = [], []
     try:
-        for a, b in EDITS:
-            s = s.replace(a, b)
-        open(TARGET, 'w').write(s)
-        open(STAMP, 'w').write(sha(TARGET) + '\n')
+        for path, edits in FILES:
+            shutil.copyfile(path, path + BACKUP)
+            done.append(path)
+            s = open(path).read()
+            for a, b in edits:
+                s = s.replace(a, b)
+            open(path, 'w').write(s)
+            stamp.append(f'{path} {sha(path)}')
+        open(STAMP, 'w').write('\n'.join(stamp) + '\n')
     except BaseException:
-        shutil.move(TARGET + BACKUP, TARGET)
-        os.utime(TARGET, None)
+        for path in done:
+            shutil.move(path + BACKUP, path)
+            os.utime(path, None)
         if os.path.exists(STAMP):
             os.remove(STAMP)
         raise
@@ -174,10 +292,14 @@ def apply():
 def revert():
     if not os.path.exists(STAMP):
         sys.exit('not applied')
-    if sha(TARGET) != open(STAMP).read().strip():
-        sys.exit(f'{TARGET} changed since apply; restore by hand from {TARGET + BACKUP}')
-    shutil.move(TARGET + BACKUP, TARGET)
-    os.utime(TARGET, None)
+    for line in open(STAMP).read().split('\n'):
+        if line:
+            path, digest = line.split()
+            if sha(path) != digest:
+                sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
+    for path, _ in FILES:
+        shutil.move(path + BACKUP, path)
+        os.utime(path, None)
     os.remove(STAMP)
     print('reverted')
 
