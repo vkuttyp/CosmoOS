@@ -2215,3 +2215,93 @@ bool selftest_vfs_lookup_named(const char **reason)
           (unsigned)(sizeof(cases) / sizeof(cases[0])));
     return true;
 }
+
+/*
+ * One unmount at a time (docs/audit/next-subsystem-mount-rel.md): the
+ * guard in vfs_umount_at that refuses a second unmount while the first
+ * is in its drain. It was unreachable until unmount honoured a start: by
+ * absolute path a second unmount cannot even resolve the target
+ * (follow_mount refuses a mount that is unmounting), and only a path
+ * from inside the mount -- "." from its root -- reaches it without
+ * crossing the mountpoint.
+ *
+ * The order is made, not waited for: a held maintenance pass keeps the
+ * first unmount in its drain, and the second starts only once
+ * `unmounting` is seen set. The second runs in a thread with a bound,
+ * because without the guard it would block in the same drain.
+ */
+struct umount_once {
+    struct vnode *start;
+    const char *path;
+    int rc;
+    unsigned done;
+};
+
+static void umount_once_main(void *arg)
+{
+    struct umount_once *u = arg;
+    u->rc = vfs_umount_at(u->start, u->path, 0);
+    __atomic_store_n(&u->done, 1u, __ATOMIC_RELEASE);
+}
+
+static bool umount_once_wait(unsigned *flag, uint64_t ms)
+{
+    uint64_t deadline = clock_now_ns() + ms * 1000000ULL;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (clock_now_ns() > deadline)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
+bool selftest_vfs_umount_once(const char **reason)
+{
+    unsigned mounts0 = vfs_mount_count();
+    CHECK(vfs_mkdir(NULL, "/tmp/um", 0755) == 0);
+    CHECK(vfs_mount("/tmp/um", "ramfs", NULL, 0) == 0);
+    struct vnode *root;
+    CHECK(vfs_lookup(NULL, "/tmp/um", &root) == 0);
+    struct mount *mnt = root->mnt, *held = NULL;
+    CHECK(mnt->root == root);
+    CHECK(vfs_mount_acquire(mnt->id, &held) == 0);   /* the first unmount will wait for this */
+
+    /* The first unmount, by absolute path: it sets `unmounting` and drains. */
+    struct umount_once first = { .start = NULL, .path = "/tmp/um" };
+    struct thread *ta = thread_create(umount_once_main, &first, "umount-first", SCHED_PRIO_DEFAULT);
+    CHECK(ta != NULL);
+    uint64_t deadline = clock_now_ns() + 2000000000ULL;
+    bool seen = false;
+    while (!seen && clock_now_ns() < deadline) {
+        mutex_lock(&mnt->mountpoint->lock);
+        seen = mnt->unmounting;
+        mutex_unlock(&mnt->mountpoint->lock);
+        if (!seen)
+            thread_sleep_ms(1);
+    }
+
+    /* The second, from inside: "." from the mount's root. */
+    struct umount_once second = { .start = root, .path = "." };
+    struct thread *tb = seen ? thread_create(umount_once_main, &second, "umount-second", SCHED_PRIO_DEFAULT) : NULL;
+    bool second_answered = tb != NULL && umount_once_wait(&second.done, 2000);
+    bool first_waiting = !__atomic_load_n(&first.done, __ATOMIC_ACQUIRE);   /* still in its drain */
+
+    /* Let everything go on every path: the root reference first, so the
+     * first unmount's reference scan finds none, then the pass. */
+    vnode_put(root);
+    vfs_mount_release(held);
+    thread_join(ta);
+    if (tb)
+        thread_join(tb);
+    (void)vfs_umount("/tmp/um");   /* a no-op unless the first failed */
+    (void)vfs_rmdir(NULL, "/tmp/um");
+
+    CHECK(seen);                        /* the first unmount reached its drain */
+    CHECK(second_answered);             /* the second did not wait in it */
+    CHECK(first_waiting);               /* ... and answered while the pass was still held */
+    CHECK(second.rc == -EBUSY);         /* the guard's answer */
+    CHECK(first.rc == 0);               /* the first then finished */
+    CHECK(vfs_mount_count() == mounts0);
+    kinfo("selftest: vfs-umount-once: a second unmount from inside the mount was refused while the first drained");
+    return true;
+}

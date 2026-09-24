@@ -623,13 +623,21 @@ static void undo_mount(struct mount *mnt, struct blkdev *bdev)
 
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
 {
+    return vfs_mount_at(NULL, path, fsname, bdev, flags);
+}
+
+/* `path` resolves from `start` as at every other entry point: a relative
+ * target names what the caller's own directory names
+ * (docs/audit/next-subsystem-mount-rel.md). */
+int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
+{
     KASSERT(g_initialized);
     struct fs_type *fs = vfs_find_fs(fsname);
     if (fs == NULL)
         return -ENODEV;
 
     struct vnode *dir;
-    int rc = vfs_lookup(NULL, path, &dir);
+    int rc = vfs_lookup(start, path, &dir);
     if (rc)
         return rc;
     if (dir->type != VNODE_DIR) {
@@ -738,8 +746,17 @@ void vfs_mount_orphaned(struct mount *mnt)
 
 int vfs_umount2(const char *path, unsigned flags)
 {
+    return vfs_umount_at(NULL, path, flags);
+}
+
+/* As vfs_mount_at: a relative target from `start`. From inside a mount,
+ * "." reaches its root without crossing the mountpoint -- the one way a
+ * second unmount can find a mount the first has set `unmounting` on,
+ * which is what the guard below is for. */
+int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)
+{
     struct vnode *root;
-    int rc = vfs_lookup(NULL, path, &root);
+    int rc = vfs_lookup(start, path, &root);
     if (rc)
         return rc;
     struct mount *mnt = root->mnt;
