@@ -78,7 +78,7 @@ S_ANCHOR_FAILURES = '''    def failures(self, lines):
         if self.error:
             out.append(f"shell harness: {self.error}")'''
 S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: does the guest still answer, and where is every vCPU?
-        import json, socket
+        import json, os, socket
         notes = self.results.setdefault("csprobe", [])
         try:
             before = os.path.getsize(log_path)
