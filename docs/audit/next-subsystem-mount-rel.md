@@ -23,6 +23,14 @@
 >    test's known load-sensitive count; recorded in
 >    `docs/testing/flakes.md` as its second sighting.
 >
+> 4. **Review found the test's failure path could crash.** On a timeout
+>    the test dropped its root reference and released the pass before
+>    joining the second thread, so a thread that started late would walk
+>    from a vnode the first unmount had freed. The second thread now owns
+>    a reference to its start and drops it when its unmount returns; a
+>    late one makes the first unmount find it and refuse. Row 1's
+>    mutation takes exactly that path, and now fails cleanly.
+>
 > **The mutations**, each applied alone on x86-64, each boot confirmed
 > booted:
 >
