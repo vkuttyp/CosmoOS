@@ -3481,8 +3481,8 @@ See [docs/development.md](docs/development.md).
   spread takes under 40 ms and a miss never recovers; the miss is two
   spinning workers alternating on one CPU, and a spinning pair built on
   purpose is never separated -- an idle CPU is refused some five hundred
-  times a second, because S26 forbids moving a thread preempted mid-way
-  through who knows what -- while a yielding pair is separated in
+  times a second, because S26 forbids moving a thread that may have been
+  preempted between the two instructions of a per-CPU access -- while a yielding pair is separated in
   milliseconds. The test had been asserting a race: that the balancer
   pulls a spinner before its first preemption, which one chaos move lost
   by the rules. Its released workers now yield, so it asserts the
