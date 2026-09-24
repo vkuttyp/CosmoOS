@@ -108,9 +108,18 @@ S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: do
             s.connect(path)
             f = s.makefile("rwb")
             f.readline()   # greeting
-            for msg in ({"execute": "qmp_capabilities"},
-                        {"execute": "human-monitor-command", "arguments": {"command-line": "info registers -a"}},
-                        {"execute": "human-monitor-command", "arguments": {"command-line": "info registers -a"}}):
+            # The registers twice, half a second apart (spinning or idle);
+            # then, on aarch64's virt machine, the console PL011's status
+            # registers -- never its data register, which a read would pop:
+            # FR (0x18; bit 4 RXFE: receive FIFO empty), CR (0x30), IMSC
+            # (0x38; bits 4-6: RX, RT and TX interrupts enabled), RIS (0x3c)
+            # and MIS (0x40) -- and the interrupt controller's view.
+            hmp = ["info registers -a", "info registers -a"]
+            if os.environ.get("COSMO_ARCH", "aarch64") == "aarch64":
+                hmp += ["xp /1wx 0x09000018", "xp /1wx 0x09000030", "xp /1wx 0x09000038",
+                        "xp /1wx 0x0900003c", "xp /1wx 0x09000040", "info pic"]
+            for msg in [{"execute": "qmp_capabilities"}] + [
+                    {"execute": "human-monitor-command", "arguments": {"command-line": c}} for c in hmp]:
                 f.write((json.dumps(msg) + "\\n").encode())
                 f.flush()
                 while True:
@@ -119,9 +128,12 @@ S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: do
                         break
                 if msg["execute"] == "human-monitor-command":
                     out = log_path + ".regs"
+                    cl = msg["arguments"]["command-line"]
                     with open(out, "a") as o:
-                        o.write("==== sample\\n" + reply.get("return", str(reply)) + "\\n")
-                    time.sleep(0.5)   # two samples, half a second apart: spinning or moving
+                        o.write(("==== sample\\n" if cl == "info registers -a" else f"==== {cl}\\n")
+                                + reply.get("return", str(reply)) + "\\n")
+                    if cl == "info registers -a":
+                        time.sleep(0.5)   # two samples, half a second apart: spinning or idle
             s.close()
             notes.append(f"CSPROBE registers written to {log_path}.regs")
         except Exception as e:  # noqa: BLE001
