@@ -59,7 +59,7 @@ BACKUP = '.lockup-busy-probe.orig'
 STAMP = '.lockup-busy-probe.applied'
 
 # The sampler: remember the largest gap between clock reads in the wait.
-S_ANCHOR_DECL = 'bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out)\n'
+S_ANCHOR_DECL = 'bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)\n'
 S_ANCHOR_LOOP = '''    uint64_t deadline = clock_now_ns() + timeout_ns;
     cpumask_t got = 0;
     for (;;) {
