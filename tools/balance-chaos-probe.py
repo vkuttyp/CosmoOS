@@ -22,7 +22,14 @@ threads spinning in user mode, and the kernel side samples every 10 ms
 for 4 s whether two share a CPU and for how long:
 
     UPROBE summary: N user spinners on N CPUs, S samples, shared in K;
-      sharings P (queued one preempted at onset: Q), longest M ms Per boot it prints
+      sharings P (queued one preempted at onset: Q), longest M ms
+
+Last, the pair made on purpose (PPROBE): two spinners pinned to one CPU
+until the queued one has been preempted, then widened to every CPU --
+once spinning, once yielding:
+
+    PPROBE spinning pair on cpu C: queued one preempted at widen 1;
+      separated NO after 1000 ms; balancer pulls +0, refused not-ready +R Per boot it prints
 
     BPROBE round R spread in M ms
     BPROBE round R MISS after 1500 ms: cpus used U of N
@@ -142,6 +149,65 @@ static bool bprobe_pinned(void)
     return true;
 }
 
+/* The pair, made on purpose: two spinners pinned to one CPU until the
+ * queued one has been preempted, then widened to every CPU. If S26 holds
+ * the queued one, no pull can separate them however long an idle CPU
+ * looks; a yielding pair is never PREEMPTED and should be separated. */
+static void pprobe(unsigned yielding)
+{
+    unsigned n = cpu_count(), self = arch_cpu_id();
+    unsigned c = (self + 1) % n;
+    static struct bal_worker w[2];
+    struct thread *t[2] = { NULL, NULL };
+    for (unsigned i = 0; i < 2; i++) {
+        memset(&w[i], 0, sizeof(w[i]));
+        completion_init(&w[i].started, "pp-start");
+        completion_init(&w[i].release, "pp-rel");
+        w[i].runs = 1;
+        w[i].yielding = yielding;
+        t[i] = thread_create_on(bal_worker_main, &w[i], "pp", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        if (t[i] == NULL)
+            return;
+        wait_for_completion(&w[i].started);
+    }
+    for (unsigned i = 0; i < 2; i++)
+        complete(&w[i].release);
+    thread_sleep_ms(50);   /* they share CPU c: each has been preempted by the other by now */
+    unsigned preempted = 0;
+    for (unsigned i = 0; i < 2; i++)
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_RELAXED) == THREAD_READY &&
+            (__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+            preempted++;
+    cpumask_t all = 0;
+    for (unsigned k = 0; k < n; k++)
+        all |= CPUMASK_OF(k);
+    for (unsigned i = 0; i < 2; i++)
+        thread_set_affinity(t[i], all);
+    struct sched_balance_stats b0, b1;
+    sched_balance_stats(&b0);
+    uint64_t start = clock_now_ns();
+    bool apart = false;
+    while (clock_now_ns() - start < 1000000000ull) {
+        if (__atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED) != __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED)) {
+            apart = true;
+            break;
+        }
+        thread_sleep_ms(2);
+    }
+    uint64_t took = (clock_now_ns() - start) / 1000000ull;
+    sched_balance_stats(&b1);
+    kinfo("PPROBE %s pair on cpu %u: queued one preempted at widen %u; separated %s after %llu ms; "
+          "balancer pulls +%llu, refused not-ready +%llu (chaos=%d)",
+          yielding ? "yielding" : "spinning", c, preempted, apart ? "yes" : "NO", (unsigned long long)took,
+          (unsigned long long)(b1.pulls - b0.pulls),
+          (unsigned long long)(b1.refused[SCHED_MIGRATE_NOT_READY] - b0.refused[SCHED_MIGRATE_NOT_READY]),
+          CONFIG_SCHED_CHAOS ? 1 : 0);
+    for (unsigned i = 0; i < 2; i++)
+        __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < 2; i++)
+        thread_join(t[i]);
+}
+
 /* The same question for USER threads: `init --probe spin:N` runs N native
  * threads that spin in user mode forever. Sampled every 10 ms for 4 s:
  * how often two of them share a CPU, how long each sharing lasts, and
@@ -222,7 +288,7 @@ static void uprobe(void)
 
 '''
 ANCHOR_CALL = '    bool r = sched_balance_pull_pinned(reason);\n'
-PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n    uprobe();\n'
+PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n    uprobe();\n    pprobe(0);\n    pprobe(1);\n'
 
 ANCHOR_INC = '#include <kernel/acpi.h>\n'
 PROBE_INC = '#include <kernel/acpi.h>\n#include <kernel/bootarchive.h>   /* BPROBE */\n#include <kernel/process.h>\n#include <kernel/signal.h>\n'
