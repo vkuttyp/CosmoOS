@@ -26,6 +26,12 @@ PROMPT = b"\ncosmo$ "
 INTERRUPT = "\x03"
 SUSPEND = "\x1a"
 INTERRUPT_DELAY_S = 0.5   # long enough for the job to be the foreground group
+
+
+def PAUSE(seconds):
+    """A step that types nothing: the harness waits `seconds` before the
+    next command, so a background job can finish just as a line arrives."""
+    return ("__pause__", seconds)
 # What the interrupt has to prove is that the job died *early*: `sleep 5`
 # reaches its prompt on its own eventually, so a run in which ^C did
 # nothing at all still ends with a prompt and every pattern matched. The
@@ -94,6 +100,30 @@ COMMANDS = [
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),
     ("jobs", [r"\[\d+\][+ ]  (Running|Done)\s+sleep 1"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
+    # A background job finishing as the next line arrives, six times, the
+    # pause walking across the moment the job exits: on aarch64 the PL011's
+    # receive interrupt used to be cleared after the drain, and a character
+    # arriving between the two stalled the console for good -- 13 release
+    # boots in 20 under this shape (docs/audit/next-subsystem-console-rx.md).
+    # console-rx-clear is the proof; this is the regression a user would see.
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(0.85), []),
+    ("echo console-burst-0-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-0-abcdefghijklmnopqrstuvwxyz$"]),
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(0.91), []),
+    ("echo console-burst-1-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-1-abcdefghijklmnopqrstuvwxyz$"]),
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(0.97), []),
+    ("echo console-burst-2-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-2-abcdefghijklmnopqrstuvwxyz$"]),
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(1.03), []),
+    ("echo console-burst-3-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-3-abcdefghijklmnopqrstuvwxyz$"]),
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(1.09), []),
+    ("echo console-burst-4-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-4-abcdefghijklmnopqrstuvwxyz$"]),
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    (PAUSE(1.15), []),
+    ("echo console-burst-5-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-5-abcdefghijklmnopqrstuvwxyz$"]),
     ("exit 0", []),
 ]
 
@@ -122,6 +152,10 @@ class ShellTest:
         sent_at = None   # when the interrupt went out, until its prompt arrives
         try:
             for cmd, _ in COMMANDS:
+                if isinstance(cmd, tuple) and cmd[0] == "__pause__":
+                    time.sleep(cmd[1])
+                    self.results["sent"].append(cmd)   # a step, not an unsent command
+                    continue
                 if cmd == SUSPEND:
                     # Like the interrupt: a raw byte at a running job,
                     # with no prompt to wait for first. The prompt it
