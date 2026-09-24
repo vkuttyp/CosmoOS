@@ -18,8 +18,8 @@ stall comes, looking at the guest from outside:
    and `sleep 1 &`, a pause timed so the job exits around the moment the
    next line arrives, then a long typed line.
 2. When a prompt does not come, before giving up it records whether the
-   guest still answers -- it sends Enter and ^C and waits three seconds
-   for any new output -- and asks QEMU, over QMP, for every vCPU's
+   console's input still works -- it sends Enter and ^C, waits three
+   seconds, and looks for the terminal's echo of the ^C -- and asks QEMU, over QMP, for every vCPU's
    registers (`info registers -a`), which it writes beside the log.
 3. `symbolize` turns the program counters in that dump into function
    names against the kernel's ELF.
@@ -33,8 +33,9 @@ the socket exists. Usage:
     python3 tools/console-stall-probe.py revert
 
 Each boot prints `CSPROBE:` lines into the harness's failure list and the
-log: `CSPROBE stall at command K: guest answered Enter/^C: yes|no (+N
-bytes)` and `CSPROBE registers written to <path>`. A boot with no stall
+log: `CSPROBE stall at command K: ^C echoed after the stall: yes|no
+(log activity +N bytes)` -- the echo, not mere log growth, is the
+answer, since a background job's message can land in the window -- and `CSPROBE registers written to <path>`. A boot with no stall
 passes, having run every cycle.
 
 `apply` refuses a file with uncommitted changes, refuses to overwrite a
@@ -93,11 +94,18 @@ S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: do
         except OSError:
             pass
         time.sleep(3.0)
+        # Growth alone is not an answer: a background job's message can land
+        # in this window while input stays stalled (found in review). The
+        # terminal echoes ^C as "^C", so that echo is what says the input
+        # path took the keystroke.
         try:
-            after = os.path.getsize(log_path)
+            with open(log_path, "rb") as lf:
+                lf.seek(before)
+                new = lf.read()
         except OSError:
-            after = before
-        notes.append(f"CSPROBE stall at command {k}: guest answered Enter/^C: {'yes' if after > before else 'no'} (+{after - before} bytes)")
+            new = b""
+        notes.append(f"CSPROBE stall at command {k}: ^C echoed after the stall: {'yes' if b'^C' in new else 'no'}"
+                     f" (log activity +{len(new)} bytes)")
         path = os.environ.get("QEMU_QMP")
         if not path:
             notes.append("CSPROBE no QMP socket")

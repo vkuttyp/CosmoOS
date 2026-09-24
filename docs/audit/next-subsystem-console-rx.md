@@ -44,7 +44,9 @@ echo csprobe-after
 ```
 
 **The guest is alive and idle.** In the stall, Enter and `^C` produce
-nothing, and the registers show all four vCPUs in
+nothing -- no output at all, +0 bytes, so not even the `^C` echo (the
+probe as first run counted any log growth as an answer; review asked for
+the echo itself, and every recorded stall had none) -- and the registers show all four vCPUs in
 `arch_cpu_wait_for_interrupt`, with CPU 0 in the exception vectors half a
 second later -- taking its tick. Nothing is runnable; nothing is stuck.
 
@@ -183,7 +185,7 @@ point.
 | kernel/arch/aarch64/pl011.c | clear before draining; the loopback test entry |
 | kernel/arch/aarch64 (a test) or kernel/tty tests | `console-rx-clear` |
 | tests/boot/shelltest.py | a few burst cycles |
-| docs | the console/tty invariants and testing docs; `docs/testing/flakes.md` (the entry resolved); README Status |
+| docs | the console/tty invariants and testing docs; `docs/testing/flakes.md` (the entry marked resolved once the fix lands -- until then it is investigated, fix pending, and re-running remains the answer); README Status |
 
 ## APIs
 
