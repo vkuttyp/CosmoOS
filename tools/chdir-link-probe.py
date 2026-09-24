@@ -111,7 +111,11 @@ LINUX_PROBE = r'''    /* --- CLPROBE (tools/chdir-link-probe.py; not for merge) 
     }
 '''
 
-EDITS = [(NATIVE, NATIVE_ANCHOR, NATIVE_PROBE), (LINUX, LINUX_ANCHOR, LINUX_PROBE)]
+# (file, anchor, probe, where): the native probe goes after init's own
+# cwd checks, which end back at `/` -- placed before them, its closing
+# chdir("/") broke their relative rmdir("cwdtest"). The Linux probe goes
+# before lxtest's chdir("/"), which it leaves true.
+EDITS = [(NATIVE, NATIVE_ANCHOR, NATIVE_PROBE, 'after'), (LINUX, LINUX_ANCHOR, LINUX_PROBE, 'before')]
 
 
 def sha(p):
@@ -121,18 +125,17 @@ def sha(p):
 def apply():
     if os.path.exists(STAMP):
         sys.exit('already applied')
-    for path, anchor, probe in EDITS:
+    for path, anchor, probe, _ in EDITS:
         if subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True).stdout.strip():
             sys.exit(f'{path} has uncommitted changes')
         s = open(path).read()
         if s.count(anchor) != 1:
             sys.exit(f'{path}: anchor not found exactly once')
     stamp = []
-    for path, anchor, probe in EDITS:
+    for path, anchor, probe, where in EDITS:
         shutil.copyfile(path, path + BACKUP)
         s = open(path).read()
-        # before the anchor: the process is still in the state the anchor's lines leave behind
-        open(path, 'w').write(s.replace(anchor, probe + anchor))
+        open(path, 'w').write(s.replace(anchor, anchor + probe if where == 'after' else probe + anchor))
         stamp.append(f'{path} {sha(path)}')
     open(STAMP, 'w').write('\n'.join(stamp) + '\n')
     print('applied')
@@ -147,7 +150,7 @@ def revert():
         path, digest = line.split()
         if sha(path) != digest:
             sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
-    for path, _, _ in EDITS:
+    for path, _, _, _ in EDITS:
         shutil.move(path + BACKUP, path)
         os.utime(path, None)
     os.remove(STAMP)
