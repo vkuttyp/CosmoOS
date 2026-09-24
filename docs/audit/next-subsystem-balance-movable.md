@@ -48,19 +48,24 @@ more ahead.
 
 ### Measured
 
-`tools/balance-chaos-probe.py` replaces the test's body, for the probe
-only, with three measurements, and runs in the chaos image and in the
-plain debug image (which differ only in `SCHED_CHAOS`), on both
-architectures:
+`tools/balance-chaos-probe.py` puts three measurements, for the probe
+only, in place of three balance tests' bodies -- each in its own test so
+each has that test's eight-second watchdog -- and runs in the chaos
+image and in the plain debug image (which differ only in `SCHED_CHAOS`),
+on both architectures. The probe was corrected in review (each phase in
+its own test, setup failures counted apart from spreads, the user
+workload confirmed formed before it is sampled, sharing read per CPU,
+the pair's premise observed rather than slept for); the figures below
+say which version measured them.
 
 1. **The test's own scenario, repeated** (`BPROBE`): as many rounds as
    fit in the watchdog, each with a 1.5 s bound, and on a miss a dump of
    every released worker's last CPU, state and `PREEMPTED` flag with the
    balancer's and the migrator's counters. **Every round that spreads,
-   spreads within 38 ms; a miss never spreads.** Misses: 1 in 280 chaos
-   rounds over seven chaos boots, 0 in 240 plain rounds over six plain
-   boots. The one miss,
-   on x86-64:
+   spreads within 38 ms; a miss never spreads.** Misses: 1 in 360 chaos
+   rounds over nine chaos boots, 0 in 320 plain rounds over eight plain
+   boots (the corrected probe's four boots among them: no miss, no setup
+   failure). The one miss, on x86-64, from the first version:
 
    ```
    BPROBE round 0 MISS after 1500 ms: cpus used 3 of 4
@@ -79,14 +84,18 @@ architectures:
 2. **The pair, made on purpose** (`PPROBE`): two workers pinned to one
    CPU for 50 ms, until the queued one has been preempted, then widened
    to every CPU; once spinning, once yielding. Deterministic, and the
-   same on both architectures, plain and chaos:
+   same in all eight boots that ran it -- both architectures, plain and
+   chaos, both versions of the probe (the corrected one waits to *see*
+   the queued spinner preempted before widening, and saw it every time):
 
    ```
    PPROBE spinning pair on cpu 0: queued one preempted at widen 1; separated NO after 1003 ms; balancer pulls +0, refused not-ready +502
    PPROBE yielding pair on cpu 0: queued one preempted at widen 0; separated yes after 3 ms; balancer pulls +1, refused not-ready +0
    ```
 
-   An idle CPU tries every tick -- five hundred refusals a second -- and
+   Spinning pairs: never separated, 455 to 502 refusals in the second.
+   Yielding pairs: separated in 3 to 7 ms. An idle CPU tries every tick
+   -- some five hundred refusals a second -- and
    is refused every time, by the rule that protects per-CPU accesses. A
    yielding pair is never preempted in the queue, and the first pull
    separates it. One move of a spinner onto a busy CPU is enough to make
@@ -95,13 +104,23 @@ architectures:
 
 3. **The same question for user threads** (`UPROBE`): `init --probe
    spin:N` (added for the probe) runs one spinning native thread per
-   CPU, sampled every 10 ms for 4 s. **No sample in eight boots -- four
-   chaos, four plain -- found two sharing a CPU**. So the case where S26's cost would
-   reach a real program -- two compute-bound user threads stuck on one
-   CPU -- was not observed, and this report does not change S26 (see
-   Alternatives).
+   CPU, sampled every 10 ms. The corrected probe, which first confirms
+   all N threads exist and are placed, in four boots: **one sharing, in
+   the aarch64 chaos boot, for 16 ms, with no preempted thread queued on
+   that CPU -- and it resolved**. The first version (eight boots, 4 s
+   each, the workload not confirmed) saw none. So the case where S26's
+   cost would reach a real program -- two compute-bound user threads
+   *stuck* on one CPU -- was not observed, and this report does not
+   change S26 (see Alternatives).
 
-The rate, 1 in 280 rounds here against five failures in two days on CI,
+   One corrected-probe boot (x86-64, chaos) failed a later test,
+   `bench-balance`, on its `threads_settle` check -- the kernel's thread
+   count back to its starting value within 200 ms. It ran after the
+   probe had killed its user spinners, whose threads are reaped
+   asynchronously; it has not been seen in any boot without the probe
+   and is not attributed to the tree.
+
+The rate, 1 in 360 rounds here against five failures in two days on CI,
 is a rate and says only that CI's hosts lose the window more often; the
 mechanism, which item 2 makes certain, is the same on both.
 
@@ -233,8 +252,11 @@ One PR: the pull test's workers, the pair test, the documents.
 | `sched-balance-pull` (changed) | as now, with the released workers yielding | `SCHED_BALANCE=0`: the workers stay two-deep on half the CPUs |
 | `sched-balance-pair` (new) | a yielding pair built on one CPU is separated within a bound; a spinning pair in the same window is not, its queued one preempted at the widen | `SCHED_BALANCE=0`: the yielding pair is never separated; `pick_migratable` ignoring `PREEMPTED` (the S26 check removed): the spinning pair is separated |
 
-Each proof run alone, the runner confirming each boot booted, in the
-plain image and the chaos image.
+Each proof run alone, the runner confirming each boot booted. The
+`SCHED_BALANCE=0` proofs run in the **plain image only**: in the chaos
+image the migrator can do the balancer's work and spread the workers
+itself (Risks). The S26 proof -- `pick_migratable` ignoring `PREEMPTED`
+-- runs in both images.
 
 ## Benchmarks
 
@@ -267,5 +289,6 @@ None.
 - **Let a preempted thread move when it was preempted in user mode**,
   which cannot be mid-way through a kernel per-CPU access. That is where
   S26's cost would reach real programs, but the probe's user-thread
-  measurement found no sharing in eight boots, so there is no measured
+  measurement found no pair stuck in twelve boots (one sharing, 16 ms,
+  that resolved), so there is no measured
   defect to fix; recorded in the inventory for when there is one.
