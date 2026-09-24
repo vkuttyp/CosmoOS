@@ -5,7 +5,7 @@ balance-chaos-probe.py -- why does sched-balance-pull fail under the chaos migra
 `sched-balance-pull` (kernel/scheduler/smptest.c) creates two workers per
 CPU, releases every other one to spin, and requires that within 3 s the
 released workers are running on as many CPUs as there are of them. It
-passes in every plain boot and has failed five times in two days in CI's
+passes in every plain boot and failed five times in two days in CI's
 chaos boot (`make test-chaos`, `docs/testing/flakes.md`).
 
 The question is which of two things the chaos boot does to it: slows the
@@ -14,44 +14,57 @@ makes it impossible (something leaves two spinners on one CPU where no
 migrator may separate them -- S26 forbids moving a PREEMPTED thread, and
 two compute-bound threads sharing a CPU are always preempted).
 
-This replaces the test's body, for the probe only, with repeated rounds
-of the same scenario inside the self-test watchdog: up to 40 rounds or
-3 s, each with a 1.5 s bound. It then asks the same of USER threads:
-`init --probe spin:N` (added to init for the probe) runs N native
-threads spinning in user mode, and the kernel side samples every 10 ms
-for 4 s whether two share a CPU and for how long:
+Three measurements, each in place of one balance test's body so that
+each has that test's own watchdog (8 s) to itself, and each returning
+success so the rest of the boot runs:
 
-    UPROBE summary: N user spinners on N CPUs, S samples, shared in K;
-      sharings P (queued one preempted at onset: Q), longest M ms
+1. BPROBE, in `sched-balance-pull`: the test's scenario repeated for up
+   to 40 rounds or 3 s, each with a 1.5 s bound; on a miss, a dump of
+   every released worker and the balancer's and migrator's counters.
+   A round whose workers could not be created is counted as such, not
+   as a spread.
 
-Last, the pair made on purpose (PPROBE): two spinners pinned to one CPU
-until the queued one has been preempted, then widened to every CPU --
-once spinning, once yielding:
+       BPROBE round R spread in M ms
+       BPROBE round R MISS after 1500 ms: cpus used U of N
+       BPROBE   worker I: last cpu C, state S, preempted P, queue cpu Q
+       BPROBE   chaos migrated +X, balancer scans +S, pulls +Y, refused not-ready +Z, gap +G
+       BPROBE summary: rounds R, spread K, missed J, setup failed F, slowest M ms (chaos=0|1)
 
-    PPROBE spinning pair on cpu C: queued one preempted at widen 1;
-      separated NO after 1000 ms; balancer pulls +0, refused not-ready +R Per boot it prints
+2. UPROBE, in `sched-balance-hysteresis`: `init --probe spin:N` (added
+   to init for the probe) runs N native threads spinning in user mode.
+   Once all N exist and each is placed on a CPU, it samples every 10 ms
+   for 3 s whether some CPU holds two of them, and whether a thread
+   queued on *that* CPU is PREEMPTED. If the workload never forms, it
+   says so and measures nothing.
 
-    BPROBE round R spread in M ms
-    BPROBE round R MISS after 1500 ms: cpus used U of N
-    BPROBE   worker I: last cpu C, state S, preempted P, queue cpu Q
-    BPROBE   chaos migrated +X, balancer scans +S, pulls +Y, refused not-ready +Z, gap +G
-    BPROBE summary: rounds R, spread K, missed J, slowest M ms (chaos=0|1)
+       UPROBE summary: N user spinners, S samples, shared in K; sharings P
+         (a preempted thread queued on the shared CPU at onset: Q), longest M ms
 
-and returns success, so the rest of the boot runs. The same probe in a
-plain debug image is the control: the two builds differ only in
-SCHED_CHAOS.
+3. PPROBE, in `sched-balance-affinity`: the pair, made on purpose. Two
+   workers pinned to one CPU; the probe waits (up to 1 s) until it sees
+   the queued one PREEMPTED -- or, for a yielding pair, until both have
+   run -- then widens both to every CPU and waits up to 1 s for them to
+   run on two CPUs. A pair whose premise was never seen is reported
+   inconclusive rather than measured.
+
+       PPROBE spinning pair on cpu C: preempted at widen 1; separated NO
+         after 1000 ms; balancer pulls +0, refused not-ready +R
+
+The same probe in a plain debug image is the control: the two builds
+differ only in SCHED_CHAOS.
 
 Usage:
 
     python3 tools/balance-chaos-probe.py apply
-    gmake ARCH=x86_64 test-chaos; grep BPROBE out/x86_64-debug-chaos/boot-test-chaos.log
-    gmake ARCH=x86_64 test;       grep BPROBE out/x86_64-debug/boot-test.log
+    gmake ARCH=x86_64 test-chaos; grep 'BPROBE\\|UPROBE\\|PPROBE' out/x86_64-debug-chaos/boot-test-chaos.log
+    gmake ARCH=x86_64 test;       grep 'BPROBE\\|UPROBE\\|PPROBE' out/x86_64-debug/boot-test.log
     python3 tools/balance-chaos-probe.py revert
 
 `apply` refuses a file with uncommitted changes and edits nothing if an
-anchor is missing (restoring on any failure part-way); `revert` restores
-its snapshot, refuses if the file changed since the apply, and touches it
-so make rebuilds.
+anchor is missing, restoring every file on a failure part-way. `revert`
+checks every file's hash first, then restores all of them from copies and
+removes the backups only once every file is restored, so a failure
+part-way leaves every backup in place for a retry.
 """
 
 import hashlib
@@ -61,23 +74,29 @@ import subprocess
 import sys
 
 TARGET = 'kernel/scheduler/smptest.c'
+INIT = 'userland/init/init.c'
 BACKUP = '.balance-chaos-probe.orig'
 STAMP = '.balance-chaos-probe.applied'
 
-# The probe goes in front of the test's wrapper; the wrapper calls it.
+ANCHOR_INC = '#include <kernel/acpi.h>\n'
+PROBE_INC = ANCHOR_INC + '#include <kernel/bootarchive.h>   /* BPROBE */\n#include <kernel/process.h>\n#include <kernel/signal.h>\n'
+
 ANCHOR_FN = 'bool selftest_sched_balance_pull(const char **reason)\n{\n'
-PROBE_FN = r'''/* --- BPROBE (tools/balance-chaos-probe.py; not for merge) --- */
-static bool bprobe_round(unsigned round, uint64_t bound_ms, uint64_t *took_ms)
+PROBE_FN = r'''/* --- BPROBE / UPROBE / PPROBE (tools/balance-chaos-probe.py; not for merge) --- */
+enum bprobe_outcome { BP_SPREAD, BP_MISS, BP_SETUP };
+
+static enum bprobe_outcome bprobe_round(unsigned round, uint64_t bound_ms, uint64_t *took_ms)
 {
     unsigned n = cpu_count();
     unsigned count = n * 2, runners = n, made = 0;
     static struct bal_worker w[CONFIG_MAX_CPUS * 2];
     static struct thread *t[CONFIG_MAX_CPUS * 2];
     const char *why = NULL;
+    *took_ms = 0;
     if (!bal_create_blocked(w, t, count, &made, &why)) {
         kinfo("BPROBE round %u setup failed: %s", round, why);
         bal_stop_all(w, t, made);
-        return true;
+        return BP_SETUP;   /* unmeasured: neither a spread nor a miss */
     }
     struct sched_balance_stats b0, b1;
     sched_balance_stats(&b0);
@@ -125,40 +144,136 @@ static bool bprobe_round(unsigned round, uint64_t bound_ms, uint64_t *took_ms)
     (void)r0;
     (void)r1;
     bal_stop_all(w, t, count);
-    return ok;
+    return ok ? BP_SPREAD : BP_MISS;
 }
 
-static bool bprobe_pinned(void)
+static void bprobe(void)
 {
     if (cpu_count() < 2)
-        return true;
+        return;
     uint64_t start = clock_now_ns(), slowest = 0;
-    unsigned rounds = 0, spread = 0, missed = 0;
+    unsigned rounds = 0, spread = 0, missed = 0, setup = 0;
     while (rounds < 40 && clock_now_ns() - start < 3000000000ull) {
         uint64_t took = 0;
-        if (bprobe_round(rounds, 1500, &took))
+        enum bprobe_outcome o = bprobe_round(rounds, 1500, &took);
+        if (o == BP_SPREAD)
             spread++;
-        else
+        else if (o == BP_MISS)
             missed++;
-        if (took > slowest)
+        else
+            setup++;
+        if (o != BP_SETUP && took > slowest)
             slowest = took;
         rounds++;
     }
-    kinfo("BPROBE summary: rounds %u, spread %u, missed %u, slowest %llu ms (chaos=%d)", rounds, spread, missed,
-          (unsigned long long)slowest, CONFIG_SCHED_CHAOS ? 1 : 0);
-    return true;
+    kinfo("BPROBE summary: rounds %u, spread %u, missed %u, setup failed %u, slowest %llu ms (chaos=%d)", rounds,
+          spread, missed, setup, (unsigned long long)slowest, CONFIG_SCHED_CHAOS ? 1 : 0);
 }
 
-/* The pair, made on purpose: two spinners pinned to one CPU until the
- * queued one has been preempted, then widened to every CPU. If S26 holds
- * the queued one, no pull can separate them however long an idle CPU
- * looks; a yielding pair is never PREEMPTED and should be separated. */
-static void pprobe(unsigned yielding)
+/* USER threads: `init --probe spin:N`. Sharing is read per CPU -- some CPU
+ * holding two of the spinners -- and a preemption is attributed only when
+ * the preempted thread is queued on that same CPU. */
+static void uprobe(void)
+{
+    unsigned n = cpu_count();
+    const void *image;
+    size_t size;
+    if (n < 2 || !bootarchive_find("init", &image, &size))
+        return;
+    char kind[16];
+    ksnprintf(kind, sizeof(kind), "spin:%u", n);
+    const char *argv[] = { "init", "--probe", kind, NULL };
+    struct process *p = NULL;
+    if (process_create_from_elf(image, size, argv[0], argv, NULL, NULL, &p) != 0) {
+        kinfo("UPROBE spawn failed");
+        return;
+    }
+    /* The workload must exist before its samples mean anything: all N
+     * threads, each placed on a CPU. */
+    bool formed = false;
+    uint64_t t0 = clock_now_ns();
+    while (!formed && clock_now_ns() - t0 < 2000000000ull) {
+        unsigned placed = 0;
+        arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+        struct thread *t;
+        list_for_each_entry(t, &p->threads, proc_link) {
+            int c = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
+            enum thread_state st = __atomic_load_n(&t->state, __ATOMIC_RELAXED);
+            if (c >= 0 && (unsigned)c < n && (st == THREAD_RUNNING || st == THREAD_READY))
+                placed++;
+        }
+        spin_unlock_irqrestore(&p->lock, s);
+        formed = placed >= n;
+        if (!formed)
+            thread_sleep_ms(5);
+    }
+    if (!formed) {
+        kinfo("UPROBE workload never formed: fewer than %u spinners placed after 2 s; nothing measured", n);
+    } else {
+        unsigned pairs = 0, samples = 0, shared_samples = 0, preempted_pairs = 0;
+        uint64_t run_start = 0, longest = 0;
+        bool in_run = false;
+        uint64_t start = clock_now_ns();
+        while (clock_now_ns() - start < 3000000000ull) {
+            unsigned per_cpu[CONFIG_MAX_CPUS] = { 0 };
+            cpumask_t preempted_on = 0;   /* CPUs with a preempted spinner queued */
+            arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+            struct thread *t;
+            list_for_each_entry(t, &p->threads, proc_link) {
+                int c = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
+                if (c < 0 || (unsigned)c >= n)
+                    continue;
+                per_cpu[c]++;
+                if (__atomic_load_n(&t->state, __ATOMIC_RELAXED) == THREAD_READY &&
+                    (__atomic_load_n(&t->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+                    preempted_on |= CPUMASK_OF((unsigned)c);
+            }
+            spin_unlock_irqrestore(&p->lock, s);
+            bool shared = false, shared_preempted = false;
+            for (unsigned c = 0; c < n; c++)
+                if (per_cpu[c] >= 2) {
+                    shared = true;
+                    if (preempted_on & CPUMASK_OF(c))
+                        shared_preempted = true;
+                }
+            samples++;
+            uint64_t now = clock_now_ns();
+            if (shared) {
+                shared_samples++;
+                if (!in_run) {
+                    in_run = true;
+                    run_start = now;
+                    pairs++;
+                    if (shared_preempted)
+                        preempted_pairs++;
+                }
+            } else if (in_run) {
+                in_run = false;
+                if (now - run_start > longest)
+                    longest = now - run_start;
+            }
+            thread_sleep_ms(10);
+        }
+        if (in_run && clock_now_ns() - run_start > longest)
+            longest = clock_now_ns() - run_start;
+        kinfo("UPROBE summary: %u user spinners, %u samples, shared in %u; sharings %u "
+              "(a preempted thread queued on the shared CPU at onset: %u), longest %llu ms%s (chaos=%d)",
+              n, samples, shared_samples, pairs, preempted_pairs, (unsigned long long)(longest / 1000000ull),
+              in_run ? ", still sharing at the end" : "", CONFIG_SCHED_CHAOS ? 1 : 0);
+    }
+    signal_send(p, SIGKILL, NULL);
+    (void)process_wait_exit(p);
+    process_put(p);
+}
+
+/* The pair, made on purpose. Every exit stops and joins what it made. */
+static void pprobe_one(unsigned yielding)
 {
     unsigned n = cpu_count(), self = arch_cpu_id();
     unsigned c = (self + 1) % n;
     static struct bal_worker w[2];
     struct thread *t[2] = { NULL, NULL };
+    unsigned made = 0;
     for (unsigned i = 0; i < 2; i++) {
         memset(&w[i], 0, sizeof(w[i]));
         completion_init(&w[i].started, "pp-start");
@@ -167,17 +282,38 @@ static void pprobe(unsigned yielding)
         w[i].yielding = yielding;
         t[i] = thread_create_on(bal_worker_main, &w[i], "pp", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
         if (t[i] == NULL)
-            return;
+            break;
+        made++;
         wait_for_completion(&w[i].started);
     }
-    for (unsigned i = 0; i < 2; i++)
+    for (unsigned i = 0; i < made; i++)
         complete(&w[i].release);
-    thread_sleep_ms(50);   /* they share CPU c: each has been preempted by the other by now */
     unsigned preempted = 0;
-    for (unsigned i = 0; i < 2; i++)
-        if (__atomic_load_n(&t[i]->state, __ATOMIC_RELAXED) == THREAD_READY &&
-            (__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
-            preempted++;
+    if (made < 2) {
+        kinfo("PPROBE %s pair: a worker could not be created; nothing measured", yielding ? "yielding" : "spinning");
+        goto out;
+    }
+    /* The premise, observed rather than assumed: a spinning pair's queued
+     * one preempted; a yielding pair's two each switched in more than once. */
+    bool premise = false;
+    uint64_t t0 = clock_now_ns();
+    while (!premise && clock_now_ns() - t0 < 1000000000ull) {
+        preempted = 0;
+        for (unsigned i = 0; i < 2; i++)
+            if (__atomic_load_n(&t[i]->state, __ATOMIC_RELAXED) == THREAD_READY &&
+                (__atomic_load_n(&t[i]->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
+                preempted++;
+        bool both_ran = __atomic_load_n(&t[0]->switches, __ATOMIC_RELAXED) > 1 &&
+                        __atomic_load_n(&t[1]->switches, __ATOMIC_RELAXED) > 1;
+        premise = yielding ? both_ran : preempted > 0;
+        if (!premise)
+            thread_sleep_ms(2);
+    }
+    if (!premise) {
+        kinfo("PPROBE %s pair on cpu %u: premise not seen in 1 s (preempted %u); inconclusive",
+              yielding ? "yielding" : "spinning", c, preempted);
+        goto out;
+    }
     cpumask_t all = 0;
     for (unsigned k = 0; k < n; k++)
         all |= CPUMASK_OF(k);
@@ -196,106 +332,50 @@ static void pprobe(unsigned yielding)
     }
     uint64_t took = (clock_now_ns() - start) / 1000000ull;
     sched_balance_stats(&b1);
-    kinfo("PPROBE %s pair on cpu %u: queued one preempted at widen %u; separated %s after %llu ms; "
+    kinfo("PPROBE %s pair on cpu %u: preempted at widen %u; separated %s after %llu ms; "
           "balancer pulls +%llu, refused not-ready +%llu (chaos=%d)",
           yielding ? "yielding" : "spinning", c, preempted, apart ? "yes" : "NO", (unsigned long long)took,
           (unsigned long long)(b1.pulls - b0.pulls),
           (unsigned long long)(b1.refused[SCHED_MIGRATE_NOT_READY] - b0.refused[SCHED_MIGRATE_NOT_READY]),
           CONFIG_SCHED_CHAOS ? 1 : 0);
-    for (unsigned i = 0; i < 2; i++)
+out:
+    for (unsigned i = 0; i < made; i++)
         __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
-    for (unsigned i = 0; i < 2; i++)
+    for (unsigned i = 0; i < made; i++)
         thread_join(t[i]);
 }
 
-/* The same question for USER threads: `init --probe spin:N` runs N native
- * threads that spin in user mode forever. Sampled every 10 ms for 4 s:
- * how often two of them share a CPU, how long each sharing lasts, and
- * whether the queued one of a pair is PREEMPTED. */
-static void uprobe(void)
+static void pprobe(void)
 {
-    unsigned n = cpu_count();
-    const void *image;
-    size_t size;
-    if (n < 2 || !bootarchive_find("init", &image, &size))
+    if (cpu_count() < 2)
         return;
-    char kind[16];
-    ksnprintf(kind, sizeof(kind), "spin:%u", n);
-    const char *argv[] = { "init", "--probe", kind, NULL };
-    struct process *p = NULL;
-    if (process_create_from_elf(image, size, argv[0], argv, NULL, NULL, &p) != 0) {
-        kinfo("UPROBE spawn failed");
-        return;
-    }
-    uint64_t t0 = clock_now_ns();
-    while (__atomic_load_n(&p->nr_threads, __ATOMIC_RELAXED) < n && clock_now_ns() - t0 < 2000000000ull)
-        thread_sleep_ms(5);
-    unsigned pairs = 0, samples = 0, shared_samples = 0, preempted_pairs = 0;
-    uint64_t run_start = 0, longest = 0;
-    bool in_run = false;
-    uint64_t start = clock_now_ns();
-    while (clock_now_ns() - start < 4000000000ull) {
-        cpumask_t seen = 0;
-        unsigned threads = 0;
-        bool preempted_queued = false;
-        unsigned per_cpu[CONFIG_MAX_CPUS] = { 0 };
-        arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-        struct thread *t;
-        list_for_each_entry(t, &p->threads, proc_link) {
-            int c = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
-            if (c >= 0 && (unsigned)c < n) {
-                seen |= CPUMASK_OF((unsigned)c);
-                per_cpu[c]++;
-            }
-            if (__atomic_load_n(&t->state, __ATOMIC_RELAXED) == THREAD_READY &&
-                (__atomic_load_n(&t->flags, __ATOMIC_RELAXED) & THREAD_FLAG_PREEMPTED))
-                preempted_queued = true;
-            threads++;
-        }
-        spin_unlock_irqrestore(&p->lock, s);
-        unsigned distinct = 0;
-        for (unsigned c = 0; c < n; c++)
-            if (seen & CPUMASK_OF(c))
-                distinct++;
-        samples++;
-        bool shared = threads >= n && distinct < n;
-        uint64_t now = clock_now_ns();
-        if (shared) {
-            shared_samples++;
-            if (!in_run) {
-                in_run = true;
-                run_start = now;
-                pairs++;
-                if (preempted_queued)
-                    preempted_pairs++;
-            }
-        } else if (in_run) {
-            in_run = false;
-            if (now - run_start > longest)
-                longest = now - run_start;
-        }
-        thread_sleep_ms(10);
-    }
-    if (in_run && clock_now_ns() - run_start > longest)
-        longest = clock_now_ns() - run_start;
-    kinfo("UPROBE summary: %u user spinners on %u CPUs, %u samples, shared in %u; sharings %u (queued one preempted at onset: %u), "
-          "longest %llu ms%s (chaos=%d)", n, n, samples, shared_samples, pairs, preempted_pairs,
-          (unsigned long long)(longest / 1000000ull), in_run ? ", still sharing at the end" : "", CONFIG_SCHED_CHAOS ? 1 : 0);
-    signal_send(p, SIGKILL, NULL);
-    (void)process_wait_exit(p);
-    process_put(p);
+    pprobe_one(0);
+    pprobe_one(1);
 }
 
 '''
-ANCHOR_CALL = '    bool r = sched_balance_pull_pinned(reason);\n'
-PROBE_CALL = '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bool r = bprobe_pinned();   /* BPROBE */\n    uprobe();\n    pprobe(0);\n    pprobe(1);\n'
+# Each measurement replaces one balance test's call, so each has that
+# test's watchdog to itself.
+CALLS = [
+    ('    bool r = sched_balance_pull_pinned(reason);\n',
+     '    (void)sched_balance_pull_pinned;\n    (void)reason;\n    bprobe();   /* BPROBE */\n    bool r = true;\n'),
+    ('    bool r = sched_balance_hysteresis_pinned(reason);\n',
+     '    (void)sched_balance_hysteresis_pinned;\n    (void)reason;\n    uprobe();   /* UPROBE */\n    bool r = true;\n'),
+    ('    bool r = sched_balance_affinity_pinned(reason);\n',
+     '    (void)sched_balance_affinity_pinned;\n    (void)reason;\n    pprobe();   /* PPROBE */\n    bool r = true;\n'),
+]
 
-ANCHOR_INC = '#include <kernel/acpi.h>\n'
-PROBE_INC = '#include <kernel/acpi.h>\n#include <kernel/bootarchive.h>   /* BPROBE */\n#include <kernel/process.h>\n#include <kernel/signal.h>\n'
+INIT_FN_ANCHOR = 'static int filter_case(const char *kind)\n'
+INIT_FN = '''static void *uprobe_spin(void *arg)   /* UPROBE (tools/balance-chaos-probe.py; not for merge) */
+{
+    for (volatile unsigned long k = 0;; k++)
+        ;
+    return arg;
+}
 
-INIT = 'userland/init/init.c'
+'''
 INIT_ANCHOR = '    if (strncmp(kind, "cwd-is:", 7) == 0) {\n'
-INIT_PROBE = '''    if (strncmp(kind, "spin:", 5) == 0) {   /* UPROBE (tools/balance-chaos-probe.py; not for merge) */
+INIT_PROBE = '''    if (strncmp(kind, "spin:", 5) == 0) {   /* UPROBE */
         unsigned n = (unsigned)strtoul(kind + 5, NULL, 10);
         static cosmo_thread_t st[64];
         for (unsigned i = 1; i < n && i < 64; i++)
@@ -305,19 +385,11 @@ INIT_PROBE = '''    if (strncmp(kind, "spin:", 5) == 0) {   /* UPROBE (tools/bal
         return 0;
     }
 '''
-INIT_FN_ANCHOR = 'static int filter_case(const char *kind)\n'
-INIT_FN = '''static void *uprobe_spin(void *arg)   /* UPROBE */
-{
-    for (volatile unsigned long k = 0;; k++)
-        ;
-    return arg;
-}
 
-'''
-
-EDITS = [(ANCHOR_INC, PROBE_INC), (ANCHOR_FN, PROBE_FN + ANCHOR_FN), (ANCHOR_CALL, PROBE_CALL)]
-INIT_EDITS = [(INIT_FN_ANCHOR, INIT_FN + INIT_FN_ANCHOR), (INIT_ANCHOR, INIT_PROBE + INIT_ANCHOR)]
-FILES = [(TARGET, EDITS), (INIT, INIT_EDITS)]
+FILES = [
+    (TARGET, [(ANCHOR_INC, PROBE_INC), (ANCHOR_FN, PROBE_FN + ANCHOR_FN)] + CALLS),
+    (INIT, [(INIT_FN_ANCHOR, INIT_FN + INIT_FN_ANCHOR), (INIT_ANCHOR, INIT_PROBE + INIT_ANCHOR)]),
+]
 
 
 def sha(p):
@@ -363,9 +435,13 @@ def revert():
             path, digest = line.split()
             if sha(path) != digest:
                 sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
+    # Restore every file from a copy first; drop the backups only once all
+    # are restored, so a failure part-way leaves every backup for a retry.
     for path, _ in FILES:
-        shutil.move(path + BACKUP, path)
+        shutil.copyfile(path + BACKUP, path)
         os.utime(path, None)
+    for path, _ in FILES:
+        os.remove(path + BACKUP)
     os.remove(STAMP)
     print('reverted')
 
