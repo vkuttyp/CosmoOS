@@ -100,12 +100,19 @@ COMMANDS = [
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),
     ("jobs", [r"\[\d+\][+ ]  (Running|Done)\s+sleep 1"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
+    ("exit 0", []),
+]
+
+BURST = [
     # A background job finishing as the next line arrives, six times, the
     # pause walking across the moment the job exits: on aarch64 the PL011's
     # receive interrupt used to be cleared after the drain, and a character
     # arriving between the two stalled the console for good -- 13 release
     # boots in 20 under this shape (docs/audit/next-subsystem-console-rx.md).
     # console-rx-clear is the proof; this is the regression a user would see.
+    # Release boots only (--shell-burst): every sighting and every probe
+    # stall was a release boot, and the six cycles cost ~7 s a boot, which
+    # the debug boots' 30-minute CI job cannot spare.
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),
     (PAUSE(0.85), []),
     ("echo console-burst-0-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-0-abcdefghijklmnopqrstuvwxyz$"]),
@@ -124,12 +131,13 @@ COMMANDS = [
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),
     (PAUSE(1.15), []),
     ("echo console-burst-5-abcdefghijklmnopqrstuvwxyz", [r"^console-burst-5-abcdefghijklmnopqrstuvwxyz$"]),
-    ("exit 0", []),
 ]
 
 
 class ShellTest:
-    def __init__(self):
+    def __init__(self, burst=False):
+        # The burst goes in before the final `exit 0`.
+        self.commands = COMMANDS[:-1] + BURST + COMMANDS[-1:] if burst else COMMANDS
         self.results = {"prompts": 0, "sent": [], "interrupt_s": None}
         self.error = None
 
@@ -151,7 +159,7 @@ class ShellTest:
         prompts = 0
         sent_at = None   # when the interrupt went out, until its prompt arrives
         try:
-            for cmd, _ in COMMANDS:
+            for cmd, _ in self.commands:
                 if isinstance(cmd, tuple) and cmd[0] == "__pause__":
                     time.sleep(cmd[1])
                     self.results["sent"].append(cmd)   # a step, not an unsent command
@@ -204,7 +212,7 @@ class ShellTest:
         elif took >= INTERRUPT_MAX_S:
             out.append(f"shell harness: the prompt took {took:.1f}s after ^C "
                        f"(>= {INTERRUPT_MAX_S}s: the job ran to completion, so ^C reached nothing)")
-        for cmd, patterns in COMMANDS:
+        for cmd, patterns in self.commands:
             if cmd not in self.results["sent"]:
                 out.append(f"shell harness: never sent {cmd!r}")
                 continue

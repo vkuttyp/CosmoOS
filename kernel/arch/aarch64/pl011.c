@@ -136,14 +136,18 @@ static void read_spcr(void)
  * its trigger level (one), so nothing after it raised anything either.
  * Cleared first, a character arriving during the drain is read by it, and
  * one arriving after the drain's last read raises an interrupt nothing
- * clears. `after_drain` is the test's hook at exactly that moment.
+ * clears. `after_drain` is the test's hook at exactly that moment. A
+ * NULL `t` reads and discards: the test runs this with every console
+ * writer held off, and a byte handed to the tty there would be echoed
+ * through console_write, which would spin on the lock the test holds.
  */
 static void rx_service(struct tty *t, void (*after_drain)(void))
 {
     wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
     while ((rd(UART_FR) & FR_RXFE) == 0) {
         uint8_t c = (uint8_t)rd(UART_DR);
-        tty_input(t, &c, 1);
+        if (t != NULL)
+            tty_input(t, &c, 1);
     }
     if (after_drain != NULL)
         after_drain();
@@ -187,6 +191,7 @@ void arch_console_input_init(void)
  * byte; the raw interrupt status, not the handler, is the evidence.
  */
 #define RIS_RXRIS (1u << 4)
+#define RX_TEST_SPINS 100000u   /* register reads; a guard, not a timing */
 
 #define CHECK(cond)                                                          \
     do {                                                                     \
@@ -211,18 +216,27 @@ bool selftest_console_rx_clear(const char **reason)
     }
     CHECK(irq_disable(g_intid) == 0);
     arch_irq_state_t st = console_hold();   /* nothing may log until console_release */
-    while (rd(UART_FR) & FR_BUSY)
-        ;                                   /* the last line out, before loopback */
+    /* The last line out, before loopback. Bounded: IRQs are off here, so
+     * a transmitter that never idles must not take the boot with it. */
+    bool idle = false;
+    for (unsigned i = 0; i < RX_TEST_SPINS && !idle; i++)
+        idle = (rd(UART_FR) & FR_BUSY) == 0;
+    if (!idle) {
+        console_release(st);
+        CHECK(irq_enable(g_intid) == 0);
+        *reason = "the transmitter never went idle";
+        return false;
+    }
     uint32_t cr = rd(UART_CR);
     while ((rd(UART_FR) & FR_RXFE) == 0)
         (void)rd(UART_DR);
     wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
     wr(UART_CR, cr | CR_LBE);
 
-    rx_service(tty_console(), rx_test_send);   /* drains nothing; the hook's byte arrives after */
+    rx_service(NULL, rx_test_send);   /* drains nothing; the hook's byte arrives after */
 
     bool arrived = false;
-    for (unsigned i = 0; i < 100000 && !arrived; i++)
+    for (unsigned i = 0; i < RX_TEST_SPINS && !arrived; i++)
         arrived = (rd(UART_FR) & FR_RXFE) == 0;
     uint32_t ris = rd(UART_RIS);
 

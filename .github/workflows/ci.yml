@@ -35,7 +35,10 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
         arch: [x86_64, aarch64]
-    timeout-minutes: 30
+    # 30 was the limit until 2026-09-25: main's aarch64 job had grown to
+    # 29-29.5 minutes (runs 36069717395, 36008860068) and was cancelled by
+    # it once with every boot passed (run 36028371189).
+    timeout-minutes: 40
     env:
       # SIGNING=dev generates an ephemeral signing key here on first use; it
       # lives only in this job's filesystem and is never uploaded (the
