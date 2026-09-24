@@ -143,13 +143,25 @@ def apply():
         s = open(path).read()
         if s.count(anchor) != 1:
             sys.exit(f'{path}: anchor not found exactly once')
-    stamp = []
-    for path, anchor, probe, where in EDITS:
-        shutil.copyfile(path, path + BACKUP)
-        s = open(path).read()
-        open(path, 'w').write(s.replace(anchor, anchor + probe if where == 'after' else probe + anchor))
-        stamp.append(f'{path} {sha(path)}')
-    open(STAMP, 'w').write('\n'.join(stamp) + '\n')
+    # All or nothing: a failure part-way restores every file already
+    # edited, so a partial apply never leaves a source changed with no
+    # stamp for revert to find (found in review).
+    stamp, done = [], []
+    try:
+        for path, anchor, probe, where in EDITS:
+            shutil.copyfile(path, path + BACKUP)
+            done.append(path)
+            s = open(path).read()
+            open(path, 'w').write(s.replace(anchor, anchor + probe if where == 'after' else probe + anchor))
+            stamp.append(f'{path} {sha(path)}')
+        open(STAMP, 'w').write('\n'.join(stamp) + '\n')
+    except BaseException:
+        for path in done:
+            shutil.move(path + BACKUP, path)
+            os.utime(path, None)
+        if os.path.exists(STAMP):
+            os.remove(STAMP)
+        raise
     print('applied')
 
 

@@ -181,8 +181,16 @@ Filesystem rules the walk does not know about are taken as the walk
 takes them. A cosmofs `.snapshots/<name>/dir` is entered by name and so
 named; its `..` rules (a snapshot's root goes up to `.snapshots`,
 `.snapshots` to the live root) are the lexical ones, because
-`.snapshots` is found only at the filesystem's root. procfs's `self`
-is entered by name, so a name through it says `self` (Risks).
+`.snapshots` is found only at the filesystem's root.
+
+One name in the tree would break the rule: procfs's `self`, today a
+*directory* resolved to the caller at lookup. Entered by name, it would
+be named `self`, and that name means a different directory to every
+process that walks it -- so a child inheriting a working directory
+entered through `/proc/self` would hold its parent's vnode and a name
+that, walked by the child, reaches the child's own (found in review of
+this report). §4 makes `self` what it stands in for, a symbolic link,
+and then the rule names it by pid like any other link.
 
 The result is **only as good as the seed**. A relative walk from a
 directory whose name is stale -- an ancestor renamed since it was
@@ -234,11 +242,22 @@ open and the naming walk. `lxtest`'s dirfd block checks the new answer:
 the `/tmp/lxdlink` directory `fchdir`s and `getcwd` answers `/tmp/lxdir`;
 the `/tmp/lxdeep/..` directory answers `/tmp/lxdir` too, not `/tmp`.
 
-### 4. procfs's `..`
+### 4. procfs: `..`, and `self` as a link
 
 `proc_pid_lookup` answers `..` with the mount's root (`dir->mnt->root`,
 referenced) -- the directory its own readdir already names with that
 inode number. `.` is handled by the VFS before any filesystem sees it.
+
+`self` becomes a **symbolic link** whose target is the reading
+process's pid, relative (`"42"`), rendered by `readlink` at the time of
+the read. `procfs.c` says it is a directory "because this VFS has
+none"; symbolic links arrived with PR #142, and the comment has been
+stale since. As a link, every walk through it expands to `/proc/<pid>`,
+and §1 names it that way -- so a name never contains `self`, and P32
+has no exception. `/proc/self/status` and every other use resolve as
+before (the link is followed); the listing still names `self`, now with
+the link type. `lstat("/proc/self")` answers a link where it answered a
+directory, as on Linux.
 
 ### 5. The invariant
 
@@ -258,7 +277,9 @@ lists.
 
 **Correctness.** One rule in one place (the walk), used by all three
 publishers; the rule is the walk's own. procfs gains the `..` its
-listing already claims.
+listing already claims, and `self` becomes the link it stands in for,
+so no name in the tree means different directories to different
+walkers.
 
 **Concurrency.** The name is private to the walk, a buffer the caller
 owns; no lock is added and none is held longer. A concurrent rename can
@@ -294,7 +315,7 @@ open's second walk (the naming lookup) is the same second walk
 | kernel/process/process.c | `chdir_inner` publishes the traversed name |
 | kernel/process/spawn.c | the child's `cwd` name from a named lookup |
 | kernel/syscall/native.c, compat/linux/syscalls.c | the directory-open sites pass base, name and path |
-| kernel-services/filesystem/procfs/procfs.c | `proc_pid_lookup` answers `..` |
+| kernel-services/filesystem/procfs/procfs.c | `proc_pid_lookup` answers `..`; `self` is a symbolic link to the caller's pid (a link vnode with a `readlink` op; readdir lists it as a link) |
 | kernel-services/vfs/vfstest.c, kernel/process/proctest.c | the tests below |
 | userland/init/init.c, tests/linux/lxtest.c | the door checks below; the dirfd block's `fchdir` expectations |
 | docs | P32, P27 and P31 reworded; the VFS and process API docs; the Linux API rows for `chdir`, `fchdir`, `getcwd`; testing docs; the inventory row struck; README Status |
@@ -340,7 +361,7 @@ it is now the right one.
 | test | door | checks | mutation it must catch |
 | --- | --- | --- | --- |
 | `vfs-lookup-named` (new, vfstest) | kernel | a table of (start name, path) → name: plain components; `.`; `..` including at `/`; an absolute link mid-path; a relative link mid-path; a link as the last component; a chain of two links; `link/..` (the physical parent, not the lexical one); a trailing slash; a component crossing into a mount and `..` back out of it; `-ENAMETOOLONG`; a relative walk from a start with no name. Each result also walked again with `vfs_lookup` and compared by vnode | `..` not removing a component; an absolute link not resetting the name; a link's own name appended |
-| `init` working-directory checks (extended) | native | `chdir` through a link to a deeper directory: `getcwd` is the target's path; `chdir("..")`: its parent's; `chdir("link/..")`: the physical parent; `stat(".")` and `stat(getcwd())` agree after each; `chdir("/proc/self")` then `chdir("..")` succeeds and `getcwd` is `/proc`; a child spawned with `cwd` naming the link is given the physical name | publishing the lexical name again; procfs `..` removed |
+| `init` working-directory checks (extended) | native | `chdir` through a link to a deeper directory: `getcwd` is the target's path; `chdir("..")`: its parent's; `chdir("link/..")`: the physical parent; `stat(".")` and `stat(getcwd())` agree after each; `chdir("/proc/self")` publishes `/proc/<own pid>`, then `chdir("..")` succeeds and `getcwd` is `/proc`; `readlink("/proc/self")` is the pid and `lstat` a link; a child spawned with `cwd` `/proc/self` is given the *parent's* `/proc/<pid>`, and `stat(getcwd())` agrees with its `stat(".")`; a child spawned with `cwd` naming a link is given the physical name | publishing the lexical name again; procfs `..` removed; `self` back to a directory (the inherited-cwd check fails) |
 | `lxtest` (extended, and the dirfd block updated) | Linux | the same `chdir` sequence at the Linux door; `fchdir` of the directory opened through `/tmp/lxdlink` succeeds and `getcwd` answers `/tmp/lxdir`; the `/tmp/lxdeep/..` directory answers `/tmp/lxdir` | the directory-open name reverting to the lexical one |
 | `process-spawn` (extended) | kernel | a spawn whose `cwd` is a relative path through a link gives the child the traversed name | spawn keeping `path_normalize` |
 
@@ -355,14 +376,11 @@ the boot's timing summary moves.
 
 ## Risks
 
-- **`/proc/self` names the caller.** A process in `/proc/self` has the
-  name `/proc/self`, which is coherent for it; a child that inherits the
-  name and its parent's vnode holds a name that, walked by the child,
-  reaches the child's own directory. This is the only name component in
-  the tree whose meaning depends on who walks it. Not changed here; the
-  build records whether any test inherits such a cwd, and the report's
-  follow-up is to have procfs's `self` behave as the link it stands in
-  for (which would make the rule of §1 name it by pid).
+- **`/proc/self` changes type.** It was a directory and becomes a
+  link; anything that `lstat`s it or lists `/proc` and checks the type
+  sees the difference. Nothing in the tree does (every use is
+  `/proc/self/<file>`, which follows the link), and it is what Linux
+  has.
 - **Staleness is unchanged, and now visible in a new place.** A
   directory file's name was never recorded for a link-reached directory;
   now it is, and it goes stale on a rename like every other name (P27).
@@ -389,6 +407,9 @@ the boot's timing summary moves.
   walk already knows.
 - **Refuse `chdir` through a link**, as the dirfd unit did for `fchdir`:
   breaks every `cd` into a linked directory.
+- **Special-case `self` in the walk** (append the pid when entering a
+  vnode procfs marks as per-caller): a filesystem hook for one name, where
+  making `self` the link it stands in for needs none.
 - **Keep the logical name, and make `..` logical too**: `chdir("..")`
   would then have to walk the *name's* parent instead of the vnode's,
   which is a second meaning of `..` that no other call has and that
