@@ -433,7 +433,10 @@ def revert():
     for line in open(STAMP).read().split('\n'):
         if line:
             path, digest = line.split()
-            if sha(path) != digest:
+            # Already restored by an earlier revert that failed part-way:
+            # the file matches its backup, and a retry finishes the job.
+            restored = os.path.exists(path + BACKUP) and sha(path) == sha(path + BACKUP)
+            if sha(path) != digest and not restored:
                 sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
     # Restore every file from a copy first; drop the backups only once all
     # are restored, so a failure part-way leaves every backup for a retry.
