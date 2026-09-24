@@ -21,7 +21,7 @@ of the same scenario inside the self-test watchdog: up to 40 rounds or
     BPROBE round R spread in M ms
     BPROBE round R MISS after 1500 ms: cpus used U of N
     BPROBE   worker I: last cpu C, state S, preempted P, queue cpu Q
-    BPROBE   chaos migrated +X, balancer pulls +Y, refused preempted +Z
+    BPROBE   chaos migrated +X, balancer scans +S, pulls +Y, refused not-ready +Z, gap +G
     BPROBE summary: rounds R, spread K, missed J, slowest M ms (chaos=0|1)
 
 and returns success, so the rest of the boot runs. The same probe in a
@@ -99,9 +99,13 @@ static bool bprobe_round(unsigned round, uint64_t bound_ms, uint64_t *took_ms)
 #if CONFIG_SCHED_CHAOS
         sched_chaos_stats(&c1, &r1);
 #endif
-        kinfo("BPROBE   chaos migrated +%llu, balancer pulls +%llu, refused preempted +%llu",
-              (unsigned long long)(c1 - c0), (unsigned long long)(b1.pulls - b0.pulls),
-              (unsigned long long)(b1.refused[SCHED_MIGRATE_PREEMPTED] - b0.refused[SCHED_MIGRATE_PREEMPTED]));
+        /* A queue whose only spare thread is PREEMPTED offers nothing:
+         * pick_migratable returns NULL and the pull reports NOT_READY. */
+        kinfo("BPROBE   chaos migrated +%llu, balancer scans +%llu, pulls +%llu, refused not-ready +%llu, gap +%llu",
+              (unsigned long long)(c1 - c0), (unsigned long long)(b1.scans - b0.scans),
+              (unsigned long long)(b1.pulls - b0.pulls),
+              (unsigned long long)(b1.refused[SCHED_MIGRATE_NOT_READY] - b0.refused[SCHED_MIGRATE_NOT_READY]),
+              (unsigned long long)(b1.refused[SCHED_MIGRATE_GAP] - b0.refused[SCHED_MIGRATE_GAP]));
     } else {
         kinfo("BPROBE round %u spread in %llu ms", round, (unsigned long long)*took_ms);
     }
