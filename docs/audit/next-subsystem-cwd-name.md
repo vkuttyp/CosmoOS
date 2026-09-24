@@ -52,7 +52,7 @@
 >    its target's length and a reader may size its `readlink` buffer
 >    from `lstat`. The lookup sets it from the looker's pid; `init`
 >    checks `st_size` against what `readlink` returned. Review also
->    found `process/design.md` and the dirfd unit's README entry still
+>    found `docs/kernel/process/design.md` and the dirfd unit's README entry still
 >    describing the lexical names.
 >
 > **The mutations**, each applied alone on x86-64, each boot confirmed
@@ -72,8 +72,8 @@
 > | 10 | the open's last component not named | `lxtest`: `fchdir(dfd)` answered `/tmp`, and both link cases |
 > | 11 | a last-component link's spelling appended at the open | **survived at first** (item 2); with `/tmp/lxdrel`, `lxtest`'s `getcwd` after `fchdir` |
 > | 12 | a restart at `/` keeping the overflow flag (review (a)) | `vfs-lookup-named`: `reset_named` |
-| 13 | `/proc/self`'s size left 0 (review (b)) | `init`: `ls.st_size == ln` |
-| -- | the naming walk's vnode comparison removed (first build) | **survived**: unreachable without a race; the build removed the second walk instead (item 1) |
+> | 13 | `/proc/self`'s size left 0 (review (b)) | `init`: `ls.st_size == ln` |
+> | -- | the naming walk's vnode comparison removed (first build) | **survived**: unreachable without a race; the build removed the second walk instead (item 1) |
 
 > Constitution §68 report. Takes up the deferred-work inventory's row
 > (section 3) "`chdir` through a symbolic link publishes the link's
@@ -191,7 +191,7 @@ those checks, and both boots pass with it applied.
 - **procfs has a directory you cannot leave by `..`.** Small, and
   reachable by any process that looks at its own `/proc/self`.
 
-## Current implementation
+## Current implementation (before this unit; the banner says what changed)
 
 **The walk.** `resolve` (kernel-services/vfs/vfs.c) walks a path from a
 `start` vnode, or from the caller's root for an absolute path. It calls
