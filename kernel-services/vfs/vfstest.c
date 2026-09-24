@@ -2241,6 +2241,11 @@ static void umount_once_main(void *arg)
 {
     struct umount_once *u = arg;
     u->rc = vfs_umount_at(u->start, u->path, 0);
+    /* A start is the thread's own reference, dropped only when its walk
+     * is over: a thread that starts late must not walk from a vnode the
+     * test has already let go of (found in review). */
+    if (u->start)
+        vnode_put(u->start);
     __atomic_store_n(&u->done, 1u, __ATOMIC_RELEASE);
 }
 
@@ -2286,12 +2291,21 @@ bool selftest_vfs_umount_once(const char **reason)
      * is -ENOENT (there is no `d`), not the -EBUSY the root filesystem
      * gives "." (found by a mutation that ignored the start and passed). */
     struct umount_once second = { .start = root, .path = "d/.." };
-    struct thread *tb = seen ? thread_create(umount_once_main, &second, "umount-second", SCHED_PRIO_DEFAULT) : NULL;
+    struct thread *tb = NULL;
+    if (seen) {
+        vnode_get(root);   /* the thread's own, put when its unmount returns */
+        tb = thread_create(umount_once_main, &second, "umount-second", SCHED_PRIO_DEFAULT);
+        if (tb == NULL)
+            vnode_put(root);
+    }
     bool second_answered = tb != NULL && umount_once_wait(&second.done, 2000);
     bool first_waiting = !__atomic_load_n(&first.done, __ATOMIC_ACQUIRE);   /* still in its drain */
 
     /* Let everything go on every path: the root reference first, so the
-     * first unmount's reference scan finds none, then the pass. */
+     * first unmount's reference scan finds none, then the pass. A second
+     * unmount that has not answered still holds its own reference, so
+     * the first cannot free the root under it: it finds that reference
+     * and refuses, and the checks below say which step failed. */
     vnode_put(root);
     vfs_mount_release(held);
     thread_join(ta);
