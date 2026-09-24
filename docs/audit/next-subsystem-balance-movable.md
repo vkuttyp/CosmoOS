@@ -296,7 +296,7 @@ One PR: the pull test's workers, the pair test, the documents.
 | test | checks | proof it must fail |
 | --- | --- | --- |
 | `sched-balance-pull` (changed) | as now, with the released workers yielding | `SCHED_BALANCE=0`: the workers stay two-deep on half the CPUs |
-| `sched-balance-pair` (new) | a yielding pair built on one CPU is separated within a bound; a spinning pair in the same window is not, its queued one preempted at the widen | `SCHED_BALANCE=0`: the yielding pair is never separated; `pick_migratable` ignoring `PREEMPTED` (the S26 check removed): the spinning pair is separated (**as built**: that alone panics on `migrate_locked`'s assertion first; with the rule removed in both places, the spinning pair is separated -- banner item 1) |
+| `sched-balance-pair` (new) | a yielding pair built on one CPU, both workers seen to have run, is separated within a bound; a spinning pair is not, widened only once it has *settled* -- both have run since release and neither is queued without `PREEMPTED` (as built: banner item 3; "its queued one preempted" was too weak, since a worker that has never run is movable) -- and a premise not seen within its bound fails as its own reason | `SCHED_BALANCE=0`: the yielding pair is never separated; `pick_migratable` ignoring `PREEMPTED` (the S26 check removed): the spinning pair is separated (**as built**: that alone panics on `migrate_locked`'s assertion first; with the rule removed in both places, the spinning pair is separated -- banner item 1) |
 
 Each proof run alone, the runner confirming each boot booted. The
 `SCHED_BALANCE=0` proofs run in the **plain image only**: in the chaos
