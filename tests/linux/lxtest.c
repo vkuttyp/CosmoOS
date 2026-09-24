@@ -694,6 +694,18 @@ int main(int argc, char **argv)
         if (dl >= 0)
             sc1(LX_close, dl);
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdlink", 0) == 0, 0);
+        /* The same through a relative link: an absolute target restarts
+         * the name at `/`, which would hide a link's spelling left in it;
+         * a relative one continues from the name as it stands. */
+        CHECKV(sc3(LX_symlinkat, "lxdir", LX_AT_FDCWD, "/tmp/lxdrel") == 0, 0);
+        long dr = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxdrel", LX_O_RDONLY | LX_O_DIRECTORY, 0);
+        CHECKV(dr >= 3, dr);
+        CHECKV(sc1(LX_fchdir, dr) == 0, 0);
+        CHECKV(sc2(LX_getcwd, cw, sizeof(cw)) == 11 && streq(cw, "/tmp/lxdir"), 0);
+        CHECKV(sc1(LX_chdir, "/") == 0, 0);
+        if (dr >= 0)
+            sc1(LX_close, dr);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxdrel", 0) == 0, 0);
         /* `..` after a link: /tmp/lxdeep -> /tmp/lxdir/deep, so opening
          * "/tmp/lxdeep/.." reaches /tmp/lxdir, and that is its name; a
          * lexical normalisation said "/tmp", a different directory. */

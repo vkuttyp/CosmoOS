@@ -2144,7 +2144,8 @@ bool selftest_vfs_lookup_named(const char **reason)
         { true, "../../..", "/" },
         { true, "abs", "/tmp/ln/a/b" },       /* an absolute link, last */
         { true, "abs/..", "/tmp/ln/a" },      /* ... mid-path: the target's parent, not /tmp/ln */
-        { true, "rel/..", "/tmp/ln/a" },      /* a relative link */
+        { true, "rel", "/tmp/ln/a/b" },       /* a relative link, last: its name must not stay in */
+        { true, "rel/..", "/tmp/ln/a" },      /* ... mid-path */
         { true, "chain", "/tmp/ln/a/b" },     /* two links */
         { true, "a/up", "/tmp/ln/m/in" },     /* a relative link into a mount */
         { true, "m/in/..", "/tmp/ln/m" },
