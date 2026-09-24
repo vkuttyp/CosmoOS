@@ -195,7 +195,7 @@ loser that waits: each fails one named check.
 | kernel/core/lockup.c | count the waits armed (`samples_waits`); the debug `lockup_test_ipi_only` knob |
 | kernel/include/kernel/lockup.h | the stat and the knob |
 | kernel/core/lockuptest.c | `lockup-sample-busy`'s checks as above |
-| docs | the lockup detector's invariants and testing docs; `docs/testing/flakes.md` (the entry resolved); the inventory; README Status |
+| docs | the lockup detector's invariants and testing docs; `docs/testing/flakes.md` (the entry marked resolved once the build lands; until then it says re-running is still the answer); the inventory; README Status |
 
 ## APIs
 

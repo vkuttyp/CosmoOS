@@ -309,7 +309,9 @@ which measured the bound under host load (`tools/lockup-busy-probe.py`):
 quiet, the sampler takes 5.00-5.12 ms; loaded, it reproduces these
 failures, and the excess is time the virtual CPU did not run -- in most
 cases one gap between two clock reads holding all of it. The unit
-replaces the wall-clock bound with a count of the waits a sample arms.
+proposes replacing the wall-clock bound with a count of the waits a
+sample arms. **Until that is built the test still checks the bound, and
+re-running remains the answer.**
 
 It is the load-sensitive family this file's list describes, and it is not
 *on* the list. The bound is `LOCKUP_SAMPLE_TIMEOUT_NS` plus two

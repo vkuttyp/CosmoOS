@@ -162,6 +162,9 @@ T_PROBE = '''        /* --- LBPROBE (tools/lockup-busy-probe.py; not for merge) 
                 lbp_el[j] = lbp_el[j - 1];
                 lbp_el[j - 1] = x;
             }
+        if (lbp_n == 0) {   /* the first sample was refused: nothing to summarise (found in review) */
+            kinfo("LBPROBE summary: no sample taken (%s)", LBP_ARCH);
+        } else
         kinfo("LBPROBE summary: %u samples, over the bound %u, el min/median/max %llu/%llu/%llu us, "
               "largest gap max %llu us, ran max %llu us, targets answered by nmi %u (%s)",
               lbp_n, lbp_over, (unsigned long long)(lbp_el[0] / 1000),
@@ -183,6 +186,13 @@ def sha(p):
 def apply():
     if os.path.exists(STAMP):
         sys.exit('already applied')
+    for path, _ in FILES:
+        # A backup without a stamp is an interrupted or hand-recovered run's
+        # only copy of the original: never overwrite it (found in review).
+        if os.path.exists(path + BACKUP):
+            sys.exit(f'{path + BACKUP} exists from an earlier run; restore or remove it by hand first')
+        if not os.path.isfile(path):
+            sys.exit(f'{path} not found: run from the top of the tree')
     for path, edits in FILES:
         if subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True).stdout.strip():
             sys.exit(f'{path} has uncommitted changes')
@@ -235,8 +245,12 @@ def load():
     if len(args) < 3 or args[1] != '--':
         sys.exit('usage: load N -- CMD...')
     n = int(args[0])
-    busy = [subprocess.Popen(['sh', '-c', 'while :; do :; done'], start_new_session=True) for _ in range(n)]
+    busy = []
     try:
+        # Started inside the try, so a failure part-way still stops every
+        # loop already running (found in review).
+        for _ in range(n):
+            busy.append(subprocess.Popen(['sh', '-c', 'while :; do :; done'], start_new_session=True))
         rc = subprocess.run(args[2:]).returncode
     finally:
         for p in busy:
