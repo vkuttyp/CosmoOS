@@ -5,6 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Target, private tty | Self-test `tty-ldisc` (`kernel/tty/ttytest.c`): the line discipline through `tty_input` and `tty_read` with echo off | `make test` |
+| Target, the PL011's clear | Self-test `console-rx-clear` (`kernel/arch/aarch64/pl011.c`; a stub that says why on x86-64): the GIC line disabled and every console writer held off (`console_hold`), the PL011 in loopback, the receive service run with a hook after its drain that transmits one byte -- which the loopback puts into the FIFO at exactly the moment the old order cleared the interrupt -- and the raw status must still show the receive interrupt pending (T16). Skips, saying so, if the byte never arrives (a PL011 without loopback). The old order fails it on the first boot | `make test` |
 | Target, real interrupt path | `tests/boot/shelltest.py` types commands into QEMU's serial port (its stdin) after each `cosmo$ ` prompt; the tty echoes them and the shell runs them | `make test`, release included |
 | User mode | `init --selftest`: `fstat(0)` is a character device, `isatty(0)`, a zero-length console read returns 0 without blocking | `make test` (self-test builds) |
 | Kill of a blocked reader | Self-test `process-spawn` kills `init --block` (a console read) and requires status 143 | `make test` |

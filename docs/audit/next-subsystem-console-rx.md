@@ -8,6 +8,35 @@
 > second was "instrument before theorising"; this report does, finds the
 > cause in four lines of the PL011 driver, and proposes the fix and a
 > test that does not wait for luck.
+>
+> **Built (PR #241).** As designed, with these differences:
+> - **The test checks the latch, not the tty.** `console-rx-clear` takes
+>   the PL011's receive interrupt away from the GIC for its window, so
+>   nothing reads the byte. It checks what the old order destroyed: after
+>   the hook's byte arrives, the raw receive interrupt (`RIS.RXRIS`) must
+>   still be pending. It then drains the byte itself, because a test byte
+>   is not input.
+> - **The byte is `'\r'`.** QEMU's PL011 in loopback also sends the byte
+>   out on the line, so it shows up in the serial log. A carriage return
+>   leaves no visible mark there.
+> - **The test lives in `pl011.c`**, which owns the registers and the
+>   shared `rx_service(tty, after_drain)` that both `rx_irq` and the test
+>   call. On x86-64, `serial.c` has a stub that logs a skip.
+> - **Holding the console off needed a new core API**:
+>   `console_hold()` and `console_release()` take and release the console
+>   spinlock (`kernel/core/console.c`).
+> - **The harness burst is six cycles** of `sleep 1 &`, a pause of
+>   0.85-1.15 s, then a typed line, before the harness's `exit 0`.
+>
+> | mutation | result |
+> | --- | --- |
+> | the old order restored (drain, then clear) | `console-rx-clear` FAIL (`ris & RIS_RXRIS`) on the first aarch64 debug boot; the only failing test |
+> | the old order restored, harness burst only | stall in 1 of 5 aarch64 release boots, so the burst is a regression check, not the proof |
+>
+> This machine's QEMU (11.1.1) implements loopback, so the test runs
+> here rather than skipping. CI's log line for the test says which it
+> did there. Both architectures pass in debug and release,
+> `gmake host-test` passes, and `gmake analyze` is clean.
 
 ## Problem
 
@@ -139,8 +168,8 @@ matters:
 - drive the receive path through a test hook at the point between the
   drain and the clear: the hook transmits one byte, which the loopback
   delivers into the FIFO -- exactly the character the old order lost;
-- then require that the byte reaches the tty, with no further input,
-  within a bound (a guard: it is either read or it never is).
+- then require that the byte's receive interrupt is still pending (as
+  built -- the design said "reaches the tty"; see the banner).
 
 With the old order the byte's interrupt is cleared and it is never read;
 with the new one it is. If QEMU's PL011 does not implement loopback (it
@@ -182,15 +211,18 @@ point.
 
 | file | change |
 | --- | --- |
-| kernel/arch/aarch64/pl011.c | clear before draining; the loopback test entry |
-| kernel/arch/aarch64 (a test) or kernel/tty tests | `console-rx-clear` |
-| tests/boot/shelltest.py | a few burst cycles |
-| docs | the console/tty invariants and testing docs; `docs/testing/flakes.md` (the entry marked resolved once the fix lands -- until then it is investigated, fix pending, and re-running remains the answer); README Status |
+| kernel/arch/aarch64/pl011.c | clear before draining (`rx_service`); the `console-rx-clear` test |
+| kernel/arch/x86_64/serial.c | a `console-rx-clear` stub that logs a skip |
+| kernel/core/console.c, kernel/include/kernel/console.h | `console_hold` / `console_release` |
+| kernel/core/selftest.c, kernel/include/kernel/selftest.h | the test's registration |
+| tests/boot/shelltest.py | six burst cycles and a `PAUSE` step |
+| docs | the console/tty invariants and testing docs; `docs/testing/flakes.md` (the entry marked fixed); `docs/kernel/diagnostics/api.md` (`console_hold`); README Status |
 
 ## APIs
 
-None public. A debug test entry in the PL011 driver takes the hook as an
-argument.
+None for userspace. In the kernel: `console_hold()` and
+`console_release()` (as built; see the banner). The test's hook is an
+argument to `rx_service`, not global state the handler reads.
 
 ## Migration plan
 
@@ -200,8 +232,8 @@ One PR: the reorder, the test, the harness cycles, the documents.
 
 | test | checks | mutation it must catch |
 | --- | --- | --- |
-| `console-rx-clear` (new, aarch64) | a byte looped into the FIFO between the drain and the clear reaches the tty | the old order (drain, then clear): the byte is never read |
-| shell harness burst cycles | a line typed as a background job exits echoes and runs | the old order: the probe's 13 in 20 |
+| `console-rx-clear` (new, aarch64) | a byte looped into the FIFO after the drain still has its receive interrupt pending | the old order (drain, then clear): fails on the first boot |
+| shell harness burst cycles | a line typed as a background job exits echoes and runs | the old order: 1 in 5 release boots, so not the proof |
 
 ## Benchmarks
 
