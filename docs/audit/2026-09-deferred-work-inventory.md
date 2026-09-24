@@ -204,6 +204,12 @@ AHCI are the two entries from that list now built.
   never separated -- five hundred refused pulls a second, by S26 -- and
   one chaos move of a released spinner onto a busy CPU makes that pair,
   so `sched-balance-pull` asserted the window rather than the contract.
+  **Open, not taken up:** a thread preempted in *user* mode cannot be
+  mid-way through a kernel per-CPU access, so S26 need not hold it; two
+  compute-bound user threads that came to share a CPU would otherwise
+  stay together while another CPU idles. The same probe's user-thread
+  measurement found no such pair stuck in twelve boots (one sharing, of
+  16 ms, that resolved), so there is no measured defect yet.
 - no priority inheritance in `mutex.c`.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
