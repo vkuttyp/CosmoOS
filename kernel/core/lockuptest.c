@@ -391,10 +391,18 @@ bool selftest_lockup_sample_irqoff(const char **reason)
 
 struct racer {
     volatile bool *go;
+    unsigned *returned;          /* shared: racers whose sample call has returned */
+    struct lockup_sample_info info;   /* what this racer's sample did */
     bool ok;
+    bool saw_loser;              /* winner only: the loser returned while this held the slot */
     cpumask_t mask;
     uint64_t elapsed_ns;
 };
+
+/* A hang guard, not a measurement: a host stall of a second is not what
+ * CI does -- the largest measured under a load average of 200 was 125 ms
+ * (docs/audit/next-subsystem-lockup-bound.md). */
+#define SAMPLE_HANG_NS (1000ull * 1000 * 1000)
 
 static void racer_main(void *arg)
 {
@@ -402,13 +410,18 @@ static void racer_main(void *arg)
     while (!*r->go)
         arch_cpu_relax();
     uint64_t t0 = clock_now_ns();
-    r->ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &r->mask);
+    r->ok = lockup_sample_all_info(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, 0, &r->mask, &r->info);
     r->elapsed_ns = clock_since_ns(t0);
+    __atomic_fetch_add(r->returned, 1u, __ATOMIC_ACQ_REL);
     if (r->ok) {
-        /* Hold the slot long enough for the loser to have asked. */
-        uint64_t until = clock_now_ns() + 2 * 1000 * 1000;
-        while (clock_now_ns() < until)
+        /* Hold the slot until the loser has returned: "refused at once"
+         * as an order, not a time. A loser that waited for the slot would
+         * return only after this releases it, and the guard would expire
+         * first. The 2 ms stopwatch this replaces measured the host. */
+        uint64_t until = clock_now_ns() + SAMPLE_HANG_NS;
+        while (__atomic_load_n(r->returned, __ATOMIC_ACQUIRE) < 2 && clock_now_ns() < until)
             arch_cpu_relax();
+        r->saw_loser = __atomic_load_n(r->returned, __ATOMIC_ACQUIRE) >= 2;
         lockup_print_samples(r->mask);
     }
 }
@@ -423,12 +436,14 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
     lockup_get_stats(&s0);
 
     volatile bool go = false;
+    unsigned returned = 0;
     struct racer r[2];
     struct thread *t[2];
     unsigned cpus[2] = { 0, 1 };
     for (int i = 0; i < 2; i++) {
         memset(&r[i], 0, sizeof(r[i]));
         r[i].go = &go;
+        r[i].returned = &returned;
         t[i] = thread_create_on(racer_main, &r[i], "lockup-racer", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpus[i]));
         CHECK(t[i] != NULL);
     }
@@ -442,18 +457,25 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
     const struct racer *loser = r[0].ok ? &r[1] : &r[0];
     const struct racer *winner = r[0].ok ? &r[0] : &r[1];
     CHECK(loser->mask == 0);
-    /* Refused at once: far under the winner's 2 ms hold, which is what a
-     * loser that waited for the slot would take (an interrupt landing on
-     * the loser's CPU in between costs tens of microseconds under TCG). */
-    CHECK(loser->elapsed_ns < 1000 * 1000);
-    CHECK(winner->elapsed_ns < LOCKUP_SAMPLE_TIMEOUT_NS + 2 * 1000 * 1000);
+    CHECK(winner->saw_loser);                    /* refused while the slot was held: by order */
+    CHECK(loser->info.claims == 1);              /* and at once: one attempt at the slot, never retried */
+    CHECK(loser->info.waits == 0);               /* sending nothing, waiting for nothing */
+    CHECK(loser->elapsed_ns < SAMPLE_HANG_NS);   /* guards against a hang, not measures */
+    CHECK(winner->elapsed_ns < SAMPLE_HANG_NS);
     CHECK(s1.samples == s0.samples + 1 && s1.samples_busy == s0.samples_busy + 1);
     kinfo("selftest: lockup-sample-busy: winner %llu us, loser refused in %llu us",
           (unsigned long long)(winner->elapsed_ns / 1000), (unsigned long long)(loser->elapsed_ns / 1000));
 
     /* The bound is total, not per target: two CPUs that cannot answer
-     * (interrupts masked; on x86-64 the NMI answers anyway) cost one
-     * timeout together, not one each. Needs three CPUs. */
+     * cost one timeout together, not one each. Needs three CPUs.
+     *
+     * Checked by what the sampler did, not by a stopwatch: the wall-clock
+     * bound this replaces (el < 5 ms + 2 ms) failed ten times in eight days
+     * at 88-241 ms, and a probe under host load found the excess was time
+     * the virtual CPU did not run (docs/audit/next-subsystem-lockup-bound.md).
+     * The sampler counts the waits it arms; the targets are made unable to
+     * answer on both architectures (on x86-64 the NMI answers even masked,
+     * so the claim was never exercised there). */
     if (n >= 3) {
         unsigned me = arch_cpu_id();
         unsigned a = (me + 1) % n, b = (me + 2) % n;
@@ -461,12 +483,15 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
         struct thread *ta = start_spinner(&sa, a, SCHED_PRIO_DEFAULT, true);
         struct thread *tb = start_spinner(&sb, b, SCHED_PRIO_DEFAULT, true);
         CHECK(ta != NULL && tb != NULL);
+        /* This sample's own report: no global state, so no other sample's
+         * count mixes in and no real report is sent without its NMI. */
+        struct lockup_sample_info info;
         uint64_t t0 = clock_now_ns();
         cpumask_t m = 0;
-        bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
+        bool ok = lockup_sample_all_info(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, LOCKUP_SAMPLE_IPI_ONLY, &m, &info);
         uint64_t el = clock_since_ns(t0);
         if (ok)
-            lockup_print_samples(m);
+            lockup_print_samples(m);   /* releases the slot, before any check can return */
         /* Both stop before either is joined: a join frees a stack, and
          * that TLB shootdown waits for every CPU's acknowledgement,
          * which a CPU with interrupts masked cannot give. */
@@ -475,8 +500,12 @@ static bool selftest_lockup_sample_busy_pinned(const char **reason)
         thread_join(ta);
         thread_join(tb);
         CHECK(ok);
-        CHECK(el < LOCKUP_SAMPLE_TIMEOUT_NS + 2 * 1000 * 1000);
-        kinfo("selftest: lockup-sample-busy: two masked targets, one bound: %llu us", (unsigned long long)(el / 1000));
+        CHECK(info.waits == 1);                                     /* one wait for both: the bound is total */
+        CHECK(info.wait_ns == LOCKUP_SAMPLE_TIMEOUT_NS);            /* ... armed for the timeout asked, not a multiple */
+        CHECK((m & (CPUMASK_OF(a) | CPUMASK_OF(b))) == 0);         /* neither answered: it waited out its timeout */
+        CHECK(el < SAMPLE_HANG_NS);                                 /* a guard against a wait that never stops */
+        kinfo("selftest: lockup-sample-busy: two targets that could not answer, one wait (%llu us)",
+              (unsigned long long)(el / 1000));
     }
     CHECK(threads_settled(before));
     return true;
