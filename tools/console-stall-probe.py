@@ -138,10 +138,12 @@ B_ANCHOR = '''        from shelltest import ShellTest
 '''
 B_PROBE = '''        from shelltest import ShellTest
         shelltest = ShellTest()
-        if "QEMU_QMP" not in env:   # CSPROBE: a QMP socket for the stall dump
+        if not env.get("QEMU_QMP"):   # CSPROBE: a QMP socket for the stall dump
             import tempfile
             env["QEMU_QMP"] = os.path.join(tempfile.mkdtemp(prefix="cosmo-csp-"), "qmp.sock")
-            os.environ["QEMU_QMP"] = env["QEMU_QMP"]
+        # Whatever socket QEMU is given -- the keyboard harness sets its own
+        # when it runs, and that one wins -- is the one the dump must use.
+        os.environ["QEMU_QMP"] = env["QEMU_QMP"]
 '''
 
 
