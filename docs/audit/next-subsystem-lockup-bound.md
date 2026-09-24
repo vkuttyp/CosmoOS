@@ -175,13 +175,18 @@ not covered by the slot's exclusion -- banner item 1.)
 
 ### 2. The masked targets cannot answer, on both architectures
 
-A debug-build knob (**as built: a per-call flag, `LOCKUP_SAMPLE_IPI_ONLY`, banner item 1**), `lockup_test_ipi_only(true)`, makes the sampler send
-the ordinary interrupt instead of the NMI. With it set, a CPU spinning
-with interrupts masked cannot answer on x86-64 either, and the
-three-CPU part checks that **neither masked target answered** (their
+The test's three-CPU sample is sent with the ordinary interrupt instead
+of the NMI: **as built, the flag `LOCKUP_SAMPLE_IPI_ONLY`, passed to
+`lockup_sample_all_info` for that one call** (banner item 1). With it, a
+CPU spinning with interrupts masked cannot answer on x86-64 either, and
+the three-CPU part checks that **neither masked target answered** (their
 bits clear in `answered`) -- which proves the sample waited out its
-timeout -- on both architectures. The knob is set only around that
-sample and cleared on every exit.
+timeout -- on both architectures. No other sample and no real report is
+affected, because the flag is that call's argument, not state. (The
+report as written proposed a debug-build global knob,
+`lockup_test_ipi_only`, set around the sample; review found that a global
+would have changed any real report taken while it was set, and it was
+never built.)
 
 ### 3. Time bounds that stay, and what they are
 
