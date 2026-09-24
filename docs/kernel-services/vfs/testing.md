@@ -242,10 +242,11 @@ through the device) and warm (the page cache). The syscall side is
 
 **What is not asserted**, and is an inventory row rather than a
 comment: no test attempts an unprivileged open, because kernel
-self-tests and the user-mode suite both run as root; and no test fires
-`vfs_umount2`'s second-unmount guard, because the path walk refuses
-first and the door that reaches it is a relative path resolved from
-inside the mount.
+self-tests and the user-mode suite both run as root. (The second item
+this paragraph listed -- no test firing the second-unmount guard -- is
+closed: see `vfs-umount-once` below. The door the row named, a relative
+path from inside the mount, did not exist until the mount-rel unit
+made `umount` resolve relative targets from a start.)
 
 ### The held walk (`docs/audit/next-subsystem-cwd-hold.md`; debug builds)
 
@@ -286,11 +287,12 @@ order happen on purpose, gated on the seam's own state and never on time.
 The `swapfirst` pass is native-only because the Linux program has no
 sysctl to read the state from.
 
-### Starts and names (`docs/audit/next-subsystem-dirfd.md`, `docs/audit/next-subsystem-cwd-name.md`)
+### Starts and names (`docs/audit/next-subsystem-dirfd.md`, `docs/audit/next-subsystem-cwd-name.md`, `docs/audit/next-subsystem-mount-rel.md`)
 
 | test | checks |
 | --- | --- |
 | `vfs-rename2` | a rename whose two names resolve from two starts lands where the second start names it, and not beside the first (P31) |
+| `vfs-umount-once` | the one-unmount-at-a-time guard (the mount-rel unit, `docs/audit/next-subsystem-mount-rel.md`): a ramfs at `/tmp/um` holding a directory `d`; a maintenance pass held (`vfs_mount_acquire`) so a first unmount by absolute path, in a thread, waits in its drain; once `unmounting` is seen set (under the mountpoint's lock), a second unmount of `d/..` from the mount's root -- a path that names that root only from there -- must answer `-EBUSY` within a bounded wait while the first is still waiting; then the root reference and the pass are released, the first completes `0`, and the mount count is back |
 | `vfs-lookup-named` | the traversed name (P32): fifteen walks under `/tmp/ln` -- plain components, `.`, `..` including at `/` and above the start, an absolute link as the last component and mid-path (`abs/..` is the target's parent, not `/tmp/ln`), a relative link as the last component (the one shape where a link's spelling left in the name is not erased by a restart at `/`) and mid-path, a chain of two, a relative link into a ramfs mounted at `/tmp/ln/m`, `..` out of that mount's root, a link inside the mount leaving it through its root, a trailing slash -- each name compared with the expected text and then walked again from the root to the same vnode; a relative walk from a start with no name is `-ENOENT`, a name that does not fit `-ENAMETOOLONG`, and one that overflowed before an absolute link to a short target is that target's name (`a/b/toroot` into ten bytes is `/tmp`) |
 
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)

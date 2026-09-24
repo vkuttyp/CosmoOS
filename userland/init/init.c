@@ -75,6 +75,36 @@ static void fs_selftest(void)
     CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
     CHECK(cosmo_rmdir("/tmp/flagm") == 0);
 
+    /* A relative mount target names what the caller's own directory
+     * names, as every other path call does (P27,
+     * docs/audit/next-subsystem-mount-rel.md). With `mrel` both beside
+     * the caller and under `/`, the mount used to cover `/mrel`. Which
+     * one a mount covers is read from the inode each name reports. */
+    {
+        struct cosmo_stat t0, r0, t1, r1;
+        CHECK(cosmo_mkdir("/tmp/mrel", 0755) == 0 && cosmo_mkdir("/mrel", 0755) == 0);
+        CHECK(cosmo_stat("/tmp/mrel", &t0) == 0 && cosmo_stat("/mrel", &r0) == 0);
+        CHECK(chdir("/tmp") == 0);
+        CHECK(cosmo_mount("none", "mrel", "ramfs", 0) == 0);
+        CHECK(cosmo_stat("/tmp/mrel", &t1) == 0 && t1.ino != t0.ino);   /* the one beside it */
+        CHECK(cosmo_stat("/mrel", &r1) == 0 && r1.ino == r0.ino);       /* not the one under / */
+        /* From inside, the caller's own directory holds the mount. (Before
+         * the fix "." named / and was refused as the root filesystem: the
+         * same errno, so this line alone proves nothing; the next ones do.) */
+        CHECK(chdir("mrel") == 0);
+        CHECK(cosmo_umount(".") == -COSMO_EBUSY);
+        CHECK(chdir("..") == 0);
+        CHECK(cosmo_umount("mrel") == 0);
+        CHECK(cosmo_stat("/tmp/mrel", &t1) == 0 && t1.ino == t0.ino);   /* uncovered */
+        /* With nothing under / to take it, a relative mount still lands here. */
+        CHECK(cosmo_rmdir("/mrel") == 0);
+        CHECK(cosmo_mount("none", "mrel", "ramfs", 0) == 0);
+        CHECK(cosmo_stat("/tmp/mrel", &t1) == 0 && t1.ino != t0.ino);
+        CHECK(cosmo_umount("mrel") == 0);
+        CHECK(chdir("/") == 0);
+        CHECK(cosmo_rmdir("/tmp/mrel") == 0);
+    }
+
     /* Symbolic links through the libc wrappers: the link's own type and
      * the target's, the bytes without a terminator, and O_NOFOLLOW. */
     {

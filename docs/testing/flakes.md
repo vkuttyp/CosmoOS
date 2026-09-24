@@ -813,6 +813,12 @@ reproduced in three further runs with the same image, and the same tree
 with the branch's new device absent (`QEMU_RMDISK=0`) passed three for
 three as well, so it is a sighting and not a consequence of the branch.
 
+**A second, 2026-09-24**, x86-64 debug, locally, on the mount-rel branch
+(`hits >= 5` at `irqtest.c:247`, 51 ms), in one of the unit's mutation
+boots -- a mutation of `vfs_umount_at`, which no interrupt path calls.
+The boots before and after it on the same host passed the test. The
+first on x86-64; still the family, still a sighting.
+
 **It also manufactured a second failure, and that part is a real
 defect in the test.** `irq-affinity` failed immediately after with
 `irq_request(...) == 0` returning `-EBUSY`: `irq-route`'s `CHECK`

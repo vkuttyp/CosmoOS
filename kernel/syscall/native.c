@@ -899,7 +899,12 @@ static int64_t sys_mount(struct syscall_args *a)
         if (bd == NULL)
             return -ENODEV;
     }
-    rc = vfs_mount(target, fstype, bd, flags);
+    /* A relative target from the caller's directory, as every other path
+     * call resolves one (P27); it used to be resolved from the root. */
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_mount_at(cwd, target, fstype, bd, flags);
+    if (cwd)
+        vnode_put(cwd);
     if (bd)
         blkdev_put(bd);   /* the mount took its own reference */
     return rc;
@@ -914,7 +919,13 @@ static int64_t sys_umount(struct syscall_args *a)
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char target[VFS_PATH_MAX];
     int rc = get_path(a->a[0], target);
-    return rc ? rc : vfs_umount2(target, flags ? VFS_UMOUNT_FORCE : 0);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();   /* as sys_mount (P27) */
+    rc = vfs_umount_at(cwd, target, flags ? VFS_UMOUNT_FORCE : 0);
+    if (cwd)
+        vnode_put(cwd);
+    return rc;
 }
 
 /* --- Phase 8: sockets ------------------------------------------------------- */

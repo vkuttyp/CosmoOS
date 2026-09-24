@@ -310,6 +310,13 @@ a walk is a crash rather than a wrong answer, so the mount carries
 
 The handshake, and it needs no claim about who takes which lock first:
 
+- `vfs_umount_at` (and `vfs_umount2`, its NULL-start form) refuses
+  `-EBUSY` if `mnt->unmounting` is already set -- one unmount at a time,
+  because the drain below drops `g_mounts_lock` and a second caller in
+  that gap would remove the namespace links the first is removing. Only
+  a path from inside the mount reaches it then (`follow_mount` refuses an
+  unmounting mount to anyone crossing its mountpoint); `vfs-umount-once`
+  fires it that way.
 - `vfs_umount2` sets `mnt->unmounting` before anything else it decides,
   to turn new walkers away. `vfs_mount_acquire` is one of the things it
   turns away, so from that moment the count can only fall.

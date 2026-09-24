@@ -83,6 +83,19 @@ filesystem, `-ENOENT`/`-ENOTDIR` for the target, `-EBUSY` if the target
 is already covered or is a mount root (no stacking) or is `/`, or the
 filesystem's own error (`-EIO` for an unformatted device, `-EINVAL` for
 a ramfs given a device or a cosmofs given none). Logs `vfs: mounted`.
+`path` resolves from the caller's root: it is `vfs_mount_at(NULL, ...)`.
+
+**`int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)`**
+and **`int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)`**
+(the mount-rel unit) The same, with `path` resolved from `start` (NULL:
+the caller's root), as every other entry point resolves its path. The
+`mount` and `umount` system calls pass the caller's working directory,
+so a relative target names what the caller's own directory names; they
+passed nothing until this unit, and from `/tmp` a mount on `mrel`
+covered `/mrel`. From inside a mount, a relative path to its root (`.`,
+or `d/..`) reaches it without crossing the mountpoint -- which is how a
+second unmount can find a mount whose first unmount is draining, and
+meet the one-unmount-at-a-time guard (`-EBUSY`).
 
 **`int vfs_umount(const char *path)`** `path` must resolve to a mount's
 root (`-EINVAL` otherwise, `-EBUSY` for `/`). `-EBUSY` while any vnode of
@@ -96,7 +109,11 @@ transaction is dropped here), drop the root, release the device.
 `vfs_umount2(path, VFS_UMOUNT_FORCE)` skips the commit and drops the
 open transaction: the recovery path when a commit keeps failing (for
 example after cosmofs abandoned a transaction). User space reaches it
-through `umount(target, COSMO_UMOUNT_FORCE)`, uid 0 only.
+through `umount(target, COSMO_UMOUNT_FORCE)`, uid 0 only. `vfs_umount`
+and `vfs_umount2` are `vfs_umount_at(NULL, ...)`. **A second unmount of
+a mount whose first is still draining is `-EBUSY` at once** (the guard
+on `mnt->unmounting`), rather than joining the drain and tearing down
+the same mount twice.
 
 **`int vfs_sync(void)`** `fs->sync` on every mount; the first error is
 returned after all mounts were tried.
@@ -582,8 +599,8 @@ Numbers 0–10 are unchanged (Phase 4). New:
 | 18 | `rename` | `const char *old, const char *new` | 0 | path errors, `EXDEV`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EBUSY`, `EINVAL` |
 | 19 | `getdents` | `int h, void *buf, size_t len` | bytes, 0 at end | `EBADF` (also a handle without READ), `EFAULT`, `ENOTDIR`, `EINVAL` |
 | 20 | `sync` | — | 0 | a filesystem's error |
-| 21 | `mount` | `const char *source, const char *target, const char *fstype, unsigned flags` | 0 | `EPERM` (uid ≠ 0), `ENODEV` (unknown device or filesystem), `EBUSY`, `EIO`, path errors |
-| 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY`, path errors |
+| 21 | `mount` | `const char *source, const char *target, const char *fstype, unsigned flags` | 0 | `EPERM` (uid ≠ 0), `ENODEV` (unknown device or filesystem), `EBUSY`, `EIO`, path errors; a relative target resolves from the caller's working directory (the mount-rel unit; it used to resolve from the root) |
+| 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY`, path errors; a relative target from the caller's working directory, as `mount`'s |
 | 100 | `mknod` | `const char *path, uint32_t mode, uint32_t type` | 0 | `EINVAL` (`type` is not `COSMO_DT_FIFO`: a socket's name is made by `bind`), path errors, `EEXIST`, `EOPNOTSUPP` (no `mknod`: cosmofs, procfs), `EROFS` |
 
 These are the namespace's numbers; `SYS_COUNT` was 23 when they were

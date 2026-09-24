@@ -258,9 +258,19 @@ accurately until threads made it a defect. `chdir` verifies the target is
 a directory before swapping vnode and name together under
 `process.lock`, the name being the path the walk took (P32), and takes
 the base it names from from the *same* snapshot it looks up in; a child inherits both (or the `cwd` named in the
-spawn request). Check: `init --selftest` (`mkdir` relative to `/tmp`,
+spawn request). **`mount` and `umount` included**: until the mount-rel
+unit (`docs/audit/next-subsystem-mount-rel.md`) they were the one
+exception, resolving a relative target from the caller's root -- from
+`/tmp`, a mount on `mrel` covered `/mrel` -- and now pass the referenced
+cwd to `vfs_mount_at` / `vfs_umount_at` like every other path call.
+Check: `init --selftest` (`mkdir` relative to `/tmp`,
 `chdir("cwdtest/../cwdtest/.")` gives `/tmp/cwdtest`, `..` gives `/tmp`,
-`ENOTDIR`, `ENOENT`, `ERANGE`; a child's `cd` leaves the parent's cwd);
+`ENOTDIR`, `ENOENT`, `ERANGE`; a child's `cd` leaves the parent's cwd;
+from `/tmp`, with `mrel` both there and under `/`, a relative mount
+covers `/tmp/mrel` by inode and not `/mrel`, the relative unmount
+uncovers it, and with `/mrel` gone the relative mount still lands in
+`/tmp`); `vfs-umount-once` (an unmount from inside a mount, which only a
+start makes possible);
 `process-spawn` (the `path_normalize` table). Gap: a renamed ancestor is
 not noticed by `getcwd` (the string is authoritative for display, the
 vnode for resolution).

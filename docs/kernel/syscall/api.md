@@ -49,8 +49,8 @@ kernel stack.
 | 19 | `getdents` | `int h, void *buf, size_t len` | bytes, 0 at end | `EBADF`, `EFAULT`, `ENOTDIR`, `EINVAL` |
 | 20 | `sync` | none | 0 | filesystem error |
 | 100 | `mknod` | `const char *path, uint32_t mode, uint32_t type` | 0 | `EINVAL` (`type` is not `COSMO_DT_FIFO`), path errors, `EEXIST`, `EOPNOTSUPP`, `EROFS`; the named-pipes unit (`docs/kernel/ipc/api.md`) |
-| 21 | `mount` | `source, target, fstype, flags` (`COSMO_MOUNT_RDONLY`) | 0 | `EPERM`, `EINVAL` (an unknown flag bit), `ENODEV`, `EBUSY`, `EIO` |
-| 22 | `umount` | `const char *target, unsigned flags` (`COSMO_UMOUNT_FORCE`) | 0 | `EPERM`, `EINVAL`, `EBUSY`, the commit's error |
+| 21 | `mount` | `source, target, fstype, flags` (`COSMO_MOUNT_RDONLY`); a relative `target` from the caller's working directory | 0 | `EPERM`, `EINVAL` (an unknown flag bit), `ENODEV`, `EBUSY`, `EIO` |
+| 22 | `umount` | `const char *target, unsigned flags` (`COSMO_UMOUNT_FORCE`); a relative `target` from the caller's working directory | 0 | `EPERM`, `EINVAL`, `EBUSY` (also: another unmount of the same mount is draining), the commit's error |
 | 23 | `socket` | `int family, int type, int proto` (`type` may carry `COSMO_SOCK_NONBLOCK` 0x800) | handle (READ and WRITE) | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
 | 24 | `bind` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EPERM`, `EADDRINUSE`, `EADDRNOTAVAIL` |
 | 25 | `listen` | `int h, int backlog` | 0 | `EBADF`, `EOPNOTSUPP`, `EINVAL` |
