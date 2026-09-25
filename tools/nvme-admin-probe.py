@@ -29,7 +29,7 @@ the same adversary can be run against it.
     gmake ARCH=aarch64 test        # and ARCH=x86_64
     python3 tools/nvme-admin-probe.py revert
 
-Every widened complete() prints nothing (it runs with interrupts masked);
+Every widened complete_linger() prints nothing (it runs with interrupts masked);
 the boot's own verdict and, on a panic, its message and the held-lock list
 are the result. Commit before applying; commit nothing while applied.
 
@@ -56,18 +56,15 @@ BACKUP = '.nvme-admin-probe.orig'
 STAMP = '.nvme-admin-probe.applied'
 
 C_ANCHOR_INC = '#include <kernel/sched.h>\n'
-C_PROBE_INC = C_ANCHOR_INC + '#include <arch/cpu.h>        /* NAPROBE */\n#include <kernel/string.h>   /* NAPROBE */\n#include <kernel/timer.h>    /* NAPROBE */\n'
+C_PROBE_INC = C_ANCHOR_INC + '#include <kernel/string.h>   /* NAPROBE: strcmp (arch/cpu.h, timer.h already included) */\n'
 
-C_ANCHOR = '''    arch_irq_state_t s = spin_lock_irqsave(&c->lock);
-    c->done = true;
-    waitqueue_wake_all(&c->wq);'''
+# complete_linger sets `done` above and wakes here; widen the gap in between.
+C_ANCHOR = '    waitqueue_wake_all(&c->wq);'
 
 
 def c_probe(spin_us):
-    return f'''    arch_irq_state_t s = spin_lock_irqsave(&c->lock);
-    c->done = true;
-    /* NAPROBE (tools/nvme-admin-probe.py; not for merge): hold the window
-     * between `done` and the unlock open, for the NVMe admin completion as
+    return f'''    /* NAPROBE (tools/nvme-admin-probe.py; not for merge): hold the window
+     * between `done` and the wake open, for the NVMe admin completion as
      * signalled from its interrupt handler only. */
     if (raw_this_cpu()->irq_depth != 0 && c->lock.name != NULL && strcmp(c->lock.name, "nvme-admin") == 0) {{
         uint64_t until = clock_now_ns() + {spin_us}ull * 1000ull;
@@ -77,16 +74,18 @@ def c_probe(spin_us):
     waitqueue_wake_all(&c->wq);'''
 
 
-N_ANCHOR = '''    int rc;
-    bool timed_out = false;
-    if (!completion_done(&w.done)) {'''
-N_FIXED = '''    int rc;
-    bool timed_out = false;
-    /* NAPROBE --fixed: decide once. Two reads of `done` let the interrupt
-     * land between them, skipping both the handshake and the timeout path. */
-    if (completion_done(&w.done)) {
-        wait_for_completion(&w.done);   /* the handshake before the frame goes */
-    } else {'''
+# --broken removes the fix from the interrupt-signalled admin wait, restoring
+# the pre-fix poll (completion_done then return, no handshake).
+N_ANCHOR = '''        /* The interrupt path signals from another CPU: wait_for_completion_timeout
+         * does the handshake, so a completed command's frame is free to leave. */
+        completed = wait_for_completion_timeout(&w.done, (uint64_t)NVME_ADMIN_TIMEOUT_MS * 1000000ull);'''
+N_BROKEN = '''        /* NAPROBE --broken: the pre-fix poll -- completion_done then return,
+         * no handshake, the bug this unit fixed. */
+        completed = false;
+        for (unsigned pw = 0; pw < NVME_ADMIN_TIMEOUT_MS && !completed; pw++) {
+            thread_sleep_ms(1);
+            completed = completion_done(&w.done);
+        }'''
 
 
 def sha(p):
@@ -172,20 +171,20 @@ def revert():
     print('reverted')
 
 
-def files(spin_us, fixed):
+def files(spin_us, broken):
     fl = [(COMPLETION, [(C_ANCHOR_INC, C_PROBE_INC), (C_ANCHOR, c_probe(spin_us))])]
-    if fixed:
-        fl.append((NVME, [(N_ANCHOR, N_FIXED)]))
+    if broken:
+        fl.append((NVME, [(N_ANCHOR, N_BROKEN)]))
     return fl
 
 
 def apply():
     args = sys.argv[2:]
-    fixed = '--fixed' in args
-    rest = [a for a in args if a != '--fixed']
+    broken = '--broken' in args
+    rest = [a for a in args if a != '--broken']
     spin_us = int(rest[0]) if rest else 3000
-    apply_files(files(spin_us, fixed))
-    print(f'applied (spin {spin_us} us{", with the handshake fix" if fixed else ""})')
+    apply_files(files(spin_us, broken))
+    print(f'applied (spin {spin_us} us{", fix removed" if broken else ""})')
 
 
 if __name__ == '__main__':
