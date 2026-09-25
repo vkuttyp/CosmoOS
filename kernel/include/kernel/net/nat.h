@@ -107,13 +107,42 @@ bool nat_in(struct netif *nif, struct mbuf *m,
 void nat_age(uint64_t now_ns);
 void nat_flush(void);                 /* drop every entry (test isolation) */
 
+/* Every refusal counter has one cause (docs/audit/next-subsystem-net-flows.md
+ * §3): the operator reads them through the control channel, and a counter
+ * that lumps two causes together points at the wrong diagnosis. */
 struct nat_stats {
-    uint64_t out_new, out_reuse, out_drop_full, out_drop_noport;
+    uint64_t out_new, out_reuse;
+    uint64_t out_drop_share;          /* the guest's share was full */
+    uint64_t out_drop_table;          /* the whole table was full */
+    uint64_t out_drop_noport;         /* no NAT identifier was free */
     uint64_t in_translated, in_no_match, in_icmp_error;
-    uint64_t dnat_in, dnat_reply, dnat_drop_full;
+    uint64_t dnat_in, dnat_reply;     /* packets translated, not flows */
+    uint64_t dnat_drop_ambiguous;     /* the reply's reverse key was already in use */
+    uint64_t dnat_drop_share;         /* the target guest's share was full */
+    uint64_t dnat_drop_table;         /* the whole table was full */
     uint64_t expired;
     uint32_t entries;                 /* live entries right now */
 };
 void nat_get_stats(struct nat_stats *out);
+
+#define NAT_KIND_MASQ 0u              /* outbound masquerade: guest -> world, reply back */
+#define NAT_KIND_DNAT 1u              /* inbound port-forward: client -> host:P -> guest:Q */
+
+/* One live entry, as the control channel lists it. `orig` is the guest's
+ * endpoint; `nat` is the uplink identity lent to it (MASQ) or the host
+ * address and port the client dialled (DNAT); `peer` is the far side (for
+ * ICMP the ports are the echo id and 0). */
+struct nat_flow {
+    uint8_t  kind;                    /* NAT_KIND_* */
+    uint8_t  proto;                   /* IPPROTO_UDP / TCP / ICMP */
+    bool     est;                     /* TCP: a non-SYN segment has passed */
+    uint16_t orig_port, nat_port, peer_port;
+    uint32_t orig_ip, nat_ip, peer_ip;    /* network order */
+    uint64_t expires_ns;
+};
+/* Copy up to `max` of the entries live at `now` -- in use and not expired,
+ * exactly the entries nat_guest_count counts against a share (invariant
+ * N24) -- under one hold of the table lock. Returns the number copied. */
+unsigned nat_flow_list(struct nat_flow *out, unsigned max, uint64_t now);
 
 #endif /* KERNEL_NET_NAT_H */

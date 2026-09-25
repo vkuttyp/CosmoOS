@@ -253,7 +253,8 @@ struct fw_stats {
     uint64_t accept_rule, drop_rule;             /* FORWARD verdicts from a matching rule */
     uint64_t accept_default, drop_default;       /* FORWARD verdicts from the default policy */
     uint64_t accept_established;                 /* a flow-table hit */
-    uint64_t flow_new, flow_drop_full;           /* flows recorded / refused for the guest's share */
+    uint64_t flow_new;                           /* guest-to-guest flows recorded */
+    uint64_t flow_drop_share, flow_drop_table;   /* refused: the initiator's share full / no free slot */
     uint64_t expired;
     uint64_t in_accept_rule, in_drop_rule;       /* INPUT verdicts from a matching rule */
     uint64_t in_accept_default, in_drop_default; /* INPUT verdicts from the default policy */
@@ -261,11 +262,30 @@ struct fw_stats {
     uint64_t hin_accept_rule, hin_drop_rule;     /* host-chain verdicts from a matching rule */
     uint64_t hin_accept_default, hin_drop_default; /* host-chain verdicts from the host default */
     uint64_t hin_accept_established;             /* host chain: the reverse of a flow the host opened */
-    uint64_t hin_flow_new, hin_flow_drop_full;   /* host flows recorded / not recorded (share spent) */
+    uint64_t hin_flow_new;                       /* host flows recorded */
+    uint64_t hin_flow_unrecorded;                /* not a refusal: the datagram was sent, its flow not
+                                                  * recorded (the host's share or the table full), so
+                                                  * its reply takes the host chain's rules */
     uint64_t out_accept_rule, out_drop_rule;     /* OUTPUT verdicts from a matching rule */
     uint64_t out_accept_default, out_drop_default; /* OUTPUT verdicts from the host's OUTPUT default */
     uint32_t flows, rules;                       /* live right now (rules: every guest's and the host's) */
 };
 void fw_get_stats(struct fw_stats *out);
+
+/* One live flow, as the control channel lists it: `a` opened it to `b`
+ * (ICMP: a_port is the echo id, b_port 0); `guest_ip` is the share it
+ * counts against, FW_HOST_GUEST_IP for a flow the host opened. */
+struct fw_flow_info {
+    uint32_t guest_ip;
+    uint32_t a_ip, b_ip;              /* network order */
+    uint16_t a_port, b_port;          /* host order */
+    uint8_t  proto;
+    bool     est;                     /* TCP: an ACK without SYN has passed */
+    uint64_t expires_ns;
+};
+/* Copy up to `max` of the flows live at `now` -- in use and not expired,
+ * exactly the flows flow_slot counts against a share (invariant N24) --
+ * under one hold of the flow table's lock. Returns the number copied. */
+unsigned fw_flow_list(struct fw_flow_info *out, unsigned max, uint64_t now);
 
 #endif /* KERNEL_NET_FW_H */

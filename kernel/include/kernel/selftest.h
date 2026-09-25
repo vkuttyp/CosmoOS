@@ -328,6 +328,8 @@ bool selftest_net_dhcp(const char **reason);
 bool selftest_net_dns(const char **reason);
 bool selftest_net_dnat(const char **reason);
 bool selftest_net_tapctl(const char **reason);
+bool selftest_net_flows_nat(const char **reason);
+bool selftest_net_flows_fw(const char **reason);
 bool selftest_net_multiguest(const char **reason);
 bool selftest_net_firewall(const char **reason);
 bool selftest_net_input(const char **reason);

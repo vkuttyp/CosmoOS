@@ -22,6 +22,8 @@
 #include <kernel/netif.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
+#include <kernel/syscall.h>
+#include <kernel/timer.h>
 #include <kernel/thread.h>
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
@@ -32,6 +34,15 @@ _Static_assert(COSMO_NETCTL_MAX_GUESTS == FW_MAX_GUESTS, "netctl.h guest bound d
 _Static_assert(COSMO_NETCTL_MAX_RULES_PER_GUEST == FW_RULES_PER_GUEST,
                "netctl.h rules-per-guest bound drifted from FW_RULES_PER_GUEST");
 _Static_assert(COSMO_NETCTL_HOST_ADDR == FW_HOST_GUEST_IP, "netctl.h host sentinel drifted from FW_HOST_GUEST_IP");
+_Static_assert(COSMO_NETCTL_MAX_NAT_FLOWS == NAT_TABLE_SIZE, "netctl.h NAT flow bound drifted from NAT_TABLE_SIZE");
+_Static_assert(COSMO_NETCTL_MAX_FW_FLOWS == FW_FLOW_MAX, "netctl.h firewall flow bound drifted from FW_FLOW_MAX");
+_Static_assert(COSMO_NETCTL_PROTO_ICMP == IPPROTO_ICMP && COSMO_NETCTL_PROTO_TCP == IPPROTO_TCP &&
+               COSMO_NETCTL_PROTO_UDP == IPPROTO_UDP, "netctl.h protocol values are the IP protocol numbers");
+/* One read is one object call through the syscall bounce, which offers at
+ * most IO_BOUNCE_MAX: a snapshot that could outgrow it could never be read. */
+_Static_assert(COSMO_NETCTL_SNAPSHOT_MAX <= IO_BOUNCE_MAX, "the netctl snapshot must fit one read");
+_Static_assert(sizeof(struct cosmo_netctl_flow) == 32, "cosmo_netctl_flow is 32 bytes in version 6");
+_Static_assert(sizeof(struct cosmo_netctl_flow_list) == 128, "cosmo_netctl_flow_list is 128 bytes in version 6");
 /* The record sizes are the ABI; a writer of the previous version must be
  * refused by size, never misread. Version 5 spent one of the command's and
  * the rule's three reserved bytes on `scope` (so those two are unchanged)
@@ -415,11 +426,95 @@ static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, si
     }
 }
 
+static uint32_t ms_left(uint64_t expires_ns, uint64_t now)
+{
+    uint64_t ms = (expires_ns - now + 999999u) / 1000000u;   /* live: expires_ns > now, so >= 1 */
+    return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+}
+
+/* The flow section (version 6): a header with the shares and the refusal
+ * counters, then every live flow, NAT's table then the firewall's, each
+ * copied in one hold of its own lock at one `now` (N24). Returns the bytes
+ * written at `p`, or -EMSGSIZE / -ENOMEM. */
+static int64_t tap_ctl_flows(uint8_t *p, size_t room)
+{
+    struct nat_flow *nf = kmalloc(NAT_TABLE_SIZE * sizeof(*nf), 0);
+    struct fw_flow_info *ff = kmalloc(FW_FLOW_MAX * sizeof(*ff), 0);
+    if (nf == NULL || ff == NULL) {
+        kfree(nf);
+        kfree(ff);
+        return -ENOMEM;
+    }
+    uint64_t now = clock_now_ns();
+    unsigned nn = nat_flow_list(nf, NAT_TABLE_SIZE, now);
+    unsigned fn = fw_flow_list(ff, FW_FLOW_MAX, now);
+    struct nat_stats ns;
+    struct fw_stats fs;
+    nat_get_stats(&ns);
+    fw_get_stats(&fs);
+
+    int64_t rc = -EMSGSIZE;
+    size_t need = sizeof(struct cosmo_netctl_flow_list) + (size_t)(nn + fn) * sizeof(struct cosmo_netctl_flow);
+    if (room >= need) {
+        struct cosmo_netctl_flow_list h = {
+            .version = COSMO_NETCTL_VERSION, .count = (uint16_t)(nn + fn),
+            .nat_quota = NAT_QUOTA_PER_GUEST, .fw_quota = FW_FLOW_QUOTA_PER_GUEST,
+            .fw_host_quota = FW_FLOW_QUOTA_HOST,
+            .counters = {
+                .masq_new = ns.out_new, .masq_drop_share = ns.out_drop_share,
+                .masq_drop_table = ns.out_drop_table, .masq_drop_noport = ns.out_drop_noport,
+                .dnat_drop_share = ns.dnat_drop_share, .dnat_drop_table = ns.dnat_drop_table,
+                .dnat_drop_ambiguous = ns.dnat_drop_ambiguous, .nat_expired = ns.expired,
+                .fw_new = fs.flow_new, .fw_drop_share = fs.flow_drop_share,
+                .fw_drop_table = fs.flow_drop_table, .fw_host_new = fs.hin_flow_new,
+                .fw_host_unrecorded = fs.hin_flow_unrecorded, .fw_expired = fs.expired,
+            },
+        };
+        memcpy(p, &h, sizeof(h));
+        uint8_t *q = p + sizeof(h);
+        for (unsigned i = 0; i < nn; i++, q += sizeof(struct cosmo_netctl_flow)) {
+            const struct nat_flow *e = &nf[i];
+            bool dnat = e->kind == NAT_KIND_DNAT;
+            /* Who opened it to whom: a masqueraded flow is the guest's to its
+             * peer; a forwarded one is the client's to the guest. */
+            struct cosmo_netctl_flow o = {
+                .table = COSMO_NETCTL_FLOW_NAT,
+                .kind = dnat ? COSMO_NETCTL_FLOW_DNAT : COSMO_NETCTL_FLOW_MASQ,
+                .proto = e->proto, .flags = e->est ? COSMO_NETCTL_FLOW_ESTABLISHED : 0,
+                .guest_addr = e->orig_ip,
+                .src_addr = dnat ? e->peer_ip : e->orig_ip, .dst_addr = dnat ? e->orig_ip : e->peer_ip,
+                .src_port = dnat ? e->peer_port : e->orig_port, .dst_port = dnat ? e->orig_port : e->peer_port,
+                .nat_addr = e->nat_ip, .nat_port = e->nat_port,
+                .expires_ms = ms_left(e->expires_ns, now),
+            };
+            memcpy(q, &o, sizeof(o));
+        }
+        for (unsigned i = 0; i < fn; i++, q += sizeof(struct cosmo_netctl_flow)) {
+            const struct fw_flow_info *f = &ff[i];
+            struct cosmo_netctl_flow o = {
+                .table = COSMO_NETCTL_FLOW_FW,
+                .kind = f->guest_ip == FW_HOST_GUEST_IP ? COSMO_NETCTL_FLOW_HOST : COSMO_NETCTL_FLOW_GUEST,
+                .proto = f->proto, .flags = f->est ? COSMO_NETCTL_FLOW_ESTABLISHED : 0,
+                .guest_addr = f->guest_ip, .src_addr = f->a_ip, .dst_addr = f->b_ip,
+                .src_port = f->a_port, .dst_port = f->b_port,
+                .expires_ms = ms_left(f->expires_ns, now),
+            };
+            memcpy(q, &o, sizeof(o));
+        }
+        rc = (int64_t)need;
+    }
+    kfree(nf);
+    kfree(ff);
+    return rc;
+}
+
 /* One read returns the whole snapshot -- the port-forward list (a struct
  * cosmo_netctl_list header and its rules) followed by the filter section (a
  * struct cosmo_netctl_filter_list; the host record (guest_addr 0) and then
  * the attached guests' policies; then every rule in evaluation order, the
- * host's first) -- or -EMSGSIZE if the buffer is too small. */
+ * host's first), then the flow section (version 6: a struct
+ * cosmo_netctl_flow_list and every live flow) -- or -EMSGSIZE if the buffer
+ * is too small. */
 static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
@@ -484,7 +579,9 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
         .version = COSMO_NETCTL_VERSION, .rule_count = (uint16_t)nr, .guest_count = (uint16_t)ng,
     };
     memcpy(fh_at, &fh, sizeof(fh));
-    return (int64_t)(p - (uint8_t *)buf);
+
+    int64_t rc = tap_ctl_flows(p, room);
+    return rc < 0 ? rc : (int64_t)(p - (uint8_t *)buf) + rc;
 }
 
 static const struct chrdev_ops tap_ctl_ops = { .read = tap_ctl_read, .write = tap_ctl_write };

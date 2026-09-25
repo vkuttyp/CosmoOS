@@ -31,8 +31,7 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 
-#define NAT_KIND_MASQ 0       /* outbound masquerade: guest -> world, reply back */
-#define NAT_KIND_DNAT 1       /* inbound port-forward: client -> host:P -> guest:Q */
+/* NAT_KIND_MASQ / NAT_KIND_DNAT: kernel/net/nat.h (the listing names them). */
 
 struct nat_entry {
     bool     in_use;
@@ -239,19 +238,19 @@ static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16
      * exists: the guest's reply carries no host port, so two such flows could
      * not be told apart on the way back. */
     if (nat_find_dnat_reply(proto, guest_ip, guest_port, client_ip, client_port, now) != NULL) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_ambiguous);
         return NULL;
     }
     /* Bound the guest's footprint the same way an outbound flow is: an inbound
      * flood using distinct client ports against one guest's forwards must fill
      * only that guest's share, not the whole table. */
     if (nat_guest_count(guest_ip, now) >= NAT_QUOTA_PER_GUEST) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_share);
         return NULL;
     }
     struct nat_entry *e = nat_free_slot(now);
     if (e == NULL) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_table);
         return NULL;
     }
     memset(e, 0, sizeof(*e));
@@ -275,7 +274,7 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
 {
     struct nat_entry *slot = nat_free_slot(now);
     if (slot == NULL) {
-        STAT(out_drop_full);
+        STAT(out_drop_table);
         return NULL;
     }
     uint16_t port = 0;
@@ -396,7 +395,7 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
          * the inbound flows to its port-forwards draw on one budget. */
         if (nat_guest_count(iph->src, now) >= NAT_QUOTA_PER_GUEST) {
             spin_unlock_irqrestore(&g_nat_lock, s);
-            STAT(out_drop_full);
+            STAT(out_drop_share);
             return -ENOSPC;
         }
         e = nat_alloc(proto, out->ip4.addr, orig_port, now);
@@ -876,6 +875,28 @@ static void pf_parse_apply(const char *cfg)
         if (*p == ',')
             p++;
     }
+}
+
+unsigned nat_flow_list(struct nat_flow *out, unsigned max, uint64_t now)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE && n < max; i++) {
+        const struct nat_entry *e = &g_nat[i];
+        /* N24: what a share counts (nat_guest_count), no more -- an expired
+         * entry still in use holds no share, so listing it would contradict
+         * the refusal the listing exists to explain. */
+        if (!e->in_use || nat_expired(e, now))
+            continue;
+        out[n++] = (struct nat_flow){
+            .kind = e->kind, .proto = e->proto, .est = e->tcp_est,
+            .orig_port = e->orig_port, .nat_port = e->nat_port, .peer_port = e->peer_port,
+            .orig_ip = e->orig_ip, .nat_ip = e->nat_ip, .peer_ip = e->peer_ip,
+            .expires_ns = e->expires_ns,
+        };
+    }
+    spin_unlock_irqrestore(&g_nat_lock, s);
+    return n;
 }
 
 void nat_age(uint64_t now_ns)
