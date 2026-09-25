@@ -7157,11 +7157,68 @@ bool selftest_net_flows_nat(const char **reason)
     }
     CHECK(mine == NAT_QUOTA_PER_GUEST);
 
+    /* (5) the other cause: the whole table. The table is exactly eight
+     * shares, so only a ninth guest can find it full with its own share
+     * unspent. A masquerading tap forwards only its one guest (.15; the
+     * anti-spoof rule in ipv4_forward), so the eight more guests are eight
+     * more taps: seven fill the table, the eighth's every flow is refused --
+     * as the table's. */
+    const unsigned extra = NAT_TABLE_SIZE / NAT_QUOTA_PER_GUEST;
+    struct tap *xt[NAT_TABLE_SIZE / NAT_QUOTA_PER_GUEST] = { 0 };
+    bool made = true;
+    for (unsigned k = 0; k < extra && made; k++) {
+        char name[8] = "flwx0";
+        name[4] = (char)('0' + k);
+        uint8_t xmac[6] = { 0x52, 0x54, 0x00, 0x24, (uint8_t)k, 0x01 };
+        xt[k] = tap_create(name, IPV4_ADDR(10, 77, 40 + k, 1), mask, xmac);
+        made = xt[k] != NULL;
+        if (made) {
+            netif_set_forward(tap_netif(xt[k]), true);
+            netif_set_masquerade(tap_netif(xt[k]), true);
+        }
+    }
+    nat_get_stats(&ns0);
+    for (unsigned k = 0; k < extra && made; k++) {
+        uint32_t src = IPV4_ADDR(10, 77, 40 + k, 15);
+        uint8_t xmac[6] = { 0x52, 0x54, 0x00, 0x24, (uint8_t)k, 0x01 };
+        for (unsigned i = 0; i < NAT_QUOTA_PER_GUEST; i++) {
+            uint16_t l4len = nettest_mk_udp(l4, src, peer, (uint16_t)(20000 + i), 9, payload, sizeof(payload));
+            uint32_t flen = nettest_wrap(frame, xmac, guest_mac, src, peer, 64, IPPROTO_UDP, l4, l4len);
+            made = tap_inject(xt[k], frame, flen) == 0 && made;
+        }
+        struct mbuf *d;
+        while ((d = tap_recv(u)) != NULL)
+            m_freem(d);
+    }
+    const unsigned sent = extra * NAT_QUOTA_PER_GUEST;
+    for (unsigned i = 0; i < 200 && made; i++) {
+        struct mbuf *d;
+        while ((d = tap_recv(u)) != NULL)
+            m_freem(d);
+        nat_get_stats(&ns1);
+        if ((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) +
+            (ns1.out_drop_table - ns0.out_drop_table) >= sent)
+            break;
+        thread_sleep_ms(10);
+    }
+    nat_get_stats(&ns1);
+    unsigned listed_all = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
+    nat_flush();
+    for (unsigned k = 0; k < extra; k++)
+        if (xt[k] != NULL)
+            tap_destroy(xt[k]);
+    CHECK(made);
+    CHECK(ns1.out_new - ns0.out_new == NAT_TABLE_SIZE - NAT_QUOTA_PER_GUEST);   /* seven more shares */
+    CHECK(ns1.out_drop_table - ns0.out_drop_table == NAT_QUOTA_PER_GUEST);     /* the eighth, by the table */
+    CHECK(ns1.out_drop_share == ns0.out_drop_share);                            /* never by a share */
+    CHECK(listed_all == NAT_TABLE_SIZE);
+
     nat_flush();
     tap_destroy(u);
     tap_destroy(g);
     kinfo("selftest: net-flows-nat: a guest flooding %u flows was listed at exactly its share of %u, "
-          "%u refusals counted as the share's and none as the table's, and none listed past expiry",
+          "%u refusals counted as the share's and none as the table's, none listed past expiry, and a "
+          "ninth source refused by the full table counted as the table's",
           flood, NAT_QUOTA_PER_GUEST, flood - NAT_QUOTA_PER_GUEST);
     return true;
 }
