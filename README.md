@@ -3543,6 +3543,17 @@ See [docs/development.md](docs/development.md).
   Before, they never became established, and the table kept them for 30 s
   instead of 300. Invariant N24: a flow is listed
   exactly when its share counts it. (PR #243)
+- **A completion's waiter no longer leaves while `complete()` is still
+  inside it.** An aarch64 debug boot on `main` panicked in `spin_unlock`
+  during NVMe probe: the driver's `admin_cmd` polled `completion_done` and,
+  once true, returned without the handshake `wait_for_completion` does, so
+  the next command reused the stack frame while the interrupt handler still
+  held its completion's lock. `wait_for_completion_timeout` now does the
+  handshake, and the four polling drivers (NVMe, xHCI, AHCI, USB) wait with
+  it, so no caller can see `done` without it. Invariant S30; the
+  `completion-timeout` self-test lingers a completion from another CPU and
+  requires the lock free on return, and `tools/nvme-admin-probe.py`
+  reproduces the exact panic on demand. (PR #245)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

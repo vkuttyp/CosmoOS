@@ -67,7 +67,10 @@ modelling interfaces as children (`docs/drivers/usb/invariants.md`, U7).
 until `done(r)` runs — in interrupt context, and so not allowed to
 block, the same rule as a bio's `done`. `usb_control_msg` and
 `usb_bulk_msg` are the synchronous shapes over it: a completion on the
-caller's stack and a bounded wait.
+caller's stack and a bounded wait (`wait_for_completion_timeout`, which
+does the handshake -- S30). On timeout the request is cancelled, which
+completes it, and then `wait_for_completion` returns with the handshake
+before the stack frame goes.
 
 ## The DMA rule
 
@@ -178,11 +181,13 @@ context its type, max packet size, error count 3 and the ring's
 dequeue pointer with the cycle state.
 
 **Commands** are serialised by a mutex and waited for on a completion
-with a 1 s bound; a command that does not complete marks the controller
-dead (`hcd->dead`): every later request fails `-EIO` and the log says
-why once. The completion event carries the command TRB's address; the
-waiter compares it, so a stale event for an earlier command cannot be
-mistaken for the current one.
+with a 1 s bound (`wait_for_completion_timeout`, which does the completion
+handshake, so the waiter never re-inits `cmdw` while the interrupt handler
+is still inside `complete` -- invariant S30); a command that does not
+complete marks the controller dead (`hcd->dead`): every later request
+fails `-EIO` and the log says why once. The completion event carries the
+command TRB's address; the waiter compares it, so a stale event for an
+earlier command cannot be mistaken for the current one.
 
 **Transfers**: a control transfer is Setup (immediate data, `TRT` by
 direction), Data (`ISP`, so a short answer is reported), Status (`IOC`);

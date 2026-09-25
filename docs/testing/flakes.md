@@ -2382,3 +2382,29 @@ placement every time.
 
 Not on the list: not a bound, and not attributable to either unit's
 mutation -- the spinning path holds no vnode and makes no system call.
+
+## An aarch64 debug boot that panicked in `spin_unlock` during NVMe probe, 2026-09-25
+
+**Not a flake: a real bug, now fixed (PR #245).** On `main`, run
+36082559265 (the merge of #242, a report that changed no code), the plain
+aarch64 debug boot died 10 s in, in NVMe probe:
+
+```
+KERNEL PANIC: assertion failed: ...lock->locked... != 0 at kernel/core/spinlock.c:117 (spin_unlock)
+CPU: 1  context: boot (no threads yet)
+  held by this CPU (1): [0] spin 'nvme-admin'#0 [irq]
+```
+
+`nvme-admin` is the lock inside the `struct completion` the driver's
+`admin_cmd` keeps on its stack. `admin_cmd` polled `completion_done` and,
+once it was true, returned without the handshake `wait_for_completion`
+does, so the next command's `completion_init` could reuse the frame while
+the interrupt handler was still inside `complete`. Recorded here rather
+than re-run because a re-run would have hidden it: it appears in exactly 1
+of 150 failed runs scanned (50 on `main`, 100 on branches).
+
+Taken up by `docs/audit/next-subsystem-nvme-admin.md` and fixed: the four
+polling drivers now wait with `wait_for_completion_timeout`, which does the
+handshake (invariant S30). `tools/nvme-admin-probe.py` reproduces the exact
+panic on demand (`--broken`), and the fix in place makes the widened window
+harmless.
