@@ -879,12 +879,15 @@ lumped counters now assert the exact cause.
 - `net-dnat`'s flood: `dnat_drop_share` rises and the other two do not.
 - `net-hoststate`: reads `hin_flow_unrecorded`.
 
-**`net-dnat` and `net-tapctl`** (DNAT established, the net-flows review):
-- `net-dnat`: the flow is half-open after the client's SYN and established
-  after the guest's SYN-ACK, which tests the reply path.
-- `net-tapctl` (3c): with no guest reply in between, the client's ACK alone
-  makes the listed flow established, with more than the half-open timeout
-  left, which tests the inbound path.
+**`net-dnat` and `net-tapctl`** (DNAT established only in order, the
+net-flows review):
+- `net-dnat` (2, 2b): the flow is half-open after the client's SYN, still
+  half-open after the guest's SYN-ACK, and established after the client's
+  ACK.
+- `net-dnat` (2c): an unsolicited ACK from a fresh client port, the guest's
+  RST to it, and a second ACK leave its entry half-open.
+- `net-tapctl` (3c): the client's ACK with no SYN-ACK in between leaves the
+  listed flow half-open, with at most the short timeout left.
 
 **`net-flows-nat`** (N24):
 1. One guest floods `NAT_TABLE_SIZE + 8` distinct UDP flows. Exactly
@@ -897,9 +900,12 @@ lumped counters now assert the exact cause.
 4. Through the device, the flow section lists those flows as the guest's to
    its peer, and its counters equal the kernel's.
 5. The table cause, which only a ninth guest can reach: eight more
-   masquerading taps send a share each. Seven fill the table, and the
+   masquerading taps send a share each, one at a time. Each guest's 32 are
+   decided before the next guest sends; the first form burst all 256 and
+   ran out a 2 s wait on CI's aarch64. Seven fill the table, and the
    eighth's 32 are refused as `out_drop_table`, none as `out_drop_share`,
-   with 256 listed.
+   with 256 listed. The counters, the taps' `rx_dropped` and the listed
+   count are logged before the checks.
 
 **`net-flows-fw`** (N24):
 1. A flow the host opened (its UDP send to the world) is listed at

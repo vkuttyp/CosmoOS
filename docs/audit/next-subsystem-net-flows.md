@@ -14,6 +14,16 @@
 >   the device. It now requires that flow listed as the client's
 >   (40001) to the guest (:80) through the dialled port (uplink:8080), and
 >   a read one byte short to be `-EMSGSIZE`.
+> - **`net-flows-nat`'s table step decides one guest at a time.** Its
+>   first form injected all eight extra guests' 256 datagrams, then waited
+>   2 s for them all to be counted. It failed on CI's first aarch64 debug
+>   boot, with the wait run out and the table count short. The
+>   cause was not established, and nothing was logged about where the
+>   datagrams went. Each guest's 32 are now decided before the next guest
+>   sends, with a patient wait that returns as soon as they are, so the
+>   eighth guest is the one the table refuses by construction. Every
+>   counter, the taps' `rx_dropped` and the listed count are logged before
+>   the checks, so a recurrence names where the datagrams went.
 > - **`net-flows-nat` also provokes the table cause.** A masquerading tap
 >   forwards only its one guest (`.15`; the anti-spoof rule in
 >   `ipv4_forward`), so a ninth source takes a ninth tap: eight more
@@ -26,17 +36,29 @@
 >   `fw_get_stats`.
 > - **`NAT_KIND_MASQ`/`NAT_KIND_DNAT` moved to `nat.h`**, where the listing
 >   names them.
-> - **A port-forwarded TCP flow can now be established** (found in
->   review). DNAT entries never set `tcp_est`: the inbound path said "no est
->   upgrade", and the reply path skipped it. So the listing reported every
->   port-forwarded connection as half-open, and the table kept one for only
->   the half-open 30 s rather than the established 300 s. DNAT now follows
->   masquerade's rule from the other side: the client's ACK without SYN, or
->   any TCP segment the guest sends back, marks the flow established.
->   `net-dnat` checks the reply path: half-open after the SYN, established
->   after the guest's SYN-ACK. `net-tapctl` checks the inbound path: the
->   client's ACK alone makes it established, listed with more than the
->   half-open timeout left.
+> - **A port-forwarded TCP flow can now be established, and only by the
+>   handshake in order** (found in review, over two rounds).
+>   - DNAT entries never set `tcp_est`: the inbound path said "no est
+>     upgrade", and the reply path skipped it. So the listing reported every
+>     port-forwarded connection as half-open, and the table kept one for
+>     only the half-open 30 s rather than the established 300 s.
+>   - The first fix copied masquerade's rule: the opener's ACK, or any
+>     reply, marks it. That was unsafe here, because the opener is an
+>     outside party and a port-forward creates an entry for any TCP
+>     segment. One unsolicited ACK then held the guest's share for 300 s,
+>     and the guest's RST to it would have counted as "the guest answered".
+>   - As built: `nat_out` records the guest's SYN-ACK on the entry
+>     (`dnat_synack`), and only a later client ACK without SYN or RST on
+>     that entry marks it established.
+>   - `net-dnat` checks the order: half-open after the SYN, still half-open
+>     after the guest's SYN-ACK, established after the client's ACK. It
+>     also sends an unsolicited ACK, then the guest's RST, then another
+>     ACK, and the flow stays half-open throughout. `net-tapctl` (3c)
+>     checks that the client's ACK with no SYN-ACK in between leaves the
+>     flow half-open, with at most the short timeout left.
+>   - Established still means no more than the order was seen: NAT reads
+>     no sequence numbers, so a blind third segment would pass. That is the
+>     "full TCP state tracking" the network design names and defers.
 > - **`vmctl flows` accepts `host`** as well as a guest address. The
 >   existing `list` commands needed no change: they compare against the
 >   version macro and size their buffers from `COSMO_NETCTL_SNAPSHOT_MAX`,
@@ -57,10 +79,11 @@
 > | `est` not carried | `net-flows-fw`: `tcp_est` |
 > | the flow section's room check removed | `net-tapctl`: the one-byte-short read not `-EMSGSIZE` |
 > | `vmctl flows` refusing version 6 | the shell harness: the counter lines missing |
-> | DNAT's inbound ACK not marking the flow established | `net-tapctl`: (3c) not established |
-> | DNAT's reply not marking the flow established | `net-dnat`: not established after the SYN-ACK |
+> | the client's ACK establishing without the guest's SYN-ACK | `net-tapctl` (3c) and `net-dnat` (2c): established |
+> | any guest TCP reply (the RST) counted as its SYN-ACK | `net-dnat` (2c): established after RST then ACK |
+> | the client's ACK never establishing | `net-dnat` (2b): not established after the handshake |
 >
-> Each mutation (twelve) ran alone on an x86-64 debug boot, with the boot
+> Each mutation (thirteen) ran alone on an x86-64 debug boot, with the boot
 > confirmed. Where the failing test returns early (`net-tapctl`,
 > `net-flows-fw`), later network tests also fail on the state it left
 > behind, as they do for the existing tests. The first failure is the one

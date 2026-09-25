@@ -3537,9 +3537,11 @@ See [docs/development.md](docs/development.md).
   flows` prints them. The counters were split first, one cause each:
   three of them had lumped a full share with a full table, and one
   counted something that was not a refusal at all. Port-forwarded TCP
-  flows now become established like masqueraded ones: on the client's
-  ACK or the guest's reply. Before, they stayed half-open, and the table
-  kept them for 30 s instead of 300. Invariant N24: a flow is listed
+  flows can now become established, and only when the handshake completes
+  in order: the guest's SYN-ACK, then the client's ACK. A client's
+  unsolicited ACK can no longer hold a guest's share for the long timeout.
+  Before, they never became established, and the table kept them for 30 s
+  instead of 300. Invariant N24: a flow is listed
   exactly when its share counts it. (PR #243)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
