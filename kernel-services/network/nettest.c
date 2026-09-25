@@ -4901,7 +4901,40 @@ bool selftest_net_dnat(const char **reason)
     CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 8080);       /* source port = what the client dialed */
     CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 12345);
     CHECK(nettest_l4_ok(u_ip, client, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
-    CHECK(dnat_flow_est(client, 12345) == 1);             /* the guest answered: established */
+    CHECK(dnat_flow_est(client, 12345) == 0);             /* the guest's half alone: still half-open */
+
+    /* (2b) the client's ACK completes the handshake in order: established. */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_recv_ip(g);
+    CHECK(r != NULL);
+    m_freem(r);
+    CHECK(dnat_flow_est(client, 12345) == 1);
+
+    /* (2c) an unsolicited ACK -- no SYN, from a fresh client port -- makes an
+     * entry the guest never accepted: the guest's RST to it and a second ACK
+     * after that leave it half-open, held for the short timeout only. */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 12399, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_recv_ip(g);
+    CHECK(r != NULL);
+    m_freem(r);
+    CHECK(dnat_flow_est(client, 12399) == 0);
+    l4len = nettest_mk_tcp(l4, guest, client, 80, 12399, TH_RST);
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    r = nettest_recv_ip(u);
+    CHECK(r != NULL);
+    m_freem(r);
+    l4len = nettest_mk_tcp(l4, client, u_ip, 12399, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_recv_ip(g);
+    CHECK(r != NULL);
+    m_freem(r);
+    CHECK(dnat_flow_est(client, 12399) == 0);
 
     /* (3) a UDP round trip through the udp rule. */
     uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -5103,9 +5136,10 @@ bool selftest_net_tapctl(const char **reason)
     }
     CHECK(file_read(f, rbuf, (size_t)rn - 1) == -EMSGSIZE);
 
-    /* (3c) the client's ACK without SYN -- no guest reply in between -- makes
-     * the flow established, listed so and kept for the established timeout,
-     * as masquerade's opener side does. */
+    /* (3c) the client's ACK without SYN, with no SYN-ACK from the guest in
+     * between, does not make the flow established: an outside party alone
+     * cannot earn the longer hold on the guest's share. Listed half-open,
+     * with no more than the half-open timeout left. */
     l4len = nettest_mk_tcp(l4, client, u_ip, 40001, 8080, TH_ACK);
     flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
     CHECK(tap_inject(u, frame, flen) == 0);
@@ -5118,15 +5152,15 @@ bool selftest_net_tapctl(const char **reason)
         size_t off = netctl_flows_off(rbuf, 1);
         struct cosmo_netctl_flow_list lh;
         memcpy(&lh, rbuf + off, sizeof(lh));
-        bool est = false;
+        bool half_open = false;
         for (unsigned i = 0; i < lh.count; i++) {
             struct cosmo_netctl_flow fl;
             memcpy(&fl, rbuf + off + sizeof(lh) + i * sizeof(fl), sizeof(fl));
             if (fl.table == COSMO_NETCTL_FLOW_NAT && fl.kind == COSMO_NETCTL_FLOW_DNAT && fl.src_port == 40001)
-                est = (fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED) &&
-                      fl.expires_ms > NAT_TIMEOUT_TCP_NS / 1000000u;       /* the longer timeout */
+                half_open = !(fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED) &&
+                      fl.expires_ms <= NAT_TIMEOUT_TCP_NS / 1000000u;      /* the short timeout */
         }
-        CHECK(est);
+        CHECK(half_open);
     }
 
     /* (4) FORWARD_DEL removes it and reaps the flow it created. */
@@ -7218,8 +7252,14 @@ bool selftest_net_flows_nat(const char **reason)
             netif_set_masquerade(tap_netif(xt[k]), true);
         }
     }
+    /* One guest at a time, each decided in full before the next sends: which
+     * guest the full table refuses is then the eighth by construction, not
+     * by the network worker's order across eight interfaces, and no burst
+     * of 256 frames crosses them at once. */
     nat_get_stats(&ns0);
-    for (unsigned k = 0; k < extra && made; k++) {
+    uint64_t rx_dropped = 0;
+    bool decided = true;
+    for (unsigned k = 0; k < extra && made && decided; k++) {
         uint32_t src = IPV4_ADDR(10, 77, 40 + k, 15);
         uint8_t xmac[6] = { 0x52, 0x54, 0x00, 0x24, (uint8_t)k, 0x01 };
         for (unsigned i = 0; i < NAT_QUOTA_PER_GUEST; i++) {
@@ -7227,28 +7267,35 @@ bool selftest_net_flows_nat(const char **reason)
             uint32_t flen = nettest_wrap(frame, xmac, guest_mac, src, peer, 64, IPPROTO_UDP, l4, l4len);
             made = tap_inject(xt[k], frame, flen) == 0 && made;
         }
-        struct mbuf *d;
-        while ((d = tap_recv(u)) != NULL)
-            m_freem(d);
-    }
-    const unsigned sent = extra * NAT_QUOTA_PER_GUEST;
-    for (unsigned i = 0; i < 200 && made; i++) {
-        struct mbuf *d;
-        while ((d = tap_recv(u)) != NULL)
-            m_freem(d);
-        nat_get_stats(&ns1);
-        if ((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) +
-            (ns1.out_drop_table - ns0.out_drop_table) >= sent)
-            break;
-        thread_sleep_ms(10);
+        decided = false;
+        for (unsigned w = 0; w < 500 && !decided; w++) {   /* returns as soon as all are decided */
+            struct mbuf *d;
+            while ((d = tap_recv(u)) != NULL)
+                m_freem(d);
+            nat_get_stats(&ns1);
+            decided = (ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) +
+                      (ns1.out_drop_table - ns0.out_drop_table) >= (k + 1) * NAT_QUOTA_PER_GUEST;
+            if (!decided)
+                thread_sleep_ms(10);
+        }
     }
     nat_get_stats(&ns1);
+    for (unsigned k = 0; k < extra; k++)
+        if (xt[k] != NULL)
+            rx_dropped += tap_netif(xt[k])->stats.rx_dropped;
     unsigned listed_all = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
+    /* Said before any check, so a failure names where the datagrams went. */
+    kinfo("selftest: net-flows-nat: table step new %llu share %llu table %llu noport %llu, "
+          "tap rx_dropped %llu, listed %u, every guest decided: %s",
+          (unsigned long long)(ns1.out_new - ns0.out_new), (unsigned long long)(ns1.out_drop_share - ns0.out_drop_share),
+          (unsigned long long)(ns1.out_drop_table - ns0.out_drop_table),
+          (unsigned long long)(ns1.out_drop_noport - ns0.out_drop_noport), (unsigned long long)rx_dropped,
+          listed_all, decided ? "yes" : "no");
     nat_flush();
     for (unsigned k = 0; k < extra; k++)
         if (xt[k] != NULL)
             tap_destroy(xt[k]);
-    CHECK(made);
+    CHECK(made && decided);
     CHECK(ns1.out_new - ns0.out_new == NAT_TABLE_SIZE - NAT_QUOTA_PER_GUEST);   /* seven more shares */
     CHECK(ns1.out_drop_table - ns0.out_drop_table == NAT_QUOTA_PER_GUEST);     /* the eighth, by the table */
     CHECK(ns1.out_drop_share == ns0.out_drop_share);                            /* never by a share */

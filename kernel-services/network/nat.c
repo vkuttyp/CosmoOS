@@ -36,6 +36,7 @@
 struct nat_entry {
     bool     in_use;
     bool     tcp_est;         /* a non-SYN segment has passed: the longer timeout */
+    bool     dnat_synack;     /* DNAT: the guest's SYN-ACK has passed back (see nat_in_dnat) */
     uint8_t  kind;            /* NAT_KIND_MASQ / NAT_KIND_DNAT */
     uint8_t  proto;           /* IPPROTO_UDP / TCP / ICMP */
     uint16_t orig_port;       /* the guest's source port, or ICMP echo id (host order) */
@@ -328,8 +329,8 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
         struct nat_entry dsnap;
         bool dhave = false;
         if (de) {
-            if (iph->proto == IPPROTO_TCP)
-                de->tcp_est = true;          /* the guest answered: both sides seen */
+            if (iph->proto == IPPROTO_TCP && (dl4[13] & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK))
+                de->dnat_synack = true;      /* the guest accepted; the client's ACK completes it */
             de->expires_ns = dnow + nat_timeout(de);
             dsnap = *de;
             dhave = true;
@@ -534,13 +535,16 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
 {
     uint32_t host_ip = iph->dst, client_ip = iph->src;
     uint64_t now = clock_now_ns();
-    /* The rule masquerade keeps, from the other side: the opener's ACK
-     * without SYN means both sides have been seen (the reply path below, in
-     * nat_out, marks it on any segment the guest sends back). */
-    bool est = false;
+    /* Established means the handshake completed in order: the guest's
+     * SYN-ACK went back (nat_out records it) and then the client's ACK
+     * without SYN arrived. The opener here is an outside party, so neither
+     * half alone may earn the longer hold on the guest's share: an
+     * unsolicited ACK creates an entry the guest never answered, and a guest
+     * reply alone may be the RST to it or the SYN-ACK to a SYN flood. */
+    bool ack = false;
     if (proto == IPPROTO_TCP) {
         uint8_t fl = 0;
-        est = m_copydata(m, ihl + 13, 1, &fl) && (fl & TH_ACK) && !(fl & TH_SYN);
+        ack = m_copydata(m, ihl + 13, 1, &fl) && (fl & TH_ACK) && !(fl & (TH_SYN | TH_RST));
     }
 
     /* Hold g_pf_lock across the conntrack create: nat_pf_del reaps under the
@@ -561,7 +565,7 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
     struct nat_entry snap;
     bool have = false;
     if (e) {
-        if (est)
+        if (ack && e->dnat_synack)
             e->tcp_est = true;
         e->expires_ns = now + nat_timeout(e);   /* refreshed per packet */
         snap = *e;
