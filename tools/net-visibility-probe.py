@@ -34,14 +34,15 @@ Each boot prints:
     NVPROBE dmesg: N lines between the mark and the end, K naming nat
                    (or INVALID if the log ring wrapped past the mark)
 
-`apply` refuses a file with uncommitted changes, refuses to overwrite a
-backup an earlier run left, and edits nothing if an anchor is missing,
-restoring every file on a failure part-way; `revert` checks every file's
-hash first, restores all from copies, removes the stamp, and only then
-removes the backups. The stamp records each file's hash before and after
-the patch, so a revert interrupted part-way can be run again: a file
-already back to its original hash is accepted whether or not its backup
-still exists.
+`apply` refuses a file with uncommitted changes (or a `git status` that
+fails), refuses to overwrite a backup an earlier run left, and edits
+nothing if an anchor is missing. It builds every patch in memory, writes
+the stamp -- each file's original and patched hash -- and then replaces
+each backup and file atomically, so from the stamp on every file is
+exactly one of the two. `revert` accepts a file already original,
+restores the patched ones atomically, removes the stamp, and only then the
+backups, so an apply or revert interrupted anywhere is finished by running
+revert (again).
 """
 
 import hashlib
@@ -118,6 +119,77 @@ def sha(p):
     return hashlib.sha256(open(p, 'rb').read()).hexdigest()
 
 
+def write_atomic(path, data):
+    # Whole or not at all: a probe interrupted mid-write must leave every
+    # file either as it was or as intended, never half of each.
+    tmp = path + '.probe-tmp'
+    with open(tmp, 'wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def git_clean(path):
+    r = subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True)
+    if r.returncode != 0:     # a failed check is not a clean tree
+        sys.exit(f'git status failed for {path}: {r.stderr.strip() or r.returncode}')
+    return not r.stdout.strip()
+
+
+def apply_files(fl):
+    """Patch every file in `fl`, or none. Every patch is built in memory
+    first; then the stamp is written, recording each file's original and
+    patched hash; then each backup and each file is replaced atomically.
+    From the stamp on, every file is exactly its original or its patched
+    bytes, so revert can finish whatever an interruption left."""
+    if os.path.exists(STAMP):
+        sys.exit('already applied (or an apply was interrupted): run revert first')
+    plan = []
+    for path, edits in fl:
+        if os.path.exists(path + BACKUP):
+            sys.exit(f'{path + BACKUP} exists from an earlier run; restore or remove it by hand first')
+        if not os.path.isfile(path):
+            sys.exit(f'{path} not found: run from the top of the tree')
+        if not git_clean(path):
+            sys.exit(f'{path} has uncommitted changes')
+        orig = open(path, 'rb').read()
+        s = orig.decode()
+        for a, b in edits:
+            if s.count(a) != 1:
+                sys.exit(f'{path}: anchor not found exactly once: {a[:50]!r}')
+            s = s.replace(a, b)
+        plan.append((path, orig, s.encode()))
+    write_atomic(STAMP, ''.join(f'{p} {hashlib.sha256(n).hexdigest()} {hashlib.sha256(o).hexdigest()}\n'
+                                for p, o, n in plan).encode())
+    for path, orig, new in plan:
+        write_atomic(path + BACKUP, orig)
+        write_atomic(path, new)
+
+
+def revert():
+    if not os.path.exists(STAMP):
+        sys.exit('not applied')
+    entries = [line.split() for line in open(STAMP).read().split('\n') if line]
+    for path, patched, orig in entries:
+        cur = sha(path)
+        if cur == orig:
+            continue                     # never patched, or already restored
+        if cur != patched:
+            sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
+        if not os.path.exists(path + BACKUP) or sha(path + BACKUP) != orig:
+            sys.exit(f'{path} is still patched and {path + BACKUP} is missing or not its original; restore by hand')
+    for path, patched, orig in entries:
+        if sha(path) == patched:
+            write_atomic(path, open(path + BACKUP, 'rb').read())
+    os.remove(STAMP)                     # every file is original now
+    for path, _, _ in entries:
+        for leftover in (path + BACKUP, path + '.probe-tmp'):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+    print('reverted')
+
+
 def files():
     return [
         (TAP, [(T_ANCHOR, T_PROBE)]),
@@ -134,65 +206,9 @@ def sysctl_net_names():
 
 
 def apply():
-    if os.path.exists(STAMP):
-        sys.exit('already applied')
-    fl = files()
-    for path, edits in fl:
-        if os.path.exists(path + BACKUP):
-            sys.exit(f'{path + BACKUP} exists from an earlier run; restore or remove it by hand first')
-        if not os.path.isfile(path):
-            sys.exit(f'{path} not found: run from the top of the tree')
-        if subprocess.run(['git', 'status', '--porcelain', '--', path], capture_output=True, text=True).stdout.strip():
-            sys.exit(f'{path} has uncommitted changes')
-        s = open(path).read()
-        for a, _ in edits:
-            if s.count(a) != 1:
-                sys.exit(f'{path}: anchor not found exactly once: {a[:50]!r}')
-    done, stamp = [], []
-    try:
-        for path, edits in fl:
-            shutil.copyfile(path, path + BACKUP)
-            done.append(path)
-            orig = sha(path)
-            s = open(path).read()
-            for a, b in edits:
-                s = s.replace(a, b)
-            open(path, 'w').write(s)
-            stamp.append(f'{path} {sha(path)} {orig}')
-        open(STAMP, 'w').write('\n'.join(stamp) + '\n')
-    except BaseException:
-        for path in done:
-            shutil.move(path + BACKUP, path)
-            os.utime(path, None)
-        if os.path.exists(STAMP):
-            os.remove(STAMP)
-        raise
+    apply_files(files())
     names, net = sysctl_net_names()
     print(f'applied; sysctl serves {len(names)} names, {len(net)} under net.: {", ".join(net) or "none"}')
-
-
-def revert():
-    if not os.path.exists(STAMP):
-        sys.exit('not applied')
-    todo = []
-    for line in open(STAMP).read().split('\n'):
-        if line:
-            path, patched, orig = line.split()
-            if sha(path) == orig:
-                continue                     # already restored by an earlier, interrupted revert
-            if sha(path) != patched:
-                sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
-            if not os.path.exists(path + BACKUP):
-                sys.exit(f'{path} is still patched and {path + BACKUP} is gone; restore by hand')
-            todo.append(path)
-    for path in todo:
-        shutil.copyfile(path + BACKUP, path)
-        os.utime(path, None)
-    os.remove(STAMP)                         # every file is original now
-    for path, _ in files():
-        if os.path.exists(path + BACKUP):
-            os.remove(path + BACKUP)
-    print('reverted')
 
 
 if __name__ == '__main__':
