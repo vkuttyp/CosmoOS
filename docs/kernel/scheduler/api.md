@@ -345,8 +345,21 @@ last (the lowest priority level's tail).
   (returns at once if done; panics in interrupt context; when it returns,
   `complete` has finished touching `c`, so the caller may free it),
   `completion_done(c)` (a lock-free read: true does *not* mean `complete`
-  has returned — a poller that saw it must still call
-  `wait_for_completion` before freeing `c`).
+  has returned — a poller that saw it must still hand off to a wait that
+  does the handshake before freeing `c`).
+- `wait_for_completion_timeout(c, ns)` — like `wait_for_completion` but
+  bounded. Returns true when completed (and, like `wait_for_completion`,
+  only after `complete` has let go of `c`, so the caller may free it) and
+  false at the deadline (`c` may complete later, so the caller must stop
+  whatever will complete it, or `wait_for_completion`, before freeing).
+  This is what a caller with a timeout uses: a poll of `completion_done`
+  followed by a bare return races `complete` (invariant S30), and this
+  primitive removes the poll (the NVMe admin bug,
+  `docs/audit/next-subsystem-nvme-admin.md`).
+- `complete_linger(c, ns)` — `complete(c)` with a spin of `ns` held
+  between publishing `done` and the wake. It is a test seam for the
+  handshake window; `complete(c)` is `complete_linger(c, 0)` and nothing
+  else passes non-zero.
 
 ---
 

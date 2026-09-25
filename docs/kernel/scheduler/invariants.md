@@ -287,6 +287,21 @@ decision taken from it is re-made under both locks by
 reports 1 while an idle one reports 0, and placement prefers the idle
 one; both halves fail when the load is `nr_running` again).
 
+**S30. A completion's waiter never returns while `complete` still holds
+the completion.** `complete` publishes `done`, wakes, and releases the
+completion's lock, all under that lock; a waiter that only reads `done`
+(`completion_done`) can return -- and free `c`, which usually lives on
+its stack -- while `complete` is still inside it, on another CPU. So
+every wait that a caller frees after must do the handshake: take the
+completion's lock once after `done` is seen, which cannot complete until
+`complete` has let go. `wait_for_completion` and
+`wait_for_completion_timeout` both do; `completion_done` does not, and a
+poll of it followed by a bare return is the bug this rule forbids (the
+NVMe admin path, `docs/audit/next-subsystem-nvme-admin.md`). Check:
+`completion-timeout` (200 completions lingered from another CPU, the
+completion's lock free on every return; it fails when the timeout wait
+drops its handshake) and, for the driver, `tools/nvme-admin-probe.py`.
+
 ## Gaps (documented, not invariants)
 
 - Cross-CPU `need_resched` is signalled by `IPI_RESCHEDULE` when the

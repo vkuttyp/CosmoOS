@@ -46,7 +46,14 @@ kernel only through exported symbols, like every driver module.
 Every admin command is issued through the same submission path as I/O
 and waited for on a completion (`struct nvme_cmd_wait`), with a 5 s bound;
 a timeout during bring-up fails the probe and the controller is left
-disabled.
+disabled. Once the admin vector exists, the wait is
+`wait_for_completion_timeout`, which does the completion handshake, so the
+waiter never returns while the interrupt handler is still inside
+`complete` on that stack completion (invariant S30; the bug this closed is
+`docs/audit/next-subsystem-nvme-admin.md`). Before the vector exists a few
+commands are polled, and there the waiting thread completes the command
+itself with `queue_process`, so no other CPU is inside `complete` and the
+poll is safe.
 
 ## Queues
 
