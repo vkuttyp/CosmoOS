@@ -53,7 +53,7 @@ BACKUP = '.nvme-admin-probe.orig'
 STAMP = '.nvme-admin-probe.applied'
 
 C_ANCHOR_INC = '#include <kernel/sched.h>\n'
-C_PROBE_INC = C_ANCHOR_INC + '#include <kernel/string.h>   /* NAPROBE */\n#include <kernel/timer.h>    /* NAPROBE */\n'
+C_PROBE_INC = C_ANCHOR_INC + '#include <arch/cpu.h>        /* NAPROBE */\n#include <kernel/string.h>   /* NAPROBE */\n#include <kernel/timer.h>    /* NAPROBE */\n'
 
 C_ANCHOR = '''    arch_irq_state_t s = spin_lock_irqsave(&c->lock);
     c->done = true;
