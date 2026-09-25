@@ -100,6 +100,10 @@ COMMANDS = [
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),
     ("jobs", [r"\[\d+\][+ ]  (Running|Done)\s+sleep 1"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
+    # The operator's view of the network's flows reads the control device's
+    # version-6 snapshot end to end (docs/audit/next-subsystem-net-flows.md).
+    ("vmctl flows", [r"^refused \(machine-wide\): masquerade \d+ share, \d+ table, \d+ no port; ",
+                     r"^host flows not recorded: \d+$"]),
     ("exit 0", []),
 ]
 

@@ -52,7 +52,8 @@ static int usage(void)
                     "         DIR any(=uplink+guest, never host)|uplink|guest|host  PROTO any|icmp|tcp|udp\n"
                     "         SRC (host rules only) addr[/prefix]|any  DST addr[/prefix]|any\n"
                     "         PORT n|any (icmp: type 0-255|echo-request|echo-reply|any)  VERDICT accept|drop\n"
-                    "         a trailing world|guest|any on a host `out` rule is the egress it applies to\n");
+                    "         a trailing world|guest|any on a host `out` rule is the egress it applies to\n"
+                    "       vmctl flows [GUESTADDR|host]\n");
     return 2;
 }
 
@@ -1768,6 +1769,141 @@ out:
     return rc;
 }
 
+/* vmctl flows [GUESTADDR|host] -- every live NAT and firewall flow, with the
+ * shares they fill and the refusal counters: the answer to "why is my
+ * guest's new flow refused?" (docs/audit/next-subsystem-net-flows.md). Read
+ * from /dev/net/tapctl's snapshot, version 6. Each share line is counted
+ * from the listing itself, so it cannot disagree with the flows below it. */
+static const char *flow_proto(uint8_t p)
+{
+    return p == COSMO_NETCTL_PROTO_TCP ? "tcp" : p == COSMO_NETCTL_PROTO_UDP ? "udp" :
+           p == COSMO_NETCTL_PROTO_ICMP ? "icmp" : "?";
+}
+
+static void flow_ep(char *out, size_t cap, uint32_t addr, uint16_t port, uint8_t proto)
+{
+    char ip[16];
+    inet_ntop(AF_INET, &addr, ip, sizeof(ip));
+    if (proto == COSMO_NETCTL_PROTO_ICMP)
+        snprintf(out, cap, "%s", ip);
+    else
+        snprintf(out, cap, "%s:%u", ip, port);
+}
+
+static int flows(int argc, char **argv)
+{
+    bool only = false;
+    uint32_t want = 0;
+    if (argc > 1)
+        return usage();
+    if (argc == 1) {
+        only = true;
+        if (strcmp(argv[0], "host") == 0)
+            want = COSMO_NETCTL_HOST_ADDR;
+        else if (inet_pton(AF_INET, argv[0], &want) != 1) {
+            fprintf(stderr, "vmctl: bad guest address\n");
+            return 2;
+        }
+    }
+    int fd = open("/dev/net/tapctl", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "vmctl: cannot open /dev/net/tapctl: %s\n", strerror(errno));
+        return 1;
+    }
+    static unsigned char buf[COSMO_NETCTL_SNAPSHOT_MAX];
+    int64_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n < (int64_t)sizeof(struct cosmo_netctl_list)) {
+        fprintf(stderr, "vmctl: flows failed: %s\n", strerror(errno));
+        return 1;
+    }
+    /* Walk the sections to the third; every count is checked against the
+     * bytes read before it is trusted. */
+    struct cosmo_netctl_list ph;
+    memcpy(&ph, buf, sizeof(ph));
+    if (ph.version != COSMO_NETCTL_VERSION) {
+        fprintf(stderr, "vmctl: snapshot version %u, this vmctl speaks %u\n", ph.version, COSMO_NETCTL_VERSION);
+        return 1;
+    }
+    size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
+    struct cosmo_netctl_filter_list fh;
+    if ((size_t)n < off + sizeof(fh))
+        goto short_snap;
+    memcpy(&fh, buf + off, sizeof(fh));
+    off += sizeof(fh) + (size_t)fh.guest_count * sizeof(struct cosmo_netctl_filter_guest) +
+           (size_t)fh.rule_count * sizeof(struct cosmo_netctl_filter_rule);
+    struct cosmo_netctl_flow_list lh;
+    if ((size_t)n < off + sizeof(lh))
+        goto short_snap;
+    memcpy(&lh, buf + off, sizeof(lh));
+    off += sizeof(lh);
+    if (lh.version != COSMO_NETCTL_VERSION || (size_t)n < off + (size_t)lh.count * sizeof(struct cosmo_netctl_flow))
+        goto short_snap;
+
+    /* The shares: one line per (table, owner), counted from the listing. */
+    struct flow_share { uint8_t table; uint32_t owner; unsigned n; };
+    static struct flow_share share[COSMO_NETCTL_MAX_NAT_FLOWS + COSMO_NETCTL_MAX_FW_FLOWS];
+    unsigned nshare = 0;
+    for (unsigned i = 0; i < lh.count; i++) {
+        struct cosmo_netctl_flow fl;
+        memcpy(&fl, buf + off + i * sizeof(fl), sizeof(fl));
+        if (only && fl.guest_addr != want)
+            continue;
+        unsigned k = 0;
+        while (k < nshare && !(share[k].table == fl.table && share[k].owner == fl.guest_addr))
+            k++;
+        if (k == nshare)
+            share[nshare++] = (struct flow_share){ fl.table, fl.guest_addr, 0 };
+        share[k].n++;
+    }
+    for (unsigned k = 0; k < nshare; k++) {
+        char ip[16];
+        if (share[k].owner == COSMO_NETCTL_HOST_ADDR)
+            strcpy(ip, "host");
+        else
+            inet_ntop(AF_INET, &share[k].owner, ip, sizeof(ip));
+        unsigned quota = share[k].table == COSMO_NETCTL_FLOW_NAT ? lh.nat_quota :
+                         share[k].owner == COSMO_NETCTL_HOST_ADDR ? lh.fw_host_quota : lh.fw_quota;
+        printf("%-4s %-15s %u/%u\n", share[k].table == COSMO_NETCTL_FLOW_NAT ? "nat" : "fw", ip, share[k].n, quota);
+    }
+    const struct cosmo_netctl_flow_counters *c = &lh.counters;
+    printf("refused (machine-wide): masquerade %llu share, %llu table, %llu no port; "
+           "port-forward %llu share, %llu table, %llu ambiguous; guest-to-guest %llu share, %llu table\n",
+           (unsigned long long)c->masq_drop_share, (unsigned long long)c->masq_drop_table,
+           (unsigned long long)c->masq_drop_noport, (unsigned long long)c->dnat_drop_share,
+           (unsigned long long)c->dnat_drop_table, (unsigned long long)c->dnat_drop_ambiguous,
+           (unsigned long long)c->fw_drop_share, (unsigned long long)c->fw_drop_table);
+    printf("host flows not recorded: %llu\n", (unsigned long long)c->fw_host_unrecorded);
+
+    for (unsigned i = 0; i < lh.count; i++) {
+        struct cosmo_netctl_flow fl;
+        memcpy(&fl, buf + off + i * sizeof(fl), sizeof(fl));
+        if (only && fl.guest_addr != want)
+            continue;
+        char src[24], dst[24], via[40] = "";
+        flow_ep(src, sizeof(src), fl.src_addr, fl.src_port, fl.proto);
+        flow_ep(dst, sizeof(dst), fl.dst_addr, fl.dst_port, fl.proto);
+        if (fl.kind == COSMO_NETCTL_FLOW_MASQ || fl.kind == COSMO_NETCTL_FLOW_DNAT) {
+            char nat[24];
+            char ip[16];
+            inet_ntop(AF_INET, &fl.nat_addr, ip, sizeof(ip));
+            snprintf(nat, sizeof(nat), fl.proto == COSMO_NETCTL_PROTO_ICMP ? "%s id %u" : "%s:%u", ip, fl.nat_port);
+            snprintf(via, sizeof(via), " %s %s", fl.kind == COSMO_NETCTL_FLOW_MASQ ? "as" : "via", nat);
+        }
+        if (fl.proto == COSMO_NETCTL_PROTO_ICMP)   /* the echo id, which is what names the flow */
+            snprintf(src + strlen(src), sizeof(src) - strlen(src), " id %u", fl.src_port);
+        static const char *const kinds[] = { "?", "masq", "dnat", "guest", "host" };
+        printf("%-4s %-5s %-4s %s -> %s%s%s %us\n", fl.table == COSMO_NETCTL_FLOW_NAT ? "nat" : "fw",
+               fl.kind <= COSMO_NETCTL_FLOW_HOST ? kinds[fl.kind] : "?", flow_proto(fl.proto), src, dst, via,
+               (fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED) ? " est" : "", (fl.expires_ms + 999u) / 1000u);
+    }
+    return 0;
+
+short_snap:
+    fprintf(stderr, "vmctl: snapshot carries no complete flow section\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -1782,5 +1918,7 @@ int main(int argc, char **argv)
         return port_forward(argc - 2, argv + 2);
     if (strcmp(argv[1], "filter") == 0)
         return filter(argc - 2, argv + 2);
+    if (strcmp(argv[1], "flows") == 0)
+        return flows(argc - 2, argv + 2);
     return usage();
 }
