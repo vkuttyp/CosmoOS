@@ -1344,9 +1344,9 @@ See [docs/development.md](docs/development.md).
   path-MTU discovery under DROP, the DNS proxy end to end, refresh and
   expiry, forwarded and loopback sends recording nothing, the share, and the
   hardened default) with thirteen bug-proofs. Reply state for a UDP flow's
-  ICMP errors, a listing of live flows, per-interface host chains,
-  rate-limit/log targets and IPv6 are later units; the OUTPUT chain is done
-  (its own entry below).
+  ICMP errors, per-interface host chains, rate-limit/log targets and IPv6
+  are later units; the OUTPUT chain and the listing of live flows are done
+  (their own entries below).
 - **The OUTPUT chain: what the host itself may send (done):**
   `docs/audit/next-subsystem-output-chain.md`,
   `docs/kernel-services/network/design.md` ("The OUTPUT chain"). The
@@ -3525,6 +3525,24 @@ See [docs/development.md](docs/development.md).
   fails with the old order on every boot. The shell harness's release
   boots also run six cycles of a background job exiting as a line is
   typed. (PR #241)
+- **The operator can see why a guest's flows are refused.** A guest that
+  fills its share of NAT's table or the firewall's has every new flow
+  dropped. Before this, nothing an operator could read changed when that
+  happened (`tools/net-visibility-probe.py`): a guest was refused 232
+  flows while the control snapshot stayed byte-identical and the log
+  silent, and the counters were read only by the self-tests. The
+  `/dev/net/tapctl` snapshot, now version 6, lists every live NAT and
+  firewall flow, opener to peer, with its NAT identity, established flag
+  and time left, beside the shares and the refusal counters. `vmctl
+  flows` prints them. The counters were split first, one cause each:
+  three of them had lumped a full share with a full table, and one
+  counted something that was not a refusal at all. Port-forwarded TCP
+  flows can now become established, and only when the handshake completes
+  in order: the guest's SYN-ACK, then the client's ACK. A client's
+  unsolicited ACK can no longer hold a guest's share for the long timeout.
+  Before, they never became established, and the table kept them for 30 s
+  instead of 300. Invariant N24: a flow is listed
+  exactly when its share counts it. (PR #243)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

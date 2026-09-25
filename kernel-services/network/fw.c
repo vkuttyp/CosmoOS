@@ -464,10 +464,11 @@ static bool flow_trackable(uint8_t proto, const struct l4_view *v)
 }
 
 /* A free slot for a new flow, if this initiator is still within its share.
- * NULL when the table is full or the share is spent -- the caller decides what
- * that means (the FORWARD chain refuses the flow; the host records nothing and
- * sends anyway). Caller holds g_fw_lock. */
-static struct fw_flow *flow_slot(uint32_t initiator, unsigned quota, uint64_t now)
+ * NULL when the table is full or the share is spent, and *share_full says
+ * which -- the caller decides what that means (the FORWARD chain refuses the
+ * flow and counts the reason; the host records nothing and sends anyway).
+ * Caller holds g_fw_lock. */
+static struct fw_flow *flow_slot(uint32_t initiator, unsigned quota, uint64_t now, bool *share_full)
 {
     unsigned mine = 0;
     struct fw_flow *slot = NULL;
@@ -480,7 +481,10 @@ static struct fw_flow *flow_slot(uint32_t initiator, unsigned quota, uint64_t no
             slot = f;
         }
     }
-    return mine >= quota ? NULL : slot;
+    /* Two reasons for no slot, counted apart: the initiator's share is
+     * spent, or (share not spent) nobody's slot is free. */
+    *share_full = mine >= quota;
+    return *share_full ? NULL : slot;
 }
 
 /* Fill a slot with a flow `a_ip` opened to `b_ip`. Caller holds g_fw_lock. */
@@ -560,10 +564,14 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct m
      * the reply -- so the flow is refused outright, as a full NAT table
      * refuses a new masquerade, and the guest's flood starves only itself. */
     if (verdict == FW_ACCEPT && dir == FW_DIR_TO_GUEST && flow_trackable(iph->proto, &v)) {
-        struct fw_flow *slot = flow_slot(iph->src, FW_FLOW_QUOTA_PER_GUEST, now);
+        bool share_full;
+        struct fw_flow *slot = flow_slot(iph->src, FW_FLOW_QUOTA_PER_GUEST, now, &share_full);
         if (slot == NULL) {
             spin_unlock_irqrestore(&g_fw_lock, s);
-            STAT(flow_drop_full);
+            if (share_full)
+                STAT(flow_drop_share);
+            else
+                STAT(flow_drop_table);
             return FW_DROP;
         }
         flow_fill(slot, iph->src, iph->proto, iph->src, iph->dst, &v, now);
@@ -700,10 +708,11 @@ void fw_host_record(const struct fw_host_flow *hf)
         spin_unlock_irqrestore(&g_fw_lock, s);
         return;
     }
-    struct fw_flow *slot = flow_slot(FW_HOST_GUEST_IP, FW_FLOW_QUOTA_HOST, now);
+    bool share_full;
+    struct fw_flow *slot = flow_slot(FW_HOST_GUEST_IP, FW_FLOW_QUOTA_HOST, now, &share_full);
     if (slot == NULL) {
         spin_unlock_irqrestore(&g_fw_lock, s);
-        STAT(hin_flow_drop_full);
+        STAT(hin_flow_unrecorded);
         return;                              /* the datagram still goes out; its reply takes the rules */
     }
     flow_fill(slot, FW_HOST_GUEST_IP, proto, src, dst, &v, now);
@@ -817,6 +826,24 @@ enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t sr
 }
 
 /* --- maintenance ---------------------------------------------------------- */
+
+unsigned fw_flow_list(struct fw_flow_info *out, unsigned max, uint64_t now)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
+    for (unsigned i = 0; i < FW_FLOW_MAX && n < max; i++) {
+        const struct fw_flow *f = &g_flows[i];
+        if (!f->in_use || now >= f->expires_ns)    /* N24: what flow_slot counts, no more */
+            continue;
+        out[n++] = (struct fw_flow_info){
+            .guest_ip = f->guest_ip, .a_ip = f->a_ip, .b_ip = f->b_ip,
+            .a_port = f->a_port, .b_port = f->b_port, .proto = f->proto, .est = f->est,
+            .expires_ns = f->expires_ns,
+        };
+    }
+    spin_unlock_irqrestore(&g_fw_lock, s);
+    return n;
+}
 
 void fw_age(uint64_t now_ns)
 {

@@ -5,7 +5,8 @@ can the operator see?
 
 A guest that has spent its NAT share (NAT_QUOTA_PER_GUEST entries) has
 every new outbound flow dropped. The kernel counts it (nat_stats'
-out_drop_full) and the flows it holds sit in a table. This probe asks
+out_drop_share; out_drop_full before the net-flows unit split it) and the
+flows it holds sit in a table. This probe asks
 what of that reaches a privileged operator on the machine, by making it
 happen and comparing, before and after, everything an operator can read
 about the network:
@@ -27,8 +28,9 @@ native sysctl table serves.
     python3 tools/net-visibility-probe.py revert
 
 Each boot prints:
-    NVPROBE nat: entries A -> B (quota Q), out_drop_full +D
+    NVPROBE nat: entries A -> B (quota Q), out_drop_share +D
     NVPROBE tapctl: snapshot X bytes before, Y after, identical: yes|no
+                    (yes before the net-flows unit; its flow section makes it no)
     NVPROBE dmesg: N lines between the mark and the end, K naming nat
                    (or INVALID if the log ring wrapped past the mark)
 
@@ -68,12 +70,12 @@ int64_t nvprobe_tapctl_read(void *buf, size_t len)
 
 N_ANCHOR_BEFORE = '    for (unsigned i = 0; i < NAT_TABLE_SIZE + 8; i++) {\n'
 N_PROBE_BEFORE = '''    /* NVPROBE: what an operator can read, before the flood. */
-    static uint8_t nvp_a[8192], nvp_b[8192];
+    static uint8_t nvp_a[COSMO_NETCTL_SNAPSHOT_MAX], nvp_b[COSMO_NETCTL_SNAPSHOT_MAX];
     int64_t nvp_na = nvprobe_tapctl_read(nvp_a, sizeof(nvp_a));
     kinfo("NVPROBE mark");
 ''' + N_ANCHOR_BEFORE
 
-N_ANCHOR_AFTER = '    CHECK(ns1.out_drop_full > ns0.out_drop_full);        /* new flows dropped once full */\n'
+N_ANCHOR_AFTER = '    CHECK(ns1.out_drop_share > ns0.out_drop_share);      /* new flows dropped once the share is full */\n'
 N_PROBE_AFTER = N_ANCHOR_AFTER + '''    {   /* NVPROBE: and after it. */
         int64_t nvp_nb = nvprobe_tapctl_read(nvp_b, sizeof(nvp_b));
         static char nvp_log[KLOG_RING_SIZE];
@@ -94,9 +96,9 @@ N_PROBE_AFTER = N_ANCHOR_AFTER + '''    {   /* NVPROBE: and after it. */
                     if (line[k] == 'n' && line[k + 1] == 'a' && line[k + 2] == 't') { nat_lines++; break; }
             }
         }
-        kinfo("NVPROBE nat: entries %u -> %u (quota %u), out_drop_full +%llu",
+        kinfo("NVPROBE nat: entries %u -> %u (quota %u), out_drop_share +%llu",
               ns0.entries, ns1.entries, (unsigned)NAT_QUOTA_PER_GUEST,
-              (unsigned long long)(ns1.out_drop_full - ns0.out_drop_full));
+              (unsigned long long)(ns1.out_drop_share - ns0.out_drop_share));
         kinfo("NVPROBE tapctl: snapshot %lld bytes before, %lld after, identical: %s",
               (long long)nvp_na, (long long)nvp_nb,
               nvp_na == nvp_nb && nvp_na > 0 && memcmp(nvp_a, nvp_b, (size_t)nvp_na) == 0 ? "yes" : "no");

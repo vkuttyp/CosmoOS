@@ -296,7 +296,7 @@ the lent port is disjoint from the host ephemeral range; the table bounded
 exceeding `NAT_TABLE_SIZE`); and the entries reclaimed by `nat_age`. Proved
 by reintroducing a missing pseudo-header checksum fixup (the uplink reads an
 invalid checksum), a table that clobbers instead of dropping when full
-(`out_drop_full` never rises), and an age that reclaims nothing (the entries
+(`out_drop_share`, formerly `out_drop_full`, never rises), and an age that reclaims nothing (the entries
 never expire).
 
 **`net-dnat`**: two taps and a static port-forward rule (`tcp:8080 →
@@ -632,7 +632,7 @@ again. (8) Neither a forwarded guest flow nor a loopback send is the host's:
 a masqueraded guest→world datagram (read back masqueraded on the uplink) and
 a loopback send both leave `hin_flow_new` unmoved. (9) The share is the
 host's own: `FW_FLOW_QUOTA_HOST` distinct flows record and the live count
-equals the share, the next one does not (`hin_flow_drop_full`) yet its
+equals the share, the next one does not (`hin_flow_unrecorded`) yet its
 datagram still leaves (read back), and a guest-to-guest flow still records
 (`flow_new`) with the host's share full. (10) State beats the hardened
 default too, not only a rule.
@@ -832,7 +832,7 @@ worker, and the host-state unit's timing perturbation turned both into
 intermittent CI failures — on the GIC-variant boot, where the same tree
 passed the default one. They are fixed rather than retried. `net-dnat` aged
 the NAT table while the flood it had just injected could still be draining
-(`dnat_drop_full` rising says *some* packet was refused, not that all were
+(`dnat_drop_share`, then `dnat_drop_full`, rising says *some* packet was refused, not that all were
 processed), so an entry created behind `nat_age` survived it; it now waits
 for translations plus refusals to account for every injected datagram, and
 asserts that sum. `net-tapctl` asserted that a client SYN is *not* forwarded
@@ -861,6 +861,71 @@ lists exactly its two seeds; the snapshot carries at least five rules).
 from the filter section the read appends (ABI version 2 and later: its
 header, the attached guests' policies and rules), rather than assumed to end
 at the port-forward rules.
+
+**`net-tapctl`** (extended again, version 6): the length counts the flow
+section too (`netctl_flows_off`, then the section's own count). The DNAT
+flow the test creates is listed through the device as the client's
+(`src` client:40001) to the guest (`dst` guest:80) through the port it
+dialled (`nat` uplink:8080), counted against the guest. A read one byte
+short of the whole snapshot is `-EMSGSIZE`, never a truncated listing. Every
+test that reads the snapshot now reads into a `COSMO_NETCTL_SNAPSHOT_MAX`
+buffer.
+
+**The split counters** (the net-flows unit): the tests that read the old
+lumped counters now assert the exact cause.
+- `net-nat`'s flood: `out_drop_share` rises and `out_drop_table` does not.
+- `net-dnat`'s ambiguous SYN: `dnat_drop_ambiguous` is exactly +1, and the
+  share and table counters are unmoved.
+- `net-dnat`'s flood: `dnat_drop_share` rises and the other two do not.
+- `net-hoststate`: reads `hin_flow_unrecorded`.
+
+**`net-dnat` and `net-tapctl`** (DNAT established only in order, the
+net-flows review):
+- `net-dnat` (2, 2b): the flow is half-open after the client's SYN, still
+  half-open after the guest's SYN-ACK, and established after the client's
+  ACK.
+- `net-dnat` (2c): an unsolicited ACK from a fresh client port, the guest's
+  RST to it, and a second ACK leave its entry half-open.
+- `net-tapctl` (3c): the client's ACK with no SYN-ACK in between leaves the
+  listed flow half-open, with at most the short timeout left.
+
+**`net-flows-nat`** (N24):
+1. One guest floods `NAT_TABLE_SIZE + 8` distinct UDP flows. Exactly
+   `NAT_QUOTA_PER_GUEST` are created and 232 are refused, all as
+   `out_drop_share` and none as `out_drop_table`.
+2. `nat_flow_list` returns exactly the share, each flow a masqueraded flow
+   of that guest from a flooded port, lent a port in the NAT range.
+3. A listing at `now + NAT_TIMEOUT_UDP_NS + 1` is empty while `entries`
+   still reads the share.
+4. Through the device, the flow section lists those flows as the guest's to
+   its peer, and its counters equal the kernel's.
+5. The table cause, which only a ninth guest can reach: eight more
+   masquerading taps send a share each, one at a time. Each guest's 32 are
+   decided before the next guest sends; the first form burst all 256 and
+   ran out a 2 s wait on CI's aarch64. Seven fill the table, and the
+   eighth's 32 are refused as `out_drop_table`, none as `out_drop_share`,
+   with 256 listed. The counters, the taps' `rx_dropped` and the listed
+   count are logged before the checks.
+
+**`net-flows-fw`** (N24):
+1. A flow the host opened (its UDP send to the world) is listed at
+   `guest_addr` `FW_HOST_GUEST_IP`.
+2. A guest-to-guest UDP flow and a TCP one are listed against the guest,
+   the TCP flow not established after its SYN and established after an ACK.
+3. Through the device, the host's flow is kind `HOST` at address 0, and the
+   guest's is kind `GUEST` with the established flag and no NAT identity.
+4. The guest's share is spent, and the next flow is refused as
+   `flow_drop_share` (exactly +1, `flow_drop_table` unmoved). The listing
+   holds exactly the share, and a listing an hour ahead is empty.
+
+The firewall's table cause (`flow_drop_table`) is counted but no test
+provokes it. The table is the guests' eight shares plus the host's, so only a
+ninth initiator can reach it. `net-flows-nat` builds that for NAT; the
+firewall's equivalent (nine guest taps forwarding to one another) is not
+built.
+
+**The shell harness** runs `vmctl flows` in every boot and requires its
+counter lines, reading the version-6 snapshot end to end from userland.
 
 ## Waiting for a property (`wait_until`)
 

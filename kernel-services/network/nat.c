@@ -31,12 +31,12 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 
-#define NAT_KIND_MASQ 0       /* outbound masquerade: guest -> world, reply back */
-#define NAT_KIND_DNAT 1       /* inbound port-forward: client -> host:P -> guest:Q */
+/* NAT_KIND_MASQ / NAT_KIND_DNAT: kernel/net/nat.h (the listing names them). */
 
 struct nat_entry {
     bool     in_use;
     bool     tcp_est;         /* a non-SYN segment has passed: the longer timeout */
+    bool     dnat_synack;     /* DNAT: the guest's SYN-ACK has passed back (see nat_in_dnat) */
     uint8_t  kind;            /* NAT_KIND_MASQ / NAT_KIND_DNAT */
     uint8_t  proto;           /* IPPROTO_UDP / TCP / ICMP */
     uint16_t orig_port;       /* the guest's source port, or ICMP echo id (host order) */
@@ -239,19 +239,19 @@ static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16
      * exists: the guest's reply carries no host port, so two such flows could
      * not be told apart on the way back. */
     if (nat_find_dnat_reply(proto, guest_ip, guest_port, client_ip, client_port, now) != NULL) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_ambiguous);
         return NULL;
     }
     /* Bound the guest's footprint the same way an outbound flow is: an inbound
      * flood using distinct client ports against one guest's forwards must fill
      * only that guest's share, not the whole table. */
     if (nat_guest_count(guest_ip, now) >= NAT_QUOTA_PER_GUEST) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_share);
         return NULL;
     }
     struct nat_entry *e = nat_free_slot(now);
     if (e == NULL) {
-        STAT(dnat_drop_full);
+        STAT(dnat_drop_table);
         return NULL;
     }
     memset(e, 0, sizeof(*e));
@@ -275,7 +275,7 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
 {
     struct nat_entry *slot = nat_free_slot(now);
     if (slot == NULL) {
-        STAT(out_drop_full);
+        STAT(out_drop_table);
         return NULL;
     }
     uint16_t port = 0;
@@ -329,6 +329,8 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
         struct nat_entry dsnap;
         bool dhave = false;
         if (de) {
+            if (iph->proto == IPPROTO_TCP && (dl4[13] & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK))
+                de->dnat_synack = true;      /* the guest accepted; the client's ACK completes it */
             de->expires_ns = dnow + nat_timeout(de);
             dsnap = *de;
             dhave = true;
@@ -396,7 +398,7 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
          * the inbound flows to its port-forwards draw on one budget. */
         if (nat_guest_count(iph->src, now) >= NAT_QUOTA_PER_GUEST) {
             spin_unlock_irqrestore(&g_nat_lock, s);
-            STAT(out_drop_full);
+            STAT(out_drop_share);
             return -ENOSPC;
         }
         e = nat_alloc(proto, out->ip4.addr, orig_port, now);
@@ -533,6 +535,17 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
 {
     uint32_t host_ip = iph->dst, client_ip = iph->src;
     uint64_t now = clock_now_ns();
+    /* Established means the handshake completed in order: the guest's
+     * SYN-ACK went back (nat_out records it) and then the client's ACK
+     * without SYN arrived. The opener here is an outside party, so neither
+     * half alone may earn the longer hold on the guest's share: an
+     * unsolicited ACK creates an entry the guest never answered, and a guest
+     * reply alone may be the RST to it or the SYN-ACK to a SYN flood. */
+    bool ack = false;
+    if (proto == IPPROTO_TCP) {
+        uint8_t fl = 0;
+        ack = m_copydata(m, ihl + 13, 1, &fl) && (fl & TH_ACK) && !(fl & (TH_SYN | TH_RST));
+    }
 
     /* Hold g_pf_lock across the conntrack create: nat_pf_del reaps under the
      * same lock, so a delete cannot complete (removing the rule and reaping)
@@ -552,7 +565,9 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
     struct nat_entry snap;
     bool have = false;
     if (e) {
-        e->expires_ns = now + nat_timeout(e);   /* refreshed per packet; no est upgrade */
+        if (ack && e->dnat_synack)
+            e->tcp_est = true;
+        e->expires_ns = now + nat_timeout(e);   /* refreshed per packet */
         snap = *e;
         have = true;
     }
@@ -876,6 +891,28 @@ static void pf_parse_apply(const char *cfg)
         if (*p == ',')
             p++;
     }
+}
+
+unsigned nat_flow_list(struct nat_flow *out, unsigned max, uint64_t now)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE && n < max; i++) {
+        const struct nat_entry *e = &g_nat[i];
+        /* N24: what a share counts (nat_guest_count), no more -- an expired
+         * entry still in use holds no share, so listing it would contradict
+         * the refusal the listing exists to explain. */
+        if (!e->in_use || nat_expired(e, now))
+            continue;
+        out[n++] = (struct nat_flow){
+            .kind = e->kind, .proto = e->proto, .est = e->tcp_est,
+            .orig_port = e->orig_port, .nat_port = e->nat_port, .peer_port = e->peer_port,
+            .orig_ip = e->orig_ip, .nat_ip = e->nat_ip, .peer_ip = e->peer_ip,
+            .expires_ns = e->expires_ns,
+        };
+    }
+    spin_unlock_irqrestore(&g_nat_lock, s);
+    return n;
 }
 
 void nat_age(uint64_t now_ns)

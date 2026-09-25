@@ -7,6 +7,89 @@
 > refused, **nothing an operator can read changes** -- not the control
 > plane's listing, not the kernel log, not sysctl -- while the kernel
 > counts every refusal in counters that only the self-tests read.
+>
+> **Built (PR #243).** As designed, with these differences:
+> - **The DNAT listing is checked in `net-tapctl`**, not `net-flows-nat`.
+>   That test already creates a DNAT flow through a port-forward and reads
+>   the device. It now requires that flow listed as the client's
+>   (40001) to the guest (:80) through the dialled port (uplink:8080), and
+>   a read one byte short to be `-EMSGSIZE`.
+> - **`net-flows-nat`'s table step decides one guest at a time.** Its
+>   first form injected all eight extra guests' 256 datagrams, then waited
+>   2 s for them all to be counted. It failed on CI's first aarch64 debug
+>   boot, with the wait run out and the table count short. The
+>   cause was not established, and nothing was logged about where the
+>   datagrams went. Each guest's 32 are now decided before the next guest
+>   sends, with a patient wait that returns as soon as they are, so the
+>   eighth guest is the one the table refuses by construction. Every
+>   counter, the taps' `rx_dropped` and the listed count are logged before
+>   the checks, so a recurrence names where the datagrams went.
+> - **`net-flows-nat` also provokes the table cause.** A masquerading tap
+>   forwards only its one guest (`.15`; the anti-spoof rule in
+>   `ipv4_forward`), so a ninth source takes a ninth tap: eight more
+>   masquerading taps send a share each. Seven fill the table, and the
+>   eighth's 32 are refused as `out_drop_table`, none as `out_drop_share`.
+>   The firewall's table cause is counted but no test provokes it.
+> - **The flow section's scratch arrays are allocated per read**
+>   (`tap_ctl_flows`), so a failed allocation is `-ENOMEM`. The listing
+>   takes no counters: they are read after it with `nat_get_stats` and
+>   `fw_get_stats`.
+> - **`NAT_KIND_MASQ`/`NAT_KIND_DNAT` moved to `nat.h`**, where the listing
+>   names them.
+> - **A port-forwarded TCP flow can now be established, and only by the
+>   handshake in order** (found in review, over two rounds).
+>   - DNAT entries never set `tcp_est`: the inbound path said "no est
+>     upgrade", and the reply path skipped it. So the listing reported every
+>     port-forwarded connection as half-open, and the table kept one for
+>     only the half-open 30 s rather than the established 300 s.
+>   - The first fix copied masquerade's rule: the opener's ACK, or any
+>     reply, marks it. That was unsafe here, because the opener is an
+>     outside party and a port-forward creates an entry for any TCP
+>     segment. One unsolicited ACK then held the guest's share for 300 s,
+>     and the guest's RST to it would have counted as "the guest answered".
+>   - As built: `nat_out` records the guest's SYN-ACK on the entry
+>     (`dnat_synack`), and only a later client ACK without SYN or RST on
+>     that entry marks it established.
+>   - `net-dnat` checks the order: half-open after the SYN, still half-open
+>     after the guest's SYN-ACK, established after the client's ACK. It
+>     also sends an unsolicited ACK, then the guest's RST, then another
+>     ACK, and the flow stays half-open throughout. `net-tapctl` (3c)
+>     checks that the client's ACK with no SYN-ACK in between leaves the
+>     flow half-open, with at most the short timeout left.
+>   - Established still means no more than the order was seen: NAT reads
+>     no sequence numbers, so a blind third segment would pass. That is the
+>     "full TCP state tracking" the network design names and defers.
+> - **`vmctl flows` accepts `host`** as well as a guest address. The
+>   existing `list` commands needed no change: they compare against the
+>   version macro and size their buffers from `COSMO_NETCTL_SNAPSHOT_MAX`,
+>   so they read version 6 and stop before the flow section.
+> - **Every test that reads the snapshot now reads into a full-size
+>   buffer.** `net-tapctl`'s last read, a dead store `gmake analyze` had
+>   always flagged, now checks its length.
+>
+> | mutation | caught by |
+> | --- | --- |
+> | `nat_flow_list` ignores `expires_ns` | `net-flows-nat`: the listing past the timeout is not empty |
+> | `fw_flow_list` ignores `expires_ns` | `net-flows-fw`: the listing an hour ahead is not empty |
+> | the NAT table cause counted as the share's | `net-flows-nat`: `out_drop_table` did not rise by 32 |
+> | an ambiguous DNAT counted as the share's | `net-dnat`: `dnat_drop_ambiguous` not +1 |
+> | the firewall's share and table causes swapped | `net-flows-fw`: `flow_drop_share` did not rise |
+> | DNAT's `src`/`dst` not swapped | `net-tapctl`: the flow not seen as the client's |
+> | a host flow listed under its opener's address | `net-flows-fw`: `dev_host` |
+> | `est` not carried | `net-flows-fw`: `tcp_est` |
+> | the flow section's room check removed | `net-tapctl`: the one-byte-short read not `-EMSGSIZE` |
+> | `vmctl flows` refusing version 6 | the shell harness: the counter lines missing |
+> | the client's ACK establishing without the guest's SYN-ACK | `net-tapctl` (3c) and `net-dnat` (2c): established |
+> | any guest TCP reply (the RST) counted as its SYN-ACK | `net-dnat` (2c): established after RST then ACK |
+> | the client's ACK never establishing | `net-dnat` (2b): not established after the handshake |
+>
+> Each mutation (thirteen) ran alone on an x86-64 debug boot, with the boot
+> confirmed. Where the failing test returns early (`net-tapctl`,
+> `net-flows-fw`), later network tests also fail on the state it left
+> behind, as they do for the existing tests. The first failure is the one
+> named above. Both architectures pass in debug. Both release boots run
+> `vmctl flows` in the harness and pass. `gmake host-test` passes, and
+> `gmake analyze` is clean on both architectures.
 
 ## Problem
 
@@ -231,7 +314,7 @@ flows: a 128-byte header and 576 × 32 = 18 432 bytes of flows, so
 
 ### 4. `vmctl flows`
 
-`vmctl flows [GUESTADDR]` reads the snapshot and prints, first, one
+`vmctl flows [GUESTADDR|host]` reads the snapshot and prints, first, one
 line per share, then the machine-wide refusal counters. Together they
 answer "why is my guest refused":
 
@@ -304,7 +387,7 @@ the same table. A listing is operator-driven, not per packet.
 | kernel-services/network/nat.c, kernel/include/kernel/net/nat.h | `nat_flow_list(out, max, now)`; `out_drop_full` split into `out_drop_share`/`out_drop_table`, `dnat_drop_full` into `dnat_drop_ambiguous`/`_share`/`_table` |
 | kernel-services/network/fw.c, kernel/include/kernel/net/fw.h | `fw_flow_list(out, max, now)`; `flow_slot` says which reason; `flow_drop_full` split into `flow_drop_share`/`flow_drop_table`; `hin_flow_drop_full` renamed `hin_flow_unrecorded` |
 | kernel-services/network/tap.c | `tap_ctl_read` writes the flow section |
-| userland/system/vmctl.c | `vmctl flows [GUESTADDR]`; the two existing listings accept version 6 |
+| userland/system/vmctl.c | `vmctl flows [GUESTADDR|host]`; the two existing listings read version 6 unchanged |
 | kernel-services/network/nettest.c | the new tests; `netctl_snapshot_len` counts the flow section; `net-nat`, `net-dnat`, `net-hoststate` read the split counters |
 | docs | network design (the control channel's snapshot), invariants (N24), testing; `docs/userland/api.md` (`vmctl flows`); the inventory row struck; README Status |
 
@@ -318,7 +401,7 @@ the same table. A listing is operator-driven, not per packet.
   `struct fw_flow_info`). The split counters in `struct nat_stats` and
   `struct fw_stats` (§3); nothing outside the network stack and its tests
   reads those structs.
-- **`vmctl flows [GUESTADDR]`**.
+- **`vmctl flows [GUESTADDR|host]`**.
 
 ## Migration plan
 

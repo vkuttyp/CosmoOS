@@ -28,8 +28,12 @@
  * DIR_OUTPUT direction, an egress `scope` in a filter command and a rule
  * record (one of the three reserved bytes each, so neither changes size),
  * and a fifth default in the per-guest record -- which had no reserved byte
- * left, so that record grows from 8 to 12 bytes and the snapshot with it. */
-#define COSMO_NETCTL_VERSION 5
+ * left, so that record grows from 8 to 12 bytes and the snapshot with it.
+ * Version 6 adds the flow section (docs/audit/next-subsystem-net-flows.md):
+ * a third section after the filter section, read-only, listing every live
+ * NAT and firewall flow with the shares and refusal counters that explain
+ * why a guest's new flows are refused. No command changes. */
+#define COSMO_NETCTL_VERSION 6
 
 /* Opcodes. FORWARD_* are carried by struct cosmo_netctl; FILTER_* by struct
  * cosmo_netctl_filter. Every command is written whole, at its own struct's
@@ -186,6 +190,72 @@ struct cosmo_netctl_filter_rule {
     uint8_t  reserved[2];
 };
 
+/*
+ * The flow section (version 6), after the filter section: a header, then
+ * `count` flows. A flow is listed exactly when its table counts it against a
+ * share -- in use and not yet expired at the read's one `now` (invariant
+ * N24) -- and each table's flows are copied in one hold of its lock, so a
+ * table's list is one instant; the NAT table's and the firewall's are two
+ * instants, one after the other. Every flow is written as who opened it
+ * (src) to whom (dst).
+ */
+#define COSMO_NETCTL_FLOW_NAT 1        /* table: NAT's conntrack */
+#define COSMO_NETCTL_FLOW_FW  2        /* table: the firewall's flow table */
+
+#define COSMO_NETCTL_FLOW_MASQ  1      /* NAT: a guest's outbound flow, masqueraded as nat_addr:nat_port */
+#define COSMO_NETCTL_FLOW_DNAT  2      /* NAT: a client's inbound flow to nat_addr:nat_port, forwarded to dst */
+#define COSMO_NETCTL_FLOW_GUEST 3      /* FW: a guest-to-guest flow the FORWARD chain accepted */
+#define COSMO_NETCTL_FLOW_HOST  4      /* FW: a flow the host opened (guest_addr HOST_ADDR) */
+
+#define COSMO_NETCTL_FLOW_ESTABLISHED 0x01   /* TCP: both directions have been seen */
+
+/* Cumulative since boot and machine-wide -- the kernel does not count per
+ * guest. Each has one cause. They are read beside the flows, not in the
+ * same lock hold, so they may lag the flows by the refusals and creations
+ * in flight (at most one per CPU): approximate to the instant, exact over
+ * time. */
+struct cosmo_netctl_flow_counters {
+    uint64_t masq_new;
+    uint64_t masq_drop_share;      /* refused: the guest's NAT share was full */
+    uint64_t masq_drop_table;      /* refused: the whole NAT table was full */
+    uint64_t masq_drop_noport;     /* refused: no NAT identifier was free */
+    uint64_t dnat_drop_share;      /* refused: the target guest's NAT share was full */
+    uint64_t dnat_drop_table;      /* refused: the whole NAT table was full */
+    uint64_t dnat_drop_ambiguous;  /* refused: the reply's reverse key was already in use */
+    uint64_t nat_expired;
+    uint64_t fw_new;               /* guest-to-guest flows recorded */
+    uint64_t fw_drop_share;        /* refused: the initiator's flow share was full */
+    uint64_t fw_drop_table;        /* refused: no free slot in the flow table */
+    uint64_t fw_host_new;          /* flows the host opened, recorded */
+    uint64_t fw_host_unrecorded;   /* not a refusal: sent, but not recorded, so the reply takes the rules */
+    uint64_t fw_expired;
+};
+
+struct cosmo_netctl_flow_list {
+    uint16_t version;              /* COSMO_NETCTL_VERSION */
+    uint16_t count;                /* struct cosmo_netctl_flow following */
+    uint16_t nat_quota;            /* one guest's NAT share */
+    uint16_t fw_quota;             /* one guest's flow share */
+    uint16_t fw_host_quota;        /* the host's flow share */
+    uint16_t reserved[3];
+    struct cosmo_netctl_flow_counters counters;
+};
+
+struct cosmo_netctl_flow {
+    uint8_t  table;                /* COSMO_NETCTL_FLOW_NAT / _FW */
+    uint8_t  kind;                 /* COSMO_NETCTL_FLOW_MASQ / DNAT / GUEST / HOST */
+    uint8_t  proto;                /* COSMO_NETCTL_PROTO_ICMP / TCP / UDP */
+    uint8_t  flags;                /* COSMO_NETCTL_FLOW_ESTABLISHED */
+    uint32_t guest_addr;           /* network byte order: whose share it counts against; HOST_ADDR = the host */
+    uint32_t src_addr, dst_addr;   /* network byte order: the initiator and the responder */
+    uint16_t src_port, dst_port;   /* host byte order; ICMP: the echo id, 0 */
+    uint32_t nat_addr;             /* network byte order: MASQ the uplink identity, DNAT the dialled
+                                    * host address; FW 0 */
+    uint16_t nat_port;             /* host byte order: MASQ the lent port or echo id, DNAT the dialled port */
+    uint16_t reserved;
+    uint32_t expires_ms;           /* from the read, rounded up: never 0 for a listed flow */
+};
+
 /* The snapshot's bounds, so a reader can size its buffer for every valid
  * configuration rather than guess (the kernel refuses a short buffer with
  * -EMSGSIZE and never returns a partial snapshot). These mirror the kernel's
@@ -195,9 +265,13 @@ struct cosmo_netctl_filter_rule {
 #define COSMO_NETCTL_MAX_GUESTS          8    /* concurrent guests */
 #define COSMO_NETCTL_MAX_RULES_PER_GUEST 32   /* firewall rules per guest (and for the host) */
 #define COSMO_NETCTL_MAX_POLICIES        (COSMO_NETCTL_MAX_GUESTS + 1)   /* the guests and the host */
+#define COSMO_NETCTL_MAX_NAT_FLOWS       256  /* NAT's conntrack table */
+#define COSMO_NETCTL_MAX_FW_FLOWS        320  /* the firewall's flow table: the guests' 256 and the host's 64 */
 #define COSMO_NETCTL_SNAPSHOT_MAX \
     (sizeof(struct cosmo_netctl_list) + COSMO_NETCTL_MAX_FORWARDS * sizeof(struct cosmo_netctl_rule) + \
      sizeof(struct cosmo_netctl_filter_list) + COSMO_NETCTL_MAX_POLICIES * sizeof(struct cosmo_netctl_filter_guest) + \
-     COSMO_NETCTL_MAX_POLICIES * COSMO_NETCTL_MAX_RULES_PER_GUEST * sizeof(struct cosmo_netctl_filter_rule))
+     COSMO_NETCTL_MAX_POLICIES * COSMO_NETCTL_MAX_RULES_PER_GUEST * sizeof(struct cosmo_netctl_filter_rule) + \
+     sizeof(struct cosmo_netctl_flow_list) + \
+     (COSMO_NETCTL_MAX_NAT_FLOWS + COSMO_NETCTL_MAX_FW_FLOWS) * sizeof(struct cosmo_netctl_flow))
 
 #endif /* UAPI_COSMO_NETCTL_H */
