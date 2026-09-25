@@ -73,7 +73,8 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(BOOT_LOG) \
-		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer \
+		$(if $(filter release,$(BUILD)),--shell-burst)
 
 # The default CPU models (scripts/qemu-run.sh) have no SMEP, SMAP or UMIP
 # (qemu64) and no PAN (cortex-a72), so on them the kernel's guard on its

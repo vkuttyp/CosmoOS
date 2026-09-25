@@ -10,6 +10,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/log.h>
+#include <kernel/selftest.h>
 #include <kernel/tty.h>
 
 #include <arch/console.h>
@@ -133,4 +134,14 @@ void arch_console_input_init(void)
         return;
     }
     kinfo("serial: console input on IRQ %u", COM1_ISA_IRQ);
+}
+
+/* The PL011's clear-then-drain test (docs/audit/next-subsystem-console-rx.md):
+ * the 16550 has no receive-interrupt clear to order -- its interrupt is
+ * "data ready", level while the FIFO holds anything. */
+bool selftest_console_rx_clear(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: console-rx-clear: the 16550 has no receive-interrupt clear; skipping");
+    return true;
 }

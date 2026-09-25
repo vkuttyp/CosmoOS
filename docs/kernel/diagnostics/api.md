@@ -22,9 +22,9 @@ checked at compile time; a non-literal format is a build error.
 
 ### `void console_unregister(struct console_sink *sink)` *(Module ABI v1)*
 - **Purpose**: unlink a sink before its memory goes away.
-- **Concurrency**: unlinks without taking the console spinlock, so it
-  races a concurrent `console_write` on another CPU (documented gap,
-  `docs/kernel/device/invariants.md` D12). Unknown sinks are ignored.
+- **Concurrency**: unlinks under the console spinlock, so no
+  `console_write` on another CPU holds the sink while it goes. Unknown
+  sinks are ignored.
 
 ### `bool console_has_sink(const char *name)`
 - **Purpose**: whether a sink of that name is registered (self-tests).
@@ -32,7 +32,17 @@ checked at compile time; a non-literal format is a build error.
 
 ### `void console_write(const char *s, size_t len)` / `void console_puts(const char *s)`
 - **Purpose**: emit bytes to every sink.
-- **Concurrency**: no lock; concurrent writers may interleave lines.
+- **Concurrency**: each call writes under the console spinlock (IRQs
+  saved), so one call's bytes are not interleaved with another's; after
+  `console_set_panic_mode` it writes without the lock.
+
+### `arch_irq_state_t console_hold(void)` / `void console_release(arch_irq_state_t st)`
+- **Purpose**: hold every `console_write` off for a short window -- the
+  PL011's `console-rx-clear` self-test uses it so no log line is looped
+  back into the receive FIFO while loopback is on.
+- **Concurrency**: takes the console spinlock with IRQs saved; the holder
+  must not log (it would deadlock) and must release on every exit.
+  Writers on other CPUs spin for the window. Not for panic context.
 
 ## `kernel/fbcon.h`
 

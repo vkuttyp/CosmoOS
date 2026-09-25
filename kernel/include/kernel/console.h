@@ -18,6 +18,7 @@
 #define KERNEL_CONSOLE_H
 
 #include <stdbool.h>
+#include <arch/irq.h>   /* arch_irq_state_t, for console_hold */
 #include <stddef.h>
 
 struct console_sink {
@@ -35,6 +36,13 @@ bool console_has_sink(const char *name);
 
 void console_write(const char *s, size_t len);
 void console_puts(const char *s);
+
+/* Tests: hold every console writer off -- another CPU's console_write
+ * spins -- for a window in which the UART must carry nothing but the
+ * test's own bytes (the PL011 loopback test). Nothing may log while it is
+ * held: a log line would wait on this very lock. */
+arch_irq_state_t console_hold(void);
+void console_release(arch_irq_state_t st);
 
 /* Panic mode: stop taking the console lock so a report can be printed
  * even if another (now halted) CPU holds it. Irreversible. */

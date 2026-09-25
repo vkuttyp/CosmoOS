@@ -3511,6 +3511,20 @@ See [docs/development.md](docs/development.md).
   architecture; the test checks one wait of exactly the timeout, and the
   loser's "refused at once" as an order plus a single claim attempt. The
   remaining time bounds are 1 s hang guards. (PR #239)
+- **The aarch64 console no longer stops taking input.** Three times on
+  CI, an aarch64 release boot's shell stopped echoing mid-line right
+  after a job event and never recovered. Provoked on purpose
+  (`tools/console-stall-probe.py`), it stalled in 13 of 20 boots. Looked
+  at from outside, the guest was idle and ticking, and the PL011's
+  receive FIFO was full with its interrupt enabled but none pending. The
+  receive handler drained the FIFO and then cleared the interrupt, so a
+  character arriving between the two lost its interrupt, and QEMU raises
+  none for the characters behind it. The handler now clears first and
+  drains after (T16). A new self-test, `console-rx-clear`, uses the
+  PL011's loopback to put a byte into the FIFO just after the drain, and
+  fails with the old order on every boot. The shell harness's release
+  boots also run six cycles of a background job exiting as a line is
+  typed. (PR #241)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

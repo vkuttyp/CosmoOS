@@ -586,6 +586,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=180.0, help="seconds before the run is killed")
     ap.add_argument("--expect-selftest", choices=["auto", "yes", "no"], default="auto",
                     help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
+    ap.add_argument("--shell-burst", action="store_true",
+                    help="add the shell harness's console burst cycles (release boots)")
     ap.add_argument("--chaos", action="store_true",
                     help="a SCHED_CHAOS=1 image: require the migrator's tally line with a count above zero")
     ap.add_argument("--harness-retry", action="store_true",
@@ -692,7 +694,7 @@ def main():
     if not args.expect_panic:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from shelltest import ShellTest
-        shelltest = ShellTest()
+        shelltest = ShellTest(burst=args.shell_burst)
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
 

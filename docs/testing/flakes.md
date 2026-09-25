@@ -1715,7 +1715,20 @@ PL011's receive FIFO full with its interrupt enabled and none pending.
 `rx_irq` drains the FIFO and then clears the receive interrupt, so a
 character arriving between the two has its interrupt cleared and is
 never read, and QEMU's PL011 raises nothing for the characters after it.
-Clearing first: no stall in six boots. Until the build lands, re-run.
+Clearing first: no stall in six boots.
+
+**Fixed (PR #241).** `rx_irq` now clears the receive interrupt and then
+drains (invariant T16, `docs/kernel/tty/invariants.md`). The new
+aarch64 self-test `console-rx-clear` makes the race happen on every
+boot: with the console held off and the PL011 in loopback, it drives the
+receive path with a hook that transmits one byte after the drain's last
+read, then requires the receive interrupt to be pending. With the old
+order it fails on the first boot and is the only test that does. The
+shell harness's release boots also gained six cycles of a background
+`sleep` exiting as the next line is typed. That is the regression a user would see, but it
+is not the proof: with the old order restored it caught the stall in 1
+of 5 release boots. If this shape comes back, it is a new bug; don't
+re-run it away.
 
 ## `net-harness` printed `ready` and nothing else, once, on this machine
 
@@ -2179,6 +2192,15 @@ this file. The test sleeps a fixed 200 ms and then requires every one
 of its workers to have made a round: the "N things after a fixed
 settle" shape, which a host stall of 200 ms defeats. The re-run passed.
 First sighting.
+
+## `net-accept-race` over the per-test budget, 2026-09-24
+
+`self-test net-accept-race took 9067 ms (budget 8000 ms)`, on CI: PR
+#240's run 36035970200 (`9731386d`), the x86-64 chaos boot. The branch
+held one report, one probe script and this file. The test itself passed
+(`64 connections accepted against a dropping peer ... ok`). The failure
+is the boot harness's per-test 8 s budget, which a chaos boot on a
+loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 

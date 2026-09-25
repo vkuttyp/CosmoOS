@@ -126,6 +126,23 @@ still asleep. Check: `tty-ldisc`, where a reader blocked under `VMIN` 1
 is released, returning 0, by a `tcsetattr` that sets `VMIN` 0 and
 nothing else.
 
+**T16. The console's receive interrupt is cleared before the drain that
+follows it, never after.** (The console-rx unit,
+`docs/audit/next-subsystem-console-rx.md`.) On AArch64 the PL011's
+receive interrupt is a latch `rx_irq` clears through ICR; cleared after
+the drain, a character arriving between the drain's last read and the
+clear lost its interrupt and stayed in the FIFO, and the console stopped
+for good (QEMU's PL011 raises the interrupt only as the FIFO count
+reaches one). Cleared first, a character arriving during the drain is
+read by it and one arriving after raises an interrupt nothing clears.
+x86-64's 16550 has no such clear: its receive interrupt is "data ready",
+level while the FIFO holds anything. Check: `console-rx-clear` (AArch64:
+through the PL011's loopback, a byte put into the FIFO after the
+service's drain -- the old window -- leaves the receive interrupt
+pending; the old order fails it); in release boots, the shell
+harness's six burst cycles (a background job finishing as the next line
+arrives).
+
 **T15. Readiness answers the same question a read answers.** "Would
 this block?" is asked in three places -- poll readiness on the console
 object, the non-blocking path in `tty_read`, and the wait itself -- and

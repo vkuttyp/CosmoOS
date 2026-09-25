@@ -123,6 +123,26 @@ masked). The handler drains the FIFO:
 while (LSR & DATA_READY): byte = RBR; tty_input(tty_console(), &byte, 1)
 ```
 
+On AArch64 the console is a PL011 (`kernel/arch/aarch64/pl011.c`), whose
+receive interrupt is a latch the driver clears through ICR -- and the
+order of that clear against the drain is what keeps input flowing
+(T16):
+
+```text
+rx_service(tty, hook):         -- rx_irq calls (tty_console(), NULL)
+  ICR = RX | RT                -- clear first
+  while (!(FR & RX_EMPTY)): byte = DR; if (tty) tty_input(tty, &byte, 1)
+  if (hook) hook()             -- the self-test's; it passes no tty
+```
+
+The other order -- drain, then clear -- stalled the aarch64 console for
+good: a character arriving between the drain's last "empty" read and the
+clear had its interrupt cleared at once and stayed in the FIFO, and
+QEMU's PL011 raises the receive interrupt only as the FIFO count reaches
+one, so nothing after it raised anything either (the console-rx unit,
+`docs/audit/next-subsystem-console-rx.md`: 13 release boots in 20 under
+the probe's shape, and three sightings on CI, one on `main`).
+
 The handler runs on the CPU the GSI is routed to (CPU 0 by the existing
 IRQ layer); `tty_input` is safe from any CPU. When no UART is present
 (no `serial0` sink) nothing is registered and the console tty simply

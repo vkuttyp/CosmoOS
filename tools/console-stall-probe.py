@@ -59,14 +59,6 @@ BACKUP = '.console-stall-probe.orig'
 STAMP = '.console-stall-probe.applied'
 
 S_ANCHOR_CMDS = 'COMMANDS = [\n'
-S_ANCHOR_RUN = '''            for cmd, _ in COMMANDS:
-                if cmd == SUSPEND:'''
-S_PROBE_RUN = '''            for cmd, _ in COMMANDS:
-                if isinstance(cmd, tuple) and cmd[0] == "__SLEEP__":   # CSPROBE: a pause, not a keystroke
-                    time.sleep(cmd[1])
-                    self.results["sent"].append(cmd)   # accounted, so the harness does not call it unsent
-                    continue
-                if cmd == SUSPEND:'''
 S_ANCHOR_FAIL = '''                if not self._wait_prompt(log_path, proc, deadline, prompts):
                     self.error = f"no prompt before command {prompts} ({cmd!r})"
                     return'''
@@ -154,10 +146,10 @@ S_PROBE_FAILURES = '''    def _csprobe(self, log_path, proc, k):   # CSPROBE: do
             out.append(f"shell harness: {self.error}")'''
 
 B_ANCHOR = '''        from shelltest import ShellTest
-        shelltest = ShellTest()
+        shelltest = ShellTest(burst=args.shell_burst)
 '''
 B_PROBE = '''        from shelltest import ShellTest
-        shelltest = ShellTest()
+        shelltest = ShellTest(burst=args.shell_burst)
         if not env.get("QEMU_QMP"):   # CSPROBE: a QMP socket for the stall dump
             import tempfile
             env["QEMU_QMP"] = os.path.join(tempfile.mkdtemp(prefix="cosmo-csp-"), "qmp.sock")
@@ -174,7 +166,7 @@ def cycles_prefix(n):
         # The background job exits one second after its start; the next
         # line goes out at 0.85-1.15 s, walking across that moment.
         pause = 0.85 + 0.3 * ((i * 7) % n) / max(n - 1, 1)
-        out.append(f'    ("sleep 1 &", []), (("__SLEEP__", {pause:.3f}), []), ("echo csprobe-after-background-{i:03d}-abcdefghijklmnopqrstuvwxyz", []),\n')
+        out.append(f'    ("sleep 1 &", []), (PAUSE({pause:.3f}), []), ("echo csprobe-after-background-{i:03d}-abcdefghijklmnopqrstuvwxyz", []),\n')
     out.append("    # --- end CSPROBE ---\n")
     return "".join(out)
 
@@ -185,7 +177,7 @@ def sha(p):
 
 def files(n):
     return [
-        (SHELL, [(S_ANCHOR_CMDS, cycles_prefix(n)), (S_ANCHOR_RUN, S_PROBE_RUN), (S_ANCHOR_FAIL, S_PROBE_FAIL),
+        (SHELL, [(S_ANCHOR_CMDS, cycles_prefix(n)), (S_ANCHOR_FAIL, S_PROBE_FAIL),
                  (S_ANCHOR_FAILURES, S_PROBE_FAILURES)]),
         (BOOT, [(B_ANCHOR, B_PROBE)]),
     ]
