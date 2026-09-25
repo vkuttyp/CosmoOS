@@ -7,6 +7,53 @@
 > refused, **nothing an operator can read changes** -- not the control
 > plane's listing, not the kernel log, not sysctl -- while the kernel
 > counts every refusal in counters that only the self-tests read.
+>
+> **Built (PR #243).** As designed, with these differences:
+> - **The DNAT listing is checked in `net-tapctl`**, not `net-flows-nat`.
+>   That test already creates a DNAT flow through a port-forward and reads
+>   the device. It now requires that flow listed as the client's
+>   (40001) to the guest (:80) through the dialled port (uplink:8080), and
+>   a read one byte short to be `-EMSGSIZE`.
+> - **`net-flows-nat` also provokes the table cause.** A masquerading tap
+>   forwards only its one guest (`.15`; the anti-spoof rule in
+>   `ipv4_forward`), so a ninth source takes a ninth tap: eight more
+>   masquerading taps send a share each. Seven fill the table, and the
+>   eighth's 32 are refused as `out_drop_table`, none as `out_drop_share`.
+>   The firewall's table cause is counted but no test provokes it.
+> - **The flow section's scratch arrays are allocated per read**
+>   (`tap_ctl_flows`), so a failed allocation is `-ENOMEM`. The listing
+>   takes no counters: they are read after it with `nat_get_stats` and
+>   `fw_get_stats`.
+> - **`NAT_KIND_MASQ`/`NAT_KIND_DNAT` moved to `nat.h`**, where the listing
+>   names them.
+> - **`vmctl flows` accepts `host`** as well as a guest address. The
+>   existing `list` commands needed no change: they compare against the
+>   version macro and size their buffers from `COSMO_NETCTL_SNAPSHOT_MAX`,
+>   so they read version 6 and stop before the flow section.
+> - **Every test that reads the snapshot now reads into a full-size
+>   buffer.** `net-tapctl`'s last read, a dead store `gmake analyze` had
+>   always flagged, now checks its length.
+>
+> | mutation | caught by |
+> | --- | --- |
+> | `nat_flow_list` ignores `expires_ns` | `net-flows-nat`: the listing past the timeout is not empty |
+> | `fw_flow_list` ignores `expires_ns` | `net-flows-fw`: the listing an hour ahead is not empty |
+> | the NAT table cause counted as the share's | `net-flows-nat`: `out_drop_table` did not rise by 32 |
+> | an ambiguous DNAT counted as the share's | `net-dnat`: `dnat_drop_ambiguous` not +1 |
+> | the firewall's share and table causes swapped | `net-flows-fw`: `flow_drop_share` did not rise |
+> | DNAT's `src`/`dst` not swapped | `net-tapctl`: the flow not seen as the client's |
+> | a host flow listed under its opener's address | `net-flows-fw`: `dev_host` |
+> | `est` not carried | `net-flows-fw`: `tcp_est` |
+> | the flow section's room check removed | `net-tapctl`: the one-byte-short read not `-EMSGSIZE` |
+> | `vmctl flows` refusing version 6 | the shell harness: the counter lines missing |
+>
+> Each mutation ran alone on an x86-64 debug boot, with the boot
+> confirmed. Where the failing test returns early (`net-tapctl`,
+> `net-flows-fw`), later network tests also fail on the state it left
+> behind, as they do for the existing tests. The first failure is the one
+> named above. Both architectures pass in debug. Both release boots run
+> `vmctl flows` in the harness and pass. `gmake host-test` passes, and
+> `gmake analyze` is clean on both architectures.
 
 ## Problem
 

@@ -404,3 +404,23 @@ to completion against it: the driver's release must not have run, and the
 reference count must show the retry's hold. Without the `netif_get` the
 count assertion fails immediately, which is the reference's absence
 stated directly rather than a crash hoped for.
+
+**N24. The operator's flow listing shows exactly what the shares count.**
+A NAT entry or a firewall flow is listed (`nat_flow_list`,
+`fw_flow_list`, and through them the `/dev/net/tapctl` snapshot's flow
+section) exactly when it is in use and not expired at the read's one
+`now`. That is the test `nat_guest_count` and `flow_slot` apply when they
+decide a share is full. An expired entry that has not been reaped is not
+listed: it no longer holds a share, and listing it would contradict the
+refusal the operator is reading the listing to explain. Each table is
+copied in one hold of its own lock, so a table's list is one instant. The
+refusal counters are read beside it, not under it, so they are exact over
+time and approximate to the instant. **Checked by** `net-flows-nat` and
+`net-flows-fw`:
+- a guest flooded past its share is listed at exactly the share;
+- a spent firewall share's flows are listed at exactly the share when the
+  next one is refused;
+- a listing taken past the timeout, with nothing aged, is empty while the
+  entries are still in use.
+
+Its mutations: either listing ignoring `expires_ns`.

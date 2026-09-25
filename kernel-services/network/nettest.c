@@ -5127,6 +5127,7 @@ bool selftest_net_tapctl(const char **reason)
     bad = cmd; bad.version = 99;
     CHECK(file_write(f, &bad, sizeof(bad)) == -ENOTSUP);                 /* wrong version */
     rn = file_read(f, rbuf, sizeof(rbuf));
+    CHECK(rn == netctl_snapshot_len(rbuf, 1));
     CHECK(((struct cosmo_netctl_list *)rbuf)->count == 1);              /* only the re-added rule */
 
     file_put(f);

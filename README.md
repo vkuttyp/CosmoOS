@@ -3525,6 +3525,19 @@ See [docs/development.md](docs/development.md).
   fails with the old order on every boot. The shell harness's release
   boots also run six cycles of a background job exiting as a line is
   typed. (PR #241)
+- **The operator can see why a guest's flows are refused.** A guest that
+  fills its share of NAT's table or the firewall's has every new flow
+  dropped. Before this, nothing an operator could read changed when that
+  happened (`tools/net-visibility-probe.py`): a guest was refused 232
+  flows while the control snapshot stayed byte-identical and the log
+  silent, and the counters were read only by the self-tests. The
+  `/dev/net/tapctl` snapshot, now version 6, lists every live NAT and
+  firewall flow, opener to peer, with its NAT identity, established flag
+  and time left, beside the shares and the refusal counters. `vmctl
+  flows` prints them. The counters were split first, one cause each:
+  three of them had lumped a full share with a full table, and one
+  counted something that was not a refusal at all. Invariant N24: a flow
+  is listed exactly when its share counts it. (PR #243)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

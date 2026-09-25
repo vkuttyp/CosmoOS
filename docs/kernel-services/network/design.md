@@ -1155,7 +1155,7 @@ segments are already admitted by the connection itself under quiet delivery,
 so recording every host segment would put `g_fw_lock` on the uplink's
 hottest send path for no reader. A send is never refused for the firewall's
 sake: no room in the host's share simply leaves the reply to the rules
-(`hin_flow_drop_full`). The host's flows share the one table under the
+(`hin_flow_unrecorded`, formerly `hin_flow_drop_full`: not a refusal). The host's flows share the one table under the
 initiator key `FW_HOST_GUEST_IP`, so `flow_find`, `fw_age` and `fw_flush`
 apply unchanged and `fw_guest_purge` cannot touch them; the table is split by
 share — `FW_FLOW_GUEST_POOL` 256 (the guests' 8 × 32, unchanged) plus
@@ -1204,8 +1204,9 @@ once, in the place that already reads it.
 
 Named and deferred: ICMP-error admission for a *UDP* flow (there is no
 consumer in the stack; when a UDP unreachable notifier exists it applies its
-own check under the flag, as TCP's does), and a `vmctl` listing of live flows
-(observability, not policy).
+own check under the flag, as TCP's does). The `vmctl` listing of live flows
+this paragraph also deferred is built: see "The operator's view of the flows"
+below.
 
 **The OUTPUT chain: what the host itself may send** (audit unit "the OUTPUT
 chain", `docs/audit/next-subsystem-output-chain.md`). The filter's fourth and
@@ -1286,6 +1287,59 @@ replies on the NIC, `nat_in`'s deliveries, and the host's own name
 resolution, all at once — and seeding those back is a copy of the
 implementation, not a policy. The operator hardens by rule, or flips the
 default once the rules it needs are in place.
+
+**The operator's view of the flows** (the net-flows unit,
+`docs/audit/next-subsystem-net-flows.md`). A guest that fills its share of
+NAT's table or the firewall's has every new flow of that kind dropped, and
+before this unit nothing an operator could read changed when that happened:
+the control snapshot was byte-identical, the log silent, and the counters
+that recorded it were read only by the self-tests. **ABI version 6** appends
+a third, read-only section to the `/dev/net/tapctl` snapshot:
+
+- a `struct cosmo_netctl_flow_list` header carrying the three shares
+  (`NAT_QUOTA_PER_GUEST`, `FW_FLOW_QUOTA_PER_GUEST`, `FW_FLOW_QUOTA_HOST`)
+  and the machine-wide refusal counters, one cause each;
+- every live flow (`struct cosmo_netctl_flow`, 32 bytes), NAT's table then the
+  firewall's, each written as its opener (`src`) to its peer (`dst`):
+  - a masqueraded flow is the guest's, and `nat` is the uplink identity lent
+    to it;
+  - a port-forwarded flow is the client's to the guest, and `nat` is the
+    host address and port it dialled;
+  - a firewall flow is `a` to `b`, counted against its guest, or against the
+    host (`guest_addr` 0) for one the host opened.
+
+  Each flow also carries its established flag and its time left, in
+  milliseconds rounded up.
+
+`nat_flow_list` and `fw_flow_list` copy each table under one hold of its lock
+at the one `now` `tap_ctl_read` takes, listing exactly what the share counts
+(N24). The counters are read beside the flows, not under that hold (several
+are incremented just after the table lock is released), so they may lag the
+flows by the refusals in flight. The ABI comment says so.
+
+**The counters were split by cause first**, because three of them lumped
+together causes that call for different diagnoses:
+
+| before | now | why |
+| --- | --- | --- |
+| `out_drop_full` | `out_drop_share`, `out_drop_table` | the guest's share full, or the whole table full |
+| `dnat_drop_full` | `dnat_drop_ambiguous`, `dnat_drop_share`, `dnat_drop_table` | a reverse key in use, the target's share full, or the table full |
+| `flow_drop_full` | `flow_drop_share`, `flow_drop_table` | `flow_slot` now says which |
+| `hin_flow_drop_full` | `hin_flow_unrecorded` | not a refusal: the host's datagram still leaves |
+
+**Sizing.** The snapshot's maximum becomes 25 784 bytes. That fits the
+64 KiB syscall bounce, and a static assert keeps it so. The flow section is
+allocated per read (two scratch arrays, `-ENOMEM` if that fails) and is
+listed only on the `0600` device, because it names every guest's peers.
+
+**`vmctl flows [GUESTADDR|host]`** prints one line per share, counted from
+the listing so it cannot disagree with the flows below it (`nat 10.0.3.15
+32/32`), then the refusal counters by name, then each flow. The existing
+`list` commands read version 6 unchanged and stop before the flow section.
+
+Named and deferred: the stack's other counters, interfaces and routes (a
+`net.*` sysctl family or an `ifconfig`); killing a flow from the control
+plane; per-guest attribution of a refusal (the counters are machine-wide).
 
 **ABI version 5.** `DIR_OUTPUT`; a `scope` byte in the filter command and the
 rule record, taken from the three reserved bytes each already carried
