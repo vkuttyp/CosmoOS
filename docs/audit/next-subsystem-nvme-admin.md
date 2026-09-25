@@ -150,7 +150,7 @@ the completion's lock once before returning, the same handshake
 `wait_for_completion` does. A caller can no longer see `done` without the
 handshake coming with it.
 
-**The three interrupt-driven polling loops use it**: NVMe's admin wait
+**All four interrupt-driven polling loops use it**: NVMe's admin wait
 once its vector exists, xHCI's command wait, AHCI's synchronous command,
 and USB's synchronous transfer. The hand-written `wait_for_completion`
 after the loop goes, and each timeout path keeps its own logic (orphaning
