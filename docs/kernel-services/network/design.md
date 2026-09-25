@@ -1337,6 +1337,15 @@ the listing so it cannot disagree with the flows below it (`nat 10.0.3.15
 32/32`), then the refusal counters by name, then each flow. The existing
 `list` commands read version 6 unchanged and stop before the flow section.
 
+**A port-forwarded TCP flow becomes established**, as a masqueraded one
+does. Review of this unit found that DNAT entries never set `tcp_est`: the
+inbound path refreshed without upgrading, and the reply path skipped them.
+So a port-forwarded connection was listed as half-open and kept for the
+half-open `NAT_TIMEOUT_TCP_NS` (30 s) rather than `NAT_TIMEOUT_TCPEST_NS`
+(300 s). The flow is now marked established by the client's ACK without SYN
+(`nat_in_dnat`) or by any TCP segment the guest sends back (`nat_out`'s
+DNAT reply). That is masquerade's rule, seen from the other side.
+
 Named and deferred: the stack's other counters, interfaces and routes (a
 `net.*` sysctl family or an `ifconfig`); killing a flow from the control
 plane; per-guest attribution of a refusal (the counters are machine-wide).

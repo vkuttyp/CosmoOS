@@ -4833,6 +4833,17 @@ bool selftest_net_dns(const char **reason)
 
 /* --- inbound port forwarding (DNAT) --------------------------------------- */
 
+/* The DNAT flow from `client`:`port`: 1 established, 0 not, -1 not listed. */
+static int dnat_flow_est(uint32_t client, uint16_t port)
+{
+    static struct nat_flow nf[NAT_TABLE_SIZE];
+    unsigned n = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
+    for (unsigned i = 0; i < n; i++)
+        if (nf[i].kind == NAT_KIND_DNAT && nf[i].peer_ip == client && nf[i].peer_port == port)
+            return nf[i].est ? 1 : 0;
+    return -1;
+}
+
 bool selftest_net_dnat(const char **reason)
 {
     static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x01 };
@@ -4875,6 +4886,7 @@ bool selftest_net_dnat(const char **reason)
     CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 12345);      /* source port intact */
     CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 80);         /* dest port rewritten to the guest's */
     CHECK(nettest_l4_ok(client, guest, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
+    CHECK(dnat_flow_est(client, 12345) == 0);             /* a SYN alone: half-open */
 
     /* (2) the guest's SYN-ACK is un-DNAT'd back to the client from host:8080. */
     l4len = nettest_mk_tcp(l4, guest, client, 80, 12345, TH_SYN | TH_ACK);
@@ -4889,6 +4901,7 @@ bool selftest_net_dnat(const char **reason)
     CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 8080);       /* source port = what the client dialed */
     CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 12345);
     CHECK(nettest_l4_ok(u_ip, client, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
+    CHECK(dnat_flow_est(client, 12345) == 1);             /* the guest answered: established */
 
     /* (3) a UDP round trip through the udp rule. */
     uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -5083,11 +5096,38 @@ bool selftest_net_tapctl(const char **reason)
             if (fl.table == COSMO_NETCTL_FLOW_NAT && fl.kind == COSMO_NETCTL_FLOW_DNAT && fl.src_port == 40001)
                 seen = fl.proto == COSMO_NETCTL_PROTO_TCP && fl.src_addr == client && fl.dst_addr == guest &&
                        fl.dst_port == 80 && fl.nat_addr == u_ip && fl.nat_port == 8080 &&
-                       fl.guest_addr == guest && fl.expires_ms > 0;
+                       fl.guest_addr == guest && fl.expires_ms > 0 &&
+                       !(fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED);      /* a SYN alone: half-open */
         }
         CHECK(seen);
     }
     CHECK(file_read(f, rbuf, (size_t)rn - 1) == -EMSGSIZE);
+
+    /* (3c) the client's ACK without SYN -- no guest reply in between -- makes
+     * the flow established, listed so and kept for the established timeout,
+     * as masquerade's opener side does. */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 40001, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    m = nettest_recv_ip(g);
+    CHECK(m != NULL);
+    m_freem(m);
+    rn = file_read(f, rbuf, sizeof(rbuf));
+    CHECK(rn == netctl_snapshot_len(rbuf, 1));
+    {
+        size_t off = netctl_flows_off(rbuf, 1);
+        struct cosmo_netctl_flow_list lh;
+        memcpy(&lh, rbuf + off, sizeof(lh));
+        bool est = false;
+        for (unsigned i = 0; i < lh.count; i++) {
+            struct cosmo_netctl_flow fl;
+            memcpy(&fl, rbuf + off + sizeof(lh) + i * sizeof(fl), sizeof(fl));
+            if (fl.table == COSMO_NETCTL_FLOW_NAT && fl.kind == COSMO_NETCTL_FLOW_DNAT && fl.src_port == 40001)
+                est = (fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED) &&
+                      fl.expires_ms > NAT_TIMEOUT_TCP_NS / 1000000u;       /* the longer timeout */
+        }
+        CHECK(est);
+    }
 
     /* (4) FORWARD_DEL removes it and reaps the flow it created. */
     struct nat_stats ns0, ns1;

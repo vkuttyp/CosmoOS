@@ -26,6 +26,17 @@
 >   `fw_get_stats`.
 > - **`NAT_KIND_MASQ`/`NAT_KIND_DNAT` moved to `nat.h`**, where the listing
 >   names them.
+> - **A port-forwarded TCP flow can now be established** (found in
+>   review). DNAT entries never set `tcp_est`: the inbound path said "no est
+>   upgrade", and the reply path skipped it. So the listing reported every
+>   port-forwarded connection as half-open, and the table kept one for only
+>   the half-open 30 s rather than the established 300 s. DNAT now follows
+>   masquerade's rule from the other side: the client's ACK without SYN, or
+>   any TCP segment the guest sends back, marks the flow established.
+>   `net-dnat` checks the reply path: half-open after the SYN, established
+>   after the guest's SYN-ACK. `net-tapctl` checks the inbound path: the
+>   client's ACK alone makes it established, listed with more than the
+>   half-open timeout left.
 > - **`vmctl flows` accepts `host`** as well as a guest address. The
 >   existing `list` commands needed no change: they compare against the
 >   version macro and size their buffers from `COSMO_NETCTL_SNAPSHOT_MAX`,
@@ -46,8 +57,10 @@
 > | `est` not carried | `net-flows-fw`: `tcp_est` |
 > | the flow section's room check removed | `net-tapctl`: the one-byte-short read not `-EMSGSIZE` |
 > | `vmctl flows` refusing version 6 | the shell harness: the counter lines missing |
+> | DNAT's inbound ACK not marking the flow established | `net-tapctl`: (3c) not established |
+> | DNAT's reply not marking the flow established | `net-dnat`: not established after the SYN-ACK |
 >
-> Each mutation ran alone on an x86-64 debug boot, with the boot
+> Each mutation (twelve) ran alone on an x86-64 debug boot, with the boot
 > confirmed. Where the failing test returns early (`net-tapctl`,
 > `net-flows-fw`), later network tests also fail on the state it left
 > behind, as they do for the existing tests. The first failure is the one
@@ -278,7 +291,7 @@ flows: a 128-byte header and 576 × 32 = 18 432 bytes of flows, so
 
 ### 4. `vmctl flows`
 
-`vmctl flows [GUESTADDR]` reads the snapshot and prints, first, one
+`vmctl flows [GUESTADDR|host]` reads the snapshot and prints, first, one
 line per share, then the machine-wide refusal counters. Together they
 answer "why is my guest refused":
 
@@ -351,7 +364,7 @@ the same table. A listing is operator-driven, not per packet.
 | kernel-services/network/nat.c, kernel/include/kernel/net/nat.h | `nat_flow_list(out, max, now)`; `out_drop_full` split into `out_drop_share`/`out_drop_table`, `dnat_drop_full` into `dnat_drop_ambiguous`/`_share`/`_table` |
 | kernel-services/network/fw.c, kernel/include/kernel/net/fw.h | `fw_flow_list(out, max, now)`; `flow_slot` says which reason; `flow_drop_full` split into `flow_drop_share`/`flow_drop_table`; `hin_flow_drop_full` renamed `hin_flow_unrecorded` |
 | kernel-services/network/tap.c | `tap_ctl_read` writes the flow section |
-| userland/system/vmctl.c | `vmctl flows [GUESTADDR]`; the two existing listings accept version 6 |
+| userland/system/vmctl.c | `vmctl flows [GUESTADDR|host]`; the two existing listings read version 6 unchanged |
 | kernel-services/network/nettest.c | the new tests; `netctl_snapshot_len` counts the flow section; `net-nat`, `net-dnat`, `net-hoststate` read the split counters |
 | docs | network design (the control channel's snapshot), invariants (N24), testing; `docs/userland/api.md` (`vmctl flows`); the inventory row struck; README Status |
 
@@ -365,7 +378,7 @@ the same table. A listing is operator-driven, not per packet.
   `struct fw_flow_info`). The split counters in `struct nat_stats` and
   `struct fw_stats` (§3); nothing outside the network stack and its tests
   reads those structs.
-- **`vmctl flows [GUESTADDR]`**.
+- **`vmctl flows [GUESTADDR|host]`**.
 
 ## Migration plan
 

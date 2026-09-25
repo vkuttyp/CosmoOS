@@ -1880,11 +1880,13 @@ static int flows(int argc, char **argv)
         memcpy(&fl, buf + off + i * sizeof(fl), sizeof(fl));
         if (only && fl.guest_addr != want)
             continue;
-        char src[24], dst[24], via[40] = "";
+        /* Wide enough for "255.255.255.255:65535" or "255.255.255.255 id 65535"
+         * whole: an ICMP flow is named by its echo id, which must not be cut. */
+        char src[32], dst[32], via[48] = "";
         flow_ep(src, sizeof(src), fl.src_addr, fl.src_port, fl.proto);
         flow_ep(dst, sizeof(dst), fl.dst_addr, fl.dst_port, fl.proto);
         if (fl.kind == COSMO_NETCTL_FLOW_MASQ || fl.kind == COSMO_NETCTL_FLOW_DNAT) {
-            char nat[24];
+            char nat[32];
             char ip[16];
             inet_ntop(AF_INET, &fl.nat_addr, ip, sizeof(ip));
             snprintf(nat, sizeof(nat), fl.proto == COSMO_NETCTL_PROTO_ICMP ? "%s id %u" : "%s:%u", ip, fl.nat_port);

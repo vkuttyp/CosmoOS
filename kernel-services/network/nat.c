@@ -328,6 +328,8 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
         struct nat_entry dsnap;
         bool dhave = false;
         if (de) {
+            if (iph->proto == IPPROTO_TCP)
+                de->tcp_est = true;          /* the guest answered: both sides seen */
             de->expires_ns = dnow + nat_timeout(de);
             dsnap = *de;
             dhave = true;
@@ -532,6 +534,14 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
 {
     uint32_t host_ip = iph->dst, client_ip = iph->src;
     uint64_t now = clock_now_ns();
+    /* The rule masquerade keeps, from the other side: the opener's ACK
+     * without SYN means both sides have been seen (the reply path below, in
+     * nat_out, marks it on any segment the guest sends back). */
+    bool est = false;
+    if (proto == IPPROTO_TCP) {
+        uint8_t fl = 0;
+        est = m_copydata(m, ihl + 13, 1, &fl) && (fl & TH_ACK) && !(fl & TH_SYN);
+    }
 
     /* Hold g_pf_lock across the conntrack create: nat_pf_del reaps under the
      * same lock, so a delete cannot complete (removing the rule and reaping)
@@ -551,7 +561,9 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
     struct nat_entry snap;
     bool have = false;
     if (e) {
-        e->expires_ns = now + nat_timeout(e);   /* refreshed per packet; no est upgrade */
+        if (est)
+            e->tcp_est = true;
+        e->expires_ns = now + nat_timeout(e);   /* refreshed per packet */
         snap = *e;
         have = true;
     }

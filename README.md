@@ -1344,9 +1344,9 @@ See [docs/development.md](docs/development.md).
   path-MTU discovery under DROP, the DNS proxy end to end, refresh and
   expiry, forwarded and loopback sends recording nothing, the share, and the
   hardened default) with thirteen bug-proofs. Reply state for a UDP flow's
-  ICMP errors, a listing of live flows, per-interface host chains,
-  rate-limit/log targets and IPv6 are later units; the OUTPUT chain is done
-  (its own entry below).
+  ICMP errors, per-interface host chains, rate-limit/log targets and IPv6
+  are later units; the OUTPUT chain and the listing of live flows are done
+  (their own entries below).
 - **The OUTPUT chain: what the host itself may send (done):**
   `docs/audit/next-subsystem-output-chain.md`,
   `docs/kernel-services/network/design.md` ("The OUTPUT chain"). The
@@ -3536,8 +3536,11 @@ See [docs/development.md](docs/development.md).
   and time left, beside the shares and the refusal counters. `vmctl
   flows` prints them. The counters were split first, one cause each:
   three of them had lumped a full share with a full table, and one
-  counted something that was not a refusal at all. Invariant N24: a flow
-  is listed exactly when its share counts it. (PR #243)
+  counted something that was not a refusal at all. Port-forwarded TCP
+  flows now become established like masqueraded ones: on the client's
+  ACK or the guest's reply. Before, they stayed half-open, and the table
+  kept them for 30 s instead of 300. Invariant N24: a flow is listed
+  exactly when its share counts it. (PR #243)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

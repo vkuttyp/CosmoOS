@@ -879,6 +879,13 @@ lumped counters now assert the exact cause.
 - `net-dnat`'s flood: `dnat_drop_share` rises and the other two do not.
 - `net-hoststate`: reads `hin_flow_unrecorded`.
 
+**`net-dnat` and `net-tapctl`** (DNAT established, the net-flows review):
+- `net-dnat`: the flow is half-open after the client's SYN and established
+  after the guest's SYN-ACK, which tests the reply path.
+- `net-tapctl` (3c): with no guest reply in between, the client's ACK alone
+  makes the listed flow established, with more than the half-open timeout
+  left, which tests the inbound path.
+
 **`net-flows-nat`** (N24):
 1. One guest floods `NAT_TABLE_SIZE + 8` distinct UDP flows. Exactly
    `NAT_QUOTA_PER_GUEST` are created and 232 are refused, all as
