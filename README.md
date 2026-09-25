@@ -3522,8 +3522,9 @@ See [docs/development.md](docs/development.md).
   none for the characters behind it. The handler now clears first and
   drains after (T16). A new self-test, `console-rx-clear`, uses the
   PL011's loopback to put a byte into the FIFO just after the drain, and
-  fails with the old order on every boot. The shell harness also keeps
-  six cycles of a background job exiting as a line is typed. (PR #241)
+  fails with the old order on every boot. The shell harness's release
+  boots also run six cycles of a background job exiting as a line is
+  typed. (PR #241)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

@@ -139,8 +139,9 @@ x86-64's 16550 has no such clear: its receive interrupt is "data ready",
 level while the FIFO holds anything. Check: `console-rx-clear` (AArch64:
 through the PL011's loopback, a byte put into the FIFO after the
 service's drain -- the old window -- leaves the receive interrupt
-pending; the old order fails it); the shell harness's six burst cycles
-(a background job finishing as the next line arrives).
+pending; the old order fails it); in release boots, the shell
+harness's six burst cycles (a background job finishing as the next line
+arrives).
 
 **T15. Readiness answers the same question a read answers.** "Would
 this block?" is asked in three places -- poll readiness on the console

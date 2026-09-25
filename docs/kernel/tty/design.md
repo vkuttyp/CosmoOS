@@ -129,8 +129,10 @@ order of that clear against the drain is what keeps input flowing
 (T16):
 
 ```text
-ICR = RX | RT                                  -- clear first
-while (!(FR & RX_EMPTY)): byte = DR; tty_input(tty_console(), &byte, 1)
+rx_service(tty, hook):         -- rx_irq calls (tty_console(), NULL)
+  ICR = RX | RT                -- clear first
+  while (!(FR & RX_EMPTY)): byte = DR; if (tty) tty_input(tty, &byte, 1)
+  if (hook) hook()             -- the self-test's; it passes no tty
 ```
 
 The other order -- drain, then clear -- stalled the aarch64 console for

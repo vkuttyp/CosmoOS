@@ -21,12 +21,24 @@
 >   leaves no visible mark there.
 > - **The test lives in `pl011.c`**, which owns the registers and the
 >   shared `rx_service(tty, after_drain)` that both `rx_irq` and the test
->   call. On x86-64, `serial.c` has a stub that logs a skip.
+>   call. The test passes no tty: with every console writer held off, a
+>   stray keystroke handed to the tty would be echoed through
+>   `console_write` and spin on the lock the test holds, so the service
+>   discards what it drains. The wait for the transmitter to idle before
+>   loopback is bounded, and the test fails by name if it never idles.
+>   On x86-64, `serial.c` has a stub that logs a skip.
 > - **Holding the console off needed a new core API**:
 >   `console_hold()` and `console_release()` take and release the console
 >   spinlock (`kernel/core/console.c`).
 > - **The harness burst is six cycles** of `sleep 1 &`, a pause of
->   0.85-1.15 s, then a typed line, before the harness's `exit 0`.
+>   0.85-1.15 s, then a typed line, before the harness's `exit 0`. It
+>   runs in release boots only (`--shell-burst`, passed by `make test`
+>   for `BUILD=release`). In every boot it cost about 7 s, and across the
+>   six debug boots that took the aarch64 CI job past its 30-minute
+>   limit. That limit is now 40 minutes: main's aarch64 job already ran
+>   29-29.5 minutes and had been cancelled by it once.
+> - **`tools/console-stall-probe.py`** now uses the harness's own
+>   `PAUSE` step instead of patching the run loop.
 >
 > | mutation | result |
 > | --- | --- |
@@ -133,13 +145,15 @@ prompts), against 13 stalls in 20 boots without it.
   the failure looked like a harness flake. It reproduces 13 times in 20
   once provoked.
 
-## Current implementation
+## Current implementation (before this unit)
 
 `arch_console_input_init` requests the PL011's receive interrupt (level
 triggered), drains anything already in the FIFO, enables the receive and
 receive-timeout interrupts (`IMSC_RXIM | IMSC_RTIM`), and enables the
-interrupt at the GIC. `rx_irq` drains the FIFO into the console tty
-(`tty_input`, which echoes) and then clears both interrupts through ICR.
+interrupt at the GIC. `rx_irq` drained the FIFO into the console tty
+(`tty_input`, which echoes) and then cleared both interrupts through ICR.
+That was the order before this unit; as built, it clears first (see the
+banner).
 
 The x86-64 console (the 16550) has no such clear: its receive interrupt
 is the line status's "data ready", level while the FIFO holds anything,
@@ -182,7 +196,8 @@ the handler reads -- the rule the lockup-bound unit's review arrived at.
 ### 3. The harness keeps a burst
 
 The shell harness gains a few of the probe's cycles (a background job
-exiting as the next line arrives), in every boot that runs it: not the
+exiting as the next line arrives) -- as built, in release boots only
+(see the banner): not the
 proof -- the loopback test is -- but the regression the user would see,
 kept where the user would see it.
 
@@ -215,7 +230,9 @@ point.
 | kernel/arch/x86_64/serial.c | a `console-rx-clear` stub that logs a skip |
 | kernel/core/console.c, kernel/include/kernel/console.h | `console_hold` / `console_release` |
 | kernel/core/selftest.c, kernel/include/kernel/selftest.h | the test's registration |
-| tests/boot/shelltest.py | six burst cycles and a `PAUSE` step |
+| tests/boot/shelltest.py, tests/boot/run_boot_test.py, Makefile | six burst cycles and a `PAUSE` step, in release boots (`--shell-burst`) |
+| tools/console-stall-probe.py | uses `PAUSE` |
+| .github/workflows/ci.yml | job timeout 30 -> 40 minutes |
 | docs | the console/tty invariants and testing docs; `docs/testing/flakes.md` (the entry marked fixed); `docs/kernel/diagnostics/api.md` (`console_hold`); README Status |
 
 ## APIs

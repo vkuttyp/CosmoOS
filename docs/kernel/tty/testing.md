@@ -5,7 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Target, private tty | Self-test `tty-ldisc` (`kernel/tty/ttytest.c`): the line discipline through `tty_input` and `tty_read` with echo off | `make test` |
-| Target, the PL011's clear | Self-test `console-rx-clear` (`kernel/arch/aarch64/pl011.c`; a stub that says why on x86-64): the GIC line disabled and every console writer held off (`console_hold`), the PL011 in loopback, the receive service run with a hook after its drain that transmits one byte -- which the loopback puts into the FIFO at exactly the moment the old order cleared the interrupt -- and the raw status must still show the receive interrupt pending (T16). Skips, saying so, if the byte never arrives (a PL011 without loopback). The old order fails it on the first boot | `make test` |
+| Target, the PL011's clear | Self-test `console-rx-clear` (`kernel/arch/aarch64/pl011.c`; a stub that says why on x86-64): the GIC line disabled and every console writer held off (`console_hold`), the transmitter waited idle (bounded; the test fails by name if it never idles), the PL011 in loopback, the receive service run with no tty -- anything it drains is discarded, since an echo would need the console lock the test holds -- and a hook after its drain that transmits one byte -- which the loopback puts into the FIFO at exactly the moment the old order cleared the interrupt -- and the raw status must still show the receive interrupt pending (T16). Skips, saying so, if the byte never arrives (a PL011 without loopback). The old order fails it on the first boot | `make test` |
 | Target, real interrupt path | `tests/boot/shelltest.py` types commands into QEMU's serial port (its stdin) after each `cosmo$ ` prompt; the tty echoes them and the shell runs them | `make test`, release included |
 | User mode | `init --selftest`: `fstat(0)` is a character device, `isatty(0)`, a zero-length console read returns 0 without blocking | `make test` (self-test builds) |
 | Kill of a blocked reader | Self-test `process-spawn` kills `init --block` (a console read) and requires status 143 | `make test` |
@@ -51,6 +51,13 @@ line and a `ps` line in the `ps` output, `^/$` and `^/tmp$` from `pwd`,
 `sh: nosuchprogram: not found`, and finally `exit 0`, after which the run
 must end through `init: shell exited with status 0`. Failures are
 reported as `shell harness: ...` lines by `run_boot_test.py`.
+
+Release boots (`make test` with `BUILD=release`, which passes
+`--shell-burst`) add six cycles before `exit 0`: `sleep 1 &`, a pause of
+0.85-1.15 s, then an `echo` whose output is required. This is the shape
+that stalled the aarch64 console (T16). It is not in the debug boots:
+it costs about 7 s a boot, and all of the stall's sightings were release
+boots.
 
 ## The foreground group (`tty-intr`, `kernel/process/proctest.c`)
 

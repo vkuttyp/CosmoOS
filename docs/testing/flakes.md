@@ -1724,8 +1724,8 @@ boot: with the console held off and the PL011 in loopback, it drives the
 receive path with a hook that transmits one byte after the drain's last
 read, then requires the receive interrupt to be pending. With the old
 order it fails on the first boot and is the only test that does. The
-shell harness also gained six cycles of a background `sleep` exiting as
-the next line is typed. That is the regression a user would see, but it
+shell harness's release boots also gained six cycles of a background
+`sleep` exiting as the next line is typed. That is the regression a user would see, but it
 is not the proof: with the old order restored it caught the stall in 1
 of 5 release boots. If this shape comes back, it is a new bug; don't
 re-run it away.
