@@ -31,7 +31,8 @@ already floods one test guest with 264 distinct UDP flows
   the end;
 - the kernel's own NAT counters, for contrast.
 
-`apply` also lists the names the native sysctl table serves. Result,
+The probe's `apply` command also lists the names the native sysctl table
+serves, read from `kernel/syscall/native.c`. Result,
 identical on **x86-64 and AArch64** (one debug boot each; the step is
 deterministic):
 
@@ -50,10 +51,26 @@ gained **no line**, and sysctl's only network name is `net.steer`.
 stack has eight statistics getters -- `arp_get_stats`, `fw_get_stats`,
 `ipv4_get_stats`, `ipv6_get_stats`, `nat_get_stats`, `tapsvc_get_stats`,
 `tcp_get_stats`, `udp_get_stats`. Each is called only from its own file
-and from `kernel-services/network/nettest.c`. `nat_stats.out_drop_full`,
-`dnat_drop_full`, `fw_stats.flow_drop_full` and `hin_flow_drop_full`
-count exactly the refusals above, and no syscall, device or file reaches
-them. `userland/networking/` holds only a README ("Network configuration
+and from `kernel-services/network/nettest.c`. No syscall, device or file
+reaches them.
+
+**Nor would the counters answer the question if they could be read.**
+They lump different causes together:
+- `nat_stats.out_drop_full` counts the refusals above, where the guest's
+  share was full (`nat.c:399`). It also counts the whole table being
+  full (`nat_alloc`, `nat.c:278`), which is a different diagnosis: one
+  guest against every guest.
+- `dnat_drop_full` counts three causes in `nat_dnat_create`: a new
+  inbound flow whose reverse key already exists (`nat.c:242`, refused
+  because the reply could not be told apart), the target guest's full
+  share (`:249`) and a full table (`:254`).
+- `fw_stats.flow_drop_full` counts both of the reasons `flow_slot`
+  returns NULL (`fw.c:470`): the initiator's share full, and no free
+  slot anywhere in the table.
+- `fw_stats.hin_flow_drop_full` is not a refusal at all. When the host's
+  share is spent, the host's datagram still goes out; only its flow goes
+  unrecorded, so the reply is judged by the host chain's rules
+  (`fw.c:706`). `userland/networking/` holds only a README ("Network configuration
 and diagnostic tools").
 
 ### Why it matters
@@ -104,14 +121,22 @@ and diagnostic tools").
 carries a flow section:
 
 ```c
-struct cosmo_netctl_flow_counters {
-    uint64_t nat_new, nat_drop_full, nat_drop_noport;   /* outbound masquerade: out_new, out_drop_full, out_drop_noport */
-    uint64_t dnat_drop_full;                            /* inbound port-forwards refused */
+struct cosmo_netctl_flow_counters {     /* one cause each; machine-wide, never per guest */
+    uint64_t masq_new;
+    uint64_t masq_drop_share;           /* the guest's share was full */
+    uint64_t masq_drop_table;           /* the whole table was full */
+    uint64_t masq_drop_noport;          /* no NAT identifier free */
+    uint64_t dnat_drop_share;           /* the target guest's share was full */
+    uint64_t dnat_drop_table;           /* the whole table was full */
+    uint64_t dnat_drop_ambiguous;       /* the reply's reverse key was already in use */
     uint64_t nat_expired;
-    uint64_t fw_new, fw_drop_full;                      /* guest-to-guest flows */
-    uint64_t fw_host_new, fw_host_drop_full;            /* flows the host opened */
+    uint64_t fw_new;                    /* guest-to-guest flows */
+    uint64_t fw_drop_share;             /* refused: the initiator's share was full */
+    uint64_t fw_drop_table;             /* refused: no free slot in the table */
+    uint64_t fw_host_new;
+    uint64_t fw_host_unrecorded;        /* the host's share was full: the datagram was sent, its reply takes the rules */
     uint64_t fw_expired;
-};   /* machine-wide, as the kernel counts them: nat_stats and fw_stats, never per guest */
+};
 
 struct cosmo_netctl_flow_list {     /* version 6 and later */
     uint16_t version;
@@ -157,25 +182,54 @@ trying to explain. Each table gets one listing function that takes
 `now` explicitly, as `nat_age` and `fw_age` already do:
 
 ```c
-unsigned nat_flow_list(struct nat_flow *out, unsigned max, uint64_t now, struct nat_stats *stats);
-unsigned fw_flow_list(struct fw_flow_info *out, unsigned max, uint64_t now, struct fw_stats *stats);
+unsigned nat_flow_list(struct nat_flow *out, unsigned max, uint64_t now);
+unsigned fw_flow_list(struct fw_flow_info *out, unsigned max, uint64_t now);
 ```
 
-Each copies its table under its own lock, **in one hold together with
-that table's counters**. So within one table, the flows and the counters
-are the same instant: a refusal counted is a refusal the listed
-occupancy explains. Across the two tables the snapshot is two instants,
-NAT's then the firewall's, the same as today's port-forward and filter
+Each copies its table under its own lock, so **a table's flows are one
+instant**. Across the two tables the snapshot is two instants, NAT's
+then the firewall's, the same as today's port-forward and filter
 sections. The design says so rather than taking both locks.
+
+**The counters are not the same instant, and the listing does not
+pretend they are.** Several are incremented just after the table lock
+is released: the share refusals (`nat.c:399`, `fw.c:566`) and the
+creations `out_new` (`nat.c:419`) and `hin_flow_new` (`fw.c:712`). So a
+snapshot can hold a flow whose creation is not yet counted, or a
+refusal counted against occupancy read a moment earlier. The difference
+is at most the refusals and creations in flight, one per CPU. The
+diagnosis the operator needs does not depend on it: the share line and
+the flows are exact under the lock, and a count that is still rising is
+still rising. The counters are read with `nat_get_stats` and
+`fw_get_stats`, as the tests read them today, and the ABI comment says
+they are cumulative and approximate to the instant.
+
+### 3. Counters with one cause each
+
+Today's counters cannot be passed on as they are, because each of three
+lumps together causes that call for different diagnoses (see
+"Measured"). The unit splits them in the kernel, so each counter the
+snapshot carries has one cause:
+
+| today | becomes | cause |
+| --- | --- | --- |
+| `nat_stats.out_drop_full` | `out_drop_share` (`nat.c:399`) and `out_drop_table` (`nat_alloc`, `:278`) | the guest's share full, or the whole table full |
+| `nat_stats.dnat_drop_full` | `dnat_drop_ambiguous` (`:242`), `dnat_drop_share` (`:249`), `dnat_drop_table` (`:254`) | a reverse key in use, the target's share full, the table full |
+| `fw_stats.flow_drop_full` | `flow_drop_share` and `flow_drop_table` (`flow_slot` says which) | the initiator's share full, or no free slot |
+| `fw_stats.hin_flow_drop_full` | `hin_flow_unrecorded` | not a refusal: the datagram was sent, its flow not recorded |
+
+`flow_slot` today returns NULL for both of its reasons. It gains an out
+parameter that says which one. The tests that read the old names
+(`net-nat`, `net-dnat`, `net-hoststate`) move to the new ones.
 
 `tap_ctl_read` gets `now` once and writes the section after the filter
 section, with the room checks the other sections use. It returns
 `-EMSGSIZE` if the buffer is too small. `COSMO_NETCTL_SNAPSHOT_MAX`
 grows by the flow list header plus `(NAT_TABLE_SIZE + FW_FLOW_MAX)`
-flows: a 96-byte header and 576 × 32 = 18 432 bytes of flows, so 25 752
-bytes in all, under the 64 KiB bounce.
+flows: a 128-byte header and 576 × 32 = 18 432 bytes of flows, so
+25 784 bytes in all, under the 64 KiB bounce.
 
-### 3. `vmctl flows`
+### 4. `vmctl flows`
 
 `vmctl flows [GUESTADDR]` reads the snapshot and prints, first, one
 line per share, then the machine-wide refusal counters. Together they
@@ -185,12 +239,15 @@ answer "why is my guest refused":
 nat   10.0.3.15   32/32
 fw    10.0.3.15    0/32
 fw    host         3/64
-refused: nat 232 (masquerade), 0 (no port), 0 (port-forward); fw 0 (guests), 0 (host)
+refused: masquerade 232 (share) 0 (table) 0 (no port); port-forward 0 (share) 0 (table) 0 (ambiguous); guest-to-guest 0 (share) 0 (table)
+host flows not recorded: 0
 ```
 
-The counters are the kernel's, which count refusals machine-wide, not per
-guest. A full share next to a rising count is the diagnosis; the kernel
-does not attribute each drop, and this unit does not add that.
+The counters are the kernel's, which count machine-wide, not per guest,
+and each has one cause (§3). A full share next to a rising `share` count
+is the diagnosis. A rising `table` count with no share full says the
+guests together have filled the table. The kernel does not attribute
+each drop to a guest, and this unit does not add that.
 
 Then one line per flow: table, kind, proto, `src -> dst`, the NAT
 identity, `est`, and seconds to expiry. Occupancy is counted from the
@@ -198,7 +255,7 @@ listing itself, so the share line and the flow lines cannot disagree.
 `port-forward list` and `filter list` accept version 6, grow their
 buffers to the new maximum, and skip the flow section.
 
-### 4. What is deliberately not in this unit
+### 5. What is deliberately not in this unit
 
 - **The stack's other counters** (ARP, IPv4/6, TCP, UDP, the tap
   services) and **interfaces, addresses and routes**: a `net.*` sysctl
@@ -211,16 +268,19 @@ buffers to the new maximum, and skip the flow section.
 - **Killing a flow from the control plane**: the listing makes that
   possible to design (it names each flow). It is not needed to see.
 
-### 5. The §70 gate
+### 6. The §70 gate
 
 **Correctness.** One liveness rule for the quota and the listing (N24),
-applied with one `now` per table.
+applied with one `now` per table. One cause per counter (§3).
 
 **Concurrency.** Each table is copied under the lock that its writers
 already take. The copy is bounded by the table size (at most 256 or 320
 entries) into kernel memory (the bounce buffer), with no fault possible.
 There is no new lock and no new order: the two table locks are taken
-one after the other, never nested.
+one after the other, never nested. The counters are atomics read outside
+those holds and may lag by the refusals and creations in flight (§2).
+The snapshot says so, and nothing the operator concludes depends on the
+same instant.
 
 **Ownership and lifetime.** None: values are copied, no pointers.
 
@@ -241,11 +301,11 @@ the same table. A listing is operator-driven, not per packet.
 | file | change |
 | --- | --- |
 | kernel/include/uapi/cosmo/netctl.h | version 6; the flow section's three structs, kinds, flag, `SNAPSHOT_MAX` |
-| kernel-services/network/nat.c, kernel/include/kernel/net/nat.h | `nat_flow_list(out, max, now, stats)` |
-| kernel-services/network/fw.c, kernel/include/kernel/net/fw.h | `fw_flow_list(out, max, now, stats)` |
+| kernel-services/network/nat.c, kernel/include/kernel/net/nat.h | `nat_flow_list(out, max, now)`; `out_drop_full` split into `out_drop_share`/`out_drop_table`, `dnat_drop_full` into `dnat_drop_ambiguous`/`_share`/`_table` |
+| kernel-services/network/fw.c, kernel/include/kernel/net/fw.h | `fw_flow_list(out, max, now)`; `flow_slot` says which reason; `flow_drop_full` split into `flow_drop_share`/`flow_drop_table`; `hin_flow_drop_full` renamed `hin_flow_unrecorded` |
 | kernel-services/network/tap.c | `tap_ctl_read` writes the flow section |
 | userland/system/vmctl.c | `vmctl flows [GUESTADDR]`; the two existing listings accept version 6 |
-| kernel-services/network/nettest.c | the new tests; `netctl_snapshot_len` counts the flow section |
+| kernel-services/network/nettest.c | the new tests; `netctl_snapshot_len` counts the flow section; `net-nat`, `net-dnat`, `net-hoststate` read the split counters |
 | docs | network design (the control channel's snapshot), invariants (N24), testing; `docs/userland/api.md` (`vmctl flows`); the inventory row struck; README Status |
 
 ## APIs
@@ -255,7 +315,9 @@ the same table. A listing is operator-driven, not per packet.
   tree (`vmctl`) and move with it.
 - **In the kernel**: `nat_flow_list` and `fw_flow_list`, each with a
   small value struct for its entries (`struct nat_flow`,
-  `struct fw_flow_info`).
+  `struct fw_flow_info`). The split counters in `struct nat_stats` and
+  `struct fw_stats` (§3); nothing outside the network stack and its tests
+  reads those structs.
 - **`vmctl flows [GUESTADDR]`**.
 
 ## Migration plan
@@ -267,7 +329,7 @@ One PR: the ABI, the two listing functions, the snapshot section,
 
 | test | checks | mutation it must catch |
 | --- | --- | --- |
-| `net-flows-nat` (new) | flood one guest past its NAT share as `net-nat` does. The listing then shows exactly `NAT_QUOTA_PER_GUEST` MASQ flows for that guest, with the flooded source ports and a `nat_port` in the NAT range. `nat_drop_full` rose by the number refused (264 − 32 = 232). Listed at `now + NAT_TIMEOUT_UDP_NS` with nothing aged, the listing is empty while the entries are still `in_use`. A DNAT flow through a port-forward is listed with the client as `src` and the dialled port as `nat_port` | the listing ignores `expires_ns` (lists what the quota no longer counts); the counters copied outside the table's lock hold (the drop count and the occupancy from different instants); DNAT's `src`/`dst` swapped |
+| `net-flows-nat` (new) | flood one guest past its NAT share as `net-nat` does. The listing then shows exactly `NAT_QUOTA_PER_GUEST` MASQ flows for that guest, with the flooded source ports and a `nat_port` in the NAT range. `masq_drop_share` rose by the number refused (264 − 32 = 232) and `masq_drop_table` did not rise. Listed at `now + NAT_TIMEOUT_UDP_NS` with nothing aged, the listing is empty while the entries are still `in_use`. A DNAT flow through a port-forward is listed with the client as `src` and the dialled port as `nat_port` | the listing ignores `expires_ns` (lists what the quota no longer counts); the share and table refusals counted in one counter again; DNAT's `src`/`dst` swapped |
 | `net-flows-fw` (new) | a guest-to-guest flow (two test taps, FORWARD accept) and a flow the host opened are listed as FW `GUEST` and `HOST`, with their initiators as `src` and `est` set once an ACK passes. A host flow counts against `guest_addr` 0 | the host flow listed under a guest's share; `est` not carried |
 | `net-tapctl` (existing) | the snapshot through the device: version 6, three sections, length from its own counts. A buffer one byte short of the whole is `-EMSGSIZE` | the flow section's room check missing |
 | boot harness | `vmctl flows` runs in the shell harness and prints its share lines | `vmctl` rejecting version 6 |

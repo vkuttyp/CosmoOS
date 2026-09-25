@@ -30,13 +30,16 @@ Each boot prints:
     NVPROBE nat: entries A -> B (quota Q), out_drop_full +D
     NVPROBE tapctl: snapshot X bytes before, Y after, identical: yes|no
     NVPROBE dmesg: N lines between the mark and the end, K naming nat
+                   (or INVALID if the log ring wrapped past the mark)
 
 `apply` refuses a file with uncommitted changes, refuses to overwrite a
 backup an earlier run left, and edits nothing if an anchor is missing,
 restoring every file on a failure part-way; `revert` checks every file's
-hash first (accepting one an earlier attempt already restored), restores
-all from copies, and removes the backups only once every file is
-restored.
+hash first, restores all from copies, removes the stamp, and only then
+removes the backups. The stamp records each file's hash before and after
+the patch, so a revert interrupted part-way can be run again: a file
+already back to its original hash is accepted whether or not its backup
+still exists.
 """
 
 import hashlib
@@ -97,8 +100,11 @@ N_PROBE_AFTER = N_ANCHOR_AFTER + '''    {   /* NVPROBE: and after it. */
         kinfo("NVPROBE tapctl: snapshot %lld bytes before, %lld after, identical: %s",
               (long long)nvp_na, (long long)nvp_nb,
               nvp_na == nvp_nb && nvp_na > 0 && memcmp(nvp_a, nvp_b, (size_t)nvp_na) == 0 ? "yes" : "no");
-        kinfo("NVPROBE dmesg: %u lines between the mark and the end, %u naming nat%s",
-              lines, nat_lines, mark == NULL ? " (mark not found)" : "");
+        if (mark == NULL)   /* the ring wrapped past it: no count is a measurement */
+            kinfo("NVPROBE dmesg: INVALID -- the mark is gone from the ring, nothing measured");
+        else
+            kinfo("NVPROBE dmesg: %u lines between the mark and the end, %u naming nat",
+                  lines, nat_lines);
     }
 '''
 
@@ -145,11 +151,12 @@ def apply():
         for path, edits in fl:
             shutil.copyfile(path, path + BACKUP)
             done.append(path)
+            orig = sha(path)
             s = open(path).read()
             for a, b in edits:
                 s = s.replace(a, b)
             open(path, 'w').write(s)
-            stamp.append(f'{path} {sha(path)}')
+            stamp.append(f'{path} {sha(path)} {orig}')
         open(STAMP, 'w').write('\n'.join(stamp) + '\n')
     except BaseException:
         for path in done:
@@ -165,20 +172,24 @@ def apply():
 def revert():
     if not os.path.exists(STAMP):
         sys.exit('not applied')
-    paths = []
+    todo = []
     for line in open(STAMP).read().split('\n'):
         if line:
-            path, digest = line.split()
-            paths.append(path)
-            restored = os.path.exists(path + BACKUP) and sha(path) == sha(path + BACKUP)
-            if sha(path) != digest and not restored:
+            path, patched, orig = line.split()
+            if sha(path) == orig:
+                continue                     # already restored by an earlier, interrupted revert
+            if sha(path) != patched:
                 sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
-    for path in paths:
+            if not os.path.exists(path + BACKUP):
+                sys.exit(f'{path} is still patched and {path + BACKUP} is gone; restore by hand')
+            todo.append(path)
+    for path in todo:
         shutil.copyfile(path + BACKUP, path)
         os.utime(path, None)
-    for path in paths:
-        os.remove(path + BACKUP)
-    os.remove(STAMP)
+    os.remove(STAMP)                         # every file is original now
+    for path, _ in files():
+        if os.path.exists(path + BACKUP):
+            os.remove(path + BACKUP)
     print('reverted')
 
 
