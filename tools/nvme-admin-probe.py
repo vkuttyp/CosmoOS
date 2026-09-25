@@ -9,23 +9,21 @@ nvme module's interrupt handler on CPU 1 during probe, with lockdep saying
 CPU 1 held the spin lock named 'nvme-admin'. That name is the lock inside
 the struct completion admin_cmd() keeps on its stack.
 
-The suspected mechanism: admin_cmd() polls completion_done() and, once it
-is true, returns without wait_for_completion() -- the handshake
-kernel/include/kernel/completion.h requires before the memory goes. So
-the frame can be reused (the next admin_cmd's completion_init at the same
-address clears the lock word) while the interrupt handler is still inside
-complete(), between setting `done` and releasing the completion's lock.
+The mechanism (now fixed): admin_cmd() polled completion_done() and, once
+it was true, returned without the handshake kernel/include/kernel/completion.h
+requires before the memory goes. So the frame could be reused (the next
+admin_cmd's completion_init at the same address clears the lock word) while
+the interrupt handler was still inside complete(), between setting `done`
+and releasing the completion's lock. The fix (this unit) is
+wait_for_completion_timeout, which does the handshake.
 
-The probe builds the adversary from that mechanism: it widens exactly that
-window -- a spin of SPIN_US inside complete(), after `done` is set and
-before the wake and unlock, for completions whose lock is named
-'nvme-admin' and only when called from interrupt context -- so the waiter,
-which sleeps 1 ms between polls, sees `done` and leaves while complete()
-is still running. `--fixed` also applies the handshake to admin_cmd (a
-wait_for_completion once `done` is seen), the fix the report proposes, so
-the same adversary can be run against it.
+The probe widens exactly that window -- a spin of SPIN_US in
+complete_linger(), after `done` is set and before the wake, for completions
+named 'nvme-admin' signalled from interrupt context. Against the fixed tree
+the boot passes; `--broken` also removes the fix from admin_cmd (restoring
+the pre-fix poll), and then the widened window reproduces the panic or hang.
 
-    python3 tools/nvme-admin-probe.py apply [--fixed] [SPIN_US]   # default 3000
+    python3 tools/nvme-admin-probe.py apply [--broken] [SPIN_US]   # default 3000
     gmake ARCH=aarch64 test        # and ARCH=x86_64
     python3 tools/nvme-admin-probe.py revert
 
@@ -182,6 +180,9 @@ def apply():
     args = sys.argv[2:]
     broken = '--broken' in args
     rest = [a for a in args if a != '--broken']
+    for a in rest:
+        if not a.isdigit():
+            sys.exit(f'unknown argument {a!r}; usage: apply [--broken] [SPIN_US]')
     spin_us = int(rest[0]) if rest else 3000
     apply_files(files(spin_us, broken))
     print(f'applied (spin {spin_us} us{", fix removed" if broken else ""})')

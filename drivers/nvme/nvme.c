@@ -329,9 +329,10 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
     spin_unlock_irqrestore(&q->lock, s);
     bool completed;
     if (c->admin.vector < 0) {
-        /* No vector yet: this thread completes the command itself with
-         * queue_process, so no other CPU is inside complete() and the poll
-         * frees the frame safely. */
+        /* Fallback: no admin vector (bring-up requests it before the first
+         * command, so this is not reached there). This thread completes the
+         * command itself with queue_process, so no other CPU is inside
+         * complete() and the poll frees the frame safely. */
         completed = false;
         for (unsigned waited = 0; waited < NVME_ADMIN_TIMEOUT_MS && !completed; waited++) {
             thread_sleep_ms(1);

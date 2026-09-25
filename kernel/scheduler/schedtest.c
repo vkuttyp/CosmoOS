@@ -967,9 +967,12 @@ bool selftest_completion_timeout(const char **reason)
         __atomic_store_n(&sh.c, &c, __ATOMIC_RELEASE);
         __atomic_store_n(&sh.round, r, __ATOMIC_RELEASE);
         /* Wait until the completer has published `done` and is lingering with
-         * the lock held: that is the window a bare poller would return in. */
-        while (!completion_done(&c))
+         * the lock held: that is the window a bare poller would return in.
+         * Bounded, so a stuck completer fails the round rather than hanging. */
+        uint64_t rdv = clock_deadline_ns(1000ull * 1000000ull);
+        while (!completion_done(&c) && !clock_deadline_passed(rdv))
             arch_cpu_relax();
+        CHECK(completion_done(&c));
         CHECK(wait_for_completion_timeout(&c, 1000ull * 1000000ull));   /* completed */
         /* The completer (on CPU 1) drops c->lock only at the end of its
          * linger; a bare read of the lock word, not spin_is_held (which asks
