@@ -87,14 +87,15 @@ is on the boot path of every machine with an NVMe disk.
 exactly that window: a 3 ms spin inside `complete()`, after `done` is set
 and before the wake and the unlock. It applies only to completions whose
 lock is named `nvme-admin`, and only when called from interrupt context.
-Its `--fixed` mode also adds the handshake to `admin_cmd`, the one line
-this report proposes. One debug boot per architecture per mode, each
+Its `--fixed` mode also applies the fix this report proposes to
+`admin_cmd`: the handshake when `done` was seen, decided from a single
+read (see Design §1). One debug boot per architecture per mode, each
 confirmed to have booted:
 
 | mode | aarch64 | x86-64 |
 | --- | --- | --- |
 | window widened | **panic at 8.6 s**: page fault writing `0xffff800000000081`, in the nvme module's probe under `module_load_boot` | **hang**: nothing after `irq: MSI vector 67 on CPU 1 (nvme-admin)`, the harness's 180 s timeout, and the lockup detector reported nothing |
-| window widened, handshake added | PASS (125.9 s) | PASS (117.0 s) |
+| window widened, handshake added | PASS (122.0 s) | PASS (114.4 s) |
 
 The symptoms differ from CI's, as a use-after-return's do: which write
 lands in the reused frame first decides whether it is the lock word (CI's
@@ -131,8 +132,18 @@ handshake closes it on both architectures.
 
 ### 1. The fix
 
-`admin_cmd` does the handshake when its poll has seen `done`, the line
-`--fixed` applies. The timeout path already does it (`:352`).
+`admin_cmd` reads `done` once after its poll and decides from that one
+read: done means wait for the handshake; not done means the existing
+timeout path (`:337`-`:352`), which detaches the waiter under the queue's
+lock or, if the interrupt got there first, waits for the handshake itself.
+
+**One read, not two** (found in review of this report). The probe's first
+`--fixed` mode added `if (completion_done) wait_for_completion;` in front
+of the existing `if (!completion_done)`. An interrupt landing between the
+two reads makes the first false and the second true, skipping both the
+handshake and the timeout path: the same return without a handshake,
+through a narrower door. The measurement above is from the corrected
+mode.
 
 ### 2. A primitive that does the handshake itself
 
@@ -268,7 +279,9 @@ None: probe-time and error paths.
 
 ## Alternatives considered
 
-- **Only the one-line fix in NVMe.** It closes today's bug. But the
+- **Only the fix in NVMe.** It closes today's bug, and the first version
+  of it, in this report's own probe, reopened the window with a second
+  read of `done`. But the
   pattern stays written out four times, three right and one wrong, and
   the fifth caller will copy one of them.
 - **Make `complete()` never touch the completion after setting `done`**
