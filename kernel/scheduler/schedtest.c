@@ -971,7 +971,11 @@ bool selftest_completion_timeout(const char **reason)
         while (!completion_done(&c))
             arch_cpu_relax();
         CHECK(wait_for_completion_timeout(&c, 1000ull * 1000000ull));   /* completed */
-        CHECK(!spin_is_held(&c.lock));   /* the handshake waited the completer out */
+        /* The completer (on CPU 1) drops c->lock only at the end of its
+         * linger; a bare read of the lock word, not spin_is_held (which asks
+         * "do *I* hold it" and reads a per-CPU id), sees whether it has. The
+         * handshake guarantees it has. */
+        CHECK(__atomic_load_n(&c.lock.locked, __ATOMIC_ACQUIRE) == 0);
         memset(&c, 0, sizeof(c));        /* the frame is the next round's now */
     }
     __atomic_store_n(&sh.stop, true, __ATOMIC_RELEASE);
