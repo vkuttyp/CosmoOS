@@ -119,6 +119,8 @@ def apply_files(fl):
     bytes, so revert can finish whatever an interruption left."""
     if os.path.exists(STAMP):
         sys.exit('already applied (or an apply was interrupted): run revert first')
+    if os.path.exists(STAMP + '.probe-tmp'):
+        os.remove(STAMP + '.probe-tmp')  # the stamp is written first: without it nothing was patched
     plan = []
     for path, edits in fl:
         if os.path.exists(path + BACKUP):
@@ -143,6 +145,9 @@ def apply_files(fl):
 
 def revert():
     if not os.path.exists(STAMP):
+        if os.path.exists(STAMP + '.probe-tmp'):
+            os.remove(STAMP + '.probe-tmp')   # an apply interrupted before its stamp: nothing was patched
+            sys.exit('not applied (removed a partial stamp an interrupted apply left)')
         sys.exit('not applied')
     entries = [line.split() for line in open(STAMP).read().split('\n') if line]
     for path, patched, orig in entries:
@@ -157,10 +162,13 @@ def revert():
         if sha(path) == patched:
             write_atomic(path, open(path + BACKUP, 'rb').read())
     os.remove(STAMP)                     # every file is original now
+    # Every temp write_atomic can leave: a file's, its backup's, the stamp's.
     for path, _, _ in entries:
-        for leftover in (path + BACKUP, path + '.probe-tmp'):
+        for leftover in (path + BACKUP, path + '.probe-tmp', path + BACKUP + '.probe-tmp'):
             if os.path.exists(leftover):
                 os.remove(leftover)
+    if os.path.exists(STAMP + '.probe-tmp'):
+        os.remove(STAMP + '.probe-tmp')
     print('reverted')
 
 
