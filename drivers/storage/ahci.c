@@ -438,16 +438,17 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
     p->issued++;
     spin_unlock_irqrestore(&p->lock, f);
 
-    uint64_t deadline = clock_deadline_ns(AHCI_SYNC_NS);
-    while (!completion_done(&w.done) && !clock_deadline_passed(deadline))
-        thread_sleep_ns(100000);
-    if (!completion_done(&w.done)) {
-        /* Take the slot back: the same restart the block layer's timeout runs. */
+    /* The handshake comes with the wait, so a completed command's w is free
+     * to leave this frame. */
+    if (!wait_for_completion_timeout(&w.done, AHCI_SYNC_NS)) {
+        /* Take the slot back: the same restart the block layer's timeout runs.
+         * It completes the slot, so wait_for_completion then returns at once
+         * with the handshake. */
         kwarn("ahci%u: port %u: command 0x%02x did not complete in %llu ms; restarting the port", p->hba->index,
               p->index, cmd, (unsigned long long)(AHCI_SYNC_NS / 1000000));
         port_restart(p, NULL, 0, -ETIMEDOUT);
+        wait_for_completion(&w.done);
     }
-    wait_for_completion(&w.done);
     return w.status;
 }
 

@@ -275,14 +275,12 @@ static int xhci_cmd(struct xhci *x, uint64_t ptr, uint32_t control, unsigned *sl
     spin_unlock_irqrestore(&x->lock, s);
     wr32(x->db, 0);
 
-    uint64_t deadline = clock_deadline_ns(XHCI_CMD_TIMEOUT_NS);
-    while (!completion_done(&x->cmdw.done) && !clock_deadline_passed(deadline))
-        thread_sleep_ns(100000);
-    if (completion_done(&x->cmdw.done))
-        wait_for_completion(&x->cmdw.done);   /* the handshake: complete() has let go before the next init */
+    /* The handshake comes with the wait: a completed command's cmdw is free
+     * to re-init on the next command; a timeout makes the controller dead. */
+    bool completed = wait_for_completion_timeout(&x->cmdw.done, XHCI_CMD_TIMEOUT_NS);
     int rc;
     s = spin_lock_irqsave(&x->lock);
-    if (!completion_done(&x->cmdw.done)) {
+    if (!completed) {
         x->cmdw.trb = 0;   /* a late event finds nobody waiting */
         x->dead = true;
         x->hcd.dead = true;

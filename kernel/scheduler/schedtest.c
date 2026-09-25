@@ -913,6 +913,83 @@ bool selftest_completion_race(const char **reason)
 }
 
 /*
+ * completion-timeout: wait_for_completion_timeout does the handshake, so a
+ * poller can no longer see `done` and return while complete() still holds
+ * the completion (the NVMe admin bug, docs/audit/next-subsystem-nvme-admin.md).
+ *
+ * A completer on CPU 1 calls complete_linger, which sets `done` and then
+ * holds the completion's lock for a spell before waking. The test thread
+ * waits until `done` is visible -- the completer is now lingering, lock
+ * held -- and only then calls wait_for_completion_timeout. It must return
+ * true, and the completion's lock must be free on return: the handshake
+ * took that lock, so it cannot return until the completer let go. Without
+ * the handshake it returns during the linger and the check sees the lock
+ * still held. The completion is static, so a miss is a named failure, not
+ * corruption. A wait on a completion nobody completes returns false.
+ */
+struct ct_shared {
+    struct completion *volatile c;
+    volatile unsigned round;
+    volatile bool stop;
+};
+
+static void ct_completer(void *arg)
+{
+    struct ct_shared *sh = arg;
+    unsigned seen = 0;
+    while (!__atomic_load_n(&sh->stop, __ATOMIC_ACQUIRE)) {
+        unsigned r = __atomic_load_n(&sh->round, __ATOMIC_ACQUIRE);
+        if (r != seen) {
+            struct completion *c = __atomic_load_n(&sh->c, __ATOMIC_ACQUIRE);
+            seen = r;
+            complete_linger(c, 2ull * 1000000ull);   /* 2 ms held between `done` and the wake */
+        } else {
+            arch_cpu_relax();
+        }
+    }
+    thread_exit(0);
+}
+
+bool selftest_completion_timeout(const char **reason)
+{
+    if (cpu_count() < 2) {
+        kinfo("selftest: completion-timeout: one CPU; skipping");
+        return true;
+    }
+    struct ct_shared sh = { NULL, 0, false };
+    struct thread *t = thread_create_on(ct_completer, &sh, "ct-completer", SCHED_PRIO_DEFAULT, CPUMASK_OF(1));
+    CHECK(t != NULL);
+    enum { ROUNDS = 200 };
+    struct completion c;
+    uint64_t t0 = clock_now_ns();
+    for (unsigned r = 1; r <= ROUNDS; r++) {
+        completion_init(&c, "ct");
+        __atomic_store_n(&sh.c, &c, __ATOMIC_RELEASE);
+        __atomic_store_n(&sh.round, r, __ATOMIC_RELEASE);
+        /* Wait until the completer has published `done` and is lingering with
+         * the lock held: that is the window a bare poller would return in. */
+        while (!completion_done(&c))
+            arch_cpu_relax();
+        CHECK(wait_for_completion_timeout(&c, 1000ull * 1000000ull));   /* completed */
+        CHECK(!spin_is_held(&c.lock));   /* the handshake waited the completer out */
+        memset(&c, 0, sizeof(c));        /* the frame is the next round's now */
+    }
+    __atomic_store_n(&sh.stop, true, __ATOMIC_RELEASE);
+    thread_join(t);
+
+    /* A completion nobody completes: the wait returns false at the deadline,
+     * decided by the return value, not by how long it took. */
+    struct completion nc;
+    completion_init(&nc, "ct-none");
+    CHECK(!wait_for_completion_timeout(&nc, 30ull * 1000000ull));
+
+    kinfo("selftest: completion-timeout: %u lingered completions, the lock free on every return, "
+          "and a timeout returned false, in %llu ms", ROUNDS,
+          (unsigned long long)(clock_since_ns(t0) / 1000000));
+    return true;
+}
+
+/*
  * wait_event_timeout: the three ways it can end (the quiesce-wake unit,
  * docs/audit/next-subsystem-quiesce-wake.md). Tested here rather than
  * only through its first caller, because a primitive whose only coverage

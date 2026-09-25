@@ -327,14 +327,25 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
     sqe->cdw0 = (sqe->cdw0 & 0xffff) | ((uint32_t)cid << 16);
     submit_locked(q, sqe);
     spin_unlock_irqrestore(&q->lock, s);
-    for (unsigned waited = 0; waited < NVME_ADMIN_TIMEOUT_MS && !completion_done(&w.done); waited++) {
-        thread_sleep_ms(1);
-        if (c->admin.vector < 0)
-            queue_process(q);   /* polled before the vector exists */
+    bool completed;
+    if (c->admin.vector < 0) {
+        /* No vector yet: this thread completes the command itself with
+         * queue_process, so no other CPU is inside complete() and the poll
+         * frees the frame safely. */
+        completed = false;
+        for (unsigned waited = 0; waited < NVME_ADMIN_TIMEOUT_MS && !completed; waited++) {
+            thread_sleep_ms(1);
+            queue_process(q);
+            completed = completion_done(&w.done);
+        }
+    } else {
+        /* The interrupt path signals from another CPU: wait_for_completion_timeout
+         * does the handshake, so a completed command's frame is free to leave. */
+        completed = wait_for_completion_timeout(&w.done, (uint64_t)NVME_ADMIN_TIMEOUT_MS * 1000000ull);
     }
     int rc;
     bool timed_out = false;
-    if (!completion_done(&w.done)) {
+    if (!completed) {
         /* Decide under the lock. If the slot still names our waiter, the
          * controller has not answered: keep the slot out of the free list
          * until it does (queue_process frees an orphan), so the late
