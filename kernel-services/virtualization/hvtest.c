@@ -1164,7 +1164,9 @@ bool selftest_el2_guest_irq_private(const char **reason)
  * or take it first: the host refills its one list register only at entry,
  * and vcpu_run re-enters after an exit it handles itself, so an exit
  * between the guest's EOI and its heartbeat decides the order -- on
- * guest_irq a host interrupt landing there, on guest_irq_exit always.
+ * guest_irq a host interrupt landing there, on guest_irq_exit always
+ * (the interrupt first), and on guest_irq_hb never in time (its handler
+ * sends the heartbeat before it can take the interrupt).
  * Both orders are correct, and asserting either is asserting the host's
  * timing: this test did, twice, and each flaked on aarch64 CI
  * (docs/audit/next-subsystem-irq-order.md). Anything other than the

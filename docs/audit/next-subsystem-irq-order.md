@@ -27,7 +27,7 @@
 >   loop's heartbeat first, with nothing pending, on every guest.
 > - **`run_until_irq` returns through `reason`**, like the rest of the
 >   file's checks. The test's body is `irq_queue_on(image, hb, reason)`,
->   run on `guest_irq.bin` and then `guest_irq_exit.bin`.
+>   run on `guest_irq.bin`, `guest_irq_exit.bin` and `guest_irq_hb.bin`.
 > - **"Exactly once" is now checked in the second half too.** After 5 is
 >   delivered the guest must be back at its heartbeat with nothing
 >   pending, as the first half already required. The old second half
@@ -199,7 +199,12 @@ the same `hv.mk` rule. `el2-guest-irq-queue` runs its body twice, once on
 future assertion that depends on the order then fails on every boot, not
 once a week on CI.
 
-Only this test gets the second guest. It is the one test whose claim is
+**As built, three guests** (see the banner): `guest_irq_hb.S` makes the
+heartbeat-first order certain as well, so neither order is left to the
+host's timing. The test runs on all three and requires each forced
+guest's order.
+
+Only this test gets the added guests. It is the one test whose claim is
 about an interrupt pending behind another. The measurement above shows
 the other twelve do not depend on the order, and doubling their run time
 buys nothing.
@@ -208,7 +213,7 @@ buys nothing.
 
 `docs/testing/flakes.md`'s entry gets the fourth sighting, the 2026-09-17
 one it never had, and the class. The virtualisation testing doc describes
-the two-guest run and why.
+the run on each guest and why (as built: three guests).
 
 ### 4. The §70 gate
 
@@ -232,7 +237,7 @@ boot.
 
 | file | change |
 | --- | --- |
-| kernel-services/virtualization/hvtest.c | `run_until_irq`; both halves of `el2-guest-irq-queue` use it; the test runs on both guests |
+| kernel-services/virtualization/hvtest.c | `run_until_irq`; both halves of `el2-guest-irq-queue` use it; the test runs on all three guests |
 | tests/hv/aarch64/guest_irq_exit.S (new), tests/hv/aarch64/guest_irq_hb.S (new, as built), tests/hv/hv.mk | the guest with an exit after every EOI; the guest whose heartbeat comes first despite it |
 | tools/irq-order-probe.py | unchanged, kept as the class's measurement for the other guests |
 | docs | `docs/testing/flakes.md` (the fourth and the unrecorded sighting, the class); `docs/kernel-services/virtualization/testing.md`; README Status |
@@ -243,14 +248,15 @@ None.
 
 ## Migration plan
 
-One PR: the helper, the second guest, the test on both, the documents.
+One PR: the helper, the added guests, the test on all three, the documents.
 
 ## Tests
 
 | test | checks | mutation it must catch |
 | --- | --- | --- |
 | `el2-guest-irq-queue` (on `guest_irq`) | both claims, in the order the host's timing gives | a 42 delivered twice, or 5 never |
-| `el2-guest-irq-queue` (on `guest_irq_exit`) | the same claims, with the interrupt always first | line 1239's heartbeat-first assertion restored: fails on every boot |
+| `el2-guest-irq-queue` (on `guest_irq_exit`) | the same claims, with the interrupt always first; zero heartbeats before each delivery | line 1239's heartbeat-first assertion restored: fails on every boot |
+| `el2-guest-irq-queue` (on `guest_irq_hb`, as built) | the same claims, with the heartbeat always first; at least one heartbeat before each delivery | an interrupt-first assertion: fails on every boot; the guest's in-handler heartbeat removed: the count check fails |
 
 ## Benchmarks
 
@@ -258,8 +264,8 @@ None.
 
 ## Risks
 
-- **The second guest changes what `x28` holds.** No guest or test reads
-  it, as checked for the nine guests above. The new guest is a copy of
+- **The added guests change what `x28` holds.** No guest or test reads
+  it, as checked for the nine guests above. The new guests are copies of
   `guest_irq.S`, whose handler does not touch `x28` either.
 - **The emulated read's value is unused**, so a distributor that changes
   what `GICD_CTLR` reads cannot change the test.
@@ -268,7 +274,7 @@ None.
 
 - **Replace line 1239 alone**, as the first half's fix did. That is what
   let the fourth sighting through. The helper removes the pattern, and
-  the second guest removes the chance of it coming back unseen.
+  the added guests remove the chance of it coming back unseen.
 - **A maintenance interrupt, so the host refills the register at the
   EOI.** That changes the hypervisor to make a test deterministic, and
   it makes only one of the two orders impossible, not the test

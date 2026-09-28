@@ -12,8 +12,10 @@
  * This guest makes that exit certain: after the EOI it reads GICD_CTLR,
  * which EL2 emulates and hands back as HV_EXIT_EMULATED, so the next
  * entry offers whatever is pending before the guest runs another
- * instruction of its loop. A test that runs on both guests is run in
- * both orders on every boot. The read goes to x28, which nothing reads.
+ * instruction of its loop: the interrupt comes first, always.
+ * guest_irq_hb.S makes the other order certain, so a test run on both
+ * runs in both orders on every boot. The read goes to x28, which nothing
+ * reads.
  *
  * Everything else is guest_irq.S's, and its header describes it.
  */

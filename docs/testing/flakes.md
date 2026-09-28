@@ -2121,9 +2121,11 @@ tree passes.
 
 **Fixed as a class (PR #247).** Both halves run through one helper that
 accepts heartbeats while the awaited interrupt is pending, and the test
-runs on a second guest, `guest_irq_exit.S`, whose exit after every EOI
-makes the other order happen on every boot. Restoring either half's old
-assertion now fails every GIC boot, not one in dozens.
+runs on two more guests: `guest_irq_exit.S`, whose exit after every EOI
+makes the interrupt come first, and `guest_irq_hb.S`, which sends its
+heartbeat from the handler with IRQs masked so the heartbeat comes first.
+Each order happens on every boot, and the test requires it. Restoring
+either half's old assertion now fails every GIC boot, not one in dozens.
 
 
 ## `mmu: TLB shootdown acknowledged by 2 of 3 CPUs`
