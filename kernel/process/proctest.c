@@ -1177,13 +1177,18 @@ static bool kill_module(const char *const argv[], int sig, const char **reason)
     struct process *p = NULL;
     CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
     thread_sleep_ms(50);
-    CHECK(!completion_done(&p->exited));
+    /* Every way out drops the creation reference: a CHECK that returned
+     * holding it left the process in the table for good, and P33 then
+     * failed every later test for it (docs/audit/next-subsystem-exit-space.md). */
+    bool alive = !completion_done(&p->exited);
     process_kill(p, sig);
     uint64_t t0 = clock_now_ns();
     int status = process_wait_exit(p);
-    CHECK(clock_since_ns(t0) < 2000000000ULL);
-    CHECK(status == 128 + sig);
+    bool prompt = clock_since_ns(t0) < 2000000000ULL;
     process_put(p);
+    CHECK(alive);
+    CHECK(prompt);
+    CHECK(status == 128 + sig);
     return true;
 }
 
@@ -1545,6 +1550,27 @@ bool selftest_elf_text_ro(const char **reason)
     return true;
 }
 
+/* Write `src` to `path` (created, 0755). False with *rc set if it could
+ * not be created; false with *rc 0 if a write fell short. */
+static bool write_program_copy(const char *path, const struct process_image *src, int *rc)
+{
+    struct file *f = NULL;
+    *rc = vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0755, &f);
+    if (*rc != 0)
+        return false;
+    size_t off = 0;
+    bool wrote = true;
+    while (off < src->size && wrote) {
+        int64_t n = file_pwrite(f, (const uint8_t *)src->data + off, src->size - off, off);
+        if (n <= 0)
+            wrote = false;
+        else
+            off += (size_t)n;
+    }
+    file_put(f);
+    return wrote;
+}
+
 bool selftest_elf_txtbsy(const char **reason);
 bool selftest_elf_txtbsy(const char **reason)
 {
@@ -1555,24 +1581,13 @@ bool selftest_elf_txtbsy(const char **reason)
     }
     /* A copy of the program, which this test may write to. */
     const char *path = "/tmp/elf-txtbsy.bin";
-    struct file *f = NULL;
-    int rc = vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0755, &f);
+    int rc = 0;
+    bool wrote = write_program_copy(path, &src, &rc);
+    free_image_with_vnode(&src);
     if (rc != 0) {
-        free_image_with_vnode(&src);
         kinfo("selftest: elf-txtbsy: cannot create %s (%d); skipping", path, rc);
         return true;
     }
-    size_t off = 0;
-    bool wrote = true;
-    while (off < src.size && wrote) {
-        int64_t n = file_pwrite(f, (const uint8_t *)src.data + off, src.size - off, off);
-        if (n <= 0)
-            wrote = false;
-        else
-            off += (size_t)n;
-    }
-    file_put(f);
-    free_image_with_vnode(&src);
     if (!wrote) {
         vfs_unlink(NULL, path);
         *reason = "could not write the copy this test runs on";
@@ -1804,6 +1819,146 @@ bool selftest_elf_txtbsy(const char **reason)
           "program are all -ETXTBSY -- a private one is not -- the text mapping is refused after a "
           "writable shared one too, and the write succeeds once it exits");
     return true;
+}
+
+/*
+ * The address space goes before EXITED is published (the exit-space
+ * unit). A child spinning in a writable copy of init holds the file busy;
+ * it is killed and held in process_last_thread_gone just before EXITED is
+ * published. There the file must already be writable -- the text went
+ * with the space -- and the child must not yet be reapable: whoever
+ * learns of the exit learns it after the space is gone.
+ */
+bool selftest_exit_space_order(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: exit-space-order: no test hooks in this build; skipping");
+    return true;
+#else
+    struct process_image src = { 0 };
+    if (read_image_with_vnode("/boot/init", &src) != 0) {
+        kinfo("selftest: exit-space-order: /boot/init unreadable; skipping");
+        return true;
+    }
+    const char *path = "/tmp/exit-space.bin";
+    int rc = 0;
+    bool wrote = write_program_copy(path, &src, &rc);
+    uint8_t last = src.size ? ((const uint8_t *)src.data)[src.size - 1] : 0;
+    size_t size = src.size;
+    free_image_with_vnode(&src);
+    if (!wrote) {
+        if (rc == 0)
+            vfs_unlink(NULL, path);
+        *reason = "could not write the copy this test runs on";
+        return false;
+    }
+    struct process_image img = { 0 };
+    if (read_image_with_vnode(path, &img) != 0) {
+        vfs_unlink(NULL, path);
+        *reason = "the copy is unreadable";
+        return false;
+    }
+    static const char *const argv[] = { "init", "--spin", NULL };
+    struct process *p = NULL;
+    bool made = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
+    free_image_with_vnode(&img);   /* a vnode reference, not a mapping: the child's text is what holds the file */
+    if (!made) {
+        vfs_unlink(NULL, path);
+        *reason = "could not run the copy";
+        return false;
+    }
+    pid_t pid = p->pid;
+
+    /* Rewrite the last byte with its own value: the file is unchanged
+     * whether or not the write is allowed. */
+    int64_t busy_rc = -1, free_rc = -1;
+    struct file *w = NULL;
+    if (vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+        busy_rc = file_pwrite(w, &last, 1, size - 1);   /* while it runs: refused, or this test proves nothing */
+        file_put(w);
+    }
+    process_test_hold_exiting(pid);
+    process_kill(p, COSMO_SIGKILL);
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!process_test_reap_held() && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    bool held = process_test_reap_held();
+    bool reapable = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PROCESS_EXITED || completion_done(&p->exited);
+    if (held && vfs_open(NULL, path, COSMO_O_WRONLY, 0, &w) == 0) {
+        free_rc = file_pwrite(w, &last, 1, size - 1);
+        file_put(w);
+    }
+    process_test_release_reap();   /* never leave the reaper parked */
+    process_wait_exit(p);
+    process_put(p);
+    wait_process_gone(pid);
+    vfs_unlink(NULL, path);
+
+    if (busy_rc != -ETXTBSY) {
+        kerror("selftest: exit-space-order: writing the running program returned %lld, wanted %d",
+               (long long)busy_rc, -ETXTBSY);
+        *reason = "the running program's file was not busy: the test proves nothing";
+        return false;
+    }
+    if (!held) {
+        *reason = "the reaper never reached the exiting hold";
+        return false;
+    }
+    if (reapable) {
+        *reason = "the child was reapable before its space had gone";
+        return false;
+    }
+    if (free_rc != 1) {
+        kerror("selftest: exit-space-order: writing at the exiting hold returned %lld, wanted 1", (long long)free_rc);
+        *reason = "the program was still busy when its exit was about to be published";
+        return false;
+    }
+    kinfo("selftest: exit-space-order: busy while it ran, writable before EXITED was published");
+    return true;
+#endif
+}
+
+/*
+ * P33 blames once: a process already reported is not reported again
+ * while it stays, so one leak fails one test. Without it, a leaked
+ * reference failed every later test for the same pid -- 19 in one boot.
+ */
+bool selftest_p33_once(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: p33-once: no test hooks in this build; skipping");
+    return true;
+#else
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    pid_t c;
+    if (!spawn_held_zombie(image, image_size, &c, reason))
+        return false;
+    uint32_t left[4] = { 0 };
+    unsigned first = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
+    bool named = first == 1 && left[0] == c;
+    selftest_leftover_reported(c);
+    unsigned again = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
+    process_test_release_reap();
+    unsigned after = selftest_leftover_processes(2000ull * 1000 * 1000, left, 4);
+    if (!named) {
+        *reason = "the first check did not name the held process";
+        return false;
+    }
+    if (again != 0) {
+        kerror("selftest: p33-once: a process already reported was reported again (%u found)", again);
+        *reason = "a process already blamed was blamed again";
+        return false;
+    }
+    CHECK(after == 0);
+    return true;
+#endif
 }
 
 /* What one more process running an already-running program may cost.

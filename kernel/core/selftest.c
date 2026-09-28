@@ -367,6 +367,7 @@ static const struct selftest tests[] = {
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },
+    { "vm-teardown-absent", selftest_vm_teardown_absent },
     { "vm-replace",      selftest_vm_replace },
     { "rlimit",          selftest_rlimit },
     { "uaccess",         selftest_uaccess },
@@ -756,6 +757,8 @@ static const struct selftest tests[] = {
     { "process-reaped",  selftest_process_reaped },
     { "process-gone-order", selftest_process_gone_order },
     { "process-leftover-named", selftest_process_leftover_named },
+    { "p33-once",        selftest_p33_once },
+    { "exit-space-order", selftest_exit_space_order },
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
     { "signal-stop",     selftest_signal_stop },
@@ -805,13 +808,66 @@ static const struct selftest tests[] = {
  * pids. It logs nothing: the runner names what it finds, and the test of
  * this check (process-leftover-named) finds one on purpose.
  */
+/*
+ * A process already reported is blamed once. Without this a test that
+ * leaked its reference -- a CHECK that returned before its put -- failed
+ * every test after it for the same pid: 19 of them in one boot of the
+ * exit-space probe. A reported pid is ignored until it leaves the table,
+ * and forgotten then.
+ */
+enum { LEFTOVER_REPORTED_MAX = 16, LEFTOVER_SNAPSHOT_MAX = 64 };
+static uint32_t g_leftover_reported[LEFTOVER_REPORTED_MAX];
+static unsigned g_leftover_nreported;
+
+void selftest_leftover_reported(uint32_t pid)
+{
+    for (unsigned i = 0; i < g_leftover_nreported; i++)
+        if (g_leftover_reported[i] == pid)
+            return;
+    if (g_leftover_nreported < LEFTOVER_REPORTED_MAX)
+        g_leftover_reported[g_leftover_nreported++] = pid;
+}
+
+static bool leftover_was_reported(uint32_t pid)
+{
+    for (unsigned i = 0; i < g_leftover_nreported; i++)
+        if (g_leftover_reported[i] == pid)
+            return true;
+    return false;
+}
+
+/* From one locked snapshot: forget reported pids no longer in it, and
+ * return the others. */
+static unsigned leftover_snapshot(uint32_t *pids, unsigned max)
+{
+    static uint32_t all[LEFTOVER_SNAPSHOT_MAX];
+    unsigned total = process_table_pids(all, LEFTOVER_SNAPSHOT_MAX), seen = total < LEFTOVER_SNAPSHOT_MAX ? total : LEFTOVER_SNAPSHOT_MAX;
+    unsigned keep = 0;
+    for (unsigned i = 0; i < g_leftover_nreported; i++) {
+        bool present = false;
+        for (unsigned k = 0; k < seen && !present; k++)
+            present = all[k] == g_leftover_reported[i];
+        if (present || total > LEFTOVER_SNAPSHOT_MAX)   /* a snapshot too large to search forgets nothing */
+            g_leftover_reported[keep++] = g_leftover_reported[i];
+    }
+    g_leftover_nreported = keep;
+    unsigned n = 0;
+    for (unsigned k = 0; k < seen; k++)
+        if (!leftover_was_reported(all[k])) {
+            if (n < max)
+                pids[n] = all[k];
+            n++;
+        }
+    return n + (total - seen);   /* beyond the snapshot: counted, not named */
+}
+
 unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max)
 {
     /* One locked snapshot decides and is returned: the count it reports
      * and the pids it names are the same reading of the table. */
     uint64_t deadline = clock_deadline_ns(wait_ns);
     for (;;) {
-        unsigned n = process_table_pids(pids, max);
+        unsigned n = leftover_snapshot(pids, max);
         if (n == 0 || clock_deadline_passed(deadline))
             return n;
         thread_sleep_ms(1);
@@ -842,6 +898,7 @@ int selftest_run_all(void)
                 char what[96];
                 if (process_describe(left[k], what, sizeof(what)))
                     kerror("selftest: %s left %s", tests[i].name, what);
+                selftest_leftover_reported(left[k]);   /* blamed here, and only here */
             }
             if (nleft > LEFT_NAMED)
                 kerror("selftest: %s left %u more processes, not named", tests[i].name, nleft - LEFT_NAMED);

@@ -98,6 +98,11 @@ int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_pr
  * Output pointers may be NULL. page_size is 4K/2M/1G of the leaf. */
 bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
                     vm_prot_t *prot, vm_cache_t *cache, size_t *page_size);
+/* How many bytes from `va` are certainly unmapped: the rest of the span
+ * of the entry where the walk found nothing (a whole absent table skips
+ * its whole range), or 0 if `va` is mapped. Lets a teardown step over
+ * what was never populated instead of querying it a page at a time. */
+size_t arch_mmu_absent_span(const struct arch_mmu_context *ctx, vaddr_t va);
 
 /* Make ctx the active translation on the calling CPU. */
 void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush);

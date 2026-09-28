@@ -1205,6 +1205,54 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
 }
 
 /*
+ * A dying space's teardown (docs/audit/next-subsystem-exit-space.md).
+ * vm_space_destroy has already invalidated the space's tag on every CPU
+ * that held it, and no CPU runs the space, so none holds a translation
+ * of it and none can make one: no chunk is shot down, and each chunk's
+ * frames are freed as soon as it is unmapped. What was never populated
+ * is stepped over an absent table at a time (arch_mmu_absent_span)
+ * rather than queried a page at a time -- the 8 MB stack reservation
+ * alone was 2,048 queries for a handful of frames, and with a shootdown
+ * per 32-page chunk a teardown cost 5.7-18.1 ms. Returns the pages it
+ * queried.
+ */
+static uint64_t dying_range_teardown(struct vm_space *space, vaddr_t base, size_t size)
+{
+    uint64_t queried = 0;
+    vaddr_t end = base + size, va = base;
+    while (va < end) {
+        size_t absent = arch_mmu_absent_span(&space->mmu, va);
+        if (absent > PAGE_SIZE) {
+            va = absent >= (size_t)(end - va) ? end : va + absent;
+            continue;
+        }
+        size_t chunk = MIN((size_t)(TEARDOWN_CHUNK_PAGES * PAGE_SIZE), (size_t)(end - va));
+        struct page *frames[TEARDOWN_CHUNK_PAGES];
+        unsigned n = 0;
+
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
+            paddr_t pa;
+            queried++;
+            if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
+                continue;
+            struct page *page = phys_to_page(pa);
+            KASSERT(page != NULL);
+            frames[n++] = page;
+            frame_uncount(space, page);
+        }
+        int rc = arch_mmu_unmap(&space->mmu, va, chunk);
+        KASSERT(rc == 0);
+        spin_unlock_irqrestore(&space->lock, s);
+
+        for (unsigned i = 0; i < n; i++)
+            pmm_page_put(frames[i]);
+        va += chunk;
+    }
+    return queried;
+}
+
+/*
  * Free a user region's record, never under the space lock. A FILE region
  * drops its count on the mapping record; the one that takes it to zero
  * unlinks the record from the vnode (under the cache mutex, which is why
@@ -1238,7 +1286,7 @@ static void regions_put_all(struct list_node *gone)
     }
 }
 
-void vm_space_destroy(struct vm_space *space)
+uint64_t vm_space_destroy_counted(struct vm_space *space)
 {
     KASSERT(space != NULL && space->user);
     /*
@@ -1250,6 +1298,16 @@ void vm_space_destroy(struct vm_space *space)
     /* Raw: whichever CPU runs this thread has the thread's own space loaded, so this says "not my space" anywhere. */
     KASSERT(raw_this_cpu()->cur_space != space);
 
+    /*
+     * First, whatever any CPU still holds under this space's tag goes.
+     * No CPU runs the space -- its threads have all switched out, and a
+     * switch loads the incoming thread's space -- so after this no CPU
+     * holds a translation of it and none can make one, and the teardown
+     * needs no shootdown before it frees a frame.
+     */
+    arch_mmu_invalidate_asid(&space->mmu, space->tlb_cpus);
+
+    uint64_t queried = 0;
     for (;;) {
         arch_irq_state_t s = spin_lock_irqsave(&space->lock);
         if (list_empty(&space->regions)) {
@@ -1263,7 +1321,7 @@ void vm_space_destroy(struct vm_space *space)
         size_t size = r->size;
         spin_unlock_irqrestore(&space->lock, s);
 
-        user_range_teardown(space, base, size);
+        queried += dying_range_teardown(space, base, size);
         region_put(r);
     }
     /* Every frame this space populated has been handed back: the loop
@@ -1279,18 +1337,16 @@ void vm_space_destroy(struct vm_space *space)
               (unsigned long long)space->shared_maps, (unsigned long long)space->mapped_pages);
 
     /*
-     * Whatever any CPU still holds under this space's tag goes now, and
-     * only then is the tag released. The other order is the bug the
-     * report was reviewed for: a tag released while a CPU still holds
-     * its translations is a tag whose next owner inherits them.
+     * And again before the tag is released. The other order is the bug
+     * the report was reviewed for: a tag released while a CPU still
+     * holds its translations is a tag whose next owner inherits them.
      *
-     * Today this invalidate has nothing left to do -- the region
-     * teardown above already invalidated every mapped page across every
-     * tag -- so no test can distinguish its presence, and that is
+     * The invalidate at the start already dropped everything, and
+     * nothing could make a translation since, so this one has nothing
+     * left to do and no test can distinguish its presence; that is
      * recorded rather than counted (docs/kernel/memory/testing.md). It
-     * is kept so that the safety of destroying a space does not depend
-     * on a decision made in `arch_mmu_invalidate`, where a future
-     * tag-qualified range invalidate would silently break it.
+     * is kept so that the tag's release never depends on the reasoning
+     * about the start -- that no CPU could have run the space meanwhile.
      */
     arch_mmu_invalidate_asid(&space->mmu, space->tlb_cpus);
     asid_release(&space->mmu);
@@ -1298,6 +1354,12 @@ void vm_space_destroy(struct vm_space *space)
 
     arch_mmu_context_destroy(&space->mmu);
     kmem_cache_free(g_space_cache, space);
+    return queried;
+}
+
+void vm_space_destroy(struct vm_space *space)
+{
+    (void)vm_space_destroy_counted(space);
 }
 
 static bool user_range_valid(uint64_t base, size_t size)

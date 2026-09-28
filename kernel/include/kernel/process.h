@@ -407,6 +407,9 @@ bool process_describe(pid_t pid, char *buf, size_t n);
  * the reaper parks after `pid` has become a zombie and before it drops
  * the exited thread's reference to it, until released. Armed by pid. */
 void process_test_hold_reap(pid_t pid);
+/* The same hold, earlier: in process_last_thread_gone after the address
+ * space is gone and before EXITED is published (the exit-space unit). */
+void process_test_hold_exiting(pid_t pid);
 bool process_test_reap_held(void);          /* the reaper is parked on it */
 void process_test_release_reap(void);       /* disarm, and let a parked reaper go */
 void process_test_reap_hook(struct process *p);   /* the reaper's side (thread_put) */

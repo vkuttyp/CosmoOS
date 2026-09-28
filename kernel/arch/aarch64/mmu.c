@@ -329,6 +329,18 @@ int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_pr
     return 0;
 }
 
+size_t arch_mmu_absent_span(const struct arch_mmu_context *ctx, vaddr_t va)
+{
+    if (va_is_high(va) != ctx_is_kernel(ctx))
+        return 0;   /* not this root's half: claim nothing, skip nothing */
+    struct walk w;
+    walk(ctx, va, &w);
+    if (w.present)
+        return 0;
+    uint64_t sz = level_size[w.level];
+    return (size_t)(sz - (va & (sz - 1)));
+}
+
 bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa, vm_prot_t *prot,
                     vm_cache_t *cache, size_t *page_size)
 {
