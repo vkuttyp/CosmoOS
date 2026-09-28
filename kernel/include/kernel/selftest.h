@@ -28,6 +28,7 @@ bool selftest_asid_destroy_reuse(const char **reason); /* a tag freed at destroy
 bool selftest_asid_race(const char **reason);       /* two CPUs may not both tag one space */
 bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
+bool selftest_vm_teardown_absent(const char **reason);   /* a dying space walks what was populated, not what was reserved */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
 bool selftest_vm_replace(const char **reason);
 bool selftest_vm_replace_race(const char **reason);  /* kernel/memory/memtest.c: replacements against each other */  /* kernel/memory/memtest.c: MAP_FIXED replacement */
@@ -185,10 +186,15 @@ bool selftest_elf_text_ro(const char **reason);
 bool selftest_elf_txtbsy(const char **reason);
 bool selftest_process_gone_order(const char **reason);    /* a leftover released in a run_module's window (P33) */
 bool selftest_process_leftover_named(const char **reason); /* the runner names a process a test left (P33) */
+bool selftest_p33_once(const char **reason);               /* a process already blamed is not blamed again (P33) */
+bool selftest_exit_space_order(const char **reason);       /* the address space goes before EXITED is published */
 /* kernel/core/selftest.c: the runner's P33 check, waiting up to `wait_ns`
- * for the process table to empty; returns how many are left and up to
- * `max` of their pids. */
-unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max);
+ * for the process table to empty; returns how many are left, and writes
+ * up to `max` of their pids, *named (if not NULL) saying how many. */
+unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max, unsigned *named);
+/* Mark `pid` as already blamed: later checks ignore it until it leaves the
+ * table (P33 blames once). */
+void selftest_leftover_reported(uint32_t pid);
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_shared_text(const char **reason);   /* one program, one set of text frames */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */

@@ -507,3 +507,19 @@ the fixed path's half of the same rule. Checked by: `mmap-place-race`
 every placement inserted, none `-EEXIST`, and the space's page count
 equal to the placements), the `mmap` section of `init --selftest` and
 `lxtest` (two threads placing at once through each door, no `EEXIST`).
+
+**M47. A space being destroyed is torn down as what it is: nothing runs
+it.** (The exit-space unit, `docs/audit/next-subsystem-exit-space.md`.)
+`vm_space_destroy` invalidates the space's tag on every CPU that held it
+before it tears anything down. No CPU runs the space, so none can make a
+new translation of it, and the teardown (`dying_range_teardown`) then
+shoots down no chunk and frees each chunk's frames once it is unmapped.
+It steps over what was never populated an absent table at a time
+(`arch_mmu_absent_span`, both architectures) instead of querying it a
+page at a time: the 8 MB stack reservation used to cost 2,048 queries for
+a handful of frames, and a shootdown per 32-page chunk made a process's
+teardown 5.7-18.1 ms. A live space's `munmap` and friends keep the
+shootdown per chunk (`user_range_teardown`). Checked by:
+`vm-teardown-absent` (the pages queried equal the pages populated). The
+invalidate itself is recorded, not counted: see `testing.md`, "The
+destroy-path invalidates have no test".

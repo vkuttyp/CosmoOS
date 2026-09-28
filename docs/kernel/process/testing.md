@@ -243,10 +243,23 @@ vacuous.
 - **`process-leftover-named`** -- holds a process and requires the
   runner's check, with a 20 ms deadline, to return exactly that pid;
   once let go, the table empties within two seconds.
+- **`p33-once`** -- holds a process, requires the runner's check to name
+  it, marks it reported (`selftest_leftover_reported`), and requires the
+  next check to find nothing while it is still there; once let go, it
+  must leave the table, checked by its pid (the check ignores it by then,
+  so could not say).
+- **`exit-space-order`** (the exit-space unit, P34) -- a child spinning in
+  a writable copy of `init` (`/tmp/exit-space.bin`) must hold the file
+  busy (`-ETXTBSY`: otherwise the test proves nothing); it is killed and
+  parked by `process_test_hold_exiting`, after its space is torn down
+  and before `EXITED` is published. There the file must be writable and
+  the child not yet reapable.
 - **The runner** waits up to two seconds after every test for the
   process table to empty and fails the test that left a process,
   naming up to sixteen of them (`selftest: <test> left pid N 'name'
-  (state, references, threads)`) and counting any beyond that. The ELF tests' `elf_settle_processes` went with this: each
+  (state, references, threads)`) and counting any beyond that. Every pid
+  it returns, up to 64, is remembered and ignored by later checks until
+  it leaves the table, so one leak fails one test. The ELF tests' `elf_settle_processes` went with this: each
   of its 37 calls preceded a return.
 
 ### The native signal ABI, sessions and the terminal

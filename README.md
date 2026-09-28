@@ -3597,6 +3597,23 @@ See [docs/development.md](docs/development.md).
   Also found, for the next unit: an exited process keeps its address space
   until its last reference drops, so `waitpid` can return while the
   child's binary is still busy. (PR #251)
+- **An exited process has no address space (P34), and tearing one down
+  steps over what was never used (M47).** `waitpid` reaped a child as
+  soon as it was `EXITED`, but the child's address space, and the text
+  mapping that held its binary busy, went only when its last reference
+  dropped. Unforced, a program that waited for a child and rewrote its
+  binary was refused `ETXTBSY` 10 times in 4,200. The space now goes
+  first in `process_last_thread_gone`, before `EXITED` is published.
+  Placed after, a parent already looking still reaped mid-teardown. That
+  needed the teardown cheap: it queried every page of every region (the
+  8 MB stack reservation is 2,048 of them) and shot down each chunk of a
+  space nothing runs, 5.7-18.1 ms a process. A dying space's tag is now
+  invalidated first; its teardown shoots down no chunk and steps over
+  absent tables (`arch_mmu_absent_span`, both architectures).
+  `exit-space-order` holds an exit between the teardown and the publish
+  and finds the binary writable; `vm-teardown-absent` counts the pages a
+  teardown queries. P33 now blames a leaked process once: one boot of the
+  probe failed 19 tests for one leak. (PR #253)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

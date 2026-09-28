@@ -68,6 +68,15 @@ reservation has no frames and can be split by `protect`; a lenient unmap
 across two regions and a gap leaves exactly the expected pieces;
 `vm_space_destroy` returns the frames.
 
+### `SELFTEST: vm-teardown-absent` (`selftest_vm_teardown_absent`, the exit-space unit)
+
+A scratch space with an 8 MB region never touched (the shape of a
+process's stack reservation) and four populated pages, destroyed through
+`vm_space_destroy_counted`. The teardown must query exactly the four
+populated pages: the 8 MB is stepped over an absent table at a time
+(`arch_mmu_absent_span`). Asserted from the count the teardown returns,
+not from time. With the skip disabled it queries 2,052.
+
 ### `SELFTEST: vm-replace` (`selftest_vm_replace`, the `MAP_FIXED` unit)
 
 On a scratch user space: replacing a whole region leaves one region,
@@ -313,17 +322,27 @@ what the allocator itself allocates rather than what the machine holds
 -- a change to that test, and to the accounting it can reach, which
 belongs to a unit of its own rather than to this one.
 
-### The destroy-path invalidate has no test, and why
+### The destroy-path invalidates have no test, and why
 
-Removing `arch_mmu_invalidate_asid` from `vm_space_destroy` leaves every
-test passing. It is not dead code and it is not proved: by the time it
-runs, `user_range_teardown` has already invalidated every mapped page of
-the space across *every* tag, so nothing observable remains for it to do.
-It is kept so that destroying a space does not depend for its safety on a
-decision made in `arch_mmu_invalidate` -- where the natural optimisation,
-naming the tag, is exactly what would break it (see M38's gap). Recorded
-rather than counted, as the FP/SIMD and terminal-mode units recorded
-theirs.
+`vm_space_destroy` invalidates the space's tag twice: first, before the
+teardown, and again before the tag is released. Removing either leaves
+every test passing, on both architectures (the exit-space unit removed
+the first on each, alone, with its boot confirmed).
+
+The first is what the dying teardown's missing per-chunk shootdown rests
+on. No CPU runs a space being destroyed, so no CPU can use or make a
+translation of it; after the invalidate, no CPU holds one either, and a
+chunk's frames can be freed as soon as it is unmapped. No test can show
+a stale translation of a tag no CPU has loaded, because nothing can use
+one. The invalidate makes the frees not depend on that reasoning alone.
+
+The second has had nothing left to do since the first was added: nothing
+could make a translation in between. It is kept so that the tag's
+release never depends on the reasoning about the start, and so that
+destroying a space never depends for its safety on a decision made in
+`arch_mmu_invalidate`, where the natural optimisation, naming the tag, is
+exactly what would break it (see M38's gap). Both are recorded rather
+than counted, as the FP/SIMD and terminal-mode units recorded theirs.
 
 ## The page-poison check (every debug boot)
 

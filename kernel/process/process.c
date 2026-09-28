@@ -975,8 +975,33 @@ static struct process *find_init_locked(struct process *except)
  * to init or to the kernel; `p` becomes a zombie its parent must collect,
  * or is dropped at once when it has no parent.
  */
+#if CONFIG_DEBUG
+static void reap_hold_at(struct process *p, unsigned point);
+#endif
+
 void process_last_thread_gone(struct process *p)
 {
+    /*
+     * The address space goes first: before any lock, and before the
+     * state that waitpid reaps on (EXITED) is published. So by the time
+     * anyone can learn that this process has exited -- its waiter, its
+     * parent, a kill(pid, 0) -- its frames are free and its text no
+     * longer holds its program busy (-ETXTBSY). It used to go only at
+     * release, when the last reference dropped, which a waiter could
+     * outrun: a program that waited for a child and rewrote its binary
+     * was refused 10 times in 4,200 (docs/audit/next-subsystem-exit-space.md).
+     * Placed after EXITED is set, a parent already looking still reaped
+     * mid-teardown. Nothing reads a zombie's space: its threads are
+     * gone, every syscall uses the caller's own, and release and
+     * thread_clear_tid accept NULL.
+     */
+    if (p->space != NULL) {
+        vm_space_destroy(p->space);
+        p->space = NULL;
+    }
+#if CONFIG_DEBUG
+    reap_hold_at(p, 1);   /* the space is gone and EXITED not yet published */
+#endif
     LIST_HEAD(orphans);
     LIST_HEAD(to_drop);   /* exited, unreaped children with no one left to wait */
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
@@ -1786,14 +1811,26 @@ bool process_describe(pid_t pid, char *buf, size_t n)
  * a parked one waits too, which is what makes an order certain.
  */
 static pid_t g_reap_hold_pid;   /* 0: disarmed */
+static unsigned g_reap_hold_point;   /* 0: a zombie, before the reaper's put; 1: exiting, before EXITED */
 static unsigned g_reap_held;
 static struct completion g_reap_go;
 
-void process_test_hold_reap(pid_t pid)
+static void reap_hold_arm(pid_t pid, unsigned point)
 {
     completion_init(&g_reap_go, "reap-hold");
     __atomic_store_n(&g_reap_held, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_reap_hold_point, point, __ATOMIC_RELEASE);
     __atomic_store_n(&g_reap_hold_pid, pid, __ATOMIC_RELEASE);
+}
+
+void process_test_hold_reap(pid_t pid)
+{
+    reap_hold_arm(pid, 0);
+}
+
+void process_test_hold_exiting(pid_t pid)
+{
+    reap_hold_arm(pid, 1);
 }
 
 bool process_test_reap_held(void)
@@ -1807,13 +1844,20 @@ void process_test_release_reap(void)
     complete(&g_reap_go);
 }
 
-void process_test_reap_hook(struct process *p)
+static void reap_hold_at(struct process *p, unsigned point)
 {
+    if (__atomic_load_n(&g_reap_hold_point, __ATOMIC_ACQUIRE) != point)
+        return;
     pid_t want = p->pid;
     if (!__atomic_compare_exchange_n(&g_reap_hold_pid, &want, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
     __atomic_store_n(&g_reap_held, 1u, __ATOMIC_RELEASE);
     wait_for_completion(&g_reap_go);
+}
+
+void process_test_reap_hook(struct process *p)
+{
+    reap_hold_at(p, 0);
 }
 #endif
 

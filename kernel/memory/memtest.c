@@ -373,6 +373,35 @@ static unsigned online_cpus(void)
     return (unsigned)__builtin_popcountll(cpu_online_mask());
 }
 
+/*
+ * A dying space's teardown walks what was populated, not what was
+ * reserved (docs/audit/next-subsystem-exit-space.md). An 8 MB region
+ * never touched -- the shape of a process's stack reservation -- and four
+ * populated pages: the teardown queries the four and steps over the 8 MB
+ * an absent table at a time. It used to query all 2,052, a page at a
+ * time, and shoot down every 32-page chunk. Asserted from the count the
+ * teardown returns, not from time.
+ */
+bool selftest_vm_teardown_absent(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000300000000000ULL;   /* far from anything a process maps */
+    const uint64_t B = A + (64ull << 20);
+    CHECK(vm_user_map_anon(sp, A, 8ull << 20, VM_PROT_RW, 0, "sparse") == 0);
+    CHECK(vm_user_map_anon(sp, B, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "dense") == 0);
+    CHECK(sp->anon_pages == 4);
+    uint64_t queried = vm_space_destroy_counted(sp);
+    if (queried != 4) {
+        kerror("selftest: vm-teardown-absent: the teardown queried %llu pages; wanted the 4 populated ones",
+               (unsigned long long)queried);
+        *reason = "the teardown walked what was never populated";
+        return false;
+    }
+    kinfo("selftest: vm-teardown-absent: an 8 MB untouched region and 4 populated pages: 4 pages queried");
+    return true;
+}
+
 bool selftest_user_vmm(const char **reason)
 {
     struct vm_space *sp = NULL;

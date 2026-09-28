@@ -161,6 +161,10 @@ int vm_space_create_user(struct vm_space **out);
 /* Tear down every region, free frames, free lower-half tables, free the
  * struct. Must not be the space active on the calling CPU. */
 void vm_space_destroy(struct vm_space *space);
+/* The same, returning how many pages the teardown queried: the regions'
+ * populated stretches, never what was left absent (memtest's
+ * vm-teardown-absent asserts it). */
+uint64_t vm_space_destroy_counted(struct vm_space *space);
 
 /* Map an anonymous user region at exactly [base, base+size). `prot`
  * must not be W+X; VM_PROT_NONE reserves the range (every access faults).
