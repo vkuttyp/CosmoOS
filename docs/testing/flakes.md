@@ -2061,7 +2061,7 @@ next sighting will say which of the two candidates it is instead of
 only that it was not hypercall 2.
 
 **And the next sighting, hours later, was diagnosed by it.** PR #215's
-aarch64 GICv3 boot again (run 35730173247):
+aarch64 GICv3 boot again (run 35728477825; an earlier version of this line gave 35730173247, which is neither a run nor a job):
 
 ```text
 [ERROR] selftest: hv: line 1185: expected hypercall 2, got exit kind 4 hypercall nr 42 a0 0

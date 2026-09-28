@@ -37,9 +37,9 @@ nothing if an anchor is missing. It builds every patch in memory, writes
 the stamp -- each file's original and patched hash -- and then replaces
 each backup and file atomically, so from the stamp on every file is
 exactly one of the two. `revert` accepts a file already original,
-restores the patched ones atomically, removes the stamp, and only then the
-backups, so an apply or revert interrupted anywhere is finished by running
-revert (again).
+restores the patched ones atomically, removes the backups, and removes the
+stamp last, so an apply or revert interrupted anywhere is finished by
+running revert (again).
 """
 
 import hashlib
@@ -158,14 +158,16 @@ def revert():
     for path, patched, orig in entries:
         if sha(path) == patched:
             write_atomic(path, open(path + BACKUP, 'rb').read())
-    os.remove(STAMP)                     # every file is original now
-    # Every temp write_atomic can leave: a file's, its backup's, the stamp's.
+    # Every file is original now. The backups and every temp write_atomic can
+    # leave go first and the stamp last: while the stamp exists a revert can
+    # be run again and finish, and once it is gone nothing is left behind.
     for path, _, _ in entries:
         for leftover in (path + BACKUP, path + '.probe-tmp', path + BACKUP + '.probe-tmp'):
             if os.path.exists(leftover):
                 os.remove(leftover)
     if os.path.exists(STAMP + '.probe-tmp'):
         os.remove(STAMP + '.probe-tmp')
+    os.remove(STAMP)
     print('reverted')
 
 
