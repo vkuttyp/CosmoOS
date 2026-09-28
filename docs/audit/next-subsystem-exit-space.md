@@ -16,7 +16,10 @@
 > - **P33 blames once:** `selftest_leftover_reported`, and a set of up to
 >   64 pids (the snapshot's own limit), pruned from each locked snapshot.
 >   The runner remembers every pid a check returns, whether or not it
->   names it in the log. `kill_module`
+>   names it in the log. `selftest_leftover_processes` gained a `named`
+>   out-parameter, the number of pids it wrote, and the runner walks only
+>   those: with more than 64 processes in the table, the ones beyond the
+>   snapshot are counted but never read from the buffer. `kill_module`
 >   drops its reference before any check. `elf-txtbsy`'s copy loop
 >   became `write_program_copy`, which `exit-space-order` shares.
 > - **Tests:** `vm-teardown-absent` (memtest; queries exactly the 4

@@ -841,8 +841,9 @@ static bool leftover_was_reported(uint32_t pid)
 }
 
 /* From one locked snapshot: forget reported pids no longer in it, and
- * return the others. */
-static unsigned leftover_snapshot(uint32_t *pids, unsigned max)
+ * return the others -- all of them counted, and *named of them written to
+ * `pids` (never more than `max`, never a pid beyond the snapshot). */
+static unsigned leftover_snapshot(uint32_t *pids, unsigned max, unsigned *named)
 {
     static uint32_t all[LEFTOVER_SNAPSHOT_MAX];
     unsigned total = process_table_pids(all, LEFTOVER_SNAPSHOT_MAX), seen = total < LEFTOVER_SNAPSHOT_MAX ? total : LEFTOVER_SNAPSHOT_MAX;
@@ -855,23 +856,25 @@ static unsigned leftover_snapshot(uint32_t *pids, unsigned max)
             g_leftover_reported[keep++] = g_leftover_reported[i];
     }
     g_leftover_nreported = keep;
-    unsigned n = 0;
+    unsigned n = 0, w = 0;
     for (unsigned k = 0; k < seen; k++)
         if (!leftover_was_reported(all[k])) {
-            if (n < max)
-                pids[n] = all[k];
+            if (w < max)
+                pids[w++] = all[k];
             n++;
         }
+    if (named)
+        *named = w;
     return n + (total - seen);   /* beyond the snapshot: counted, not named */
 }
 
-unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max)
+unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max, unsigned *named)
 {
     /* One locked snapshot decides and is returned: the count it reports
      * and the pids it names are the same reading of the table. */
     uint64_t deadline = clock_deadline_ns(wait_ns);
     for (;;) {
-        unsigned n = leftover_snapshot(pids, max);
+        unsigned n = leftover_snapshot(pids, max, named);
         if (n == 0 || clock_deadline_passed(deadline))
             return n;
         thread_sleep_ms(1);
@@ -897,8 +900,9 @@ int selftest_run_all(void)
             /* Counted in the test's time, so the budget sees the wait. */
             enum { LEFT_NAMED = 16 };
             static uint32_t left[LEFTOVER_SNAPSHOT_MAX];
-            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFTOVER_SNAPSHOT_MAX);
-            for (unsigned k = 0; k < nleft && k < LEFTOVER_SNAPSHOT_MAX; k++) {
+            unsigned named = 0;
+            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFTOVER_SNAPSHOT_MAX, &named);
+            for (unsigned k = 0; k < named; k++) {   /* only the pids this check wrote: never a stale entry */
                 char what[96];
                 if (k < LEFT_NAMED && process_describe(left[k], what, sizeof(what)))
                     kerror("selftest: %s left %s", tests[i].name, what);

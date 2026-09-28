@@ -189,9 +189,9 @@ bool selftest_process_leftover_named(const char **reason); /* the runner names a
 bool selftest_p33_once(const char **reason);               /* a process already blamed is not blamed again (P33) */
 bool selftest_exit_space_order(const char **reason);       /* the address space goes before EXITED is published */
 /* kernel/core/selftest.c: the runner's P33 check, waiting up to `wait_ns`
- * for the process table to empty; returns how many are left and up to
- * `max` of their pids. */
-unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max);
+ * for the process table to empty; returns how many are left, and writes
+ * up to `max` of their pids, *named (if not NULL) saying how many. */
+unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max, unsigned *named);
 /* Mark `pid` as already blamed: later checks ignore it until it leaves the
  * table (P33 blames once). */
 void selftest_leftover_reported(uint32_t pid);

@@ -755,14 +755,15 @@ bool selftest_process_leftover_named(const char **reason)
     if (!spawn_held_zombie(image, image_size, &c, reason))
         return false;
     uint32_t left[4] = { 0 };
-    unsigned n = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
+    unsigned named = 0;
+    unsigned n = selftest_leftover_processes(20ull * 1000 * 1000, left, 4, &named);
     process_test_release_reap();
-    if (n != 1 || left[0] != c) {
+    if (n != 1 || named != 1 || left[0] != c) {
         kerror("selftest: process-leftover-named: the check found %u, first pid %u; wanted pid %u", n, left[0], c);
         *reason = "the runner's check did not name the process left";
         return false;
     }
-    CHECK(selftest_leftover_processes(2000ull * 1000 * 1000, left, 4) == 0);
+    CHECK(selftest_leftover_processes(2000ull * 1000 * 1000, left, 4, NULL) == 0);
     return true;
 #endif
 }
@@ -1941,10 +1942,11 @@ bool selftest_p33_once(const char **reason)
     if (!spawn_held_zombie(image, image_size, &c, reason))
         return false;
     uint32_t left[4] = { 0 };
-    unsigned first = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
-    bool named = first == 1 && left[0] == c;
+    unsigned wrote = 0;
+    unsigned first = selftest_leftover_processes(20ull * 1000 * 1000, left, 4, &wrote);
+    bool named = first == 1 && wrote == 1 && left[0] == c;
     selftest_leftover_reported(c);
-    unsigned again = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
+    unsigned again = selftest_leftover_processes(20ull * 1000 * 1000, left, 4, NULL);
     process_test_release_reap();
     /* By its pid: the check ignores c now, so it could not say c left. */
     bool gone = wait_process_gone(c);
