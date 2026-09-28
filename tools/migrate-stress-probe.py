@@ -21,7 +21,7 @@ The probe instruments it and repeats it:
 - the test is registered REPS times (default 40), so one boot runs it that
   many times and gives a rate.
 
-    python3 tools/migrate-stress-probe.py apply [REPS]
+    python3 tools/migrate-stress-probe.py apply [--once] [REPS]
     gmake ARCH=aarch64 test          # quiet, and with other boots beside it
     grep MSPROBE out/aarch64-debug/boot-test.log
     python3 tools/migrate-stress-probe.py revert
@@ -39,6 +39,26 @@ import sys
 
 SMP = 'kernel/scheduler/smptest.c'
 REG = 'kernel/core/selftest.c'
+THREAD_H = 'kernel/include/kernel/thread.h'
+SCHED_C = 'kernel/scheduler/sched.c'
+RR_C = 'kernel/scheduler/policy_rr.c'
+
+# --once: the candidate fix -- a thread is migrated at most once between two
+# runs. migrate_locked marks it, the switch-in clears the mark, and
+# pick_migratable skips a marked thread, so a moved thread (which lands at
+# its new queue's tail, the first place pick_migratable looks) is not the
+# next one moved.
+ONCE = [
+    (THREAD_H, [("#define THREAD_FLAG_PREEMPTED (1u << 2)\n",
+                 "#define THREAD_FLAG_PREEMPTED (1u << 2)\n#define THREAD_FLAG_MIGRATED (1u << 3)   /* MSPROBE --once */\n")]),
+    (SCHED_C, [("    t->cpu = (int)to;\n    g_policy->enqueue(rqt, t, false);\n",
+                "    t->cpu = (int)to;\n    t->flags |= THREAD_FLAG_MIGRATED;   /* MSPROBE --once */\n    g_policy->enqueue(rqt, t, false);\n"),
+               ("    next->flags &= ~THREAD_FLAG_PREEMPTED;   /* it runs again: whatever it had in flight completes here */\n",
+                "    next->flags &= ~THREAD_FLAG_PREEMPTED;   /* it runs again: whatever it had in flight completes here */\n"
+                "    next->flags &= ~THREAD_FLAG_MIGRATED;   /* MSPROBE --once */\n")]),
+    (RR_C, [("            if (t != rq->current && (t->flags & THREAD_FLAG_PREEMPTED) == 0 && (t->affinity & allowed) != 0)",
+             "            if (t != rq->current && (t->flags & (THREAD_FLAG_PREEMPTED | THREAD_FLAG_MIGRATED)) == 0 && (t->affinity & allowed) != 0)")]),
+]
 BACKUP = '.migrate-stress-probe.orig'
 STAMP = '.migrate-stress-probe.applied'
 
@@ -242,15 +262,22 @@ def revert():
     print('reverted')
 
 
-def files(reps):
+def files(reps, once):
     reg = '    { "sched-migrate-stress", selftest_sched_migrate_stress },\n'
-    return [(SMP, EDITS), (REG, [(reg, reg * reps)])]
+    return [(SMP, EDITS), (REG, [(reg, reg * reps)])] + (ONCE if once else [])
 
 
 def apply():
-    reps = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 40
-    apply_files(files(reps))
-    print(f'applied: sched-migrate-stress instrumented, registered {reps} times')
+    args = sys.argv[2:]
+    once = '--once' in args
+    rest = [a for a in args if a != '--once']
+    for a in rest:
+        if not a.isdigit():
+            sys.exit(f'unknown argument {a!r}; usage: apply [--once] [REPS]')
+    reps = int(rest[0]) if rest else 40
+    apply_files(files(reps, once))
+    print(f'applied: sched-migrate-stress instrumented, registered {reps} times'
+          + (', with a thread migrated at most once between runs' if once else ''))
 
 
 if __name__ == '__main__':
