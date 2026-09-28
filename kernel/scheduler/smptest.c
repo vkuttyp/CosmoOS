@@ -10,6 +10,7 @@
 #include <kernel/completion.h>
 #include <kernel/ipi.h>
 #include <kernel/log.h>
+#include <kernel/kmalloc.h>
 #include <kernel/mutex.h>
 #include <kernel/page.h>
 #include <kernel/percpu.h>
@@ -2075,8 +2076,12 @@ bool selftest_sched_migrate_refuses(const char **reason)
 
 /* --- the stress --- */
 
+enum { STRESS_SPIN = 8, STRESS_SLEEP = 8, STRESS_PAIRS = 4, STRESS_MUTEX = 2,
+       STRESS_WORKERS = STRESS_SPIN + STRESS_SLEEP + 2 * STRESS_PAIRS + STRESS_MUTEX + 1 /* the late starter */ };
+
 struct stress_shared {
-    volatile unsigned stop;
+    volatile unsigned stop;           /* the workers' */
+    volatile unsigned mig_stop;       /* the migrator's own: it stops before the workers do */
     volatile unsigned bad_affinity;   /* a worker found itself on a CPU its mask excludes */
     struct mutex mtx;
 };
@@ -2084,21 +2089,36 @@ struct stress_shared {
 struct stress_worker {
     struct stress_shared *sh;
     volatile uint64_t rounds;
+    volatile uint64_t entered_ns;     /* when its thread first ran (0: never) */
+    volatile uint64_t first_ns;       /* when its first round's check ran */
+    volatile unsigned exited;         /* set as its last action: joining it cannot block */
+    unsigned late_ms;                 /* the late starter: sleep this long before the first round */
     struct completion *wait_on;   /* ping-pong: what I wait for */
     struct completion *signal;    /*            and what I signal */
 };
 
 static void stress_check_here(struct stress_worker *w)
 {
+    if (w->first_ns == 0)
+        w->first_ns = clock_now_ns();
     preempt_disable();
     if ((thread_current()->affinity & CPUMASK_OF(arch_cpu_id())) == 0)
         __atomic_store_n(&w->sh->bad_affinity, 1u, __ATOMIC_RELEASE);
     preempt_enable();
 }
 
+static void stress_exit(struct stress_worker *w)
+{
+    __atomic_store_n(&w->exited, 1u, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
 static void stress_spinner(void *arg)
 {
     struct stress_worker *w = arg;
+    w->entered_ns = clock_now_ns();
+    if (w->late_ms)
+        thread_sleep_ms(w->late_ms);   /* the late starter: no round inside the stress window */
     while (!__atomic_load_n(&w->sh->stop, __ATOMIC_ACQUIRE)) {
         stress_check_here(w);
         w->rounds++;
@@ -2110,23 +2130,25 @@ static void stress_spinner(void *arg)
          * can serve them -- a starved spinner, not a defect. */
         sched_yield();
     }
-    thread_exit(0);
+    stress_exit(w);
 }
 
 static void stress_sleeper(void *arg)
 {
     struct stress_worker *w = arg;
+    w->entered_ns = clock_now_ns();
     while (!__atomic_load_n(&w->sh->stop, __ATOMIC_ACQUIRE)) {
         stress_check_here(w);
         w->rounds++;
         thread_sleep_ms(1);
     }
-    thread_exit(0);
+    stress_exit(w);
 }
 
 static void stress_pingpong(void *arg)
 {
     struct stress_worker *w = arg;
+    w->entered_ns = clock_now_ns();
     while (!__atomic_load_n(&w->sh->stop, __ATOMIC_ACQUIRE)) {
         complete(w->signal);
         wait_for_completion(w->wait_on);
@@ -2134,12 +2156,13 @@ static void stress_pingpong(void *arg)
         w->rounds++;
     }
     complete(w->signal);   /* the partner may be waiting on us */
-    thread_exit(0);
+    stress_exit(w);
 }
 
 static void stress_mutexer(void *arg)
 {
     struct stress_worker *w = arg;
+    w->entered_ns = clock_now_ns();
     while (!__atomic_load_n(&w->sh->stop, __ATOMIC_ACQUIRE)) {
         mutex_lock(&w->sh->mtx);
         stress_check_here(w);
@@ -2147,7 +2170,7 @@ static void stress_mutexer(void *arg)
         mutex_unlock(&w->sh->mtx);
         arch_cpu_relax();
     }
-    thread_exit(0);
+    stress_exit(w);
 }
 
 static uint64_t stress_rand(uint64_t *s)
@@ -2165,7 +2188,7 @@ static void stress_migrator(void *arg)
     struct stress_worker *w = arg;
     uint64_t seed = 0x9E3779B97F4A7C15ull;
     unsigned n = cpu_count();
-    while (!__atomic_load_n(&w->sh->stop, __ATOMIC_ACQUIRE)) {
+    while (!__atomic_load_n(&w->sh->mig_stop, __ATOMIC_ACQUIRE)) {
         unsigned from = (unsigned)(stress_rand(&seed) % n), to = (unsigned)(stress_rand(&seed) % n);
         struct thread *moved;
         if (sched_migrate_from(from, to, 0, &moved) == SCHED_MIGRATED)   /* no gap: move for no reason, as the adversary does */
@@ -2175,11 +2198,42 @@ static void stress_migrator(void *arg)
     thread_exit(0);
 }
 
+/* One run's storage, allocated per run: a worker left unjoined on a
+ * failure keeps it, so no later run resets memory a live thread holds. */
+struct stress_run {
+    struct stress_shared sh;
+    struct stress_worker w[STRESS_WORKERS];   /* spinners, sleepers, ping-pong, mutex, the late starter */
+    const char *kind[STRESS_WORKERS];
+    void (*fn[STRESS_WORKERS])(void *);
+    bool timed[STRESS_WORKERS];               /* sleeps on a timer: a sleeper, or the late starter */
+    struct thread *t[STRESS_WORKERS];
+    struct stress_worker mig;
+    struct thread *mig_t;
+    struct completion pc[2 * STRESS_PAIRS];
+};
+
 /*
- * 200 ms of spinners, sleepers, ping-pong pairs and mutex contenders
- * while a migrator moves whatever it finds between random CPUs: every
- * worker made progress, no worker ever ran outside its mask, and the
- * migration count rose by at least 100.
+ * sched-migrate-stress (docs/audit/next-subsystem-migrate-stress.md).
+ *
+ * The claim is that migration strands no thread: dequeued and never
+ * enqueued, or queued where nothing runs it. It is not that every thread
+ * runs within some window while a random migrator works. The policy picks
+ * a migratable thread from the tail and a move enqueues at the tail, so
+ * the thread just moved is the next one moved, and a migrator in a tight
+ * loop can keep a waiting thread from ever reaching a queue's head (the
+ * probe measured one moved 250 times before its first round); queues pile
+ * too. The old single-window assertion failed on exactly that, twice on
+ * CI, with no thread lost.
+ *
+ * So, three phases. 200 ms of stress, in which at least 100 migrations
+ * must happen. Then the migrator stops (its own flag) and is joined. Then,
+ * with nothing re-queueing threads, every worker must run again -- its
+ * rounds pass the snapshot taken as the migrator stopped -- within a
+ * count-based hang guard. A late starter, whose first round comes after
+ * the stress window, makes the old window assertion fail on every boot if
+ * it is ever restored. A worker that fails is named; one that never says
+ * it is leaving is not joined (that would hang the boot), and the run's
+ * storage is left to it.
  */
 bool selftest_sched_migrate_stress(const char **reason)
 {
@@ -2188,76 +2242,144 @@ bool selftest_sched_migrate_stress(const char **reason)
         return true;
     }
     unsigned before = thread_count();
+    struct stress_run *run = kzalloc(sizeof(*run));
+    CHECK(run != NULL);
+    struct stress_shared *sh = &run->sh;
+    mutex_init(&sh->mtx, "mig-stress");
+    for (unsigned i = 0; i < 2 * STRESS_PAIRS; i++)
+        completion_init(&run->pc[i], "mig-pp");
+
+    uint64_t t0 = clock_now_ns();
     uint64_t moves = sched_migration_count();
-    enum { SPIN = 8, SLEEP = 8, PAIRS = 4, MUTEX = 2 };
-    static struct stress_shared sh;
-    static struct stress_worker spin[SPIN], sleep[SLEEP], pp[2 * PAIRS], mx[MUTEX], mig;
-    static struct completion pc[2 * PAIRS];
-    struct thread *t[SPIN + SLEEP + 2 * PAIRS + MUTEX + 1];
-    unsigned made = 0;
+    unsigned k = 0;
+    bool made_all = true;
+    for (unsigned i = 0; i < STRESS_SPIN; i++, k++) {
+        run->w[k] = (struct stress_worker){ .sh = sh };
+        run->kind[k] = "spin";
+        run->fn[k] = stress_spinner;
+    }
+    for (unsigned i = 0; i < STRESS_SLEEP; i++, k++) {
+        run->w[k] = (struct stress_worker){ .sh = sh };
+        run->kind[k] = "sleep";
+        run->fn[k] = stress_sleeper;
+        run->timed[k] = true;
+    }
+    for (unsigned i = 0; i < STRESS_PAIRS; i++, k += 2) {
+        run->w[k] = (struct stress_worker){ .sh = sh, .wait_on = &run->pc[2 * i], .signal = &run->pc[2 * i + 1] };
+        run->w[k + 1] = (struct stress_worker){ .sh = sh, .wait_on = &run->pc[2 * i + 1], .signal = &run->pc[2 * i] };
+        run->kind[k] = run->kind[k + 1] = "pingpong";
+        run->fn[k] = run->fn[k + 1] = stress_pingpong;
+    }
+    for (unsigned i = 0; i < STRESS_MUTEX; i++, k++) {
+        run->w[k] = (struct stress_worker){ .sh = sh };
+        run->kind[k] = "mutex";
+        run->fn[k] = stress_mutexer;
+    }
+    run->w[k] = (struct stress_worker){ .sh = sh, .late_ms = 300 };   /* past the window, every boot */
+    run->kind[k] = "late";
+    run->fn[k] = stress_spinner;
+    run->timed[k] = true;
+    k++;
+    for (unsigned i = 0; i < STRESS_WORKERS; i++) {
+        run->t[i] = thread_create(run->fn[i], &run->w[i], "mig-worker", SCHED_PRIO_DEFAULT);
+        made_all = made_all && run->t[i] != NULL;
+    }
+    run->mig = (struct stress_worker){ .sh = sh };
+    run->mig_t = thread_create(stress_migrator, &run->mig, "mig-migrator", SCHED_PRIO_DEFAULT);
 
-    memset(&sh, 0, sizeof(sh));
-    mutex_init(&sh.mtx, "mig-stress");
-    for (unsigned i = 0; i < 2 * PAIRS; i++)
-        completion_init(&pc[i], "mig-pp");
-    for (unsigned i = 0; i < SPIN; i++) {
-        spin[i] = (struct stress_worker){ .sh = &sh };
-        t[made++] = thread_create(stress_spinner, &spin[i], "mig-spin", SCHED_PRIO_DEFAULT);
-    }
-    for (unsigned i = 0; i < SLEEP; i++) {
-        sleep[i] = (struct stress_worker){ .sh = &sh };
-        t[made++] = thread_create(stress_sleeper, &sleep[i], "mig-sleep", SCHED_PRIO_DEFAULT);
-    }
-    for (unsigned i = 0; i < PAIRS; i++) {
-        pp[2 * i] = (struct stress_worker){ .sh = &sh, .wait_on = &pc[2 * i], .signal = &pc[2 * i + 1] };
-        pp[2 * i + 1] = (struct stress_worker){ .sh = &sh, .wait_on = &pc[2 * i + 1], .signal = &pc[2 * i] };
-        t[made++] = thread_create(stress_pingpong, &pp[2 * i], "mig-ping", SCHED_PRIO_DEFAULT);
-        t[made++] = thread_create(stress_pingpong, &pp[2 * i + 1], "mig-pong", SCHED_PRIO_DEFAULT);
-    }
-    for (unsigned i = 0; i < MUTEX; i++) {
-        mx[i] = (struct stress_worker){ .sh = &sh };
-        t[made++] = thread_create(stress_mutexer, &mx[i], "mig-mutex", SCHED_PRIO_DEFAULT);
-    }
-    mig = (struct stress_worker){ .sh = &sh };
-    t[made++] = thread_create(stress_migrator, &mig, "mig-migrator", SCHED_PRIO_DEFAULT);
-
+    /* Phase 1: stress. */
     thread_sleep_ms(200);
-    __atomic_store_n(&sh.stop, 1u, __ATOMIC_RELEASE);
-    for (unsigned i = 0; i < 2 * PAIRS; i++)
-        complete(&pc[i]);   /* release any half of a pair still waiting */
-    bool all_made = true;
-    for (unsigned i = 0; i < made; i++) {
-        if (t[i] != NULL)
-            thread_join(t[i]);
-        else
-            all_made = false;
-    }
-    if (!all_made) {
-        *reason = "a worker could not be created";
-        return false;
-    }
+
+    /* Phase 2: the migrator stops, on its own flag, and is joined. */
+    __atomic_store_n(&sh->mig_stop, 1u, __ATOMIC_RELEASE);
+    if (run->mig_t != NULL)
+        thread_join(run->mig_t);
     uint64_t moved = sched_migration_count() - moves;
-    bool progress = true;
-    for (unsigned i = 0; i < SPIN; i++) progress = progress && spin[i].rounds > 0;
-    for (unsigned i = 0; i < SLEEP; i++) progress = progress && sleep[i].rounds > 0;
-    for (unsigned i = 0; i < 2 * PAIRS; i++) progress = progress && pp[i].rounds > 0;
-    for (unsigned i = 0; i < MUTEX; i++) progress = progress && mx[i].rounds > 0;
-    if (!progress) {
-        *reason = "a worker made no progress under migration";
+
+    /* Phase 3: every worker runs again. */
+    uint64_t snap[STRESS_WORKERS];
+    for (unsigned i = 0; i < STRESS_WORKERS; i++)
+        snap[i] = run->w[i].rounds;
+    const char *fail = NULL;
+    if (!made_all || run->mig_t == NULL)
+        fail = "a worker could not be created";
+    unsigned waits = 0;
+    for (; fail == NULL && waits < 5000; waits++) {   /* a hang guard, counted, not a latency claim */
+        bool all = true;
+        for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
+            all = run->w[i].rounds > snap[i];
+        if (all)
+            break;
+        thread_sleep_ms(1);
+    }
+    if (fail == NULL && waits == 5000)
+        fail = "a worker did not run again after the migrator stopped";
+
+    /* Stop the workers and release every ping-pong wait: a half blocked on
+     * its partner cannot see `stop`. Then join each worker that says it is
+     * leaving; on a failure, wait (the same guard) for that to happen. */
+    __atomic_store_n(&sh->stop, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < 2 * STRESS_PAIRS; i++)
+        complete(&run->pc[i]);
+    for (unsigned g = 0; g < 5000; g++) {
+        bool all = true;
+        for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
+            all = run->t[i] == NULL || __atomic_load_n(&run->w[i].exited, __ATOMIC_ACQUIRE);
+        if (all)
+            break;
+        thread_sleep_ms(1);
+    }
+    bool left_unjoined = false;
+    for (unsigned i = 0; i < STRESS_WORKERS; i++) {
+        if (run->t[i] == NULL)
+            continue;
+        if (__atomic_load_n(&run->w[i].exited, __ATOMIC_ACQUIRE)) {
+            thread_join(run->t[i]);
+            continue;
+        }
+        /* Not leaving. A mutex contender asleep while the mutex is held by
+         * another worker that is not leaving is waiting on that one; every
+         * other worker that is not leaving -- a sleeper still asleep
+         * included -- is stranded or stuck in its own right. */
+        left_unjoined = true;
+        struct thread *owner = __atomic_load_n(&sh->mtx.owner, __ATOMIC_RELAXED);
+        bool behind = false;
+        if (run->fn[i] == stress_mutexer && run->t[i]->state == THREAD_BLOCKED && owner != NULL && owner != run->t[i])
+            for (unsigned j = 0; j < STRESS_WORKERS; j++)
+                if (run->t[j] == owner && !__atomic_load_n(&run->w[j].exited, __ATOMIC_ACQUIRE))
+                    behind = true;
+        struct stress_worker *w = &run->w[i];
+        kerror("selftest: sched-migrate-stress: %s worker %u %s: entered %lld us, first round %lld us, "
+               "rounds %llu (%llu at the migrator's stop), thread state %d on cpu %d%s",
+               run->kind[i], i, behind ? "blocked behind a stranded worker" : "stranded or stuck",
+               w->entered_ns ? (long long)((w->entered_ns - t0) / 1000) : -1ll,
+               w->first_ns ? (long long)((w->first_ns - t0) / 1000) : -1ll,
+               (unsigned long long)w->rounds, (unsigned long long)snap[i], (int)run->t[i]->state, run->t[i]->cpu,
+               run->timed[i] ? ", a timed sleeper" : "");
+    }
+    if (left_unjoined) {
+        /* Its storage stays with it: run is not freed. */
+        *reason = fail != NULL ? fail : "a worker did not leave when told";
         return false;
     }
-    if (sh.bad_affinity) {
+    bool bad_affinity = sh->bad_affinity;
+    kfree(run);
+    if (fail != NULL) {
+        *reason = fail;
+        return false;
+    }
+    if (bad_affinity) {
         *reason = "a worker ran on a CPU its affinity excludes";
         return false;
     }
     if (moved < 100) {
-        kerror("selftest: sched-migrate-stress: only %llu migrations in 200 ms (the migrator made %llu)",
-               (unsigned long long)moved, (unsigned long long)mig.rounds);
+        kerror("selftest: sched-migrate-stress: only %llu migrations in the stress window", (unsigned long long)moved);
         *reason = "fewer than 100 migrations happened";
         return false;
     }
     CHECK(threads_settle(before));
-    kinfo("selftest: sched-migrate-stress: %llu migrations in 200 ms over %u workers; every worker progressed and stayed inside its mask",
-          (unsigned long long)moved, made - 1);
+    kinfo("selftest: sched-migrate-stress: %llu migrations in the stress window over %u workers; every worker, "
+          "the late starter included, ran again after the migrator stopped (%u ms), and stayed inside its mask",
+          (unsigned long long)moved, (unsigned)STRESS_WORKERS, waits);
     return true;
 }
