@@ -1191,15 +1191,13 @@ static bool run_until_irq(struct vcpu *v, struct cosmo_vm_exit *x, unsigned want
 }
 
 /*
- * The test's body, on one guest image. `hb` gets the heartbeats that came
- * before each of the two deliveries whose order is the host's to choose.
+ * The test's body, on one guest. `hb` gets the heartbeats that came before
+ * each of the two deliveries whose order is the host's to choose. Every
+ * return, a failed check's included, leaves the guest to the caller.
  */
-static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
+static bool irq_queue_body(struct vcpu *v, unsigned hb[2], const char **reason)
 {
-    struct vm *vm;
-    struct vcpu *v;
     struct cosmo_vcpu_regs regs;
-    CHECK(make_guest(image, &vm, &v) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
@@ -1250,8 +1248,19 @@ static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
     CHECK(vcpu_run(v, &x) == 0);                    /* and not again */
     CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
-    drop_guest(vm, v);
     return true;
+}
+
+/* The body on one guest image, the guest dropped on every return: a
+ * failing check must not leave its VM to the tests that follow. */
+static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
+{
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest(image, &vm, &v) == 0);
+    bool ok = irq_queue_body(v, hb, reason);
+    drop_guest(vm, v);
+    return ok;
 }
 
 /*
