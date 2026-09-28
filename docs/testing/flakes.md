@@ -2261,6 +2261,14 @@ comment-only change. All 403 self-tests passed; the failure is the
 harness's per-test 8 s budget, over by 305 ms. The rerun passed. First
 sighting.
 
+## `sched-load`: no load reported for a compute-bound CPU, 2026-09-28
+
+`SELFTEST: sched-load ... FAIL: a CPU running a compute-bound thread
+reported no load (1 ms)`, local, x86-64 debug, in a mutation boot of the
+migrate-stress unit. The mutation strands only that test's own workers,
+and `sched-load` runs before it, so the mutation had no effect on it.
+The same test passed in every other boot of the unit. First sighting.
+
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 
 Local, aarch64 debug, both on the balance-pair fix's branch, which changes
