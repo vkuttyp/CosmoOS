@@ -1,7 +1,31 @@
 # NEXT SUBSYSTEM — three scheduler tests assume a spinner is running when it has only been placed
 
-> **Status: proposed.** Report and probe (`tools/placed-running-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #255).** As designed, with these specifics:
+>
+> - `struct mig_spinner` gained `entered`, set as `mig_spinner_main`'s
+>   first act, and `wait_spinner_entered` waits for it (2 s bound).
+>   `sched-load` fails with "the compute-bound thread never ran", and the
+>   migrate tests with "the spinner never ran", if it never does.
+> - `sched-migrate-refuses`' spinner runs at `SCHED_PRIO_DEFAULT - 16`.
+>   The adversary is part of the test on every boot, not only a
+>   mutation: `mig-rival`, at the reaper's priority (`DEFAULT - 8`),
+>   pinned to the spinner's CPU, is created just before the spinner's
+>   migrate, and must not run within 20 ms. Release builds run it too.
+> - **A correction to "What remains" below:** a spinner that a
+>   higher-priority thread has preempted is refused as **`preempted`**,
+>   not `affinity`. `sched_migrate` checks the PREEMPTED flag first. The
+>   sightings' `affinity` is the other way a spinner isn't running:
+>   never having run, which the wait now ends. With the rival, the test
+>   would have failed as `preempted`; the mutation below shows it.
+> - Measured: debug, release, the GIC boot and chaos boots pass on both
+>   architectures. `host-test` and `analyze` are clean.
+>
+> Mutations, each alone, with its boot confirmed:
+>
+> | mutation | result |
+> |---|---|
+> | the refused spinner back at `DEFAULT - 1` | `sched-migrate-refuses` FAIL: "the running spinner: preempted (a thread at the reaper's priority had taken its CPU)", and "a thread at the reaper's priority took the spinner's CPU" (x86-64 and aarch64) |
+> | `wait_spinner_entered` without its wait | all three FAIL, 0 ms: "the compute-bound thread never ran", and "the spinner never ran" twice |
 
 ## Problem
 

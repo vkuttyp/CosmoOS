@@ -3614,6 +3614,18 @@ See [docs/development.md](docs/development.md).
   and finds the binary writable; `vm-teardown-absent` counts the pages a
   teardown queries. P33 now blames a leaked process once: one boot of the
   probe failed 19 tests for one leak. (PR #253)
+- **Three scheduler tests wait for the spinner they rely on to run.**
+  `sched-load`, `sched-migrate` and `sched-migrate-refuses` each start a
+  pinned spinner and then rely on it running. Each waited for something
+  a spinner that has only been placed already satisfies: a non-zero load,
+  or its worker `READY`. `tools/placed-running-probe.py` found the spinner
+  not yet running at 98-99 of 100 of `sched-load`'s checks, and at 1-14
+  of 100 of the others'. `sched-load`'s 0 ms failure was a read inside the
+  idle CPU's switch, where the thread is dequeued before it is current.
+  The spinner now says it has run (`entered`), and the tests wait for
+  it. `sched-migrate-refuses`' spinner outranks the reaper and `quiesce`,
+  and a rival at the reaper's priority, made runnable on its CPU before
+  the migrate, must not run. (PR #255)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
