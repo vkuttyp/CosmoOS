@@ -67,6 +67,37 @@ for fn in ('stress_spinner', 'stress_sleeper', 'stress_pingpong', 'stress_mutexe
     w->entered_ns = clock_now_ns();   /* MSPROBE */
 """))
 EDITS += [
+    ("""    volatile unsigned bad_affinity;   /* a worker found itself on a CPU its mask excludes */
+    struct mutex mtx;
+};""", """    volatile unsigned bad_affinity;   /* a worker found itself on a CPU its mask excludes */
+    struct mutex mtx;
+    struct thread *msp_thr[32];                 /* MSPROBE: each worker's thread, for the migrator */
+    struct stress_worker *msp_w[32];
+    volatile unsigned msp_moved[32];            /* how often the migrator moved it */
+    volatile unsigned msp_moved_before_run[32]; /* of those, before its first round */
+};"""),
+    ("""        if (sched_migrate_from(from, to, 0, &moved) == SCHED_MIGRATED)   /* no gap: move for no reason, as the adversary does */
+            w->rounds++;""", """        if (sched_migrate_from(from, to, 0, &moved) == SCHED_MIGRATED) {   /* no gap: move for no reason, as the adversary does */
+            w->rounds++;
+            for (unsigned q = 0; q < 32; q++)   /* MSPROBE: whose move was it */
+                if (w->sh->msp_thr[q] == moved) {
+                    w->sh->msp_moved[q]++;
+                    if (w->sh->msp_w[q] != NULL && w->sh->msp_w[q]->first_ns == 0)
+                        w->sh->msp_moved_before_run[q]++;
+                    break;
+                }
+        }"""),
+    ("""    t[made++] = thread_create(stress_migrator, &mig, "mig-migrator", SCHED_PRIO_DEFAULT);""",
+     """    {   /* MSPROBE: the migrator's table, filled before it starts */
+        struct stress_worker *ws[] = { spin, sleep, pp, mx };
+        unsigned ns[] = { SPIN, SLEEP, 2 * PAIRS, MUTEX }, q = 0;
+        for (unsigned a = 0; a < 4; a++)
+            for (unsigned b = 0; b < ns[a]; b++, q++) {
+                sh.msp_thr[q] = t[q];
+                sh.msp_w[q] = &ws[a][b];
+            }
+    }
+    t[made++] = thread_create(stress_migrator, &mig, "mig-migrator", SCHED_PRIO_DEFAULT);"""),
     ("""    unsigned before = thread_count();
     uint64_t moves = sched_migration_count();
     enum { SPIN = 8, SLEEP = 8, PAIRS = 4, MUTEX = 2 };""",
@@ -109,11 +140,12 @@ EDITS += [
                     mins[a] = w->rounds;
                 if (w->rounds == 0)
                     kinfo("MSPROBE zero: %s %u entered %lld us first-round %lld us; at the window's close cpu %d state %d, "
-                          "that cpu's load %u",
+                          "that cpu's load %u; migrated %u times, %u before its first round",
                           k[a].kind, b, w->entered_ns ? (long long)((w->entered_ns - msp_t0) / 1000) : -1ll,
                           w->first_ns ? (long long)((w->first_ns - msp_t0) / 1000) : -1ll,
                           msp_cpu[k[a].base + b], msp_state[k[a].base + b],
-                          msp_cpu[k[a].base + b] >= 0 ? msp_load[msp_cpu[k[a].base + b]] : 0u);
+                          msp_cpu[k[a].base + b] >= 0 ? msp_load[msp_cpu[k[a].base + b]] : 0u,
+                          sh.msp_moved[k[a].base + b], sh.msp_moved_before_run[k[a].base + b]);
             }
         }
         kinfo("MSPROBE rep: sleep took %llu us; min rounds spin %llu sleep %llu pingpong %llu mutex %llu; migrations %llu; "
