@@ -1219,7 +1219,12 @@ static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
     CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
 
-    /* --- a resident interrupt taken while a lower number is offered --- */
+    /* --- a resident interrupt taken while a lower number is offered ---
+     * One more run first, nothing pending, so the guest is at the heartbeat
+     * in its loop: guest_irq_hb's last heartbeat came from its handler,
+     * where the mask set below would be undone by the handler's `eret`. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0);
     regs.pstate |= (1u << 7);                       /* mask */
     CHECK(vcpu_set_regs(v, &regs) == 0);
@@ -1248,11 +1253,13 @@ static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
 }
 
 /*
- * Both claims, in both orders: on guest_irq the guest usually reaches its
- * heartbeat before a pending interrupt is placed; on guest_irq_exit an
- * exit after every EOI makes the interrupt come first, always. An
- * assertion that depends on the order fails on every boot, not when the
- * host's tick lines up.
+ * Both claims, in both orders, each order certain: guest_irq_exit forces
+ * an exit after every EOI, so the pending interrupt always comes first
+ * (zero heartbeats before it); guest_irq_hb forces the same exit but sends
+ * its heartbeat from the handler, IRQs still masked, so the heartbeat
+ * always comes first (at least one). guest_irq, unforced, runs as well:
+ * it is the order the host's timing gives. An assertion that depends on
+ * the order fails on every boot, not when the host's tick lines up.
  */
 bool selftest_el2_guest_irq_queue(const char **reason)
 {
@@ -1262,15 +1269,19 @@ bool selftest_el2_guest_irq_queue(const char **reason)
         kinfo("selftest: el2-guest-irq-queue: no virtual GIC on this machine; skipping");
         return true;
     }
-    unsigned hb[2], hbx[2];
+    unsigned hb[2], hbx[2], hbh[2];
     if (!irq_queue_on("tests/hv/guest_irq.bin", hb, reason))
         return false;
     if (!irq_queue_on("tests/hv/guest_irq_exit.bin", hbx, reason))
         return false;
+    if (!irq_queue_on("tests/hv/guest_irq_hb.bin", hbh, reason))
+        return false;
     CHECK(hbx[0] == 0 && hbx[1] == 0);   /* the exit guest takes each pending interrupt first */
+    CHECK(hbh[0] >= 1 && hbh[1] >= 1);   /* the heartbeat guest reaches its heartbeat first */
     kinfo("selftest: el2-guest-irq-queue: a second instance is not swallowed, and a resident "
           "interrupt is cleared when it is taken, in both orders (heartbeats before delivery: "
-          "%u and %u on guest_irq, %u and %u on guest_irq_exit)", hb[0], hb[1], hbx[0], hbx[1]);
+          "%u and %u on guest_irq, %u and %u on guest_irq_exit, %u and %u on guest_irq_hb)",
+          hb[0], hb[1], hbx[0], hbx[1], hbh[0], hbh[1]);
     return true;
 }
 
