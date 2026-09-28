@@ -9,6 +9,41 @@
 > report finds two mechanisms, rejects a scheduler change that would have
 > hidden one of them, and proposes a test that asserts what migration
 > actually promises: no thread is stranded.
+>
+> **Built (PR #249).** As designed, with these differences:
+> - **The hang guards are deadlines, 2 s and 1 s, not counts of sleeps.**
+>   A `thread_sleep_ms(1)` lasts until a later tick, and in a failing run
+>   each measured over 10 ms, so a count of sleeps says nothing useful
+>   about how long a guard lasts. At 5 000 sleeps each guard was about
+>   40 s: the stranding mutation then took the test 85 s, and on aarch64
+>   ran the boot past its 180 s timeout with no verdict at all. At 500 a
+>   caught stranding took 13 to 16 s, past the self-test runner's 8 s
+>   per-test budget and into its watchdog (found in review). As
+>   deadlines, 2 s for the workers to run again and 1 s for them to
+>   leave, a caught stranding takes 3.3 to 3.6 s, inside the budget.
+>   A clean run needs 2 to 11 waits.
+> - **A worker that missed the snapshot is named as soon as phase 3
+>   fails** (found in review), before `stop` and the releases. Otherwise
+>   one that then leaves and is joined would go unnamed.
+> - **The workers are named `mstress-worker`.** `sched-migrate`'s worker is
+>   `mig-worker`, and a fault injected by name hit that test first.
+> - **"Blocked behind a stranded worker"** is decided from the thread's
+>   state and the mutex's recorded owner: a mutex contender that is BLOCKED
+>   while another unjoined worker holds the mutex. Every other worker that
+>   is not leaving is "stranded or stuck", and its line says when it is a
+>   timed sleeper.
+>
+> | mutation | result |
+> | --- | --- |
+> | a stranded thread: `migrate_locked` returns after the dequeue, without the enqueue, for the first `mstress-worker` it moves | x86-64 and aarch64: `FAIL: a worker did not run again after the migrator stopped`. The worker is named twice: `... did not run again` when phase 3 fails, then `... stranded or stuck: rounds R (R at the migrator's stop), thread state 0 on cpu C`. It is the only worker named, the test takes 3.3 to 3.6 s (no budget line), and the boot runs to its verdict |
+> | the old 200 ms progress assertion restored after phase 1 | `FAIL: a worker made no progress under migration`, on the first boot: the late starter has not yet run |
+>
+> Each mutation ran alone with its boot confirmed. Both architectures pass
+> in debug and release, as does the aarch64 chaos boot. The workers run
+> again within 2 to 11 waits of the migrator stopping. `gmake host-test`
+> passes. `gmake analyze` adds nothing: its reports (`sched.c:596`, byte
+> for byte `main`'s file, and `smptest.c:1476`, `main`'s at 1475) are
+> `main`'s own.
 
 ## Problem
 
@@ -153,9 +188,10 @@ The test gets three phases:
    the head of its queue in time proportional to the queue ahead of it.
 3. **Every worker runs again.** A snapshot of each worker's rounds is
    taken as the migrator stops. The test then waits for each worker's
-   rounds to pass its snapshot, counting its waits (`thread_sleep_ms(1)`,
-   bounded at 5 000 as a hang guard, not a latency claim). A thread a
-   migration stranded never runs again, and the guard names it. Then the
+   rounds to pass its snapshot, sleeping 1 ms between checks until a 2 s
+   deadline (`STRESS_RUN_AGAIN_NS`) -- a hang guard, not a latency claim;
+   the banner says why it is a deadline and not a count of sleeps. A
+   thread a migration stranded never runs again, and the guard names it. Then the
    workers' `stop`, every ping-pong completion completed (as the test does
    today: a half blocked on its partner cannot see `stop`), and join.
 
@@ -292,9 +328,11 @@ None.
   stranded or stuck one. Joining any of them could hang the boot instead
   of naming it. The storage it keeps is leaked,
   once, on a boot that has already failed.
-- **The hang guard is time.** 5 000 waits of 1 ms is 5 s of the
-  test's own sleeps, far above any queue's drain. It says "stuck", not
-  "slow".
+- **The hang guards are time.** As built they are deadlines, 2 s for the
+  workers to run again and 1 s for them to leave, so a caught stranding
+  takes the test 3.3 to 3.6 s, inside the self-test runner's 8 s budget
+  and its watchdog. That is hundreds of times the 2 to 11 waits a clean
+  run needs. They say "stuck", not "slow".
 
 ## Alternatives considered
 

@@ -108,8 +108,24 @@ exactly one queue and `t->cpu` names it. `sched_wake`'s unlocked read of
 `sched-migrate` (the moved worker's first run is on the destination),
 `sched-migrate-refuses` (each refusal by name, the window built with
 `waitqueue_prepare` and a wake under preemption off), `sched-migrate-stress`
-(3,500 or so moves in 200 ms with every worker inside its mask), and the
-whole suite under `make test-chaos`.
+(thousands of moves in 200 ms, every worker inside its mask, and every worker
+running again once the migrator stops: no thread stranded), and the whole
+suite under `make test-chaos`.
+
+**What S26 does not promise: how soon a moved thread runs.** A migration
+enqueues at the destination's tail, and `rr_pick_migratable` takes the
+thread nearest the tail, so the thread just moved is its new queue's first
+candidate. A migrator that returns to that CPU moves it again. In a tight
+loop that can keep a waiting thread from ever reaching a queue's head:
+`tools/migrate-stress-probe.py` measured one test worker moved 250 times
+before its first round. No thread is lost, only delayed. The real
+migrators do not return that fast: the balancer pulls one thread only when
+the busiest CPU is at least two ahead, and the chaos migrator moves at most
+one thread per CPU every 16 ms. "Migrated at most once between two runs"
+was measured and rejected: it cut the test migrator's moves from thousands
+to a median of 64 per 200 ms, still left workers unrun behind piled queues,
+and changed which refusal `sched-migrate-refuses` sees
+(`docs/audit/next-subsystem-migrate-stress.md`).
 
 ## Entry conditions
 
