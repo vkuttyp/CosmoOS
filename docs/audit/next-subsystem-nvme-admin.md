@@ -8,6 +8,55 @@
 > in a loop three other drivers write correctly by hand. This report
 > proposes the fix, a primitive that makes the rule impossible to skip,
 > and a test that checks the rule rather than waiting for the race.
+>
+> **Built (PR #245).** As designed, with these differences:
+> - **NVMe's polled branch is a fallback, not a bring-up phase.** Bring-up
+>   requests the admin vector (`nvme.c:751`) before the first admin command
+>   (the first `identify`, `:763`), so `admin.vector < 0` is never true on
+>   the normal path. The branch stays for that case. It is sound without a
+>   handshake because there the waiting thread completes the command
+>   itself. S30 and the driver doc name it as the one sound poll.
+> - **xHCI and AHCI keep a late completion** (found in review). A command
+>   completing in the gap after the timed wait's last check but before the
+>   driver decides was accepted by the old code's under-lock re-check, and
+>   the first conversion dropped that. So a command that answered could have
+>   killed the xHCI controller or restarted the AHCI port. After a false
+>   return, both now re-check `completion_done`, and on a late completion
+>   take the handshake with `wait_for_completion` and treat the command as
+>   completed. USB needed nothing: its cancel already handles that case.
+> - **The test reads the lock word, not `spin_is_held`.** `spin_is_held`
+>   asks "do *I* hold it" and reads a per-CPU id. The completer is on
+>   another CPU, and the read trips S25 in a migratable context, so the
+>   first version caught the mutation as an S25 panic rather than a named
+>   failure.
+> - **Every exit from `completion-timeout` stops and joins its completer**
+>   (found in review). The completer holds pointers into the test's frame,
+>   so a failing round records its reason, logs it, stops and joins the
+>   completer, and only then returns. The rendezvous before each wait is
+>   bounded at 1 s.
+> - **The probe now removes the fix instead of adding it**: `--broken`
+>   replaces `--fixed`, since the tree is fixed. It anchors on
+>   `complete_linger`'s wake.
+> - **The timeout paths of the four converted waits are reached by no
+>   test.** `ahci-timeout` injects in the bio submit path (`FI_AHCI_CI`) and
+>   `usb-storage-timeout` in the asynchronous request chain (`FI_USB_CSW`),
+>   so both exercise the block layer's timeout, not these synchronous waits.
+>   The waits' success paths run on every boot, through the probe of each
+>   device (IDENTIFY, the USB storage reset and synchronous bulk transfers,
+>   the xHCI commands, the NVMe admin commands). The late-completion
+>   re-check is not provoked by any test either: its window is the gap
+>   between a timer firing and the next instruction.
+>
+> | mutation | caught by |
+> | --- | --- |
+> | `wait_for_completion_timeout` without its handshake | `completion-timeout`: "the wait returned while the completer still held the completion's lock", the only failing test (three boots) |
+> | the NVMe fix removed (`nvme-admin-probe.py --broken`), window widened | aarch64: the original panic exactly, `spin_unlock` at `spinlock.c:117` on CPU 1; x86-64 passed that run (a race, not a certainty) |
+> | the fix in place, window widened (`nvme-admin-probe.py`) | nothing: both architectures pass, which is the fix working |
+>
+> Both architectures pass in debug and release, and `gmake host-test`
+> passes. `gmake analyze` is clean apart from an intermittent
+> `core.uninitialized` report at `nvme.c:492` (the bio PRP path, untouched
+> here), which `main`'s own `nvme.c` also produces.
 
 ## Problem
 
@@ -158,7 +207,7 @@ bool wait_for_completion_timeout(struct completion *c, uint64_t timeout_ns);
 
 It is built on `wait_event_timeout`. When the event has happened, it takes
 the completion's lock once before returning, the same handshake
-`wait_for_completion` does. A caller can no longer see `done` without the
+`wait_for_completion` does. A caller waiting on an interrupt can no longer see `done` without the
 handshake coming with it.
 
 **All four interrupt-driven polling loops use it**: NVMe's admin wait

@@ -396,6 +396,7 @@ static const struct selftest tests[] = {
     { "semaphore",       selftest_semaphore },
     { "completion",      selftest_completion },
     { "completion-race", selftest_completion_race },
+    { "completion-timeout", selftest_completion_timeout },
     { "waitqueue",       selftest_waitqueue },
     { "smp-online",      selftest_smp_online },
     { "smp-affinity",    selftest_smp_affinity },

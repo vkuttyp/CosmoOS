@@ -57,6 +57,7 @@ bool selftest_mutex(const char **reason);
 bool selftest_semaphore(const char **reason);
 bool selftest_completion(const char **reason);
 bool selftest_completion_race(const char **reason);   /* a completion freed by its waiter while complete() still runs */
+bool selftest_completion_timeout(const char **reason);   /* wait_for_completion_timeout does the handshake a poller skipped */
 bool selftest_waitqueue(const char **reason);
 
 /* Phase 3 part 2: kernel/scheduler/smptest.c */

@@ -163,7 +163,12 @@ waiting — review, PR #53.)
 
 A synchronous command (IDENTIFY, the tests' one-offs) waits, bounded,
 while the port is restarting: a slot taken during a restart would be
-absent from the recovery's `PxCI` snapshot and sorted wrongly.
+absent from the recovery's `PxCI` snapshot and sorted wrongly. The wait
+is `wait_for_completion_timeout`, which does the completion handshake, so
+the waiter never leaves its stack completion while the interrupt handler
+is still inside `complete` (invariant S30). On timeout it restarts the
+port, which completes the slot, and then `wait_for_completion` returns at
+once with the handshake.
 
 Every restart that fails what the port holds — the block layer's
 timeout and a synchronous command's — goes through one function

@@ -107,6 +107,17 @@ A thread sleeps 10 ms then `complete`s. `wait_for_completion` returns
 after at least 10 ms, `completion_done` is true, and a second wait
 returns immediately.
 
+### `completion-timeout`
+Two CPUs (skips on one). A completer on CPU 1 calls `complete_linger`,
+which publishes `done` and then holds the completion's lock for 2 ms
+before waking. The test thread waits for `done` to appear -- the completer
+is now lingering, lock held -- and calls `wait_for_completion_timeout`: it
+must return true and the completion's lock must read free (the handshake
+waited the completer out, S30). 200 rounds, the completion re-used each
+round; then a wait on a completion nobody completes returns false at its
+deadline. It fails when the timeout wait drops its handshake (the lock is
+still held on return).
+
 ### `waitqueue`
 Two threads `wait_event` on `go != 0`. After 5 ms the queue is non-empty
 and nobody has woken. `waitqueue_wake_all` with `go` still 0 returns 2

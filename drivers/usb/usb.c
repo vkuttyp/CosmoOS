@@ -170,15 +170,17 @@ static int usb_sync_msg(struct usb_request *r, uint64_t timeout_ns)
     int rc = usb_submit(r);
     if (rc)
         return rc;
-    uint64_t deadline = clock_deadline_ns((timeout_ns ? timeout_ns : USB_TIMEOUT_NS));
-    while (!completion_done(&s.done) && !clock_deadline_passed(deadline))
-        thread_sleep_ns(250000);
-    if (!completion_done(&s.done)) {
+    /* The handshake comes with the wait, so a completed transfer's s is free
+     * to leave this frame. */
+    if (!wait_for_completion_timeout(&s.done, timeout_ns ? timeout_ns : USB_TIMEOUT_NS)) {
+        /* Cancel completes the request (with -ETIMEDOUT unless the controller
+         * beat us to it), so wait_for_completion then returns with the
+         * handshake. */
         if (usb_cancel(r, -ETIMEDOUT) == 0)
             kwarn("usb: %s: %s transfer on ep 0x%02x timed out", r->udev->dev.name,
                   r->ep == 0 ? "control" : "bulk", r->ep);
+        wait_for_completion(&s.done);
     }
-    wait_for_completion(&s.done);
     return r->status;
 }
 
