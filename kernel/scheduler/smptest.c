@@ -2281,7 +2281,7 @@ bool selftest_sched_migrate_stress(const char **reason)
     run->timed[k] = true;
     k++;
     for (unsigned i = 0; i < STRESS_WORKERS; i++) {
-        run->t[i] = thread_create(run->fn[i], &run->w[i], "mig-worker", SCHED_PRIO_DEFAULT);
+        run->t[i] = thread_create(run->fn[i], &run->w[i], "mstress-worker", SCHED_PRIO_DEFAULT);
         made_all = made_all && run->t[i] != NULL;
     }
     run->mig = (struct stress_worker){ .sh = sh };
