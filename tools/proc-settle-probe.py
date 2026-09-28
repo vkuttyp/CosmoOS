@@ -233,11 +233,15 @@ unsigned psprobe_table(struct psprobe_ent *out, unsigned max)
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
         if (n < max) {
+            /* state and nr_threads change under p->lock: read them there
+             * (table lock, then p->lock, as process_last_thread_gone does) */
+            arch_irq_state_t ps = spin_lock_irqsave(&p->lock);
             out[n].pid = p->pid;
             out[n].ppid = p->parent_pid;
             out[n].state = (int)p->state;
-            out[n].refs = __atomic_load_n(&p->obj.refcount, __ATOMIC_RELAXED);
             out[n].thr = p->nr_threads;
+            spin_unlock_irqrestore(&p->lock, ps);
+            out[n].refs = __atomic_load_n(&p->obj.refcount, __ATOMIC_RELAXED);
             strlcpy(out[n].name, p->name, sizeof(out[n].name));
         }
         n++;
@@ -319,11 +323,18 @@ static void psprobe_diff(const char *what, const char *call, pid_t mine,
               ps_call, (int)ps_mine, ps_na, before, ps_nb, process_count(),
               (unsigned long long)((clock_now_ns() - ps_t1) / 1000),
               process_count() == before ? "" : " -- NOT SETTLED");
-        kinfo("PSPROBE stages '%s': exit-completed pid %d at %lld us, test resumed %lld us, release pid %d by '%s' began %lld us, took %lld us",
-              ps_call, psprobe_exit_pid, 0ll, (long long)((ps_t1 - psprobe_exit_ns) / 1000),
+        /* The stage globals hold the *last* exit and release anywhere: an
+         * interval is printed only when both were this call's process,
+         * and -1 otherwise, so another process's exit is never timed. */
+        bool ps_ours = psprobe_exit_pid == (int)ps_mine && psprobe_rel_pid == (int)ps_mine;
+        kinfo("PSPROBE stages '%s': exit-completed pid %d at %lld us, test resumed %lld us, release pid %d by '%s' began %lld us, took %lld us%s",
+              ps_call, psprobe_exit_pid, 0ll,
+              ps_ours ? (long long)((long long)(ps_t1 - psprobe_exit_ns) / 1000) : -1ll,
               psprobe_rel_pid, psprobe_rel_who,
-              psprobe_rel_pid == (int)ps_mine ? (long long)((long long)(psprobe_rel_start_ns - psprobe_exit_ns) / 1000) : -1ll,
-              psprobe_rel_pid == (int)ps_mine ? (long long)((psprobe_rel_end_ns - psprobe_rel_start_ns) / 1000) : -1ll);
+              ps_ours ? (long long)((long long)(psprobe_rel_start_ns - psprobe_exit_ns) / 1000) : -1ll,
+              ps_ours ? (long long)((psprobe_rel_end_ns - psprobe_rel_start_ns) / 1000) : -1ll,
+              ps_ours ? "" : " -- another process's stages, not timed");
+        if (ps_ours)
         kinfo("PSPROBE parts '%s': handles %llu us, vm %llu us (%llu mapped pages), rest %llu us",
               ps_call, (unsigned long long)((psprobe_rel_h_ns - psprobe_rel_start_ns) / 1000),
               (unsigned long long)((psprobe_rel_vm_ns - psprobe_rel_h_ns) / 1000), (unsigned long long)psprobe_rel_pages,
