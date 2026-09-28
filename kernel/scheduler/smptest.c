@@ -1997,8 +1997,8 @@ static bool sched_migrate_refuses_pinned(const char **reason)
      * The spinner must stay RUNNING from here to its migrate, so it
      * outranks every kernel service thread: the reaper (DEFAULT - 8, and
      * since P34 it does every process's teardown) and quiesce
-     * (DEFAULT - 4) would otherwise preempt it, leaving a queued pinned
-     * thread whose right answer is AFFINITY.
+     * (DEFAULT - 4) would otherwise preempt it, and a preempted thread's
+     * right answer is PREEMPTED, not NOT_READY.
      */
     struct mig_spinner sp = { 0 };
     struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 16, CPUMASK_OF(a));
@@ -2034,8 +2034,10 @@ static bool sched_migrate_refuses_pinned(const char **reason)
          * The adversary: a thread at the reaper's priority, made runnable
          * on a just before the spinner's migrate. It cannot take a from
          * the spinner, so it must not run in the 20 ms given it; were the
-         * spinner below it, it would run at once, and the spinner would
-         * be queued -- refused as AFFINITY, the sightings' answer.
+         * spinner below it, it would run at once, and the spinner, taken
+         * off its CPU, would be refused as PREEMPTED. (The sightings'
+         * AFFINITY is the other way a spinner is not running: never
+         * having run -- queued and pinned -- which the wait above ends.)
          */
         struct refuse_rival rv = { 0 };
         struct thread *trv = thread_create_on(refuse_rival_main, &rv, "mig-rival", SCHED_PRIO_DEFAULT - 8, CPUMASK_OF(a));
