@@ -815,7 +815,11 @@ static const struct selftest tests[] = {
  * exit-space probe. A reported pid is ignored until it leaves the table,
  * and forgotten then.
  */
-enum { LEFTOVER_REPORTED_MAX = 16, LEFTOVER_SNAPSHOT_MAX = 64 };
+/* One limit for both: a snapshot names up to 64 pids, and every pid a
+ * check returns can be remembered. More than 64 processes in the table
+ * at a test's end (never seen: it is empty after every test of a clean
+ * boot) are counted but not named, and could be blamed again. */
+enum { LEFTOVER_SNAPSHOT_MAX = 64, LEFTOVER_REPORTED_MAX = LEFTOVER_SNAPSHOT_MAX };
 static uint32_t g_leftover_reported[LEFTOVER_REPORTED_MAX];
 static unsigned g_leftover_nreported;
 
@@ -892,13 +896,13 @@ int selftest_run_all(void)
         {
             /* Counted in the test's time, so the budget sees the wait. */
             enum { LEFT_NAMED = 16 };
-            uint32_t left[LEFT_NAMED];
-            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFT_NAMED);
-            for (unsigned k = 0; k < nleft && k < LEFT_NAMED; k++) {
+            static uint32_t left[LEFTOVER_SNAPSHOT_MAX];
+            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFTOVER_SNAPSHOT_MAX);
+            for (unsigned k = 0; k < nleft && k < LEFTOVER_SNAPSHOT_MAX; k++) {
                 char what[96];
-                if (process_describe(left[k], what, sizeof(what)))
+                if (k < LEFT_NAMED && process_describe(left[k], what, sizeof(what)))
                     kerror("selftest: %s left %s", tests[i].name, what);
-                selftest_leftover_reported(left[k]);   /* blamed here, and only here */
+                selftest_leftover_reported(left[k]);   /* blamed here, and only here: named or not */
             }
             if (nleft > LEFT_NAMED)
                 kerror("selftest: %s left %u more processes, not named", tests[i].name, nleft - LEFT_NAMED);

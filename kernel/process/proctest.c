@@ -1946,7 +1946,8 @@ bool selftest_p33_once(const char **reason)
     selftest_leftover_reported(c);
     unsigned again = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
     process_test_release_reap();
-    unsigned after = selftest_leftover_processes(2000ull * 1000 * 1000, left, 4);
+    /* By its pid: the check ignores c now, so it could not say c left. */
+    bool gone = wait_process_gone(c);
     if (!named) {
         *reason = "the first check did not name the held process";
         return false;
@@ -1956,7 +1957,7 @@ bool selftest_p33_once(const char **reason)
         *reason = "a process already blamed was blamed again";
         return false;
     }
-    CHECK(after == 0);
+    CHECK(gone);
     return true;
 #endif
 }

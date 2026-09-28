@@ -618,8 +618,12 @@ count ends one below where it began; `process-leftover-named` requires
 the runner's check to name a held process by pid.
 
 A process left behind is blamed once (the exit-space unit). The runner
-remembers the pids it has reported and later checks ignore them until
-they leave the table. Without this, a test that leaked its reference --
+remembers every pid its check returns, named in the log or not, and
+later checks ignore them until they leave the table. The check reads the
+table in one snapshot of up to 64 pids and remembers up to 64: more than
+64 processes left at a test's end would be counted but not remembered,
+and could be blamed again. (The table is empty at the end of every test
+of a clean boot.) Without this, a test that leaked its reference --
 a `CHECK` that returned before its put -- failed every test after it for
 the same pid, 19 in one boot. *Checked by*: `p33-once`.
 

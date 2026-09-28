@@ -13,8 +13,10 @@
 >   queried. `arch_mmu_absent_span` is added on both architectures; on
 >   aarch64 it claims nothing for the wrong half of the address space,
 >   as `arch_mmu_query` does.
-> - **P33 blames once:** `selftest_leftover_reported` and a 16-entry set,
->   pruned from each locked snapshot of up to 64 pids. `kill_module`
+> - **P33 blames once:** `selftest_leftover_reported`, and a set of up to
+>   64 pids (the snapshot's own limit), pruned from each locked snapshot.
+>   The runner remembers every pid a check returns, whether or not it
+>   names it in the log. `kill_module`
 >   drops its reference before any check. `elf-txtbsy`'s copy loop
 >   became `write_program_copy`, which `exit-space-order` shares.
 > - **Tests:** `vm-teardown-absent` (memtest; queries exactly the 4
