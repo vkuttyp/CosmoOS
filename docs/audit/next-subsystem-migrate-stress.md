@@ -16,10 +16,10 @@
 SELFTEST: sched-migrate-stress ... FAIL: a worker made no progress under migration (268 ms)
 ```
 
-The test (`kernel/scheduler/smptest.c`) starts 22 workers and a migrator:
+The test (`kernel/scheduler/smptest.c`) starts 26 workers and a migrator:
 - 8 spinners that yield each round;
 - 8 sleepers (1 ms);
-- 4 ping-pong pairs on completions;
+- 4 ping-pong pairs on completions (8 threads);
 - 2 mutex contenders;
 - a migrator calling `sched_migrate_from` between random CPUs in a tight
   loop.
@@ -146,15 +146,17 @@ The test gets three phases:
 
 1. **Stress, 200 ms**, as now. The migration count (at least 100) is
    taken over this window alone.
-2. **Stop the migrator and join it.** With nothing re-queueing threads,
-   every READY thread reaches the head of its queue in time proportional
-   to the queue ahead of it.
+2. **Stop the migrator and join it.** The migrator gets a stop flag of its
+   own (`mig_stop`); today it shares `stop` with every worker, and setting
+   that would stop the workers too, so their rounds could not advance in
+   phase 3. With nothing re-queueing threads, every READY thread reaches
+   the head of its queue in time proportional to the queue ahead of it.
 3. **Every worker runs again.** A snapshot of each worker's rounds is
    taken as the migrator stops. The test then waits for each worker's
    rounds to pass its snapshot, counting its waits (`thread_sleep_ms(1)`,
    bounded at 5 000 as a hang guard, not a latency claim). A thread a
-   migration stranded never runs again, and the guard names it. Then
-   `stop`, and join.
+   migration stranded never runs again, and the guard names it. Then the
+   workers' `stop`, and join.
 
 The affinity check stays as it is.
 
@@ -166,12 +168,21 @@ accept it. Reintroducing the window's assertion then fails on every boot,
 not once a week on CI (the irq-order unit's lesson: make the other case
 certain).
 
-### 3. The failure names the worker
+### 3. The failure names the worker, and a stranded one is isolated
 
 The probe's instrument becomes permanent. A worker that fails phase 3 is
 reported by kind, index, when it entered, its first round, and its thread's
 CPU and state. The test does not join a stranded thread, which would hang
 the boot; it reports it and fails.
+
+A stranded thread may yet run, and a failed self-test does not stop the
+tests after it. So the run's shared state, its workers and their
+completions and mutex are allocated per run (`kzalloc`), not static as
+now. After a clean join they are freed. On a failure with a worker
+unjoined, the test sets every stop flag and leaves the block allocated:
+the stranded thread, if it ever runs, finds its own storage intact and
+its stop set, and exits. A later run of the test gets fresh storage and
+never resets the memory that thread still holds.
 
 ### 4. The scheduler's property, written down
 
@@ -191,8 +202,9 @@ latency miss can no longer hide.
 **Concurrency.** Unchanged in the kernel. The test's phases are ordered
 by joins and counts, not by time.
 
-**Ownership and lifetime.** A worker reported stranded is not joined;
-its storage is static, as now.
+**Ownership and lifetime.** A worker reported stranded is not joined,
+and its run's storage (allocated per run) is left allocated for it, so no
+later run can reset memory a live thread holds. A clean run frees it.
 
 **Security.** None.
 
@@ -230,8 +242,10 @@ None.
 
 ## Risks
 
-- **A stranded thread is not joined.** It is reported and left, and the
-  boot fails on it. Joining it would hang the boot instead of naming it.
+- **A stranded thread is not joined.** It is reported and left with its
+  storage and its stop flag set, and the boot fails on it. Joining it would
+  hang the boot instead of naming it. The storage it keeps is leaked,
+  once, on a boot that has already failed.
 - **The hang guard is time.** 5 000 waits of 1 ms is 5 s of the
   test's own sleeps, far above any queue's drain. It says "stuck", not
   "slow".

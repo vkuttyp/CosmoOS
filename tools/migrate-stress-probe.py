@@ -7,8 +7,8 @@ Two CI sightings, both aarch64 (docs/testing/flakes.md):
 
     SELFTEST: sched-migrate-stress ... FAIL: a worker made no progress under migration (268 ms)
 
-The test starts 22 workers (8 spinners, 8 sleepers, 4 ping-pong pairs, 2
-mutex contenders) and a random migrator, sleeps 200 ms, stops them, and
+The test starts 26 workers (8 spinners, 8 sleepers, 4 ping-pong pairs of
+two, 2 mutex contenders) and a random migrator, sleeps 200 ms, stops them, and
 requires every worker to have finished at least one round. The failure
 says only that one did not.
 
