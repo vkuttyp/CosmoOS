@@ -223,6 +223,32 @@ table. The user-mode form of this check (`kill(pid, 0)` right after
 `waitpid`, in `init --selftest`) samples the same window but races the
 reaper; this one does not.
 
+### `process-gone-order`, `process-leftover-named`, and the runner's check (P33)
+
+Both use a reap hold armed by pid (`process_test_hold_reap`, debug
+builds only; release builds skip them): the reaper parks after the
+process has become a zombie and before it drops the exited thread's
+reference to it. `spawn_held_zombie` arms it on an `init --spin` while
+it still spins, kills it, waits for the reaper to park, and requires the
+zombie to be in the table (`process_present`), so the hold is never
+vacuous.
+
+- **`process-gone-order`** -- the CI failure, made certain. A is held;
+  `init --probe dev-tty-none` runs through `run_module_hooked`, whose
+  after-spawn hook lets A go. The reaper is one thread, so A leaves the
+  table inside B's window, before B's exit is even completed. Requires
+  `run_module` to pass (it checks B's pid), A to be gone, and the count
+  to end **one below** where it began: the order the old count check
+  could not pass.
+- **`process-leftover-named`** -- holds a process and requires the
+  runner's check, with a 20 ms deadline, to return exactly that pid;
+  once let go, the table empties within two seconds.
+- **The runner** waits up to two seconds after every test for the
+  process table to empty and fails the test that left a process,
+  naming it (`selftest: <test> left pid N 'name' (state, references,
+  threads)`). The ELF tests' `elf_settle_processes` went with this: each
+  of its 37 calls preceded a return.
+
 ### The native signal ABI, sessions and the terminal
 
 Seven self-tests, each a user program the kernel runs and whose exit
