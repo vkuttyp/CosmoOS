@@ -807,10 +807,15 @@ static const struct selftest tests[] = {
  */
 unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max)
 {
+    /* One locked snapshot decides and is returned: the count it reports
+     * and the pids it names are the same reading of the table. */
     uint64_t deadline = clock_deadline_ns(wait_ns);
-    while (process_count() != 0 && !clock_deadline_passed(deadline))
+    for (;;) {
+        unsigned n = process_table_pids(pids, max);
+        if (n == 0 || clock_deadline_passed(deadline))
+            return n;
         thread_sleep_ms(1);
-    return process_table_pids(pids, max);
+    }
 }
 
 int selftest_run_all(void)
@@ -830,13 +835,16 @@ int selftest_run_all(void)
         bool ok = tests[i].fn(&reason);
         {
             /* Counted in the test's time, so the budget sees the wait. */
-            uint32_t left[4];
-            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, 4);
-            for (unsigned k = 0; k < nleft && k < 4; k++) {
+            enum { LEFT_NAMED = 16 };
+            uint32_t left[LEFT_NAMED];
+            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFT_NAMED);
+            for (unsigned k = 0; k < nleft && k < LEFT_NAMED; k++) {
                 char what[96];
                 if (process_describe(left[k], what, sizeof(what)))
                     kerror("selftest: %s left %s", tests[i].name, what);
             }
+            if (nleft > LEFT_NAMED)
+                kerror("selftest: %s left %u more processes, not named", tests[i].name, nleft - LEFT_NAMED);
             if (nleft != 0 && ok) {
                 ok = false;
                 reason = "a process it spawned outlived it (P33)";

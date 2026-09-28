@@ -245,8 +245,8 @@ vacuous.
   once let go, the table empties within two seconds.
 - **The runner** waits up to two seconds after every test for the
   process table to empty and fails the test that left a process,
-  naming it (`selftest: <test> left pid N 'name' (state, references,
-  threads)`). The ELF tests' `elf_settle_processes` went with this: each
+  naming up to sixteen of them (`selftest: <test> left pid N 'name'
+  (state, references, threads)`) and counting any beyond that. The ELF tests' `elf_settle_processes` went with this: each
   of its 37 calls preceded a return.
 
 ### The native signal ABI, sessions and the terminal

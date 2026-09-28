@@ -606,9 +606,11 @@ and could never get back to `before` (`dev-tty-none` on CI,
   it does not;
 - the runner (`selftest_run_all`), after every test, waits up to two
   seconds for the table to empty (`selftest_leftover_processes`) and
-  fails a test that leaves a process, logging each pid left with its
-  name, state, references and threads. The wait counts in the test's
-  time.
+  fails a test that leaves a process. It logs up to sixteen of the pids
+  left, each with its name, state, references and threads, and counts
+  any beyond that. The wait counts in the test's time. The check returns
+  one locked snapshot of the table: the count and the pids it names are
+  the same reading.
 
 *Checked by*: `process-gone-order` forces the CI order with a reap hold
 armed by pid (debug builds) and requires `run_module` to pass while the

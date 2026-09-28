@@ -12,9 +12,11 @@
 >   own pid with 1 ms sleeps for up to 2 s, and on failure logs "its process
 >   (pid N) was not released".
 > - The runner's check is `selftest_leftover_processes(wait_ns, pids,
->   max)` (`kernel/core/selftest.c`). The runner logs each process left
->   (`selftest: <test> left pid N 'name' (state, references, threads)`) and
->   fails the test with "a process it spawned outlived it (P33)". The
+>   max)` (`kernel/core/selftest.c`), which decides and returns one locked
+>   snapshot (`process_table_pids`), so the count and the pids agree. The
+>   runner logs up to sixteen of the processes left
+>   (`selftest: <test> left pid N 'name' (state, references, threads)`),
+>   counts any beyond that, and fails the test with "a process it spawned outlived it (P33)". The
 >   check itself logs nothing, because `process-leftover-named` finds a
 >   process on purpose.
 > - `process-gone-order` and `process-leftover-named` are registered after
@@ -190,8 +192,9 @@ checks that. The machine-wide count goes. On failure it names the pid:
 
 The runner, after every test and before printing its verdict, waits up
 to 2 s for the process table to empty. A test that leaves a process
-fails ("a process it spawned outlived it (P33)"), and each pid left is
-logged with its name, state, references and threads. The wait counts in the test's duration, so
+fails ("a process it spawned outlived it (P33)"), and up to sixteen of
+the pids left are logged with their name, state, references and threads
+(any beyond that are counted). The wait counts in the test's duration, so
 the per-test budget sees it.
 
 This covers every spawner in one place, including the 12 in the list
