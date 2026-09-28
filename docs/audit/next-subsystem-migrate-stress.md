@@ -9,6 +9,32 @@
 > report finds two mechanisms, rejects a scheduler change that would have
 > hidden one of them, and proposes a test that asserts what migration
 > actually promises: no thread is stranded.
+>
+> **Built (PR #249).** As designed, with these differences:
+> - **The hang guards are 500 sleeps, not 5 000.** A `thread_sleep_ms(1)`
+>   lasts until a later tick, several ms at `CONFIG_HZ` 250, not 1 ms. At
+>   5 000 each guard was about 40 s. The stranding mutation then took the
+>   test 85 s, and on aarch64 it ran the boot past its 180 s timeout with
+>   no verdict at all. At 500 a caught stranding takes 13 to 16 s.
+> - **The workers are named `mstress-worker`.** `sched-migrate`'s worker is
+>   `mig-worker`, and a fault injected by name hit that test first.
+> - **"Blocked behind a stranded worker"** is decided from the thread's
+>   state and the mutex's recorded owner: a mutex contender that is BLOCKED
+>   while another unjoined worker holds the mutex. Every other worker that
+>   is not leaving is "stranded or stuck", and its line says when it is a
+>   timed sleeper.
+>
+> | mutation | result |
+> | --- | --- |
+> | a stranded thread: `migrate_locked` returns after the dequeue, without the enqueue, for the first `mstress-worker` it moves | x86-64 and aarch64: `FAIL: a worker did not run again after the migrator stopped`, with `spin worker N stranded or stuck: ... rounds R (R at the migrator's stop), thread state 0 on cpu C`. It is the only worker named, the boot runs to its verdict, and the test takes 13 to 16 s |
+> | the old 200 ms progress assertion restored after phase 1 | `FAIL: a worker made no progress under migration`, on the first boot: the late starter has not yet run |
+>
+> Each mutation ran alone with its boot confirmed. Both architectures pass
+> in debug and release, as does the aarch64 chaos boot. The workers run
+> again within 2 to 8 waits of the migrator stopping. `gmake host-test`
+> passes. `gmake analyze` adds nothing: its reports (`sched.c:596`, byte
+> for byte `main`'s file, and `smptest.c:1476`, `main`'s at 1475) are
+> `main`'s own.
 
 ## Problem
 
@@ -154,7 +180,8 @@ The test gets three phases:
 3. **Every worker runs again.** A snapshot of each worker's rounds is
    taken as the migrator stops. The test then waits for each worker's
    rounds to pass its snapshot, counting its waits (`thread_sleep_ms(1)`,
-   bounded at 5 000 as a hang guard, not a latency claim). A thread a
+   bounded at 5 000 as a hang guard, not a latency claim; as built, 500 --
+   see the banner). A thread a
    migration stranded never runs again, and the guard names it. Then the
    workers' `stop`, every ping-pong completion completed (as the test does
    today: a half blocked on its partner cannot see `stop`), and join.
@@ -292,9 +319,11 @@ None.
   stranded or stuck one. Joining any of them could hang the boot instead
   of naming it. The storage it keeps is leaked,
   once, on a boot that has already failed.
-- **The hang guard is time.** 5 000 waits of 1 ms is 5 s of the
-  test's own sleeps, far above any queue's drain. It says "stuck", not
-  "slow".
+- **The hang guard is time.** As built it is 500 counted sleeps per guard.
+  A `thread_sleep_ms(1)` lasts until a later tick, so each is several ms,
+  and a caught stranding takes the test 13 to 16 s in all. That is far
+  above any queue's drain and well short of the boot's timeout. It says
+  "stuck", not "slow".
 
 ## Alternatives considered
 

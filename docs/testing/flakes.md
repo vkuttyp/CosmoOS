@@ -2232,6 +2232,18 @@ of its workers to have made a round: the "N things after a fixed
 settle" shape, which a host stall of 200 ms defeats. The re-run passed.
 First sighting.
 
+**The second, 2026-09-28** (run 36387945129, the GIC boot of the irq-order
+unit's PR, a change to vGIC tests), gave the same message. Neither sighting
+said which worker; `tools/migrate-stress-probe.py` did. It found 7 failures
+in 440 loaded aarch64 repetitions and none in 80 quiet ones. Every
+zero-round worker was READY and first ran after the window had closed,
+some after being migrated 36, 42 and 250 times: the test migrator
+re-picks the thread it just moved (S26). No thread was lost.
+**Fixed (PR #249)**: the test now asserts that migration strands nothing
+(every worker runs again once the migrator stops) instead of a latency,
+with a late starter that makes the old assertion fail on every boot
+(`docs/audit/next-subsystem-migrate-stress.md`).
+
 ## `net-accept-race` over the per-test budget, 2026-09-24
 
 `self-test net-accept-race took 9067 ms (budget 8000 ms)`, on CI: PR

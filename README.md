@@ -3570,6 +3570,18 @@ See [docs/development.md](docs/development.md).
   two more guests, `guest_irq_exit` (the interrupt always first) and
   `guest_irq_hb` (the heartbeat always first). So both orders happen on
   every boot, and an assertion of either fails at once. (PR #247)
+- **`sched-migrate-stress` asserts what migration promises.** It failed
+  twice on aarch64 CI with "a worker made no progress under migration".
+  `tools/migrate-stress-probe.py` named the worker: in every case it was
+  READY and first ran after the 200 ms window closed, and no thread was
+  lost. The test's migrator re-picks the thread it just moved, because the
+  policy takes the tail and a move enqueues at the tail; one worker was
+  moved 250 times before its first round. The test now runs in three
+  phases: stress, stop the migrator, then require every worker to run
+  again. A late starter makes the old window assertion fail on every boot.
+  A worker that never leaves is named rather than joined, with its storage
+  left to it. "Migrate at most once between runs" was measured and
+  rejected. (PR #249)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
