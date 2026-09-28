@@ -85,6 +85,12 @@ EDITS += [
         msp_cpu[i] = t[i] ? t[i]->cpu : -1;
         msp_state[i] = t[i] ? (int)t[i]->state : -1;
     }
+    unsigned msp_load[CONFIG_MAX_CPUS], msp_maxload = 0;   /* MSPROBE: the queues at the close */
+    for (unsigned c = 0; c < cpu_count() && c < CONFIG_MAX_CPUS; c++) {
+        msp_load[c] = sched_cpu_load(c);
+        if (msp_load[c] > msp_maxload)
+            msp_maxload = msp_load[c];
+    }
     __atomic_store_n(&sh.stop, 1u, __ATOMIC_RELEASE);"""),
     ("""    uint64_t moved = sched_migration_count() - moves;
     bool progress = true;""",
@@ -102,15 +108,18 @@ EDITS += [
                 if (w->rounds < mins[a])
                     mins[a] = w->rounds;
                 if (w->rounds == 0)
-                    kinfo("MSPROBE zero: %s %u entered %lld us first-round %lld us; at the window's close cpu %d state %d",
+                    kinfo("MSPROBE zero: %s %u entered %lld us first-round %lld us; at the window's close cpu %d state %d, "
+                          "that cpu's load %u",
                           k[a].kind, b, w->entered_ns ? (long long)((w->entered_ns - msp_t0) / 1000) : -1ll,
                           w->first_ns ? (long long)((w->first_ns - msp_t0) / 1000) : -1ll,
-                          msp_cpu[k[a].base + b], msp_state[k[a].base + b]);
+                          msp_cpu[k[a].base + b], msp_state[k[a].base + b],
+                          msp_cpu[k[a].base + b] >= 0 ? msp_load[msp_cpu[k[a].base + b]] : 0u);
             }
         }
-        kinfo("MSPROBE rep: sleep took %llu us; min rounds spin %llu sleep %llu pingpong %llu mutex %llu; migrations %llu",
+        kinfo("MSPROBE rep: sleep took %llu us; min rounds spin %llu sleep %llu pingpong %llu mutex %llu; migrations %llu; "
+              "max cpu load %u",
               (unsigned long long)(msp_woke / 1000), (unsigned long long)mins[0], (unsigned long long)mins[1],
-              (unsigned long long)mins[2], (unsigned long long)mins[3], (unsigned long long)moved);
+              (unsigned long long)mins[2], (unsigned long long)mins[3], (unsigned long long)moved, msp_maxload);
     }
     bool progress = true;"""),
 ]
