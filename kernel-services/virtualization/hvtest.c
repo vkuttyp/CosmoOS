@@ -1156,70 +1156,75 @@ bool selftest_el2_guest_irq_private(const char **reason)
  * Both are the same mistake: asking "was the offered vector taken?"
  * when the question is "which interrupt did the guest take?".
  */
-bool selftest_el2_guest_irq_queue(const char **reason)
+/*
+ * Run until the guest reports INTID `want`, accepting heartbeats while
+ * `want` still reads as pending, and return how many came first.
+ *
+ * The guest may reach its heartbeat before a pending interrupt is placed,
+ * or take it first: the host refills its one list register only at entry,
+ * and vcpu_run re-enters after an exit it handles itself, so an exit
+ * between the guest's EOI and its heartbeat decides the order -- on
+ * guest_irq a host interrupt landing there, on guest_irq_exit always
+ * (the interrupt first), and on guest_irq_hb never in time (its handler
+ * sends the heartbeat before it can take the interrupt).
+ * Both orders are correct, and asserting either is asserting the host's
+ * timing: this test did, twice, and each flaked on aarch64 CI
+ * (docs/audit/next-subsystem-irq-order.md). Anything other than the
+ * interrupt or a heartbeat fails, named.
+ */
+static bool run_until_irq(struct vcpu *v, struct cosmo_vm_exit *x, unsigned want, unsigned *heartbeats,
+                          const char **reason)
 {
-    if (skip_without_backend(reason))
-        return true;
-    if (!hv_caps()->inject_irq) {
-        kinfo("selftest: el2-guest-irq-queue: no virtual GIC on this machine; skipping");
-        return true;
-    }
-    struct vm *vm;
-    struct vcpu *v;
     struct cosmo_vcpu_regs regs;
-    CHECK(make_guest("tests/hv/guest_irq.bin", &vm, &v) == 0);
+    *heartbeats = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        CHECK(vcpu_run(v, x) == 0);
+        if (x->kind == COSMO_VM_EXIT_HYPERCALL && x->hypercall.nr == want)
+            return true;
+        CHECK_HC(*x, 2);   /* anything else fails here, naming what came */
+        (*heartbeats)++;
+        CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == want);
+    }
+    kerror("selftest: hv: INTID %u still pending after 8 heartbeats", want);
+    *reason = "a pending interrupt was never delivered";
+    return false;
+}
+
+/*
+ * The test's body, on one guest. `hb` gets the heartbeats that came before
+ * each of the two deliveries whose order is the host's to choose. Every
+ * return, a failed check's included, leaves the guest to the caller.
+ */
+static bool irq_queue_body(struct vcpu *v, unsigned hb[2], const char **reason)
+{
+    struct cosmo_vcpu_regs regs;
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);
     CHECK_HC(x, 1);
 
-    /* --- the same INTID twice, the second while the first is Active --- */
+    /* --- the same INTID twice, the second while the first is Active ---
+     * The claim is that the second instance is *kept*: the completion of
+     * one instance is not the delivery of the next, and the second is
+     * delivered afterwards exactly once -- whenever the guest takes it. */
     CHECK(vcpu_inject(v, 42) == 0);
     CHECK(vcpu_run(v, &x) == 0);
     CHECK_HC(x, 42);   /* acknowledged */
     CHECK(vcpu_inject(v, 42) == 0);                                     /* again, while Active */
-    /*
-     * The claim is that the second instance is *kept*: the completion of
-     * one instance is not the delivery of the next, and the second is
-     * delivered afterwards exactly once.
-     *
-     * It is not a claim about where the guest is when that happens. Once
-     * the guest deactivates the first instance the second is pending and
-     * unmasked, so it may be taken immediately -- before the guest
-     * reaches the heartbeat at the top of its loop -- or after one or
-     * more heartbeats, depending only on how the run is scheduled. This
-     * test asserted the second ordering and flaked on the first, twice
-     * on aarch64 CI, and the instrument built after the second sighting
-     * named it on the third: `expected hypercall 2, got exit kind 4
-     * hypercall nr 42` (docs/testing/flakes.md).
-     *
-     * So: run until the second instance arrives, allowing heartbeats on
-     * the way and requiring 42 to read as pending at each of them.
-     */
-    unsigned heartbeats = 0;
-    bool second_arrived = false;
-    for (unsigned i = 0; i < 8 && !second_arrived; i++) {
-        CHECK(vcpu_run(v, &x) == 0);
-        if (x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42) {
-            second_arrived = true;
-        } else {
-            CHECK_HC(x, 2);   /* anything else fails here, naming what came */
-            heartbeats++;
-            CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
-        }
-    }
-    if (!second_arrived) {
-        *reason = "the second injection of the same INTID was never delivered";
+    if (!run_until_irq(v, &x, 42, &hb[0], reason))
         return false;
-    }
-    kinfo("selftest: hv: the second instance of INTID 42 arrived after %u heartbeat(s)", heartbeats);
     /* And exactly once: the guest is back at its heartbeat with nothing
      * pending and no third delivery. */
     CHECK(vcpu_run(v, &x) == 0);
     CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
 
-    /* --- a resident interrupt taken while a lower number is offered --- */
+    /* --- a resident interrupt taken while a lower number is offered ---
+     * One more run first, nothing pending, so the guest is at the heartbeat
+     * in its loop: guest_irq_hb's last heartbeat came from its handler,
+     * where the mask set below would be undone by the handler's `eret`. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK_HC(x, 2);
     CHECK(vcpu_get_regs(v, &regs) == 0);
     regs.pstate |= (1u << 7);                       /* mask */
     CHECK(vcpu_set_regs(v, &regs) == 0);
@@ -1235,14 +1240,59 @@ bool selftest_el2_guest_irq_queue(const char **reason)
      * must be cleared. */
     CHECK_HC(x, 42);
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 5);
-    CHECK(vcpu_run(v, &x) == 0);                    /* the EOI frees the register */
-    CHECK_HC(x, 2);
-    CHECK(vcpu_run(v, &x) == 0);
-    CHECK_HC(x, 5);    /* then 5, once */
+    /* Then 5, once, before or after a heartbeat: the EOI of 42 frees the
+     * register, and when 5 is placed is the host's to choose. */
+    if (!run_until_irq(v, &x, 5, &hb[1], reason))
+        return false;
     CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+    CHECK(vcpu_run(v, &x) == 0);                    /* and not again */
+    CHECK_HC(x, 2);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+    return true;
+}
+
+/* The body on one guest image, the guest dropped on every return: a
+ * failing check must not leave its VM to the tests that follow. */
+static bool irq_queue_on(const char *image, unsigned hb[2], const char **reason)
+{
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest(image, &vm, &v) == 0);
+    bool ok = irq_queue_body(v, hb, reason);
     drop_guest(vm, v);
+    return ok;
+}
+
+/*
+ * Both claims, in both orders, each order certain: guest_irq_exit forces
+ * an exit after every EOI, so the pending interrupt always comes first
+ * (zero heartbeats before it); guest_irq_hb forces the same exit but sends
+ * its heartbeat from the handler, IRQs still masked, so the heartbeat
+ * always comes first (at least one). guest_irq, unforced, runs as well:
+ * it is the order the host's timing gives. An assertion that depends on
+ * the order fails on every boot, not when the host's tick lines up.
+ */
+bool selftest_el2_guest_irq_queue(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: el2-guest-irq-queue: no virtual GIC on this machine; skipping");
+        return true;
+    }
+    unsigned hb[2], hbx[2], hbh[2];
+    if (!irq_queue_on("tests/hv/guest_irq.bin", hb, reason))
+        return false;
+    if (!irq_queue_on("tests/hv/guest_irq_exit.bin", hbx, reason))
+        return false;
+    if (!irq_queue_on("tests/hv/guest_irq_hb.bin", hbh, reason))
+        return false;
+    CHECK(hbx[0] == 0 && hbx[1] == 0);   /* the exit guest takes each pending interrupt first */
+    CHECK(hbh[0] >= 1 && hbh[1] >= 1);   /* the heartbeat guest reaches its heartbeat first */
     kinfo("selftest: el2-guest-irq-queue: a second instance is not swallowed, and a resident "
-          "interrupt is cleared when it is taken");
+          "interrupt is cleared when it is taken, in both orders (heartbeats before delivery: "
+          "%u and %u on guest_irq, %u and %u on guest_irq_exit, %u and %u on guest_irq_hb)",
+          hb[0], hb[1], hbx[0], hbx[1], hbh[0], hbh[1]);
     return true;
 }
 

@@ -89,6 +89,13 @@ the same family as the rows above, recorded here rather than listed;
 if it recurs the fix is to time from `entered` itself, not from a
 point this thread reaches later.
 
+**It recurred on 2026-09-28**, x86-64 debug, local, with an aarch64 boot
+running beside it. The tree was the irq-order unit's branch, which changes
+only aarch64 guests and vGIC tests, none of which x86-64 runs. It failed
+the same check, now at `quiescetest.c:1049`, and a rerun alone passed.
+Second sighting, both local, both on a loaded host. The fix named above is
+still the one: time from `entered`.
+
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
 timer at "less than what it asked for"); both bounds still sit an order
@@ -2088,6 +2095,38 @@ Three sightings, one instrument, one diagnosis, one fix. The
 instrument stays: the fifty-one hypercall expectations in that file
 now name what they got.
 
+**It was one fix of two.** A fourth sighting, on 2026-09-25 (run
+36112785285, the GIC boot of a branch that changed a report and a probe
+script), was named by the same instrument:
+
+```text
+[ERROR] selftest: hv: line 1239: expected hypercall 2, got exit kind 4 hypercall nr 5 a0 0
+```
+
+It was the second half of the same test making the same assertion: a
+resident 42 completed with INTID 5 pending, and the heartbeat required
+before 5. The fix above replaced the first half's assertion, not the
+pattern. There was also a sighting before any of these, on `main` on
+2026-09-17 (run 35205713978, line 1157), which this entry never had.
+Five in all.
+
+The mechanism, now measured (`docs/audit/next-subsystem-irq-order.md`):
+the one list register is refilled only at entry, and `vcpu_run`
+re-enters after a host interrupt or an emulated GIC access, so any exit
+between the guest's EOI and its heartbeat puts a pending interrupt first.
+`tools/irq-order-probe.py` forces that exit after every EOI in the nine
+guests that take an interrupt, thirteen tests. With it applied, the old
+tree failed line 1239 on every GIC boot and nowhere else, and the fixed
+tree passes.
+
+**Fixed as a class (PR #247).** Both halves run through one helper that
+accepts heartbeats while the awaited interrupt is pending, and the test
+runs on two more guests: `guest_irq_exit.S`, whose exit after every EOI
+makes the interrupt come first, and `guest_irq_hb.S`, which sends its
+heartbeat from the handler with IRQs masked so the heartbeat comes first.
+Each order happens on every boot, and the test requires it. Restoring
+either half's old assertion now fails every GIC boot, not one in dozens.
+
 
 ## `mmu: TLB shootdown acknowledged by 2 of 3 CPUs`
 
@@ -2202,6 +2241,14 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `syscall-fuzz` over the per-test budget, 2026-09-28
+
+`self-test syscall-fuzz took 8305 ms (budget 8000 ms)`, local, aarch64
+GIC boot (`make test-gic`), on the irq-order unit's branch after a
+comment-only change. All 403 self-tests passed; the failure is the
+harness's per-test 8 s budget, over by 305 ms. The rerun passed. First
+sighting.
+
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 
 Local, aarch64 debug, both on the balance-pair fix's branch, which changes
@@ -2288,6 +2335,13 @@ boot:
   child's release once its thread is reaped. The reaper's turn came
   later than that once under migration; the bound catches a leak, not
   slowness, and is two seconds now (`LOAD-SENSITIVE`).
+  **Two seconds was exceeded once too, on CI, 2026-09-28**, and not under
+  the chaos migrator: `dev-tty-none ... FAIL: check failed:
+  process_count() == before at line 254 (2107 ms)`, the plain aarch64
+  debug boot of the irq-order unit's PR (run 36389174994, `439be9fb`, a
+  change to vGIC tests that skip in that boot). Same helper
+  (`run_module`, `kernel/process/proctest.c`), same bound. First sighting
+  at two seconds.
 
 ## `tcp-pcb-timer-free`'s held callback parked on a CPU nobody could release it from
 
