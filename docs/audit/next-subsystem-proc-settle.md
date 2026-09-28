@@ -1,7 +1,43 @@
 # NEXT SUBSYSTEM — a test's process outlives the test, and the next test counts it
 
-> **Status: proposed.** Report and probe (`tools/proc-settle-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #251).** As designed, with these specifics:
+>
+> - `process_present`, `process_table_pids` and `process_describe`
+>   (`kernel/process/process.c`); the reap hold is `process_test_hold_reap`,
+>   `process_test_reap_held`, `process_test_release_reap` and the reaper's
+>   side `process_test_reap_hook`, called from `thread_put` after
+>   `process_last_thread_gone` in debug builds. It parks on a completion,
+>   armed by a compare-and-swap on the pid.
+> - `run_module` is `run_module_hooked` without a hook. It waits for its
+>   own pid with 1 ms sleeps for up to 2 s, and on failure logs "its process
+>   (pid N) was not released".
+> - The runner's check is `selftest_leftover_processes(wait_ns, pids,
+>   max)` (`kernel/core/selftest.c`), which decides and returns one locked
+>   snapshot (`process_table_pids`), so the count and the pids agree. The
+>   runner logs up to sixteen of the processes left
+>   (`selftest: <test> left pid N 'name' (state, references, threads)`),
+>   counts any beyond that, and fails the test with "a process it spawned outlived it (P33)". The
+>   check itself logs nothing, because `process-leftover-named` finds a
+>   process on purpose.
+> - `process-gone-order` and `process-leftover-named` are registered after
+>   `process-reaped`, share `spawn_held_zombie`, and skip in release
+>   builds, like the other hold tests.
+> - All 37 `elf_settle_processes` calls, and the helper, are gone.
+> - Measured: every boot passes on both architectures (debug, release,
+>   the aarch64 GIC boot, chaos). The new tests take 29–57 ms. One x86
+>   chaos boot failed `sched-migrate-refuses` (its spinner refused as
+>   "affinity"; no process involved) and passed on the rerun; it is
+>   recorded in `flakes.md`.
+>
+> Mutations, each alone, with its boot confirmed:
+>
+> | mutation | result |
+> |---|---|
+> | `run_module` back to the count | `process-gone-order` FAIL, "the process it ran was not released", 2039 ms x86-64, 2052 ms aarch64 |
+> | the runner's check finds nothing | `process-leftover-named` FAIL: "the check found 0 ... wanted pid 166" |
+> | the hold does not wait | both new tests FAIL: "the held process had already left the table" |
+> | `process_present` always false | both FAIL the same way. The same boot failed four host-networking tests (`net-hostinput`, `net-hoststate`, `net-output`, `net-flows-fw`), which run long before any process test and do not use `process_present`; three of them are the family recorded in `flakes.md` |
+> | pid 8 (`dev-tty`'s) released 2.5 s late | **`dev-tty` FAIL**, "a process it spawned outlived it (P33)", with `dev-tty left pid 8 'init' (state 2, 1 references, 0 threads)`; **`dev-tty-none` passes**. The failure moves to the test that left the process |
 
 ## Problem
 
@@ -156,8 +192,9 @@ checks that. The machine-wide count goes. On failure it names the pid:
 
 The runner, after every test and before printing its verdict, waits up
 to 2 s for the process table to empty. A test that leaves a process
-fails with a reason naming it, and each pid left is logged with its
-name, state and references. The wait counts in the test's duration, so
+fails ("a process it spawned outlived it (P33)"), and up to sixteen of
+the pids left are logged with their name, state, references and threads
+(any beyond that are counted). The wait counts in the test's duration, so
 the per-test budget sees it.
 
 This covers every spawner in one place, including the 12 in the list
@@ -174,8 +211,8 @@ empty at every test's end, on both architectures.
 A reaper hold armed by identity: `process_test_hold_reap(pid)` parks the
 reaper between `process_last_thread_gone` and its reference drop for that
 pid only, until the test releases it (a completion, not a sleep). It is
-compiled the way the existing identity-armed holds
-(`tcp_test_hold_callback`) are. The reaper is one thread, so while it
+compiled only in debug builds, as the existing identity-armed hold
+(`tcp_test_hold_callback`) is, and its tests skip in release builds. The reaper is one thread, so while it
 is parked, every exit queued behind it waits too.
 
 A new test, `process-gone-order`, uses it to make the CI order certain:

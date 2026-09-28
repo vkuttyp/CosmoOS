@@ -2288,6 +2288,11 @@ only `smptest.c`'s two balance tests:
 Recorded, not attributed: neither test touches the scheduler's balance
 tests, and the next boots of the same tree passed both.
 
+**`signal-group` was attributed and fixed later (PR #251):** the test
+before it, `process-reaped`, had returned with its process still held by
+the reaper, which released it inside `signal-group`'s window. See
+"`run_module`'s process count: the previous test's process" below.
+
 ## Under the chaos migrator: `sched-balance-pull` on CI, three times on 2026-09-23, and twice on the 24th
 
 `SELFTEST: sched-balance-pull ... FAIL: runnable threads stayed on the
@@ -2362,6 +2367,11 @@ boot:
   change to vGIC tests that skip in that boot). Same helper
   (`run_module`, `kernel/process/proctest.c`), same bound. First sighting
   at two seconds.
+  **The bound was never the problem (PR #251).** Both were the test
+  before -- `tty-nosig`, then `dev-tty` -- returning with its process
+  still held by the reaper, which released it inside the next test's
+  window. See "`run_module`'s process count: the previous test's
+  process" below.
 
 ## `tcp-pcb-timer-free`'s held callback parked on a CPU nobody could release it from
 
@@ -2492,3 +2502,50 @@ handshake removed. The balancer test does not use that wait. Two more
 boots with the same mutation failed only `completion-timeout`, the test
 the mutation was aimed at, and every unmutated boot of the unit passed.
 First sighting; not attributed to the mutation.
+
+## `run_module`'s process count: the previous test's process, 2026-09-28
+
+Three sightings of `process_count() == before` (`run_module`,
+`kernel/process/proctest.c:254`), in three tests: `tty-isatty` (chaos,
+2026-09-22, at the old 500 ms bound), `signal-group` (2026-09-24, 2477
+ms) and `dev-tty-none` (CI run 36389174994, 2026-09-28, 2107 ms). Each
+was recorded as its own first sighting and blamed on the test that
+failed; the bound was widened once.
+
+**The mechanism** (`docs/audit/next-subsystem-proc-settle.md`). The
+count covers every process on the machine. The reaper completes a
+process's exit before it drops the exited thread's reference, so a test
+that waits for the exit and puts its own reference can return with its
+process still in the table. The CI log shows `dev-tty` passing before
+its pid 8 was released, and pid 8 released after `dev-tty-none` had
+created pid 9: `before` counted pid 8, both left, and the count settled
+one below `before` for good. The test before each of the three
+sightings -- `tty-nosig`, `process-reaped`, `dev-tty` -- is one of the
+twelve that `tools/proc-settle-probe.py` shows returning before their
+process is released once the reaper is late. Delaying only pid 8's reap
+reproduced the CI failure on every boot (2117 / 2094 ms).
+
+**Fixed (PR #251)** by P33 (`docs/kernel/process/invariants.md`):
+`run_module` waits for its own pid, and the runner fails a test that
+leaves a process, naming it. `process-gone-order` forces the CI order on
+every debug boot.
+
+**Also found, not fixed:** an exited process keeps its address space
+until its last reference drops. Under the probe's delay `elf-txtbsy`
+gets `-ETXTBSY` writing a program its child ran after the child's exit,
+on both architectures. No natural sighting; recorded as the next unit
+in the deferred-work inventory.
+
+## `sched-migrate-refuses`: the running spinner refused as "affinity", 2026-09-28
+
+`SELFTEST: sched-migrate-refuses ... FAIL: a refusal came back under the
+wrong name (6 ms)`, with `sched-migrate-refuses: the running spinner:
+affinity`, local, x86-64 chaos boot of the proc-settle unit's branch,
+which changes no scheduler code. The rerun of the same tree passed. The
+test expects its spinner, pinned to one CPU and assumed to be running
+there, to be refused as not ready (`smptest.c`, "the running spinner").
+It was refused for its affinity instead, which is the answer for a
+pinned thread that is queued rather than running: at that instant the
+spinner was not on its CPU. First sighting; the test assumes a state it
+does not wait for.
+

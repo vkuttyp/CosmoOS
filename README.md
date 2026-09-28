@@ -3582,6 +3582,21 @@ See [docs/development.md](docs/development.md).
   A worker that never leaves is named rather than joined, with its storage
   left to it. "Migrate at most once between runs" was measured and
   rejected. (PR #249)
+- **A test's process is named, not counted, and nothing a test spawns
+  outlives it (P33).** `run_module`'s `process_count() == before` failed
+  in three tests (`dev-tty-none` on CI, `signal-group`, `tty-isatty`), and
+  each time the cause was the test before. The reaper completes an exit
+  before it drops the exited thread's reference, so a test could return
+  with its process still in the table, and the next test counted it and
+  watched it leave. `tools/proc-settle-probe.py` reproduced the CI failure
+  on every boot by delaying one pid's reap, and named the twelve tests that
+  return early. `run_module` now waits for its own pid (`process_present`).
+  The runner waits up to two seconds after every test for the table to
+  empty and fails, by name, a test that leaves a process.
+  `process-gone-order` forces the CI order with a reap hold armed by pid.
+  Also found, for the next unit: an exited process keeps its address space
+  until its last reference drops, so `waitpid` can return while the
+  child's binary is still busy. (PR #251)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

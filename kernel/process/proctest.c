@@ -216,7 +216,23 @@ bool selftest_elf(const char **reason)
 
 /* --- run the boot module --- */
 
-static bool run_module(const char *const argv[], int *status_out, const char **reason)
+/*
+ * Wait for `pid` to leave the process table: its release has finished.
+ * The bound catches a leak, not slowness -- a release is tens of
+ * milliseconds, a little over a hundred for init's self-test.
+ */
+static bool wait_process_gone(pid_t pid)
+{
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (process_present(pid) && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    return !process_present(pid);
+}
+
+/* `after_spawn`, if given, runs once the process exists (the
+ * process-gone-order test releases a held reap there). */
+static bool run_module_hooked(const char *const argv[], int *status_out, void (*after_spawn)(void *), void *arg,
+                              const char **reason)
 {
     const void *image;
     size_t image_size;
@@ -226,10 +242,12 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
         return true;
     }
     struct process *p = NULL;
-    unsigned before = process_count();
     int rc = process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p);
     CHECK(rc == 0);
     CHECK(p != NULL && p->pid > 0);
+    pid_t pid = p->pid;
+    if (after_spawn)
+        after_spawn(arg);
 
     /*
      * The bound catches a hang, not slowness: init's self-test now
@@ -243,17 +261,28 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
     CHECK(clock_since_ns(t0) < 15000000000ULL);
     process_put(p);
 
-    /* The process object is released once its thread is reaped. The
-     * bound catches a leak, not slowness: under the chaos migrator
-     * (`make test-chaos`) the reaper's turn came later than 500 ms once
-     * in about fifty boots, so it is two seconds (LOAD-SENSITIVE,
-     * docs/testing/flakes.md). */
-    uint64_t deadline = clock_deadline_ns(2000000000ULL);
-    while (process_count() != before && !clock_deadline_passed(deadline))
-        sched_yield();
-    CHECK(process_count() == before);
+    /*
+     * The process object is released once its last reference drops,
+     * which may be the reaper's, after this. So this waits for *its*
+     * process to leave the table (P33). It used to wait for the
+     * machine's process count to come back, which a previous test's
+     * process, released late by the reaper, broke -- the count settled
+     * one below where it started and never came back -- and which a
+     * leftover leaving first satisfied with this one still there
+     * (docs/audit/next-subsystem-proc-settle.md).
+     */
+    if (!wait_process_gone(pid)) {
+        kerror("selftest: its process (pid %u) was not released", pid);
+        *reason = "the process it ran was not released";
+        return false;
+    }
     *status_out = status;
     return true;
+}
+
+static bool run_module(const char *const argv[], int *status_out, const char **reason)
+{
+    return run_module_hooked(argv, status_out, NULL, NULL, reason);
 }
 
 bool selftest_process_selftest(const char **reason)
@@ -620,6 +649,122 @@ bool selftest_dev_tty(const char **reason)
 bool selftest_dev_tty_none(const char **reason)
 {
     return run_signal_probe("dev-tty-none", reason);
+}
+
+/* --- P33: a process is named, not counted ---
+ * (docs/audit/next-subsystem-proc-settle.md) */
+
+#if CONFIG_DEBUG
+/*
+ * A process that has exited and is held at its reap: a zombie still in
+ * the table, the way the reaper left dev-tty's on CI while dev-tty-none
+ * ran. The hold is armed while it spins, so its exit cannot slip past.
+ */
+static bool spawn_held_zombie(const void *image, size_t image_size, pid_t *pid_out, const char **reason)
+{
+    static const char *const argv[] = { "init", "--spin", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    process_test_hold_reap(pid);
+    process_kill(p, COSMO_SIGKILL);
+    process_wait_exit(p);
+    process_put(p);
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!process_test_reap_held() && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    if (!process_test_reap_held()) {
+        process_test_release_reap();
+        *reason = "the reaper never reached the hold";
+        return false;
+    }
+    /* The hold is real, not vacuous: the zombie is still in the table. */
+    if (!process_present(pid)) {
+        process_test_release_reap();
+        *reason = "the held process had already left the table";
+        return false;
+    }
+    *pid_out = pid;
+    return true;
+}
+
+static void release_reap(void *arg)
+{
+    (void)arg;
+    process_test_release_reap();
+}
+#endif
+
+/*
+ * The CI failure, made certain. A is held at its reap; B runs through
+ * run_module, which releases A once B exists. The reaper is one thread,
+ * so A's release comes before B's exit is even completed: A leaves the
+ * table inside B's window, which is what dev-tty's process did to
+ * dev-tty-none. run_module's check is on B's pid, so it passes, and the
+ * count really did end one below where it began -- the check it
+ * replaced could not have passed.
+ */
+bool selftest_process_gone_order(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: process-gone-order: no test hooks in this build; skipping");
+    return true;
+#else
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    pid_t a;
+    if (!spawn_held_zombie(image, image_size, &a, reason))
+        return false;
+    unsigned count0 = process_count();
+    static const char *const argv[] = { "init", "--probe", "dev-tty-none", NULL };
+    int status = -2;
+    bool ok = run_module_hooked(argv, &status, release_reap, NULL, reason);
+    process_test_release_reap();   /* never leave the reaper parked, whatever happened */
+    if (!ok)
+        return false;
+    CHECK(status == 0);
+    CHECK(!process_present(a));
+    CHECK(process_count() == count0 - 1);
+    return true;
+#endif
+}
+
+/*
+ * The runner's check names a process a test left: one held at its reap
+ * is found, by pid, and once let go the table empties.
+ */
+bool selftest_process_leftover_named(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: process-leftover-named: no test hooks in this build; skipping");
+    return true;
+#else
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    pid_t c;
+    if (!spawn_held_zombie(image, image_size, &c, reason))
+        return false;
+    uint32_t left[4] = { 0 };
+    unsigned n = selftest_leftover_processes(20ull * 1000 * 1000, left, 4);
+    process_test_release_reap();
+    if (n != 1 || left[0] != c) {
+        kerror("selftest: process-leftover-named: the check found %u, first pid %u; wanted pid %u", n, left[0], c);
+        *reason = "the runner's check did not name the process left";
+        return false;
+    }
+    CHECK(selftest_leftover_processes(2000ull * 1000 * 1000, left, 4) == 0);
+    return true;
+#endif
 }
 
 bool selftest_tty_intr(const char **reason)
@@ -1112,22 +1257,6 @@ bool selftest_linux_elf(const char **reason)
 }
 
 /*
- * Leave the machine as it was found: wait for the process table to come
- * back to where it started before returning. Killing a child and
- * joining it is not the same as the child being *gone*, and the tests
- * that run next -- `process-spawn` among them -- ask whether a freshly
- * spawned child is alive after fifty milliseconds. Two of this unit's
- * boots failed there, on the slower architecture, because these tests
- * were still being torn down.
- */
-static void elf_settle_processes(unsigned before)
-{
-    uint64_t deadline = clock_deadline_ns(2000ull * 1000000ull);
-    while (process_count() != before && !clock_deadline_passed(deadline))
-        thread_sleep_ms(5);
-}
-
-/*
  * A note on the children these tests run.
  *
  * They spin (`init --spin`) rather than block on the console. A child
@@ -1247,11 +1376,9 @@ static void free_image_with_vnode(struct process_image *img)
 bool selftest_elf_data_private(const char **reason);
 bool selftest_elf_data_private(const char **reason)
 {
-    unsigned procs0 = process_count();
     struct process_image img = { 0 };
     if (read_image_with_vnode("/boot/init", &img) != 0) {
         kinfo("selftest: elf-data-private: /boot/init unreadable; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     struct elf_info info;
@@ -1259,7 +1386,6 @@ bool selftest_elf_data_private(const char **reason)
     if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
         free_image_with_vnode(&img);
         *reason = "the boot image does not validate";
-        elf_settle_processes(procs0);
         return false;
     }
     /* A byte inside a writable segment's *file* part, which both
@@ -1275,7 +1401,6 @@ bool selftest_elf_data_private(const char **reason)
     if (data_va == 0) {
         free_image_with_vnode(&img);
         kinfo("selftest: elf-data-private: no writable segment with file bytes; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
 
@@ -1314,12 +1439,10 @@ bool selftest_elf_data_private(const char **reason)
     }
     if (!ok) {
         *reason = "could not create two processes from one image";
-        elf_settle_processes(procs0);
         return false;
     }
     if (!measured) {
         kinfo("selftest: elf-data-private: the data page is not present in both; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     if (after2 != before2) {
@@ -1327,23 +1450,19 @@ bool selftest_elf_data_private(const char **reason)
                "(%02x -> %02x) at %p",
                before2, after2, (void *)data_va);
         *reason = "two processes share a writable segment";
-        elf_settle_processes(procs0);
         return false;
     }
     kinfo("selftest: elf-data-private: a store in one process's data (now %02x) left the other's at %02x",
           after1, after2);
-    elf_settle_processes(procs0);
     return true;
 }
 
 bool selftest_elf_text_ro(const char **reason);
 bool selftest_elf_text_ro(const char **reason)
 {
-    unsigned procs0 = process_count();
     struct process_image img = { 0 };
     if (read_image_with_vnode("/boot/init", &img) != 0) {
         kinfo("selftest: elf-text-ro: /boot/init unreadable; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     struct elf_info info;
@@ -1351,7 +1470,6 @@ bool selftest_elf_text_ro(const char **reason)
     if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
         free_image_with_vnode(&img);
         *reason = "the boot image does not validate";
-        elf_settle_processes(procs0);
         return false;
     }
     uint64_t text_va = 0, tail_va = 0;
@@ -1370,7 +1488,6 @@ bool selftest_elf_text_ro(const char **reason)
     free_image_with_vnode(&img);
     if (!ok) {
         *reason = "could not create the process";
-        elf_settle_processes(procs0);
         return false;
     }
 
@@ -1412,7 +1529,6 @@ bool selftest_elf_text_ro(const char **reason)
 
     if (text_va != 0 && prot_rc == 0) {
         *reason = "shared text could be made writable";
-        elf_settle_processes(procs0);
         return false;
     }
     if (tail_va != 0 && tail_rc != 0) {
@@ -1422,23 +1538,19 @@ bool selftest_elf_text_ro(const char **reason)
         kerror("selftest: elf-text-ro: the zero tail at %p reads %02x %02x %02x %02x",
                (void *)tail_va, tail[0], tail[1], tail[2], tail[3]);
         *reason = "a segment's zero tail is not zero";
-        elf_settle_processes(procs0);
         return false;
     }
     kinfo("selftest: elf-text-ro: shared text refuses PROT_WRITE (%d), and the zero tail reads as zero",
           prot_rc);
-    elf_settle_processes(procs0);
     return true;
 }
 
 bool selftest_elf_txtbsy(const char **reason);
 bool selftest_elf_txtbsy(const char **reason)
 {
-    unsigned procs0 = process_count();
     struct process_image src = { 0 };
     if (read_image_with_vnode("/boot/init", &src) != 0) {
         kinfo("selftest: elf-txtbsy: /boot/init unreadable; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     /* A copy of the program, which this test may write to. */
@@ -1448,7 +1560,6 @@ bool selftest_elf_txtbsy(const char **reason)
     if (rc != 0) {
         free_image_with_vnode(&src);
         kinfo("selftest: elf-txtbsy: cannot create %s (%d); skipping", path, rc);
-        elf_settle_processes(procs0);
         return true;
     }
     size_t off = 0;
@@ -1465,7 +1576,6 @@ bool selftest_elf_txtbsy(const char **reason)
     if (!wrote) {
         vfs_unlink(NULL, path);
         *reason = "could not write the copy this test runs on";
-        elf_settle_processes(procs0);
         return false;
     }
 
@@ -1473,7 +1583,6 @@ bool selftest_elf_txtbsy(const char **reason)
     if (read_image_with_vnode(path, &img) != 0) {
         vfs_unlink(NULL, path);
         *reason = "the copy is unreadable";
-        elf_settle_processes(procs0);
         return false;
     }
     /* Where this program's shared text lands, so the wait below can see
@@ -1646,13 +1755,11 @@ bool selftest_elf_txtbsy(const char **reason)
 
     if (!ok) {
         *reason = "could not run the copy";
-        elf_settle_processes(procs0);
         return false;
     }
     if (!alive) {
         kinfo("selftest: elf-txtbsy: this copy's text was not shared from the file, so there is "
               "nothing for the interlock to refuse; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     if (busy_rc != -ETXTBSY) {
@@ -1661,48 +1768,41 @@ bool selftest_elf_txtbsy(const char **reason)
                (long long)busy_rc, -ETXTBSY, same_vnode ? "is" : "IS NOT",
                direct_busy ? "IS" : "is not");
         *reason = "a file being executed could be written";
-        elf_settle_processes(procs0);
         return false;
     }
     if (trunc_rc != -ETXTBSY) {
         kerror("selftest: elf-txtbsy: truncating a running program returned %d, wanted %d",
                trunc_rc, -ETXTBSY);
         *reason = "a file being executed could be truncated";
-        elf_settle_processes(procs0);
         return false;
     }
     if (wshared_rc != -ETXTBSY) {
         kerror("selftest: elf-txtbsy: a writable shared mapping of a running program returned %d, wanted %d",
                wshared_rc, -ETXTBSY);
         *reason = "a running program's text could be mapped writable and shared";
-        elf_settle_processes(procs0);
         return false;
     }
     if (wpriv_rc != 0) {
         kerror("selftest: elf-txtbsy: a PRIVATE writable mapping of a running program returned %d, wanted 0",
                wpriv_rc);
         *reason = "the refusal is about writability, not about the shared frame";
-        elf_settle_processes(procs0);
         return false;
     }
     if (text_after_w_rc != -ETXTBSY) {
         kerror("selftest: elf-txtbsy: a text mapping made after a writable shared one returned %d, wanted %d",
                text_after_w_rc, -ETXTBSY);
         *reason = "the two mappings are refused in one order only";
-        elf_settle_processes(procs0);
         return false;
     }
     if (free_rc != 1) {
         kerror("selftest: elf-txtbsy: writing after the process exited returned %lld, wanted 1",
                (long long)free_rc);
         *reason = "a file stayed busy after the process running it exited";
-        elf_settle_processes(procs0);
         return false;
     }
     kinfo("selftest: elf-txtbsy: a write, a truncate and a writable shared mapping of a running "
           "program are all -ETXTBSY -- a private one is not -- the text mapping is refused after a "
           "writable shared one too, and the write succeeds once it exits");
-    elf_settle_processes(procs0);
     return true;
 }
 
@@ -1714,11 +1814,9 @@ bool selftest_elf_txtbsy(const char **reason)
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_share_cost(const char **reason)
 {
-    unsigned procs0 = process_count();
     struct process_image img = { 0 };
     if (read_image_with_vnode("/boot/init", &img) != 0) {
         kinfo("selftest: elf-share-cost: /boot/init unreadable; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
     enum { COPIES = 3 };
@@ -1745,7 +1843,6 @@ bool selftest_elf_share_cost(const char **reason)
     free_image_with_vnode(&img);
     if (made < 2) {
         *reason = "could not create two processes";
-        elf_settle_processes(procs0);
         return false;
     }
     /*
@@ -1763,25 +1860,21 @@ bool selftest_elf_share_cost(const char **reason)
         kerror("selftest: elf-share-cost: a copy cost %llu pages, over the bound of %u",
                (unsigned long long)cost[made - 1], ELF_COST_MAX_PAGES);
         *reason = "a process costs more than a shared, demand-paged image should";
-        elf_settle_processes(procs0);
         return false;
     }
     kinfo("selftest: elf-share-cost: pages per copy %llu, %llu, %llu (bound %u; the report measured 89 with no sharing)",
           (unsigned long long)cost[0], (unsigned long long)cost[1],
           (unsigned long long)(made > 2 ? cost[2] : 0), ELF_COST_MAX_PAGES);
     (void)reason;
-    elf_settle_processes(procs0);
     return true;
 }
 
 bool selftest_elf_shared_text(const char **reason)
 {
-    unsigned procs0 = process_count();
     struct process_image img = { 0 };
     int rc = read_image_with_vnode("/boot/init", &img);
     if (rc) {
         kinfo("selftest: elf-shared-text: /boot/init unreadable (%d); skipping", rc);
-        elf_settle_processes(procs0);
         return true;
     }
     struct elf_info info;
@@ -1789,7 +1882,6 @@ bool selftest_elf_shared_text(const char **reason)
     if (elf_validate(img.data, img.size, USER_LO, USER_HI, &info, &why) != 0) {
         free_image_with_vnode(&img);
         *reason = "the boot image does not validate";
-        elf_settle_processes(procs0);
         return false;
     }
     /* The first executable segment's first page: what two processes
@@ -1803,7 +1895,6 @@ bool selftest_elf_shared_text(const char **reason)
     if (text_va == 0) {
         free_image_with_vnode(&img);
         kinfo("selftest: elf-shared-text: no shareable executable segment; skipping");
-        elf_settle_processes(procs0);
         return true;
     }
 
@@ -1843,7 +1934,6 @@ bool selftest_elf_shared_text(const char **reason)
 
     if (!ok) {
         *reason = "could not create two processes from one image";
-        elf_settle_processes(procs0);
         return false;
     }
     if (!got1 || !got2) {
@@ -1852,19 +1942,16 @@ bool selftest_elf_shared_text(const char **reason)
          * has a benign reading. */
         kinfo("selftest: elf-shared-text: text page not present in %s; skipping the identity check",
               !got1 && !got2 ? "either space" : (!got1 ? "the first space" : "the second space"));
-        elf_settle_processes(procs0);
         return true;
     }
     if (pa1 != pa2) {
         kerror("selftest: elf-shared-text: va %p maps to %p in one process and %p in the other",
                (void *)text_va, (void *)pa1, (void *)pa2);
         *reason = "two processes running one program have separate copies of its text";
-        elf_settle_processes(procs0);
         return false;
     }
     kinfo("selftest: elf-shared-text: two processes map va %p to the same frame %p",
           (void *)text_va, (void *)pa1);
-    elf_settle_processes(procs0);
     return true;
 }
 

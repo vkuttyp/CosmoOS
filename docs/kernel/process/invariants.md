@@ -585,6 +585,38 @@ memory and is never inside the few instructions where the free lands. The
 fix stands on its construction, and what would prove it is a kernel-side
 seam of the kind `docs/audit/next-subsystem-condvar.md` used.
 
+## The self-tests and the process table
+
+**P33. Nothing a self-test spawns outlives it, and a test asks about its
+own process by pid.** (The proc-settle unit,
+`docs/audit/next-subsystem-proc-settle.md`.) A process exits and is
+released in two steps. The reaper runs `process_last_thread_gone`, which
+completes the exit that a waiter wakes on, and only then drops the
+exited thread's reference; the release runs when the last reference
+drops, which may be the reaper's. A test that waits for the exit and
+drops its own reference can return with its process still in the
+table. The next test's `run_module` used to count the machine's
+processes, took that one into `before`, saw it released in its window,
+and could never get back to `before` (`dev-tty-none` on CI,
+`signal-group`, `tty-isatty`). So:
+
+- `run_module` waits for **its own pid** to leave the table
+  (`process_present`, which takes no reference; a pid is never reused,
+  so it names one process for the machine's life), and names the pid if
+  it does not;
+- the runner (`selftest_run_all`), after every test, waits up to two
+  seconds for the table to empty (`selftest_leftover_processes`) and
+  fails a test that leaves a process. It logs up to sixteen of the pids
+  left, each with its name, state, references and threads, and counts
+  any beyond that. The wait counts in the test's time. The check returns
+  one locked snapshot of the table: the count and the pids it names are
+  the same reading.
+
+*Checked by*: `process-gone-order` forces the CI order with a reap hold
+armed by pid (debug builds) and requires `run_module` to pass while the
+count ends one below where it began; `process-leftover-named` requires
+the runner's check to name a held process by pid.
+
 ## Gaps (documented, not invariants)
 
 - **The cwd race is not proved by a test**, only by construction, and the

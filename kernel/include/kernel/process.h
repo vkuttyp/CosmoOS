@@ -392,6 +392,25 @@ struct process *process_current(void);
 
 struct process *process_lookup(pid_t pid);   /* referenced or NULL */
 
+/* Is `pid` still in the process table -- its release not yet finished?
+ * Takes no reference. Pids are never reused, so a pid names one process
+ * for the machine's life: this is how a test asks about *its* process
+ * rather than counting the machine's (P33). */
+bool process_present(pid_t pid);
+/* The table's pids, up to `max` of them; returns how many there are. */
+unsigned process_table_pids(pid_t *out, unsigned max);
+/* One line about `pid` -- name, state, references, threads -- or false
+ * if it has left the table. */
+bool process_describe(pid_t pid, char *buf, size_t n);
+
+/* Test-only, debug builds (docs/audit/next-subsystem-proc-settle.md):
+ * the reaper parks after `pid` has become a zombie and before it drops
+ * the exited thread's reference to it, until released. Armed by pid. */
+void process_test_hold_reap(pid_t pid);
+bool process_test_reap_held(void);          /* the reaper is parked on it */
+void process_test_release_reap(void);       /* disarm, and let a parked reaper go */
+void process_test_reap_hook(struct process *p);   /* the reaper's side (thread_put) */
+
 /* Sessions and process groups (docs/kernel/process/design.md).
  * `pid` 0 means the caller in each of these, as POSIX has it. */
 /* Job control (docs/kernel/process/design.md, "Stopping"). Posting a

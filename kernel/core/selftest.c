@@ -16,6 +16,8 @@
 #include <kernel/log.h>
 #include <kernel/timer.h>
 #include <kernel/printf.h>
+#include <kernel/process.h>
+#include <kernel/thread.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <arch/cpu.h>
@@ -752,6 +754,8 @@ static const struct selftest tests[] = {
     { "signal-mask",     selftest_signal_mask },
     { "signal-fault",    selftest_signal_fault },
     { "process-reaped",  selftest_process_reaped },
+    { "process-gone-order", selftest_process_gone_order },
+    { "process-leftover-named", selftest_process_leftover_named },
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
     { "signal-stop",     selftest_signal_stop },
@@ -788,6 +792,32 @@ static const struct selftest tests[] = {
     { "elf-txtbsy",      selftest_elf_txtbsy },
 };
 
+/*
+ * P33: nothing a self-test spawns outlives it. A test waits for its
+ * process to exit and drops its reference, but the reaper may hold the
+ * last one for a while after; a process released during the *next* test
+ * broke that test's count and was blamed on it, three times in three
+ * tests (docs/audit/next-subsystem-proc-settle.md). So the runner waits
+ * up to `wait_ns` for the table to empty after every test, and a test
+ * that leaves a process fails, by name.
+ *
+ * Returns how many processes are left and fills up to `max` of their
+ * pids. It logs nothing: the runner names what it finds, and the test of
+ * this check (process-leftover-named) finds one on purpose.
+ */
+unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max)
+{
+    /* One locked snapshot decides and is returned: the count it reports
+     * and the pids it names are the same reading of the table. */
+    uint64_t deadline = clock_deadline_ns(wait_ns);
+    for (;;) {
+        unsigned n = process_table_pids(pids, max);
+        if (n == 0 || clock_deadline_passed(deadline))
+            return n;
+        thread_sleep_ms(1);
+    }
+}
+
 int selftest_run_all(void)
 {
     int failed = 0;
@@ -803,6 +833,23 @@ int selftest_run_all(void)
         sched_watchdog_kick();
         uint64_t t0 = clock_now_ns();
         bool ok = tests[i].fn(&reason);
+        {
+            /* Counted in the test's time, so the budget sees the wait. */
+            enum { LEFT_NAMED = 16 };
+            uint32_t left[LEFT_NAMED];
+            unsigned nleft = selftest_leftover_processes(2000ull * 1000 * 1000, left, LEFT_NAMED);
+            for (unsigned k = 0; k < nleft && k < LEFT_NAMED; k++) {
+                char what[96];
+                if (process_describe(left[k], what, sizeof(what)))
+                    kerror("selftest: %s left %s", tests[i].name, what);
+            }
+            if (nleft > LEFT_NAMED)
+                kerror("selftest: %s left %u more processes, not named", tests[i].name, nleft - LEFT_NAMED);
+            if (nleft != 0 && ok) {
+                ok = false;
+                reason = "a process it spawned outlived it (P33)";
+            }
+        }
         uint64_t dt = clock_since_ns(t0);
         total_ns += dt;
         if (dt > slowest_ns) {

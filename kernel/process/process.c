@@ -13,6 +13,7 @@
 #include <kernel/utsns.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/printf.h>
 #include <kernel/futex.h>
 #include <kernel/uaccess.h>
 #include <kernel/process.h>
@@ -1717,6 +1718,104 @@ unsigned process_count(void)
 {
     return g_process_count;
 }
+
+/*
+ * A process by name, not by count (P33). The count covers every process
+ * on the machine, so a check on it holds only while nothing else is
+ * created or released -- and the previous test's process, released
+ * late by the reaper, was (docs/audit/next-subsystem-proc-settle.md).
+ * A pid is never reused, so it names one process for the machine's life.
+ */
+bool process_present(pid_t pid)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    bool in = false;
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link)
+        if (p->pid == pid) {
+            in = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return in;
+}
+
+unsigned process_table_pids(pid_t *out, unsigned max)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link) {
+        if (n < max)
+            out[n] = p->pid;
+        n++;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return n;
+}
+
+bool process_describe(pid_t pid, char *buf, size_t n)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link) {
+        if (p->pid != pid)
+            continue;
+        /* state and nr_threads change under p->lock; table lock first,
+         * as process_last_thread_gone takes them */
+        arch_irq_state_t ps = spin_lock_irqsave(&p->lock);
+        int state = (int)p->state;
+        unsigned threads = p->nr_threads;
+        spin_unlock_irqrestore(&p->lock, ps);
+        ksnprintf(buf, n, "pid %u '%s' (state %d, %u references, %u threads)", p->pid, p->name, state,
+                  __atomic_load_n(&p->obj.refcount, __ATOMIC_RELAXED), threads);
+        spin_unlock_irqrestore(&g_process_table_lock, s);
+        return true;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return false;
+}
+
+#if CONFIG_DEBUG
+/*
+ * The reap hold (docs/audit/next-subsystem-proc-settle.md). The reaper
+ * parks after `pid`'s last thread has made it a zombie -- its exit is
+ * complete, its waiter woken -- and before it drops that thread's
+ * reference, until the test releases it. Armed by identity: any other
+ * process passes. The reaper is one thread, so every exit queued behind
+ * a parked one waits too, which is what makes an order certain.
+ */
+static pid_t g_reap_hold_pid;   /* 0: disarmed */
+static unsigned g_reap_held;
+static struct completion g_reap_go;
+
+void process_test_hold_reap(pid_t pid)
+{
+    completion_init(&g_reap_go, "reap-hold");
+    __atomic_store_n(&g_reap_held, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_reap_hold_pid, pid, __ATOMIC_RELEASE);
+}
+
+bool process_test_reap_held(void)
+{
+    return __atomic_load_n(&g_reap_held, __ATOMIC_ACQUIRE) != 0;
+}
+
+void process_test_release_reap(void)
+{
+    __atomic_store_n(&g_reap_hold_pid, 0, __ATOMIC_RELEASE);   /* disarm first: nothing new parks */
+    complete(&g_reap_go);
+}
+
+void process_test_reap_hook(struct process *p)
+{
+    pid_t want = p->pid;
+    if (!__atomic_compare_exchange_n(&g_reap_hold_pid, &want, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_reap_held, 1u, __ATOMIC_RELEASE);
+    wait_for_completion(&g_reap_go);
+}
+#endif
 
 /* --- sessions and process groups (docs/kernel/process/design.md) ---------
  *
