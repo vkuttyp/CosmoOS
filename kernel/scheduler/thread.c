@@ -289,6 +289,10 @@ void thread_put(struct thread *t)
         spin_unlock_irqrestore(&p->lock, s);
         if (last)
             process_last_thread_gone(p);
+#if CONFIG_DEBUG
+        if (last)
+            process_test_reap_hook(p);   /* a zombie now: a test may hold its release here */
+#endif
         process_put(p);
     }
     kmem_cache_free(g_thread_cache, t);

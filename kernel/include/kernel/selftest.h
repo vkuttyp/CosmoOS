@@ -12,6 +12,7 @@
 #define KERNEL_SELFTEST_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Returns the number of failed tests. */
 int selftest_run_all(void);
@@ -182,6 +183,12 @@ bool selftest_process_nproc(const char **reason);     /* NPROC admission under c
 bool selftest_elf_data_private(const char **reason);
 bool selftest_elf_text_ro(const char **reason);
 bool selftest_elf_txtbsy(const char **reason);
+bool selftest_process_gone_order(const char **reason);    /* a leftover released in a run_module's window (P33) */
+bool selftest_process_leftover_named(const char **reason); /* the runner names a process a test left (P33) */
+/* kernel/core/selftest.c: the runner's P33 check, waiting up to `wait_ns`
+ * for the process table to empty; returns how many are left and up to
+ * `max` of their pids. */
+unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max);
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_shared_text(const char **reason);   /* one program, one set of text frames */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
