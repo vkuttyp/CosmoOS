@@ -188,10 +188,10 @@ The test gets three phases:
    the head of its queue in time proportional to the queue ahead of it.
 3. **Every worker runs again.** A snapshot of each worker's rounds is
    taken as the migrator stops. The test then waits for each worker's
-   rounds to pass its snapshot, counting its waits (`thread_sleep_ms(1)`,
-   bounded at 5 000 as a hang guard, not a latency claim; as built, a 2 s
-   deadline -- see the banner). A thread a
-   migration stranded never runs again, and the guard names it. Then the
+   rounds to pass its snapshot, sleeping 1 ms between checks until a 2 s
+   deadline (`STRESS_RUN_AGAIN_NS`) -- a hang guard, not a latency claim;
+   the banner says why it is a deadline and not a count of sleeps. A
+   thread a migration stranded never runs again, and the guard names it. Then the
    workers' `stop`, every ping-pong completion completed (as the test does
    today: a half blocked on its partner cannot see `stop`), and join.
 

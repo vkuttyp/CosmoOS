@@ -2239,7 +2239,7 @@ struct stress_run {
  * must happen. Then the migrator stops (its own flag) and is joined. Then,
  * with nothing re-queueing threads, every worker must run again -- its
  * rounds pass the snapshot taken as the migrator stopped -- within a
- * count-based hang guard. A late starter, whose first round comes after
+ * 2 s deadline (STRESS_RUN_AGAIN_NS), a hang guard. A late starter, whose first round comes after
  * the stress window, makes the old window assertion fail on every boot if
  * it is ever restored. A worker that fails is named; one that never says
  * it is leaving is not joined (that would hang the boot), and the run's
