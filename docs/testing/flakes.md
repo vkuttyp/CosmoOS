@@ -2335,6 +2335,13 @@ boot:
   child's release once its thread is reaped. The reaper's turn came
   later than that once under migration; the bound catches a leak, not
   slowness, and is two seconds now (`LOAD-SENSITIVE`).
+  **Two seconds was exceeded once too, on CI, 2026-09-28**, and not under
+  the chaos migrator: `dev-tty-none ... FAIL: check failed:
+  process_count() == before at line 254 (2107 ms)`, the plain aarch64
+  debug boot of the irq-order unit's PR (run 36389174994, `439be9fb`, a
+  change to vGIC tests that skip in that boot). Same helper
+  (`run_module`, `kernel/process/proctest.c`), same bound. First sighting
+  at two seconds.
 
 ## `tcp-pcb-timer-free`'s held callback parked on a CPU nobody could release it from
 
