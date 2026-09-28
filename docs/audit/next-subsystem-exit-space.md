@@ -53,15 +53,19 @@ boot confirmed.
 user program meets it.
 
 **Where a teardown goes** (`--parts`, every `vm_space_destroy` in a
-boot, means):
+boot, means; two boots per architecture, each counted per space):
 
-| | aarch64 (616 teardowns) | x86-64 (601) |
+| | aarch64 (616, 617 teardowns) | x86-64 (601, 602) |
 |---|---|---|
-| regions / pages walked / frames freed / chunks | 13.0 / 2104 / 49 / 76 | 13.3 / 2138 / 60 / 78 |
-| walk (a query per page, and the unmap, under the lock) | 5.9 ms | 1.2 ms |
-| shootdowns (one cross-CPU round per 32-page chunk) | 4.5 ms | 2.8 ms |
-| frees | 1.4 ms | 1.5 ms |
-| **all** | **11.8 ms** | **5.7 ms** |
+| regions / pages walked / frames freed / chunks | 13.0 / 2073–2104 / 49 / 76 | 13.3 / 2122–2138 / 59–60 / 77–78 |
+| walk (a query per page, and the unmap, under the lock) | 5.9–9.0 ms | 1.2–1.6 ms |
+| shootdowns (one cross-CPU round per 32-page chunk) | 4.5–7.4 ms | 2.8–4.4 ms |
+| frees | 1.4–1.5 ms | 1.5–1.7 ms |
+| **all** | **11.8–18.1 ms** | **5.7–7.9 ms** |
+
+The timing itself slows each teardown, and the window widens with it:
+the second aarch64 `--parts` boot refused 7 of 60 rewrites, with the file
+busy for up to 16 ms. The `--parts` boots are not counted above.
 
 About 97% of the pages walked are empty. The 8 MB stack reservation
 (`USER_STACK_SIZE`) is 2,048 of them, and each is queried from the root.
@@ -120,7 +124,7 @@ left a process once, not every test after it.
   reference drops. The proc-settle probe saw that take a whole test
   (`dev-tty`'s process, released during `dev-tty-none`).
 - The teardown walks every page of every region, and shoots down each
-  chunk of a space no CPU runs. That costs 5.7–11.8 ms per process
+  chunk of a space no CPU runs. That costs 5.7–18.1 ms per process
   exit, on the single reaper thread or in whichever thread drops the
   last reference.
 
@@ -232,8 +236,8 @@ translation: the invalidate precedes the frees.
 
 **Failure.** Unchanged: `vm_space_destroy` cannot fail.
 
-**Performance.** 3.6 ms instead of 11.8 ms per teardown on aarch64,
-1.5 ms instead of 5.7 ms on x86-64, and 12–14% off the self-test suite
+**Performance.** 3.6 ms instead of 11.8–18.1 ms per teardown on
+aarch64, 1.5 ms instead of 5.7–7.9 ms on x86-64, and 12–14% off the self-test suite
 in the probe's boots. It is paid at exit, on the reaper, before the
 parent is told.
 

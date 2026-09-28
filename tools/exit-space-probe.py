@@ -97,10 +97,12 @@ static int txtbsy_race(unsigned n)
         }
     }
     unlink(path);
+    /* A rewrite that failed for another reason measured nothing: say so
+     * with a status the kernel test fails on, not only in the line. */
     printf("TXBPROBE: %u of %u rewrites after waitpid refused with ETXTBSY (%u other errors); busy for %llu us at most, %llu us in all\\n",
            busy, n, other, (unsigned long long)(longest / 1000), (unsigned long long)(total / 1000));
     fflush(stdout);
-    return 0;
+    return other != 0 ? 6 : 0;
 }
 
 int main(int argc, char **argv)
@@ -139,12 +141,12 @@ VMM_C = 'kernel/memory/vmm.c'
 # --parts: where a space's teardown goes. Every vm_space_destroy logs its
 # regions, pages walked, frames freed and chunks, and the time in the
 # walk (query + unmap under the lock), the shootdowns and the frees.
-PARTS = [(VMM_C, [
-    ("""static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t size)
-{""", """static uint64_t esp_walk_ns, esp_shoot_ns, esp_free_ns, esp_pages, esp_frames, esp_chunks;   /* ESPARTS */
-static bool esp_on;
-static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t size)
-{"""),
+PARTS = [('kernel/include/kernel/vmm.h', [("""struct vm_space {
+    struct arch_mmu_context mmu;""", """struct vm_space {
+    uint64_t esp[6];   /* ESPARTS: walk, shoot, free ns; pages, frames, chunks -- per space, so */
+    bool esp_on;       /* two teardowns at once never share a counter */
+    struct arch_mmu_context mmu;""")]),
+         (VMM_C, [
     ("""        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
         for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
             paddr_t pa;
@@ -153,10 +155,10 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
         arch_irq_state_t s = spin_lock_irqsave(&space->lock);
         for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
             paddr_t pa;
-            esp_pages++;
+            space->esp[3]++;
             if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
                 continue;
-            esp_frames++;"""),
+            space->esp[4]++;"""),
     ("""        spin_unlock_irqrestore(&space->lock, s);
 
         user_shootdown(space, va, chunk);
@@ -174,17 +176,18 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
          * frame the cache's own is never the mapping's to drop. */
         for (unsigned i = 0; i < n; i++)
             pmm_page_put(frames[i]);
-        if (esp_on) {   /* ESPARTS */
-            esp_walk_ns += esp_t1 - esp_t0;
-            esp_shoot_ns += esp_t2 - esp_t1;
-            esp_free_ns += clock_now_ns() - esp_t2;
-            esp_chunks++;
+        if (space->esp_on) {   /* ESPARTS */
+            space->esp[0] += esp_t1 - esp_t0;
+            space->esp[1] += esp_t2 - esp_t1;
+            space->esp[2] += clock_now_ns() - esp_t2;
+            space->esp[5]++;
         }"""),
     ("""    KASSERT(raw_this_cpu()->cur_space != space);
 
     for (;;) {""", """    KASSERT(raw_this_cpu()->cur_space != space);
-    esp_walk_ns = esp_shoot_ns = esp_free_ns = esp_pages = esp_frames = esp_chunks = 0;   /* ESPARTS */
-    esp_on = true;
+    for (unsigned q = 0; q < 6; q++)   /* ESPARTS */
+        space->esp[q] = 0;
+    space->esp_on = true;
     unsigned esp_regions = 0;
     uint64_t esp_start = clock_now_ns();
 
@@ -195,11 +198,11 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
         region_put(r);
         esp_regions++;   /* ESPARTS */
     }
-    esp_on = false;
+    space->esp_on = false;
     kinfo("ESPARTS: %u regions, %llu pages walked, %llu frames, %llu chunks: walk %llu us, shootdown %llu us, free %llu us, all %llu us",
-          esp_regions, (unsigned long long)esp_pages, (unsigned long long)esp_frames, (unsigned long long)esp_chunks,
-          (unsigned long long)(esp_walk_ns / 1000), (unsigned long long)(esp_shoot_ns / 1000),
-          (unsigned long long)(esp_free_ns / 1000), (unsigned long long)((clock_now_ns() - esp_start) / 1000));"""),
+          esp_regions, (unsigned long long)space->esp[3], (unsigned long long)space->esp[4], (unsigned long long)space->esp[5],
+          (unsigned long long)(space->esp[0] / 1000), (unsigned long long)(space->esp[1] / 1000),
+          (unsigned long long)(space->esp[2] / 1000), (unsigned long long)((clock_now_ns() - esp_start) / 1000));"""),
 ])]
 
 
