@@ -2241,6 +2241,14 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `syscall-fuzz` over the per-test budget, 2026-09-28
+
+`self-test syscall-fuzz took 8305 ms (budget 8000 ms)`, local, aarch64
+GIC boot (`make test-gic`), on the irq-order unit's branch after a
+comment-only change. All 403 self-tests passed; the failure is the
+harness's per-test 8 s budget, over by 305 ms. The rerun passed. First
+sighting.
+
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 
 Local, aarch64 debug, both on the balance-pair fix's branch, which changes
