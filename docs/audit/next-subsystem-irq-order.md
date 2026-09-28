@@ -28,8 +28,9 @@ was pending behind 42, first.
 - **The list register is refilled only at entry.** There is one list
   register and no maintenance interrupt (`ICH_HCR_EL2` has only `EN`).
   So the host places a pending interrupt only when the vCPU enters:
-  the owner's `vintr_take_lowest` and `el2_vdist_offer`
-  (`kernel/arch/aarch64/hv_el2.c`).
+  the owner's offer (`vintr_take_lowest`,
+  `kernel-services/virtualization/vintr.c`, called from `vcpu_run`) and
+  the distributor's (`el2_vdist_offer`, `kernel/arch/aarch64/hv_el2.c`).
 - **`vcpu_run` re-enters without returning after some exits**
   (`kernel-services/virtualization/vcpu.c`): a host interrupt
   (`HV_EXIT_INTR`) and a guest access to its own GIC (`HV_EXIT_EMULATED`).
@@ -58,7 +59,7 @@ a revision that touched the hypervisor:
 | 35205713978 (`main`) | 2026-09-17 | 1157 | (before the instrument) — not in `flakes.md` |
 | (the mprotect unit, `60ccfd7`) | 2026-09-20 | 1157 | (before the instrument) |
 | 35726616478 | 2026-09-22 | 1159 | (before the instrument) |
-| 35728477825 | 2026-09-22 | 1185 | hypercall 42: the first half's order, since fixed |
+| 35728477825 | 2026-09-22 | 1185 | hypercall 42: the first half's order, since fixed (`flakes.md` gives 35730173247, which is neither a run nor a job) |
 | 36112785285 | 2026-09-25 | 1239 | hypercall 5: the second half's order |
 
 **Deterministic, from the mechanism.** `tools/irq-order-probe.py` puts
