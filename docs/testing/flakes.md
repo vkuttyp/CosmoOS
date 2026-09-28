@@ -2269,6 +2269,12 @@ migrate-stress unit. The mutation strands only that test's own workers,
 and `sched-load` runs before it, so the mutation had no effect on it.
 The same test passed in every other boot of the unit. First sighting.
 
+**Second sighting, 2026-09-28**, the same line in 0 ms, in the x86-64
+chaos boot of the exit-space unit's branch. `sched-load` runs at registry
+line 492, before any process test and before any address space is torn
+down, so the branch's change is not on its path. The rerun passed. Two
+sightings, both x86-64, one plain and one chaos.
+
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 
 Local, aarch64 debug, both on the balance-pair fix's branch, which changes
@@ -2530,11 +2536,12 @@ reproduced the CI failure on every boot (2117 / 2094 ms).
 leaves a process, naming it. `process-gone-order` forces the CI order on
 every debug boot.
 
-**Also found, not fixed:** an exited process keeps its address space
-until its last reference drops. Under the probe's delay `elf-txtbsy`
-gets `-ETXTBSY` writing a program its child ran after the child's exit,
-on both architectures. No natural sighting; recorded as the next unit
-in the deferred-work inventory.
+**Also found, and fixed by the exit-space unit (PR #253):** an exited
+process kept its address space until its last reference dropped. Under
+the probe's delay `elf-txtbsy` got `-ETXTBSY` writing a program its
+child ran after the child's exit, on both architectures, and a user
+program met it unforced 10 times in 4,200 rounds. The space now goes
+before `EXITED` is published (P34).
 
 ## `sched-migrate-refuses`: the running spinner refused as "affinity", 2026-09-28
 
@@ -2548,4 +2555,27 @@ It was refused for its affinity instead, which is the answer for a
 pinned thread that is queued rather than running: at that instant the
 spinner was not on its CPU. First sighting; the test assumes a state it
 does not wait for.
+
+**Second sighting, the same day, in a plain boot:** the same check, the
+same answer (`the running spinner: affinity`, 20 ms), local x86-64 debug,
+in a boot of the exit-space unit's probe, which changes only `init` and
+one process test. `sched-migrate-refuses` runs at registry line 501, long
+before any process test, so neither this probe nor P33's runner check
+(which returns at once on an empty table) is on its path. The test
+treats "its pinned worker is queued" as proof that the spinner holds the
+CPU, but a higher-priority thread briefly on that CPU queues both. Two
+sightings, both x86-64: a candidate for its own unit.
+
+## Four host-networking tests together, twice, 2026-09-28
+
+`net-hostinput`, `net-hoststate`, `net-flows-fw` and `net-output` failed
+together in two local debug boots on one day: the x86-64 mutation boot
+of the proc-settle unit that made `process_present` always false, and an
+aarch64 boot of the exit-space probe's first `--fix` candidate. Each
+failed on its first frame not arriving (about 3 s for three of them, 0.5 s
+for `net-flows-fw`). None of them runs near a process test or touches the
+code either change made. Three of the four are the set recorded under
+"`mmu: TLB shootdown acknowledged by 2 of 3 CPUs`", whose cause was the
+host not scheduling the machine's vCPU threads; both boots ran beside
+another boot. Recorded, not attributed.
 

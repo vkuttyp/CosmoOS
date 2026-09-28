@@ -617,6 +617,30 @@ armed by pid (debug builds) and requires `run_module` to pass while the
 count ends one below where it began; `process-leftover-named` requires
 the runner's check to name a held process by pid.
 
+A process left behind is blamed once (the exit-space unit). The runner
+remembers the pids it has reported and later checks ignore them until
+they leave the table. Without this, a test that leaked its reference --
+a `CHECK` that returned before its put -- failed every test after it for
+the same pid, 19 in one boot. *Checked by*: `p33-once`.
+
+**P34. An exited process has no address space.** (The exit-space unit,
+`docs/audit/next-subsystem-exit-space.md`.) `process_last_thread_gone`
+tears the space down first -- before it takes a lock, and before it
+publishes `EXITED`, the state `waitpid` reaps on -- and sets `p->space`
+to `NULL`. Whoever learns that a process has exited (its waiter, its
+parent, `kill(pid, 0)`) learns it after the process's frames are free and
+its text no longer holds its program busy. It used to go only at
+release, when the last reference dropped: a program that waited for a
+child and rewrote the child's binary was refused `-ETXTBSY` 10 times in
+4,200 rounds (0 of 1,800 now), and placed after `EXITED` was published,
+a parent already looking still reaped mid-teardown. Nothing reads a
+zombie's space: its threads are gone, every syscall uses the caller's
+own, and `process_release` and `thread_clear_tid` accept `NULL`.
+*Checked by*: `exit-space-order` (a second reap hold, after the teardown
+and before `EXITED`: the program must be writable there and the child
+not yet reapable), and `elf-txtbsy`, whose write after the child's exit
+is now the semantics rather than a race.
+
 ## Gaps (documented, not invariants)
 
 - **The cwd race is not proved by a test**, only by construction, and the

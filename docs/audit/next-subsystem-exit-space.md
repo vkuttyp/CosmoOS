@@ -1,7 +1,43 @@
 # NEXT SUBSYSTEM — an exited process keeps its memory until its last reference drops
 
-> **Status: proposed.** Report and probe (`tools/exit-space-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #253).** As designed, with these specifics:
+>
+> - **The teardown at exit:** `process_last_thread_gone` destroys the
+>   space and sets `p->space = NULL` before anything else. The second
+>   hold point (`process_test_hold_exiting`) sits right after it, before
+>   `EXITED` is published. The reap hold now takes a point (0: a zombie,
+>   before the reaper's put; 1: exiting).
+> - **The dying teardown:** `dying_range_teardown` (`vmm.c`) is used only
+>   by `vm_space_destroy`, which invalidates the tag first and keeps the
+>   final invalidate. `vm_space_destroy_counted` returns the pages
+>   queried. `arch_mmu_absent_span` is added on both architectures; on
+>   aarch64 it claims nothing for the wrong half of the address space,
+>   as `arch_mmu_query` does.
+> - **P33 blames once:** `selftest_leftover_reported` and a 16-entry set,
+>   pruned from each locked snapshot of up to 64 pids. `kill_module`
+>   drops its reference before any check. `elf-txtbsy`'s copy loop
+>   became `write_program_copy`, which `exit-space-order` shares.
+> - **Tests:** `vm-teardown-absent` (memtest; queries exactly the 4
+>   populated pages), `p33-once` and `exit-space-order` (debug builds).
+> - **Measured unforced** with the probe on the built tree: **0 of 900
+>   rewrites refused on each architecture.**
+> - **Speed, side by side:** `main` and the branch, booted at the same
+>   time on the same architecture, twice each, show no measurable
+>   change in the suite's total (aarch64 109.5 and 104.1 s against 106.4
+>   and 104.0; x86-64 101.5 and 97.4 against 108.8 and 95.6).
+>   `process-user` on aarch64 was faster (7.3 and 8.0 s against 6.3 and
+>   6.0). The 12–14% below was measured with the probe's 900 extra
+>   spawns in both arms, which is where a cheaper teardown shows.
+>
+> Mutations, each alone, with its boot confirmed:
+>
+> | mutation | result |
+> |---|---|
+> | the teardown back at release | `exit-space-order` FAIL: "writing at the exiting hold returned -26" (x86-64 and aarch64) |
+> | the teardown after `EXITED` is published | `exit-space-order` FAIL, the same (x86-64) |
+> | the absent-span skip disabled | `vm-teardown-absent` FAIL: "queried 2052 pages" |
+> | blame-once forgotten | `p33-once` FAIL: "a process already reported was reported again" |
+> | the first invalidate removed | every test passes on both architectures, as the design said; recorded in `docs/kernel/memory/testing.md`, "The destroy-path invalidates have no test" |
 
 ## Problem
 
