@@ -2125,9 +2125,11 @@ static bool sched_migrate_refuses_pinned(const char **reason)
     uint64_t deadline = clock_deadline_ns(2000000000ULL);
     while (pw.runs == 0 && !clock_deadline_passed(deadline))
         thread_sleep_ms(1);
-    struct mig_spinner sp2 = { 0 };
+    struct mig_spinner *sp2 = kzalloc(sizeof(*sp2));
     unsigned on = pw.cpu;   /* where it runs; the spinner goes there */
-    struct thread *ts2 = on == a || on == b ? thread_create_on(mig_spinner_main, &sp2, "mig-spin2", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(on)) : NULL;
+    struct thread *ts2 = sp2 != NULL && (on == a || on == b)
+                             ? thread_create_on(mig_spinner_main, sp2, "mig-spin2", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(on))
+                             : NULL;
     bool preempted = ts2 != NULL && wait_ready_on(tp, on);
     if (preempted) {
         r = sched_migrate(tp, on == a ? b : a);
@@ -2137,9 +2139,13 @@ static bool sched_migrate_refuses_pinned(const char **reason)
         }
     }
     __atomic_store_n(&pw.release, 1u, __ATOMIC_RELEASE);
-    __atomic_store_n(&sp2.stop, 1u, __ATOMIC_RELEASE);
+    /* Joined only if it has run; otherwise abandoned, and it frees itself.
+     * Either order of this read and its entering is safe: a spinner that
+     * enters after the read is abandoned all the same. */
     if (ts2)
-        thread_join(ts2);
+        spinner_finish(sp2, ts2, __atomic_load_n(&sp2->entered, __ATOMIC_ACQUIRE) != 0);
+    else
+        kfree(sp2);
     thread_join(tp);
     if (!preempted) {
         *reason = "the worker never ran, or was never preempted on its CPU";

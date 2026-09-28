@@ -20,8 +20,11 @@
 > - A spinner that never runs is not joined (`thread_join` has no
 >   deadline): `spinner_finish` marks it abandoned, stops it, drops its
 >   reference, and it frees its own storage when it first runs. One that
->   ran is joined and freed. The spinners are allocated, never on the
->   test's stack.
+>   ran is joined and freed. Every spinner in the three tests is
+>   allocated, never on the test's stack, and goes through
+>   `spinner_finish`: the three main spinners, and
+>   `sched-migrate-refuses`' second (`mig-spin2`, the one that preempts
+>   its worker), which is joined only if it has entered.
 > - Measured: debug, release, the GIC boot and chaos boots pass on both
 >   architectures. `host-test` and `analyze` are clean.
 >
@@ -190,8 +193,9 @@ with acquire. As built, an abandoned spinner's `abandoned` flag is
 stored (release) before `stop`, and read (acquire) after the spinner
 sees `stop`, so the abandon is always seen. Nothing else changes.
 
-**Ownership and lifetime.** As built, the spinners' storage is
-allocated, never on the test's stack. A spinner that ran is joined, and
+**Ownership and lifetime.** As built, every spinner's storage in the
+three tests is allocated, never on the test's stack: the three main
+spinners and `mig-spin2`, each through `spinner_finish`. A spinner that ran is joined, and
 the test frees its storage. A spinner that never ran is not joined: the
 test marks it abandoned, stops it and drops its reference, and never
 touches the storage again. The spinner frees it when it first runs and

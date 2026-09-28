@@ -2618,3 +2618,12 @@ first in the suite, before any scheduler test the branch changes. The
 rerun passed. It is the host-time family of the old `schedtest.c` lag
 bound (widened in PR #63): the host did not schedule the machine's vCPU
 for part of the window. Recorded, not attributed.
+
+## `net-nicbench` over the per-test budget, 2026-09-29
+
+`self-test net-nicbench took 8039 ms (budget 8000 ms)`, local aarch64
+debug, one boot of the placed-running unit's branch beside an x86-64
+boot. The test passed; the harness's 8 s budget failed it, by 39 ms. The
+branch changes only three scheduler tests, which run long before it.
+The rerun passed. First sighting of this test over its budget; the
+`net-accept-race` and `syscall-fuzz` budget entries are the same family.
