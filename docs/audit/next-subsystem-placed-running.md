@@ -17,6 +17,11 @@
 >   sightings' `affinity` is the other way a spinner isn't running:
 >   never having run, which the wait now ends. With the rival, the test
 >   would have failed as `preempted`; the mutation below shows it.
+> - A spinner that never runs is not joined (`thread_join` has no
+>   deadline): `spinner_finish` marks it abandoned, stops it, drops its
+>   reference, and it frees its own storage when it first runs. One that
+>   ran is joined and freed. The spinners are allocated, never on the
+>   test's stack.
 > - Measured: debug, release, the GIC boot and chaos boots pass on both
 >   architectures. `host-test` and `analyze` are clean.
 >
@@ -130,7 +135,7 @@ failure).
   spinner 98–99% of the time. It is testing "a placed thread counts",
   not the "running" its comment says.
 
-## Current implementation
+## Current implementation (before this unit)
 
 - `mig_spinner_main` spins until `stop`. Nothing records that it ran.
 - `sched_load_pinned` waits for a non-zero `sched_cpu_load(busy)`.
@@ -193,7 +198,7 @@ acquire. Nothing else changes.
 
 ## Affected files
 
-The proposed implementation's scope; this PR changes none of them.
+The scope, built in PR #255 (the banner above says what was built).
 
 | file | change |
 |---|---|

@@ -843,7 +843,8 @@ static void mig_worker_main(void *arg)
  * of lower priority while it spins, so a worker queued there stays READY. */
 struct mig_spinner {
     volatile unsigned stop;
-    volatile unsigned entered;   /* it has run: set as its first act */
+    volatile unsigned entered;     /* it has run: set as its first act */
+    volatile unsigned abandoned;   /* nobody will join it: it frees itself (set before stop) */
 };
 
 static void mig_spinner_main(void *arg)
@@ -852,6 +853,10 @@ static void mig_spinner_main(void *arg)
     __atomic_store_n(&s->entered, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE))
         arch_cpu_relax();
+    /* After stop (acquire), so an abandon made before stop is seen: the
+     * test let go of it and will never touch `s` again. */
+    if (__atomic_load_n(&s->abandoned, __ATOMIC_ACQUIRE))
+        kfree(s);
     thread_exit(0);
 }
 
@@ -875,17 +880,20 @@ static bool wait_spinner_entered(struct mig_spinner *s)
  * Stop a spinner and let it go. One that ran is joined and its storage
  * freed. One that never ran cannot be joined -- it must run to see `stop`,
  * and thread_join has no deadline, so the join would hang the boot where
- * the test meant to report "never ran". Its reference is dropped instead
- * and its storage (allocated, never on the test's stack, for exactly
- * this) is left to it: it exits whenever it first runs.
+ * the test meant to report "never ran". It is marked abandoned before it
+ * is stopped, its reference is dropped, and it frees its own storage
+ * (allocated, never on the test's stack, for exactly this) when it first
+ * runs and sees `stop`. Exactly one of the two frees it.
  */
 static void spinner_finish(struct mig_spinner *s, struct thread *t, bool entered)
 {
-    __atomic_store_n(&s->stop, 1u, __ATOMIC_RELEASE);
     if (!entered) {
+        __atomic_store_n(&s->abandoned, 1u, __ATOMIC_RELEASE);
+        __atomic_store_n(&s->stop, 1u, __ATOMIC_RELEASE);
         thread_put(t);
-        return;
+        return;   /* `s` belongs to the spinner now */
     }
+    __atomic_store_n(&s->stop, 1u, __ATOMIC_RELEASE);
     thread_join(t);
     kfree(s);
 }
