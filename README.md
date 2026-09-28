@@ -3557,6 +3557,18 @@ See [docs/development.md](docs/development.md).
   `completion-timeout` self-test lingers a completion from another CPU and
   requires the lock free on return, and `tools/nvme-admin-probe.py`
   reproduces the exact panic on demand. (PR #245)
+- **The vGIC queue test holds in both interrupt orders.**
+  `el2-guest-irq-queue` failed on aarch64 CI's GIC boot five times. The
+  host refills its one list register only at vCPU entry, so any exit
+  between the guest's EOI and its heartbeat puts a pending interrupt
+  first. Both orders are correct, and the test asserted one of them in two
+  places, of which a fix had removed only the first.
+  `tools/irq-order-probe.py` forces that exit in all nine guests that take
+  an interrupt, and found the remaining assertion to be the only one of
+  its kind in thirteen tests. Both halves now go through one helper that
+  accepts a heartbeat while the interrupt is pending. The test runs on a
+  second guest, `guest_irq_exit`, which makes the other order happen on
+  every boot, so an assertion of either order fails at once. (PR #247)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

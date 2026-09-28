@@ -2088,6 +2088,36 @@ Three sightings, one instrument, one diagnosis, one fix. The
 instrument stays: the fifty-one hypercall expectations in that file
 now name what they got.
 
+**It was one fix of two.** A fourth sighting, on 2026-09-25 (run
+36112785285, the GIC boot of a branch that changed a report and a probe
+script), was named by the same instrument:
+
+```text
+[ERROR] selftest: hv: line 1239: expected hypercall 2, got exit kind 4 hypercall nr 5 a0 0
+```
+
+It was the second half of the same test making the same assertion: a
+resident 42 completed with INTID 5 pending, and the heartbeat required
+before 5. The fix above replaced the first half's assertion, not the
+pattern. There was also a sighting before any of these, on `main` on
+2026-09-17 (run 35205713978, line 1157), which this entry never had.
+Five in all.
+
+The mechanism, now measured (`docs/audit/next-subsystem-irq-order.md`):
+the one list register is refilled only at entry, and `vcpu_run`
+re-enters after a host interrupt or an emulated GIC access, so any exit
+between the guest's EOI and its heartbeat puts a pending interrupt first.
+`tools/irq-order-probe.py` forces that exit after every EOI in the nine
+guests that take an interrupt, thirteen tests. With it applied, the old
+tree failed line 1239 on every GIC boot and nowhere else, and the fixed
+tree passes.
+
+**Fixed as a class (PR #247).** Both halves run through one helper that
+accepts heartbeats while the awaited interrupt is pending, and the test
+runs on a second guest, `guest_irq_exit.S`, whose exit after every EOI
+makes the other order happen on every boot. Restoring either half's old
+assertion now fails every GIC boot, not one in dozens.
+
 
 ## `mmu: TLB shootdown acknowledged by 2 of 3 CPUs`
 

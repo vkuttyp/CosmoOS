@@ -10,6 +10,36 @@
 > guest that takes an interrupt and makes the remaining site order-free.
 > It also proposes running the test in both orders on every boot, so the
 > class cannot come back unseen.
+>
+> **Built (PR #247).** As designed, with these details:
+> - **`run_until_irq` returns through `reason`**, like the rest of the
+>   file's checks. The test's body is `irq_queue_on(image, hb, reason)`,
+>   run on `guest_irq.bin` and then `guest_irq_exit.bin`.
+> - **"Exactly once" is now checked in the second half too.** After 5 is
+>   delivered the guest must be back at its heartbeat with nothing
+>   pending, as the first half already required. The old second half
+>   stopped at 5.
+> - **On the exit guest the test requires zero heartbeats before each
+>   delivery.** Without that, a guest that stopped forcing the exit would
+>   make "both orders" one order again, silently. The kinfo line gives
+>   the count for each delivery on each guest; a GIC boot reads `1 and 1
+>   on guest_irq, 0 and 0 on guest_irq_exit`.
+> - **The queue test had no row in the virtualisation testing doc**; it
+>   has one now.
+>
+> | mutation | caught by |
+> | --- | --- |
+> | the second half's heartbeat-first assertion restored | `el2-guest-irq-queue` on the exit guest: line 1241, `expected hypercall 2, got ... hypercall nr 5` -- CI's failure, on every boot |
+> | the first half's heartbeat-first assertion restored | the same test: `got ... hypercall nr 42`, the third sighting's shape |
+> | `run_until_irq` taking a heartbeat as the delivery | the "exactly once" check after it: the next run delivers 42 |
+> | the exit guest's `GICD_CTLR` read removed | `hbx[0] == 0 && hbx[1] == 0` |
+>
+> Each mutation ran alone in an aarch64 GIC boot, with the boot confirmed.
+> `tools/irq-order-probe.py` applied to the fixed tree passes: none of the
+> thirteen tests depends on the order now. Both architectures pass in
+> debug and release, as does the GIC boot. `gmake host-test` passes.
+> `gmake analyze` adds nothing: its two reports (`nvme.c:492` and the
+> `uart-race` test's `sib.consumed`) are `main`'s own.
 
 ## Problem
 
