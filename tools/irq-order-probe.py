@@ -19,7 +19,8 @@ pending interrupt is delivered first. That ordering is a race with the
 host's tick, and a test that asserts either order is asserting it.
 
 The probe makes that exit certain instead of a race: it adds two
-instructions to the guest's IRQ handler (tests/hv/aarch64/guest_irq.S),
+instructions to the IRQ handler of every guest whose handler ends in the
+same EOI-then-eret (nine guests under tests/hv/aarch64/, thirteen tests),
 after the EOI and before `eret` -- a read of GICD_CTLR, which is emulated
 at EL2 and handed back to vcpu_run as HV_EXIT_EMULATED. Every assertion
 that holds only when the heartbeat comes first then fails, deterministically,
@@ -43,15 +44,19 @@ import shutil
 import subprocess
 import sys
 
-GUEST = 'tests/hv/aarch64/guest_irq.S'
+# Every guest whose IRQ handler ends in the same EOI-then-eret: nine guests,
+# thirteen tests. x28 is used by none of them, so the read clobbers nothing a
+# test looks at (x1 is a hypercall's a0).
+GUESTS = ['tests/hv/aarch64/guest_%s.S' % g for g in
+          ('irq', 'gic', 'sgi', 'spi', 'timer', 'timer_wfi', 'uart_rx', 'uart_wfi', 'uart_poll')]
 BACKUP = '.irq-order-probe.orig'
 STAMP = '.irq-order-probe.applied'
 
 G_ANCHOR = """    msr  icc_eoir1_el1, x0
     eret"""
 G_PROBE = """    msr  icc_eoir1_el1, x0
-    movz x1, #0x0800, lsl #16      /* IOPROBE (tools/irq-order-probe.py; not for merge): */
-    ldr  w1, [x1]                  /* GICD_CTLR, emulated: an exit between the EOI and the heartbeat */
+    movz x28, #0x0800, lsl #16     /* IOPROBE (tools/irq-order-probe.py; not for merge): */
+    ldr  w28, [x28]                /* GICD_CTLR, emulated: an exit between the EOI and the heartbeat */
     eret"""
 
 
@@ -139,12 +144,12 @@ def revert():
 
 
 def files():
-    return [(GUEST, [(G_ANCHOR, G_PROBE)])]
+    return [(g, [(G_ANCHOR, G_PROBE)]) for g in GUESTS]
 
 
 def apply():
     apply_files(files())
-    print('applied: the guest reads GICD_CTLR after every EOI')
+    print(f'applied: {len(GUESTS)} guests read GICD_CTLR after every EOI')
 
 
 if __name__ == '__main__':
