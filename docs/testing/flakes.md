@@ -89,6 +89,13 @@ the same family as the rows above, recorded here rather than listed;
 if it recurs the fix is to time from `entered` itself, not from a
 point this thread reaches later.
 
+**It recurred on 2026-09-28**, x86-64 debug, local, with an aarch64 boot
+running beside it. The tree was the irq-order unit's branch, which changes
+only aarch64 guests and vGIC tests, none of which x86-64 runs. It failed
+the same check, now at `quiescetest.c:1049`, and a rerun alone passed.
+Second sighting, both local, both on a loaded host. The fix named above is
+still the one: time from `entered`.
+
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
 timer at "less than what it asked for"); both bounds still sit an order

@@ -11,7 +11,20 @@
 > It also proposes running the test in both orders on every boot, so the
 > class cannot come back unseen.
 >
-> **Built (PR #247).** As designed, with these details:
+> **Built (PR #247).** As designed, with these differences:
+> - **A third guest makes the other order certain too** (found in
+>   review). The design's two guests left heartbeat-first to the plain
+>   guest's timing. `guest_irq_hb.S` forces the same exit after the EOI
+>   but sends its heartbeat from the handler, with IRQs still masked,
+>   before `eret`, so the heartbeat comes first however the host
+>   interleaves. The test requires at least one heartbeat before each
+>   delivery there. The forced exit is what makes this provable: without
+>   the in-handler heartbeat the guest behaves like `guest_irq_exit`, and
+>   the check fails.
+> - **One more run before the second half masks the guest.** On
+>   `guest_irq_hb` the last heartbeat came from the handler, and the
+>   handler's `eret` would undo a mask set there. The run reaches the
+>   loop's heartbeat first, with nothing pending, on every guest.
 > - **`run_until_irq` returns through `reason`**, like the rest of the
 >   file's checks. The test's body is `irq_queue_on(image, hb, reason)`,
 >   run on `guest_irq.bin` and then `guest_irq_exit.bin`.
@@ -20,10 +33,11 @@
 >   pending, as the first half already required. The old second half
 >   stopped at 5.
 > - **On the exit guest the test requires zero heartbeats before each
->   delivery.** Without that, a guest that stopped forcing the exit would
->   make "both orders" one order again, silently. The kinfo line gives
->   the count for each delivery on each guest; a GIC boot reads `1 and 1
->   on guest_irq, 0 and 0 on guest_irq_exit`.
+>   delivery, and on the heartbeat guest at least one.** Without those,
+>   a guest that stopped forcing its order would make "both orders" one
+>   order again, silently. The kinfo line gives the count for each
+>   delivery on each guest; a GIC boot reads `1 and 1 on guest_irq, 0 and
+>   0 on guest_irq_exit, 1 and 1 on guest_irq_hb`.
 > - **The queue test had no row in the virtualisation testing doc**; it
 >   has one now.
 >
@@ -33,6 +47,8 @@
 > | the first half's heartbeat-first assertion restored | the same test: `got ... hypercall nr 42`, the third sighting's shape |
 > | `run_until_irq` taking a heartbeat as the delivery | the "exactly once" check after it: the next run delivers 42 |
 > | the exit guest's `GICD_CTLR` read removed | `hbx[0] == 0 && hbx[1] == 0` |
+> | the heartbeat guest's in-handler heartbeat removed | `hbh[0] >= 1 && hbh[1] >= 1` |
+> | the run before the second half's mask removed | line 1231, `got ... hypercall nr 42`: the heartbeat guest's `eret` undid the mask |
 >
 > Each mutation ran alone in an aarch64 GIC boot, with the boot confirmed.
 > `tools/irq-order-probe.py` applied to the fixed tree passes: none of the
@@ -217,7 +233,7 @@ boot.
 | file | change |
 | --- | --- |
 | kernel-services/virtualization/hvtest.c | `run_until_irq`; both halves of `el2-guest-irq-queue` use it; the test runs on both guests |
-| tests/hv/aarch64/guest_irq_exit.S (new), tests/hv/hv.mk | the guest with an exit after every EOI |
+| tests/hv/aarch64/guest_irq_exit.S (new), tests/hv/aarch64/guest_irq_hb.S (new, as built), tests/hv/hv.mk | the guest with an exit after every EOI; the guest whose heartbeat comes first despite it |
 | tools/irq-order-probe.py | unchanged, kept as the class's measurement for the other guests |
 | docs | `docs/testing/flakes.md` (the fourth and the unrecorded sighting, the class); `docs/kernel-services/virtualization/testing.md`; README Status |
 

@@ -3566,9 +3566,10 @@ See [docs/development.md](docs/development.md).
   `tools/irq-order-probe.py` forces that exit in all nine guests that take
   an interrupt, and found the remaining assertion to be the only one of
   its kind in thirteen tests. Both halves now go through one helper that
-  accepts a heartbeat while the interrupt is pending. The test runs on a
-  second guest, `guest_irq_exit`, which makes the other order happen on
-  every boot, so an assertion of either order fails at once. (PR #247)
+  accepts a heartbeat while the interrupt is pending. The test also runs on
+  two more guests, `guest_irq_exit` (the interrupt always first) and
+  `guest_irq_hb` (the heartbeat always first). So both orders happen on
+  every boot, and an assertion of either fails at once. (PR #247)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
