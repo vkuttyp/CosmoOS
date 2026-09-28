@@ -2076,6 +2076,11 @@ bool selftest_sched_migrate_refuses(const char **reason)
 
 /* --- the stress --- */
 
+/* A hang guard, counted in sleeps rather than timed: a thread_sleep_ms(1)
+ * lasts until a later tick, several ms at CONFIG_HZ 250, so 500 of them is
+ * seconds -- far above any queue's drain, short of the boot's timeout. */
+enum { STRESS_GUARD_WAITS = 500 };
+
 enum { STRESS_SPIN = 8, STRESS_SLEEP = 8, STRESS_PAIRS = 4, STRESS_MUTEX = 2,
        STRESS_WORKERS = STRESS_SPIN + STRESS_SLEEP + 2 * STRESS_PAIRS + STRESS_MUTEX + 1 /* the late starter */ };
 
@@ -2304,7 +2309,7 @@ bool selftest_sched_migrate_stress(const char **reason)
     if (!made_all || run->mig_t == NULL)
         fail = "a worker could not be created";
     unsigned waits = 0;
-    for (; fail == NULL && waits < 5000; waits++) {   /* a hang guard, counted, not a latency claim */
+    for (; fail == NULL && waits < STRESS_GUARD_WAITS; waits++) {   /* a hang guard, counted, not a latency claim */
         bool all = true;
         for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
             all = run->w[i].rounds > snap[i];
@@ -2312,7 +2317,7 @@ bool selftest_sched_migrate_stress(const char **reason)
             break;
         thread_sleep_ms(1);
     }
-    if (fail == NULL && waits == 5000)
+    if (fail == NULL && waits == STRESS_GUARD_WAITS)
         fail = "a worker did not run again after the migrator stopped";
 
     /* Stop the workers and release every ping-pong wait: a half blocked on
@@ -2321,7 +2326,7 @@ bool selftest_sched_migrate_stress(const char **reason)
     __atomic_store_n(&sh->stop, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < 2 * STRESS_PAIRS; i++)
         complete(&run->pc[i]);
-    for (unsigned g = 0; g < 5000; g++) {
+    for (unsigned g = 0; g < STRESS_GUARD_WAITS; g++) {
         bool all = true;
         for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
             all = run->t[i] == NULL || __atomic_load_n(&run->w[i].exited, __ATOMIC_ACQUIRE);
@@ -2379,7 +2384,7 @@ bool selftest_sched_migrate_stress(const char **reason)
     }
     CHECK(threads_settle(before));
     kinfo("selftest: sched-migrate-stress: %llu migrations in the stress window over %u workers; every worker, "
-          "the late starter included, ran again after the migrator stopped (%u ms), and stayed inside its mask",
+          "the late starter included, ran again after the migrator stopped (%u waits), and stayed inside its mask",
           (unsigned long long)moved, (unsigned)STRESS_WORKERS, waits);
     return true;
 }
