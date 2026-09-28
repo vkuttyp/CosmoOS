@@ -297,7 +297,12 @@ completion's lock once after `done` is seen, which cannot complete until
 `complete` has let go. `wait_for_completion` and
 `wait_for_completion_timeout` both do; `completion_done` does not, and a
 poll of it followed by a bare return is the bug this rule forbids (the
-NVMe admin path, `docs/audit/next-subsystem-nvme-admin.md`). Check:
+NVMe admin path, `docs/audit/next-subsystem-nvme-admin.md`). The one
+place a poll is sound is where the waiting thread is itself the completer:
+`complete` has returned on that thread before the poll reads `done`, so
+nothing is still inside `c`. NVMe's no-vector fallback is that case
+(`queue_process` on the waiting thread), and the normal path never reaches
+it. Check:
 `completion-timeout` (200 completions lingered from another CPU, the
 completion's lock free on every return; it fails when the timeout wait
 drops its handshake) and, for the driver, `tools/nvme-admin-probe.py`.

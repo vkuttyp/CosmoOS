@@ -962,7 +962,11 @@ bool selftest_completion_timeout(const char **reason)
     enum { ROUNDS = 200 };
     struct completion c;
     uint64_t t0 = clock_now_ns();
-    for (unsigned r = 1; r <= ROUNDS; r++) {
+    /* Every exit from here goes through `done`: the completer holds pointers
+     * to `sh` and `c` on this stack, so it is stopped and joined before this
+     * frame can go, on a failure as much as on success. */
+    const char *fail = NULL;
+    for (unsigned r = 1; r <= ROUNDS && fail == NULL; r++) {
         completion_init(&c, "ct");
         __atomic_store_n(&sh.c, &c, __ATOMIC_RELEASE);
         __atomic_store_n(&sh.round, r, __ATOMIC_RELEASE);
@@ -972,17 +976,32 @@ bool selftest_completion_timeout(const char **reason)
         uint64_t rdv = clock_deadline_ns(1000ull * 1000000ull);
         while (!completion_done(&c) && !clock_deadline_passed(rdv))
             arch_cpu_relax();
-        CHECK(completion_done(&c));
-        CHECK(wait_for_completion_timeout(&c, 1000ull * 1000000ull));   /* completed */
+        if (!completion_done(&c)) {
+            fail = "the completer did not publish done within 1 s";
+            break;
+        }
+        if (!wait_for_completion_timeout(&c, 1000ull * 1000000ull)) {
+            fail = "wait_for_completion_timeout returned false on a completed completion";
+            break;
+        }
         /* The completer (on CPU 1) drops c->lock only at the end of its
          * linger; a bare read of the lock word, not spin_is_held (which asks
          * "do *I* hold it" and reads a per-CPU id), sees whether it has. The
          * handshake guarantees it has. */
-        CHECK(__atomic_load_n(&c.lock.locked, __ATOMIC_ACQUIRE) == 0);
+        if (__atomic_load_n(&c.lock.locked, __ATOMIC_ACQUIRE) != 0) {
+            fail = "the wait returned while the completer still held the completion's lock";
+            break;
+        }
         memset(&c, 0, sizeof(c));        /* the frame is the next round's now */
     }
+    if (fail != NULL)   /* said before the join, so the reason is in the log even if the join waits */
+        kerror("selftest: completion-timeout: %s", fail);
     __atomic_store_n(&sh.stop, true, __ATOMIC_RELEASE);
-    thread_join(t);
+    thread_join(t);   /* a lingering completer finishes on `c`, still live, before this */
+    if (fail != NULL) {
+        *reason = fail;
+        return false;
+    }
 
     /* A completion nobody completes: the wait returns false at the deadline,
      * decided by the return value, not by how long it took. */

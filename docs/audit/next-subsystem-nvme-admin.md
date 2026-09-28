@@ -158,7 +158,7 @@ bool wait_for_completion_timeout(struct completion *c, uint64_t timeout_ns);
 
 It is built on `wait_event_timeout`. When the event has happened, it takes
 the completion's lock once before returning, the same handshake
-`wait_for_completion` does. A caller can no longer see `done` without the
+`wait_for_completion` does. A caller waiting on an interrupt can no longer see `done` without the
 handshake coming with it.
 
 **All four interrupt-driven polling loops use it**: NVMe's admin wait

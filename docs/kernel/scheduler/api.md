@@ -353,9 +353,11 @@ last (the lowest priority level's tail).
   false at the deadline (`c` may complete later, so the caller must stop
   whatever will complete it, or `wait_for_completion`, before freeing).
   This is what a caller with a timeout uses: a poll of `completion_done`
-  followed by a bare return races `complete` (invariant S30), and this
-  primitive removes the poll (the NVMe admin bug,
-  `docs/audit/next-subsystem-nvme-admin.md`).
+  followed by a bare return races `complete` on another CPU (invariant
+  S30), and this primitive removes the poll (the NVMe admin bug,
+  `docs/audit/next-subsystem-nvme-admin.md`). A poll is sound only where
+  the waiting thread completes `c` itself, as NVMe's no-vector fallback
+  does.
 - `complete_linger(c, ns)` — `complete(c)` with a spin of `ns` held
   between publishing `done` and the wake. It is a test seam for the
   handshake window; `complete(c)` is `complete_linger(c, 0)` and nothing

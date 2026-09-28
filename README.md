@@ -3550,7 +3550,10 @@ See [docs/development.md](docs/development.md).
   the next command reused the stack frame while the interrupt handler still
   held its completion's lock. `wait_for_completion_timeout` now does the
   handshake, and the four polling drivers (NVMe, xHCI, AHCI, USB) wait with
-  it, so no caller can see `done` without it. Invariant S30; the
+  it wherever an interrupt completes the command. The one poll left is
+  NVMe's no-vector fallback, where the waiting thread completes the command
+  itself, so no other CPU can be inside `complete`; the normal path never
+  reaches it. Invariant S30; the
   `completion-timeout` self-test lingers a completion from another CPU and
   requires the lock free on return, and `tools/nvme-admin-probe.py`
   reproduces the exact panic on demand. (PR #245)
