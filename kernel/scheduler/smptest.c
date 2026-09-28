@@ -2076,10 +2076,15 @@ bool selftest_sched_migrate_refuses(const char **reason)
 
 /* --- the stress --- */
 
-/* A hang guard, counted in sleeps rather than timed: a thread_sleep_ms(1)
- * lasts until a later tick, several ms at CONFIG_HZ 250, so 500 of them is
- * seconds -- far above any queue's drain, short of the boot's timeout. */
-enum { STRESS_GUARD_WAITS = 500 };
+/* The hang guards, as deadlines: they bound the test's time, not a claim
+ * about it. A thread_sleep_ms(1) lasts until a later tick -- in a failing
+ * run each measured over 10 ms -- so a guard counted in sleeps has no
+ * useful bound on its duration (500 of them ran 6-8 s). Two seconds for the
+ * workers to run again and one for them to leave keep a caught stranding
+ * inside the self-test runner's 8 s budget and its watchdog, and stay
+ * hundreds of times above the few waits a clean run needs. */
+#define STRESS_RUN_AGAIN_NS  (2000ull * 1000 * 1000)
+#define STRESS_LEAVE_NS      (1000ull * 1000 * 1000)
 
 enum { STRESS_SPIN = 8, STRESS_SLEEP = 8, STRESS_PAIRS = 4, STRESS_MUTEX = 2,
        STRESS_WORKERS = STRESS_SPIN + STRESS_SLEEP + 2 * STRESS_PAIRS + STRESS_MUTEX + 1 /* the late starter */ };
@@ -2309,16 +2314,34 @@ bool selftest_sched_migrate_stress(const char **reason)
     if (!made_all || run->mig_t == NULL)
         fail = "a worker could not be created";
     unsigned waits = 0;
-    for (; fail == NULL && waits < STRESS_GUARD_WAITS; waits++) {   /* a hang guard, counted, not a latency claim */
-        bool all = true;
-        for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
-            all = run->w[i].rounds > snap[i];
-        if (all)
+    uint64_t again_by = clock_deadline_ns(STRESS_RUN_AGAIN_NS);   /* a hang guard, not a latency claim */
+    bool all_again = false;
+    while (fail == NULL) {
+        all_again = true;
+        for (unsigned i = 0; i < STRESS_WORKERS && all_again; i++)
+            all_again = run->w[i].rounds > snap[i];
+        if (all_again || clock_deadline_passed(again_by))
             break;
         thread_sleep_ms(1);
+        waits++;
     }
-    if (fail == NULL && waits == STRESS_GUARD_WAITS)
+    if (fail == NULL && !all_again) {
         fail = "a worker did not run again after the migrator stopped";
+        /* Named now, before any cleanup: a worker that missed the snapshot
+         * may still leave once told to, and be joined, and it is the one
+         * this failure is about. */
+        for (unsigned i = 0; i < STRESS_WORKERS; i++) {
+            if (run->w[i].rounds > snap[i])
+                continue;
+            struct stress_worker *w = &run->w[i];
+            kerror("selftest: sched-migrate-stress: %s worker %u did not run again: entered %lld us, first round "
+                   "%lld us, rounds %llu (%llu at the migrator's stop), thread state %d on cpu %d%s",
+                   run->kind[i], i, w->entered_ns ? (long long)((w->entered_ns - t0) / 1000) : -1ll,
+                   w->first_ns ? (long long)((w->first_ns - t0) / 1000) : -1ll, (unsigned long long)w->rounds,
+                   (unsigned long long)snap[i], run->t[i] ? (int)run->t[i]->state : -1,
+                   run->t[i] ? run->t[i]->cpu : -1, run->timed[i] ? ", a timed sleeper" : "");
+        }
+    }
 
     /* Stop the workers and release every ping-pong wait: a half blocked on
      * its partner cannot see `stop`. Then join each worker that says it is
@@ -2326,11 +2349,11 @@ bool selftest_sched_migrate_stress(const char **reason)
     __atomic_store_n(&sh->stop, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < 2 * STRESS_PAIRS; i++)
         complete(&run->pc[i]);
-    for (unsigned g = 0; g < STRESS_GUARD_WAITS; g++) {
+    for (uint64_t leave_by = clock_deadline_ns(STRESS_LEAVE_NS);;) {
         bool all = true;
         for (unsigned i = 0; i < STRESS_WORKERS && all; i++)
             all = run->t[i] == NULL || __atomic_load_n(&run->w[i].exited, __ATOMIC_ACQUIRE);
-        if (all)
+        if (all || clock_deadline_passed(leave_by))
             break;
         thread_sleep_ms(1);
     }
