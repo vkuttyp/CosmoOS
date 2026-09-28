@@ -185,14 +185,23 @@ preemption (above), so their spinners keep their priorities:
 **Correctness.** Three tests wait for the state they assert. No kernel
 change.
 
-**Concurrency.** The spinner's flag is a release store, read with
-acquire. Nothing else changes.
+**Concurrency.** The spinner's `entered` flag is a release store, read
+with acquire. As built, an abandoned spinner's `abandoned` flag is
+stored (release) before `stop`, and read (acquire) after the spinner
+sees `stop`, so the abandon is always seen. Nothing else changes.
 
-**Ownership and lifetime.** None.
+**Ownership and lifetime.** As built, the spinners' storage is
+allocated, never on the test's stack. A spinner that ran is joined, and
+the test frees its storage. A spinner that never ran is not joined: the
+test marks it abandoned, stops it and drops its reference, and never
+touches the storage again. The spinner frees it when it first runs and
+sees `stop`. Exactly one of the two frees it.
 
 **Security.** None.
 
-**Failure.** A spinner that never runs is reported as that.
+**Failure.** A spinner that never runs is reported as that, in about
+2 s, and the boot carries on: no path joins a spinner that has not said
+it ran (`thread_join` has no deadline).
 
 **Performance.** One short wait per test, normally a millisecond or two.
 
