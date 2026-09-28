@@ -191,15 +191,22 @@ own `exited` flag, which the worker sets as its last action. Every worker
 that sets it is joined, so a join never blocks on a thread that has not
 already said it is leaving.
 
-A worker that has not set it is classified by its thread's state, read once
-the guard has run out:
-- **BLOCKED**: asleep in a wait, a waiter on a stranded worker, not
-  stranded itself. The only such wait left after the completions are
-  released is `mutex_lock` behind a stranded holder. It is reported as
-  "blocked behind a stranded worker", with the mutex's owner named.
-- **Anything else** (READY on a queue that never runs it, or a state
-  that cannot hold for a live thread): **stranded**, reported as the
-  migration defect.
+A worker that has not set it is classified once the guard has run out,
+by what it is waiting on, not only by whether its thread is BLOCKED. A
+timed sleeper (the 1 ms sleepers, the late starter's 300 ms) is BLOCKED
+too while it sleeps. It normally wakes, sees `stop` and leaves long before
+the guard runs out, but one that has not is stuck in its own right, not
+behind anyone.
+- **Blocked behind a stranded worker**: only a mutex contender whose
+  thread is BLOCKED while the mutex's recorded owner (`struct mutex`'s
+  `owner`) is a worker this test classified as stranded. It is reported
+  as such, with that owner named.
+- **Stranded or stuck**: every other worker that has not set `exited`,
+  whatever its state. That includes a sleeper still asleep, a thread
+  READY on a queue that never runs it, and a mutex contender whose mutex
+  is not held by a stranded worker. Each is reported with its kind, its
+  thread's state and CPU, and whether it is a timed sleeper. It is
+  reported as the defect, since nothing else in the test explains it.
 
 Both are left unjoined, because neither can be released safely: the mutex
 is held by a thread that will not run. The test's failure names the
