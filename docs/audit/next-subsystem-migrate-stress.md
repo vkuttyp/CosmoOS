@@ -176,17 +176,35 @@ reported by kind, index, when it entered, its first round, and its thread's
 CPU and state. The test does not join a stranded thread, which would hang
 the boot; it reports it and fails.
 
-**On a failure, only the stranded are left unjoined.** A worker can fail
-phase 3 without being stranded. The partner of a stranded ping-pong half
-is blocked in `wait_for_completion` on a signal that never comes, and it
-cannot see a stop flag there. So the failure path does what the success
-path does before joining anything: it sets every stop flag and completes
-every ping-pong completion, which releases any half still waiting. It then
-waits, with the same count-based guard, for each worker's own `exited`
-flag, which the worker sets as its last action. Every worker that sets it
-is joined; one that does not is the stranded one. It is reported, and it
-is the only one left unjoined. The join never blocks on a thread that has
-not already said it is leaving.
+**On a failure, each worker that is not leaving is reported for what it
+is.** A worker can fail phase 3 without being stranded, in two ways:
+- the partner of a stranded ping-pong half is blocked in
+  `wait_for_completion` on a signal that never comes;
+- a mutex contender is blocked in `mutex_lock` behind a stranded contender
+  that was stranded holding the mutex.
+
+Neither can see a stop flag where it sleeps. So the failure path first
+does what the success path does before any join: it sets every stop flag
+and completes every ping-pong completion, which releases any half still
+waiting. It then waits, with the same count-based guard, for each worker's
+own `exited` flag, which the worker sets as its last action. Every worker
+that sets it is joined, so a join never blocks on a thread that has not
+already said it is leaving.
+
+A worker that has not set it is classified by its thread's state, read once
+the guard has run out:
+- **BLOCKED**: asleep in a wait, a waiter on a stranded worker, not
+  stranded itself. The only such wait left after the completions are
+  released is `mutex_lock` behind a stranded holder. It is reported as
+  "blocked behind a stranded worker", with the mutex's owner named.
+- **Anything else** (READY on a queue that never runs it, or a state
+  that cannot hold for a live thread): **stranded**, reported as the
+  migration defect.
+
+Both are left unjoined, because neither can be released safely: the mutex
+is held by a thread that will not run. The test's failure names the
+stranded one as the cause, so a blocked waiter is never counted as a
+second defect.
 
 A stranded thread may yet run, and a failed self-test does not stop the
 tests after it. So the run's shared state, its workers and their
@@ -215,9 +233,10 @@ latency miss can no longer hide.
 **Concurrency.** Unchanged in the kernel. The test's phases are ordered
 by joins and counts, not by time.
 
-**Ownership and lifetime.** A worker reported stranded is not joined,
-and its run's storage (allocated per run) is left allocated for it, so no
-later run can reset memory a live thread holds. A clean run frees it.
+**Ownership and lifetime.** A worker reported stranded, and any worker
+blocked behind it, is not joined. The run's storage (allocated per run) is
+left allocated for them, so no later run can reset memory a live thread
+holds. A clean run frees it.
 
 **Security.** None.
 
@@ -255,8 +274,10 @@ None.
 
 ## Risks
 
-- **A stranded thread is not joined.** It is reported and left with its
-  storage and its stop flag set, and the boot fails on it. Joining it would
+- **A stranded thread is not joined, nor is a worker blocked behind it.**
+  Each is reported for what it is (stranded, or blocked behind the
+  stranded one), and left with its storage and its stop flag set; the
+  boot fails on the stranded one. Joining it would
   hang the boot instead of naming it. The storage it keeps is leaked,
   once, on a boot that has already failed.
 - **The hang guard is time.** 5 000 waits of 1 ms is 5 s of the
