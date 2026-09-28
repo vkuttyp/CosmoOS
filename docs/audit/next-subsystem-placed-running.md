@@ -11,9 +11,9 @@
 >   mutation: `mig-rival`, at the reaper's priority (`DEFAULT - 8`),
 >   pinned to the spinner's CPU, is created just before the spinner's
 >   migrate, and must not run within 20 ms. Release builds run it too.
-> - **A correction to "What remains" below:** a spinner that a
->   higher-priority thread has preempted is refused as **`preempted`**,
->   not `affinity`. `sched_migrate` checks the PREEMPTED flag first. The
+> - **A correction, made in "What remains" and "Tests" below:** a spinner
+>   that a higher-priority thread has preempted is refused as
+>   **`preempted`**, not `affinity`. `sched_migrate` checks the PREEMPTED flag first. The
 >   sightings' `affinity` is the other way a spinner isn't running:
 >   never having run, which the wait now ends. With the rival, the test
 >   would have failed as `preempted`; the mutation below shows it.
@@ -102,8 +102,11 @@ in what a preempted spinner does to them:
 - **`sched-load`**: still passes. The preempting thread is current, so
   the load is at least 1.
 - **`sched-migrate`**: still passes. The worker stays queued and is moved.
-- **`sched-migrate-refuses`**: fails. The spinner is queued, and
-  `AFFINITY` is correct.
+- **`sched-migrate-refuses`**: fails. The spinner has been taken off its
+  CPU, and `sched_migrate` refuses it as `PREEMPTED`. (As built, the
+  mutation that lowered the spinner's priority measured that answer; an
+  earlier draft of this report said `AFFINITY`, which is the answer for
+  a spinner that has never run.)
 
 Not seen in 600 checks, but possible, and only in the last test.
 
@@ -215,7 +218,7 @@ Each mutation alone, with its boot confirmed:
 - the migrate tests without the wait: the probe's log again;
 - **the refused spinner back at `DEFAULT - 1`, with a thread of the
   reaper's priority made runnable on its CPU just before the migrate:**
-  `sched-migrate-refuses` must fail with "affinity", and pass at
+  `sched-migrate-refuses` must fail with "preempted", and pass at
   `DEFAULT - 16`. The competing thread is built for the test, so the
   preemption happens on every run.
 
