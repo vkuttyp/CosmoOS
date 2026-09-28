@@ -62,3 +62,9 @@ tests/hv/aarch64/Image
 *.mmap-place-probe.applied
 *.dirfd-probe.orig
 *.dirfd-probe.applied
+
+# A probe tool's backups, stamp and temps while it is applied
+# (tools/*-probe.py): never part of a commit.
+*-probe.orig
+.*-probe.applied
+*.probe-tmp
