@@ -843,12 +843,46 @@ static void mig_worker_main(void *arg)
  * of lower priority while it spins, so a worker queued there stays READY. */
 struct mig_spinner {
     volatile unsigned stop;
+    volatile unsigned entered;   /* it has run: set as its first act */
 };
 
 static void mig_spinner_main(void *arg)
 {
     struct mig_spinner *s = arg;
+    __atomic_store_n(&s->entered, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    thread_exit(0);
+}
+
+/*
+ * A spinner that has been created is on its CPU's queue: READY, counted
+ * by sched_cpu_load, and a worker created after it is READY too -- every
+ * wait these tests used was satisfied before the spinner had run. The
+ * probe found sched-load checking a queued spinner 98-99 times in 100
+ * (docs/audit/next-subsystem-placed-running.md). The spinner's own word
+ * is the only proof it runs.
+ */
+static bool wait_spinner_entered(struct mig_spinner *s)
+{
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!__atomic_load_n(&s->entered, __ATOMIC_ACQUIRE) && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    return __atomic_load_n(&s->entered, __ATOMIC_ACQUIRE) != 0;
+}
+
+/* A thread at the reaper's priority, for sched-migrate-refuses: says it
+ * ran, then holds its CPU until stopped. */
+struct refuse_rival {
+    volatile unsigned ran;
+    volatile unsigned stop;
+};
+
+static void refuse_rival_main(void *arg)
+{
+    struct refuse_rival *r = arg;
+    __atomic_store_n(&r->ran, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE))
         arch_cpu_relax();
     thread_exit(0);
 }
@@ -1757,14 +1791,18 @@ static bool sched_load_pinned(const char **reason)
 
     bool ok = true;
     const char *why = NULL;
-    /* Wait for it to be the running thread there, not merely placed. */
-    uint64_t deadline = clock_deadline_ns(2000000000ULL);
-    while (!clock_deadline_passed(deadline) && sched_cpu_load(busy) == 0)
-        thread_sleep_ms(1);
+    /* Wait for it to be the running thread there, not merely placed: by
+     * its own word. A non-zero load came first from the queued spinner,
+     * and the next read could land in the idle CPU's switch to it --
+     * dequeued, not yet current -- and read 0. */
+    bool entered = wait_spinner_entered(&sp);
 
     unsigned busy_load = sched_cpu_load(busy);
     unsigned spare_load = sched_cpu_load(spare);
-    if (busy_load == 0) {
+    if (!entered) {
+        why = "the compute-bound thread never ran";
+        ok = false;
+    } else if (busy_load == 0) {
         why = "a CPU running a compute-bound thread reported no load";
         ok = false;
     } else if (spare_load != 0) {
@@ -1853,6 +1891,13 @@ static bool sched_migrate_pinned(const char **reason)
     struct mig_spinner sp = { 0 };
     struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(a));
     CHECK(ts != NULL);
+    /* The spinner holds a before the worker is placed behind it. */
+    if (!wait_spinner_entered(&sp)) {
+        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
+        thread_join(ts);
+        *reason = "the spinner never ran";
+        return false;
+    }
     struct mig_worker w = { .cpu = ~0u };
     struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-worker", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
     if (tw == NULL) {
@@ -1948,9 +1993,22 @@ static bool sched_migrate_refuses_pinned(const char **reason)
     bool ok = true;
     enum sched_migrate_result r;
 
+    /*
+     * The spinner must stay RUNNING from here to its migrate, so it
+     * outranks every kernel service thread: the reaper (DEFAULT - 8, and
+     * since P34 it does every process's teardown) and quiesce
+     * (DEFAULT - 4) would otherwise preempt it, leaving a queued pinned
+     * thread whose right answer is AFFINITY.
+     */
     struct mig_spinner sp = { 0 };
-    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(a));
+    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 16, CPUMASK_OF(a));
     CHECK(ts != NULL);
+    if (!wait_spinner_entered(&sp)) {
+        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
+        thread_join(ts);
+        *reason = "the spinner never ran";
+        return false;
+    }
     struct mig_worker w = { .cpu = ~0u };
     struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-pinned", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
     CHECK(tw != NULL);
@@ -1972,11 +2030,36 @@ static bool sched_migrate_refuses_pinned(const char **reason)
             kerror("selftest: sched-migrate-refuses: to a CPU that is not one: %s", sched_migrate_result_name(r));
             ok = false;
         }
+        /*
+         * The adversary: a thread at the reaper's priority, made runnable
+         * on a just before the spinner's migrate. It cannot take a from
+         * the spinner, so it must not run in the 20 ms given it; were the
+         * spinner below it, it would run at once, and the spinner would
+         * be queued -- refused as AFFINITY, the sightings' answer.
+         */
+        struct refuse_rival rv = { 0 };
+        struct thread *trv = thread_create_on(refuse_rival_main, &rv, "mig-rival", SCHED_PRIO_DEFAULT - 8, CPUMASK_OF(a));
+        uint64_t rdl = clock_deadline_ns(20ull * 1000 * 1000);
+        while (trv != NULL && !__atomic_load_n(&rv.ran, __ATOMIC_ACQUIRE) && !clock_deadline_passed(rdl))
+            thread_sleep_ms(1);
+        bool rival_ran = trv != NULL && __atomic_load_n(&rv.ran, __ATOMIC_ACQUIRE);
         r = sched_migrate(ts, b);   /* the spinner: RUNNING on a */
         if (r != SCHED_MIGRATE_NOT_READY) {
-            kerror("selftest: sched-migrate-refuses: the running spinner: %s", sched_migrate_result_name(r));
+            kerror("selftest: sched-migrate-refuses: the running spinner: %s (a thread at the reaper's priority %s)",
+                   sched_migrate_result_name(r), rival_ran ? "had taken its CPU" : "had not run");
             ok = false;
         }
+        if (trv == NULL) {
+            kerror("selftest: sched-migrate-refuses: the reaper-priority rival could not be created");
+            ok = false;
+        } else if (rival_ran) {
+            kerror("selftest: sched-migrate-refuses: a thread at the reaper's priority took the spinner's CPU");
+            ok = false;
+        }
+        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);   /* the rival runs once the spinner leaves */
+        __atomic_store_n(&rv.stop, 1u, __ATOMIC_RELEASE);
+        if (trv != NULL)
+            thread_join(trv);
     }
     __atomic_store_n(&w.release, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
@@ -2062,7 +2145,7 @@ static bool sched_migrate_refuses_pinned(const char **reason)
         return false;
     }
     CHECK(threads_settle(before));
-    kinfo("selftest: sched-migrate-refuses: affinity, same-cpu, offline, not-ready (running and blocked), preempted and current (the window) each refused by name");
+    kinfo("selftest: sched-migrate-refuses: affinity, same-cpu, offline, not-ready (running and blocked), preempted and current (the window) each refused by name; the running spinner held its CPU against a thread at the reaper's priority");
     return true;
 }
 
