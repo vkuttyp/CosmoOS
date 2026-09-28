@@ -156,7 +156,8 @@ The test gets three phases:
    rounds to pass its snapshot, counting its waits (`thread_sleep_ms(1)`,
    bounded at 5 000 as a hang guard, not a latency claim). A thread a
    migration stranded never runs again, and the guard names it. Then the
-   workers' `stop`, and join.
+   workers' `stop`, every ping-pong completion completed (as the test does
+   today: a half blocked on its partner cannot see `stop`), and join.
 
 The affinity check stays as it is.
 
@@ -174,6 +175,18 @@ The probe's instrument becomes permanent. A worker that fails phase 3 is
 reported by kind, index, when it entered, its first round, and its thread's
 CPU and state. The test does not join a stranded thread, which would hang
 the boot; it reports it and fails.
+
+**On a failure, only the stranded are left unjoined.** A worker can fail
+phase 3 without being stranded. The partner of a stranded ping-pong half
+is blocked in `wait_for_completion` on a signal that never comes, and it
+cannot see a stop flag there. So the failure path does what the success
+path does before joining anything: it sets every stop flag and completes
+every ping-pong completion, which releases any half still waiting. It then
+waits, with the same count-based guard, for each worker's own `exited`
+flag, which the worker sets as its last action. Every worker that sets it
+is joined; one that does not is the stranded one. It is reported, and it
+is the only one left unjoined. The join never blocks on a thread that has
+not already said it is leaving.
 
 A stranded thread may yet run, and a failed self-test does not stop the
 tests after it. So the run's shared state, its workers and their
