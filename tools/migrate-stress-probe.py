@@ -108,7 +108,8 @@ EDITS += [
                 }
         }"""),
     ("""    t[made++] = thread_create(stress_migrator, &mig, "mig-migrator", SCHED_PRIO_DEFAULT);""",
-     """    {   /* MSPROBE: the migrator's table, filled before it starts */
+     """    _Static_assert(SPIN + SLEEP + 2 * PAIRS + MUTEX <= 32, "MSPROBE: the migrator's table holds 32 workers");
+    {   /* MSPROBE: the migrator's table, filled before it starts */
         struct stress_worker *ws[] = { spin, sleep, pp, mx };
         unsigned ns[] = { SPIN, SLEEP, 2 * PAIRS, MUTEX }, q = 0;
         for (unsigned a = 0; a < 4; a++)

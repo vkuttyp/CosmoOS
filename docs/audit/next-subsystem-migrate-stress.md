@@ -208,10 +208,14 @@ behind anyone.
   thread's state and CPU, and whether it is a timed sleeper. It is
   reported as the defect, since nothing else in the test explains it.
 
-Both are left unjoined, because neither can be released safely: the mutex
-is held by a thread that will not run. The test's failure names the
-stranded one as the cause, so a blocked waiter is never counted as a
-second defect.
+Every worker that has not set `exited` is left unjoined, in either class,
+because a join waits for the thread to exit and none of these has said it
+will. Joining one could block the boot for good, where the test's job is
+to name it and fail. A mutex waiter behind a stranded holder cannot be
+released at all, since the holder will not run. A stuck sleeper or a
+thread READY where nothing runs it has, by definition, not left within the
+guard. The failure names the stranded or stuck workers as the cause, so a
+waiter blocked behind one is never counted as a second defect.
 
 A stranded thread may yet run, and a failed self-test does not stop the
 tests after it. So the run's shared state, its workers and their
@@ -240,8 +244,8 @@ latency miss can no longer hide.
 **Concurrency.** Unchanged in the kernel. The test's phases are ordered
 by joins and counts, not by time.
 
-**Ownership and lifetime.** A worker reported stranded, and any worker
-blocked behind it, is not joined. The run's storage (allocated per run) is
+**Ownership and lifetime.** A worker that has not set `exited` (stranded,
+stuck, or blocked behind a stranded one) is not joined. The run's storage (allocated per run) is
 left allocated for them, so no later run can reset memory a live thread
 holds. A clean run frees it.
 
@@ -273,7 +277,7 @@ One PR.
 
 | test | checks | mutation it must catch |
 | --- | --- | --- |
-| `sched-migrate-stress` | at least 100 migrations in the window; no worker outside its mask; every worker, the late starter included, runs again after the migrator stops | `migrate_locked` dropping the thread (dequeue without enqueue): phase 3 names it and fails, without hanging the boot; the 200 ms progress assertion restored: the late starter fails it on every boot |
+| `sched-migrate-stress` | at least 100 migrations in the window; no worker outside its mask; every worker, the late starter included, runs again after the migrator stops | **a stranded thread**, injected: `migrate_locked` returns after `g_policy->dequeue(rqf, t)` without the enqueue at `to` (the thread leaves every queue and nothing will run it). This is the fault the test exists for, not one the current code has. Phase 3 must name that worker as stranded and fail without hanging the boot. **The 200 ms progress assertion restored**: the late starter fails it on every boot |
 
 ## Benchmarks
 
@@ -281,11 +285,12 @@ None.
 
 ## Risks
 
-- **A stranded thread is not joined, nor is a worker blocked behind it.**
-  Each is reported for what it is (stranded, or blocked behind the
-  stranded one), and left with its storage and its stop flag set; the
-  boot fails on the stranded one. Joining it would
-  hang the boot instead of naming it. The storage it keeps is leaked,
+- **A worker that has not said it is leaving is not joined.** That covers a
+  stranded or stuck worker (a sleeper still asleep included) and a mutex
+  waiter behind a stranded holder. Each is reported for what it is and
+  left with its storage and its stop flag set, and the boot fails on the
+  stranded or stuck one. Joining any of them could hang the boot instead
+  of naming it. The storage it keeps is leaked,
   once, on a boot that has already failed.
 - **The hang guard is time.** 5 000 waits of 1 ms is 5 s of the
   test's own sleeps, far above any queue's drain. It says "stuck", not
