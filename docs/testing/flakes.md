@@ -2408,3 +2408,13 @@ polling drivers now wait with `wait_for_completion_timeout`, which does the
 handshake (invariant S30). `tools/nvme-admin-probe.py` reproduces the exact
 panic on demand (`--broken`), and the fix in place makes the widened window
 harmless.
+
+## `sched-balance-hysteresis`: moved a thread for a difference of one, 2026-09-28
+
+`SELFTEST: sched-balance-hysteresis ... FAIL: the balancer moved a thread
+for a difference of one (567 ms)`, local, x86-64 debug, in a mutation
+boot of the nvme-admin unit, with `wait_for_completion_timeout`'s
+handshake removed. The balancer test does not use that wait. Two more
+boots with the same mutation failed only `completion-timeout`, the test
+the mutation was aimed at, and every unmutated boot of the unit passed.
+First sighting; not attributed to the mutation.
