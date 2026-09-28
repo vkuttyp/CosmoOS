@@ -2608,3 +2608,13 @@ s1.dns_expired > s0.dns_expired at line 4817 (851 ms)`. Then
 cascade has P33's shape before it blamed once: one test's early return
 leaves a tap from the pool of eight, and the tests after it fail for it.
 A candidate unit: the network tests' cleanup on a failed check.
+
+## `timer`: the tick count lagged the clock, 2026-09-29
+
+`SELFTEST: timer ... FAIL: the tick count lagged the clock by more than
+half the window (89 ms)`, local x86-64 debug, one boot of the
+placed-running unit's branch, beside an aarch64 boot. The test runs
+first in the suite, before any scheduler test the branch changes. The
+rerun passed. It is the host-time family of the old `schedtest.c` lag
+bound (widened in PR #63): the host did not schedule the machine's vCPU
+for part of the window. Recorded, not attributed.

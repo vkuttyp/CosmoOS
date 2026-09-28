@@ -871,6 +871,25 @@ static bool wait_spinner_entered(struct mig_spinner *s)
     return __atomic_load_n(&s->entered, __ATOMIC_ACQUIRE) != 0;
 }
 
+/*
+ * Stop a spinner and let it go. One that ran is joined and its storage
+ * freed. One that never ran cannot be joined -- it must run to see `stop`,
+ * and thread_join has no deadline, so the join would hang the boot where
+ * the test meant to report "never ran". Its reference is dropped instead
+ * and its storage (allocated, never on the test's stack, for exactly
+ * this) is left to it: it exits whenever it first runs.
+ */
+static void spinner_finish(struct mig_spinner *s, struct thread *t, bool entered)
+{
+    __atomic_store_n(&s->stop, 1u, __ATOMIC_RELEASE);
+    if (!entered) {
+        thread_put(t);
+        return;
+    }
+    thread_join(t);
+    kfree(s);
+}
+
 /* A thread at the reaper's priority, for sched-migrate-refuses: says it
  * ran, then holds its CPU until stopped. */
 struct refuse_rival {
@@ -1785,9 +1804,14 @@ static bool sched_load_pinned(const char **reason)
 
     /* A thread that runs and never queues anything behind it: the whole
      * difference between the two definitions of load. */
-    struct mig_spinner sp = { 0 };
-    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "load-spin", SCHED_PRIO_DEFAULT, CPUMASK_OF(busy));
-    CHECK(ts != NULL);
+    struct mig_spinner *sp = kzalloc(sizeof(*sp));
+    CHECK(sp != NULL);
+    struct thread *ts = thread_create_on(mig_spinner_main, sp, "load-spin", SCHED_PRIO_DEFAULT, CPUMASK_OF(busy));
+    if (ts == NULL) {
+        kfree(sp);
+        *reason = "cannot create the spinner";
+        return false;
+    }
 
     bool ok = true;
     const char *why = NULL;
@@ -1795,7 +1819,7 @@ static bool sched_load_pinned(const char **reason)
      * its own word. A non-zero load came first from the queued spinner,
      * and the next read could land in the idle CPU's switch to it --
      * dequeued, not yet current -- and read 0. */
-    bool entered = wait_spinner_entered(&sp);
+    bool entered = wait_spinner_entered(sp);
 
     unsigned busy_load = sched_cpu_load(busy);
     unsigned spare_load = sched_cpu_load(spare);
@@ -1845,8 +1869,7 @@ static bool sched_load_pinned(const char **reason)
             thread_join(t[i]);
     }
 
-    __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
-    thread_join(ts);
+    spinner_finish(sp, ts, entered);
 
     if (!ok) {
         *reason = why;
@@ -1888,21 +1911,24 @@ static bool sched_migrate_pinned(const char **reason)
     unsigned before = thread_count();
     uint64_t moves = sched_migration_count();
 
-    struct mig_spinner sp = { 0 };
-    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(a));
-    CHECK(ts != NULL);
+    struct mig_spinner *sp = kzalloc(sizeof(*sp));
+    CHECK(sp != NULL);
+    struct thread *ts = thread_create_on(mig_spinner_main, sp, "mig-spin", SCHED_PRIO_DEFAULT - 1, CPUMASK_OF(a));
+    if (ts == NULL) {
+        kfree(sp);
+        *reason = "cannot create the spinner";
+        return false;
+    }
     /* The spinner holds a before the worker is placed behind it. */
-    if (!wait_spinner_entered(&sp)) {
-        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
-        thread_join(ts);
+    if (!wait_spinner_entered(sp)) {
+        spinner_finish(sp, ts, false);
         *reason = "the spinner never ran";
         return false;
     }
     struct mig_worker w = { .cpu = ~0u };
     struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-worker", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
     if (tw == NULL) {
-        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
-        thread_join(ts);
+        spinner_finish(sp, ts, true);
         *reason = "cannot create the worker";
         return false;
     }
@@ -1919,10 +1945,10 @@ static bool sched_migrate_pinned(const char **reason)
         thread_sleep_ms(1);
     unsigned first = w.cpu;
     __atomic_store_n(&w.release, 1u, __ATOMIC_RELEASE);
-    __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sp->stop, 1u, __ATOMIC_RELEASE);
     if (first != ~0u)
         thread_join(tw);
-    thread_join(ts);
+    spinner_finish(sp, ts, true);
     if (!ready) {
         *reason = "the worker never became READY on the spinner's CPU";
         return false;
@@ -2000,18 +2026,26 @@ static bool sched_migrate_refuses_pinned(const char **reason)
      * (DEFAULT - 4) would otherwise preempt it, and a preempted thread's
      * right answer is PREEMPTED, not NOT_READY.
      */
-    struct mig_spinner sp = { 0 };
-    struct thread *ts = thread_create_on(mig_spinner_main, &sp, "mig-spin", SCHED_PRIO_DEFAULT - 16, CPUMASK_OF(a));
-    CHECK(ts != NULL);
-    if (!wait_spinner_entered(&sp)) {
-        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
-        thread_join(ts);
+    struct mig_spinner *sp = kzalloc(sizeof(*sp));
+    CHECK(sp != NULL);
+    struct thread *ts = thread_create_on(mig_spinner_main, sp, "mig-spin", SCHED_PRIO_DEFAULT - 16, CPUMASK_OF(a));
+    if (ts == NULL) {
+        kfree(sp);
+        *reason = "cannot create the spinner";
+        return false;
+    }
+    if (!wait_spinner_entered(sp)) {
+        spinner_finish(sp, ts, false);
         *reason = "the spinner never ran";
         return false;
     }
     struct mig_worker w = { .cpu = ~0u };
     struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-pinned", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));
-    CHECK(tw != NULL);
+    if (tw == NULL) {
+        spinner_finish(sp, ts, true);   /* never left holding its CPU at DEFAULT - 16 */
+        *reason = "cannot create the worker";
+        return false;
+    }
     bool ready = wait_ready_on(tw, a);
 
     if (ready) {
@@ -2058,15 +2092,15 @@ static bool sched_migrate_refuses_pinned(const char **reason)
             kerror("selftest: sched-migrate-refuses: a thread at the reaper's priority took the spinner's CPU");
             ok = false;
         }
-        __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);   /* the rival runs once the spinner leaves */
+        __atomic_store_n(&sp->stop, 1u, __ATOMIC_RELEASE);   /* the rival runs once the spinner leaves */
         __atomic_store_n(&rv.stop, 1u, __ATOMIC_RELEASE);
         if (trv != NULL)
             thread_join(trv);
     }
     __atomic_store_n(&w.release, 1u, __ATOMIC_RELEASE);
-    __atomic_store_n(&sp.stop, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sp->stop, 1u, __ATOMIC_RELEASE);
     thread_join(tw);
-    thread_join(ts);
+    spinner_finish(sp, ts, true);
     if (!ready) {
         *reason = "the worker never became READY on the spinner's CPU";
         return false;
