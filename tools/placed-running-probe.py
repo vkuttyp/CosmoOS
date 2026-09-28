@@ -81,7 +81,9 @@ FIX = [
         thread_sleep_ms(1);""", """    /* Wait for it to be the running thread there, not merely placed. */
     uint64_t deadline = clock_deadline_ns(2000000000ULL);
     while (!clock_deadline_passed(deadline) && !__atomic_load_n(&sp.entered, __ATOMIC_ACQUIRE))   /* PRPROBE --fix */
-        thread_sleep_ms(1);"""),
+        thread_sleep_ms(1);
+    if (!__atomic_load_n(&sp.entered, __ATOMIC_ACQUIRE))
+        kinfo("PRPROBE timeout: load: the spinner never entered in 2 s");"""),
 ]
 for anchor in ("""    struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-worker", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));""",
                """    struct thread *tw = thread_create_on(mig_worker_main, &w, "mig-pinned", SCHED_PRIO_DEFAULT, CPUMASK_OF(a));"""):
@@ -89,6 +91,8 @@ for anchor in ("""    struct thread *tw = thread_create_on(mig_worker_main, &w, 
         uint64_t pr_dl = clock_deadline_ns(2000000000ULL);
         while (!__atomic_load_n(&sp.entered, __ATOMIC_ACQUIRE) && !clock_deadline_passed(pr_dl))
             thread_sleep_ms(1);
+        if (!__atomic_load_n(&sp.entered, __ATOMIC_ACQUIRE))
+            kinfo("PRPROBE timeout: migrate: the spinner never entered in 2 s");
     }
 """ + anchor))
 

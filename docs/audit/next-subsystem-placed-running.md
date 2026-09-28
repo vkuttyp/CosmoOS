@@ -68,9 +68,10 @@ both boots passed.
 ### What remains after the wait
 
 After the spinner has entered, a thread of higher priority can still
-preempt it on its CPU. The spinner runs at `SCHED_PRIO_DEFAULT - 1`
-(31), and two kernel service threads run above it: the reaper (24) and
-`quiesce` (28). Since P34 (the exit-space unit) the reaper does every
+preempt it on its CPU. The migrate tests' spinner runs at
+`SCHED_PRIO_DEFAULT - 1` (31) and `sched-load`'s at `SCHED_PRIO_DEFAULT`
+(32), and two kernel service threads run above both: the reaper (24)
+and `quiesce` (28). Since P34 (the exit-space unit) the reaper does every
 process's teardown, so it runs more than it did. The three tests differ
 in what a preempted spinner does to them:
 
@@ -86,9 +87,9 @@ Not seen in 600 checks, but possible, and only in the last test.
 
 In the first aarch64 probe boot, `net-dns` failed a timing check
 (`s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired`, line 4817;
-its first sighting). Then seven later network tests failed to open
-`/dev/net/tap`, one failed on `svc != NULL`, and `process-user` failed
-(`status == 0`). The shape is P33's before it blamed once: one test's
+its first sighting). Then eight later tests failed with it: six network
+tests could not open `/dev/net/tap`, `net-hoststate` failed on
+`svc != NULL`, and `process-user` failed (`status == 0`). The shape is P33's before it blamed once: one test's
 early return leaves a shared resource, here a tap from the pool of
 eight, and the tests after it fail for it. It is recorded here and not
 taken up: it is a unit of its own (the network tests' cleanup on
@@ -137,7 +138,9 @@ interrupt can preempt it for the few milliseconds it holds its CPU, and
 "running" stays true from `entered` to the migrate. The worker and the
 second spinner (`mig-spin2`, which must preempt the worker) keep their
 priorities. `sched-load` and `sched-migrate` are unaffected by a
-preemption (above), so their spinners keep `DEFAULT - 1`.
+preemption (above), so their spinners keep their priorities:
+`SCHED_PRIO_DEFAULT` for `sched-load`'s `load-spin`, `DEFAULT - 1` for
+`sched-migrate`'s.
 
 ### 3. The record
 
@@ -162,6 +165,8 @@ acquire. Nothing else changes.
 **Performance.** One short wait per test, normally a millisecond or two.
 
 ## Affected files
+
+The proposed implementation's scope; this PR changes none of them.
 
 | file | change |
 |---|---|
