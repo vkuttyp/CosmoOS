@@ -23,7 +23,9 @@
 >   - `race_client`: a stop flag.
 >   - The DNS responder: stopped, unblocked and joined.
 >   - The harness's echo threads put their own references.
->   - Six tests already released on every exit and are unchanged.
+>   - The tests that already released on every exit are unchanged: the
+>     TCP timer, ARP and ND retry, steer-injector, both benchmark, and
+>     tap-ready tests.
 > - **The runner's census:** `nettest_census` (interfaces by name via
 >   `netif_names`, `tapsvc_count`, `socket_count`), taken before and
 >   after every test.
