@@ -87,6 +87,15 @@ reschedule, and the target handled one after the snapshot.
 - **After the snapshot, not after the block:** the waiter's count before
   it blocked was a superset. Any reschedule IPI to that CPU during the
   block raised it, including one owed to another wake.
+- **"After the wake", not "this wake's":** reschedule IPIs carry nothing
+  and coalesce, so no count can say which wake sent the one the target
+  handled.
+  - A wake that sends none fails.
+  - A wake whose IPI is lost while another CPU's reaches the target
+    within the wake's own latency would pass. Greptile named that
+    residue on #263.
+  - The handler's increment is atomic (`count` in `ipi.c`), because
+    `ipi_count_on` reads it from another CPU.
 - **If a thread became runnable on the target between the idle read and
   the post,** the wake asks for nothing. The record says so, and the
   round is repeated with a fresh waiter, up to 5 times.

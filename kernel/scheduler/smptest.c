@@ -424,12 +424,15 @@ static void cross_waiter(void *arg)
  *   also waits for the target to read idle: a load of 0 cannot be read
  *   while the waiter is current, since a current thread counts one, and
  *   the hint reads high, never low (S29).
- * - **The IPI must be this wake's.** The waiter's count before it blocked
- *   is a superset: any reschedule IPI to that CPU during the block raised
- *   it, including one owed to someone else's wake. The count is taken
- *   from the wake's own snapshot instead, made under the target's lock
- *   before it sends.
- *
+ * - **The IPI must come after the wake.** The waiter's count before it
+ *   blocked is a superset: any reschedule IPI to that CPU during the block
+ *   raised it, including one owed to someone else's wake. The count is
+ *   taken from the wake's own snapshot instead, made under the target's
+ *   lock before it sends. That is as close as a count gets: reschedule
+ *   IPIs carry nothing and coalesce, so an IPI after the snapshot is
+ *   *an* interrupt after the wake, not provably this wake's. A wake that
+ *   sends none fails (the mutation); one whose IPI is lost while another
+ *   CPU's reaches the target within the wake's own latency would not. *
  * A thread can still become runnable on the target between the idle read
  * and the post; then the wake asks for nothing, which the record says, and
  * the round is run again with a fresh waiter, up to SMP_WAKE_ROUNDS.
