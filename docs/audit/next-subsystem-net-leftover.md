@@ -26,9 +26,20 @@
 >   - The tests that already released on every exit are unchanged: the
 >     TCP timer, ARP and ND retry, steer-injector, both benchmark, and
 >     tap-ready tests.
-> - **The runner's census:** `nettest_census` (interfaces by name via
->   `netif_names`, `tapsvc_count`, `socket_count`), taken before and
->   after every test.
+> - **The runner's census:** `nettest_census` (interfaces by name and
+>   count via `netif_names`, `tapsvc_count`, `socket_count`), taken
+>   before and after every test. After review, only what a test **adds**
+>   is a leftover. An abandoned `hin_connect` puts its socket when its
+>   connect times out, possibly during a later test, which must not be
+>   failed for it. Interface counts are compared too, so a name that did
+>   not fit the 512-byte buffer still counts.
+> - **Interface references:** after review, a fake interface's creator
+>   reference, a `netif_find` reference and `net-csum-offload`'s kept
+>   packet are released however the test returns, through static
+>   `nt_netif_ref` holders. This covers the ARP and ND flush-count tests,
+>   `net-netif-lifetime`, `net-steer` and `net-csum-offload`. The
+>   forced-midpoint pass was rerun after the change: 50 of 50 on both
+>   architectures, nothing left, no hang or panic.
 > - **`net-dns`:** asserts `s1.dns_expired - s0.dns_expired >=
 >   s0.dns_pending`.
 > - **Forcing:** `tools/net-leftover-probe.py --count-checks` and

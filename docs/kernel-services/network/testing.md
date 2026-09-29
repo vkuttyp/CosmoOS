@@ -962,16 +962,28 @@ failed for the slot (`docs/audit/next-subsystem-net-leftover.md`).
 - **Objects registered with the stack are static**: `net-steer`'s and
   `net-csum-offload`'s interfaces. A release can run after any frame is
   gone.
+- **A reference a test holds on an interface** is released however it
+  returns: the creator's, after a successful registration, and one
+  `netif_find` gave it. Each is held through a static `struct
+  nt_netif_ref` (`nt_netif_hold`, put with `nt_netif_ref_put`). The key
+  is the holder, not the interface, whose address is already its
+  unregister's key. `net-csum-offload`'s kept packet is freed the same
+  way. This covers the ARP and ND flush-count tests, `net-netif-lifetime`,
+  `net-steer` and `net-csum-offload`.
 - **Tests that already release on every exit are unchanged:** the tcp
   timer, ARP and ND retry, steer injector, bench and tap-ready tests.
 
 **The runner's network check.** After a test's releases have run, the
 runner compares the interfaces (by name), the live DHCP/DNS services
 (`tapsvc_count`) and the socket count with their values before the test
-(`nettest_census`). A test that changed them fails, and the runner logs
-the change: `selftest: <test> left the network changed: interfaces
-[...] -> [...], services a -> b, sockets c -> d`. The next test starts
-from what is left, so a leftover is blamed once.
+(`nettest_census`). A test that **added** any of them fails, and the
+runner logs the change: `selftest: <test> left the network changed:
+interfaces (n) [...] -> (m) [...], services a -> b, sockets c -> d`.
+Fewer is never a leftover: an abandoned `hin_connect` puts its socket
+when its connect finally times out, which can happen during a later test,
+and that later test has left nothing. Interfaces are compared by count as
+well as by name, so a name that did not fit the buffer still counts. The
+next test starts from what is left, so a leftover is blamed once.
 
 **Checked by forcing.** `tools/net-leftover-probe.py --count-checks`
 counts each test's passing checks, and `--force last|mid LOG` makes
