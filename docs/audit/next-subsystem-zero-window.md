@@ -154,13 +154,16 @@ build before the push.
 
 ## Affected files
 
+The implementation's; this PR (the report) adds only the last row's
+probe and this report.
+
 | file | change |
 |---|---|
 | `kernel-services/network/nettest.c` | `net-hostinput`'s window-update check (§1); `net-zero-window-probe` (§2) |
 | `docs/audit/next-subsystem-zero-window.md` | as built |
 | `docs/testing/flakes.md` | the entry's "fixed by" |
 | `README.md` | Status entry |
-| `tools/zero-window-probe.py` | (this PR) the probe |
+| `tools/zero-window-probe.py` | added by this PR; unchanged by the implementation |
 
 No TCP code changes.
 
@@ -195,9 +198,14 @@ none has run yet, because `net-zero-window-probe` does not exist):
   `net-zero-window-probe`'s acked-probe case catches it by refusal:
   its ACK of `+102` is above `snd_max`. The RFC 5961 check in
   `tcp_input` (`SEQ_GT(ack, pcb->snd_max)` → `challenge_ack`) drops it
-  before the window opens. The case must then see a challenge ACK
-  (ack `+101`, no data) where it expects the data from `+102`, and
-  fail. Greptile corrected the first prediction on #258, a resend from
+  before the window opens. The case must then see no data from
+  `+102`, and fail. What comes back instead is at most a challenge
+  ACK: seq `+101` (`snd_nxt`), ack the peer's own sequence
+  (`rcv_nxt`, `1003` in `net-hostinput`'s numbering), and no data.
+  "At most", because `challenge_allowed` rate-limits challenge ACKs
+  machine-wide (`TCP_CHALLENGE_PER_SEC`). The case therefore asserts
+  the absence of the data and the `challenge_acks` count, not the
+  challenge segment's arrival. Greptile corrected the first prediction on #258, a resend from
   `+101`, which cannot happen because the ACK never lands.
 
 ## Benchmarks
