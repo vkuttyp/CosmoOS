@@ -2756,3 +2756,35 @@ reached the network test 4.7 s after the harness's whole budget; every
 self-test before it had passed. This is not the reset family the tally
 above counts: the harness never got as far as a connection. It is a
 slow host, and it is recorded, not counted.
+
+## `thrtest` step 25: the mutex word was not 1 at the broadcast's probe, 2026-09-29
+
+```
+thrtest: step 25
+thrtest: FAIL bp_state_seen == 1u at line 2424
+THREADTEST: FAIL 1
+```
+
+CI run 36623173528, aarch64 debug, on PR #262 (the smp-wake report),
+which changes only `tools/smp-wake-probe.py` and documentation. Every
+self-test had passed; the user-mode suite failed. First sighting.
+
+**What the check assumes.** Step 25 runs twice. A holder locks `cv_m`
+uncontended, three waiters sleep on `cv_c`, and the test broadcasts with
+a probe that runs at phase `at`: phase 0 before the requeue, phase 1
+after it. The probe asserts that `cv_m.state` reads 1: held, and
+uncontended.
+
+**A candidate mechanism, not proven for this sighting.**
+- The requeue wakes one waiter (`cosmo_futex_requeue(..., 1, ~0u, seq)`)
+  and moves the rest onto the mutex word.
+- The woken waiter relocks `cv_m`, which the holder still has, so it
+  marks the word contended (2) and sleeps.
+- At phase 1, the probe runs on the broadcasting thread right after the
+  requeue returns. If the woken waiter has reached its lock first, on
+  another CPU, the word reads 2 on a correct libc.
+
+The log does not say which iteration failed (`at` 0 or 1). So this is
+the interleaving that fits, not a finding. The next step is to record
+`at` and the word's value in the failure, before changing the claim.
+
