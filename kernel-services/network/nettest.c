@@ -77,16 +77,32 @@
  * out: they close whenever their connect times out, maybe during a later
  * test, and must neither blame that test nor hide a socket it leaves). */
 static unsigned g_nt_abandoned;
+/* Odd while an abandoned socket is being put and its count dropped:
+ * the census retries until it reads both halves of one state. */
+static unsigned g_nt_abandon_seq;
 
 void nettest_census(struct nettest_census *out)
 {
     out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
     out->services = tapsvc_count();
-    /* The abandoned connects' sockets are read first and subtracted: each
-     * thread puts its socket before it leaves the count, so this can read
-     * one low, never one high. */
-    unsigned abandoned = __atomic_load_n(&g_nt_abandoned, __ATOMIC_ACQUIRE);
-    unsigned sockets = socket_count();
+    /* The abandoned connects' sockets are subtracted, read with the socket
+     * count as one state: a socket put between the two reads made either
+     * order wrong by one -- low in a "before" census is a false addition
+     * after. The sequence is odd while a thread puts its socket and drops
+     * the count, and changes when it has; retry until it is even and
+     * unchanged across both reads. */
+    unsigned abandoned = 0, sockets = 0;
+    for (unsigned tries = 0; tries < 1000; tries++) {
+        unsigned q = __atomic_load_n(&g_nt_abandon_seq, __ATOMIC_ACQUIRE);
+        if (q & 1) {
+            thread_sleep_ms(1);
+            continue;
+        }
+        abandoned = __atomic_load_n(&g_nt_abandoned, __ATOMIC_ACQUIRE);
+        sockets = socket_count();
+        if (__atomic_load_n(&g_nt_abandon_seq, __ATOMIC_ACQUIRE) == q)
+            break;
+    }
     out->sockets = sockets > abandoned ? sockets - abandoned : 0;
 }
 
@@ -6502,14 +6518,15 @@ static void hin_connect_thread(void *arg)
     c->done = true;
     /* Abandoned by a failed test while it connected: the socket is its to put. */
     if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED) {
+        /* The put and the count's drop are one state change to the census
+         * (g_nt_abandon_seq odd between them). */
+        __atomic_fetch_add(&g_nt_abandon_seq, 1u, __ATOMIC_ACQ_REL);
         if (c->s) {
             ksock_put(c->s);
             c->s = NULL;
         }
-        /* After the put: a census between the two reads a count already
-         * lower, never one that still includes a socket no longer
-         * excused. */
         __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);
+        __atomic_fetch_add(&g_nt_abandon_seq, 1u, __ATOMIC_ACQ_REL);
     }
     thread_exit(0);
 }
@@ -6528,7 +6545,9 @@ static void hin_conn_release(void *arg)
     struct hin_conn *c = arg;
     for (unsigned i = 0; i < 200 && !c->done; i++)
         thread_sleep_ms(10);
-    __atomic_fetch_add(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);   /* before the exchange: the thread may decrement at once */
+    /* Counted before the exchange: the thread may drop the count at once.
+     * No socket changes here, so the census's sequence is not involved. */
+    __atomic_fetch_add(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);
     if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
         __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);   /* not abandoned after all */
         thread_join(c->th);
