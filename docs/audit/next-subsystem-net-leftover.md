@@ -45,8 +45,8 @@ it had made when it did.
 ### Measured
 
 `tools/net-leftover-probe.py` logs, whenever they change across a test,
-the network interfaces (by name), the live DHCP/DNS services and the
-socket count. At `net-dns`'s expiry step it logs the queries the service
+the network interfaces (by name: a swap that keeps the count shows
+too), the live DHCP/DNS services and the socket count. At `net-dns`'s expiry step it logs the queries the service
 had handled when the wait ended and at the check. It adds no delay of its
 own: a first version slept 100 ms there, which is exactly the settle the
 test lacks, and hid the failure. `--slow-dns US` makes the service's DNS
@@ -71,6 +71,19 @@ interfaces go from 3 to 16.
 In the same `--gap` boot, the aging reclaimed every entry pending before
 it: `dns_expired` rose by 128, the pending count read before the aging.
 That is the claim step (5) exists for, and it held.
+
+### The same defect outside the network
+
+`irq-route` and `irq-affinity` failed together in this report's own
+probe boot (aarch64, 2026-09-29): `hits >= 5` (the interrupt-count
+flake `flakes.md` records), then `irq_request(...) == 0` in
+`irq-affinity`. `flakes.md` already names why: `irq-route`'s `CHECK`
+returns before its `irq_disable` and release, so the line stays held
+and the next test's request is refused with `-EBUSY`. It is the third
+sighting of that pair (2026-09-20, 2026-09-24, 2026-09-29). `flakes.md`
+left the repair, "a test that acquires a resource releases it on every
+exit", to whoever next touched `kernel/interrupt/irqtest.c`. The defer
+list is that repair, so `irq-route` is in this unit's scope: one release.
 
 ### How many tests can do this
 
@@ -135,6 +148,16 @@ The network tests register a release right after each acquisition:
 Their explicit teardown lines go. The order is kept by construction:
 a service is registered after its tap, so it is released before it.
 
+**A thread's argument must outlive its join.** A release runs after the
+test function returns, when its frame, and any helper's, is gone.
+Twenty `thread_create` calls, in 16 functions, pass a pointer to a stack
+local: test functions (`net-tcpverdict` has three) and helpers such as
+`tcp_transfer`, whose sink thread reads its `srv`. A thread started that
+way can read a dead frame between the failed `CHECK` and its release.
+Those twenty arguments move off the stack: allocated at the start, and
+freed by the release that stops and joins the thread, after the join.
+A release can then run after any frame has gone.
+
 This covers all 38 functions. It is mechanical, one line per acquisition,
 and each converted test is checked by the forced failure below.
 
@@ -179,7 +202,8 @@ The proposed implementation's scope; this PR changes none of them.
 | file | change |
 |---|---|
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | `selftest_defer`, the runner running releases, the network check |
-| `kernel-services/network/nettest.c` | 38 functions: a release per acquisition, explicit teardowns removed; `net-dns` (5) |
+| `kernel-services/network/nettest.c` | 38 functions: a release per acquisition, explicit teardowns removed; the 20 thread arguments off the stack; `net-dns` (5) |
+| `kernel/interrupt/irqtest.c` | `irq-route`: its interrupt line released through the defer list |
 | `kernel-services/network/netif.c`, `tapsvc.c` | the counts the runner reads (interface names, services) |
 | `docs/testing/flakes.md`, `docs/kernel-services/network/testing.md`, `README.md` | the record |
 

@@ -140,14 +140,18 @@ def reg_edits(reps):
             extern unsigned nlprobe_svcs(void);
             extern unsigned socket_count(void);
             static unsigned last_n = ~0u, last_s = ~0u, last_k = ~0u;
+            static char last_names[160];
             char names[160];
             unsigned n = nlprobe_netifs(names, sizeof(names)), sv = nlprobe_svcs(), k = socket_count();
-            if (n != last_n || sv != last_s || k != last_k)
+            /* The names too: a test that removes one interface and adds
+             * another leaves the count where it was. */
+            if (n != last_n || sv != last_s || k != last_k || strcmp(names, last_names) != 0)
                 kinfo("NLPROBE left: '%s' ended with %u netifs (%s), %u services, %u sockets",
                       tests[i].name, n, names, sv, k);
             last_n = n;
             last_s = sv;
             last_k = k;
+            strlcpy(last_names, names, sizeof(last_names));
         }
 """),
         ('    { "net-dns",         selftest_net_dns },\n', '    { "net-dns",         selftest_net_dns },\n' * reps),
