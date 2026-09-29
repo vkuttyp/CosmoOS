@@ -2664,6 +2664,24 @@ pass when it fails: `net-hoststate`, `net-flows-fw`, `net-output` and
 time, a timing-dependent one (the persist path after a zero window), so
 it is a candidate for its own unit, not three independent flakes.
 
+**Found and fixed (the zero-window unit, PR #259;
+`docs/audit/next-subsystem-zero-window.md`).**
+
+- **What the check assumed.** It wanted the 50 bytes in the first segment
+  after the window update, and the kernel does not promise that.
+- **Why it failed.** A zero window with data waiting sends a one-byte
+  probe on the retransmit timer, and the probe advances `snd_nxt`. The
+  blocked phase lasts about 180 ms, against a 200 ms RTO. On a slow host
+  the probe went first, so the first segment was the probe (`+101`, 1
+  byte) or the rest (`+102`, 49).
+- **The proof.** `tools/zero-window-probe.py` forced the failure with a
+  300 ms pause on either side of the blocked check, and a 700 ms pause
+  for two probes: 2/2 on each architecture.
+- **The fix.** The check now asks for every one of the 50 bytes, in any
+  order (`hin_recv_stream`), and the new `net-zero-window-probe` tests the probe.
+- **The proof of the fix.** The three forced placements pass on both
+  architectures.
+
 ## `sched-balance-hysteresis`: moved a thread for a difference of one, second sighting
 
 2026-09-29, local aarch64 debug, in the net-leftover unit's check-counting
