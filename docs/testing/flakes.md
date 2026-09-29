@@ -2692,8 +2692,8 @@ boot, which changes no scheduler code (the first sighting was on
 `docs/audit/next-subsystem-hysteresis.md`), and fixed by the hysteresis
 unit (PR #261).** The test now judges by the balancer's own record of
 each pull: `sched_migrate_from` writes the locked difference onto the
-thread it moves. A third thread spinning on A must be pulled, at two or
-more. The balancer
+thread it moves. A third thread spinning beside the pair must draw a
+pull, at two or more. The balancer
 cannot pull for a difference of one: `sched_migrate_from` re-decides
 under both locks with `min_gap = 2`. A move is a real, locked 3 vs 1: a
 third thread made runnable on A between the test's samples, while one of

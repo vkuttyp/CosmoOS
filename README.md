@@ -3677,7 +3677,7 @@ See [docs/development.md](docs/development.md).
   `sched_migrate_from` now records each balancer pull's locked
   difference on the thread it moves (`bal_pulls`, `bal_gap_min`, debug
   builds). The test fails any pull below two, and a third thread
-  spinning on A must be pulled, at two or more. (PR #261)
+  spinning beside the pair must draw a pull, at two or more. (PR #261)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

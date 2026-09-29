@@ -11,14 +11,20 @@
 > - **The quiet window's gap is taken and reset in one step**
 >   (`__atomic_exchange_n`), so the intruder phase is judged on its own
 >   pulls.
-> - **The intruder** is a spinner pinned to A. The phase ends at the
->   first pull of a worker, bounded at 1 s. Both architectures pulled
->   once, at a recorded difference of **2**: the probe's "3 vs 1",
->   written as a difference.
+> - **The intruder** is a spinner pinned beside the pair: on A, or on B
+>   if a legitimate quiet-window pull moved a worker there. The pair's CPU
+>   is read from the workers' run queues (`t->cpu`) after the quiet
+>   window's snapshot. A pull after that read is itself one the phase
+>   counts. Greptile found the hole on #261: pinned always to A, a
+>   quiet-window pull left 2 against 2, and a correct balancer drew
+>   nothing. The phase ends at the first pull of a worker, bounded at
+>   1 s. Both architectures pulled once, at a recorded difference of
+>   **2**: the probe's "3 vs 1", written as a difference.
 > - **Mutations,** each alone on both architectures, boot confirmed:
 >
 >   | mutation | result |
 >   |---|---|
+>   | a legitimate pull forced inside the quiet window (a spinner on A until one worker is pulled), with the intruder always on A | fails on both: "a steady three against one drew no pull within a second". With the placement as built, the same forcing passes on both: the intruder joined B and drew its pull |
 >   | threshold of one (the scan's `mine + 2` and `min_gap`) | fails on both: 13 and 10 pulls, the smallest at a locked difference of 1 |
 >   | only `min_gap` lowered to 1 | **fails in 2 of 6 boots** (one per architecture). The scan still asks for a hint of two, so it pulls only when the hint's double count lands on B's scan: a rate, not a certainty |
 >   | the record not written | fails on both, in the intruder phase: "a steady three against one on cpu A drew no pull within a second" |
@@ -199,8 +205,10 @@ the sampler stays only to report moves in the log.
 
 ### 2. A real third thread, made certain: the intruder phase
 
-After the quiet window, the test adds an intruder pinned to A that
-spins until a worker has been pulled, bounded at 1 s: a steady 3 vs 1.
+After the quiet window, the test adds an intruder pinned beside the
+pair (on A, or on B if a quiet-window pull moved a worker there, read
+from the workers' run queues) that spins until a worker has been pulled,
+bounded at 1 s: a steady 3 vs 1.
 It asserts that exactly this happens: a pull, recorded at a locked
 difference of two or more. That is the sightings' case, as a proof
 rather than a rerun, and it proves the record is written. Both
