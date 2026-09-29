@@ -59,16 +59,26 @@ pauses before the blocked check: that is a slow host at either point.
 | instrumented, unforced | both | 4 | `rto 200 ms; blocked phase 179–183 ms, saw nothing; after the update: seq +101, 50 bytes` | ok, 4/4 |
 | `--stretch 300` | both | 2 | `blocked phase 180 ms, saw nothing; after the update: seq +101, 1 bytes` | **FAIL** at the check, 2/2 |
 | `--early 300` | both | 2 | `blocked phase 301 ms, saw seq +101, 1 bytes; after the update: seq +102, 49 bytes` | **FAIL** at the check, 2/2 |
-| `--stretch 300 --fix` | both | 2 | as `--stretch 300` | ok, 2/2 |
-| `--early 300 --fix` | both | 2 | as `--early 300` | ok, 2/2 |
+| `--stretch 700` | both | 2 | `blocked phase 180–201 ms, saw nothing; after the update: seq +101, 1 bytes` | **FAIL** at the check, 2/2 |
+| `--stretch 300 --fix` | both | 2 | as `--stretch 300`; `--fix read 2 segments` | ok, 2/2 |
+| `--early 300 --fix` | both | 2 | as `--early 300`; `--fix read 1 segments` | ok, 2/2 |
+| `--stretch 700 --fix` | both | 2 | as `--stretch 700`; `--fix read 3 segments` | ok, 2/2 |
 
 - **The unforced runs** place the whole blocked phase inside the RTO,
   with 17–21 ms to spare.
 - **The two forced placements** are the two ways over it. The probe
   goes out either after the blocked check or inside it. The instrumented
   check fails on the same condition as the original each time.
+- **`--stretch 700` passes a second timeout** (200 ms, then 400 ms after
+  the doubling). The timeout rewinds `snd_nxt` to `snd_una` and sends
+  the probe byte again. The candidate then reads three segments to
+  cover the 50 bytes. The probe logs only the first segment's sequence
+  and the count, so "the second is the repeated probe at `+101`" is
+  inferred from the rewind, not logged. A check that demanded each
+  segment start exactly where the last ended would reject it. That was
+  the candidate as first written; Greptile found it on #258.
 - **The unforced runs never saw a probe.** The mechanism is therefore
-  established by forcing, and not observed in the three CI sightings
+  established by forcing, and not observed in the three sightings
   themselves. The failed check's message cannot say which segment it
   read. The sightings are consistent with it: the same check each time,
   in boots that change no TCP code.
@@ -98,14 +108,17 @@ one segment, or before the persist timer.
 
 ### 1. The window-update check asserts the stream, not the segment
 
-The check reads segments until it has 50 bytes, and each must start
-where the last ended, from `iss1 + 101`. A one-byte probe seen in the
-blocked phase counts as the first byte. This is the probe's `--fix`
-block, bounded at 4 segments:
+The check reads segments until the 50 bytes from `iss1 + 101` are
+covered. A segment may start at or before the covered edge, but never
+past it (no gap), and never run past the 50. A repeated probe or a
+retransmission from `snd_una` therefore passes, and a skipped byte does
+not. A one-byte probe seen in the blocked phase counts as the first
+byte. This is the probe's `--fix` block, bounded at 8 segments:
 
 ```c
 uint32_t covered = (blocked_seen && bseq == 101 && blen == 1) ? 1 : 0;
-/* then: each segment must have seq == iss1 + 101 + covered and fit in 50 */
+/* each segment: off = seq - (iss1 + 101); off <= covered, paylen > 0,
+ * off + paylen <= 50; covered = max(covered, off + paylen) */
 CHECK(ok_run && covered == 50);
 ```
 
@@ -163,29 +176,37 @@ None; test-only.
 
 | test | proves |
 |---|---|
-| `net-hostinput` | the 50 bytes arrive in order from `iss1 + 101` with or without a probe; forced both ways by the probe's `--stretch` and `--early` |
+| `net-hostinput` | the 50 bytes arrive from `iss1 + 101` with no gap, with or without a probe (repeats allowed); forced by the probe's `--stretch` (one probe and two) and `--early` |
 | `net-zero-window-probe` (new) | a zero window with data sends a one-byte probe on the timer; data after a window update resumes in order past it |
 
-**Mutations** (each alone, boot confirmed):
+**Measured in this report:** the old check fails under `--stretch 300`,
+`--stretch 700` and `--early 300`, and the candidate passes all three
+(the rows above).
 
-- **The old check in place of §1's, under `--stretch` or `--early`:**
-  fails, the rows above.
+**Planned for the implementation** (each run alone, boot confirmed then;
+none has run yet, because `net-zero-window-probe` does not exist):
+
 - **The probe removed** (the `seglen = 1` branch disabled):
-  `net-zero-window-probe` fails, because no probe arrives.
-- **The probe does not advance `snd_nxt`:** the resumed data starts at
-  the probe byte. The test must see the byte twice and fail. If it
-  cannot, this mutation shows that the in-order rule is weaker than
-  stated.
+  `net-zero-window-probe` should fail, because no probe arrives.
+- **The probe does not advance `snd_nxt`:** the data after the window
+  update starts at the probe byte again. `net-hostinput`'s §1 check
+  allows a repeated byte by design, so it cannot catch this.
+  `net-zero-window-probe`'s acked-probe case must catch it: after an
+  ack of `+102`, a segment from `+101` resends a byte the peer acked,
+  which is never legitimate. If that case does not fail, the test is
+  weaker than stated.
 
 ## Benchmarks
 
-None; `net-hostinput` gains one to three more `hin_recv` calls only when a
-probe went out.
+None; `net-hostinput` gains at most seven more `hin_recv` calls, and only
+when a probe went out (two in the measured runs).
 
 ## Risks
 
-- **§1's loop is bounded at 4 segments.** A stack that sent the 50
-  bytes one byte at a time would fail it. That would be a real
+- **§1's loop is bounded at 8 segments.** A stack that sent the 50
+  bytes one byte at a time would fail it. The most measured is 3.
+  That was two probes and the rest, under `--stretch 700`, which a
+  host would need to stall for over 600 ms to reach. That would be a real
   regression (silly-window avoidance), so the bound is intended.
 - **The seam arms the timer on the calling CPU.** Its comment says so.
   The test is single-CPU in what it asserts, so this is harmless. The

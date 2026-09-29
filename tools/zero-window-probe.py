@@ -29,8 +29,9 @@ segment after the window update (ZWPROBE lines).
 the timer fires first. --early MS pauses MS after the send, before the
 blocked check, so the probe goes out inside the blocked phase and that
 check sees it. --fix is the candidate check: the 50 bytes arrive
-in order from iss1 + 101, a probe byte already seen during the blocked
-phase counting as the first.
+from iss1 + 101 with no gap, a probe byte already seen during the blocked
+phase counting as the first; a segment may repeat bytes already covered
+(a second probe, or a retransmission from snd_una), never skip any.
 
 `apply` and `revert` are those of tools/nvme-admin-probe.py: stamp first,
 every file replaced atomically, the stamp removed last, finished by
@@ -78,18 +79,25 @@ def new_block(stretch, fix, early=0):
           zw_got ? sg.seq - iss1 : 0, zw_got ? sg.paylen : 0);
 """
     if fix:
-        s += """    {   /* ZWPROBE --fix: the 50 bytes in order from iss1 + 101, a probe byte counted */
+        s += """    {   /* ZWPROBE --fix: the 50 bytes from iss1 + 101 with no gap, a probe byte counted.
+         * A segment may start at or before what is covered (a repeated probe, or a
+         * retransmission from snd_una), never after it, and never past the 50. */
         uint32_t covered = (zw_blocked_seen && zw_bseq == 101 && zw_blen == 1) ? 1 : 0;
         bool ok_run = zw_got;
-        for (unsigned k = 0; ok_run && covered < 50 && k < 4; k++) {
-            if (sg.seq != iss1 + 101 + covered || sg.paylen == 0 || covered + sg.paylen > 50) {
+        unsigned zw_segs = 0;
+        for (unsigned k = 0; ok_run && covered < 50 && k < 8; k++) {
+            uint32_t off = sg.seq - (iss1 + 101);
+            if (off > covered || sg.paylen == 0 || off + sg.paylen > 50) {
                 ok_run = false;
                 break;
             }
-            covered += sg.paylen;
+            zw_segs++;
+            if (off + sg.paylen > covered)
+                covered = off + sg.paylen;
             if (covered < 50)
                 ok_run = hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES);
         }
+        kinfo("ZWPROBE: --fix read %u segments after the update, covered %u", zw_segs, covered);
         CHECK(ok_run && covered == 50);
     }"""
     else:
