@@ -1342,7 +1342,8 @@ bool selftest_sched_balance_pair(const char **reason)
  * (docs/audit/next-subsystem-load-balancer.md, the found gap).
  */
 #if CONFIG_SCHED_BALANCE && CONFIG_DEBUG && !CONFIG_SCHED_CHAOS
-/* A third runnable thread on A, for as long as the test says. */
+/* A third runnable thread beside the pair (on A, or B after a quiet-window
+ * pull), for as long as the test says. */
 struct hyst_intruder {
     unsigned stop;
 };

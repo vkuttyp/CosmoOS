@@ -252,7 +252,7 @@ builds.
 
 | test | proves |
 |---|---|
-| `sched-balance-hysteresis` | no balancer pull of its workers below a locked difference of two, across a quiet window, whatever the sampler sees; then, with an intruder on A, a legitimate pull at two or more passes |
+| `sched-balance-hysteresis` | no balancer pull of its workers below a locked difference of two, across a quiet window, whatever the sampler sees; then, with an intruder beside the pair (on A, or on B if a quiet-window pull moved a worker there), a legitimate pull at two or more is required and passes |
 
 **Mutations** (each alone, both architectures, boot confirmed): the
 banner's table. Two of them differ from the plan:
