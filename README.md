@@ -3651,6 +3651,17 @@ See [docs/development.md](docs/development.md).
     interfaces were registered on the stack. With those fixed, 50 of 50
     were forced on both. Each time exactly the forced tests failed and
     nothing was left behind. (PR #257)
+- **`net-hostinput`'s window update is checked as a stream, and the
+  zero-window probe has a test.** The check failed three times. A zero
+  window with data waiting sends a one-byte probe on the retransmit
+  timer, and the test's blocked phase (~180 ms) runs just under the
+  200 ms RTO. On a slow host the probe went first, and the data resumed
+  past it, which the check (all 50 bytes in the first segment) refused.
+  `tools/zero-window-probe.py` forced it both ways. The check now asks
+  for the 50 bytes with no gap (`hin_recv_stream`), and
+  `net-zero-window-probe` proves the probe and what follows it: an
+  update that acks the probe, one that does not, and one that arrives
+  before it is read. No TCP code changed. (PR #259)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

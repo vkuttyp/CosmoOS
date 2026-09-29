@@ -33,6 +33,10 @@ from iss1 + 101 with no gap, a probe byte already seen during the blocked
 phase counting as the first; a segment may repeat bytes already covered
 (a second probe, or a retransmission from snd_una), never skip any.
 
+It patches the check as it was before the zero-window unit (main
+46dbd3b4 and earlier). On a tree with the fix (hin_recv_stream), its
+anchor is not found, and apply exits without touching anything.
+
 `apply` and `revert` are those of tools/nvme-admin-probe.py: stamp first,
 every file replaced atomically, the stamp removed last, finished by
 running revert (again).

@@ -1,7 +1,43 @@
 # NEXT SUBSYSTEM — net-hostinput's window-update check races the zero-window probe
 
-> **Status: proposed.** Report and probe (`tools/zero-window-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #259).** As designed, with these specifics:
+>
+> - **§1's check is a helper,** `hin_recv_stream(u, port, base, covered,
+>   total, &sg, have)`, in `nettest.c`. It also passes over a bare ACK
+>   and fails a SYN, FIN or RST. `net-hostinput` counts a probe it read
+>   in the blocked phase as `covered = 1`.
+> - **§2's test does not use the seam.** It waits for the probe the
+>   timer sends at its own RTO. It needs no debug-only seam, so no
+>   release stub either; release boots run no self-tests, but the
+>   release build compiles it. Each wait is for the probe, not a stopwatch. It
+>   has four cases:
+>   1. the probe;
+>   2. an update that does not ack it;
+>   3. an update that acks it;
+>   4. an update sent once `retransmits` has risen, with the probe still
+>      unread: `net-hostinput`'s slow-host placement, made
+>      deterministic.
+> - **§2 does not assert `challenge_acks`.** It is a machine-wide
+>   counter, and the claim is about this connection. Case (3) asserts
+>   the data.
+> - **Mutations,** each alone on both architectures:
+>
+>   | mutation | result |
+>   |---|---|
+>   | the probe removed | fails at (1) |
+>   | one probe keeping `snd_nxt` and `snd_max` | fails at (3), as predicted; (2) passes |
+>   | the helper demanding the whole run in its first segment (the old rule) | fails at (2) |
+>
+>   The second mutation's first form only skipped `snd_nxt += seglen`,
+>   so the output loop built probes until the batch was full. It failed
+>   at (2) by the 8-segment bound, not by the mechanism, and was
+>   replaced.
+> - **Forced placements** against the new `net-hostinput` (a 300 ms or
+>   700 ms pause before the update, 300 ms before the blocked check)
+>   pass on both architectures.
+> - **`tools/zero-window-probe.py`** patches the pre-fix check. On a
+>   tree with the fix, its anchor is not found and it exits without
+>   touching anything; its docstring says so.
 
 ## Problem
 
@@ -143,7 +179,8 @@ asserts:
 The seam is `CONFIG_DEBUG` only (`tcp.c`, the `#if CONFIG_DEBUG`
 block that holds `tcp_test_arm_rexmit`). The test either registers only
 in debug or has a release stub, and `gmake BUILD=release image` must
-build before the push.
+build before the push. (As built, the test uses no seam; see the
+banner.)
 
 ### 3. The record
 
@@ -159,17 +196,19 @@ probe and this report.
 
 | file | change |
 |---|---|
-| `kernel-services/network/nettest.c` | `net-hostinput`'s window-update check (§1); `net-zero-window-probe` (§2) |
+| `kernel-services/network/nettest.c` | `hin_recv_stream`; `net-hostinput`'s window-update check (§1); `net-zero-window-probe` (§2) |
+| `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | the new test registered after `net-hostinput` |
 | `docs/audit/next-subsystem-zero-window.md` | as built |
+| `docs/kernel-services/network/testing.md` | `net-hostinput`'s window update; a section on the new test and its mutations |
 | `docs/testing/flakes.md` | the entry's "fixed by" |
 | `README.md` | Status entry |
-| `tools/zero-window-probe.py` | added by this PR; unchanged by the implementation |
+| `tools/zero-window-probe.py` | added by the report (#258); the implementation adds a docstring note that it targets the pre-fix check |
 
 No TCP code changes.
 
 ## APIs
 
-None. `tcp_test_arm_rexmit` exists.
+None. (`tcp_test_arm_rexmit` exists; as built, it is not used.)
 
 ## Migration plan
 
@@ -224,7 +263,10 @@ when a probe went out (two in the measured runs).
   The test is single-CPU in what it asserts, so this is harmless. The
   implementation should confirm that the probe cannot race the test's
   own window update. The update is sent only after the probe has been
-  read.
+  read. (As built, no seam is used. Case (4) sends its update once
+  `retransmits` has risen. The rexmit work counts and outputs the
+  probe in one hold of the pcb's lock, and the update's input takes
+  that lock after them.)
 
 ## Alternatives considered
 

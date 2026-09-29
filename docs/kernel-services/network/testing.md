@@ -530,7 +530,11 @@ acknowledged (the fifth acceptance point). Accepted segments that do not
 advance `snd_una` keep their output on C1: three duplicate ACKs make the 100
 bytes in flight retransmit (`retransmits` rises); an ACK with window 0 blocks
 a 50-byte send (nothing of that size read back) and a pure window update
-releases it; two data segments with an unchanged ACK are delivered and
+releases it, all 50 bytes from `iss1 + 101` with no gap (`hin_recv_stream`).
+They may come in one segment, or as a zero-window probe and the rest
+past it: the blocked phase (~180 ms) is about the 200 ms RTO, so on a
+slow host the retransmit timer sends the one-byte probe first
+(`net-zero-window-probe`, below); two data segments with an unchanged ACK are delivered and
 acknowledged together; the peer's FIN is acknowledged and the accepted socket
 reads EOF. A valid reset (`seq == rcv_nxt`) from a peer under a DROP rule
 tears C2 down (`-ECONNRESET`, `rsts_in`) and emits nothing. (5) ICMP by type:
@@ -926,6 +930,61 @@ built.
 
 **The shell harness** runs `vmctl flows` in every boot and requires its
 counter lines, reading the version-6 snapshot end to end from userland.
+
+## The zero-window probe (`net-zero-window-probe`)
+
+A zero window with data waiting sends a one-byte probe on the
+retransmit timer, and the probe advances `snd_nxt`
+(`docs/audit/next-subsystem-zero-window.md`). `net-hostinput`'s
+window-update check used to demand all 50 bytes in the first segment
+after the update. It failed whenever the update landed after the timer's
+first expiry: three sightings, and deterministic under a 300 ms pause
+at either side of its blocked check.
+
+**`hin_recv_stream(u, port, base, covered, total, &sg, have)`** is the
+check both tests now make. The bytes `[base, base + total)` arrive
+with no gap: a data segment may start at or before the covered edge (a
+probe sent again, a retransmission from `snd_una`) but never past it,
+and never runs past the range. A bare ACK is passed over, and a SYN,
+FIN or RST fails the check. It reads at most 8 segments.
+
+**`net-zero-window-probe`** has its own uplink tap (`zwpu`,
+`10.77.12.1`, the world at `.99`) and a listener on `:2230`. The world
+completes the handshake by hand and closes its window. Each wait is for
+the probe itself, which the timer sends at its RTO; no stopwatch.
+
+1. **The probe:** a 50-byte send draws one byte at `snd_una`, and the
+   pcb's `retransmits` rises.
+2. **An update that does not ack the probe byte:** the 50 bytes from
+   `snd_una`, with the probe counted.
+3. **An update that acks the probe byte:** the other 49 from exactly
+   past it. A segment before `+52` fails, since `off` wraps.
+4. **The probe unread when the update arrives:** `net-hostinput` on a
+   slow host. The update is sent once `retransmits` has risen. The
+   count and the probe's output are one hold of the pcb's lock, which
+   the update's input takes after them. The 50 bytes arrive from the
+   probe byte on.
+
+It closes with a reset from the world at `rcv_nxt`.
+
+**Mutations** (each alone, both architectures, boot confirmed):
+
+| mutation | result |
+|---|---|
+| the probe removed (`seglen = 1` → `break`) | fails at (1): no one-byte segment |
+| one probe that keeps `snd_nxt` and `snd_max` | fails at (3): the ACK of `+52` is above `snd_max`, is refused (RFC 5961), and nothing follows; (2) passes, as a repeated byte is allowed |
+| `hin_recv_stream` demanding the whole run in its first segment (the old check's rule) | fails at (2) |
+
+A first form of the second mutation, which only skipped `snd_nxt += seglen`,
+flooded probes: the output loop never advanced and built one until the
+batch was full. It failed at (2) through the 8-segment bound, which is
+not the mechanism under test, and was replaced.
+
+**Forced placements**, all passing on both architectures:
+`net-hostinput` with a 300 ms or 700 ms pause before the window update
+(one probe, or two), and with a 300 ms pause before the blocked check
+(the probe read inside it). Under the old check each placement failed on
+both architectures (the report's table).
 
 ## Releases however a test returns (the net-leftover unit)
 
