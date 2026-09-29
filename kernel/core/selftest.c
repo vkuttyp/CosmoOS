@@ -1020,9 +1020,9 @@ int selftest_run_all(void)
         }
         nettest_census(&net_after);
         if (!nettest_census_equal(&net_before, &net_after)) {
-            kerror("selftest: %s left the network changed: interfaces [%s] -> [%s], services %u -> %u, sockets %u -> %u",
-                   tests[i].name, net_before.netifs, net_after.netifs, net_before.services, net_after.services,
-                   net_before.sockets, net_after.sockets);
+            kerror("selftest: %s left the network changed: interfaces (%u) [%s] -> (%u) [%s], services %u -> %u, sockets %u -> %u",
+                   tests[i].name, net_before.nnetifs, net_before.netifs, net_after.nnetifs, net_after.netifs,
+                   net_before.services, net_after.services, net_before.sockets, net_after.sockets);
             if (ok) {
                 ok = false;
                 reason = "it left network state behind";

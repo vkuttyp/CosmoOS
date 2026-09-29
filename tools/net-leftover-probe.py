@@ -316,7 +316,7 @@ def apply_verify(args):
     force = None
     if '--force' in args:
         k = args.index('--force')
-        if k + 2 >= len(args) + 1 or args[k + 1] not in ('last', 'mid'):
+        if k + 2 >= len(args) or args[k + 1] not in ('last', 'mid'):
             sys.exit('usage: apply --count-checks | --force last|mid LOGFILE')
         mode, log = args[k + 1], args[k + 2]
         table = []
@@ -326,6 +326,8 @@ def apply_verify(args):
             if m and int(m.group(2)) > 0:
                 n = int(m.group(2))
                 table.append((m.group(1), n if mode == 'last' else max(1, n // 2)))
+        if not table:
+            sys.exit(f'{log}: no "NLPROBE checks" line with a positive count -- nothing to force')
         force = table
     table = force or []
     apply_files([(REG, [nlp_globals(table)] + NLP_RUNNER), (NETTEST, NLP_MACROS)])

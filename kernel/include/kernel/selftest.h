@@ -210,10 +210,12 @@ bool selftest_release(void *arg);
 bool selftest_forget(void *arg);
 
 /* kernel-services/network/nettest.c: the network the runner compares
- * before and after every test -- interfaces by name, live DHCP/DNS
- * services, sockets. */
+ * before and after every test -- interfaces by name and count, live
+ * DHCP/DNS services, sockets. nettest_census_equal is false only when the
+ * test added something: fewer is never a leftover. */
 struct nettest_census {
-    char netifs[192];
+    char netifs[512];
+    unsigned nnetifs;   /* all of them, whether or not their names fit */
     unsigned services;
     unsigned sockets;
 };

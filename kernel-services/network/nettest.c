@@ -75,14 +75,48 @@
  */
 void nettest_census(struct nettest_census *out)
 {
-    netif_names(out->netifs, sizeof(out->netifs));
+    out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
     out->services = tapsvc_count();
     out->sockets = socket_count();
 }
 
-bool nettest_census_equal(const struct nettest_census *a, const struct nettest_census *b)
+/* Is interface `name` (length n) among `list`'s comma-separated names? */
+static bool census_has(const char *list, const char *name, size_t n)
 {
-    return strcmp(a->netifs, b->netifs) == 0 && a->services == b->services && a->sockets == b->sockets;
+    for (const char *p = list; *p;) {
+        const char *q = strchr(p, ',');
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        if (len == n && memcmp(p, name, n) == 0)
+            return true;
+        if (!q)
+            break;
+        p = q + 1;
+    }
+    return false;
+}
+
+/*
+ * Did the test leave anything? Only what it added counts. A later test
+ * that finds fewer -- a socket an abandoned connect finally put, an
+ * interface an earlier leftover's owner released -- has left nothing, and
+ * failing it for that would be the cross-test failure this check exists
+ * to end. The interface count is compared too: a name that did not fit
+ * the buffer still counts.
+ */
+bool nettest_census_equal(const struct nettest_census *before, const struct nettest_census *after)
+{
+    if (after->nnetifs > before->nnetifs || after->services > before->services || after->sockets > before->sockets)
+        return false;
+    for (const char *p = after->netifs; *p;) {
+        const char *q = strchr(p, ',');
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        if (!census_has(before->netifs, p, len))
+            return false;   /* a new name, even if another went */
+        if (!q)
+            break;
+        p = q + 1;
+    }
+    return true;
 }
 
 static void nt_rel_tap(void *a) { tap_destroy(a); }
@@ -165,6 +199,48 @@ static void nt_netif_unregister(struct netif *nif)
 {
     if (!selftest_release(nif))
         netif_unregister(nif);
+}
+
+/* A reference the test holds on an interface (a creator's, or one
+ * netif_find gave it), released however it returns. Keyed by a static
+ * holder, never by the interface: the interface's own address is its
+ * unregister's key, and netif_find can return the very interface the test
+ * registered. */
+struct nt_netif_ref {
+    struct netif *nif;
+};
+
+static void nt_rel_netif_ref(void *arg)
+{
+    struct nt_netif_ref *r = arg;
+    if (r->nif)
+        netif_put(r->nif);
+    r->nif = NULL;
+}
+
+static bool nt_netif_hold(struct nt_netif_ref *r, struct netif *nif)
+{
+    r->nif = nif;
+    if (!selftest_defer(nt_rel_netif_ref, r)) {
+        nt_rel_netif_ref(r);
+        return false;
+    }
+    return true;
+}
+
+static void nt_netif_ref_put(struct nt_netif_ref *r)
+{
+    if (!selftest_release(r))
+        nt_rel_netif_ref(r);
+}
+
+/* A packet a fake interface kept, freed however the test returns. */
+static void nt_rel_mbuf_slot(void *slot)
+{
+    struct mbuf **p = slot;
+    if (*p)
+        m_freem(*p);
+    *p = NULL;
 }
 
 static int nt_vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out)
@@ -1639,6 +1715,8 @@ bool selftest_net_arp_flush_counts(const char **reason)
     f.nif.ip4.addr = htonl(0x0a4b0001);
     f.nif.ip4.mask = htonl(0xffffff00);
     CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
 
     struct arp_stats s0, s1;
     arp_get_stats(&s0);
@@ -1651,7 +1729,7 @@ bool selftest_net_arp_flush_counts(const char **reason)
     arp_get_stats(&s1);
     CHECK(s1.pending_dropped == s0.pending_dropped + 1);
 
-    kobject_put(&f.nif.obj);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     kinfo("selftest: net-arp-flush-counts: a flush with one packet pending moved "
           "pending_dropped %llu -> %llu",
@@ -1684,6 +1762,8 @@ bool selftest_net_nd_flush_counts(const char **reason)
     static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
     nd_fake_setup(&f, &ops, "ndfl0");
     CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
 
     struct ip_stats s0, s1;
     ipv6_get_stats(&s0);
@@ -1700,7 +1780,7 @@ bool selftest_net_nd_flush_counts(const char **reason)
      * different struct, so a fix in one is invisible to the other. */
     CHECK(s1.nd_pending_dropped == s0.nd_pending_dropped + 1);
 
-    kobject_put(&f.nif.obj);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     kinfo("selftest: net-nd-flush-counts: a flush with one packet pending moved "
           "nd_pending_dropped %llu -> %llu",
@@ -1808,6 +1888,8 @@ bool selftest_net_netif_lifetime(const char **reason)
     CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* no release: refused */
     f.nif.ops = &ops;
     CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator, found_ref;   /* released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
     CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + registry */
 
     /* A duplicate name is refused before the object exists: no kobject,
@@ -1823,6 +1905,7 @@ bool selftest_net_netif_lifetime(const char **reason)
     CHECK(dup.nif.obj.type == NULL && dup.nif.obj.refcount == 0 && dup.nif.obj.owner == NULL);
 
     struct netif *found = netif_find("test0");
+    CHECK(nt_netif_hold(&found_ref, found));
     CHECK(found == &f.nif && kobject_refcount(&f.nif.obj) == 3);
 
     struct mbuf *m = m_getcl();
@@ -1852,9 +1935,9 @@ bool selftest_net_netif_lifetime(const char **reason)
     CHECK(netif_rxq_count(found) == q0);
     CHECK(f.nif.stats.rx_packets == 1);
 
-    netif_put(&f.nif);                           /* the creator is done */
+    nt_netif_ref_put(&creator);                  /* the creator is done */
     CHECK(f.releases == 0);
-    netif_put(found);
+    nt_netif_ref_put(&found_ref);
     CHECK(f.releases == 1);
     return true;
 }
@@ -2964,6 +3047,8 @@ bool selftest_net_steer(const char **reason)
     f.nif.ops = &ops;
     f.nif.priv = &f;
     CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
     netif_set_ipv4(&f.nif, IPV4_ADDR(10, 9, 0, 1), htonl(0xffffff00u), 0);
     netif_set_up(&f.nif, true);
 
@@ -3048,7 +3133,7 @@ bool selftest_net_steer(const char **reason)
 
     nt_netif_set_rx_hook(NULL, NULL);
     nt_netif_unregister(&f.nif);
-    netif_put(&f.nif);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     return true;
 }
@@ -3148,6 +3233,9 @@ bool selftest_net_csum_offload(const char **reason)
     c.nif.priv = &c;
     c.nif.caps = NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM;
     CHECK(nt_netif_register(&c.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &c.nif));
+    CHECK(selftest_defer(nt_rel_mbuf_slot, &c.last));   /* the packet it keeps: freed after the unregister */
     uint32_t me = IPV4_ADDR(10, 9, 1, 1), peer = IPV4_ADDR(10, 9, 1, 2);
     netif_set_ipv4(&c.nif, me, htonl(0xffffff00u), 0);
     netif_set_up(&c.nif, true);
@@ -3200,14 +3288,14 @@ bool selftest_net_csum_offload(const char **reason)
 
     /* The loopback interface offloads both ways: a transfer computes no
      * transport checksum at all (net-lo-tcp exercises it). */
-    struct netif *lo = netif_loopback();
-    CHECK(lo != NULL && (lo->caps & NETIF_CAP_TXCSUM) && (lo->caps & NETIF_CAP_RXCSUM));
-    netif_put(lo);
+    static struct nt_netif_ref lo;
+    CHECK(nt_netif_hold(&lo, netif_loopback()));
+    CHECK(lo.nif != NULL && (lo.nif->caps & NETIF_CAP_TXCSUM) && (lo.nif->caps & NETIF_CAP_RXCSUM));
+    nt_netif_ref_put(&lo);
 
     nt_netif_unregister(&c.nif);
-    if (c.last)
-        m_freem(c.last);
-    netif_put(&c.nif);
+    selftest_release(&c.last);
+    nt_netif_ref_put(&creator);
     CHECK(c.releases == 1);
     return true;
 }
