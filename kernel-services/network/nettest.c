@@ -77,33 +77,42 @@
  * out: they close whenever their connect times out, maybe during a later
  * test, and must neither blame that test nor hide a socket it leaves). */
 static unsigned g_nt_abandoned;
-/* Odd while an abandoned socket is being put and its count dropped:
- * the census retries until it reads both halves of one state. */
-static unsigned g_nt_abandon_seq;
+/* An abandoned thread whose connect has returned hands its socket here
+ * and changes nothing else; the runner puts it at its next census. So
+ * both counts the census reads change only on the runner's thread --
+ * the one reading them -- however many connects finish at once. */
+enum { NT_REAP_MAX = 16 };
+static struct socket *g_nt_reap[NT_REAP_MAX];
+static unsigned g_nt_nreap;
+static spinlock_t g_nt_reap_lock = SPINLOCK_INIT("nt-reap");
+
+static void nt_reap_abandoned(void)
+{
+    struct socket *take[NT_REAP_MAX];
+    arch_irq_state_t s = spin_lock_irqsave(&g_nt_reap_lock);
+    unsigned n = g_nt_nreap;
+    for (unsigned i = 0; i < n; i++)
+        take[i] = g_nt_reap[i];
+    g_nt_nreap = 0;
+    spin_unlock_irqrestore(&g_nt_reap_lock, s);
+    for (unsigned i = 0; i < n; i++) {
+        if (take[i])
+            ksock_put(take[i]);
+        g_nt_abandoned--;
+    }
+}
 
 void nettest_census(struct nettest_census *out)
 {
     out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
     out->services = tapsvc_count();
-    /* The abandoned connects' sockets are subtracted, read with the socket
-     * count as one state: a socket put between the two reads made either
-     * order wrong by one -- low in a "before" census is a false addition
-     * after. The sequence is odd while a thread puts its socket and drops
-     * the count, and changes when it has; retry until it is even and
-     * unchanged across both reads. */
-    unsigned abandoned = 0, sockets = 0;
-    for (unsigned tries = 0; tries < 1000; tries++) {
-        unsigned q = __atomic_load_n(&g_nt_abandon_seq, __ATOMIC_ACQUIRE);
-        if (q & 1) {
-            thread_sleep_ms(1);
-            continue;
-        }
-        abandoned = __atomic_load_n(&g_nt_abandoned, __ATOMIC_ACQUIRE);
-        sockets = socket_count();
-        if (__atomic_load_n(&g_nt_abandon_seq, __ATOMIC_ACQUIRE) == q)
-            break;
-    }
-    out->sockets = sockets > abandoned ? sockets - abandoned : 0;
+    /* The abandoned connects' sockets are subtracted. Any whose connect
+     * has returned are put first, here, so the socket count and the
+     * abandoned count both change only on this thread: they are read as
+     * one state without any retry. */
+    nt_reap_abandoned();
+    unsigned sockets = socket_count();
+    out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
 }
 
 /* Is interface `name` (length n) among `list`'s comma-separated names? */
@@ -6518,15 +6527,17 @@ static void hin_connect_thread(void *arg)
     c->done = true;
     /* Abandoned by a failed test while it connected: the socket is its to put. */
     if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED) {
-        /* The put and the count's drop are one state change to the census
-         * (g_nt_abandon_seq odd between them). */
-        __atomic_fetch_add(&g_nt_abandon_seq, 1u, __ATOMIC_ACQ_REL);
-        if (c->s) {
-            ksock_put(c->s);
-            c->s = NULL;
-        }
-        __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);
-        __atomic_fetch_add(&g_nt_abandon_seq, 1u, __ATOMIC_ACQ_REL);
+        /* Hand the socket to the runner, which puts it at its next census:
+         * nothing the census reads changes on this thread. */
+        struct socket *sock = c->s;
+        c->s = NULL;
+        arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
+        bool queued = g_nt_nreap < NT_REAP_MAX;
+        if (queued)
+            g_nt_reap[g_nt_nreap++] = sock;
+        spin_unlock_irqrestore(&g_nt_reap_lock, st);
+        if (!queued && sock)   /* more at once than the list holds: kept, and still excused, so the counts agree */
+            kwarn("nettest: an abandoned connect's socket is kept: the reap list is full");
     }
     thread_exit(0);
 }
@@ -6545,17 +6556,14 @@ static void hin_conn_release(void *arg)
     struct hin_conn *c = arg;
     for (unsigned i = 0; i < 200 && !c->done; i++)
         thread_sleep_ms(10);
-    /* Counted before the exchange: the thread may drop the count at once.
-     * No socket changes here, so the census's sequence is not involved. */
-    __atomic_fetch_add(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);
     if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
-        __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);   /* not abandoned after all */
         thread_join(c->th);
         if (c->s)
             ksock_put(c->s);
         c->s = NULL;
     } else {
-        thread_put(c->th);   /* it puts its socket when its connect returns */
+        g_nt_abandoned++;    /* this runner thread's count: the census subtracts it */
+        thread_put(c->th);   /* it hands its socket to the runner when its connect returns */
     }
     c->th = NULL;
 }

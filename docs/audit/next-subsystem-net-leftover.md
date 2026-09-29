@@ -35,10 +35,12 @@
 >   not fit the 512-byte buffer still counts. The sockets abandoned
 >   connect threads still hold are left out of the count
 >   (`g_nt_abandoned`), so one closing during a later test can't hide a
->   socket that test leaves. The two counts are read as one state (a
->   sequence, `g_nt_abandon_seq`, brackets each put and its drop); two
->   plain reads could be one low in a "before" census, which is a false
->   addition after.
+>   socket that test leaves. Both counts change only on the runner's
+>   thread: an abandoned thread whose connect returns hands its socket to
+>   a list, and the runner puts it and drops the count at the start of its
+>   next census. (Two reviews' worth of alternatives failed first: plain
+>   reads could be one low in a "before" census, a false addition after,
+>   and a sequence broke with two threads closing at once.)
 > - **Interface references:** after review, a fake interface's creator
 >   reference, a `netif_find` reference and `net-csum-offload`'s kept
 >   packet are released however the test returns, through static

@@ -983,10 +983,11 @@ Fewer is never a leftover: an abandoned `hin_connect` puts its socket
 when its connect finally times out, which can happen during a later test,
 and that later test has left nothing. Those sockets are also left out of
 the count while they are held (`g_nt_abandoned`), so one closing can't
-hide a socket the later test leaves. The census reads that count and the
-socket count as one state: a thread's put and its drop of the count are
-bracketed by a sequence (`g_nt_abandon_seq`), and the census retries
-until it reads both halves unchanged. Interfaces are compared by count as
+hide a socket the later test leaves. Both counts change only on the
+runner's thread: an abandoned thread whose connect returns hands its
+socket to a list, and the runner puts it (and drops the count) at the
+start of its next census. So they are read as one state, however many
+connects finish at once. Interfaces are compared by count as
 well as by name, so a name that did not fit the buffer still counts. The
 next test starts from what is left, so a leftover is blamed once.
 
