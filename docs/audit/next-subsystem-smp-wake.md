@@ -70,17 +70,30 @@ Its modes:
   named `cross-waiter` only).
 - **`--busy`**: runs a spinner at the waiter's priority on the target
   through the post.
-- **`--fix`**: the candidate (§1).
+- **`--fix`**: the candidate (§1). The target is read idle first,
+  before any `--busy` spinner exists, so a timeout leaves nothing running.
+  Then the wake must have requested a reschedule, and the target must
+  have handled one after the wake. That is counted from a snapshot of
+  the target's handled count, taken in `sched_wake` under the target's
+  lock, not from the waiter's read before it blocked.
 
 | run | arch | target at the wake | reschedule requested | IPIs on the target | `smp-wake` |
 |---|---|---|---|---|---|
 | unforced | both | idle | yes | +1 | ok |
 | `--window 20` | both | **the waiter itself** | no | **+0** | **FAIL** at the check, the sighting's message |
 | `--busy` | both | `swp-busy`, prio 32 | no | +1 (not this wake's; likeliest the spinner's creation) | ok, **for the wrong reason** |
-| `--window 20 --fix` | both | idle | yes | +1 | ok |
-| `--fix` | both | idle | yes | +1 | ok |
+| `--window 20 --fix` | both | idle | yes | +1 from the wake's snapshot | ok |
+| `--fix` | both | idle | yes | +1 from the wake's snapshot | ok |
+| `--busy --fix` | both | `swp-busy`, prio 32 | no | the block-to-return count rose (76 → 77, 97 → 98); **from the wake's snapshot, +0** | FAIL, cleanly: the only failure in the boot, the spinner joined |
+| the no-IPI mutation, `--fix` | both | idle | yes | +0 | FAIL |
 
 Each row is one boot per architecture.
+
+The `--busy --fix` row is the superset, caught: the IPI that raised the
+old count had arrived before the wake, so a count from the wake's
+snapshot does not include it. The first `--fix` asserted "requested and
+the block-to-return count rose", which that IPI would still have passed.
+Greptile found it on #262.
 
 **Does the test catch its target defect?** Yes, measured with a
 mutation: `request_resched` sending no IPI at all fails `smp-wake` on
@@ -117,9 +130,16 @@ can also pass without the event it asserts.
   hysteresis unit's pull record does. In debug builds, `sched_wake`
   writes `t->wake_resched`, whether it called `request_resched`, under
   the target's lock.
-- **The assertion becomes exact:** the wake requested a reschedule
-  *and* the target counted an IPI. A wake that requested none is not a
-  pass whatever the count did.
+- **The wake also snapshots the target's handled reschedule count**,
+  under the same lock, before it sends (`t->wake_ipi_base`).
+- **The assertion:** the wake requested a reschedule *and* the target
+  handled one after the snapshot. A wake that requested none is not a
+  pass whatever the count did. An IPI the target handled before the wake
+  no longer counts.
+- **One residue remains.** Another CPU's reschedule IPI to the same
+  target, sent between this wake and the waiter's return, is not told
+  apart from this wake's. The window is the wake's own latency, and a
+  lost IPI would also have to coincide with it.
 - **Retry for a busy target.** If the target became busy between the
   idle read and the post, the record says no reschedule was requested.
   That round is retried, up to 5 rounds with a fresh waiter each, and
@@ -141,14 +161,16 @@ explanation under the flakes entry.
 
 | file | change |
 |---|---|
-| `kernel/include/kernel/thread.h` | `wake_resched` |
-| `kernel/scheduler/sched.c` | record it in `sched_wake` (debug) |
+| `kernel/include/kernel/thread.h` | `wake_resched`, `wake_ipi_base` |
+| `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `ipi_count_on(cpu, kind)`: another CPU's handled count |
+| `kernel/scheduler/sched.c` | record both in `sched_wake` (debug) |
 | `kernel/scheduler/smptest.c` | the idle wait, the record-based assertion, the retry |
 | `docs/kernel/scheduler/testing.md`, `docs/testing/flakes.md`, `README.md` | as above |
 
 ## APIs
 
-None. One `struct thread` field, written only in debug builds.
+`ipi_count_on(cpu, kind)`, a read of another CPU's handled count. Two
+`struct thread` fields, written only in debug builds.
 
 ## Tests
 
@@ -160,7 +182,7 @@ None. One `struct thread` field, written only in debug builds.
 
 | mutation | expected |
 |---|---|
-| `request_resched` sends no IPI | fails: requested, no IPI |
+| `request_resched` sends no IPI | fails: requested, no IPI after the snapshot (measured with the probe's `--fix`: 0 → 0 on both architectures) |
 | `sched_wake` never calls `request_resched` | fails: no round's wake requested one |
 | the idle wait removed, under the probe's `--window` | fails: no round requested, since the waiter is current every time |
 | the record not written | fails: no round's wake requested one |

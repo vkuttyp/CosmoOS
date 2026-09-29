@@ -37,7 +37,11 @@ waiter's priority on the target through the post. --fix is the candidate
 check: after BLOCKED, the test also waits until the target reads idle
 (sched_cpu_load == 0, which cannot be read while the waiter is still
 current), then asserts that the wake requested a reschedule and that the
-target counted an IPI.
+target handled one after the wake: counted from a snapshot of the
+target's count taken at the wake, under its lock, so a reschedule IPI
+that arrived during the block but before the post does not count. The
+wait comes before any --busy spinner exists, so a timeout leaves nothing
+running.
 
 `apply` and `revert` are those of tools/nvme-admin-probe.py: stamp first,
 every file replaced atomically, the stamp removed last, finished by
@@ -50,14 +54,28 @@ import subprocess
 import sys
 
 SCHED = 'kernel/scheduler/sched.c'
+IPI = 'kernel/interrupt/ipi.c'
 WAIT = 'kernel/scheduler/wait.c'
 SMPT = 'kernel/scheduler/smptest.c'
 BACKUP = '.smp-wake-probe.orig'
 STAMP = '.smp-wake-probe.applied'
 
+IPI_OLD = """uint64_t ipi_count(enum ipi_kind kind)
+{"""
+IPI_NEW = """uint64_t ipi_count_on(unsigned cpu, enum ipi_kind kind);   /* SWPROBE */
+uint64_t ipi_count_on(unsigned cpu, enum ipi_kind kind)
+{
+    return cpu < CONFIG_MAX_CPUS && kind < IPI_KIND_COUNT ? __atomic_load_n(&g_counts[cpu][kind], __ATOMIC_RELAXED) : 0;
+}
+
+uint64_t ipi_count(enum ipi_kind kind)
+{"""
+
 SCHED_OLD = """bool sched_wake(struct thread *t)
 {"""
 SCHED_NEW = """/* SWPROBE: the cross-waiter's last wake, under the target's lock. */
+uint64_t ipi_count_on(unsigned cpu, enum ipi_kind kind);
+uint64_t g_swp_base;
 unsigned g_swp_seen, g_swp_requested, g_swp_cpu, g_swp_cur_is_idle, g_swp_cur_is_self;
 int g_swp_cur_prio;
 char g_swp_cur[16];
@@ -71,6 +89,7 @@ SCHED_NEW2 = """        bool swp_req = rq->current == rq->idle || t->priority < 
         if (strncmp(t->name, "cross-waiter", THREAD_NAME_MAX) == 0) {   /* SWPROBE */
             g_swp_seen = 1;
             g_swp_requested = swp_req;
+            g_swp_base = ipi_count_on(rq->cpu, IPI_RESCHEDULE);   /* handled on the target before this wake */
             g_swp_cpu = rq->cpu;
             g_swp_cur_is_idle = rq->current == rq->idle;
             g_swp_cur_is_self = rq->current == t;
@@ -108,6 +127,7 @@ def wait_new(ms):
 SMPT_OLD_DECL = """static bool selftest_smp_wake_pinned(const char **reason)
 {"""
 SMPT_NEW_DECL = """extern unsigned g_swp_seen, g_swp_requested, g_swp_cpu, g_swp_cur_is_idle, g_swp_cur_is_self;   /* SWPROBE */
+extern uint64_t g_swp_base;
 extern int g_swp_cur_prio;
 extern char g_swp_cur[16];
 
@@ -135,20 +155,21 @@ def smpt_new_post(busy, fix=False):
     __attribute__((unused)) static struct swp_spinner sps;
     struct thread *spt = NULL;
 """
+    if fix:
+        s += """    /* SWPROBE --fix: BLOCKED is set before the waiter switches out; wait
+     * until the target reads idle. A load of 0 cannot be read while the
+     * waiter is still its current thread. Before any spinner exists, so
+     * a timeout leaves nothing running. */
+    while (sched_cpu_load(target) != 0) {
+        CHECK(clock_now_ns() < deadline + MS(1000));
+        thread_sleep_ms(1);
+    }
+"""
     if busy:
         s += """    __atomic_store_n(&sps.stop, 0u, __ATOMIC_RELAXED);
     spt = thread_create_on(swp_spin, &sps, "swp-busy", SCHED_PRIO_DEFAULT, CPUMASK_OF(target));
     CHECK(spt != NULL);
     thread_sleep_ms(20);   /* SWPROBE --busy: the spinner is running on the target */
-"""
-    if fix:
-        s += """    /* SWPROBE --fix: BLOCKED is set before the waiter switches out; wait
-     * until the target reads idle. A load of 0 cannot be read while the
-     * waiter is still its current thread. */
-    while (sched_cpu_load(target) != 0) {
-        CHECK(clock_now_ns() < deadline + MS(1000));
-        thread_sleep_ms(1);
-    }
 """
     s += """    uint64_t sent = clock_now_ns();
     semaphore_up(&cw.sem); /* from CPU 0: wake + IPI to CPU 1 */
@@ -160,15 +181,18 @@ def smpt_new_post(busy, fix=False):
 """
     s += """    thread_join(t);
     kinfo("SWPROBE: wake seen %u on cpu %u: target running %s (prio %d; idle %u, the waiter itself %u), "
-          "reschedule requested %u; IPIs on the target %llu -> %llu",
+          "reschedule requested %u; IPIs on the target %llu -> %llu, %llu at the wake",
           g_swp_seen, g_swp_cpu, g_swp_cur, g_swp_cur_prio, g_swp_cur_is_idle, g_swp_cur_is_self,
-          g_swp_requested, (unsigned long long)cw.ipis_before, (unsigned long long)cw.ipis_after);
+          g_swp_requested, (unsigned long long)cw.ipis_before, (unsigned long long)cw.ipis_after,
+          (unsigned long long)g_swp_base);
     (void)spt;
 """
     return s
 
 SMPT_OLD_CHECK = """    CHECK(cw.ipis_after > cw.ipis_before);"""
-SMPT_NEW_FIX = """    CHECK(g_swp_requested && cw.ipis_after > cw.ipis_before);   /* SWPROBE --fix: the wake of an idle target requested it, and it arrived */"""
+SMPT_NEW_FIX = """    /* SWPROBE --fix: the wake requested a reschedule, and the target handled
+     * one after the wake (counted from the wake, not from the block). */
+    CHECK(g_swp_requested && cw.ipis_after > g_swp_base);"""
 
 
 def sha(p):
@@ -270,7 +294,8 @@ def apply():
         window = int(args[1])
     elif args:
         sys.exit('usage: apply [--window MS] [--busy] [--fix]')
-    fl = [(SCHED, [(SCHED_OLD, SCHED_NEW), (SCHED_OLD2, SCHED_NEW2)]),
+    fl = [(IPI, [(IPI_OLD, IPI_NEW)]),
+          (SCHED, [(SCHED_OLD, SCHED_NEW), (SCHED_OLD2, SCHED_NEW2)]),
           (SMPT, [(SMPT_OLD_DECL, SMPT_NEW_DECL), (SMPT_OLD_POST, smpt_new_post(busy, fix))]
                  + ([(SMPT_OLD_CHECK, SMPT_NEW_FIX)] if fix else []))]
     if window:
