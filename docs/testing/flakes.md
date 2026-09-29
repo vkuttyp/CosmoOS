@@ -2232,6 +2232,22 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
+**Explained (the smp-wake report, `docs/audit/next-subsystem-smp-wake.md`;
+not yet fixed).** `tools/smp-wake-probe.py` recorded `rq->current` at the
+wake, and found a second way besides the one above.
+- **The waiter's own window.** `waitqueue_prepare` sets `BLOCKED` before
+  the waiter switches out, so a post in between finds the waiter itself
+  current, at equal priority, and sends nothing.
+- **Reproduced.** Held in that window (`--window 20`), the test fails
+  with this sighting's exact message on both architectures, the record
+  reading "target running cross-waiter, reschedule requested 0".
+- **The equal-priority thread.** A spinner at the waiter's priority on
+  the target (`--busy`) also sends none. The count still rose there,
+  from the spinner's own creation: the check can pass without the IPI
+  it asserts.
+- **The candidate** waits for the target to read idle and asserts on the
+  wake's own record. It passes under the window.
+
 ## `sched-migrate-stress`: a worker made no progress, 2026-09-24
 
 `SELFTEST: sched-migrate-stress ... FAIL: a worker made no progress
