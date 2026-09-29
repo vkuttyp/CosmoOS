@@ -89,7 +89,7 @@ unsigned nlprobe_svcs(void)   /* NLPROBE: services holding a slot */
 
 NETTEST_EDITS = [("""    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
     tapsvc_get_stats(&s1);
-    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);""", """    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
+    CHECK(s1.dns_expired - s0.dns_expired >= s0.dns_pending);""", """    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
     tapsvc_get_stats(&s1);
     /* NLPROBE: no delay of its own -- a sleep here is the settle the test
      * lacks, and hid the failure. Queries handled between the wait's end
@@ -98,7 +98,7 @@ NETTEST_EDITS = [("""    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SE
           (unsigned long long)s0.dns_query, (unsigned long long)s1.dns_query,
           (unsigned long long)(s1.dns_query - s0.dns_query), s0.dns_pending, s1.dns_pending,
           (unsigned long long)(s1.dns_expired - s0.dns_expired));
-    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);""")]
+    CHECK(s1.dns_expired - s0.dns_expired >= s0.dns_pending);""")]
 
 
 def slow_dns(us):
@@ -127,8 +127,76 @@ def gap(ms):
     tapsvc_get_stats(&s1);""")
 
 
-FAIL_DNS = ("""    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);""",
+FAIL_DNS = ("""    CHECK(s1.dns_expired - s0.dns_expired >= s0.dns_pending);""",
             """    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired && !"NLPROBE --fail-dns");""")
+
+
+# --- the implementation's verification (the net-leftover unit) -----------
+#
+# --count-checks: every CHECK, CHECK_BREAK and TCHECK in nettest.c counts
+# the checks a test passes, and the runner logs the count per test
+# (NLPROBE checks). --force last|mid TABLE: from such a log, each test in
+# it fails at its last passed check (or halfway), in one boot -- the
+# runner must release what it held (no "left the network" line), nothing
+# may hang, and every other test must pass.
+
+NLP_RUNNER = [('''        g_defer_overflow = false;
+        bool ok = tests[i].fn(&reason);''', '''        g_defer_overflow = false;
+        nlp_checks = 0;
+        nlp_forced = false;
+        nlp_force_at = 0;
+        for (unsigned q = 0; q < sizeof(nlp_table) / sizeof(nlp_table[0]); q++)
+            if (nlp_table[q].name && strcmp(nlp_table[q].name, tests[i].name) == 0)
+                nlp_force_at = nlp_table[q].at;
+        bool ok = tests[i].fn(&reason);
+        if (nlp_checks != 0 && !nlp_forced)
+            kinfo("NLPROBE checks '%s' %u", tests[i].name, nlp_checks);
+        if (nlp_forced)
+            kinfo("NLPROBE forced '%s' at check %u of its passing ones", tests[i].name, nlp_force_at);''')]
+
+def nlp_globals(table):
+    rows = ''.join(f'    {{ "{n}", {at} }},\n' for n, at in table) or '    { NULL, 0 },\n'
+    return ('''int selftest_run_all(void)
+{''', '''/* NLPROBE: the forced-failure table, and the counters the checks bump */
+unsigned nlp_checks, nlp_force_at;
+bool nlp_forced;
+static const struct { const char *name; unsigned at; } nlp_table[] = {
+''' + rows + '''};
+
+int selftest_run_all(void)
+{''')
+
+NLP_MACROS = [
+    ('''#define CHECK(cond)                                                            \\
+    do {                                                                       \\
+        if (!(cond)) {                                                         \\
+            *reason = "check failed: " #cond " at line " STR(__LINE__);        \\
+            return false;                                                      \\
+        }                                                                      \\
+    } while (0)''', '''extern unsigned nlp_checks, nlp_force_at;   /* NLPROBE */
+extern bool nlp_forced;
+static inline bool nlp_hit(void)
+{
+    if (++nlp_checks == nlp_force_at) {
+        nlp_forced = true;
+        return true;
+    }
+    return false;
+}
+#define CHECK(cond)                                                            \\
+    do {                                                                       \\
+        if (!(cond) || nlp_hit()) {                                            \\
+            *reason = nlp_forced ? "NLPROBE forced" : "check failed: " #cond " at line " STR(__LINE__); \\
+            return false;                                                      \\
+        }                                                                      \\
+    } while (0)'''),
+    ('''#define CHECK_BREAK(cond)                                                      \\
+    if (!(cond)) {                                                             \\''', '''#define CHECK_BREAK(cond)                                                      \\
+    if (!(cond) || nlp_hit()) {                                                \\'''),
+    ('''        if (!(cond)) {                                                                       \\
+            *reason = "tap-ready: " #cond;                                                   \\''', '''        if (!(cond) || nlp_hit()) {                                                          \\
+            *reason = "tap-ready: " #cond;                                                   \\'''),
+]
 
 
 def reg_edits(reps):
@@ -243,8 +311,31 @@ def revert():
     print('reverted')
 
 
+def apply_verify(args):
+    count = '--count-checks' in args
+    force = None
+    if '--force' in args:
+        k = args.index('--force')
+        if k + 2 >= len(args) + 1 or args[k + 1] not in ('last', 'mid'):
+            sys.exit('usage: apply --count-checks | --force last|mid LOGFILE')
+        mode, log = args[k + 1], args[k + 2]
+        table = []
+        import re as _re
+        for line in open(log, errors='replace'):
+            m = _re.search(r"NLPROBE checks '([^']+)' (\d+)", line)
+            if m and int(m.group(2)) > 0:
+                n = int(m.group(2))
+                table.append((m.group(1), n if mode == 'last' else max(1, n // 2)))
+        force = table
+    table = force or []
+    apply_files([(REG, [nlp_globals(table)] + NLP_RUNNER), (NETTEST, NLP_MACROS)])
+    print(f'applied: checks counted per test' + (f'; {len(table)} tests forced to fail ({args[args.index("--force") + 1]})' if force else ''))
+
+
 def apply():
     args = sys.argv[2:]
+    if '--count-checks' in args or '--force' in args:
+        return apply_verify(args)
     fail = '--fail-dns' in args
     args = [a for a in args if a != '--fail-dns']
     slow = None
