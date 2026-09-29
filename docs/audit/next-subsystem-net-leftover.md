@@ -52,6 +52,11 @@
 >   architectures, nothing left, no hang or panic.
 > - **`net-dns`:** asserts `s1.dns_expired - s0.dns_expired >=
 >   s0.dns_pending`.
+> - **`netif_register` refuses a name without a terminator** inside its
+>   8 bytes (`-EINVAL`), added while verifying a review of
+>   `netif_names`. Every name in the tree was already terminated; the
+>   check makes that guaranteed. `net-netif-lifetime` registers an
+>   8-byte unterminated name and requires the refusal.
 > - **Forcing:** `tools/net-leftover-probe.py --count-checks` and
 >   `--force last|mid` make every counted test (50) fail at a chosen
 >   check, in one boot.

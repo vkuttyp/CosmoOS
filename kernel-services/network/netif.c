@@ -142,8 +142,11 @@ static void netif_autoconfig(struct netif *nif)
 
 int netif_register(struct netif *nif)
 {
-    if (nif->name[0] == '\0' || nif->ops == NULL || nif->ops->transmit == NULL || nif->ops->release == NULL ||
-        nif->mtu < 68)
+    /* A name must end inside its array: every reader (netif_find's
+     * strcmp, netif_names' strlen, the log lines) takes it as a string,
+     * and an unterminated one would read on into the fields after it. */
+    if (nif->name[0] == '\0' || memchr(nif->name, '\0', sizeof(nif->name)) == NULL || nif->ops == NULL ||
+        nif->ops->transmit == NULL || nif->ops->release == NULL || nif->mtu < 68)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;

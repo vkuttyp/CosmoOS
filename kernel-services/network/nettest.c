@@ -1934,6 +1934,9 @@ bool selftest_net_netif_lifetime(const char **reason)
     f.nif.flags = NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP;
     CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* no release: refused */
     f.nif.ops = &ops;
+    memcpy(f.nif.name, "tooLong8", sizeof(f.nif.name));   /* all 8 bytes, no terminator */
+    CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* an unterminated name: refused */
+    strlcpy(f.nif.name, "test0", sizeof(f.nif.name));
     CHECK(nt_netif_register(&f.nif) == 0);
     static struct nt_netif_ref creator, found_ref;   /* released however it returns */
     CHECK(nt_netif_hold(&creator, &f.nif));
