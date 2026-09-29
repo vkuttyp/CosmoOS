@@ -82,8 +82,22 @@ returns before its `irq_disable` and release, so the line stays held
 and the next test's request is refused with `-EBUSY`. It is the third
 sighting of that pair (2026-09-20, 2026-09-24, 2026-09-29). `flakes.md`
 left the repair, "a test that acquires a resource releases it on every
-exit", to whoever next touched `kernel/interrupt/irqtest.c`. The defer
-list is that repair, so `irq-route` is in this unit's scope: one release.
+exit", to whoever next touched `kernel/interrupt/irqtest.c`, and cites
+`irqtest.c:247`. Both are wrong: `selftest_irq_route` is in
+`kernel/scheduler/schedtest.c` (the check is `schedtest.c:247`), and only
+`irq-affinity` lives in `irqtest.c`. The implementation corrects
+`flakes.md`.
+
+`irq-route` holds two things a failed `CHECK` skips: its interrupt line
+(`irq_request`, released with `irq_disable` and `irq_release`), and the
+periodic source that drives it (`arch_test_periodic_irq_start`: the PIT
+on x86-64, a timer on aarch64), stopped by
+`arch_test_periodic_irq_stop`. Left running, the source keeps raising
+the line after the test. The defer list is the repair, with two
+releases registered in acquisition order: the source's stop right after
+it starts, and the line's disable-and-release right after the request.
+They run in reverse: the line, then the source, which is the order the
+test's own last lines use. `irq-route` is in this unit's scope.
 
 ### How many tests can do this
 
@@ -203,7 +217,7 @@ The proposed implementation's scope; this PR changes none of them.
 |---|---|
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | `selftest_defer`, the runner running releases, the network check |
 | `kernel-services/network/nettest.c` | 38 functions: a release per acquisition, explicit teardowns removed; the 20 thread arguments off the stack; `net-dns` (5) |
-| `kernel/interrupt/irqtest.c` | `irq-route`: its interrupt line released through the defer list |
+| `kernel/scheduler/schedtest.c` | `irq-route`: its interrupt line and its periodic source released through the defer list |
 | `kernel-services/network/netif.c`, `tapsvc.c` | the counts the runner reads (interface names, services) |
 | `docs/testing/flakes.md`, `docs/kernel-services/network/testing.md`, `README.md` | the record |
 
