@@ -86,6 +86,12 @@ struct thread {
      * (docs/audit/next-subsystem-hysteresis.md). */
     uint32_t bal_pulls;
     int32_t bal_gap_min;                /* THREAD_BAL_GAP_NONE until a pull */
+    /* (rq) this thread's last wake: whether it asked its CPU to reschedule
+     * (request_resched, which interrupts it from another CPU), and that
+     * CPU's handled IPI_RESCHEDULE count just before -- smp-wake's evidence,
+     * written in debug builds only (docs/audit/next-subsystem-smp-wake.md). */
+    bool wake_resched;
+    uint64_t wake_ipi_base;
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */
     struct waitqueue *waiting_on;       /* diagnostics */

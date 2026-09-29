@@ -386,20 +386,55 @@ struct cross_wake {
     volatile uint64_t woke_at;
     volatile unsigned on_cpu;
     /* IPI_RESCHEDULE handled on the target, read on the target (the
-     * waiter is pinned there and ipi_count is this-CPU's), either side
-     * of the block. */
-    volatile uint64_t ipis_before, ipis_after;
+     * waiter is pinned there) after it returns; and the waiter's own
+     * record of its wake (sched_wake, debug builds): whether the wake
+     * asked the target to reschedule, and the target's handled count
+     * just before it sent. */
+    volatile uint64_t ipis_after, ipi_base;
+    volatile bool requested;
 };
 
+#if CONFIG_DEBUG
 static void cross_waiter(void *arg)
 {
     struct cross_wake *cw = arg;
-    cw->ipis_before = ipi_count(IPI_RESCHEDULE);
     semaphore_down(&cw->sem);
     cw->ipis_after = ipi_count(IPI_RESCHEDULE);
+    struct thread *self = thread_current();
+    cw->requested = self->wake_resched;
+    cw->ipi_base = self->wake_ipi_base;
     cw->woke_at = clock_now_ns();
     cw->on_cpu = arch_cpu_id();
 }
+#endif
+
+/*
+ * A wake from another CPU interrupts an idle target: the wake asks for a
+ * reschedule, and the target handles IPI_RESCHEDULE after it.
+ *
+ * Both halves are read from the kernel's own record, because neither can
+ * be inferred from outside (docs/audit/next-subsystem-smp-wake.md):
+ *
+ * - **The target must be idle at the post.** sched_wake owes the IPI only
+ *   to a target running its idle thread or something of lower priority.
+ *   The waiter's BLOCKED state is set before it switches out
+ *   (waitqueue_prepare), so a post that follows BLOCKED can find the
+ *   waiter itself still current, at equal priority -- no IPI, and the
+ *   waiter runs straight on. That was the one CI failure. So the test
+ *   also waits for the target to read idle: a load of 0 cannot be read
+ *   while the waiter is current, since a current thread counts one, and
+ *   the hint reads high, never low (S29).
+ * - **The IPI must be this wake's.** The waiter's count before it blocked
+ *   is a superset: any reschedule IPI to that CPU during the block raised
+ *   it, including one owed to someone else's wake. The count is taken
+ *   from the wake's own snapshot instead, made under the target's lock
+ *   before it sends.
+ *
+ * A thread can still become runnable on the target between the idle read
+ * and the post; then the wake asks for nothing, which the record says, and
+ * the round is run again with a fresh waiter, up to SMP_WAKE_ROUNDS.
+ */
+enum { SMP_WAKE_ROUNDS = 5 };
 
 static bool selftest_smp_wake_pinned(const char **reason)
 {
@@ -408,7 +443,12 @@ static bool selftest_smp_wake_pinned(const char **reason)
         kinfo("selftest: one CPU; cross-CPU wake not exercised");
         return true;
     }
-
+#if !CONFIG_DEBUG
+    (void)reason;
+    (void)before;
+    kinfo("selftest: smp-wake: no wake record in this build; skipping");
+    return true;
+#else
     /* A CPU other than this one, which the wrapper pins: the wake must
      * cross CPUs for the reschedule IPI it counts to be sent at all. */
     unsigned here = arch_cpu_id(), target = here;
@@ -418,45 +458,55 @@ static bool selftest_smp_wake_pinned(const char **reason)
             break;
         }
     CHECK(target != here);
-    struct cross_wake cw;
-    semaphore_init(&cw.sem, 0, "cross-wake");
-    cw.woke_at = 0;
-    cw.on_cpu = 999;
 
-    struct thread *t = thread_create_on(cross_waiter, &cw, "cross-waiter", SCHED_PRIO_DEFAULT,
-                                        CPUMASK_OF(target));
-    CHECK(t != NULL);
-    /* Wait for it to *be* blocked rather than sleeping and assuming: a
-     * post that finds no waiter yet takes the fast path and sends no
-     * IPI, and the check below would fail for a reason that is not the
-     * kernel's. BLOCKED is set under the wait-queue lock after the entry
-     * is linked (wait.c), so once seen, the post will find the waiter.
-     * The kernel writes `state` as a plain store under a lock this test
-     * does not hold; this is a one-word read outside it, used to decide
-     * when to post and never as a claim. */
-    uint64_t deadline = clock_now_ns() + MS(1000);
-    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
-        CHECK(clock_now_ns() < deadline);
-        thread_sleep_ms(1);
+    for (unsigned round = 1; round <= SMP_WAKE_ROUNDS; round++) {
+        struct cross_wake cw;
+        semaphore_init(&cw.sem, 0, "cross-wake");
+        cw.woke_at = 0;
+        cw.on_cpu = 999;
+        cw.requested = false;
+
+        struct thread *t = thread_create_on(cross_waiter, &cw, "cross-waiter", SCHED_PRIO_DEFAULT,
+                                            CPUMASK_OF(target));
+        CHECK(t != NULL);
+        /* Blocked, so that the post finds a waiter (a post that finds
+         * none takes the fast path and wakes nobody), and then the target
+         * idle, so that the waiter has switched out. The kernel writes
+         * `state` as a plain store under a lock this test does not hold;
+         * both are reads used to decide when to post, never as claims. */
+        uint64_t deadline = clock_now_ns() + MS(1000);
+        bool ready = false;
+        while (!ready && clock_now_ns() < deadline) {
+            ready = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_BLOCKED && sched_cpu_load(target) == 0;
+            if (!ready)
+                thread_sleep_ms(1);
+        }
+
+        uint64_t sent = clock_now_ns();
+        semaphore_up(&cw.sem);
+        thread_join(t);
+        CHECK(ready);   /* after the join: the waiter never outlives the test */
+        CHECK(cw.on_cpu == target);
+        CHECK(cw.woke_at >= sent);
+        if (!cw.requested) {
+            kinfo("selftest: smp-wake: round %u: the target was busy at the post (the wake asked for no "
+                  "reschedule); again",
+                  round);
+            continue;
+        }
+        /* The IPI woke the idle CPU: it handled a reschedule IPI after this
+         * wake asked for one (sched.c, request_resched). */
+        CHECK(cw.ipis_after > cw.ipi_base);
+        kinfo("selftest: smp-wake: cross-CPU wake seen %llu us after the post, round %u; the target handled "
+              "%llu reschedule IPI(s) after the wake",
+              (unsigned long long)((cw.woke_at - sent) / 1000), round,
+              (unsigned long long)(cw.ipis_after - cw.ipi_base));
+        CHECK(threads_settle(before));
+        return true;
     }
-
-    uint64_t sent = clock_now_ns();
-    semaphore_up(&cw.sem); /* from CPU 0: wake + IPI to CPU 1 */
-    thread_join(t);
-
-    CHECK(cw.on_cpu == target);
-    CHECK(cw.woke_at >= sent);
-    /* The IPI woke the idle CPU: it handled a reschedule IPI between
-     * blocking and running again (sched.c, request_resched). This was
-     * `woke_at - sent < 2 ms` ("well under a tick"), which never proved
-     * that -- a tick landing inside the 2 ms passes it too -- and which a
-     * held vCPU fails on a correct kernel. Counting the IPI on the target
-     * is the claim itself. */
-    CHECK(cw.ipis_after > cw.ipis_before);
-    kinfo("selftest: smp-wake: cross-CPU wake seen %llu us after the post",
-          (unsigned long long)((cw.woke_at - sent) / 1000));
-    CHECK(threads_settle(before));
-    return true;
+    *reason = "no round's wake found the target idle";
+    return false;
+#endif
 }
 
 /* Pinned for the whole test: the target is "another CPU than mine", a
