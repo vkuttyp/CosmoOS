@@ -3643,10 +3643,13 @@ See [docs/development.md](docs/development.md).
     same way.
   - The runner compares interfaces, services and sockets before and
     after every test.
-  - Forcing every network test to fail at its last check and at its
-    midpoint, in one boot each: exactly those fail, and nothing is left
-    or hangs. The midpoint run found two interfaces registered on the
-    stack. (PR #257)
+  - Every network test was forced to fail at its last check and at its
+    midpoint, in one boot each. At the last check, 50 of 50 were forced
+    on x86-64 and 49 on aarch64, where one test passed fewer checks than
+    counted. At the midpoint, the first run hung both architectures: two
+    interfaces were registered on the stack. With those fixed, 50 of 50
+    were forced on both. Each time exactly the forced tests failed and
+    nothing was left behind. (PR #257)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

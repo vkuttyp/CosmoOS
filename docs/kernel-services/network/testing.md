@@ -994,11 +994,22 @@ well as by name, so a name that did not fit the buffer still counts. The
 next test starts from what is left, so a leftover is blamed once.
 
 **Checked by forcing.** `tools/net-leftover-probe.py --count-checks`
-counts each test's passing checks, and `--force last|mid LOG` makes
-every counted test (50) fail at that check, in one boot. On both
-architectures, at both points, exactly the forced tests fail, none
-leaves the network changed, and nothing hangs or panics. The midpoint
-run found the two stack interfaces: `net-steer` hung its boot.
+counts each test's passing checks (50 tests counted), and `--force
+last|mid LOG` makes each counted test fail at that check, in one boot.
+A test that passes fewer checks on the forcing run than it was counted
+with never reaches its forcing point, and passes. As recorded:
+
+- **At the last check:** 50 of 50 forced on x86-64 and 49 of 50 on
+  aarch64 (`net-icmp-limit` passed fewer checks than counted there). In
+  both boots exactly the forced tests failed, none left the network
+  changed, and nothing hung or panicked.
+- **At the midpoint:** the first run hung both architectures in
+  `net-steer`. Its interface, like `net-csum-offload`'s, was on the stack,
+  and the runner's release touched the dead frame. With both static,
+  the rerun forced 50 of 50 on both architectures: exactly those failed,
+  none left the network changed, and nothing hung or panicked. It was
+  rerun, with the same result, after each review change to the releases,
+  including once with every `hin_connect` thread abandoned at once.
 
 ## Waiting for a property (`wait_until`)
 

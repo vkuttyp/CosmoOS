@@ -58,8 +58,9 @@
 >   check makes that guaranteed. `net-netif-lifetime` registers an
 >   8-byte unterminated name and requires the refusal.
 > - **Forcing:** `tools/net-leftover-probe.py --count-checks` and
->   `--force last|mid` make every counted test (50) fail at a chosen
->   check, in one boot.
+>   `--force last|mid` make each counted test (50) fail at a chosen
+>   check, in one boot. A test that passes fewer checks on the forcing run
+>   than it was counted with never reaches its point, and passes.
 >   - At the last check: 50 of 50 forced on x86-64 and 49 of 50 on
 >     aarch64 (`net-icmp-limit` passed fewer checks on that run), with no
 >     leftover, hang or panic.
