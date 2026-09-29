@@ -10,7 +10,8 @@
 >   window update's data can reach the wire before the probe, and a
 >   receiver reassembles. Greptile found this on #259. A segment
 >   reaching outside the range fails, including a byte before `base`,
->   whose offset wraps. A SYN, FIN or RST fails, with or without data,
+>   whose offset `seq - base` wraps to a value `>= total`, which the
+>   range check rejects. A SYN, FIN or RST fails, with or without data,
 >   and a bare ACK is passed over. `net-hostinput` counts a probe it
 >   read in the blocked phase as `covered = 1`.
 > - **§2's test does not use the seam the report proposed**
@@ -164,7 +165,8 @@ segments until every byte of `[base, base + total)` has arrived:
   unlocking (`batch_send` follows the unlock), so a window update's data
   can reach the wire before the probe, and a receiver reassembles.
 - **A segment reaching outside the range fails.** That includes a byte
-  before `base`, whose offset `seq - base` wraps past `total`.
+  before `base`, whose offset `seq - base` wraps to a value `>= total`,
+  which `off >= total` rejects.
 - **A SYN, FIN or RST fails,** with or without data. A bare ACK is
   passed over.
 - **At most 8 segments are read.** 50 bytes one at a time is a

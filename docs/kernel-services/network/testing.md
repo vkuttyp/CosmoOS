@@ -948,7 +948,8 @@ again, a retransmission from `snd_una`). Order is not asked for: the
 retransmit work builds its probe under the pcb's lock but sends it
 after unlocking, so a window update's data can reach the wire first,
 and a receiver reassembles. A segment reaching outside the range fails
-the check, including a byte before `base`, whose offset wraps. A SYN,
+the check, including a byte before `base`: its offset `seq - base`
+wraps to a value `>= total`, which the range check rejects. A SYN,
 FIN or RST fails it, with or without data, and a bare ACK is passed
 over. It reads at most 8 segments.
 
@@ -962,7 +963,8 @@ the probe itself, which the timer sends at its RTO; no stopwatch.
 2. **An update that does not ack the probe byte:** the 50 bytes from
    `snd_una`, with the probe counted.
 3. **An update that acks the probe byte:** the other 49 from exactly
-   past it. A segment before `+52` fails, since `off` wraps.
+   past it. A segment before `+52` fails: its `off` wraps to a value
+   `>= total`, which the range check rejects.
 4. **The probe not yet counted when the update arrives:** `net-hostinput`
    on a slow host, where the blocked check missed the probe. The probe
    is read off the tap before the update is sent, so it is on the wire
