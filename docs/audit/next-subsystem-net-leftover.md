@@ -38,7 +38,9 @@
 >   socket that test leaves. Both counts change only on the runner's
 >   thread: an abandoned thread whose connect returns hands its socket to
 >   a list, and the runner puts it and drops the count at the start of its
->   next census. (Two reviews' worth of alternatives failed first: plain
+>   next census. After the last test the runner drains the list once
+>   more (`nettest_finish`), and a connect that returns later puts its
+>   own socket. (Two reviews' worth of alternatives failed first: plain
 >   reads could be one low in a "before" census, a false addition after,
 >   and a sequence broke with two threads closing at once.)
 > - **Interface references:** after review, a fake interface's creator
@@ -295,6 +297,7 @@ The scope, built in PR #257 (the banner says what was built).
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | `selftest_defer`, the runner running releases, the network check |
 | `kernel-services/network/nettest.c` | 38 functions: a release per acquisition, explicit teardowns removed; the 20 thread arguments off the stack; `net-dns` (5) |
 | `kernel/scheduler/schedtest.c` | `irq-route`: its interrupt line and its periodic source released through the defer list |
+| `tools/net-leftover-probe.py` | the forcing modes: `--count-checks`, and `--force last|mid LOG`, which fail every counted network test at a chosen check in one boot |
 | `kernel-services/network/netif.c`, `tapsvc.c` | the counts the runner reads (interface names, services) |
 | `docs/testing/flakes.md`, `docs/kernel-services/network/testing.md`, `README.md` | the record |
 

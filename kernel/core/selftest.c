@@ -1046,6 +1046,7 @@ int selftest_run_all(void)
     }
 
     sched_watchdog_disarm();
+    nettest_finish();   /* sockets abandoned connects hand over from now on are theirs to put */
 
     /* The lock order the whole run recorded, for docs/kernel/lockdep/testing.md. */
     lockdep_dump_graph();

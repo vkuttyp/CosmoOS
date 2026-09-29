@@ -221,6 +221,9 @@ struct nettest_census {
 };
 void nettest_census(struct nettest_census *out);
 bool nettest_census_equal(const struct nettest_census *a, const struct nettest_census *b);
+/* After the last test: sockets abandoned connects hand over later are put
+ * by their threads, since no census is left to drain them. */
+void nettest_finish(void);
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_shared_text(const char **reason);   /* one program, one set of text frames */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */

@@ -987,7 +987,9 @@ hide a socket the later test leaves. Both counts change only on the
 runner's thread: an abandoned thread whose connect returns hands its
 socket to a list, and the runner puts it (and drops the count) at the
 start of its next census. So they are read as one state, however many
-connects finish at once. Interfaces are compared by count as
+connects finish at once. After the last test the runner drains the list
+once more (`nettest_finish`), and a connect that returns after that puts
+its own socket. Interfaces are compared by count as
 well as by name, so a name that did not fit the buffer still counts. The
 next test starts from what is left, so a leftover is blamed once.
 

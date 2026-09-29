@@ -86,6 +86,8 @@ static struct socket *g_nt_reap[NT_REAP_MAX];
 static unsigned g_nt_nreap;
 static spinlock_t g_nt_reap_lock = SPINLOCK_INIT("nt-reap");
 
+static bool g_nt_finished;   /* the self-tests are over: no census will drain the list again */
+
 static void nt_reap_abandoned(void)
 {
     struct socket *take[NT_REAP_MAX];
@@ -100,6 +102,16 @@ static void nt_reap_abandoned(void)
             ksock_put(take[i]);
         g_nt_abandoned--;
     }
+}
+
+/* After the last test: drain the list, and from now on an abandoned
+ * connect puts its own socket -- no census is left to drain it. */
+void nettest_finish(void)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
+    g_nt_finished = true;
+    spin_unlock_irqrestore(&g_nt_reap_lock, st);
+    nt_reap_abandoned();
 }
 
 void nettest_census(struct nettest_census *out)
@@ -6532,11 +6544,14 @@ static void hin_connect_thread(void *arg)
         struct socket *sock = c->s;
         c->s = NULL;
         arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
-        bool queued = g_nt_nreap < NT_REAP_MAX;
+        bool finished = g_nt_finished;
+        bool queued = !finished && g_nt_nreap < NT_REAP_MAX;
         if (queued)
             g_nt_reap[g_nt_nreap++] = sock;
         spin_unlock_irqrestore(&g_nt_reap_lock, st);
-        if (!queued && sock)   /* more at once than the list holds: kept, and still excused, so the counts agree */
+        if (finished && sock)
+            ksock_put(sock);   /* after the last census: nothing counts it now, so it is put here */
+        else if (!queued && sock)   /* more at once than the list holds: kept, and still excused, so the counts agree */
             kwarn("nettest: an abandoned connect's socket is kept: the reap list is full");
     }
     thread_exit(0);
