@@ -188,13 +188,17 @@ none has run yet, because `net-zero-window-probe` does not exist):
 
 - **The probe removed** (the `seglen = 1` branch disabled):
   `net-zero-window-probe` should fail, because no probe arrives.
-- **The probe does not advance `snd_nxt`:** the data after the window
-  update starts at the probe byte again. `net-hostinput`'s §1 check
-  allows a repeated byte by design, so it cannot catch this.
-  `net-zero-window-probe`'s acked-probe case must catch it: after an
-  ack of `+102`, a segment from `+101` resends a byte the peer acked,
-  which is never legitimate. If that case does not fail, the test is
-  weaker than stated.
+- **The probe does not advance `snd_nxt`** (so `snd_max` stays at
+  `+101` too): the data after a window update that acks only `+101`
+  starts at the probe byte again. `net-hostinput`'s §1 check allows a
+  repeated byte by design, so it cannot catch this.
+  `net-zero-window-probe`'s acked-probe case catches it by refusal:
+  its ACK of `+102` is above `snd_max`. The RFC 5961 check in
+  `tcp_input` (`SEQ_GT(ack, pcb->snd_max)` → `challenge_ack`) drops it
+  before the window opens. The case must then see a challenge ACK
+  (ack `+101`, no data) where it expects the data from `+102`, and
+  fail. Greptile corrected the first prediction on #258, a resend from
+  `+101`, which cannot happen because the ACK never lands.
 
 ## Benchmarks
 
