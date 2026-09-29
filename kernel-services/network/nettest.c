@@ -6496,34 +6496,44 @@ static void hin_drain(struct tap *u)
 #define HIN_TRIES 200u
 
 /*
- * The bytes [base, base + total) of one direction arrive with no gap
- * (docs/audit/next-subsystem-zero-window.md). A data segment may start at
- * or before what is covered -- a zero-window probe sent again, or a
- * retransmission from snd_una -- but never past it, and never runs past
- * the range; a bare ACK is passed over; anything else fails. `covered`
- * counts bytes the caller has already seen, and `have` says `sg` holds a
- * segment the caller read and has not yet counted. At most 8 segments:
- * 50 bytes one at a time is a regression, not a delivery.
+ * Every byte of [base, base + total) of one direction arrives
+ * (docs/audit/next-subsystem-zero-window.md). A data segment may repeat
+ * bytes already seen -- a zero-window probe sent again, a retransmission
+ * from snd_una -- and may arrive in any order: the retransmit work builds
+ * its probe under the pcb's lock but sends it after, so a window update's
+ * data can reach the wire first, and a receiver reassembles. It never
+ * reaches outside the range (a byte before `base` wraps `off` past it). A
+ * bare ACK is passed over; a SYN, FIN or RST fails. `covered` bytes from
+ * `base` are already seen, and `have` says `sg` holds a segment the caller
+ * read and has not yet counted. At most 8 segments: 50 bytes one at a
+ * time is a regression, not a delivery.
  */
 static bool hin_recv_stream(struct tap *u, uint16_t wport, uint32_t base, uint32_t covered, uint32_t total,
                             struct hin_seg *sg, bool have)
 {
-    for (unsigned k = 0; covered < total && k < 8; k++) {
+    uint8_t seen[64] = { 0 };
+    if (total > sizeof(seen) || covered > total)
+        return false;
+    for (uint32_t i = 0; i < covered; i++)
+        seen[i] = 1;
+    uint32_t n = covered;
+    for (unsigned k = 0; n < total && k < 8; k++) {
         if (!have && !hin_recv(u, IPPROTO_TCP, wport, sg, HIN_TRIES))
             return false;
         have = false;
-        if (sg->paylen == 0) {
-            if (sg->flags & (TH_SYN | TH_FIN | TH_RST))
-                return false;
-            continue;
-        }
-        uint32_t off = sg->seq - base;
-        if (off > covered || off + sg->paylen > total)
+        if (sg->flags & (TH_SYN | TH_FIN | TH_RST))
             return false;
-        if (off + sg->paylen > covered)
-            covered = off + sg->paylen;
+        if (sg->paylen == 0)
+            continue;
+        uint32_t off = sg->seq - base;
+        if (off >= total || sg->paylen > total - off)
+            return false;
+        for (uint32_t i = off; i < off + sg->paylen; i++) {
+            n += !seen[i];
+            seen[i] = 1;
+        }
     }
-    return covered == total;
+    return n == total;
 }
 
 /* A non-blocking accept, awaited. */
@@ -6977,8 +6987,9 @@ bool selftest_net_hostinput(const char **reason)
     uint32_t zw_covered = zw_seen && sg.seq == iss1 + 101 && sg.paylen == 1 ? 1 : 0;
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 101, TH_ACK, 64240, NULL, 0);   /* window update */
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    /* The 50 bytes from iss1 + 101 with no gap: in one segment, or a probe
-     * (read above or not) and the rest past it (net-zero-window-probe). */
+    /* Every one of the 50 bytes from iss1 + 101: in one segment, or a probe
+     * (read above or not) and the rest past it, in either order
+     * (net-zero-window-probe). */
     CHECK(hin_recv_stream(u, 40001, iss1 + 101, zw_covered, 50, &sg, false));
     hin_drain(u);
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 151, TH_ACK, 64240, data, 10);
@@ -7327,8 +7338,8 @@ bool selftest_net_zero_window_probe(const char **reason)
     CHECK(hin_recv(u, IPPROTO_TCP, 41001, &sg, HIN_TRIES) && sg.paylen == 1 && sg.seq == iss + 1);
     CHECK(__atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) > rx0);
 
-    /* (2) an update that does not ack the probe byte: the 50 bytes from
-     * iss + 1 with no gap, the probe counted -- its byte may come again. */
+    /* (2) an update that does not ack the probe byte: every one of the 50
+     * bytes from iss + 1, the probe counted -- its byte may come again. */
     l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 1, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(hin_recv_stream(u, 41001, iss + 1, 1, 50, &sg, false));
@@ -7349,18 +7360,16 @@ bool selftest_net_zero_window_probe(const char **reason)
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
     hin_drain(u);
 
-    /* (4) the probe still unread when the update arrives -- net-hostinput on a
-     * slow host. The update is sent once the timer has counted the probe;
-     * the count and the probe's output are one hold of the pcb's lock, which
-     * the update's input takes after them. */
-    rx0 = __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED);
+    /* (4) the probe not yet counted when the update arrives -- net-hostinput
+     * on a slow host, where the blocked check missed it. The probe is on the
+     * wire before the update is sent (read off the tap: the retransmit
+     * count rises under the pcb's lock, but the probe is sent after it), and
+     * the helper counts it as the run's first segment. */
     CHECK(ksock_sendto(a, data + 100, 50, NULL) == 50);
-    for (unsigned i = 0; i < HIN_TRIES && __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) == rx0; i++)
-        thread_sleep_ms(10);
-    CHECK(__atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) > rx0);
+    CHECK(hin_recv(u, IPPROTO_TCP, 41001, &sg, HIN_TRIES) && sg.paylen == 1 && sg.seq == iss + 101);
     l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 101, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv_stream(u, 41001, iss + 101, 0, 50, &sg, false));
+    CHECK(hin_recv_stream(u, 41001, iss + 101, 0, 50, &sg, true));
 
     /* The world resets the connection (seq == rcv_nxt), acking everything. */
     l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 151, TH_RST | TH_ACK, 0, NULL, 0);
