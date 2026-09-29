@@ -2677,8 +2677,8 @@ it is a candidate for its own unit, not three independent flakes.
 - **The proof.** `tools/zero-window-probe.py` forced the failure with a
   300 ms pause on either side of the blocked check, and a 700 ms pause
   for two probes: 2/2 on each architecture.
-- **The fix.** The check now asks for the 50 bytes with no gap
-  (`hin_recv_stream`), and the new `net-zero-window-probe` tests the probe.
+- **The fix.** The check now asks for every one of the 50 bytes, in any
+  order (`hin_recv_stream`), and the new `net-zero-window-probe` tests the probe.
 - **The proof of the fix.** The three forced placements pass on both
   architectures.
 

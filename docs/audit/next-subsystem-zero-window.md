@@ -3,9 +3,16 @@
 > **Status: built (PR #259).** As designed, with these specifics:
 >
 > - **§1's check is a helper,** `hin_recv_stream(u, port, base, covered,
->   total, &sg, have)`, in `nettest.c`. It also passes over a bare ACK
->   and fails a SYN, FIN or RST. `net-hostinput` counts a probe it read
->   in the blocked phase as `covered = 1`.
+>   total, &sg, have)`, in `nettest.c`. It asks that **every byte of the
+>   range arrive, in any order**, not "no gap in arrival order" as §1
+>   proposed. The rexmit work builds its probe under the pcb's lock but
+>   sends it after unlocking (`batch_send` follows the unlock), so a
+>   window update's data can reach the wire before the probe, and a
+>   receiver reassembles. Greptile found this on #259. A segment
+>   reaching outside the range fails, including a byte before `base`,
+>   whose offset wraps. A SYN, FIN or RST fails, with or without data,
+>   and a bare ACK is passed over. `net-hostinput` counts a probe it
+>   read in the blocked phase as `covered = 1`.
 > - **§2's test does not use the seam.** It waits for the probe the
 >   timer sends at its own RTO. It needs no debug-only seam, so no
 >   release stub either; release boots run no self-tests, but the
@@ -14,9 +21,12 @@
 >   1. the probe;
 >   2. an update that does not ack it;
 >   3. an update that acks it;
->   4. an update sent once `retransmits` has risen, with the probe still
->      unread: `net-hostinput`'s slow-host placement, made
->      deterministic.
+>   4. the probe read off the tap before the update is sent, and passed
+>      to the helper uncounted, as the run's first segment:
+>      `net-hostinput`'s slow-host placement, made deterministic. A
+>      first form sent the update once `retransmits` had risen. The
+>      count is taken under the lock, but the probe goes out after it,
+>      so that form could see the data first (Greptile, #259).
 > - **§2 does not assert `challenge_acks`.** It is a machine-wide
 >   counter, and the claim is about this connection. Case (3) asserts
 >   the data.
@@ -144,7 +154,8 @@ one segment, or before the persist timer.
 
 ### 1. The window-update check asserts the stream, not the segment
 
-The check reads segments until the 50 bytes from `iss1 + 101` are
+*(As proposed. As built, the rule is "every byte, in any order"; see the
+banner.)* The check reads segments until the 50 bytes from `iss1 + 101` are
 covered. A segment may start at or before the covered edge, but never
 past it (no gap), and never run past the 50. A repeated probe or a
 retransmission from `snd_una` therefore passes, and a skipped byte does
@@ -164,7 +175,8 @@ CHECK(ok_run && covered == 50);
 
 ### 2. A test of the probe itself: `net-zero-window-probe`
 
-The step above tolerates the probe, but nothing proves the probe exists.
+*(As proposed. As built, the test uses no seam and has four cases; see
+the banner.)* The step above tolerates the probe, but nothing proves the probe exists.
 A new test closes the window, queues data, and fires the persist timer
 itself with the existing seam `tcp_test_arm_rexmit(pcb, 1 ms)`. That
 makes the adversary the mechanism, not a stopwatch. The test then
@@ -191,8 +203,8 @@ banner.)
 
 ## Affected files
 
-The implementation's; this PR (the report) adds only the last row's
-probe and this report.
+The implementation's, as built (PR #259). The report (#258) added only
+the probe and this report.
 
 | file | change |
 |---|---|
@@ -218,8 +230,8 @@ None; test-only.
 
 | test | proves |
 |---|---|
-| `net-hostinput` | the 50 bytes arrive from `iss1 + 101` with no gap, with or without a probe (repeats allowed); forced by the probe's `--stretch` (one probe and two) and `--early` |
-| `net-zero-window-probe` (new) | a zero window with data sends a one-byte probe on the timer; data after a window update resumes in order past it |
+| `net-hostinput` | every one of the 50 bytes from `iss1 + 101` arrives, with or without a probe (repeats and any order allowed); forced by the probe's `--stretch` (one probe and two) and `--early` |
+| `net-zero-window-probe` (new) | a zero window with data sends a one-byte probe on the timer; data after a window update resumes past it, and no byte the peer acked is sent again |
 
 **Measured in this report:** the old check fails under `--stretch 300`,
 `--stretch 700` and `--early 300`, and the candidate passes all three
@@ -263,10 +275,10 @@ when a probe went out (two in the measured runs).
   The test is single-CPU in what it asserts, so this is harmless. The
   implementation should confirm that the probe cannot race the test's
   own window update. The update is sent only after the probe has been
-  read. (As built, no seam is used. Case (4) sends its update once
-  `retransmits` has risen. The rexmit work counts and outputs the
-  probe in one hold of the pcb's lock, and the update's input takes
-  that lock after them.)
+  read. (As built, no seam is used, and every case sends its update only
+  after reading the probe off the tap. The rexmit work counts the probe
+  under the pcb's lock but sends it after unlocking, so a count alone
+  does not order the probe before the update's data.)
 
 ## Alternatives considered
 

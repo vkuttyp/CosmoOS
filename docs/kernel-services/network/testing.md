@@ -530,7 +530,7 @@ acknowledged (the fifth acceptance point). Accepted segments that do not
 advance `snd_una` keep their output on C1: three duplicate ACKs make the 100
 bytes in flight retransmit (`retransmits` rises); an ACK with window 0 blocks
 a 50-byte send (nothing of that size read back) and a pure window update
-releases it, all 50 bytes from `iss1 + 101` with no gap (`hin_recv_stream`).
+releases it, every one of the 50 bytes from `iss1 + 101` (`hin_recv_stream`).
 They may come in one segment, or as a zero-window probe and the rest
 past it: the blocked phase (~180 ms) is about the 200 ms RTO, so on a
 slow host the retransmit timer sends the one-byte probe first
@@ -942,11 +942,15 @@ first expiry: three sightings, and deterministic under a 300 ms pause
 at either side of its blocked check.
 
 **`hin_recv_stream(u, port, base, covered, total, &sg, have)`** is the
-check both tests now make. The bytes `[base, base + total)` arrive
-with no gap: a data segment may start at or before the covered edge (a
-probe sent again, a retransmission from `snd_una`) but never past it,
-and never runs past the range. A bare ACK is passed over, and a SYN,
-FIN or RST fails the check. It reads at most 8 segments.
+check both tests now make. Every byte of `[base, base + total)`
+arrives, in any order, and a byte may come more than once (a probe sent
+again, a retransmission from `snd_una`). Order is not asked for: the
+retransmit work builds its probe under the pcb's lock but sends it
+after unlocking, so a window update's data can reach the wire first,
+and a receiver reassembles. A segment reaching outside the range fails
+the check, including a byte before `base`, whose offset wraps. A SYN,
+FIN or RST fails it, with or without data, and a bare ACK is passed
+over. It reads at most 8 segments.
 
 **`net-zero-window-probe`** has its own uplink tap (`zwpu`,
 `10.77.12.1`, the world at `.99`) and a listener on `:2230`. The world
@@ -959,11 +963,11 @@ the probe itself, which the timer sends at its RTO; no stopwatch.
    `snd_una`, with the probe counted.
 3. **An update that acks the probe byte:** the other 49 from exactly
    past it. A segment before `+52` fails, since `off` wraps.
-4. **The probe unread when the update arrives:** `net-hostinput` on a
-   slow host. The update is sent once `retransmits` has risen. The
-   count and the probe's output are one hold of the pcb's lock, which
-   the update's input takes after them. The 50 bytes arrive from the
-   probe byte on.
+4. **The probe not yet counted when the update arrives:** `net-hostinput`
+   on a slow host, where the blocked check missed the probe. The probe
+   is read off the tap before the update is sent, so it is on the wire
+   first. It is handed to the helper uncounted (`have`), as the run's
+   first segment.
 
 It closes with a reset from the world at `rcv_nxt`.
 

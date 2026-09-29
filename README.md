@@ -3658,7 +3658,7 @@ See [docs/development.md](docs/development.md).
   200 ms RTO. On a slow host the probe went first, and the data resumed
   past it, which the check (all 50 bytes in the first segment) refused.
   `tools/zero-window-probe.py` forced it both ways. The check now asks
-  for the 50 bytes with no gap (`hin_recv_stream`), and
+  for every one of the 50 bytes, in any order (`hin_recv_stream`), and
   `net-zero-window-probe` proves the probe and what follows it: an
   update that acks the probe, one that does not, and one that arrives
   before it is read. No TCP code changed. (PR #259)
