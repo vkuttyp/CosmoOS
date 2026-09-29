@@ -4,8 +4,8 @@
 >
 > - **§1's check is a helper,** `hin_recv_stream(u, port, base, covered,
 >   total, &sg, have)`, in `nettest.c`. It asks that **every byte of the
->   range arrive, in any order**, not "no gap in arrival order" as §1
->   proposed. The rexmit work builds its probe under the pcb's lock but
+>   range arrive, in any order**, not "no gap in arrival order" as the
+>   report (#258) proposed. The rexmit work builds its probe under the pcb's lock but
 >   sends it after unlocking (`batch_send` follows the unlock), so a
 >   window update's data can reach the wire before the probe, and a
 >   receiver reassembles. Greptile found this on #259. A segment
@@ -13,8 +13,9 @@
 >   whose offset wraps. A SYN, FIN or RST fails, with or without data,
 >   and a bare ACK is passed over. `net-hostinput` counts a probe it
 >   read in the blocked phase as `covered = 1`.
-> - **§2's test does not use the seam.** It waits for the probe the
->   timer sends at its own RTO. It needs no debug-only seam, so no
+> - **§2's test does not use the seam the report proposed**
+>   (`tcp_test_arm_rexmit`). It waits for the probe the timer sends at
+>   its own RTO. It needs no debug-only code, so no
 >   release stub either; release boots run no self-tests, but the
 >   release build compiles it. Each wait is for the probe, not a stopwatch. It
 >   has four cases:
@@ -152,47 +153,69 @@ one segment, or before the persist timer.
 
 ## Design
 
-### 1. The window-update check asserts the stream, not the segment
+### 1. The window-update check asserts the bytes, not the segment
 
-*(As proposed. As built, the rule is "every byte, in any order"; see the
-banner.)* The check reads segments until the 50 bytes from `iss1 + 101` are
-covered. A segment may start at or before the covered edge, but never
-past it (no gap), and never run past the 50. A repeated probe or a
-retransmission from `snd_una` therefore passes, and a skipped byte does
-not. A one-byte probe seen in the blocked phase counts as the first
-byte. This is the probe's `--fix` block, bounded at 8 segments:
+`hin_recv_stream(u, port, base, covered, total, &sg, have)` reads
+segments until every byte of `[base, base + total)` has arrived:
+
+- **Order is not asked for.** A byte may arrive in any order, and more
+  than once: a probe sent again, a retransmission from `snd_una`. The
+  rexmit work builds its probe under the pcb's lock but sends it after
+  unlocking (`batch_send` follows the unlock), so a window update's data
+  can reach the wire before the probe, and a receiver reassembles.
+- **A segment reaching outside the range fails.** That includes a byte
+  before `base`, whose offset `seq - base` wraps past `total`.
+- **A SYN, FIN or RST fails,** with or without data. A bare ACK is
+  passed over.
+- **At most 8 segments are read.** 50 bytes one at a time is a
+  regression (silly-window avoidance), not a delivery.
+- **`covered` bytes from `base` are already seen,** and `have` says
+  `sg` holds a segment the caller read and has not yet counted.
+
+`net-hostinput` counts a one-byte probe at `iss1 + 101` that it read in
+the blocked phase as `covered = 1`, and otherwise passes 0:
 
 ```c
-uint32_t covered = (blocked_seen && bseq == 101 && blen == 1) ? 1 : 0;
-/* each segment: off = seq - (iss1 + 101); off <= covered, paylen > 0,
- * off + paylen <= 50; covered = max(covered, off + paylen) */
-CHECK(ok_run && covered == 50);
+bool zw_seen = hin_recv(u, IPPROTO_TCP, 40001, &sg, 15);
+CHECK(!(zw_seen && sg.paylen >= 50));
+uint32_t zw_covered = zw_seen && sg.seq == iss1 + 101 && sg.paylen == 1 ? 1 : 0;
+/* window update */
+CHECK(hin_recv_stream(u, 40001, iss1 + 101, zw_covered, 50, &sg, false));
 ```
 
 - **The blocked check stays as it is.** It proves that nothing of 50
-  bytes goes out through a zero window. A 1-byte probe is not a
-  violation of it.
+  bytes goes out through a zero window; a one-byte probe does not
+  violate it.
 
 ### 2. A test of the probe itself: `net-zero-window-probe`
 
-*(As proposed. As built, the test uses no seam and has four cases; see
-the banner.)* The step above tolerates the probe, but nothing proves the probe exists.
-A new test closes the window, queues data, and fires the persist timer
-itself with the existing seam `tcp_test_arm_rexmit(pcb, 1 ms)`. That
-makes the adversary the mechanism, not a stopwatch. The test then
-asserts:
+The step above tolerates the probe; this test proves it exists and
+what follows it. It has its own uplink tap (`zwpu`, `10.77.12.1`, the
+world at `.99`) and a listener on `:2230`. The world completes the
+handshake by hand and closes its window. Each wait is for the probe the
+retransmit timer sends at its own RTO, with no stopwatch and no seam.
+So it needs no debug-only code, and the release build compiles it.
+Release boots run no self-tests.
 
-- the probe: one byte at `snd_una`, and `retransmits` counted once;
-- for a window update that does not ack the probe byte, the rest in
-  order from `+1` after it, as `net-hostinput` now expects;
-- for a window update that acks the probe byte, the rest from there,
-  with no byte sent twice.
+1. **The probe:** a 50-byte send draws one byte at `snd_una`, and the
+   pcb's `retransmits` rises.
+2. **An update that does not ack the probe byte:** every byte of the 50
+   from `snd_una`, the probe counted.
+3. **An update that acks the probe byte:** every byte of the other 49
+   from exactly past it. A resend of an acked byte falls before `base`
+   and fails.
+4. **The probe not yet counted:** `net-hostinput` on a slow host, where
+   the blocked check missed it. The probe is read off the tap before the
+   update is sent, so it is on the wire first, and is handed to the
+   helper uncounted (`have`).
 
-The seam is `CONFIG_DEBUG` only (`tcp.c`, the `#if CONFIG_DEBUG`
-block that holds `tcp_test_arm_rexmit`). The test either registers only
-in debug or has a release stub, and `gmake BUILD=release image` must
-build before the push. (As built, the test uses no seam; see the
-banner.)
+It closes with a reset from the world at `rcv_nxt`. Every case sends
+its update only after reading the probe off the tap: a count taken
+under the lock does not order the probe's output before the update's
+data.
+
+It does not assert `challenge_acks`. That is a machine-wide counter,
+and the claim is about this connection, so case (3) asserts the data.
 
 ### 3. The record
 
@@ -220,7 +243,7 @@ No TCP code changes.
 
 ## APIs
 
-None. (`tcp_test_arm_rexmit` exists; as built, it is not used.)
+None.
 
 ## Migration plan
 
@@ -233,31 +256,27 @@ None; test-only.
 | `net-hostinput` | every one of the 50 bytes from `iss1 + 101` arrives, with or without a probe (repeats and any order allowed); forced by the probe's `--stretch` (one probe and two) and `--early` |
 | `net-zero-window-probe` (new) | a zero window with data sends a one-byte probe on the timer; data after a window update resumes past it, and no byte the peer acked is sent again |
 
-**Measured in this report:** the old check fails under `--stretch 300`,
-`--stretch 700` and `--early 300`, and the candidate passes all three
-(the rows above).
+**Measured by the report (#258):** the old check fails under `--stretch
+300`, `--stretch 700` and `--early 300`, and the candidate passes all
+three (the rows above).
 
-**Planned for the implementation** (each run alone, boot confirmed then;
-none has run yet, because `net-zero-window-probe` does not exist):
+**Mutations** (each alone, both architectures, boot confirmed):
 
-- **The probe removed** (the `seglen = 1` branch disabled):
-  `net-zero-window-probe` should fail, because no probe arrives.
-- **The probe does not advance `snd_nxt`** (so `snd_max` stays at
-  `+101` too): the data after a window update that acks only `+101`
-  starts at the probe byte again. `net-hostinput`'s §1 check allows a
-  repeated byte by design, so it cannot catch this.
-  `net-zero-window-probe`'s acked-probe case catches it by refusal:
-  its ACK of `+102` is above `snd_max`. The RFC 5961 check in
-  `tcp_input` (`SEQ_GT(ack, pcb->snd_max)` → `challenge_ack`) drops it
-  before the window opens. The case must then see no data from
-  `+102`, and fail. What comes back instead is at most a challenge
-  ACK: seq `+101` (`snd_nxt`), ack the peer's own sequence
-  (`rcv_nxt`, `1003` in `net-hostinput`'s numbering), and no data.
-  "At most", because `challenge_allowed` rate-limits challenge ACKs
-  machine-wide (`TCP_CHALLENGE_PER_SEC`). The case therefore asserts
-  the absence of the data and the `challenge_acks` count, not the
-  challenge segment's arrival. Greptile corrected the first prediction on #258, a resend from
-  `+101`, which cannot happen because the ACK never lands.
+| mutation | result |
+|---|---|
+| the probe removed (`seglen = 1` → `break`) | fails at (1): no one-byte segment |
+| one probe that keeps `snd_nxt` and `snd_max` | fails at (3), and (2) passes. The ACK of `+52` is above `snd_max`, so `tcp_input`'s RFC 5961 check (`SEQ_GT(ack, pcb->snd_max)` → `challenge_ack`) drops it before the window opens, and no data follows. `net-hostinput` allows a repeated byte by design, so it cannot catch this |
+| `hin_recv_stream` demanding the whole run in its first segment (the old check's rule) | fails at (2) |
+
+A first form of the second mutation, which only skipped
+`snd_nxt += seglen`, flooded probes: the output loop never advanced and
+built one until the batch was full. It failed at (2) through the
+8-segment bound, which is not the mechanism under test, and was
+replaced.
+
+**Forced placements** against the new `net-hostinput`: a 300 ms or
+700 ms pause before the window update (one probe, or two), and 300 ms
+before the blocked check. All pass on both architectures.
 
 ## Benchmarks
 
@@ -266,19 +285,15 @@ when a probe went out (two in the measured runs).
 
 ## Risks
 
-- **§1's loop is bounded at 8 segments.** A stack that sent the 50
+- **§1's helper is bounded at 8 segments.** A stack that sent the 50
   bytes one byte at a time would fail it. The most measured is 3.
   That was two probes and the rest, under `--stretch 700`, which a
   host would need to stall for over 600 ms to reach. That would be a real
   regression (silly-window avoidance), so the bound is intended.
-- **The seam arms the timer on the calling CPU.** Its comment says so.
-  The test is single-CPU in what it asserts, so this is harmless. The
-  implementation should confirm that the probe cannot race the test's
-  own window update. The update is sent only after the probe has been
-  read. (As built, no seam is used, and every case sends its update only
-  after reading the probe off the tap. The rexmit work counts the probe
-  under the pcb's lock but sends it after unlocking, so a count alone
-  does not order the probe before the update's data.)
+- **Wire order is not asserted.** Neither test checks that the stack
+  sends in sequence order. That is deliberate: the probe's output
+  follows its lock's release, so order is a race, and a receiver
+  reassembles. A byte outside the range, or one never sent, still fails.
 
 ## Alternatives considered
 
