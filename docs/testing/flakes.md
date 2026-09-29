@@ -2687,3 +2687,52 @@ it is a candidate for its own unit, not three independent flakes.
 2026-09-29, local aarch64 debug, in the net-leftover unit's check-counting
 boot, which changes no scheduler code (the first sighting was on
 2026-09-28, x86-64). Recorded.
+
+**Explained (the hysteresis report,
+`docs/audit/next-subsystem-hysteresis.md`; not yet fixed).** The balancer
+cannot pull for a difference of one: `sched_migrate_from` re-decides
+under both locks with `min_gap = 2`. A move is a real, locked 3 vs 1: a
+third thread made runnable on A between the test's samples, while one of
+A's workers is queued after a yield and so movable. The test judged the
+premise from `sched_cpu_load` samples every ~8 ms, and failed when none
+of them caught the third thread. `tools/hysteresis-probe.py --force`
+reproduced the exact message in 2 of 4 boots, once per architecture.
+This is the mechanism shown to produce the failure; the two sightings'
+logs hold no pull-time record, so it is not observed in them.
+
+The probe also found that the sampled premise "breaks" in nearly every
+boot with nothing extra on A. The unlocked hint counts a yielding CPU
+twice between `enqueue(prev)` and `rq->current = next`. So the test
+passed a balancer lowered to a threshold of one on aarch64, calling 12
+moves "not asserted".
+
+## `syscall-fuzz` over the per-test budget, second sighting, 2026-09-29
+
+`self-test syscall-fuzz took 9641 ms (budget 8000 ms)`, local aarch64
+debug, a boot of `tools/hysteresis-probe.py --force --fix` (it changes
+only `sched-balance-hysteresis` and records pulls in
+`sched_migrate_from`), run beside an x86-64 boot. All self-tests passed;
+the harness's budget failed it. The first sighting was over by 305 ms,
+this one by 1641 ms. Recorded, not attributed.
+
+## `lockup-sample-irqoff`: the restored CPU did not answer the second sample, 2026-09-29
+
+`SELFTEST: lockup-sample-irqoff ... FAIL: check failed: m2 &
+CPUMASK_OF((unsigned)k) at line 373`, local aarch64 debug, a boot of
+`tools/hysteresis-probe.py --fix` beside an x86-64 boot. The check is
+the test's last-but-one step: after the interrupts-off spinner on CPU `k`
+stops, a second `lockup_sample_all` must hear from `k` within
+`LOCKUP_SAMPLE_TIMEOUT_NS`. It did not. The first sample and the
+NMI-or-not branch had passed. A vCPU the host did not schedule in time
+fits; nothing in the log shows it. First sighting; recorded, not
+attributed.
+
+## The network harness's budget, missed by a slow boot, 2026-09-29
+
+`network harness: ready at 154.7s, back-connection accepted at -,
+budget 150.0s`, local x86-64 debug, a boot of
+`tools/hysteresis-probe.py --force` beside an aarch64 boot. The guest
+reached the network test 4.7 s after the harness's whole budget; every
+self-test before it had passed. This is not the reset family the tally
+above counts: the harness never got as far as a connection. It is a
+slow host, and it is recorded, not counted.
