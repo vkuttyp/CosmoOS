@@ -557,6 +557,17 @@ void tapsvc_stop(struct tapsvc *svc)
     kfree(svc);
 }
 
+unsigned tapsvc_count(void)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i])
+            n++;
+    spin_unlock_irqrestore(&g_svcs_lock, s);
+    return n;
+}
+
 void tapsvc_get_stats(struct tapsvc_stats *out)
 {
     *out = g_stats;

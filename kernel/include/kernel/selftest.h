@@ -195,6 +195,35 @@ unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned 
 /* Mark `pid` as already blamed: later checks ignore it until it leaves the
  * table (P33 blames once). */
 void selftest_leftover_reported(uint32_t pid);
+
+/* A test's releases (the net-leftover unit): register one at each
+ * acquisition; the runner runs what is left, last first, after the test,
+ * however it returned. selftest_release runs the latest one registered for
+ * `arg` now, where the test used to tear down, and says whether there was
+ * one. selftest_defer is false when the list is full (64), and the test
+ * then fails by name. */
+bool selftest_defer(void (*fn)(void *), void *arg);
+bool selftest_release(void *arg);
+/* Drop the latest release registered for `arg` without running it: for a
+ * test whose own release is what it tests, once that release has
+ * succeeded under its CHECK. */
+bool selftest_forget(void *arg);
+
+/* kernel-services/network/nettest.c: the network the runner compares
+ * before and after every test -- interfaces by name and count, live
+ * DHCP/DNS services, sockets. nettest_census_equal is false only when the
+ * test added something: fewer is never a leftover. */
+struct nettest_census {
+    char netifs[512];
+    unsigned nnetifs;   /* all of them, whether or not their names fit */
+    unsigned services;
+    unsigned sockets;
+};
+void nettest_census(struct nettest_census *out);
+bool nettest_census_equal(const struct nettest_census *a, const struct nettest_census *b);
+/* After the last test: sockets abandoned connects hand over later are put
+ * by their threads, since no census is left to drain them. */
+void nettest_finish(void);
 bool selftest_elf_share_cost(const char **reason);
 bool selftest_elf_shared_text(const char **reason);   /* one program, one set of text frames */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */

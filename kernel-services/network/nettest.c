@@ -60,6 +60,319 @@
         break;                                                                 \
     } else (void)0
 
+/* --- releases however a test returns (the net-leftover unit) ------------
+ *
+ * CHECK returns at once, and a test released what it made only on its last
+ * lines: one failure kept a tap, a DHCP/DNS service slot and its sockets,
+ * and eight tests after it failed for the slot (docs/audit/
+ * next-subsystem-net-leftover.md). Every acquisition in this file goes
+ * through one of these, which registers its release with the runner
+ * (selftest_defer) in the same call, so no CHECK can fall between the two.
+ * Every release goes through one too: it runs the registered release early
+ * (selftest_release), where the test used to tear down, and falls back to
+ * the plain call for anything not registered. What a test still holds when
+ * it returns, the runner releases, last acquired first.
+ */
+/* Sockets abandoned connect threads still hold (the census leaves them
+ * out: they close whenever their connect times out, maybe during a later
+ * test, and must neither blame that test nor hide a socket it leaves). */
+static unsigned g_nt_abandoned;
+/* An abandoned thread whose connect has returned hands its socket here
+ * and changes nothing else; the runner puts it at its next census. So
+ * both counts the census reads change only on the runner's thread --
+ * the one reading them -- however many connects finish at once. */
+enum { NT_REAP_MAX = 16 };
+static struct socket *g_nt_reap[NT_REAP_MAX];
+static unsigned g_nt_nreap;
+static spinlock_t g_nt_reap_lock = SPINLOCK_INIT("nt-reap");
+
+static bool g_nt_finished;   /* the self-tests are over: no census will drain the list again */
+
+static void nt_reap_abandoned(void)
+{
+    struct socket *take[NT_REAP_MAX];
+    arch_irq_state_t s = spin_lock_irqsave(&g_nt_reap_lock);
+    unsigned n = g_nt_nreap;
+    for (unsigned i = 0; i < n; i++)
+        take[i] = g_nt_reap[i];
+    g_nt_nreap = 0;
+    spin_unlock_irqrestore(&g_nt_reap_lock, s);
+    for (unsigned i = 0; i < n; i++) {
+        if (take[i])
+            ksock_put(take[i]);
+        g_nt_abandoned--;
+    }
+}
+
+/* After the last test: drain the list, and from now on an abandoned
+ * connect puts its own socket -- no census is left to drain it. */
+void nettest_finish(void)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
+    g_nt_finished = true;
+    spin_unlock_irqrestore(&g_nt_reap_lock, st);
+    nt_reap_abandoned();
+}
+
+void nettest_census(struct nettest_census *out)
+{
+    out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
+    out->services = tapsvc_count();
+    /* The abandoned connects' sockets are subtracted. Any whose connect
+     * has returned are put first, here, so the socket count and the
+     * abandoned count both change only on this thread: they are read as
+     * one state without any retry. */
+    nt_reap_abandoned();
+    unsigned sockets = socket_count();
+    out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
+}
+
+/* Is interface `name` (length n) among `list`'s comma-separated names? */
+static bool census_has(const char *list, const char *name, size_t n)
+{
+    for (const char *p = list; *p;) {
+        const char *q = strchr(p, ',');
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        if (len == n && memcmp(p, name, n) == 0)
+            return true;
+        if (!q)
+            break;
+        p = q + 1;
+    }
+    return false;
+}
+
+/*
+ * Did the test leave anything? Only what it added counts. A later test
+ * that finds fewer -- a socket an abandoned connect finally put, an
+ * interface an earlier leftover's owner released -- has left nothing, and
+ * failing it for that would be the cross-test failure this check exists
+ * to end. The interface count is compared too: a name that did not fit
+ * the buffer still counts.
+ */
+bool nettest_census_equal(const struct nettest_census *before, const struct nettest_census *after)
+{
+    if (after->nnetifs > before->nnetifs || after->services > before->services || after->sockets > before->sockets)
+        return false;
+    for (const char *p = after->netifs; *p;) {
+        const char *q = strchr(p, ',');
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        if (!census_has(before->netifs, p, len))
+            return false;   /* a new name, even if another went */
+        if (!q)
+            break;
+        p = q + 1;
+    }
+    return true;
+}
+
+static void nt_rel_tap(void *a) { tap_destroy(a); }
+static void nt_rel_svc(void *a) { tapsvc_stop(a); }
+static void nt_rel_sock(void *a) { ksock_put(a); }
+static void nt_rel_nif(void *a) { netif_unregister(a); }
+static void nt_rel_file(void *a) { file_put(a); }
+
+static struct tap *nt_tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t mac[6])
+{
+    struct tap *t = tap_create(name, ip, mask, mac);
+    if (t != NULL && !selftest_defer(nt_rel_tap, t)) {
+        tap_destroy(t);
+        return NULL;
+    }
+    return t;
+}
+
+static void nt_tap_destroy(struct tap *t)
+{
+    if (!selftest_release(t))
+        tap_destroy(t);
+}
+
+static struct tapsvc *nt_tapsvc_start(struct tap *t)
+{
+    struct tapsvc *svc = tapsvc_start(t);
+    if (svc != NULL && !selftest_defer(nt_rel_svc, svc)) {
+        tapsvc_stop(svc);
+        return NULL;
+    }
+    return svc;
+}
+
+static void nt_tapsvc_stop(struct tapsvc *svc)
+{
+    if (!selftest_release(svc))
+        tapsvc_stop(svc);
+}
+
+static int nt_ksock_create(int family, int type, uint32_t uid, struct socket **out)
+{
+    int rc = ksock_create(family, type, uid, out);
+    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
+        ksock_put(*out);
+        *out = NULL;
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+static int nt_ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
+{
+    int rc = ksock_accept(s, out, peer);
+    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
+        ksock_put(*out);
+        *out = NULL;
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+static void nt_ksock_put(struct socket *s)
+{
+    if (!selftest_release(s))
+        ksock_put(s);
+}
+
+static int nt_netif_register(struct netif *nif)
+{
+    int rc = netif_register(nif);
+    if (rc == 0 && !selftest_defer(nt_rel_nif, nif)) {
+        netif_unregister(nif);
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+static void nt_netif_unregister(struct netif *nif)
+{
+    if (!selftest_release(nif))
+        netif_unregister(nif);
+}
+
+/* A reference the test holds on an interface (a creator's, or one
+ * netif_find gave it), released however it returns. Keyed by a static
+ * holder, never by the interface: the interface's own address is its
+ * unregister's key, and netif_find can return the very interface the test
+ * registered. */
+struct nt_netif_ref {
+    struct netif *nif;
+};
+
+static void nt_rel_netif_ref(void *arg)
+{
+    struct nt_netif_ref *r = arg;
+    if (r->nif)
+        netif_put(r->nif);
+    r->nif = NULL;
+}
+
+static bool nt_netif_hold(struct nt_netif_ref *r, struct netif *nif)
+{
+    r->nif = nif;
+    if (!selftest_defer(nt_rel_netif_ref, r)) {
+        nt_rel_netif_ref(r);
+        return false;
+    }
+    return true;
+}
+
+static void nt_netif_ref_put(struct nt_netif_ref *r)
+{
+    if (!selftest_release(r))
+        nt_rel_netif_ref(r);
+}
+
+/* A packet a fake interface kept, freed however the test returns. */
+static void nt_rel_mbuf_slot(void *slot)
+{
+    struct mbuf **p = slot;
+    if (*p)
+        m_freem(*p);
+    *p = NULL;
+}
+
+static int nt_vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out)
+{
+    int rc = vfs_open(start, path, flags, mode, out);
+    if (rc == 0 && !selftest_defer(nt_rel_file, *out)) {
+        file_put(*out);
+        *out = NULL;
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+static void nt_file_put(struct file *f)
+{
+    if (!selftest_release(f))
+        file_put(f);
+}
+
+/* Hooks and settings a test changes are restored however it returns: a
+ * hook left installed with a pointer into a dead frame is called by the
+ * next packet, and a lossy or black-hole loopback filter left in place
+ * fails every loopback test after it. Changing one registers its
+ * restore; putting it back runs that restore early. */
+static char g_nt_lo_filter, g_nt_rx_hook, g_nt_steering, g_nt_keepalive, g_nt_fin_wait2;   /* keys */
+
+static void nt_restore_lo_filter(void *k) { (void)k; loopback_set_filter(NULL, NULL); }
+static void nt_restore_rx_hook(void *k) { (void)k; netif_set_rx_hook(NULL, NULL); }
+static void nt_restore_steering(void *k) { (void)k; netif_set_steering(true); }
+static void nt_restore_keepalive(void *k) { (void)k; tcp_set_keepalive(0, 0, 0); }
+static void nt_restore_fin_wait2(void *k) { (void)k; tcp_set_fin_wait2(0); }
+
+/* Changed: register the restore once. Put back: run it (or just put back). */
+static void nt_changed(void *key, void (*restore)(void *))
+{
+    selftest_forget(key);   /* a second change keeps one restore */
+    if (!selftest_defer(restore, key))
+        restore(key);       /* no room: restore now rather than leave it */
+}
+
+static void nt_loopback_set_filter(lo_filter_fn fn, void *arg)
+{
+    loopback_set_filter(fn, arg);
+    if (fn != NULL)
+        nt_changed(&g_nt_lo_filter, nt_restore_lo_filter);
+    else
+        selftest_forget(&g_nt_lo_filter);
+}
+
+static void nt_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
+{
+    netif_set_rx_hook(fn, arg);
+    if (fn != NULL)
+        nt_changed(&g_nt_rx_hook, nt_restore_rx_hook);
+    else
+        selftest_forget(&g_nt_rx_hook);
+}
+
+static void nt_netif_set_steering(bool on)
+{
+    netif_set_steering(on);
+    if (!on)
+        nt_changed(&g_nt_steering, nt_restore_steering);
+    else
+        selftest_forget(&g_nt_steering);
+}
+
+static void nt_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt)
+{
+    tcp_set_keepalive(idle_ns, intvl_ns, cnt);
+    if (idle_ns || intvl_ns || cnt)
+        nt_changed(&g_nt_keepalive, nt_restore_keepalive);
+    else
+        selftest_forget(&g_nt_keepalive);
+}
+
+static void nt_tcp_set_fin_wait2(uint64_t ns)
+{
+    tcp_set_fin_wait2(ns);
+    if (ns)
+        nt_changed(&g_nt_fin_wait2, nt_restore_fin_wait2);
+    else
+        selftest_forget(&g_nt_fin_wait2);
+}
+
 static struct netaddr v4addr(uint32_t ip, uint16_t port)
 {
     struct netaddr a;
@@ -317,14 +630,14 @@ bool selftest_net_arp(const char **reason)
 static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct netaddr cli_addr)
 {
     struct socket *srv, *cli;
-    CHECK(ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &srv) == 0);
-    CHECK(ksock_create(cli_addr.family, COSMO_SOCK_DGRAM, 0, &cli) == 0);
+    CHECK(nt_ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &srv) == 0);
+    CHECK(nt_ksock_create(cli_addr.family, COSMO_SOCK_DGRAM, 0, &cli) == 0);
     CHECK(ksock_bind(srv, &srv_addr) == 0);
     CHECK(ksock_bind(srv, &srv_addr) == -EINVAL);   /* twice */
     struct socket *dup;
-    CHECK(ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &dup) == 0);
+    CHECK(nt_ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &dup) == 0);
     CHECK(ksock_bind(dup, &srv_addr) == -EADDRINUSE);
-    ksock_put(dup);
+    nt_ksock_put(dup);
     struct netaddr srv_name;
     CHECK(ksock_getsockname(srv, &srv_name) == 0 && srv_name.port == srv_addr.port);
 
@@ -350,16 +663,16 @@ static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct n
     CHECK(ksock_sendto(cli, msg, 1, &bad) == -EINVAL);
     CHECK(ksock_sendto(cli, msg, 70000, &srv_addr) == -EMSGSIZE || sizeof(msg) < 70000);
     struct socket *unbound;
-    CHECK(ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &unbound) == 0);
+    CHECK(nt_ksock_create(srv_addr.family, COSMO_SOCK_DGRAM, 0, &unbound) == 0);
     CHECK(ksock_recvfrom(unbound, buf, 10, NULL) == -EINVAL);
-    ksock_put(unbound);
+    nt_ksock_put(unbound);
     /* A datagram to a closed port is dropped (v4 replies with ICMP). */
     struct netaddr closed = srv_addr;
     closed.port = 9;
     CHECK(ksock_sendto(cli, msg, 3, &closed) == 3);
     thread_sleep_ms(20);
-    ksock_put(cli);
-    ksock_put(srv);
+    nt_ksock_put(cli);
+    nt_ksock_put(srv);
     return true;
 }
 
@@ -377,10 +690,10 @@ bool selftest_net_lo_udp(const char **reason)
      * the bind succeeds whatever uid the socket records. The refusal for
      * an unprivileged caller is exercised by init --unpriv-test. */
     struct socket *s;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 1000, &s) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 1000, &s) == 0);
     struct netaddr low = v4addr(0, 80);
     CHECK(ksock_bind(s, &low) == 0);
-    ksock_put(s);
+    nt_ksock_put(s);
     udp_get_stats(&u1);
     CHECK(u1.rx_no_port >= u0.rx_no_port + 2 && u1.rx_bad_cksum == u0.rx_bad_cksum);
     thread_sleep_ms(10);
@@ -397,10 +710,67 @@ struct tcp_server {
     uint32_t bytes_seen;
     uint32_t bytes_echoed;
     int result;
-    bool done;
+    volatile bool done;
     bool echo;               /* echo mode for the harness */
     volatile bool stop;
+    /* For its release (the net-leftover unit): the thread, and the
+     * sockets it is blocked on, published under `lock` so the release can
+     * take a reference and shut them without racing the thread's put. */
+    struct thread *th;
+    spinlock_t lock;
+    struct socket *ls, *c;
 };
+
+static void tcp_server_publish(struct tcp_server *srv, struct socket **slot, struct socket *sock)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
+    *slot = sock;
+    spin_unlock_irqrestore(&srv->lock, s);
+}
+
+/*
+ * Stop a server thread and join it, however its test returned: `stop`,
+ * then shut the read side of whatever it is blocked on -- accept and recv
+ * both return on it -- until it says it is done (5 s at most), then join.
+ * A reference is taken under the lock, so a socket the thread puts
+ * meanwhile is never shut after it has gone.
+ */
+static void tcp_server_release(void *arg)
+{
+    struct tcp_server *srv = arg;
+    srv->stop = true;
+    for (unsigned i = 0; i < 500 && !srv->done; i++) {
+        struct socket *held[2] = { NULL, NULL };
+        arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
+        if (srv->ls) { held[0] = srv->ls; ksock_get(held[0]); }
+        if (srv->c) { held[1] = srv->c; ksock_get(held[1]); }
+        spin_unlock_irqrestore(&srv->lock, s);
+        for (unsigned k = 0; k < 2; k++)
+            if (held[k]) {
+                ksock_shutdown(held[k], COSMO_SHUT_RD);
+                ksock_put(held[k]);
+            }
+        thread_sleep_ms(10);
+    }
+    if (srv->th)
+        thread_join(srv->th);
+    srv->th = NULL;
+}
+
+/* A server's storage outlives any frame (its thread may run after the
+ * test returns), and its release is registered the moment it exists. */
+static bool tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio)
+{
+    spinlock_init(&srv->lock, "tcp-server");
+    srv->th = thread_create(fn, srv, name, prio);
+    if (srv->th == NULL)
+        return false;
+    if (!selftest_defer(tcp_server_release, srv)) {
+        tcp_server_release(srv);
+        return false;
+    }
+    return true;
+}
 
 static uint8_t pattern(uint32_t i)
 {
@@ -415,15 +785,18 @@ static void tcp_sink_thread(void *arg)
     srv->result = ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
     if (srv->result)
         goto done;
+    tcp_server_publish(srv, &srv->ls, ls);
     srv->result = ksock_bind(ls, &srv->addr);
     if (srv->result == 0)
         srv->result = ksock_listen(ls, 4);
     if (srv->result == 0)
         srv->result = ksock_accept(ls, &c, NULL);
     if (srv->result) {
+        tcp_server_publish(srv, &srv->ls, NULL);
         ksock_put(ls);
         goto done;
     }
+    tcp_server_publish(srv, &srv->c, c);
     uint8_t *buf = kmalloc(8192, 0);
     for (;;) {
         int64_t n = ksock_recvfrom(c, buf, 8192, NULL);
@@ -446,6 +819,8 @@ static void tcp_sink_thread(void *arg)
     /* Wait for the peer's close so both sides run the full sequence. */
     ksock_recvfrom(c, buf, 16, NULL);
     kfree(buf);
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
     ksock_put(c);
     ksock_put(ls);
 done:
@@ -455,15 +830,14 @@ done:
 
 static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t bytes, unsigned linger_ms)
 {
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = addr;
-    struct thread *t = thread_create(tcp_sink_thread, &srv, "tcp-sink", 32);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, tcp_sink_thread, "tcp-sink", 32));
     thread_sleep_ms(20);   /* let it listen */
 
     struct socket *c;
-    CHECK(ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &addr) == 0);
     struct netaddr peer, me;
     CHECK(ksock_getpeername(c, &peer) == 0 && peer.port == addr.port);
@@ -515,16 +889,17 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
         CHECK(ksock_sendto(c, "x", 1, NULL) == -EPIPE);
         /* The ended connection no longer reserves its port. */
         struct socket *again;
-        CHECK(ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &again) == 0);
+        CHECK(nt_ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &again) == 0);
         CHECK(ksock_bind(again, &me) == 0);
-        ksock_put(again);
+        nt_ksock_put(again);
     }
-    ksock_put(c);
+    nt_ksock_put(c);
     for (unsigned i = 0; i < 500 && !srv.done; i++) {
         thread_sleep_ms(10);
         sched_watchdog_kick();
     }
     CHECK(srv.done && srv.result == 0 && srv.bytes_seen == bytes);
+    selftest_release(&srv);   /* joined here: the next call reuses `srv` */
 
     /* The server's child leaves LAST_ACK when the network worker processes
      * our final ACK. The worker runs below this thread's priority and is
@@ -534,9 +909,9 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
     int rc = -EADDRINUSE;
     for (unsigned i = 0; i < 2000 && rc == -EADDRINUSE; i++) {
         struct socket *probe;
-        CHECK(ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &probe) == 0);
+        CHECK(nt_ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &probe) == 0);
         rc = ksock_bind(probe, &addr);
-        ksock_put(probe);
+        nt_ksock_put(probe);
         if (rc == -EADDRINUSE)
             thread_sleep_ms(1);
     }
@@ -787,10 +1162,10 @@ bool selftest_net_lo_tcp(const char **reason)
 
     /* A connection to a closed port is refused with a reset. */
     struct socket *c;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     struct netaddr closed = v4addr(INADDR_LOOPBACK_N, 5999);
     CHECK(ksock_connect(c, &closed) == -ECONNREFUSED);
-    ksock_put(c);
+    nt_ksock_put(c);
     tcp_get_stats(&t1);
     CHECK(t1.rsts_in == t0.rsts_in + 1);
 
@@ -803,26 +1178,26 @@ bool selftest_net_lo_tcp(const char **reason)
      * handshake for `backlog` clients; the next SYN is ignored (the client
      * times out, so only check the queue fills). */
     struct socket *ls;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     struct netaddr la = v4addr(INADDR_LOOPBACK_N, 6002);
     CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 2) == 0);
     CHECK(ksock_listen(ls, 2) == -EINVAL);
     struct socket *c1, *c2;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0 && ksock_connect(c1, &la) == 0);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0 && ksock_connect(c1, &la) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
     struct socket *a1;
     struct netaddr peer;
-    CHECK(ksock_accept(ls, &a1, &peer) == 0 && peer.port >= NET_EPHEMERAL_LO);
+    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0 && peer.port >= NET_EPHEMERAL_LO);
     CHECK(ksock_sendto(a1, "hi", 2, NULL) == 2);
     char b[4];
     CHECK(ksock_recvfrom(c1, b, 4, NULL) == 2 && memcmp(b, "hi", 2) == 0);
     /* Closing the listener resets the still-queued connection. */
-    ksock_put(ls);
+    nt_ksock_put(ls);
     thread_sleep_ms(20);
     CHECK(ksock_recvfrom(c2, b, 4, NULL) < 0 || ksock_sendto(c2, "x", 1, NULL) < 0);
-    ksock_put(a1);
-    ksock_put(c1);
-    ksock_put(c2);
+    nt_ksock_put(a1);
+    nt_ksock_put(c1);
+    nt_ksock_put(c2);
 
     thread_sleep_ms(50);
     CHECK(socket_count() == socks0);
@@ -865,17 +1240,17 @@ bool selftest_net_tcp_mss(const char **reason)
      * end from the route (before its lock), the passive one from the
      * interface the SYN arrived on (before its lock). */
     struct socket *ls, *c, *acc;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     struct netaddr la = v4addr(INADDR_LOOPBACK_N, 6010);
     CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 1) == 0);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0 && ksock_connect(c, &la) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0 && ksock_connect(c, &la) == 0);
     struct netaddr peer;
-    CHECK(ksock_accept(ls, &acc, &peer) == 0);
+    CHECK(nt_ksock_accept(ls, &acc, &peer) == 0);
     CHECK(c->tcp->path_mss == TCP_MSS_LO && c->tcp->mss == TCP_MSS_LO);
     CHECK(acc->tcp->path_mss == TCP_MSS_LO && acc->tcp->mss == TCP_MSS_LO);
-    ksock_put(acc);
-    ksock_put(c);
-    ksock_put(ls);
+    nt_ksock_put(acc);
+    nt_ksock_put(c);
+    nt_ksock_put(ls);
     thread_sleep_ms(20);
     return true;
 }
@@ -908,9 +1283,9 @@ bool selftest_net_lo_tcp_loss(const char **reason)
     tcp_get_stats(&t0);
     g_seen = g_dropped = 0;
     g_drop_every = 7;
-    loopback_set_filter(lossy_filter, NULL);
+    nt_loopback_set_filter(lossy_filter, NULL);
     bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6010), 256u * 1024u, 0);
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     if (!ok)
         return false;
     tcp_get_stats(&t1);
@@ -954,7 +1329,7 @@ static void h_tcp_echo_thread(void *arg)
             break;
         }
     }
-    ksock_put(ls);
+    ksock_put(ls);   /* its own reference: the harness took one for it */
     thread_exit(0);
 }
 
@@ -973,7 +1348,7 @@ static void h_udp_echo_thread(void *arg)
         ksock_sendto(s, buf, (size_t)n, &from);
     }
     kfree(buf);
-    ksock_put(s);
+    ksock_put(s);   /* its own reference: the harness took one for it */
     thread_exit(0);
 }
 
@@ -1021,10 +1396,10 @@ bool selftest_net_harness(const char **reason)
 
     /* Echo services on port 7 for the harness's port forwards. */
     struct socket *tls, *us;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &tls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &tls) == 0);
     struct netaddr any7 = v4addr(0, 7);
     CHECK(ksock_bind(tls, &any7) == 0 && ksock_listen(tls, 4) == 0);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &us) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &us) == 0);
     CHECK(ksock_bind(us, &any7) == 0);
     g_h_quit = g_h_stop = false;
     g_h_tcp_conns = g_h_udp_pkts = 0;
@@ -1066,7 +1441,7 @@ bool selftest_net_harness(const char **reason)
     struct socket *c = NULL;
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
     for (attempt = 1; attempt <= HARNESS_ATTEMPTS && !client_ok; attempt++) {
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     /* Sampled BEFORE the connect. PR #169's window opened after it
      * returned, so a reset arriving during the handshake or before the
      * first sample fell outside it -- which is why one failure showed
@@ -1140,7 +1515,7 @@ bool selftest_net_harness(const char **reason)
     int work_queued = c->tcp ? (int)__atomic_load_n(&c->tcp->work.queued, __ATOMIC_ACQUIRE) : -1;
     unsigned work_flags = c->tcp ? __atomic_load_n(&c->tcp->work_flags, __ATOMIC_ACQUIRE) : 0u;
     int pcb_state = c->tcp ? (int)c->tcp->state : -1;
-    ksock_put(c);
+    nt_ksock_put(c);
     c = NULL;
     if (client_ok) {
         kprintf("NETTEST: client ok (attempt %u of %u)\n", attempt, HARNESS_ATTEMPTS);
@@ -1191,8 +1566,8 @@ bool selftest_net_harness(const char **reason)
     ksock_sendto(us, "x", 1, &self);       /* the UDP thread wakes and exits */
     thread_sleep_ms(50);
     kprintf("NETTEST: done tcp_conns=%d udp_pkts=%d quit=%d\n", g_h_tcp_conns, g_h_udp_pkts, g_h_quit ? 1 : 0);
-    ksock_put(tls);
-    ksock_put(us);
+    nt_ksock_put(tls);
+    nt_ksock_put(us);
     CHECK(client_ok);
     CHECK(g_h_quit);
     return true;
@@ -1273,7 +1648,7 @@ bool selftest_net_arp_retry_unregister(const char **reason)
     f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
     f.nif.ip4.addr = htonl(0x0a4a0001);          /* 10.74.0.1 */
     f.nif.ip4.mask = htonl(0xffffff00);
-    CHECK(netif_register(&f.nif) == 0);
+    CHECK(nt_netif_register(&f.nif) == 0);
 
     /* One unresolved address on this interface, with a packet behind it. */
     uint8_t mac[ETH_ALEN];
@@ -1289,7 +1664,7 @@ bool selftest_net_arp_retry_unregister(const char **reason)
         /* The hook is armed and the interface registered: neither may
          * outlive a failure here. */
         arp_test_hold_retry(false);
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
         kobject_put(&f.nif.obj);
         *reason = "could not create the retry thread";
         return false;
@@ -1302,7 +1677,7 @@ bool selftest_net_arp_retry_unregister(const char **reason)
             arp_test_hold_retry(false);
             arp_test_release_retry();
             thread_join(t);
-            netif_unregister(&f.nif);
+            nt_netif_unregister(&f.nif);
             kobject_put(&f.nif.obj);
             *reason = "the ARP retry never parked";
             return false;
@@ -1326,7 +1701,7 @@ bool selftest_net_arp_retry_unregister(const char **reason)
         CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
 
         /* Tear the interface down completely while the retry is parked. */
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
         unregistered = true;
 
         /* THE ASSERTION. The registry's reference is gone and the flush
@@ -1340,7 +1715,7 @@ bool selftest_net_arp_retry_unregister(const char **reason)
     arp_test_release_retry();
     thread_join(t);
     if (!unregistered)
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
 
     if (ok) {
         if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
@@ -1386,7 +1761,9 @@ bool selftest_net_arp_flush_counts(const char **reason)
     f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
     f.nif.ip4.addr = htonl(0x0a4b0001);
     f.nif.ip4.mask = htonl(0xffffff00);
-    CHECK(netif_register(&f.nif) == 0);
+    CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
 
     struct arp_stats s0, s1;
     arp_get_stats(&s0);
@@ -1395,11 +1772,11 @@ bool selftest_net_arp_flush_counts(const char **reason)
     CHECK(m != NULL);
     CHECK(arp_resolve(&f.nif, htonl(0x0a4b0002), mac, m) == -EINPROGRESS);
 
-    netif_unregister(&f.nif);     /* step 5 flushes the entry and its packet */
+    nt_netif_unregister(&f.nif);     /* step 5 flushes the entry and its packet */
     arp_get_stats(&s1);
     CHECK(s1.pending_dropped == s0.pending_dropped + 1);
 
-    kobject_put(&f.nif.obj);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     kinfo("selftest: net-arp-flush-counts: a flush with one packet pending moved "
           "pending_dropped %llu -> %llu",
@@ -1431,7 +1808,9 @@ bool selftest_net_nd_flush_counts(const char **reason)
     static struct fake_nif f;
     static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
     nd_fake_setup(&f, &ops, "ndfl0");
-    CHECK(netif_register(&f.nif) == 0);
+    CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
 
     struct ip_stats s0, s1;
     ipv6_get_stats(&s0);
@@ -1442,13 +1821,13 @@ bool selftest_net_nd_flush_counts(const char **reason)
     int rc = nd_resolve(&f.nif, &dst, mac, m);
     CHECK(rc != 0);              /* unresolved: the packet is now pending */
 
-    netif_unregister(&f.nif);
+    nt_netif_unregister(&f.nif);
     ipv6_get_stats(&s1);
     /* The counter ND did not have until this unit: ARP's lives in a
      * different struct, so a fix in one is invisible to the other. */
     CHECK(s1.nd_pending_dropped == s0.nd_pending_dropped + 1);
 
-    kobject_put(&f.nif.obj);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     kinfo("selftest: net-nd-flush-counts: a flush with one packet pending moved "
           "nd_pending_dropped %llu -> %llu",
@@ -1466,7 +1845,7 @@ bool selftest_net_nd_retry_unregister(const char **reason)
     static struct fake_nif f;
     static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
     nd_fake_setup(&f, &ops, "ndref0");
-    CHECK(netif_register(&f.nif) == 0);
+    CHECK(nt_netif_register(&f.nif) == 0);
 
     struct in6_addr dst = { { 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 } };
     uint8_t mac[ETH_ALEN];
@@ -1481,7 +1860,7 @@ bool selftest_net_nd_retry_unregister(const char **reason)
         /* The hook is armed and the interface registered: neither may
          * outlive a failure here. */
         nd_test_hold_retry(false);
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
         kobject_put(&f.nif.obj);
         *reason = "could not create the retry thread";
         return false;
@@ -1492,7 +1871,7 @@ bool selftest_net_nd_retry_unregister(const char **reason)
             nd_test_hold_retry(false);
             nd_test_release_retry();
             thread_join(t);
-            netif_unregister(&f.nif);
+            nt_netif_unregister(&f.nif);
             kobject_put(&f.nif.obj);
             *reason = "the ND retry never parked";
             return false;
@@ -1506,7 +1885,7 @@ bool selftest_net_nd_retry_unregister(const char **reason)
     bool unregistered = false;
     do {
         CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
         unregistered = true;
         CHECK_BREAK(f.releases == 0);                     /* the retry still holds it */
         CHECK_BREAK(kobject_refcount(&f.nif.obj) == 2);
@@ -1516,7 +1895,7 @@ bool selftest_net_nd_retry_unregister(const char **reason)
     nd_test_release_retry();
     thread_join(t);
     if (!unregistered)
-        netif_unregister(&f.nif);
+        nt_netif_unregister(&f.nif);
 
     if (ok) {
         if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
@@ -1553,9 +1932,14 @@ bool selftest_net_netif_lifetime(const char **reason)
     f.nif.priv = &f;
     /* Loopback-style: input_one frees an unknown protocol without a link layer. */
     f.nif.flags = NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP;
-    CHECK(netif_register(&f.nif) == -EINVAL);   /* no release: refused */
+    CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* no release: refused */
     f.nif.ops = &ops;
-    CHECK(netif_register(&f.nif) == 0);
+    memcpy(f.nif.name, "tooLong8", sizeof(f.nif.name));   /* all 8 bytes, no terminator */
+    CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* an unterminated name: refused */
+    strlcpy(f.nif.name, "test0", sizeof(f.nif.name));
+    CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator, found_ref;   /* released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
     CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + registry */
 
     /* A duplicate name is refused before the object exists: no kobject,
@@ -1567,10 +1951,11 @@ bool selftest_net_netif_lifetime(const char **reason)
     dup.nif.mtu = 1500;
     dup.nif.ops = &ops;
     dup.nif.priv = &dup;
-    CHECK(netif_register(&dup.nif) == -EEXIST);
+    CHECK(nt_netif_register(&dup.nif) == -EEXIST);
     CHECK(dup.nif.obj.type == NULL && dup.nif.obj.refcount == 0 && dup.nif.obj.owner == NULL);
 
     struct netif *found = netif_find("test0");
+    CHECK(nt_netif_hold(&found_ref, found));
     CHECK(found == &f.nif && kobject_refcount(&f.nif.obj) == 3);
 
     struct mbuf *m = m_getcl();
@@ -1584,7 +1969,7 @@ bool selftest_net_netif_lifetime(const char **reason)
     m->pkt.proto = 0x88B5;
     netif_rx(found, m);                          /* queued for the worker */
 
-    netif_unregister(&f.nif);
+    nt_netif_unregister(&f.nif);
     CHECK(netif_find("test0") == NULL);
     CHECK((f.nif.flags & NETIF_GONE) && !(f.nif.flags & NETIF_UP));
     CHECK(kobject_refcount(&f.nif.obj) == 2);
@@ -1600,9 +1985,9 @@ bool selftest_net_netif_lifetime(const char **reason)
     CHECK(netif_rxq_count(found) == q0);
     CHECK(f.nif.stats.rx_packets == 1);
 
-    netif_put(&f.nif);                           /* the creator is done */
+    nt_netif_ref_put(&creator);                  /* the creator is done */
     CHECK(f.releases == 0);
-    netif_put(found);
+    nt_netif_ref_put(&found_ref);
     CHECK(f.releases == 1);
     return true;
 }
@@ -1620,12 +2005,23 @@ struct race_client {
     unsigned rounds;
     unsigned failures;
     struct netaddr server;
+    volatile bool stop;      /* its release: finish the round and leave */
+    struct thread *th;
 };
+
+static void race_client_release(void *arg)
+{
+    struct race_client *rc = arg;
+    rc->stop = true;
+    if (rc->th)
+        thread_join(rc->th);
+    rc->th = NULL;
+}
 
 static void race_client_main(void *arg)
 {
     struct race_client *rc = arg;
-    for (unsigned i = 0; i < rc->rounds; i++) {
+    for (unsigned i = 0; i < rc->rounds && !rc->stop; i++) {
         struct socket *c;
         if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) != 0) {
             rc->failures++;
@@ -1642,28 +2038,35 @@ static void race_client_main(void *arg)
 bool selftest_net_accept_race(const char **reason)
 {
     struct socket *ls;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0);
     CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 8) == 0);
-    struct race_client rc = { .rounds = 64 };
+    static struct race_client rc;   /* the client may outlive this frame */
+    memset(&rc, 0, sizeof(rc));
+    rc.rounds = 64;
     CHECK(ksock_getsockname(ls, &rc.server) == 0);
 
-    struct thread *t = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    rc.th = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
+    CHECK(rc.th != NULL);
+    if (!selftest_defer(race_client_release, &rc)) {
+        race_client_release(&rc);
+        *reason = "its release list was full";
+        return false;
+    }
     unsigned accepted = 0;
     for (unsigned i = 0; i < rc.rounds; i++) {
         struct socket *c;
         struct netaddr peer;
-        int rc2 = ksock_accept(ls, &c, &peer);
+        int rc2 = nt_ksock_accept(ls, &c, &peer);
         CHECK(rc2 == 0);
         CHECK(c->tcp != NULL && c->tcp->sock == c);   /* attached under the lock */
         CHECK(peer.family == COSMO_AF_INET && peer.port != 0);
         accepted++;
-        ksock_put(c);
+        nt_ksock_put(c);
     }
-    thread_join(t);
+    selftest_release(&rc);   /* joined */
     CHECK(rc.failures == 0);
-    ksock_put(ls);
+    nt_ksock_put(ls);
     kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
     return true;
 }
@@ -1865,11 +2268,11 @@ bool selftest_net_tcp_syncache(const char **reason)
 {
     struct tcp_stats t0, t1;
     struct socket *ls;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     struct netaddr addr = v4addr(INADDR_LOOPBACK_N, 6020);
     CHECK(ksock_bind(ls, &addr) == 0 && ksock_listen(ls, 4) == 0);
     g_guard_port = 6020;
-    loopback_set_filter(drop_rst_filter, NULL);
+    nt_loopback_set_filter(drop_rst_filter, NULL);
     tcp_get_stats(&t0);
     /* 300 SYNs from 300 sources that will never answer. */
     for (unsigned i = 0; i < 300; i++)
@@ -1891,11 +2294,11 @@ bool selftest_net_tcp_syncache(const char **reason)
     CHECK(!tcp_accept_ready(ls->tcp));
     /* A real client still connects, through a cache slot or a cookie. */
     struct socket *c;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &addr) == 0);
     struct socket *a;
     struct netaddr peer;
-    CHECK(ksock_accept(ls, &a, &peer) == 0 && peer.port != 0);
+    CHECK(nt_ksock_accept(ls, &a, &peer) == 0 && peer.port != 0);
     CHECK(ksock_sendto(c, "hello", 5, NULL) == 5);
     uint8_t buf[8];
     CHECK(ksock_recvfrom(a, buf, sizeof(buf), NULL) == 5 && memcmp(buf, "hello", 5) == 0);
@@ -1908,10 +2311,10 @@ bool selftest_net_tcp_syncache(const char **reason)
     struct tcp_stats t2;
     tcp_get_stats(&t2);
     CHECK(t2.syn_bad_ack == t1.syn_bad_ack + 1 && t2.conns_passive == t1.conns_passive);
-    loopback_set_filter(NULL, NULL);
-    ksock_put(a);
-    ksock_put(c);
-    ksock_put(ls);
+    nt_loopback_set_filter(NULL, NULL);
+    nt_ksock_put(a);
+    nt_ksock_put(c);
+    nt_ksock_put(ls);
     kinfo("selftest: net-tcp-syncache: %llu SYNs cached, %llu answered with cookies, %llu cookies accepted",
           (unsigned long long)cached, (unsigned long long)cookies,
           (unsigned long long)(t2.syn_cookies_ok - t0.syn_cookies_ok));
@@ -1925,15 +2328,21 @@ static void holding_server(void *arg)
     struct socket *ls = NULL, *c = NULL;
     srv->result = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls);
     if (srv->result == 0)
+        tcp_server_publish(srv, &srv->ls, ls);
+    if (srv->result == 0)
         srv->result = ksock_bind(ls, &srv->addr);
     if (srv->result == 0)
         srv->result = ksock_listen(ls, 4);
     if (srv->result == 0)
         srv->result = ksock_accept(ls, &c, NULL);
+    if (srv->result == 0)
+        tcp_server_publish(srv, &srv->c, c);
     while (!srv->stop) {
         thread_sleep_ms(10);
         sched_watchdog_kick();
     }
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
     if (c)
         ksock_put(c);
     if (ls)
@@ -1966,14 +2375,13 @@ static bool tcp_left_established(void *arg)
 
 bool selftest_net_tcp_rfc5961(const char **reason)
 {
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6021);
-    struct thread *t = thread_create(holding_server, &srv, "rfc5961-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "rfc5961-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     struct socket *c;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
     struct netaddr me;
     CHECK(ksock_getsockname(c, &me) == 0);
@@ -2005,9 +2413,8 @@ bool selftest_net_tcp_rfc5961(const char **reason)
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -ECONNRESET);
     tcp_get_stats(&t1);
     CHECK(t1.rsts_in == t0.rsts_in + 1);
-    ksock_put(c);
-    srv.stop = true;   /* its close sends a FIN into the void and is reset */
-    thread_join(t);
+    nt_ksock_put(c);
+    selftest_release(&srv);   /* its close sends a FIN into the void and is reset */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-tcp-rfc5961: three blind segments challenged, the exact reset accepted");
     return true;
@@ -2071,9 +2478,9 @@ bool selftest_net_tcp_reorder(const char **reason)
     CHECK(lo != NULL);
     g_held = NULL;
     g_reorder_seen = g_reordered = g_pass_one = 0;
-    loopback_set_filter(reorder_filter, lo);
+    nt_loopback_set_filter(reorder_filter, lo);
     bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6022), 512u * 1024u, 0);
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     if (g_held) {
         m_freem(g_held);
         g_held = NULL;
@@ -2107,18 +2514,17 @@ bool selftest_net_tcp_keepalive(const char **reason)
 {
     struct tcp_stats t0, t1;
     /* Keepalive: an idle connection whose peer vanished times out. */
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6023);
-    struct thread *t = thread_create(holding_server, &srv, "keep-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "keep-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     /* The idle timer is armed when a connection is established: shorten it first. */
-    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    nt_tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     struct socket *c;
     struct tcp_stats tb;
     tcp_get_stats(&tb);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
     /* connect returns when *this* side is established: the handshake's
      * third segment is still the worker's to send. The black hole must
@@ -2130,7 +2536,7 @@ bool selftest_net_tcp_keepalive(const char **reason)
     CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
     g_guard_port = 6023;
-    loopback_set_filter(blackhole_filter, NULL);
+    nt_loopback_set_filter(blackhole_filter, NULL);
     struct state_target closed = { .s = c, .want = TCP_CLOSED };
     CHECK(wait_until(tcp_state_is, &closed, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_CLOSED);
@@ -2141,34 +2547,31 @@ bool selftest_net_tcp_keepalive(const char **reason)
     CHECK(t1.timeouts > t0.timeouts);
     uint64_t probes = t1.keepalive_probes - t0.keepalive_probes;
     CHECK(probes >= 3);
-    loopback_set_filter(NULL, NULL);
-    tcp_set_keepalive(0, 0, 0);
-    ksock_put(c);
-    srv.stop = true;
-    thread_join(t);
+    nt_loopback_set_filter(NULL, NULL);
+    nt_tcp_set_keepalive(0, 0, 0);
+    nt_ksock_put(c);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
 
     /* An orphaned FIN_WAIT_2 ends on its own. */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6024);
-    t = thread_create(holding_server, &srv, "fw2-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "fw2-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     tcp_get_stats(&tb);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
     est.base = tb.conns_passive;   /* the server side established before the close (as above) */
     CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
-    tcp_set_fin_wait2(100ull * 1000000ull);
-    ksock_put(c);   /* close: FIN; the server never answers with its own */
+    nt_tcp_set_fin_wait2(100ull * 1000000ull);
+    nt_ksock_put(c);   /* close: FIN; the server never answers with its own */
     struct tcpc_target fw2 = { .base = t0.fin_wait2_timeouts, .want = 1, .which = TC_FIN_WAIT2_TIMEOUTS };
     CHECK(wait_until(tcp_counter_reached, &fw2, 5000));
     tcp_get_stats(&t1);
-    tcp_set_fin_wait2(0);
+    nt_tcp_set_fin_wait2(0);
     CHECK(t1.fin_wait2_timeouts == t0.fin_wait2_timeouts + 1);
-    srv.stop = true;
-    thread_join(t);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-tcp-keepalive: %llu probes unanswered, one orphaned FIN_WAIT_2 reaped",
           (unsigned long long)probes);
@@ -2302,20 +2705,19 @@ bool selftest_net_icmp_limit(const char **reason)
     /* Path MTU discovery: a "fragmentation needed" quoting a segment in
      * flight lowers the connection's MSS; one quoting nothing in flight is
      * ignored. */
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6026);
-    struct thread *t = thread_create(holding_server, &srv, "pmtu-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "pmtu-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     struct socket *c;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
     struct netaddr me;
     CHECK(ksock_getsockname(c, &me) == 0);
     CHECK(c->tcp->mss == TCP_MSS_LO && ipv4_path_mtu(INADDR_LOOPBACK_N) == 65535);
     g_guard_port = 6026;
-    loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
+    nt_loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
     uint8_t big[2000];
     memset(big, 'm', sizeof(big));
     uint32_t nxt0 = c->tcp->snd_nxt;   /* the baseline, taken before the send */
@@ -2397,7 +2799,7 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 1500);   /* recorded once the connection confirmed it */
     CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     /* The retransmission delivers the data in 1460-byte segments. Waiting
      * for the retransmit counter says that in one line; `settle(300)` said
      * "probably by now", and 300 ms was the largest sleep in the file. */
@@ -2413,9 +2815,8 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(wait_until(tcp_acked_since, &acked, 5000));
     ipv4_pmtu_flush();
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
-    ksock_put(c);
-    srv.stop = true;
-    thread_join(t);
+    nt_ksock_put(c);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-icmp-limit: %llu echo replies sent, %llu suppressed; MSS lowered to 1460 by PMTUD",
           (unsigned long long)sent, (unsigned long long)limited);
@@ -2426,12 +2827,12 @@ bool selftest_net_nonblock(const char **reason)
 {
     struct socket *ls, *c, *a;
     struct netaddr addr = v4addr(INADDR_LOOPBACK_N, 6027);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     ksock_set_nonblock(ls, true);
     CHECK(ksock_bind(ls, &addr) == 0 && ksock_listen(ls, 2) == 0);
-    CHECK(ksock_accept(ls, &a, NULL) == -EAGAIN);
+    CHECK(nt_ksock_accept(ls, &a, NULL) == -EAGAIN);
     CHECK(ksock_ready(ls) == 0);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     ksock_set_nonblock(c, true);
     int rc = ksock_connect(c, &addr);
     CHECK(rc == 0 || rc == -EINPROGRESS);
@@ -2444,7 +2845,7 @@ bool selftest_net_nonblock(const char **reason)
     { struct ready_target rt = { .s = ls, .mask = COSMO_IO_READABLE };
       CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(ls) & COSMO_IO_READABLE);
-    CHECK(ksock_accept(ls, &a, NULL) == 0);
+    CHECK(nt_ksock_accept(ls, &a, NULL) == 0);
     ksock_set_nonblock(a, true);
     uint8_t buf[4096];
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -EAGAIN);
@@ -2516,16 +2917,16 @@ bool selftest_net_nonblock(const char **reason)
     { struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
       CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
-    ksock_put(a);
+    nt_ksock_put(a);
     { struct ready_target rt = { .s = c, .mask = COSMO_IO_HANGUP };
       CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK((ksock_ready(c) & COSMO_IO_HANGUP) && ksock_recvfrom(c, buf, sizeof(buf), NULL) == 0);
-    ksock_put(c);
-    ksock_put(ls);
+    nt_ksock_put(c);
+    nt_ksock_put(ls);
 
     /* Datagrams. */
     struct socket *u;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &u) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &u) == 0);
     ksock_set_nonblock(u, true);
     struct netaddr ua = v4addr(INADDR_LOOPBACK_N, 6028);
     CHECK(ksock_bind(u, &ua) == 0);
@@ -2535,7 +2936,7 @@ bool selftest_net_nonblock(const char **reason)
     { struct ready_target rt = { .s = u, .mask = COSMO_IO_READABLE };
       CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == 1);
-    ksock_put(u);
+    nt_ksock_put(u);
 
     /* Pipe ends through the object operations. */
     struct kobject *rd, *wr;
@@ -2688,21 +3089,23 @@ static void steer_wait(struct steer_state *st, unsigned want)
 bool selftest_net_steer(const char **reason)
 {
     static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    struct fake_nif f;
+    static struct fake_nif f;   /* registered: its release may run after this frame is gone */
     memset(&f, 0, sizeof(f));
     strlcpy(f.nif.name, "steer0", sizeof(f.nif.name));
     memcpy(f.nif.mac, "\x02\x11\x22\x33\x44\x55", 6);
     f.nif.mtu = 1500;
     f.nif.ops = &ops;
     f.nif.priv = &f;
-    CHECK(netif_register(&f.nif) == 0);
+    CHECK(nt_netif_register(&f.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &f.nif));
     netif_set_ipv4(&f.nif, IPV4_ADDR(10, 9, 0, 1), htonl(0xffffff00u), 0);
     netif_set_up(&f.nif, true);
 
-    struct steer_state st;
+    static struct steer_state st;   /* the hook's: it may outlive this frame */
     memset(&st, 0, sizeof(st));
     st.nif = &f.nif;
-    netif_set_rx_hook(steer_hook, &st);
+    nt_netif_set_rx_hook(steer_hook, &st);
 
     /* The hash is a function of the flow alone: the same frame from any
      * CPU hashes the same, and the eight flows are not all one value. */
@@ -2759,7 +3162,7 @@ bool selftest_net_steer(const char **reason)
         netif_rx_on(&f.nif, m, 1);
         steer_wait(&st, 1);
         CHECK(st.seen == 1 && st.cpu[0] == 2);
-        netif_set_steering(false);
+        nt_netif_set_steering(false);
         memset(&st.cpu, 0, sizeof(st.cpu));
         memset(&st.next, 0, sizeof(st.next));
         st.seen = 0;
@@ -2769,7 +3172,7 @@ bool selftest_net_steer(const char **reason)
             netif_rx(&f.nif, m);
         }
         steer_wait(&st, STEER_FLOWS);
-        netif_set_steering(true);
+        nt_netif_set_steering(true);
         CHECK(st.seen == STEER_FLOWS);
         for (unsigned k = 0; k < STEER_FLOWS; k++)
             CHECK(st.cpu[k] == 1);
@@ -2778,9 +3181,9 @@ bool selftest_net_steer(const char **reason)
     CHECK(netif_cpu_stats(0, &cs) && cs.rx_queued > 0);
     CHECK(!netif_cpu_stats(CONFIG_MAX_CPUS, &cs));
 
-    netif_set_rx_hook(NULL, NULL);
-    netif_unregister(&f.nif);
-    netif_put(&f.nif);
+    nt_netif_set_rx_hook(NULL, NULL);
+    nt_netif_unregister(&f.nif);
+    nt_netif_ref_put(&creator);
     CHECK(f.releases == 1);
     return true;
 }
@@ -2871,7 +3274,7 @@ static bool csum_packet_valid(const struct mbuf *m)
 bool selftest_net_csum_offload(const char **reason)
 {
     static const struct netif_ops ops = { .transmit = csum_nif_transmit, .release = csum_nif_release };
-    struct csum_nif c;
+    static struct csum_nif c;   /* registered: its release may run after this frame is gone */
     memset(&c, 0, sizeof(c));
     strlcpy(c.nif.name, "csum0", sizeof(c.nif.name));
     memcpy(c.nif.mac, "\x02\x11\x22\x33\x44\x66", 6);
@@ -2879,7 +3282,10 @@ bool selftest_net_csum_offload(const char **reason)
     c.nif.ops = &ops;
     c.nif.priv = &c;
     c.nif.caps = NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM;
-    CHECK(netif_register(&c.nif) == 0);
+    CHECK(nt_netif_register(&c.nif) == 0);
+    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
+    CHECK(nt_netif_hold(&creator, &c.nif));
+    CHECK(selftest_defer(nt_rel_mbuf_slot, &c.last));   /* the packet it keeps: freed after the unregister */
     uint32_t me = IPV4_ADDR(10, 9, 1, 1), peer = IPV4_ADDR(10, 9, 1, 2);
     netif_set_ipv4(&c.nif, me, htonl(0xffffff00u), 0);
     netif_set_up(&c.nif, true);
@@ -2932,14 +3338,14 @@ bool selftest_net_csum_offload(const char **reason)
 
     /* The loopback interface offloads both ways: a transfer computes no
      * transport checksum at all (net-lo-tcp exercises it). */
-    struct netif *lo = netif_loopback();
-    CHECK(lo != NULL && (lo->caps & NETIF_CAP_TXCSUM) && (lo->caps & NETIF_CAP_RXCSUM));
-    netif_put(lo);
+    static struct nt_netif_ref lo;
+    CHECK(nt_netif_hold(&lo, netif_loopback()));
+    CHECK(lo.nif != NULL && (lo.nif->caps & NETIF_CAP_TXCSUM) && (lo.nif->caps & NETIF_CAP_RXCSUM));
+    nt_netif_ref_put(&lo);
 
-    netif_unregister(&c.nif);
-    if (c.last)
-        m_freem(c.last);
-    netif_put(&c.nif);
+    nt_netif_unregister(&c.nif);
+    selftest_release(&c.last);
+    nt_netif_ref_put(&creator);
     CHECK(c.releases == 1);
     return true;
 }
@@ -3090,10 +3496,10 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     *delivered = 0;
     struct netaddr addr = v4addr(INADDR_LOOPBACK_N, port);
     struct socket *rx, *tx;
-    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &rx) != 0)
+    if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &rx) != 0)
         return 0;
-    if (ksock_bind(rx, &addr) != 0 || ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) != 0) {
-        ksock_put(rx);
+    if (ksock_bind(rx, &addr) != 0 || nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) != 0) {
+        nt_ksock_put(rx);
         return 0;
     }
     struct bench_udp_rx r = { .s = rx };
@@ -3116,8 +3522,8 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     ksock_shutdown(rx, COSMO_SHUT_RD);
     if (t)
         thread_join(t);
-    ksock_put(tx);
-    ksock_put(rx);
+    nt_ksock_put(tx);
+    nt_ksock_put(rx);
     if (dt == 0)
         return 0;
     return (unsigned)(((uint64_t)sent * 1000000000ull) / dt);
@@ -3128,7 +3534,7 @@ bool selftest_net_bench(const char **reason)
     (void)reason;
     unsigned ncpu = cpu_count();
     for (unsigned steer = 0; steer < 2; steer++) {
-        netif_set_steering(steer != 0);
+        nt_netif_set_steering(steer != 0);
         /* Fresh ports per round: the previous round's connections may still
          * be in TIME_WAIT on theirs. */
         uint16_t base = (uint16_t)(6100 + 40 * steer);
@@ -3138,7 +3544,7 @@ bool selftest_net_bench(const char **reason)
         kinfo("net-bench: steer=%u cpus=%u: tcp 1 flow %u MiB/s, 2 flows %u MiB/s total, udp %u sends/s (%u of %u delivered)",
               steer, ncpu, one, two, pps, delivered, BENCH_UDP_SENDS);
     }
-    netif_set_steering(true);
+    nt_netif_set_steering(true);
     return true;
 }
 
@@ -3319,10 +3725,13 @@ static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_pe
      * returns only after a grace period, so no worker is still inside
      * the hook when the round ends -- a reply from this interface's
      * round cannot be counted into the next interface's. */
-    struct nicbench_hook ctx = { .nif = nif, .gateway = nif->ip4.gateway };
+    static struct nicbench_hook ctx;   /* the hook's: static, so a return before its removal leaves nothing dangling */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.nif = nif;
+    ctx.gateway = nif->ip4.gateway;
     struct nicbench_hook *h = &ctx;
     uint64_t rx0 = nif->stats.rx_packets, drops0 = rxq_drops_total();
-    netif_set_rx_hook(nicbench_rx_hook, h);
+    nt_netif_set_rx_hook(nicbench_rx_hook, h);
     uint64_t t0 = clock_now_ns();
     unsigned sent = 0;
     for (unsigned i = 0; i < NICBENCH_ARP; i++) {
@@ -3364,7 +3773,7 @@ stop:;
     while (__atomic_load_n(&h->replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
         thread_sleep_ms(1);
     uint64_t dt = clock_since_ns(t0);
-    netif_set_rx_hook(NULL, NULL);
+    nt_netif_set_rx_hook(NULL, NULL);
     unsigned got = __atomic_load_n(&h->replies, __ATOMIC_RELAXED);
     kinfo("selftest: net-nicbench: %s: %u ARP requests sent, %u replies counted at the boundary, %llu frames received by the driver, %llu dropped at the receive queue",
           nif->name, sent, got, (unsigned long long)(nif->stats.rx_packets - rx0),
@@ -3391,7 +3800,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, unsigned *sends
                          uint64_t *frames_out, unsigned *accepted)
 {
     struct socket *tx;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
     struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
     static uint8_t payload[NICBENCH_UDP_LEN];
     /* Warm up: the first send resolves the gateway and parks behind it. */
@@ -3410,7 +3819,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, unsigned *sends
     uint64_t dt = clock_since_ns(t0);
     thread_sleep_ms(20);   /* the driver's completions and counters settle */
     *frames_out = nif->stats.tx_packets - tx0;
-    ksock_put(tx);
+    nt_ksock_put(tx);
     *accepted = sent;
     *sends_per_s = dt ? (unsigned)(((uint64_t)sent * 1000000000ull) / dt) : 0;
     *ns_per_send = sent ? dt / sent : 0;
@@ -3574,7 +3983,7 @@ bool selftest_net_sockerr_udp(const char **reason)
     struct ip_stats i0, i1;
     ipv4_get_stats(&i0);
     do {
-        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
+        CHECK_BREAK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
         struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40410);
         struct netaddr peer = v4addr(INADDR_LOOPBACK_N, 40411);
         CHECK_BREAK(ksock_bind(s, &me) == 0);
@@ -3606,7 +4015,7 @@ bool selftest_net_sockerr_udp(const char **reason)
         pass = true;
     } while (0);
     if (s)
-        ksock_put(s);
+        nt_ksock_put(s);
     netif_put(lo);
     if (!pass)
         return false;
@@ -3629,7 +4038,7 @@ bool selftest_net_sockerr_spoof(const char **reason)
     struct ip_stats i0, i1;
     ipv4_get_stats(&i0);
     do {
-        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &conn) == 0);
+        CHECK_BREAK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &conn) == 0);
         struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40420);
         struct netaddr peer = v4addr(INADDR_LOOPBACK_N, 40421);
         CHECK_BREAK(ksock_bind(conn, &me) == 0);
@@ -3637,7 +4046,7 @@ bool selftest_net_sockerr_spoof(const char **reason)
 
         /* An UNCONNECTED socket on its own port: it has no flow, so no
          * message can be about it. */
-        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &unconn) == 0);
+        CHECK_BREAK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &unconn) == 0);
         struct netaddr other = v4addr(INADDR_LOOPBACK_N, 40422);
         CHECK_BREAK(ksock_bind(unconn, &other) == 0);
 
@@ -3676,9 +4085,9 @@ bool selftest_net_sockerr_spoof(const char **reason)
         pass = true;
     } while (0);
     if (conn)
-        ksock_put(conn);
+        nt_ksock_put(conn);
     if (unconn)
-        ksock_put(unconn);
+        nt_ksock_put(unconn);
     netif_put(lo);
     if (!pass)
         return false;
@@ -3697,19 +4106,19 @@ bool selftest_net_sockerr_accept(const char **reason)
     struct socket *ls = NULL;
     bool pass = false;
     do {
-        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+        CHECK_BREAK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
         struct netaddr me = v4addr(INADDR_LOOPBACK_N, 40430);
         CHECK_BREAK(ksock_bind(ls, &me) == 0);
         CHECK_BREAK(ksock_listen(ls, 1) == 0);
         ksock_set_nonblock(ls, true);
         /* Nothing pending: the ordinary answer. */
         struct socket *c = (struct socket *)(uintptr_t)0xdeadbeefu;
-        CHECK_BREAK(ksock_accept(ls, &c, NULL) == -EAGAIN);
+        CHECK_BREAK(nt_ksock_accept(ls, &c, NULL) == -EAGAIN);
         CHECK_BREAK(c == (struct socket *)(uintptr_t)0xdeadbeefu);   /* untouched */
 
         /* The writer this unit gave the field. */
         sock_set_error(ls, -ECONNABORTED);
-        int rc = ksock_accept(ls, &c, NULL);
+        int rc = nt_ksock_accept(ls, &c, NULL);
         /* The bug returned 0 here. Both halves are checked, because a
          * caller that trusts the return reads the pointer: an errno-only
          * assertion would pass against `return 0` with *out written. */
@@ -3719,7 +4128,7 @@ bool selftest_net_sockerr_accept(const char **reason)
         pass = true;
     } while (0);
     if (ls)
-        ksock_put(ls);
+        nt_ksock_put(ls);
     if (!pass)
         return false;
     kinfo("selftest: net-sockerr-accept: a pending error reaches accept as an errno, "
@@ -3735,7 +4144,7 @@ bool selftest_net_sockerr_locking(const char **reason)
     struct socket *s = NULL;
     bool pass = false;
     do {
-        CHECK_BREAK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
+        CHECK_BREAK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &s) == 0);
         /* Without the mutex. */
         sock_set_error(s, -EHOSTUNREACH);
         CHECK_BREAK(ksock_error(s) == -EHOSTUNREACH);
@@ -3795,7 +4204,7 @@ bool selftest_net_sockerr_locking(const char **reason)
         pass = true;
     } while (0);
     if (s)
-        ksock_put(s);
+        nt_ksock_put(s);
     if (!pass)
         return false;
     kinfo("selftest: net-sockerr-locking: the pending error reads the same with s->lock held "
@@ -3807,8 +4216,9 @@ bool selftest_net_rxhook_grace(const char **reason)
 {
     struct netif *lo = netif_loopback();
     CHECK(lo != NULL);
-    struct rxhook_grace_state st = { 0, 0 };
-    netif_set_rx_hook(rxhook_grace_hook, &st);
+    static struct rxhook_grace_state st;   /* the hook's: it may outlive this frame */
+    memset(&st, 0, sizeof(st));
+    nt_netif_set_rx_hook(rxhook_grace_hook, &st);
     struct mbuf *m = m_getcl();
     CHECK(m != NULL);
     m->data = m->buf + 64;
@@ -3823,7 +4233,7 @@ bool selftest_net_rxhook_grace(const char **reason)
     for (unsigned i = 0; i < 1000 && !__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE); i++)
         thread_sleep_ms(1);
     CHECK(__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE) == 1);
-    netif_set_rx_hook(NULL, NULL);
+    nt_netif_set_rx_hook(NULL, NULL);
     /* Returned: the hook has finished, and `st` -- this stack frame --
      * may go. Without the grace period this fails on two or more CPUs. */
     CHECK(__atomic_load_n(&st.exited, __ATOMIC_ACQUIRE) == 1);
@@ -3866,7 +4276,7 @@ bool selftest_tap(const char **reason)
     static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
     static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
     uint32_t host_ip = IPV4_ADDR(10, 0, 3, 1), guest_ip = IPV4_ADDR(10, 0, 3, 15);
-    struct tap *t = tap_create("taptest", host_ip, htonl(0xffffff00u), host_mac);
+    struct tap *t = nt_tap_create("taptest", host_ip, htonl(0xffffff00u), host_mac);
     CHECK(t != NULL);
     struct netif *nif = tap_netif(t);
 
@@ -3945,7 +4355,7 @@ bool selftest_tap(const char **reason)
     }
     CHECK(held == TAP_TXQ_MAX);
 
-    tap_destroy(t);
+    nt_tap_destroy(t);
     kinfo("selftest: tap: a transmitted frame was read back, an injected ARP was answered by the stack, "
           "and the queue capped at %u", TAP_TXQ_MAX);
     return true;
@@ -3959,9 +4369,9 @@ bool selftest_net_route(const char **reason)
 {
     static const uint8_t mac_a[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x01 };
     static const uint8_t mac_b[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x02 };
-    struct tap *a = tap_create("rtbroad", IPV4_ADDR(10, 9, 0, 1), htonl(0xffff0000u), mac_a);   /* 10.9.0.0/16 */
+    struct tap *a = nt_tap_create("rtbroad", IPV4_ADDR(10, 9, 0, 1), htonl(0xffff0000u), mac_a);   /* 10.9.0.0/16 */
     CHECK(a != NULL);
-    struct tap *b = tap_create("rtnarrow", IPV4_ADDR(10, 9, 5, 1), htonl(0xffffff00u), mac_b);  /* 10.9.5.0/24 (later) */
+    struct tap *b = nt_tap_create("rtnarrow", IPV4_ADDR(10, 9, 5, 1), htonl(0xffffff00u), mac_b);  /* 10.9.5.0/24 (later) */
     CHECK(b != NULL);
 
     struct netif *r = ipv4_route(IPV4_ADDR(10, 9, 5, 7));   /* in both: the /24 wins */
@@ -3974,8 +4384,8 @@ bool selftest_net_route(const char **reason)
     CHECK(r != NULL && (r->flags & NETIF_LOOPBACK));
     if (r) netif_put(r);
 
-    tap_destroy(b);
-    tap_destroy(a);
+    nt_tap_destroy(b);
+    nt_tap_destroy(a);
     kinfo("selftest: net-route: longest-prefix connected routing picks the /24 over the /16");
     return true;
 }
@@ -4057,9 +4467,9 @@ bool selftest_net_forward(const char **reason)
     uint32_t gw_ip = IPV4_ADDR(10, 77, 3, 1), guest_ip = IPV4_ADDR(10, 77, 3, 15);
     uint32_t up_ip = IPV4_ADDR(10, 77, 4, 1), peer_ip = IPV4_ADDR(10, 77, 4, 99);
 
-    struct tap *g = tap_create("fwdg", gw_ip, mask, g_gw_mac);
+    struct tap *g = nt_tap_create("fwdg", gw_ip, mask, g_gw_mac);
     CHECK(g != NULL);
-    struct tap *u = tap_create("fwdu", up_ip, mask, u_gw_mac);
+    struct tap *u = nt_tap_create("fwdu", up_ip, mask, u_gw_mac);
     CHECK(u != NULL);
     netif_set_forward(tap_netif(g), true);   /* guest side forwards; uplink deliberately does not */
 
@@ -4122,8 +4532,8 @@ bool selftest_net_forward(const char **reason)
     ipv4_get_stats(&s1);
     CHECK(s1.rx_not_for_us == s0.rx_not_for_us + 1 && s1.fwd == s0.fwd);
 
-    tap_destroy(u);
-    tap_destroy(g);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
     kinfo("selftest: net-forward: a guest datagram was forwarded (TTL 64->63), a TTL-1 datagram "
           "drew a time-exceeded, and non-forwarding ingress stayed a non-router");
     return true;
@@ -4211,9 +4621,9 @@ bool selftest_net_nat(const char **reason)
     uint32_t g_ip = IPV4_ADDR(10, 77, 3, 1), guest = IPV4_ADDR(10, 77, 3, 15);
     uint32_t u_ip = IPV4_ADDR(10, 77, 4, 1), peer = IPV4_ADDR(10, 77, 4, 99);
 
-    struct tap *g = tap_create("natg", g_ip, mask, g_mac);
+    struct tap *g = nt_tap_create("natg", g_ip, mask, g_mac);
     CHECK(g != NULL);
-    struct tap *u = tap_create("natu", u_ip, mask, u_mac);
+    struct tap *u = nt_tap_create("natu", u_ip, mask, u_mac);
     CHECK(u != NULL);
     netif_set_forward(tap_netif(g), true);
     netif_set_masquerade(tap_netif(g), true);   /* masquerade flows forwarded from the guest tap */
@@ -4402,8 +4812,8 @@ bool selftest_net_nat(const char **reason)
     CHECK(ns1.entries == 0 && ns1.expired > ns0.expired);
 
     nat_flush();
-    tap_destroy(u);
-    tap_destroy(g);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
     kinfo("selftest: net-nat: UDP/TCP/ICMP round trips masqueraded and restored (checksums valid), "
           "an ICMP error translated back, the table bounded at %u and its entries expiring", NAT_TABLE_SIZE);
     return true;
@@ -4441,7 +4851,7 @@ bool selftest_tap_filter(const char **reason)
     static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x01 };
     static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x0f };
     uint32_t host_ip = IPV4_ADDR(10, 88, 0, 1), guest_ip = IPV4_ADDR(10, 88, 0, 15);
-    struct tap *t = tap_create("filt", host_ip, htonl(0xffffff00u), host_mac);
+    struct tap *t = nt_tap_create("filt", host_ip, htonl(0xffffff00u), host_mac);
     CHECK(t != NULL);
     unsigned calls = 0;
     tap_set_input_filter(t, tapfilt_hook, &calls);
@@ -4493,7 +4903,7 @@ bool selftest_tap_filter(const char **reason)
     CHECK(tap_inject(t, f, sizeof(f)) == 0);
     CHECK(calls == 1 && tap_recv(t) == NULL);           /* no reply: the stack drops the unknown type */
 
-    tap_destroy(t);
+    nt_tap_destroy(t);
     kinfo("selftest: tap-filter: a claimed frame answered out the tap, an unclaimed frame reached the stack");
     return true;
 }
@@ -4562,9 +4972,9 @@ bool selftest_net_dhcp(const char **reason)
     static const uint8_t other_mac[6] = { 0x52, 0x54, 0x00, 0x06, 0x00, 0xaa };
     uint32_t host_ip = IPV4_ADDR(10, 88, 1, 1), mask = htonl(0xffffff00u);
     uint32_t guest_ip = IPV4_ADDR(10, 88, 1, 15);
-    struct tap *t = tap_create("dhcp", host_ip, mask, host_mac);
+    struct tap *t = nt_tap_create("dhcp", host_ip, mask, host_mac);
     CHECK(t != NULL);
-    struct tapsvc *svc = tapsvc_start(t);
+    struct tapsvc *svc = nt_tapsvc_start(t);
     CHECK(svc != NULL);
 
     uint8_t frame[400], rx[400];
@@ -4628,8 +5038,8 @@ bool selftest_net_dhcp(const char **reason)
     tapsvc_get_stats(&s1);
     CHECK(s1.dhcp_ignored > s0.dhcp_ignored);
 
-    tapsvc_stop(svc);
-    tap_destroy(t);
+    nt_tapsvc_stop(svc);
+    nt_tap_destroy(t);
     kinfo("selftest: net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, "
           "the flag-clear reply is a chaddr unicast, a second client is refused");
     return true;
@@ -4654,7 +5064,20 @@ static uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id)
 
 /* The test upstream resolver: echo each query as an answer with one A record. */
 static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
-static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; } g_dnsresp;
+static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; struct thread *th; } g_dnsresp;
+
+/* The responder's release (the net-leftover unit): registered after its
+ * thread, so it runs before the sockets it reads are put. */
+static void dns_responder_release(void *arg)
+{
+    (void)arg;
+    g_dnsresp.running = false;
+    if (g_dnsresp.sock)
+        ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);   /* its blocked recv returns */
+    if (g_dnsresp.th)
+        thread_join(g_dnsresp.th);
+    g_dnsresp.th = NULL;
+}
 
 static void dns_responder_main(void *arg)
 {
@@ -4688,26 +5111,31 @@ bool selftest_net_dns(const char **reason)
     static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x07, 0x00, 0x0f };
     uint32_t host_ip = IPV4_ADDR(10, 88, 2, 1), mask = htonl(0xffffff00u);
     uint32_t guest_ip = IPV4_ADDR(10, 88, 2, 15);
-    struct tap *t = tap_create("dns", host_ip, mask, host_mac);
+    struct tap *t = nt_tap_create("dns", host_ip, mask, host_mac);
     CHECK(t != NULL);
     nettest_seed_arp(tap_netif(t), guest_ip, guest_mac);   /* so replies reach the guest */
-    struct tapsvc *svc = tapsvc_start(t);
+    struct tapsvc *svc = nt_tapsvc_start(t);
     CHECK(svc != NULL);
 
     /* A loopback upstream resolver the proxy will forward to. */
     struct netaddr rl;
     memset(&rl, 0, sizeof(rl));
     rl.family = COSMO_AF_INET; rl.v4 = IPV4_ADDR(127, 0, 0, 1); rl.port = 5300;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.sock) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.sock) == 0);
     CHECK(ksock_bind(g_dnsresp.sock, &rl) == 0);
     struct netaddr sp;
     memset(&sp, 0, sizeof(sp));
     sp.family = COSMO_AF_INET; sp.v4 = IPV4_ADDR(127, 0, 0, 1); sp.port = 5301;
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.spoof) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.spoof) == 0);
     CHECK(ksock_bind(g_dnsresp.spoof, &sp) == 0);
     g_dnsresp.running = true;
-    struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
-    CHECK(rth != NULL);
+    g_dnsresp.th = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
+    CHECK(g_dnsresp.th != NULL);
+    if (!selftest_defer(dns_responder_release, &g_dnsresp)) {
+        dns_responder_release(&g_dnsresp);
+        *reason = "its release list was full";
+        return false;
+    }
     tapsvc_test_set_upstream(svc, IPV4_ADDR(127, 0, 0, 1), 5300);
 
     uint8_t msg[64], l4[128], frame[256], rx[256];
@@ -4809,23 +5237,28 @@ bool selftest_net_dns(const char **reason)
     CHECK(s1.dns_pending <= 128);                              /* never exceeds the bound */
     CHECK(s1.dns_drop_full > s0.dns_drop_full);                /* the flood was dropped */
 
-    /* (5) expiry reclaims the pending entries. */
+    /* (5) expiry reclaims the pending entries: every entry pending before
+     * the aging is reclaimed by it. The table is not asserted empty after:
+     * the wait above ends at the first drop, and the rest of the flood may
+     * still be queued for the service -- a query that lands after the
+     * aging takes a freed slot, as it should. Asserting emptiness failed
+     * one boot that way, and the probe reproduced it with a 50 ms pause
+     * between the aging and the check (docs/audit/
+     * next-subsystem-net-leftover.md). */
     tapsvc_get_stats(&s0);
     CHECK(s0.dns_pending > 0);
     tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
     tapsvc_get_stats(&s1);
-    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);
+    CHECK(s1.dns_expired - s0.dns_expired >= s0.dns_pending);
 
     /* Tear down the responder and the service. */
-    g_dnsresp.running = false;
-    ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);
-    thread_join(rth);
-    ksock_put(g_dnsresp.sock);
-    ksock_put(g_dnsresp.spoof);
+    selftest_release(&g_dnsresp);   /* stop, unblock, join */
+    nt_ksock_put(g_dnsresp.sock);
+    nt_ksock_put(g_dnsresp.spoof);
     g_dnsresp.sock = NULL;
     g_dnsresp.spoof = NULL;
-    tapsvc_stop(svc);
-    tap_destroy(t);
+    nt_tapsvc_stop(svc);
+    nt_tap_destroy(t);
     kinfo("selftest: net-dns: a query is relayed and its answer restored to the guest, two queries "
           "sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires");
     return true;
@@ -4854,9 +5287,9 @@ bool selftest_net_dnat(const char **reason)
     uint32_t g_ip = IPV4_ADDR(10, 77, 5, 1), guest = IPV4_ADDR(10, 77, 5, 15);
     uint32_t u_ip = IPV4_ADDR(10, 77, 6, 1), client = IPV4_ADDR(10, 77, 6, 99);
 
-    struct tap *g = tap_create("dnatg", g_ip, mask, g_mac);
+    struct tap *g = nt_tap_create("dnatg", g_ip, mask, g_mac);
     CHECK(g != NULL);
-    struct tap *u = tap_create("dnatu", u_ip, mask, u_mac);
+    struct tap *u = nt_tap_create("dnatu", u_ip, mask, u_mac);
     CHECK(u != NULL);
     netif_set_forward(tap_netif(g), true);        /* the guest side forwards its replies out */
     netif_set_masquerade(tap_netif(g), true);
@@ -5024,8 +5457,8 @@ bool selftest_net_dnat(const char **reason)
 
     nat_pf_clear();
     nat_flush();
-    tap_destroy(u);
-    tap_destroy(g);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
     kinfo("selftest: net-dnat: a client connection was forwarded to the guest and its reply "
           "un-DNAT'd back from host:P (TCP and UDP), an unruled port stayed local, the table bounded");
     return true;
@@ -5066,9 +5499,9 @@ bool selftest_net_tapctl(const char **reason)
     uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
     uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
 
-    struct tap *g = tap_create("nctlg", g_ip, mask, g_mac);
+    struct tap *g = nt_tap_create("nctlg", g_ip, mask, g_mac);
     CHECK(g != NULL);
-    struct tap *u = tap_create("nctlu", u_ip, mask, u_mac);
+    struct tap *u = nt_tap_create("nctlu", u_ip, mask, u_mac);
     CHECK(u != NULL);
     netif_set_forward(tap_netif(g), true);        /* the guest tap: the only valid target */
     netif_set_masquerade(tap_netif(g), true);
@@ -5078,7 +5511,7 @@ bool selftest_net_tapctl(const char **reason)
     nat_pf_clear();
 
     struct file *f = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
 
     struct cosmo_netctl cmd;
     /* Room for the whole snapshot: the port-forward list, the filter section
@@ -5204,11 +5637,11 @@ bool selftest_net_tapctl(const char **reason)
     CHECK(rn == netctl_snapshot_len(rbuf, 1));
     CHECK(((struct cosmo_netctl_list *)rbuf)->count == 1);              /* only the re-added rule */
 
-    file_put(f);
+    nt_file_put(f);
     nat_pf_clear();
     nat_flush();
-    tap_destroy(u);
-    tap_destroy(g);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
     kinfo("selftest: net-tapctl: a forward added through /dev/net/tapctl took effect and listed, "
           "delete reaped its flow, and duplicate/off-tap/short/bad-version commands were refused");
     return true;
@@ -5234,7 +5667,7 @@ bool selftest_net_multiguest(const char **reason)
 
     /* (1) eight opens are eight taps on eight distinct subnets; a ninth is refused. */
     for (unsigned k = 0; k < MG_MAX; k++) {
-        CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[k]) == 0 && f[k] != NULL);
+        CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[k]) == 0 && f[k] != NULL);
         char name[8];
         ksnprintf(name, sizeof(name), "tap%u", k);
         struct netif *n = netif_find(name);
@@ -5242,7 +5675,7 @@ bool selftest_net_multiguest(const char **reason)
         netif_put(n);
     }
     struct file *ninth = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &ninth) == -ENOSPC && ninth == NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &ninth) == -ENOSPC && ninth == NULL);
 
     /* (2) a frame written to one file reaches only that file's tap: an ARP
      * for tap0's address answered on file 0, nothing on file 1. */
@@ -5317,19 +5750,19 @@ bool selftest_net_multiguest(const char **reason)
 
     /* (3) the last close of one file destroys only its tap, purges only its
      * guest's NAT state, and frees its slot; the others live on. */
-    file_put(f[0]); f[0] = NULL;
+    nt_file_put(f[0]); f[0] = NULL;
     struct netif *gone = netif_find("tap0"), *kept = netif_find("tap1");
     CHECK(gone == NULL && kept != NULL);
     netif_put(kept);
     unsigned nr = nat_pf_list(rules, NAT_PF_MAX);
     CHECK(nr == 1 && rules[0].guest_ip == gb);   /* tap0's guest purged, tap1's kept */
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[0]) == 0);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[0]) == 0);
     struct netif *again = netif_find("tap0");
     CHECK(again != NULL && again->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
     netif_put(again);
 
     for (unsigned k = 0; k < MG_MAX; k++)
-        if (f[k]) file_put(f[k]);
+        if (f[k]) nt_file_put(f[k]);
     CHECK(netif_find("tap0") == NULL && netif_find("tap7") == NULL);
 
     kinfo("selftest: net-multiguest: eight opens gave eight taps on eight subnets, a ninth was refused, "
@@ -5384,8 +5817,8 @@ bool selftest_net_firewall(const char **reason)
     /* Two guests through /dev/net/tap, as vmctl opens them (so each attaches
      * to the firewall): A on tap0 (10.0.3.15), B on tap1 (10.0.4.15). */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0a };
     static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0b };
@@ -5519,22 +5952,22 @@ bool selftest_net_firewall(const char **reason)
      * is closed; B's release purges it, an add for the departed B is refused,
      * and a fresh tap at B's address starts with no rules. */
     struct file *fctl = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
     struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
                                      .guest_addr = gb, .direction = COSMO_NETCTL_DIR_TO_GUEST,
                                      .proto = COSMO_NETCTL_PROTO_UDP, .dst_prefix = 32,
                                      .verdict = COSMO_NETCTL_VERDICT_ACCEPT, .dst_addr = ga, .dst_port = 5000 };
     CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
-    file_put(fctl); fctl = NULL;                         /* the transient handle vmctl would close */
+    nt_file_put(fctl); fctl = NULL;                         /* the transient handle vmctl would close */
     l4len = nettest_mk_udp(l4, gb, ga, 5001, 5000, pl, sizeof(pl));
     CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
     CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);        /* the rule outlived its handle */
-    file_put(fb); fb = NULL;                             /* B departs: purged and detached */
+    nt_file_put(fb); fb = NULL;                             /* B departs: purged and detached */
     struct fw_rule b_rule = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
                               .verdict = FW_ACCEPT, .dst_ip = ga, .dst_port = 5000 };
     CHECK(fw_rule_add(gb, 0, &b_rule) == -ENOENT);       /* an add after teardown is refused */
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
     { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&   /* the reused address inherits nothing: */
           listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);   /* only the fresh seeds */
@@ -5544,7 +5977,7 @@ bool selftest_net_firewall(const char **reason)
 
     /* (8) the control round trip: an ADD is listed with its guest and index;
      * POLICY flips the default and the next verdict follows; bad writes change nothing. */
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
     c.guest_addr = ga; c.proto = COSMO_NETCTL_PROTO_TCP; c.dst_addr = gb; c.dst_port = 445; c.at_index = 0;
     CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
     static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
@@ -5587,10 +6020,10 @@ bool selftest_net_firewall(const char **reason)
     CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOENT);              /* no such tuple */
     bad = c; bad.proto = COSMO_NETCTL_PROTO_ICMP; bad.dst_port = 300;
     CHECK(file_write(fctl, &bad, sizeof(bad)) == -EINVAL);              /* an ICMP selector is a type <= 255 or ANY */
-    file_put(fctl);
+    nt_file_put(fctl);
 
-    file_put(fa);
-    file_put(fb);
+    nt_file_put(fa);
+    nt_file_put(fb);
     fw_flush();
     kinfo("selftest: net-firewall: inter-guest dropped by default and uplink accepted, one rule punched one hole, "
           "a reply was admitted by state (echo by id, not a reverse request), a DROP inserted first won and was "
@@ -5677,8 +6110,8 @@ bool selftest_net_input(const char **reason)
 
     /* Two guests through /dev/net/tap (so each attaches): A on tap0, B on tap1. */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     uint32_t gb = IPV4_ADDR(10, 0, 4, 15), gwb = IPV4_ADDR(10, 0, 4, 1);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0e, 0x00, 0x0a };
@@ -5856,9 +6289,9 @@ bool selftest_net_input(const char **reason)
     l4len = nettest_mk_tcp(l4, gb, gwb, 40000, 2222, TH_SYN);
     CHECK(fwt_send(fb, tap1mac, bmac, gb, gwb, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    file_put(fb); fb = NULL;
+    nt_file_put(fb); fb = NULL;
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&
           listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);
 
@@ -5882,7 +6315,7 @@ bool selftest_net_input(const char **reason)
      * wildcard is not mistaken for it, a type above 255 and ANY-as-policy-
      * direction are refused. */
     struct file *fctl = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
     struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
                                      .guest_addr = ga, .direction = COSMO_NETCTL_DIR_TO_HOST,
                                      .proto = COSMO_NETCTL_PROTO_TCP, .dst_prefix = 32,
@@ -5932,10 +6365,10 @@ bool selftest_net_input(const char **reason)
     CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
     pol.verdict = COSMO_NETCTL_VERDICT_DROP;
     CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
-    file_put(fctl);
+    nt_file_put(fctl);
 
-    file_put(fa);
-    file_put(fb);
+    nt_file_put(fa);
+    nt_file_put(fb);
     fw_flush();
     kinfo("selftest: net-input: the seeded DNS and echo reached the host and nothing else did, a rule opened a "
           "port per datagram, the seeds were deletable, the ICMP selector was a type (echo reply and need-frag "
@@ -6068,7 +6501,7 @@ static struct socket *hin_accept(struct socket *ls)
     for (unsigned i = 0; i < 100; i++) {
         struct socket *a = NULL;
         struct netaddr peer;
-        if (ksock_accept(ls, &a, &peer) == 0)
+        if (nt_ksock_accept(ls, &a, &peer) == 0)
             return a;
         thread_sleep_ms(10);
     }
@@ -6095,7 +6528,10 @@ struct hin_conn {
     struct socket *s;
     int rc;
     volatile bool done;
+    struct thread *th;
+    unsigned owner;   /* who puts `s`: HIN_RUNNING, then HIN_DONE (the test) or HIN_ABANDONED (the thread) */
 };
+enum { HIN_RUNNING, HIN_DONE, HIN_ABANDONED };
 
 static void hin_connect_thread(void *arg)
 {
@@ -6104,12 +6540,82 @@ static void hin_connect_thread(void *arg)
     if (c->rc == 0)
         c->rc = ksock_connect(c->s, &c->peer);
     c->done = true;
+    /* Abandoned by a failed test while it connected: the socket is its to put. */
+    if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED) {
+        /* Hand the socket to the runner, which puts it at its next census:
+         * nothing the census reads changes on this thread. */
+        struct socket *sock = c->s;
+        c->s = NULL;
+        arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
+        bool finished = g_nt_finished;
+        bool queued = !finished && g_nt_nreap < NT_REAP_MAX;
+        if (queued)
+            g_nt_reap[g_nt_nreap++] = sock;
+        spin_unlock_irqrestore(&g_nt_reap_lock, st);
+        if (finished && sock)
+            ksock_put(sock);   /* after the last census: nothing counts it now, so it is put here */
+        else if (!queued && sock)   /* more at once than the list holds: kept, and still excused, so the counts agree */
+            kwarn("nettest: an abandoned connect's socket is kept: the reap list is full");
+    }
     thread_exit(0);
+}
+
+/*
+ * Its release, however the test returned (the net-leftover unit). A
+ * connect waits only for the TCP state to leave SYN_SENT -- nothing but
+ * the retransmit timeout ends it -- so the release gives the thread two
+ * seconds, then either joins it and puts its socket, or lets it go and
+ * leaves the socket to it. One exchange decides, so exactly one side puts.
+ * The storage is static at every call site: the thread may outlive the
+ * frame.
+ */
+static void hin_conn_release(void *arg)
+{
+    struct hin_conn *c = arg;
+    for (unsigned i = 0; i < 200 && !c->done; i++)
+        thread_sleep_ms(10);
+    if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
+        thread_join(c->th);
+        if (c->s)
+            ksock_put(c->s);
+        c->s = NULL;
+    } else {
+        g_nt_abandoned++;    /* this runner thread's count: the census subtracts it */
+        thread_put(c->th);   /* it hands its socket to the runner when its connect returns */
+    }
+    c->th = NULL;
+}
+
+static bool hin_conn_start(struct hin_conn *c, const char *name)
+{
+    c->owner = HIN_RUNNING;
+    c->th = thread_create(hin_connect_thread, c, name, SCHED_PRIO_DEFAULT);
+    if (c->th == NULL)
+        return false;
+    if (!selftest_defer(hin_conn_release, c)) {
+        hin_conn_release(c);
+        return false;
+    }
+    return true;
+}
+
+/* The success path, once the test has seen `done`: the thread is joined,
+ * and its socket becomes an ordinary one of the test's, released by its
+ * put or by the runner. */
+static void hin_conn_join(struct hin_conn *c)
+{
+    selftest_forget(c);
+    thread_join(c->th);
+    c->th = NULL;
+    if (c->s != NULL && !selftest_defer(nt_rel_sock, c->s)) {
+        ksock_put(c->s);
+        c->s = NULL;
+    }
 }
 
 static bool hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port)
 {
-    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, out) != 0)
+    if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, out) != 0)
         return false;
     struct netaddr a = v4addr(ip, port);
     if (ksock_bind(*out, &a) != 0)
@@ -6120,7 +6626,7 @@ static bool hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port)
 
 static bool hin_tcp_listener(struct socket **out, uint16_t port)
 {
-    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, out) != 0)
+    if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, out) != 0)
         return false;
     struct netaddr a = v4addr(0, port);
     if (ksock_bind(*out, &a) != 0 || ksock_listen(*out, 4) != 0)
@@ -6150,13 +6656,13 @@ bool selftest_net_hostinput(const char **reason)
     uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1);
     uint32_t w[5] = { IPV4_ADDR(10, 77, 8, 99), IPV4_ADDR(10, 77, 8, 98), IPV4_ADDR(10, 77, 8, 97),
                       IPV4_ADDR(10, 77, 8, 96), IPV4_ADDR(10, 77, 8, 95) };
-    struct tap *u = tap_create("hinu", u_ip, htonl(0xffffff00u), umac);
+    struct tap *u = nt_tap_create("hinu", u_ip, htonl(0xffffff00u), umac);
     CHECK(u != NULL);
     for (unsigned i = 0; i < 5; i++)
         nettest_seed_arp(tap_netif(u), w[i], wmac[i]);
     /* And one guest through /dev/net/tap (so it attaches): A on tap0. */
     struct file *fa = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0f, 0x00, 0x0a };
     static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
@@ -6330,7 +6836,7 @@ bool selftest_net_hostinput(const char **reason)
     /* The keepalive clock is not refreshed by a rejected segment: with a
      * short idle time armed at C4's establishment and rejected probes arriving
      * every 40 ms under a rule covering the peer, the probe still fires. */
-    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    nt_tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_TCP, 40004, &sg, HIN_TRIES) && (sg.flags & TH_SYN) && sg.ack == 4001);
@@ -6358,11 +6864,11 @@ bool selftest_net_hostinput(const char **reason)
         thread_sleep_ms(40);
     }
     tcp_get_stats(&ts1);
-    tcp_set_keepalive(0, 0, 0);
+    nt_tcp_set_keepalive(0, 0, 0);
     CHECK(ts1.keepalive_probes > ts0.keepalive_probes);
     CHECK(ts1.quiet_dropped >= ts0.quiet_dropped + 10);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w3) == 0);
-    ksock_put(a4);
+    nt_ksock_put(a4);
 
     /* The host's own outbound connection completes under a rule covering the
      * peer (the SYN_SENT acceptance point), and a bare ACK to a tuple with no
@@ -6370,9 +6876,9 @@ bool selftest_net_hostinput(const char **reason)
     struct fw_rule r_w4 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[4], 32, 0, FW_DROP);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_w4) == 0);
     hin_drain(u);
-    struct hin_conn cn = { .peer = v4addr(w[4], 9000) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "hin-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    static struct hin_conn cn;   /* static: the connect thread may outlive this frame */
+    cn = (struct hin_conn){ .peer = v4addr(w[4], 9000) };
+    CHECK(hin_conn_start(&cn, "hin-connect"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* the host's SYN */
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -6384,7 +6890,7 @@ bool selftest_net_hostinput(const char **reason)
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
-    thread_join(ct);
+    hin_conn_join(&cn);
     tcp_get_stats(&ts0);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9001, hport, 5001, hiss + 1, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
@@ -6393,7 +6899,7 @@ bool selftest_net_hostinput(const char **reason)
     /* The host closes first: its FIN goes out; the peer's ACK and FIN are
      * accepted (TIME_WAIT); a bare ACK there draws nothing; a retransmitted
      * FIN -- an exact-position match on the connection -- is acknowledged. */
-    ksock_put(cn.s);
+    nt_ksock_put(cn.s);
     CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && (sg.flags & TH_FIN) && sg.seq == hiss + 1);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
@@ -6461,7 +6967,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && (sg.flags & TH_ACK) && sg.ack == 1024);
     CHECK(hin_recv_sock(a1, buf, sizeof(buf), HIN_TRIES) == 0);                       /* EOF */
-    ksock_put(a1);
+    nt_ksock_put(a1);
     /* A valid reset (seq == rcv_nxt) from a peer under a DROP rule still tears
      * C2 down: the socket reports it, and nothing is emitted. */
     struct fw_rule r_w1 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[1], 32, 2223, FW_DROP);
@@ -6476,7 +6982,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(!hin_recv(u, IPPROTO_TCP, 40002, &sg, 10));
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w1) == 0);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_2222) == 0);
-    ksock_put(a2);
+    nt_ksock_put(a2);
 
     /* (5) UDP and ICMP are per datagram: an icmp type-8 DROP drops an echo
      * request -- delivered quiet, then freed by icmp_input, the one place
@@ -6517,11 +7023,11 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(hin_recv_sock(ul, buf, sizeof(buf), 5) == -EAGAIN);
     {
         struct socket *lo = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
         CHECK(hin_recv_sock(ul, buf, sizeof(buf), HIN_TRIES) == 4);
-        ksock_put(lo);
+        nt_ksock_put(lo);
     }
     ipv4_get_stats(&is0);
     l4len = nettest_mk_udp(l4, ga, INADDR_LOOPBACK_N, 6102, 7002, pl, sizeof(pl));
@@ -6565,11 +7071,11 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(fs1.hin_drop_default == fs0.hin_drop_default && fs1.hin_drop_rule == fs0.hin_drop_rule);
     {
         struct socket *lo = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
         CHECK(hin_recv_sock(ul, buf, sizeof(buf), HIN_TRIES) == 4);
-        ksock_put(lo);
+        nt_ksock_put(lo);
     }
     /* Default flip: under DROP an unruled SYN drops; an explicit ACCEPT rule
      * readmits it; back to ACCEPT. */
@@ -6611,7 +7117,7 @@ bool selftest_net_hostinput(const char **reason)
      * beside policy_from_uplink; a host rule naming TO_HOST and a version-3
      * sized write are refused. */
     struct file *fctl = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
     struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
                                      .guest_addr = COSMO_NETCTL_HOST_ADDR, .direction = COSMO_NETCTL_DIR_FROM_UPLINK,
                                      .proto = COSMO_NETCTL_PROTO_TCP, .verdict = COSMO_NETCTL_VERDICT_DROP,
@@ -6651,12 +7157,12 @@ bool selftest_net_hostinput(const char **reason)
     c.op = COSMO_NETCTL_FILTER_DEL;
     CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
     { struct fw_rule none[1]; CHECK(fw_rule_list(FW_HOST_GUEST_IP, none, 1) == 0); }
-    file_put(fctl);
+    nt_file_put(fctl);
 
-    ksock_put(ls1); ksock_put(ls2); ksock_put(us); ksock_put(uc); ksock_put(ul);
-    file_put(fa);
+    nt_ksock_put(ls1); nt_ksock_put(ls2); nt_ksock_put(us); nt_ksock_put(uc); nt_ksock_put(ul);
+    nt_file_put(fa);
     hin_drain(u);
-    tap_destroy(u);
+    nt_tap_destroy(u);
     fw_flush();
     nat_flush();
     kinfo("selftest: net-hostinput: the world reached the host under the default, a sourced DROP matched by "
@@ -6744,7 +7250,7 @@ bool selftest_net_hoststate(const char **reason)
     static const uint8_t gmac[6]  = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x1f };
     uint32_t u_ip = IPV4_ADDR(10, 77, 9, 1);
     uint32_t w = IPV4_ADDR(10, 77, 9, 99), w2 = IPV4_ADDR(10, 77, 9, 98);
-    struct tap *u = tap_create("hstu", u_ip, htonl(0xffffff00u), umac);
+    struct tap *u = nt_tap_create("hstu", u_ip, htonl(0xffffff00u), umac);
     CHECK(u != NULL);
     nettest_seed_arp(tap_netif(u), w, wmac);
     nettest_seed_arp(tap_netif(u), w2, wmac);
@@ -6892,9 +7398,9 @@ bool selftest_net_hoststate(const char **reason)
      * one of its own in flight. */
     hin_drain(u);
     fw_get_stats(&fs0);
-    struct hin_conn cn = { .peer = v4addr(w, 9100) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "hst-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    static struct hin_conn cn;   /* static: the connect thread may outlive this frame */
+    cn = (struct hin_conn){ .peer = v4addr(w, 9100) };
+    CHECK(hin_conn_start(&cn, "hst-connect"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.flags == TH_SYN);
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -6904,7 +7410,7 @@ bool selftest_net_hoststate(const char **reason)
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
-    thread_join(ct);
+    hin_conn_join(&cn);
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new);   /* TCP is not recorded: no lock on that send path */
     static uint8_t big[1200];
@@ -6937,7 +7443,7 @@ bool selftest_net_hoststate(const char **reason)
     l4len = hst_mk_unreach_tcp(l4, u_ip, w, hport, 9100, qseq);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
-    ksock_put(cn.s);
+    nt_ksock_put(cn.s);
     hin_drain(u);
 
     /* (6) the DNS proxy end to end under the DROP: a guest's query, the
@@ -6946,10 +7452,10 @@ bool selftest_net_hoststate(const char **reason)
      * its own id. The socket is unconnected by design (it authenticates the
      * sender itself), so nothing but this state could admit the answer. */
     uint32_t g_ip = IPV4_ADDR(10, 88, 9, 1), guest = IPV4_ADDR(10, 88, 9, 15);
-    struct tap *gt = tap_create("hstg", g_ip, htonl(0xffffff00u), gtmac);
+    struct tap *gt = nt_tap_create("hstg", g_ip, htonl(0xffffff00u), gtmac);
     CHECK(gt != NULL);
     nettest_seed_arp(tap_netif(gt), guest, gmac);
-    struct tapsvc *svc = tapsvc_start(gt);
+    struct tapsvc *svc = nt_tapsvc_start(gt);
     CHECK(svc != NULL);
     tapsvc_test_set_upstream(svc, w, 5300);
     uint8_t msg[64];
@@ -6993,8 +7499,8 @@ bool selftest_net_hoststate(const char **reason)
         CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x1357);            /* the guest's own id */
         CHECK((dns[2] & 0x80) && memcmp(buf + rl - 4, dns_answer_ip, 4) == 0);
     }
-    tapsvc_stop(svc);
-    tap_destroy(gt);
+    nt_tapsvc_stop(svc);
+    nt_tap_destroy(gt);
     hin_drain(u);
 
     /* (7) a send on a live flow refreshes it rather than recording a second;
@@ -7022,8 +7528,8 @@ bool selftest_net_hoststate(const char **reason)
      * a masqueraded guest-to-world flow leaves through output_on, not
      * ipv4_output, and loopback never reaches a chain. */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2a };
     static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2b };
@@ -7038,11 +7544,11 @@ bool selftest_net_hoststate(const char **reason)
     fw_get_stats(&fs0);
     {
         struct socket *lo = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7100);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
         CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
-        ksock_put(lo);
+        nt_ksock_put(lo);
     }
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new);                  /* loopback records nothing */
@@ -7103,12 +7609,12 @@ bool selftest_net_hoststate(const char **reason)
         CHECK(unsolicited && none == -EAGAIN);
     }
 
-    file_put(fa);
-    file_put(fb);
+    nt_file_put(fa);
+    nt_file_put(fb);
     icmp_set_echo_reply_hook(NULL);
-    ksock_put(cs); ksock_put(cs2); ksock_put(cs3);
+    nt_ksock_put(cs); nt_ksock_put(cs2); nt_ksock_put(cs3);
     hin_drain(u);
-    tap_destroy(u);
+    nt_tap_destroy(u);
     fw_flush();
     nat_flush();
     kinfo("selftest: net-hoststate: under a hardened host the replies to its own unconnected UDP sends and echo "
@@ -7127,10 +7633,10 @@ bool selftest_net_hoststate(const char **reason)
 static size_t flows_read(uint8_t *snap, size_t cap, int64_t *len)
 {
     struct file *f = NULL;
-    if (vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) != 0 || f == NULL)
+    if (nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) != 0 || f == NULL)
         return 0;
     *len = file_read(f, snap, cap);
-    file_put(f);
+    nt_file_put(f);
     if (*len <= 0)
         return 0;
     struct cosmo_netctl_list ph;
@@ -7149,9 +7655,9 @@ bool selftest_net_flows_nat(const char **reason)
     uint32_t u_ip = IPV4_ADDR(10, 77, 32, 1), peer = IPV4_ADDR(10, 77, 32, 99);
     const unsigned flood = NAT_TABLE_SIZE + 8;
 
-    struct tap *g = tap_create("flwg", g_ip, mask, g_mac);
+    struct tap *g = nt_tap_create("flwg", g_ip, mask, g_mac);
     CHECK(g != NULL);
-    struct tap *u = tap_create("flwu", u_ip, mask, u_mac);
+    struct tap *u = nt_tap_create("flwu", u_ip, mask, u_mac);
     CHECK(u != NULL);
     netif_set_forward(tap_netif(g), true);
     netif_set_masquerade(tap_netif(g), true);
@@ -7245,7 +7751,7 @@ bool selftest_net_flows_nat(const char **reason)
         char name[8] = "flwx0";
         name[4] = (char)('0' + k);
         uint8_t xmac[6] = { 0x52, 0x54, 0x00, 0x24, (uint8_t)k, 0x01 };
-        xt[k] = tap_create(name, IPV4_ADDR(10, 77, 40 + k, 1), mask, xmac);
+        xt[k] = nt_tap_create(name, IPV4_ADDR(10, 77, 40 + k, 1), mask, xmac);
         made = xt[k] != NULL;
         if (made) {
             netif_set_forward(tap_netif(xt[k]), true);
@@ -7294,7 +7800,7 @@ bool selftest_net_flows_nat(const char **reason)
     nat_flush();
     for (unsigned k = 0; k < extra; k++)
         if (xt[k] != NULL)
-            tap_destroy(xt[k]);
+            nt_tap_destroy(xt[k]);
     CHECK(made && decided);
     CHECK(ns1.out_new - ns0.out_new == NAT_TABLE_SIZE - NAT_QUOTA_PER_GUEST);   /* seven more shares */
     CHECK(ns1.out_drop_table - ns0.out_drop_table == NAT_QUOTA_PER_GUEST);     /* the eighth, by the table */
@@ -7302,8 +7808,8 @@ bool selftest_net_flows_nat(const char **reason)
     CHECK(listed_all == NAT_TABLE_SIZE);
 
     nat_flush();
-    tap_destroy(u);
-    tap_destroy(g);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
     kinfo("selftest: net-flows-nat: a guest flooding %u flows was listed at exactly its share of %u, "
           "%u refusals counted as the share's and none as the table's, none listed past expiry, and a "
           "ninth source refused by the full table counted as the table's",
@@ -7319,7 +7825,7 @@ bool selftest_net_flows_fw(const char **reason)
     static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x23, 0x00, 0x01 };
     static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x23, 0x00, 0x63 };
     uint32_t u_ip = IPV4_ADDR(10, 77, 33, 1), w = IPV4_ADDR(10, 77, 33, 99);
-    struct tap *u = tap_create("flwh", u_ip, htonl(0xffffff00u), umac);
+    struct tap *u = nt_tap_create("flwh", u_ip, htonl(0xffffff00u), umac);
     CHECK(u != NULL);
     nettest_seed_arp(tap_netif(u), w, wmac);
 
@@ -7339,8 +7845,8 @@ bool selftest_net_flows_fw(const char **reason)
     /* (2) a guest-to-guest flow, UDP, and a TCP one that becomes established
      * once an ACK without SYN has passed. */
     struct file *fa = NULL, *fb = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
     static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x23, 0x00, 0x2a };
     static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x23, 0x00, 0x2b };
@@ -7434,11 +7940,11 @@ bool selftest_net_flows_fw(const char **reason)
     CHECK(ga_listed == FW_FLOW_QUOTA_PER_GUEST);                /* the share the refusal saw */
     CHECK(fw_flow_list(ff, FW_FLOW_MAX, clock_now_ns() + 3600ull * 1000000000ull) == 0);   /* N24 */
 
-    file_put(fa);
-    file_put(fb);
-    ksock_put(cs);
+    nt_file_put(fa);
+    nt_file_put(fb);
+    nt_ksock_put(cs);
     hin_drain(u);
-    tap_destroy(u);
+    nt_tap_destroy(u);
     fw_flush();
     nat_flush();
     kinfo("selftest: net-flows-fw: a flow the host opened listed as the host's, guest-to-guest UDP and TCP listed "
@@ -7479,11 +7985,11 @@ bool selftest_net_output(const char **reason)
     static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
     uint32_t u_ip = IPV4_ADDR(10, 77, 10, 1), w = IPV4_ADDR(10, 77, 10, 99);
     uint32_t wnet = IPV4_ADDR(10, 77, 10, 0);
-    struct tap *u = tap_create("outu", u_ip, htonl(0xffffff00u), umac);
+    struct tap *u = nt_tap_create("outu", u_ip, htonl(0xffffff00u), umac);
     CHECK(u != NULL);
     nettest_seed_arp(tap_netif(u), w, wmac);
     struct file *fa = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
     { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
 
@@ -7654,14 +8160,14 @@ bool selftest_net_output(const char **reason)
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_lo) == 0);
     {
         struct socket *tx = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
         struct netaddr loto = v4addr(INADDR_LOOPBACK_N, 7201);
         CHECK(ksock_sendto(tx, pl, sizeof(pl), &loto) == (int64_t)sizeof(pl));
         CHECK(hin_recv_sock(lo, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
-        ksock_put(tx);
+        nt_ksock_put(tx);
     }
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
-    ksock_put(lo);
+    nt_ksock_put(lo);
 
     /* (8) TCP is told too, since the verdict unit: batch_send reports what
      * the link refused and tcp_connect returns it, so a nonblocking connect
@@ -7675,13 +8181,13 @@ bool selftest_net_output(const char **reason)
     fw_get_stats(&fs0);
     {
         struct socket *c = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
         ksock_set_nonblock(c, true);
         struct netaddr peer = v4addr(w, 9200);
         CHECK(ksock_connect(c, &peer) == -EPERM);              /* told, not left connecting */
         CHECK(FWT_RISES(fw_get_stats, fs1, out_drop_rule, fs0.out_drop_rule));
         CHECK(!hin_recv(u, IPPROTO_TCP, 9200, &sg, 15));       /* the SYN never left */
-        ksock_put(c);
+        nt_ksock_put(c);
     }
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_tcp) == 0);
 
@@ -7757,7 +8263,7 @@ bool selftest_net_output(const char **reason)
      * the version-5 one. */
     _Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "the v5 policy record is 12 bytes");
     struct file *fctl = NULL;
-    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
     struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
                                      .guest_addr = COSMO_NETCTL_HOST_ADDR,
                                      .direction = COSMO_NETCTL_DIR_OUTPUT,
@@ -7797,12 +8303,12 @@ bool selftest_net_output(const char **reason)
     }
     c.op = COSMO_NETCTL_FILTER_DEL;
     CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
-    file_put(fctl);
+    nt_file_put(fctl);
 
-    ksock_put(cs);
-    file_put(fa);
+    nt_ksock_put(cs);
+    nt_file_put(fa);
     hin_drain(u);
-    tap_destroy(u);
+    nt_tap_destroy(u);
     fw_flush();
     nat_flush();
     nat_pf_clear();
@@ -7831,7 +8337,7 @@ bool selftest_net_tcpverdict(const char **reason)
     static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x1d, 0x00, 0x63 };
     uint32_t u_ip = IPV4_ADDR(10, 77, 11, 1), w = IPV4_ADDR(10, 77, 11, 99);
     uint32_t wnet = IPV4_ADDR(10, 77, 11, 0);
-    struct tap *u = tap_create("tvu", u_ip, htonl(0xffffff00u), umac);
+    struct tap *u = nt_tap_create("tvu", u_ip, htonl(0xffffff00u), umac);
     CHECK(u != NULL);
     nettest_seed_arp(tap_netif(u), w, wmac);
 
@@ -7853,17 +8359,16 @@ bool selftest_net_tcpverdict(const char **reason)
     ipv4_get_stats(&is0);
     static struct hin_conn cn;   /* static: a stuck connect must not write a dead stack */
     cn = (struct hin_conn){ .peer = v4addr(w, 9300) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "tv-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    CHECK(hin_conn_start(&cn, "tv-connect"));
     for (unsigned i = 0; i < HIN_TRIES && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == -EPERM);
-    thread_join(ct);
+    hin_conn_join(&cn);
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_refused, ts0.out_refused));
     CHECK(ts1.out_aborted > ts0.out_aborted);
     CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
     CHECK(!hin_recv(u, IPPROTO_TCP, 9300, &sg, 15));   /* the SYN never left */
-    ksock_put(cn.s);
+    nt_ksock_put(cn.s);
 
     /* (1b) The abort earns its keep on a connect already waiting. Here the
      * first SYN left before the rule existed, so the caller is blocked on
@@ -7874,8 +8379,7 @@ bool selftest_net_tcpverdict(const char **reason)
     hin_drain(u);
     static struct hin_conn cnw;
     cnw = (struct hin_conn){ .peer = v4addr(w, 9303) };
-    struct thread *ctw = thread_create(hin_connect_thread, &cnw, "tv-connw", SCHED_PRIO_DEFAULT);
-    CHECK(ctw != NULL);
+    CHECK(hin_conn_start(&cnw, "tv-connw"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9303, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* it left */
     struct fw_rule out_w = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9303, FW_DROP, FW_SCOPE_ANY);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_w) == 0);
@@ -7883,10 +8387,10 @@ bool selftest_net_tcpverdict(const char **reason)
     for (unsigned i = 0; i < 250 && !cnw.done; i++)     /* the first RTO is a second */
         thread_sleep_ms(10);
     CHECK(cnw.done && cnw.rc == -EPERM);
-    thread_join(ctw);
+    hin_conn_join(&cnw);
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_aborted, ts0.out_aborted));
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_w) == 0);
-    ksock_put(cnw.s);
+    nt_ksock_put(cnw.s);
 
     /* (2) A nonblocking connect fails outright, rather than reporting an open
      * already abandoned: tcp_connect returns the refusal and ksock_connect
@@ -7894,23 +8398,23 @@ bool selftest_net_tcpverdict(const char **reason)
      * call reports an open in progress, with the SYN on the link. */
     {
         struct socket *c = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
         ksock_set_nonblock(c, true);
         struct netaddr peer = v4addr(w, 9300);
         CHECK(ksock_connect(c, &peer) == -EPERM);
         CHECK(ksock_ready(c) & COSMO_IO_ERROR);
-        ksock_put(c);
+        nt_ksock_put(c);
     }
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_c) == 0);
     hin_drain(u);
     {
         struct socket *c = NULL;
-        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
         ksock_set_nonblock(c, true);
         struct netaddr peer = v4addr(w, 9300);
         CHECK(ksock_connect(c, &peer) == -EINPROGRESS);
         CHECK(hin_recv(u, IPPROTO_TCP, 9300, &sg, HIN_TRIES) && sg.flags == TH_SYN);
-        ksock_put(c);
+        nt_ksock_put(c);
     }
 
     /* (3) A refused SYN-ACK has no connection to tell -- a passive open's
@@ -7932,7 +8436,7 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(!hin_recv(u, IPPROTO_TCP, 40300, &sg, 15));       /* no SYN-ACK left */
     {
         struct socket *a = NULL;
-        CHECK(ksock_accept(ls, &a, NULL) == -EAGAIN);        /* and nothing to accept */
+        CHECK(nt_ksock_accept(ls, &a, NULL) == -EAGAIN);        /* and nothing to accept */
     }
     /* The same SYN again, under the same rule: the slot the first one used is
      * free, so it is cached anew. This is the assertion the drop is *for* --
@@ -7951,15 +8455,14 @@ bool selftest_net_tcpverdict(const char **reason)
     l4len = hin_mk_tcp(l4, w, u_ip, 40301, 9301, 7100, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_TCP, 40301, &sg, HIN_TRIES) && sg.flags == (TH_SYN | TH_ACK));
-    ksock_put(ls);
+    nt_ksock_put(ls);
 
     /* An established connection of the host's own, driven from the world
      * side, for (4) and (5). */
     hin_drain(u);
     static struct hin_conn cn2;
     cn2 = (struct hin_conn){ .peer = v4addr(w, 9302) };
-    struct thread *ct2 = thread_create(hin_connect_thread, &cn2, "tv-conn2", SCHED_PRIO_DEFAULT);
-    CHECK(ct2 != NULL);
+    CHECK(hin_conn_start(&cn2, "tv-conn2"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9302, &sg, HIN_TRIES) && sg.flags == TH_SYN);
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -7969,7 +8472,7 @@ bool selftest_net_tcpverdict(const char **reason)
     for (unsigned i = 0; i < HIN_TRIES && !cn2.done; i++)
         thread_sleep_ms(10);
     CHECK(cn2.done && cn2.rc == 0);
-    thread_join(ct2);
+    hin_conn_join(&cn2);
     ksock_set_nonblock(cn2.s, true);
     /* Two bytes from the peer, in before the rule: they must stay readable. */
     l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5001, hiss + 1, TH_ACK | TH_PSH, 64240, "hi", 2);
@@ -8041,7 +8544,7 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_recorded, ts0.out_recorded));
     CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "pq", 2) == 0);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_e) == 0);
-    ksock_put(cn2.s);
+    nt_ksock_put(cn2.s);
 
     /* (6) A stray segment's reset is refused with no connection to tell:
      * counted, and nothing else happens. */
@@ -8064,12 +8567,12 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(hin_tcp_listener(&lo_ls, 9310));
     struct fw_rule out_lo = OUT_RULE(IPPROTO_TCP, 0, 0, 0, 0, 9310, FW_DROP, FW_SCOPE_ANY);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_lo) == 0);
-    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &lo_c) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &lo_c) == 0);
     struct netaddr lo_a = v4addr(INADDR_LOOPBACK_N, 9310);
     CHECK(ksock_connect(lo_c, &lo_a) == 0);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
-    ksock_put(lo_c);
-    ksock_put(lo_ls);
+    nt_ksock_put(lo_c);
+    nt_ksock_put(lo_ls);
 
     /* (8) The datagram protocols are untouched by this unit: a refused UDP
      * send is still told at once, by the same -EPERM this unit gave a new
@@ -8081,7 +8584,7 @@ bool selftest_net_tcpverdict(const char **reason)
     struct netaddr uto = v4addr(w, 7401);
     CHECK(ksock_sendto(us, "x", 1, &uto) == -EPERM);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_u) == 0);
-    ksock_put(us);
+    nt_ksock_put(us);
 
     /* Every socket this test made is gone: a refusal takes a reference to
      * the socket it has to wake, and one already taken is kept rather than
@@ -8092,7 +8595,7 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(socket_count() == socks0);
 
     hin_drain(u);
-    tap_destroy(u);
+    nt_tap_destroy(u);
     fw_flush();
     nat_flush();
     nat_pf_clear();
@@ -8175,7 +8678,7 @@ bool selftest_tap_ready(const char **reason)
     uint8_t buf[128];
     TCHECK(netif_find("tap0") == NULL);   /* no tap open: the probe's will be tap0 */
 
-    TCHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f) == 0);   /* blocking: the device's default */
+    TCHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f) == 0);   /* blocking: the device's default */
     nif = netif_find("tap0");
     TCHECK(nif != NULL);
     /* Readiness: writable always, not readable with nothing queued; a queue to wait on. */
@@ -8207,14 +8710,14 @@ bool selftest_tap_ready(const char **reason)
     /* The mode is the open file's: a second open made non-blocking at open
      * answers so while the first, blocking, does not, and reads 0 at once. */
     struct file *f2 = NULL;
-    TCHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f2) == 0);
+    TCHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f2) == 0);
     bool per_open = kobject_set_nonblock(&f2->obj, -1) == 1 && kobject_set_nonblock(&f->obj, -1) == 0 &&
                     file_read(f2, buf, sizeof(buf)) == 0;
-    file_put(f2);
+    nt_file_put(f2);
     TCHECK(per_open);
     netif_put(nif);
     nif = NULL;
-    file_put(f);
+    nt_file_put(f);
     f = NULL;
     TCHECK(netif_find("tap0") == NULL);
 
@@ -8270,7 +8773,7 @@ out:
     if (nif)
         netif_put(nif);
     if (f)
-        file_put(f);
+        nt_file_put(f);
     if (p) {
         process_kill(p, COSMO_SIGKILL);
         if (completion_done(&p->exited)) {

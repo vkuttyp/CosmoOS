@@ -3626,6 +3626,31 @@ See [docs/development.md](docs/development.md).
   it. `sched-migrate-refuses`' spinner outranks the reaper and `quiesce`,
   and a rival at the reaper's priority, made runnable on its CPU before
   the migrate, must not run. (PR #255)
+- **A failed test releases what it made, and a test that leaves network
+  state is named once.** One `net-dns` failure used to take eight tests
+  with it. It returned holding its tap and one of the eight DHCP/DNS
+  service slots, `net-multiguest`'s eighth tap then failed for want of a
+  slot and kept its seven, and every later tap open failed.
+  `tools/net-leftover-probe.py` reproduced that exactly.
+  - The expiry check now asserts that the aging reclaimed everything
+    pending before it, not an empty table, which a still-draining flood
+    can refill.
+  - Every acquisition in the network tests registers its release with
+    the runner (`selftest_defer`), and the runner runs what a test still
+    holds, last first. That covers taps, services, sockets, interfaces,
+    files, hooks, settings and threads (whose arguments outlive their
+    join). `irq-route` releases its line and its periodic source the
+    same way.
+  - The runner compares interfaces, services and sockets before and
+    after every test, and fails a test only for what it added: fewer is
+    never a leftover.
+  - Every network test was forced to fail at its last check and at its
+    midpoint, in one boot each. At the last check, 50 of 50 were forced
+    on x86-64 and 49 on aarch64, where one test passed fewer checks than
+    counted. At the midpoint, the first run hung both architectures: two
+    interfaces were registered on the stack. With those fixed, 50 of 50
+    were forced on both. Each time exactly the forced tests failed and
+    nothing was left behind. (PR #257)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

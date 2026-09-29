@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
+| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: a registration without a release, and one whose name fills all 8 bytes with no terminator, are both refused with `-EINVAL`; registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -926,6 +926,90 @@ built.
 
 **The shell harness** runs `vmctl flows` in every boot and requires its
 counter lines, reading the version-6 snapshot end to end from userland.
+
+## Releases however a test returns (the net-leftover unit)
+
+`CHECK` returns at once. A network test used to release what it made
+only on its last lines, so a failure kept everything: one `net-dns`
+failure held a tap and a DHCP/DNS service slot, and eight tests after it
+failed for the slot (`docs/audit/next-subsystem-net-leftover.md`).
+
+- **Every acquisition registers its release in the same call.** In
+  `nettest.c`, taps, services, sockets (created or accepted),
+  interfaces and files go through `nt_` wrappers (`nt_tap_create`,
+  `nt_ksock_create`, ...), which call `selftest_defer`. The runner runs
+  what a test still holds after it returns, last acquired first.
+- **Every release goes through a wrapper too** (`nt_tap_destroy`,
+  `nt_ksock_put`, ...). It runs the registered release early
+  (`selftest_release`), where the test used to tear down, so the success
+  path keeps its order, and falls back to the plain call for anything
+  not registered.
+- **Hooks and settings** a test changes (the loopback filter, the rx
+  hook, steering, keepalive, FIN_WAIT_2) register their restore when
+  changed and run it when put back. A hook's data is static, never on
+  the frame: `net-steer`, `net-rxhook-grace` and `nicbench` keep theirs
+  static.
+- **A thread's argument outlives its join**, and its release (the
+  test's own stop, whatever unblocks it, and the join) is registered
+  when it is created. That is after what it uses, so it runs first.
+  - `tcp_server` threads publish the sockets they block on under a lock.
+    The release takes a reference and shuts their read side.
+  - `hin_connect` threads block in a connect nothing can interrupt. The
+    release waits 2 s, then joins, or abandons the thread, which puts
+    its socket itself. One exchange decides which side puts.
+  - A thread's own sockets use the plain calls: the thread, not the
+    runner, puts them.
+- **Objects registered with the stack are static**: `net-steer`'s and
+  `net-csum-offload`'s interfaces. A release can run after any frame is
+  gone.
+- **A reference a test holds on an interface** is released however it
+  returns: the creator's, after a successful registration, and one
+  `netif_find` gave it. Each is held through a static `struct
+  nt_netif_ref` (`nt_netif_hold`, put with `nt_netif_ref_put`). The key
+  is the holder, not the interface, whose address is already its
+  unregister's key. `net-csum-offload`'s kept packet is freed the same
+  way. This covers the ARP and ND flush-count tests, `net-netif-lifetime`,
+  `net-steer` and `net-csum-offload`.
+- **Tests that already release on every exit are unchanged:** the tcp
+  timer, ARP and ND retry, steer injector, bench and tap-ready tests.
+
+**The runner's network check.** After a test's releases have run, the
+runner compares the interfaces (by name), the live DHCP/DNS services
+(`tapsvc_count`) and the socket count with their values before the test
+(`nettest_census`). A test that **added** any of them fails, and the
+runner logs the change: `selftest: <test> left the network changed:
+interfaces (n) [...] -> (m) [...], services a -> b, sockets c -> d`.
+Fewer is never a leftover: an abandoned `hin_connect` puts its socket
+when its connect finally times out, which can happen during a later test,
+and that later test has left nothing. Those sockets are also left out of
+the count while they are held (`g_nt_abandoned`), so one closing can't
+hide a socket the later test leaves. Both counts change only on the
+runner's thread: an abandoned thread whose connect returns hands its
+socket to a list, and the runner puts it (and drops the count) at the
+start of its next census. So they are read as one state, however many
+connects finish at once. After the last test the runner drains the list
+once more (`nettest_finish`), and a connect that returns after that puts
+its own socket. Interfaces are compared by count as
+well as by name, so a name that did not fit the buffer still counts. The
+next test starts from what is left, so a leftover is blamed once.
+
+**Checked by forcing.** `tools/net-leftover-probe.py --count-checks`
+counts each test's passing checks (50 tests counted), and `--force
+last|mid LOG` makes each counted test fail at that check, in one boot.
+A test that passes fewer checks on the forcing run than it was counted
+with never reaches its forcing point, and passes. As recorded:
+
+- **At the last check:** 50 of 50 forced on x86-64 and 49 of 50 on
+  aarch64 (`net-icmp-limit` passed fewer checks than counted there). In
+  both boots exactly the forced tests failed, none left the network
+  changed, and nothing hung or panicked.
+- **At the midpoint:** the first run hung both architectures in
+  `net-steer`. Its interface, like `net-csum-offload`'s, was on the stack,
+  and the runner's release touched the dead frame. With both static,
+  the rerun forced 50 of 50 on both architectures: exactly those failed,
+  none left the network changed, and nothing hung or panicked. It was
+  rerun, with the same result, after each review change to the releases,
+  including once with every `hin_connect` thread abandoned at once.
 
 ## Waiting for a property (`wait_until`)
 

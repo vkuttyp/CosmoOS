@@ -854,6 +854,16 @@ it: the repair is the usual one for this file — a test that acquires a
 resource releases it on every exit — and it belongs to whoever next
 touches `kernel/interrupt/irqtest.c`.
 
+**Corrected and fixed (the net-leftover unit, PR #257).** `irq-route` is
+in `kernel/scheduler/schedtest.c` (the check is `schedtest.c:247`), not
+`irqtest.c`; only `irq-affinity` lives there. It held its line and the
+periodic source driving it (`arch_test_periodic_irq_start`), and both
+are now released through the defer list. The source's stop is
+registered when it starts, and the line's release when it is requested,
+so the line goes first. With `irq-route`'s count forced to fail,
+`irq-affinity` passes on both architectures. A third sighting, 2026-09-29
+(aarch64), came before the repair.
+
 ## The count
 
 `net-harness` sightings live here, in one place, because six different
@@ -2609,6 +2619,15 @@ cascade has P33's shape before it blamed once: one test's early return
 leaves a tap from the pool of eight, and the tests after it fail for it.
 A candidate unit: the network tests' cleanup on a failed check.
 
+**Attributed and fixed (the net-leftover unit, PR #257).** The expiry
+check asserted an empty table after aging, and a still-draining flood
+takes a freed slot: reproduced exactly with a slowed service and a 50 ms
+pause (`tools/net-leftover-probe.py`). It now asserts that the aging
+reclaimed everything pending before it. A failed network test releases
+everything it made (`selftest_defer`), and the runner fails a test that
+leaves network state, once. With the same forcing on the built tree,
+`net-dns` passes and nothing follows.
+
 ## `timer`: the tick count lagged the clock, 2026-09-29
 
 `SELFTEST: timer ... FAIL: the tick count lagged the clock by more than
@@ -2627,3 +2646,26 @@ boot. The test passed; the harness's 8 s budget failed it, by 39 ms. The
 branch changes only three scheduler tests, which run long before it.
 The rerun passed. First sighting of this test over its budget; the
 `net-accept-race` and `syscall-fuzz` budget entries are the same family.
+
+## `net-hostinput`: no data after a window update, three times
+
+`net-hostinput ... FAIL: check failed: hin_recv(u, IPPROTO_TCP, 40001,
+&sg, HIN_TRIES) && sg.paylen == 50 && sg.seq == iss1 + 101`: the 50
+bytes queued behind a zero window were not seen within `HIN_TRIES` of
+the window update. Three sightings, all x86-64 debug:
+- 2026-09-28, the proc-settle unit's `process_present` mutation boot
+  (line 6438);
+- twice on 2026-09-29, in boots of the net-leftover unit's branch
+  (line 6793, then 6801 as code above it moved).
+
+The branch changes no TCP code. Since that unit, the tests after it
+pass when it fails: `net-hoststate`, `net-flows-fw`, `net-output` and
+`process-user`, which failed with it before. It is the same check each
+time, a timing-dependent one (the persist path after a zero window), so
+it is a candidate for its own unit, not three independent flakes.
+
+## `sched-balance-hysteresis`: moved a thread for a difference of one, second sighting
+
+2026-09-29, local aarch64 debug, in the net-leftover unit's check-counting
+boot, which changes no scheduler code (the first sighting was on
+2026-09-28, x86-64). Recorded.
