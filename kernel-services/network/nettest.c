@@ -2956,7 +2956,7 @@ static void steer_wait(struct steer_state *st, unsigned want)
 bool selftest_net_steer(const char **reason)
 {
     static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    struct fake_nif f;
+    static struct fake_nif f;   /* registered: its release may run after this frame is gone */
     memset(&f, 0, sizeof(f));
     strlcpy(f.nif.name, "steer0", sizeof(f.nif.name));
     memcpy(f.nif.mac, "\x02\x11\x22\x33\x44\x55", 6);
@@ -3139,7 +3139,7 @@ static bool csum_packet_valid(const struct mbuf *m)
 bool selftest_net_csum_offload(const char **reason)
 {
     static const struct netif_ops ops = { .transmit = csum_nif_transmit, .release = csum_nif_release };
-    struct csum_nif c;
+    static struct csum_nif c;   /* registered: its release may run after this frame is gone */
     memset(&c, 0, sizeof(c));
     strlcpy(c.nif.name, "csum0", sizeof(c.nif.name));
     memcpy(c.nif.mac, "\x02\x11\x22\x33\x44\x66", 6);
