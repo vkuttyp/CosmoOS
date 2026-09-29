@@ -184,6 +184,72 @@ static void nt_file_put(struct file *f)
         file_put(f);
 }
 
+/* Hooks and settings a test changes are restored however it returns: a
+ * hook left installed with a pointer into a dead frame is called by the
+ * next packet, and a lossy or black-hole loopback filter left in place
+ * fails every loopback test after it. Changing one registers its
+ * restore; putting it back runs that restore early. */
+static char g_nt_lo_filter, g_nt_rx_hook, g_nt_steering, g_nt_keepalive, g_nt_fin_wait2;   /* keys */
+
+static void nt_restore_lo_filter(void *k) { (void)k; loopback_set_filter(NULL, NULL); }
+static void nt_restore_rx_hook(void *k) { (void)k; netif_set_rx_hook(NULL, NULL); }
+static void nt_restore_steering(void *k) { (void)k; netif_set_steering(true); }
+static void nt_restore_keepalive(void *k) { (void)k; tcp_set_keepalive(0, 0, 0); }
+static void nt_restore_fin_wait2(void *k) { (void)k; tcp_set_fin_wait2(0); }
+
+/* Changed: register the restore once. Put back: run it (or just put back). */
+static void nt_changed(void *key, void (*restore)(void *))
+{
+    selftest_forget(key);   /* a second change keeps one restore */
+    if (!selftest_defer(restore, key))
+        restore(key);       /* no room: restore now rather than leave it */
+}
+
+static void nt_loopback_set_filter(lo_filter_fn fn, void *arg)
+{
+    loopback_set_filter(fn, arg);
+    if (fn != NULL)
+        nt_changed(&g_nt_lo_filter, nt_restore_lo_filter);
+    else
+        selftest_forget(&g_nt_lo_filter);
+}
+
+static void nt_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
+{
+    netif_set_rx_hook(fn, arg);
+    if (fn != NULL)
+        nt_changed(&g_nt_rx_hook, nt_restore_rx_hook);
+    else
+        selftest_forget(&g_nt_rx_hook);
+}
+
+static void nt_netif_set_steering(bool on)
+{
+    netif_set_steering(on);
+    if (!on)
+        nt_changed(&g_nt_steering, nt_restore_steering);
+    else
+        selftest_forget(&g_nt_steering);
+}
+
+static void nt_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt)
+{
+    tcp_set_keepalive(idle_ns, intvl_ns, cnt);
+    if (idle_ns || intvl_ns || cnt)
+        nt_changed(&g_nt_keepalive, nt_restore_keepalive);
+    else
+        selftest_forget(&g_nt_keepalive);
+}
+
+static void nt_tcp_set_fin_wait2(uint64_t ns)
+{
+    tcp_set_fin_wait2(ns);
+    if (ns)
+        nt_changed(&g_nt_fin_wait2, nt_restore_fin_wait2);
+    else
+        selftest_forget(&g_nt_fin_wait2);
+}
+
 static struct netaddr v4addr(uint32_t ip, uint16_t port)
 {
     struct netaddr a;
@@ -521,10 +587,67 @@ struct tcp_server {
     uint32_t bytes_seen;
     uint32_t bytes_echoed;
     int result;
-    bool done;
+    volatile bool done;
     bool echo;               /* echo mode for the harness */
     volatile bool stop;
+    /* For its release (the net-leftover unit): the thread, and the
+     * sockets it is blocked on, published under `lock` so the release can
+     * take a reference and shut them without racing the thread's put. */
+    struct thread *th;
+    spinlock_t lock;
+    struct socket *ls, *c;
 };
+
+static void tcp_server_publish(struct tcp_server *srv, struct socket **slot, struct socket *sock)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
+    *slot = sock;
+    spin_unlock_irqrestore(&srv->lock, s);
+}
+
+/*
+ * Stop a server thread and join it, however its test returned: `stop`,
+ * then shut the read side of whatever it is blocked on -- accept and recv
+ * both return on it -- until it says it is done (5 s at most), then join.
+ * A reference is taken under the lock, so a socket the thread puts
+ * meanwhile is never shut after it has gone.
+ */
+static void tcp_server_release(void *arg)
+{
+    struct tcp_server *srv = arg;
+    srv->stop = true;
+    for (unsigned i = 0; i < 500 && !srv->done; i++) {
+        struct socket *held[2] = { NULL, NULL };
+        arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
+        if (srv->ls) { held[0] = srv->ls; ksock_get(held[0]); }
+        if (srv->c) { held[1] = srv->c; ksock_get(held[1]); }
+        spin_unlock_irqrestore(&srv->lock, s);
+        for (unsigned k = 0; k < 2; k++)
+            if (held[k]) {
+                ksock_shutdown(held[k], COSMO_SHUT_RD);
+                ksock_put(held[k]);
+            }
+        thread_sleep_ms(10);
+    }
+    if (srv->th)
+        thread_join(srv->th);
+    srv->th = NULL;
+}
+
+/* A server's storage outlives any frame (its thread may run after the
+ * test returns), and its release is registered the moment it exists. */
+static bool tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio)
+{
+    spinlock_init(&srv->lock, "tcp-server");
+    srv->th = thread_create(fn, srv, name, prio);
+    if (srv->th == NULL)
+        return false;
+    if (!selftest_defer(tcp_server_release, srv)) {
+        tcp_server_release(srv);
+        return false;
+    }
+    return true;
+}
 
 static uint8_t pattern(uint32_t i)
 {
@@ -536,18 +659,21 @@ static void tcp_sink_thread(void *arg)
 {
     struct tcp_server *srv = arg;
     struct socket *ls, *c;
-    srv->result = nt_ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
+    srv->result = ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
     if (srv->result)
         goto done;
+    tcp_server_publish(srv, &srv->ls, ls);
     srv->result = ksock_bind(ls, &srv->addr);
     if (srv->result == 0)
         srv->result = ksock_listen(ls, 4);
     if (srv->result == 0)
-        srv->result = nt_ksock_accept(ls, &c, NULL);
+        srv->result = ksock_accept(ls, &c, NULL);
     if (srv->result) {
-        nt_ksock_put(ls);
+        tcp_server_publish(srv, &srv->ls, NULL);
+        ksock_put(ls);
         goto done;
     }
+    tcp_server_publish(srv, &srv->c, c);
     uint8_t *buf = kmalloc(8192, 0);
     for (;;) {
         int64_t n = ksock_recvfrom(c, buf, 8192, NULL);
@@ -570,8 +696,10 @@ static void tcp_sink_thread(void *arg)
     /* Wait for the peer's close so both sides run the full sequence. */
     ksock_recvfrom(c, buf, 16, NULL);
     kfree(buf);
-    nt_ksock_put(c);
-    nt_ksock_put(ls);
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
+    ksock_put(c);
+    ksock_put(ls);
 done:
     srv->done = true;
     thread_exit(0);
@@ -579,11 +707,10 @@ done:
 
 static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t bytes, unsigned linger_ms)
 {
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = addr;
-    struct thread *t = thread_create(tcp_sink_thread, &srv, "tcp-sink", 32);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, tcp_sink_thread, "tcp-sink", 32));
     thread_sleep_ms(20);   /* let it listen */
 
     struct socket *c;
@@ -649,6 +776,7 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
         sched_watchdog_kick();
     }
     CHECK(srv.done && srv.result == 0 && srv.bytes_seen == bytes);
+    selftest_release(&srv);   /* joined here: the next call reuses `srv` */
 
     /* The server's child leaves LAST_ACK when the network worker processes
      * our final ACK. The worker runs below this thread's priority and is
@@ -1032,9 +1160,9 @@ bool selftest_net_lo_tcp_loss(const char **reason)
     tcp_get_stats(&t0);
     g_seen = g_dropped = 0;
     g_drop_every = 7;
-    loopback_set_filter(lossy_filter, NULL);
+    nt_loopback_set_filter(lossy_filter, NULL);
     bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6010), 256u * 1024u, 0);
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     if (!ok)
         return false;
     tcp_get_stats(&t1);
@@ -1055,7 +1183,7 @@ static void h_tcp_echo_thread(void *arg)
     struct socket *ls = arg;
     for (;;) {
         struct socket *c;
-        if (nt_ksock_accept(ls, &c, NULL) != 0)
+        if (ksock_accept(ls, &c, NULL) != 0)
             break;
         g_h_tcp_conns++;
         uint8_t *buf = kmalloc(8192, 0);
@@ -1072,13 +1200,13 @@ static void h_tcp_echo_thread(void *arg)
                 break;
         }
         kfree(buf);
-        nt_ksock_put(c);
+        ksock_put(c);
         if (quit) {
             g_h_quit = true;
             break;
         }
     }
-    nt_ksock_put(ls);
+    ksock_put(ls);   /* its own reference: the harness took one for it */
     thread_exit(0);
 }
 
@@ -1097,7 +1225,7 @@ static void h_udp_echo_thread(void *arg)
         ksock_sendto(s, buf, (size_t)n, &from);
     }
     kfree(buf);
-    nt_ksock_put(s);
+    ksock_put(s);   /* its own reference: the harness took one for it */
     thread_exit(0);
 }
 
@@ -1744,14 +1872,25 @@ struct race_client {
     unsigned rounds;
     unsigned failures;
     struct netaddr server;
+    volatile bool stop;      /* its release: finish the round and leave */
+    struct thread *th;
 };
+
+static void race_client_release(void *arg)
+{
+    struct race_client *rc = arg;
+    rc->stop = true;
+    if (rc->th)
+        thread_join(rc->th);
+    rc->th = NULL;
+}
 
 static void race_client_main(void *arg)
 {
     struct race_client *rc = arg;
-    for (unsigned i = 0; i < rc->rounds; i++) {
+    for (unsigned i = 0; i < rc->rounds && !rc->stop; i++) {
         struct socket *c;
-        if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) != 0) {
+        if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) != 0) {
             rc->failures++;
             continue;
         }
@@ -1759,7 +1898,7 @@ static void race_client_main(void *arg)
             rc->failures++;
         else if (i & 1)
             ksock_shutdown(c, 2);   /* FIN before the server accepts */
-        nt_ksock_put(c);               /* close: FIN or, with unread data, RST */
+        ksock_put(c);               /* close: FIN or, with unread data, RST */
     }
 }
 
@@ -1769,11 +1908,18 @@ bool selftest_net_accept_race(const char **reason)
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
     struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0);
     CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 8) == 0);
-    struct race_client rc = { .rounds = 64 };
+    static struct race_client rc;   /* the client may outlive this frame */
+    memset(&rc, 0, sizeof(rc));
+    rc.rounds = 64;
     CHECK(ksock_getsockname(ls, &rc.server) == 0);
 
-    struct thread *t = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    rc.th = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
+    CHECK(rc.th != NULL);
+    if (!selftest_defer(race_client_release, &rc)) {
+        race_client_release(&rc);
+        *reason = "its release list was full";
+        return false;
+    }
     unsigned accepted = 0;
     for (unsigned i = 0; i < rc.rounds; i++) {
         struct socket *c;
@@ -1785,7 +1931,7 @@ bool selftest_net_accept_race(const char **reason)
         accepted++;
         nt_ksock_put(c);
     }
-    thread_join(t);
+    selftest_release(&rc);   /* joined */
     CHECK(rc.failures == 0);
     nt_ksock_put(ls);
     kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
@@ -1993,7 +2139,7 @@ bool selftest_net_tcp_syncache(const char **reason)
     struct netaddr addr = v4addr(INADDR_LOOPBACK_N, 6020);
     CHECK(ksock_bind(ls, &addr) == 0 && ksock_listen(ls, 4) == 0);
     g_guard_port = 6020;
-    loopback_set_filter(drop_rst_filter, NULL);
+    nt_loopback_set_filter(drop_rst_filter, NULL);
     tcp_get_stats(&t0);
     /* 300 SYNs from 300 sources that will never answer. */
     for (unsigned i = 0; i < 300; i++)
@@ -2032,7 +2178,7 @@ bool selftest_net_tcp_syncache(const char **reason)
     struct tcp_stats t2;
     tcp_get_stats(&t2);
     CHECK(t2.syn_bad_ack == t1.syn_bad_ack + 1 && t2.conns_passive == t1.conns_passive);
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     nt_ksock_put(a);
     nt_ksock_put(c);
     nt_ksock_put(ls);
@@ -2047,21 +2193,27 @@ static void holding_server(void *arg)
 {
     struct tcp_server *srv = arg;
     struct socket *ls = NULL, *c = NULL;
-    srv->result = nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls);
+    srv->result = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls);
+    if (srv->result == 0)
+        tcp_server_publish(srv, &srv->ls, ls);
     if (srv->result == 0)
         srv->result = ksock_bind(ls, &srv->addr);
     if (srv->result == 0)
         srv->result = ksock_listen(ls, 4);
     if (srv->result == 0)
-        srv->result = nt_ksock_accept(ls, &c, NULL);
+        srv->result = ksock_accept(ls, &c, NULL);
+    if (srv->result == 0)
+        tcp_server_publish(srv, &srv->c, c);
     while (!srv->stop) {
         thread_sleep_ms(10);
         sched_watchdog_kick();
     }
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
     if (c)
-        nt_ksock_put(c);
+        ksock_put(c);
     if (ls)
-        nt_ksock_put(ls);
+        ksock_put(ls);
     srv->done = true;
     thread_exit(0);
 }
@@ -2090,11 +2242,10 @@ static bool tcp_left_established(void *arg)
 
 bool selftest_net_tcp_rfc5961(const char **reason)
 {
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6021);
-    struct thread *t = thread_create(holding_server, &srv, "rfc5961-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "rfc5961-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     struct socket *c;
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
@@ -2130,8 +2281,7 @@ bool selftest_net_tcp_rfc5961(const char **reason)
     tcp_get_stats(&t1);
     CHECK(t1.rsts_in == t0.rsts_in + 1);
     nt_ksock_put(c);
-    srv.stop = true;   /* its close sends a FIN into the void and is reset */
-    thread_join(t);
+    selftest_release(&srv);   /* its close sends a FIN into the void and is reset */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-tcp-rfc5961: three blind segments challenged, the exact reset accepted");
     return true;
@@ -2195,9 +2345,9 @@ bool selftest_net_tcp_reorder(const char **reason)
     CHECK(lo != NULL);
     g_held = NULL;
     g_reorder_seen = g_reordered = g_pass_one = 0;
-    loopback_set_filter(reorder_filter, lo);
+    nt_loopback_set_filter(reorder_filter, lo);
     bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6022), 512u * 1024u, 0);
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     if (g_held) {
         m_freem(g_held);
         g_held = NULL;
@@ -2231,14 +2381,13 @@ bool selftest_net_tcp_keepalive(const char **reason)
 {
     struct tcp_stats t0, t1;
     /* Keepalive: an idle connection whose peer vanished times out. */
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6023);
-    struct thread *t = thread_create(holding_server, &srv, "keep-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "keep-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     /* The idle timer is armed when a connection is established: shorten it first. */
-    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    nt_tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     struct socket *c;
     struct tcp_stats tb;
     tcp_get_stats(&tb);
@@ -2254,7 +2403,7 @@ bool selftest_net_tcp_keepalive(const char **reason)
     CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
     g_guard_port = 6023;
-    loopback_set_filter(blackhole_filter, NULL);
+    nt_loopback_set_filter(blackhole_filter, NULL);
     struct state_target closed = { .s = c, .want = TCP_CLOSED };
     CHECK(wait_until(tcp_state_is, &closed, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_CLOSED);
@@ -2265,18 +2414,16 @@ bool selftest_net_tcp_keepalive(const char **reason)
     CHECK(t1.timeouts > t0.timeouts);
     uint64_t probes = t1.keepalive_probes - t0.keepalive_probes;
     CHECK(probes >= 3);
-    loopback_set_filter(NULL, NULL);
-    tcp_set_keepalive(0, 0, 0);
+    nt_loopback_set_filter(NULL, NULL);
+    nt_tcp_set_keepalive(0, 0, 0);
     nt_ksock_put(c);
-    srv.stop = true;
-    thread_join(t);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
 
     /* An orphaned FIN_WAIT_2 ends on its own. */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6024);
-    t = thread_create(holding_server, &srv, "fw2-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "fw2-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     tcp_get_stats(&tb);
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
@@ -2284,15 +2431,14 @@ bool selftest_net_tcp_keepalive(const char **reason)
     est.base = tb.conns_passive;   /* the server side established before the close (as above) */
     CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
-    tcp_set_fin_wait2(100ull * 1000000ull);
+    nt_tcp_set_fin_wait2(100ull * 1000000ull);
     nt_ksock_put(c);   /* close: FIN; the server never answers with its own */
     struct tcpc_target fw2 = { .base = t0.fin_wait2_timeouts, .want = 1, .which = TC_FIN_WAIT2_TIMEOUTS };
     CHECK(wait_until(tcp_counter_reached, &fw2, 5000));
     tcp_get_stats(&t1);
-    tcp_set_fin_wait2(0);
+    nt_tcp_set_fin_wait2(0);
     CHECK(t1.fin_wait2_timeouts == t0.fin_wait2_timeouts + 1);
-    srv.stop = true;
-    thread_join(t);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-tcp-keepalive: %llu probes unanswered, one orphaned FIN_WAIT_2 reaped",
           (unsigned long long)probes);
@@ -2426,11 +2572,10 @@ bool selftest_net_icmp_limit(const char **reason)
     /* Path MTU discovery: a "fragmentation needed" quoting a segment in
      * flight lowers the connection's MSS; one quoting nothing in flight is
      * ignored. */
-    struct tcp_server srv;
+    static struct tcp_server srv;   /* its thread may outlive this frame */
     memset(&srv, 0, sizeof(srv));
     srv.addr = v4addr(INADDR_LOOPBACK_N, 6026);
-    struct thread *t = thread_create(holding_server, &srv, "pmtu-srv", SCHED_PRIO_DEFAULT);
-    CHECK(t != NULL);
+    CHECK(tcp_server_start(&srv, holding_server, "pmtu-srv", SCHED_PRIO_DEFAULT));
     thread_sleep_ms(20);
     struct socket *c;
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
@@ -2439,7 +2584,7 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(ksock_getsockname(c, &me) == 0);
     CHECK(c->tcp->mss == TCP_MSS_LO && ipv4_path_mtu(INADDR_LOOPBACK_N) == 65535);
     g_guard_port = 6026;
-    loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
+    nt_loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
     uint8_t big[2000];
     memset(big, 'm', sizeof(big));
     uint32_t nxt0 = c->tcp->snd_nxt;   /* the baseline, taken before the send */
@@ -2521,7 +2666,7 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 1500);   /* recorded once the connection confirmed it */
     CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
-    loopback_set_filter(NULL, NULL);
+    nt_loopback_set_filter(NULL, NULL);
     /* The retransmission delivers the data in 1460-byte segments. Waiting
      * for the retransmit counter says that in one line; `settle(300)` said
      * "probably by now", and 300 ms was the largest sleep in the file. */
@@ -2538,8 +2683,7 @@ bool selftest_net_icmp_limit(const char **reason)
     ipv4_pmtu_flush();
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
     nt_ksock_put(c);
-    srv.stop = true;
-    thread_join(t);
+    selftest_release(&srv);   /* stop, unblock and join */
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-icmp-limit: %llu echo replies sent, %llu suppressed; MSS lowered to 1460 by PMTUD",
           (unsigned long long)sent, (unsigned long long)limited);
@@ -2823,10 +2967,10 @@ bool selftest_net_steer(const char **reason)
     netif_set_ipv4(&f.nif, IPV4_ADDR(10, 9, 0, 1), htonl(0xffffff00u), 0);
     netif_set_up(&f.nif, true);
 
-    struct steer_state st;
+    static struct steer_state st;   /* the hook's: it may outlive this frame */
     memset(&st, 0, sizeof(st));
     st.nif = &f.nif;
-    netif_set_rx_hook(steer_hook, &st);
+    nt_netif_set_rx_hook(steer_hook, &st);
 
     /* The hash is a function of the flow alone: the same frame from any
      * CPU hashes the same, and the eight flows are not all one value. */
@@ -2883,7 +3027,7 @@ bool selftest_net_steer(const char **reason)
         netif_rx_on(&f.nif, m, 1);
         steer_wait(&st, 1);
         CHECK(st.seen == 1 && st.cpu[0] == 2);
-        netif_set_steering(false);
+        nt_netif_set_steering(false);
         memset(&st.cpu, 0, sizeof(st.cpu));
         memset(&st.next, 0, sizeof(st.next));
         st.seen = 0;
@@ -2893,7 +3037,7 @@ bool selftest_net_steer(const char **reason)
             netif_rx(&f.nif, m);
         }
         steer_wait(&st, STEER_FLOWS);
-        netif_set_steering(true);
+        nt_netif_set_steering(true);
         CHECK(st.seen == STEER_FLOWS);
         for (unsigned k = 0; k < STEER_FLOWS; k++)
             CHECK(st.cpu[k] == 1);
@@ -2902,7 +3046,7 @@ bool selftest_net_steer(const char **reason)
     CHECK(netif_cpu_stats(0, &cs) && cs.rx_queued > 0);
     CHECK(!netif_cpu_stats(CONFIG_MAX_CPUS, &cs));
 
-    netif_set_rx_hook(NULL, NULL);
+    nt_netif_set_rx_hook(NULL, NULL);
     nt_netif_unregister(&f.nif);
     netif_put(&f.nif);
     CHECK(f.releases == 1);
@@ -3088,8 +3232,8 @@ static void bench_sink_main(void *arg)
 {
     struct bench_sink *b = arg;
     struct socket *ls, *c;
-    if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0) {
-        if (ksock_bind(ls, &b->addr) == 0 && ksock_listen(ls, 2) == 0 && nt_ksock_accept(ls, &c, NULL) == 0) {
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0) {
+        if (ksock_bind(ls, &b->addr) == 0 && ksock_listen(ls, 2) == 0 && ksock_accept(ls, &c, NULL) == 0) {
             uint8_t *buf = kmalloc(16384, 0);
             for (;;) {
                 int64_t n = ksock_recvfrom(c, buf, 16384, NULL);
@@ -3100,11 +3244,11 @@ static void bench_sink_main(void *arg)
                 b->bytes += (uint32_t)n;
             }
             kfree(buf);
-            nt_ksock_put(c);
+            ksock_put(c);
         } else {
             b->err = -1000;
         }
-        nt_ksock_put(ls);
+        ksock_put(ls);
     } else {
         b->err = -1001;
     }
@@ -3124,7 +3268,7 @@ static void bench_client_main(void *arg)
     struct bench_client *cl = arg;
     struct socket *c;
     uint8_t *buf = kmalloc(16384, 0);
-    if (buf && nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0) {
+    if (buf && ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0) {
         int rc = ksock_connect(c, &cl->addr);
         if (rc == 0) {
             while (cl->sent < cl->bytes) {
@@ -3140,7 +3284,7 @@ static void bench_client_main(void *arg)
         } else {
             cl->err = rc;
         }
-        nt_ksock_put(c);
+        ksock_put(c);
     }
     kfree(buf);
     cl->done = true;
@@ -3252,7 +3396,7 @@ bool selftest_net_bench(const char **reason)
     (void)reason;
     unsigned ncpu = cpu_count();
     for (unsigned steer = 0; steer < 2; steer++) {
-        netif_set_steering(steer != 0);
+        nt_netif_set_steering(steer != 0);
         /* Fresh ports per round: the previous round's connections may still
          * be in TIME_WAIT on theirs. */
         uint16_t base = (uint16_t)(6100 + 40 * steer);
@@ -3262,7 +3406,7 @@ bool selftest_net_bench(const char **reason)
         kinfo("net-bench: steer=%u cpus=%u: tcp 1 flow %u MiB/s, 2 flows %u MiB/s total, udp %u sends/s (%u of %u delivered)",
               steer, ncpu, one, two, pps, delivered, BENCH_UDP_SENDS);
     }
-    netif_set_steering(true);
+    nt_netif_set_steering(true);
     return true;
 }
 
@@ -3443,10 +3587,13 @@ static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_pe
      * returns only after a grace period, so no worker is still inside
      * the hook when the round ends -- a reply from this interface's
      * round cannot be counted into the next interface's. */
-    struct nicbench_hook ctx = { .nif = nif, .gateway = nif->ip4.gateway };
+    static struct nicbench_hook ctx;   /* the hook's: static, so a return before its removal leaves nothing dangling */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.nif = nif;
+    ctx.gateway = nif->ip4.gateway;
     struct nicbench_hook *h = &ctx;
     uint64_t rx0 = nif->stats.rx_packets, drops0 = rxq_drops_total();
-    netif_set_rx_hook(nicbench_rx_hook, h);
+    nt_netif_set_rx_hook(nicbench_rx_hook, h);
     uint64_t t0 = clock_now_ns();
     unsigned sent = 0;
     for (unsigned i = 0; i < NICBENCH_ARP; i++) {
@@ -3488,7 +3635,7 @@ stop:;
     while (__atomic_load_n(&h->replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
         thread_sleep_ms(1);
     uint64_t dt = clock_since_ns(t0);
-    netif_set_rx_hook(NULL, NULL);
+    nt_netif_set_rx_hook(NULL, NULL);
     unsigned got = __atomic_load_n(&h->replies, __ATOMIC_RELAXED);
     kinfo("selftest: net-nicbench: %s: %u ARP requests sent, %u replies counted at the boundary, %llu frames received by the driver, %llu dropped at the receive queue",
           nif->name, sent, got, (unsigned long long)(nif->stats.rx_packets - rx0),
@@ -3931,8 +4078,9 @@ bool selftest_net_rxhook_grace(const char **reason)
 {
     struct netif *lo = netif_loopback();
     CHECK(lo != NULL);
-    struct rxhook_grace_state st = { 0, 0 };
-    netif_set_rx_hook(rxhook_grace_hook, &st);
+    static struct rxhook_grace_state st;   /* the hook's: it may outlive this frame */
+    memset(&st, 0, sizeof(st));
+    nt_netif_set_rx_hook(rxhook_grace_hook, &st);
     struct mbuf *m = m_getcl();
     CHECK(m != NULL);
     m->data = m->buf + 64;
@@ -3947,7 +4095,7 @@ bool selftest_net_rxhook_grace(const char **reason)
     for (unsigned i = 0; i < 1000 && !__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE); i++)
         thread_sleep_ms(1);
     CHECK(__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE) == 1);
-    netif_set_rx_hook(NULL, NULL);
+    nt_netif_set_rx_hook(NULL, NULL);
     /* Returned: the hook has finished, and `st` -- this stack frame --
      * may go. Without the grace period this fails on two or more CPUs. */
     CHECK(__atomic_load_n(&st.exited, __ATOMIC_ACQUIRE) == 1);
@@ -4778,7 +4926,20 @@ static uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id)
 
 /* The test upstream resolver: echo each query as an answer with one A record. */
 static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
-static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; } g_dnsresp;
+static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; struct thread *th; } g_dnsresp;
+
+/* The responder's release (the net-leftover unit): registered after its
+ * thread, so it runs before the sockets it reads are put. */
+static void dns_responder_release(void *arg)
+{
+    (void)arg;
+    g_dnsresp.running = false;
+    if (g_dnsresp.sock)
+        ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);   /* its blocked recv returns */
+    if (g_dnsresp.th)
+        thread_join(g_dnsresp.th);
+    g_dnsresp.th = NULL;
+}
 
 static void dns_responder_main(void *arg)
 {
@@ -4830,8 +4991,13 @@ bool selftest_net_dns(const char **reason)
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.spoof) == 0);
     CHECK(ksock_bind(g_dnsresp.spoof, &sp) == 0);
     g_dnsresp.running = true;
-    struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
-    CHECK(rth != NULL);
+    g_dnsresp.th = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
+    CHECK(g_dnsresp.th != NULL);
+    if (!selftest_defer(dns_responder_release, &g_dnsresp)) {
+        dns_responder_release(&g_dnsresp);
+        *reason = "its release list was full";
+        return false;
+    }
     tapsvc_test_set_upstream(svc, IPV4_ADDR(127, 0, 0, 1), 5300);
 
     uint8_t msg[64], l4[128], frame[256], rx[256];
@@ -4933,17 +5099,22 @@ bool selftest_net_dns(const char **reason)
     CHECK(s1.dns_pending <= 128);                              /* never exceeds the bound */
     CHECK(s1.dns_drop_full > s0.dns_drop_full);                /* the flood was dropped */
 
-    /* (5) expiry reclaims the pending entries. */
+    /* (5) expiry reclaims the pending entries: every entry pending before
+     * the aging is reclaimed by it. The table is not asserted empty after:
+     * the wait above ends at the first drop, and the rest of the flood may
+     * still be queued for the service -- a query that lands after the
+     * aging takes a freed slot, as it should. Asserting emptiness failed
+     * one boot that way, and the probe reproduced it with a 50 ms pause
+     * between the aging and the check (docs/audit/
+     * next-subsystem-net-leftover.md). */
     tapsvc_get_stats(&s0);
     CHECK(s0.dns_pending > 0);
     tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
     tapsvc_get_stats(&s1);
-    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);
+    CHECK(s1.dns_expired - s0.dns_expired >= s0.dns_pending);
 
     /* Tear down the responder and the service. */
-    g_dnsresp.running = false;
-    ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);
-    thread_join(rth);
+    selftest_release(&g_dnsresp);   /* stop, unblock, join */
     nt_ksock_put(g_dnsresp.sock);
     nt_ksock_put(g_dnsresp.spoof);
     g_dnsresp.sock = NULL;
@@ -6219,16 +6390,76 @@ struct hin_conn {
     struct socket *s;
     int rc;
     volatile bool done;
+    struct thread *th;
+    unsigned owner;   /* who puts `s`: HIN_RUNNING, then HIN_DONE (the test) or HIN_ABANDONED (the thread) */
 };
+enum { HIN_RUNNING, HIN_DONE, HIN_ABANDONED };
 
 static void hin_connect_thread(void *arg)
 {
     struct hin_conn *c = arg;
-    c->rc = nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c->s);
+    c->rc = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c->s);
     if (c->rc == 0)
         c->rc = ksock_connect(c->s, &c->peer);
     c->done = true;
+    /* Abandoned by a failed test while it connected: the socket is its to put. */
+    if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED && c->s) {
+        ksock_put(c->s);
+        c->s = NULL;
+    }
     thread_exit(0);
+}
+
+/*
+ * Its release, however the test returned (the net-leftover unit). A
+ * connect waits only for the TCP state to leave SYN_SENT -- nothing but
+ * the retransmit timeout ends it -- so the release gives the thread two
+ * seconds, then either joins it and puts its socket, or lets it go and
+ * leaves the socket to it. One exchange decides, so exactly one side puts.
+ * The storage is static at every call site: the thread may outlive the
+ * frame.
+ */
+static void hin_conn_release(void *arg)
+{
+    struct hin_conn *c = arg;
+    for (unsigned i = 0; i < 200 && !c->done; i++)
+        thread_sleep_ms(10);
+    if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
+        thread_join(c->th);
+        if (c->s)
+            ksock_put(c->s);
+        c->s = NULL;
+    } else {
+        thread_put(c->th);   /* it puts its socket when its connect returns */
+    }
+    c->th = NULL;
+}
+
+static bool hin_conn_start(struct hin_conn *c, const char *name)
+{
+    c->owner = HIN_RUNNING;
+    c->th = thread_create(hin_connect_thread, c, name, SCHED_PRIO_DEFAULT);
+    if (c->th == NULL)
+        return false;
+    if (!selftest_defer(hin_conn_release, c)) {
+        hin_conn_release(c);
+        return false;
+    }
+    return true;
+}
+
+/* The success path, once the test has seen `done`: the thread is joined,
+ * and its socket becomes an ordinary one of the test's, released by its
+ * put or by the runner. */
+static void hin_conn_join(struct hin_conn *c)
+{
+    selftest_forget(c);
+    thread_join(c->th);
+    c->th = NULL;
+    if (c->s != NULL && !selftest_defer(nt_rel_sock, c->s)) {
+        ksock_put(c->s);
+        c->s = NULL;
+    }
 }
 
 static bool hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port)
@@ -6454,7 +6685,7 @@ bool selftest_net_hostinput(const char **reason)
     /* The keepalive clock is not refreshed by a rejected segment: with a
      * short idle time armed at C4's establishment and rejected probes arriving
      * every 40 ms under a rule covering the peer, the probe still fires. */
-    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    nt_tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_TCP, 40004, &sg, HIN_TRIES) && (sg.flags & TH_SYN) && sg.ack == 4001);
@@ -6482,7 +6713,7 @@ bool selftest_net_hostinput(const char **reason)
         thread_sleep_ms(40);
     }
     tcp_get_stats(&ts1);
-    tcp_set_keepalive(0, 0, 0);
+    nt_tcp_set_keepalive(0, 0, 0);
     CHECK(ts1.keepalive_probes > ts0.keepalive_probes);
     CHECK(ts1.quiet_dropped >= ts0.quiet_dropped + 10);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w3) == 0);
@@ -6494,9 +6725,9 @@ bool selftest_net_hostinput(const char **reason)
     struct fw_rule r_w4 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[4], 32, 0, FW_DROP);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_w4) == 0);
     hin_drain(u);
-    struct hin_conn cn = { .peer = v4addr(w[4], 9000) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "hin-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    static struct hin_conn cn;   /* static: the connect thread may outlive this frame */
+    cn = (struct hin_conn){ .peer = v4addr(w[4], 9000) };
+    CHECK(hin_conn_start(&cn, "hin-connect"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* the host's SYN */
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -6508,7 +6739,7 @@ bool selftest_net_hostinput(const char **reason)
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
-    thread_join(ct);
+    hin_conn_join(&cn);
     tcp_get_stats(&ts0);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9001, hport, 5001, hiss + 1, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
@@ -7016,9 +7247,9 @@ bool selftest_net_hoststate(const char **reason)
      * one of its own in flight. */
     hin_drain(u);
     fw_get_stats(&fs0);
-    struct hin_conn cn = { .peer = v4addr(w, 9100) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "hst-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    static struct hin_conn cn;   /* static: the connect thread may outlive this frame */
+    cn = (struct hin_conn){ .peer = v4addr(w, 9100) };
+    CHECK(hin_conn_start(&cn, "hst-connect"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.flags == TH_SYN);
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -7028,7 +7259,7 @@ bool selftest_net_hoststate(const char **reason)
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
-    thread_join(ct);
+    hin_conn_join(&cn);
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new);   /* TCP is not recorded: no lock on that send path */
     static uint8_t big[1200];
@@ -7977,12 +8208,11 @@ bool selftest_net_tcpverdict(const char **reason)
     ipv4_get_stats(&is0);
     static struct hin_conn cn;   /* static: a stuck connect must not write a dead stack */
     cn = (struct hin_conn){ .peer = v4addr(w, 9300) };
-    struct thread *ct = thread_create(hin_connect_thread, &cn, "tv-connect", SCHED_PRIO_DEFAULT);
-    CHECK(ct != NULL);
+    CHECK(hin_conn_start(&cn, "tv-connect"));
     for (unsigned i = 0; i < HIN_TRIES && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == -EPERM);
-    thread_join(ct);
+    hin_conn_join(&cn);
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_refused, ts0.out_refused));
     CHECK(ts1.out_aborted > ts0.out_aborted);
     CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
@@ -7998,8 +8228,7 @@ bool selftest_net_tcpverdict(const char **reason)
     hin_drain(u);
     static struct hin_conn cnw;
     cnw = (struct hin_conn){ .peer = v4addr(w, 9303) };
-    struct thread *ctw = thread_create(hin_connect_thread, &cnw, "tv-connw", SCHED_PRIO_DEFAULT);
-    CHECK(ctw != NULL);
+    CHECK(hin_conn_start(&cnw, "tv-connw"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9303, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* it left */
     struct fw_rule out_w = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9303, FW_DROP, FW_SCOPE_ANY);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_w) == 0);
@@ -8007,7 +8236,7 @@ bool selftest_net_tcpverdict(const char **reason)
     for (unsigned i = 0; i < 250 && !cnw.done; i++)     /* the first RTO is a second */
         thread_sleep_ms(10);
     CHECK(cnw.done && cnw.rc == -EPERM);
-    thread_join(ctw);
+    hin_conn_join(&cnw);
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_aborted, ts0.out_aborted));
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_w) == 0);
     nt_ksock_put(cnw.s);
@@ -8082,8 +8311,7 @@ bool selftest_net_tcpverdict(const char **reason)
     hin_drain(u);
     static struct hin_conn cn2;
     cn2 = (struct hin_conn){ .peer = v4addr(w, 9302) };
-    struct thread *ct2 = thread_create(hin_connect_thread, &cn2, "tv-conn2", SCHED_PRIO_DEFAULT);
-    CHECK(ct2 != NULL);
+    CHECK(hin_conn_start(&cn2, "tv-conn2"));
     CHECK(hin_recv(u, IPPROTO_TCP, 9302, &sg, HIN_TRIES) && sg.flags == TH_SYN);
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
@@ -8093,7 +8321,7 @@ bool selftest_net_tcpverdict(const char **reason)
     for (unsigned i = 0; i < HIN_TRIES && !cn2.done; i++)
         thread_sleep_ms(10);
     CHECK(cn2.done && cn2.rc == 0);
-    thread_join(ct2);
+    hin_conn_join(&cn2);
     ksock_set_nonblock(cn2.s, true);
     /* Two bytes from the peer, in before the rule: they must stay readable. */
     l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5001, hiss + 1, TH_ACK | TH_PSH, 64240, "hi", 2);

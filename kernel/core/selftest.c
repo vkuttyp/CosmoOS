@@ -922,6 +922,22 @@ bool selftest_release(void *arg)
     return true;
 }
 
+bool selftest_forget(void *arg)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_defer_lock);
+    for (unsigned i = g_ndefers; i-- > 0;)
+        if (g_defers[i].arg == arg) {
+            for (unsigned k = i; k + 1 < g_ndefers; k++)
+                g_defers[k] = g_defers[k + 1];
+            g_ndefers--;
+            found = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_defer_lock, s);
+    return found;
+}
+
 /* The runner's side: every release still registered, last first. */
 static unsigned run_defers(void)
 {

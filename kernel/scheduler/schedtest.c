@@ -220,6 +220,30 @@ static void pit_handler(unsigned vector, struct arch_trap_frame *frame, void *ar
     g_pit_hits++;
 }
 
+/*
+ * irq-route's two holdings, released however it returns (the net-leftover
+ * unit). A failed count used to return with the line held and the source
+ * running: irq-affinity's request then got -EBUSY, three times recorded in
+ * docs/testing/flakes.md. The line's release is registered after the
+ * request and the source's stop after the start, so the runner releases
+ * the line first, as the test's own last lines do.
+ */
+static irq_t g_route_gsi;
+static unsigned g_route_source;   /* its address is the source's key */
+
+static void irq_route_stop_source(void *key)
+{
+    (void)key;
+    arch_test_periodic_irq_stop();
+}
+
+static void irq_route_release_line(void *key)
+{
+    irq_t gsi = *(irq_t *)key;
+    (void)irq_disable(gsi);
+    (void)irq_release(gsi);
+}
+
 bool selftest_irq_route(const char **reason)
 {
     int isa = arch_test_periodic_irq_start(200);
@@ -227,17 +251,28 @@ bool selftest_irq_route(const char **reason)
         kinfo("selftest: no periodic ISA source; skipping IRQ routing");
         return true;
     }
+    if (!selftest_defer(irq_route_stop_source, &g_route_source)) {
+        arch_test_periodic_irq_stop();
+        *reason = "its release list was full";
+        return false;
+    }
     unsigned flags;
     irq_t gsi = irq_legacy_to_gsi((unsigned)isa, &flags);
 
     g_pit_hits = 0;
     int rc = irq_request(gsi, pit_handler, NULL, "selftest-pit", flags, raw_cpu_id());   /* a target for the line, not a claim about this thread */
     if (rc == -ENODEV) {
-        arch_test_periodic_irq_stop();
+        selftest_release(&g_route_source);
         kinfo("selftest: no I/O APIC covers GSI %u; skipping IRQ routing", gsi);
         return true;
     }
     CHECK(rc == 0);
+    g_route_gsi = gsi;
+    if (!selftest_defer(irq_route_release_line, &g_route_gsi)) {
+        irq_route_release_line(&g_route_gsi);
+        *reason = "its release list was full";
+        return false;
+    }
     CHECK(irq_request(gsi, pit_handler, NULL, "dup", flags, 0) == -EBUSY);
     CHECK(irq_vector_of(gsi) >= 48);
 
@@ -252,8 +287,9 @@ bool selftest_irq_route(const char **reason)
     CHECK(g_pit_hits == after_mask);
 
     CHECK(irq_release(gsi) == 0);
+    selftest_forget(&g_route_gsi);   /* released, and checked, by the test itself */
     CHECK(irq_vector_of(gsi) == -1);
-    arch_test_periodic_irq_stop();
+    selftest_release(&g_route_source);
     return true;
 }
 

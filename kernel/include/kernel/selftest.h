@@ -204,6 +204,10 @@ void selftest_leftover_reported(uint32_t pid);
  * then fails by name. */
 bool selftest_defer(void (*fn)(void *), void *arg);
 bool selftest_release(void *arg);
+/* Drop the latest release registered for `arg` without running it: for a
+ * test whose own release is what it tests, once that release has
+ * succeeded under its CHECK. */
+bool selftest_forget(void *arg);
 
 /* kernel-services/network/nettest.c: the network the runner compares
  * before and after every test -- interfaces by name, live DHCP/DNS
