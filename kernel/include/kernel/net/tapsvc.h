@@ -49,6 +49,8 @@ void tapsvc_get_stats(struct tapsvc_stats *out);
 /* Reclaim DNS pending entries past their timeout (the net worker calls this
  * from periodic aging; tests drive it with a future timestamp). */
 void tapsvc_dns_age(uint64_t now_ns);
+/* Live services (one per tap that has one): the self-test runner's census. */
+unsigned tapsvc_count(void);
 /* Test hook: point the DNS proxy at a chosen upstream (ip/port network+host). */
 void tapsvc_test_set_upstream(struct tapsvc *svc, uint32_t ip, uint16_t port);
 

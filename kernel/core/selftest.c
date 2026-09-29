@@ -868,6 +868,81 @@ static unsigned leftover_snapshot(uint32_t *pids, unsigned max, unsigned *named)
     return n + (total - seen);   /* beyond the snapshot: counted, not named */
 }
 
+/*
+ * A test's releases run however it returns (the net-leftover unit,
+ * docs/audit/next-subsystem-net-leftover.md). CHECK returns at once, and a
+ * test that released what it made only on its last lines kept all of it on
+ * a failure: one net-dns failure held a tap and a service slot, and eight
+ * tests after it failed for the slot. A release is registered at the
+ * acquisition; the runner runs what is left, last first, after the test.
+ * selftest_release runs one early, where the test used to tear down, so
+ * the success path keeps its order. Locked: a test's own threads put the
+ * sockets they were handed.
+ */
+enum { DEFER_MAX = 64 };
+static struct {
+    void (*fn)(void *);
+    void *arg;
+} g_defers[DEFER_MAX];
+static unsigned g_ndefers;
+static bool g_defer_overflow;
+static spinlock_t g_defer_lock = SPINLOCK_INIT("selftest-defer");
+
+bool selftest_defer(void (*fn)(void *), void *arg)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_defer_lock);
+    bool ok = g_ndefers < DEFER_MAX;
+    if (ok) {
+        g_defers[g_ndefers].fn = fn;
+        g_defers[g_ndefers].arg = arg;
+        g_ndefers++;
+    } else {
+        g_defer_overflow = true;
+    }
+    spin_unlock_irqrestore(&g_defer_lock, s);
+    return ok;
+}
+
+bool selftest_release(void *arg)
+{
+    void (*fn)(void *) = NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&g_defer_lock);
+    for (unsigned i = g_ndefers; i-- > 0;)
+        if (g_defers[i].arg == arg) {
+            fn = g_defers[i].fn;
+            for (unsigned k = i; k + 1 < g_ndefers; k++)
+                g_defers[k] = g_defers[k + 1];
+            g_ndefers--;
+            break;
+        }
+    spin_unlock_irqrestore(&g_defer_lock, s);
+    if (fn == NULL)
+        return false;
+    fn(arg);   /* outside the lock: a release may sleep, join, or register */
+    return true;
+}
+
+/* The runner's side: every release still registered, last first. */
+static unsigned run_defers(void)
+{
+    unsigned ran = 0;
+    for (;;) {
+        void (*fn)(void *) = NULL;
+        void *arg = NULL;
+        arch_irq_state_t s = spin_lock_irqsave(&g_defer_lock);
+        if (g_ndefers > 0) {
+            g_ndefers--;
+            fn = g_defers[g_ndefers].fn;
+            arg = g_defers[g_ndefers].arg;
+        }
+        spin_unlock_irqrestore(&g_defer_lock, s);
+        if (fn == NULL)
+            return ran;
+        fn(arg);
+        ran++;
+    }
+}
+
 unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned max, unsigned *named)
 {
     /* One locked snapshot decides and is returned: the count it reports
@@ -895,7 +970,19 @@ int selftest_run_all(void)
         const char *reason = "";
         sched_watchdog_kick();
         uint64_t t0 = clock_now_ns();
+        /* The network before the test: a test is judged by what it
+         * changed, so a leftover is blamed on the test that left it and
+         * becomes the next test's starting point -- blamed once. */
+        static struct nettest_census net_before, net_after;
+        nettest_census(&net_before);
+        g_defer_overflow = false;
         bool ok = tests[i].fn(&reason);
+        unsigned released = run_defers();
+        if (g_defer_overflow && ok) {
+            ok = false;
+            reason = "its release list overflowed";
+        }
+        (void)released;
         {
             /* Counted in the test's time, so the budget sees the wait. */
             enum { LEFT_NAMED = 16 };
@@ -913,6 +1000,16 @@ int selftest_run_all(void)
             if (nleft != 0 && ok) {
                 ok = false;
                 reason = "a process it spawned outlived it (P33)";
+            }
+        }
+        nettest_census(&net_after);
+        if (!nettest_census_equal(&net_before, &net_after)) {
+            kerror("selftest: %s left the network changed: interfaces [%s] -> [%s], services %u -> %u, sockets %u -> %u",
+                   tests[i].name, net_before.netifs, net_after.netifs, net_before.services, net_after.services,
+                   net_before.sockets, net_after.sockets);
+            if (ok) {
+                ok = false;
+                reason = "it left network state behind";
             }
         }
         uint64_t dt = clock_since_ns(t0);

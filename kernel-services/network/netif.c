@@ -286,6 +286,29 @@ void netif_unregister(struct netif *nif)
     mutex_unlock(&g_unregister_lock);
 }
 
+unsigned netif_names(char *buf, size_t n)
+{
+    unsigned count = 0;
+    size_t off = 0;
+    if (n)
+        buf[0] = '\0';
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    struct netif *it;
+    list_for_each_entry(it, &g_netifs, link) {
+        count++;
+        size_t len = strlen(it->name);
+        if (n && off + len + 2 < n) {
+            if (off)
+                buf[off++] = ',';
+            memcpy(buf + off, it->name, len);
+            off += len;
+            buf[off] = '\0';
+        }
+    }
+    spin_unlock_irqrestore(&g_netif_lock, s);
+    return count;
+}
+
 struct netif *netif_find(const char *name)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
