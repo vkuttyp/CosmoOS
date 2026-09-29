@@ -927,6 +927,59 @@ built.
 **The shell harness** runs `vmctl flows` in every boot and requires its
 counter lines, reading the version-6 snapshot end to end from userland.
 
+## Releases however a test returns (the net-leftover unit)
+
+`CHECK` returns at once. A network test used to release what it made
+only on its last lines, so a failure kept everything: one `net-dns`
+failure held a tap and a DHCP/DNS service slot, and eight tests after it
+failed for the slot (`docs/audit/next-subsystem-net-leftover.md`).
+
+- **Every acquisition registers its release in the same call.** In
+  `nettest.c`, taps, services, sockets (created or accepted),
+  interfaces and files go through `nt_` wrappers (`nt_tap_create`,
+  `nt_ksock_create`, ...), which call `selftest_defer`. The runner runs
+  what a test still holds after it returns, last acquired first.
+- **Every release goes through a wrapper too** (`nt_tap_destroy`,
+  `nt_ksock_put`, ...). It runs the registered release early
+  (`selftest_release`), where the test used to tear down, so the success
+  path keeps its order, and falls back to the plain call for anything
+  not registered.
+- **Hooks and settings** a test changes (the loopback filter, the rx
+  hook, steering, keepalive, FIN_WAIT_2) register their restore when
+  changed and run it when put back. A hook's data is static, never on
+  the frame: `net-steer`, `net-rxhook-grace` and `nicbench` keep theirs
+  static.
+- **A thread's argument outlives its join**, and its release (the
+  test's own stop, whatever unblocks it, and the join) is registered
+  when it is created. That is after what it uses, so it runs first.
+  - `tcp_server` threads publish the sockets they block on under a lock.
+    The release takes a reference and shuts their read side.
+  - `hin_connect` threads block in a connect nothing can interrupt. The
+    release waits 2 s, then joins, or abandons the thread, which puts
+    its socket itself. One exchange decides which side puts.
+  - A thread's own sockets use the plain calls: the thread, not the
+    runner, puts them.
+- **Objects registered with the stack are static**: `net-steer`'s and
+  `net-csum-offload`'s interfaces. A release can run after any frame is
+  gone.
+- **Tests that already release on every exit are unchanged:** the tcp
+  timer, ARP and ND retry, steer injector, bench and tap-ready tests.
+
+**The runner's network check.** After a test's releases have run, the
+runner compares the interfaces (by name), the live DHCP/DNS services
+(`tapsvc_count`) and the socket count with their values before the test
+(`nettest_census`). A test that changed them fails, and the runner logs
+the change: `selftest: <test> left the network changed: interfaces
+[...] -> [...], services a -> b, sockets c -> d`. The next test starts
+from what is left, so a leftover is blamed once.
+
+**Checked by forcing.** `tools/net-leftover-probe.py --count-checks`
+counts each test's passing checks, and `--force last|mid LOG` makes
+every counted test (50) fail at that check, in one boot. On both
+architectures, at both points, exactly the forced tests fail, none
+leaves the network changed, and nothing hangs or panics. The midpoint
+run found the two stack interfaces: `net-steer` hung its boot.
+
 ## Waiting for a property (`wait_until`)
 
 No test in this file sleeps a fixed interval and then counts. `settle(ms)`

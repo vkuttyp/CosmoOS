@@ -3626,6 +3626,27 @@ See [docs/development.md](docs/development.md).
   it. `sched-migrate-refuses`' spinner outranks the reaper and `quiesce`,
   and a rival at the reaper's priority, made runnable on its CPU before
   the migrate, must not run. (PR #255)
+- **A failed test releases what it made, and a test that leaves network
+  state is named once.** One `net-dns` failure used to take eight tests
+  with it. It returned holding its tap and one of the eight DHCP/DNS
+  service slots, `net-multiguest`'s eighth tap then failed for want of a
+  slot and kept its seven, and every later tap open failed.
+  `tools/net-leftover-probe.py` reproduced that exactly.
+  - The expiry check now asserts that the aging reclaimed everything
+    pending before it, not an empty table, which a still-draining flood
+    can refill.
+  - Every acquisition in the network tests registers its release with
+    the runner (`selftest_defer`), and the runner runs what a test still
+    holds, last first. That covers taps, services, sockets, interfaces,
+    files, hooks, settings and threads (whose arguments outlive their
+    join). `irq-route` releases its line and its periodic source the
+    same way.
+  - The runner compares interfaces, services and sockets before and
+    after every test.
+  - Forcing every network test to fail at its last check and at its
+    midpoint, in one boot each: exactly those fail, and nothing is left
+    or hangs. The midpoint run found two interfaces registered on the
+    stack. (PR #257)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

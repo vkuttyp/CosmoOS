@@ -623,7 +623,16 @@ later checks ignore them until they leave the table. The check reads the
 table in one snapshot of up to 64 pids and remembers up to 64: more than
 64 processes left at a test's end would be counted but not remembered,
 and could be blamed again. (The table is empty at the end of every test
-of a clean boot.) Without this, a test that leaked its reference --
+of a clean boot.)
+
+The runner does the same for the network (the net-leftover unit). It
+first runs what the test still holds, releases it registered at each
+acquisition (`selftest_defer`, run last first however the test returned).
+Then it compares the interfaces (by name), the live DHCP/DNS services and
+the socket count with their values before the test. A test that changed
+them fails, and the next test starts from what it left, so a leftover
+is blamed once (`docs/kernel-services/network/testing.md`, "Releases
+however a test returns"). Without this, a test that leaked its reference --
 a `CHECK` that returned before its put -- failed every test after it for
 the same pid, 19 in one boot. *Checked by*: `p33-once`.
 

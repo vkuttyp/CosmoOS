@@ -1,7 +1,63 @@
 # NEXT SUBSYSTEM — a failed network test keeps its taps, and the tests after it fail for them
 
-> **Status: proposed.** Report and probe (`tools/net-leftover-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #257).** As designed, with these specifics:
+>
+> - **The release list:** `selftest_defer`, `selftest_release` (run one
+>   early, by argument) and `selftest_forget` (drop one without running
+>   it, for a test whose own release is under test, as `irq-route`'s
+>   line is). It holds 64 entries per test, is locked, and a full list
+>   fails the test by name.
+> - **Wrappers:** the network tests use `nt_` wrappers, applied by a
+>   word-boundary rename across `nettest.c`: 23 tap creations, 3 service
+>   starts, 53 socket creations and 14 accepts, 9 interface
+>   registrations, and 24 file opens, with their releases.
+> - **Hooks and settings:** the loopback filter, rx hook, steering,
+>   keepalive and FIN_WAIT_2 wrappers register a restore. This was found
+>   in the build: `net-steer`'s hook took a frame pointer, so a failure
+>   left a hook that the next packet would call with a dead frame.
+> - **Threads:**
+>   - `tcp_server` (`tcp_sink_thread`, `holding_server`): published
+>     sockets, and a reference taken for the shutdown.
+>   - `hin_connect`: it abandons after 2 s, and one exchange decides who
+>     puts.
+>   - `race_client`: a stop flag.
+>   - The DNS responder: stopped, unblocked and joined.
+>   - The harness's echo threads put their own references.
+>   - Six tests already released on every exit and are unchanged.
+> - **The runner's census:** `nettest_census` (interfaces by name via
+>   `netif_names`, `tapsvc_count`, `socket_count`), taken before and
+>   after every test.
+> - **`net-dns`:** asserts `s1.dns_expired - s0.dns_expired >=
+>   s0.dns_pending`.
+> - **Forcing:** `tools/net-leftover-probe.py --count-checks` and
+>   `--force last|mid` make every counted test (50) fail at a chosen
+>   check, in one boot.
+>   - At the last check: 50 of 50 forced on x86-64 and 49 of 50 on
+>     aarch64 (`net-icmp-limit` passed fewer checks on that run), with no
+>     leftover, hang or panic.
+>   - At the midpoint: the first run hung both architectures in
+>     `net-steer`. Its interface, like `net-csum-offload`'s, was on the
+>     stack, and the runner's `netif_unregister` touched a dead frame.
+>     Both are now static. The rerun forced 50 of 50 on both
+>     architectures: exactly those failed, nothing was left, and nothing
+>     hung or panicked.
+> - **The sighting's forcing on the built tree** (`--slow-dns 600 --gap
+>   50`): 56 and 58 queries landed in the pause, the aging reclaimed
+>   all 128, `net-dns` passed, and nothing followed.
+> - **Verified:** debug, release, the GIC boot and chaos boots pass on
+>   both architectures, and `host-test` and `analyze` are clean. A debug
+>   x86-64 boot failed `net-hostinput` twice, the third and fourth
+>   sightings of one zero-window check (recorded in `flakes.md`), and the
+>   tests after it passed.
+>
+> Mutations, each alone, with its boot confirmed:
+>
+> | mutation | result |
+> |---|---|
+> | `net-dns`'s aging removed | `net-dns` FAIL at the new check (x86-64) |
+> | `irq-route`'s count made to fail, the sightings' shape | `irq-route` FAIL, and **`irq-affinity` passes** on both architectures (it failed with `-EBUSY` in every sighting) |
+> | a forced `net-dns` whose tap's release is not registered | the runner names it: `net-dns left the network changed: interfaces [lo,eth0,eth1] -> [lo,eth0,eth1,dns]`, and no later test fails for it |
+> | the forced-midpoint run with the stack interfaces (as found) | both boots hung in `net-steer`, the reason for the fix |
 
 ## Problem
 
@@ -118,7 +174,7 @@ checks, `net-hoststate` 112, `net-output` 106. The acquisition sites:
 - P33 (the proc-settle unit) made a leaked *process* fail only the test
   that left it. Network resources have no such rule.
 
-## Current implementation
+## Current implementation (before this unit)
 
 - `CHECK(cond)` returns false from the test function at once.
 - Each network test releases what it made in its last lines, in its own
@@ -211,7 +267,7 @@ leaves something is named.
 
 ## Affected files
 
-The proposed implementation's scope; this PR changes none of them.
+The scope, built in PR #257 (the banner says what was built).
 
 | file | change |
 |---|---|
