@@ -42,7 +42,10 @@ that (a busy CPU scans every `SCHED_BALANCE_TICKS` = 16 ticks = 64 ms),
 B pulls. With a third thread running, one of A's workers is queued
 after a *yield*, so it is not `THREAD_FLAG_PREEMPTED`, and
 `pick_migratable` may take it. If no sample happened to see the 3, the
-test fails. That is the two sightings.
+test fails. That fits the two sightings, and the probe reproduces their
+exact message this way. But the sightings' logs record no pull-time
+loads and no third thread, so it is the mechanism shown to produce the
+failure, not one observed in those two boots.
 
 **2. The test's premise check is fooled by the hint, in nearly every
 boot, so it cannot catch the defect it exists for.**
@@ -67,17 +70,18 @@ held. At the test's first broken sample, it also takes A's lock and
 records what A holds. Its modes:
 
 - **`--force`**: an intruder pinned to A runs ~3 ms right after each of
-  the test's samples, and the next sample waits for the burst to end.
-  So the intruder is runnable between samples and never at one. It is
-  built from the mechanism, not a stopwatch.
+  the test's samples, one burst per sample (a counting semaphore), and
+  the next sample waits for the burst to end. So the intruder is
+  runnable between samples and never at one. It is built from the
+  mechanism, not a stopwatch. The probe fails the window if the
+  intruder cannot be created.
 - **`--threshold1`**: the balancer's scan and its locked re-check both
   lowered to a difference of one.
 - **`--fix`**: the candidate check (§1).
 
-**Pulls at the moment of decision.** Every forced pull (twelve boots:
-the eight in the table's `--force` row, two with the first `--fix`
-described below, and the two `--force --fix`) recorded the same shape,
-on both architectures:
+**Pulls at the moment of decision.** Every forced pull (the eight boots
+in the table's two forced rows) recorded the same shape, on both
+architectures:
 
 ```
 HYPROBE: pull 0: cpu 0 -> 2, locked loads 3 vs 1 (min_gap 2); running hyintr/32; queued [hyst/32,hyst/32]
@@ -89,8 +93,8 @@ movable one.
 | run | boots | premise "broken" (sampled 3 vs 1) | moves | pulls recorded (below a locked two) | verdict |
 |---|---|---|---|---|---|
 | probe, unforced | 4 (2 per arch) | **4 of 4** (and 4 of 4 in the 4 boots before the locked peek was added) | 0 | 0 | ok |
-| `--force` | 8 (4 per arch, across the intruder's three forms: 5 ms bursts, 3 ms, 3 ms with the sample waiting it out) | 8 of 8 | 1 each | 1 each (0), all `3 vs 1` | ok, "not asserted" |
-| `--force --fix` | 2 | x86 yes, **aarch64 no** | 1 each | 1 each (0) | ok |
+| `--force` (the test's own verdict) | 4 (2 per arch) | 2 of 4 | 1 each | 1 each (0), all `3 vs 1` | **FAIL in 2 of 4, one per arch**: "the balancer moved a thread for a difference of one"; the other 2 "not asserted" |
+| `--force --fix` | 4 (2 per arch) | 4 of 4 | 1 each | 1 each (0), all `3 vs 1` | ok, 4 of 4 |
 | `--threshold1` | 2 | aarch64 yes, x86 no | 12 / 2 | 14 (8) / 15 (8) | **aarch64 ok ("not asserted")**, x86 FAIL |
 | `--threshold1 --fix` | 2 | yes | 14 / 12 | 15 (15) / 12 (12) | FAIL, both |
 | `--fix`, unforced | 2 | 2 of 2 | 0 | 0 | ok |
@@ -101,11 +105,18 @@ What the table shows:
   which is CPU 0 or 1. The locked peek a moment later found load 2 each
   time: two `hyst` workers, one running and one queued, and nothing
   else. That is the double count, not a thread.
-- **The flake, reproduced.** In the aarch64 `--force --fix` boot, a
-  worker moved on a locked 3 vs 1, and no sample ever saw the premise
-  broken. That is exactly the sightings' shape: the unmodified test
-  would have failed it. The candidate judged it by the locked loads and
-  passed.
+- **The flake, reproduced.** Under `--force`, the unmodified verdict
+  failed with the sightings' message in 2 of 4 boots, once per
+  architecture. In each, a worker moved on a locked 3 vs 1, and no
+  sample saw the premise broken. The other 2 boots escaped as "not
+  asserted" only because the double count broke the premise; their
+  locked peeks found load 2. The candidate passed all 4 forced boots,
+  each pull at 3 vs 1.
+- **An earlier `--force` was wrong, and its runs are not in the table.**
+  Greptile found it on #260. It signalled each burst with a completion,
+  which latches, so after the first burst the intruder ran nearly
+  continuously and the samples saw it. Those runs showed only that a
+  steady third thread is pulled at 3 vs 1.
 - **The first threshold-of-one table** (an earlier `--fix` that still
   gated on the sampler's moves) showed a second hole. With pulls going
   back and forth between samples, x86 recorded 14 pulls, 8 of them
@@ -166,8 +177,10 @@ written.
 
 ### 3. The record
 
-- **flakes.md:** the entry, explained by this PR, gains "fixed". This
-  PR also records three sightings from the probe's boots.
+- **flakes.md:** this PR adds the explanation to the hysteresis entry
+  and marks it "not yet fixed". The implementation adds "fixed by"
+  when it merges. This PR also records three sightings from the probe's
+  boots.
 - **`docs/kernel/scheduler/testing.md`:** the test's claim and why it
   is judged by the locked record.
 - **`sched_cpu_load`'s comment:** it names the double count, so the

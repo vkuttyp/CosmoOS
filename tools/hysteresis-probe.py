@@ -35,7 +35,8 @@ a transient the sampler cannot see, built from the mechanism rather than
 waited for. --fix is the candidate: the window is judged by the balancer's
 own locked loads at every pull of a worker, not by the sampler. Any pull
 below a locked difference of two fails, whether or not the sampler saw a
-move; with none, every move was the rule obeyed.
+move, and so does a move with no pull recorded; otherwise every move was
+the rule obeyed.
 
 --threshold1 is the defect the test exists to catch: the balancer pulls on
 a difference of one (the scan's `mine + 2` and the locked re-check's
@@ -157,7 +158,7 @@ static struct hyprobe_rec g_hypeek;
 
 /* HYPROBE --force: runnable on A between the sampler's samples, never at one. */
 struct hyprobe_intr {
-    struct completion go;
+    struct semaphore go;        /* counting: one up per burst (a completion latches) */
     unsigned busy, stop, bursts;
 };
 
@@ -165,7 +166,7 @@ __attribute__((unused)) static void hyprobe_intruder(void *arg)
 {
     struct hyprobe_intr *x = arg;
     for (;;) {
-        wait_for_completion(&x->go);
+        semaphore_down(&x->go);
         if (__atomic_load_n(&x->stop, __ATOMIC_ACQUIRE))
             break;
         uint64_t until = clock_now_ns() + 3000000ull;
@@ -191,9 +192,14 @@ def smpt_new_start(force):
 """
     if force:
         s += """    memset(&hyx, 0, sizeof(hyx));
-    completion_init(&hyx.go, "hyprobe-go");
-    if (ok)
+    semaphore_init(&hyx.go, 0, "hyprobe-go");
+    if (ok) {
         hyt = thread_create_on(hyprobe_intruder, &hyx, "hyintr", SCHED_PRIO_DEFAULT, CPUMASK_OF(a_cpu));
+        if (hyt == NULL) {   /* a forced window without its intruder would measure nothing */
+            kerror("HYPROBE: --force: the intruder could not be created");
+            ok = false;
+        }
+    }
 """
     return s + SMPT_OLD_START
 
@@ -213,7 +219,7 @@ SMPT_OLD_LOOPEND = """            thread_sleep_ms(5);
 def smpt_new_loopend(fix):
     s = """            if (hyt != NULL && !__atomic_load_n(&hyx.busy, __ATOMIC_ACQUIRE)) {   /* HYPROBE --force */
                 __atomic_store_n(&hyx.busy, 1u, __ATOMIC_RELEASE);
-                complete(&hyx.go);
+                semaphore_up(&hyx.go);
                 /* Invisible at every sample by construction: the next
                  * sample waits for the burst to end. */
                 while (__atomic_load_n(&hyx.busy, __ATOMIC_ACQUIRE) && !clock_deadline_passed(deadline))
@@ -225,7 +231,7 @@ def smpt_new_loopend(fix):
     sched_balance_stats(&s1);
     if (hyt != NULL) {
         __atomic_store_n(&hyx.stop, 1u, __ATOMIC_RELEASE);
-        complete(&hyx.go);
+        semaphore_up(&hyx.go);
         thread_join(hyt);
     }
     unsigned hy_n = __atomic_load_n(&g_hyprobe_n, __ATOMIC_RELAXED);
@@ -263,17 +269,18 @@ def smpt_new_loopend(fix):
         s += """    /* HYPROBE --fix: judged by the balancer's locked loads at each pull
      * alone. A pull below two fails, whatever the sampler saw; with none,
      * every move was the rule obeyed. */
-    if (hy_below != 0) {
+    if (hy_below != 0 || (moved != 0 && hy_n == 0)) {
         for (unsigned i = 0; i < W; i++)
             if (t[i] != NULL)
                 __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
         for (unsigned i = 0; i < W; i++)
             if (t[i] != NULL)
                 thread_join(t[i]);
-        *reason = "the balancer pulled a thread for a locked difference below two";
+        *reason = hy_below != 0 ? "the balancer pulled a thread for a locked difference below two"
+                                : "a worker moved with no balancer pull recorded";
         return false;
     }
-    bool hy_legit = moved != 0;
+    bool hy_legit = moved != 0;   /* every move had a recorded pull, all at two or more */
 """
     else:
         s += """    bool hy_legit = false;

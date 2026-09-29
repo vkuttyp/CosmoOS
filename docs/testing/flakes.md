@@ -2696,7 +2696,9 @@ third thread made runnable on A between the test's samples, while one of
 A's workers is queued after a yield and so movable. The test judged the
 premise from `sched_cpu_load` samples every ~8 ms, and failed when none
 of them caught the third thread. `tools/hysteresis-probe.py --force`
-reproduced that shape on aarch64.
+reproduced the exact message in 2 of 4 boots, once per architecture.
+This is the mechanism shown to produce the failure; the two sightings'
+logs hold no pull-time record, so it is not observed in them.
 
 The probe also found that the sampled premise "breaks" in nearly every
 boot with nothing extra on A. The unlocked hint counts a yielding CPU
