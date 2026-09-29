@@ -2243,8 +2243,8 @@ wake, and found a second way besides the one above.
   reading "target running cross-waiter, reschedule requested 0".
 - **The equal-priority thread.** A spinner at the waiter's priority on
   the target (`--busy`) also sends none. The count still rose there,
-  from the spinner's own creation: the check can pass without the IPI
-  it asserts.
+  likeliest from the spinner's own creation (the probe does not record
+  which IPI arrived), so the check can pass without the IPI it asserts.
 - **The candidate** waits for the target to read idle and asserts on the
   wake's own record. It passes under the window.
 
