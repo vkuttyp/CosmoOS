@@ -128,6 +128,7 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags)
     t->affinity = CPUMASK_ALL;
     t->cpu = -1;
     t->refcount = 2;
+    t->bal_gap_min = THREAD_BAL_GAP_NONE;
     t->flags = flags;
     list_init(&t->rq_link);
     list_init(&t->all_link);

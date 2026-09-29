@@ -3662,6 +3662,22 @@ See [docs/development.md](docs/development.md).
   `net-zero-window-probe` proves the probe and what follows it: an
   update that acks the probe, one that does not, and one that arrives
   before it is read. No TCP code changed. (PR #259)
+- **`sched-balance-hysteresis` judges the balancer by what it saw.** It
+  failed twice with "the balancer moved a thread for a difference of
+  one", which the balancer cannot do: it re-checks every pull under both
+  locks. The test judged pulls by sampled loads, and that failed two
+  ways.
+  - A third thread briefly runnable on A is a real 3 against 1, a pull
+    the rule allows, and a sampler every ~8 ms can miss it.
+    `tools/hysteresis-probe.py` reproduced the message that way.
+  - The load hint reads a yielding CPU one high mid-switch. So the
+    sampled premise broke in nearly every boot, and a balancer lowered
+    to a threshold of one passed as "not asserted".
+
+  `sched_migrate_from` now records each balancer pull's locked
+  difference on the thread it moves (`bal_pulls`, `bal_gap_min`, debug
+  builds). The test fails any pull below two, and a third thread
+  spinning beside the pair must draw a pull, at two or more. (PR #261)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

@@ -203,6 +203,15 @@ static unsigned g_pick_rotor;
  * comparison against `idle` is an identity test on a pointer and never
  * a dereference: `rq->current` belongs to another CPU and may name a
  * thread that exits a moment later.
+ *
+ * **It can read one high.** `schedule_internal` re-queues a yielding or
+ * preempted `prev` before it dequeues `next` and sets `rq->current`, all
+ * under the queue's lock, so a read inside that window counts `prev`
+ * twice: a CPU running two threads reads 3. A CPU whose threads yield in
+ * a loop does that often. Nothing may assert on this number; a caller
+ * that needs the load decides under the lock (`load_locked`), and a test
+ * that needs what the balancer saw reads it from the pulled thread
+ * (`bal_gap_min`; docs/audit/next-subsystem-hysteresis.md).
  */
 unsigned sched_cpu_load(unsigned cpu)
 {
@@ -595,6 +604,17 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigne
     }
     struct thread *t = g_policy->pick_migratable(&g_rqs[from], CPUMASK_OF(to));
     if (t != NULL) {
+#if CONFIG_DEBUG
+        if (min_gap != 0) {
+            /* A pull that asked for a gap (the balancer; chaos asks for
+             * none): record the gap it was made at, exact under both locks,
+             * on the thread it moved. */
+            int32_t gap = (int32_t)load_locked(&g_rqs[from]) - (int32_t)load_locked(&g_rqs[to]);
+            __atomic_store_n(&t->bal_pulls, t->bal_pulls + 1u, __ATOMIC_RELAXED);
+            if (gap < __atomic_load_n(&t->bal_gap_min, __ATOMIC_RELAXED))
+                __atomic_store_n(&t->bal_gap_min, gap, __ATOMIC_RELAXED);
+        }
+#endif
         migrate_locked(t, from, to);
         *moved = t;
         r = SCHED_MIGRATED;
