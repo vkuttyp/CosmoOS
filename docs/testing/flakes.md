@@ -2275,6 +2275,14 @@ line 492, before any process test and before any address space is torn
 down, so the branch's change is not on its path. The rerun passed. Two
 sightings, both x86-64, one plain and one chaos.
 
+**Attributed and fixed (the placed-running unit, PR #255).** The test
+waited for a non-zero load, which the spinner satisfied while still
+queued. The next read landed in the idle CPU's switch to it:
+`schedule_internal` dequeues the next thread before it sets
+`rq->current`, so an unlocked `sched_cpu_load` read 0 (a documented
+hint). The loop exited on its first read, which is why the failure took
+0 ms. The test now waits for the spinner's own `entered` flag.
+
 ## `quiesce-straggler` and `signal-group`: one sighting each, 2026-09-24
 
 Local, aarch64 debug, both on the balance-pair fix's branch, which changes
@@ -2566,6 +2574,14 @@ treats "its pinned worker is queued" as proof that the spinner holds the
 CPU, but a higher-priority thread briefly on that CPU queues both. Two
 sightings, both x86-64: a candidate for its own unit.
 
+**Attributed and fixed (the placed-running unit, PR #255).** The test's
+spinner had not run yet: it was still queued and pinned, and `affinity`
+is the right answer for that. `tools/placed-running-probe.py` found the
+spinner not yet running at 1-7 of 100 of this test's checks, and at
+98-99 of 100 of `sched-load`'s. The three spinner tests now wait for the
+spinner's own `entered` flag, and this test's spinner outranks the
+reaper and `quiesce` (a spinner they preempt is refused as `preempted`).
+
 ## Four host-networking tests together, twice, 2026-09-28
 
 `net-hostinput`, `net-hoststate`, `net-flows-fw` and `net-output` failed
@@ -2579,3 +2595,35 @@ code either change made. Three of the four are the set recorded under
 host not scheduling the machine's vCPU threads; both boots ran beside
 another boot. Recorded, not attributed.
 
+## `net-dns` timed out, and eight tests after it failed for its tap, 2026-09-29
+
+Local aarch64 debug, in a boot of the placed-running probe (which
+registered three scheduler tests 100 times each and touched no network
+code): `net-dns ... FAIL: check failed: s1.dns_pending == 0 &&
+s1.dns_expired > s0.dns_expired at line 4817 (851 ms)`. Then
+`net-multiguest`, `net-firewall`, `net-input`, `net-hostinput`,
+`net-flows-fw` and `net-output` failed to open `/dev/net/tap`,
+`net-hoststate` failed on `svc != NULL`, and `process-user` failed
+(`status == 0`): 9 of 705. First sighting of `net-dns`'s check. The
+cascade has P33's shape before it blamed once: one test's early return
+leaves a tap from the pool of eight, and the tests after it fail for it.
+A candidate unit: the network tests' cleanup on a failed check.
+
+## `timer`: the tick count lagged the clock, 2026-09-29
+
+`SELFTEST: timer ... FAIL: the tick count lagged the clock by more than
+half the window (89 ms)`, local x86-64 debug, one boot of the
+placed-running unit's branch, beside an aarch64 boot. The test runs
+first in the suite, before any scheduler test the branch changes. The
+rerun passed. It is the host-time family of the old `schedtest.c` lag
+bound (widened in PR #63): the host did not schedule the machine's vCPU
+for part of the window. Recorded, not attributed.
+
+## `net-nicbench` over the per-test budget, 2026-09-29
+
+`self-test net-nicbench took 8039 ms (budget 8000 ms)`, local aarch64
+debug, one boot of the placed-running unit's branch beside an x86-64
+boot. The test passed; the harness's 8 s budget failed it, by 39 ms. The
+branch changes only three scheduler tests, which run long before it.
+The rerun passed. First sighting of this test over its budget; the
+`net-accept-race` and `syscall-fuzz` budget entries are the same family.

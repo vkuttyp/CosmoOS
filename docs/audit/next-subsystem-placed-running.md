@@ -1,7 +1,39 @@
 # NEXT SUBSYSTEM — three scheduler tests assume a spinner is running when it has only been placed
 
-> **Status: proposed.** Report and probe (`tools/placed-running-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #255).** As designed, with these specifics:
+>
+> - `struct mig_spinner` gained `entered`, set as `mig_spinner_main`'s
+>   first act, and `wait_spinner_entered` waits for it (2 s bound).
+>   `sched-load` fails with "the compute-bound thread never ran", and the
+>   migrate tests with "the spinner never ran", if it never does.
+> - `sched-migrate-refuses`' spinner runs at `SCHED_PRIO_DEFAULT - 16`.
+>   The adversary is part of the test on every boot, not only a
+>   mutation: `mig-rival`, at the reaper's priority (`DEFAULT - 8`),
+>   pinned to the spinner's CPU, is created just before the spinner's
+>   migrate, and must not run within 20 ms. Release builds run it too.
+> - **A correction, made in "What remains" and "Tests" below:** a spinner
+>   that a higher-priority thread has preempted is refused as
+>   **`preempted`**, not `affinity`. `sched_migrate` checks the PREEMPTED flag first. The
+>   sightings' `affinity` is the other way a spinner isn't running:
+>   never having run, which the wait now ends. With the rival, the test
+>   would have failed as `preempted`; the mutation below shows it.
+> - A spinner that never runs is not joined (`thread_join` has no
+>   deadline): `spinner_finish` marks it abandoned, stops it, drops its
+>   reference, and it frees its own storage when it first runs. One that
+>   ran is joined and freed. Every spinner in the three tests is
+>   allocated, never on the test's stack, and goes through
+>   `spinner_finish`: the three main spinners, and
+>   `sched-migrate-refuses`' second (`mig-spin2`, the one that preempts
+>   its worker), which is joined only if it has entered.
+> - Measured: debug, release, the GIC boot and chaos boots pass on both
+>   architectures. `host-test` and `analyze` are clean.
+>
+> Mutations, each alone, with its boot confirmed:
+>
+> | mutation | result |
+> |---|---|
+> | the refused spinner back at `DEFAULT - 1` | `sched-migrate-refuses` FAIL: "the running spinner: preempted (a thread at the reaper's priority had taken its CPU)", and "a thread at the reaper's priority took the spinner's CPU" (x86-64 and aarch64) |
+> | `wait_spinner_entered` without its wait | all three FAIL, 0 ms: "the compute-bound thread never ran", and "the spinner never ran" twice |
 
 ## Problem
 
@@ -78,8 +110,11 @@ in what a preempted spinner does to them:
 - **`sched-load`**: still passes. The preempting thread is current, so
   the load is at least 1.
 - **`sched-migrate`**: still passes. The worker stays queued and is moved.
-- **`sched-migrate-refuses`**: fails. The spinner is queued, and
-  `AFFINITY` is correct.
+- **`sched-migrate-refuses`**: fails. The spinner has been taken off its
+  CPU, and `sched_migrate` refuses it as `PREEMPTED`. (As built, the
+  mutation that lowered the spinner's priority measured that answer; an
+  earlier draft of this report said `AFFINITY`, which is the answer for
+  a spinner that has never run.)
 
 Not seen in 600 checks, but possible, and only in the last test.
 
@@ -103,7 +138,7 @@ failure).
   spinner 98–99% of the time. It is testing "a placed thread counts",
   not the "running" its comment says.
 
-## Current implementation
+## Current implementation (before this unit)
 
 - `mig_spinner_main` spins until `stop`. Nothing records that it ran.
 - `sched_load_pinned` waits for a non-zero `sched_cpu_load(busy)`.
@@ -153,20 +188,30 @@ preemption (above), so their spinners keep their priorities:
 **Correctness.** Three tests wait for the state they assert. No kernel
 change.
 
-**Concurrency.** The spinner's flag is a release store, read with
-acquire. Nothing else changes.
+**Concurrency.** The spinner's `entered` flag is a release store, read
+with acquire. As built, an abandoned spinner's `abandoned` flag is
+stored (release) before `stop`, and read (acquire) after the spinner
+sees `stop`, so the abandon is always seen. Nothing else changes.
 
-**Ownership and lifetime.** None.
+**Ownership and lifetime.** As built, every spinner's storage in the
+three tests is allocated, never on the test's stack: the three main
+spinners and `mig-spin2`, each through `spinner_finish`. A spinner that ran is joined, and
+the test frees its storage. A spinner that never ran is not joined: the
+test marks it abandoned, stops it and drops its reference, and never
+touches the storage again. The spinner frees it when it first runs and
+sees `stop`. Exactly one of the two frees it.
 
 **Security.** None.
 
-**Failure.** A spinner that never runs is reported as that.
+**Failure.** A spinner that never runs is reported as that, in about
+2 s, and the boot carries on: no path joins a spinner that has not said
+it ran (`thread_join` has no deadline).
 
 **Performance.** One short wait per test, normally a millisecond or two.
 
 ## Affected files
 
-The proposed implementation's scope; this PR changes none of them.
+The scope, built in PR #255 (the banner above says what was built).
 
 | file | change |
 |---|---|
@@ -191,7 +236,7 @@ Each mutation alone, with its boot confirmed:
 - the migrate tests without the wait: the probe's log again;
 - **the refused spinner back at `DEFAULT - 1`, with a thread of the
   reaper's priority made runnable on its CPU just before the migrate:**
-  `sched-migrate-refuses` must fail with "affinity", and pass at
+  `sched-migrate-refuses` must fail with "preempted", and pass at
   `DEFAULT - 16`. The competing thread is built for the test, so the
   preemption happens on every run.
 
