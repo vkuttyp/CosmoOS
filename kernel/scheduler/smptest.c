@@ -1309,10 +1309,22 @@ bool selftest_sched_balance_pair(const char **reason)
  * nowhere else, and no other CPU can take them whatever it sees. The
  * difference between A and B is one.
  *
- * The claim: nothing moves, for the whole window, and the proof is the
- * workers' own CPUs rather than a counter anyone else can touch. With
- * the threshold at one, B sees 2 against its 1 and takes a thread
- * immediately, which shows up as a worker changing CPU.
+ * The claim: the balancer never pulls one of these workers at a locked
+ * difference below two. The evidence is the pull itself: sched_migrate_from
+ * records, on the thread it moves, the difference it saw under both
+ * locks (`bal_pulls`, `bal_gap_min`). With the threshold at one, B sees 2
+ * against its 1 and pulls at once, at a recorded difference of one.
+ *
+ * It is not the workers' sampled CPUs, nor sampled loads. A thread made
+ * runnable on A for a few milliseconds is a real 3 against 1 and a pull
+ * the rule allows, and a sampler every few ticks can miss it; and the
+ * load hint reads a yielding CPU one high (sched_cpu_load), so a sampled
+ * "premise" broke in nearly every boot and hid the very pulls this test
+ * is for (docs/audit/next-subsystem-hysteresis.md). Sampled moves are
+ * logged, and a move with no recorded pull fails.
+ *
+ * After the quiet window, a third thread on A makes that 3 against 1
+ * certain: it must be pulled, at a recorded difference of two or more.
  *
  * The workers **yield**, and they have to. Two compute-bound threads
  * sharing a CPU alternate by preemption, so the one in the queue always
@@ -1328,6 +1340,21 @@ bool selftest_sched_balance_pair(const char **reason)
  * where I want it, then let it move" is the order that works
  * (docs/audit/next-subsystem-load-balancer.md, the found gap).
  */
+#if CONFIG_SCHED_BALANCE && CONFIG_DEBUG && !CONFIG_SCHED_CHAOS
+/* A third runnable thread on A, for as long as the test says. */
+struct hyst_intruder {
+    unsigned stop;
+};
+
+static void hyst_intruder_main(void *arg)
+{
+    struct hyst_intruder *x = arg;
+    while (!__atomic_load_n(&x->stop, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    thread_exit(0);
+}
+#endif
+
 static bool sched_balance_hysteresis_pinned(const char **reason)
 {
     unsigned n = cpu_count();
@@ -1348,7 +1375,15 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         kinfo("selftest: sched-balance-hysteresis: fewer than three CPUs; skipping");
         return true;
     }
-#if CONFIG_SCHED_CHAOS
+#if !CONFIG_DEBUG
+    /* The evidence is the pull record sched_migrate_from keeps on the
+     * thread it moves, which only debug builds write. */
+    (void)a_cpu;
+    (void)b_cpu;
+    (void)reason;
+    kinfo("selftest: sched-balance-hysteresis: no pull record in this build; skipping");
+    return true;
+#elif CONFIG_SCHED_CHAOS
     /* The evidence here is a worker changing CPU, and under the chaos
      * migrator a worker changes CPU because the adversary moved it for
      * no reason -- which is what the adversary is for. The test cannot
@@ -1390,7 +1425,14 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         else
             wait_for_completion(&w[i].started);
     }
+    /* Each worker's record of the balancer's pulls, from before it can be
+     * pulled at all: pinned, nothing can take it. */
+    uint32_t p0[W] = { 0, 0, 0 };
     if (ok) {
+        for (unsigned i = 0; i < W; i++) {
+            __atomic_store_n(&t[i]->bal_gap_min, THREAD_BAL_GAP_NONE, __ATOMIC_RELAXED);
+            p0[i] = __atomic_load_n(&t[i]->bal_pulls, __ATOMIC_RELAXED);
+        }
         /* Now let them move between A and B -- and only those two. */
         for (unsigned i = 0; i < W; i++)
             thread_set_affinity(t[i], both);
@@ -1400,12 +1442,14 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
 
     struct sched_balance_stats s0, s1;
     sched_balance_stats(&s0);
-    unsigned moved = 0, load_a = 0, load_b = 0;
-    bool premise_broken = false;
+    unsigned moved = 0, load_a = 0, load_b = 0, pulls = 0, pulls_intr = 0;
+    int32_t gap_min = THREAD_BAL_GAP_NONE, gap_min_intr = THREAD_BAL_GAP_NONE;
+    bool intr_made = false;
     if (ok) {
-        /* Sample where each worker is running. The first sample is taken
-         * after a settle so that a thread still reaching its first CPU
-         * is not counted as a move. */
+        /* Where each worker runs, for the log. The first sample is taken
+         * after a settle so that a thread still reaching its first CPU is
+         * not counted as a move. The loads are a hint and are not
+         * asserted on: see sched_cpu_load. */
         thread_sleep_ms(50);
         load_a = sched_cpu_load(a_cpu);
         load_b = sched_cpu_load(b_cpu);
@@ -1414,23 +1458,6 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
             seen[i] = __atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED);
         uint64_t deadline = clock_deadline_ns(500ull * 1000000ull);
         while (!clock_deadline_passed(deadline)) {
-            /*
-             * The test's premise is that the only difference in reach is
-             * the one it built, which is one. Any other thread in the
-             * kernel becoming runnable on A makes A's load 3 against B's
-             * 1, and then a pull is the balancer obeying the rule rather
-             * than breaking it. CI's slower host showed exactly that: one
-             * move in 239 scans, on a machine that was not as quiet as
-             * this one.
-             *
-             * So the premise is checked rather than assumed. If the gap
-             * is ever seen at two or more, the window did not hold the
-             * test's conditions and it reports that instead of calling a
-             * legitimate pull a violation.
-             */
-            unsigned la = sched_cpu_load(a_cpu), lb = sched_cpu_load(b_cpu);
-            if (la > lb + 1 || lb > la + 1)
-                premise_broken = true;
             for (unsigned i = 0; i < W; i++) {
                 unsigned c = __atomic_load_n(&w[i].cpu, __ATOMIC_RELAXED);
                 if (c != seen[i]) {
@@ -1439,6 +1466,48 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
                 }
             }
             thread_sleep_ms(5);
+        }
+        /* The quiet window's verdict comes from the pulls themselves. */
+        for (unsigned i = 0; i < W; i++) {
+            uint32_t p = __atomic_load_n(&t[i]->bal_pulls, __ATOMIC_RELAXED);
+            int32_t g = __atomic_exchange_n(&t[i]->bal_gap_min, THREAD_BAL_GAP_NONE, __ATOMIC_RELAXED);
+            pulls += p - p0[i];
+            p0[i] = p;
+            if (g < gap_min)
+                gap_min = g;
+        }
+
+        /*
+         * Then a third thread on A, made certain: a steady 3 against 1.
+         * That is a pull the rule allows, and it is what the test used to
+         * call a violation when a transient third thread fell between its
+         * samples. It must be pulled, at a locked difference of two or
+         * more. B is busy, so it scans every SCHED_BALANCE_TICKS; the
+         * bound is about fifteen scans.
+         */
+        static struct hyst_intruder hi;
+        __atomic_store_n(&hi.stop, 0u, __ATOMIC_RELAXED);
+        struct thread *it = thread_create_on(hyst_intruder_main, &hi, "hyst-intr", SCHED_PRIO_DEFAULT,
+                                             CPUMASK_OF(a_cpu));
+        intr_made = it != NULL;
+        if (intr_made) {
+            uint64_t until = clock_deadline_ns(1000ull * 1000000ull);
+            while (!clock_deadline_passed(until)) {
+                uint32_t sum = 0;
+                for (unsigned i = 0; i < W; i++)
+                    sum += __atomic_load_n(&t[i]->bal_pulls, __ATOMIC_RELAXED) - p0[i];
+                if (sum != 0)
+                    break;
+                thread_sleep_ms(5);
+            }
+            __atomic_store_n(&hi.stop, 1u, __ATOMIC_RELEASE);
+            thread_join(it);
+            for (unsigned i = 0; i < W; i++) {
+                int32_t g = __atomic_load_n(&t[i]->bal_gap_min, __ATOMIC_RELAXED);
+                pulls_intr += __atomic_load_n(&t[i]->bal_pulls, __ATOMIC_RELAXED) - p0[i];
+                if (g < gap_min_intr)
+                    gap_min_intr = g;
+            }
         }
     }
     sched_balance_stats(&s1);
@@ -1462,30 +1531,40 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         *reason = "the balancer did not look at all during the window";
         return false;
     }
-    if (moved != 0 && premise_broken) {
-        /* Not a pass and not a failure: the machine did not hold still
-         * enough for the question to be asked. Say so, with the numbers,
-         * rather than reporting a legitimate pull as a violation. */
-        kinfo("selftest: sched-balance-hysteresis: %u move(s), but the difference between cpu %u and cpu %u reached two "
-              "during the window (another thread became runnable there), so the difference of one was not the only one; "
-              "not asserted",
-              moved, a_cpu, b_cpu);
-        CHECK(threads_settle(before));
-        return true;
+    if (pulls != 0 && gap_min < 2) {
+        kerror("selftest: sched-balance-hysteresis: %u pull(s) of three threads held two-to-one across cpu %u and cpu %u, "
+               "the smallest at a locked difference of %d",
+               pulls, a_cpu, b_cpu, (int)gap_min);
+        *reason = "the balancer pulled a thread for a locked difference below two";
+        return false;
     }
-    if (moved != 0) {
-        kerror("selftest: sched-balance-hysteresis: %u moves of three threads held two-to-one across cpu %u and cpu %u, in %llu scans, "
-               "with the difference never above one",
-               moved, a_cpu, b_cpu, (unsigned long long)scans);
-        *reason = "the balancer moved a thread for a difference of one";
+    if (moved != 0 && pulls == 0) {
+        *reason = "a worker moved with no balancer pull recorded";
+        return false;
+    }
+    if (!intr_made) {
+        *reason = "the intruder could not be created";
+        return false;
+    }
+    if (pulls_intr == 0) {
+        *reason = "a steady three against one on cpu A drew no pull within a second";
+        return false;
+    }
+    if (gap_min_intr < 2) {
+        kerror("selftest: sched-balance-hysteresis: with a third thread on cpu %u, a pull at a locked difference of %d",
+               a_cpu, (int)gap_min_intr);
+        *reason = "the balancer pulled a thread for a locked difference below two";
         return false;
     }
     CHECK(threads_settle(before));
-    kinfo("selftest: sched-balance-hysteresis: two threads on cpu %u (load %u) against one on cpu %u (load %u) stayed put "
-          "through %llu scans and %llu pulls elsewhere",
-          a_cpu, load_a, b_cpu, load_b, (unsigned long long)scans, (unsigned long long)(s1.pulls - s0.pulls));
+    kinfo("selftest: sched-balance-hysteresis: two threads on cpu %u (load %u) against one on cpu %u (load %u): "
+          "%u pull(s) and %u sampled move(s) in %llu scans%s; a third thread on cpu %u drew %u pull(s), the smallest "
+          "at a locked difference of %d",
+          a_cpu, load_a, b_cpu, load_b, pulls, moved, (unsigned long long)scans,
+          pulls != 0 ? " (each at a locked difference of two or more: another thread was runnable there)" : "",
+          a_cpu, pulls_intr, (int)gap_min_intr);
     return true;
-#endif /* CONFIG_SCHED_CHAOS */
+#endif /* !CONFIG_DEBUG, CONFIG_SCHED_CHAOS */
 #endif /* CONFIG_SCHED_BALANCE */
 }
 

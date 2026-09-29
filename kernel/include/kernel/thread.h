@@ -50,6 +50,9 @@ enum thread_state {
  * runs again (S26). Set and cleared under the run-queue lock. */
 #define THREAD_FLAG_PREEMPTED (1u << 2)
 
+/* `bal_gap_min` before any pull: above every gap a pull can be made at. */
+#define THREAD_BAL_GAP_NONE INT32_MAX
+
 struct waitqueue;
 struct process;
 
@@ -77,6 +80,12 @@ struct thread {
     uint64_t last_start_ns;             /* (rq) */
     uint64_t ready_since_ns;            /* (rq) when it was last enqueued: the stall detector's stamp (debug) */
     uint64_t switches;                  /* (rq) times switched in */
+    /* (both rqs) the balancer's pulls of this thread, and the smallest locked
+     * load difference any of them was made at: sched-balance-hysteresis's
+     * evidence, written in debug builds only
+     * (docs/audit/next-subsystem-hysteresis.md). */
+    uint32_t bal_pulls;
+    int32_t bal_gap_min;                /* THREAD_BAL_GAP_NONE until a pull */
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */
     struct waitqueue *waiting_on;       /* diagnostics */
