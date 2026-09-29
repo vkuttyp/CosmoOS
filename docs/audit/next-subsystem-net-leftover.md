@@ -32,7 +32,10 @@
 >   is a leftover. An abandoned `hin_connect` puts its socket when its
 >   connect times out, possibly during a later test, which must not be
 >   failed for it. Interface counts are compared too, so a name that did
->   not fit the 512-byte buffer still counts.
+>   not fit the 512-byte buffer still counts. The sockets abandoned
+>   connect threads still hold are left out of the count
+>   (`g_nt_abandoned`), so one closing during a later test can't hide a
+>   socket that test leaves.
 > - **Interface references:** after review, a fake interface's creator
 >   reference, a `netif_find` reference and `net-csum-offload`'s kept
 >   packet are released however the test returns, through static
@@ -69,7 +72,7 @@
 > |---|---|
 > | `net-dns`'s aging removed | `net-dns` FAIL at the new check (x86-64) |
 > | `irq-route`'s count made to fail, the sightings' shape | `irq-route` FAIL, and **`irq-affinity` passes** on both architectures (it failed with `-EBUSY` in every sighting) |
-> | a forced `net-dns` whose tap's release is not registered | the runner names it: `net-dns left the network changed: interfaces [lo,eth0,eth1] -> [lo,eth0,eth1,dns]`, and no later test fails for it |
+> | a forced `net-dns` whose tap's release is not registered | the runner names it: `net-dns left the network changed: interfaces (3) [lo,eth0,eth1] -> (4) [lo,eth0,eth1,dns]`, and no later test fails for it |
 > | the forced-midpoint run with the stack interfaces (as found) | both boots hung in `net-steer`, the reason for the fix |
 
 ## Problem

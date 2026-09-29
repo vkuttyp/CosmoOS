@@ -73,11 +73,21 @@
  * the plain call for anything not registered. What a test still holds when
  * it returns, the runner releases, last acquired first.
  */
+/* Sockets abandoned connect threads still hold (the census leaves them
+ * out: they close whenever their connect times out, maybe during a later
+ * test, and must neither blame that test nor hide a socket it leaves). */
+static unsigned g_nt_abandoned;
+
 void nettest_census(struct nettest_census *out)
 {
     out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
     out->services = tapsvc_count();
-    out->sockets = socket_count();
+    /* The abandoned connects' sockets are read first and subtracted: each
+     * thread puts its socket before it leaves the count, so this can read
+     * one low, never one high. */
+    unsigned abandoned = __atomic_load_n(&g_nt_abandoned, __ATOMIC_ACQUIRE);
+    unsigned sockets = socket_count();
+    out->sockets = sockets > abandoned ? sockets - abandoned : 0;
 }
 
 /* Is interface `name` (length n) among `list`'s comma-separated names? */
@@ -6491,9 +6501,15 @@ static void hin_connect_thread(void *arg)
         c->rc = ksock_connect(c->s, &c->peer);
     c->done = true;
     /* Abandoned by a failed test while it connected: the socket is its to put. */
-    if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED && c->s) {
-        ksock_put(c->s);
-        c->s = NULL;
+    if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED) {
+        if (c->s) {
+            ksock_put(c->s);
+            c->s = NULL;
+        }
+        /* After the put: a census between the two reads a count already
+         * lower, never one that still includes a socket no longer
+         * excused. */
+        __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);
     }
     thread_exit(0);
 }
@@ -6512,7 +6528,9 @@ static void hin_conn_release(void *arg)
     struct hin_conn *c = arg;
     for (unsigned i = 0; i < 200 && !c->done; i++)
         thread_sleep_ms(10);
+    __atomic_fetch_add(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);   /* before the exchange: the thread may decrement at once */
     if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
+        __atomic_fetch_sub(&g_nt_abandoned, 1u, __ATOMIC_ACQ_REL);   /* not abandoned after all */
         thread_join(c->th);
         if (c->s)
             ksock_put(c->s);

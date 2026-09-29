@@ -981,7 +981,9 @@ runner logs the change: `selftest: <test> left the network changed:
 interfaces (n) [...] -> (m) [...], services a -> b, sockets c -> d`.
 Fewer is never a leftover: an abandoned `hin_connect` puts its socket
 when its connect finally times out, which can happen during a later test,
-and that later test has left nothing. Interfaces are compared by count as
+and that later test has left nothing. Those sockets are also left out of
+the count while they are held (`g_nt_abandoned`), so one closing can't
+hide a socket the later test leaves. Interfaces are compared by count as
 well as by name, so a name that did not fit the buffer still counts. The
 next test starts from what is left, so a leftover is blamed once.
 
