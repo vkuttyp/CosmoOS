@@ -286,9 +286,12 @@ imbalance. Two is also the smallest difference that means a thread is
 is at load 1, so its thread is never dragged to an idle CPU to arrive
 cold and do the work it was already doing. One thread moves per look,
 which shrinks the difference by two. Check: `sched-balance-hysteresis`
-(two threads on one CPU against one on another, both movable, nothing
-moves through hundreds of scans; sixteen moves when the threshold is
-lowered to one).
+(two threads on one CPU against one on another, both movable: every
+balancer pull of them is recorded, under both locks, at a difference of
+two or more, and a third thread on the first CPU is pulled at two; with
+the threshold lowered to one, 10 to 13 pulls at a difference of one;
+with only the locked re-check lowered, pulls at one in 2 of 6 boots,
+since the scan must first be fooled by the hint reading one high).
 
 **S29. Load counts the thread a CPU is running.** `sched_cpu_load(c)` is
 `nr_running` plus the running thread unless it is that CPU's idle
@@ -299,7 +302,12 @@ was reading. The load is read without the target's run-queue lock and is
 a **hint**: it compares `rq->current` against `rq->idle` by identity and
 never dereferences it, because that thread belongs to another CPU. Every
 decision taken from it is re-made under both locks by
-`sched_migrate_from`. Check: `sched-load` (a CPU running one thread
+`sched_migrate_from`. **It can read one high**: `schedule_internal`
+re-queues `prev` before it sets `rq->current = next`, so a read inside
+that window counts `prev` twice, and a CPU whose threads yield in a loop
+does it often. Nothing may assert on it; a test that needs what the
+balancer saw reads `bal_gap_min` from the pulled thread
+(`docs/audit/next-subsystem-hysteresis.md`). Check: `sched-load` (a CPU running one thread
 reports 1 while an idle one reports 0, and placement prefers the idle
 one; both halves fail when the load is `nr_running` again).
 

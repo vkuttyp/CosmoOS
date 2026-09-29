@@ -310,7 +310,12 @@ The load is read without the target queue's lock. It is a hint: it
 compares `rq->current` with `rq->idle` by identity and never
 dereferences it, and every decision taken from it is re-made under both
 locks inside `sched_migrate_from`, which also chooses the thread. A
-stale reading costs a scan.
+stale reading costs a scan. It can also read one high: `schedule_internal`
+re-queues `prev` before it sets `rq->current`, so a read inside the
+switch counts `prev` twice (S29). The re-check absorbs that too.
+`sched_migrate_from` records each balancer pull's locked difference on
+the thread it moves (`bal_pulls`, `bal_gap_min`, debug builds), which is
+what `sched-balance-hysteresis` judges by.
 
 **A pull, from two moments** (S27). The CPU that decides is the CPU that
 receives. An idle CPU with an empty queue looks on every tick -- it has

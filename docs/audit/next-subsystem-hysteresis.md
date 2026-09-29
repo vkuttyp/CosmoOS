@@ -1,7 +1,31 @@
 # NEXT SUBSYSTEM — sched-balance-hysteresis judges pulls by a hint that counts a yielding CPU twice
 
-> **Status: proposed.** Report and probe (`tools/hysteresis-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #261).** As designed, with these specifics:
+>
+> - **The fields exist in every build and are written only in debug**,
+>   as `ready_since_ns` is. `bal_gap_min` starts at `THREAD_BAL_GAP_NONE`
+>   (`INT32_MAX`, set in `thread_alloc`).
+> - **The test skips in a non-debug build,** where nothing writes the
+>   record, as it already skipped under the chaos migrator and with the
+>   balancer compiled out. Release boots run no self-tests.
+> - **The quiet window's gap is taken and reset in one step**
+>   (`__atomic_exchange_n`), so the intruder phase is judged on its own
+>   pulls.
+> - **The intruder** is a spinner pinned to A. The phase ends at the
+>   first pull of a worker, bounded at 1 s. Both architectures pulled
+>   once, at a recorded difference of **2**: the probe's "3 vs 1",
+>   written as a difference.
+> - **Mutations,** each alone on both architectures, boot confirmed:
+>
+>   | mutation | result |
+>   |---|---|
+>   | threshold of one (the scan's `mine + 2` and `min_gap`) | fails on both: 13 and 10 pulls, the smallest at a locked difference of 1 |
+>   | only `min_gap` lowered to 1 | **fails in 2 of 6 boots** (one per architecture). The scan still asks for a hint of two, so it pulls only when the hint's double count lands on B's scan: a rate, not a certainty |
+>   | the record not written | fails on both, in the intruder phase: "a steady three against one on cpu A drew no pull within a second" |
+>
+>   The fourth planned mutation (the intruder phase judged by the old
+>   sampled premise) was not run: the build removed the sampled premise,
+>   so there is nothing left to mutate back.
 
 ## Problem
 
@@ -144,24 +168,31 @@ passes one with the defect it exists to catch.
 
 ### 1. The balancer records what it saw, on the thread it moved
 
-In debug builds, `struct thread` gains two fields, written in
-`sched_migrate_from` under both locks when the caller asked for a gap
-(`min_gap != 0`, so the balancer and not the chaos migrator):
+`struct thread` gains two fields, present in every build and written
+only in debug builds, as `ready_since_ns` is. `sched_migrate_from` writes
+them under both locks when the caller asked for a gap (`min_gap != 0`:
+the balancer, not the chaos migrator):
 
 - `bal_pulls`: this thread's balancer pulls.
 - `bal_gap_min`: the smallest locked difference among them,
-  `load_locked(from) - load_locked(to)` before the move.
+  `load_locked(from) - load_locked(to)` before the move. It starts at
+  `THREAD_BAL_GAP_NONE` (`INT32_MAX`, set in `thread_alloc`).
 
-The test sets `bal_gap_min` to its maximum and reads `bal_pulls` before
-widening each worker's affinity; no pull can happen while a worker is
-pinned. After the window and the join, it reads both again:
+The test sets `bal_gap_min` to `THREAD_BAL_GAP_NONE` and reads
+`bal_pulls` before widening each worker's affinity; no pull can happen
+while a worker is pinned. After the quiet window, it reads both, taking
+and resetting the gap in one step (`__atomic_exchange_n`):
 
 - **Any pull with `bal_gap_min < 2` fails.** "The balancer pulled a
   thread for a locked difference below two", whether or not the sampler
   saw the worker move.
-- **A move with every pull at two or more** is the rule obeyed and
-  passes, logged with the gap seen.
+- **A sampled move with no recorded pull fails:** "a worker moved with
+  no balancer pull recorded".
+- **Pulls, every one at two or more,** are the rule obeyed and pass,
+  and are logged.
 - **No pull** passes, as before.
+
+The test skips in a non-debug build, where nothing writes the record.
 
 The sampled premise check and its "not asserted" escape are removed;
 the sampler stays only to report moves in the log.
@@ -171,38 +202,43 @@ the sampler stays only to report moves in the log.
 After the quiet window, the test adds an intruder pinned to A that
 spins until a worker has been pulled, bounded at 1 s: a steady 3 vs 1.
 It asserts that exactly this happens: a pull, recorded at a locked
-difference of two or more, and no failure. That is the sightings'
-case, as a proof rather than a rerun, and it proves the record is
-written.
+difference of two or more. That is the sightings' case, as a proof
+rather than a rerun, and it proves the record is written. Both
+architectures pulled once, at a recorded difference of 2.
 
 ### 3. The record
 
-- **flakes.md:** this PR adds the explanation to the hysteresis entry
-  and marks it "not yet fixed". The implementation adds "fixed by"
-  when it merges. This PR also records three sightings from the probe's
-  boots.
-- **`docs/kernel/scheduler/testing.md`:** the test's claim and why it
+- **flakes.md:** the report (#260) added the explanation and three
+  sightings from the probe's boots. The implementation adds "fixed by
+  the hysteresis unit (PR #261)".
+- **`docs/kernel/scheduler/testing.md`:** the test's claim, and why it
   is judged by the locked record.
+- **`docs/kernel/scheduler/invariants.md`:** S28's check, and in S29 the
+  hint reading one high.
+- **`docs/kernel/scheduler/design.md`:** the same note on the hint, and
+  the record.
 - **`sched_cpu_load`'s comment:** it names the double count, so the
   next reader of the hint knows it reads one high on a CPU mid-switch.
 - **README Status entry.**
 
 ## Affected files
 
-The implementation's. This PR adds the probe, this report, the
-explanation under the hysteresis flakes entry, and three new flakes
-entries from the probe's boots.
+The implementation's, as built (PR #261). The report (#260) added the
+probe, this report, the explanation under the hysteresis flakes entry,
+and three new flakes entries.
 
 | file | change |
 |---|---|
-| `kernel/include/kernel/thread.h` | `bal_pulls`, `bal_gap_min` (debug) |
-| `kernel/scheduler/sched.c` | record them in `sched_migrate_from`; `sched_cpu_load`'s comment |
-| `kernel/scheduler/smptest.c` | the verdict from the record; the intruder phase |
-| `docs/kernel/scheduler/testing.md`, `docs/testing/flakes.md`, `README.md` | as above |
+| `kernel/include/kernel/thread.h` | `bal_pulls`, `bal_gap_min`, `THREAD_BAL_GAP_NONE` |
+| `kernel/scheduler/thread.c` | `bal_gap_min` starts at `THREAD_BAL_GAP_NONE` |
+| `kernel/scheduler/sched.c` | the record in `sched_migrate_from` (debug); `sched_cpu_load`'s comment |
+| `kernel/scheduler/smptest.c` | the verdict from the record; the intruder phase; the non-debug skip |
+| `docs/kernel/scheduler/testing.md`, `invariants.md`, `design.md`, `docs/testing/flakes.md`, `README.md` | as above |
 
 ## APIs
 
-None outside debug builds.
+None. Two `struct thread` fields and a constant, written only in debug
+builds.
 
 ## Tests
 
@@ -210,15 +246,12 @@ None outside debug builds.
 |---|---|
 | `sched-balance-hysteresis` | no balancer pull of its workers below a locked difference of two, across a quiet window, whatever the sampler sees; then, with an intruder on A, a legitimate pull at two or more passes |
 
-**Planned mutations** (each alone, both architectures, boot
-confirmed):
-
-| mutation | expected |
-|---|---|
-| `--threshold1`'s two lowerings (the scan's `mine + 2` and `min_gap`) | fails, a pull below two |
-| only `min_gap` lowered to 1 | fails, a pull below two |
-| the record not written | the intruder phase fails: a move with no pull recorded |
-| the intruder phase's pull judged by the old sampled premise | fails in some boots; recorded as a rate, not asserted |
+**Mutations** (each alone, both architectures, boot confirmed): the
+banner's table. Two of them differ from the plan:
+- Only `min_gap` lowered was planned to fail. It fails in 2 of 6
+  boots, because the scan must first be fooled by the hint.
+- The sampled-premise mutation was not run, because the premise is
+  gone.
 
 ## Benchmarks
 
