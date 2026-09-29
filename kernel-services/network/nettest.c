@@ -6495,6 +6495,37 @@ static void hin_drain(struct tap *u)
  * "nothing arrives" -- keep their own short budgets. */
 #define HIN_TRIES 200u
 
+/*
+ * The bytes [base, base + total) of one direction arrive with no gap
+ * (docs/audit/next-subsystem-zero-window.md). A data segment may start at
+ * or before what is covered -- a zero-window probe sent again, or a
+ * retransmission from snd_una -- but never past it, and never runs past
+ * the range; a bare ACK is passed over; anything else fails. `covered`
+ * counts bytes the caller has already seen, and `have` says `sg` holds a
+ * segment the caller read and has not yet counted. At most 8 segments:
+ * 50 bytes one at a time is a regression, not a delivery.
+ */
+static bool hin_recv_stream(struct tap *u, uint16_t wport, uint32_t base, uint32_t covered, uint32_t total,
+                            struct hin_seg *sg, bool have)
+{
+    for (unsigned k = 0; covered < total && k < 8; k++) {
+        if (!have && !hin_recv(u, IPPROTO_TCP, wport, sg, HIN_TRIES))
+            return false;
+        have = false;
+        if (sg->paylen == 0) {
+            if (sg->flags & (TH_SYN | TH_FIN | TH_RST))
+                return false;
+            continue;
+        }
+        uint32_t off = sg->seq - base;
+        if (off > covered || off + sg->paylen > total)
+            return false;
+        if (off + sg->paylen > covered)
+            covered = off + sg->paylen;
+    }
+    return covered == total;
+}
+
 /* A non-blocking accept, awaited. */
 static struct socket *hin_accept(struct socket *ls)
 {
@@ -6938,10 +6969,17 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
     hin_drain(u);
     CHECK(ksock_sendto(a1, data, 50, NULL) == 50);
-    CHECK(!(hin_recv(u, IPPROTO_TCP, 40001, &sg, 15) && sg.paylen >= 50));   /* blocked by the zero window */
+    /* Blocked by the zero window: nothing of 50 bytes goes out. The
+     * retransmit timer may send a one-byte probe meanwhile (its RTO is about
+     * this phase's length), and a probe seen here is the run's first byte. */
+    bool zw_seen = hin_recv(u, IPPROTO_TCP, 40001, &sg, 15);
+    CHECK(!(zw_seen && sg.paylen >= 50));
+    uint32_t zw_covered = zw_seen && sg.seq == iss1 + 101 && sg.paylen == 1 ? 1 : 0;
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 101, TH_ACK, 64240, NULL, 0);   /* window update */
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && sg.paylen == 50 && sg.seq == iss1 + 101);
+    /* The 50 bytes from iss1 + 101 with no gap: in one segment, or a probe
+     * (read above or not) and the rest past it (net-zero-window-probe). */
+    CHECK(hin_recv_stream(u, 40001, iss1 + 101, zw_covered, 50, &sg, false));
     hin_drain(u);
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 151, TH_ACK, 64240, data, 10);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
@@ -7235,6 +7273,102 @@ static uint16_t hst_mk_unreach_tcp(uint8_t *l4, uint32_t host_ip, uint32_t peer_
     l4[2] = (uint8_t)(ck >> 8);
     l4[3] = (uint8_t)ck;
     return n;
+}
+
+/*
+ * A zero window with data waiting sends a one-byte probe on the retransmit
+ * timer, and the data after a window update resumes past it
+ * (docs/audit/next-subsystem-zero-window.md). net-hostinput's window-update
+ * check tolerates the probe; this proves it exists and what follows it. The
+ * timer fires by itself: each wait is for the probe, not a stopwatch.
+ */
+bool selftest_net_zero_window_probe(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x1e, 0x00, 0x01 };
+    static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x1e, 0x00, 0x63 };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 12, 1), w = IPV4_ADDR(10, 77, 12, 99);
+    struct tap *u = nt_tap_create("zwpu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+    struct socket *ls = NULL;
+    CHECK(hin_tcp_listener(&ls, 2230));
+
+    uint8_t l4[160], data[150];
+    uint16_t l4len;
+    struct hin_seg sg;
+    for (unsigned i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)i;
+    hin_drain(u);
+
+    /* The handshake, the world side by hand; then the world closes its window. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 41001, &sg, HIN_TRIES) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+          sg.ack == 5001);
+    uint32_t iss = sg.seq;
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a = hin_accept(ls);
+    CHECK(a != NULL && a->tcp != NULL);
+    ksock_set_nonblock(a, true);
+    struct tcp_pcb *pcb = a->tcp;
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 1, TH_ACK, 0, NULL, 0);            /* window 0 */
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    hin_drain(u);
+
+    /* (1) the probe: one byte at snd_una, sent by the retransmit timer and
+     * counted as one of its retransmissions. */
+    uint64_t rx0 = __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED);
+    CHECK(ksock_sendto(a, data, 50, NULL) == 50);
+    CHECK(hin_recv(u, IPPROTO_TCP, 41001, &sg, HIN_TRIES) && sg.paylen == 1 && sg.seq == iss + 1);
+    CHECK(__atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) > rx0);
+
+    /* (2) an update that does not ack the probe byte: the 50 bytes from
+     * iss + 1 with no gap, the probe counted -- its byte may come again. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_stream(u, 41001, iss + 1, 1, 50, &sg, false));
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 51, TH_ACK, 0, NULL, 0);           /* all acked, window 0 */
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    hin_drain(u);
+
+    /* (3) an update that acks the probe byte: the rest resumes exactly past
+     * it, and no acked byte is sent again. A probe that did not advance
+     * snd_nxt would leave snd_max behind this ACK, which RFC 5961 refuses
+     * (a challenge ACK, passed over here), and no data would follow. */
+    CHECK(ksock_sendto(a, data + 50, 50, NULL) == 50);
+    CHECK(hin_recv(u, IPPROTO_TCP, 41001, &sg, HIN_TRIES) && sg.paylen == 1 && sg.seq == iss + 51);
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 52, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_stream(u, 41001, iss + 52, 0, 49, &sg, false));
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 101, TH_ACK, 0, NULL, 0);          /* all acked, window 0 */
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    hin_drain(u);
+
+    /* (4) the probe still unread when the update arrives -- net-hostinput on a
+     * slow host. The update is sent once the timer has counted the probe;
+     * the count and the probe's output are one hold of the pcb's lock, which
+     * the update's input takes after them. */
+    rx0 = __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED);
+    CHECK(ksock_sendto(a, data + 100, 50, NULL) == 50);
+    for (unsigned i = 0; i < HIN_TRIES && __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) == rx0; i++)
+        thread_sleep_ms(10);
+    CHECK(__atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED) > rx0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 101, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_stream(u, 41001, iss + 101, 0, 50, &sg, false));
+
+    /* The world resets the connection (seq == rcv_nxt), acking everything. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41001, 2230, 5001, iss + 151, TH_RST | TH_ACK, 0, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    nt_ksock_put(a);
+    kinfo("selftest: net-zero-window-probe: the probe went out on the timer, and the data resumed past it "
+          "whether the update acked it, did not, or came before it was read\n");
+    return true;
 }
 
 bool selftest_net_hoststate(const char **reason)
