@@ -1323,8 +1323,9 @@ bool selftest_sched_balance_pair(const char **reason)
  * is for (docs/audit/next-subsystem-hysteresis.md). Sampled moves are
  * logged, and a move with no recorded pull fails.
  *
- * After the quiet window, a third thread on A makes that 3 against 1
- * certain: it must be pulled, at a recorded difference of two or more.
+ * After the quiet window, a third thread beside the pair (on A, or on B
+ * if a legitimate pull moved one there) makes that 3 against 1 certain:
+ * it must be pulled, at a recorded difference of two or more.
  *
  * The workers **yield**, and they have to. Two compute-bound threads
  * sharing a CPU alternate by preemption, so the one in the queue always
@@ -1445,6 +1446,7 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
     unsigned moved = 0, load_a = 0, load_b = 0, pulls = 0, pulls_intr = 0;
     int32_t gap_min = THREAD_BAL_GAP_NONE, gap_min_intr = THREAD_BAL_GAP_NONE;
     bool intr_made = false;
+    unsigned intr_cpu = 0;
     if (ok) {
         /* Where each worker runs, for the log. The first sample is taken
          * after a settle so that a thread still reaching its first CPU is
@@ -1478,17 +1480,28 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         }
 
         /*
-         * Then a third thread on A, made certain: a steady 3 against 1.
-         * That is a pull the rule allows, and it is what the test used to
-         * call a violation when a transient third thread fell between its
-         * samples. It must be pulled, at a locked difference of two or
-         * more. B is busy, so it scans every SCHED_BALANCE_TICKS; the
-         * bound is about fifteen scans.
+         * Then a third thread beside the pair, made certain: a steady 3
+         * against 1. That is a pull the rule allows, and it is what the
+         * test used to call a violation when a transient third thread fell
+         * between its samples. It must be pulled, at a locked difference
+         * of two or more. The busy side scans every SCHED_BALANCE_TICKS;
+         * the bound is about fifteen scans.
+         *
+         * The pair is on A unless the quiet window made a (legitimate)
+         * pull, which leaves it on B; an intruder on the lone worker's CPU
+         * would make 2 against 2 and draw nothing. So it joins whichever
+         * CPU the workers' run queues say holds two, read after the
+         * snapshot above: a pull after that read is itself a pull this
+         * phase counts.
          */
+        unsigned on_a = 0;
+        for (unsigned i = 0; i < W; i++)
+            on_a += (unsigned)__atomic_load_n(&t[i]->cpu, __ATOMIC_RELAXED) == a_cpu;
+        intr_cpu = on_a >= 2 ? a_cpu : b_cpu;
         static struct hyst_intruder hi;
         __atomic_store_n(&hi.stop, 0u, __ATOMIC_RELAXED);
         struct thread *it = thread_create_on(hyst_intruder_main, &hi, "hyst-intr", SCHED_PRIO_DEFAULT,
-                                             CPUMASK_OF(a_cpu));
+                                             CPUMASK_OF(intr_cpu));
         intr_made = it != NULL;
         if (intr_made) {
             uint64_t until = clock_deadline_ns(1000ull * 1000000ull);
@@ -1547,12 +1560,12 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
         return false;
     }
     if (pulls_intr == 0) {
-        *reason = "a steady three against one on cpu A drew no pull within a second";
+        *reason = "a steady three against one drew no pull within a second";
         return false;
     }
     if (gap_min_intr < 2) {
         kerror("selftest: sched-balance-hysteresis: with a third thread on cpu %u, a pull at a locked difference of %d",
-               a_cpu, (int)gap_min_intr);
+               intr_cpu, (int)gap_min_intr);
         *reason = "the balancer pulled a thread for a locked difference below two";
         return false;
     }
@@ -1562,7 +1575,7 @@ static bool sched_balance_hysteresis_pinned(const char **reason)
           "at a locked difference of %d",
           a_cpu, load_a, b_cpu, load_b, pulls, moved, (unsigned long long)scans,
           pulls != 0 ? " (each at a locked difference of two or more: another thread was runnable there)" : "",
-          a_cpu, pulls_intr, (int)gap_min_intr);
+          intr_cpu, pulls_intr, (int)gap_min_intr);
     return true;
 #endif /* !CONFIG_DEBUG, CONFIG_SCHED_CHAOS */
 #endif /* CONFIG_SCHED_BALANCE */
