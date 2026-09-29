@@ -628,10 +628,14 @@ of a clean boot.)
 The runner does the same for the network (the net-leftover unit). It
 first runs what the test still holds, releases it registered at each
 acquisition (`selftest_defer`, run last first however the test returned).
-Then it compares the interfaces (by name), the live DHCP/DNS services and
-the socket count with their values before the test. A test that changed
-them fails, and the next test starts from what it left, so a leftover
-is blamed once (`docs/kernel-services/network/testing.md`, "Releases
+Then it compares the interfaces (by name and count), the live DHCP/DNS
+services and the socket count with their values before the test. A test
+that **added** to them -- a new interface name, or more interfaces,
+services or sockets -- fails. Fewer is never a leftover: a socket an
+abandoned connect finally closes during a later test does not blame that
+test, and while such sockets are held they are left out of the count.
+The next test starts from what the failed one left, so a leftover is
+blamed once (`docs/kernel-services/network/testing.md`, "Releases
 however a test returns"). Without this, a test that leaked its reference --
 a `CHECK` that returned before its put -- failed every test after it for
 the same pid, 19 in one boot. *Checked by*: `p33-once`.

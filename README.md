@@ -3642,7 +3642,8 @@ See [docs/development.md](docs/development.md).
     join). `irq-route` releases its line and its periodic source the
     same way.
   - The runner compares interfaces, services and sockets before and
-    after every test.
+    after every test, and fails a test only for what it added: fewer is
+    never a leftover.
   - Every network test was forced to fail at its last check and at its
     midpoint, in one boot each. At the last check, 50 of 50 were forced
     on x86-64 and 49 on aarch64, where one test passed fewer checks than

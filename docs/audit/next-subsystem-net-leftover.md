@@ -267,7 +267,11 @@ name), the live services and the socket count with their values before
 the test. A test that leaves one fails by name ("left netif `dns`", "left
 1 service", "left 4 sockets"). As with P33, it is blamed once: the
 baseline moves to what is left, so the tests after it are not failed for
-it.
+it. (As built, only what a test **adds** fails it, interface counts are
+compared too, sockets held by abandoned connects are left out of the
+count, and the log line reads `selftest: <test> left the network
+changed: interfaces (n) [...] -> (m) [...], services a -> b, sockets c
+-> d`; see the banner.)
 
 ### 4. The record
 
