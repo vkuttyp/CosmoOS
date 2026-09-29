@@ -1,7 +1,36 @@
 # NEXT SUBSYSTEM — smp-wake posts while the waiter is still running
 
-> **Status: proposed.** Report and probe (`tools/smp-wake-probe.py`)
-> only; nothing in the kernel changes in this PR.
+> **Status: built (PR #263).** As designed, with these specifics:
+>
+> - **The fields** `wake_resched` and `wake_ipi_base` exist in every
+>   build and are written only in debug, as the hysteresis unit's pull
+>   record is. `ipi_count_on(cpu, kind)` is declared in `ipi.h`. The test
+>   skips in a non-debug build, where nothing writes the record.
+> - **The waiter reads its own record** (`thread_current()`) when it
+>   returns, so the test never touches a joined thread.
+> - **One wait loop, for both conditions** (`BLOCKED` and the target
+>   idle), bounded at 1 s. Its verdict is checked after the join, so a
+>   timeout never leaves a waiter behind.
+> - **Measured:** both architectures passed in round 1, with one
+>   reschedule IPI after the wake's snapshot and the wake seen 83–98 µs
+>   after the post.
+> - **Mutations,** each alone, both architectures, boot confirmed:
+>
+>   | mutation | result |
+>   |---|---|
+>   | no IPI in `request_resched` | fails at the count (`cw.ipis_after > cw.ipi_base`) |
+>   | `request_resched` never called | fails at the count. The plan expected "no round requested"; the record keeps the decision, which this mutation leaves intact, and only the call goes |
+>   | the idle wait removed, the waiter held 20 ms between `BLOCKED` and its switch | fails: "no round's wake found the target idle" |
+>   | the record not written | fails: "no round's wake found the target idle" |
+>
+>   With the idle wait in place, the same 20 ms hold passes on both
+>   architectures.
+> - **The testing guide's old claim was out of date.** It said nothing
+>   else notices a missing IPI. With no IPI, `process-user` also misses
+>   its 15 s bound on both architectures, and on x86-64 `mutex`,
+>   `process-spawn` and `hid-keyboard` also fail. The guide is corrected.
+> - **The docs are the SMP ones** (`docs/kernel/smp/testing.md`,
+>   `invariants.md` SMP9), where `smp-wake` lives, not the scheduler's.
 
 ## Problem
 
@@ -120,16 +149,18 @@ can also pass without the event it asserts.
 
 ### 1. Post to an idle target, and read what the wake decided
 
-- **Wait for the target to be idle.** After `BLOCKED`, the test also
-  waits until the target reads idle: `sched_cpu_load(target) == 0`,
-  bounded at 1 s. A load of 0 cannot be read while the waiter is still
+- **Wait for the target to be idle.** The test waits until the waiter
+  reads `BLOCKED` *and* the target reads idle, `sched_cpu_load(target)
+  == 0`, in one loop bounded at 1 s, checked after the join. A load of 0 cannot be read while the waiter is still
   current, because a current thread counts 1. The hint can read one
   high (S29), never low, so 0 is a sound observation that the waiter is
   off the CPU.
 - **The wake records its decision on the woken thread**, as the
   hysteresis unit's pull record does. In debug builds, `sched_wake`
-  writes `t->wake_resched`, whether it called `request_resched`, under
-  the target's lock.
+  writes `t->wake_resched`, whether it asks for `request_resched`, under
+  the target's lock. The fields exist in every build. The waiter reads
+  them from `thread_current()` when it returns, and the test skips in a
+  non-debug build.
 - **The wake also snapshots the target's handled reschedule count**,
   under the same lock, before it sends (`t->wake_ipi_base`).
 - **The assertion:** the wake requested a reschedule *and* the target
@@ -142,30 +173,32 @@ can also pass without the event it asserts.
   lost IPI would also have to coincide with it.
 - **Retry for a busy target.** If the target became busy between the
   idle read and the post, the record says no reschedule was requested.
-  That round is retried, up to 5 rounds with a fresh waiter each, and
-  the test fails only if no round's wake requested one, or if one did
-  and no IPI arrived.
+  That round is logged and repeated, up to `SMP_WAKE_ROUNDS` (5) with a
+  fresh waiter each. The test fails if no round's wake requested one, or
+  if one did and no IPI arrived after its snapshot.
 
 ### 2. The record
 
-- **flakes.md:** the entry gains "explained" (this PR) and "fixed by"
-  (the implementation).
-- **`docs/kernel/scheduler/testing.md`:** the test's claim, and why it
-  waits for idle and reads the wake's record.
+- **flakes.md:** the report (#262) explained the entry; the
+  implementation adds "fixed by the smp-wake unit (PR #263)".
+- **`docs/kernel/smp/testing.md`:** the test's claim, and why it waits
+  for idle and reads the wake's record, with the mutations. It also
+  corrects the old "nothing else notices" claim.
+- **`docs/kernel/smp/invariants.md`:** SMP9's check.
 - **README Status entry.**
 
 ## Affected files
 
-The implementation's. This PR adds the probe, this report, and the
-explanation under the flakes entry.
+The implementation's, as built (PR #263). The report (#262) added the
+probe, this report, and the explanation under the flakes entry.
 
 | file | change |
 |---|---|
 | `kernel/include/kernel/thread.h` | `wake_resched`, `wake_ipi_base` |
 | `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `ipi_count_on(cpu, kind)`: another CPU's handled count |
 | `kernel/scheduler/sched.c` | record both in `sched_wake` (debug) |
-| `kernel/scheduler/smptest.c` | the idle wait, the record-based assertion, the retry |
-| `docs/kernel/scheduler/testing.md`, `docs/testing/flakes.md`, `README.md` | as above |
+| `kernel/scheduler/smptest.c` | the idle wait, the record-based assertion, the retry, the non-debug skip |
+| `docs/kernel/smp/testing.md`, `docs/kernel/smp/invariants.md`, `docs/testing/flakes.md`, `README.md` | as above |
 
 ## APIs
 
@@ -178,14 +211,8 @@ explanation under the flakes entry.
 |---|---|
 | `smp-wake` | a cross-CPU wake of a thread blocked on an idle CPU requests a reschedule, and the target handles the IPI |
 
-**Planned mutations** (each alone, both architectures, boot confirmed):
-
-| mutation | expected |
-|---|---|
-| `request_resched` sends no IPI | fails: requested, no IPI after the snapshot (measured with the probe's `--fix`: 0 → 0 on both architectures) |
-| `sched_wake` never calls `request_resched` | fails: no round's wake requested one |
-| the idle wait removed, under the probe's `--window` | fails: no round requested, since the waiter is current every time |
-| the record not written | fails: no round's wake requested one |
+**Mutations** (each alone, both architectures, boot confirmed): the
+banner's table.
 
 ## Benchmarks
 
