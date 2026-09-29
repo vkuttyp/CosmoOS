@@ -2232,6 +2232,22 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
+**Explained (the smp-wake report, `docs/audit/next-subsystem-smp-wake.md`;
+not yet fixed).** `tools/smp-wake-probe.py` recorded `rq->current` at the
+wake, and found a second way besides the one above.
+- **The waiter's own window.** `waitqueue_prepare` sets `BLOCKED` before
+  the waiter switches out, so a post in between finds the waiter itself
+  current, at equal priority, and sends nothing.
+- **Reproduced.** Held in that window (`--window 20`), the test fails
+  with this sighting's exact message on both architectures, the record
+  reading "target running cross-waiter, reschedule requested 0".
+- **The equal-priority thread.** A spinner at the waiter's priority on
+  the target (`--busy`) also sends none. The count still rose there,
+  likeliest from the spinner's own creation (the probe does not record
+  which IPI arrived), so the check can pass without the IPI it asserts.
+- **The candidate** waits for the target to read idle and asserts on the
+  wake's own record. It passes under the window.
+
 ## `sched-migrate-stress`: a worker made no progress, 2026-09-24
 
 `SELFTEST: sched-migrate-stress ... FAIL: a worker made no progress
@@ -2740,3 +2756,35 @@ reached the network test 4.7 s after the harness's whole budget; every
 self-test before it had passed. This is not the reset family the tally
 above counts: the harness never got as far as a connection. It is a
 slow host, and it is recorded, not counted.
+
+## `thrtest` step 25: the mutex word was not 1 at the broadcast's probe, 2026-09-29
+
+```
+thrtest: step 25
+thrtest: FAIL bp_state_seen == 1u at line 2424
+THREADTEST: FAIL 1
+```
+
+CI run 36623173528, aarch64 debug, on PR #262 (the smp-wake report),
+which changes only `tools/smp-wake-probe.py` and documentation. Every
+self-test had passed; the user-mode suite failed. First sighting.
+
+**What the check assumes.** Step 25 runs twice. A holder locks `cv_m`
+uncontended, three waiters sleep on `cv_c`, and the test broadcasts with
+a probe that runs at phase `at`: phase 0 before the requeue, phase 1
+after it. The probe asserts that `cv_m.state` reads 1: held, and
+uncontended.
+
+**A candidate mechanism, not proven for this sighting.**
+- The requeue wakes one waiter (`cosmo_futex_requeue(..., 1, ~0u, seq)`)
+  and moves the rest onto the mutex word.
+- The woken waiter relocks `cv_m`, which the holder still has, so it
+  marks the word contended (2) and sleeps.
+- At phase 1, the probe runs on the broadcasting thread right after the
+  requeue returns. If the woken waiter has reached its lock first, on
+  another CPU, the word reads 2 on a correct libc.
+
+The log does not say which iteration failed (`at` 0 or 1). So this is
+the interleaving that fits, not a finding. The next step is to record
+`at` and the word's value in the failure, before changing the claim.
+
