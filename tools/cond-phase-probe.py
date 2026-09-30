@@ -26,7 +26,8 @@ lines, from the user-mode suite).
     python3 tools/cond-phase-probe.py revert
 
 --force makes the probe, at phase 1, wait (bounded at 1 s, yielding) until
-the word reads 2 before it reads it: the woken waiter has reached the held
+the word reads 2 before it reads it -- and a wait that timed out fails
+the step rather than passing untested: the woken waiter has reached the held
 mutex first, which is the order the sighting needs, made certain. --fix is
 the candidate check: phase 0 reads 1; phase 1 reads 1 or 2, the word held
 either way.
@@ -38,6 +39,7 @@ running revert (again).
 
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 
@@ -50,16 +52,23 @@ NEW_READ_FORCE = """    if (phase == 1) {   /* CPPROBE --force: the woken waiter
         uint64_t cp_deadline = cosmo_clock_ns() + 1000000000ull;
         while (__atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) != 2u && cosmo_clock_ns() < cp_deadline)
             cosmo_yield();
+        cp_forced_reached = __atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) == 2u;
     }
     bp_state_seen = cv_m.state;                 /* 1: the holder, uncontended */"""
+
+OLD_DECL = """static volatile unsigned bp_holding, bp_go, bp_done, bp_phase_seen, bp_state_seen, bp_at_phase;"""
+NEW_DECL = """static volatile unsigned bp_holding, bp_go, bp_done, bp_phase_seen, bp_state_seen, bp_at_phase;
+static volatile unsigned cp_forced_reached = 2u;   /* CPPROBE: 2 = not forced, 1 = reached 2, 0 = timed out */"""
 
 OLD_CHECK = """        cosmo_cond_broadcast(&cv_c);
         CHECK(bp_phase_seen == 3u);              /* both phases ran */
         CHECK(bp_state_seen == 1u);              /* the holder held it uncontended */"""
 def new_check(fix):
     s = """        cosmo_cond_broadcast(&cv_c);
-        printf("CPPROBE: step 25 at phase %u: the word read %u at the probe\\n", at, bp_state_seen);
+        printf("CPPROBE: step 25 at phase %u: the word read %u at the probe (forced wait: %s)\\n", at, bp_state_seen,
+               cp_forced_reached == 2u ? "none" : cp_forced_reached ? "reached 2" : "TIMED OUT");
         CHECK(bp_phase_seen == 3u);              /* both phases ran */
+        CHECK(at == 0u || cp_forced_reached != 0u);   /* CPPROBE: a forced wait that timed out tested nothing */
 """
     if fix:
         s += """        CHECK(at == 0u ? bp_state_seen == 1u : (bp_state_seen == 1u || bp_state_seen == 2u));   /* CPPROBE --fix */"""
@@ -80,6 +89,8 @@ def write_atomic(path, data):
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
+    if os.path.exists(path):   # keep the file's mode: the umask must not change it
+        os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
     os.replace(tmp, path)
 
 
@@ -162,7 +173,7 @@ def apply():
     fix = '--fix' in args
     if [a for a in args if a not in ('--force', '--fix')]:
         sys.exit('usage: apply [--force] [--fix]')
-    edits = [(OLD_CHECK, new_check(fix))]
+    edits = [(OLD_DECL, NEW_DECL), (OLD_CHECK, new_check(fix))]
     if force:
         edits.append((OLD_READ, NEW_READ_FORCE))
     apply_files([(THR, edits)])

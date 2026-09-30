@@ -46,7 +46,8 @@ holds at phase 0, where nobody has been woken, and is a race at phase 1.
 `tools/cond-phase-probe.py` prints each iteration's phase and the value
 the probe read (CPPROBE lines from the user-mode suite). `--force` makes
 the phase-1 probe wait, yielding and bounded at 1 s, until the word
-reads 2 before it reads it. That makes the woken waiter reach the held
+reads 2 before it reads it. A wait that times out fails the step instead
+of passing untested; the probe prints whether it reached 2. That makes the woken waiter reach the held
 mutex first: the order the sighting needs, made certain. `--fix` is the
 candidate (§1).
 
@@ -88,23 +89,27 @@ exercised on a given boot.
 
 ## Design
 
-### 1. Assert what each phase allows, and take both phase-1 orders every boot
+### 1. Assert what each phase allows, and make the waiter-first order certain
 
 - **Phase 0 must read 1.** Nobody has been woken, and nothing but the
   holder touches the word.
 - **Phase 1 as it stands** accepts 1 or 2, and logs which. The word is
-  held either way, and it is the holder's unlock that must carry the
-  handoff in both.
+  held either way, and the holder's unlock must carry the handoff
+  whichever order the two threads took.
 - **A third iteration takes the waiter-first order for certain.** It is
-  phase 1 again, with the probe waiting (bounded, yielding) until the
-  word reads 2 before it reads it, as `--force` does. It asserts 2, and
-  that every waiter returns: the unlock finds 2 and wakes the woken
-  waiter.
-- **The other order, the unlock finding 1,** is the usual one (both
-  unforced boots). It stays exercised by the plain phase-1 iteration,
-  which logs the value so a run shows which order it took. Making it
-  certain would need a seam in libc to hold the woken waiter, which this
-  report does not propose.
+  phase 1 again, with the probe waiting (bounded at 1 s, yielding) until
+  the word reads 2 before it reads it, as `--force` does. It asserts
+  that the wait reached 2 (a timeout is a failure, not an untested
+  pass), and that every waiter returns: the unlock finds 2 and wakes
+  the woken waiter.
+- **The other order, the unlock finding 1, is not guaranteed.** It is
+  the usual one: both unforced boots read 1 at the probe. But the plain
+  phase-1 iteration can take either order on a given boot. Even a read
+  of 1 does not prove it, since the waiter can arrive between the read
+  and the unlock. Its coverage on any one boot is therefore uncertain;
+  the logged value shows which order the read saw. Making it certain
+  would need a seam in libc to hold the woken waiter, which this report
+  does not propose. Greptile named this on #264.
 
 ### 2. The record
 
@@ -134,7 +139,7 @@ None.
 
 | test | proves |
 |---|---|
-| `thrtest` step 25 | a holder's unlock inside a broadcast hands off to every waiter: before the requeue, after it in the usual order, and after it with the woken waiter first |
+| `thrtest` step 25 | a holder's unlock inside a broadcast hands off to every waiter: before the requeue; after it, in whichever order the threads took (usually the unlock first, not guaranteed); and after it with the woken waiter first, made certain |
 
 **Planned mutations** (each alone, both architectures, boot confirmed):
 

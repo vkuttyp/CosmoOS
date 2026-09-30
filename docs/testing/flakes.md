@@ -2810,3 +2810,18 @@ branch changes only `smp-wake` and `sched_wake`'s debug record. The test
 passed; the harness's budget failed it, by 116 ms. The first sighting was
 over by 39 ms. Recorded, not attributed.
 
+## Two boots timed out on a host at load 100, and `lockup-hard` failed in one, 2026-09-30
+
+Two parallel debug boots (aarch64 and x86-64) of
+`tools/cond-phase-probe.py --force --fix` both hit the harness's 180 s
+timeout before the interactive stage. The host's one-minute load average
+was 101, and macOS's `securityd` and a software-update service were
+running at 116% and 66% of a CPU.
+- The x86-64 boot also failed
+  `lockup-hard ... check failed: s1.hard_answered & CPUMASK_OF((unsigned)k)
+  at line 645`: a CPU did not answer the hard-lockup sample in time,
+  which fits a vCPU the host did not run. First sighting.
+- Run again one at a time, at a load of 10 to 25, both passed.
+
+Recorded, not attributed.
+
