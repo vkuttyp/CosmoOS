@@ -811,18 +811,44 @@ void sched_chaos_stats(uint64_t *migrated, uint64_t *refused)
 
 static uint64_t g_watchdog_timeout;
 static uint64_t g_watchdog_last_kick;
-static volatile bool g_watchdog_fired;
+static bool g_watchdog_fired;     /* this arming has fired; only an arm clears it */
+static bool g_watchdog_quiet;     /* this arming counts its firing and prints nothing */
+static uint64_t g_watchdog_fires;
+
+/*
+ * One arming fires at most once. The self-test runner arms before every test
+ * (docs/audit/next-subsystem-watchdog-spent.md), so the one firing belongs
+ * to the test that is running: a kick moves the last-progress time and
+ * leaves a fired arming fired.
+ *
+ * The order is what lets CPU 0's tick read an arming without a lock: the
+ * kick time and the quiet flag are written before `fired` is cleared with
+ * release, and the check reads `fired` with acquire before it reads them.
+ * A tick that sees the new arming unfired therefore sees its kick time,
+ * never the previous test's (which would fire a dump the moment it was
+ * cleared).
+ */
+static void watchdog_arm(uint64_t timeout_ns, bool quiet)
+{
+    __atomic_store_n(&g_watchdog_last_kick, clock_now_ns(), __ATOMIC_RELAXED);
+    __atomic_store_n(&g_watchdog_quiet, quiet, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_watchdog_fired, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_watchdog_timeout, timeout_ns, __ATOMIC_RELEASE);
+}
 
 void sched_watchdog_arm(uint64_t timeout_ns)
 {
-    g_watchdog_last_kick = clock_now_ns();
-    g_watchdog_fired = false;
-    __atomic_store_n(&g_watchdog_timeout, timeout_ns, __ATOMIC_RELEASE);
+    watchdog_arm(timeout_ns, false);
+}
+
+void sched_watchdog_arm_quiet(uint64_t timeout_ns)
+{
+    watchdog_arm(timeout_ns, true);
 }
 
 void sched_watchdog_kick(void)
 {
-    g_watchdog_last_kick = clock_now_ns();
+    __atomic_store_n(&g_watchdog_last_kick, clock_now_ns(), __ATOMIC_RELAXED);
 }
 
 void sched_watchdog_disarm(void)
@@ -830,18 +856,34 @@ void sched_watchdog_disarm(void)
     __atomic_store_n(&g_watchdog_timeout, 0, __ATOMIC_RELEASE);
 }
 
+void sched_watchdog_state(uint64_t *timeout_ns, bool *fired)
+{
+    *timeout_ns = __atomic_load_n(&g_watchdog_timeout, __ATOMIC_ACQUIRE);
+    *fired = __atomic_load_n(&g_watchdog_fired, __ATOMIC_ACQUIRE);
+}
+
+uint64_t sched_watchdog_fire_count(void)
+{
+    return __atomic_load_n(&g_watchdog_fires, __ATOMIC_ACQUIRE);
+}
+
 static void watchdog_check(uint64_t now, struct arch_trap_frame *frame)
 {
     uint64_t timeout = __atomic_load_n(&g_watchdog_timeout, __ATOMIC_ACQUIRE);
+    if (timeout == 0 || __atomic_load_n(&g_watchdog_fired, __ATOMIC_ACQUIRE))
+        return;
     uint64_t last = __atomic_load_n(&g_watchdog_last_kick, __ATOMIC_RELAXED);
     /* A kick from another CPU between this tick's timestamp and the check
      * puts `last` ahead of `now`: progress, not a hang (the difference would
      * otherwise wrap to a huge count and fire the report). That used to be
      * a hand-rolled `now <= last ||` here; it is the saturating subtraction
      * now, which is the same test written once for the whole tree. */
-    if (timeout == 0 || g_watchdog_fired || clock_delta_ns(now, last) < timeout)
+    if (clock_delta_ns(now, last) < timeout)
         return;
-    g_watchdog_fired = true;
+    __atomic_store_n(&g_watchdog_fired, true, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_watchdog_fires, 1u, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&g_watchdog_quiet, __ATOMIC_RELAXED))
+        return;   /* a self-test's arming: counted, not printed */
     kprintf("\n[WATCHDOG] no progress for %llu ms; scheduler state:\n",
             (unsigned long long)(clock_delta_ns(now, last) / 1000000));
     sched_dump();

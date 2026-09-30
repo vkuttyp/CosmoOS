@@ -195,3 +195,5 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_nettest_deadline.py
 	@echo "== $(ROOT)/tests/boot/test_usertest_sections.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_usertest_sections.py
+	@echo "== $(ROOT)/tests/boot/test_selftest_budgets.py"
+	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_selftest_budgets.py

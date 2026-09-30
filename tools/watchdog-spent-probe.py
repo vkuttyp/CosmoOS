@@ -34,6 +34,11 @@ test's own budget: the harness's 8 s, or its composite budget for
 quiet for longer than it is allowed to take gets the dump. A passing
 composite test does not.
 
+**Built (the watchdog-spent unit).** The runner now arms the watchdog per
+test at the test's budget, so `--fix` is the tree itself and is refused.
+On the built tree the sleeper also trips the harness's `[WATCHDOG]`
+forbidden marker, beside its budget.
+
 `read` names the test each `[WATCHDOG]` dump fell in: the first
 `SELFTEST:` line after the dump.
 
@@ -68,25 +73,13 @@ static bool wdprobe_sleeper(const char **reason)
 
 static const struct selftest tests[] = {""".replace('%uu', str(SLEEP_MS) + 'u')
 
-OLD_EARLY = """    { "cosmofs-replay",  selftest_cosmofs_replay },"""
+OLD_EARLY = """    { "cosmofs-replay",  selftest_cosmofs_replay, 40000 },"""
 NEW_EARLY = """    { "wdprobe-sleeper", wdprobe_sleeper },   /* WDPROBE --early */
-    { "cosmofs-replay",  selftest_cosmofs_replay },"""
+    { "cosmofs-replay",  selftest_cosmofs_replay, 40000 },"""
 
 OLD_LATE = """    { "syscall-fuzz",    selftest_syscall_fuzz },"""
 NEW_LATE = """    { "wdprobe-sleeper", wdprobe_sleeper },   /* WDPROBE --late */
     { "syscall-fuzz",    selftest_syscall_fuzz },"""
-
-OLD_KICK = """        sched_watchdog_kick();
-        uint64_t t0 = clock_now_ns();"""
-NEW_KICK = """        {   /* WDPROBE --fix: each test gets the watchdog afresh, at its own budget */
-            uint64_t wd_ms = 8000;
-            if (strcmp(tests[i].name, "cosmofs-replay") == 0)
-                wd_ms = 40000;
-            else if (strcmp(tests[i].name, "process-user") == 0)
-                wd_ms = 20000;
-            sched_watchdog_arm(wd_ms * 1000ull * 1000ull);
-        }
-        uint64_t t0 = clock_now_ns();"""
 
 
 def sha(p):
@@ -181,9 +174,9 @@ def apply():
     late, early, fix = '--late' in args, '--early' in args, '--fix' in args
     if late == early or [a for a in args if a not in ('--late', '--early', '--fix')]:
         sys.exit('usage: apply --late|--early [--fix]')
-    edits = [(OLD_TABLE, NEW_TABLE), (OLD_LATE, NEW_LATE) if late else (OLD_EARLY, NEW_EARLY)]
     if fix:
-        edits.append((OLD_KICK, NEW_KICK))
+        sys.exit('--fix is built: the runner arms the watchdog per test at its budget (selftest_run_all)')
+    edits = [(OLD_TABLE, NEW_TABLE), (OLD_LATE, NEW_LATE) if late else (OLD_EARLY, NEW_EARLY)]
     apply_files([(SELFTEST, edits)])
     print(f'applied: a {SLEEP_MS} ms sleeper '
           + ('after cosmofs-replay (before syscall-fuzz)' if late else 'before cosmofs-replay')

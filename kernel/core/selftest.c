@@ -15,6 +15,7 @@
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/timer.h>
+#include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
 #include <kernel/thread.h>
@@ -43,6 +44,39 @@ typedef bool (*selftest_fn)(const char **reason);
 struct selftest {
     const char *name;
     selftest_fn fn;
+};
+
+/*
+ * A test's budget is how long it may take, and the hang watchdog's period
+ * while it runs: the runner arms the watchdog before each test at that
+ * test's budget, and prints every budget in one line the boot harness reads
+ * (docs/verification/design.md, "Per-test timing"). One number, one place.
+ * A test not named below has the default; a name below that no test has is
+ * refused when the run starts, so a typo cannot quietly mean the default.
+ */
+#define SELFTEST_BUDGET_DEFAULT_MS 8000u
+
+static const struct selftest_budget {
+    const char *name;
+    unsigned ms;
+} budgets[] = {
+    /* The entire user-mode suite behind one line (every fs, net, proc,
+     * fpu, trap, priv and svc check init makes, and a spawn per tool), so
+     * it grows whenever userland gains a test. It stood at 7129 ms of 8000
+     * on CI before docs/audit/next-subsystem-fsctl.md gave it its own
+     * budget; the harness names its slowest section. */
+    { "process-user",   20000 },
+    /* One line is not one test: it mounts and structurally checks every
+     * prefix of a recorded write stream, 410 filesystem images, and grows
+     * whenever a transaction writes another block -- by design, twice so
+     * far (docs/audit/next-subsystem-snap-deadlist.md, -orphan.md). About
+     * 13 s here and 20 s on CI. 40 s is twice CI's figure and still far
+     * under the 180 s boot timeout: a budget notices a test that stopped
+     * terminating, it does not ration one that got more thorough. Under
+     * the old single 8 s arming this test fired the watchdog in every
+     * debug boot and left it spent for every test after it
+     * (docs/audit/next-subsystem-watchdog-spent.md). */
+    { "cosmofs-replay", 40000 },
 };
 
 /* --- formatter --- */
@@ -355,6 +389,48 @@ static bool test_fpu_bench(const char **reason)
     return true;
 }
 
+/* --- the runner's hang watchdog (docs/audit/next-subsystem-watchdog-spent.md) --- */
+
+static unsigned selftest_budget_ms(const char *name);
+
+/* Fires a quiet arming once and returns with it still fired. The next test
+ * checks that the runner, not this test, cleared that. */
+static bool selftest_watchdog_spend(const char **reason)
+{
+    uint64_t before = sched_watchdog_fire_count();
+    sched_watchdog_arm_quiet(50ull * 1000 * 1000);
+    thread_sleep_ms(150);   /* three periods: one firing, not three */
+    uint64_t fired = sched_watchdog_fire_count() - before;
+    uint64_t period;
+    bool is_fired;
+    sched_watchdog_state(&period, &is_fired);
+    if (fired != 1 || !is_fired) {
+        kerror("selftest: watchdog-spend: %llu firings in three periods, fired %d", (unsigned long long)fired,
+               (int)is_fired);
+        *reason = fired == 0 ? "a quiet arming did not fire" : "one arming fired more than once";
+        return false;
+    }
+    return true;   /* left fired, on purpose */
+}
+
+/* The first thing it does: read the arming the runner gave it. */
+static bool selftest_watchdog_rearm(const char **reason)
+{
+    uint64_t period;
+    bool fired;
+    sched_watchdog_state(&period, &fired);
+    if (fired || period != (uint64_t)selftest_budget_ms("watchdog-rearm") * 1000 * 1000) {
+        kerror("selftest: watchdog-rearm: entered with the watchdog %s, period %llu ms", fired ? "fired" : "armed",
+               (unsigned long long)(period / 1000000));
+        *reason = fired ? "the runner did not re-arm the watchdog: the previous test's firing carried over"
+                        : "the runner armed the watchdog at another period than this test's budget";
+        return false;
+    }
+    kinfo("selftest: watchdog-rearm: armed afresh at %llu ms after the previous test fired it",
+          (unsigned long long)(period / 1000000));
+    return true;
+}
+
 static const struct selftest tests[] = {
     { "printf",          test_printf },
     { "string",          test_string },
@@ -548,6 +624,10 @@ static const struct selftest tests[] = {
     { "cosmofs-ops",     selftest_cosmofs_ops },
     { "cosmofs-crash",   selftest_cosmofs_crash },
     { "cosmofs-replay",  selftest_cosmofs_replay },
+    /* The watchdog is armed per test: the first leaves it fired, the
+     * second finds it re-armed. Adjacent, in this order. */
+    { "watchdog-spend",  selftest_watchdog_spend },
+    { "watchdog-rearm",  selftest_watchdog_rearm },
     { "cosmofs-holes",   selftest_cosmofs_holes },
     { "cosmofs-csum",    selftest_cosmofs_csum },
     { "cosmofs-fsync",   selftest_cosmofs_fsync },
@@ -973,19 +1053,47 @@ unsigned selftest_leftover_processes(uint64_t wait_ns, uint32_t *pids, unsigned 
     }
 }
 
+/* A test's budget in ms: its entry in `budgets`, or the default. */
+static unsigned selftest_budget_ms(const char *name)
+{
+    for (size_t b = 0; b < ARRAY_SIZE(budgets); b++)
+        if (strcmp(budgets[b].name, name) == 0)
+            return budgets[b].ms;
+    return SELFTEST_BUDGET_DEFAULT_MS;
+}
+
 int selftest_run_all(void)
 {
     int failed = 0;
 
-    /* A test that hangs is worth more with a scheduler dump than as a
-     * bare harness timeout. */
-    sched_watchdog_arm(8ull * 1000 * 1000 * 1000);
+    /* Every budget, before the first test: the harness judges durations by
+     * this line and by nothing of its own. */
+    {
+        static char line[256];   /* one kprintf: another CPU's line must not land inside it */
+        size_t n = (size_t)ksnprintf(line, sizeof(line), "SELFTEST: budgets default=%u", SELFTEST_BUDGET_DEFAULT_MS);
+        for (size_t b = 0; b < ARRAY_SIZE(budgets); b++) {
+            bool named = false;
+            for (size_t i = 0; i < ARRAY_SIZE(tests) && !named; i++)
+                named = strcmp(tests[i].name, budgets[b].name) == 0;
+            if (!named)
+                panic("selftest: a budget for '%s', which is no test", budgets[b].name);
+            if (n < sizeof(line))
+                n += (size_t)ksnprintf(line + n, sizeof(line) - n, " %s=%u", budgets[b].name, budgets[b].ms);
+        }
+        KASSERT(n < sizeof(line));   /* a truncated line would hold a test to the default */
+        kprintf("%s\n", line);
+    }
 
     uint64_t total_ns = 0, slowest_ns = 0;
     const char *slowest = "-";
     for (size_t i = 0; i < ARRAY_SIZE(tests); i++) {
         const char *reason = "";
-        sched_watchdog_kick();
+        /* A test that hangs is worth more with a scheduler dump than as a
+         * bare harness timeout. Armed, not kicked: an arming fires once, so
+         * one armed for the whole run was spent by the first test to go
+         * quiet for 8 s -- `cosmofs-replay`, in every debug boot -- and
+         * the tests after it had none. */
+        sched_watchdog_arm((uint64_t)selftest_budget_ms(tests[i].name) * 1000 * 1000);
         uint64_t t0 = clock_now_ns();
         /* The network before the test: a test is judged by what it
          * changed, so a leftover is blamed on the test that left it and

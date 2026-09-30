@@ -164,6 +164,55 @@ def failed_selftests(lines):
     return names
 
 
+SELFTEST_RESULT = re.compile(r"^SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)")
+SELFTEST_BUDGETS = re.compile(r"^SELFTEST: budgets (.*)$")
+
+
+def selftest_timings(selftest_lines):
+    """(ms, name) for every self-test result line, slowest first."""
+    timings = []
+    for ln in selftest_lines:
+        m = SELFTEST_RESULT.match(ln.strip())
+        if m:
+            timings.append((int(m.group(2)), m.group(1)))
+    timings.sort(reverse=True)
+    return timings
+
+
+def selftest_budgets(selftest_lines):
+    """The budgets the kernel printed before its first test, as
+    {name: ms} with a "default" entry, or None when it printed none.
+
+    The kernel arms the hang watchdog at each test's budget and prints them
+    all in one line (`SELFTEST: budgets default=8000 cosmofs-replay=40000
+    ...`), so the harness and the watchdog hold a test to the same number
+    (docs/audit/next-subsystem-watchdog-spent.md). A line without a numeric
+    default is no line."""
+    for ln in selftest_lines:
+        m = SELFTEST_BUDGETS.match(ln.strip())
+        if not m:
+            continue
+        budgets = {}
+        for tok in m.group(1).split():
+            k, _, v = tok.partition("=")
+            if k and v.isdigit():
+                budgets[k] = int(v)
+        return budgets if "default" in budgets else None
+    return None
+
+
+def budget_failures(selftest_lines):
+    """A failure for each test over its budget, and one for a run that ran
+    tests but printed no budgets: that is a failure, not a fallback to
+    numbers of the harness's own."""
+    timings = selftest_timings(selftest_lines)
+    budgets = selftest_budgets(selftest_lines)
+    if budgets is None:
+        return ["missing budgets line (SELFTEST: budgets default=...)"] if timings else []
+    return [f"self-test {name} took {ms} ms (budget {budgets.get(name, budgets['default'])} ms)"
+            for ms, name in timings if ms > budgets.get(name, budgets["default"])]
+
+
 def load_sensitive_notes(failed, listed):
     """One failure-report line per failing test that is on the list.
     `listed` is None when the list could not be read; that is reported
@@ -450,6 +499,10 @@ FORBIDDEN_MARKERS = [
     # a real report fails the run with the CPU's trace in the log; the
     # self-tests' own reports say "expected" and do not match.
     r"\] (soft|hard) lockup:",
+    # The hang watchdog: a test quiet for its whole budget. The runner
+    # arms it per test at that budget, so a passing boot prints none
+    # (docs/audit/next-subsystem-watchdog-spent.md).
+    r"^\[WATCHDOG\] no progress",
 ]
 # The guard boot: the WARN naming an absent protection contradicts the
 # required INFO line and fails the run on its own.
@@ -793,58 +846,14 @@ def main():
 
     selftest_lines = [ln for ln in lines if ln.startswith("SELFTEST: ")]
     # Per-test durations (docs/verification/design.md, "Per-test timing"):
-    # report the slowest and fail one that nears the hang watchdog.
-    budget_ms = int(os.environ.get("SELFTEST_BUDGET_MS", "8000"))
-    # One line here is not one test. `process-user` runs the *entire*
-    # user-mode suite -- every fs, net, proc, fpu, trap, priv and svc
-    # check init makes, plus a process spawn for each tool it drives --
-    # behind a single SELFTEST line, so it grows whenever userland gains
-    # a test and is compared against a number meant for one test nearing
-    # the hang watchdog. On CI it was already at 7129 ms of 8000 before
-    # the unit that noticed (docs/audit/next-subsystem-fsctl.md), which
-    # is a budget that fails the next addition whatever it is.
-    #
-    # It keeps a budget, because a suite that hangs must still be caught;
-    # it just gets one sized for what it is.
-    #
-    # `cosmofs-replay` is the same shape: it mounts and structurally
-    # checks *every prefix* of a recorded write stream -- complete
-    # filesystem images behind one SELFTEST line -- so it grows whenever
-    # a transaction writes another block, and each image is a mount and
-    # a full walk rather than a step of one test. Its CI spread on
-    # identical code was 4703-8309 ms against a budget of 8000
-    # (docs/audit/next-subsystem-unmount-leak.md), which is a runner
-    # deciding the result rather than the code.
-    #
-    # It has grown twice since, by design and not by drift: the snapshot
-    # deadlist unit put a snapshot in the workload (211 -> 334 images,
-    # docs/audit/next-subsystem-snap-deadlist.md) and the orphan unit
-    # held a handle across a sync (334 -> 410,
-    # docs/audit/next-subsystem-orphan.md). Each addition is a class of
-    # crash the suite could not see before. At 410 images it takes about
-    # 13 s here and 20.4 s on CI, which failed a 20 s budget by two per
-    # cent -- the runner deciding the result again.
-    #
-    # 40 s, then: roughly twice CI's current number, so the next unit
-    # that adds a workload is not fighting the clock, and still far
-    # enough under the 180 s boot timeout to catch a suite that hangs.
-    # A budget's job is to notice a test that stopped terminating, not
-    # to ration a test that got more thorough.
-    composite_budget_ms = {"process-user": 20000, "cosmofs-replay": 40000}
-    timings = []
-    for ln in selftest_lines:
-        m = re.match(r"SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)", ln)
-        if m:
-            timings.append((int(m.group(2)), m.group(1)))
+    # report the slowest and fail one over its budget -- the kernel's
+    # budgets, from its own line (`selftest_budgets`).
+    timings = selftest_timings(selftest_lines)
     if timings:
-        timings.sort(reverse=True)
         total = sum(t for t, _ in timings)
         print(f"boot-test: {len(timings)} self-tests, {total} ms total; slowest: "
               + ", ".join(f"{name} {ms} ms" for ms, name in timings[:5]))
-        for ms, name in timings:
-            limit = composite_budget_ms.get(name, budget_ms)
-            if ms > limit:
-                failures.append(f"self-test {name} took {ms} ms (budget {limit} ms)")
+    failures.extend(budget_failures(selftest_lines))
     # The user-mode suite's own sections. `process-user` above is one
     # line for all of them, so this is the only place a slow section is
     # named rather than the whole suite.
