@@ -99,6 +99,17 @@ a timer armed by an object that outlives it fires into freed memory. The
 callback takes only what it needs to wake the queue and bump the count, and
 `release` cancels-then-quiesces.
 
+A submitted timer is kept alive by the **ring's own reference**, not the
+handle: `aio_submit` takes a reference on the object (`handle_lookup` →
+`kobject_get`) that the parked entry holds and `req_free` drops. So closing
+the handle while a `POLL` is parked does not free the timer — `release`, and
+the timer cancel, run when the object's *last* reference drops, which for a
+submitted timer is when the entry is drained: it completes, or the ring is
+closed and `aio_release` drops every parked entry. This reference is exactly
+what makes the hazard safe (a parked timer cannot be freed under the ring),
+and it means "cancel at `close`" is only the un-submitted case, where the
+handle is the last reference.
+
 ## Affected files
 
 | file | change |
@@ -122,7 +133,7 @@ Planned for the implementation; the probe's userland block grows into it.
 
 | test | proves |
 |---|---|
-| `aio-timer` (userland, in init's async-I/O suite) | a timer armed for 20 ms, submitted to the ring as `POLL`, completes with its `user_data` after it fires and not before; `READ` returns the expiration count; a periodic timer fires repeatedly; `F_NOWAIT` before it fires is `-EAGAIN`; `close` while parked drops the entry and cancels the timer |
+| `aio-timer` (userland, in init's async-I/O suite) | a timer armed for 20 ms, submitted to the ring as `POLL`, completes with its `user_data` after it fires and not before; `READ` returns the expiration count; a periodic timer fires repeatedly; `F_NOWAIT` before it fires is `-EAGAIN`; a timer created and closed **without** submitting cancels its timer at `close` (its last reference is the handle); and closing the **ring** while a `POLL` is parked drops the entry (`aio_release`) and cancels the timer |
 
 **Planned mutations** (each alone, boot confirmed):
 - the callback not waking `poll_wq`: the parked poll never completes and the
@@ -130,8 +141,9 @@ Planned for the implementation; the probe's userland block grows into it.
 - `ready` not reflecting the expiration: the poll completes before the timer
   fires (or never), and the "not before" assertion fails.
 - read not resetting the count: a periodic timer's second read is wrong.
-- `release` not cancelling the timer: a create/close loop under the poison
-  fires a cancelled timer into freed memory (the `tcp-pcb-timer-free` shape).
+- `release` not cancelling the timer: a create-and-close loop (no submit, so
+  the handle is the only reference) under the poison fires a cancelled timer
+  into freed memory (the `tcp-pcb-timer-free` shape).
 
 ## Benchmarks
 
@@ -140,8 +152,9 @@ None.
 ## Risks
 
 - **The timer outliving the object** — the central hazard, handled by
-  `release` cancelling and quiescing the callback (§Design 3). A test arms
-  and closes in a loop to exercise it.
+  `release` cancelling and quiescing the callback (§Design 3), and bounded
+  while submitted by the ring's reference. A test arms and closes without
+  submitting, in a loop, to drive `release` at `close`.
 - **Interval drift and coalescing** — a periodic timer that fires faster
   than it is read must accumulate a count, not queue N wakeups; the count is
   a single `uint64_t`, read-and-reset, so a slow reader loses nothing but
