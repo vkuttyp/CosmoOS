@@ -3760,7 +3760,7 @@ See [docs/development.md](docs/development.md).
   correct for them. `tools/lockup-interrupted-probe.py --force` parks a
   cross call on the spinner's CPU and samples into it: with the old check
   that forced sample fails as the sightings did, with the new one it
-  passes. (PR #NNN)
+  passes. (PR #271)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
