@@ -36,7 +36,11 @@ the test has sampled. The test waits for the handler to be parked, then
 samples. On x86-64 the NMI interrupts the parked handler. On AArch64 there
 is no NMI: the sample is an ordinary interrupt, which the parked handler
 (interrupts masked) holds off, so the sample should go unanswered within
-its 5 ms timeout. Each architecture's outcome is printed.
+its 5 ms timeout. Each architecture's outcome is printed. If the forcing
+cannot happen -- fewer than three online CPUs, the helper thread fails to
+start, or the handler never parks -- the test fails on CHECK(lp_was_parked)
+rather than silently sampling the plain case, so a forced run that could
+not force never reads as a pass.
 
 --fix is the candidate check. The sample names the spinner if either:
 - the PC is in spin_here and trace[1] is exactly spin_here's return
@@ -147,6 +151,12 @@ def new_start(force):
         thread_join(lp_th);"""
     return s
 
+OLD_OWN = """    CHECK(own);
+"""
+NEW_OWN = """    CHECK(own);
+    CHECK(lp_was_parked);   /* LIPROBE --force: a run that could not force -- no third CPU, thread_create_on failed, or the handler never parked -- is a plain run in disguise, not a pass. Placed after stop_spinner so a failure does not leak the spinner. */
+"""
+
 OLD_READ = """    bool own = (m & CPUMASK_OF(arch_cpu_id())) != 0;
 """
 def new_read(force):
@@ -249,7 +259,10 @@ def revert():
         if cur == orig:
             continue                     # never patched, or already restored
         if cur != patched:
-            sys.exit(f'{path} changed since apply; restore by hand from {path + BACKUP}')
+            sys.exit(f'{path} changed since apply. {path + BACKUP} is the pre-probe '
+                     f'original, so copying it back would erase those changes. Keep your '
+                     f'edits and remove the LIPROBE lines by hand, then delete {path + BACKUP} '
+                     f'and {STAMP}.')
         if not os.path.exists(path + BACKUP) or sha(path + BACKUP) != orig:
             sys.exit(f'{path} is still patched and {path + BACKUP} is missing or not its original; restore by hand')
     for path, patched, orig in entries:
@@ -275,6 +288,8 @@ def apply():
         sys.exit('usage: apply [--force] [--fix]')
     edits = [(OLD_INC, NEW_INC), (OLD_SPIN, NEW_SPIN), (OLD_HERE, NEW_HERE), (OLD_FN, NEW_FN),
              (OLD_START, new_start(force)), (OLD_READ, new_read(force))]
+    if force:
+        edits.append((OLD_OWN, NEW_OWN))
     if fix:
         edits.append((OLD_CHECK, NEW_CHECK_FIX))
     apply_files([(LT, edits)])

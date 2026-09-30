@@ -1,5 +1,11 @@
 # NEXT SUBSYSTEM — lockup-sample asserts a leaf PC on a spinner that can be interrupted
 
+> Constitution §68 report. This PR adds the report and the probe
+> (`tools/lockup-interrupted-probe.py`); the kernel change described under
+> "Design" and the edits in "Affected files" are planned work that lands in
+> the implementation PR that follows, gated on CI. As committed here, the
+> `lockup-sample` check still asserts the leaf PC is in `spin_here`.
+
 ## Problem
 
 `docs/testing/flakes.md` ("`lockup-sample`, and a failure that was not a
@@ -27,8 +33,8 @@ has no allowance for it, and a spinner with interrupts enabled will be
 interrupted.
 
 `flakes.md` already named this as a known-brittle check with a repair in
-hand: assert on the whole trace, not the leaf PC. This unit measures it
-and makes the repair.
+hand: assert on the whole trace, not the leaf PC. This report measures it
+with the probe; the implementation PR that follows makes the repair.
 
 ### Measured
 
