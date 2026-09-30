@@ -623,13 +623,14 @@ static void proc_selftest(void)
         CHECK(cosmo_timer_create(0, 0) == -COSMO_EINVAL);     /* a timer must be armed */
 
         /* Firing: a 20 ms one-shot submitted as POLL completes with its
-         * user_data once it fires. The wait is unbounded, so a slow boot only
-         * delays the completion, never fails the check. */
+         * user_data once it fires. The wait is a generous 5 s -- far above the
+         * firing latency even on a slow or loaded boot, so it does not flake,
+         * yet bounded, so a broken timer fails the test rather than hanging. */
         int tfd = (int)cosmo_timer_create(20000000ull, 0);
         CHECK(tfd >= 3);
         struct cosmo_sqe s = { .op = COSMO_AIO_POLL, .handle = tfd, .events = COSMO_IO_READABLE, .user_data = 11 };
         CHECK(cosmo_aio_submit(ring, &s, 1) == 1);
-        long got = cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER);
+        long got = cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull);
         CHECK(got == 1 && cq[0].user_data == 11 && cq[0].result == COSMO_IO_READABLE);
         /* READ returns the expiration count (one) and resets it, so a following
          * non-waiting READ is -EAGAIN. */
@@ -637,12 +638,12 @@ static void proc_selftest(void)
         struct cosmo_sqe r = { .op = COSMO_AIO_READ, .handle = tfd, .addr = (uint64_t)&exp,
                                .len = sizeof(exp), .user_data = 12 };
         CHECK(cosmo_aio_submit(ring, &r, 1) == 1);
-        CHECK(cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER) == 1 && cq[0].user_data == 12 &&
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull) == 1 && cq[0].user_data == 12 &&
               cq[0].result == (long)sizeof(exp) && exp == 1);
         struct cosmo_sqe rn = { .op = COSMO_AIO_READ, .flags = COSMO_AIO_F_NOWAIT, .handle = tfd,
                                 .addr = (uint64_t)&exp, .len = sizeof(exp), .user_data = 13 };
         CHECK(cosmo_aio_submit(ring, &rn, 1) == 1);
-        CHECK(cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER) == 1 && cq[0].user_data == 13 &&
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull) == 1 && cq[0].user_data == 13 &&
               cq[0].result == -COSMO_EAGAIN);
         CHECK(close(tfd) == 0);
 

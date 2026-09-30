@@ -1,5 +1,11 @@
 # NEXT SUBSYSTEM — the async I/O ring cannot submit a timer
 
+> **Built in PR #275.** `timer_create` returns a timer kobject that rides the
+> ring's POLL/READ path; `aio-timer` exercises it. The rest of this document
+> is the §68 report as written before the implementation — its "Design",
+> "Affected files" and "Tests" describe what was then planned and is now
+> shipped.
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/aio-timer-probe.py`); the timer object and syscall described under
 > "Design" and the edits in "Affected files" are planned work that lands in
