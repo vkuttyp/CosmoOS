@@ -700,6 +700,21 @@ logs and a local build's addresses do not match, so that is not shown.
 Three sightings of one known-brittle check. The repair named above is
 still the fix: assert on the trace, not the leaf PC.
 
+**Fixed, 2026-09-30** (unit `docs/audit/next-subsystem-lockup-interrupted.md`).
+`spin_here` now records the exact address it returns to in `spinner_main`
+(`__builtin_return_address(0)`), and `lockup-sample` accepts the spinner
+by that frame rather than by the leaf PC: either the leaf is in
+`spin_here` with that return just above it (uninterrupted), or the leaf
+is elsewhere and that return appears deeper in the trace (interrupted).
+The `MAIN_FN_BOUND` bound on `trace[1]` goes; `SPIN_FN_BOUND` stays for
+the uninterrupted leaf and for the masked (`lockup-sample-irqoff`,
+`lockup-hard`) and tick-sampled (`lockup-sample-busy`) checks, which
+cannot be sampled mid-interrupt and keep the leaf-PC form. The interrupted
+case is forced on x86-64 by `tools/lockup-interrupted-probe.py --force`,
+which parks a cross call on the spinner's CPU and samples into it; with
+the old leaf-PC check that forced sample fails exactly as the sightings
+did, and with the new check it passes.
+
 **And the third was not a flake.** `cosmofs-writeback` failed on the
 same branch and looked exactly like the other two -- a timing-ish test,
 in a subsystem the branch does not touch, on one run of three. It was a
