@@ -2791,6 +2791,17 @@ The log does not say which iteration failed (`at` 0 or 1). So this is
 the interleaving that fits, not a finding. The next step is to record
 `at` and the word's value in the failure, before changing the claim.
 
+**Explained (the cond-phase report, `docs/audit/next-subsystem-cond-phase.md`;
+not yet fixed).** `tools/cond-phase-probe.py` prints each iteration's
+phase and the word.
+- **Phase 0 reads 1 every time.**
+- **At phase 1, the woken waiter can be first.** Made to reach the held
+  mutex first (`--force`: the probe waits until the word reads 2), the
+  word reads 2 and the step fails with this sighting's exact check, on
+  both architectures. Every waiter still returns.
+- **The unforced boots read 1 at phase 1.** So the failing iteration
+  was phase 1's, and the check asserted a race's outcome, not a defect.
+
 ## `net-nicbench` over the per-test budget, second sighting, 2026-09-30
 
 `self-test net-nicbench took 8116 ms (budget 8000 ms)`, local aarch64
@@ -2798,4 +2809,19 @@ debug, in the smp-wake unit's first boot, beside an x86-64 boot. The
 branch changes only `smp-wake` and `sched_wake`'s debug record. The test
 passed; the harness's budget failed it, by 116 ms. The first sighting was
 over by 39 ms. Recorded, not attributed.
+
+## Two boots timed out on a host at load 100, and `lockup-hard` failed in one, 2026-09-30
+
+Two parallel debug boots (aarch64 and x86-64) of
+`tools/cond-phase-probe.py --force --fix` both hit the harness's 180 s
+timeout before the interactive stage. The host's one-minute load average
+was 101, and macOS's `securityd` and a software-update service were
+running at 116% and 66% of a CPU.
+- The x86-64 boot also failed
+  `lockup-hard ... check failed: s1.hard_answered & CPUMASK_OF((unsigned)k)
+  at line 645`: a CPU did not answer the hard-lockup sample in time,
+  which fits a vCPU the host did not run. First sighting.
+- Run again one at a time, at a load of 10 to 25, both passed.
+
+Recorded, not attributed.
 
