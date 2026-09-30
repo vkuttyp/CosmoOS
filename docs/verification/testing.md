@@ -12,7 +12,7 @@ QEMU TCG on an Apple M-series host, 2026-09-05).
 | Host unit | `test_modelf` `unaligned-tables` (the fuzz finding's regression) | `make host-test` |
 | Target, debug | `fault-kmalloc`, `fault-blk`, `cosmofs-replay`, `syscall-fuzz`; every test's duration and the timing summary | `make test`, `QEMU_SMP=1 make test`, `ARCH=aarch64 make test` |
 | Target, release | the four tests report "compiled out" and pass; no fault-injection hook, no `debug.faultinject` | `make BUILD=release test` |
-| Boot harness | `boot-test: N self-tests, T ms total; slowest: …`; a test over `SELFTEST_BUDGET_MS` fails the run, or over its own entry in `composite_budget_ms` if it is a suite behind one line (`process-user`, `cosmofs-replay`) | `make test` |
+| Boot harness | `boot-test: N self-tests, T ms total; slowest: …`; a test over its budget fails the run: 8000 ms, or its entry in the kernel's `SELFTEST: budgets` line if it is a suite behind one line (`process-user`, `cosmofs-replay`); a run with tests and no budgets line fails; a `[WATCHDOG]` dump fails | `make test`; the parse: `tests/boot/test_selftest_budgets.py` (`make host-test`) |
 
 ## Fuzz targets
 

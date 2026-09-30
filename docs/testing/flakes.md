@@ -128,8 +128,12 @@ added here to make a red run go away:
   None of these can fail for the host's reasons any more.
 - **Bounds that named a hang**: a spinner never preempted, a lost
   semaphore wake, a cross call never answered. These do not present as a
-  slow return but as no return, which the self-test watchdog (8 s, with a
-  scheduler dump) or the call's own one-second panic reports. The
+  slow return but as no return, which the self-test watchdog (the test's
+  budget, 8 s by default, with a scheduler dump) or the call's own
+  one-second panic reports. Until the watchdog-spent unit (PR #267) the
+  watchdog was armed once per run and spent by `cosmofs-replay` in every
+  debug boot, so for the 229 tests after it this was not true: a hang
+  there timed out with no dump. It is armed per test now. The
   `< 200 ms`, `< 500 ms` and `< 100 ms` that used to sit on them could fail
   only on a loaded host and were removed.
 - **Lower bounds** (`elapsed >= MS(30)`): a loaded host makes them more
@@ -2275,6 +2279,12 @@ with a late starter that makes the old assertion fail on every boot
 
 ## `net-accept-race` over the per-test budget, 2026-09-24
 
+**No dump could have attributed it.** The test ran after `cosmofs-replay`,
+which had already spent the run's one watchdog arming; the watchdog-spent
+unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
+test, so a next sighting carries the dump of what the test was doing at its
+budget.
+
 `self-test net-accept-race took 9067 ms (budget 8000 ms)`, on CI: PR
 #240's run 36035970200 (`9731386d`), the x86-64 chaos boot. The branch
 held one report, one probe script and this file. The test itself passed
@@ -2283,6 +2293,12 @@ is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
+
+**No dump could have attributed it.** The test ran after `cosmofs-replay`,
+which had already spent the run's one watchdog arming; the watchdog-spent
+unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
+test, so a next sighting carries the dump of what the test was doing at its
+budget.
 
 `self-test syscall-fuzz took 8305 ms (budget 8000 ms)`, local, aarch64
 GIC boot (`make test-gic`), on the irq-order unit's branch after a
@@ -2659,6 +2675,12 @@ for part of the window. Recorded, not attributed.
 
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
+**No dump could have attributed it.** The test ran after `cosmofs-replay`,
+which had already spent the run's one watchdog arming; the watchdog-spent
+unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
+test, so a next sighting carries the dump of what the test was doing at its
+budget.
+
 `self-test net-nicbench took 8039 ms (budget 8000 ms)`, local aarch64
 debug, one boot of the placed-running unit's branch beside an x86-64
 boot. The test passed; the harness's 8 s budget failed it, by 39 ms. The
@@ -2730,6 +2752,12 @@ passed a balancer lowered to a threshold of one on aarch64, calling 12
 moves "not asserted".
 
 ## `syscall-fuzz` over the per-test budget, second sighting, 2026-09-29
+
+**No dump could have attributed it.** The test ran after `cosmofs-replay`,
+which had already spent the run's one watchdog arming; the watchdog-spent
+unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
+test, so a next sighting carries the dump of what the test was doing at its
+budget.
 
 `self-test syscall-fuzz took 9641 ms (budget 8000 ms)`, local aarch64
 debug, a boot of `tools/hysteresis-probe.py --force --fix` (it changes
@@ -2806,6 +2834,12 @@ phase and the word.
 
 ## `net-nicbench` over the per-test budget, second sighting, 2026-09-30
 
+**No dump could have attributed it.** The test ran after `cosmofs-replay`,
+which had already spent the run's one watchdog arming; the watchdog-spent
+unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
+test, so a next sighting carries the dump of what the test was doing at its
+budget.
+
 `self-test net-nicbench took 8116 ms (budget 8000 ms)`, local aarch64
 debug, in the smp-wake unit's first boot, beside an x86-64 boot. The
 branch changes only `smp-wake` and `sched_wake`'s debug record. The test
@@ -2826,4 +2860,32 @@ running at 116% and 66% of a CPU.
 - Run again one at a time, at a load of 10 to 25, both passed.
 
 Recorded, not attributed.
+
+## `net-lo-tcp` hung, with the test thread blocked on a socket, 2026-09-30
+
+Local aarch64 debug, one boot of the watchdog-spent unit's mutation that
+held `cosmofs-replay` to the default budget (it changes that one entry of
+the budgets table and nothing else; the boot before it, same mutation on
+x86-64, and every other boot of the unit that booted passed `net-lo-tcp`). After
+`tcp-pcb-timer-free ... ok (17 ms)` the next test, `net-lo-tcp`, never
+returned; the harness timed out at 180 s after 272 self-tests. The
+watchdog, armed for that test, printed:
+
+```
+[WATCHDOG] no progress for 8001 ms; scheduler state:
+cpu 0: online current 'idle' queued 1 load 1 ... need_resched 1 ...
+cpu 1-3: online current 'idle' queued 0 ...
+   1 kmain                blocked   32   3      28192     4918 socket
+  12 blk-timeout          ready     32   0        243      209 sleep
+netrx/0-3: up ... drop 0
+```
+
+The test thread waits on a socket and nothing else in the machine is
+running to wake it: every CPU is idle, the four network workers are
+blocked, and the only other threads are the idle,
+reaper, quiesce and driver service threads. Nothing more was printed for the remaining
+~60 s. First sighting, and the first hang after position 180 to carry a
+dump: before PR #267 this boot would have timed out silently. The test
+after `tcp-pcb-timer-free` (whose held-callback history is above) is the
+shape to look at first; not attributed.
 

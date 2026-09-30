@@ -197,9 +197,22 @@ creates under `/tmp`.
 Each self-test line carries its duration: `SELFTEST: name ... ok (12 ms)`.
 After the run, `SELFTEST: timing total=N ms slowest=name (M ms)`. The boot
 harness parses the durations, prints the five slowest tests and the total
-in its own report, and fails a test that exceeded `SELFTEST_BUDGET_MS`
-(default 8000, the hang watchdog's period) so a test that only just
-finishes is noticed before it becomes a timeout.
+in its own report, and fails a test that exceeded its budget so a test
+that only just finishes is noticed before it becomes a timeout.
+
+**The budgets are the kernel's, and each is also the watchdog's period.**
+`selftest.c`'s `budgets` table names the tests that are not held to the
+default of 8000 ms. Before the first test the runner prints
+`SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000`,
+and the harness judges durations by that line alone: a run that ran tests
+and printed no such line fails. A budget naming no test panics the run, so
+a typo cannot quietly mean the default. Before each test the runner arms
+the hang watchdog at that test's budget. An arming fires at most once, so
+the one dump belongs to the test that went quiet. Before this, one arming
+covered the whole run, and `cosmofs-replay` spent it in every debug boot,
+leaving the 229 tests after it with none
+(`docs/audit/next-subsystem-watchdog-spent.md`). A passing boot prints no
+`[WATCHDOG]` dump, and the harness forbids the marker.
 
 **One line is not always one test.** `process-user` runs the entire
 user-mode suite -- every filesystem, network, process, floating-point,
@@ -222,9 +235,9 @@ the result. Making the suite fit by checking fewer images would trade the
 coverage for the budget, which is the wrong way round: the budget is
 there to catch a hang, not to cap a suite.
 
-Such a test gets a budget sized for what it is, in
-`composite_budget_ms` in the harness, beside the default rather than
-instead of it: `process-user` and `cosmofs-replay` have 20 s. It keeps a budget, because a
+Such a test gets a budget sized for what it is, in the kernel's
+`budgets` table, beside the default rather than instead of it:
+`process-user` has 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
 suite that hangs must still be caught. The list is deliberately short
 and each entry is an admission that the line reports too little.
 

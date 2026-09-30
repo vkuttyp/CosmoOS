@@ -1,5 +1,41 @@
 # NEXT SUBSYSTEM — the self-test hang watchdog is spent on a passing test
 
+> **Status: built (PR #267).** As designed, with these specifics:
+>
+> - **The budgets are a separate table, not a registry field.**
+>   `selftest.c` builds with `-Wmissing-field-initializers`, so a third
+>   field in `struct selftest` would have had to be written into all ~400
+>   entries. `budgets[]` names the two tests that are not at the default,
+>   and the runner panics at start on an entry that names no test, so a
+>   typo cannot quietly mean 8 s. `struct selftest` is private to
+>   `selftest.c`, not in `selftest.h` as §Affected files said.
+> - **The harness's parse is in functions** (`selftest_timings`,
+>   `selftest_budgets`, `budget_failures`) with a host test,
+>   `tests/boot/test_selftest_budgets.py` (10 checks, `make host-test`).
+> - **The arming's order:** the kick time and the quiet flag are written
+>   before `fired` is cleared with release; the tick reads `fired` with
+>   acquire before the kick time. A tick never pairs a cleared arming with
+>   the previous test's kick time.
+> - **Measured**, one debug boot each, both architectures:
+>
+>   | boot | result |
+>   |---|---|
+>   | plain | PASS, 411 tests, **0 dumps** (every debug boot before had 1); the budgets line; `watchdog-rearm` ok |
+>   | the probe's `--late` sleeper | its dump falls in the sleeper (test 405); the boot fails on the forbidden marker and its budget |
+>   | M1: the per-test arm back to one 8 s arming and a kick | caught twice on both: `watchdog-rearm` fails at entry (fired, period 50 ms), and the marker fires in `cosmofs-replay` |
+>   | M2: `cosmofs-replay` back to the default budget | caught on both: the marker fires in `cosmofs-replay`, and it fails its budget (x86-64 13628 ms of 8000) |
+>   | M3: the harness ignoring named budgets / accepting no budgets line | each fails one host check |
+>
+>   The aarch64 M2 boot hung in `net-lo-tcp`, a test after position 180,
+>   and the watchdog armed for that test printed its dump: the first hang
+>   there to carry one. Recorded in `docs/testing/flakes.md` as a first
+>   sighting, not attributed. (Its first attempt did not boot: QEMU could
+>   not bind a host-forwarding port.)
+> - **The docs:** `docs/verification/design.md` §6, `api.md`,
+>   `invariants.md` F6, `testing.md`, `tests/README.md`,
+>   `docs/development.md`, flakes (the hang-bounds claim and the five
+>   budget entries), README.
+
 ## Problem
 
 `selftest_run_all` arms the scheduler's hang watchdog once, at 8 s, and
