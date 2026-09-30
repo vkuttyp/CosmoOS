@@ -688,6 +688,18 @@ a repair exists (accept a PC anywhere in the interrupted thread's
 stack, or assert on the trace rather than the leaf PC). It is recorded
 here rather than patched inside an unrelated unit.
 
+**The third sighting, 2026-09-30**, x86-64 CI, the chaos boot
+(`make test-chaos`), run 36702855400 on PR #268: a report and one probe
+script, no kernel change since `main` @ `15b69f73`, which was green. The
+same assertion, now `lockuptest.c:187` (`check failed: in_fn(pc, ...,
+SPIN_FN_BOUND)`, 49 ms). The sampled CPU 1 had a five-frame trace
+(`pc 0xffffffff800067e0 (nmi, 23456 us ago)`), deeper than the idle
+CPUs' three frames, which fits a sample taken inside an interrupt on the
+spinner. The frames are unsymbolized, because CI keeps only the serial
+logs and a local build's addresses do not match, so that is not shown.
+Three sightings of one known-brittle check. The repair named above is
+still the fix: assert on the trace, not the leaf PC.
+
 **And the third was not a flake.** `cosmofs-writeback` failed on the
 same branch and looked exactly like the other two -- a timing-ish test,
 in a subsystem the branch does not touch, on one run of three. It was a
