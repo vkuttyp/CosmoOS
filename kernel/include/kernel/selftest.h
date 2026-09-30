@@ -392,6 +392,7 @@ bool selftest_net_sockerr_accept(const char **reason);
 bool selftest_net_sockerr_locking(const char **reason);
 bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
+bool selftest_net_accept_order(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
 bool selftest_net_tcp_mss(const char **reason);
 bool selftest_net_harness(const char **reason);

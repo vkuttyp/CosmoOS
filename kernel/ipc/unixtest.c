@@ -127,6 +127,12 @@ bool selftest_unix_stream(const char **reason)
     /* The backlog: two queued, the third refused when it will not wait;
      * accepting one makes room. */
     CHECK(mk(COSMO_SOCK_STREAM, &c) == 0 && mk(COSMO_SOCK_STREAM, &c2) == 0 && mk(COSMO_SOCK_STREAM, &c3) == 0);
+    /* The accept below takes `c`: unix_connect queues the connection
+     * itself, synchronously and in connect order, and unix_accept pops
+     * the front (unix.c). TCP gives no such order -- a connection is queued
+     * when its final ACK is processed -- which is why net-lo-tcp's backlog
+     * step asks which client it accepted and this one need not
+     * (docs/audit/next-subsystem-accept-order.md). */
     CHECK(unix_connect(c, &name) == 0);
     CHECK(unix_connect(c2, &name) == 0);
     ksock_set_nonblock(c3, true);

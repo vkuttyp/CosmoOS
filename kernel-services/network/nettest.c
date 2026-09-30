@@ -1154,6 +1154,8 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
 }
 
 
+static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
+
 bool selftest_net_lo_tcp(const char **reason)
 {
     unsigned socks0 = socket_count();
@@ -1174,30 +1176,10 @@ bool selftest_net_lo_tcp(const char **reason)
     if (!tcp_transfer(reason, v6loop(6001), 256u * 1024u, 2500))
         return false;
 
-    /* Listen backlog: a listener that never accepts still completes the
-     * handshake for `backlog` clients; the next SYN is ignored (the client
-     * times out, so only check the queue fills). */
-    struct socket *ls;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
-    struct netaddr la = v4addr(INADDR_LOOPBACK_N, 6002);
-    CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 2) == 0);
-    CHECK(ksock_listen(ls, 2) == -EINVAL);
-    struct socket *c1, *c2;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0 && ksock_connect(c1, &la) == 0);
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
-    struct socket *a1;
-    struct netaddr peer;
-    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0 && peer.port >= NET_EPHEMERAL_LO);
-    CHECK(ksock_sendto(a1, "hi", 2, NULL) == 2);
-    char b[4];
-    CHECK(ksock_recvfrom(c1, b, 4, NULL) == 2 && memcmp(b, "hi", 2) == 0);
-    /* Closing the listener resets the still-queued connection. */
-    nt_ksock_put(ls);
-    thread_sleep_ms(20);
-    CHECK(ksock_recvfrom(c2, b, 4, NULL) < 0 || ksock_sendto(c2, "x", 1, NULL) < 0);
-    nt_ksock_put(a1);
-    nt_ksock_put(c1);
-    nt_ksock_put(c2);
+    /* The listen backlog, in whichever order the handshakes complete. */
+    bool accepted_first;
+    if (!lo_tcp_backlog(reason, 6002, false, &accepted_first))
+        return false;
 
     thread_sleep_ms(50);
     CHECK(socket_count() == socks0);
@@ -2166,6 +2148,129 @@ static bool ready_has(void *arg)
 {
     const struct ready_target *t = arg;
     return (ksock_ready(t->s) & t->mask) == t->mask;
+}
+
+/* --- the listen backlog, in either accept order ----------------------------------
+ *
+ * A listener with backlog 2 that has not accepted still completes the
+ * handshake for two clients; the test accepts one, exchanges `hi` with it,
+ * and closing the listener resets the other.
+ *
+ * **Which one it accepts is not the client that connected first.** A
+ * connection joins the accept queue when the listener processes that
+ * client's final ACK, on the network worker the ACK's flow hashes to --
+ * after the client's connect() has returned. The two clients' ACKs are
+ * usually on different workers, so if the first's worker runs late the
+ * second is queued, and accepted, first. This step used to receive `hi`
+ * on `c1` regardless, and in that order it waited for data nobody would
+ * send: a hang with every CPU idle
+ * (docs/audit/next-subsystem-accept-order.md). It now asks which client
+ * it accepted, and bounds the receive, so a wrong answer fails in seconds.
+ *
+ * `force` makes the second client first, deterministically: the first's
+ * final ACK is held in tcp_input until the second is queued, then
+ * delivered. `net-lo-tcp` runs this unforced and `net-accept-order`
+ * forced -- one step, both orders.
+ */
+#if CONFIG_DEBUG
+struct backlog_forced { struct socket *ls; };
+static bool backlog_second_queued(void *arg)
+{
+    /* Two fields, both monotone until the test acts: the ACK stays held
+     * until it is delivered below, and nothing accepts meanwhile, so the
+     * queue only grows (wait_until's contract). */
+    const struct backlog_forced *f = arg;
+    return tcp_test_ack_held() && (ksock_ready(f->ls) & COSMO_IO_READABLE);
+}
+
+static void backlog_release_hold(void *arg)
+{
+    (void)arg;
+    tcp_test_deliver_held_ack();   /* disarms, and a held ACK goes back in: nothing is left half-open */
+}
+#endif
+
+static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first)
+{
+    const char *who = force ? "net-accept-order" : "net-lo-tcp";
+    struct socket *ls;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    struct netaddr la = v4addr(INADDR_LOOPBACK_N, port);
+    CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 2) == 0);
+    CHECK(ksock_listen(ls, 2) == -EINVAL);
+    if (force) {
+#if CONFIG_DEBUG
+        tcp_test_hold_ack(port);
+        if (!selftest_defer(backlog_release_hold, NULL)) {
+            backlog_release_hold(NULL);
+            *reason = "its release list was full";
+            return false;
+        }
+#else
+        *reason = "forcing the order needs the debug build's hold";
+        return false;
+#endif
+    }
+    struct socket *c1, *c2;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0 && ksock_connect(c1, &la) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
+#if CONFIG_DEBUG
+    if (force) {
+        struct backlog_forced f = { .ls = ls };
+        bool second_first = wait_until(backlog_second_queued, &f, 2000);
+        bool delivered = tcp_test_deliver_held_ack();   /* either way: a failed wait must not strand c1 */
+        if (!second_first || !delivered) {
+            kerror("selftest: %s: the first client's ACK %s, the second %s", who, delivered ? "was held" : "was not held",
+                   second_first ? "was queued" : "was not queued in time");
+            *reason = "the forced order did not happen";
+            return false;
+        }
+    }
+#endif
+    struct socket *a1;
+    struct netaddr peer, n1, n2;
+    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0 && peer.port >= NET_EPHEMERAL_LO);
+    CHECK(ksock_getsockname(c1, &n1) == 0 && ksock_getsockname(c2, &n2) == 0);
+    CHECK(peer.port == n1.port || peer.port == n2.port);
+    *accepted_first = peer.port == n1.port;
+    struct socket *mine = *accepted_first ? c1 : c2, *other = *accepted_first ? c2 : c1;
+    kinfo("selftest: %s: accepted the %s client", who, *accepted_first ? "first" : "second");
+    CHECK(ksock_sendto(a1, "hi", 2, NULL) == 2);
+    /* Bounded: a step that picked the wrong client fails here, not at the
+     * harness's timeout. */
+    struct ready_target rt = { .s = mine, .mask = COSMO_IO_READABLE };
+    CHECK(wait_until(ready_has, &rt, 2000));
+    char b[4];
+    CHECK(ksock_recvfrom(mine, b, 4, NULL) == 2 && memcmp(b, "hi", 2) == 0);
+    /* Closing the listener resets the still-queued connection. */
+    nt_ksock_put(ls);
+    thread_sleep_ms(20);
+    CHECK(ksock_recvfrom(other, b, 4, NULL) < 0 || ksock_sendto(other, "x", 1, NULL) < 0);
+    nt_ksock_put(a1);
+    nt_ksock_put(c1);
+    nt_ksock_put(c2);
+    return true;
+}
+
+/* The backlog step in the order that hung it: the second client's
+ * handshake completes first, and the accept follows completion, not
+ * connect(). */
+bool selftest_net_accept_order(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-accept-order: no test hooks in this build; skipping");
+    return true;
+#else
+    unsigned socks0 = socket_count();
+    bool accepted_first;
+    if (!lo_tcp_backlog(reason, 6004, true, &accepted_first))
+        return false;
+    CHECK(!accepted_first);   /* completion order: the held client is accepted second */
+    thread_sleep_ms(50);
+    CHECK(socket_count() == socks0);
+    return true;
+#endif
 }
 
 /* A connection has reached (not merely left) a state. */
