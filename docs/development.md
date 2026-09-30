@@ -386,8 +386,10 @@ trap frame is available, and a frame-pointer stack trace. Resolve the
 addresses against `out/<arch>-<build>/kernel/kernel.map`, or with
 `llvm-symbolizer --obj=out/<arch>-<build>/kernel/kernel.elf <addr>`.
 
-A self-test that stops making progress for 8 s triggers the scheduler
-hang watchdog, which prints `[WATCHDOG] no progress ...` followed by
+A self-test that stops making progress for its budget (8 s unless the
+boot's `SELFTEST: budgets` line says otherwise) triggers the scheduler
+hang watchdog. The runner arms it afresh before each test, so the dump
+belongs to the test that went quiet, and a passing boot has none. It prints `[WATCHDOG] no progress ...` followed by
 every CPU's run queue (`need_resched`, `preempt`, `irq_depth`, `ticks`)
 and every thread with its state and `waiting_on`. All CPUs on `idle`
 with empty queues and a thread `blocked` on `-` is a lost wakeup; see

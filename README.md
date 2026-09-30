@@ -3706,6 +3706,25 @@ See [docs/development.md](docs/development.md).
   - The unlock-first order stays the usual one, and is not guaranteed.
 
   (PR #265)
+- **The self-test hang watchdog is armed for each test, at that test's
+  budget.** An arming fires once and only an arm clears it, and the runner
+  armed once for the whole run, so `cosmofs-replay` (13-20 s, no kicks)
+  fired it in every debug boot and the 229 tests after it -- every network,
+  guest, process and signal test, `process-user`, `syscall-fuzz` -- had no
+  watchdog. `tools/watchdog-spent-probe.py` showed a 9 s sleeper after it
+  went unreported on both architectures.
+  - The budgets are one table in the kernel, printed as `SELFTEST:
+    budgets default=8000 process-user=20000 cosmofs-replay=40000`; the
+    harness judges by that line alone, and a run with tests and no line
+    fails.
+  - The runner arms the watchdog before each test at its budget. A
+    passing boot prints no `[WATCHDOG]` dump, and the harness forbids it.
+  - `watchdog-spend` leaves a quiet arming fired; `watchdog-rearm`, next,
+    finds the runner re-armed it.
+  - Its first catch: a `net-lo-tcp` hang with the test thread blocked on
+    a socket, now in `docs/testing/flakes.md`.
+
+  (PR #267)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

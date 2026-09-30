@@ -175,10 +175,18 @@ void sched_dump_register(const char *name, void (*fn)(void));
 uint64_t sched_switch_count(unsigned cpu);
 
 /* Hang watchdog: if sched_watchdog_kick() is not called for `timeout_ns`
- * while armed, the boot CPU's tick prints every thread and run queue
- * once. Used by the self-test runner; costs one comparison per tick. */
+ * while armed, the boot CPU's tick prints every thread and run queue --
+ * once per arming: a kick does not re-enable a fired arming, an arm does.
+ * The self-test runner arms before every test, at that test's budget.
+ * Costs one comparison per tick.
+ *
+ * For the watchdog's own self-tests: an arming whose firing is counted and
+ * not printed, the current arming, and how many times any arming fired. */
 void sched_watchdog_arm(uint64_t timeout_ns);
 void sched_watchdog_kick(void);
 void sched_watchdog_disarm(void);
+void sched_watchdog_arm_quiet(uint64_t timeout_ns);
+void sched_watchdog_state(uint64_t *timeout_ns, bool *fired);
+uint64_t sched_watchdog_fire_count(void);
 
 #endif /* KERNEL_SCHED_H */

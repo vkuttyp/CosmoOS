@@ -30,8 +30,9 @@ Host unit tests, host fuzz targets, kernel integration tests, QEMU boot tests. E
   the virtio console to `boot-test.log.vcon`, and requires the
   `boot complete` line there as well as the driver-module load lines.
   Since the verification milestone it reads each self-test's duration,
-  prints the total and the five slowest, and fails a test over
-  `SELFTEST_BUDGET_MS` (default 8000).
+  prints the total and the five slowest, and fails a test over its
+  budget: 8000 ms, or what the kernel's `SELFTEST: budgets` line gives
+  it (`docs/verification/design.md` §6).
 - `modules/`: kernel module fixtures packed into the boot archive under
   `tests/` and loaded only by the module self-tests: `cosmotest`
   (exports, all section groups), `cosmotest_dep` (depends on cosmotest),
