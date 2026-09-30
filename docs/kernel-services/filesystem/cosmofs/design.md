@@ -10,12 +10,20 @@ pool blocks (`pool_*`). Every metadata block starts with a 32-byte
 header:
 
 ```c
-struct cfs_mhdr { uint32_t magic /* "CFSM" */; uint32_t kind; uint64_t generation; uint64_t blkno; uint32_t crc; uint32_t pad; };
+struct cfs_mhdr { uint32_t magic /* "CFSM" */; uint32_t kind; uint64_t generation; uint64_t blkno; uint32_t crc; uint32_t csum_algo; };
 ```
 
-`crc` is CRC32C over the whole block with the field taken as zero;
-`blkno` must equal the block's own number, so a misdirected write is
-detected as well as a corrupted one. `generation` is the transaction
+`csum_algo` (version 11; the spare `pad` word before it) says which
+algorithm `crc` is: `CFS_CSUM_CRC32C`, and — because a metadata block
+always carried a checksum — a pre-v11 image's zeroed word also reads as
+CRC32C. The field is inside the checksummed region, so it is covered by
+`crc`. `cfs_mhdr_fault_of` resolves the algorithm before the checksum: a
+value this build has no verifier for is `MHDR_ALGO`, a distinct fault from
+`MHDR_CRC`, so a format or algorithm skew is named rather than reported as
+damage. The superblock and the pool label keep CRC32C as the fixed
+bootstrap, since they are read before they can be parsed. `blkno` must
+equal the block's own number, so a misdirected write is detected as well
+as a corrupted one. `generation` is the transaction
 that wrote the block; a block whose generation equals the open
 transaction may be modified in place, any other is copied first.
 

@@ -630,6 +630,7 @@ static const struct selftest tests[] = {
     { "watchdog-rearm",  selftest_watchdog_rearm },
     { "cosmofs-holes",   selftest_cosmofs_holes },
     { "cosmofs-csum",    selftest_cosmofs_csum },
+    { "cosmofs-metadata-csum-id", selftest_cosmofs_metadata_csum_id },
     { "cosmofs-fsync",   selftest_cosmofs_fsync },
     { "cosmofs-snapshot", selftest_cosmofs_snapshot },
     { "cosmofs-snapshot-remount", selftest_cosmofs_snapshot_remount },

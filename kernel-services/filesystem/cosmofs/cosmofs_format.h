@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      10u  /* version 10: a record of what this root still owes */
+#define CFS_VERSION      11u  /* version 11: the metadata header declares its checksum algorithm */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -55,7 +55,11 @@ enum cfs_kind {
 #define CFS_DVA_VDEV(d)    ((unsigned)((uint64_t)(d) >> CFS_DVA_VDEV_SHIFT))
 #define CFS_DVA_BLK(d)     ((uint64_t)(d) & CFS_DVA_BLK_MASK)
 
-/* Inode checksum algorithms (cfs_inode.csum_algo). */
+/* Checksum algorithms. For an inode (cfs_inode.csum_algo) they say how its
+ * data and directory blocks are checksummed, and CFS_CSUM_NONE means a block
+ * carries no checksum. For a metadata header (cfs_mhdr.csum_algo) they say
+ * how the header's `crc` is computed; a metadata block always has a checksum,
+ * so 0 there is a pre-v11 image's zeroed pad and reads as CRC32C. */
 #define CFS_CSUM_NONE     0u
 #define CFS_CSUM_CRC32C   1u
 /* Version 7: the entry is a Poly1305 tag over the block's *ciphertext*
@@ -80,8 +84,10 @@ struct cfs_mhdr {
     uint32_t kind;
     uint64_t generation;
     uint64_t blkno;
-    uint32_t crc;          /* CRC32C over the block with this field zero */
-    uint32_t pad;
+    uint32_t crc;          /* checksum over the block with this field zero, by csum_algo */
+    uint32_t csum_algo;    /* CFS_CSUM_*: which algorithm `crc` is. 0 (a pre-v11 image's
+                            * zeroed pad) and CFS_CSUM_CRC32C both mean CRC32C; the field
+                            * is inside the checksummed region, so it is covered by `crc`. */
 };
 
 #define CFS_MHDR_SIZE        32u
