@@ -137,28 +137,38 @@ is what TCP promises: accept order follows handshake completion, not
 
 ### 2. The other order, made certain
 
-A new self-test, `net-accept-order`, forces the order this step used to
-assume away. Its seam is a debug hook in `tcp_input`, the probe's hold
-made permanent under `CONFIG_SELFTEST`: armed with a listener port, it
-holds that port's first bare ACK and hands it back to the test. The
-test:
-1. connects `c1` and `c2` with `c1`'s ACK held;
-2. waits for `c2` to be queued;
-3. delivers the held ACK;
-4. asserts that the accept returns `c2`, and that a second accept
-   returns `c1`;
-5. checks that data sent on each accepted socket arrives at its own
-   client.
+**The backlog step becomes one helper, run in both orders**:
+`lo_tcp_backlog(port, force)`. `net-lo-tcp` runs it unforced, as today.
+A new self-test, `net-accept-order`, runs **the same helper** forced, so
+the step that hung is the step under test (Greptile, #268). A separate
+test of the other order would pass while the step itself regressed.
 
-It is the probe's `--force` run, turned into an assertion about the
-stack: accept order is completion order, and each accepted socket is
-paired with the right client.
+The forcing seam is a debug hook in `tcp_input`, the probe's hold made
+permanent under `CONFIG_SELFTEST`. Armed with a listener port, it holds
+that port's first bare ACK and hands it back to the test. Forced, the
+helper:
+1. connects `c1` and `c2` with `c1`'s ACK held;
+2. waits, bounded, for `c2` to be queued;
+3. delivers the held ACK, even when the wait timed out, so a failed run
+   leaves no half-open connection;
+4. asserts the forced order happened (`c2` queued first);
+5. then runs the step's own checks, identical in both orders.
+
+**The step's receive is bounded.** Before it receives `hi`, the helper
+waits, with a deadline, for the client it chose to become readable. A
+step that picks the wrong client then fails on that wait ("hi did not
+arrive on the client it chose") instead of blocking until the harness's
+timeout. Both orders, one code path, and a regression fails in seconds.
+
+In addition, `net-accept-order` asserts what the forced run shows about
+the stack: the accept returned `c2`, completion order and not
+`connect()` order.
 
 ## Affected files
 
 | file | change |
 |---|---|
-| `kernel-services/network/nettest.c` | the backlog step asks which client it accepted (§1); `net-accept-order` (§2) |
+| `kernel-services/network/nettest.c` | the backlog step as `lo_tcp_backlog(port, force)`, which asks which client it accepted and bounds its receive (§1, §2); `net-lo-tcp` calls it unforced, `net-accept-order` forced |
 | `kernel-services/network/tcp.c` | the ACK hold hook, `CONFIG_SELFTEST` only |
 | `kernel/include/kernel/net/tcp.h` | the hook's declaration |
 | `kernel/core/selftest.c` | registers `net-accept-order` |
@@ -178,13 +188,13 @@ paired with the right client.
 | test | proves |
 |---|---|
 | `net-lo-tcp` | the backlog step passes in either order and says which it took |
-| `net-accept-order` (new) | a later-connecting client whose handshake completes first is accepted first, and each accepted socket is paired with its own client |
+| `net-accept-order` (new) | the same backlog step, forced into the order that hung: it passes, and the accept returned the later-connecting client whose handshake completed first |
 
 **Planned mutations** (each alone, both architectures, boot confirmed):
-- the backlog step back to receiving on `c1`: `net-accept-order` is
-  unaffected, since it does not use that step. The step itself is
-  exercised only in the unforced order, so this mutation survives. It is
-  recorded as such, and `net-accept-order` is the test of the order.
+- the backlog step back to receiving on `c1`: `net-lo-tcp` still passes
+  (unforced, `c1` is accepted), and `net-accept-order` fails on the
+  bounded readable wait, because `hi` went to `c2`. It fails in seconds;
+  it does not hang.
 - `net-accept-order` without its hold: the order is not forced, the
   test's wait times out, and it fails ("the forced order did not
   happen"), not a silent pass.

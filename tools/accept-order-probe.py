@@ -125,8 +125,9 @@ def new_step(force, fix):
         kprintf("LTPROBE: forced: c1's ACK %s, c2 %s\\n", lt_m ? "held" : "NOT HELD",
                 lt_c2_first ? "queued first" : "NOT QUEUED (timed out)");
         __atomic_store_n(&g_ltprobe_arm, 0, __ATOMIC_RELEASE);
+        if (lt_m != NULL)   /* delivered either way: a failed wait must not strand c1 half-open */
+            tcp_input(g_ltprobe_nif, lt_m, &g_ltprobe_ip4, NULL);
         CHECK(lt_c2_first);   /* a forced order that did not happen tested nothing */
-        tcp_input(g_ltprobe_nif, lt_m, &g_ltprobe_ip4, NULL);
     }
 """
     s += """    struct socket *a1;
