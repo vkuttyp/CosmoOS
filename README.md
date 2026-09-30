@@ -3796,7 +3796,7 @@ See [docs/development.md](docs/development.md).
   20 ms one-shot submitted as `POLL` completes with its `user_data` after it
   fires and not before, `READ` returns the count then `-EAGAIN`, a periodic
   timer fires repeatedly, and a create-and-close without submitting cancels
-  at `close`. (PR #NNN)
+  at `close`. (PR #275)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
