@@ -64,8 +64,10 @@ Each row is one boot per architecture.
   its log.
 - **Under `--force`, every waiter still returns** (the suite passes
   with the fix), so the handoff through "the unlock finds 2" works.
-- **The two unforced boots read 1 at phase 1:** the holder's unlock
-  found 1 and woke nobody. That is the path the step exists to guard,
+- **The two unforced boots read 1 at phase 1.** The probe reads the
+  word just before it tells the holder to unlock, so the unlock most
+  likely found 1 and woke nobody; the waiter could still arrive between
+  the read and the unlock. That is the path the step exists to guard,
   and it is the usual order, not a certain one.
 
 ### Why it matters
