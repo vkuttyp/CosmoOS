@@ -621,29 +621,45 @@ static void proc_selftest(void)
         int ring = (int)cosmo_aio_create(4, 0);
         CHECK(ring >= 3);
         CHECK(cosmo_timer_create(0, 0) == -COSMO_EINVAL);     /* a timer must be armed */
-        int tfd = (int)cosmo_timer_create(20000000ull, 0);    /* one-shot, 20 ms */
+
+        /* Firing: a 20 ms one-shot submitted as POLL completes with its
+         * user_data once it fires. The wait is unbounded, so a slow boot only
+         * delays the completion, never fails the check. */
+        int tfd = (int)cosmo_timer_create(20000000ull, 0);
         CHECK(tfd >= 3);
-        /* Before it fires it is not readable: a POLL parks, a zero wait sees nothing. */
         struct cosmo_sqe s = { .op = COSMO_AIO_POLL, .handle = tfd, .events = COSMO_IO_READABLE, .user_data = 11 };
         CHECK(cosmo_aio_submit(ring, &s, 1) == 1);
-        CHECK(cosmo_aio_wait(ring, cq, 4, 0, 0) == 0);        /* parked, not fired */
-        /* It completes once it fires, carrying its user_data. */
-        long got = cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull);
+        long got = cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER);
         CHECK(got == 1 && cq[0].user_data == 11 && cq[0].result == COSMO_IO_READABLE);
-        /* READ returns the expiration count (one so far) and resets it. */
+        /* READ returns the expiration count (one) and resets it, so a following
+         * non-waiting READ is -EAGAIN. */
         uint64_t exp = 0;
         struct cosmo_sqe r = { .op = COSMO_AIO_READ, .handle = tfd, .addr = (uint64_t)&exp,
                                .len = sizeof(exp), .user_data = 12 };
         CHECK(cosmo_aio_submit(ring, &r, 1) == 1);
-        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull) == 1 && cq[0].user_data == 12 &&
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER) == 1 && cq[0].user_data == 12 &&
               cq[0].result == (long)sizeof(exp) && exp == 1);
-        /* A one-shot has disarmed: a non-waiting READ now reports -EAGAIN. */
         struct cosmo_sqe rn = { .op = COSMO_AIO_READ, .flags = COSMO_AIO_F_NOWAIT, .handle = tfd,
                                 .addr = (uint64_t)&exp, .len = sizeof(exp), .user_data = 13 };
         CHECK(cosmo_aio_submit(ring, &rn, 1) == 1);
-        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull) == 1 && cq[0].user_data == 13 &&
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, COSMO_AIO_WAIT_FOREVER) == 1 && cq[0].user_data == 13 &&
               cq[0].result == -COSMO_EAGAIN);
-        CHECK(close(tfd) == 0 && close(ring) == 0);
+        CHECK(close(tfd) == 0);
+
+        /* Parks, and the two-reference lifetime: a one-hour timer cannot fire
+         * during the test whatever the host load, so a bounded wait on its
+         * parked POLL sees nothing. Closing the timer handle while the entry is
+         * parked leaves the timer alive by the ring's reference; closing the
+         * ring then drops the parked entry and releases the timer. Both closes
+         * succeed and nothing hangs (docs/audit/next-subsystem-aio-timer.md). */
+        int far = (int)cosmo_timer_create(3600ull * 1000 * 1000 * 1000, 0);
+        CHECK(far >= 3);
+        struct cosmo_sqe fs = { .op = COSMO_AIO_POLL, .handle = far, .events = COSMO_IO_READABLE, .user_data = 14 };
+        CHECK(cosmo_aio_submit(ring, &fs, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 50000000ull) == 0);   /* parked; the hour is not up */
+        CHECK(close(far) == 0);     /* handle closed while parked: the ring holds the other reference */
+        CHECK(close(ring) == 0);    /* drops the parked entry, releasing the timer */
+
         /* A periodic timer fires repeatedly; a plain blocking read collects each. */
         int per = (int)cosmo_timer_create(10000000ull, 10000000ull);   /* 10 ms, then every 10 ms */
         CHECK(per >= 3);
