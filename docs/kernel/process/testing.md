@@ -658,7 +658,8 @@ the loop contract a tested property rather than a comment in a header.
 thread door", carries the table and the numbers): the herd measured with
 eight waiters and one requeueing broadcast; every waiter returning with
 the mutex held at 1, at 2, and not held; another holder unlocking inside
-the broadcast at either phase of libc's `__cosmo_cond_bcast_probe`; a
+the broadcast at either phase of libc's `__cosmo_cond_bcast_probe`, and
+after the requeue with the woken waiter first (step 25's third run); a
 concurrent broadcaster answered `-EAGAIN`; a requeued timed wait
 expiring on the mutex word; a never-waited condition; the recorded
 mutex's page unmapped before a broadcast (a child, so the bug-proof is a

@@ -297,7 +297,8 @@ rule for the caller.
 native thread door") — the herd measured with eight waiters; every
 waiter returning with the mutex held at 1, at 2, and not held; another
 holder unlocking inside the broadcast at either phase of libc's
-`__cosmo_cond_bcast_probe`; a concurrent broadcaster answered `-EAGAIN`;
+`__cosmo_cond_bcast_probe`, and after the requeue with the woken waiter
+reaching the held mutex first; a concurrent broadcaster answered `-EAGAIN`;
 a requeued timed wait expiring on the mutex word; a never-waited
 condition; and the recorded mutex's page unmapped before a broadcast,
 in a child so any load through the pointer is a status. Each rule's
