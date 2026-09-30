@@ -282,7 +282,13 @@ int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(cons
  * holding a good copy when there was one. -EIO when there was none. */
 int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
                    unsigned *repaired);
-/* A metadata block's own check: kind, its own DVA, and the CRC. */
+/* Why a metadata block did not verify. MHDR_ALGO is a header whose
+ * csum_algo this build cannot verify -- a format or algorithm skew, distinct
+ * from MHDR_CRC (a checksum that did not match). Order is the check order, so
+ * the algorithm is resolved before the checksum it names. */
+enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_ALGO, MHDR_CRC };
+enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t dva, uint32_t kind);
+/* A metadata block's own check: kind, its own DVA, csum_algo, and the CRC. */
 bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind);
 /* Seal a metadata block outside a transaction (format time). */
 void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation);

@@ -299,6 +299,7 @@ bool selftest_cosmofs_ops(const char **reason);
 bool selftest_cosmofs_crash(const char **reason);
 bool selftest_cosmofs_holes(const char **reason);      /* milestone 7 (RAM devices): sparse files */
 bool selftest_cosmofs_csum(const char **reason);       /* data and directory checksums */
+bool selftest_cosmofs_metadata_csum_id(const char **reason);  /* the metadata header's checksum algorithm id */
 bool selftest_cosmofs_fsync(const char **reason);
 bool selftest_cosmofs_snapshot(const char **reason);
 bool selftest_cosmofs_snapshot_remount(const char **reason);      /* fsync commits */

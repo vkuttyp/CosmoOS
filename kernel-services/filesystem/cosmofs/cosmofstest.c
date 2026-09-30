@@ -296,6 +296,7 @@ bool selftest_cosmofs_crash(const char **reason)
 #include <kernel/wait.h>
 
 #include "cosmofs_format.h"
+#include "cosmofs_internal.h"
 
 #if CONFIG_DEBUG
 
@@ -690,6 +691,58 @@ bool selftest_cosmofs_writeback(const char **reason)
     return engine_unmount(bd, reason);
 }
 
+/* The metadata header declares its checksum algorithm, and an algorithm this
+ * build cannot verify is a distinct fault from a checksum that did not match. */
+static uint32_t meta_test_crc(const uint8_t *block)
+{
+    size_t off = offsetof(struct cfs_mhdr, crc);
+    static const uint8_t zero4[4] = { 0 };
+    uint32_t c = crc32c(block, off);
+    c = crc32c_update(c, zero4, 4);
+    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
+}
+
+bool selftest_cosmofs_metadata_csum_id(const char **reason)
+{
+    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    CHECK(block != NULL);
+    memset(block, 0xa5, CFS_BLOCK);
+    struct cfs_mhdr *h = (struct cfs_mhdr *)block;
+
+    /* A freshly sealed block names CRC32C and verifies. */
+    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    enum mhdr_fault f_sealed = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    unsigned sealed_algo = h->csum_algo;
+
+    /* A pre-v11 image left the field zero; it still reads as CRC32C. */
+    h->csum_algo = CFS_CSUM_NONE;
+    h->crc = meta_test_crc(block);
+    enum mhdr_fault f_legacy = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+
+    /* A block declaring an algorithm this build has no verifier for, with a
+     * CRC that is itself valid: the fault is MHDR_ALGO, decided before the
+     * checksum, so a format or algorithm skew is not read as damage. */
+    h->csum_algo = CFS_CSUM_POLY1305;
+    h->crc = meta_test_crc(block);
+    enum mhdr_fault f_algo = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+
+    /* One flipped payload bit under CRC32C is MHDR_CRC, distinct from above. */
+    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    block[CFS_MHDR_SIZE + 3] ^= 0x01u;
+    enum mhdr_fault f_corrupt = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+
+    kfree(block);   /* free before any CHECK can return */
+
+    CHECK(f_sealed == MHDR_OK);
+    CHECK(sealed_algo == CFS_CSUM_CRC32C);
+    CHECK(f_legacy == MHDR_OK);
+    CHECK(f_algo == MHDR_ALGO);
+    CHECK(f_corrupt == MHDR_CRC);
+    kinfo("selftest: cosmofs-metadata-csum-id: the metadata header declares its checksum algorithm; "
+          "an unsupported one is a distinct fault from a bad checksum");
+    return true;
+}
+
 #else
 bool selftest_cosmofs_holes(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_csum(const char **reason) { (void)reason; return true; }
@@ -697,6 +750,7 @@ bool selftest_cosmofs_fsync(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_reserve(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_fallback(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_writeback(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_metadata_csum_id(const char **reason) { (void)reason; return true; }
 #endif
 
 #if CONFIG_DEBUG

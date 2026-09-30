@@ -46,25 +46,34 @@ static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t bl
     h->kind = kind;
     h->generation = fs->gen;
     h->blkno = blkno;
-    h->pad = 0;
+    h->csum_algo = CFS_CSUM_CRC32C;   /* the algorithm `crc` is computed with */
     h->crc = 0;
     h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
+}
+
+/* A metadata header's checksum algorithm. CRC32C is the only one the format
+ * computes today; 0 is a pre-v11 image's zeroed pad and is also CRC32C. Any
+ * other value is a block this build cannot verify (MHDR_ALGO), which is a
+ * different finding from a checksum that simply did not match. */
+static bool meta_csum_supported(uint32_t algo)
+{
+    return algo == CFS_CSUM_NONE || algo == CFS_CSUM_CRC32C;
 }
 
 /*
  * Why a metadata block did not verify, for the message below.
  *
- * The four are very different findings and the error said only "bad
+ * The five are very different findings and the error said only "bad
  * metadata header or checksum" for all of them: a wrong magic is a block
  * that was never sealed as metadata, a wrong `blkno` is one block's
  * content sitting at another's address, a wrong kind is the right block
- * misused, and a bad CRC is content that changed after it was sealed.
- * Chasing the writeback thread that committed during a mount needed to
- * know which; the message is kept because the next one will too.
+ * misused, an unsupported csum_algo is a block checksummed by an algorithm
+ * this build does not have (a format or algorithm skew, not damage), and a
+ * bad CRC is content that changed after it was sealed. Chasing the writeback
+ * thread that committed during a mount needed to know which; the message is
+ * kept because the next one will too. The enum is in cosmofs_internal.h.
  */
-enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_CRC };
-
-static enum mhdr_fault mhdr_fault_of(const uint8_t *block, uint64_t blkno, uint32_t kind)
+enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t blkno, uint32_t kind)
 {
     const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
     if (h->magic != CFS_MHDR_MAGIC)
@@ -73,6 +82,8 @@ static enum mhdr_fault mhdr_fault_of(const uint8_t *block, uint64_t blkno, uint3
         return MHDR_BLKNO;
     if (kind && h->kind != kind)
         return MHDR_KIND;
+    if (!meta_csum_supported(h->csum_algo))
+        return MHDR_ALGO;
     if (block_crc(block, offsetof(struct cfs_mhdr, crc)) != h->crc)
         return MHDR_CRC;
     return MHDR_OK;
@@ -80,7 +91,7 @@ static enum mhdr_fault mhdr_fault_of(const uint8_t *block, uint64_t blkno, uint3
 
 static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
 {
-    return mhdr_fault_of(block, blkno, kind) == MHDR_OK ? 0 : -EIO;
+    return cfs_mhdr_fault_of(block, blkno, kind) == MHDR_OK ? 0 : -EIO;
 }
 
 struct mhdr_want {
@@ -211,12 +222,12 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
              * "bad header or checksum" covers four different faults with
              * four different causes. */
             const struct cfs_mhdr *h = (const struct cfs_mhdr *)b->data;
-            static const char *const why[] = { "ok", "magic", "blkno", "kind", "crc" };
-            enum mhdr_fault f = mhdr_fault_of(b->data, blkno, kind);
-            kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu crc 0x%08x "
+            static const char *const why[] = { "ok", "magic", "blkno", "kind", "algo", "crc" };
+            enum mhdr_fault f = cfs_mhdr_fault_of(b->data, blkno, kind);
+            kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu algo %u crc 0x%08x "
                    "(wanted kind %u at blkno %llu, computed crc 0x%08x)",
                    (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
-                   (unsigned long long)h->blkno, h->crc, kind, (unsigned long long)blkno,
+                   (unsigned long long)h->blkno, h->csum_algo, h->crc, kind, (unsigned long long)blkno,
                    block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
         } else {
             /* Nothing was read, so b->data describes nothing: saying
