@@ -935,8 +935,9 @@ static void bp_probe(int phase)
     if ((unsigned)phase != bp_at_phase)
         return;
     if (phase == 1 && bp_force_contend) {
-        /* The woken waiter reaches the held mutex first: wait for its 2. */
-        uint64_t deadline = cosmo_clock_ns() + 1000000000ull;
+        /* The woken waiter reaches the held mutex first: wait for its 2,
+         * as long as a join would wait for it to finish. */
+        uint64_t deadline = cosmo_clock_ns() + JOIN_BUDGET_NS;
         while (__atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) != 2u && cosmo_clock_ns() < deadline)
             cosmo_yield();
         bp_forced_reached = __atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) == 2u;

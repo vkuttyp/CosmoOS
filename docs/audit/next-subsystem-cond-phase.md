@@ -96,7 +96,9 @@ The check fails a correct libc in the waiter-first order. And because
 the order is a race, the step does not know which handoff path it
 exercised on a given boot.
 
-## Current implementation
+## The implementation before this unit
+
+What step 25 was before PR #265; the banner and Design describe it as built.
 
 - **`libc/src/thread.c`, `cosmo_cond_broadcast`:** increments `seq`,
   probe phase 0, requeue (wakes one, moves the rest onto the mutex
@@ -116,7 +118,8 @@ exercised on a given boot.
   held either way, and the holder's unlock must carry the handoff
   whichever order the two threads took.
 - **A third run takes the waiter-first order for certain.** It is
-  phase 1 again, with the probe waiting (bounded at 1 s, yielding) until
+  phase 1 again, with the probe waiting (bounded by `JOIN_BUDGET_NS`,
+  3 s, the step's own join budget; yielding) until
   the word reads 2 before it reads it, as `--force` does. It asserts
   that the wait reached 2 (a timeout is a failure, not an untested
   pass), and that every waiter returns: the unlock finds 2 and wakes
@@ -172,7 +175,9 @@ None.
 
 ## Risks
 
-- **The third run's wait is bounded at 1 s.** If the woken waiter never
+- **The third run's wait is bounded by `JOIN_BUDGET_NS` (3 s),** the
+  budget every join in these steps allows; the probe used 1 s. Greptile
+  found the tighter bound on #265. If the woken waiter never
   reaches the mutex in that time, `bp_forced_reached` stays 0 and the
   run fails ("the wait did not reach 2"). That is a stuck handoff too,
   not an untested pass.
