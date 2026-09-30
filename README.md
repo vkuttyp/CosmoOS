@@ -3761,6 +3761,24 @@ See [docs/development.md](docs/development.md).
   cross call on the spinner's CPU and samples into it: with the old check
   that forced sample fails as the sightings did, with the new one it
   passes. (PR #271)
+- **A cosmofs metadata block says how it is checksummed.** Every metadata
+  header carried a CRC32C with the algorithm hardcoded, while data blocks
+  self-describe (`cfs_inode.csum_algo`: CRC32C or Poly1305) -- so on an
+  encrypted filesystem the data was authenticated and the metadata only
+  CRC'd, and a metadata block written by any other algorithm was
+  indistinguishable from corruption. The header's spare word becomes
+  `csum_algo`, written `CFS_CSUM_CRC32C` and covered by the block's own
+  CRC. `cfs_mhdr_fault_of` resolves it before the checksum: a pre-v11
+  image's zeroed word and `CFS_CSUM_CRC32C` both read as CRC32C, so no
+  format version is threaded to the verify site, and any other value is
+  `MHDR_ALGO` -- a distinct fault named in the metadata-fault message,
+  rather than a bad checksum. `CFS_VERSION` is 11; the superblock and
+  label keep CRC32C as the fixed bootstrap. Authenticating metadata is the
+  enabled future work (the wrapped-key block is verified before the key is
+  unwrapped, so metadata checksums cannot be authenticated unconditionally).
+  `cosmofs-metadata-csum-id` proves a sealed block names CRC32C, a legacy
+  block reads as CRC32C, an unsupported algorithm is `MHDR_ALGO`, and a
+  one-bit corruption is `MHDR_CRC` -- the two distinct. (PR #NNN)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

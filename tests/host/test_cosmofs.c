@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 10 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 11 && CFS_VERSION_MIN == 2);
     /* Version 8: a symbolic link is a third type in the mode's top
      * nibble, so the inode did not grow and every older image still
      * mounts; what version 8 gates is *writing* one. */
@@ -46,6 +46,14 @@ static void test_layout_sizes(void)
      */
     EXPECT(offsetof(struct cfs_super, orphan_root) == offsetof(struct cfs_super, free_root) + 8);
     EXPECT(CFS_KIND_ORPHAN == 14);
+    /*
+     * Version 11 gives the metadata header a checksum algorithm id in the
+     * word that was `pad`, so the header did not grow and every older image
+     * still mounts -- a pre-v11 block's zeroed word reads as CRC32C, the
+     * same as CFS_CSUM_CRC32C (docs/audit/next-subsystem-cosmofs-metadata-csum-id.md).
+     */
+    EXPECT(offsetof(struct cfs_mhdr, csum_algo) == offsetof(struct cfs_mhdr, crc) + 4);
+    EXPECT(sizeof(struct cfs_mhdr) == CFS_MHDR_SIZE && CFS_CSUM_CRC32C == 1);
     EXPECT(CFS_ORPHANS_PER_BLOCK == CFS_DEAD_PER_BLOCK);
     EXPECT(sizeof(struct cfs_inode) == CFS_INODE_SIZE);
     /* The snapshot structures the version adds. */
