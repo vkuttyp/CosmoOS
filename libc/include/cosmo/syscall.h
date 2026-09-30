@@ -443,6 +443,13 @@ static inline long cosmo_aio_wait(int ring, struct cosmo_cqe *cqes, unsigned n, 
 {
     return cosmo_syscall5(SYS_aio_wait, ring, cqes, n, min, timeout_ns);
 }
+/* A timer as a submittable I/O object (a timerfd): first expiry after
+ * initial_ns, then every interval_ns if non-zero. Returns a handle that
+ * becomes readable when it fires; a read returns the expiration count. */
+static inline long cosmo_timer_create(uint64_t initial_ns, uint64_t interval_ns)
+{
+    return cosmo_syscall2(SYS_timer_create, initial_ns, interval_ns);
+}
 
 /* Signals a program can catch (docs/kernel/process/design.md, "The
  * native signal ABI"). `sigreturn` is not here: it is reached only from

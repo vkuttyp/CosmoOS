@@ -163,7 +163,8 @@
 #define SYS_recvmsg   98  /* (int h, struct cosmo_msg *) -> bytes; nr_handles and flags are written back */
 #define SYS_socketpair 99 /* (int family, int type, int h[2]) -> 0; two connected sockets, no name */
 #define SYS_mknod     100 /* (const char *path, uint32_t mode, uint32_t type) -> 0; type COSMO_DT_FIFO: a named pipe */
-#define SYS_COUNT     101
+#define SYS_timer_create 101 /* (uint64_t initial_ns, uint64_t interval_ns) -> handle; a timer as a submittable I/O object (timerfd) */
+#define SYS_COUNT     102
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five

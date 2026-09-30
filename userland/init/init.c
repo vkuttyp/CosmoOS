@@ -615,6 +615,50 @@ static void proc_selftest(void)
         CHECK(cosmo_aio_submit(999, sq, 1) == -COSMO_EBADF && cosmo_aio_submit(p[0], sq, 1) == -COSMO_EBADF);
     }
 
+    /* A timer as a submittable I/O object (docs/audit/next-subsystem-aio-timer.md). */
+    {
+        struct cosmo_cqe cq[4];
+        int ring = (int)cosmo_aio_create(4, 0);
+        CHECK(ring >= 3);
+        CHECK(cosmo_timer_create(0, 0) == -COSMO_EINVAL);     /* a timer must be armed */
+        int tfd = (int)cosmo_timer_create(20000000ull, 0);    /* one-shot, 20 ms */
+        CHECK(tfd >= 3);
+        /* Before it fires it is not readable: a POLL parks, a zero wait sees nothing. */
+        struct cosmo_sqe s = { .op = COSMO_AIO_POLL, .handle = tfd, .events = COSMO_IO_READABLE, .user_data = 11 };
+        CHECK(cosmo_aio_submit(ring, &s, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 0, 0) == 0);        /* parked, not fired */
+        /* It completes once it fires, carrying its user_data. */
+        long got = cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull);
+        CHECK(got == 1 && cq[0].user_data == 11 && cq[0].result == COSMO_IO_READABLE);
+        /* READ returns the expiration count (one so far) and resets it. */
+        uint64_t exp = 0;
+        struct cosmo_sqe r = { .op = COSMO_AIO_READ, .handle = tfd, .addr = (uint64_t)&exp,
+                               .len = sizeof(exp), .user_data = 12 };
+        CHECK(cosmo_aio_submit(ring, &r, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull) == 1 && cq[0].user_data == 12 &&
+              cq[0].result == (long)sizeof(exp) && exp == 1);
+        /* A one-shot has disarmed: a non-waiting READ now reports -EAGAIN. */
+        struct cosmo_sqe rn = { .op = COSMO_AIO_READ, .flags = COSMO_AIO_F_NOWAIT, .handle = tfd,
+                                .addr = (uint64_t)&exp, .len = sizeof(exp), .user_data = 13 };
+        CHECK(cosmo_aio_submit(ring, &rn, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 1000000000ull) == 1 && cq[0].user_data == 13 &&
+              cq[0].result == -COSMO_EAGAIN);
+        CHECK(close(tfd) == 0 && close(ring) == 0);
+        /* A periodic timer fires repeatedly; a plain blocking read collects each. */
+        int per = (int)cosmo_timer_create(10000000ull, 10000000ull);   /* 10 ms, then every 10 ms */
+        CHECK(per >= 3);
+        uint64_t c1 = 0, c2 = 0;
+        CHECK(read(per, &c1, sizeof(c1)) == (long)sizeof(c1) && c1 >= 1);
+        CHECK(read(per, &c2, sizeof(c2)) == (long)sizeof(c2) && c2 >= 1);
+        CHECK(close(per) == 0);
+        /* Create and close without submitting: release cancels the armed timer,
+         * the handle being its only reference (the tcp-pcb-timer-free shape). */
+        for (int i = 0; i < 8; i++) {
+            int t = (int)cosmo_timer_create(1000000000ull, 0);   /* far off; closed before it fires */
+            CHECK(t >= 3 && close(t) == 0);
+        }
+    }
+
     /* The console: a character device, a terminal. */
     CHECK(fstat(0, &st) == 0 && S_ISCHR(st.st_type));
     CHECK(isatty(0) == 1);
