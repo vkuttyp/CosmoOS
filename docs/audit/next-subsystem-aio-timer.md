@@ -99,16 +99,16 @@ a timer armed by an object that outlives it fires into freed memory. The
 callback takes only what it needs to wake the queue and bump the count, and
 `release` cancels-then-quiesces.
 
-A submitted timer is kept alive by the **ring's own reference**, not the
-handle: `aio_submit` takes a reference on the object (`handle_lookup` →
-`kobject_get`) that the parked entry holds and `req_free` drops. So closing
-the handle while a `POLL` is parked does not free the timer — `release`, and
-the timer cancel, run when the object's *last* reference drops, which for a
-submitted timer is when the entry is drained: it completes, or the ring is
-closed and `aio_release` drops every parked entry. This reference is exactly
-what makes the hazard safe (a parked timer cannot be freed under the ring),
-and it means "cancel at `close`" is only the un-submitted case, where the
-handle is the last reference.
+`release`, and the timer cancel, run only when the object's *last* reference
+drops. A submitted timer has **two**: the open handle's, and one the ring
+takes at submit (`aio_submit` → `handle_lookup` → `kobject_get`) that the
+parked entry holds and `req_free` drops. Neither alone frees it — closing the
+handle leaves the ring's reference, and closing the ring (`aio_release` drops
+every parked entry) leaves the handle's — so the timer is cancelled when
+whichever closes *last* closes, in either order. That the ring holds a
+reference while an entry is parked is exactly what makes the hazard safe: a
+submitted timer cannot be freed under the ring. "Cancel at `close`" is the
+un-submitted case, where the handle is the only reference.
 
 ## Affected files
 
@@ -133,7 +133,7 @@ Planned for the implementation; the probe's userland block grows into it.
 
 | test | proves |
 |---|---|
-| `aio-timer` (userland, in init's async-I/O suite) | a timer armed for 20 ms, submitted to the ring as `POLL`, completes with its `user_data` after it fires and not before; `READ` returns the expiration count; a periodic timer fires repeatedly; `F_NOWAIT` before it fires is `-EAGAIN`; a timer created and closed **without** submitting cancels its timer at `close` (its last reference is the handle); and closing the **ring** while a `POLL` is parked drops the entry (`aio_release`) and cancels the timer |
+| `aio-timer` (userland, in init's async-I/O suite) | a timer armed for 20 ms, submitted to the ring as `POLL`, completes with its `user_data` after it fires and not before; `READ` returns the expiration count; a periodic timer fires repeatedly; `F_NOWAIT` before it fires is `-EAGAIN`; a timer created and closed **without** submitting cancels its timer at `close` (the handle is its only reference); and with a timer submitted as a parked `POLL`, closing the ring drops the parked entry (`aio_release`) while an open handle keeps the timer, which is cancelled only once that handle is closed too — the test closes both and checks the entry was dropped |
 
 **Planned mutations** (each alone, boot confirmed):
 - the callback not waking `poll_wq`: the parked poll never completes and the
