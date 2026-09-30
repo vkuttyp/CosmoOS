@@ -3693,6 +3693,19 @@ See [docs/development.md](docs/development.md).
   - The test asserts both, and repeats a round whose target turned busy.
 
   (PR #263)
+- **`thrtest` step 25 asserts what each phase of a broadcast allows.**
+  It failed once on CI, reading the mutex word as something other than 1
+  after the requeue. The requeue wakes one waiter, which relocks the
+  held mutex at 2, and if it gets there before the probe reads, 2 is
+  correct. `tools/cond-phase-probe.py` made that order certain and
+  failed the check on both architectures.
+  - Before the requeue, the word must read 1.
+  - After it, 1 or 2, and the run logs which.
+  - A third run forces the waiter-first order and asserts 2; a forced
+    wait that times out fails.
+  - The unlock-first order stays the usual one, and is not guaranteed.
+
+  (PR #265)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

@@ -2791,8 +2791,10 @@ The log does not say which iteration failed (`at` 0 or 1). So this is
 the interleaving that fits, not a finding. The next step is to record
 `at` and the word's value in the failure, before changing the claim.
 
-**Explained (the cond-phase report, `docs/audit/next-subsystem-cond-phase.md`;
-not yet fixed).** `tools/cond-phase-probe.py` prints each iteration's
+**Explained (the cond-phase report, `docs/audit/next-subsystem-cond-phase.md`),
+and fixed by the cond-phase unit (PR #265).** Step 25 now asserts 1 before
+the requeue and 1 or 2 after it, logging which. A third run makes the
+woken-waiter-first order certain and asserts 2. `tools/cond-phase-probe.py` prints each iteration's
 phase and the word.
 - **Phase 0 reads 1 every time.**
 - **At phase 1, the woken waiter can be first.** Made to reach the held

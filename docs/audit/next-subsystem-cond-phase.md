@@ -1,7 +1,26 @@
 # NEXT SUBSYSTEM — thrtest step 25 asserts which of two threads reached the mutex first
 
-> **Status: proposed.** Report and probe (`tools/cond-phase-probe.py`)
-> only; nothing in the kernel or libc changes in this PR.
+> **Status: built (PR #265).** As designed, with these specifics:
+>
+> - **Three runs** in step 25's loop (`run` 0, 1, 2; phase 0, 1, 1).
+>   `bp_force_contend` turns on the third run's wait, and
+>   `bp_forced_reached` records whether it reached 2. The plain phase-1
+>   run prints what it read: "the woken waiter first", or "the holder's
+>   unlock first, most likely".
+> - **Measured:** both architectures passed. The plain phase-1 run read 1
+>   (the holder's unlock first, most likely), and the forced run reached
+>   2.
+> - **Mutations,** each alone, both architectures, boot confirmed:
+>
+>   | mutation | result |
+>   |---|---|
+>   | the forced run's assertion back to `== 1` | fails on both: `bp_state_seen == 1u` (it reads 2) |
+>   | phase 0's assertion widened to 1 or 2 | survives on both, as planned: nothing makes phase 0 read 2. Recorded as such, not as a catch |
+>   | the forced run's wait removed | fails on both, twice: `bp_forced_reached == 1u` and `bp_state_seen == 2u`. A missing wait is not a silent pass |
+>   | `cosmo_cond_wait` relocking with `cosmo_mutex_lock` | `thrtest` hangs at step 20 on both, before step 23 or 25, and the boot times out. The plan said step 23 catches the rule first; an earlier step does, so step 25's dependence on it is not measurable this way |
+> - **The docs:** `docs/libc/testing.md` row 25, `docs/libc/invariants.md`
+>   and `docs/kernel/process/testing.md`'s summaries of steps 23 to 30,
+>   flakes (fixed by), and README.
 
 ## Problem
 
@@ -77,7 +96,9 @@ The check fails a correct libc in the waiter-first order. And because
 the order is a race, the step does not know which handoff path it
 exercised on a given boot.
 
-## Current implementation
+## The implementation before this unit
+
+What step 25 was before PR #265; the banner and Design describe it as built.
 
 - **`libc/src/thread.c`, `cosmo_cond_broadcast`:** increments `seq`,
   probe phase 0, requeue (wakes one, moves the rest onto the mutex
@@ -96,8 +117,9 @@ exercised on a given boot.
 - **Phase 1 as it stands** accepts 1 or 2, and logs which. The word is
   held either way, and the holder's unlock must carry the handoff
   whichever order the two threads took.
-- **A third iteration takes the waiter-first order for certain.** It is
-  phase 1 again, with the probe waiting (bounded at 1 s, yielding) until
+- **A third run takes the waiter-first order for certain.** It is
+  phase 1 again, with the probe waiting (bounded by `JOIN_BUDGET_NS`,
+  3 s, the step's own join budget; yielding) until
   the word reads 2 before it reads it, as `--force` does. It asserts
   that the wait reached 2 (a timeout is a failure, not an untested
   pass), and that every waiter returns: the unlock finds 2 and wakes
@@ -121,13 +143,13 @@ exercised on a given boot.
 
 ## Affected files
 
-The implementation's. This PR adds the probe, this report, and the
-explanation under the flakes entry.
+The implementation's, as built (PR #265). The report (#264) added the
+probe, this report, and the explanation under the flakes entry.
 
 | file | change |
 |---|---|
-| `userland/tests/thrtest.c` | step 25: per-phase assertions, the third iteration, the comment |
-| `docs/libc/testing.md`, `docs/testing/flakes.md`, `README.md` | as above |
+| `userland/tests/thrtest.c` | step 25: per-phase assertions, the third run (`bp_force_contend`, `bp_forced_reached`), both comments |
+| `docs/libc/testing.md`, `docs/libc/invariants.md`, `docs/kernel/process/testing.md`, `docs/testing/flakes.md`, `README.md` | as above |
 
 No kernel or libc change.
 
@@ -141,13 +163,11 @@ None.
 |---|---|
 | `thrtest` step 25 | a holder's unlock inside a broadcast hands off to every waiter: before the requeue; after it, in whichever order the threads took (usually the unlock first, not guaranteed); and after it with the woken waiter first, made certain |
 
-**Planned mutations** (each alone, both architectures, boot confirmed):
-
-| mutation | expected |
-|---|---|
-| the third iteration's assertion back to `== 1` | fails: it reads 2 |
-| phase 0's assertion widened to 1 or 2 | survives, showing nothing makes phase 0 read 2 (recorded as such, not as a catch) |
-| `cosmo_cond_wait`'s return relocks with `cosmo_mutex_lock` instead of `mutex_lock_contended(m, 1)` (which always holds at 2) | the third iteration still passes: a *held* word is contended at 2 either way. The plain phase-1 iteration, in its usual order (the holder's unlock first, the woken waiter then taking a free word at 1), hangs: the waiter's own unlock finds 1 and wakes nobody behind it. Step 23 already catches this rule; the row records which of step 25's iterations depends on it |
+**Mutations** (each alone, both architectures, boot confirmed): the
+banner's table. The plan predicted the relock mutation's effect on step
+25's runs: the forced run unaffected, since a held word is contended at
+2 either way; the plain phase-1 run hanging in its usual order. Neither
+could be observed, because `thrtest` hangs at step 20 first.
 
 ## Benchmarks
 
@@ -155,9 +175,12 @@ None.
 
 ## Risks
 
-- **The third iteration's wait is bounded at 1 s.** If the woken waiter
-  never reaches the mutex in that time, the iteration fails as a stuck
-  handoff, which is also what it would be.
+- **The third run's wait is bounded by `JOIN_BUDGET_NS` (3 s),** the
+  budget every join in these steps allows; the probe used 1 s. Greptile
+  found the tighter bound on #265. If the woken waiter never
+  reaches the mutex in that time, `bp_forced_reached` stays 0 and the
+  run fails ("the wait did not reach 2"). That is a stuck handoff too,
+  not an untested pass.
 
 ## Alternatives considered
 
