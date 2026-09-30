@@ -67,12 +67,12 @@ static bool threads_settled(unsigned before)
  * compile that grew it past this bound fails the range check loudly
  * rather than letting a wrong PC pass. */
 #define SPIN_FN_BOUND 128u
-#define MAIN_FN_BOUND 512u
 
 struct spinner {
     volatile bool stop;
     volatile bool running;          /* set inside spin_here, so the PC after it is in the loop */
     volatile bool masked;           /* interrupts off while spinning */
+    volatile uintptr_t ret;         /* the address spin_here returns to in spinner_main, exactly */
     int priority;
     unsigned cpu;
 };
@@ -81,6 +81,10 @@ struct spinner {
  * the CPU is inside it names that function, not this one. */
 static __noinline void spin_here(struct spinner *s)
 {
+    /* Record the exact address this call returns to in spinner_main. That
+     * one address marks the spinner's frame on any sampled stack, with no
+     * reliance on a function-size bound. */
+    s->ret = (uintptr_t)__builtin_return_address(0);
     s->running = true;
     while (!s->stop)
         ;
@@ -175,6 +179,8 @@ static bool selftest_lockup_sample_pinned(const char **reason)
     /* Read the fields before the print releases the slot. */
     uintptr_t pc = sm->pc, tr1 = sm->depth > 1 ? sm->trace[1] : 0;
     unsigned depth = sm->depth;
+    uintptr_t trace[LOCKUP_TRACE_MAX];
+    memcpy(trace, sm->trace, sizeof(trace));
     uint64_t when = sm->when_ns;
     bool own = (m & CPUMASK_OF(arch_cpu_id())) != 0;
     if (ok)
@@ -184,11 +190,25 @@ static bool selftest_lockup_sample_pinned(const char **reason)
     CHECK(ok);
     CHECK(m & CPUMASK_OF((unsigned)k));
     CHECK(own);
-    CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND));
     CHECK(depth >= 2);
-    CHECK(in_fn(tr1, (const void *)spinner_main, MAIN_FN_BOUND));
+    /* The spinner's own frame is on the sampled stack, whether the sample
+     * caught it in its loop or inside an interrupt. spin_here records the
+     * exact address it returns to in spinner_main; either the leaf is in
+     * spin_here with that return just above it (uninterrupted), or the leaf
+     * is elsewhere and that return appears below it (interrupted -- on
+     * x86-64 an NMI can sample the spinner while an ordinary interrupt runs
+     * on its CPU, and the leaf is then the handler's). Neither cares what
+     * the leaf is; a sample that named the wrong CPU, or reached a stack
+     * without the spinner's frame, still fails. */
+    {
+        uintptr_t ret = s.ret;
+        bool ret_below = false;
+        for (unsigned i = 1; i < depth && i < LOCKUP_TRACE_MAX; i++)
+            ret_below |= trace[i] == ret;
+        CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND) ? tr1 == ret : ret_below);
+    }
     CHECK(when >= t0 && when <= t1);
-    kinfo("selftest: lockup-sample: cpu %d answered in %llu us; pc in spin_here, depth %u", k,
+    kinfo("selftest: lockup-sample: cpu %d answered in %llu us; spinner frame on the sampled stack, depth %u", k,
           (unsigned long long)((t1 - t0) / 1000), depth);
     CHECK(threads_settled(before));
     return true;

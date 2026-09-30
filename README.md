@@ -3743,6 +3743,24 @@ See [docs/development.md](docs/development.md).
     at `connect()`.
 
   (PR #269)
+- **A spinner sampled mid-interrupt still names the spinner.**
+  `lockup-sample` starts a spinner on another CPU with interrupts on and
+  asserted the sampled PC was in `spin_here`. On x86-64 the sample is an
+  NMI, which can land while an ordinary interrupt runs on the spinner's
+  CPU, and the leaf PC is then the handler's -- three CI sightings, all
+  x86-64, all on commits that change no kernel code
+  (`docs/testing/flakes.md`, the second with the interrupt tail and
+  `spinner_main` at frame #6). `spin_here` now records the exact address
+  it returns to in `spinner_main` (`__builtin_return_address(0)`), and the
+  test accepts the spinner by that frame: the leaf in `spin_here` with
+  that return just above it (uninterrupted), or the leaf elsewhere with
+  that return deeper in the trace (interrupted). The `MAIN_FN_BOUND` bound
+  on `trace[1]` goes; the masked (`lockup-sample-irqoff`, `lockup-hard`)
+  and tick-sampled (`lockup-sample-busy`) checks keep the leaf-PC form,
+  correct for them. `tools/lockup-interrupted-probe.py --force` parks a
+  cross call on the spinner's CPU and samples into it: with the old check
+  that forced sample fails as the sightings did, with the new one it
+  passes. (PR #NNN)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
