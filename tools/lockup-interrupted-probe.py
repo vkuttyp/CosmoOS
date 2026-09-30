@@ -23,8 +23,11 @@ interrupts enabled will be.
     python3 tools/lockup-interrupted-probe.py revert
 
 The instrumentation classifies the sampled PC and each trace entry:
-S (spin_here), M (spinner_main), P (the probe's parked handler), or ?
-(anything else).
+P (the probe's parked handler), R (exactly spin_here's return address
+into spinner_main, which spin_here records), S (spin_here), or ?
+(anything else). A first version classified spinner_main by the test's
+512-byte MAIN_FN_BOUND, and the probe's own handler, placed after it,
+fell inside that range and read as spinner_main.
 
 --force makes the sample land inside an interrupt on the spinner,
 deterministically. A helper thread on a third CPU sends CPU k a cross call
@@ -36,9 +39,10 @@ is no NMI: the sample is an ordinary interrupt, which the parked handler
 its 5 ms timeout. Each architecture's outcome is printed.
 
 --fix is the candidate check. The sample names the spinner if either:
-- the PC is in spin_here and trace[1] is in spinner_main (uninterrupted); or
-- the PC is elsewhere and spinner_main appears deeper in the trace (the
-  spinner, interrupted).
+- the PC is in spin_here and trace[1] is exactly spin_here's return
+  address (uninterrupted); or
+- the PC is elsewhere and that exact return address appears deeper in the
+  trace (the spinner, interrupted).
 
 `apply` and `revert` are those of tools/cond-phase-probe.py.
 """
@@ -59,6 +63,15 @@ NEW_INC = """#include <kernel/timer.h>
 #include <kernel/smp.h>   /* LIPROBE */
 """
 
+OLD_SPIN = """    volatile bool masked;           /* interrupts off while spinning */"""
+NEW_SPIN = """    volatile bool masked;           /* interrupts off while spinning */
+    volatile uintptr_t ret;         /* LIPROBE: spin_here's return address, exactly */"""
+OLD_HERE = """    s->running = true;
+    while (!s->stop)"""
+NEW_HERE = """    s->ret = (uintptr_t)__builtin_return_address(0);   /* LIPROBE */
+    s->running = true;
+    while (!s->stop)"""
+
 OLD_FN = """static bool selftest_lockup_sample_pinned(const char **reason)
 {"""
 NEW_FN = r"""/* LIPROBE: a cross call parked on the spinner's CPU until the test has sampled. */
@@ -66,26 +79,28 @@ static volatile int lp_parked, lp_release;
 static __noinline void lp_park(void *arg)
 {
     (void)arg;
-    uint64_t d = clock_now_ns() + 50ull * 1000 * 1000;
     lp_parked = 1;
-    while (!lp_release && clock_now_ns() < d)
+    /* No call in the loop, so the sample's PC is in here: bounded by a count. */
+    for (unsigned long i = 0; !lp_release && i < 400000000ul; i++)
         ;
     lp_parked = 2;
 }
 static unsigned lp_target;
-static void lp_caller_main(void *arg)
+static __attribute__((unused)) void lp_caller_main(void *arg)
 {
     (void)arg;
     smp_call_function_single(lp_target, lp_park, NULL);
 }
-static char lp_class(uintptr_t a)
+/* P the parked handler, R exactly spin_here's return into spinner_main,
+ * S spin_here, ? anything else. P first: it sits near spinner_main. */
+static char lp_class(uintptr_t a, uintptr_t ret)
 {
-    if (in_fn(a, (const void *)spin_here, SPIN_FN_BOUND))
-        return 'S';
-    if (in_fn(a, (const void *)spinner_main, MAIN_FN_BOUND))
-        return 'M';
     if (in_fn(a, (const void *)lp_park, 256))
         return 'P';
+    if (a == ret)
+        return 'R';
+    if (in_fn(a, (const void *)spin_here, SPIN_FN_BOUND))
+        return 'S';
     return '?';
 }
 
@@ -141,10 +156,10 @@ def new_read(force):
         char cls[LOCKUP_TRACE_MAX + 1];
         unsigned n = depth < LOCKUP_TRACE_MAX ? depth : LOCKUP_TRACE_MAX;
         for (unsigned i = 0; i < n; i++)
-            cls[i] = lp_class(lp_tr[i]);
+            cls[i] = lp_class(lp_tr[i], s.ret);
         cls[n] = 0;
         kprintf("LIPROBE: cpu %d answered %d, nmi %d, pc %c, depth %u, trace %s\n", k,
-                (int)((m >> k) & 1), (int)sm->nmi, lp_class(pc), depth, cls);
+                (int)((m >> k) & 1), (int)sm->nmi, lp_class(pc, s.ret), depth, cls);
     }
 """
     if force:
@@ -157,12 +172,11 @@ OLD_CHECK = """    CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND));
     CHECK(in_fn(tr1, (const void *)spinner_main, MAIN_FN_BOUND));
     CHECK(when >= t0 && when <= t1);"""
 NEW_CHECK_FIX = r"""    CHECK(depth >= 2);
-    {   /* LIPROBE --fix: the spinner, in its loop or interrupted */
-        bool lp_main_below = false;
+    {   /* LIPROBE --fix: the spinner's own frame, exactly: in its loop, or interrupted */
+        bool lp_ret_below = false;
         for (unsigned i = 1; i < depth && i < LOCKUP_TRACE_MAX; i++)
-            lp_main_below |= in_fn(lp_tr[i], (const void *)spinner_main, MAIN_FN_BOUND);
-        CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND) ? in_fn(tr1, (const void *)spinner_main, MAIN_FN_BOUND)
-                                                                 : lp_main_below);
+            lp_ret_below |= lp_tr[i] == s.ret;
+        CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND) ? tr1 == s.ret : lp_ret_below);
     }
     CHECK(when >= t0 && when <= t1);"""
 
@@ -259,7 +273,8 @@ def apply():
     force, fix = '--force' in args, '--fix' in args
     if [a for a in args if a not in ('--force', '--fix')]:
         sys.exit('usage: apply [--force] [--fix]')
-    edits = [(OLD_INC, NEW_INC), (OLD_FN, NEW_FN), (OLD_START, new_start(force)), (OLD_READ, new_read(force))]
+    edits = [(OLD_INC, NEW_INC), (OLD_SPIN, NEW_SPIN), (OLD_HERE, NEW_HERE), (OLD_FN, NEW_FN),
+             (OLD_START, new_start(force)), (OLD_READ, new_read(force))]
     if fix:
         edits.append((OLD_CHECK, NEW_CHECK_FIX))
     apply_files([(LT, edits)])
