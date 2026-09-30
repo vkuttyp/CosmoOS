@@ -81,9 +81,9 @@ retransmissions are logged (`selftest: net-lo-tcp: N segments, 0
 retransmits`).
 
 **`net-accept-order`** (debug builds): the same backlog step, forced into
-the order that hung it. `tcp_test_hold_ack` holds the first client's
-final ACK in `tcp_input` until the second client is queued, then delivers
-it; the held ACK is delivered even when the wait fails, so no connection
+the order that hung it. The first client is bound to port 6005, and
+`tcp_test_hold_ack(6004, 6005)` holds that client's final ACK in
+`tcp_input` until the second client is queued, then delivers it; the held ACK is delivered even when the wait fails, so no connection
 is left half-open. The test asserts that the order happened (the second
 client was queued first) and that the accept returned the second client;
 then the step's checks run as in `net-lo-tcp`.

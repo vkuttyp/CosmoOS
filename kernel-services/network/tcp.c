@@ -25,6 +25,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
+#include <kernel/sched.h>
 #include <kernel/socket.h>
 #include <kernel/string.h>
 
@@ -246,56 +247,78 @@ void tcp_test_arm_rexmit(struct tcp_pcb *pcb, uint64_t ns)
 }
 
 /*
- * Hold the next bare ACK to a listener port, unprocessed, until the test
+ * Hold one client's final ACK to a listener, unprocessed, until the test
  * delivers it (docs/audit/next-subsystem-accept-order.md). A connection
- * joins its listener's accept queue when the listener processes the
- * client's final ACK, so holding one client's ACK while another's
- * handshake completes makes the later `connect()` the first accepted --
- * an order the network workers produce on their own only when a host
- * stalls one of them, made certain.
+ * joins its listener's accept queue when the listener processes that ACK,
+ * so holding the first client's while the second's handshake completes
+ * makes the later `connect()` the first accepted -- an order the network
+ * workers produce on their own only when a host stalls one of them, made
+ * certain.
  *
- * Taken in tcp_input before any lock and before anything is looked up, so
- * the hold delays that one segment and nothing else. Armed by port and
- * consumed by the first match; IPv4 only (the test's listener). */
-static uint16_t g_test_hold_ack_port;   /* the listener port; 0: disarmed */
+ * Armed by both ports: the listener's and the held client's. The first
+ * version matched the listener port alone and would have held whichever
+ * client's ACK reached tcp_input first -- the second's, in the very race
+ * the test forces (Greptile, #269).
+ *
+ * One state word decides who owns the segment. The hook moves ARMED to
+ * CLAIMING, fills the fields, and publishes HELD; delivery either disarms
+ * an unclaimed hold (ARMED to IDLE) or waits out a claim in progress and
+ * takes the segment. So a delivery can never miss a segment that a worker
+ * is between claiming and storing (Greptile, #269). Taken in tcp_input
+ * before any lock, so the hold delays that one segment and nothing else.
+ */
+enum { HOLD_IDLE, HOLD_ARMED, HOLD_CLAIMING, HOLD_HELD };
+static unsigned g_test_hold_state;
+static uint16_t g_test_hold_dport, g_test_hold_sport;
 static struct mbuf *g_test_held_ack;
 static struct ipv4_hdr g_test_held_ip4; /* what delivering it needs back */
 static struct netif *g_test_held_nif;
 
-void tcp_test_hold_ack(uint16_t port)
+void tcp_test_hold_ack(uint16_t dport, uint16_t sport)
 {
-    __atomic_store_n(&g_test_hold_ack_port, port, __ATOMIC_RELEASE);
+    g_test_hold_dport = dport;
+    g_test_hold_sport = sport;
+    __atomic_store_n(&g_test_hold_state, (unsigned)HOLD_ARMED, __ATOMIC_RELEASE);   /* the ports are visible with it */
 }
 
 bool tcp_test_ack_held(void)
 {
-    return __atomic_load_n(&g_test_held_ack, __ATOMIC_ACQUIRE) != NULL;
+    return __atomic_load_n(&g_test_hold_state, __ATOMIC_ACQUIRE) == HOLD_HELD;
 }
 
 bool tcp_test_deliver_held_ack(void)
 {
-    __atomic_store_n(&g_test_hold_ack_port, 0, __ATOMIC_RELEASE);
-    struct mbuf *m = __atomic_exchange_n(&g_test_held_ack, NULL, __ATOMIC_ACQ_REL);
-    if (m == NULL)
-        return false;
-    tcp_input(g_test_held_nif, m, &g_test_held_ip4, NULL);   /* the port is disarmed: it is not held again */
+    unsigned st = HOLD_ARMED;
+    if (__atomic_compare_exchange_n(&g_test_hold_state, &st, (unsigned)HOLD_IDLE, false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE))
+        return false;   /* never claimed: disarmed */
+    while ((st = __atomic_load_n(&g_test_hold_state, __ATOMIC_ACQUIRE)) == HOLD_CLAIMING)
+        sched_yield();   /* a worker is between the claim and the store: a few instructions */
+    if (st != HOLD_HELD)
+        return false;   /* idle: nothing armed */
+    struct mbuf *m = g_test_held_ack;
+    g_test_held_ack = NULL;
+    __atomic_store_n(&g_test_hold_state, (unsigned)HOLD_IDLE, __ATOMIC_RELEASE);
+    tcp_input(g_test_held_nif, m, &g_test_held_ip4, NULL);   /* idle: it is not held again */
     return true;
 }
 
-/* In tcp_input: take `m` if it is the armed port's first bare ACK. */
+/* In tcp_input: take `m` if it is the armed client's bare ACK to the armed port. */
 static bool test_hold_ack(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct tcp_hdr *th,
                           uint32_t len, unsigned hlen)
 {
-    uint16_t port = __atomic_load_n(&g_test_hold_ack_port, __ATOMIC_ACQUIRE);
-    if (port == 0 || ip4 == NULL || ntohs(th->dport) != port || len != hlen ||
+    if (__atomic_load_n(&g_test_hold_state, __ATOMIC_ACQUIRE) != HOLD_ARMED || ip4 == NULL ||
+        ntohs(th->dport) != g_test_hold_dport || ntohs(th->sport) != g_test_hold_sport || len != hlen ||
         (th->flags & (TH_SYN | TH_ACK | TH_FIN | TH_RST)) != TH_ACK)
         return false;
-    /* One segment: the first CPU to disarm the port takes it. */
-    if (!__atomic_compare_exchange_n(&g_test_hold_ack_port, &port, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        return false;
+    unsigned st = HOLD_ARMED;
+    if (!__atomic_compare_exchange_n(&g_test_hold_state, &st, (unsigned)HOLD_CLAIMING, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
+        return false;   /* delivery disarmed it first */
     g_test_held_ip4 = *ip4;
     g_test_held_nif = nif;
-    __atomic_store_n(&g_test_held_ack, m, __ATOMIC_RELEASE);   /* the fields above are visible with it */
+    g_test_held_ack = m;
+    __atomic_store_n(&g_test_hold_state, (unsigned)HOLD_HELD, __ATOMIC_RELEASE);   /* the fields are visible with it */
     return true;
 }
 #endif

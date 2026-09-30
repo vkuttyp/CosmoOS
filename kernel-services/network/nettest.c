@@ -2200,7 +2200,7 @@ static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool 
     CHECK(ksock_listen(ls, 2) == -EINVAL);
     if (force) {
 #if CONFIG_DEBUG
-        tcp_test_hold_ack(port);
+        tcp_test_hold_ack(port, (uint16_t)(port + 1));   /* c1 is bound to port + 1 below */
         if (!selftest_defer(backlog_release_hold, NULL)) {
             backlog_release_hold(NULL);
             *reason = "its release list was full";
@@ -2212,7 +2212,12 @@ static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool 
 #endif
     }
     struct socket *c1, *c2;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0 && ksock_connect(c1, &la) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0);
+    if (force) {   /* a known port, so the hold takes c1's ACK and no other */
+        struct netaddr ca = v4addr(INADDR_LOOPBACK_N, (uint16_t)(port + 1));
+        CHECK(ksock_bind(c1, &ca) == 0);
+    }
+    CHECK(ksock_connect(c1, &la) == 0);
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
 #if CONFIG_DEBUG
     if (force) {
@@ -2229,8 +2234,9 @@ static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool 
 #endif
     struct socket *a1;
     struct netaddr peer, n1, n2;
-    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0 && peer.port >= NET_EPHEMERAL_LO);
+    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0);
     CHECK(ksock_getsockname(c1, &n1) == 0 && ksock_getsockname(c2, &n2) == 0);
+    CHECK(n2.port >= NET_EPHEMERAL_LO && (force ? n1.port == port + 1 : n1.port >= NET_EPHEMERAL_LO));
     CHECK(peer.port == n1.port || peer.port == n2.port);
     *accepted_first = peer.port == n1.port;
     struct socket *mine = *accepted_first ? c1 : c2, *other = *accepted_first ? c2 : c1;
@@ -2254,7 +2260,7 @@ static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool 
 
 /* The backlog step in the order that hung it: the second client's
  * handshake completes first, and the accept follows completion, not
- * connect(). */
+ * connect(). Ports 6004 (the listener) and 6005 (the first client). */
 bool selftest_net_accept_order(const char **reason)
 {
 #if !CONFIG_DEBUG

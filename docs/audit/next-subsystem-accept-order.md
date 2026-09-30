@@ -5,12 +5,21 @@
 > - **The hook is guarded by `CONFIG_DEBUG`,** as `tcp.c`'s other test
 >   hooks are; the report's first version said `CONFIG_SELFTEST`, and
 >   named two functions. The sections below are written as built. There
->   are three: `tcp_test_hold_ack(port)`,
+>   are three: `tcp_test_hold_ack(dport, sport)`,
 >   `tcp_test_ack_held()` (the test's wait needs to see the hold), and
 >   `tcp_test_deliver_held_ack()` (disarms, and returns whether anything
 >   was held). The hook runs in `tcp_input` right after the header
->   pull-up, before any lock. One compare-and-swap on the port takes one
->   segment.
+>   pull-up, before any lock.
+> - **The hold is armed by both ports** (Greptile, #269): the listener's
+>   and the first client's, which the forced run binds to `port + 1`.
+>   Armed by the listener port alone, it would take whichever client's ACK
+>   reached `tcp_input` first, and in the race it forces that can be the
+>   second's.
+> - **One state word owns the segment** (Greptile, #269): IDLE, ARMED,
+>   CLAIMING, HELD. The hook claims (ARMED to CLAIMING), stores, and
+>   publishes HELD. Delivery disarms an unclaimed hold, or waits out a
+>   claim in progress and takes the segment, so it can never miss one a
+>   worker is between claiming and storing.
 > - **A failed forced run leaves nothing half-open.** The hold is
 >   released through `selftest_defer`, and the forced wait delivers the
 >   held ACK whether or not the wait succeeded.
@@ -175,10 +184,11 @@ the step that hung is the step under test (Greptile, #268). A separate
 test of the other order would pass while the step itself regressed.
 
 The forcing seam is a debug hook in `tcp_input`, the probe's hold made
-permanent under `CONFIG_DEBUG` (as `tcp.c`'s other test hooks are). Armed with a listener port, it holds
-that port's first bare ACK and hands it back to the test. Forced, the
-helper:
-1. connects `c1` and `c2` with `c1`'s ACK held;
+permanent under `CONFIG_DEBUG` (as `tcp.c`'s other test hooks are). Armed with the listener's port
+and the held client's, it holds that client's bare ACK to the listener
+and hands it back to the test. Forced, the helper:
+1. binds `c1` to `port + 1`, then connects `c1` and `c2` with `c1`'s ACK
+   held;
 2. waits, bounded, for `c2` to be queued;
 3. delivers the held ACK, even when the wait timed out, so a failed run
    leaves no half-open connection;
@@ -211,7 +221,8 @@ the stack: the accept returned `c2`, completion order and not
 ## APIs
 
 - Kernel, debug builds only:
-  - `tcp_test_hold_ack(port)` arms the hold;
+  - `tcp_test_hold_ack(dport, sport)` arms the hold for client port
+    `sport`'s ACK to listener port `dport`;
   - `tcp_test_ack_held()` says whether a segment is held;
   - `tcp_test_deliver_held_ack()` disarms, delivers the held segment, and
     returns whether there was one.
