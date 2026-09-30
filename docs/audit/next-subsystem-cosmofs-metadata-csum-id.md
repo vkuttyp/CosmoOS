@@ -44,8 +44,8 @@ header (one debug boot, x86-64):
 ```
 CFSPROBE: sealed metadata header records algo 0 (the spare word); verifies 1, always CRC32C
 CFSPROBE: header declaring algo 2 verifies 1 under CRC32C -- the field is inert
-CFSPROBE: other-algorithm block verifies 0, one-bit-corrupt block verifies 0 -- same verdict
-SELFTEST: cosmofs-metadata-csum-id ... ok (2 ms)
+CFSPROBE: different-rule block verifies 0, one-bit-corrupt block verifies 0 -- same verdict
+SELFTEST: cosmofs-metadata-csum-id ... ok (17 ms)
 ```
 
 - **The writer records no algorithm.** After `cfs_mhdr_seal_raw` the spare
@@ -55,10 +55,12 @@ SELFTEST: cosmofs-metadata-csum-id ... ok (2 ms)
   `CFS_CSUM_POLY1305`) into that word and recomputing a valid CRC leaves
   the block verifying — the verifier applies CRC32C regardless of the
   field, so it selects nothing and a reader cannot learn one was meant.
-- **An algorithm change is indistinguishable from corruption.** A block
-  whose checksum is computed by a different rule fails to verify with the
-  *same* verdict as a block with one flipped bit: both are `-EIO`, both
-  land in `mhdr_fault_of`'s `MHDR_CRC` ("content that changed after it was
+- **A different checksum rule is indistinguishable from corruption.** A
+  block checksummed by a different but self-consistent rule (a CRC32C over
+  the whole block, the `crc` field included — what another format could
+  store, not a damaged block) fails to verify with the *same* verdict as a
+  block with one flipped bit: both are `-EIO`, both land in
+  `mhdr_fault_of`'s `MHDR_CRC` ("content that changed after it was
   sealed"). Nothing tells the two apart.
 
 ## Why it matters
@@ -89,6 +91,11 @@ SELFTEST: cosmofs-metadata-csum-id ... ok (2 ms)
 | data (the contrast) | `cfs_inode.csum_algo` | per inode: `CFS_CSUM_CRC32C` or `CFS_CSUM_POLY1305` |
 
 ## Design
+
+All of this section, the "Affected files", "APIs" and "Tests" below, and
+the format-version bump are **planned work for the implementation PR**.
+Nothing in this PR alters the on-disk format; the probe only reads and
+reports the current state.
 
 ### 1. The metadata header declares its checksum algorithm
 
@@ -127,15 +134,15 @@ Only `CFSM`-headed metadata carries a per-header `csum_algo`.
 ### 4. What this enables, and does not build
 
 Authenticating metadata — a Poly1305 tag over metadata on an encrypted
-filesystem — is the reason to have the field, and is **not** built here.
-It cannot be unconditional: the master key is unwrapped from the
+filesystem — is the reason to have the field, and is **not** part of this
+unit. It cannot be unconditional: the master key is unwrapped from the
 `CFS_KIND_KEYS` block, which is itself a metadata block verified by
 `cfs_mhdr_ok` *before* `cfs_keys_unwrap` runs
 (`cosmofs_crypt.c:153`), so at least the keys block must stay checkable
-without the key. This unit makes the algorithm declared, read, dispatched
-(CRC32C only for now) and an unknown value diagnosed distinctly; choosing
-which metadata to authenticate, and threading the key to those reads, is a
-unit of its own.
+without the key. The implementation makes the algorithm declared, read,
+dispatched (CRC32C only for now) and an unknown value diagnosed distinctly;
+choosing which metadata to authenticate, and threading the key to those
+reads, is a unit of its own.
 
 ## Affected files
 
@@ -149,12 +156,17 @@ unit of its own.
 
 ## APIs
 
-None. This is an on-disk format change: the metadata header's spare word
-gains meaning and the format version becomes 11. No syscall or user ABI
-changes; `cfs_mhdr_ok`'s signature is unchanged. The `mhdr_fault`
-enumeration gains `MHDR_ALGO`, which is internal to cosmofs.
+None (planned). The implementation is an on-disk format change: the
+metadata header's spare word gains meaning and the format version becomes
+11. No syscall or user ABI changes; `cfs_mhdr_ok`'s signature is
+unchanged. The `mhdr_fault` enumeration gains `MHDR_ALGO`, internal to
+cosmofs.
 
 ## Tests
+
+Planned for the implementation. It reuses the probe's test name; the
+probe's `cosmofs-metadata-csum-id` demonstrates the current gap, and the
+implementation rewrites it to prove the fix:
 
 | test | proves |
 |---|---|

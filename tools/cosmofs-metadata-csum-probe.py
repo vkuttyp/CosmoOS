@@ -68,35 +68,49 @@ bool selftest_cosmofs_metadata_csum_id(const char **reason)
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     CHECK(block != NULL);
     memset(block, 0xa5, CFS_BLOCK);
-    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
     struct cfs_mhdr *h = (struct cfs_mhdr *)block;
-    CHECK(cfs_mhdr_ok(block, 42, CFS_KIND_INODES));
-    /* The writer records no algorithm: the one spare header word is zero. */
-    CHECK(h->pad == 0);
-    kprintf("CFSPROBE: sealed metadata header records algo %u (the spare word); verifies %d, always CRC32C\n",
-            h->pad, (int)cfs_mhdr_ok(block, 42, CFS_KIND_INODES));
+
+    /* Seal a metadata block. The writer records no algorithm: the one spare
+     * header word is left zero. */
+    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    bool sealed_ok = cfs_mhdr_ok(block, 42, CFS_KIND_INODES);
+    unsigned sealed_algo = h->pad;
+
     /* Declare a different algorithm in the spare word, with a valid CRC. The
      * block still verifies: the verifier applies CRC32C regardless of the
      * field, so it selects nothing and a reader cannot learn one was meant. */
     h->pad = CFS_CSUM_POLY1305;
     h->crc = cfsprobe_block_crc(block);
     bool inert = cfs_mhdr_ok(block, 42, CFS_KIND_INODES);
-    kprintf("CFSPROBE: header declaring algo %u verifies %d under CRC32C -- the field is inert\n",
-            h->pad, (int)inert);
-    CHECK(inert);
-    /* A block checksummed by another rule is rejected -- by the same verdict
-     * as one flipped bit, so an algorithm change cannot be told from damage. */
+    unsigned inert_algo = h->pad;
+
+    /* A block checksummed by a different *rule* -- a CRC32C over the whole
+     * block, the crc field included, rather than taken as zero -- is a
+     * self-consistent checksum some other format could store, not a damaged
+     * one. It is rejected: the verifier computes only its own rule. */
     cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
-    h->crc = cfsprobe_block_crc(block) ^ 0xffffffffu;
-    bool other_algo = cfs_mhdr_ok(block, 42, CFS_KIND_INODES);
+    h->crc = crc32c(block, CFS_BLOCK);
+    bool other_rule = cfs_mhdr_ok(block, 42, CFS_KIND_INODES);
+
+    /* One flipped payload bit is rejected by the same verdict, so a different
+     * rule cannot be told from corruption. */
     cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
     block[CFS_MHDR_SIZE + 3] ^= 0x01u;
     bool corrupt = cfs_mhdr_ok(block, 42, CFS_KIND_INODES);
-    kprintf("CFSPROBE: other-algorithm block verifies %d, one-bit-corrupt block verifies %d -- same verdict\n",
-            (int)other_algo, (int)corrupt);
-    CHECK(!other_algo && !corrupt);
-    kfree(block);
-    kinfo("selftest: cosmofs-metadata-csum-id: metadata records no checksum algorithm; a different algorithm is indistinguishable from corruption");
+
+    kfree(block);   /* free before any CHECK can return */
+
+    kprintf("CFSPROBE: sealed metadata header records algo %u (the spare word); verifies %d, always CRC32C\n",
+            sealed_algo, (int)sealed_ok);
+    kprintf("CFSPROBE: header declaring algo %u verifies %d under CRC32C -- the field is inert\n",
+            inert_algo, (int)inert);
+    kprintf("CFSPROBE: different-rule block verifies %d, one-bit-corrupt block verifies %d -- same verdict\n",
+            (int)other_rule, (int)corrupt);
+    CHECK(sealed_ok);
+    CHECK(sealed_algo == 0);
+    CHECK(inert);
+    CHECK(!other_rule && !corrupt);
+    kinfo("selftest: cosmofs-metadata-csum-id: metadata records no checksum algorithm; a different checksum rule is indistinguishable from corruption");
     return true;
 }
 
