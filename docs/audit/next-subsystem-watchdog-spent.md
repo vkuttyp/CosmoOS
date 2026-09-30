@@ -155,7 +155,7 @@ kick) now fails every debug boot instead of hiding in it.
 |---|---|
 | `kernel/core/selftest.c` | `budget_ms` in the registry (two entries set); the budgets line; per-test `sched_watchdog_arm` |
 | `kernel/include/kernel/selftest.h` | `struct selftest` gains `budget_ms`; `SELFTEST_BUDGET_DEFAULT_MS` |
-| `kernel/scheduler/sched.c`, `kernel/include/kernel/sched.h` | the header's comment ("prints ... once") says once per arming; `sched_watchdog_fire_count()` for the test (§Tests) |
+| `kernel/scheduler/sched.c`, `kernel/include/kernel/sched.h` | the header's comment ("prints ... once") says once per arming; the fire count, the state read and the quiet arming for the two tests (§Tests) |
 | `tests/boot/run_boot_test.py` | budgets from the boot's line, `composite_budget_ms` and `SELFTEST_BUDGET_MS` removed, the forbidden marker |
 | `docs/verification/design.md` §6, `api.md`, `invariants.md` F6, `testing.md`; `tests/README.md`; `docs/development.md` | where the budgets live, "20 s each" corrected, the watchdog per test |
 | `docs/testing/flakes.md` | the hang-bounds paragraph's claim now holds for every test; the five budget entries point here |
@@ -163,25 +163,42 @@ kick) now fails every debug boot instead of hiding in it.
 
 ## APIs
 
-- Kernel: `sched_watchdog_fire_count()`, a debug read of how many times
-  the watchdog has fired, for the self-test.
+- Kernel, for the two self-tests:
+  - `sched_watchdog_fire_count()`: how many times the watchdog has
+    fired;
+  - `sched_watchdog_state(uint64_t *period_ns, bool *fired)`: the
+    current arming;
+  - `sched_watchdog_arm_quiet(period_ns)`: an arming whose firing is
+    counted, not printed.
 - Nothing is added for userland. The boot log gains one line.
 
 ## Tests
 
 | test | proves |
 |---|---|
-| `watchdog-rearm` (new self-test, placed after `cosmofs-replay`) | arms a 50 ms period in quiet mode (the dump counted, not printed), sleeps past it twice: fired once, not twice. Arms again and sleeps past it: fired again. It re-arms at its own budget before returning. A kick-only runner fails it on the third count. |
+| `watchdog-spend` (new self-test) | arms a 50 ms period in quiet mode (the dump counted, not printed) and sleeps 150 ms: the fire count rose by exactly one, so the watchdog fires once per arming, not once per period. It then **returns with the watchdog fired**, on purpose, and does not re-arm it. |
+| `watchdog-rearm` (new self-test, registered directly after `watchdog-spend`) | at entry, before it calls anything that arms, reads `sched_watchdog_state()`: not fired, and the period is its own budget (8000 ms). Only the runner can have made that true. A runner that kicks instead of arming leaves `watchdog-spend`'s fired state (and its 50 ms period) in place, and this test fails. |
 | the forbidden marker | a passing boot has no dump; the plain boot today would fail it |
 | the budgets line | the harness fails a boot whose self-tests printed no budgets line |
 | `tools/watchdog-spent-probe.py --late` on the build | the sleeper's dump falls in the sleeper, test 403 |
 
-The quiet mode is a test-only flag read by `watchdog_check`. It exists
-so the test does not print two real dumps into every boot, which would
-reintroduce the noise the unit removes.
+**The pair, not one test, is what checks the runner.** A single test
+that arms the watchdog itself clears the fired state whatever the runner
+does, so it passes under a kick-only runner (Greptile, #266).
+`watchdog-spend` leaves the watchdog fired, and only the runner's arm
+between the two tests clears it. The check does not depend on
+`cosmofs-replay` still taking longer than 8 s.
+
+The quiet mode is a test-only flag read by `watchdog_check`, and
+`sched_watchdog_arm` clears it. It exists so the pair does not print a
+real dump into every boot, which would reintroduce the noise the unit
+removes.
 
 **Planned mutations** (each alone, both architectures, boot confirmed):
-- the per-test arm back to a kick: `watchdog-rearm` fails, and the
+- the per-test arm back to a kick: `watchdog-rearm` fails at entry, and
+  the forbidden marker fires in `cosmofs-replay`;
+- the runner arming every test at 8 s, ignoring `budget_ms`:
+  `watchdog-rearm` still passes (its budget is the default), and the
   forbidden marker fires in `cosmofs-replay`;
 - `cosmofs-replay`'s budget back to the default: the forbidden marker
   fires in every boot;
