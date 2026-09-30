@@ -1,52 +1,45 @@
 #!/usr/bin/env python3
-"""
-lockup-interrupted-probe.py -- why does lockup-sample's sampled PC sometimes
-lie outside spin_here?
+"""lockup-interrupted-probe.py -- reproduce, and prove the fix for, the
+sighting where lockup-sample's sampled PC lies outside spin_here.
 
-Three sightings (docs/testing/flakes.md, "`lockup-sample`, and a failure
-that was not a flake at all"), all x86-64, all on commits that change no
-kernel code:
+This probe applies to the *current* tree, after the fix (the unit
+docs/audit/next-subsystem-lockup-interrupted.md, PR #271): spin_here
+records the exact address it returns to in spinner_main (s->ret), and
+lockup-sample accepts the spinner by that frame -- the leaf in spin_here
+with trace[1] that return (uninterrupted), or the leaf elsewhere with that
+return deeper in the trace (interrupted). The earlier version of this
+probe, shipped with the report (PR #270), added those pieces itself and no
+longer applies now that the kernel carries them.
 
-    SELFTEST: lockup-sample ... FAIL: check failed: in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND)
-
-The test starts a spinner on CPU k, with interrupts enabled, and samples
-every CPU. On x86-64 the sample is an NMI. An NMI can arrive while an
-ordinary interrupt is being handled on the spinner's CPU, and then the
-sampled PC is in that handler. The second sighting's trace showed exactly
-that: an interrupt's tail, then isr.S, then spinner_main. The check has no
-allowance for a spinner that is interrupted, which a spinner with
-interrupts enabled will be.
-
-    python3 tools/lockup-interrupted-probe.py apply [--force] [--fix]
+    python3 tools/lockup-interrupted-probe.py apply [--force] [--mut-leaf | --mut-noret]
     gmake ARCH=x86_64 test > run.txt 2>&1
     grep LIPROBE out/x86_64-debug/boot-test.log
     python3 tools/lockup-interrupted-probe.py revert
 
 The instrumentation classifies the sampled PC and each trace entry:
-P (the probe's parked handler), R (exactly spin_here's return address
-into spinner_main, which spin_here records), S (spin_here), or ?
-(anything else). A first version classified spinner_main by the test's
-512-byte MAIN_FN_BOUND, and the probe's own handler, placed after it,
-fell inside that range and read as spinner_main.
+P (the probe's parked handler), R (exactly spin_here's return address into
+spinner_main, which spin_here records), S (spin_here), or ? (anything
+else). P is tested first: the parked handler sits near spinner_main.
 
 --force makes the sample land inside an interrupt on the spinner,
 deterministically. A helper thread on a third CPU sends CPU k a cross call
-(smp_call_function_single) whose handler parks, bounded at 50 ms, until
-the test has sampled. The test waits for the handler to be parked, then
-samples. On x86-64 the NMI interrupts the parked handler. On AArch64 there
-is no NMI: the sample is an ordinary interrupt, which the parked handler
-(interrupts masked) holds off, so the sample should go unanswered within
-its 5 ms timeout. Each architecture's outcome is printed. If the forcing
-cannot happen -- fewer than three online CPUs, the helper thread fails to
-start, or the handler never parks -- the test fails on CHECK(lp_was_parked)
-rather than silently sampling the plain case, so a forced run that could
-not force never reads as a pass.
+(smp_call_function_single) whose handler parks, bounded, until the test
+has sampled. On x86-64 the NMI interrupts the parked handler, so the
+sampled PC is in it (class P) and spin_here's return is deeper (R): the
+interrupted case. On AArch64 there is no NMI -- the sample is an ordinary
+interrupt the parked handler (interrupts masked) holds off, so it goes
+unanswered and the test fails earlier, at the answered check; the
+interrupted-leaf hazard is x86-64's alone, which is why every sighting is.
+If the forcing cannot happen (fewer than three online CPUs, the helper
+thread fails to start, or the handler never parks) the test fails on
+CHECK(lp_was_parked) rather than silently sampling the plain case, so a
+forced run that could not force never reads as a pass.
 
---fix is the candidate check. The sample names the spinner if either:
-- the PC is in spin_here and trace[1] is exactly spin_here's return
-  address (uninterrupted); or
-- the PC is elsewhere and that exact return address appears deeper in the
-  trace (the spinner, interrupted).
+With --force alone the shipped check accepts the interrupted sample (ok).
+The mutations show the check is load-bearing, on that same forced sample:
+--mut-leaf reverts the check to `pc in spin_here` alone -> it fails
+exactly as the sightings did; --mut-noret stops spin_here recording its
+return -> the frame scan finds no matching address and fails.
 
 `apply` and `revert` are those of tools/cond-phase-probe.py.
 """
@@ -67,15 +60,7 @@ NEW_INC = """#include <kernel/timer.h>
 #include <kernel/smp.h>   /* LIPROBE */
 """
 
-OLD_SPIN = """    volatile bool masked;           /* interrupts off while spinning */"""
-NEW_SPIN = """    volatile bool masked;           /* interrupts off while spinning */
-    volatile uintptr_t ret;         /* LIPROBE: spin_here's return address, exactly */"""
-OLD_HERE = """    s->running = true;
-    while (!s->stop)"""
-NEW_HERE = """    s->ret = (uintptr_t)__builtin_return_address(0);   /* LIPROBE */
-    s->running = true;
-    while (!s->stop)"""
-
+# The forcing helpers and the sample classifier, before the pinned test.
 OLD_FN = """static bool selftest_lockup_sample_pinned(const char **reason)
 {"""
 NEW_FN = r"""/* LIPROBE: a cross call parked on the spinner's CPU until the test has sampled. */
@@ -111,17 +96,16 @@ static char lp_class(uintptr_t a, uintptr_t ret)
 static bool selftest_lockup_sample_pinned(const char **reason)
 {"""
 
-OLD_START = """    CHECK(t != NULL);
+# --force: park a cross call before the sample, capture whether it was still
+# parked at the sample. Anchored on the unique setup-through-sample block.
+OLD_FORCE = """    CHECK(t != NULL);
 
     uint64_t t0 = clock_now_ns();
     cpumask_t m = 0;
-    bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);"""
-
-def new_start(force):
-    s = """    CHECK(t != NULL);
+    bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
 """
-    if force:
-        s += r"""    struct thread *lp_th = NULL;   /* LIPROBE --force */
+NEW_FORCE = r"""    CHECK(t != NULL);
+    struct thread *lp_th = NULL;   /* LIPROBE --force */
     {
         unsigned me = arch_cpu_id(), third = ~0u;
         for (unsigned c = 0; c < cpu_count() && third == ~0u; c++)
@@ -138,38 +122,28 @@ def new_start(force):
         kprintf("LIPROBE: forced: the cross call %s on cpu %d (caller on cpu %d)\n",
                 lp_parked == 1 ? "parked" : "DID NOT PARK", k, (int)third);
     }
-"""
-    s += """
+
     uint64_t t0 = clock_now_ns();
     cpumask_t m = 0;
-    bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);"""
-    if force:
-        s += r"""
+    bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
     bool lp_was_parked = lp_parked == 1;   /* LIPROBE --force: still inside the handler at the sample */
     lp_release = 1;
     if (lp_th)
-        thread_join(lp_th);"""
-    return s
-
-OLD_OWN = """    CHECK(own);
-"""
-NEW_OWN = """    CHECK(own);
-    CHECK(lp_was_parked);   /* LIPROBE --force: a run that could not force -- no third CPU, thread_create_on failed, or the handler never parked -- is a plain run in disguise, not a pass. Placed after stop_spinner so a failure does not leak the spinner. */
+        thread_join(lp_th);
 """
 
-OLD_READ = """    bool own = (m & CPUMASK_OF(arch_cpu_id())) != 0;
+# The classification print, after the trace is copied out of the slot.
+OLD_READ = """    memcpy(trace, sm->trace, sizeof(trace));
 """
 def new_read(force):
-    s = OLD_READ + r"""    uintptr_t lp_tr[LOCKUP_TRACE_MAX];   /* LIPROBE */
-    memcpy(lp_tr, sm->trace, sizeof(lp_tr));
-    {
-        char cls[LOCKUP_TRACE_MAX + 1];
-        unsigned n = depth < LOCKUP_TRACE_MAX ? depth : LOCKUP_TRACE_MAX;
-        for (unsigned i = 0; i < n; i++)
-            cls[i] = lp_class(lp_tr[i], s.ret);
-        cls[n] = 0;
+    s = OLD_READ + r"""    {   /* LIPROBE */
+        char lp_cls[LOCKUP_TRACE_MAX + 1];
+        unsigned lp_n = depth < LOCKUP_TRACE_MAX ? depth : LOCKUP_TRACE_MAX;
+        for (unsigned i = 0; i < lp_n; i++)
+            lp_cls[i] = lp_class(trace[i], s.ret);
+        lp_cls[lp_n] = 0;
         kprintf("LIPROBE: cpu %d answered %d, nmi %d, pc %c, depth %u, trace %s\n", k,
-                (int)((m >> k) & 1), (int)sm->nmi, lp_class(pc, s.ret), depth, cls);
+                (int)((m >> k) & 1), (int)sm->nmi, lp_class(pc, s.ret), depth, lp_cls);
     }
 """
     if force:
@@ -177,18 +151,28 @@ def new_read(force):
 """
     return s
 
-OLD_CHECK = """    CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND));
-    CHECK(depth >= 2);
-    CHECK(in_fn(tr1, (const void *)spinner_main, MAIN_FN_BOUND));
-    CHECK(when >= t0 && when <= t1);"""
-NEW_CHECK_FIX = r"""    CHECK(depth >= 2);
-    {   /* LIPROBE --fix: the spinner's own frame, exactly: in its loop, or interrupted */
-        bool lp_ret_below = false;
+# --force guard: a run that could not force is a plain run in disguise, not a
+# pass. After stop_spinner/CHECK(own) so a failure does not leak the spinner.
+OLD_OWN = """    CHECK(own);
+"""
+NEW_OWN = """    CHECK(own);
+    CHECK(lp_was_parked);   /* LIPROBE --force */
+"""
+
+# --mut-leaf: the check back to the sighting's leaf-PC assertion.
+OLD_CHECK = """    {
+        uintptr_t ret = s.ret;
+        bool ret_below = false;
         for (unsigned i = 1; i < depth && i < LOCKUP_TRACE_MAX; i++)
-            lp_ret_below |= lp_tr[i] == s.ret;
-        CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND) ? tr1 == s.ret : lp_ret_below);
-    }
-    CHECK(when >= t0 && when <= t1);"""
+            ret_below |= trace[i] == ret;
+        CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND) ? tr1 == ret : ret_below);
+    }"""
+MUT_LEAF = """    (void)tr1;
+    CHECK(in_fn(pc, (const void *)spin_here, SPIN_FN_BOUND));   /* LIPROBE --mut-leaf: the sighting's check */"""
+
+# --mut-noret: spin_here records no return address.
+OLD_HERE_RET = """    s->ret = (uintptr_t)__builtin_return_address(0);"""
+MUT_NORET = """    s->ret = 0;   /* LIPROBE --mut-noret */"""
 
 
 def sha(p):
@@ -283,19 +267,28 @@ def revert():
 
 def apply():
     args = sys.argv[2:]
-    force, fix = '--force' in args, '--fix' in args
-    if [a for a in args if a not in ('--force', '--fix')]:
-        sys.exit('usage: apply [--force] [--fix]')
-    edits = [(OLD_INC, NEW_INC), (OLD_SPIN, NEW_SPIN), (OLD_HERE, NEW_HERE), (OLD_FN, NEW_FN),
-             (OLD_START, new_start(force)), (OLD_READ, new_read(force))]
+    force = '--force' in args
+    mut_leaf = '--mut-leaf' in args
+    mut_noret = '--mut-noret' in args
+    if [a for a in args if a not in ('--force', '--mut-leaf', '--mut-noret')]:
+        sys.exit('usage: apply [--force] [--mut-leaf | --mut-noret]')
+    if mut_leaf and mut_noret:
+        sys.exit('usage: --mut-leaf and --mut-noret are exclusive')
+    edits = [(OLD_INC, NEW_INC), (OLD_FN, NEW_FN)]
+    if force:
+        edits.append((OLD_FORCE, NEW_FORCE))
+    edits.append((OLD_READ, new_read(force)))
     if force:
         edits.append((OLD_OWN, NEW_OWN))
-    if fix:
-        edits.append((OLD_CHECK, NEW_CHECK_FIX))
+    if mut_leaf:
+        edits.append((OLD_CHECK, MUT_LEAF))
+    if mut_noret:
+        edits.append((OLD_HERE_RET, MUT_NORET))
     apply_files([(LT, edits)])
     print('applied: lockup-sample classifies its sample'
           + ('; a cross call parked on the spinner\'s CPU at the sample' if force else '')
-          + ('; the check accepts the spinner interrupted' if fix else ''))
+          + ('; the check reverted to the leaf PC (the sighting)' if mut_leaf else '')
+          + ('; spin_here records no return' if mut_noret else ''))
 
 
 if __name__ == '__main__':
