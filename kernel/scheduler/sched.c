@@ -447,7 +447,14 @@ bool sched_wake(struct thread *t)
     if (t->state == THREAD_BLOCKED) {
         t->state = THREAD_READY;
         g_policy->enqueue(rq, t, false);
-        if (rq->current == rq->idle || t->priority < rq->current->priority)
+        bool resched = rq->current == rq->idle || t->priority < rq->current->priority;
+#if CONFIG_DEBUG
+        /* What this wake decided, and the target's handled count before it
+         * sends: an IPI the target handled earlier is not this wake's. */
+        t->wake_resched = resched;
+        t->wake_ipi_base = ipi_count_on(rq->cpu, IPI_RESCHEDULE);
+#endif
+        if (resched)
             request_resched(rq);
         woke = true;
     }

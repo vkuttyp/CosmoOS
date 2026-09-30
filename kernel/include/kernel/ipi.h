@@ -40,5 +40,9 @@ void ipi_broadcast_others(enum ipi_kind kind);
 
 /* Diagnostics: IPIs of `kind` handled on this CPU. */
 uint64_t ipi_count(enum ipi_kind kind);
+/* `cpu`'s count of handled IPIs of `kind`: a statistic, read with a relaxed
+ * atomic load -- no torn value, and ordered with nothing else. smp-wake's
+ * evidence (docs/audit/next-subsystem-smp-wake.md). */
+uint64_t ipi_count_on(unsigned cpu, enum ipi_kind kind);
 
 #endif /* KERNEL_IPI_H */

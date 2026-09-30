@@ -62,18 +62,61 @@ acknowledgement accounting; it does not prove a stale translation is
 gone, which would require an access that faults.
 
 ### `smp-wake`
-A thread pinned to CPU 1 blocks in `semaphore_down`; CPU 0 waits until
-its state reads `THREAD_BLOCKED` (a post that finds no waiter takes the
-fast path and sends no IPI) and posts. The waiter records the wake time
-and CPU, and `ipi_count(IPI_RESCHEDULE)` -- this-CPU's count, read on CPU
-1 -- either side of the block: `on_cpu == 1`, wake time ≥ post time, and
-the count moved, which is the claim that the IPI and not the tick woke
-the idle CPU. That claim used to be a `< 2 ms` latency, which never
-proved it (a tick landing inside 2 ms passes too) and which a held vCPU
-fails on a correct kernel. The latency is printed. Proved: removing the
-IPI in `request_resched` fails at the count -- and nothing else in the
-suite notices, because the tick carries liveness. Single CPU: logged as
-not exercised.
+A thread pinned to another CPU (the target) blocks in `semaphore_down`.
+The test posts once two things read true:
+- the waiter's state reads `THREAD_BLOCKED` (a post that finds no waiter
+  takes the fast path and sends no IPI);
+- the target reads idle, `sched_cpu_load(target) == 0`.
+
+The idle wait is needed because `waitqueue_prepare` sets `BLOCKED` before
+the waiter switches out. A post in between finds the waiter itself still
+current, at equal priority, so `sched_wake` owes no IPI. That was the
+one CI failure (`docs/audit/next-subsystem-smp-wake.md`). A load of 0
+cannot be read while the waiter is current, since the hint reads high,
+never low (S29).
+
+The claim is read from the kernel's own record, which `sched_wake` keeps
+on the woken thread in debug builds:
+- `wake_resched`: whether the wake asked the target to reschedule;
+- `wake_ipi_base`: the target's handled `IPI_RESCHEDULE` count
+  (`ipi_count_on`), taken under the target's lock before it sends.
+
+The waiter copies both when it returns, with the count again. The test
+asserts `on_cpu == target`, wake time ≥ post time, the wake asked for a
+reschedule, and the target handled one after the snapshot.
+- **After the snapshot, not after the block:** the waiter's count before
+  it blocked was a superset. Any reschedule IPI to that CPU during the
+  block raised it, including one owed to another wake.
+- **"After the wake", not "this wake's":** reschedule IPIs carry nothing
+  and coalesce, so no count can say which wake sent the one the target
+  handled.
+  - A wake that sends none fails.
+  - A wake whose IPI is lost while another CPU's reaches the target
+    within the wake's own latency would pass. Greptile named that
+    residue on #263.
+  - The handler's increment is atomic (`count` in `ipi.c`), because
+    `ipi_count_on` reads it from another CPU.
+- **If a thread became runnable on the target between the idle read and
+  the post,** the wake asks for nothing. The record says so, and the
+  round is repeated with a fresh waiter, up to 5 times.
+
+The latency is printed.
+
+Proved, each mutation alone on both architectures:
+
+| mutation | result |
+|---|---|
+| no IPI in `request_resched` | fails at the count |
+| `request_resched` never called | fails at the count |
+| the idle wait removed, with the waiter held 20 ms between `BLOCKED` and its switch | fails: no round's wake found the target idle |
+| the record not written | fails: no round's wake found the target idle |
+
+With the idle wait in place, the same 20 ms hold passes. Without the
+IPI, other tests fail too (`process-user`'s 15 s bound on both
+architectures; on x86-64 also `mutex`, `process-spawn` and
+`hid-keyboard`), because liveness then rides on the tick; `smp-wake` is
+the one that names the cause. Skipped in a non-debug build, which writes
+no record. Single CPU: logged as not exercised.
 
 ### `smp-ticks`
 Snapshot `percpu_get(c)->ticks` on every online CPU, sleep 40 ms,
@@ -124,7 +167,7 @@ that led to SMP11 showed all CPUs halted with one transient sample in
 ## Waits and time bounds
 
 A test waits for the property, never for an interval (`threads_settle`,
-the wait for `THREAD_BLOCKED` in `smp-wake`). An upper bound on elapsed
+the waits for `THREAD_BLOCKED` and an idle target in `smp-wake`). An upper bound on elapsed
 time is kept, restated as an observable, or widened and labelled
 `LOAD-SENSITIVE` and listed in `docs/testing/flakes.md`, which says which
 and why; this suite has none listed, since its three were all restated.

@@ -30,7 +30,9 @@ static volatile uint32_t g_call_done;
 
 static void count(enum ipi_kind kind)
 {
-    g_counts[arch_cpu_id()][kind]++;
+    /* Atomic: ipi_count_on reads another CPU's count while it may be
+     * handling one. */
+    __atomic_fetch_add(&g_counts[arch_cpu_id()][kind], 1u, __ATOMIC_RELAXED);
 }
 
 static void ipi_reschedule(unsigned vector, struct arch_trap_frame *frame, void *arg)
@@ -129,6 +131,11 @@ void ipi_broadcast_others(enum ipi_kind kind)
 {
     KASSERT(g_initialized && kind < IPI_KIND_COUNT);
     arch_ipi_broadcast_others((unsigned)g_vectors[kind]);
+}
+
+uint64_t ipi_count_on(unsigned cpu, enum ipi_kind kind)
+{
+    return cpu < CONFIG_MAX_CPUS && kind < IPI_KIND_COUNT ? __atomic_load_n(&g_counts[cpu][kind], __ATOMIC_RELAXED) : 0;
 }
 
 uint64_t ipi_count(enum ipi_kind kind)

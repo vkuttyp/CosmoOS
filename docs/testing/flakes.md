@@ -2232,8 +2232,11 @@ this is the story that fits, not a finding: the next step is to record
 `rq->current` on the target at the post (or assert the target idle
 before posting) before changing the claim.
 
-**Explained (the smp-wake report, `docs/audit/next-subsystem-smp-wake.md`;
-not yet fixed).** `tools/smp-wake-probe.py` recorded `rq->current` at the
+**Explained (the smp-wake report, `docs/audit/next-subsystem-smp-wake.md`),
+and fixed by the smp-wake unit (PR #263).** The test now waits for the
+target to read idle before it posts, and asserts from the wake's own
+record: the wake asked for a reschedule, and the target handled one after
+the wake's snapshot of its count. A busy target repeats the round. `tools/smp-wake-probe.py` recorded `rq->current` at the
 wake, and found a second way besides the one above.
 - **The waiter's own window.** `waitqueue_prepare` sets `BLOCKED` before
   the waiter switches out, so a post in between finds the waiter itself
@@ -2787,4 +2790,12 @@ uncontended.
 The log does not say which iteration failed (`at` 0 or 1). So this is
 the interleaving that fits, not a finding. The next step is to record
 `at` and the word's value in the failure, before changing the claim.
+
+## `net-nicbench` over the per-test budget, second sighting, 2026-09-30
+
+`self-test net-nicbench took 8116 ms (budget 8000 ms)`, local aarch64
+debug, in the smp-wake unit's first boot, beside an x86-64 boot. The
+branch changes only `smp-wake` and `sched_wake`'s debug record. The test
+passed; the harness's budget failed it, by 116 ms. The first sighting was
+over by 39 ms. Recorded, not attributed.
 

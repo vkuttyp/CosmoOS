@@ -3678,6 +3678,21 @@ See [docs/development.md](docs/development.md).
   difference on the thread it moves (`bal_pulls`, `bal_gap_min`, debug
   builds). The test fails any pull below two, and a third thread
   spinning beside the pair must draw a pull, at two or more. (PR #261)
+- **`smp-wake` posts to an idle target and reads what the wake
+  decided.** It failed once on CI with no reschedule IPI counted. The
+  test posted as soon as the waiter read `BLOCKED`, which
+  `waitqueue_prepare` sets before the waiter switches out. A post in
+  that window finds the waiter itself running, and `sched_wake` rightly
+  sends nothing. `tools/smp-wake-probe.py` reproduced it exactly. The
+  test also counted any reschedule IPI during the whole block, so it
+  could pass without this wake's.
+  - It now waits for the target to read idle before posting.
+  - `sched_wake` records on the woken thread whether it asked for a
+    reschedule, and the target's handled count before it sent
+    (`wake_resched`, `wake_ipi_base`, debug builds; `ipi_count_on`).
+  - The test asserts both, and repeats a round whose target turned busy.
+
+  (PR #263)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
