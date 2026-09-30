@@ -2901,3 +2901,17 @@ dump: before PR #267 this boot would have timed out silently. The test
 after `tcp-pcb-timer-free` (whose held-callback history is above) is the
 shape to look at first; not attributed.
 
+**Explained (the accept-order report,
+`docs/audit/next-subsystem-accept-order.md`), and fixed by the
+accept-order unit (PR #269).** It was not the timer at all. The test's
+listen-backlog step connected `c1` then `c2`, accepted once, and waited
+for `hi` on `c1`. A connection is queued when the listener processes its
+final ACK, on the network worker that ACK's flow hashes to, after
+`connect()` has returned. So `c2` can be accepted first, and then nothing
+ever writes to `c1`. `tools/accept-order-probe.py --force` held `c1`'s
+ACK until `c2` was queued, and reproduced this dump exactly on both
+architectures. The sighting's log could not say which wait `net-lo-tcp`
+was in; the forced run matches it. The step now asks which client it
+accepted and bounds its receive. `net-accept-order` runs the same step in
+the forced order on every debug boot.
+
