@@ -3778,7 +3778,7 @@ See [docs/development.md](docs/development.md).
   unwrapped, so metadata checksums cannot be authenticated unconditionally).
   `cosmofs-metadata-csum-id` proves a sealed block names CRC32C, a legacy
   block reads as CRC32C, an unsupported algorithm is `MHDR_ALGO`, and a
-  one-bit corruption is `MHDR_CRC` -- the two distinct. (PR #NNN)
+  one-bit corruption is `MHDR_CRC` -- the two distinct. (PR #273)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
