@@ -27,7 +27,7 @@ docs/testing/flakes.md ran. --early registers it just before
 `cosmofs-replay`. That is the control: the same sleeper, differing only in
 position.
 
---fix is the candidate. The runner arms the watchdog afresh before each
+--fix was the candidate. The runner arms the watchdog afresh before each
 test, instead of kicking it, which clears the latch. The period is the
 test's own budget: the harness's 8 s, or its composite budget for
 `process-user` (20 s) and `cosmofs-replay` (40 s). A test that goes
@@ -73,9 +73,9 @@ static bool wdprobe_sleeper(const char **reason)
 
 static const struct selftest tests[] = {""".replace('%uu', str(SLEEP_MS) + 'u')
 
-OLD_EARLY = """    { "cosmofs-replay",  selftest_cosmofs_replay, 40000 },"""
+OLD_EARLY = """    { "cosmofs-replay",  selftest_cosmofs_replay },"""
 NEW_EARLY = """    { "wdprobe-sleeper", wdprobe_sleeper },   /* WDPROBE --early */
-    { "cosmofs-replay",  selftest_cosmofs_replay, 40000 },"""
+    { "cosmofs-replay",  selftest_cosmofs_replay },"""
 
 OLD_LATE = """    { "syscall-fuzz",    selftest_syscall_fuzz },"""
 NEW_LATE = """    { "wdprobe-sleeper", wdprobe_sleeper },   /* WDPROBE --late */

@@ -8,7 +8,9 @@
 >   entries. `budgets[]` names the two tests that are not at the default,
 >   and the runner panics at start on an entry that names no test, so a
 >   typo cannot quietly mean 8 s. `struct selftest` is private to
->   `selftest.c`, not in `selftest.h` as §Affected files said.
+>   `selftest.c`; the report's first version placed the field in
+>   `selftest.h`. §2, §Affected files, §Tests and the mutations below are
+>   written as built.
 > - **The harness's parse is in functions** (`selftest_timings`,
 >   `selftest_budgets`, `budget_failures`) with a host test,
 >   `tests/boot/test_selftest_budgets.py` (10 checks, `make host-test`).
@@ -161,12 +163,17 @@ still fails that test on its duration. The rule is: **the dump belongs
 to the test that is running, and says what it was doing when it went
 quiet.**
 
-### 2. The budget lives in the registry, and the harness reads it from the boot
+### 2. The budgets live in the kernel, and the harness reads them from the boot
 
-- `struct selftest` gains `budget_ms`; 0 means the default,
-  `SELFTEST_BUDGET_DEFAULT_MS` (8000).
-- `process-user` gets 20000 and `cosmofs-replay` 40000, with the
-  harness's comment on why moved beside them.
+- `selftest.c` gains a `budgets[]` table beside the registry, naming the
+  tests that are not at the default, `SELFTEST_BUDGET_DEFAULT_MS` (8000):
+  `process-user` 20000 and `cosmofs-replay` 40000, with the harness's
+  comment on why moved beside them. `selftest_budget_ms(name)` looks a
+  test up. (A `budget_ms` field in `struct selftest` was the first plan;
+  the build's `-Wmissing-field-initializers` would have made every one of
+  ~400 registry entries spell it out.)
+- A table entry that names no registered test panics the run at start,
+  so a misspelt name cannot quietly hold its test to the default.
 - Before the first test, the runner prints one line:
   `SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000`.
 - The harness takes its budgets from that line and drops
@@ -189,10 +196,11 @@ kick) now fails every debug boot instead of hiding in it.
 
 | file | change |
 |---|---|
-| `kernel/core/selftest.c` | `budget_ms` in the registry (two entries set); the budgets line; per-test `sched_watchdog_arm` |
-| `kernel/include/kernel/selftest.h` | `struct selftest` gains `budget_ms`; `SELFTEST_BUDGET_DEFAULT_MS` |
+| `kernel/core/selftest.c` | `SELFTEST_BUDGET_DEFAULT_MS`, the `budgets[]` table and `selftest_budget_ms`; the budgets line and its name check; per-test `sched_watchdog_arm`; `watchdog-spend` and `watchdog-rearm` |
 | `kernel/scheduler/sched.c`, `kernel/include/kernel/sched.h` | the header's comment ("prints ... once") says once per arming; the fire count, the state read and the quiet arming for the two tests (§Tests) |
-| `tests/boot/run_boot_test.py` | budgets from the boot's line, `composite_budget_ms` and `SELFTEST_BUDGET_MS` removed, the forbidden marker |
+| `tests/boot/run_boot_test.py` | budgets from the boot's line (`selftest_timings`, `selftest_budgets`, `budget_failures`), `composite_budget_ms` and `SELFTEST_BUDGET_MS` removed, the forbidden marker |
+| `tests/boot/test_selftest_budgets.py`, `tests/host/host.mk` | the parse's host test, run by `make host-test` |
+| `tools/watchdog-spent-probe.py` | anchors for the built tree; `--fix` refused as built |
 | `docs/verification/design.md` §6, `api.md`, `invariants.md` F6, `testing.md`; `tests/README.md`; `docs/development.md` | where the budgets live, "20 s each" corrected, the watchdog per test |
 | `docs/testing/flakes.md` | the hang-bounds paragraph's claim now holds for every test; the five budget entries point here |
 | `README.md` | Status entry |
@@ -202,9 +210,9 @@ kick) now fails every debug boot instead of hiding in it.
 - Kernel, for the two self-tests:
   - `sched_watchdog_fire_count()`: how many times the watchdog has
     fired;
-  - `sched_watchdog_state(uint64_t *period_ns, bool *fired)`: the
+  - `sched_watchdog_state(uint64_t *timeout_ns, bool *fired)`: the
     current arming;
-  - `sched_watchdog_arm_quiet(period_ns)`: an arming whose firing is
+  - `sched_watchdog_arm_quiet(timeout_ns)`: an arming whose firing is
     counted, not printed.
 - Nothing is added for userland. The boot log gains one line.
 
@@ -216,7 +224,8 @@ kick) now fails every debug boot instead of hiding in it.
 | `watchdog-rearm` (new self-test, registered directly after `watchdog-spend`) | at entry, before it calls anything that arms, reads `sched_watchdog_state()`: not fired, and the period is its own budget (8000 ms). Only the runner can have made that true. A runner that kicks instead of arming leaves `watchdog-spend`'s fired state (and its 50 ms period) in place, and this test fails. |
 | the forbidden marker | a passing boot has no dump; the plain boot today would fail it |
 | the budgets line | the harness fails a boot whose self-tests printed no budgets line |
-| `tools/watchdog-spent-probe.py --late` on the build | the sleeper's dump falls in the sleeper, test 403 |
+| `tests/boot/test_selftest_budgets.py` (host, 10 checks) | the line's parse; a named budget covers its test and only it; the boundary; a failed test's duration judged; no line with tests fails; a line without a numeric default is no line |
+| `tools/watchdog-spent-probe.py --late` on the build | the sleeper's dump falls in the sleeper, test 405 |
 
 **The pair, not one test, is what checks the runner.** A single test
 that arms the watchdog itself clears the fired state whatever the runner
@@ -230,16 +239,19 @@ The quiet mode is a test-only flag read by `watchdog_check`, and
 real dump into every boot, which would reintroduce the noise the unit
 removes.
 
-**Planned mutations** (each alone, both architectures, boot confirmed):
-- the per-test arm back to a kick: `watchdog-rearm` fails at entry, and
-  the forbidden marker fires in `cosmofs-replay`;
-- the runner arming every test at 8 s, ignoring `budget_ms`:
-  `watchdog-rearm` still passes (its budget is the default), and the
-  forbidden marker fires in `cosmofs-replay`;
-- `cosmofs-replay`'s budget back to the default: the forbidden marker
-  fires in every boot;
-- the harness ignoring the budgets line: the boot fails `cosmofs-replay`
-  at 8000 ms.
+**Mutations** (each alone; the results are in the banner):
+- M1, the per-test arm back to one 8 s arming and a kick: `watchdog-rearm`
+  fails at entry, and the forbidden marker fires in `cosmofs-replay`
+  (booted, both architectures);
+- M2, `cosmofs-replay`'s entry removed from `budgets[]`: the forbidden
+  marker fires in `cosmofs-replay` and it fails its budget (booted, both
+  architectures);
+- M3, the harness ignoring named budgets, and accepting a run with no
+  budgets line: each fails one host check (host test only).
+
+A runner that arms every test at 8 s, ignoring the table, was not run
+separately: it holds `cosmofs-replay` to 8 s, which is M2's effect, and
+`watchdog-rearm` still passes because its budget is the default.
 
 ## Benchmarks
 
