@@ -3779,6 +3779,24 @@ See [docs/development.md](docs/development.md).
   `cosmofs-metadata-csum-id` proves a sealed block names CRC32C, a legacy
   block reads as CRC32C, an unsupported algorithm is `MHDR_ALGO`, and a
   one-bit corruption is `MHDR_CRC` -- the two distinct. (PR #273)
+- **A timer is a submittable I/O object.** The async I/O ring drove any
+  object with a readiness operation -- files, sockets, devices -- but had no
+  timer to submit: its only timer was `aio_wait`'s whole-call timeout, a bare
+  return, not a completion, so "wake me after T" could not be multiplexed
+  with I/O and told apart from "nothing was ready". `timer_create`
+  (`SYS_timer_create`) returns a timer kobject (a timerfd): armed with an
+  initial delay and an optional interval, it becomes `READABLE` once it has
+  expired, a `READ` returns the expiration count and resets it, and it rides
+  the existing `POLL`/`READ` path with no new AIO op -- so a submitted `POLL`
+  completes with the entry's `user_data` when it fires, and it serves
+  `poll`/`select` and a blocking read too. `release` marks it dying so the
+  callback cannot re-arm, then `timer_cancel_sync` cancels and waits out a
+  callback in flight; a submitted timer is kept alive by the ring's reference
+  while parked, so it cannot be freed under the ring. `aio-timer` proves a
+  20 ms one-shot submitted as `POLL` completes with its `user_data` after it
+  fires and not before, `READ` returns the count then `-EAGAIN`, a periodic
+  timer fires repeatedly, and a create-and-close without submitting cancels
+  at `close`. (PR #NNN)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

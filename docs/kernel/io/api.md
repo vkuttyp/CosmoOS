@@ -69,6 +69,16 @@ thread's non-blocking flag) is parked again, unless `NOWAIT`.
 | 60 | `aio_create` | `unsigned entries, unsigned flags` | a ring handle (READ and WRITE) | `EINVAL`, `ENOMEM`, `EMFILE` |
 | 61 | `aio_submit` | `int ring, const struct cosmo_sqe *sqes, unsigned n` | entries accepted | `EBADF` (not a ring, or lacking a right), `EPERM`, `EFAULT`, `EBUSY` |
 | 62 | `aio_wait` | `int ring, struct cosmo_cqe *cqes, unsigned n, unsigned min, uint64_t timeout_ns` | completions copied | `EBADF`, `EPERM`, `EINVAL`, `EFAULT`, `EINTR` |
+| 101 | `timer_create` | `uint64_t initial_ns, uint64_t interval_ns` | a handle | `EINVAL` (initial_ns 0), `ENOMEM` |
+
+`timer_create` returns a timer as a submittable I/O object: it first expires
+after `initial_ns` and, if `interval_ns` is non-zero, re-arms for that
+interval. The handle becomes `READABLE` once it has expired; a `READ` of at
+least 8 bytes returns the expiration count since the last read (a
+`uint64_t`) and resets it, blocking until the first expiry unless the caller
+or the ring asked not to. It rides `POLL`/`READ` on the ring, and answers
+`ioready`, `poll`/`select` and a blocking read like any object. libc:
+`cosmo_timer_create(initial_ns, interval_ns)`.
 
 `struct cosmo_sqe` (40 bytes: `op`, `flags`, `events`, `handle`,
 `addr`, `len`, `offset`, `user_data`) and `struct cosmo_cqe` (16 bytes:
