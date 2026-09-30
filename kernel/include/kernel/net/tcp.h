@@ -179,6 +179,12 @@ unsigned tcp_test_callback_saw_dead(void);
 unsigned tcp_test_callback_checked(void);
 unsigned tcp_test_callback_cpu(void);   /* where the held callback ran: the placement is the whole hazard */
 void tcp_test_arm_rexmit(struct tcp_pcb *pcb, uint64_t ns);
+/* Hold client port `sport`'s bare ACK to listener port `dport`
+ * unprocessed; deliver it later (docs/audit/next-subsystem-accept-order.md).
+ * Delivering disarms. */
+void tcp_test_hold_ack(uint16_t dport, uint16_t sport);
+bool tcp_test_ack_held(void);
+bool tcp_test_deliver_held_ack(void);   /* false: nothing was held */
 #endif
 
 void tcp_init(void);

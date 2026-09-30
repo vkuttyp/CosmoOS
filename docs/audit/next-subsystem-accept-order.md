@@ -1,5 +1,45 @@
 # NEXT SUBSYSTEM — net-lo-tcp assumes accept returns the first client to connect
 
+> **Status: built (PR #269).** As designed, with these specifics:
+>
+> - **The hook is guarded by `CONFIG_DEBUG`,** as `tcp.c`'s other test
+>   hooks are; the report's first version said `CONFIG_SELFTEST`, and
+>   named two functions. The sections below are written as built. There
+>   are three: `tcp_test_hold_ack(dport, sport)`,
+>   `tcp_test_ack_held()` (the test's wait needs to see the hold), and
+>   `tcp_test_deliver_held_ack()` (disarms, and returns whether anything
+>   was held). The hook runs in `tcp_input` right after the header
+>   pull-up, before any lock.
+> - **The hold is armed by both ports** (Greptile, #269): the listener's
+>   and the first client's, which the forced run binds to `port + 1`.
+>   Armed by the listener port alone, it would take whichever client's ACK
+>   reached `tcp_input` first, and in the race it forces that can be the
+>   second's.
+> - **One state word owns the segment** (Greptile, #269): IDLE, ARMED,
+>   CLAIMING, HELD. The hook claims (ARMED to CLAIMING), stores, and
+>   publishes HELD. Delivery disarms an unclaimed hold, or waits out a
+>   claim in progress and takes the segment, so it can never miss one a
+>   worker is between claiming and storing.
+> - **A failed forced run leaves nothing half-open.** The hold is
+>   released through `selftest_defer`, and the forced wait delivers the
+>   held ACK whether or not the wait succeeded.
+> - **Ports:** `net-lo-tcp` 6002, as before; `net-accept-order` 6004.
+>   `net-accept-order` is registered right after `net-lo-tcp`.
+> - **Measured**, one debug boot each, both architectures:
+>
+>   | boot | result |
+>   |---|---|
+>   | plain | PASS; `net-lo-tcp` accepted the first client; `net-accept-order` accepted the second, ok (96 ms x86-64, 106 ms aarch64) |
+>   | the step back to receiving on `c1` | `net-accept-order` fails on the bounded readable wait in ~2 s (`wait_until(ready_has, ...)`), and the boot runs on; `net-lo-tcp` passes |
+>   | `net-accept-order` without its hold | fails in ~2 s: "the forced order did not happen" |
+>   | `tcp_accept` LIFO (`list_push_front` on queueing) | `net-accept-order` fails `!accepted_first`; `net-lo-tcp` passes, accepting the second client |
+>
+>   The first attempt at the `c1` mutation did not compile (`mine`
+>   unused, `-Werror`); it was rerun with `(void)mine`, and both boots
+>   were confirmed to start.
+> - **The docs:** `docs/kernel-services/network/testing.md`, flakes (the
+>   sighting explained), README.
+
 ## Problem
 
 `docs/testing/flakes.md` ("`net-lo-tcp` hung, with the test thread
@@ -144,10 +184,11 @@ the step that hung is the step under test (Greptile, #268). A separate
 test of the other order would pass while the step itself regressed.
 
 The forcing seam is a debug hook in `tcp_input`, the probe's hold made
-permanent under `CONFIG_SELFTEST`. Armed with a listener port, it holds
-that port's first bare ACK and hands it back to the test. Forced, the
-helper:
-1. connects `c1` and `c2` with `c1`'s ACK held;
+permanent under `CONFIG_DEBUG` (as `tcp.c`'s other test hooks are). Armed with the listener's port
+and the held client's, it holds that client's bare ACK to the listener
+and hands it back to the test. Forced, the helper:
+1. binds `c1` to `port + 1`, then connects `c1` and `c2` with `c1`'s ACK
+   held;
 2. waits, bounded, for `c2` to be queued;
 3. delivers the held ACK, even when the wait timed out, so a failed run
    leaves no half-open connection;
@@ -169,7 +210,7 @@ the stack: the accept returned `c2`, completion order and not
 | file | change |
 |---|---|
 | `kernel-services/network/nettest.c` | the backlog step as `lo_tcp_backlog(port, force)`, which asks which client it accepted and bounds its receive (§1, §2); `net-lo-tcp` calls it unforced, `net-accept-order` forced |
-| `kernel-services/network/tcp.c` | the ACK hold hook, `CONFIG_SELFTEST` only |
+| `kernel-services/network/tcp.c` | the ACK hold hook, `CONFIG_DEBUG` only |
 | `kernel/include/kernel/net/tcp.h` | the hook's declaration |
 | `kernel/core/selftest.c` | registers `net-accept-order` |
 | `docs/kernel-services/network/testing.md` | the step's description; `net-accept-order` |
@@ -179,9 +220,14 @@ the stack: the accept returned `c2`, completion order and not
 
 ## APIs
 
-- Kernel, debug builds only: `tcp_test_hold_ack(port)` arms the hold;
-  `tcp_test_held_ack()` takes the held segment and delivers it. Nothing
-  outside the self-tests calls them.
+- Kernel, debug builds only:
+  - `tcp_test_hold_ack(dport, sport)` arms the hold for client port
+    `sport`'s ACK to listener port `dport`;
+  - `tcp_test_ack_held()` says whether a segment is held;
+  - `tcp_test_deliver_held_ack()` disarms, delivers the held segment, and
+    returns whether there was one.
+
+  Nothing outside the self-tests calls them.
 
 ## Tests
 
@@ -208,7 +254,7 @@ None.
 ## Risks
 
 - **The hold hook sits in `tcp_input`,** the receive path of every
-  segment. It is compiled only with `CONFIG_SELFTEST`, and when it is
+  segment. It is compiled only with `CONFIG_DEBUG`, and when it is
   not armed it costs one atomic load. The hook takes the segment before
   the TCP lock, so holding it blocks no other connection.
 - **A held ACK is a real segment kept out of the stack for up to 2 s.**

@@ -68,11 +68,25 @@ TIME_WAIT, and `getsockname`, `recvfrom` (0) and `sendto` (`-EPIPE`)
 still behave, and a new socket can bind the client's former port:
 the pcb is not freed under a live socket and no longer holds the port. Then: `connect` to a closed port is `-ECONNREFUSED` and
 `rsts_in` grew by one; a listener with backlog 2 accepts one of two
-queued connections, exchanges `hi`, and closing the listener resets
-the other (`c2` sees an error on read or write); `conns_established`
+queued connections, exchanges `hi` with the client it accepted, and
+closing the listener resets the other, which sees an error on read or
+write. Which client the accept returns is completion order, not
+`connect()` order: a connection is queued when the listener processes its
+final ACK, on the worker that flow hashes to. So the step
+(`lo_tcp_backlog`) matches the accepted socket's peer port to a client and
+bounds its receive; it used to assume `c1` and could hang
+(`docs/audit/next-subsystem-accept-order.md`); `conns_established`
 grew by at least four and `bad_cksum` did not move; segments and
 retransmissions are logged (`selftest: net-lo-tcp: N segments, 0
 retransmits`).
+
+**`net-accept-order`** (debug builds): the same backlog step, forced into
+the order that hung it. The first client is bound to port 6005, and
+`tcp_test_hold_ack(6004, 6005)` holds that client's final ACK in
+`tcp_input` until the second client is queued, then delivers it; the held ACK is delivered even when the wait fails, so no connection
+is left half-open. The test asserts that the order happened (the second
+client was queued first) and that the accept returned the second client;
+then the step's checks run as in `net-lo-tcp`.
 
 **`net-lo-tcp-loss`**: installs the loopback filter, which drops every
 seventh TCP segment that carries data, and repeats the 1 MiB IPv4

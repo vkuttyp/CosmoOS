@@ -3725,6 +3725,24 @@ See [docs/development.md](docs/development.md).
     a socket, now in `docs/testing/flakes.md`.
 
   (PR #267)
+- **`net-lo-tcp`'s backlog step asks which client it accepted.** It
+  connected two clients to a listener, accepted once, and waited for
+  `hi` on the first. But TCP queues a connection when the listener
+  processes the client's final ACK, on the network worker that flow
+  hashes to, after `connect()` has returned. So the second client can be
+  accepted first, and the step then hung with every CPU idle: the
+  per-test watchdog's first catch. `tools/accept-order-probe.py`
+  reproduced it on both architectures by holding the first client's ACK.
+  - The step (`lo_tcp_backlog`) matches the accepted socket's peer to a
+    client, receives on that one after a bounded readable wait, and
+    expects the reset on the other.
+  - `net-accept-order` runs the same step in the forced order:
+    `tcp_test_hold_ack` (debug builds) holds the first client's ACK in
+    `tcp_input` until the second is queued.
+  - `unixtest`'s backlog step says why its order holds: AF_UNIX queues
+    at `connect()`.
+
+  (PR #269)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
