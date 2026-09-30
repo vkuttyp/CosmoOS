@@ -79,7 +79,7 @@ nothing else about it changes:
 - `--late`, just before `syscall-fuzz` (test 403), after `cosmofs-replay`;
 - `--early`, just before `cosmofs-replay` (test 180): the control.
 
-`--fix` is the candidate (§1). `read` names the test each dump fell in:
+`--fix` was the candidate (§1), patched onto the tree before the build; the built tree is that fix, and the probe now refuses the flag. `read` names the test each dump fell in:
 the first `SELFTEST:` line after it.
 
 Every boot below failed the harness, and in every one the only failure

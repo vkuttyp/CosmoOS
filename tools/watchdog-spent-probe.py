@@ -16,7 +16,7 @@ registered after it.
 The probe adds one self-test, `wdprobe-sleeper`, that sleeps 9 s without a
 kick: a test that stops making progress for longer than the period.
 
-    python3 tools/watchdog-spent-probe.py apply --late|--early [--fix]
+    python3 tools/watchdog-spent-probe.py apply --late|--early
     gmake ARCH=x86_64 test > run.txt 2>&1   # the harness fails the sleeper's budget
     python3 tools/watchdog-spent-probe.py read out/x86_64-debug/boot-test.log
     python3 tools/watchdog-spent-probe.py revert
@@ -27,15 +27,16 @@ docs/testing/flakes.md ran. --early registers it just before
 `cosmofs-replay`. That is the control: the same sleeper, differing only in
 position.
 
---fix was the candidate. The runner arms the watchdog afresh before each
-test, instead of kicking it, which clears the latch. The period is the
+The report's candidate (then `--fix`, now built) armed the watchdog
+afresh before each test, instead of kicking it, which clears the latch. The period is the
 test's own budget: the harness's 8 s, or its composite budget for
 `process-user` (20 s) and `cosmofs-replay` (40 s). A test that goes
 quiet for longer than it is allowed to take gets the dump. A passing
 composite test does not.
 
 **Built (the watchdog-spent unit).** The runner now arms the watchdog per
-test at the test's budget, so `--fix` is the tree itself and is refused.
+test at the test's budget, so the tree is the fix and there is no `--fix`
+(an old command line that passes it is told so).
 On the built tree the sleeper also trips the harness's `[WATCHDOG]`
 forbidden marker, beside its budget.
 
@@ -171,16 +172,15 @@ def revert():
 
 def apply():
     args = sys.argv[2:]
-    late, early, fix = '--late' in args, '--early' in args, '--fix' in args
-    if late == early or [a for a in args if a not in ('--late', '--early', '--fix')]:
-        sys.exit('usage: apply --late|--early [--fix]')
-    if fix:
+    if '--fix' in args:
         sys.exit('--fix is built: the runner arms the watchdog per test at its budget (selftest_run_all)')
+    late, early = '--late' in args, '--early' in args
+    if late == early or [a for a in args if a not in ('--late', '--early')]:
+        sys.exit('usage: apply --late|--early')
     edits = [(OLD_TABLE, NEW_TABLE), (OLD_LATE, NEW_LATE) if late else (OLD_EARLY, NEW_EARLY)]
     apply_files([(SELFTEST, edits)])
     print(f'applied: a {SLEEP_MS} ms sleeper '
-          + ('after cosmofs-replay (before syscall-fuzz)' if late else 'before cosmofs-replay')
-          + ('; the runner re-arms the watchdog per test at its budget' if fix else ''))
+          + ('after cosmofs-replay (before syscall-fuzz)' if late else 'before cosmofs-replay'))
 
 
 DUMP = re.compile(r'^\[WATCHDOG\] no progress for (\d+) ms')
