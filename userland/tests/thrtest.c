@@ -891,14 +891,30 @@ static void hd_start(cosmo_thread_t *w, unsigned n)
  * Step 25: a thread that holds `cv_m` while main broadcasts without it,
  * and unlocks at the moment the probe names, `bp_at_phase`: 0 is after
  * `seq` moved and before the requeue, 1 is after the requeue and before
- * the broadcast returns. Either way its unlock finds 1 (it took a free
- * mutex; the waiters are asleep on the condition, not on it) and wakes
- * nobody. The handoff must not depend on that unlock, and does not: the
- * one waiter the requeue wakes relocks at 2 whatever the word says and
- * its unlock carries the rest. The report designed a broadcaster-side
- * fix-up for exactly this window; this step is what showed it was not
- * needed, and it stays as the regression guard for the argument.
+ * the broadcast returns. The handoff must not depend on which way the
+ * holder's unlock finds the word, and does not.
+ *
+ * What the probe reads depends on the phase
+ * (docs/audit/next-subsystem-cond-phase.md):
+ * - **Phase 0** reads 1: nobody has been woken, and nothing but the
+ *   holder touches the word.
+ * - **Phase 1** reads 1 or 2. The requeue has woken one waiter, which
+ *   relocks at 2 whatever the word says. If it reaches the held mutex
+ *   before the probe reads, the word is 2 and the holder's unlock wakes
+ *   it; if not, the unlock finds 1 and wakes nobody, and the woken waiter
+ *   takes the free word at 2 and its unlock carries the rest. Asserting 1
+ *   here asserted which thread got there first (one CI failure).
+ * - **`bp_force_contend`** makes the second order certain. At phase 1
+ *   the probe waits, bounded, until the word reads 2 before it reads it,
+ *   and records whether it did (`bp_forced_reached`). The first order,
+ *   the unlock finding 1, is the usual one but is not guaranteed on any
+ *   one boot; the plain phase-1 run logs which it read.
+ *
+ * The report designed a broadcaster-side fix-up for this window; this
+ * step is what showed it was not needed, and it stays as the regression
+ * guard for the argument.
  */
+static volatile unsigned bp_force_contend, bp_forced_reached;
 static volatile unsigned bp_holding, bp_go, bp_done, bp_phase_seen, bp_state_seen, bp_at_phase;
 static void *bp_holder(void *arg)
 {
@@ -918,7 +934,14 @@ static void bp_probe(int phase)
     bp_phase_seen |= 1u << phase;
     if ((unsigned)phase != bp_at_phase)
         return;
-    bp_state_seen = cv_m.state;                 /* 1: the holder, uncontended */
+    if (phase == 1 && bp_force_contend) {
+        /* The woken waiter reaches the held mutex first: wait for its 2. */
+        uint64_t deadline = cosmo_clock_ns() + 1000000000ull;
+        while (__atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) != 2u && cosmo_clock_ns() < deadline)
+            cosmo_yield();
+        bp_forced_reached = __atomic_load_n(&cv_m.state, __ATOMIC_ACQUIRE) == 2u;
+    }
+    bp_state_seen = cv_m.state;                 /* phase 0: 1; phase 1: 1 or 2 */
     __atomic_store_n(&bp_go, 1, __ATOMIC_RELEASE);
     cosmo_futex_wake(&bp_go, 1);
     while (__atomic_load_n(&bp_done, __ATOMIC_ACQUIRE) == 0)
@@ -2398,16 +2421,20 @@ int main(int argc, char **argv)
     STEP("25");
     /*
      * (25) **Another thread holds the mutex, and unlocks inside the
-     * broadcast** -- once before its requeue, once after. Built from the
-     * mechanism: libc's broadcast probe runs on this thread inside the
-     * window, tells the holder to unlock, and waits until it has. The
-     * holder's unlock finds 1 and wakes nobody; the waiters end up on a
-     * free word, and every one still returns, because the woken waiter
-     * takes the free word at 2 and its unlock reaches the next. No
-     * mutation of the two rules is specific to this step (23 catches
-     * both); it guards the interleaving the report thought needed more.
+     * broadcast** -- before its requeue, after it, and after it with the
+     * woken waiter first. Built from the mechanism: libc's broadcast probe
+     * runs on this thread inside the window, tells the holder to unlock,
+     * and waits until it has. Whichever way the holder's unlock finds the
+     * word -- 1, waking nobody, the woken waiter then taking the free word
+     * at 2; or 2, waking that waiter -- every one returns. What each run
+     * reads is in the comment above bp_probe. No mutation of the two rules
+     * is specific to this step (23 catches both); it guards the
+     * interleaving the report thought needed more.
      */
-    for (unsigned at = 0; at < 2u; at++) {
+    for (unsigned run = 0; run < 3u; run++) {
+        /* Phase 0; phase 1 in whichever order the threads take; phase 1
+         * with the woken waiter first, made certain. */
+        unsigned at = run == 0 ? 0u : 1u;
         enum { N = 3 };
         cosmo_thread_t w[N], h;
         hd_start(w, N);
@@ -2415,13 +2442,24 @@ int main(int argc, char **argv)
         cosmo_mutex_unlock(&cv_m);
         bp_holding = bp_go = bp_done = bp_phase_seen = bp_state_seen = 0;
         bp_at_phase = at;
+        bp_force_contend = run == 2;
+        bp_forced_reached = 0;
         CHECK(cosmo_thread_start(&h, bp_holder, NULL, 32u * 1024u) == 0);
         while (__atomic_load_n(&bp_holding, __ATOMIC_ACQUIRE) == 0)
             cosmo_futex_wait(&bp_holding, 0, 0);
         __atomic_store_n(&__cosmo_cond_bcast_probe, bp_probe, __ATOMIC_RELEASE);
         cosmo_cond_broadcast(&cv_c);
         CHECK(bp_phase_seen == 3u);              /* both phases ran */
-        CHECK(bp_state_seen == 1u);              /* the holder held it uncontended */
+        if (run == 0) {
+            CHECK(bp_state_seen == 1u);          /* before the requeue: the holder, uncontended */
+        } else if (run == 1) {
+            CHECK(bp_state_seen == 1u || bp_state_seen == 2u);   /* held; either order */
+            printf("thrtest: step 25: after the requeue the word read %u (%s)\n", bp_state_seen,
+                   bp_state_seen == 2u ? "the woken waiter first" : "the holder's unlock first, most likely");
+        } else {
+            CHECK(bp_forced_reached == 1u);      /* the woken waiter reached it: a timeout tested nothing */
+            CHECK(bp_state_seen == 2u);
+        }
         CHECK(join_bounded(&h) == 0);
         for (unsigned i = 0; i < N; i++)
             CHECK(join_bounded(&w[i]) == 0);
