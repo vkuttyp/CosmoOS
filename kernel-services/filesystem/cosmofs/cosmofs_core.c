@@ -202,8 +202,10 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
         b->refs++;
         list_remove(&b->link);
         list_push_front(&fs->bufs, &b->link);
-        if (kind && cfs_buf_hdr(b)->kind != kind)
+        if (kind && cfs_buf_hdr(b)->kind != kind) {
+            cfs_buf_put(fs, b);   /* undo the ref taken above: a kind mismatch is not a hand-out */
             return -EIO;
+        }
         *out = b;
         return 0;
     }

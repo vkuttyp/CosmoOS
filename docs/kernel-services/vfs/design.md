@@ -395,11 +395,13 @@ Block size 4096. All integers little-endian. Every metadata block
 starts with:
 
 ```c
-struct cfs_mhdr { uint32_t magic; /* "CFSM" */ uint32_t kind; uint64_t generation; uint64_t blkno; uint32_t crc; uint32_t pad; };  /* 32 bytes */
+struct cfs_mhdr { uint32_t magic; /* "CFSM" */ uint32_t kind; uint64_t generation; uint64_t blkno; uint32_t crc; uint32_t csum_algo; };  /* 32 bytes */
 ```
 
-`crc` is CRC32C over the block with the field zeroed, and `blkno` must
-equal the block's own number (misdirected writes are detected).
+`crc` is a checksum over the block with the field zeroed, `csum_algo`
+(version 11, the former `pad` word) says which algorithm it is (CRC32C
+today; a pre-v11 image's zeroed word also reads as CRC32C), and `blkno`
+must equal the block's own number (misdirected writes are detected).
 
 | Block | Content |
 |---|---|
