@@ -731,6 +731,15 @@ bool selftest_cosmofs_metadata_csum_id(const char **reason)
     block[CFS_MHDR_SIZE + 3] ^= 0x01u;
     enum mhdr_fault f_corrupt = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
 
+    /* csum_algo sits after crc but is inside the checksummed region: block_crc
+     * zeroes only the 4 crc bytes and covers the rest of the block. Flip the
+     * field between two *supported* values (1 -> 0), so the algorithm check
+     * still passes, without recomputing the CRC: the block no longer verifies,
+     * which it could not do unless csum_algo were covered by crc. */
+    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    h->csum_algo = CFS_CSUM_NONE;
+    enum mhdr_fault f_covered = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+
     kfree(block);   /* free before any CHECK can return */
 
     CHECK(f_sealed == MHDR_OK);
@@ -738,6 +747,7 @@ bool selftest_cosmofs_metadata_csum_id(const char **reason)
     CHECK(f_legacy == MHDR_OK);
     CHECK(f_algo == MHDR_ALGO);
     CHECK(f_corrupt == MHDR_CRC);
+    CHECK(f_covered == MHDR_CRC);   /* csum_algo is covered by the checksum */
     kinfo("selftest: cosmofs-metadata-csum-id: the metadata header declares its checksum algorithm; "
           "an unsupported one is a distinct fault from a bad checksum");
     return true;
