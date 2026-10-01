@@ -36,15 +36,8 @@ void mutex_init(struct mutex *m, const char *name)
  * so a boost applied to a thread that releases concurrently is undone by that
  * release -- the global lock orders the two.
  */
-/* Chain bound. The lock-acquisition order is acyclic (lockdep checks it in
- * debug), so a real chain is no deeper than the threads in it; 64 covers any
- * realistic nesting. Reaching it means either a pathologically deep chain or,
- * in a release build where lockdep is off, a lock-order cycle from a bug --
- * either way the walk stops and warns rather than looping or silently
- * dropping a boost. */
-#define PI_MAX_DEPTH 64u
-
 static spinlock_t g_pi_lock = SPINLOCK_INIT("mutex-pi");
+static uint64_t g_pi_walk_gen;   /* bumped per chain walk, under g_pi_lock */
 
 /* The best (lowest-number) effective priority among `m`'s blocked waiters, or
  * SCHED_PRIO_COUNT when it has none. g_pi_lock held. */
@@ -65,13 +58,20 @@ static int pi_top_waiter(struct mutex *m)
  * propagate up the chain of mutexes it is itself blocked on. g_pi_lock held. */
 static void pi_apply_chain(struct thread *t)
 {
-    unsigned depth = 0;
+    /* Mark each thread as the walk visits it. A valid chain is acyclic (each
+     * thread holds a distinct mutex while waiting on the next), so it ends on
+     * its own, however long -- no fixed bound truncates it. Reaching a thread
+     * already marked for THIS walk is a cycle, which only a lock-order bug can
+     * produce (lockdep forbids it in debug); the walk stops and warns rather
+     * than looping. The generation is bumped under g_pi_lock, so no two walks
+     * share one and no marks need clearing. */
+    uint64_t gen = ++g_pi_walk_gen;
     while (t != NULL) {
-        if (++depth > PI_MAX_DEPTH) {
-            WARN(true, "mutex PI: donation chain over %u deep -- a lock-order cycle or a pathological nesting",
-                 PI_MAX_DEPTH);
+        if (t->pi_walk_gen == gen) {
+            WARN(true, "mutex PI: donation chain cycle -- a lock-order violation");
             break;
         }
+        t->pi_walk_gen = gen;
         int eff = t->base_prio;
         struct mutex *hm;
         list_for_each_entry(hm, &t->pi_held, pi_link) {

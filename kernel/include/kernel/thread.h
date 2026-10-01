@@ -108,6 +108,7 @@ struct thread {
      * acquiring (NULL otherwise) -- the donation chain walks the latter. */
     struct list_node pi_held;
     struct mutex *pi_blocked_on;
+    uint64_t pi_walk_gen;   /* (pi) marks this thread visited on the current donation-chain walk, to catch a cycle without bounding a valid chain's length */
     bool io_nonblock;                   /* the I/O ring executes an entry: object waits return -EAGAIN instead */
     /* Milestone 10: user threads and signals (docs/kernel/process/design.md §11). */
     struct arch_user_regs *init_regs;   /* a clone's first register set, freed at its first user entry */
