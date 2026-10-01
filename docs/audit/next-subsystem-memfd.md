@@ -92,8 +92,9 @@ unlinked-but-open lifetime, exactly memfd's.
 ### 2. The Linux doors
 
 - **`memfd_create(name, flags)`** — copy `name` from user with a bound (Linux
-  caps it at 249 bytes; it is advisory — used only for `/proc/self/fd` and
-  accounting — so it is validated and otherwise kept for diagnostics).
+  caps it at 249 bytes; it is advisory — Linux uses it only for
+  `/proc/self/fd` and accounting — so it is validated (readable, within the
+  length limit) and otherwise ignored).
   `flags` must be a subset of `MFD_CLOEXEC` (`-EINVAL` otherwise):
   `MFD_ALLOW_SEALING` and `MFD_HUGETLB` are **rejected**, not silently
   accepted, so a program that depends on seals or hugepages gets a clear error
@@ -194,5 +195,4 @@ None.
   would duplicate the page-cache file path. Reusing ramfs is why this is small.
 - **Supporting `name` as a real path.** Linux memfds are anonymous; the name is
   advisory. Making it a real file would pull in directory placement and
-  collisions for no gain, so the name is validated and kept only for
-  diagnostics.
+  collisions for no gain, so the name is validated and then ignored.
