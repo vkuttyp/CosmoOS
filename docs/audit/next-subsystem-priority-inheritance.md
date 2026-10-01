@@ -110,9 +110,15 @@ its priority: the owner's effective priority is lowered to
 `min(owner->priority, waiter->priority)`, and if the owner is **itself**
 blocked on another mutex, the donation propagates up that chain —
 `owner → owner's-mutex's-owner → …` — each boosted to at least the waiter's
-priority. The chain is bounded: the lock-acquisition order is a DAG (lockdep
-enforces no cycle, S-class order), so propagation terminates; a depth guard is
-the belt-and-braces. Each boosted thread that is **ready** is requeued at its
+priority. The walk stops at a fixed depth limit. In correct code it never
+reaches it, because the lock-acquisition order is acyclic — which lockdep
+**verifies in debug builds** (it is off in release, so the acyclicity is an
+invariant the rest of the kernel must keep, not something this walk can
+assume at runtime). If a lock-ordering cycle ever did exist (a kernel bug),
+reaching the limit makes the walk **stop boosting and return** rather than
+loop forever; the boosts already applied are safe — they only raise
+priorities, never block or reorder locks — and a debug build logs a warning
+naming the limit, so the bug surfaces. Each boosted thread that is **ready** is requeued at its
 new level (§5); one that is **running** keeps running (it is already the one
 we want to run); one that is **blocked** takes the new level when it next
 wakes, and the chain carries on from it.
@@ -199,9 +205,12 @@ stay a single `try_take`) is worth recording.
   (S24) and per-rq lockdep classes rather than inventing a second scheme; a
   donation never holds the mutex's own spinlock across the rq lock in an order
   that could invert against it.
-- **The chain and cycles.** Propagation follows the lock-acquisition DAG;
-  lockdep already forbids a cycle, and a depth bound is the guard against a
-  mistake.
+- **The chain and cycles.** Propagation follows the lock-acquisition order,
+  which is acyclic in correct code and which lockdep verifies in debug builds
+  but not release. The depth limit is the runtime guard: on reaching it the
+  walk stops and returns (the partial boost is harmless), so a lock-ordering
+  bug cannot turn donation into an infinite loop — it is reported, in debug,
+  not hung on.
 - **Restoration correctness.** The subtle part is dropping exactly the right
   boost on unlock when a thread holds several contended mutexes; the held-list
   + per-mutex `top_waiter` make the recompute exact rather than a guess, which

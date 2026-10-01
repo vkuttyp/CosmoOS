@@ -88,9 +88,11 @@ static void pi_high(void *arg)
     mutex_unlock(&p->m);
 }
 
-static bool pi_wait_state(struct thread *t, enum thread_state st)
+/* One absolute deadline for the whole test, so a failure path cannot sum
+ * several waits past the per-test watchdog budget (8 s): the first wait that
+ * cannot complete burns the rest of the budget and the test then fails. */
+static bool pi_wait_state(struct thread *t, enum thread_state st, uint64_t deadline)
 {
-    uint64_t deadline = clock_now_ns() + MS(2000);
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != st) {
         if (clock_now_ns() >= deadline)
             return false;
@@ -99,9 +101,8 @@ static bool pi_wait_state(struct thread *t, enum thread_state st)
     return true;
 }
 
-static bool pi_wait_flag(volatile int *flag, unsigned ms)
+static bool pi_wait_flag(volatile int *flag, uint64_t deadline)
 {
-    uint64_t deadline = clock_now_ns() + MS(ms);
     while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
         if (clock_now_ns() >= deadline)
             return false;
@@ -123,33 +124,51 @@ static bool selftest_prio_inversion_pinned(const char **reason)
     mutex_init(&p.m, "pi-probe");
     semaphore_init(&p.l_run, 0, "pi-l");
     semaphore_init(&p.mid_run, 0, "pi-mid");
+    uint64_t dl = clock_now_ns() + MS(6000);   /* whole-test bound, under the 8 s budget */
 
-    struct thread *L = thread_create_on(pi_low, &p, "pi-low", pl, CPUMASK_OF(here));
-    CHECK(L != NULL);
-    CHECK(pi_wait_flag(&p.held, 2000));       /* L took the mutex ... */
-    CHECK(pi_wait_state(L, THREAD_BLOCKED));  /* ... and parked holding it */
+    /* No CHECK after a thread is created: a mid-setup failure must still
+     * release the parked workers and join them, or L is left holding the
+     * mutex and the runner moves on with orphaned threads. Record the
+     * reason, fall to `out`, unwind there. */
+    struct thread *L = NULL, *H = NULL, *Mid = NULL;
+    const char *why = NULL;
 
-    struct thread *H = thread_create_on(pi_high, &p, "pi-high", ph, CPUMASK_OF(here));
-    CHECK(H != NULL);
-    CHECK(pi_wait_state(H, THREAD_BLOCKED));   /* blocked on the mutex L holds */
+    L = thread_create_on(pi_low, &p, "pi-low", pl, CPUMASK_OF(here));
+    if (L == NULL) { why = "pi-low: thread_create_on"; goto out; }
+    if (!pi_wait_flag(&p.held, dl)) { why = "L did not take the mutex"; goto out; }
+    if (!pi_wait_state(L, THREAD_BLOCKED, dl)) { why = "L did not park holding the mutex"; goto out; }
 
-    struct thread *Mid = thread_create_on(pi_mid, &p, "pi-mid", pm, CPUMASK_OF(here));
-    CHECK(Mid != NULL);
-    CHECK(pi_wait_state(Mid, THREAD_BLOCKED)); /* parked on mid_run */
+    H = thread_create_on(pi_high, &p, "pi-high", ph, CPUMASK_OF(here));
+    if (H == NULL) { why = "pi-high: thread_create_on"; goto out; }
+    if (!pi_wait_state(H, THREAD_BLOCKED, dl)) { why = "H did not block on the mutex"; goto out; }
+
+    Mid = thread_create_on(pi_mid, &p, "pi-mid", pm, CPUMASK_OF(here));
+    if (Mid == NULL) { why = "pi-mid: thread_create_on"; goto out; }
+    if (!pi_wait_state(Mid, THREAD_BLOCKED, dl)) { why = "Mid did not park"; goto out; }
 
     /* Release Mid and L together: both runnable, priority alone decides. */
     semaphore_up(&p.mid_run);
     semaphore_up(&p.l_run);
+    if (!pi_wait_flag(&p.h_got, dl)) { why = "H never acquired the mutex"; goto out; }
+    if (p.h_saw_mid != 1)
+        why = "no inversion: the high thread was not delayed by the medium one";
 
-    CHECK(pi_wait_flag(&p.h_got, 5000));
-    thread_join(L);
-    thread_join(H);
-    thread_join(Mid);
-
-    CHECK(p.h_saw_mid == 1);   /* inversion: Mid finished before H could acquire */
+out:
+    /* Release both parks (idempotent: an extra up on a consumed semaphore
+     * just leaves a count nothing will down) so any worker still waiting
+     * runs to exit, then join everything created. */
+    semaphore_up(&p.l_run);
+    semaphore_up(&p.mid_run);
+    if (L != NULL) thread_join(L);
+    if (H != NULL) thread_join(H);
+    if (Mid != NULL) thread_join(Mid);
+    if (why != NULL) {
+        *reason = why;
+        return false;
+    }
+    CHECK(threads_settle(before));
     kprintf("PRIOINV: a medium-priority thread ran to completion before a high-priority thread blocked on a "
             "mutex held by a low-priority one could acquire it; mutex.c has no priority inheritance\n");
-    CHECK(threads_settle(before));
     return true;
 }
 
