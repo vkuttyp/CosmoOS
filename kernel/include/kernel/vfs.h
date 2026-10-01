@@ -360,6 +360,11 @@ void file_set_dir_path(struct file *f, const char *name);
  * as one object has to implement anyway (a record cut in half is
  * nothing). -EISDIR, -EACCES, -ENOTSUP. */
 int vfs_truncate(struct vnode *start, const char *path, uint64_t size);
+/* ftruncate: resize an already-open regular file by its vnode. Unlike
+ * vfs_truncate it does not check inode permission -- the caller has already
+ * proved the fd is writable, which is what ftruncate(2) gates on. -EISDIR for
+ * a directory, -EINVAL for a non-regular vnode, -ETXTBSY, -ENOTSUP. */
+int vfs_ftruncate(struct vnode *vn, uint64_t size);
 int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st);
 /* stat without following a link named by the last component. */
 int vfs_lstat(struct vnode *start, const char *path, struct cosmo_stat *st);
@@ -428,6 +433,12 @@ struct chrdev_ops {
     int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
 };
 int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
+
+/* Create an anonymous (unlinked) regular ramfs file -- the backing for a
+ * Linux memfd. It has no directory entry: the single reference *out carries is
+ * the only one, to be consumed by vfs_open_vnode, so the file and its pages
+ * are freed when the last fd and mapping drop. Size starts at zero. */
+int ramfs_anon_reg(uint32_t mode, struct vnode **out);
 void *ramfs_chr_priv(const struct vnode *vn);
 
 /* Diagnostics. */

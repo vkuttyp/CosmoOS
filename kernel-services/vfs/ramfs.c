@@ -38,6 +38,12 @@ struct ramfs_node {
     struct fifo *fifo;          /* named pipes: the ring's holder (kernel/ipc/fifo.c) */
 };
 
+/* The ramfs mount that backs anonymous files (memfd): the first ramfs mounted,
+ * which is the system root at boot and is never unmounted. Chosen here rather
+ * than from the caller's "/" so a memfd works regardless of the process's root
+ * (a chroot, or a cosmofs root). */
+static struct mount *g_anon_mnt;
+
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
 static const struct vnode_ops ramfs_lnk_ops;
@@ -46,7 +52,12 @@ static const struct vnode_ops ramfs_fifo_ops;
 
 static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t mode, struct vnode *parent)
 {
-    struct vnode *vn = vnode_alloc(mnt, mnt->next_ino++);
+    /* The inode number is bumped atomically: a named create holds the parent
+     * dir's lock, but two creates in different directories of one mount (or an
+     * anonymous create, which holds no dir lock) would otherwise race this
+     * mount-wide counter and hand two files the same number. */
+    uint64_t ino = __atomic_fetch_add(&mnt->next_ino, 1, __ATOMIC_RELAXED);
+    struct vnode *vn = vnode_alloc(mnt, ino);
     if (vn == NULL)
         return NULL;
     struct ramfs_node *n = kzalloc(sizeof(*n));
@@ -563,6 +574,27 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
     return 0;
 }
 
+int ramfs_anon_reg(uint32_t mode, struct vnode **out)
+{
+    /* Back the file on the system ramfs mount, not the caller's root (which
+     * may be a chroot or a non-ramfs filesystem). ramfs_new's inode bump and
+     * hash insert are each self-synchronising, so no external lock is needed. */
+    if (g_anon_mnt == NULL)
+        return -ENOTSUP;   /* no ramfs mounted (should not happen after boot) */
+    struct vnode *vn = ramfs_new(g_anon_mnt, VNODE_REG, mode & 07777, NULL);
+    if (vn == NULL)
+        return -ENOMEM;
+    /* Born unlinked: no directory entry ever referenced it, so do the unlink's
+     * work now -- clear the pin ramfs_new sets and make nlink 0. The single
+     * vnode_alloc reference is the caller's, to be consumed by vfs_open_vnode;
+     * when the last fd and mapping drop it, ramfs_evict frees the node and its
+     * pages. No one else holds a reference yet, so this needs no lock. */
+    vn->flags &= ~VNODE_PINNED;
+    vn->nlink = 0;
+    *out = vn;
+    return 0;
+}
+
 static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fs;
@@ -574,6 +606,8 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
      * through /tmp (docs/kernel/security/design.md §3). */
     mnt->flags |= MOUNT_CACHE_IS_STORE;
     mnt->cache_limit_pages = RAMFS_MAX_PAGES;
+    if (g_anon_mnt == NULL)
+        g_anon_mnt = mnt;   /* the first ramfs (the system root) backs anonymous files */
     struct vnode *root = ramfs_new(mnt, VNODE_DIR, 0755, NULL);
     if (root == NULL)
         return -ENOMEM;

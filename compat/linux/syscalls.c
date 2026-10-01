@@ -722,6 +722,52 @@ static int64_t lx_timerfd_create(struct syscall_args *a) { return do_timerfd_cre
 static int64_t lx_timerfd_settime(struct syscall_args *a) { return do_timerfd_settime((int)a->a[0], (unsigned)a->a[1], a->a[2], a->a[3]); }
 static int64_t lx_timerfd_gettime(struct syscall_args *a) { return do_timerfd_gettime((int)a->a[0], a->a[1]); }
 
+/* memfd_create: an anonymous memory-backed file (a ramfs regular file with no
+ * name). See docs/audit/next-subsystem-memfd.md. */
+static int64_t lx_memfd_create(struct syscall_args *a)
+{
+    unsigned flags = (unsigned)a->a[1];
+    if (flags & ~(unsigned)LX_MFD_CLOEXEC)
+        return -EINVAL;   /* MFD_ALLOW_SEALING / MFD_HUGETLB unsupported */
+    /* The name is advisory (Linux uses it only for /proc/self/fd and
+     * accounting): validate that it is a readable, bounded string, then
+     * ignore it. Linux caps it at 249 bytes and returns -EINVAL for a longer
+     * one, so a 250-byte buffer turns strncpy_from_user's -ENAMETOOLONG into
+     * -EINVAL; a faulting pointer stays -EFAULT. MFD_CLOEXEC is a no-op under
+     * the spawn model. */
+    char name[250];
+    int rc = strncpy_from_user(name, a->a[0], sizeof(name));
+    if (rc == -EFAULT)
+        return -EFAULT;
+    if (rc < 0)
+        return -EINVAL;   /* too long (> 249), as Linux reports it */
+    struct vnode *vn;
+    rc = ramfs_anon_reg(0600, &vn);
+    if (rc)
+        return rc;
+    struct file *f;
+    rc = vfs_open_vnode(vn, COSMO_O_RDWR, &f);   /* consumes vn's reference */
+    if (rc)
+        return rc;
+    int h = handle_install(&process_current()->handles, &f->obj,
+                           HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    file_put(f);   /* the table holds its own reference */
+    return h;
+}
+
+static int64_t lx_ftruncate(struct syscall_args *a)
+{
+    int64_t len = (int64_t)a->a[1];
+    if (len < 0)
+        return -EINVAL;
+    struct file *f = file_of((int)a->a[0], HANDLE_RIGHT_WRITE);   /* must be open for writing */
+    if (f == NULL)
+        return -EBADF;
+    int rc = (int)vfs_ftruncate(f->vn, (uint64_t)len);
+    file_put(f);
+    return rc;
+}
+
 static int64_t lx_getdents64(struct syscall_args *a)
 {
     uint64_t ubuf = a->a[1];
@@ -3032,6 +3078,8 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_timerfd_create] = lx_timerfd_create,
     [LX_timerfd_settime] = lx_timerfd_settime,
     [LX_timerfd_gettime] = lx_timerfd_gettime,
+    [LX_memfd_create] = lx_memfd_create,
+    [LX_ftruncate] = lx_ftruncate,
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,

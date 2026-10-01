@@ -4,8 +4,15 @@
 > (`tools/memfd-probe.py`); the anonymous-ramfs-file constructor, the
 > `memfd_create` and `ftruncate` doors and the `lxtest` checks described under
 > "Design" and the edits in "Affected files" are planned work that lands in the
-> implementation PR that follows, gated on CI. As committed here,
-> `memfd_create` returns `-ENOSYS`.
+> implementation PR that follows, gated on CI. As the report was committed
+> (before PR #289), `memfd_create` returned `-ENOSYS`.
+>
+> **Built in PR #289.** The implementation landed `ramfs_anon_reg` in
+> `kernel-services/vfs/ramfs.c`, `vfs_ftruncate` in `vfs.c`, and the
+> `memfd_create`/`ftruncate` doors in `compat/linux/syscalls.c`, with the
+> `lxtest` checks; both arches boot PASS and `host-test` passes. Every
+> present-tense statement below describes the state the report measured,
+> before this implementation.
 
 ## Problem
 
@@ -85,8 +92,9 @@ unlinked-but-open lifetime, exactly memfd's.
 ### 2. The Linux doors
 
 - **`memfd_create(name, flags)`** — copy `name` from user with a bound (Linux
-  caps it at 249 bytes; it is advisory — used only for `/proc/self/fd` and
-  accounting — so it is validated and otherwise kept for diagnostics).
+  caps it at 249 bytes; it is advisory — Linux uses it only for
+  `/proc/self/fd` and accounting — so it is validated (readable, within the
+  length limit) and otherwise ignored).
   `flags` must be a subset of `MFD_CLOEXEC` (`-EINVAL` otherwise):
   `MFD_ALLOW_SEALING` and `MFD_HUGETLB` are **rejected**, not silently
   accepted, so a program that depends on seals or hugepages gets a clear error
@@ -187,5 +195,4 @@ None.
   would duplicate the page-cache file path. Reusing ramfs is why this is small.
 - **Supporting `name` as a real path.** Linux memfds are anonymous; the name is
   advisory. Making it a real file would pull in directory placement and
-  collisions for no gain, so the name is validated and kept only for
-  diagnostics.
+  collisions for no gain, so the name is validated and then ignored.

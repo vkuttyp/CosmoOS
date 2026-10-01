@@ -3867,6 +3867,15 @@ See [docs/development.md](docs/development.md).
   remaining. The periodic re-arm, the expiration count and the resetting 8-byte
   read ride the existing timer object, which already answers `poll`/`select`.
   (PR #287)
+- **`memfd_create(2)` for the Linux personality.** An anonymous memory-backed
+  file: `ramfs_anon_reg` makes an unlinked `VNODE_REG` on the root ramfs mount
+  (born unlinked — `VNODE_PINNED` cleared, `nlink` 0 — so the open file owns
+  the only reference and the vnode and its pages are freed on the last close),
+  which `memfd_create` installs read+write (`MFD_CLOEXEC` a no-op; sealing and
+  hugepages rejected). `ftruncate` is wired alongside — `vfs_ftruncate` calls
+  the vnode `truncate` op for any fd open for writing — so a program sizes the
+  memfd and `mmap`s it; the file reads, writes and maps through the existing
+  page cache. (PR #289)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
