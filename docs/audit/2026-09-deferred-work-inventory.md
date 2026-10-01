@@ -212,7 +212,7 @@ AHCI are the two entries from that list now built.
   stay together while another CPU idles. The same probe's user-thread
   measurement found no such pair stuck in twelve boots (one sharing, of
   16 ms, that resolved), so there is no measured defect yet.
-- no priority inheritance in `mutex.c` — **taken up by `docs/audit/next-subsystem-priority-inheritance.md`** (the report; the effective/base-priority split, donation with bounded chain propagation, restore-on-unlock, and the `sched_set_effective_prio` requeue land in the implementation PR, after which this closes). Measured by `tools/priority-inheritance-probe.py`: a staged three-thread inversion on one CPU shows a medium-priority thread running to completion before a high-priority thread blocked on a mutex held by a low-priority one can acquire it.
+- ~~no priority inheritance in `mutex.c`~~ — **BUILT (the priority-inheritance unit, `docs/audit/next-subsystem-priority-inheritance.md`, PR #281)**: a mutex owner is boosted to the highest-priority thread blocked on it and up the chain, under a single `g_pi_lock` (the outermost PI lock; run-queue and wait-queue locks nest under it), and restored on release; `struct thread` gained `base_prio` with `priority` the effective value, and `sched_reprioritize` requeues a ready/running/blocked thread re-checking its CPU against a migration. `prio-inversion` proves it: the three-thread inversion on one CPU now resolves with the high thread acquiring before the medium thread finishes. Measured first by `tools/priority-inheritance-probe.py` (the inverted outcome, before the fix).
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
   routing tables or protocol lookup structures as §22 asks.

@@ -468,6 +468,7 @@ static const struct selftest tests[] = {
     { "preempt-wake",    selftest_preempt_wake },
     { "preempt-wake-direct", selftest_preempt_wake_direct },
     { "preempt-wake-locked", selftest_preempt_wake_locked },
+    { "prio-inversion",  selftest_prio_inversion },
     { "irqrestore-bench", selftest_irqrestore_bench },
     { "sleep",           selftest_sleep },
     { "wait-timeout",    selftest_wait_timeout },

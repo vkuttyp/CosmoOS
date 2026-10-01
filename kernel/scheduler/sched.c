@@ -462,6 +462,56 @@ bool sched_wake(struct thread *t)
     return woke;
 }
 
+/*
+ * Priority inheritance (mutex.c) computes a thread's new effective priority
+ * and this applies it, requeueing a ready thread at its new level. Called
+ * under g_pi_lock, never with a run-queue lock held. The thread may be
+ * ready, running, or blocked -- and ready on another CPU's queue, so this
+ * locks the queue `t->cpu` names and re-checks that `t` is still there, as a
+ * concurrent migration can move a ready thread between the read and the
+ * lock. Migration takes two run-queue locks and never g_pi_lock, so this
+ * single lock held under g_pi_lock cannot deadlock against it.
+ */
+void sched_reprioritize(struct thread *t, int prio)
+{
+    prio = prio < 0 ? 0 : (prio >= SCHED_PRIO_COUNT ? SCHED_PRIO_LOWEST : prio);
+
+    struct runqueue *rq;
+    arch_irq_state_t s;
+    for (;;) {
+        int cpu = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        if (cpu < 0) {               /* not on any queue yet (mid-creation) */
+            t->priority = prio;
+            return;
+        }
+        rq = &g_rqs[cpu];
+        s = spin_lock_irqsave(&rq->lock);
+        if (__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE) == cpu)
+            break;
+        spin_unlock_irqrestore(&rq->lock, s);
+    }
+    if (t->priority != prio) {
+        if (t->state == THREAD_READY && !list_empty(&t->rq_link)) {
+            g_policy->dequeue(rq, t);
+            t->priority = prio;
+            g_policy->enqueue(rq, t, false);
+            /* A ready thread boosted above the running one preempts it. */
+            if (rq->current == NULL || rq->current == rq->idle || prio < rq->current->priority)
+                request_resched(rq);
+        } else {
+            /* Running: already on-CPU, so a boost needs no switch and a drop
+             * must NOT force one here -- a restore in mutex_unlock runs just
+             * before it wakes the waiter, and rescheduling now would preempt
+             * the owner into some other ready thread before the waiter it is
+             * about to wake is even runnable. The wake that follows drives
+             * any preemption (sched_wake reschedules for the woken thread).
+             * Blocked: takes effect when it next wakes. */
+            t->priority = prio;
+        }
+    }
+    spin_unlock_irqrestore(&rq->lock, s);
+}
+
 void sched_set_running_current(void)
 {
     /* Interrupts off before the block is read, as in schedule_internal:

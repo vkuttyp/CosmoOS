@@ -1,14 +1,17 @@
 /*
  * mutex.h - Sleeping mutual exclusion.
  *
- * Owner-tracked, not recursive, no priority inheritance. Must not be
- * used from interrupt context or with preemption disabled (asserted).
+ * Owner-tracked, not recursive, with priority inheritance: an owner is
+ * boosted to the priority of the highest-priority thread blocked on it (and
+ * up the chain), and restored on release. Must not be used from interrupt
+ * context or with preemption disabled (asserted).
  * Unlock by a non-owner panics.
  */
 
 #ifndef KERNEL_MUTEX_H
 #define KERNEL_MUTEX_H
 
+#include <kernel/list.h>
 #include <kernel/spinlock.h>
 #include <kernel/wait.h>
 
@@ -20,7 +23,10 @@ struct mutex {
     struct waitqueue wq;
     const char *name;
     uint16_t class;   /* lockdep class + 1 (kind mutex), cached at first acquisition */
-    uint16_t pad[3];
+    uint16_t pi_active;   /* a waiter has donated to the owner: unlock must run the PI restore (under g_pi_lock) */
+    /* (pi, under g_pi_lock in mutex.c) links this mutex into its owner's
+     * pi_held list while it has waiters, so the owner inherits their priority. */
+    struct list_node pi_link;
 };
 
 void mutex_init(struct mutex *m, const char *name);

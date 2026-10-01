@@ -60,6 +60,12 @@ void sched_yield(void);
  * need_resched is set and the context is preemptible. */
 void sched_preempt(void);
 
+/* Apply a thread's new effective priority, requeueing it if ready. Called
+ * by priority inheritance (mutex.c) under its g_pi_lock, never with a
+ * run-queue lock held; handles a ready/running/blocked thread, including one
+ * ready on another CPU's queue. */
+void sched_reprioritize(struct thread *t, int prio);
+
 /* Make a BLOCKED thread READY. Returns true if it did; false (no-op) if
  * the thread was already READY or RUNNING, which wakers use to keep
  * looking for a waiter that actually needs waking. */

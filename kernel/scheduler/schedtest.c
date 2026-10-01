@@ -478,6 +478,144 @@ bool selftest_preempt_wake(const char **reason)
 }
 
 
+/* --- priority inheritance: a mutex owner is boosted to a waiter's priority -
+ *
+ * The three-thread inversion, staged on one CPU. A low-priority thread L
+ * holds a mutex; a high-priority thread H blocks on it; a medium-priority
+ * thread Mid is runnable. With inheritance, H blocking on the mutex boosts L
+ * to H's priority, so L outranks Mid, runs, and releases the mutex before Mid
+ * finishes -- and H, at the instant it acquires, sees that Mid had not yet
+ * finished (h_saw_mid == 0). Without inheritance it would see the opposite,
+ * which is what tools/priority-inheritance-probe.py showed on the tree before
+ * this unit. Deterministic: L parks holding the mutex, H blocks, Mid parks,
+ * then Mid and L are released together and priority order alone decides.
+ * Every wait is bounded, so a regression is a failed check, not a hang.
+ */
+struct pi_test {
+    struct mutex m;
+    struct semaphore l_run, mid_run;
+    volatile int held, mid_done, h_got, h_saw_mid;
+};
+
+static void pi_test_low(void *arg)
+{
+    struct pi_test *p = arg;
+    mutex_lock(&p->m);
+    __atomic_store_n(&p->held, 1, __ATOMIC_RELEASE);
+    semaphore_down(&p->l_run);
+    mutex_unlock(&p->m);
+}
+
+static void pi_test_mid(void *arg)
+{
+    struct pi_test *p = arg;
+    semaphore_down(&p->mid_run);
+    for (volatile unsigned i = 0; i < 2000000u; i++)
+        arch_cpu_relax();
+    __atomic_store_n(&p->mid_done, 1, __ATOMIC_RELEASE);
+}
+
+static void pi_test_high(void *arg)
+{
+    struct pi_test *p = arg;
+    mutex_lock(&p->m);
+    __atomic_store_n(&p->h_saw_mid, __atomic_load_n(&p->mid_done, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+    __atomic_store_n(&p->h_got, 1, __ATOMIC_RELEASE);
+    mutex_unlock(&p->m);
+}
+
+static bool pi_wait_state(struct thread *t, enum thread_state st, uint64_t deadline)
+{
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != st) {
+        if (clock_now_ns() >= deadline)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
+static bool pi_wait_flag(volatile int *flag, uint64_t deadline)
+{
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (clock_now_ns() >= deadline)
+            return false;
+        thread_sleep_ms(1);
+    }
+    return true;
+}
+
+static bool selftest_prio_inversion_pinned(const char **reason)
+{
+    unsigned before = thread_count();
+    unsigned here = arch_cpu_id();
+    int base = thread_current()->priority;
+    CHECK(base + 12 < SCHED_PRIO_COUNT);
+    int ph = base + 4, pm = base + 8, pl = base + 12;   /* H > Mid > L, all below this thread */
+
+    static struct pi_test p;
+    memset(&p, 0, sizeof(p));
+    mutex_init(&p.m, "pi-test");
+    semaphore_init(&p.l_run, 0, "pi-l");
+    semaphore_init(&p.mid_run, 0, "pi-mid");
+    uint64_t dl = clock_now_ns() + MS(6000);   /* whole-test bound, under the 8 s budget */
+
+    struct thread *L = NULL, *H = NULL, *Mid = NULL;
+    const char *why = NULL;
+
+    L = thread_create_on(pi_test_low, &p, "pi-low", pl, CPUMASK_OF(here));
+    if (L == NULL) { why = "pi-low: thread_create_on"; goto out; }
+    if (!pi_wait_flag(&p.held, dl)) { why = "L did not take the mutex"; goto out; }
+    if (!pi_wait_state(L, THREAD_BLOCKED, dl)) { why = "L did not park holding the mutex"; goto out; }
+
+    H = thread_create_on(pi_test_high, &p, "pi-high", ph, CPUMASK_OF(here));
+    if (H == NULL) { why = "pi-high: thread_create_on"; goto out; }
+    if (!pi_wait_state(H, THREAD_BLOCKED, dl)) { why = "H did not block on the mutex"; goto out; }
+
+    Mid = thread_create_on(pi_test_mid, &p, "pi-mid", pm, CPUMASK_OF(here));
+    if (Mid == NULL) { why = "pi-mid: thread_create_on"; goto out; }
+    if (!pi_wait_state(Mid, THREAD_BLOCKED, dl)) { why = "Mid did not park"; goto out; }
+
+    /* Release Mid and L together: both runnable, priority alone decides. */
+    semaphore_up(&p.mid_run);
+    semaphore_up(&p.l_run);
+    if (!pi_wait_flag(&p.h_got, dl)) { why = "H never acquired the mutex"; goto out; }
+    if (p.h_saw_mid != 0)
+        why = "priority was not inherited: the medium thread finished before the high thread acquired";
+
+out:
+    semaphore_up(&p.l_run);
+    semaphore_up(&p.mid_run);
+    if (L != NULL) thread_join(L);
+    if (H != NULL) thread_join(H);
+    if (Mid != NULL) thread_join(Mid);
+    if (why != NULL) {
+        *reason = why;
+        return false;
+    }
+    /* The workers run below this thread, and one may have been preempted
+     * inside thread_exit (it signalled the join before leaving the run
+     * queue). threads_settle spins with sched_yield, which never lets a
+     * lower-priority thread finish, so wait by sleeping -- that yields the
+     * CPU down to them. */
+    bool settled = false;
+    for (unsigned i = 0; i < 400 && !settled; i++) {
+        if (thread_count() == before) { settled = true; break; }
+        thread_sleep_ms(1);
+    }
+    CHECK(settled);
+    kinfo("selftest: prio-inversion: the low owner was boosted to the high waiter's priority and ran before the "
+          "medium thread");
+    return true;
+}
+
+bool selftest_prio_inversion(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_prio_inversion_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 /* --- the other shape: a direct sched_wake, no wait-queue wake ---
  *
  * The futex, poll, the AIO ring, process kill and signal delivery find

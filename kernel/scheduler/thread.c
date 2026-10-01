@@ -125,6 +125,9 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags)
     strlcpy(t->name, name ? name : "?", sizeof(t->name));
     t->state = THREAD_BLOCKED;
     t->priority = priority < 0 ? 0 : priority >= SCHED_PRIO_COUNT ? SCHED_PRIO_LOWEST : priority;
+    t->base_prio = t->priority;   /* the effective priority starts at the base; inheritance may lower the number */
+    list_init(&t->pi_held);
+    t->pi_blocked_on = NULL;
     t->affinity = CPUMASK_ALL;
     t->cpu = -1;
     t->refcount = 2;
