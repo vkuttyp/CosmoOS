@@ -1,5 +1,20 @@
 # NEXT SUBSYSTEM — the Linux personality has no statx
 
+> **Built in PR #283.** `LX_statx` (332 / 291) + `lx_statx`, which resolves
+> exactly as `lx_newfstatat` does and marshals a 256-byte `struct statx`
+> through `lx_statx_from_native`; `stx_mask` reports the supported set
+> (type/mode/nlink/uid/gid/ino/size/blocks/blksize + mtime/ctime) and omits
+> `STATX_ATIME`/`STATX_BTIME`, which the kernel does not keep. Everything below
+> this banner is the §68 report as written for PR #282, **before** the
+> implementation — its present-tense framing ("`statx` returns `-ENOSYS`") and
+> its "Design", "Affected files" and "Tests" describe what was then planned, to
+> be read in that past light. Two details shipped differently: the marshaller
+> (`lx_statx_from_native`) lives in `convert.c` beside `lx_stat_from_native`,
+> not in `syscalls.c` as the table lists; and the handler also rejects an
+> invalid sync-flag combination or reserved mask bit with `-EINVAL` and stats
+> the current directory for an empty-path `AT_FDCWD` call (both from review of
+> the implementation PR).
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/statx-probe.py`); `LX_statx`, the `struct statx` marshaller and the
 > `lx_statx` handler described under "Design" and the edits in "Affected

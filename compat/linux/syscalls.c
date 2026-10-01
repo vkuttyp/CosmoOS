@@ -563,6 +563,51 @@ static int64_t lx_newfstatat(struct syscall_args *a)
     return rc ? rc : stat_out(&st, a->a[2]);
 }
 
+static int64_t lx_statx(struct syscall_args *a)
+{
+    unsigned flags = (unsigned)a->a[2];
+    uint32_t mask = (uint32_t)a->a[3];
+    uint64_t ubuf = a->a[4];
+    /* Linux rejects an impossible sync request (both FORCE and DONT) and any
+     * reserved mask bit before touching the file. */
+    if ((flags & LX_AT_STATX_SYNC_TYPE) == LX_AT_STATX_SYNC_TYPE || (mask & LX_STATX__RESERVED))
+        return -EINVAL;
+    char path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(path, a->a[1], VFS_PATH_MAX);
+    if (rc < 0)
+        return rc;
+    struct cosmo_stat st;
+    if (path[0] == '\0') {
+        if (!(flags & LX_AT_EMPTY_PATH))
+            return -ENOENT;
+        if ((int)a->a[0] == LX_AT_FDCWD) {
+            /* Empty path + AT_FDCWD: the current directory itself. Stat the
+             * vnode directly -- a "." lookup would demand search permission on
+             * the cwd, which an empty-path stat must not require. */
+            struct vnode *cwd = process_cwd_get();
+            mutex_lock(&cwd->lock);   /* vnode_stat reads several fields; the lock the other stat paths hold keeps them one moment's values */
+            vnode_stat(cwd, &st);
+            mutex_unlock(&cwd->lock);
+            vnode_put(cwd);
+            rc = 0;
+        } else {
+            rc = syscall_handle_stat((int)a->a[0], &st);   /* the fd itself */
+        }
+    } else {
+        struct vnode *start;
+        rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);
+        if (rc)
+            return rc;
+        rc = (flags & LX_AT_SYMLINK_NOFOLLOW) ? vfs_lstat(start, path, &st) : vfs_stat(start, path, &st);
+        vnode_put(start);
+    }
+    if (rc)
+        return rc;
+    struct lx_statx sx;
+    lx_statx_from_native(&st, mask, &sx);
+    return copy_to_user(ubuf, &sx, sizeof(sx)) ? -EFAULT : 0;
+}
+
 static int64_t lx_getdents64(struct syscall_args *a)
 {
     uint64_t ubuf = a->a[1];
@@ -2865,6 +2910,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_mknod] = lx_mknod,
 #endif
     [LX_newfstatat] = lx_newfstatat,
+    [LX_statx] = lx_statx,
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,

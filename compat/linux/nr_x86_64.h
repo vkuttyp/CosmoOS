@@ -121,6 +121,7 @@
 #define LX_mkdirat 258
 #define LX_mknodat 259
 #define LX_newfstatat 262
+#define LX_statx 332
 #define LX_unlinkat 263
 #define LX_renameat 264
 #define LX_symlinkat 266

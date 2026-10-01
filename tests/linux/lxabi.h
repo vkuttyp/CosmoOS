@@ -46,6 +46,7 @@ static inline long lx_syscall6(long nr, long a1, long a2, long a3, long a4, long
 #define sc2(n, a, b) lx_syscall6((n), (long)(a), (long)(b), 0, 0, 0, 0)
 #define sc3(n, a, b, c) lx_syscall6((n), (long)(a), (long)(b), (long)(c), 0, 0, 0)
 #define sc4(n, a, b, c, d) lx_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), 0, 0)
+#define sc5(n, a, b, c, d, e) lx_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), 0)
 #define sc6(n, a, b, c, d, e, f) lx_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
 
 static inline size_t lx_strlen(const char *s)

@@ -20,6 +20,10 @@
 int lx_open_flags(unsigned lx, unsigned *native);
 /* Native stat record to the Linux struct stat. */
 void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out);
+/* Native stat record to the Linux struct statx. `mask` is the caller's
+ * request, advisory in Linux; the result's stx_mask reports the fixed set
+ * this kernel supplies (LX_STATX_SUPPORTED), and no others. */
+void lx_statx_from_native(const struct cosmo_stat *st, uint32_t mask, struct lx_statx *out);
 /* Native exit status (exit n, 128+sig, 139) to the Linux wait status word. */
 int lx_wait_status(int native_status);
 /* The terminal's modes, both ways (compat/linux/convert.c). */

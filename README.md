@@ -3835,6 +3835,15 @@ See [docs/development.md](docs/development.md).
   ready/running/blocked thread, re-checking its CPU against a migration.
   `prio-inversion` stages the classic three-thread inversion on one CPU and
   shows the high thread now acquires before the medium thread finishes. (PR #281)
+- **`statx(2)` for the Linux personality.** The modern stat call (x86-64 332,
+  AArch64 291) joins `fstat`/`newfstatat`/`stat`/`lstat`: `lx_statx` resolves
+  the dirfd+path the same way `newfstatat` does and marshals a 256-byte
+  `struct statx`. `stx_mask` reports exactly the fields the kernel keeps —
+  type/mode, nlink, uid/gid, inode, size, blocks, block size, mtime and ctime
+  — and omits `STATX_ATIME` and `STATX_BTIME`, which `struct cosmo_stat` does
+  not record, so a caller is told they are absent rather than handed a value
+  the kernel never kept. `lxtest` checks the fields against `fstat` on the
+  same file. (PR #283)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

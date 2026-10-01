@@ -66,6 +66,39 @@ void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out)
     out->st_atime_nsec = out->st_mtime_nsec;
 }
 
+_Static_assert(sizeof(struct lx_statx) == LX_STATX_BYTES, "statx must be 256 bytes on both ABIs");
+
+void lx_statx_from_native(const struct cosmo_stat *st, uint32_t mask, struct lx_statx *out)
+{
+    (void)mask;   /* advisory in Linux; we report the set we actually fill */
+    memset(out, 0, sizeof(*out));
+    uint32_t type;
+    switch (st->type) {
+    case COSMO_DT_DIR: type = LX_S_IFDIR; break;
+    case COSMO_DT_CHR: type = LX_S_IFCHR; break;
+    case COSMO_DT_FIFO: type = LX_S_IFIFO; break;
+    case COSMO_DT_SOCK: type = LX_S_IFSOCK; break;
+    case COSMO_DT_LNK: type = LX_S_IFLNK; break;
+    default: type = LX_S_IFREG; break;
+    }
+    out->stx_mode = (uint16_t)(type | (st->mode & 07777u));
+    out->stx_nlink = (uint32_t)st->nlink;
+    out->stx_uid = st->uid;
+    out->stx_gid = st->gid;
+    out->stx_ino = st->ino;
+    out->stx_size = st->size;
+    out->stx_blksize = 4096;
+    out->stx_blocks = (st->size + 511) / 512;
+    out->stx_mtime.tv_sec = (int64_t)(st->mtime_ns / 1000000000ull);
+    out->stx_mtime.tv_nsec = (uint32_t)(st->mtime_ns % 1000000000ull);
+    out->stx_ctime.tv_sec = (int64_t)(st->ctime_ns / 1000000000ull);
+    out->stx_ctime.tv_nsec = (uint32_t)(st->ctime_ns % 1000000000ull);
+    /* atime and btime are left zero AND out of the mask: the kernel records
+     * neither, and statx says a field is meaningful only when its bit is set
+     * -- so the caller is told they are absent, not handed a value. */
+    out->stx_mask = LX_STATX_SUPPORTED;
+}
+
 int lx_wait_status(int native_status)
 {
     /* The two job-control outcomes sit above the byte the exit and kill
