@@ -94,7 +94,12 @@ between `blk_unregister`+teardown in `remove` and the geometry read+
 `blk_register` in `probe`. In order
 (`docs/audit/next-subsystem-virtio-remove-inflight.md`):
 
-1. Refuse new submissions (the removal unit's barrier).
+1. Pause new submissions through a **reset gate** — not `blk_unregister`'s
+   `gone`, which marks the disk permanently removed, but a reversible
+   `resetting` flag on the `blkdev` that `blk_submit` honors (holding or
+   refusing new bios), set here and cleared at step 5. The block layer gains
+   this gate; it drains in-flight submits the same way `blk_unregister` does,
+   so no bio reaches `virtq_add` after the queue is freed.
 2. `virtio_device_reset` — the device drops every request in its rings.
 3. `virtq_free` the old queue, which also releases its interrupt (and frees
    the slot: `virtq_alloc` on an already-occupied slot 0 is `-EINVAL`).
@@ -109,9 +114,22 @@ between `blk_unregister`+teardown in `remove` and the geometry read+
 
 The `blkdev` (and the `vblk` behind it) is the same object throughout, still
 registered under the same name — callers keep their reference and their
-handle stays valid, which is the whole difference from a remove+rebind. The
-pre-allocated slot tables (`inflight`, `maps`) are reused and re-cleared, not
-re-allocated, since the slot count does not change. `virtio_device_init` on
+handle stays valid, which is the whole difference from a remove+rebind.
+
+Because it reuses the device, reset must also re-read what `probe` reads and
+`remove` discards, rather than assume it is unchanged:
+- **Geometry.** `probe` reads the capacity, block size and segment limits
+  from the device config and stores them on the `blkdev`; reset refreshes
+  them into the same `blkdev`. For the ordinary case — the same device reset
+  to a known state — they are identical and the refresh is a no-op; a reset
+  that came back with a different capacity or block size is an incompatible
+  change, and reset fails (the disk is left not-ready and the caller told)
+  rather than serving I/O against stale bounds.
+- **Queue size.** `virtq_alloc` takes the device's queue size each time;
+  reset checks the size the rebuilt queue reports against `nr_slots` and
+  re-sizes the `inflight`/`maps` tables if it changed (and fails rather than
+  silently shrinking slot state). In the common case the size matches and the
+  tables are reused and re-cleared, not re-allocated. `virtio_device_init` on
 its own only resets and negotiates; the queue teardown, the completion of
 outstanding requests, the re-alloc and `DRIVER_OK` are the driver's steps,
 which is why reset is largely per-driver rather than a single bus default (a
@@ -133,6 +151,7 @@ removal.
 |---|---|
 | `kernel/include/kernel/device.h` | `reset` op on `struct device_driver`; `device_reset` declaration |
 | `kernel/device/device.c` | `device_reset(dev)` — bound + has `reset` → call, else `-ENODEV`/`-EOPNOTSUPP` |
+| `kernel/block/blk.c`, `kernel/include/kernel/blk.h` | a reversible reset gate on `blkdev` (`blk_submit` holds/refuses while `resetting`, draining in-flight), distinct from the permanent `gone` |
 | `drivers/virtio/virtio.c` | an optional bus helper wrapping the `virtio_device_init`/`virtio_device_ready` bookends |
 | `drivers/virtio/virtio_blk.c` | the block driver's `reset`: refuse new submits, `virtio_device_reset` + `virtq_free` the old queue, complete outstanding `-EIO` once, then `virtio_device_init` + `virtq_alloc` + `virtio_device_ready`, keeping the `blkdev` |
 | `docs/kernel/device/*.md` | the reset operation |
