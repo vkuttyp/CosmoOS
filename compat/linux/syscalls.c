@@ -922,7 +922,7 @@ static int64_t do_epoll_wait(int epfd, uint64_t uevents, int maxevents, int time
              * so the event is not lost (collect already disabled them). */
             for (int64_t j = i; j < n; j++)
                 if (buf[j].oneshot)
-                    epoll_obj_rearm(ep, buf[j].fd);
+                    epoll_obj_rearm(ep, buf[j].fd, buf[j].id);
             rc = i ? i : -EFAULT;
         }
     }

@@ -44,6 +44,7 @@
 struct epoll_item {
     struct kobject *obj;      /* the member, referenced */
     int fd;                   /* the key */
+    uint64_t id;              /* this registration instance (fd may be reused after DEL) */
     unsigned want;            /* COSMO_IO_* requested, for readiness filtering */
     uint32_t events;          /* opaque personality events token, echoed to the waiter */
     uint64_t data;            /* opaque data token, echoed to the waiter */
@@ -68,6 +69,7 @@ struct epoll_obj {
     struct waitqueue wait;    /* the set's own queue: ctl wakes it, wait sleeps on it */
     struct list_node items;
     unsigned nr;
+    uint64_t next_id;         /* assigns each registration a unique instance id */
 };
 
 static void epoll_release(struct kobject *obj);
@@ -148,6 +150,7 @@ static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned 
         unsigned io = item_ready(it);
         if (io != 0) {
             out[n].fd = it->fd;
+            out[n].id = it->id;
             out[n].io = io;
             out[n].events = it->events;
             out[n].data = it->data;
@@ -178,6 +181,7 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     }
     it->obj = target;          /* takes ownership of the caller's reference */
     it->fd = fd;
+    it->id = ep->next_id++;
     it->want = want;
     it->events = events;
     it->data = data;
@@ -231,13 +235,18 @@ int epoll_obj_del(struct kobject *epobj, int fd)
     return 0;
 }
 
-void epoll_obj_rearm(struct kobject *epobj, int fd)
+void epoll_obj_rearm(struct kobject *epobj, int fd, uint64_t id)
 {
     struct epoll_obj *ep = epoll_of(epobj);
     mutex_lock(&ep->lock);
     struct epoll_item *it = find_item(ep, fd);
-    if (it != NULL)
+    /* Only the exact registration that produced the undelivered event: if the
+     * fd was removed, or removed and re-added, the id no longer matches and
+     * this is a no-op -- never re-enabling a different registration. */
+    if (it != NULL && it->id == id && it->disabled) {
         it->disabled = false;
+        waitqueue_wake_all(&ep->wait);   /* a waiter that slept while it was disabled must re-evaluate */
+    }
     mutex_unlock(&ep->lock);
 }
 
