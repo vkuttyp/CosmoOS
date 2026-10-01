@@ -5,6 +5,10 @@
 > the `lxtest` checks described under "Design" and the edits in "Affected
 > files" are planned work that lands in the implementation PR that follows,
 > gated on CI. As committed here, `eventfd2` returns `-ENOSYS`.
+>
+> **Built in PR #285.** The implementation landed `kernel/io/eventfd.c`, wired
+> `eventfd`/`eventfd2` through `do_eventfd` in `compat/linux/syscalls.c`, and
+> added the `lxtest` checks; both arches boot PASS and `host-test` passes.
 
 ## Problem
 
