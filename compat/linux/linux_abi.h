@@ -357,6 +357,12 @@ struct lx_statx {
 #define LX_EFD_SEMAPHORE 1u
 #define LX_EFD_CLOEXEC   LX_O_CLOEXEC
 #define LX_EFD_NONBLOCK  LX_O_NONBLOCK
+
+/* timerfd flags: TFD_CLOEXEC/TFD_NONBLOCK are O_CLOEXEC/O_NONBLOCK (for
+ * timerfd_create); TFD_TIMER_ABSTIME marks an absolute deadline (settime). */
+#define LX_TFD_CLOEXEC       LX_O_CLOEXEC
+#define LX_TFD_NONBLOCK      LX_O_NONBLOCK
+#define LX_TFD_TIMER_ABSTIME 1u
 /* The fields this kernel can supply: the basic set minus the access time,
  * which `struct cosmo_stat` does not record (no btime either). */
 #define LX_STATX_SUPPORTED (LX_STATX_TYPE | LX_STATX_MODE | LX_STATX_NLINK | LX_STATX_UID | \
@@ -366,6 +372,12 @@ struct lx_statx {
 struct lx_timespec {
     int64_t tv_sec;
     int64_t tv_nsec;
+};
+
+/* timerfd itimerspec: it_interval first, it_value second (Linux layout). */
+struct lx_itimerspec {
+    struct lx_timespec it_interval;
+    struct lx_timespec it_value;
 };
 
 struct lx_timeval {
