@@ -721,6 +721,7 @@ static const struct selftest tests[] = {
     { "net-lo-udp",      selftest_net_lo_udp },
     { "tcp-pcb-timer-free", selftest_tcp_pcb_timer_free },
     { "net-lo-tcp",      selftest_net_lo_tcp },
+    { "net-rx-dup",      selftest_net_rx_dup },
     { "net-accept-order", selftest_net_accept_order },
     { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },
     { "net-tcp-mss",     selftest_net_tcp_mss },

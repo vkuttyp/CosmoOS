@@ -70,6 +70,7 @@ enum fi_kind {
     FI_DEMAND_COPY,   /* the frame of a kernel-mode demand-zero fault in a user copy */
     FI_USB_CSW,       /* usb_storage: the CSW read queued without the doorbell */
     FI_AHCI_CI,       /* ahci: a slot filled, its PxCI bit never set */
+    FI_NET_RX_DUP,    /* a received frame delivered a second time (link-layer retransmit, switch flood) */
     FI_KIND_COUNT,
 };
 /* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests
@@ -84,8 +85,13 @@ A rule fails every `every`-th eligible event (1 = every one), at most
 when NULL. Eligible events: `kmalloc` and `kmem_cache_alloc` (the large-page
 path included, so `kzalloc`/`krealloc` are covered) return NULL;
 `blk_submit` returns `-EIO` before the driver sees the bio;
-`bio_complete` turns a successful completion into `-EIO`. The check is a
-few loads on the hot path in debug builds and compiles out in release.
+`bio_complete` turns a successful completion into `-EIO`; `rx_common`
+delivers a second copy of a received frame (`FI_NET_RX_DUP`), so the stack
+meets the same frame twice. The check is a few loads on the hot path in
+debug builds and compiles out in release. It returns false in interrupt
+context, so a receive-path rule fires only where the receive runs in a
+thread (loopback; a thread-deferred driver), not in a driver's own
+interrupt handler.
 
 Configuration: the kernel API (`faultinject_set`, `faultinject_clear`,
 `faultinject_stats`) for self-tests, and the boot parameter

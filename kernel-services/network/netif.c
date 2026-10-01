@@ -12,6 +12,7 @@
 
 #include <kernel/completion.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/fwcfg.h>
 #include <kernel/kmalloc.h>
 #include <kernel/net/cksum.h>
@@ -543,13 +544,30 @@ static void rx_common(struct netif *nif, struct mbuf *m, int cpu)
     struct net_cpu *c = steer(nif, m, cpu);
     if (c->id == raw_cpu_id())   /* a statistic: steered to the CPU that received it */
         __atomic_fetch_add(&c->stats.rx_steered_here, 1, __ATOMIC_RELAXED);
+    /* Fault injection (FI_NET_RX_DUP): deliver a second copy of the frame,
+     * so the stack meets the same frame twice (a link-layer retransmit, a
+     * switch flooding). The copy is made BEFORE m is queued -- once m is on
+     * the rxq a worker can dequeue and free it (mbufq_dequeue takes only the
+     * queue lock, not this read-side section), so reading m afterwards would
+     * race. The copy carries m->pkt and M_CSUM_OK, so the receiver accepts it
+     * and the transport, not the link, is what must dedup. The framework
+     * returns false in interrupt context, so this fires only where rx_common
+     * runs in a thread (loopback; a thread-deferred driver). */
+    struct mbuf *dup = faultinject_should_fail(FI_NET_RX_DUP) ? m_copypacket(m) : NULL;
     if (!mbufq_enqueue(&c->rxq, m)) {
         __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&c->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        if (dup != NULL)
+            m_freem(dup);
         quiesce_read_unlock();
         return;
     }
     __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+    /* Enqueue the duplicate right behind the original on the same queue, so
+     * it is delivered immediately after. mbufq_enqueue frees it and returns
+     * false on a full queue, so a failure needs no second free. */
+    if (dup != NULL && mbufq_enqueue(&c->rxq, dup))
+        __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
     quiesce_read_unlock();
     waitqueue_wake_one(&c->wq);
 }
