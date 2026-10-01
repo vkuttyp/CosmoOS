@@ -3,6 +3,7 @@
  */
 
 #include <kernel/lockdep.h>
+#include <kernel/log.h>
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -35,7 +36,13 @@ void mutex_init(struct mutex *m, const char *name)
  * so a boost applied to a thread that releases concurrently is undone by that
  * release -- the global lock orders the two.
  */
-#define PI_MAX_DEPTH 16u   /* chain bound: the lock-acquisition order is acyclic (lockdep checks it in debug) */
+/* Chain bound. The lock-acquisition order is acyclic (lockdep checks it in
+ * debug), so a real chain is no deeper than the threads in it; 64 covers any
+ * realistic nesting. Reaching it means either a pathologically deep chain or,
+ * in a release build where lockdep is off, a lock-order cycle from a bug --
+ * either way the walk stops and warns rather than looping or silently
+ * dropping a boost. */
+#define PI_MAX_DEPTH 64u
 
 static spinlock_t g_pi_lock = SPINLOCK_INIT("mutex-pi");
 
@@ -58,7 +65,13 @@ static int pi_top_waiter(struct mutex *m)
  * propagate up the chain of mutexes it is itself blocked on. g_pi_lock held. */
 static void pi_apply_chain(struct thread *t)
 {
-    for (unsigned depth = 0; t != NULL && depth < PI_MAX_DEPTH; depth++) {
+    unsigned depth = 0;
+    while (t != NULL) {
+        if (++depth > PI_MAX_DEPTH) {
+            WARN(true, "mutex PI: donation chain over %u deep -- a lock-order cycle or a pathological nesting",
+                 PI_MAX_DEPTH);
+            break;
+        }
         int eff = t->base_prio;
         struct mutex *hm;
         list_for_each_entry(hm, &t->pi_held, pi_link) {
@@ -170,6 +183,12 @@ void mutex_lock_nested(struct mutex *m, unsigned subclass)
 void mutex_unlock(struct mutex *m)
 {
     struct thread *cur = thread_current();
+    /* g_pi_lock is held across BOTH the ownership clear and the removal of
+     * this mutex's donation, so they are one step: otherwise a new owner
+     * could acquire and release the mutex in the gap and remove the link
+     * from this (old) owner's pi_held, leaving this owner boosted forever.
+     * g_pi_lock is outermost; m->lock nests inside it (never the reverse). */
+    arch_irq_state_t gs = spin_lock_irqsave(&g_pi_lock);
     arch_irq_state_t s = spin_lock_irqsave(&m->lock);
     if (m->owner != cur)
         panic("mutex_unlock('%s') by '%s' but owner is '%s'", m->name, cur->name,
@@ -178,20 +197,13 @@ void mutex_unlock(struct mutex *m)
     __atomic_store_n(&m->owner, NULL, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&m->lock, s);
 
-    /* Give up any priority this mutex donated. The owner is cleared above
-     * (under m->lock) before g_pi_lock is taken, so a thread donating
-     * concurrently reads a NULL owner and does not boost a thread that no
-     * longer holds the lock; a boost that landed earlier is recorded as this
-     * mutex sitting in `pi_held`, and is undone here. Taken on every unlock
-     * because whether a donation landed can only be read under g_pi_lock. */
-    s = spin_lock_irqsave(&g_pi_lock);
     if (!list_empty(&m->pi_link)) {
         list_remove(&m->pi_link);
         list_init(&m->pi_link);
         m->pi_active = 0;
         pi_apply_chain(cur);   /* cur loses this mutex's inherited priority */
     }
-    spin_unlock_irqrestore(&g_pi_lock, s);
+    spin_unlock_irqrestore(&g_pi_lock, gs);
     waitqueue_wake_one(&m->wq);
 }
 

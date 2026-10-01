@@ -7,7 +7,13 @@
 > asserts the high thread acquires the mutex before the medium thread finishes.
 > Everything below this banner is the §68 report as written for PR #280, before
 > the implementation — read its "Design", "Affected files" and "Tests" as what
-> was then planned and is now shipped.
+> was then planned. Three details shipped differently: the requeue entry point
+> is named `sched_reprioritize`, not `sched_set_effective_prio`; it does **not**
+> request a reschedule when a running thread's priority is dropped (the design
+> said it would — doing so would preempt an unlocking owner before it wakes the
+> waiter, so the wake drives the preemption instead); and the one shipped test
+> is `prio-inversion`, with the report's "planned mutations" exercised as the
+> implementation PR's non-vacuity mutation rather than as separate tests.
 >
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/priority-inheritance-probe.py`); the priority-inheritance design
