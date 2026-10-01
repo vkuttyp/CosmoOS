@@ -3813,7 +3813,7 @@ See [docs/development.md](docs/development.md).
   capacity/block-size or queue-size change. `device-reset` proves a bound
   virtio-blk reset in place keeps the same disk registered and its data
   intact, a driver with no reset is `-EOPNOTSUPP`, and an unbound device
-  `-ENODEV`. (PR #NNN)
+  `-ENODEV`. (PR #277)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
