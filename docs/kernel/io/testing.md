@@ -26,6 +26,18 @@ Run by `init --selftest` on every debug boot (the boot test requires
 - Closing the ring with parked reads, then the pipe, leaves nothing
   behind; `aio_submit` on a non-ring handle or a bad handle is `-EBADF`.
 
+## The timer object (`init --selftest`, the aio-timer unit)
+
+A timer from `timer_create` is a submittable readiness object
+(`docs/audit/next-subsystem-aio-timer.md`). A 20 ms one-shot submitted as
+`POLL` parks (`aio_wait` with `min` 0 returns nothing) and completes with
+its `user_data` and `READABLE` once it fires; a `READ` returns the
+expiration count (1) and resets it, so a following `NOWAIT` `READ` is
+`-EAGAIN`. A periodic timer's two blocking reads each return at least one
+expiry. A timer created with `initial_ns` 0 is `-EINVAL`; a timer created
+and closed without submitting cancels at `close`, the handle being its only
+reference.
+
 ## Syscall fuzzer
 
 `aio_create` and `aio_submit` are in the fuzzer's table (52 of 63 calls

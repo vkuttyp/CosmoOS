@@ -615,6 +615,67 @@ static void proc_selftest(void)
         CHECK(cosmo_aio_submit(999, sq, 1) == -COSMO_EBADF && cosmo_aio_submit(p[0], sq, 1) == -COSMO_EBADF);
     }
 
+    /* A timer as a submittable I/O object (docs/audit/next-subsystem-aio-timer.md). */
+    {
+        struct cosmo_cqe cq[4];
+        int ring = (int)cosmo_aio_create(4, 0);
+        CHECK(ring >= 3);
+        CHECK(cosmo_timer_create(0, 0) == -COSMO_EINVAL);     /* a timer must be armed */
+
+        /* Firing: a 20 ms one-shot submitted as POLL completes with its
+         * user_data once it fires. The wait is a generous 5 s -- far above the
+         * firing latency even on a slow or loaded boot, so it does not flake,
+         * yet bounded, so a broken timer fails the test rather than hanging. */
+        int tfd = (int)cosmo_timer_create(20000000ull, 0);
+        CHECK(tfd >= 3);
+        struct cosmo_sqe s = { .op = COSMO_AIO_POLL, .handle = tfd, .events = COSMO_IO_READABLE, .user_data = 11 };
+        CHECK(cosmo_aio_submit(ring, &s, 1) == 1);
+        long got = cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull);
+        CHECK(got == 1 && cq[0].user_data == 11 && cq[0].result == COSMO_IO_READABLE);
+        /* READ returns the expiration count (one) and resets it, so a following
+         * non-waiting READ is -EAGAIN. */
+        uint64_t exp = 0;
+        struct cosmo_sqe r = { .op = COSMO_AIO_READ, .handle = tfd, .addr = (uint64_t)&exp,
+                               .len = sizeof(exp), .user_data = 12 };
+        CHECK(cosmo_aio_submit(ring, &r, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull) == 1 && cq[0].user_data == 12 &&
+              cq[0].result == (long)sizeof(exp) && exp == 1);
+        struct cosmo_sqe rn = { .op = COSMO_AIO_READ, .flags = COSMO_AIO_F_NOWAIT, .handle = tfd,
+                                .addr = (uint64_t)&exp, .len = sizeof(exp), .user_data = 13 };
+        CHECK(cosmo_aio_submit(ring, &rn, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 5000000000ull) == 1 && cq[0].user_data == 13 &&
+              cq[0].result == -COSMO_EAGAIN);
+        CHECK(close(tfd) == 0);
+
+        /* Parks, and the two-reference lifetime: a one-hour timer cannot fire
+         * during the test whatever the host load, so a bounded wait on its
+         * parked POLL sees nothing. Closing the timer handle while the entry is
+         * parked leaves the timer alive by the ring's reference; closing the
+         * ring then drops the parked entry and releases the timer. Both closes
+         * succeed and nothing hangs (docs/audit/next-subsystem-aio-timer.md). */
+        int far = (int)cosmo_timer_create(3600ull * 1000 * 1000 * 1000, 0);
+        CHECK(far >= 3);
+        struct cosmo_sqe fs = { .op = COSMO_AIO_POLL, .handle = far, .events = COSMO_IO_READABLE, .user_data = 14 };
+        CHECK(cosmo_aio_submit(ring, &fs, 1) == 1);
+        CHECK(cosmo_aio_wait(ring, cq, 4, 1, 50000000ull) == 0);   /* parked; the hour is not up */
+        CHECK(close(far) == 0);     /* handle closed while parked: the ring holds the other reference */
+        CHECK(close(ring) == 0);    /* drops the parked entry, releasing the timer */
+
+        /* A periodic timer fires repeatedly; a plain blocking read collects each. */
+        int per = (int)cosmo_timer_create(10000000ull, 10000000ull);   /* 10 ms, then every 10 ms */
+        CHECK(per >= 3);
+        uint64_t c1 = 0, c2 = 0;
+        CHECK(read(per, &c1, sizeof(c1)) == (long)sizeof(c1) && c1 >= 1);
+        CHECK(read(per, &c2, sizeof(c2)) == (long)sizeof(c2) && c2 >= 1);
+        CHECK(close(per) == 0);
+        /* Create and close without submitting: release cancels the armed timer,
+         * the handle being its only reference (the tcp-pcb-timer-free shape). */
+        for (int i = 0; i < 8; i++) {
+            int t = (int)cosmo_timer_create(1000000000ull, 0);   /* far off; closed before it fires */
+            CHECK(t >= 3 && close(t) == 0);
+        }
+    }
+
     /* The console: a character device, a terminal. */
     CHECK(fstat(0, &st) == 0 && S_ISCHR(st.st_type));
     CHECK(isatty(0) == 1);

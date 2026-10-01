@@ -7,6 +7,7 @@
  */
 
 #include <kernel/aio.h>
+#include <kernel/timerobj.h>
 #include <kernel/blk.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
@@ -1841,6 +1842,17 @@ static int64_t sys_aio_create(struct syscall_args *a)
     return h;
 }
 
+static int64_t sys_timer_create(struct syscall_args *a)
+{
+    struct kobject *obj;
+    int rc = timer_obj_create(a->a[0], a->a[1], &obj);
+    if (rc)
+        return rc;
+    int h = handle_install(&process_current()->handles, obj, HANDLE_RIGHT_ALL);
+    kobject_put(obj);
+    return h;
+}
+
 static struct aio_ring *ring_of(int h)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
@@ -2492,6 +2504,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_ioready] = sys_ioready,
     [SYS_setnonblock] = sys_setnonblock,
     [SYS_aio_create] = sys_aio_create,
+    [SYS_timer_create] = sys_timer_create,
     [SYS_aio_submit] = sys_aio_submit,
     [SYS_aio_wait] = sys_aio_wait,
     [SYS_setgroups] = sys_setgroups,

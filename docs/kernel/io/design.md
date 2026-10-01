@@ -157,6 +157,14 @@ prepare (`docs/kernel/device/design.md`, "The block layer for NVMe") and
 what a later milestone plugs in behind `PREAD`/`PWRITE` without changing
 the interface.
 
+A timer is a submittable object of its own (`timer_create`,
+`docs/audit/next-subsystem-aio-timer.md`): a kobject with a readiness
+operation that becomes readable when it has expired, so it rides `POLL` and
+`READ` with no new op and lets a program multiplex "wake me after T" with
+I/O in one ring and learn, by `user_data`, which fired. It is the timer the
+ring's own `aio_wait` timeout — a bare return, not a completion — could not
+be.
+
 ## Buffer ownership
 
 From `aio_submit` until the completion is collected, the buffer named by
