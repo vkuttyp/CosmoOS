@@ -242,6 +242,20 @@ void arp_flush(struct netif *nif)
     spin_unlock_irqrestore(&g_lock, s);
 }
 
+void arp_delete(uint32_t ip)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    struct arp_entry *e = find(ip);
+    if (e != NULL) {
+        if (e->pending)
+            g_stats.pending_dropped++;   /* counted like the flush and the timeout */
+        m_freem(e->pending);
+        memset(e, 0, sizeof(*e));         /* state back to ARP_FREE */
+        g_stats.entries--;
+    }
+    spin_unlock_irqrestore(&g_lock, s);
+}
+
 #if CONFIG_DEBUG
 /*
  * The window this unit closes, held open on purpose.
