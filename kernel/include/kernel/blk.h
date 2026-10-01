@@ -150,6 +150,13 @@ int blk_register_named(struct blkdev *bd, const char *name);
  * be completed (bio_complete with -EIO after a reset). Sleeps. */
 void blk_unregister(struct blkdev *bd);
 
+/* Reset a registered device in place: pause submissions (new bios wait in the
+ * pending queue), drain the submit path, run `reinit` (the driver resets the
+ * hardware, completes whatever was in flight, and rebuilds), then reopen and
+ * resubmit what waited. The blkdev stays registered. Returns reinit's result;
+ * a non-zero result leaves the disk not serving I/O. */
+int blk_reset(struct blkdev *bd, int (*reinit)(struct blkdev *bd));
+
 #if CONFIG_DEBUG
 /*
  * Test hooks for the unregister barrier's two halves

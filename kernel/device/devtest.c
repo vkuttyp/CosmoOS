@@ -1768,6 +1768,102 @@ bool selftest_virtio_remove_inflight(const char **reason)
     return r;
 }
 
+static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
+
+#if CONFIG_DEBUG
+struct rst_inflight { volatile int rc; volatile int n; };
+static void rst_inflight_done(struct bio *bio)
+{
+    struct rst_inflight *s = bio->arg;
+    s->rc = bio->status;
+    __atomic_fetch_add(&s->n, 1, __ATOMIC_ACQ_REL);
+}
+#endif
+
+/* A device reset re-initializes a bound device in place -- the device stays
+ * bound and its higher-level object registered, unlike a remove+reprobe which
+ * replaces them (docs/audit/next-subsystem-device-reset.md). */
+bool selftest_device_reset(const char **reason)
+{
+    /* Device-model error paths, in every build (no debug hooks): a bound
+     * device whose driver has no reset is -EOPNOTSUPP; a device that never
+     * bound (no matching driver) is -ENODEV. */
+    ensure_fake_bus();
+    static struct device fb, fu;
+    static struct device_driver fdrv = { .name = "reset-fake", .match_data = "resetfake",
+                                         .probe = reset_fake_probe };
+    fdrv.bus = &fake_bus;
+    device_setup(&fb, &fake_bus, NULL, "resetfake");         /* matches fdrv -> bound */
+    fb.release = device_release_static;
+    device_setup(&fu, &fake_bus, NULL, "reset-unbound");     /* no matching driver -> unbound */
+    fu.release = device_release_static;
+    CHECK(driver_register(&fdrv) == 0);
+    CHECK(device_register(&fb) == 0 && fb.state == DEV_BOUND);
+    CHECK(device_register(&fu) == 0 && fu.state == DEV_UNBOUND);
+    CHECK(device_reset(&fb) == -EOPNOTSUPP);   /* bound, but the driver has no reset */
+    CHECK(device_reset(&fu) == -ENODEV);        /* never bound */
+    device_unregister(&fb);
+    device_unregister(&fu);
+    driver_unregister(&fdrv);
+
+#if !CONFIG_DEBUG
+    kinfo("selftest: device-reset: error paths ok; the in-place reset needs debug hooks, skipped");
+    return true;
+#else
+    /* The real thing: a bound virtio-blk reset in place. The SAME blkdev stays
+     * registered and usable -- a read after the reset returns the pattern
+     * written before it -- which a remove+reprobe could not do, the old disk
+     * being gone. */
+    struct blkdev *bd = rm_find();
+    if (bd == NULL) {
+        kinfo("selftest: device-reset: error paths ok; no removal disk (QEMU_RMDISK=0) for the in-place reset");
+        return true;
+    }
+    uint8_t *pat = kmalloc(4096, 0), *chk = kmalloc(4096, 0);
+    if (pat == NULL || chk == NULL) {
+        kfree(pat);
+        kfree(chk);
+        blkdev_put(bd);
+        *reason = "check failed: the test's own buffers";
+        return false;
+    }
+    for (unsigned i = 0; i < 512; i++)
+        pat[i] = (uint8_t)(i * 5 + 1);
+    bool ok = rm_io(bd, BIO_WRITE, pat) == 0 && device_reset(bd->dev) == 0;
+    if (ok) {
+        memset(chk, 0, 512);
+        ok = rm_io(bd, BIO_READ, chk) == 0 && memcmp(chk, pat, 512) == 0;
+    }
+    /* A request in flight across the reset completes exactly once, -EIO: hold
+     * completions so a submitted bio stays in its slot, then reset, whose
+     * slot-table walk completes it (the removal unit's hold seam). */
+    const struct blk_test_driver_hooks *h = blk_test_driver_hooks("virtio_blk");
+    if (ok && h != NULL && h->hold_completions != NULL) {
+        static struct rst_inflight ifl;
+        ifl.rc = 0;
+        __atomic_store_n(&ifl.n, 0, __ATOMIC_RELEASE);
+        h->hold_completions(bd);
+        static struct bio ib;
+        ib = (struct bio){ .dev = bd, .dir = BIO_READ, .sector = 0, .nsectors = 1, .buf = chk,
+                           .done = rst_inflight_done, .arg = &ifl };
+        if (blk_submit(&ib) == 0 && device_reset(bd->dev) == 0)
+            ok = __atomic_load_n(&ifl.n, __ATOMIC_ACQUIRE) == 1 && ifl.rc == -EIO;
+        else
+            ok = false;
+        h->hold_completions(NULL);
+    }
+    blkdev_put(bd);
+    kfree(pat);
+    kfree(chk);
+    if (!ok) {
+        *reason = "check failed: the disk did not survive an in-place reset";
+        return false;
+    }
+    kinfo("selftest: device-reset: virtio-blk reset in place; the same disk stayed registered and its data intact");
+    return true;
+#endif
+}
+
 
 bool selftest_blk_lifetime(const char **reason)
 {

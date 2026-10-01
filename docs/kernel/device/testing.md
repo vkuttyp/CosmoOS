@@ -317,6 +317,16 @@ for a millisecond -- fails that assertion within a millisecond
 the window does not, being a no-op with nothing else runnable
 (`docs/testing/flakes.md`).
 
+### `device-reset`
+
+`docs/audit/next-subsystem-device-reset.md`. The device-model error paths,
+on a local fake driver with no `reset`: a bound device is `-EOPNOTSUPP`, an
+unbound one `-ENODEV`. Then, on the removal disk above (skipped without it),
+a bound virtio-blk is reset in place by `device_reset`: a pattern written
+before the reset is read back afterwards through the **same** `blkdev` — which
+a remove+reprobe could not do, the old disk being gone — proving the reset
+re-initializes the device while keeping it registered.
+
 ## Gaps
 
 - No host unit test for the virtqueue ring logic (`virtq_add`/`virtq_pop`

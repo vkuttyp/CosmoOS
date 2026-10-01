@@ -84,6 +84,11 @@ struct device_driver {
     void (*remove)(struct device *dev);
     struct list_node bus_link;
     unsigned bound;
+    /* Optional. Re-initialize a bound device in place, keeping it bound and
+     * its higher-level object registered. NULL means the device cannot be
+     * reset (device_reset returns -EOPNOTSUPP). Appended last so the fields
+     * above keep their offsets; the module ABI version is bumped regardless. */
+    int (*reset)(struct device *dev);
 };
 
 void device_init(void);
@@ -118,6 +123,13 @@ int device_register(struct device *dev);
  * reference. The creator's reference remains: device_put it when done
  * with the object; the release runs when the last holder is gone. Sleeps. */
 void device_unregister(struct device *dev);
+
+/* Reset a bound device in place: the driver re-initializes the hardware and
+ * returns it to a working state, keeping the device bound and its
+ * higher-level object registered (unlike unregister+register, which replace
+ * them). Sleeps. -ENODEV if the device is not bound, -EOPNOTSUPP if its
+ * driver has no reset, else the driver's result. */
+int device_reset(struct device *dev);
 
 /* Register a driver and probe the bus's unbound devices. Sleeps.
  * Returns 0 even if no device matched. */

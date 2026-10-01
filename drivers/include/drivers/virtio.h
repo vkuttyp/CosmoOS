@@ -152,6 +152,7 @@ struct virtio_driver {
     uint64_t features;                          /* wanted device features */
     int (*probe)(struct virtio_device *vdev);
     void (*remove)(struct virtio_device *vdev);
+    int (*reset)(struct virtio_device *vdev);   /* optional: reset the device in place */
 };
 
 extern struct bus_type virtio_bus;

@@ -65,6 +65,17 @@ release the bus's reference. The object lives on while `device_find`
 holders and the creator hold it; `dev->release` runs from the last put.
 Sleeps; callable from `remove`.
 
+### `int device_reset(struct device *dev)`
+Purpose: re-initialize a bound device in place, keeping it bound and its
+higher-level object registered (unlike `device_unregister`+`device_register`,
+which replace them). Runs the driver's `reset` op under the model lock.
+Returns `-ENODEV` if the device is not bound, `-EOPNOTSUPP` if its driver has
+no `reset`, else the driver's result (non-zero leaves the device not serving
+I/O). Sleeps. The `reset` op on `struct device_driver` is optional; the
+virtio bus provides it for drivers that implement `virtio_driver.reset`
+(virtio-blk pauses submissions, resets and rebuilds the queue on the same
+`blkdev` — `docs/audit/next-subsystem-device-reset.md`).
+
 ### `void device_release_static(struct device *dev)` *(exported)*
 An empty release for devices in static storage (tests, immortal roots).
 
