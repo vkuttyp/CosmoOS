@@ -747,9 +747,14 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_pwrite64, mfd2, &two, 1, 0) == 1, 0);
         CHECKV(sc4(LX_pread64, mfd, mb, 1, 0) == 1 && (unsigned char)mb[0] == 0xAA, 0);   /* mfd unchanged */
         CHECKV(sc1(LX_close, mfd2) == 0, 0);
-        /* errors: unsupported flags and a negative length */
+        /* errors: unsupported flags, an overlong name, and a negative length */
         CHECKV(sc2(LX_memfd_create, "x", LX_MFD_ALLOW_SEALING) == -22, 0);   /* -EINVAL */
         CHECKV(sc2(LX_memfd_create, "x", 0x8) == -22, 0);                    /* unknown flag */
+        char longname[300];
+        for (int i = 0; i < 299; i++)
+            longname[i] = 'a';
+        longname[299] = '\0';
+        CHECKV(sc2(LX_memfd_create, longname, 0) == -22, 0);                 /* > 249 bytes -> EINVAL */
         CHECKV(sc2(LX_ftruncate, mfd, -1) == -22, 0);                        /* negative length */
         CHECKV(sc1(LX_close, mfd) == 0, 0);
         /* lifetime: create + size + write + close in a loop, far more times

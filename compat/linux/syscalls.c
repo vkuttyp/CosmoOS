@@ -731,11 +731,16 @@ static int64_t lx_memfd_create(struct syscall_args *a)
         return -EINVAL;   /* MFD_ALLOW_SEALING / MFD_HUGETLB unsupported */
     /* The name is advisory (Linux uses it only for /proc/self/fd and
      * accounting): validate that it is a readable, bounded string, then
-     * ignore it. MFD_CLOEXEC is a no-op under the spawn model. */
-    char name[256];
+     * ignore it. Linux caps it at 249 bytes and returns -EINVAL for a longer
+     * one, so a 250-byte buffer turns strncpy_from_user's -ENAMETOOLONG into
+     * -EINVAL; a faulting pointer stays -EFAULT. MFD_CLOEXEC is a no-op under
+     * the spawn model. */
+    char name[250];
     int rc = strncpy_from_user(name, a->a[0], sizeof(name));
+    if (rc == -EFAULT)
+        return -EFAULT;
     if (rc < 0)
-        return rc;
+        return -EINVAL;   /* too long (> 249), as Linux reports it */
     struct vnode *vn;
     rc = ramfs_anon_reg(0600, &vn);
     if (rc)
