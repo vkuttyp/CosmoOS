@@ -24,7 +24,7 @@ struct kobject;
  * one-shot it could not deliver. */
 struct epoll_ready {
     int fd;
-    uint64_t id;              /* the registration instance, to re-arm exactly this one */
+    uint64_t id;              /* the arm instance, to re-arm exactly this one */
     unsigned io;
     uint32_t events;
     uint64_t data;
@@ -50,10 +50,11 @@ int epoll_obj_mod(struct kobject *ep, int fd, unsigned want, uint32_t events, ui
 /* Remove the registration keyed by `fd`, dropping its held reference. -ENOENT
  * if not registered. */
 int epoll_obj_del(struct kobject *ep, int fd);
-/* Re-arm the one-shot registration `(fd, id)` whose event the door could not
- * deliver, and wake the set. A no-op if that exact registration is gone (the
- * fd was removed, or removed and re-added as a different instance), so a reused
- * fd's new registration is never wrongly re-enabled. */
+/* Re-arm the one-shot arm `(fd, id)` whose event the door could not deliver,
+ * and wake the set. A no-op unless that exact arm is still the current one:
+ * if the fd was removed (or removed and re-added), or the registration was
+ * MOD-re-armed since, `id` no longer matches and nothing is re-enabled -- so an
+ * event another waiter already received cannot be reported a second time. */
 void epoll_obj_rearm(struct kobject *ep, int fd, uint64_t id);
 
 /* Wait until a member is ready, the timeout elapses, or a kill is pending.

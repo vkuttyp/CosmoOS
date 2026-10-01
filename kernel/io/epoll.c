@@ -44,7 +44,8 @@
 struct epoll_item {
     struct kobject *obj;      /* the member, referenced */
     int fd;                   /* the key */
-    uint64_t id;              /* this registration instance (fd may be reused after DEL) */
+    uint64_t id;              /* this ARM instance: bumped on add and on each MOD re-arm, so a
+                               * stale re-arm (from a failed copy) never matches a later arm */
     unsigned want;            /* COSMO_IO_* requested, for readiness filtering */
     uint32_t events;          /* opaque personality events token, echoed to the waiter */
     uint64_t data;            /* opaque data token, echoed to the waiter */
@@ -69,7 +70,7 @@ struct epoll_obj {
     struct waitqueue wait;    /* the set's own queue: ctl wakes it, wait sleeps on it */
     struct list_node items;
     unsigned nr;
-    uint64_t next_id;         /* assigns each registration a unique instance id */
+    uint64_t next_id;         /* assigns each arm (add or MOD re-arm) a unique id */
 };
 
 static void epoll_release(struct kobject *obj);
@@ -210,6 +211,7 @@ int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events,
     it->data = data;
     it->oneshot = oneshot;
     it->disabled = false;      /* MOD re-arms a fired one-shot */
+    it->id = ep->next_id++;    /* a fresh arm: a copy-failure re-arm of the previous arm must not match */
     waitqueue_wake_all(&ep->wait);   /* a widened mask or re-arm can make it reportable */
     mutex_unlock(&ep->lock);
     return 0;
