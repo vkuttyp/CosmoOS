@@ -18,11 +18,16 @@ struct kobject;
 
 #define EPOLL_WAIT_FOREVER UINT64_MAX
 
-/* One ready member, kernel-side: the COSMO_IO_* bits that fired and the opaque
- * token the registration carried. */
+/* One ready member, kernel-side. `io` is the COSMO_IO_* bits that fired;
+ * `events` and `data` are the opaque personality tokens the registration
+ * carried (the door interprets them); `fd` and `oneshot` let the door re-arm a
+ * one-shot it could not deliver. */
 struct epoll_ready {
-    unsigned events;
+    int fd;
+    unsigned io;
+    uint32_t events;
     uint64_t data;
+    bool oneshot;
 };
 
 int epoll_obj_create(struct kobject **out);
@@ -33,16 +38,19 @@ struct kobject *epoll_obj_from_kobject(struct kobject *obj);
 
 /* Register `target` (a referenced object; the add takes ownership of that
  * reference on success, the caller drops it on failure) under key `fd` with a
- * COSMO_IO_* `want` mask, opaque `data`, and one-shot flag. -EEXIST if `fd` is
- * already registered. */
+ * COSMO_IO_* `want` mask for readiness filtering, an opaque `events` token and
+ * opaque `data` (both echoed to the waiter), and a one-shot flag. -EEXIST if
+ * `fd` is already registered. */
 int epoll_obj_add(struct kobject *ep, int fd, struct kobject *target,
-                  unsigned want, uint64_t data, bool oneshot);
+                  unsigned want, uint32_t events, uint64_t data, bool oneshot);
 /* Update the registration keyed by `fd` and re-arm a one-shot. -ENOENT if not
  * registered. */
-int epoll_obj_mod(struct kobject *ep, int fd, unsigned want, uint64_t data, bool oneshot);
+int epoll_obj_mod(struct kobject *ep, int fd, unsigned want, uint32_t events, uint64_t data, bool oneshot);
 /* Remove the registration keyed by `fd`, dropping its held reference. -ENOENT
  * if not registered. */
 int epoll_obj_del(struct kobject *ep, int fd);
+/* Re-arm a one-shot keyed by `fd` (the door could not deliver its event). */
+void epoll_obj_rearm(struct kobject *ep, int fd);
 
 /* Wait until a member is ready, the timeout elapses, or a kill is pending.
  * Fills up to `max` ready members into `out` and returns the count (0 at the

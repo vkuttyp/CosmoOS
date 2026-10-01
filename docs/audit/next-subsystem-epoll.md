@@ -179,8 +179,8 @@ could gain a native door later; the gap this closes is the Linux one.
 
 ## Tests
 
-Planned for the implementation (`tests/linux/lxtest.c`, which runs in the
-standard boot).
+Built in PR #291 (`tests/linux/lxtest.c`, which runs in the standard boot);
+these were the plan this report set out.
 
 | test | proves |
 |---|---|

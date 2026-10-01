@@ -783,7 +783,7 @@ static unsigned epoll_events_to_io(uint32_t ev)
     return io;   /* ERR/HUP are always reported, never requested */
 }
 
-static uint32_t epoll_events_from_io(unsigned io)
+static uint32_t epoll_events_from_io(unsigned io, uint32_t asked)
 {
     uint32_t ev = 0;
     if (io & COSMO_IO_READABLE)
@@ -791,7 +791,7 @@ static uint32_t epoll_events_from_io(unsigned io)
     if (io & COSMO_IO_WRITABLE)
         ev |= LX_EPOLLOUT;
     if (io & COSMO_IO_HANGUP)
-        ev |= LX_EPOLLHUP;
+        ev |= LX_EPOLLHUP | (asked & LX_EPOLLRDHUP);   /* RDHUP only if the caller asked, as poll does */
     if (io & COSMO_IO_ERROR)
         ev |= LX_EPOLLERR;
     return ev;
@@ -866,7 +866,7 @@ static int64_t lx_epoll_ctl(struct syscall_args *a)
     unsigned want = epoll_events_to_io(ev.events);
     bool oneshot = (ev.events & LX_EPOLLONESHOT) != 0;
     if (op == LX_EPOLL_CTL_MOD) {
-        rc = epoll_obj_mod(ep, fd, want, ev.data, oneshot);
+        rc = epoll_obj_mod(ep, fd, want, ev.events, ev.data, oneshot);
         kobject_put(ep);
         return rc;
     }
@@ -881,7 +881,7 @@ static int64_t lx_epoll_ctl(struct syscall_args *a)
         kobject_put(ep);
         return -EINVAL;   /* nesting an epoll in an epoll */
     }
-    rc = epoll_obj_add(ep, fd, target, want, ev.data, oneshot);   /* takes target's ref on success */
+    rc = epoll_obj_add(ep, fd, target, want, ev.events, ev.data, oneshot);   /* takes target's ref on success */
     if (rc)
         kobject_put(target);
     kobject_put(ep);
@@ -910,12 +910,20 @@ static int64_t do_epoll_wait(int epfd, uint64_t uevents, int maxevents, int time
     int64_t n = epoll_obj_wait(ep, buf, k, timeout_ns);
     int64_t rc = n;
     if (n > 0) {
-        for (int64_t i = 0; i < n; i++) {
-            struct lx_epoll_event ev = { .events = epoll_events_from_io(buf[i].events), .data = buf[i].data };
-            if (copy_to_user(uevents + (uint64_t)i * sizeof(ev), &ev, sizeof(ev))) {
-                rc = i ? i : -EFAULT;
+        int64_t i = 0;
+        for (; i < n; i++) {
+            struct lx_epoll_event ev = { .events = epoll_events_from_io(buf[i].io, buf[i].events),
+                                         .data = buf[i].data };
+            if (copy_to_user(uevents + (uint64_t)i * sizeof(ev), &ev, sizeof(ev)))
                 break;
-            }
+        }
+        if (i < n) {
+            /* The copy failed at i: re-arm the one-shots we could not deliver,
+             * so the event is not lost (collect already disabled them). */
+            for (int64_t j = i; j < n; j++)
+                if (buf[j].oneshot)
+                    epoll_obj_rearm(ep, buf[j].fd);
+            rc = i ? i : -EFAULT;
         }
     }
     kfree(buf);
@@ -930,12 +938,22 @@ static __maybe_unused int64_t lx_epoll_wait(struct syscall_args *a)
 
 static int64_t lx_epoll_pwait(struct syscall_args *a)
 {
-    /* The signal mask is validated (size, if given) but not applied: the
-     * common path passes NULL, and the limited signal model here has no safe
-     * place to swap a blocked set around the wait. */
-    if (a->a[4] != 0 && a->a[5] != 8)
-        return -EINVAL;
-    return do_epoll_wait((int)a->a[0], a->a[1], (int)a->a[2], (int)a->a[3]);
+    /* Swap in the caller's signal mask for the wait and restore it after, the
+     * way lx_ppoll does; a NULL mask is the common path. */
+    bool swap = a->a[4] != 0;
+    uint64_t mask = 0, old = 0;
+    if (swap) {
+        if (a->a[5] != 8)
+            return -EINVAL;
+        if (copy_from_user(&mask, a->a[4], 8))
+            return -EFAULT;
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    int64_t rc = do_epoll_wait((int)a->a[0], a->a[1], (int)a->a[2], (int)a->a[3]);
+    if (swap)
+        signal_set_blocked_saved(old);
+    return rc;
 }
 
 static int64_t lx_getdents64(struct syscall_args *a)
