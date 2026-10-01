@@ -83,7 +83,11 @@ creation) and gains three operations, all monotonic-ns at the kernel boundary
   remaining time and interval through the out-params (for `old_value`), reset
   the expiration count to zero (Linux resets on settime), set the new interval,
   and if `initial_ns != 0` arm the timer for it and record the deadline; if
-  `initial_ns == 0` leave the object disarmed. The cancel is
+  `initial_ns == 0` leave the object disarmed. **`initial_ns == 0` is this
+  function's sole disarm signal**, so the Linux door must map "disarm" to a
+  zero `initial_ns` and an armed request to a non-zero one — never let a
+  computed delay collapse to zero mean disarm (see the door below). The cancel
+  is
   `timer_cancel_sync` and runs **before** the state is taken under the object
   lock — the fire callback takes that same lock, so cancelling under it would
   deadlock (the `release` path already cancels outside the lock).
@@ -92,10 +96,14 @@ creation) and gains three operations, all monotonic-ns at the kernel boundary
   current interval. `timerfd_gettime` always reports the remaining time
   relative, even for an absolute-armed timer.
 
-The object tracks `deadline_ns` (the next monotonic expiry), set when it is
-armed and advanced by the interval on each periodic re-arm, and an `armed`
-flag. The expiration count, the resetting read, readiness and `poll_wq` are
-unchanged from `timerobj`.
+The object tracks `deadline_ns` (the next monotonic expiry) and an `armed`
+flag. Both the arm and each periodic re-arm set `deadline_ns = clock_now_ns()
++ delay` immediately before `timer_start(delay)`, so the tracked deadline and
+the timer the callback actually arms follow the same schedule — `gettime`
+cannot drift from the real expiry. (The fire callback already re-arms with
+`timer_start(interval_ns)` from the moment it runs; it now records that same
+`now + interval_ns` as the deadline.) The expiration count, the resetting
+read, readiness and `poll_wq` are unchanged from `timerobj`.
 
 A `timer_obj_from_kobject(obj)` accessor (like `aio_ring_from_kobject`) returns
 the `timer_obj` or NULL, so the Linux door can confirm an fd is a timerfd
@@ -103,9 +111,12 @@ before a settime/gettime and return `-EINVAL` otherwise.
 
 ### 2. The Linux doors
 
-- **`timerfd_create(clockid, flags)`** — `clockid` must be `CLOCK_MONOTONIC`
-  or `CLOCK_REALTIME` (`-EINVAL` otherwise; `BOOTTIME` is treated as monotonic
-  since this kernel does not suspend). `flags` must be a subset of
+- **`timerfd_create(clockid, flags)`** — `clockid` must be `CLOCK_MONOTONIC`,
+  `CLOCK_REALTIME`, or `CLOCK_BOOTTIME`; `CLOCK_BOOTTIME` is accepted and
+  aliased to monotonic (this kernel does not suspend, so boot time and
+  monotonic time are identical), and every other `clockid` returns `-EINVAL`.
+  Only `CLOCK_REALTIME` reads the wall clock; the other two use the monotonic
+  counter. `flags` must be a subset of
   `TFD_NONBLOCK | TFD_CLOEXEC` (`-EINVAL` otherwise). It creates a disarmed
   `timer_obj`, remembers whether the clock is the wall clock (so settime's
   absolute conversion uses the right `now`), sets the object's non-blocking
@@ -113,12 +124,16 @@ before a settime/gettime and return `-EINVAL` otherwise.
   and installs it as a **read-only** fd (a timerfd is not writable).
 - **`timerfd_settime(fd, flags, new_value, old_value)`** — `flags` must be a
   subset of `TFD_TIMER_ABSTIME` (`-EINVAL` otherwise). Copy in the
-  `itimerspec`, convert `it_value` and `it_interval` to ns. The monotonic
-  initial delay is `it_value` directly for a relative timer, or
-  `max(0, it_value - now)` for `TFD_TIMER_ABSTIME`, where `now` is
-  `clock_realtime_ns()` or `clock_now_ns()` by the fd's clock. Call
-  `timer_obj_settime`; if `old_value` is non-NULL write the previous remaining
-  time and interval back as an `itimerspec`.
+  `itimerspec`, convert `it_value` and `it_interval` to ns. Disarm (passing
+  `initial_ns == 0` to `timer_obj_settime`) **iff the raw `it_value` is zero**
+  — the disarm decision is the itimerspec, never the computed delay. For an
+  armed request the monotonic initial delay is `it_value` directly for a
+  relative timer, or `it_value - now` for `TFD_TIMER_ABSTIME` (where `now` is
+  `clock_realtime_ns()` or `clock_now_ns()` by the fd's clock); an absolute
+  deadline that has already passed clamps to a minimum of **1 ns, not 0**, so
+  it fires immediately rather than disarming (Linux fires a past absolute timer
+  at once). If `old_value` is non-NULL write the previous remaining time and
+  interval back as an `itimerspec`.
 - **`timerfd_gettime(fd, curr_value)`** — `timer_obj_gettime`, then write the
   remaining time and interval as an `itimerspec`.
 
@@ -145,8 +160,9 @@ before re-arming, so a stale expiry cannot survive a re-arm.
 The Linux `timerfd_create(2)`, `timerfd_settime(2)` and `timerfd_gettime(2)`
 system calls. No native ABI change: the arm/disarm surface is added to the
 existing `timer_obj` kobject and could back a native door later, but the gap
-this closes is the Linux one. `CLOCK_MONOTONIC` and `CLOCK_REALTIME` are
-supported.
+this closes is the Linux one. `CLOCK_MONOTONIC`, `CLOCK_REALTIME` and
+`CLOCK_BOOTTIME` (aliased to monotonic) are accepted; any other `clockid` is
+`-EINVAL`.
 
 ## Tests
 
@@ -156,15 +172,18 @@ standard boot).
 | test | proves |
 |---|---|
 | `timerfd` one-shot | `timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK)` returns an fd; a relative `settime` of ~40 ms makes it readable (`poll`); the 8-byte read returns a count ≥ 1; a second read is `-EAGAIN` (drained, non-blocking) |
-| `timerfd` periodic | `settime` with a ~20 ms value and ~20 ms interval, then a ~120 ms sleep, reads an expiration count ≥ 2 |
+| `timerfd` periodic | `settime` with a ~20 ms value and ~20 ms interval, then accumulate expirations across blocking reads (or `poll`+read) **until the count reaches 2**, under a generous overall deadline (say 2 s) — a wait for the count, never "N fires after a fixed sleep", so a slow host is late, not wrong |
 | `timerfd` gettime | on an armed one-shot, `timerfd_gettime` reports a remaining `it_value` in `(0, the set value]` and the interval it was set with; after a disarming `settime` (`it_value == 0`) it reports `0`/`0` and `poll` is not readable |
 | `timerfd` absolute | `settime` with `TFD_TIMER_ABSTIME` at `clock_gettime(MONOTONIC) + ~40 ms` becomes readable within a bound |
+| `timerfd` past absolute | `settime` with `TFD_TIMER_ABSTIME` at a deadline already in the past (`clock_gettime(MONOTONIC) − 1 s`) and a non-zero `it_value` fires at once — readable immediately, not disarmed |
 | `timerfd` errors | a bad `clockid` and a settime on a non-timerfd fd are `-EINVAL` |
 
 **Planned mutations** (each alone, boot confirmed):
 - `timerfd_settime` not subtracting `now` for `TFD_TIMER_ABSTIME`: the absolute
   timer is armed ~a wall-clock-era into the future, never fires in the bound,
   and the absolute test's `poll` times out.
+- a passed absolute deadline clamping to `0` rather than `1 ns`: the past-abs
+  timer disarms instead of firing, so that test never becomes readable.
 - `timer_obj_gettime` returning the stored deadline instead of
   `deadline - now`: the remaining-time check (`it_value <=` the set value)
   fails.
@@ -203,7 +222,8 @@ None.
   `settime` (it starts disarmed), so all three calls ship together;
   `gettime` is cheap once the deadline is tracked and completes the trio a
   program expects.
-- **Supporting every `clockid`.** `CLOCK_MONOTONIC` and `CLOCK_REALTIME` are
-  what programs arm timerfds with; the exotic clocks (`BOOTTIME_ALARM`,
+- **Supporting every `clockid`.** `CLOCK_MONOTONIC`, `CLOCK_REALTIME` and
+  `CLOCK_BOOTTIME` are what programs arm timerfds with; `BOOTTIME` is aliased
+  to monotonic (no suspend). The alarm clocks (`BOOTTIME_ALARM`,
   `REALTIME_ALARM`) are wake-from-suspend features this kernel has no basis
-  for, so they are rejected rather than aliased.
+  for, so they are rejected (`-EINVAL`) rather than aliased.
