@@ -5,6 +5,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/fwcfg.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -601,7 +602,7 @@ bool selftest_net_arp(const char **reason)
     CHECK(arp_lookup(asker, mac) && memcmp(mac, forged_mac, 6) == 0);
     arp_get_stats(&s1);
     CHECK(s1.replies_sent == s0.replies_sent + 1 && s1.entries == s0.entries + 1);
-    arp_flush(nif);   /* the test's entries; a real gateway entry is re-learned below */
+    arp_delete(asker);   /* remove only the entry this test added, not a real gateway entry */
     /* The gateway resolves for real when a NIC is present (asynchronous). */
     if (nif->ip4.gateway) {
         struct mbuf *probe = m_getcl();
@@ -609,6 +610,8 @@ bool selftest_net_arp(const char **reason)
         probe->len = probe->pkt.len = 20;
         int rc = arp_resolve(nif, nif->ip4.gateway, mac, probe);
         CHECK(rc == 0 || rc == -EINPROGRESS);
+        if (rc == 0)
+            m_freem(probe);   /* already resolved (gateway still cached): arp_resolve took no ownership */
         for (unsigned i = 0; i < 50 && !arp_lookup(nif->ip4.gateway, mac); i++)
             thread_sleep_ms(10);
         if (arp_lookup(nif->ip4.gateway, mac))
@@ -1155,6 +1158,107 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
 
 
 static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
+
+/* --- a duplicated received frame (FI_NET_RX_DUP) ----------------------------
+ *
+ * A frame delivered twice -- a link-layer retransmit, a switch flooding --
+ * must leave the stack as a single delivery would: TCP hands a duplicated
+ * segment to the socket once (sequence dedup), ARP keeps one cache entry.
+ * The injection in rx_common duplicates every frame the armed thread
+ * receives in thread context; the test drives it over loopback (where the
+ * hook fires) and, when an ethernet interface exists, once through the
+ * ethernet receive path for ARP. The rule is armed for this thread only, so
+ * concurrent network work is untouched.
+ */
+bool selftest_net_rx_dup(const char **reason)
+{
+#if !CONFIG_FAULTINJECT
+    (void)reason;
+    kinfo("selftest: net-rx-dup: fault injection compiled out of this build; skipping");
+    return true;
+#else
+    unsigned socks0 = socket_count();
+
+    /* Arm the duplication for this thread, then move a pattern stream over
+     * loopback. Every frame this thread delivers to rx_common is doubled;
+     * tcp_sink_thread verifies the pattern and that exactly the bytes sent
+     * arrived, so a re-delivered duplicate would overshoot or break it. */
+    faultinject_set(FI_NET_RX_DUP, 1, 0, thread_current());
+    bool tcp_ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6070), 256u * 1024u, 0);
+    struct fi_stats fst;
+    faultinject_stats(FI_NET_RX_DUP, &fst);
+
+    /* ARP idempotency, when an ethernet interface is present: feed one
+     * request addressed to us through the full receive path (netif_rx ->
+     * ether_input -> arp_input). The injection doubles it, so arp_input runs
+     * twice and two replies go out -- proof the duplicate was delivered --
+     * but the asker is recorded once. */
+    bool arp_present = false, arp_doubled = false, arp_one_entry = false;
+    struct netif *nif = (tcp_ok ? netif_default() : NULL);
+    if (nif != NULL) {
+        netif_put(nif);   /* borrowed: the default nif is not unregistered under the tests */
+        arp_present = true;
+        static const uint8_t asker_mac[ETH_ALEN] = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x42 };
+        uint32_t asker = IPV4_ADDR(10, 99, 0, 70);
+        struct arp_stats a0, a1 = {0};
+        arp_get_stats(&a0);
+        struct mbuf *f = m_getcl();
+        if (f != NULL) {
+            f->len = f->pkt.len = ETH_HLEN + 28;
+            uint8_t *p = f->data;
+            memset(p, 0, ETH_HLEN + 28);
+            memcpy(p, nif->mac, ETH_ALEN);        /* dst = us */
+            memcpy(p + ETH_ALEN, asker_mac, ETH_ALEN);
+            p[12] = 0x08; p[13] = 0x06;           /* ethertype ARP */
+            uint8_t *a = p + ETH_HLEN;
+            a[1] = 1;     /* htype ethernet */
+            a[2] = 0x08;  /* ptype IPv4 */
+            a[4] = ETH_ALEN;
+            a[5] = 4;
+            a[7] = 1;     /* op: request */
+            memcpy(a + 8, asker_mac, ETH_ALEN);
+            memcpy(a + 14, &asker, 4);
+            memcpy(a + 24, &nif->ip4.addr, 4);
+            netif_rx(nif, f);
+            /* Wait on the counter (not a fixed settle): one request in, two
+             * replies out is the duplicate delivered. */
+            for (unsigned i = 0; i < 500; i++) {
+                arp_get_stats(&a1);
+                if (a1.replies_sent >= a0.replies_sent + 2)
+                    break;
+                thread_sleep_ms(10);
+                sched_watchdog_kick();
+            }
+            uint8_t mac[ETH_ALEN];
+            arp_doubled = a1.replies_sent >= a0.replies_sent + 2;
+            arp_one_entry = arp_lookup(asker, mac) && memcmp(mac, asker_mac, ETH_ALEN) == 0
+                            && a1.entries == a0.entries + 1;
+            arp_delete(asker);   /* remove only the entry this test added */
+        }
+    }
+
+    faultinject_clear(FI_NET_RX_DUP);
+
+    if (!tcp_ok)
+        return false;   /* tcp_transfer set *reason */
+    CHECK(fst.hits > 0);   /* not vacuous: the injection fired */
+    /* That a delivered duplicate reaches the stack is proved by the ARP
+     * phase below (one request in, two replies out): a wholly-duplicate TCP
+     * segment is trimmed against rcv_nxt and absorbed silently, so no TCP
+     * counter isolates it -- the ARP path, which replies per request, does.
+     * The TCP phase proves the dedup is correct given that delivery. */
+    if (arp_present) {
+        CHECK(arp_doubled);     /* the duplicated request yielded two replies */
+        CHECK(arp_one_entry);   /* ... but one cache entry */
+    }
+    thread_sleep_ms(50);
+    CHECK(socket_count() == socks0);
+    kinfo("selftest: net-rx-dup: %llu frames doubled, TCP delivered 262144 bytes once%s",
+          (unsigned long long)fst.hits,
+          arp_present ? ", ARP kept one entry across a doubled request" : " (no ethernet interface: ARP skipped)");
+    return true;
+#endif
+}
 
 bool selftest_net_lo_tcp(const char **reason)
 {

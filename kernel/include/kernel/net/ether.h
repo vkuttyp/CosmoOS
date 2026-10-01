@@ -37,6 +37,9 @@ void arp_input(struct netif *nif, struct mbuf *m);
 int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mbuf *m);
 bool arp_lookup(uint32_t ip, uint8_t mac[ETH_ALEN]);
 void arp_flush(struct netif *nif);
+/* Remove one entry by IP, if present (a pending packet is dropped and
+ * counted, as the flush and the timeout do). */
+void arp_delete(uint32_t ip);
 /* Test hook: run the ageing pass as if `now_ns` had passed. */
 void arp_age(uint64_t now_ns);
 struct arp_stats {
