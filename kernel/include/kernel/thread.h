@@ -55,6 +55,7 @@ enum thread_state {
 
 struct waitqueue;
 struct process;
+struct mutex;
 
 struct thread {
     tid_t tid;
@@ -72,7 +73,8 @@ struct thread {
     size_t stack_size;
     void (*entry)(void *arg);
     void *arg;
-    int priority;                       /* (rq) */
+    int priority;                       /* (rq) the effective priority the scheduler keys on */
+    int base_prio;                      /* (pi) the created priority; `priority` equals it except while boosted by priority inheritance */
     cpumask_t affinity;
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
@@ -101,6 +103,11 @@ struct thread {
     unsigned flags;
     struct lockdep_held held_mutex[LOCKDEP_MAX_HELD_MUTEX];   /* lockdep: mutexes this thread holds */
     unsigned nr_held_mutex;
+    /* (pi, under g_pi_lock in mutex.c) priority inheritance: the mutexes this
+     * thread holds that have waiters, and the one it is itself blocked
+     * acquiring (NULL otherwise) -- the donation chain walks the latter. */
+    struct list_node pi_held;
+    struct mutex *pi_blocked_on;
     bool io_nonblock;                   /* the I/O ring executes an entry: object waits return -EAGAIN instead */
     /* Milestone 10: user threads and signals (docs/kernel/process/design.md §11). */
     struct arch_user_regs *init_regs;   /* a clone's first register set, freed at its first user entry */
