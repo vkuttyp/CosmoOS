@@ -11,6 +11,7 @@
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/spinlock.h>
+#include <kernel/eventfd.h>
 #include <kernel/futex.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
@@ -607,6 +608,27 @@ static int64_t lx_statx(struct syscall_args *a)
     lx_statx_from_native(&st, mask, &sx);
     return copy_to_user(ubuf, &sx, sizeof(sx)) ? -EFAULT : 0;
 }
+
+static int64_t do_eventfd(uint64_t initval, unsigned flags)
+{
+    if (flags & ~(unsigned)(LX_EFD_SEMAPHORE | LX_EFD_NONBLOCK | LX_EFD_CLOEXEC))
+        return -EINVAL;
+    struct kobject *obj;
+    int rc = eventfd_obj_create(initval, (flags & LX_EFD_SEMAPHORE) != 0, &obj);
+    if (rc)
+        return rc;
+    if (flags & LX_EFD_NONBLOCK)
+        kobject_set_nonblock(obj, 1);
+    /* EFD_CLOEXEC is accepted and ignored: this kernel's spawn model carries
+     * no descriptor across exec, so there is nothing to mark (as pipe2 does). */
+    int h = handle_install(&process_current()->handles, obj,
+                           HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    kobject_put(obj);   /* the handle holds its own reference */
+    return h;
+}
+
+static int64_t lx_eventfd2(struct syscall_args *a) { return do_eventfd((uint64_t)a->a[0], (unsigned)a->a[1]); }
+static __maybe_unused int64_t lx_eventfd(struct syscall_args *a) { return do_eventfd((uint64_t)a->a[0], 0); }   /* the older call: no flags */
 
 static int64_t lx_getdents64(struct syscall_args *a)
 {
@@ -2911,6 +2933,10 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
 #endif
     [LX_newfstatat] = lx_newfstatat,
     [LX_statx] = lx_statx,
+    [LX_eventfd2] = lx_eventfd2,
+#ifdef LX_eventfd
+    [LX_eventfd] = lx_eventfd,   /* x86-64 only: the older number, no flags */
+#endif
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,
