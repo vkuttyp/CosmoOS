@@ -261,6 +261,25 @@ void device_unregister(struct device *dev)
     kobject_put(&dev->obj);
 }
 
+int device_reset(struct device *dev)
+{
+    model_lock();
+    if (dev->driver == NULL || dev->state != DEV_BOUND) {
+        model_unlock();
+        return -ENODEV;
+    }
+    if (dev->driver->reset == NULL) {
+        model_unlock();
+        return -EOPNOTSUPP;
+    }
+    /* The driver keeps the device bound and its higher-level object
+     * registered; it only re-initializes the hardware. Held across the
+     * driver call as unbind's remove is. */
+    int rc = dev->driver->reset(dev);
+    model_unlock();
+    return rc;
+}
+
 int driver_register(struct device_driver *drv)
 {
     KASSERT(g_initialized && drv->bus != NULL && drv->probe != NULL && drv->name != NULL);

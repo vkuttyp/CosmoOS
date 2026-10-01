@@ -537,6 +537,22 @@ static void drain_pending(struct blkdev *bd)
     }
 }
 
+int blk_reset(struct blkdev *bd, int (*reinit)(struct blkdev *bd))
+{
+    /* Pause submissions into the pending queue (the same `recovering` gate
+     * the timeout path uses) and drain the submit path (as `blk_unregister`
+     * does), so no bio reaches the driver while it tears the queue down. The
+     * disk stays registered; `reinit` re-initializes the hardware and
+     * completes whatever was in flight. */
+    __atomic_store_n(&bd->recovering, true, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0)
+        sched_yield();
+    int rc = reinit(bd);
+    __atomic_store_n(&bd->recovering, false, __ATOMIC_RELEASE);
+    drain_pending(bd);   /* resubmit whatever waited, onto the rebuilt queue */
+    return rc;
+}
+
 /* Call the driver with the bio on the in-flight list: a driver may
  * complete synchronously from inside submit, and the completion must
  * find the bio there to take it off. A refusal takes it off again. */
@@ -873,6 +889,7 @@ EXPORT_SYMBOL(blk_test_driver_hooks_set);
 #endif
 EXPORT_SYMBOL(bio_segment);
 EXPORT_SYMBOL(blk_unregister);
+EXPORT_SYMBOL(blk_reset);
 EXPORT_SYMBOL(blk_submit);
 EXPORT_SYMBOL(bio_complete);
 EXPORT_SYMBOL(blk_read);

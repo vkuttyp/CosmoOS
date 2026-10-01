@@ -43,6 +43,12 @@ static void virtio_remove_thunk(struct device *dev)
         vdrv->remove(to_virtio_device(dev));
 }
 
+static int virtio_reset_thunk(struct device *dev)
+{
+    struct virtio_driver *vdrv = container_of(dev->driver, struct virtio_driver, drv);
+    return vdrv->reset(to_virtio_device(dev));
+}
+
 int virtio_register_driver(struct virtio_driver *vdrv)
 {
     if (vdrv->ids == NULL || vdrv->probe == NULL)
@@ -51,6 +57,7 @@ int virtio_register_driver(struct virtio_driver *vdrv)
     vdrv->drv.match_data = vdrv->ids;
     vdrv->drv.probe = virtio_probe_thunk;
     vdrv->drv.remove = virtio_remove_thunk;
+    vdrv->drv.reset = vdrv->reset ? virtio_reset_thunk : NULL;
     return driver_register(&vdrv->drv);
 }
 

@@ -1768,6 +1768,65 @@ bool selftest_virtio_remove_inflight(const char **reason)
     return r;
 }
 
+static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
+
+/* A device reset re-initializes a bound device in place -- the device stays
+ * bound and its higher-level object registered, unlike a remove+reprobe which
+ * replaces them (docs/audit/next-subsystem-device-reset.md). */
+bool selftest_device_reset(const char **reason)
+{
+    /* Device-model errors, no hardware: a bound device whose driver has no
+     * reset is -EOPNOTSUPP; an unbound device is -ENODEV. */
+    ensure_fake_bus();
+    static struct device fd;
+    static struct device_driver fdrv = { .name = "reset-fake", .match_data = "resetfake",
+                                         .probe = reset_fake_probe };
+    fdrv.bus = &fake_bus;
+    device_setup(&fd, &fake_bus, NULL, "resetfake");
+    fd.release = device_release_static;
+    CHECK(driver_register(&fdrv) == 0);
+    CHECK(device_register(&fd) == 0 && fd.state == DEV_BOUND);
+    CHECK(device_reset(&fd) == -EOPNOTSUPP);   /* bound, but the driver has no reset */
+    device_test_unbind(&fd);
+    CHECK(device_reset(&fd) == -ENODEV);        /* unbound */
+    device_unregister(&fd);
+    driver_unregister(&fdrv);
+
+    /* The real thing: a bound virtio-blk reset in place. The SAME blkdev stays
+     * registered and usable -- a read after the reset returns the pattern
+     * written before it -- which a remove+reprobe could not do, the old disk
+     * being gone. */
+    struct blkdev *bd = rm_find();
+    if (bd == NULL) {
+        kinfo("selftest: device-reset: error paths ok; no removal disk (QEMU_RMDISK=0) for the in-place reset");
+        return true;
+    }
+    uint8_t *pat = kmalloc(4096, 0), *chk = kmalloc(4096, 0);
+    if (pat == NULL || chk == NULL) {
+        kfree(pat);
+        kfree(chk);
+        blkdev_put(bd);
+        *reason = "check failed: the test's own buffers";
+        return false;
+    }
+    for (unsigned i = 0; i < 512; i++)
+        pat[i] = (uint8_t)(i * 5 + 1);
+    bool ok = rm_io(bd, BIO_WRITE, pat) == 0 && device_reset(bd->dev) == 0;
+    if (ok) {
+        memset(chk, 0, 512);
+        ok = rm_io(bd, BIO_READ, chk) == 0 && memcmp(chk, pat, 512) == 0;
+    }
+    blkdev_put(bd);
+    kfree(pat);
+    kfree(chk);
+    if (!ok) {
+        *reason = "check failed: the disk did not survive an in-place reset";
+        return false;
+    }
+    kinfo("selftest: device-reset: virtio-blk reset in place; the same disk stayed registered and its data intact");
+    return true;
+}
+
 
 bool selftest_blk_lifetime(const char **reason)
 {
