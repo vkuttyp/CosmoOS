@@ -78,12 +78,20 @@ so "force sync" and "don't sync" return the same answer.
 A `struct statx` (the Linux ABI layout, with `STATX_*` mask bits) is added to
 a compat header and the test's `lxabi.h`. The marshaller fills the fields the
 kernel tracks — type and mode, nlink, uid/gid, inode, size, blocks, the
-block size, and the atime/mtime/ctime timestamps — and sets `stx_mask` to
+block size, and the **mtime and ctime** timestamps — and sets `stx_mask` to
 **exactly** those it filled. `statx` is explicit that a field is meaningful
-only when its bit is set in `stx_mask`, so a field the kernel does not keep
-(`STATX_BTIME`, the creation time) is left out of the mask rather than
-reported as zero. `stx_blksize` and `stx_attributes` are filled as the ABI
-requires.
+only when its bit is set in `stx_mask`, so a field the kernel does not keep is
+left out of the mask rather than reported as a value it never recorded:
+
+- `STATX_BTIME` (creation time) — not tracked.
+- `STATX_ATIME` (access time) — **not tracked either**. `struct cosmo_stat`
+  has only `mtime_ns` and `ctime_ns`; the old `lx_stat` marshaller copies the
+  mtime into the `st_atime` slot (`convert.c`, `out->st_atime = out->st_mtime`)
+  because that ABI has no way to say "no atime". `statx` does have that way —
+  omitting the bit — so it must not claim `STATX_ATIME` for a time the kernel
+  never recorded.
+
+`stx_blksize` and `stx_attributes` are filled as the ABI requires.
 
 ### 3. Resolution and flags
 
@@ -117,7 +125,7 @@ Planned for the implementation.
 
 | test | proves |
 |---|---|
-| `lxtest` statx | `statx` on the test file returns 0 and its `stx_mode`/`stx_size`/`stx_nlink` equal what `fstat` returned for the same file; `stx_mask` has the expected bits and not `STATX_BTIME`; the `AT_EMPTY_PATH` form on an open fd and `AT_SYMLINK_NOFOLLOW` on a symlink match `newfstatat` |
+| `lxtest` statx | `statx` on the test file returns 0 and its `stx_mode`/`stx_size`/`stx_nlink` equal what `fstat` returned for the same file; `stx_mask` has the expected bits and neither `STATX_BTIME` nor `STATX_ATIME` (the kernel keeps neither); the `AT_EMPTY_PATH` form on an open fd and `AT_SYMLINK_NOFOLLOW` on a symlink match `newfstatat` |
 
 **Planned mutations** (each alone, boot confirmed):
 - the marshaller leaving `stx_size` zero: the field-equality check against
@@ -144,6 +152,6 @@ None.
 - **Alias `statx` to `newfstatat`'s marshaller.** The output structs differ
   (statx has the mask and extra fields), so a shared path can produce the
   `cosmo_stat` but not the final struct; the marshaller is statx-specific.
-- **Report every `STATX_*` bit including `STATX_BTIME` as zero.** Wrong: a
+- **Report every `STATX_*` bit including `STATX_BTIME`/`STATX_ATIME` as zero (or atime-as-mtime).** Wrong: a
   caller reads a field only when its mask bit is set, and claiming a creation
   time the kernel does not keep would be a lie the mask exists to prevent.
