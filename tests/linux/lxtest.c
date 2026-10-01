@@ -711,6 +711,61 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_timerfd_settime, ntf, 0, &its, 0) == -22, 0);   /* not a timerfd */
         CHECKV(sc1(LX_close, ntf) == 0, 0);
     }
+    /* memfd: an anonymous memory-backed file (docs/audit/next-subsystem-memfd.md). */
+    {
+        char mp[64], mb[64];
+        for (int i = 0; i < 64; i++)
+            mp[i] = (char)(i + 1);
+        long mfd = sc2(LX_memfd_create, "lxtest", LX_MFD_CLOEXEC);
+        CHECKV(mfd >= 3, mfd);
+        /* starts empty; ftruncate sizes it, fstat sees the size */
+        CHECKV(sc2(LX_ftruncate, mfd, 4096) == 0, 0);
+        struct lx_stat mst;
+        CHECKV(sc2(LX_fstat, mfd, &mst) == 0 && mst.st_size == 4096 &&
+               (mst.st_mode & LX_S_IFMT) == LX_S_IFREG, (long)mst.st_size);
+        /* write a pattern and read it back */
+        CHECKV(sc4(LX_pwrite64, mfd, mp, 64, 0) == 64, 0);
+        __builtin_memset(mb, 0, sizeof(mb));
+        CHECKV(sc4(LX_pread64, mfd, mb, 64, 0) == 64 && memeq(mb, mp, 64), 0);
+        /* mmap MAP_SHARED: the pattern is visible through the mapping, a store
+         * through the mapping is visible via pread, and a pwrite is visible
+         * through the mapping -- memory-backed and shareable */
+        long mm = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED, mfd, 0);
+        CHECKV(mm > 0 && (mm & 0xfff) == 0, mm);
+        volatile unsigned char *mv = (unsigned char *)mm;
+        CHECK(mv[0] == 1 && mv[63] == 64);
+        mv[0] = 0xAA;
+        CHECKV(sc4(LX_pread64, mfd, mb, 1, 0) == 1 && (unsigned char)mb[0] == 0xAA, (long)(unsigned char)mb[0]);
+        unsigned char one = 0x55;
+        CHECKV(sc4(LX_pwrite64, mfd, &one, 1, 100) == 1, 0);
+        CHECK(mv[100] == 0x55);
+        CHECKV(sc2(LX_munmap, mm, 4096) == 0, 0);
+        /* a second memfd is an independent file */
+        long mfd2 = sc2(LX_memfd_create, "lxtest2", 0);
+        CHECKV(mfd2 >= 3 && mfd2 != mfd, mfd2);
+        unsigned char two = 0x11;
+        CHECKV(sc4(LX_pwrite64, mfd2, &two, 1, 0) == 1, 0);
+        CHECKV(sc4(LX_pread64, mfd, mb, 1, 0) == 1 && (unsigned char)mb[0] == 0xAA, 0);   /* mfd unchanged */
+        CHECKV(sc1(LX_close, mfd2) == 0, 0);
+        /* errors: unsupported flags and a negative length */
+        CHECKV(sc2(LX_memfd_create, "x", LX_MFD_ALLOW_SEALING) == -22, 0);   /* -EINVAL */
+        CHECKV(sc2(LX_memfd_create, "x", 0x8) == -22, 0);                    /* unknown flag */
+        CHECKV(sc2(LX_ftruncate, mfd, -1) == -22, 0);                        /* negative length */
+        CHECKV(sc1(LX_close, mfd) == 0, 0);
+        /* lifetime: create + size + write + close in a loop, far more times
+         * than the ramfs page budget (16384 pages), does not run out of
+         * memory -- each file and its page is freed on the last close. A leaked
+         * pin would exhaust the budget and the pwrite would start to fail. */
+        int ok = 1;
+        for (int i = 0; i < 20000 && ok; i++) {
+            long t = sc2(LX_memfd_create, "loop", 0);
+            if (t < 3) { ok = 0; break; }
+            unsigned char z = (unsigned char)i;
+            ok = sc2(LX_ftruncate, t, 4096) == 0 && sc4(LX_pwrite64, t, &z, 1, 0) == 1;
+            sc1(LX_close, t);
+        }
+        CHECKV(ok, 0);
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

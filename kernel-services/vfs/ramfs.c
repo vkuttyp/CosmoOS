@@ -563,6 +563,36 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
     return 0;
 }
 
+int ramfs_anon_reg(uint32_t mode, struct vnode **out)
+{
+    /* Build the file on the root ramfs mount (the page cache is its store).
+     * The root dir's lock serialises the mount's inode-number bump the way a
+     * named create's dir lock does. */
+    struct vnode *root;
+    int rc = vfs_lookup(NULL, "/", &root);
+    if (rc)
+        return rc;
+    if (root->ops != &ramfs_dir_ops) {   /* root must be a ramfs directory */
+        vnode_put(root);
+        return -ENOTSUP;
+    }
+    mutex_lock(&root->lock);
+    struct vnode *vn = ramfs_new(root->mnt, VNODE_REG, mode & 07777, NULL);
+    mutex_unlock(&root->lock);
+    vnode_put(root);
+    if (vn == NULL)
+        return -ENOMEM;
+    /* Born unlinked: no directory entry ever referenced it, so do the unlink's
+     * work now -- clear the pin ramfs_new sets and make nlink 0. The single
+     * vnode_alloc reference is the caller's, to be consumed by vfs_open_vnode;
+     * when the last fd and mapping drop it, ramfs_evict frees the node and its
+     * pages. No one else holds a reference yet, so this needs no lock. */
+    vn->flags &= ~VNODE_PINNED;
+    vn->nlink = 0;
+    *out = vn;
+    return 0;
+}
+
 static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fs;

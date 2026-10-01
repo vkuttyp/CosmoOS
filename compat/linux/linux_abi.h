@@ -363,6 +363,12 @@ struct lx_statx {
 #define LX_TFD_CLOEXEC       LX_O_CLOEXEC
 #define LX_TFD_NONBLOCK      LX_O_NONBLOCK
 #define LX_TFD_TIMER_ABSTIME 1u
+
+/* memfd_create flags (MFD_*): their own small bitset, not the O_* bits.
+ * Only MFD_CLOEXEC is supported; sealing and hugepages are out of scope. */
+#define LX_MFD_CLOEXEC       0x0001u
+#define LX_MFD_ALLOW_SEALING 0x0002u
+#define LX_MFD_HUGETLB       0x0004u
 /* The fields this kernel can supply: the basic set minus the access time,
  * which `struct cosmo_stat` does not record (no btime either). */
 #define LX_STATX_SUPPORTED (LX_STATX_TYPE | LX_STATX_MODE | LX_STATX_NLINK | LX_STATX_UID | \

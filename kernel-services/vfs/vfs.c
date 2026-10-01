@@ -2331,6 +2331,24 @@ static bool is_ancestor(struct vnode *anc, struct vnode *vn)
  * locked in address order: no other path locks two directories without
  * an ancestry between them, and other renames are excluded by the mutex.
  */
+int vfs_ftruncate(struct vnode *vn, uint64_t size)
+{
+    if (vn->type == VNODE_DIR)
+        return -EISDIR;
+    if (vn->type != VNODE_REG)
+        return -EINVAL;
+    /* No inode-permission check: ftruncate(2) gates on the fd being open for
+     * writing, which the caller has already established; it does not consult
+     * the file mode the way truncate(2) (vfs_truncate) does. */
+    mutex_lock(&vn->lock);
+    /* As in the write and the O_TRUNC open: a running program's pages are not
+     * the caller's to remove. */
+    int rc = text_busy_locked(vn) ? -ETXTBSY
+           : vn->ops->truncate    ? vn->ops->truncate(vn, size) : -ENOTSUP;
+    mutex_unlock(&vn->lock);
+    return rc;
+}
+
 int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
 {
     struct vnode *vn;
