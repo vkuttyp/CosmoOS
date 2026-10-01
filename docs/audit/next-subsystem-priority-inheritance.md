@@ -1,5 +1,14 @@
 # NEXT SUBSYSTEM — the sleeping mutex has no priority inheritance
 
+> **Built in PR #281.** `mutex.c` boosts an owner to a blocked waiter's
+> priority (and up the chain) under a single `g_pi_lock`, restores it on
+> release, and `sched_reprioritize` requeues the thread; `struct thread` gained
+> `base_prio` and the effective `priority`. The `prio-inversion` test now
+> asserts the high thread acquires the mutex before the medium thread finishes.
+> Everything below this banner is the §68 report as written for PR #280, before
+> the implementation — read its "Design", "Affected files" and "Tests" as what
+> was then planned and is now shipped.
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/priority-inheritance-probe.py`); the priority-inheritance design
 > under "Design" and the edits in "Affected files" are planned work that lands

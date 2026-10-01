@@ -3824,6 +3824,17 @@ See [docs/development.md](docs/development.md).
   TCP stream and the sink still receives the bytes once, in order (sequence
   dedup), and doubles one ARP request through the ethernet path -- two replies,
   one cache entry. (PR #279)
+- **Priority inheritance in the sleeping mutex.** A mutex owner is boosted to
+  the priority of the highest-priority thread blocked on it, and up the chain
+  of owners, so a medium-priority thread can no longer starve a high-priority
+  one that is waiting on a lock a low-priority thread holds. `struct thread`
+  gained `base_prio`; `priority` is the effective value, raised while a held
+  mutex has a higher-priority waiter and restored on release. One `g_pi_lock`
+  serialises donation and restoration as the outermost lock (run-queue and
+  wait-queue locks nest under it), and `sched_reprioritize` requeues a
+  ready/running/blocked thread, re-checking its CPU against a migration.
+  `prio-inversion` stages the classic three-thread inversion on one CPU and
+  shows the high thread now acquires before the medium thread finishes. (PR #281)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
