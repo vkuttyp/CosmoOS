@@ -610,6 +610,8 @@ bool selftest_net_arp(const char **reason)
         probe->len = probe->pkt.len = 20;
         int rc = arp_resolve(nif, nif->ip4.gateway, mac, probe);
         CHECK(rc == 0 || rc == -EINPROGRESS);
+        if (rc == 0)
+            m_freem(probe);   /* already resolved (gateway still cached): arp_resolve took no ownership */
         for (unsigned i = 0; i < 50 && !arp_lookup(nif->ip4.gateway, mac); i++)
             thread_sleep_ms(10);
         if (arp_lookup(nif->ip4.gateway, mac))
