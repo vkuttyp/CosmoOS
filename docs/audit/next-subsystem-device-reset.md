@@ -86,29 +86,39 @@ bound across the call — only the driver's hardware state is re-initialized.
 
 ### 2. The virtio reset handler
 
-`virtio_blk`'s `reset` quiesces submission (the removal unit's seam,
-`docs/audit/next-subsystem-virtio-remove-inflight.md`) and fails the
-in-flight requests `-EIO`, keeping the `blkdev` registered. Then, as `remove`
-does, it **tears the old queue down before rebuilding**: `virtio_device_reset`
-(the device drops any request still in its rings), then `virtq_free` on the
-queue — which also releases its interrupt — because `virtq_alloc` on an
-already-occupied slot 0 is `-EINVAL`, so the old queue must go first. Then it
-re-runs probe's setup: `virtio_device_init` (reset and re-negotiate the same
-features), `virtq_alloc` to rebuild the queue with the `vblk_done` callback,
-and `virtio_device_ready` for `DRIVER_OK`. (`virtio_device_init` on its own
-only resets and negotiates; the queue teardown, the re-alloc and `DRIVER_OK`
-are the driver's steps, which is why reset is largely per-driver rather than
-a single bus default — though a bus helper can wrap the init/ready bookends.)
-The `blkdev` stays registered throughout: callers keep their reference, and
-I/O submitted after the reset runs on the re-created queue.
+`virtio_blk`'s `reset` is `vblk_remove`'s teardown followed by `vblk_probe`'s
+rebuild, with the `blkdev` kept registered in between. In order
+(`docs/audit/next-subsystem-virtio-remove-inflight.md`):
+
+1. Refuse new submissions (the removal unit's barrier).
+2. `virtio_device_reset` — the device drops every request in its rings.
+3. `virtq_free` the old queue, which also releases its interrupt (and makes
+   the slot free: `virtq_alloc` on an already-occupied slot 0 is `-EINVAL`).
+4. **Only now**, with the queue and its `vblk_done` handler gone, walk the
+   slot table and complete each still-outstanding request `-EIO` exactly
+   once. Completing them *before* `virtq_free` would race the interrupt
+   handler, which could complete the same `bio` twice and unmap a slot twice
+   — the hazard `vblk_remove`'s own comment calls out.
+5. Rebuild as `probe` does: `virtio_device_init` (reset and re-negotiate the
+   same features), `virtq_alloc` (the queue with the `vblk_done` callback),
+   `virtio_device_ready` for `DRIVER_OK`.
+
+`virtio_device_init` on its own only resets and negotiates; the queue
+teardown, the completion of outstanding requests, the re-alloc and
+`DRIVER_OK` are the driver's steps, which is why reset is largely per-driver
+rather than a single bus default (a bus helper can wrap the init/ready
+bookends). The `blkdev` stays registered throughout: callers keep their
+reference, and I/O submitted after the reset runs on the re-created queue.
 
 ### 3. In-flight requests
 
-A reset, like a removal, must not leave a submitted request pointing into
-torn-down queues. It reuses the removal unit's quiesce: no new request is
-accepted once the reset starts, requests already in the device's rings are
-completed `-EIO`, and only then are the queues reset. This is the one real
-hazard and it is already solved for removal.
+A reset, like a removal, must not leave a submitted request pointing into a
+torn-down queue, nor complete one twice. It follows the removal order
+exactly: refuse new requests, `virtio_device_reset` and `virtq_free` the
+queue (releasing its interrupt), and *only then* walk the slot table and
+complete each outstanding request `-EIO` — once, with the `vblk_done` handler
+already gone. This is the one real hazard and it is already solved for
+removal.
 
 ## Affected files
 
@@ -117,7 +127,7 @@ hazard and it is already solved for removal.
 | `kernel/include/kernel/device.h` | `reset` op on `struct device_driver`; `device_reset` declaration |
 | `kernel/device/device.c` | `device_reset(dev)` — bound + has `reset` → call, else `-ENODEV`/`-EOPNOTSUPP` |
 | `drivers/virtio/virtio.c` | an optional bus helper wrapping the `virtio_device_init`/`virtio_device_ready` bookends |
-| `drivers/virtio/virtio_blk.c` | the block driver's `reset`: quiesce and fail in-flight, `virtio_device_reset` + `virtq_free` the old queue, then `virtio_device_init` + `virtq_alloc` + `virtio_device_ready`, keeping the `blkdev` |
+| `drivers/virtio/virtio_blk.c` | the block driver's `reset`: refuse new submits, `virtio_device_reset` + `virtq_free` the old queue, complete outstanding `-EIO` once, then `virtio_device_init` + `virtq_alloc` + `virtio_device_ready`, keeping the `blkdev` |
 | `docs/kernel/device/*.md` | the reset operation |
 | `README.md` | Status entry |
 
