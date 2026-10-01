@@ -609,11 +609,14 @@ static int64_t lx_statx(struct syscall_args *a)
     return copy_to_user(ubuf, &sx, sizeof(sx)) ? -EFAULT : 0;
 }
 
-static int64_t do_eventfd(uint64_t initval, unsigned flags)
+static int64_t do_eventfd(uint32_t initval, unsigned flags)
 {
     if (flags & ~(unsigned)(LX_EFD_SEMAPHORE | LX_EFD_NONBLOCK | LX_EFD_CLOEXEC))
         return -EINVAL;
     struct kobject *obj;
+    /* Linux's initval is an unsigned int: only the low 32 bits count, so a
+     * caller leaving junk in the high half of the register starts at the
+     * value it asked for, not that junk. */
     int rc = eventfd_obj_create(initval, (flags & LX_EFD_SEMAPHORE) != 0, &obj);
     if (rc)
         return rc;
@@ -627,8 +630,8 @@ static int64_t do_eventfd(uint64_t initval, unsigned flags)
     return h;
 }
 
-static int64_t lx_eventfd2(struct syscall_args *a) { return do_eventfd((uint64_t)a->a[0], (unsigned)a->a[1]); }
-static __maybe_unused int64_t lx_eventfd(struct syscall_args *a) { return do_eventfd((uint64_t)a->a[0], 0); }   /* the older call: no flags */
+static int64_t lx_eventfd2(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], (unsigned)a->a[1]); }
+static __maybe_unused int64_t lx_eventfd(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], 0); }   /* the older call: no flags */
 
 static int64_t lx_getdents64(struct syscall_args *a)
 {

@@ -4,11 +4,14 @@
 > (`tools/eventfd-probe.py`); the eventfd kobject, the `LX_eventfd2` door and
 > the `lxtest` checks described under "Design" and the edits in "Affected
 > files" are planned work that lands in the implementation PR that follows,
-> gated on CI. As committed here, `eventfd2` returns `-ENOSYS`.
+> gated on CI. As the report was committed (before PR #285), `eventfd2`
+> returned `-ENOSYS`.
 >
 > **Built in PR #285.** The implementation landed `kernel/io/eventfd.c`, wired
 > `eventfd`/`eventfd2` through `do_eventfd` in `compat/linux/syscalls.c`, and
 > added the `lxtest` checks; both arches boot PASS and `host-test` passes.
+> Every present-tense statement below describes the state the report
+> measured, before this implementation; `eventfd2` now returns a descriptor.
 
 ## Problem
 
@@ -44,7 +47,8 @@ standard boot (one debug boot, x86-64):
 LXEVENTFD: eventfd2 unimplemented -> -ENOSYS; no eventfd object
 ```
 
-The check asserts `eventfd2(0, 0)` returns `-ENOSYS` today.
+The check asserts `eventfd2(0, 0)` returned `-ENOSYS` at the report commit,
+before PR #285.
 
 ## Why it matters
 
