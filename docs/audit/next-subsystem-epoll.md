@@ -4,8 +4,14 @@
 > (`tools/epoll-probe.py`); the epoll kobject, the `epoll_create1`/`epoll_ctl`/
 > `epoll_wait`/`epoll_pwait` doors and the `lxtest` checks described under
 > "Design" and the edits in "Affected files" are planned work that lands in the
-> implementation PR that follows, gated on CI. As committed here,
-> `epoll_create1` returns `-ENOSYS`.
+> implementation PR that follows, gated on CI. As the report was committed
+> (before PR #291), `epoll_create1` returned `-ENOSYS`.
+>
+> **Built in PR #291.** The implementation landed `kernel/io/epoll.c` and the
+> `epoll_create1`/`create`/`ctl`/`wait`/`pwait` doors in
+> `compat/linux/syscalls.c`, with the `lxtest` checks; both arches boot PASS
+> and `host-test` passes. Every present-tense statement below describes the
+> state the report measured, before this implementation.
 
 ## Problem
 

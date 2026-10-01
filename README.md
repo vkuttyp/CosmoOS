@@ -3876,6 +3876,17 @@ See [docs/development.md](docs/development.md).
   the vnode `truncate` op for any fd open for writing — so a program sizes the
   memfd and `mmap`s it; the file reads, writes and maps through the existing
   page cache. (PR #289)
+- **`epoll` for the Linux personality.** The scalable readiness interface, as
+  a kobject holding an interest set (`kernel/io/epoll.c`): `epoll_wait` arms a
+  wait entry on every member's `poll_wq` and the set's own queue and reports
+  the ready ones — the async I/O ring's multi-wait with a persistent, dynamic
+  set in place of a per-call array, composing the existing readiness operations
+  with no new mechanism. `epoll_create1`/`create`/`ctl`(ADD/MOD/DEL)/`wait`/
+  `pwait` are wired (create and wait on x86-64; create1, ctl and pwait on
+  both), level-triggered, with `EPOLLONESHOT`. A finite timeout wakes the
+  waiter directly; `epoll_ctl` wakes the set so a concurrent waiter
+  re-evaluates. `EPOLLET`, nesting an epoll, and auto-remove-on-close are
+  deferred (explicit `EPOLL_CTL_DEL`). (PR #291)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
