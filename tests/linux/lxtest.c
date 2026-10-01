@@ -627,11 +627,16 @@ int main(int argc, char **argv)
         uint64_t itv = (uint64_t)cur.it_interval.tv_sec * 1000000000ull + (uint64_t)cur.it_interval.tv_nsec;
         CHECKV(rem > 0 && rem <= 1000000000ull, (long)rem);
         CHECKV(itv == 500000000ull, (long)itv);
-        __builtin_memset(&its, 0, sizeof(its));                 /* it_value == 0: disarm */
+        /* disarm with a non-zero it_interval: it_value == 0 disarms, but the
+         * interval is kept and gettime still reports it (Linux). */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_interval.tv_nsec = 250000000;          /* 250 ms, kept on disarm */
         CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
         __builtin_memset(&cur, 0, sizeof(cur));
         CHECKV(sc2(LX_timerfd_gettime, tfd, &cur) == 0, 0);
         CHECKV(cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0, 0);
+        uint64_t ditv = (uint64_t)cur.it_interval.tv_sec * 1000000000ull + (uint64_t)cur.it_interval.tv_nsec;
+        CHECKV(ditv == 250000000ull, (long)ditv);     /* interval kept across the disarm */
         tp = (struct lx_pollfd){ (int)tfd, LX_POLLIN, 0 };
         CHECKV(lx_poll_ms(&tp, 1, 0) == 0, 0);        /* disarmed: not readable */
 
@@ -678,6 +683,24 @@ int main(int argc, char **argv)
         tp = (struct lx_pollfd){ (int)afd, LX_POLLIN, 0 };
         CHECKV(lx_poll_ms(&tp, 1, 1000) == 1 && tp.revents == LX_POLLIN, tp.revents);
         CHECKV(sc1(LX_close, afd) == 0, 0);
+
+        /* absolute against CLOCK_REALTIME: the wall-clock path converts the
+         * deadline against clock_realtime_ns, so a ~40 ms-ahead REALTIME
+         * deadline becomes readable within a bound. */
+        long rfd = sc2(LX_timerfd_create, LX_CLOCK_REALTIME, LX_TFD_NONBLOCK);
+        CHECKV(rfd >= 3, rfd);
+        struct lx_timespec rnow;
+        CHECKV(sc2(LX_clock_gettime, LX_CLOCK_REALTIME, &rnow) == 0, 0);
+        uint64_t rat = (uint64_t)rnow.tv_sec * 1000000000ull + (uint64_t)rnow.tv_nsec + 40000000;
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = (int64_t)(rat / 1000000000ull);
+        its.it_value.tv_nsec = (int64_t)(rat % 1000000000ull);
+        CHECKV(sc4(LX_timerfd_settime, rfd, LX_TFD_TIMER_ABSTIME, &its, 0) == 0, 0);
+        tp = (struct lx_pollfd){ (int)rfd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 2000) == 1 && tp.revents == LX_POLLIN, tp.revents);
+        tc = 0;
+        CHECKV(sc3(LX_read, rfd, &tc, 8) == 8 && tc >= 1, (long)tc);
+        CHECKV(sc1(LX_close, rfd) == 0, 0);
 
         /* errors: a bad clockid, and a settime on a non-timerfd fd. */
         CHECKV(sc2(LX_timerfd_create, 99, 0) == -22, 0);   /* -EINVAL */

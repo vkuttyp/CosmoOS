@@ -688,7 +688,9 @@ static int64_t do_timerfd_settime(int fd, unsigned flags, uint64_t unew, uint64_
         initial_ns = value_ns;
     }
     uint64_t old_rem = 0, old_int = 0;
-    timer_obj_settime(obj, initial_ns, value_ns == 0 ? 0 : interval_ns, &old_rem, &old_int);
+    /* Pass the interval even when disarming: Linux keeps it, and
+     * timerfd_gettime reports it after a disarm. */
+    timer_obj_settime(obj, initial_ns, interval_ns, &old_rem, &old_int);
     kobject_put(obj);
     if (uold) {
         if (put_timespec(uold + offsetof(struct lx_itimerspec, it_value), old_rem) ||
