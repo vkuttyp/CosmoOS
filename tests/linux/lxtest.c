@@ -545,6 +545,58 @@ int main(int argc, char **argv)
     /* Invalid requests are rejected (-EINVAL) before the file is touched. */
     CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxtest.txt", 0x6000, 0, &sxc) == -22, 0);       /* both sync flags */
     CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxtest.txt", 0, 0x80000000L, &sxc) == -22, 0);  /* reserved mask bit */
+    /* eventfd: a counter fd, readable while non-zero. */
+    {
+        uint64_t egot = 0, ev = 5;
+        long efd = sc2(LX_eventfd2, 0, 0);
+        CHECKV(efd >= 3, efd);
+        struct lx_pollfd epf = { (int)efd, LX_POLLIN, 0 };
+        CHECKV(sc3(LX_write, efd, &ev, 8) == 8, 0);
+        CHECKV(lx_poll_ms(&epf, 1, 1000) == 1 && epf.revents == LX_POLLIN, epf.revents);
+        CHECKV(sc3(LX_read, efd, &egot, 8) == 8 && egot == 5, (long)egot);
+        epf.revents = 0;
+        CHECKV(lx_poll_ms(&epf, 1, 0) == 0, 0);          /* drained: no longer readable */
+        CHECKV(sc1(LX_close, efd) == 0, 0);
+        /* EFD_SEMAPHORE: three reads of 1, then empty. */
+        long sfd = sc2(LX_eventfd2, 3, LX_EFD_SEMAPHORE);
+        CHECKV(sfd >= 3, sfd);
+        for (int k = 0; k < 3; k++)
+            CHECKV(sc3(LX_read, sfd, &egot, 8) == 8 && egot == 1, (long)egot);
+        struct lx_pollfd spf = { (int)sfd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&spf, 1, 0) == 0, 0);
+        CHECKV(sc1(LX_close, sfd) == 0, 0);
+        /* EFD_NONBLOCK: read on empty is EAGAIN; the all-ones write is EINVAL. */
+        long nfd = sc2(LX_eventfd2, 0, LX_EFD_NONBLOCK);
+        CHECKV(nfd >= 3, nfd);
+        CHECKV(sc3(LX_read, nfd, &egot, 8) == -11, 0);   /* -EAGAIN */
+        uint64_t emax = (uint64_t)-1;
+        CHECKV(sc3(LX_write, nfd, &emax, 8) == -22, 0);  /* -EINVAL */
+        CHECKV(sc1(LX_close, nfd) == 0, 0);
+        /* Near the ceiling: the counter saturates at UINT64_MAX-1. A write
+         * that would carry it past that is refused (-EAGAIN here, a block
+         * otherwise); writable readiness tracks the room, and a read makes
+         * the refused write fit. */
+        long ffd = sc2(LX_eventfd2, 0, LX_EFD_NONBLOCK);
+        CHECKV(ffd >= 3, ffd);
+        uint64_t near = (uint64_t)-1 - 2;                /* leaves room for exactly 1 */
+        CHECKV(sc3(LX_write, ffd, &near, 8) == 8, 0);
+        struct lx_pollfd fpf = { (int)ffd, LX_POLLOUT, 0 };
+        CHECKV(lx_poll_ms(&fpf, 1, 0) == 1 && (fpf.revents & LX_POLLOUT), fpf.revents);
+        uint64_t two = 2, one = 1;
+        CHECKV(sc3(LX_write, ffd, &two, 8) == -11, 0);   /* -EAGAIN: no room for 2 */
+        CHECKV(sc3(LX_write, ffd, &one, 8) == 8, 0);     /* 1 fits: now at the ceiling */
+        fpf.revents = 0;
+        CHECKV(lx_poll_ms(&fpf, 1, 0) == 0, 0);          /* full: no longer writable */
+        CHECKV(sc3(LX_read, ffd, &egot, 8) == 8 && egot == (uint64_t)-1 - 1, (long)egot);
+        CHECKV(sc3(LX_write, ffd, &two, 8) == 8, 0);     /* the read made room: the write proceeds */
+        CHECKV(sc1(LX_close, ffd) == 0, 0);
+#ifdef LX_eventfd
+        /* the older x86-64 number: an initial value, no flags. */
+        long ofd = sc1(LX_eventfd, 7);
+        CHECKV(ofd >= 3 && sc3(LX_read, ofd, &egot, 8) == 8 && egot == 7, (long)egot);
+        CHECKV(sc1(LX_close, ofd) == 0, 0);
+#endif
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

@@ -3844,6 +3844,18 @@ See [docs/development.md](docs/development.md).
   not record, so a caller is told they are absent rather than handed a value
   the kernel never kept. `lxtest` checks the fields against `fstat` on the
   same file. (PR #283)
+- **`eventfd(2)` for the Linux personality.** A `uint64` counter and a wait
+  queue as a kobject on the readiness template (`kernel/io/eventfd.c`, the
+  timer object is the model): a `write` adds its 8-byte value and wakes
+  readers, a `read` drains the whole count to zero — or returns 1 and
+  decrements in semaphore mode — and wakes writers, with the all-ones write
+  rejected and an overflowing write blocked, as on Linux. Carrying
+  `read`/`write`/`ready`/`poll_wq`, it serves `poll`/`select` and blocking
+  read/write; readiness and reads also ride the I/O ring, though a ring write
+  of an all-or-nothing counter is not spin-safe and no eventfd door onto the
+  native ring exists today. `eventfd2` is wired on both arches and the
+  older `eventfd` on x86-64; `EFD_SEMAPHORE`/`EFD_NONBLOCK` are honoured and
+  `EFD_CLOEXEC` is a no-op under the spawn model. (PR #285)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

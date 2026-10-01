@@ -4,7 +4,14 @@
 > (`tools/eventfd-probe.py`); the eventfd kobject, the `LX_eventfd2` door and
 > the `lxtest` checks described under "Design" and the edits in "Affected
 > files" are planned work that lands in the implementation PR that follows,
-> gated on CI. As committed here, `eventfd2` returns `-ENOSYS`.
+> gated on CI. As the report was committed (before PR #285), `eventfd2`
+> returned `-ENOSYS`.
+>
+> **Built in PR #285.** The implementation landed `kernel/io/eventfd.c`, wired
+> `eventfd`/`eventfd2` through `do_eventfd` in `compat/linux/syscalls.c`, and
+> added the `lxtest` checks; both arches boot PASS and `host-test` passes.
+> Every present-tense statement below describes the state the report
+> measured, before this implementation; `eventfd2` now returns a descriptor.
 
 ## Problem
 
@@ -40,7 +47,8 @@ standard boot (one debug boot, x86-64):
 LXEVENTFD: eventfd2 unimplemented -> -ENOSYS; no eventfd object
 ```
 
-The check asserts `eventfd2(0, 0)` returns `-ENOSYS` today.
+The check asserts `eventfd2(0, 0)` returned `-ENOSYS` at the report commit,
+before PR #285.
 
 ## Why it matters
 
@@ -56,7 +64,7 @@ The check asserts `eventfd2(0, 0)` returns `-ENOSYS` today.
 
 | piece | where | what it does |
 |---|---|---|
-| readiness kobject | `struct kobject_io_type` (`object.h`): `read`, `write`, `ready`, `poll_wq`, `set_nonblock` | a kobject that serves `poll`/`select`, blocking `read`/`write`, and the I/O ring, with per-object non-blocking mode |
+| readiness kobject | `struct kobject_io_type` (`object.h`): `read`, `write`, `ready`, `poll_wq`, `set_nonblock` | a kobject that serves `poll`/`select` and blocking `read`/`write`, with per-object non-blocking mode; readiness and reads also ride the I/O ring, though a ring *write* is not spin-safe for an all-or-nothing counter and the ring has no eventfd door today (see the note in `eventfd.c`) |
 | the template | `timerobj.c` (`timer_obj_create`) | a counter-bearing kobject: `read` returns the count and resets, `ready` is `COSMO_IO_READABLE` while non-zero, `poll_wq` is its wait queue, `release` is synchronous |
 | handle install | `handle_install(&proc->handles, obj, rights)` | wraps a fresh kobject as an fd (as `lx_openat`/`lx_dup` do) |
 | dispatch | `linux_table[LX_NR_MAX]`; unlisted → `lx_unknown` | `eventfd2` is unlisted → `-ENOSYS` |
@@ -156,7 +164,7 @@ None.
 - **A fresh object type, not the timerobj template.** The io-type
   (`read`/`write`/`ready`/`poll_wq`/`set_nonblock`) is exactly eventfd's
   surface; reusing it is why this is small and gets `poll`/`select` and the
-  I/O ring for free.
+  ring's readiness/read paths for free.
 - **Only `eventfd2`, ignoring the old `eventfd` number.** On x86-64 the
   older `eventfd` (284) is a distinct number a program can still call, so it
   gets its own entry routed to the same handler with `flags == 0`; `eventfd2`

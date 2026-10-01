@@ -77,6 +77,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/futex.c \
 	kernel/io/aio.c \
 	kernel/io/timerobj.c \
+	kernel/io/eventfd.c \
 	kernel/io/poll.c \
 	kernel/io/polltest.c \
 	compat/linux/convert.c \
