@@ -568,6 +568,10 @@ static int64_t lx_statx(struct syscall_args *a)
     unsigned flags = (unsigned)a->a[2];
     uint32_t mask = (uint32_t)a->a[3];
     uint64_t ubuf = a->a[4];
+    /* Linux rejects an impossible sync request (both FORCE and DONT) and any
+     * reserved mask bit before touching the file. */
+    if ((flags & LX_AT_STATX_SYNC_TYPE) == LX_AT_STATX_SYNC_TYPE || (mask & LX_STATX__RESERVED))
+        return -EINVAL;
     char path[VFS_PATH_MAX];
     int rc = strncpy_from_user(path, a->a[1], VFS_PATH_MAX);
     if (rc < 0)
@@ -576,7 +580,13 @@ static int64_t lx_statx(struct syscall_args *a)
     if (path[0] == '\0') {
         if (!(flags & LX_AT_EMPTY_PATH))
             return -ENOENT;
-        rc = syscall_handle_stat((int)a->a[0], &st);   /* the fd itself */
+        if ((int)a->a[0] == LX_AT_FDCWD) {
+            struct vnode *cwd = process_cwd_get();   /* empty path + AT_FDCWD: the current directory */
+            rc = vfs_stat(cwd, ".", &st);
+            vnode_put(cwd);
+        } else {
+            rc = syscall_handle_stat((int)a->a[0], &st);   /* the fd itself */
+        }
     } else {
         struct vnode *start;
         rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);

@@ -538,6 +538,13 @@ int main(int argc, char **argv)
     CHECKV(sc5(LX_statx, sxfd, "", LX_AT_EMPTY_PATH, LX_STATX_BASIC_STATS, &sxe) == 0
            && sxe.stx_size == 22 && sxe.stx_ino == sx.stx_ino, (long)sxe.stx_size);
     CHECKV(sc1(LX_close, sxfd) == 0, 0);
+    /* AT_FDCWD + empty path statx the current directory. */
+    struct lx_statx sxc;
+    CHECKV(sc5(LX_statx, LX_AT_FDCWD, "", LX_AT_EMPTY_PATH, LX_STATX_BASIC_STATS, &sxc) == 0
+           && (sxc.stx_mode & LX_S_IFMT) == LX_S_IFDIR, (long)sxc.stx_mode);
+    /* Invalid requests are rejected (-EINVAL) before the file is touched. */
+    CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxtest.txt", 0x6000, 0, &sxc) == -22, 0);       /* both sync flags */
+    CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxtest.txt", 0, 0x80000000L, &sxc) == -22, 0);  /* reserved mask bit */
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
@@ -561,6 +568,13 @@ int main(int argc, char **argv)
         CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFREG && ls.st_size == 22, ls.st_mode);
         CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxlink", &ls, LX_AT_SYMLINK_NOFOLLOW) == 0, 0);
         CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFLNK && ls.st_size == 15, ls.st_mode);
+        /* statx follows the link by default and stats the link itself with
+         * AT_SYMLINK_NOFOLLOW, like newfstatat. */
+        struct lx_statx lsx;
+        CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxlink", 0, LX_STATX_BASIC_STATS, &lsx) == 0
+               && (lsx.stx_mode & LX_S_IFMT) == LX_S_IFREG && lsx.stx_size == 22, (long)lsx.stx_mode);
+        CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxlink", LX_AT_SYMLINK_NOFOLLOW, LX_STATX_BASIC_STATS, &lsx) == 0
+               && (lsx.stx_mode & LX_S_IFMT) == LX_S_IFLNK && lsx.stx_size == 15, (long)lsx.stx_mode);
 #ifdef LX_lstat
         CHECKV(sc2(LX_lstat, "/tmp/lxlink", &ls) == 0, 0);
         CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFLNK, ls.st_mode);

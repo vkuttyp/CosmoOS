@@ -350,6 +350,8 @@ struct lx_statx {
 #define LX_STATX_BLOCKS 0x0400u
 #define LX_STATX_BTIME  0x0800u
 #define LX_STATX_BASIC_STATS 0x07ffu
+#define LX_STATX__RESERVED   0x80000000u   /* a reserved mask bit: EINVAL */
+#define LX_AT_STATX_SYNC_TYPE 0x6000        /* FORCE_SYNC | DONT_SYNC; both set is EINVAL */
 /* The fields this kernel can supply: the basic set minus the access time,
  * which `struct cosmo_stat` does not record (no btime either). */
 #define LX_STATX_SUPPORTED (LX_STATX_TYPE | LX_STATX_MODE | LX_STATX_NLINK | LX_STATX_UID | \
