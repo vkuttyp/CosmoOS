@@ -88,8 +88,13 @@ wrapped in a `struct kobject_io_type`:
 `semaphore = (flags & EFD_SEMAPHORE)`, installs it as an fd with read and
 write rights, sets the object's non-blocking mode from `EFD_NONBLOCK`, and
 marks the handle close-on-exec from `EFD_CLOEXEC`. An unknown flag bit is
-`-EINVAL`. The older `eventfd(2)` is `eventfd2` with `flags == 0`; this kernel
-implements the `eventfd2` number the current ABI uses.
+`-EINVAL`.
+
+x86-64 also keeps the **older `eventfd`** (number 284), which takes only an
+initial value and no flags; a program can call it directly, so it gets its own
+table entry `LX_eventfd` that calls the same handler with `flags == 0`.
+AArch64's asm-generic table has only `eventfd2` (19), no separate `eventfd`.
+Both live numbers are therefore covered.
 
 ### 3. Lifetime
 
@@ -103,7 +108,7 @@ refcount already handles.
 | file | change |
 |---|---|
 | `kernel/io/eventfd.c`, a header, `kernel/kernel.mk` | the eventfd kobject |
-| `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | `LX_eventfd2` (290 / 19) |
+| `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | `LX_eventfd2` (290 / 19) and `LX_eventfd` (x86-64 284) |
 | `compat/linux/linux_abi.h` | `EFD_SEMAPHORE`/`EFD_NONBLOCK`/`EFD_CLOEXEC` |
 | `compat/linux/syscalls.c` | `lx_eventfd2` + `[LX_eventfd2]` in the table |
 | `tests/linux/lxtest.c` | the eventfd checks |
@@ -152,6 +157,7 @@ None.
   (`read`/`write`/`ready`/`poll_wq`/`set_nonblock`) is exactly eventfd's
   surface; reusing it is why this is small and gets `poll`/`select` and the
   I/O ring for free.
-- **Only `eventfd(2)`, not `eventfd2`.** Current glibc calls `eventfd2` with
-  flags; implementing that number covers both, and `EFD_*` is the point of the
-  modern call.
+- **Only `eventfd2`, ignoring the old `eventfd` number.** On x86-64 the
+  older `eventfd` (284) is a distinct number a program can still call, so it
+  gets its own entry routed to the same handler with `flags == 0`; `eventfd2`
+  alone would leave 284 returning `-ENOSYS`.

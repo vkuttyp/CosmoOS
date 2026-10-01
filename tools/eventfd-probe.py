@@ -39,9 +39,15 @@ NEW_ARM = OLD_ARM + "#define LX_eventfd2 19\n"
 
 OLD_TEST = '    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxtest.txt", &st, 0) == 0 && st.st_size == 22, 0);\n'
 NEW_TEST = OLD_TEST + """    /* LXEVENTFD probe (tools/eventfd-probe.py): eventfd2 is not implemented,
-     * so the dispatcher's lx_unknown answers -ENOSYS. */
-    CHECKV(sc2(LX_eventfd2, 0, 0) == -38, 0);   /* -ENOSYS */
-    lx_puts("LXEVENTFD: eventfd2 unimplemented -> -ENOSYS; no eventfd object\\n");
+     * so the dispatcher's lx_unknown answers -ENOSYS. The marker prints only
+     * when the syscall really returned -ENOSYS, so grepping it cannot show a
+     * false result after a failed check. */
+    {
+        long efdrc = sc2(LX_eventfd2, 0, 0);
+        CHECKV(efdrc == -38, efdrc);   /* -ENOSYS */
+        if (efdrc == -38)
+            lx_puts("LXEVENTFD: eventfd2 unimplemented -> -ENOSYS; no eventfd object\\n");
+    }
 """
 
 
