@@ -585,7 +585,9 @@ static int64_t lx_statx(struct syscall_args *a)
              * vnode directly -- a "." lookup would demand search permission on
              * the cwd, which an empty-path stat must not require. */
             struct vnode *cwd = process_cwd_get();
+            mutex_lock(&cwd->lock);   /* vnode_stat reads several fields; the lock the other stat paths hold keeps them one moment's values */
             vnode_stat(cwd, &st);
+            mutex_unlock(&cwd->lock);
             vnode_put(cwd);
             rc = 0;
         } else {
