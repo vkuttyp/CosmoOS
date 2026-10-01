@@ -1,5 +1,14 @@
 # NEXT SUBSYSTEM — the Linux personality has no statx
 
+> **Built in PR #283.** `LX_statx` (332 / 291) + `lx_statx`, which resolves
+> exactly as `lx_newfstatat` does and marshals a 256-byte `struct statx`
+> through `lx_statx_from_native`; `stx_mask` reports the supported set
+> (type/mode/nlink/uid/gid/ino/size/blocks/blksize + mtime/ctime) and omits
+> `STATX_ATIME`/`STATX_BTIME`, which the kernel does not keep. The rest of this
+> document is the §68 report as written for PR #282, before the
+> implementation — read its "Design", "Affected files" and "Tests" in that
+> light.
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/statx-probe.py`); `LX_statx`, the `struct statx` marshaller and the
 > `lx_statx` handler described under "Design" and the edits in "Affected
