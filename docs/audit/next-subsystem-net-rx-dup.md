@@ -116,10 +116,16 @@ knob:
 - **Interrupt context.** `faultinject_should_fail` returns false when
   `irq_depth != 0` (the framework's deliberate rule: fault injection describes
   thread work, and allocating a copy in a handler has no caller to report to).
-  So the duplication fires wherever `rx_common` runs in **thread** context —
-  the loopback path (`lo_transmit` runs on the sending thread), and any driver
-  that defers receive to a thread — and is a no-op in a driver's interrupt
-  handler, like every other kind. The test drives it over loopback.
+  So the duplication fires only where `rx_common` runs in **thread** context.
+  The loopback path is one (`lo_transmit` runs on the sending thread), and the
+  test drives it there. The two hardware drivers are **not**: `e1000e` calls
+  `netif_rx` straight from `e1000e_irq`, and `virtio-net`'s `vnet_rx_done` is a
+  virtqueue interrupt callback, so the knob is a no-op on their receive paths —
+  the same limitation every fault-injection kind has. This unit does not add a
+  thread-deferred (NAPI-style) receive path, so it covers thread-context
+  delivery only; the stack code under test (`input_one` → `ipv4_input` →
+  `tcp_input`, and `arp_input`) is interface-agnostic once `rx_common` has
+  handed the frame up, so loopback exercises the dedup logic in full.
 - **Counting.** `seen`/`hits` on the rule count eligible frames and injected
   duplicates, so a test can assert that duplicates were *actually* delivered
   (`hits > 0`) and is not vacuous.
