@@ -521,6 +521,23 @@ int main(int argc, char **argv)
     CHECKV(sc1(LX_close, fd) == 0, 0);
     CHECKV(sc1(LX_close, fd) == -9, 0);                        /* EBADF */
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxtest.txt", &st, 0) == 0 && st.st_size == 22, 0);
+    /* statx returns the same fields as fstat/newfstatat for the file, with a
+     * mask that reports exactly what the kernel supplies -- and not atime or
+     * btime, which it does not record. */
+    struct lx_statx sx;
+    CHECKV(sizeof(struct lx_statx) == LX_STATX_BYTES, (long)sizeof(struct lx_statx));
+    CHECKV(sc5(LX_statx, LX_AT_FDCWD, "/tmp/lxtest.txt", 0, LX_STATX_BASIC_STATS, &sx) == 0, 0);
+    CHECKV(sx.stx_size == (uint64_t)st.st_size && sx.stx_nlink == st.st_nlink
+           && sx.stx_mode == (uint16_t)st.st_mode, (long)sx.stx_size);
+    CHECKV((sx.stx_mask & LX_STATX_SUPPORTED) == LX_STATX_SUPPORTED
+           && (sx.stx_mask & (LX_STATX_ATIME | LX_STATX_BTIME)) == 0, (long)sx.stx_mask);
+    /* The AT_EMPTY_PATH form on an open fd matches. */
+    long sxfd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxtest.txt", 0, 0);
+    CHECKV(sxfd >= 3, sxfd);
+    struct lx_statx sxe;
+    CHECKV(sc5(LX_statx, sxfd, "", LX_AT_EMPTY_PATH, LX_STATX_BASIC_STATS, &sxe) == 0
+           && sxe.stx_size == 22 && sxe.stx_ino == sx.stx_ino, (long)sxe.stx_size);
+    CHECKV(sc1(LX_close, sxfd) == 0, 0);
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

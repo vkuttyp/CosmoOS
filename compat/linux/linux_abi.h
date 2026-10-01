@@ -302,6 +302,60 @@ struct lx_stat {                 /* AArch64 (asm-generic) struct stat: 128 bytes
 #define LX_STAT_SIZE 128
 #endif
 
+/* statx(2): one 256-byte layout on both architectures (a modern syscall with
+ * a fixed struct, unlike the per-arch struct stat above). */
+struct lx_statx_timestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+};
+struct lx_statx {
+    uint32_t stx_mask;         /* which fields below are filled */
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct lx_statx_timestamp stx_atime;
+    struct lx_statx_timestamp stx_btime;
+    struct lx_statx_timestamp stx_ctime;
+    struct lx_statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t __spare3[12];
+};
+#define LX_STATX_BYTES 256
+
+#define LX_STATX_TYPE   0x0001u
+#define LX_STATX_MODE   0x0002u
+#define LX_STATX_NLINK  0x0004u
+#define LX_STATX_UID    0x0008u
+#define LX_STATX_GID    0x0010u
+#define LX_STATX_ATIME  0x0020u
+#define LX_STATX_MTIME  0x0040u
+#define LX_STATX_CTIME  0x0080u
+#define LX_STATX_INO    0x0100u
+#define LX_STATX_SIZE   0x0200u
+#define LX_STATX_BLOCKS 0x0400u
+#define LX_STATX_BTIME  0x0800u
+#define LX_STATX_BASIC_STATS 0x07ffu
+/* The fields this kernel can supply: the basic set minus the access time,
+ * which `struct cosmo_stat` does not record (no btime either). */
+#define LX_STATX_SUPPORTED (LX_STATX_TYPE | LX_STATX_MODE | LX_STATX_NLINK | LX_STATX_UID | \
+                            LX_STATX_GID | LX_STATX_MTIME | LX_STATX_CTIME | LX_STATX_INO | \
+                            LX_STATX_SIZE | LX_STATX_BLOCKS)
+
 struct lx_timespec {
     int64_t tv_sec;
     int64_t tv_nsec;
