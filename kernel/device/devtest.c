@@ -1768,9 +1768,9 @@ bool selftest_virtio_remove_inflight(const char **reason)
     return r;
 }
 
-#if CONFIG_DEBUG
 static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
 
+#if CONFIG_DEBUG
 struct rst_inflight { volatile int rc; volatile int n; };
 static void rst_inflight_done(struct bio *bio)
 {
@@ -1785,28 +1785,31 @@ static void rst_inflight_done(struct bio *bio)
  * replaces them (docs/audit/next-subsystem-device-reset.md). */
 bool selftest_device_reset(const char **reason)
 {
-#if !CONFIG_DEBUG
-    (void)reason;
-    kinfo("selftest: device-reset: no test hooks in this build; skipping");
-    return true;
-#else
-    /* Device-model errors, no hardware: a bound device whose driver has no
-     * reset is -EOPNOTSUPP; an unbound device is -ENODEV. */
+    /* Device-model error paths, in every build (no debug hooks): a bound
+     * device whose driver has no reset is -EOPNOTSUPP; a device that never
+     * bound (no matching driver) is -ENODEV. */
     ensure_fake_bus();
-    static struct device fd;
+    static struct device fb, fu;
     static struct device_driver fdrv = { .name = "reset-fake", .match_data = "resetfake",
                                          .probe = reset_fake_probe };
     fdrv.bus = &fake_bus;
-    device_setup(&fd, &fake_bus, NULL, "resetfake");
-    fd.release = device_release_static;
+    device_setup(&fb, &fake_bus, NULL, "resetfake");         /* matches fdrv -> bound */
+    fb.release = device_release_static;
+    device_setup(&fu, &fake_bus, NULL, "reset-unbound");     /* no matching driver -> unbound */
+    fu.release = device_release_static;
     CHECK(driver_register(&fdrv) == 0);
-    CHECK(device_register(&fd) == 0 && fd.state == DEV_BOUND);
-    CHECK(device_reset(&fd) == -EOPNOTSUPP);   /* bound, but the driver has no reset */
-    device_test_unbind(&fd);
-    CHECK(device_reset(&fd) == -ENODEV);        /* unbound */
-    device_unregister(&fd);
+    CHECK(device_register(&fb) == 0 && fb.state == DEV_BOUND);
+    CHECK(device_register(&fu) == 0 && fu.state == DEV_UNBOUND);
+    CHECK(device_reset(&fb) == -EOPNOTSUPP);   /* bound, but the driver has no reset */
+    CHECK(device_reset(&fu) == -ENODEV);        /* never bound */
+    device_unregister(&fb);
+    device_unregister(&fu);
     driver_unregister(&fdrv);
 
+#if !CONFIG_DEBUG
+    kinfo("selftest: device-reset: error paths ok; the in-place reset needs debug hooks, skipped");
+    return true;
+#else
     /* The real thing: a bound virtio-blk reset in place. The SAME blkdev stays
      * registered and usable -- a read after the reset returns the pattern
      * written before it -- which a remove+reprobe could not do, the old disk
