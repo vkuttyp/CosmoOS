@@ -164,7 +164,7 @@ None.
 - **A fresh object type, not the timerobj template.** The io-type
   (`read`/`write`/`ready`/`poll_wq`/`set_nonblock`) is exactly eventfd's
   surface; reusing it is why this is small and gets `poll`/`select` and the
-  I/O ring for free.
+  ring's readiness/read paths for free.
 - **Only `eventfd2`, ignoring the old `eventfd` number.** On x86-64 the
   older `eventfd` (284) is a distinct number a program can still call, so it
   gets its own entry routed to the same handler with `flags == 0`; `eventfd2`

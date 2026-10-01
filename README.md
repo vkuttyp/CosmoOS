@@ -3850,8 +3850,10 @@ See [docs/development.md](docs/development.md).
   readers, a `read` drains the whole count to zero — or returns 1 and
   decrements in semaphore mode — and wakes writers, with the all-ones write
   rejected and an overflowing write blocked, as on Linux. Carrying
-  `read`/`write`/`ready`/`poll_wq`, it serves `poll`/`select`, blocking I/O
-  and the I/O ring with no new op. `eventfd2` is wired on both arches and the
+  `read`/`write`/`ready`/`poll_wq`, it serves `poll`/`select` and blocking
+  read/write; readiness and reads also ride the I/O ring, though a ring write
+  of an all-or-nothing counter is not spin-safe and no eventfd door onto the
+  native ring exists today. `eventfd2` is wired on both arches and the
   older `eventfd` on x86-64; `EFD_SEMAPHORE`/`EFD_NONBLOCK` are honoured and
   `EFD_CLOEXEC` is a no-op under the spawn model. (PR #285)
 - **Devices that can be waited on: readiness for the terminal and the
