@@ -1768,6 +1768,7 @@ bool selftest_virtio_remove_inflight(const char **reason)
     return r;
 }
 
+#if CONFIG_DEBUG
 static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
 
 struct rst_inflight { volatile int rc; volatile int n; };
@@ -1777,12 +1778,18 @@ static void rst_inflight_done(struct bio *bio)
     s->rc = bio->status;
     __atomic_fetch_add(&s->n, 1, __ATOMIC_ACQ_REL);
 }
+#endif
 
 /* A device reset re-initializes a bound device in place -- the device stays
  * bound and its higher-level object registered, unlike a remove+reprobe which
  * replaces them (docs/audit/next-subsystem-device-reset.md). */
 bool selftest_device_reset(const char **reason)
 {
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: device-reset: no test hooks in this build; skipping");
+    return true;
+#else
     /* Device-model errors, no hardware: a bound device whose driver has no
      * reset is -EOPNOTSUPP; an unbound device is -ENODEV. */
     ensure_fake_bus();
@@ -1851,6 +1858,7 @@ bool selftest_device_reset(const char **reason)
     }
     kinfo("selftest: device-reset: virtio-blk reset in place; the same disk stayed registered and its data intact");
     return true;
+#endif
 }
 
 
