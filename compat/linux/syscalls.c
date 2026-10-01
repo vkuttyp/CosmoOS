@@ -581,9 +581,13 @@ static int64_t lx_statx(struct syscall_args *a)
         if (!(flags & LX_AT_EMPTY_PATH))
             return -ENOENT;
         if ((int)a->a[0] == LX_AT_FDCWD) {
-            struct vnode *cwd = process_cwd_get();   /* empty path + AT_FDCWD: the current directory */
-            rc = vfs_stat(cwd, ".", &st);
+            /* Empty path + AT_FDCWD: the current directory itself. Stat the
+             * vnode directly -- a "." lookup would demand search permission on
+             * the cwd, which an empty-path stat must not require. */
+            struct vnode *cwd = process_cwd_get();
+            vnode_stat(cwd, &st);
             vnode_put(cwd);
+            rc = 0;
         } else {
             rc = syscall_handle_stat((int)a->a[0], &st);   /* the fd itself */
         }
