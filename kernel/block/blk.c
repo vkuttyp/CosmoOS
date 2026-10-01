@@ -539,17 +539,25 @@ static void drain_pending(struct blkdev *bd)
 
 int blk_reset(struct blkdev *bd, int (*reinit)(struct blkdev *bd))
 {
-    /* Pause submissions into the pending queue (the same `recovering` gate
-     * the timeout path uses) and drain the submit path (as `blk_unregister`
-     * does), so no bio reaches the driver while it tears the queue down. The
-     * disk stays registered; `reinit` re-initializes the hardware and
-     * completes whatever was in flight. */
+    /* Hold g_blk_lock across the whole reset, as the timeout worker holds it
+     * across its recovery: both gate `bd` through `recovering`, so this is
+     * what keeps the two recovery paths from reopening each other's gate (a
+     * timeout clearing `recovering` while the queue is torn down). The lock
+     * order is model_lock -> g_blk_lock, the same as device_register ->
+     * blk_register; the submit path takes neither, so the drain below still
+     * makes progress. */
+    mutex_lock(&g_blk_lock);
+    /* Pause submissions into the pending queue and drain the submit path (as
+     * blk_unregister does), so no bio reaches the driver while it tears the
+     * queue down. The disk stays registered; reinit re-initializes the
+     * hardware and completes whatever was in flight. */
     __atomic_store_n(&bd->recovering, true, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0)
         sched_yield();
     int rc = reinit(bd);
     __atomic_store_n(&bd->recovering, false, __ATOMIC_RELEASE);
     drain_pending(bd);   /* resubmit whatever waited, onto the rebuilt queue */
+    mutex_unlock(&g_blk_lock);
     return rc;
 }
 

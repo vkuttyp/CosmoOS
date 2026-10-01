@@ -1,5 +1,11 @@
 # NEXT SUBSYSTEM — the device model has no generic reset operation
 
+> **Built in PR #277.** `device_reset(dev)` + a `reset` op on
+> `struct device_driver`; virtio-blk resets in place via `blk_reset`. The rest
+> of this document is the §68 report as written before the implementation —
+> its "Design", "Affected files" and "Tests" describe what was then planned
+> and is now shipped.
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/device-reset-probe.py`); the `reset` operation and the virtio
 > handler described under "Design" and the edits in "Affected files" are

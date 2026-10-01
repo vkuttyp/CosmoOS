@@ -82,12 +82,13 @@ struct device_driver {
     const void *match_data;     /* bus-specific id table */
     int (*probe)(struct device *dev);
     void (*remove)(struct device *dev);
-    /* Optional. Re-initialize a bound device in place, keeping it bound and
-     * its higher-level object registered. NULL means the device cannot be
-     * reset (device_reset returns -EOPNOTSUPP). */
-    int (*reset)(struct device *dev);
     struct list_node bus_link;
     unsigned bound;
+    /* Optional. Re-initialize a bound device in place, keeping it bound and
+     * its higher-level object registered. NULL means the device cannot be
+     * reset (device_reset returns -EOPNOTSUPP). Appended last so the fields
+     * above keep their offsets; the module ABI version is bumped regardless. */
+    int (*reset)(struct device *dev);
 };
 
 void device_init(void);

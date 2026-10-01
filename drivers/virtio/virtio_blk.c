@@ -496,8 +496,10 @@ static int vblk_reinit(struct blkdev *bd)
     struct virtio_device *vdev = vb->vdev;
 
     virtio_device_reset(vdev);   /* the device drops every in-flight request */
-    virtq_free(vb->vq);          /* release the queue and its interrupt first */
-    vb->vq = NULL;
+    if (vb->vq) {                /* NULL when a previous reset failed after freeing it */
+        virtq_free(vb->vq);      /* release the queue and its interrupt first */
+        vb->vq = NULL;
+    }
     for (unsigned i = 0; i < vb->nr_slots; i++) {
         arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
         struct bio *bio = vb->inflight[i];
@@ -513,17 +515,24 @@ static int vblk_reinit(struct blkdev *bd)
     int rc = virtio_device_init(vdev, VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_RO | VIRTIO_BLK_F_BLK_SIZE |
                                           VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_SIZE_MAX);
     if (rc)
-        return rc;
+        goto fail;
     uint64_t capacity = virtio_read_config64(vdev, CFG_CAPACITY);
     uint32_t blk_size = virtio_has_feature(vdev, VIRTIO_BLK_F_BLK_SIZE) ? virtio_read_config32(vdev, CFG_BLK_SIZE)
                                                                        : 512;
-    if (capacity == 0 || blk_size < 512 || (blk_size & (blk_size - 1)) != 0 || blk_size > 4096)
-        return -EIO;
+    if (capacity == 0 || blk_size < 512 || (blk_size & (blk_size - 1)) != 0 || blk_size > 4096) {
+        rc = -EIO;
+        goto fail;
+    }
     /* A reset re-reads the geometry but must not change the disk under its
-     * callers: an incompatible change fails the reset, leaving it not-ready. */
-    if (blk_size != bd->sector_size || capacity / (blk_size / 512) != bd->capacity) {
+     * callers: an incompatible change -- capacity, block size, or the
+     * read-only flag (a parked write must not slip onto a now-read-only
+     * device) -- fails the reset, leaving it not-ready. */
+    bool read_only = virtio_has_feature(vdev, VIRTIO_BLK_F_RO);
+    if (blk_size != bd->sector_size || capacity / (blk_size / 512) != bd->capacity ||
+        read_only != bd->read_only) {
         kerror("virtio-blk: %s: geometry changed across reset; disk left down", vdev->dev.name);
-        return -EIO;
+        rc = -EIO;
+        goto fail;
     }
     vb->flush = virtio_has_feature(vdev, VIRTIO_BLK_F_FLUSH);
     vb->seg_max = virtio_has_feature(vdev, VIRTIO_BLK_F_SEG_MAX) ? virtio_read_config32(vdev, CFG_SEG_MAX) : 1;
@@ -534,7 +543,7 @@ static int vblk_reinit(struct blkdev *bd)
 
     rc = virtq_alloc(vdev, 0, 0, vblk_done, &vb->vq);
     if (rc)
-        return rc;
+        goto fail;
     unsigned nr_slots = vb->vq->size / 4;
     if (nr_slots < 4)
         nr_slots = 4;
@@ -545,12 +554,24 @@ static int vblk_reinit(struct blkdev *bd)
                vb->nr_slots, nr_slots);
         virtq_free(vb->vq);
         vb->vq = NULL;
-        return -EIO;
+        rc = -EIO;
+        goto fail;
     }
     virtio_device_ready(vdev);
     bd->max_segments = vb->seg_max;
-    bd->read_only = virtio_has_feature(vdev, VIRTIO_BLK_F_RO);
+    bd->read_only = read_only;
+    /* Alive again: a timeout before the reset may have marked the device
+     * dead (vblk_timeout); the rebuilt device accepts I/O. */
+    __atomic_store_n(&vb->dead, false, __ATOMIC_RELEASE);
     return 0;
+
+fail:
+    /* The device is torn down (queue freed) and could not be rebuilt. Mark it
+     * dead so a submit -- including blk_reset's drain_pending of what waited --
+     * completes -EIO at vblk_submit's guard instead of reaching the freed
+     * queue. The disk stays registered but refuses I/O until removed. */
+    __atomic_store_n(&vb->dead, true, __ATOMIC_RELEASE);
+    return rc;
 }
 
 static int vblk_reset(struct virtio_device *vdev)

@@ -1770,6 +1770,14 @@ bool selftest_virtio_remove_inflight(const char **reason)
 
 static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
 
+struct rst_inflight { volatile int rc; volatile int n; };
+static void rst_inflight_done(struct bio *bio)
+{
+    struct rst_inflight *s = bio->arg;
+    s->rc = bio->status;
+    __atomic_fetch_add(&s->n, 1, __ATOMIC_ACQ_REL);
+}
+
 /* A device reset re-initializes a bound device in place -- the device stays
  * bound and its higher-level object registered, unlike a remove+reprobe which
  * replaces them (docs/audit/next-subsystem-device-reset.md). */
@@ -1815,6 +1823,24 @@ bool selftest_device_reset(const char **reason)
     if (ok) {
         memset(chk, 0, 512);
         ok = rm_io(bd, BIO_READ, chk) == 0 && memcmp(chk, pat, 512) == 0;
+    }
+    /* A request in flight across the reset completes exactly once, -EIO: hold
+     * completions so a submitted bio stays in its slot, then reset, whose
+     * slot-table walk completes it (the removal unit's hold seam). */
+    const struct blk_test_driver_hooks *h = blk_test_driver_hooks("virtio_blk");
+    if (ok && h != NULL && h->hold_completions != NULL) {
+        static struct rst_inflight ifl;
+        ifl.rc = 0;
+        __atomic_store_n(&ifl.n, 0, __ATOMIC_RELEASE);
+        h->hold_completions(bd);
+        static struct bio ib;
+        ib = (struct bio){ .dev = bd, .dir = BIO_READ, .sector = 0, .nsectors = 1, .buf = chk,
+                           .done = rst_inflight_done, .arg = &ifl };
+        if (blk_submit(&ib) == 0 && device_reset(bd->dev) == 0)
+            ok = __atomic_load_n(&ifl.n, __ATOMIC_ACQUIRE) == 1 && ifl.rc == -EIO;
+        else
+            ok = false;
+        h->hold_completions(NULL);
     }
     blkdev_put(bd);
     kfree(pat);
