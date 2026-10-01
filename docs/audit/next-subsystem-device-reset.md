@@ -86,29 +86,36 @@ bound across the call — only the driver's hardware state is re-initialized.
 
 ### 2. The virtio reset handler
 
-`virtio_blk`'s `reset` is `vblk_remove`'s teardown followed by `vblk_probe`'s
-rebuild, with the `blkdev` kept registered in between. In order
+`virtio_blk`'s `reset` operates on the **existing** `vblk` and its `blkdev`:
+it does **not** `blk_unregister` the disk (as `remove` does), `blk_register`
+a new one or re-allocate the driver's private state (as `probe` does). It
+re-does only the device-and-queue initialization those two bracket — the part
+between `blk_unregister`+teardown in `remove` and the geometry read+
+`blk_register` in `probe`. In order
 (`docs/audit/next-subsystem-virtio-remove-inflight.md`):
 
 1. Refuse new submissions (the removal unit's barrier).
 2. `virtio_device_reset` — the device drops every request in its rings.
-3. `virtq_free` the old queue, which also releases its interrupt (and makes
-   the slot free: `virtq_alloc` on an already-occupied slot 0 is `-EINVAL`).
+3. `virtq_free` the old queue, which also releases its interrupt (and frees
+   the slot: `virtq_alloc` on an already-occupied slot 0 is `-EINVAL`).
 4. **Only now**, with the queue and its `vblk_done` handler gone, walk the
-   slot table and complete each still-outstanding request `-EIO` exactly
-   once. Completing them *before* `virtq_free` would race the interrupt
-   handler, which could complete the same `bio` twice and unmap a slot twice
-   — the hazard `vblk_remove`'s own comment calls out.
-5. Rebuild as `probe` does: `virtio_device_init` (reset and re-negotiate the
-   same features), `virtq_alloc` (the queue with the `vblk_done` callback),
-   `virtio_device_ready` for `DRIVER_OK`.
+   driver's slot table and complete each still-outstanding request `-EIO`
+   exactly once. Completing them *before* `virtq_free` would race the
+   interrupt handler, which could complete the same `bio` twice and unmap a
+   slot twice — the hazard `vblk_remove`'s own comment calls out.
+5. `virtio_device_init` (reset and re-negotiate the same features),
+   `virtq_alloc` into the same `vb->vq` (the queue with the `vblk_done`
+   callback), `virtio_device_ready` for `DRIVER_OK`.
 
-`virtio_device_init` on its own only resets and negotiates; the queue
-teardown, the completion of outstanding requests, the re-alloc and
-`DRIVER_OK` are the driver's steps, which is why reset is largely per-driver
-rather than a single bus default (a bus helper can wrap the init/ready
-bookends). The `blkdev` stays registered throughout: callers keep their
-reference, and I/O submitted after the reset runs on the re-created queue.
+The `blkdev` (and the `vblk` behind it) is the same object throughout, still
+registered under the same name — callers keep their reference and their
+handle stays valid, which is the whole difference from a remove+rebind. The
+pre-allocated slot tables (`inflight`, `maps`) are reused and re-cleared, not
+re-allocated, since the slot count does not change. `virtio_device_init` on
+its own only resets and negotiates; the queue teardown, the completion of
+outstanding requests, the re-alloc and `DRIVER_OK` are the driver's steps,
+which is why reset is largely per-driver rather than a single bus default (a
+bus helper can wrap the init/ready bookends).
 
 ### 3. In-flight requests
 
