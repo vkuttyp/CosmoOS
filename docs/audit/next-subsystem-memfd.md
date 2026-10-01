@@ -66,11 +66,21 @@ failed check.
 ### 1. An anonymous ramfs regular file
 
 A small public constructor in `ramfs.c` (the `ramfs_mkchr` pattern, but
-unnamed) builds an **unlinked** `VNODE_REG` via `ramfs_new(mnt, VNODE_REG,
-mode, NULL)`: `ramfs_file_ops`, the embedded page cache, `VNODE_PINNED` (its own
-reference is the pin), and no directory entry — an anonymous file, like one
-that has been `unlink`ed while held open. It uses the same ramfs mount the root
-already provides. Size starts at zero.
+unnamed) builds a **born-unlinked** `VNODE_REG` via `ramfs_new(mnt, VNODE_REG,
+mode, NULL)`: `ramfs_file_ops`, the embedded page cache, and no directory
+entry, on the same ramfs mount the root already provides. Size starts at zero.
+
+`ramfs_new` leaves a vnode `VNODE_PINNED` with `nlink = 1` and holds the
+`vnode_alloc` reference as that pin — for a *named* file the pin is released by
+`ramfs_unlink` (which clears `VNODE_PINNED`, drops `nlink`, and `vnode_put`s the
+pin, "open files keep it alive", `ramfs.c`). An anonymous file has no name to
+`unlink`, so the constructor must do the unlink's work up front: clear
+`VNODE_PINNED` and set `nlink = 0`, leaving the single `vnode_alloc` reference
+to be **consumed** by `vfs_open_vnode` into the `struct file` (as the exec path
+relies on, `spawn.c`). The file then owns the one and only reference — there is
+no retained pin — so closing the last fd drops it to zero and `ramfs_evict`
+frees the vnode and its page-cache pages. This is the `O_TMPFILE` /
+unlinked-but-open lifetime, exactly memfd's.
 
 ### 2. The Linux doors
 
@@ -94,10 +104,15 @@ page-cache path with no new mechanism.
 
 ### 3. Lifetime
 
-The anonymous vnode is pinned by its own reference; the `struct file` holds it
-while the fd (or a `dup`) is open, and a file mapping holds the pages. When the
-last fd and mapping are gone the file and its page-cache pages are freed —
-exactly an unlinked ramfs file. No new lifetime rule.
+The anonymous vnode carries no pin (§1): its single reference is consumed by
+`vfs_open_vnode` into the `struct file`, which holds it while the fd (or a
+`dup`) is open; a file mapping holds a reference to the pages too. When the last
+fd and mapping are gone the reference count reaches zero and `ramfs_evict` frees
+the vnode and its page-cache pages — exactly an unlinked-but-open ramfs file.
+The one subtlety the implementation must get right is that the constructor
+clears `VNODE_PINNED` and the open consumes the reference, so there is no pin
+left with no `unlink` to release it; otherwise the pages would never be freed.
+No new lifetime mechanism beyond the vnode refcount the VFS already has.
 
 ## Affected files
 
@@ -127,6 +142,7 @@ standard boot).
 | `memfd` basic | `memfd_create("m", MFD_CLOEXEC)` returns an fd; `ftruncate` to 4096 sets the size (`fstat`); a `pwrite` of a pattern reads back with `pread` |
 | `memfd` mmap | after `ftruncate`, `mmap(MAP_SHARED)` the fd; a store through the mapping is visible via `pread`, and bytes written with `pwrite` are visible through the mapping — the file is memory-backed and shareable |
 | `memfd` independent | two `memfd_create` calls return distinct files (a write to one is not seen in the other) |
+| `memfd` lifetime | a loop of create + `ftruncate(a page)` + write + `close`, many times, does not leak: the file and its pages are freed on close. Asserted against a kernel vnode/page-cache accounting count if one is reachable (the honest form — a leak needs a counting test); otherwise it at least establishes close does not strand an fd or panic |
 | `memfd` errors | `MFD_ALLOW_SEALING` and an unknown flag are `-EINVAL`; `ftruncate` with a negative length is `-EINVAL` |
 
 **Planned mutations** (each alone, boot confirmed):
@@ -135,6 +151,9 @@ standard boot).
   returns `-EBADF`.
 - `ftruncate` not calling the `truncate` op: the size stays 0 and the `fstat`
   (and the `mmap` read) check fails.
+- the constructor leaving `VNODE_PINNED` set (not doing the unlink's work): the
+  lifetime loop leaks a vnode and its pages each iteration — caught by the
+  accounting count the lifetime test watches.
 
 ## Benchmarks
 
