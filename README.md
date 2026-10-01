@@ -3797,6 +3797,23 @@ See [docs/development.md](docs/development.md).
   fires and not before, `READ` returns the count then `-EAGAIN`, a periodic
   timer fires repeatedly, and a create-and-close without submitting cancels
   at `close`. (PR #275)
+- **A bound device can be reset in place.** The device model had
+  `match`/`probe`/`remove` and no reset: the only in-place re-init of a bound
+  device was a full remove+reprobe, which replaces the device and its
+  higher-level object (a virtio-blk becomes a fresh `blkdev`, invalidating
+  every reference). `device_reset(dev)` + a `reset` op on `struct
+  device_driver` close that: the device stays bound and registered while the
+  driver re-initializes the hardware. `blk_reset` pauses submissions into the
+  pending queue (the `recovering` gate the timeout path uses) and drains the
+  submit path, then reopens; virtio-blk's reset mirrors its remove's teardown
+  (`virtio_device_reset`, `virtq_free` releasing the interrupt, then the
+  in-flight slots completed `-EIO` once) and its probe's rebuild
+  (`virtio_device_init`, `virtq_alloc`, `virtio_device_ready`) on the **same**
+  `blkdev`, re-reading the geometry and failing on an incompatible
+  capacity/block-size or queue-size change. `device-reset` proves a bound
+  virtio-blk reset in place keeps the same disk registered and its data
+  intact, a driver with no reset is `-EOPNOTSUPP`, and an unbound device
+  `-ENODEV`. (PR #NNN)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
