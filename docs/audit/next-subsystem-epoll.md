@@ -96,13 +96,20 @@ struct epoll_item {
 - **`epoll_ctl(DEL)`** — remove the entry and `kobject_put` its reference;
   `-ENOENT` if not registered.
 - **`epoll_wait(epfd, events, maxevents, timeout_ms)`** — aio_wait's loop:
-  prepare a wait entry on every enabled entry's `poll_wq`, evaluate each with
-  poll.c's rule (`kobject_ready(obj) & (want | HANGUP | ERROR)`), and if none is
-  ready and the timeout has not expired, `sched_block_current`; on wake, finish
-  all and re-evaluate. Fill up to `maxevents` ready entries into the user array
-  (translating `COSMO_IO_*` back to `EPOLL*`), disabling one-shots that fired.
-  A `timeout_ms` of `-1` waits forever, `0` polls; the deadline uses a timer
-  that wakes the epoll wait queue, as `aio_wait`'s alarm does.
+  prepare a wait entry on the epoll object's **own** wait queue (so a
+  concurrent `epoll_ctl` that adds a ready member wakes the sleeper, as
+  `aio_wait` prepares on the ring's own `wait`) **and** on every enabled
+  entry's `poll_wq`; evaluate each with poll.c's rule (`kobject_ready(obj) &
+  (want | HANGUP | ERROR)`), and if none is ready and the deadline has not
+  passed, `sched_block_current`; on wake, finish all and re-evaluate. Fill up
+  to `maxevents` ready entries into the user array (translating `COSMO_IO_*`
+  back to `EPOLL*`), disabling one-shots that fired. `timeout_ms` of `-1`
+  waits forever, `0` polls; a finite timeout arms a timer whose callback
+  records the deadline as expired and **wakes the waiting thread directly**
+  (`sched_wake` on the thread it recorded, plus a `fired` flag the loop tests
+  under the lock) — exactly `aio_wait`'s `alarm`, not a wake of the epoll
+  queue, so the wait cannot miss its own deadline when no member is on that
+  queue. The timer is cancelled with `timer_cancel_sync` on the way out.
 - **`ready`/`poll_wq`** on the epoll object itself: readable when any entry is
   ready, its own wait queue — so an epoll fd can be polled or (later) nested.
 
@@ -169,6 +176,7 @@ standard boot).
 |---|---|
 | `epoll` basic | `epoll_create1(EPOLL_CLOEXEC)` returns an fd; add an eventfd for `EPOLLIN`; `epoll_wait` with a 0 timeout returns 0; write the eventfd; `epoll_wait` returns 1 with that entry's `data`; drain it; `epoll_wait` returns 0 |
 | `epoll` multi | add an eventfd and a timerfd; arm only the timerfd; a bounded `epoll_wait` returns exactly the timerfd entry; then the eventfd too once written |
+| `epoll` timeout | with a member registered but not ready, `epoll_wait` with a finite timeout (say 50 ms) returns `0` at the deadline rather than blocking forever — the direct-thread timeout wake |
 | `epoll` MOD/DEL | `MOD` an entry from `EPOLLIN` to `0` (no longer reported); `DEL` an entry (no longer reported, and a second `DEL` is `-ENOENT`) |
 | `epoll` oneshot | an `EPOLLONESHOT` entry is reported once, then not again until `MOD` re-arms it |
 | `epoll` errors | `ADD` of an already-registered fd is `-EEXIST`; `MOD`/`DEL` of an unregistered fd is `-ENOENT`; adding an epoll fd to itself is `-EINVAL`; `maxevents <= 0` is `-EINVAL` |
