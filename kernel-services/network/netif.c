@@ -565,9 +565,17 @@ static void rx_common(struct netif *nif, struct mbuf *m, int cpu)
     __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
     /* Enqueue the duplicate right behind the original on the same queue, so
      * it is delivered immediately after. mbufq_enqueue frees it and returns
-     * false on a full queue, so a failure needs no second free. */
-    if (dup != NULL && mbufq_enqueue(&c->rxq, dup))
-        __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+     * false on a full queue, so a failure needs no second free -- but is
+     * counted as a drop, like the original's, so the receive counters show
+     * when an armed rule could not deliver the copy. */
+    if (dup != NULL) {
+        if (mbufq_enqueue(&c->rxq, dup)) {
+            __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&c->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        }
+    }
     quiesce_read_unlock();
     waitqueue_wake_one(&c->wq);
 }

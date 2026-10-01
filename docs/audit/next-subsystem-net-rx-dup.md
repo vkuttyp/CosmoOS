@@ -3,10 +3,15 @@
 > **Built in PR #279.** `FI_NET_RX_DUP` injected at `rx_common` (the copy made
 > before the original is queued, carrying `M_CSUM_OK`); the `net-rx-dup` test
 > doubles a loopback TCP stream — delivered once, in order — and one ARP
-> request through the ethernet path — two replies, one cache entry. The rest
-> of this document is the §68 report as written before the implementation; its
-> "Design", "Affected files" and "Tests" describe what was then planned and is
-> now shipped.
+> request through the ethernet path — two replies, one cache entry.
+>
+> **Everything below this banner is the §68 report as written for PR #278,
+> before the implementation, and is kept as the record.** Its present-tense
+> framing ("no fault-injection kind can duplicate a received frame"), the
+> "planned work that lands in the implementation PR that follows" note, and
+> the "Design", "Affected files" and "Tests" sections all describe what was
+> then planned and is now shipped — read them in that past light, not as the
+> current state.
 >
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/net-rx-dup-probe.py`); the `FI_NET_RX_DUP` fault-injection kind, the

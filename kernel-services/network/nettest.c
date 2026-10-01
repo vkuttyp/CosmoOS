@@ -1231,7 +1231,9 @@ bool selftest_net_rx_dup(const char **reason)
             arp_doubled = a1.replies_sent >= a0.replies_sent + 2;
             arp_one_entry = arp_lookup(asker, mac) && memcmp(mac, asker_mac, ETH_ALEN) == 0
                             && a1.entries == a0.entries + 1;
-            arp_flush(nif);   /* the test's entry */
+            /* The one bogus entry (10.99.0.70) ages out on its own; not
+             * flushed, which would also discard a gateway entry or a packet
+             * parked on an ARP reply. The net census does not track ARP. */
         }
     }
 
