@@ -1,5 +1,13 @@
 # NEXT SUBSYSTEM — the network receive path has no duplicate-frame fault injection
 
+> **Built in PR #279.** `FI_NET_RX_DUP` injected at `rx_common` (the copy made
+> before the original is queued, carrying `M_CSUM_OK`); the `net-rx-dup` test
+> doubles a loopback TCP stream — delivered once, in order — and one ARP
+> request through the ethernet path — two replies, one cache entry. The rest
+> of this document is the §68 report as written before the implementation; its
+> "Design", "Affected files" and "Tests" describe what was then planned and is
+> now shipped.
+>
 > Constitution §68 report. This PR adds the report and the probe
 > (`tools/net-rx-dup-probe.py`); the `FI_NET_RX_DUP` fault-injection kind, the
 > injection in `rx_common` and the `net-rx-dup` test described under "Design"

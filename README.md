@@ -3814,6 +3814,16 @@ See [docs/development.md](docs/development.md).
   virtio-blk reset in place keeps the same disk registered and its data
   intact, a driver with no reset is `-EOPNOTSUPP`, and an unbound device
   `-ENODEV`. (PR #277)
+- **Fault injection for a duplicated received frame.** `FI_NET_RX_DUP` joins
+  the fault-injection kinds: when armed, `rx_common` delivers a second copy of
+  a frame -- made before the original is queued (a worker could otherwise free
+  it mid-copy) and carrying `M_CSUM_OK` -- so the stack meets the same frame
+  twice, a link-layer retransmit or a switch flooding. It fires only where the
+  receive runs in a thread (loopback; a thread-deferred driver), a no-op in a
+  driver's interrupt handler like every kind. `net-rx-dup` doubles a loopback
+  TCP stream and the sink still receives the bytes once, in order (sequence
+  dedup), and doubles one ARP request through the ethernet path -- two replies,
+  one cache entry. (PR #279)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
