@@ -90,9 +90,13 @@ struct epoll_item {
   reject adding the epoll to itself or another epoll (`-EINVAL`, deferring
   nested-epoll loop detection), reject a duplicate `(fd,obj)` (`-EEXIST`),
   translate the `EPOLL*` event mask to `COSMO_IO_*` (`poll_events_to_io`'s
-  shape), store the entry holding the reference.
+  shape), store the entry holding the reference, and **wake the epoll object's
+  wait queue** so a concurrent `epoll_wait` re-evaluates the new member (as
+  `aio_submit` wakes the ring's `wait` after parking an entry) — without this
+  the waiter could miss a newly ready fd until another event or the timeout.
 - **`epoll_ctl(MOD)`** — update an existing entry's events/data and re-arm a
-  one-shot; `-ENOENT` if not registered.
+  one-shot; `-ENOENT` if not registered. It wakes the epoll wait queue too,
+  since a re-arm or a widened mask can make the entry newly reportable.
 - **`epoll_ctl(DEL)`** — remove the entry and `kobject_put` its reference;
   `-ENOENT` if not registered.
 - **`epoll_wait(epfd, events, maxevents, timeout_ms)`** — aio_wait's loop:
