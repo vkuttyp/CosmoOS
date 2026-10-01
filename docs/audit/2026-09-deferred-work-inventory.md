@@ -239,7 +239,7 @@ IPv6 routing beyond loopback and ND against a real peer.
   execs dies.
 - missing (re-checked 2026-09-21): `epoll`, ~~`sendmsg`/`recvmsg`,
   `socketpair`~~ (built with `AF_UNIX` and `SCM_RIGHTS`, the unix-sockets
-  unit), `rseq`, `statx`, `memfd_create`,
+  unit), `rseq`, `statx` (**taken up by `docs/audit/next-subsystem-statx.md`** — the report; `LX_statx` + a `struct statx` marshaller over the existing VFS stat path land in the implementation PR, after which this closes), `memfd_create`,
   `eventfd`/`timerfd`/`signalfd`, shared memory, netlink, `mremap`;
   ~~`msync`~~ is built (the file-regions unit, `LX_msync` 26).
   `setsockopt`/`getsockopt` exist as stubs: `getsockopt` answers
