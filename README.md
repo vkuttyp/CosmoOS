@@ -3856,6 +3856,17 @@ See [docs/development.md](docs/development.md).
   native ring exists today. `eventfd2` is wired on both arches and the
   older `eventfd` on x86-64; `EFD_SEMAPHORE`/`EFD_NONBLOCK` are honoured and
   `EFD_CLOEXEC` is a no-op under the spawn model. (PR #285)
+- **`timerfd(2)` for the Linux personality.** A waitable timer fd, built by
+  giving the aio-timer unit's timer kobject (`kernel/io/timerobj.c`) the
+  control surface it lacked: a disarmed create, `timer_obj_settime`
+  (cancel-reset-rearm, reporting the old setting), and `timer_obj_gettime`
+  (remaining). `timerfd_create` takes `CLOCK_MONOTONIC`/`REALTIME`/`BOOTTIME`
+  (BOOTTIME aliased to monotonic), `TFD_NONBLOCK`/`TFD_CLOEXEC`, and a
+  read-only fd; `timerfd_settime` disarms only on a zero `it_value` and fires a
+  past `TFD_TIMER_ABSTIME` deadline at once; `timerfd_gettime` reports the time
+  remaining. The periodic re-arm, the expiration count and the resetting 8-byte
+  read ride the existing timer object, which already answers `poll`/`select`.
+  (PR #287)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

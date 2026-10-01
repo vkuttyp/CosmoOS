@@ -12,6 +12,7 @@
 #include <kernel/errno.h>
 #include <kernel/spinlock.h>
 #include <kernel/eventfd.h>
+#include <kernel/timerobj.h>
 #include <kernel/futex.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
@@ -632,6 +633,94 @@ static int64_t do_eventfd(uint32_t initval, unsigned flags)
 
 static int64_t lx_eventfd2(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], (unsigned)a->a[1]); }
 static __maybe_unused int64_t lx_eventfd(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], 0); }   /* the older call: no flags */
+
+/* timerfd: a waitable timer fd on the timer kobject (kernel/io/timerobj.c).
+ * See docs/audit/next-subsystem-timerfd.md. */
+static int64_t do_timerfd_create(unsigned clockid, unsigned flags)
+{
+    if (clockid != LX_CLOCK_MONOTONIC && clockid != LX_CLOCK_REALTIME && clockid != LX_CLOCK_BOOTTIME)
+        return -EINVAL;   /* BOOTTIME is accepted and aliased to monotonic (no suspend) */
+    if (flags & ~(unsigned)(LX_TFD_NONBLOCK | LX_TFD_CLOEXEC))
+        return -EINVAL;
+    struct kobject *obj;
+    int rc = timer_obj_create_disarmed((flags & LX_TFD_NONBLOCK) != 0,
+                                       clockid == LX_CLOCK_REALTIME, &obj);
+    if (rc)
+        return rc;
+    /* TFD_CLOEXEC is accepted and ignored: the spawn model carries no
+     * descriptor across exec (as for pipe2/eventfd). A timerfd is read-only. */
+    int h = handle_install(&process_current()->handles, obj,
+                           HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    kobject_put(obj);
+    return h;
+}
+
+static int64_t do_timerfd_settime(int fd, unsigned flags, uint64_t unew, uint64_t uold)
+{
+    if (flags & ~(unsigned)LX_TFD_TIMER_ABSTIME)
+        return -EINVAL;
+    struct kobject *obj = handle_lookup(&process_current()->handles, fd, HANDLE_RIGHT_READ);
+    if (obj == NULL)
+        return -EBADF;
+    if (timer_obj_from_kobject(obj) == NULL) {
+        kobject_put(obj);
+        return -EINVAL;   /* not a timerfd */
+    }
+    uint64_t value_ns, interval_ns;
+    int rc = ns_from_timespec(unew + offsetof(struct lx_itimerspec, it_value), &value_ns);
+    if (!rc)
+        rc = ns_from_timespec(unew + offsetof(struct lx_itimerspec, it_interval), &interval_ns);
+    if (rc) {
+        kobject_put(obj);
+        return rc;
+    }
+    /* The disarm decision is the raw it_value, never a computed delay: a zero
+     * it_value disarms, a non-zero one always arms. */
+    uint64_t initial_ns;
+    if (value_ns == 0) {
+        initial_ns = 0;
+    } else if (flags & LX_TFD_TIMER_ABSTIME) {
+        uint64_t now = timer_obj_is_realtime(obj) ? clock_realtime_ns() : clock_now_ns();
+        /* A deadline already in the past fires at once (minimum 1 ns, never 0 --
+         * 0 would be read as a disarm), matching Linux. */
+        initial_ns = value_ns > now ? value_ns - now : 1;
+    } else {
+        initial_ns = value_ns;
+    }
+    uint64_t old_rem = 0, old_int = 0;
+    /* Pass the interval even when disarming: Linux keeps it, and
+     * timerfd_gettime reports it after a disarm. */
+    timer_obj_settime(obj, initial_ns, interval_ns, &old_rem, &old_int);
+    kobject_put(obj);
+    if (uold) {
+        if (put_timespec(uold + offsetof(struct lx_itimerspec, it_value), old_rem) ||
+            put_timespec(uold + offsetof(struct lx_itimerspec, it_interval), old_int))
+            return -EFAULT;
+    }
+    return 0;
+}
+
+static int64_t do_timerfd_gettime(int fd, uint64_t ucurr)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, fd, HANDLE_RIGHT_READ);
+    if (obj == NULL)
+        return -EBADF;
+    if (timer_obj_from_kobject(obj) == NULL) {
+        kobject_put(obj);
+        return -EINVAL;
+    }
+    uint64_t rem = 0, intv = 0;
+    timer_obj_gettime(obj, &rem, &intv);
+    kobject_put(obj);
+    if (put_timespec(ucurr + offsetof(struct lx_itimerspec, it_value), rem) ||
+        put_timespec(ucurr + offsetof(struct lx_itimerspec, it_interval), intv))
+        return -EFAULT;
+    return 0;
+}
+
+static int64_t lx_timerfd_create(struct syscall_args *a) { return do_timerfd_create((unsigned)a->a[0], (unsigned)a->a[1]); }
+static int64_t lx_timerfd_settime(struct syscall_args *a) { return do_timerfd_settime((int)a->a[0], (unsigned)a->a[1], a->a[2], a->a[3]); }
+static int64_t lx_timerfd_gettime(struct syscall_args *a) { return do_timerfd_gettime((int)a->a[0], a->a[1]); }
 
 static int64_t lx_getdents64(struct syscall_args *a)
 {
@@ -2940,6 +3029,9 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
 #ifdef LX_eventfd
     [LX_eventfd] = lx_eventfd,   /* x86-64 only: the older number, no flags */
 #endif
+    [LX_timerfd_create] = lx_timerfd_create,
+    [LX_timerfd_settime] = lx_timerfd_settime,
+    [LX_timerfd_gettime] = lx_timerfd_gettime,
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,

@@ -597,6 +597,120 @@ int main(int argc, char **argv)
         CHECKV(sc1(LX_close, ofd) == 0, 0);
 #endif
     }
+    /* timerfd: a waitable timer fd (docs/audit/next-subsystem-timerfd.md). */
+    {
+        struct lx_itimerspec its, cur;
+        struct lx_pollfd tp;
+        uint64_t tc;
+        /* one-shot, non-blocking: a ~40 ms relative timer becomes readable,
+         * the 8-byte read returns a count >= 1, a second read is -EAGAIN. */
+        long tfd = sc2(LX_timerfd_create, LX_CLOCK_MONOTONIC, LX_TFD_NONBLOCK);
+        CHECKV(tfd >= 3, tfd);
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_nsec = 40000000;              /* 40 ms */
+        CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
+        tp = (struct lx_pollfd){ (int)tfd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 2000) == 1 && tp.revents == LX_POLLIN, tp.revents);
+        tc = 0;
+        CHECKV(sc3(LX_read, tfd, &tc, 8) == 8 && tc >= 1, (long)tc);
+        CHECKV(sc3(LX_read, tfd, &tc, 8) == -11, 0);  /* drained -> -EAGAIN */
+
+        /* gettime on an armed one-shot: remaining in (0, 1 s], the interval as
+         * set; then a disarming settime reads 0/0 and is not readable. */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = 1;                      /* 1 s */
+        its.it_interval.tv_nsec = 500000000;          /* 500 ms */
+        CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
+        __builtin_memset(&cur, 0, sizeof(cur));
+        CHECKV(sc2(LX_timerfd_gettime, tfd, &cur) == 0, 0);
+        uint64_t rem = (uint64_t)cur.it_value.tv_sec * 1000000000ull + (uint64_t)cur.it_value.tv_nsec;
+        uint64_t itv = (uint64_t)cur.it_interval.tv_sec * 1000000000ull + (uint64_t)cur.it_interval.tv_nsec;
+        CHECKV(rem > 0 && rem <= 1000000000ull, (long)rem);
+        CHECKV(itv == 500000000ull, (long)itv);
+        /* disarm with a non-zero it_interval: it_value == 0 disarms, but the
+         * interval is kept and gettime still reports it (Linux). */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_interval.tv_nsec = 250000000;          /* 250 ms, kept on disarm */
+        CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
+        __builtin_memset(&cur, 0, sizeof(cur));
+        CHECKV(sc2(LX_timerfd_gettime, tfd, &cur) == 0, 0);
+        CHECKV(cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0, 0);
+        uint64_t ditv = (uint64_t)cur.it_interval.tv_sec * 1000000000ull + (uint64_t)cur.it_interval.tv_nsec;
+        CHECKV(ditv == 250000000ull, (long)ditv);     /* interval kept across the disarm */
+        tp = (struct lx_pollfd){ (int)tfd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 0) == 0, 0);        /* disarmed: not readable */
+
+        /* periodic: accumulate expirations across reads until the count
+         * reaches 2 under a generous deadline -- a wait for the count, never
+         * N fires after a fixed sleep. */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_nsec = 20000000;              /* 20 ms */
+        its.it_interval.tv_nsec = 20000000;           /* 20 ms */
+        CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
+        uint64_t total = 0;
+        for (int i = 0; i < 40 && total < 2; i++) {   /* up to ~2 s */
+            struct lx_pollfd pp = { (int)tfd, LX_POLLIN, 0 };
+            if (lx_poll_ms(&pp, 1, 100) == 1) {
+                uint64_t c = 0;
+                if (sc3(LX_read, tfd, &c, 8) == 8)
+                    total += c;
+            }
+        }
+        CHECKV(total >= 2, (long)total);
+        CHECKV(sc1(LX_close, tfd) == 0, 0);
+
+        /* absolute: a monotonic deadline ~40 ms ahead becomes readable; then a
+         * deadline already in the past fires at once, not disarm. */
+        long afd = sc2(LX_timerfd_create, LX_CLOCK_MONOTONIC, LX_TFD_NONBLOCK);
+        CHECKV(afd >= 3, afd);
+        struct lx_timespec now;
+        CHECKV(sc2(LX_clock_gettime, LX_CLOCK_MONOTONIC, &now) == 0, 0);
+        uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+        uint64_t at = now_ns + 40000000;              /* +40 ms */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = (int64_t)(at / 1000000000ull);
+        its.it_value.tv_nsec = (int64_t)(at % 1000000000ull);
+        CHECKV(sc4(LX_timerfd_settime, afd, LX_TFD_TIMER_ABSTIME, &its, 0) == 0, 0);
+        tp = (struct lx_pollfd){ (int)afd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 2000) == 1 && tp.revents == LX_POLLIN, tp.revents);
+        tc = 0;
+        CHECKV(sc3(LX_read, afd, &tc, 8) == 8 && tc >= 1, (long)tc);
+        uint64_t past = now_ns - 10000000;            /* 10 ms ago: a past, non-zero deadline */
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = (int64_t)(past / 1000000000ull);
+        its.it_value.tv_nsec = (int64_t)(past % 1000000000ull);
+        CHECKV(sc4(LX_timerfd_settime, afd, LX_TFD_TIMER_ABSTIME, &its, 0) == 0, 0);
+        tp = (struct lx_pollfd){ (int)afd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 1000) == 1 && tp.revents == LX_POLLIN, tp.revents);
+        CHECKV(sc1(LX_close, afd) == 0, 0);
+
+        /* absolute against CLOCK_REALTIME: the wall-clock path converts the
+         * deadline against clock_realtime_ns, so a ~40 ms-ahead REALTIME
+         * deadline becomes readable within a bound. */
+        long rfd = sc2(LX_timerfd_create, LX_CLOCK_REALTIME, LX_TFD_NONBLOCK);
+        CHECKV(rfd >= 3, rfd);
+        struct lx_timespec rnow;
+        CHECKV(sc2(LX_clock_gettime, LX_CLOCK_REALTIME, &rnow) == 0, 0);
+        uint64_t rat = (uint64_t)rnow.tv_sec * 1000000000ull + (uint64_t)rnow.tv_nsec + 40000000;
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_sec = (int64_t)(rat / 1000000000ull);
+        its.it_value.tv_nsec = (int64_t)(rat % 1000000000ull);
+        CHECKV(sc4(LX_timerfd_settime, rfd, LX_TFD_TIMER_ABSTIME, &its, 0) == 0, 0);
+        tp = (struct lx_pollfd){ (int)rfd, LX_POLLIN, 0 };
+        CHECKV(lx_poll_ms(&tp, 1, 2000) == 1 && tp.revents == LX_POLLIN, tp.revents);
+        tc = 0;
+        CHECKV(sc3(LX_read, rfd, &tc, 8) == 8 && tc >= 1, (long)tc);
+        CHECKV(sc1(LX_close, rfd) == 0, 0);
+
+        /* errors: a bad clockid, and a settime on a non-timerfd fd. */
+        CHECKV(sc2(LX_timerfd_create, 99, 0) == -22, 0);   /* -EINVAL */
+        long ntf = sc2(LX_eventfd2, 0, 0);
+        CHECKV(ntf >= 3, ntf);
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_nsec = 10000000;
+        CHECKV(sc4(LX_timerfd_settime, ntf, 0, &its, 0) == -22, 0);   /* not a timerfd */
+        CHECKV(sc1(LX_close, ntf) == 0, 0);
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

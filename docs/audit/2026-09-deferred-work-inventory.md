@@ -240,7 +240,7 @@ IPv6 routing beyond loopback and ND against a real peer.
 - missing (re-checked 2026-09-21): `epoll`, ~~`sendmsg`/`recvmsg`,
   `socketpair`~~ (built with `AF_UNIX` and `SCM_RIGHTS`, the unix-sockets
   unit), `rseq`, ~~`statx`~~ (**BUILT — the statx unit, `docs/audit/next-subsystem-statx.md`, PR #283**: `LX_statx` 332/291 + `lx_statx` marshalling a 256-byte `struct statx` over the existing VFS stat path, `stx_mask` reporting the supported set and omitting the atime/btime the kernel does not keep), `memfd_create`,
-  ~~`eventfd`~~ (**BUILT — the eventfd unit, `docs/audit/next-subsystem-eventfd.md`, PR #285**: a `uint64` counter and wait queue as a kobject on the aio-timer readiness-object pattern (`kernel/io/eventfd.c`), `eventfd2` wired on both arches and `eventfd` on x86-64, `EFD_SEMAPHORE`/`EFD_NONBLOCK` honoured) / `timerfd`/`signalfd`, shared memory, netlink, `mremap`;
+  ~~`eventfd`~~ (**BUILT — the eventfd unit, `docs/audit/next-subsystem-eventfd.md`, PR #285**: a `uint64` counter and wait queue as a kobject on the aio-timer readiness-object pattern (`kernel/io/eventfd.c`), `eventfd2` wired on both arches and `eventfd` on x86-64, `EFD_SEMAPHORE`/`EFD_NONBLOCK` honoured) / ~~`timerfd`~~ (**BUILT — the timerfd unit, `docs/audit/next-subsystem-timerfd.md`, PR #287**: `timerfd_create`/`settime`/`gettime` on the aio-timer timer kobject (`kernel/io/timerobj.c`) given a disarmed create + `settime`/`gettime`, `CLOCK_MONOTONIC`/`REALTIME`/`BOOTTIME`, absolute and periodic timers) / `signalfd`, shared memory, netlink, `mremap`;
   ~~`msync`~~ is built (the file-regions unit, `LX_msync` 26).
   `setsockopt`/`getsockopt` exist as stubs: `getsockopt` answers
   `SOL_SOCKET`/`SO_ERROR` only and `setsockopt` is `-ENOPROTOOPT` for

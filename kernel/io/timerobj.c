@@ -19,6 +19,7 @@
 
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/mutex.h>
 #include <kernel/object.h>
 #include <kernel/compiler.h>
 #include <kernel/sched.h>
@@ -35,11 +36,15 @@ struct timer_obj {
     struct kobject obj;
     struct timer timer;
     struct waitqueue wq;
-    spinlock_t lock;          /* count, interval_ns, dying */
+    struct mutex op_lock;     /* serialises settime's cancel+re-arm (not taken by the callback) */
+    spinlock_t lock;          /* count, interval_ns, deadline_ns, armed, dying */
     uint64_t count;           /* expirations since the last read */
     uint64_t interval_ns;     /* 0 = one-shot */
+    uint64_t deadline_ns;     /* monotonic time of the next expiry while armed */
+    bool armed;               /* a timer is pending (settime/gettime remaining) */
     bool dying;               /* release in progress: the callback must not re-arm */
     bool nonblock;            /* the object's non-blocking mode (set_nonblock) */
+    bool realtime;            /* the fd's clock is the wall clock (timerfd abs settime) */
 };
 
 static struct timer_obj *timer_obj_of(struct kobject *obj)
@@ -57,8 +62,14 @@ static void timer_obj_fired(struct timer *t, void *arg)
         return;
     }
     to->count++;
-    if (to->interval_ns)
-        timer_start(&to->timer, to->interval_ns);   /* re-arm from the callback */
+    if (to->interval_ns) {
+        /* Re-arm from the callback, and record the same now+interval the
+         * timer is armed for, so gettime's remaining cannot drift from it. */
+        to->deadline_ns = clock_now_ns() + to->interval_ns;
+        timer_start(&to->timer, to->interval_ns);
+    } else {
+        to->armed = false;   /* a one-shot has fired: nothing pending */
+    }
     spin_unlock_irqrestore(&to->lock, s);
     waitqueue_wake_all(&to->wq);
 }
@@ -142,10 +153,84 @@ int timer_obj_create(uint64_t initial_ns, uint64_t interval_ns, struct kobject *
         return -ENOMEM;
     kobject_init(&to->obj, &timer_type.base);
     spinlock_init(&to->lock, "timer");
+    mutex_init(&to->op_lock, "timer-op");
     waitqueue_init(&to->wq, "timer");
     to->interval_ns = interval_ns;
     timer_setup(&to->timer, timer_obj_fired, to);
+    to->deadline_ns = clock_now_ns() + initial_ns;
+    to->armed = true;
     timer_start(&to->timer, initial_ns);
     *out = &to->obj;
     return 0;
+}
+
+int timer_obj_create_disarmed(bool nonblock, bool realtime, struct kobject **out)
+{
+    struct timer_obj *to = kzalloc(sizeof(*to));
+    if (to == NULL)
+        return -ENOMEM;
+    kobject_init(&to->obj, &timer_type.base);
+    spinlock_init(&to->lock, "timer");
+    mutex_init(&to->op_lock, "timer-op");
+    waitqueue_init(&to->wq, "timer");
+    to->nonblock = nonblock;
+    to->realtime = realtime;
+    timer_setup(&to->timer, timer_obj_fired, to);   /* set up but not started */
+    *out = &to->obj;
+    return 0;
+}
+
+void timer_obj_settime(struct kobject *obj, uint64_t initial_ns, uint64_t interval_ns,
+                       uint64_t *old_remaining_ns, uint64_t *old_interval_ns)
+{
+    struct timer_obj *to = timer_obj_of(obj);
+    /* Serialise the whole cancel-and-re-arm against another settime on the
+     * same fd: two could each finish timer_cancel_sync and then both call
+     * timer_start, and timer_start panics on an already-pending timer. The
+     * op_lock is a mutex the fire callback never takes, so cancelling under it
+     * cannot deadlock (the callback uses `lock`). */
+    mutex_lock(&to->op_lock);
+    /* Cancel any pending expiry *before* taking the spinlock: the fire
+     * callback takes that lock, so cancelling under it would deadlock (the
+     * release path cancels outside the lock for the same reason). After this
+     * the callback is neither pending nor running, so nothing re-arms the
+     * timer until the timer_start below. */
+    timer_cancel_sync(&to->timer);
+    arch_irq_state_t s = spin_lock_irqsave(&to->lock);
+    uint64_t now = clock_now_ns();
+    if (old_remaining_ns)
+        *old_remaining_ns = (to->armed && to->deadline_ns > now) ? to->deadline_ns - now : 0;
+    if (old_interval_ns)
+        *old_interval_ns = to->interval_ns;
+    to->count = 0;                 /* settime resets the expiration count (Linux) */
+    to->interval_ns = interval_ns; /* stored even when disarming: gettime reports it (Linux) */
+    if (initial_ns != 0) {
+        to->deadline_ns = now + initial_ns;
+        to->armed = true;
+        timer_start(&to->timer, initial_ns);
+    } else {
+        to->armed = false;
+    }
+    spin_unlock_irqrestore(&to->lock, s);
+    mutex_unlock(&to->op_lock);
+}
+
+void timer_obj_gettime(struct kobject *obj, uint64_t *remaining_ns, uint64_t *interval_ns)
+{
+    struct timer_obj *to = timer_obj_of(obj);
+    arch_irq_state_t s = spin_lock_irqsave(&to->lock);
+    uint64_t now = clock_now_ns();
+    *remaining_ns = (to->armed && to->deadline_ns > now) ? to->deadline_ns - now : 0;
+    *interval_ns = to->interval_ns;
+    spin_unlock_irqrestore(&to->lock, s);
+}
+
+bool timer_obj_is_realtime(struct kobject *obj)
+{
+    return timer_obj_of(obj)->realtime;
+}
+
+struct kobject *timer_obj_from_kobject(struct kobject *obj)
+{
+    return (obj != NULL && obj->type == &timer_type.base) ? obj : NULL;
 }

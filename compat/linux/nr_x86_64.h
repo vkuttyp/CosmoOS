@@ -123,6 +123,9 @@
 #define LX_newfstatat 262
 #define LX_eventfd 284
 #define LX_eventfd2 290
+#define LX_timerfd_create 283
+#define LX_timerfd_settime 286
+#define LX_timerfd_gettime 287
 #define LX_statx 332
 #define LX_unlinkat 263
 #define LX_renameat 264

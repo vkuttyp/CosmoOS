@@ -4,8 +4,14 @@
 > (`tools/timerfd-probe.py`); the `timer_obj` arm/disarm surface, the three
 > `timerfd` doors and the `lxtest` checks described under "Design" and the
 > edits in "Affected files" are planned work that lands in the implementation
-> PR that follows, gated on CI. As committed here, `timerfd_create` returns
-> `-ENOSYS`.
+> PR that follows, gated on CI. As the report was committed (before PR #287),
+> `timerfd_create` returned `-ENOSYS`.
+>
+> **Built in PR #287.** The implementation landed the `timer_obj` arm/disarm
+> surface in `kernel/io/timerobj.c`, wired the three doors in
+> `compat/linux/syscalls.c`, and added the `lxtest` checks; both arches boot
+> PASS and `host-test` passes. Every present-tense statement below describes
+> the state the report measured, before this implementation.
 
 ## Problem
 
