@@ -57,24 +57,38 @@ void netrxdup_probe_set(bool on) { __atomic_store_n(&g_netrxdup_probe, on, __ATO
 uint64_t netrxdup_probe_count(void) { return __atomic_load_n(&g_netrxdup_count, __ATOMIC_ACQUIRE); }
 """
 
-OLD_RX = """    __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
-    quiesce_read_unlock();
-    waitqueue_wake_one(&c->wq);
-"""
-NEW_RX = """    __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
-    if (__atomic_load_n(&g_netrxdup_probe, __ATOMIC_ACQUIRE)) {
-        struct mbuf *d = m_copypacket(m);   /* keeps m->pkt and M_CSUM_OK */
-        if (d != NULL) {
-            if (mbufq_enqueue(&c->rxq, d)) {
-                __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&g_netrxdup_count, 1, __ATOMIC_RELAXED);
-            } else {
-                m_freem(d);
-            }
-        }
+OLD_RX = """    if (c->id == raw_cpu_id())   /* a statistic: steered to the CPU that received it */
+        __atomic_fetch_add(&c->stats.rx_steered_here, 1, __ATOMIC_RELAXED);
+    if (!mbufq_enqueue(&c->rxq, m)) {
+        __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&c->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        quiesce_read_unlock();
+        return;
     }
-    quiesce_read_unlock();
-    waitqueue_wake_one(&c->wq);
+    __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+"""
+NEW_RX = """    if (c->id == raw_cpu_id())   /* a statistic: steered to the CPU that received it */
+        __atomic_fetch_add(&c->stats.rx_steered_here, 1, __ATOMIC_RELAXED);
+    /* NETRXDUP probe: copy m BEFORE it is queued -- once m is on the rxq a
+     * worker can dequeue and free it (mbufq_dequeue takes only the queue
+     * lock, not this read-side section), so reading it here would race. */
+    struct mbuf *netrxdup_d = __atomic_load_n(&g_netrxdup_probe, __ATOMIC_ACQUIRE)
+                                  ? m_copypacket(m) : NULL;   /* keeps m->pkt and M_CSUM_OK */
+    if (!mbufq_enqueue(&c->rxq, m)) {
+        __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&c->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        if (netrxdup_d != NULL)
+            m_freem(netrxdup_d);
+        quiesce_read_unlock();
+        return;
+    }
+    __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+    /* Deliver the copy behind the original. mbufq_enqueue frees it and
+     * returns false on a full queue, so this must not free it again. */
+    if (netrxdup_d != NULL && mbufq_enqueue(&c->rxq, netrxdup_d)) {
+        __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_netrxdup_count, 1, __ATOMIC_RELAXED);
+    }
 """
 
 # --- nettest.c: the gap self-test -------------------------------------------
