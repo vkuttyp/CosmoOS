@@ -64,7 +64,7 @@ before PR #285.
 
 | piece | where | what it does |
 |---|---|---|
-| readiness kobject | `struct kobject_io_type` (`object.h`): `read`, `write`, `ready`, `poll_wq`, `set_nonblock` | a kobject that serves `poll`/`select`, blocking `read`/`write`, and the I/O ring, with per-object non-blocking mode |
+| readiness kobject | `struct kobject_io_type` (`object.h`): `read`, `write`, `ready`, `poll_wq`, `set_nonblock` | a kobject that serves `poll`/`select` and blocking `read`/`write`, with per-object non-blocking mode; readiness and reads also ride the I/O ring, though a ring *write* is not spin-safe for an all-or-nothing counter and the ring has no eventfd door today (see the note in `eventfd.c`) |
 | the template | `timerobj.c` (`timer_obj_create`) | a counter-bearing kobject: `read` returns the count and resets, `ready` is `COSMO_IO_READABLE` while non-zero, `poll_wq` is its wait queue, `release` is synchronous |
 | handle install | `handle_install(&proc->handles, obj, rights)` | wraps a fresh kobject as an fd (as `lx_openat`/`lx_dup` do) |
 | dispatch | `linux_table[LX_NR_MAX]`; unlisted → `lx_unknown` | `eventfd2` is unlisted → `-ENOSYS` |

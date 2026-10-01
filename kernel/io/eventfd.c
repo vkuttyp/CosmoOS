@@ -4,14 +4,24 @@
  * A kobject carrying a uint64 counter and a wait queue. A write adds its
  * 8-byte value to the counter and wakes readers; a read returns the count and
  * resets it (or returns 1 and decrements, in semaphore mode) and wakes
- * writers; both block (or return -EAGAIN) when they cannot proceed. Because it
- * is a kobject with read/write/ready/poll_wq, it serves poll/select, blocking
- * read/write and the I/O ring with no new op -- the same template as the
- * timer object (kernel/io/timerobj.c). See docs/audit/next-subsystem-eventfd.md.
+ * writers; both block (or return -EAGAIN) when they cannot proceed. As a
+ * kobject with read/write/ready/poll_wq it serves poll/select and blocking
+ * read/write -- the same template as the timer object (kernel/io/timerobj.c).
+ * See docs/audit/next-subsystem-eventfd.md.
  *
- * Lifetime: a plain kobject. A parked I/O-ring entry or a blocked waiter holds
- * a reference, so `release` (a plain free -- no timer, unlike timerobj) runs
- * only once the last reference and handle are gone.
+ * A note on the async I/O ring: readiness and reads ride it cleanly (a set
+ * READABLE bit means the next read returns data). A ring *write* does not: an
+ * eventfd write is all-or-nothing, so the object can report WRITABLE yet still
+ * -EAGAIN a value that will not fit, which the level-triggered ring would
+ * retry without sleeping. This matters only to the native ring, which eventfd
+ * has no door onto (its only door is the Linux personality, a different
+ * personality from the ring's); a native door would want the ring to gain an
+ * edge-triggered retry first. The reachable paths -- poll/select and blocking
+ * read/write -- are exact.
+ *
+ * Lifetime: a plain kobject. A blocked waiter holds a reference, so `release`
+ * (a plain free -- no timer, unlike timerobj) runs only once the last
+ * reference and handle are gone.
  */
 
 #include <kernel/compiler.h>

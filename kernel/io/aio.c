@@ -30,7 +30,6 @@ struct aio_req {
     struct waitqueue *wq;          /* the object's poll_wq for `want`, or NULL */
     unsigned want;                 /* COSMO_IO_READABLE or WRITABLE */
     bool prepared;                 /* `we` is queued on `wq` right now */
-    bool await_edge;               /* ran, returned -EAGAIN: wait for a wq wake, don't re-run on the level bit */
     struct list_node link;
 };
 
@@ -138,8 +137,6 @@ static unsigned op_rights(uint8_t op)
 /* Would the entry complete without waiting for readiness? */
 static bool runnable(const struct aio_req *q)
 {
-    if (q->await_edge)
-        return false;   /* a prior run returned -EAGAIN; wait for a fresh poll_wq wake */
     if (q->obj == NULL || q->sqe.op == COSMO_AIO_FSYNC)
         return true;
     const struct kobject_io_type *io = kobject_io_of(q->obj);
@@ -234,13 +231,7 @@ static void dispatch(struct aio_ring *r, struct aio_req *q, bool at_submit)
     if (runnable(q)) {
         int64_t rc = run(q);
         if (rc == -EAGAIN && !(q->sqe.flags & COSMO_AIO_F_NOWAIT) && q->obj) {
-            /* The object said ready but the call could not proceed: either
-             * readiness vanished in the race, or the level bit does not
-             * promise this request (an all-or-nothing write to an eventfd
-             * with room for less than the value). Park and wait for a fresh
-             * poll_wq wake rather than re-running it on the unchanged bit,
-             * which would spin aio_wait. */
-            q->await_edge = true;
+            /* Readiness vanished between the check and the call: park. */
         } else {
             cq_push(r, q->sqe.user_data, rc);
             if (at_submit)
@@ -410,10 +401,6 @@ int64_t aio_wait(struct aio_ring *r, uint64_t ucqes, unsigned n, unsigned min, u
                 waitqueue_finish(q->wq, &q->we);
                 q->prepared = false;
             }
-            /* A wake arrived (a poll_wq fired, or a submit): give every
-             * edge-waiting entry one retry against the new object state. */
-            if (sleep)
-                q->await_edge = false;
         }
     }
     unsigned out = 0;
