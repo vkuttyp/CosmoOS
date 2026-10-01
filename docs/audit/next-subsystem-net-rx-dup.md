@@ -207,6 +207,11 @@ None.
   subject the real receive path to a duplicate — the point of a §47
   fault-injection point is to drive `netif_rx` → the stack end to end, which
   only an injection at the choke point does.
-- **Inject in each driver's receive handler.** One site per driver, and in
-  interrupt context where the framework (rightly) suppresses injection;
-  `rx_common` is the single thread-context point they all share.
+- **Inject in each driver's receive handler.** One site per driver, and for
+  the two hardware drivers (`e1000e`, `virtio-net`) in interrupt context,
+  where the framework (rightly) suppresses injection — so this would not fire
+  there either. `rx_common` is the single point all interfaces funnel through,
+  and the injection fires on the frames that reach it in thread context
+  (loopback, which the test drives); the stack it then feeds is the same for
+  every interface. That is strictly more than a per-driver IRQ-context site
+  could inject, for one site instead of one per driver.
