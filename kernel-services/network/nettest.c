@@ -602,7 +602,7 @@ bool selftest_net_arp(const char **reason)
     CHECK(arp_lookup(asker, mac) && memcmp(mac, forged_mac, 6) == 0);
     arp_get_stats(&s1);
     CHECK(s1.replies_sent == s0.replies_sent + 1 && s1.entries == s0.entries + 1);
-    arp_flush(nif);   /* the test's entries; a real gateway entry is re-learned below */
+    arp_delete(asker);   /* remove only the entry this test added, not a real gateway entry */
     /* The gateway resolves for real when a NIC is present (asynchronous). */
     if (nif->ip4.gateway) {
         struct mbuf *probe = m_getcl();
