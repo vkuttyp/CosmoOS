@@ -18,11 +18,14 @@ unregisters the device's higher-level object and registers a new one: a
 virtio-blk `remove`+`rebind` produces a **different `blkdev`**, so any handle
 or pointer to the old one is stale.
 
-The capability a reset needs already exists one layer down. `virtio.c`
-exports `virtio_device_reset` (write the device status to zero) and
-`virtio_device_init` (re-negotiate features, re-create the virtqueues,
-`DRIVER_OK`), and every virtio driver calls them — but only inside its own
-`probe` and `remove`. There is no path from the device model to "reset this
+The pieces a reset needs already exist one layer down. `virtio.c` exports
+`virtio_device_reset` (status to zero), `virtio_device_init` (reset and
+re-negotiate features, up to `FEATURES_OK`) and `virtio_device_ready`
+(`DRIVER_OK`); a driver's `probe` strings these together with its own
+`virtq_alloc` to build the virtqueues (`virtio_blk.c`: `virtio_device_init`,
+then `virtq_alloc`, then `virtio_device_ready`). All the pieces are there —
+but reachable only from inside a driver's own `probe` and `remove`, never as
+a model operation. There is no path from the device model to "reset this
 device in place and leave it bound and registered."
 
 Prompt #2 §41 names "device reset" among the operations to design
@@ -39,15 +42,17 @@ removal disk (`QEMU_RMDISK`) the only way the model allows today (one debug
 boot, x86-64):
 
 ```
-DEVRESET: struct device_driver has no reset op; re-initialising vdb needed remove+reprobe (a fresh blkdev), not an in-place reset; virtio_device_reset exists but is private to the driver's remove
+DEVRESET: struct device_driver has no reset op; re-initialising vdb needed remove+reprobe, which replaced the blkdev with a different object (not an in-place reset); virtio_device_reset exists but is private to the driver's remove
 ```
 
 - **No reset operation.** `device_driver` carries no `reset`, and nothing in
   the model calls `virtio_device_reset`.
 - **Re-init is remove+reprobe.** The only in-place recovery is
   `pci_test_remove` + `pci_test_rebind`, which runs the driver's `remove` and
-  a fresh `probe`: the device is destroyed and re-created, a new `blkdev`
-  under the same name, not the same object reset.
+  a fresh `probe`. The probe keeps a reference to the old `blkdev` across the
+  cycle (`blk_unregister` waits only for in-flight submits, not references),
+  so a pointer comparison shows the re-probe produced a **different** object
+  under the same name — the device was destroyed and re-created, not reset.
 
 ## Why it matters
 
@@ -67,7 +72,7 @@ DEVRESET: struct device_driver has no reset op; re-initialising vdb needed remov
 | driver ops | `struct device_driver` (`device.h`) | `match`, `probe`, `remove` — no `reset` |
 | bind / unbind | `try_bind` / `unbind` (`device.c`) | `probe` on bind, `remove` on unbind |
 | re-init path | `pci_test_remove` + `pci_test_rebind`, `device_test_unbind` + `device_test_bind` | full teardown then fresh probe; a new higher-level object |
-| the primitive | `virtio_device_reset`, `virtio_device_init` (`virtio.c`, exported) | reset the status to zero; re-negotiate and re-create the queues — called only inside a driver's `probe`/`remove` |
+| the pieces | `virtio_device_reset`, `virtio_device_init`, `virtio_device_ready` (`virtio.c`, exported) + the driver's `virtq_alloc` | status to zero; reset and re-negotiate features; `DRIVER_OK`; the driver builds its queues — strung together only inside a driver's `probe`/`remove` |
 
 ## Design
 
@@ -82,13 +87,16 @@ bound across the call — only the driver's hardware state is re-initialized.
 ### 2. The virtio reset handler
 
 `virtio_blk`'s `reset` quiesces submission (the removal unit's seam,
-`docs/audit/next-subsystem-virtio-remove-inflight.md`), fails the in-flight
-requests `-EIO` as a removal does, then `virtio_device_reset` +
-`virtio_device_init` with the same features `probe` negotiated, re-creating
-the virtqueues, and returns the device to `DRIVER_OK`. The `blkdev` stays
-registered throughout: callers keep their reference, and I/O submitted after
-the reset runs on the re-created queues. The common part (reset + re-init)
-can live on the virtio bus so other virtio drivers get a default `reset`.
+`docs/audit/next-subsystem-virtio-remove-inflight.md`) and fails the
+in-flight requests `-EIO` as a removal does, then re-runs its probe-time
+setup: `virtio_device_init` (reset and re-negotiate the same features),
+`virtq_alloc` to rebuild its virtqueue with the `vblk_done` callback, and
+`virtio_device_ready` for `DRIVER_OK`. (`virtio_device_init` on its own only
+resets and negotiates; the queues and `DRIVER_OK` are the driver's own
+steps, which is why the reset is largely per-driver rather than a single bus
+default — though a bus helper can wrap the init/ready bookends.) The
+`blkdev` stays registered throughout: callers keep their reference, and I/O
+submitted after the reset runs on the re-created queue.
 
 ### 3. In-flight requests
 
@@ -104,8 +112,8 @@ hazard and it is already solved for removal.
 |---|---|
 | `kernel/include/kernel/device.h` | `reset` op on `struct device_driver`; `device_reset` declaration |
 | `kernel/device/device.c` | `device_reset(dev)` — bound + has `reset` → call, else `-ENODEV`/`-EOPNOTSUPP` |
-| `drivers/virtio/virtio.c` | a bus-level `reset` default: quiesce, `virtio_device_reset` + `virtio_device_init` |
-| `drivers/virtio/virtio_blk.c` | the block driver's `reset` (fail in-flight, re-init, keep the `blkdev`) |
+| `drivers/virtio/virtio.c` | an optional bus helper wrapping the `virtio_device_init`/`virtio_device_ready` bookends |
+| `drivers/virtio/virtio_blk.c` | the block driver's `reset`: quiesce and fail in-flight, `virtio_device_init` + `virtq_alloc` + `virtio_device_ready`, keep the `blkdev` |
 | `docs/kernel/device/*.md` | the reset operation |
 | `README.md` | Status entry |
 

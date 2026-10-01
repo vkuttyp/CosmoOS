@@ -51,51 +51,55 @@ bool selftest_device_reset_gap(const char **reason)
     kinfo("selftest: device-reset-gap: no test hooks in this build; skipping");
     return true;
 #else
-    struct blkdev *bd = rm_find();
-    if (bd == NULL) {
+    struct blkdev *old = rm_find();
+    if (old == NULL) {
         kinfo("selftest: device-reset-gap: no removal disk (QEMU_RMDISK=0); skipping");
         return true;
     }
     char name[BLKDEV_NAME_MAX];
-    memcpy(name, bd->name, sizeof(name));
-    struct pci_device *pdev = to_pci_device(to_virtio_device(bd->dev)->hw);
+    memcpy(name, old->name, sizeof(name));
+    struct pci_device *pdev = to_pci_device(to_virtio_device(old->dev)->hw);
     uint8_t *pat = kmalloc(4096, 0), *chk = kmalloc(4096, 0);
     if (pat == NULL || chk == NULL) {
         kfree(pat);
         kfree(chk);
-        blkdev_put(bd);
+        blkdev_put(old);
         *reason = "check failed: the probe's own buffers";
         return false;
     }
     for (unsigned i = 0; i < 512; i++)
         pat[i] = (uint8_t)(i * 7 + 3);
-    bool ok = rm_io(bd, BIO_WRITE, pat) == 0;
-    blkdev_put(bd);
+    bool ok = rm_io(old, BIO_WRITE, pat) == 0;
     /* The only in-place re-init the model offers is a full remove + reprobe:
      * there is no device_reset op, and virtio_device_reset is private to the
-     * driver's remove. */
+     * driver's remove. Keep old's reference across it -- blk_unregister waits
+     * only for in-flight submits, not references -- so its object stays alive
+     * and a pointer comparison shows the reprobe replaced it, rather than
+     * resetting it in place. */
     if (ok)
         ok = pci_test_remove(pdev) == 0 && pci_test_rebind(pdev) == 0;
     struct blkdev *again = ok ? rm_find() : NULL;
     if (again != NULL) {
         memset(chk, 0, 512);
-        ok = strcmp(again->name, name) == 0 && rm_io(again, BIO_READ, chk) == 0 &&
-             memcmp(chk, pat, 512) == 0;
+        ok = again != old &&                      /* a different object: not reset in place */
+             strcmp(again->name, name) == 0 &&
+             rm_io(again, BIO_READ, chk) == 0 && memcmp(chk, pat, 512) == 0;
         blkdev_put(again);
     } else {
         ok = false;
     }
+    blkdev_put(old);
     kfree(pat);
     kfree(chk);
     if (!ok) {
         if (pdev->dev.state == DEV_UNBOUND)
             pci_test_rebind(pdev);
-        *reason = "check failed: the removal disk did not survive remove+reprobe";
+        *reason = "check failed: the removal disk did not survive remove+reprobe as a new object";
         return false;
     }
-    kprintf("DEVRESET: struct device_driver has no reset op; re-initialising %s needed remove+reprobe "
-            "(a fresh blkdev), not an in-place reset; virtio_device_reset exists but is private to the "
-            "driver's remove\n", name);
+    kprintf("DEVRESET: struct device_driver has no reset op; re-initialising %s needed remove+reprobe, "
+            "which replaced the blkdev with a different object (not an in-place reset); virtio_device_reset "
+            "exists but is private to the driver's remove\n", name);
     return true;
 #endif
 }
