@@ -3887,6 +3887,12 @@ See [docs/development.md](docs/development.md).
   waiter directly; `epoll_ctl` wakes the set so a concurrent waiter
   re-evaluates. `EPOLLET`, nesting an epoll, and auto-remove-on-close are
   deferred (explicit `EPOLL_CTL_DEL`). (PR #291)
+- **`sysinfo(2)` for the Linux personality.** The coarse machine snapshot, no
+  longer a stub: `lx_sysinfo` fills `struct sysinfo` from the stats the kernel
+  already keeps — `uptime` from the monotonic clock, `totalram`/`freeram` from
+  the buddy allocator's page counts (`pmm_get_stats`, `mem_unit = 1`, bytes),
+  and `procs` from the process count. Load average, swap and high memory are
+  reported zero (the system has none). (PR #293)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

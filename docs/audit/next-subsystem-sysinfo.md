@@ -4,7 +4,14 @@
 > (`tools/sysinfo-probe.py`); the `lx_sysinfo` handler, the `struct lx_sysinfo`
 > and the `lxtest` check described under "Design" and the edits in "Affected
 > files" are planned work that lands in the implementation PR that follows,
-> gated on CI. As committed here, `sysinfo` returns `-ENOSYS`.
+> gated on CI. As the report was committed (before PR #293), `sysinfo`
+> returned `-ENOSYS`.
+>
+> **Built in PR #293.** The implementation added `struct lx_sysinfo` and the
+> `lx_sysinfo` handler (filling uptime/memory/procs from `pmm_get_stats`,
+> `clock_now_ns`, `process_count`) and flipped `[LX_sysinfo]` from `lx_nosys`;
+> both arches boot PASS and `host-test` passes. Every present-tense statement
+> below describes the state the report measured, before this implementation.
 
 ## Problem
 
