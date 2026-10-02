@@ -9,6 +9,17 @@
 > `lx_epoll_ctl` rejected any `events` with `EPOLLET` set with `-EINVAL`
 > (`compat/linux/syscalls.c:943`), so an edge-triggered registration could not
 > be made at all.
+>
+> **Built in PR #301.** The implementation added `edge`/`armed` to
+> `struct epoll_item`, the `collect` gating, the `epoll_obj_wait` re-arm (drained
+> or woken, but not on a timeout-only wake) and the §3a sleep-decision gating,
+> the `edge` parameter on `epoll_obj_add`/`epoll_obj_mod`, the `epoll_obj_rearm`
+> extension for an undelivered edge, and the door change — as described below.
+> The tests landed in `tests/linux/lxtest.c`. Both arches boot PASS and
+> `host-test` passes. Every present-tense statement below describes the state
+> the report measured, before this implementation. One refinement over the plan:
+> the re-arm deliberately skips a timeout-only wake, since a deadline elapsing is
+> not an event and would otherwise re-report a disarmed, still-ready edge member.
 
 ## Problem
 
