@@ -1708,10 +1708,11 @@ static int64_t lx_shmdt(struct syscall_args *a)
         return -EINVAL;   /* no attach at that address */
 
     struct vm_space *space = process_current()->space;
-    /* Unmap only the segment's own pages in the recorded range: a part the
-     * program unmapped itself is skipped, and a mapping it put in that range
-     * (its own munmap then a fresh mmap) is left untouched. */
-    vm_user_unmap_vnode(space, at->addr, at->size, shm_vnode(at->seg));
+    /* Detach the mapping that starts at this address, if it is still the
+     * segment's: SysV keys on the attach's base, so another attach of the same
+     * segment, or a mapping the program put here after its own munmap, is left
+     * alone. Atomic against a concurrent map/unmap of the range. */
+    vm_user_unmap_shm(space, at->addr, shm_vnode(at->seg));
     shm_detach(at->seg);   /* nattch-- and drop the attach's reference */
     kfree(at);
     return 0;

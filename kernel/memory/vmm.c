@@ -2643,41 +2643,44 @@ bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_
     return ok;
 }
 
-/* Unmap only the parts of [addr, addr+len) that are file mappings of `vn`,
- * leaving any other region (a gap, or a mapping the program put there) in
- * place. Used by shmdt so a detach frees exactly the segment's own pages --
- * never a mapping that replaced part of the attach, and never leaving the
- * segment's remaining pages behind after a partial unmap. Each matching
- * sub-range is removed through vm_user_unmap, so the split/teardown/shootdown
- * are the ordinary ones; the scan restarts after each removal because the
- * region list changed. */
-void vm_user_unmap_vnode(struct vm_space *space, uint64_t addr, size_t len, struct vnode *vn)
+/*
+ * Detach a System V shm attach: unmap the one region that STARTS at `addr`,
+ * if it is a file mapping of `vn` (the segment's backing). SysV shmdt detaches
+ * the mapping at the attach's base address, so keying on base == addr means a
+ * different attach of the same segment (at another base) is never removed, nor
+ * is a mapping the program put at `addr` in place of a detached attach. The
+ * whole thing runs under one hold of the space lock with the region claimed
+ * (VM_REGION_QUIESCED) across the teardown -- as map_replace does -- so a
+ * concurrent mmap cannot be handed the range mid-teardown and then be torn
+ * down (there is no release-then-act window). It unmaps a whole region, so no
+ * split is needed and there is no failure path to retry.
+ */
+void vm_user_unmap_shm(struct vm_space *space, uint64_t addr, struct vnode *vn)
 {
     KASSERT(space->user);
-    uint64_t end = addr + len;
-    if (len == 0 || end < addr)
-        return;
 
-    for (;;) {
-        uint64_t lo = 0, hi = 0;
-        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
-        struct vm_region *r;
-        list_for_each_entry(r, &space->regions, link) {
-            if (r->base + r->size <= addr)
-                continue;
-            if (r->base >= end)
-                break;
-            if (r->kind == VM_REGION_FILE && r->fmap != NULL && r->fmap->vn == vn) {
-                lo = r->base > addr ? r->base : addr;
-                hi = (r->base + r->size) < end ? (r->base + r->size) : end;
-                break;
-            }
-        }
+    mutex_lock(&space->replace_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, (vaddr_t)addr);
+    if (r == NULL || r->base != addr || r->kind != VM_REGION_FILE || r->fmap == NULL ||
+        r->fmap->vn != vn || (r->flags & VM_REGION_QUIESCED)) {
         spin_unlock_irqrestore(&space->lock, s);
-        if (hi == 0)
-            return;   /* no segment-backed page left in the range */
-        vm_user_unmap(space, lo, hi - lo, 0);
+        mutex_unlock(&space->replace_lock);
+        return;   /* nothing of this segment starts here */
     }
+    size_t size = r->size;
+    r->flags |= VM_REGION_QUIESCED;   /* claim it: faults back off, no map can take the range */
+    space->mapped_pages -= size / PAGE_SIZE;
+    spin_unlock_irqrestore(&space->lock, s);
+
+    user_range_teardown(space, (vaddr_t)addr, size);
+    file_hold_release(space);
+
+    s = spin_lock_irqsave(&space->lock);
+    list_remove(&r->link);
+    spin_unlock_irqrestore(&space->lock, s);
+    mutex_unlock(&space->replace_lock);
+    region_put(r);   /* frees the region and drops its fmap/vnode reference */
 }
 
 /* --- diagnostics --- */
