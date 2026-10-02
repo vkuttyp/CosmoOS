@@ -123,9 +123,21 @@ static int64_t signalfd_read(struct kobject *obj, void *buf, size_t len)
 
         struct lx_signalfd_siginfo *recs = buf;
         struct signal_info info;
+        bool from_shared;
+        struct thread *th = thread_current();
+        /* Record what this read consumes, by its set, so a copy fault can put
+         * it back (signalfd_read_undo). Reset each attempt, including after a
+         * blocking wait, so it names only this read's drained signals. */
+        th->sigfd_undo_thread = 0;
+        th->sigfd_undo_shared = 0;
         size_t n = 0;
-        while (n < cap && signal_consume_mask(mask, &info))
+        while (n < cap && signal_consume_mask(mask, &info, &from_shared)) {
+            if (from_shared)
+                th->sigfd_undo_shared |= SIGMASK(info.sig);
+            else
+                th->sigfd_undo_thread |= SIGMASK(info.sig);
             fill_ssi(&recs[n++], &info);
+        }
         if (n > 0)
             return (int64_t)(n * sizeof(struct lx_signalfd_siginfo));
         if (nb)
@@ -136,6 +148,20 @@ static int64_t signalfd_read(struct kobject *obj, void *buf, size_t len)
         if (rc)
             return rc;
     }
+}
+
+/* The copy of a read's records to user space faulted: put the signals it
+ * drained back into the pending set, so the failed read loses none of them. */
+static void signalfd_read_undo(struct kobject *obj)
+{
+    (void)obj;
+    struct thread *t = thread_current();
+    signal_reinject_sets(t->sigfd_undo_thread, t->sigfd_undo_shared);
+    t->sigfd_undo_thread = 0;
+    t->sigfd_undo_shared = 0;
+    /* A poller that found nothing and slept while the copy faulted (the
+     * signals briefly gone from the pending set) must re-check now. */
+    waitqueue_wake_all(&t->proc->signalfd_wqh);
 }
 
 static int signalfd_set_nonblock(struct kobject *obj, int on)
@@ -157,6 +183,7 @@ static void signalfd_release(struct kobject *obj)
 static const struct kobject_io_type signalfd_type = {
     .base = { .name = "signalfd", .release = signalfd_release, .flags = KOBJECT_TYPE_IO },
     .read = signalfd_read,
+    .read_undo = signalfd_read_undo,
     .ready = signalfd_ready,
     .set_nonblock = signalfd_set_nonblock,
     .poll_wq = signalfd_poll_wq,

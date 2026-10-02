@@ -157,7 +157,7 @@ uint64_t signal_pending_set(void)
  * the process has blocked) and orders strictly by signal number (a signalfd
  * reports in order). For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
  */
-bool signal_consume_mask(uint64_t mask, struct signal_info *out)
+bool signal_consume_mask(uint64_t mask, struct signal_info *out, bool *from_shared)
 {
     struct thread *t = thread_current();
     struct process *p = t->proc;
@@ -166,16 +166,43 @@ bool signal_consume_mask(uint64_t mask, struct signal_info *out)
     bool got = cand != 0;
     if (got) {
         int sig = __builtin_ctzll(cand) + 1;
+        /* Clear the pending bit but leave sig_info[sig-1] untouched: a
+         * signalfd that cannot copy this record out puts the signal back by
+         * re-setting the bit alone (signal_reinject_sets), and the detail is
+         * still in the slot. */
         if (t->sig_pending & SIGMASK(sig)) {
             t->sig_pending &= ~SIGMASK(sig);
             *out = t->sig_info[sig - 1];
+            *from_shared = false;
         } else {
             p->sig_shared_pending &= ~SIGMASK(sig);
             *out = p->sig_shared_info[sig - 1];
+            *from_shared = true;
         }
     }
     spin_unlock_irqrestore(&p->lock, s);
     return got;
+}
+
+/*
+ * Put back signals a signalfd read consumed but could not copy to user: for
+ * each set, re-set the pending bit of every signal in `thr`/`shr` that no
+ * newer instance has re-made pending (coalesced -- the newer one, already in
+ * the slot, wins, so this must not clobber it). signal_consume_mask cleared
+ * only the pending bit, never the siginfo slot, so re-setting the bit restores
+ * the signal in full. For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
+ */
+void signal_reinject_sets(uint64_t thr, uint64_t shr)
+{
+    if ((thr | shr) == 0)
+        return;
+    struct thread *t = thread_current();
+    struct process *p = t->proc;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint64_t already = t->sig_pending | p->sig_shared_pending;
+    t->sig_pending |= thr & ~already;
+    p->sig_shared_pending |= shr & ~already;
+    spin_unlock_irqrestore(&p->lock, s);
 }
 
 /* --- sending -------------------------------------------------------------------- */

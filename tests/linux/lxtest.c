@@ -1058,6 +1058,22 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_signalfd4, sfu, &both, 8, 0) == sfu, 0);     /* widen the mask */
         CHECKV(sc3(LX_read, sfu, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
         CHECK(ssi.ssi_signo == 10);                                /* now readable */
+        /* a read whose destination faults must not lose the signal: the fd
+         * drains it, then the copy to user faults and read_undo puts it back.
+         * An in-range page made PROT_NONE passes user_range_ok but faults the
+         * copy; a raised SIGUSR1 survives the -EFAULT read and the next read
+         * still returns it. */
+        long pg = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+        CHECKV(pg > 0 && (pg & 0xfff) == 0, pg);
+        CHECKV(sc3(LX_mprotect, pg, 4096, 0) == 0, 0);             /* PROT_NONE */
+        long sff = sc4(LX_signalfd4, -1, &m1, 8, LX_SFD_NONBLOCK);
+        CHECKV(sff >= 0, sff);
+        CHECKV(sc2(LX_kill, sc0(LX_getpid), 10) == 0, 0);          /* SIGUSR1 pending */
+        CHECKV(sc3(LX_read, sff, pg, sizeof(ssi)) == -14, 0);      /* -EFAULT: copy faults */
+        CHECKV(sc3(LX_read, sff, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);   /* not lost */
+        CHECK(ssi.ssi_signo == 10);
+        CHECKV(sc2(LX_munmap, pg, 4096) == 0, 0);
+        CHECKV(sc1(LX_close, sff) == 0, 0);
         /* errors */
         CHECKV(sc4(LX_signalfd4, -1, &m1, 4, 0) == -22, 0);         /* bad sizemask */
         CHECKV(sc4(LX_signalfd4, -1, &m1, 8, 0x9999) == -22, 0);    /* bad flags */
@@ -1070,7 +1086,7 @@ int main(int argc, char **argv)
         CHECKV(sc1(LX_close, sfc2) == 0, 0);
         CHECKV(sc1(LX_close, sfu) == 0, 0);
         CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &saved_mask, 0, 8) == 0, 0);
-        lx_puts("LXSIGFD: signalfd read/nonblock/mask-scope/blocked-SIGCHLD\n");
+        lx_puts("LXSIGFD: signalfd read/nonblock/mask-scope/blocked-SIGCHLD/fault-keeps\n");
     }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */

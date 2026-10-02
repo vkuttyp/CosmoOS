@@ -121,8 +121,14 @@ uint64_t signal_pending_set(void);   /* pending on the thread or the process, bl
 
 /* Consume the lowest pending signal in `mask` (thread- or process-directed,
  * blocked or not) for the current thread into *out; true if one was found.
- * For signalfd(2). */
-bool signal_consume_mask(uint64_t mask, struct signal_info *out);
+ * *from_shared says which set it came from, so signal_reinject_sets can put
+ * it back there on a failed copy. Clears only the pending bit, not the
+ * siginfo slot. For signalfd(2). */
+bool signal_consume_mask(uint64_t mask, struct signal_info *out, bool *from_shared);
+/* Put back signals signal_consume_mask took but a signalfd could not copy to
+ * user: re-set the pending bit of each signal in `thr`/`shr`, skipping any a
+ * newer instance has already re-made pending. For signalfd(2). */
+void signal_reinject_sets(uint64_t thr, uint64_t shr);
 /* A call that swaps the mask while it waits (rt_sigsuspend, ppoll):
  * the mask the handler's frame records, and the one restored when no
  * handler runs, is `saved`, not the temporary one. */
