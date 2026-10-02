@@ -868,9 +868,13 @@ int main(int argc, char **argv)
         CHECKV(sizeof(struct lx_sysinfo) == 112, (long)sizeof(struct lx_sysinfo));   /* LP64 layout */
         CHECKV(si.mem_unit == 1, (long)si.mem_unit);
         CHECKV(si.uptime >= 0 && si.uptime < 86400, (long)si.uptime);   /* plausible seconds, not poison */
-        CHECKV(si.totalram > 0 && si.freeram <= si.totalram, (long)(si.totalram >> 20));
+        CHECKV(si.totalram > 0 && si.freeram < si.totalram, (long)(si.totalram >> 20));   /* some RAM is always in use */
         CHECKV(si.procs >= 1, (long)si.procs);
-        CHECKV(si.loads[0] == 0 && si.totalswap == 0, 0);   /* the fields with no backing read zero */
+        /* every field with no backing reads zero (the struct was poisoned) */
+        CHECKV(si.loads[0] == 0 && si.loads[1] == 0 && si.loads[2] == 0, 0);
+        CHECKV(si.sharedram == 0 && si.bufferram == 0, 0);
+        CHECKV(si.totalswap == 0 && si.freeswap == 0, 0);
+        CHECKV(si.totalhigh == 0 && si.freehigh == 0 && si.pad == 0, 0);
     }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
