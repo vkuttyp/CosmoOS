@@ -898,7 +898,38 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_read, etf, &ticks, 8) == 8, 0);
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, etf, 0) == 0, 0);
         CHECKV(sc1(LX_close, etf) == 0, 0);
-        lx_puts("LXEPOLLET: edge once + re-arm on member wake (drain/refill, oneshot+ET, blocked timerfd); level repeats\n");
+        /* a dual-queue member: an O_RDWR FIFO wakes rd_wq on a write (data for
+         * readers) and wr_wq on a read (space for writers). An edge watch for
+         * both directions must track both queues, or a writable edge produced
+         * by a read -- which wakes only wr_wq -- is lost. Isolate that: capture
+         * the generation after the FIFO is full (its rd_wq wakes accounted),
+         * then a read wakes only wr_wq and the writable edge must still fire. */
+        CHECKV(sc4(LX_mknodat, LX_AT_FDCWD, "/tmp/lxepfifo", LX_S_IFIFO | 0644, 0) == 0, 0);
+        long ff = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxepfifo", LX_O_RDWR | LX_O_NONBLOCK, 0);
+        CHECKV(ff >= 3, ff);
+        struct lx_epoll_event ffe = { .events = LX_EPOLLIN | LX_EPOLLOUT | LX_EPOLLET, .data = 0xF1 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, ff, &ffe) == 0, 0);
+        /* empty FIFO is writable: the initial edge reports EPOLLOUT */
+        got = sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0);
+        CHECKV(got == 1 && (out[0].events & LX_EPOLLOUT), (long)out[0].events);
+        /* fill it (writes wake rd_wq); now readable, not writable. The read
+         * edge re-arms and reports, capturing the generation past those wakes.
+         * The bytes written are irrelevant, so an uninitialised buffer is fine. */
+        static char ffbig[256];
+        while (sc3(LX_write, ff, ffbig, sizeof(ffbig)) > 0) { }   /* until EAGAIN (full) */
+        got = sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0);
+        CHECKV(got == 1 && (out[0].events & LX_EPOLLIN), (long)out[0].events);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);   /* no new edge yet */
+        /* draining frees space past the writable threshold -> writable again,
+         * waking ONLY wr_wq (reads wake writers, not readers): the writable edge
+         * must be reported, which needs the write queue tracked, not just read */
+        while (sc3(LX_read, ff, ffbig, sizeof(ffbig)) > 0) { }
+        got = sc6(LX_epoll_pwait, ep, out, 4, 1000, 0, 0);
+        CHECKV(got == 1 && (out[0].events & LX_EPOLLOUT), (long)out[0].events);
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, ff, 0) == 0, 0);
+        CHECKV(sc1(LX_close, ff) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxepfifo", 0) == 0, 0);
+        lx_puts("LXEPOLLET: edge once + re-arm on member wake (drain/refill, oneshot+ET, blocked timerfd, O_RDWR FIFO writable edge); level repeats\n");
 
         /* errors */
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd, &ee) == -17, 0);   /* EEXIST */

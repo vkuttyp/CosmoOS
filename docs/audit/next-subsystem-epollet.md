@@ -155,6 +155,15 @@ nothing and re-arms nothing. A member with no poll queue (always ready, never
 changing) has no generation to advance, so it reports once and stays quiet —
 correct for a source with no transitions.
 
+A member's read and write readiness can live on **different** queues — an
+`O_RDWR` FIFO wakes its read queue on a write (data for readers) and its write
+queue on a read (space for writers). So an edge watch for both directions must
+track both: `member_wqs` resolves up to two queues (one per requested direction,
+de-duplicated, via `kobject_poll_wq` with a single-direction mask), and the
+generation is their **sum** — any one advancing re-arms. Tracking only one
+queue would drop, for example, the writable edge a read produces on a full FIFO.
+Most members have a single queue, so this is one entry for them.
+
 The re-arm is naturally per-member (each reads its own queue), so there is no
 coarse "re-arm all on any wake". A report leaves `edge_gen` unchanged, so an
 event that arrived between the re-arm and the report is not swallowed — the next
@@ -168,11 +177,12 @@ must therefore not treat such a member as ready, or a blocking `epoll_wait` on a
 disarmed-but-readable edge member would neither report (collect gates it out)
 nor sleep (readiness seen) — a busy-spin. `snapshot` already skips `disabled`
 one-shots, but a disarmed edge member is **not** `disabled` — it must stay in
-the snapshot so its `poll_wq` is armed and its next wake ends the sleep. So the
-snapshot records each member's `edge`/`armed` and its `edge_gen`, and
-`snap_any_ready` — called **after** the wait entries are armed — treats a
-disarmed edge member as ready only if its queue's generation has advanced past
-the recorded `edge_gen` (a wake raced in between `collect` and the arm, so
+the snapshot so **each** of its poll queues is armed (both directions of an
+`O_RDWR` FIFO) and any of their wakes ends the sleep. So the snapshot records
+each member's queues, `edge`/`armed` and its `edge_gen`, and `snap_any_ready` —
+called **after** the wait entries are armed — treats a disarmed edge member as
+ready only if its combined generation has advanced past the recorded `edge_gen`
+(a wake raced in between `collect` and the arm, so
 re-collect rather than sleep); otherwise it does not count. This re-read closes
 the collect-to-arm window the same way the level path re-reads
 `kobject_ready`. A wake after this check wakes the armed entry instead.
@@ -195,7 +205,7 @@ readiness bits), matching Linux.
 | file | change |
 |---|---|
 | `kernel/include/kernel/wait.h`, `kernel/scheduler/wait.c` | `struct waitqueue` gains `wake_gen`, bumped on every wake; `waitqueue_wake_gen()` reads it (§3) |
-| `kernel/io/epoll.c`, `kernel/include/kernel/epoll.h` | `edge`/`armed`/`edge_gen` on `struct epoll_item`; `collect` re-arms an edge member when its queue generation advanced and reports it only while `armed`; the sleep check (`snap_any_ready`) treats a disarmed edge member as not ready and re-reads the generation (§3a); `epoll_obj_rearm` restores a reported edge too; `epoll_obj_add`/`epoll_obj_mod` gain an `edge` parameter |
+| `kernel/io/epoll.c`, `kernel/include/kernel/epoll.h` | `edge`/`armed`/`edge_gen` on `struct epoll_item`; `member_wqs` resolves a member's up-to-two direction queues and the generation is their sum; `collect` re-arms an edge member when that generation advanced and reports it only while `armed`; the snapshot pins and arms both queues; the sleep check (`snap_any_ready`) treats a disarmed edge member as not ready and re-reads the generation (§3a); `epoll_obj_rearm` restores a reported edge too; `epoll_obj_add`/`epoll_obj_mod` gain an `edge` parameter |
 | `compat/linux/syscalls.c` | drop the `EPOLLET → -EINVAL` refusal; extract `edge`; pass it through; `do_epoll_wait` re-arms an undelivered edge; flip the existing `-EINVAL` assertion's expectation |
 | `tests/linux/lxtest.c` | edge-vs-level tests (below); the existing `EPOLLET → -EINVAL` error check becomes the accepted path |
 | `README.md` | Status entry |
@@ -224,6 +234,7 @@ drops the wake fails the check rather than hanging the boot.
 | level contrast | after a MOD to level, a ready member stays reported on repeated `epoll_wait(0)`, confirming only the edge member is suppressed |
 | `EPOLLET\|EPOLLONESHOT` | reported once; a fresh edge while the one-shot is disabled is **not** reported; a MOD re-arms and it reports again — the two suppressions are orthogonal |
 | edge re-arms on a blocking wake | a periodic timerfd registered edge is reported and drained (disarming it); a later period fires and its wake re-arms the edge so `epoll_wait` with a finite, far-longer deadline returns it (a dropped wake fails at the deadline, never hangs). A periodic timer, not a second thread, is the waker, so the single-threaded self-test stays deterministic |
+| dual-queue writable edge | an `O_RDWR` FIFO watched `EPOLLIN\|EPOLLOUT\|EPOLLET`: fill it (its read queue wakes, the readable edge is reported, the generation captured past those wakes), then drain it — which wakes only the write queue — and the writable edge is still reported, proving both direction queues are tracked |
 
 **Mutations** (each alone, boot confirmed):
 - `collect` reports an edge member regardless of `armed` (treat it as level):
@@ -232,6 +243,9 @@ drops the wake fails the check rather than hanging the boot.
 - `collect` never sets `armed` when the member's generation advanced (the §3
   re-arm): every re-arm check fails — a drained-then-refilled or blocking-woken
   edge member is never reported again.
+- `member_wqs` tracks only the read queue: the `O_RDWR` FIFO writable-edge check
+  fails — a writable edge produced by a read (which wakes only the write queue)
+  is lost.
 
 ## Benchmarks
 

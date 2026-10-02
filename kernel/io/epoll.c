@@ -59,18 +59,20 @@ struct epoll_item {
     struct list_node link;
 };
 
-/* A member captured for one wait: its queue and a held reference, so the sleep
- * is immune to a concurrent DEL/MOD of the live list. */
+/* A member captured for one wait: its queue(s) and a held reference, so the
+ * sleep is immune to a concurrent DEL/MOD of the live list. A member's read and
+ * write readiness can live on different queues (an O_RDWR FIFO), so up to two. */
 struct epoll_snap {
     struct kobject *obj;      /* referenced for the duration of the wait */
-    struct waitqueue *wq;     /* kobject_poll_wq(obj, want|HANGUP|ERROR), or NULL */
+    struct waitqueue *wq[2];  /* the requested directions' wake queues, de-duplicated */
+    unsigned nwq;
     unsigned want;
     bool edge;                /* captured so the sleep decision gates like collect */
     bool armed;               /* a disarmed edge member is not "ready" for the sleep check */
     uint64_t edge_gen;        /* the member's wake generation collect last acted on: a change
-                               * seen after the wait entry is armed is a fresh edge, so do not sleep */
-    struct wait_entry we;
-    bool prepared;
+                               * seen after the wait entries are armed is a fresh edge, so do not sleep */
+    struct wait_entry we[2];
+    bool prepared[2];
 };
 
 struct epoll_obj {
@@ -145,14 +147,49 @@ static unsigned item_ready(const struct epoll_item *it)
     return kobject_ready(it->obj) & EPOLL_WANT_ALL(it->want);
 }
 
-/* The wake generation of a member's poll queue -- it advances whenever the
- * member's readiness source fires (an event). A member with no poll queue
- * (always ready, never changes) has no event to track, so its stored value is
- * returned, which never looks changed. Lock held (the item list). */
+/* Resolve the wake queue(s) the member's requested directions sleep on. A
+ * member's read and write readiness can live on different queues (an O_RDWR
+ * FIFO wakes rd_wq on a read and wr_wq on a write), so fill up to two, one per
+ * requested direction, de-duplicated. Returns the count. Lock held. */
+static unsigned member_wqs(struct kobject *obj, unsigned want, struct waitqueue *out[2])
+{
+    unsigned n = 0;
+    struct waitqueue *rd = (want & COSMO_IO_READABLE)
+        ? kobject_poll_wq(obj, COSMO_IO_READABLE | COSMO_IO_HANGUP | COSMO_IO_ERROR) : NULL;
+    struct waitqueue *wr = (want & COSMO_IO_WRITABLE)
+        ? kobject_poll_wq(obj, COSMO_IO_WRITABLE | COSMO_IO_HANGUP | COSMO_IO_ERROR) : NULL;
+    if (rd)
+        out[n++] = rd;
+    if (wr && wr != rd)
+        out[n++] = wr;
+    if (n == 0) {
+        /* Neither direction requested (e.g. a hangup-only watch): the queue for
+         * the full mask. */
+        struct waitqueue *w = kobject_poll_wq(obj, EPOLL_WANT_ALL(want));
+        if (w)
+            out[n++] = w;
+    }
+    return n;
+}
+
+/* The combined wake generation across `n` queues: any one advancing advances
+ * the sum (both are monotonic), so a change means a watched direction fired. */
+static uint64_t wqs_gen(struct waitqueue *const *wq, unsigned n)
+{
+    uint64_t g = 0;
+    for (unsigned i = 0; i < n; i++)
+        g += waitqueue_wake_gen(wq[i]);
+    return g;
+}
+
+/* The member's combined wake generation over its requested directions. A member
+ * with no poll queue (always ready, never changes) has no event to track, so
+ * its stored value is returned, which never looks changed. Lock held. */
 static uint64_t item_wq_gen(const struct epoll_item *it)
 {
-    struct waitqueue *wq = kobject_poll_wq(it->obj, EPOLL_WANT_ALL(it->want));
-    return wq ? waitqueue_wake_gen(wq) : it->edge_gen;
+    struct waitqueue *wqs[2];
+    unsigned n = member_wqs(it->obj, it->want, wqs);
+    return n ? wqs_gen(wqs, n) : it->edge_gen;
 }
 
 /* Lock held. Fill up to `max` ready members, newest fairness: each reported
@@ -332,13 +369,15 @@ static unsigned snapshot(struct epoll_obj *ep, struct epoll_snap *snap, unsigned
             continue;
         kobject_get(it->obj);
         snap[n].obj = it->obj;
-        snap[n].wq = kobject_poll_wq(it->obj, EPOLL_WANT_ALL(it->want));
+        snap[n].nwq = member_wqs(it->obj, it->want, snap[n].wq);
         snap[n].want = it->want;
         snap[n].edge = it->edge;
         snap[n].armed = it->armed;
         snap[n].edge_gen = it->edge_gen;
-        snap[n].prepared = false;
-        wait_entry_init(&snap[n].we);
+        for (unsigned j = 0; j < 2; j++) {
+            snap[n].prepared[j] = false;
+            wait_entry_init(&snap[n].we[j]);
+        }
         n++;
     }
     return n;
@@ -356,7 +395,7 @@ static bool snap_any_ready(struct epoll_snap *snap, unsigned n)
 {
     for (unsigned i = 0; i < n; i++) {
         if (snap[i].edge && !snap[i].armed) {
-            if (snap[i].wq && waitqueue_wake_gen(snap[i].wq) != snap[i].edge_gen)
+            if (snap[i].nwq && wqs_gen(snap[i].wq, snap[i].nwq) != snap[i].edge_gen)
                 return true;   /* a fresh edge raced in; re-collect rather than sleep */
             continue;
         }
@@ -411,9 +450,9 @@ int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned 
         wait_entry_init(&ep_we);
         waitqueue_prepare(&ep->wait, &ep_we);
         for (unsigned i = 0; i < sn; i++) {
-            if (snap[i].wq) {
-                waitqueue_prepare(snap[i].wq, &snap[i].we);
-                snap[i].prepared = true;
+            for (unsigned j = 0; j < snap[i].nwq; j++) {
+                waitqueue_prepare(snap[i].wq[j], &snap[i].we[j]);
+                snap[i].prepared[j] = true;
             }
         }
         bool sleep = !snap_any_ready(snap, sn) && !__atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) &&
@@ -426,8 +465,9 @@ int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned 
          * DEL removed and freed its item. */
         waitqueue_finish(&ep->wait, &ep_we);
         for (unsigned i = 0; i < sn; i++) {
-            if (snap[i].prepared)
-                waitqueue_finish(snap[i].wq, &snap[i].we);
+            for (unsigned j = 0; j < 2; j++)
+                if (snap[i].prepared[j])
+                    waitqueue_finish(snap[i].wq[j], &snap[i].we[j]);
             kobject_put(snap[i].obj);
         }
         kfree(snap);
