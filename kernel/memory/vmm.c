@@ -488,6 +488,22 @@ const struct vm_region *vm_find_region(struct vm_space *space, vaddr_t va)
     return r;
 }
 
+bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    const struct vm_region *r = space_find(space, va);
+    if (r != NULL) {
+        out->base = r->base;
+        out->size = r->size;
+        out->prot = r->prot;
+        out->kind = r->kind;
+        out->flags = r->flags;
+        out->name = r->name;   /* an immortal string */
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    return r != NULL;
+}
+
 /* --- faults --- */
 
 static void describe_region(const struct vm_region *r, char *buf, size_t len)

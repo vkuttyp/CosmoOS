@@ -353,6 +353,21 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
  * of `space` that all carry `prot`. */
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot);
 
+/* A region's fields copied out by value. Unlike vm_find_region, which returns
+ * a live pointer after dropping the space lock, this reads everything under
+ * the lock, so the caller holds no pointer that a concurrent unmap could free
+ * (used by mremap to snapshot the mapping it resizes). */
+struct vm_region_info {
+    uint64_t base;
+    size_t size;
+    vm_prot_t prot;
+    enum vm_region_kind kind;
+    unsigned flags;
+    const char *name;
+};
+/* Fill *out with the region of `space` that contains `va`; true if one does. */
+bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out);
+
 /* Take over paging from the loader. Requires pmm_init and kmalloc_init.
  * After return: kernel tables active, all RAM in the direct map, boot
  * tables freed, deferred frames released, fault handler installed. */

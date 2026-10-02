@@ -876,6 +876,40 @@ int main(int argc, char **argv)
         CHECKV(si.totalswap == 0 && si.freeswap == 0, 0);
         CHECKV(si.totalhigh == 0 && si.freehigh == 0 && si.pad == 0, 0);
     }
+    /* mremap (docs/audit/next-subsystem-mremap.md): in-place anon resize.
+     * FIXED placement keeps the gaps deterministic. */
+    {
+        /* grow in place: the sentinel survives and the new page is usable */
+        long gp = sc6(LX_mmap, 0x32000000000UL, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                      LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(gp == 0x32000000000L, gp);
+        volatile unsigned int *gw = (unsigned int *)gp;
+        gw[0] = 0xA5A5;
+        CHECKV(sc5(LX_mremap, gp, 4096, 8192, 0, 0) == gp, 0);   /* same address */
+        CHECK(gw[0] == 0xA5A5);                                  /* sentinel survived */
+        volatile unsigned int *gw2 = (unsigned int *)(gp + 4096);
+        gw2[0] = 0x1234;
+        CHECK(gw2[0] == 0x1234);                                 /* new page usable */
+        /* shrink: the freed page is really unmapped (mprotect -> -ENOMEM) */
+        CHECKV(sc5(LX_mremap, gp, 8192, 4096, 0, 0) == gp, 0);
+        CHECK(gw[0] == 0xA5A5);                                  /* first page intact */
+        CHECKV(sc3(LX_mprotect, gp + 4096, 4096, LX_PROT_READ) == -12, 0);   /* -ENOMEM: unmapped */
+        CHECKV(sc2(LX_munmap, gp, 4096) == 0, 0);
+        /* blocked grow: a different-prot mapping right after -> -ENOMEM, even MAYMOVE */
+        long ba = sc6(LX_mmap, 0x31000000000UL, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                      LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(ba == 0x31000000000L, ba);
+        long bb = sc6(LX_mmap, ba + 4096, 4096, LX_PROT_READ,
+                      LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(bb == ba + 4096, bb);
+        CHECKV(sc5(LX_mremap, ba, 4096, 8192, 0, 0) == -12, 0);                    /* -ENOMEM */
+        CHECKV(sc5(LX_mremap, ba, 4096, 8192, LX_MREMAP_MAYMOVE, 0) == -12, 0);    /* never moves */
+        CHECKV(sc2(LX_munmap, ba, 4096) == 0 && sc2(LX_munmap, ba + 4096, 4096) == 0, 0);
+        /* errors: FIXED, a non-page-aligned old_addr, and an unmapped address */
+        CHECKV(sc5(LX_mremap, 0x31000000000UL, 4096, 8192, LX_MREMAP_FIXED, 0x33000000000UL) == -22, 0);
+        CHECKV(sc5(LX_mremap, 0x32000000001UL, 4096, 8192, 0, 0) == -22, 0);   /* unaligned */
+        CHECKV(sc5(LX_mremap, 0x40000000000UL, 4096, 8192, 0, 0) == -14, 0);   /* unmapped -> -EFAULT */
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

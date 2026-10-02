@@ -1545,6 +1545,47 @@ static int64_t lx_munmap(struct syscall_args *a)
     return vm_user_unmap(process_current()->space, addr, page_align_up(len), 0);
 }
 
+/* mremap: resize an anonymous mapping in place (grow or shrink).
+ * See docs/audit/next-subsystem-mremap.md. */
+static int64_t lx_mremap(struct syscall_args *a)
+{
+    uint64_t old_addr = a->a[0];
+    size_t raw_old = (size_t)a->a[1];
+    unsigned flags = (unsigned)a->a[3];
+    if (flags & ~(unsigned)(LX_MREMAP_MAYMOVE | LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
+        return -EINVAL;
+    if (flags & (LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
+        return -EINVAL;   /* v1 places nothing at a chosen address and always unmaps a shrink */
+    if (!is_page_aligned(old_addr) || raw_old == 0 || a->a[2] == 0)
+        return -EINVAL;   /* old_size 0 (the shareable-dup form) is unsupported */
+    size_t old_size = page_align_up(raw_old);
+    size_t new_size = page_align_up((size_t)a->a[2]);
+
+    struct vm_space *space = process_current()->space;
+    struct vm_region_info info;
+    if (!vm_user_region_at(space, old_addr, &info))
+        return -EFAULT;
+    if (info.kind != VM_REGION_ANON)
+        return -EINVAL;   /* v1: anonymous mappings only (file/physical are out of scope) */
+    if (old_addr != info.base || old_size != info.size)
+        return -EINVAL;   /* v1: the whole region, by its exact base and size */
+
+    if (new_size == old_size)
+        return (int64_t)old_addr;
+    if (new_size < old_size) {
+        int rc = vm_user_unmap(space, old_addr + new_size, old_size - new_size, 0);
+        return rc ? rc : (int64_t)old_addr;
+    }
+    /* Grow: map the delta at the end; vm_user_map_anon merges it with this
+     * region (same kind/prot/flags/name) when the space after is free, and
+     * returns -EEXIST when it is not -- which v1 reports as -ENOMEM rather
+     * than relocating, even under MREMAP_MAYMOVE. */
+    int rc = vm_user_map_anon(space, old_addr + old_size, new_size - old_size, info.prot, 0, info.name);
+    if (rc == -EEXIST)
+        return -ENOMEM;
+    return rc ? rc : (int64_t)old_addr;
+}
+
 static int64_t lx_mprotect(struct syscall_args *a)
 {
     uint64_t addr = a->a[0];
@@ -3132,6 +3173,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_mmap] = lx_mmap,
     [LX_mprotect] = lx_mprotect,
     [LX_munmap] = lx_munmap,
+    [LX_mremap] = lx_mremap,
     [LX_msync] = lx_msync,
     [LX_brk] = lx_brk,
     [LX_rt_sigaction] = lx_rt_sigaction,
