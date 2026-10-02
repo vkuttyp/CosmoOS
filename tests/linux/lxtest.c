@@ -918,6 +918,56 @@ int main(int argc, char **argv)
         CHECKV(sc5(LX_mremap, eq, 4096, 4096, 0, 0) == eq, 0);   /* equal size, live -> same address */
         CHECKV(sc2(LX_munmap, eq, 4096) == 0, 0);
     }
+    /* System V shared memory (docs/audit/next-subsystem-shm.md): shmget makes
+     * an anonymous segment, shmat maps it MAP_SHARED, shmdt/IPC_RMID tear it
+     * down with the "freed on the last detach" lifecycle. */
+    {
+        int sid = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 8192, LX_IPC_CREAT | 0600);
+        CHECKV(sid >= 0, sid);
+        /* attach; a write is visible through a SECOND attach of the same id */
+        long s1 = sc3(LX_shmat, sid, 0, 0);
+        CHECKV(s1 > 0, s1);
+        volatile unsigned int *q1 = (unsigned int *)s1;
+        q1[0] = 0x5151;
+        long s2 = sc3(LX_shmat, sid, 0, 0);
+        CHECKV(s2 > 0, s2);
+        CHECK(s2 != s1);                         /* two distinct mappings */
+        volatile unsigned int *q2 = (unsigned int *)s2;
+        CHECK(q2[0] == 0x5151);                  /* shared: the second sees it */
+        q2[1] = 0x6262;
+        CHECK(q1[1] == 0x6262);                  /* and the write goes both ways */
+        /* IPC_STAT: the size and the live attach count (2) */
+        struct lx_shmid_ds ds;
+        CHECKV(sc3(LX_shmctl, sid, LX_IPC_STAT, &ds) == 0, 0);
+        CHECK(ds.shm_segsz == 8192);
+        CHECK(ds.shm_nattch == 2);
+        /* attach at an exact address: lands there, reads the sentinel */
+        long sf = sc3(LX_shmat, sid, 0x35000000000UL, 0);
+        CHECKV(sf == 0x35000000000L, sf);
+        CHECK(((volatile unsigned int *)sf)[0] == 0x5151);
+        CHECKV(sc3(LX_shmat, sid, 0x35000000000UL, 0) == -12, 0);   /* occupied -> -ENOMEM */
+        CHECKV(sc3(LX_shmat, sid, 0x35000000001UL, 0) == -22, 0);   /* unaligned -> -EINVAL */
+        CHECKV(sc1(LX_shmdt, sf) == 0, 0);
+        /* shmdt really unmaps; a second detach of the same address is -EINVAL */
+        CHECKV(sc1(LX_shmdt, s2) == 0, 0);
+        CHECKV(sc3(LX_mprotect, s2, 4096, LX_PROT_READ) == -12, 0);   /* -ENOMEM: unmapped */
+        CHECKV(sc1(LX_shmdt, s2) == -22, 0);
+        /* IPC_RMID with s1 still attached: the live mapping still reads its
+         * sentinel (not freed at removal), but the id is gone for new ops */
+        CHECKV(sc3(LX_shmctl, sid, LX_IPC_RMID, 0) == 0, 0);
+        CHECK(q1[0] == 0x5151);
+        CHECKV(sc3(LX_shmat, sid, 0, 0) == -22, 0);               /* no new attach */
+        CHECKV(sc3(LX_shmctl, sid, LX_IPC_STAT, &ds) == -22, 0);  /* id gone */
+        CHECKV(sc1(LX_shmdt, s1) == 0, 0);                        /* last detach frees it */
+        CHECKV(sc3(LX_shmat, sid, 0, 0) == -22, 0);               /* still gone */
+        /* errors: a bad id, and IPC_CREAT|IPC_EXCL of an existing key */
+        CHECKV(sc3(LX_shmat, 999999, 0, 0) == -22, 0);
+        int kid = (int)sc3(LX_shmget, 0x5109, 4096, LX_IPC_CREAT | 0600);
+        CHECKV(kid >= 0, kid);
+        CHECKV(sc3(LX_shmget, 0x5109, 4096, LX_IPC_CREAT | LX_IPC_EXCL | 0600) == -17, 0);   /* -EEXIST */
+        CHECKV(sc3(LX_shmctl, kid, LX_IPC_RMID, 0) == 0, 0);
+        lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed-addr, stat, rmid-on-last-detach\n");
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
