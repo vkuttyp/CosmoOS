@@ -48,7 +48,8 @@ spare eventfd are already in scope:
 LXEPOLLET: edge-triggered epoll rejected -> -EINVAL; level-triggered only
 ```
 
-The check calls `epoll_ctl(ep, EPOLL_CTL_ADD, efd, {EPOLLIN|EPOLLET})` and
+The check calls `epoll_ctl(ep, EPOLL_CTL_ADD, efd2, {EPOLLIN|EPOLLET})` (`efd2` is
+the spare eventfd the surrounding block already created for its error cases) and
 asserts it returned `-EINVAL` at the report commit, before the implementation.
 The marker prints only when the call really returned `-EINVAL`, so grepping it
 cannot show a false result after a failed check. (`tests/linux/lxtest.c` already
@@ -125,6 +126,23 @@ spurious edge, which Linux's `EPOLLET` contract explicitly permits (a consumer
 must use non-blocking fds and drain to `EAGAIN`, so a spurious wakeup is
 harmless). It never *drops* an edge for a ready, armed member.
 
+### 3a. The sleep decision must gate on `armed` too
+
+A disarmed edge member stays **readable** at the object level even though
+`collect` will not report it. The wait's decision to sleep (`snap_any_ready`,
+`epoll.c:343`) today asks only `kobject_ready(obj) & want`, which would see such
+a member as ready — so a blocking `epoll_wait` on a disarmed-but-readable edge
+member would neither report (collect gates it out) nor sleep (readiness seen):
+it would busy-spin. `snapshot` already skips `disabled` one-shots for this
+reason, but a disarmed edge member is **not** `disabled` — it must still be in
+the snapshot so its `poll_wq` is armed and a drain or a new event wakes the wait
+to re-arm it. So the snapshot records each member's `edge`/`armed`, and the
+"any ready" check applies the same gating as `collect`: an edge member counts as
+ready for the sleep decision only when `armed`. The wait then sleeps on a
+disarmed edge member (waiting on its queue and the set's), and a wake re-arms and
+re-reports it. This is the one spot in `epoll_obj_wait` the unit must touch
+beyond the re-arm.
+
 ### 4. The door stops refusing EPOLLET (`compat/linux/syscalls.c`)
 
 `lx_epoll_ctl` drops the `EPOLLET → -EINVAL` block and extracts
@@ -142,7 +160,7 @@ readiness bits), matching Linux.
 
 | file | change |
 |---|---|
-| `kernel/io/epoll.c`, `kernel/include/kernel/epoll.h` | `edge`/`armed` on `struct epoll_item`; `collect` gates an edge member on `armed`; `epoll_obj_wait` re-arms (drained-or-woken); `epoll_obj_add`/`epoll_obj_mod` gain an `edge` parameter |
+| `kernel/io/epoll.c`, `kernel/include/kernel/epoll.h` | `edge`/`armed` on `struct epoll_item`; `collect` gates an edge member on `armed`; `epoll_obj_wait` re-arms (drained-or-woken) and its sleep check (`snap_any_ready`, via the snapshot's recorded `edge`/`armed`) treats a disarmed edge member as not ready (§3a); `epoll_obj_add`/`epoll_obj_mod` gain an `edge` parameter |
 | `compat/linux/syscalls.c` | drop the `EPOLLET → -EINVAL` refusal; extract `edge`; pass it through; flip the existing `-EINVAL` assertion's expectation |
 | `tests/linux/lxtest.c` | edge-vs-level tests; the existing `EPOLLET → -EINVAL` error check becomes the accepted path |
 | `README.md` | Status entry |
@@ -157,14 +175,17 @@ interfaces and the behaviour of an existing flag.
 ## Tests
 
 Planned for the implementation (`tests/linux/lxtest.c`, the standard-boot
-CHECK/CHECKV self-test), all deterministic with `timeout == 0` polls — no timing.
+CHECK/CHECKV self-test). The edge-vs-level checks are deterministic with
+`timeout == 0` polls — no timing. The one blocking-wake check waits with a
+finite timeout (a few seconds) as a deadline, never `-1`, so a regression that
+drops the wake fails the check rather than hanging the boot.
 
 | test | proves |
 |---|---|
 | edge reported once | add `EPOLLIN\|EPOLLET` on an eventfd, write it, `epoll_wait(0)` returns it once; a second `epoll_wait(0)` **without** draining returns 0 (a level member would return 1) |
 | level contrast | a plain `EPOLLIN` member stays reported on repeated `epoll_wait(0)` while it is ready, confirming only the edge member is suppressed |
 | edge re-arms after a drain | drain the eventfd (not ready), `epoll_wait(0)` returns 0, write again, `epoll_wait(0)` returns it — a fresh transition is a new edge |
-| edge re-arms on a blocking wake | an edge member drained and not reported; a write while a thread is blocked in `epoll_wait(-1)` wakes it and returns the member (bounded wait, no fixed sleep) |
+| edge re-arms on a blocking wake | an edge member drained and not reported; a write while a thread is blocked in `epoll_wait` with a finite multi-second timeout wakes it and returns the member before the deadline (a dropped wake fails at the deadline, never hangs) |
 | `EPOLLET` accepted | `epoll_ctl(ADD, …, EPOLLIN\|EPOLLET)` returns 0, not `-EINVAL` (the former error case) |
 | `EPOLLET\|EPOLLONESHOT` | reported once, then suppressed until MOD re-arms, regardless of the edge flag (the two suppressions are orthogonal) |
 
