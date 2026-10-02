@@ -233,6 +233,14 @@ None.
   `process_current()`, so an inherited or `SCM_RIGHTS`-passed `signalfd`
   reports the reader's signals and cannot outlive and dereference a gone
   process — matching Linux, where the read side uses `current`.
+- **Shared-descriptor mask update.** A mask update wakes the updating process's
+  `signalfd_wqh`, which covers the ordinary case (the process that owns the fd
+  updates and polls it). A `signalfd` shared to another process whose thread is
+  blocked in `poll` while a *different* process updates the mask is not woken by
+  the update (each process has its own `signalfd_wqh`); it is woken by the next
+  signal as usual. This cross-process poll-vs-update race is pathological — a
+  shared `signalfd` almost always belongs to one process — and is a documented
+  v1 limitation, not a correctness bug for the single-process use.
 - **Consuming blocked signals.** `signalfd` deliberately dequeues blocked
   signals (that is the point), so `signal_consume_mask` drops the
   `~sig_blocked` filter — but `SIGKILL`/`SIGSTOP` must never be maskable into a
