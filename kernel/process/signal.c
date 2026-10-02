@@ -366,12 +366,16 @@ queue:
  * be done under the lock -- the first takes a wait queue's lock and the
  * second sends a signal to another process.
  */
-static void signal_after_route(struct process *p, bool woke_stopped, bool stopped_now)
+static void signal_after_route(struct process *p, bool woke_stopped)
 {
-    if (woke_stopped)
+    if (woke_stopped) {
         waitqueue_wake_all(&p->stopped_wq);
-    if (woke_stopped || stopped_now)
-        process_notify_parent_event(p);
+        process_notify_parent_event(p);   /* the continue: CLD_CONTINUED to the parent */
+    }
+    /* A stop's parent notice is NOT sent here: a stop is only posted at this
+     * point, not complete, and sending a CLD_STOPPED record now would report
+     * the stop before every thread has parked. The authoritative notice comes
+     * from process_stop_park once the last thread parks. */
     /* Wake any signalfd waiting on this process: a signal may now be pending
      * that one reports. Done here, after p->lock is released, so the wait
      * queue's lock never nests under p->lock. Pollers re-check their mask. */
@@ -402,10 +406,9 @@ bool signal_raise_stop_self(int sig, const struct signal_info *info)
     bool ignored = p->sigactions[sig - 1].handler == SIG_IGN || (t->sig_blocked & SIGMASK(sig)) != 0;
     if (!ignored)
         route_locked(p, NULL, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
     if (!ignored)
-        signal_after_route(p, woke_stopped, stopped_now);
+        signal_after_route(p, woke_stopped);
     return !ignored;
 }
 
@@ -416,9 +419,8 @@ int signal_send(struct process *p, int sig, const struct signal_info *info)
     bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     route_locked(p, NULL, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
-    signal_after_route(p, woke_stopped, stopped_now);
+    signal_after_route(p, woke_stopped);
     return 0;
 }
 
@@ -432,9 +434,8 @@ int signal_send_thread(struct thread *t, int sig, const struct signal_info *info
     bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     route_locked(p, t, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
-    signal_after_route(p, woke_stopped, stopped_now);
+    signal_after_route(p, woke_stopped);
     return 0;
 }
 

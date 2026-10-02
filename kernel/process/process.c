@@ -2095,19 +2095,10 @@ void process_notify_parent_event(struct process *p)
         cld = SI_CLD_CONTINUED;
         status = SIGCONT;
     }
-    /* A stop is posted before every thread has parked; the authoritative
-     * "stopped" report comes from the park-complete call, which sets
-     * stop_reportable. Suppress the earlier, incomplete one so a parent does
-     * not get a CLD_STOPPED record before the process is actually stopped. */
-    bool suppress = cld == SI_CLD_STOPPED && !p->stop_reportable;
     uint32_t cuid = p->cred.ruid;
     spin_unlock_irqrestore(&p->lock, s);
     if (parent == NULL)
         return;
-    if (suppress) {
-        process_put(parent);
-        return;
-    }
     struct signal_info info = { .sig = SIGCHLD, .source = SIGSRC_CHILD, .code = cld,
                                 .sender_pid = p->pid, .sender_uid = cuid, .status = status };
     signal_send(parent, SIGCHLD, &info);
