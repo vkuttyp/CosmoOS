@@ -1568,14 +1568,13 @@ static int64_t lx_mremap(struct syscall_args *a)
     size_t old_size = page_align_up(raw_old);
     size_t new_size = page_align_up(raw_new);
 
-    if (new_size == old_size)
-        return (int64_t)old_addr;
-
-    /* The find, the whole-anonymous-region check and the resize all happen
-     * under one hold of the space lock, so a concurrent munmap/MAP_FIXED
-     * cannot slip a different mapping into the range mid-resize. MAYMOVE is
-     * accepted but never relocates: a grow the space after cannot absorb is
-     * -ENOMEM (realloc falls back to allocate-copy-free). */
+    /* vm_user_remap finds and validates the mapping (whole anonymous
+     * region) and resizes it -- all guarding the space lock -- so even an
+     * equal-size request reports -EFAULT for an unmapped address rather
+     * than a bogus success. A concurrent munmap/MAP_FIXED cannot slip a
+     * different mapping into the range mid-resize. MAYMOVE is accepted but
+     * never relocates: a grow the space after cannot absorb is -ENOMEM
+     * (realloc falls back to allocate-copy-free). */
     int rc = vm_user_remap(process_current()->space, old_addr, old_size, new_size);
     return rc ? rc : (int64_t)old_addr;
 }

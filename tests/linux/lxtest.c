@@ -909,6 +909,14 @@ int main(int argc, char **argv)
         CHECKV(sc5(LX_mremap, 0x31000000000UL, 4096, 8192, LX_MREMAP_FIXED, 0x33000000000UL) == -22, 0);
         CHECKV(sc5(LX_mremap, 0x32000000001UL, 4096, 8192, 0, 0) == -22, 0);   /* unaligned */
         CHECKV(sc5(LX_mremap, 0x40000000000UL, 4096, 8192, 0, 0) == -14, 0);   /* unmapped -> -EFAULT */
+        /* an equal-size request still validates the mapping: unmapped is
+         * -EFAULT, not a bogus success */
+        CHECKV(sc5(LX_mremap, 0x40000000000UL, 4096, 4096, 0, 0) == -14, 0);   /* equal size, unmapped */
+        long eq = sc6(LX_mmap, 0x34000000000UL, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                      LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(eq == 0x34000000000L, eq);
+        CHECKV(sc5(LX_mremap, eq, 4096, 4096, 0, 0) == eq, 0);   /* equal size, live -> same address */
+        CHECKV(sc2(LX_munmap, eq, 4096) == 0, 0);
     }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
