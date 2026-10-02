@@ -682,9 +682,14 @@ static int64_t do_signalfd(int fd, uint64_t umask, size_t sizemask, unsigned fla
         return -EFAULT;
     mask &= ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));   /* never reportable via a signalfd */
 
-    if (fd >= 0) {
-        /* Update an existing signalfd's mask. */
-        struct kobject *obj = handle_lookup(&process_current()->handles, fd, 0);
+    if (fd != -1) {
+        /* Update an existing signalfd's mask; only -1 creates, as Linux
+         * documents (a negative fd other than -1 is -EBADF). The holder must
+         * have the read right, so a handle whose rights were narrowed cannot
+         * change what another holder reads. */
+        if (fd < 0)
+            return -EBADF;
+        struct kobject *obj = handle_lookup(&process_current()->handles, fd, HANDLE_RIGHT_READ);
         if (obj == NULL)
             return -EBADF;
         int rc = signalfd_obj_set_mask(obj, mask);

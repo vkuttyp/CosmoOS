@@ -69,8 +69,22 @@ static void fill_ssi(struct lx_signalfd_siginfo *ssi, const struct signal_info *
     case SIGSRC_KERNEL:
     default:
         ssi->ssi_code = LX_SI_KERNEL;
+        /* SIGCHLD carries the child's pid in sender_pid; report it so a
+         * parent can tell which child the record is for (the exit status is
+         * not carried by signal_info -- the handler path lacks it too). */
+        ssi->ssi_pid = info->sender_pid;
         break;
     }
+}
+
+/* A matching signal is pending right now, re-reading the mask so a concurrent
+ * mask update takes effect in a blocked read's wait. */
+static bool signalfd_has_pending(struct signalfd_obj *sf)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&sf->lock);
+    uint64_t mask = sf->mask;
+    spin_unlock_irqrestore(&sf->lock, s);
+    return (signal_pending_set() & mask) != 0;
 }
 
 static unsigned signalfd_ready(struct kobject *obj)
@@ -111,8 +125,9 @@ static int64_t signalfd_read(struct kobject *obj, void *buf, size_t len)
             return (int64_t)(n * sizeof(struct lx_signalfd_siginfo));
         if (nb)
             return -EAGAIN;
-        int rc = wait_event_killable(&process_current()->signalfd_wqh,
-                                     (signal_pending_set() & mask) != 0);
+        /* The predicate re-reads the mask, so a mask update (which wakes this
+         * queue) is honoured rather than slept through. */
+        int rc = wait_event_killable(&process_current()->signalfd_wqh, signalfd_has_pending(sf));
         if (rc)
             return rc;
     }
@@ -163,5 +178,8 @@ int signalfd_obj_set_mask(struct kobject *obj, uint64_t mask)
     arch_irq_state_t s = spin_lock_irqsave(&sf->lock);
     sf->mask = mask;
     spin_unlock_irqrestore(&sf->lock, s);
+    /* Wake this process's signalfd waiters: a signal already pending that the
+     * new mask now includes must make a blocked read/poll return. */
+    waitqueue_wake_all(&process_current()->signalfd_wqh);
     return 0;
 }

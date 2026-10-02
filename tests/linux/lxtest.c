@@ -1048,15 +1048,27 @@ int main(int argc, char **argv)
         /* drain the pending SIGUSR1 via its own fd so it does not leak */
         CHECKV(sc3(LX_read, sfd, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
         CHECK(ssi.ssi_signo == 10);
+        /* mask update: a pending signal newly added to the mask becomes
+         * readable (sfu watches only SIGCHLD, then is widened to SIGUSR1) */
+        long sfu = sc4(LX_signalfd4, -1, &mc, 8, LX_SFD_NONBLOCK);
+        CHECKV(sfu >= 0, sfu);
+        CHECKV(sc2(LX_kill, sc0(LX_getpid), 10) == 0, 0);          /* SIGUSR1: not in sfu's mask yet */
+        CHECKV(sc3(LX_read, sfu, &ssi, sizeof(ssi)) == -11, 0);    /* -EAGAIN */
+        unsigned long both = (1UL << (10 - 1)) | (1UL << (17 - 1));
+        CHECKV(sc4(LX_signalfd4, sfu, &both, 8, 0) == sfu, 0);     /* widen the mask */
+        CHECKV(sc3(LX_read, sfu, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
+        CHECK(ssi.ssi_signo == 10);                                /* now readable */
         /* errors */
         CHECKV(sc4(LX_signalfd4, -1, &m1, 4, 0) == -22, 0);         /* bad sizemask */
         CHECKV(sc4(LX_signalfd4, -1, &m1, 8, 0x9999) == -22, 0);    /* bad flags */
+        CHECKV(sc4(LX_signalfd4, -2, &m1, 8, 0) == -9, 0);          /* only -1 creates: -EBADF */
         /* close the fds and restore the signal mask so the later tests see a
          * clean descriptor table and signal state */
         CHECKV(sc1(LX_close, sfd) == 0, 0);
         CHECKV(sc1(LX_close, sfn) == 0, 0);
         CHECKV(sc1(LX_close, sfc) == 0, 0);
         CHECKV(sc1(LX_close, sfc2) == 0, 0);
+        CHECKV(sc1(LX_close, sfu) == 0, 0);
         CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &saved_mask, 0, 8) == 0, 0);
         lx_puts("LXSIGFD: signalfd read/nonblock/mask-scope/blocked-SIGCHLD\n");
     }
