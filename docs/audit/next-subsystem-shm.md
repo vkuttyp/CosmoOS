@@ -117,8 +117,10 @@ through a direct pointer (not a re-lookup by `id`). Lookups by `id`
   `SHM_RDONLY` and read/write otherwise: when `shmaddr` is `NULL` the kernel
   chooses a gap (`vm_user_map_file_free`); when it is non-`NULL` it must be
   page-aligned and the mapping is placed **at that exact address**
-  (`vm_user_map_file`), returning `-ENOMEM`/`-EINVAL` if that address is not
-  free rather than silently relocating (`SHM_RND` rounding is deferred). Records
+  (`vm_user_map_file`) rather than silently relocating (`SHM_RND` rounding is
+  deferred). `vm_user_map_file` answers an occupied range with `-EEXIST`; the
+  door reports that as `-ENOMEM` (the segment could not be placed where asked),
+  so a caller sees an `mmap`-style failure, not the VM's internal code. Records
   the attach `{addr, size, struct shm_segment *seg}` in `linux_state`, bumps
   `nattch`, and returns the address.
 - **`shmdt(shmaddr)`** — finds the per-process attach at `shmaddr` (`-EINVAL` if
@@ -193,7 +195,7 @@ standard boot).
 | test | proves |
 |---|---|
 | create + attach + share | `shmget(IPC_PRIVATE, 8192, IPC_CREAT\|0600)` ≥ 0; `shmat` returns an address; a write through it is visible through a **second** `shmat` of the same `shmid` (one segment, two mappings, shared) |
-| attach at a fixed address | `shmat(id, addr, 0)` with a free page-aligned `addr` returns exactly `addr` (not a relocated one), and the segment is readable there; `shmat` at an occupied `addr` is `-ENOMEM` (no silent relocation) |
+| attach at a fixed address | `shmat(id, addr, 0)` with a free page-aligned `addr` returns exactly `addr` (not a relocated one), and the segment is readable there; `shmat` at an occupied `addr` is `-ENOMEM` (the door's translation of `vm_user_map_file`'s `-EEXIST`; no silent relocation) |
 | shmdt | `shmdt` of an attached address returns 0 and a later `mprotect` of it is `-ENOMEM` (really unmapped); `shmdt` of an unattached address is `-EINVAL` |
 | IPC_STAT | `shmctl(id, IPC_STAT, &ds)` reports `shm_segsz == 8192` and `shm_nattch` equal to the live attach count (e.g. 1, then 2 after a second `shmat`, then back down after `shmdt`) |
 | IPC_RMID lifecycle | with one attach still live, `IPC_RMID` returns 0, the live mapping **still reads its sentinel** (not freed at removal), and `shmat`/`shmctl(IPC_STAT)` of that `shmid` are now `-EINVAL` (the id is gone, no new attach); after the last `shmdt` the `shmid` stays `-EINVAL`. This distinguishes freed-on-last-detach from freed-at-removal (the live read would fault) and from never-removed (`IPC_STAT` would still succeed) — a page-reuse check could not. |
