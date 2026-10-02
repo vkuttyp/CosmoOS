@@ -41,10 +41,12 @@ NEW_TEST = OLD_TEST + """    /* LXMREMAP probe (tools/mremap-probe.py): mremap h
         CHECKV(mrp > 0, mrp);   /* a failed setup must fail, not skip the check */
         long mrrc = sc5(LX_mremap, mrp, 4096, 8192, 0, 0);
         CHECKV(mrrc == -38, mrrc);   /* -ENOSYS */
-        if (mrrc == -38)
+        /* Marker only on a real mapping AND the real -ENOSYS, so a failed mmap
+         * cannot print a false success for a grepper. */
+        if (mrp > 0 && mrrc == -38) {
             lx_puts("LXMREMAP: mremap unimplemented -> -ENOSYS; no in-place resize\\n");
-        if (mrp > 0)
             sc2(LX_munmap, mrp, 4096);
+        }
     }
 """
 
