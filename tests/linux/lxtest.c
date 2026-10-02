@@ -860,6 +860,18 @@ int main(int argc, char **argv)
         CHECKV(sc1(LX_close, lfd) == 0 && sc1(LX_close, lep) == 0, 0);
 #endif
     }
+    /* sysinfo (docs/audit/next-subsystem-sysinfo.md) */
+    {
+        struct lx_sysinfo si;
+        __builtin_memset(&si, 0xAB, sizeof(si));   /* poison, so a non-write is caught */
+        CHECKV(sc1(LX_sysinfo, &si) == 0, 0);
+        CHECKV(sizeof(struct lx_sysinfo) == 112, (long)sizeof(struct lx_sysinfo));   /* LP64 layout */
+        CHECKV(si.mem_unit == 1, (long)si.mem_unit);
+        CHECKV(si.uptime >= 0 && si.uptime < 86400, (long)si.uptime);   /* plausible seconds, not poison */
+        CHECKV(si.totalram > 0 && si.freeram <= si.totalram, (long)(si.totalram >> 20));
+        CHECKV(si.procs >= 1, (long)si.procs);
+        CHECKV(si.loads[0] == 0 && si.totalswap == 0, 0);   /* the fields with no backing read zero */
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

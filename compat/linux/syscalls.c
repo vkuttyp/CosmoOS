@@ -21,6 +21,7 @@
 #include <kernel/object.h>
 #include <kernel/percpu.h>
 #include <kernel/pipe.h>
+#include <kernel/pmm.h>
 #include <kernel/poll.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
@@ -1886,6 +1887,22 @@ static __maybe_unused int64_t lx_time(struct syscall_args *a)
     return t;
 }
 
+/* sysinfo(2): uptime and a coarse memory/process snapshot, marshalled from the
+ * stats the kernel already keeps. See docs/audit/next-subsystem-sysinfo.md. */
+static int64_t lx_sysinfo(struct syscall_args *a)
+{
+    struct pmm_stats st;
+    pmm_get_stats(&st);
+    struct lx_sysinfo si;
+    memset(&si, 0, sizeof(si));   /* loads, swap, shared/buffer, high, pad: none here, so zero */
+    si.uptime = (int64_t)(clock_now_ns() / 1000000000ull);
+    si.mem_unit = 1;              /* report bytes */
+    si.totalram = st.total_pages * PAGE_SIZE;
+    si.freeram = st.free_pages * PAGE_SIZE;
+    si.procs = (uint16_t)process_count();
+    return copy_to_user(a->a[0], &si, sizeof(si)) ? -EFAULT : 0;
+}
+
 static int64_t lx_nanosleep(struct syscall_args *a)
 {
     uint64_t ns;
@@ -3209,7 +3226,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_umask] = lx_umask,
     [LX_gettimeofday] = lx_gettimeofday,
     [LX_getrlimit] = lx_getrlimit,
-    [LX_sysinfo] = lx_nosys,
+    [LX_sysinfo] = lx_sysinfo,
     [LX_getuid] = lx_getuid,
     [LX_getgid] = lx_getgid,
     [LX_geteuid] = lx_geteuid,

@@ -416,6 +416,26 @@ struct lx_timeval {
     int64_t tv_usec;
 };
 
+/* sysinfo(2): the LP64 layout, identical on x86-64 and AArch64 (so no arch
+ * packing). The compiler inserts the same padding before `totalhigh` (after
+ * the two shorts) and at the tail as glibc's struct sysinfo, so sizeof agrees
+ * on both sides. */
+struct lx_sysinfo {
+    int64_t  uptime;        /* seconds since boot */
+    uint64_t loads[3];      /* 1/5/15-min load average (fixed point); 0 here */
+    uint64_t totalram;      /* in units of mem_unit */
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;         /* current process count */
+    uint16_t pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;      /* the unit totalram etc. are counted in (bytes) */
+};
+
 struct lx_iovec {
     uint64_t iov_base;
     uint64_t iov_len;
