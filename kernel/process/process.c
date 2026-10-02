@@ -452,6 +452,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     list_init(&p->sibling);
     waitqueue_init(&p->child_wq, "children");
     waitqueue_init(&p->stopped_wq, "stopped");
+    waitqueue_init(&p->signalfd_wqh, "signalfd");
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");

@@ -7,6 +7,15 @@
 > planned work that lands in the implementation PR that follows, gated on CI.
 > As the report was committed, the calls were unlisted in `linux_table`, so the
 > dispatcher's `lx_unknown` returned `-ENOSYS`.
+>
+> **Built in PR #299.** The implementation added the `LX_signalfd`/
+> `LX_signalfd4` numbers, `kernel/io/signalfd.c`, the per-process
+> `signalfd_wqh` and `signal_consume_mask` (plus keeping a blocked ignored
+> signal pending), the `lx_signalfd`/`lx_signalfd4` doors, and the checks — as
+> described below. The tests landed in `tests/linux/lxtest.c` (the standard
+> CHECK/CHECKV self-test), not `lxsig.c`. Both arches boot PASS and
+> `host-test` passes. Every present-tense statement below describes the state
+> the report measured, before this implementation.
 
 ## Problem
 

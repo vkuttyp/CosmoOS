@@ -111,6 +111,11 @@ void signal_get_action(struct process *p, int sig, struct sigaction_k *out);
 uint64_t signal_blocked(void);
 void signal_set_blocked(uint64_t mask);
 uint64_t signal_pending_set(void);   /* pending on the thread or the process, blocked or not */
+
+/* Consume the lowest pending signal in `mask` (thread- or process-directed,
+ * blocked or not) for the current thread into *out; true if one was found.
+ * For signalfd(2). */
+bool signal_consume_mask(uint64_t mask, struct signal_info *out);
 /* A call that swaps the mask while it waits (rt_sigsuspend, ppoll):
  * the mask the handler's frame records, and the one restored when no
  * handler runs, is `saved`, not the temporary one. */

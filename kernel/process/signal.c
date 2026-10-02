@@ -150,6 +150,34 @@ uint64_t signal_pending_set(void)
     return v;
 }
 
+/*
+ * Consume the lowest-numbered pending signal in `mask` for the current thread
+ * or its process, blocked or not, into *out; returns whether one was found.
+ * Unlike dequeue_locked this takes blocked signals (a signalfd reads signals
+ * the process has blocked) and orders strictly by signal number (a signalfd
+ * reports in order). For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
+ */
+bool signal_consume_mask(uint64_t mask, struct signal_info *out)
+{
+    struct thread *t = thread_current();
+    struct process *p = t->proc;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint64_t cand = (t->sig_pending | p->sig_shared_pending) & mask;
+    bool got = cand != 0;
+    if (got) {
+        int sig = __builtin_ctzll(cand) + 1;
+        if (t->sig_pending & SIGMASK(sig)) {
+            t->sig_pending &= ~SIGMASK(sig);
+            *out = t->sig_info[sig - 1];
+        } else {
+            p->sig_shared_pending &= ~SIGMASK(sig);
+            *out = p->sig_shared_info[sig - 1];
+        }
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    return got;
+}
+
 /* --- sending -------------------------------------------------------------------- */
 
 static void fill_info(struct signal_info *slot, int sig, const struct signal_info *info)
@@ -223,8 +251,28 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
         }
     }
     const struct sigaction_k *a = action_locked(p, sig);
-    if (a->handler == SIG_IGN || (a->handler == SIG_DFL && signal_default_is_ignore(sig)))
-        return true;   /* discarded, blocked or not (a recorded deviation: Linux keeps a blocked one) */
+    if (a->handler == SIG_IGN || (a->handler == SIG_DFL && signal_default_is_ignore(sig))) {
+        /*
+         * An ignored signal is discarded -- unless it is blocked, in which
+         * case Linux keeps it pending (so sigwait/rt_sigpending, and a
+         * signalfd, can still see it; it is flushed if still ignored when
+         * unblocked, or discarded at delivery). A signalfd for SIGCHLD, whose
+         * default action is ignore, depends on this. See
+         * docs/audit/next-subsystem-signalfd.md.
+         */
+        bool blocked_everywhere = true;
+        if (t) {
+            blocked_everywhere = (t->sig_blocked & SIGMASK(sig)) != 0;
+        } else {
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link)
+                if (!(o->sig_blocked & SIGMASK(sig)))
+                    blocked_everywhere = false;
+        }
+        if (!blocked_everywhere)
+            return true;   /* discarded */
+        goto queue;        /* blocked: keep it pending */
+    }
     /*
      * The stop signals' default. The process stops as a unit: its own
      * flag is the authority, and every thread gets a reason to reach a
@@ -324,6 +372,10 @@ static void signal_after_route(struct process *p, bool woke_stopped, bool stoppe
         waitqueue_wake_all(&p->stopped_wq);
     if (woke_stopped || stopped_now)
         process_notify_parent_event(p);
+    /* Wake any signalfd waiting on this process: a signal may now be pending
+     * that one reports. Done here, after p->lock is released, so the wait
+     * queue's lock never nests under p->lock. Pollers re-check their mask. */
+    waitqueue_wake_all(&p->signalfd_wqh);
 }
 
 /*

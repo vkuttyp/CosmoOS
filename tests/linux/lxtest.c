@@ -1010,6 +1010,56 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_shmctl, pid2, LX_IPC_RMID, 0) == 0, 0);
         lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed, stat, rmid, perms, rdonly, partial-dt\n");
     }
+    /* signalfd (docs/audit/next-subsystem-signalfd.md): block signals, read
+     * them as a file. */
+    {
+        /* block SIGUSR1 (10) and SIGCHLD (17) so they queue for the fd;
+         * save the prior mask to restore before the later signal tests run */
+        unsigned long blk = (1UL << (10 - 1)) | (1UL << (17 - 1));
+        unsigned long saved_mask = 0;
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &blk, &saved_mask, 8) == 0, 0);
+        /* a signalfd for SIGUSR1; a raised SIGUSR1 reads back */
+        unsigned long m1 = 1UL << (10 - 1);
+        long sfd = sc4(LX_signalfd4, -1, &m1, 8, 0);
+        CHECKV(sfd >= 0, sfd);
+        CHECKV(sc2(LX_kill, sc0(LX_getpid), 10) == 0, 0);
+        struct lx_signalfd_siginfo ssi;
+        CHECKV(sc3(LX_read, sfd, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
+        CHECK(ssi.ssi_signo == 10);
+        /* nonblock: nothing pending now -> -EAGAIN */
+        long sfn = sc4(LX_signalfd4, -1, &m1, 8, LX_SFD_NONBLOCK);
+        CHECKV(sfn >= 0, sfn);
+        CHECKV(sc3(LX_read, sfn, &ssi, sizeof(ssi)) == -11, 0);   /* -EAGAIN */
+        /* blocked SIGCHLD (default-ignore) still reaches the fd; nonblock so a
+         * regression that discards it fails cleanly (the signal is pending the
+         * moment kill returns) rather than blocking */
+        unsigned long mc = 1UL << (17 - 1);
+        long sfc = sc4(LX_signalfd4, -1, &mc, 8, LX_SFD_NONBLOCK);
+        CHECKV(sfc >= 0, sfc);
+        CHECKV(sc2(LX_kill, sc0(LX_getpid), 17) == 0, 0);
+        CHECKV(sc3(LX_read, sfc, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
+        CHECK(ssi.ssi_signo == 17);
+        /* a signal NOT in the fd's mask is not reported (sfc watches only
+         * SIGCHLD): raise SIGUSR1, the SIGCHLD fd stays empty (-EAGAIN) */
+        CHECKV(sc2(LX_kill, sc0(LX_getpid), 10) == 0, 0);
+        long sfc2 = sc4(LX_signalfd4, -1, &mc, 8, LX_SFD_NONBLOCK);
+        CHECKV(sfc2 >= 0, sfc2);
+        CHECKV(sc3(LX_read, sfc2, &ssi, sizeof(ssi)) == -11, 0);   /* -EAGAIN: SIGUSR1 not in mask */
+        /* drain the pending SIGUSR1 via its own fd so it does not leak */
+        CHECKV(sc3(LX_read, sfd, &ssi, sizeof(ssi)) == (long)sizeof(ssi), 0);
+        CHECK(ssi.ssi_signo == 10);
+        /* errors */
+        CHECKV(sc4(LX_signalfd4, -1, &m1, 4, 0) == -22, 0);         /* bad sizemask */
+        CHECKV(sc4(LX_signalfd4, -1, &m1, 8, 0x9999) == -22, 0);    /* bad flags */
+        /* close the fds and restore the signal mask so the later tests see a
+         * clean descriptor table and signal state */
+        CHECKV(sc1(LX_close, sfd) == 0, 0);
+        CHECKV(sc1(LX_close, sfn) == 0, 0);
+        CHECKV(sc1(LX_close, sfc) == 0, 0);
+        CHECKV(sc1(LX_close, sfc2) == 0, 0);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &saved_mask, 0, 8) == 0, 0);
+        lx_puts("LXSIGFD: signalfd read/nonblock/mask-scope/blocked-SIGCHLD\n");
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

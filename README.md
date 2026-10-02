@@ -3915,6 +3915,17 @@ See [docs/development.md](docs/development.md).
   "destroyed on the last detach", straight from the refcount. `shmctl`
   `IPC_STAT` reports the size and attach count; `IPC_SET`, `SHM_RND`,
   `SHM_REMAP`, `SHM_HUGETLB`, resize and IPC namespaces are deferred. (PR #297)
+- **`signalfd` for the Linux personality.** `signalfd`/`signalfd4` make a
+  descriptor that reads blocked signals as `signalfd_siginfo` records, so a
+  program can fold `SIGCHLD`/`SIGTERM` into a `poll`/`epoll` loop — the fourth
+  fd-based event source after eventfd, timerfd and epoll. It is a readiness
+  kobject (`kernel/io/signalfd.c`) holding just a mask, reading the current
+  process's pending signals and polling a per-process `signalfd_wqh` the signal
+  path wakes; the object has no process pointer, so a passed or inherited fd
+  reports the reader's signals. The signal core gained a consume-by-mask
+  dequeue and now keeps a *blocked* ignored signal pending (so a `signalfd` for
+  `SIGCHLD`, whose default is ignore, sees child exits). `SIGKILL`/`SIGSTOP`
+  are never reportable; non-RT coalescing (one record per signal number). (PR #299)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
