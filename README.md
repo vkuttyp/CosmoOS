@@ -3893,15 +3893,17 @@ See [docs/development.md](docs/development.md).
   the buddy allocator's page counts (`pmm_get_stats`, `mem_unit = 1`, bytes),
   and `procs` from the process count. Load average, swap and high memory are
   reported zero (the system has none). (PR #293)
-- **`mremap(2)` for the Linux personality.** In-place resize of an anonymous
-  mapping: `lx_mremap` grows it by mapping the delta at its end
-  (`vm_user_map_anon`, which merges with the region) when the space after is
-  free, and shrinks it by unmapping the tail; a grow with no room is `-ENOMEM`.
-  `MREMAP_MAYMOVE` is accepted but never relocates (so `realloc` falls back on
-  its own), and `MREMAP_FIXED`/`MREMAP_DONTUNMAP`, file/physical mappings, and
-  sub-range resizes are `-EINVAL`. A `vm_user_region_at` helper snapshots the
-  region by value under the space lock, so no freed pointer escapes it.
-  (PR #295)
+- **`mremap(2)` for the Linux personality.** In-place resize of a whole
+  anonymous mapping: `lx_mremap` validates the lengths (rejecting a size near
+  `UINT64_MAX` before rounding) and calls `vm_user_remap`, which finds the
+  region, checks it is a whole anonymous mapping and grows or shrinks it — all
+  under one hold of the space lock, so no concurrent `munmap`/`MAP_FIXED` can
+  race the resize. It extends or trims the region record itself: a grow keeps
+  the region's flags (guard pages, name) and never leaves two regions, and a
+  grow with no room after it is `-ENOMEM`. `MREMAP_MAYMOVE` is accepted but
+  never relocates (so `realloc` falls back on its own), and
+  `MREMAP_FIXED`/`MREMAP_DONTUNMAP`, file/physical mappings, and sub-range
+  resizes are `-EINVAL`. (PR #295)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

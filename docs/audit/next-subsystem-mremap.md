@@ -7,11 +7,18 @@
 > PR that follows, gated on CI. As the report was committed (before PR #295),
 > `mremap` returned `-ENOSYS`.
 >
-> **Built in PR #295.** The implementation added `vm_user_region_at` and the
-> `lx_mremap` handler (in-place grow/shrink of a whole anonymous mapping) and
-> wired `[LX_mremap]`; both arches boot PASS and `host-test` passes. Every
-> present-tense statement below describes the state the report measured,
-> before this implementation.
+> **Built in PR #295.** The implementation added the `lx_mremap` handler
+> (in-place grow/shrink of a whole anonymous mapping) and wired `[LX_mremap]`;
+> both arches boot PASS and `host-test` passes. Review replaced the
+> "Design" sketch's snapshot-then-resize (a `vm_user_region_at` helper
+> feeding separate `vm_user_unmap`/`vm_user_map_anon` calls) with a single
+> `vm_user_remap` primitive that finds, validates and resizes the region
+> under one hold of the space lock — closing the snapshot-then-act race the
+> "Risks" section had deferred, and extending the region record itself so a
+> grow preserves its flags instead of leaving two regions. `lx_mremap` also
+> bounds the lengths against the user window before rounding, so a size near
+> `UINT64_MAX` can no longer round to zero. Every present-tense statement
+> below describes the state the report measured, before this implementation.
 
 ## Problem
 
