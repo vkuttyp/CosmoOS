@@ -771,6 +771,95 @@ int main(int argc, char **argv)
         }
         CHECKV(ok, 0);
     }
+    /* epoll (docs/audit/next-subsystem-epoll.md): level-triggered. Uses
+     * epoll_pwait (wired on both arches) with a NULL sigmask. */
+    {
+        long ep = sc1(LX_epoll_create1, LX_EPOLL_CLOEXEC);
+        CHECKV(ep >= 3, ep);
+        long efd = sc2(LX_eventfd2, 0, 0);
+        CHECKV(efd >= 3, efd);
+        struct lx_epoll_event ee = { .events = LX_EPOLLIN, .data = 0xCAFE };
+        struct lx_epoll_event out[4];
+        uint64_t one = 1, sink;
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd, &ee) == 0, 0);
+        /* not ready: a 0-timeout wait returns 0 */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
+        /* write it -> reported with its data; drain -> not ready again */
+        CHECKV(sc3(LX_write, efd, &one, 8) == 8, 0);
+        long got = sc6(LX_epoll_pwait, ep, out, 4, 1000, 0, 0);
+        CHECKV(got == 1 && out[0].data == 0xCAFE && (out[0].events & LX_EPOLLIN), (long)got);
+        CHECKV(sc3(LX_read, efd, &sink, 8) == 8, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
+
+        /* multi: add a timerfd too; arm only it; the bounded wait returns the
+         * timerfd entry */
+        long tfd = sc2(LX_timerfd_create, LX_CLOCK_MONOTONIC, LX_TFD_NONBLOCK);
+        CHECKV(tfd >= 3, tfd);
+        struct lx_epoll_event te = { .events = LX_EPOLLIN, .data = 0x7 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, tfd, &te) == 0, 0);
+        struct lx_itimerspec its;
+        __builtin_memset(&its, 0, sizeof(its));
+        its.it_value.tv_nsec = 40000000;          /* 40 ms */
+        CHECKV(sc4(LX_timerfd_settime, tfd, 0, &its, 0) == 0, 0);
+        got = sc6(LX_epoll_pwait, ep, out, 4, 2000, 0, 0);
+        CHECKV(got == 1 && out[0].data == 0x7, (long)got);
+        uint64_t exp;
+        CHECKV(sc3(LX_read, tfd, &exp, 8) == 8, 0);   /* drain the timerfd */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, tfd, 0) == 0, 0);
+        CHECKV(sc1(LX_close, tfd) == 0, 0);
+
+        /* timeout: a registered-but-not-ready member, finite wait returns 0 */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 50, 0, 0) == 0, 0);
+
+        /* MOD to events 0: not reported even once written; MOD back restores it */
+        struct lx_epoll_event z = { .events = 0, .data = 0xCAFE };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd, &z) == 0, 0);
+        CHECKV(sc3(LX_write, efd, &one, 8) == 8, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd, &ee) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 1000, 0, 0) == 1, 0);
+        CHECKV(sc3(LX_read, efd, &sink, 8) == 8, 0);
+
+        /* oneshot: reported once, then not until MOD re-arms */
+        struct lx_epoll_event os = { .events = LX_EPOLLIN | LX_EPOLLONESHOT, .data = 0x9 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd, &os) == 0, 0);
+        CHECKV(sc3(LX_write, efd, &one, 8) == 8, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 1000, 0, 0) == 1 && out[0].data == 0x9, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);   /* still readable, but disabled */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd, &ee) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1, 0);   /* re-armed, still readable */
+        CHECKV(sc3(LX_read, efd, &sink, 8) == 8, 0);
+
+        /* errors */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd, &ee) == -17, 0);   /* EEXIST */
+        long efd2 = sc2(LX_eventfd2, 0, 0);
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd2, &ee) == -2, 0);   /* ENOENT */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, efd2, 0) == -2, 0);     /* ENOENT */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, ep, &ee) == -22, 0);    /* nesting -> EINVAL */
+        struct lx_epoll_event et = { .events = LX_EPOLLIN | LX_EPOLLET, .data = 0 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd2, &et) == -22, 0);  /* EPOLLET -> EINVAL */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 0, 0, 0, 0) == -22, 0);            /* maxevents 0 -> EINVAL */
+        CHECKV(sc1(LX_close, efd2) == 0, 0);
+
+        /* DEL: no longer reported */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, efd, 0) == 0, 0);
+        CHECKV(sc3(LX_write, efd, &one, 8) == 8, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
+        CHECKV(sc1(LX_close, efd) == 0, 0);
+        CHECKV(sc1(LX_close, ep) == 0, 0);
+#ifdef LX_epoll_create
+        /* x86-64 legacy epoll_create + epoll_wait */
+        long lep = sc1(LX_epoll_create, 1);
+        CHECKV(lep >= 3, lep);
+        long lfd = sc2(LX_eventfd2, 0, 0);
+        struct lx_epoll_event le = { .events = LX_EPOLLIN, .data = 0x5 };
+        CHECKV(sc4(LX_epoll_ctl, lep, LX_EPOLL_CTL_ADD, lfd, &le) == 0, 0);
+        CHECKV(sc3(LX_write, lfd, &one, 8) == 8, 0);
+        CHECKV(sc4(LX_epoll_wait, lep, out, 4, 1000) == 1 && out[0].data == 0x5, 0);
+        CHECKV(sc1(LX_epoll_create, 0) == -22, 0);   /* size <= 0 -> EINVAL */
+        CHECKV(sc1(LX_close, lfd) == 0 && sc1(LX_close, lep) == 0, 0);
+#endif
+    }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);

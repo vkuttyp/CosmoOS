@@ -369,6 +369,31 @@ struct lx_statx {
 #define LX_MFD_CLOEXEC       0x0001u
 #define LX_MFD_ALLOW_SEALING 0x0002u
 #define LX_MFD_HUGETLB       0x0004u
+
+/* epoll. The event bits are the poll bits; ET/ONESHOT are the high bits.
+ * struct epoll_event is packed on x86-64 only (12 bytes, data unaligned at
+ * offset 4), matching Linux's 32-bit-compatible ABI; on AArch64 it is the
+ * natural 16-byte layout. */
+#define LX_EPOLLIN      0x001u
+#define LX_EPOLLOUT     0x004u
+#define LX_EPOLLERR     0x008u
+#define LX_EPOLLHUP     0x010u
+#define LX_EPOLLRDHUP   0x2000u
+#define LX_EPOLLONESHOT (1u << 30)
+#define LX_EPOLLET      (1u << 31)
+#define LX_EPOLL_CTL_ADD 1
+#define LX_EPOLL_CTL_DEL 2
+#define LX_EPOLL_CTL_MOD 3
+#define LX_EPOLL_CLOEXEC LX_O_CLOEXEC
+#ifdef LX_ABI_X86_64
+#define LX_EPOLL_PACKED __attribute__((packed))
+#else
+#define LX_EPOLL_PACKED
+#endif
+struct lx_epoll_event {
+    uint32_t events;
+    uint64_t data;
+} LX_EPOLL_PACKED;
 /* The fields this kernel can supply: the basic set minus the access time,
  * which `struct cosmo_stat` does not record (no btime either). */
 #define LX_STATX_SUPPORTED (LX_STATX_TYPE | LX_STATX_MODE | LX_STATX_NLINK | LX_STATX_UID | \

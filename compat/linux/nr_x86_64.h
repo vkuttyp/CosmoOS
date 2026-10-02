@@ -125,6 +125,11 @@
 #define LX_eventfd2 290
 #define LX_ftruncate 77
 #define LX_memfd_create 319
+#define LX_epoll_create 213
+#define LX_epoll_wait 232
+#define LX_epoll_ctl 233
+#define LX_epoll_pwait 281
+#define LX_epoll_create1 291
 #define LX_timerfd_create 283
 #define LX_timerfd_settime 286
 #define LX_timerfd_gettime 287

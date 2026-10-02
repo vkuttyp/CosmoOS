@@ -11,6 +11,7 @@
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/spinlock.h>
+#include <kernel/epoll.h>
 #include <kernel/eventfd.h>
 #include <kernel/timerobj.h>
 #include <kernel/futex.h>
@@ -765,6 +766,193 @@ static int64_t lx_ftruncate(struct syscall_args *a)
         return -EBADF;
     int rc = (int)vfs_ftruncate(f->vn, (uint64_t)len);
     file_put(f);
+    return rc;
+}
+
+/* epoll: an interest set of fds, waited on together (kernel/io/epoll.c).
+ * See docs/audit/next-subsystem-epoll.md. Level-triggered. */
+#define LX_EPOLL_WAIT_MAX 1024u   /* per-call cap on reported events (level-triggered re-reports) */
+
+static unsigned epoll_events_to_io(uint32_t ev)
+{
+    unsigned io = 0;
+    if (ev & LX_EPOLLIN)
+        io |= COSMO_IO_READABLE;
+    if (ev & LX_EPOLLOUT)
+        io |= COSMO_IO_WRITABLE;
+    return io;   /* ERR/HUP are always reported, never requested */
+}
+
+static uint32_t epoll_events_from_io(unsigned io, uint32_t asked)
+{
+    uint32_t ev = 0;
+    if (io & COSMO_IO_READABLE)
+        ev |= LX_EPOLLIN;
+    if (io & COSMO_IO_WRITABLE)
+        ev |= LX_EPOLLOUT;
+    if (io & COSMO_IO_HANGUP)
+        ev |= LX_EPOLLHUP | (asked & LX_EPOLLRDHUP);   /* RDHUP only if the caller asked, as poll does */
+    if (io & COSMO_IO_ERROR)
+        ev |= LX_EPOLLERR;
+    return ev;
+}
+
+/* Resolve an epoll fd to its object, referenced. NULL with *err set. */
+static struct kobject *epoll_of_fd(int epfd, int *err)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, epfd, 0);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    if (epoll_obj_from_kobject(obj) == NULL) {
+        kobject_put(obj);
+        *err = -EINVAL;   /* not an epoll */
+        return NULL;
+    }
+    return obj;
+}
+
+static int64_t do_epoll_create(unsigned flags)
+{
+    if (flags & ~(unsigned)LX_EPOLL_CLOEXEC)
+        return -EINVAL;
+    struct kobject *obj;
+    int rc = epoll_obj_create(&obj);
+    if (rc)
+        return rc;
+    /* EPOLL_CLOEXEC is accepted and a no-op under the spawn model. */
+    int h = handle_install(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    kobject_put(obj);
+    return h;
+}
+
+static int64_t lx_epoll_create1(struct syscall_args *a) { return do_epoll_create((unsigned)a->a[0]); }
+
+static __maybe_unused int64_t lx_epoll_create(struct syscall_args *a)
+{
+    if ((int)a->a[0] <= 0)
+        return -EINVAL;   /* the legacy call wants a positive size hint, then ignores it */
+    return do_epoll_create(0);
+}
+
+static int64_t lx_epoll_ctl(struct syscall_args *a)
+{
+    int op = (int)a->a[1];
+    int fd = (int)a->a[2];
+    int err = 0;
+    struct kobject *ep = epoll_of_fd((int)a->a[0], &err);
+    if (ep == NULL)
+        return err;
+    int64_t rc;
+    if (op == LX_EPOLL_CTL_DEL) {
+        rc = epoll_obj_del(ep, fd);
+        kobject_put(ep);
+        return rc;
+    }
+    if (op != LX_EPOLL_CTL_ADD && op != LX_EPOLL_CTL_MOD) {
+        kobject_put(ep);
+        return -EINVAL;
+    }
+    struct lx_epoll_event ev;
+    if (copy_from_user(&ev, a->a[3], sizeof(ev))) {
+        kobject_put(ep);
+        return -EFAULT;
+    }
+    if (ev.events & LX_EPOLLET) {   /* edge-triggered is deferred */
+        kobject_put(ep);
+        return -EINVAL;
+    }
+    unsigned want = epoll_events_to_io(ev.events);
+    bool oneshot = (ev.events & LX_EPOLLONESHOT) != 0;
+    if (op == LX_EPOLL_CTL_MOD) {
+        rc = epoll_obj_mod(ep, fd, want, ev.events, ev.data, oneshot);
+        kobject_put(ep);
+        return rc;
+    }
+    /* ADD: the member must be a valid fd and not an epoll (no nesting). */
+    struct kobject *target = handle_lookup(&process_current()->handles, fd, 0);
+    if (target == NULL) {
+        kobject_put(ep);
+        return -EBADF;
+    }
+    if (epoll_obj_from_kobject(target) != NULL) {
+        kobject_put(target);
+        kobject_put(ep);
+        return -EINVAL;   /* nesting an epoll in an epoll */
+    }
+    rc = epoll_obj_add(ep, fd, target, want, ev.events, ev.data, oneshot);   /* takes target's ref on success */
+    if (rc)
+        kobject_put(target);
+    kobject_put(ep);
+    return rc;
+}
+
+static int64_t do_epoll_wait(int epfd, uint64_t uevents, int maxevents, int timeout_ms)
+{
+    if (maxevents <= 0)
+        return -EINVAL;
+    unsigned k = (unsigned)maxevents;
+    if (k > LX_EPOLL_WAIT_MAX)
+        k = LX_EPOLL_WAIT_MAX;
+    if (!user_range_ok(uevents, (size_t)k * sizeof(struct lx_epoll_event)))
+        return -EFAULT;
+    int err = 0;
+    struct kobject *ep = epoll_of_fd(epfd, &err);
+    if (ep == NULL)
+        return err;
+    struct epoll_ready *buf = kmalloc((size_t)k * sizeof(*buf), 0);
+    if (buf == NULL) {
+        kobject_put(ep);
+        return -ENOMEM;
+    }
+    uint64_t timeout_ns = timeout_ms < 0 ? EPOLL_WAIT_FOREVER : (uint64_t)timeout_ms * 1000000ull;
+    int64_t n = epoll_obj_wait(ep, buf, k, timeout_ns);
+    int64_t rc = n;
+    if (n > 0) {
+        int64_t i = 0;
+        for (; i < n; i++) {
+            struct lx_epoll_event ev = { .events = epoll_events_from_io(buf[i].io, buf[i].events),
+                                         .data = buf[i].data };
+            if (copy_to_user(uevents + (uint64_t)i * sizeof(ev), &ev, sizeof(ev)))
+                break;
+        }
+        if (i < n) {
+            /* The copy failed at i: re-arm the one-shots we could not deliver,
+             * so the event is not lost (collect already disabled them). */
+            for (int64_t j = i; j < n; j++)
+                if (buf[j].oneshot)
+                    epoll_obj_rearm(ep, buf[j].fd, buf[j].id);
+            rc = i ? i : -EFAULT;
+        }
+    }
+    kfree(buf);
+    kobject_put(ep);
+    return rc;
+}
+
+static __maybe_unused int64_t lx_epoll_wait(struct syscall_args *a)
+{
+    return do_epoll_wait((int)a->a[0], a->a[1], (int)a->a[2], (int)a->a[3]);
+}
+
+static int64_t lx_epoll_pwait(struct syscall_args *a)
+{
+    /* Swap in the caller's signal mask for the wait and restore it after, the
+     * way lx_ppoll does; a NULL mask is the common path. */
+    bool swap = a->a[4] != 0;
+    uint64_t mask = 0, old = 0;
+    if (swap) {
+        if (a->a[5] != 8)
+            return -EINVAL;
+        if (copy_from_user(&mask, a->a[4], 8))
+            return -EFAULT;
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    int64_t rc = do_epoll_wait((int)a->a[0], a->a[1], (int)a->a[2], (int)a->a[3]);
+    if (swap)
+        signal_set_blocked_saved(old);
     return rc;
 }
 
@@ -3080,6 +3268,13 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_timerfd_gettime] = lx_timerfd_gettime,
     [LX_memfd_create] = lx_memfd_create,
     [LX_ftruncate] = lx_ftruncate,
+    [LX_epoll_create1] = lx_epoll_create1,
+    [LX_epoll_ctl] = lx_epoll_ctl,
+    [LX_epoll_pwait] = lx_epoll_pwait,
+#ifdef LX_epoll_create
+    [LX_epoll_create] = lx_epoll_create,   /* x86-64: the legacy create and wait */
+    [LX_epoll_wait] = lx_epoll_wait,
+#endif
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,
