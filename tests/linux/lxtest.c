@@ -771,8 +771,9 @@ int main(int argc, char **argv)
         }
         CHECKV(ok, 0);
     }
-    /* epoll (docs/audit/next-subsystem-epoll.md): level-triggered. Uses
-     * epoll_pwait (wired on both arches) with a NULL sigmask. */
+    /* epoll (docs/audit/next-subsystem-epoll.md): level- and edge-triggered
+     * (EPOLLET, docs/audit/next-subsystem-epollet.md). Uses epoll_pwait (wired
+     * on both arches) with a NULL sigmask. */
     {
         long ep = sc1(LX_epoll_create1, LX_EPOLL_CLOEXEC);
         CHECKV(ep >= 3, ep);
@@ -830,14 +831,40 @@ int main(int argc, char **argv)
         CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1, 0);   /* re-armed, still readable */
         CHECKV(sc3(LX_read, efd, &sink, 8) == 8, 0);
 
+        /* edge-triggered (EPOLLET): reported only on a transition into
+         * readiness, not on every wait while it stays ready. efd (above) is
+         * drained and not ready, so it does not interfere. Deterministic
+         * timeout==0 polls plus one finite-deadline wait -- no timing. */
+        long eet = sc2(LX_eventfd2, 0, 0);
+        CHECKV(eet >= 3, eet);
+        struct lx_epoll_event ete = { .events = LX_EPOLLIN | LX_EPOLLET, .data = 0xED };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, eet, &ete) == 0, 0);   /* accepted; was -EINVAL */
+        CHECKV(sc3(LX_write, eet, &one, 8) == 8, 0);
+        got = sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0);
+        CHECKV(got == 1 && out[0].data == 0xED, (long)got);                  /* one edge */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);            /* still ready, no new edge */
+        CHECKV(sc3(LX_read, eet, &sink, 8) == 8, 0);                         /* drain */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);            /* drained: not ready */
+        CHECKV(sc3(LX_write, eet, &one, 8) == 8, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 1000, 0, 0) == 1, 0);         /* fresh edge, finite deadline */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);            /* suppressed again */
+        /* level contrast: MOD the same fd to level; still ready (not drained)
+         * -> reported on every poll, unlike the edge member above */
+        struct lx_epoll_event etl = { .events = LX_EPOLLIN, .data = 0xED };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, eet, &etl) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1, 0);            /* level: ready -> reported */
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1, 0);            /* level: still reported */
+        CHECKV(sc3(LX_read, eet, &sink, 8) == 8, 0);
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, eet, 0) == 0, 0);
+        CHECKV(sc1(LX_close, eet) == 0, 0);
+        lx_puts("LXEPOLLET: edge-triggered reported once, re-arms on drain+refill; level repeats\n");
+
         /* errors */
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd, &ee) == -17, 0);   /* EEXIST */
         long efd2 = sc2(LX_eventfd2, 0, 0);
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_MOD, efd2, &ee) == -2, 0);   /* ENOENT */
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, efd2, 0) == -2, 0);     /* ENOENT */
         CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, ep, &ee) == -22, 0);    /* nesting -> EINVAL */
-        struct lx_epoll_event et = { .events = LX_EPOLLIN | LX_EPOLLET, .data = 0 };
-        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, efd2, &et) == -22, 0);  /* EPOLLET -> EINVAL */
         CHECKV(sc6(LX_epoll_pwait, ep, out, 0, 0, 0, 0) == -22, 0);            /* maxevents 0 -> EINVAL */
         CHECKV(sc1(LX_close, efd2) == 0, 0);
 

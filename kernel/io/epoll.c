@@ -16,8 +16,9 @@
  * entries are its own (so two waiters do not share one), it finishes on the
  * queues it armed (so a MOD that changes a member's queue cannot strand it),
  * and it holds a reference to each member across the sleep (so a DEL or close
- * cannot free a member whose queue the waiter is parked on). Level-triggered;
- * one-shot supported. See docs/audit/next-subsystem-epoll.md.
+ * cannot free a member whose queue the waiter is parked on). Level- and
+ * edge-triggered (EPOLLET, docs/audit/next-subsystem-epollet.md); one-shot
+ * supported. See docs/audit/next-subsystem-epoll.md.
  *
  * Lifetime: each registration holds a reference to its member object, dropped
  * on EPOLL_CTL_DEL and when the epoll is released. v1 has no auto-remove on a
@@ -51,6 +52,8 @@ struct epoll_item {
     uint64_t data;            /* opaque data token, echoed to the waiter */
     bool oneshot;             /* disable after one report, until MOD re-arms */
     bool disabled;            /* a fired one-shot, until MOD or rearm */
+    bool edge;                /* EPOLLET: report only on a transition into readiness */
+    bool armed;               /* edge: eligible to report an edge now (distinct from !disabled) */
     struct list_node link;
 };
 
@@ -60,6 +63,8 @@ struct epoll_snap {
     struct kobject *obj;      /* referenced for the duration of the wait */
     struct waitqueue *wq;     /* kobject_poll_wq(obj, want|HANGUP|ERROR), or NULL */
     unsigned want;
+    bool edge;                /* captured so the sleep decision gates like collect */
+    bool armed;               /* a disarmed edge member is not "ready" for the sleep check */
     struct wait_entry we;
     bool prepared;
 };
@@ -149,16 +154,25 @@ static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned 
         struct list_node *next = cur->next;
         struct epoll_item *it = container_of(cur, struct epoll_item, link);
         unsigned io = item_ready(it);
-        if (io != 0) {
+        /* An edge member whose readiness has dropped re-arms: its next rise is a
+         * fresh edge (the consumer drained it). */
+        if (it->edge && io == 0)
+            it->armed = true;
+        /* An edge member reports only on a transition -- only while armed. A
+         * level member reports whenever ready, as before. */
+        if (io != 0 && !(it->edge && !it->armed)) {
             out[n].fd = it->fd;
             out[n].id = it->id;
             out[n].io = io;
             out[n].events = it->events;
             out[n].data = it->data;
             out[n].oneshot = it->oneshot;
+            out[n].edge = it->edge;
             n++;
             if (it->oneshot)
                 it->disabled = true;
+            if (it->edge)
+                it->armed = false;         /* disarm until a drain or a wake re-arms it */
             list_remove(&it->link);        /* round-robin: reported goes to the tail */
             list_push_back(&ep->items, &it->link);
         }
@@ -168,7 +182,7 @@ static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned 
 }
 
 int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
-                  unsigned want, uint32_t events, uint64_t data, bool oneshot)
+                  unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge)
 {
     struct epoll_obj *ep = epoll_of(epobj);
     struct epoll_item *it = kzalloc(sizeof(*it));
@@ -188,6 +202,8 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     it->data = data;
     it->oneshot = oneshot;
     it->disabled = false;
+    it->edge = edge;
+    it->armed = true;          /* a fresh arm is eligible to report an edge */
     list_push_back(&ep->items, &it->link);
     ep->nr++;
     /* A concurrent epoll_wait must re-evaluate the new member (as aio_submit
@@ -197,7 +213,7 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     return 0;
 }
 
-int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events, uint64_t data, bool oneshot)
+int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge)
 {
     struct epoll_obj *ep = epoll_of(epobj);
     mutex_lock(&ep->lock);
@@ -211,6 +227,8 @@ int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events,
     it->data = data;
     it->oneshot = oneshot;
     it->disabled = false;      /* MOD re-arms a fired one-shot */
+    it->edge = edge;
+    it->armed = true;          /* ... and re-arms the edge */
     it->id = ep->next_id++;    /* a fresh arm: a copy-failure re-arm of the previous arm must not match */
     waitqueue_wake_all(&ep->wait);   /* a widened mask or re-arm can make it reportable */
     mutex_unlock(&ep->lock);
@@ -244,10 +262,22 @@ void epoll_obj_rearm(struct kobject *epobj, int fd, uint64_t id)
     struct epoll_item *it = find_item(ep, fd);
     /* Only the exact registration that produced the undelivered event: if the
      * fd was removed, or removed and re-added, the id no longer matches and
-     * this is a no-op -- never re-enabling a different registration. */
-    if (it != NULL && it->id == id && it->disabled) {
-        it->disabled = false;
-        waitqueue_wake_all(&ep->wait);   /* a waiter that slept while it was disabled must re-evaluate */
+     * this is a no-op -- never re-enabling a different registration. Restore
+     * whichever suppression the report set: a fired one-shot's `disabled`, or a
+     * reported edge's `armed`, so an event the door could not copy out is not
+     * lost. */
+    if (it != NULL && it->id == id) {
+        bool changed = false;
+        if (it->disabled) {
+            it->disabled = false;
+            changed = true;
+        }
+        if (it->edge && !it->armed) {
+            it->armed = true;
+            changed = true;
+        }
+        if (changed)
+            waitqueue_wake_all(&ep->wait);   /* a waiter that slept while it was suppressed must re-evaluate */
     }
     mutex_unlock(&ep->lock);
 }
@@ -280,6 +310,8 @@ static unsigned snapshot(struct epoll_obj *ep, struct epoll_snap *snap, unsigned
         snap[n].obj = it->obj;
         snap[n].wq = kobject_poll_wq(it->obj, EPOLL_WANT_ALL(it->want));
         snap[n].want = it->want;
+        snap[n].edge = it->edge;
+        snap[n].armed = it->armed;
         snap[n].prepared = false;
         wait_entry_init(&snap[n].we);
         n++;
@@ -287,12 +319,34 @@ static unsigned snapshot(struct epoll_obj *ep, struct epoll_snap *snap, unsigned
     return n;
 }
 
+/* Whether the wait should stay awake rather than sleep: a member `collect`
+ * would report is ready. A disarmed edge member is readable at the object level
+ * but collect will not report it, so it must not keep the wait spinning -- it is
+ * still in the snapshot (its queue armed) so a drain or event wakes the wait to
+ * re-arm it, but it does not count as ready here. Mirrors collect's gating. */
 static bool snap_any_ready(struct epoll_snap *snap, unsigned n)
 {
-    for (unsigned i = 0; i < n; i++)
+    for (unsigned i = 0; i < n; i++) {
+        if (snap[i].edge && !snap[i].armed)
+            continue;
         if (kobject_ready(snap[i].obj) & EPOLL_WANT_ALL(snap[i].want))
             return true;
+    }
     return false;
+}
+
+/* Lock held. Re-arm every edge member: a wake means a member's queue (or a ctl)
+ * fired, so a new event that arrived while the wait slept is a fresh edge even
+ * if the member never went fully not-ready. Coarse by design (all edge members,
+ * not only the one that fired) because this object pulls readiness and cannot
+ * attribute a wake to one member; a spurious edge is within Linux's EPOLLET
+ * contract. */
+static void rearm_edges(struct epoll_obj *ep)
+{
+    struct epoll_item *it;
+    list_for_each_entry(it, &ep->items, link)
+        if (it->edge)
+            it->armed = true;
 }
 
 int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned max, uint64_t timeout_ns)
@@ -311,9 +365,19 @@ int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned 
     struct wait_entry ep_we;
     int rc = 0;
     unsigned n = 0;
+    bool woke = false;        /* the last iteration slept and was woken: re-arm edges */
 
     for (;;) {
         mutex_lock(&ep->lock);
+        if (woke) {
+            /* Re-arm edge members on a real wake (a member's queue or a ctl),
+             * which may be a fresh edge -- but NOT when only the timeout fired:
+             * a deadline elapsing is not an event, and re-arming on it would
+             * re-report a disarmed, still-ready edge member with no new event. */
+            if (!__atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE))
+                rearm_edges(ep);
+            woke = false;
+        }
         n = collect(ep, out, max);
         if (n > 0 || __atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) || process_kill_pending()) {
             if (n == 0 && process_kill_pending())
@@ -343,8 +407,10 @@ int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned 
         bool sleep = !snap_any_ready(snap, sn) && !__atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) &&
                      !process_kill_pending();
         mutex_unlock(&ep->lock);
-        if (sleep)
+        if (sleep) {
             sched_block_current();
+            woke = true;       /* re-arm edge members before the next collect */
+        }
         /* Finish without the lock: each pinned member (and so its queue) is
          * kept alive by the reference the snapshot holds, even if a concurrent
          * DEL removed and freed its item. */
