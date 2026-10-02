@@ -1545,44 +1545,38 @@ static int64_t lx_munmap(struct syscall_args *a)
     return vm_user_unmap(process_current()->space, addr, page_align_up(len), 0);
 }
 
-/* mremap: resize an anonymous mapping in place (grow or shrink).
+/* mremap: resize a whole anonymous mapping in place (grow or shrink).
  * See docs/audit/next-subsystem-mremap.md. */
 static int64_t lx_mremap(struct syscall_args *a)
 {
     uint64_t old_addr = a->a[0];
-    size_t raw_old = (size_t)a->a[1];
+    size_t raw_old = (size_t)a->a[1], raw_new = (size_t)a->a[2];
     unsigned flags = (unsigned)a->a[3];
     if (flags & ~(unsigned)(LX_MREMAP_MAYMOVE | LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
         return -EINVAL;
     if (flags & (LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
         return -EINVAL;   /* v1 places nothing at a chosen address and always unmaps a shrink */
-    if (!is_page_aligned(old_addr) || raw_old == 0 || a->a[2] == 0)
-        return -EINVAL;   /* old_size 0 (the shareable-dup form) is unsupported */
+    if (!is_page_aligned(old_addr))
+        return -EINVAL;
+    /* Bound the lengths against the user window BEFORE rounding: a size
+     * near UINT64_MAX would make page_align_up wrap to 0, and a 0 old_size
+     * is the shareable-dup form v1 does not support. (As lx_mmap does.) */
+    if (raw_old == 0 || raw_old > (size_t)(USER_HI - USER_LO))
+        return -EINVAL;
+    if (raw_new == 0 || raw_new > (size_t)(USER_HI - USER_LO))
+        return -EINVAL;
     size_t old_size = page_align_up(raw_old);
-    size_t new_size = page_align_up((size_t)a->a[2]);
-
-    struct vm_space *space = process_current()->space;
-    struct vm_region_info info;
-    if (!vm_user_region_at(space, old_addr, &info))
-        return -EFAULT;
-    if (info.kind != VM_REGION_ANON)
-        return -EINVAL;   /* v1: anonymous mappings only (file/physical are out of scope) */
-    if (old_addr != info.base || old_size != info.size)
-        return -EINVAL;   /* v1: the whole region, by its exact base and size */
+    size_t new_size = page_align_up(raw_new);
 
     if (new_size == old_size)
         return (int64_t)old_addr;
-    if (new_size < old_size) {
-        int rc = vm_user_unmap(space, old_addr + new_size, old_size - new_size, 0);
-        return rc ? rc : (int64_t)old_addr;
-    }
-    /* Grow: map the delta at the end; vm_user_map_anon merges it with this
-     * region (same kind/prot/flags/name) when the space after is free, and
-     * returns -EEXIST when it is not -- which v1 reports as -ENOMEM rather
-     * than relocating, even under MREMAP_MAYMOVE. */
-    int rc = vm_user_map_anon(space, old_addr + old_size, new_size - old_size, info.prot, 0, info.name);
-    if (rc == -EEXIST)
-        return -ENOMEM;
+
+    /* The find, the whole-anonymous-region check and the resize all happen
+     * under one hold of the space lock, so a concurrent munmap/MAP_FIXED
+     * cannot slip a different mapping into the range mid-resize. MAYMOVE is
+     * accepted but never relocates: a grow the space after cannot absorb is
+     * -ENOMEM (realloc falls back to allocate-copy-free). */
+    int rc = vm_user_remap(process_current()->space, old_addr, old_size, new_size);
     return rc ? rc : (int64_t)old_addr;
 }
 

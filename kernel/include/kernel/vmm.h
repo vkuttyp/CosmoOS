@@ -353,20 +353,16 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
  * of `space` that all carry `prot`. */
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot);
 
-/* A region's fields copied out by value. Unlike vm_find_region, which returns
- * a live pointer after dropping the space lock, this reads everything under
- * the lock, so the caller holds no pointer that a concurrent unmap could free
- * (used by mremap to snapshot the mapping it resizes). */
-struct vm_region_info {
-    uint64_t base;
-    size_t size;
-    vm_prot_t prot;
-    enum vm_region_kind kind;
-    unsigned flags;
-    const char *name;
-};
-/* Fill *out with the region of `space` that contains `va`; true if one does. */
-bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out);
+/* Resize a whole anonymous user mapping in place -- Linux mremap(2) with no
+ * move. [base, base+old_size) must name a single VM_REGION_ANON region
+ * exactly; it is found, validated and grown/shrunk to new_size under one hold
+ * of the space lock, so no concurrent unmap or MAP_FIXED replacement can race
+ * the resize. The region record itself is extended or trimmed, so its flags
+ * ride along. Sizes are page-aligned, non-zero and different. 0 on success
+ * (the mapping stays at `base`); -EFAULT (nothing mapped), -EINVAL (not a
+ * whole anonymous region, or new_size out of the user window), -EBUSY (a
+ * replacement owns it), or -ENOMEM (grow blocked or over COSMO_RLIMIT_AS). */
+int vm_user_remap(struct vm_space *space, uint64_t base, size_t old_size, size_t new_size);
 
 /* Take over paging from the loader. Requires pmm_init and kmalloc_init.
  * After return: kernel tables active, all RAM in the direct map, boot

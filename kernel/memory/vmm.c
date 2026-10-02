@@ -488,22 +488,6 @@ const struct vm_region *vm_find_region(struct vm_space *space, vaddr_t va)
     return r;
 }
 
-bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
-    const struct vm_region *r = space_find(space, va);
-    if (r != NULL) {
-        out->base = r->base;
-        out->size = r->size;
-        out->prot = r->prot;
-        out->kind = r->kind;
-        out->flags = r->flags;
-        out->name = r->name;   /* an immortal string */
-    }
-    spin_unlock_irqrestore(&space->lock, s);
-    return r != NULL;
-}
-
 /* --- faults --- */
 
 static void describe_region(const struct vm_region *r, char *buf, size_t len)
@@ -1698,6 +1682,105 @@ out:
     for (unsigned i = used; i < 2; i++)
         if (spares[i])
             kmem_cache_free(g_region_cache, spares[i]);
+    return rc;
+}
+
+/* No region other than `self` has a footprint touching [lo, hi). Lock held. */
+static bool range_free_except(struct vm_space *space, vaddr_t lo, vaddr_t hi, const struct vm_region *self)
+{
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r == self)
+            continue;
+        vaddr_t rlo, rhi;
+        region_footprint(r, &rlo, &rhi);
+        if (lo < rhi && rlo < hi)
+            return false;
+    }
+    return true;
+}
+
+/*
+ * In-place resize of a whole anonymous user mapping -- Linux mremap(2)
+ * with no move. The region named by [base, base+old_size) is found,
+ * validated and resized under ONE hold of the space lock, so no
+ * concurrent munmap or MAP_FIXED replacement can slip a different mapping
+ * into the range between the check and the resize. Growing and shrinking
+ * extend or trim the region record ITSELF: its flags (guard pages, name)
+ * ride along, and there is never a second region to fail a later
+ * whole-region check. Demand-zero throughout -- the grown span faults in
+ * zero pages like any anonymous mapping; user anonymous regions are never
+ * VM_REGION_POPULATED (only the in-kernel allocator sets it), and even a
+ * populated one is served correctly by the anon fault path.
+ *
+ * On success returns 0 and the mapping stays at `base`. Otherwise:
+ *   -EFAULT  nothing is mapped at `base`
+ *   -EINVAL  not anonymous, not the whole region (base and old_size must
+ *            name it exactly), or new_size names an invalid user range
+ *   -EBUSY   a MAP_FIXED replacement owns the region right now
+ *   -ENOMEM  a grow the space after cannot absorb, or over COSMO_RLIMIT_AS
+ *
+ * The caller passes page-aligned, non-zero, differing sizes.
+ */
+int vm_user_remap(struct vm_space *space, uint64_t base, size_t old_size, size_t new_size)
+{
+    KASSERT(space->user);
+    KASSERT(is_page_aligned(base) && is_page_aligned(old_size) && is_page_aligned(new_size));
+    KASSERT(old_size > 0 && new_size > 0 && new_size != old_size);
+
+    /* The new extent must sit inside the user window; this also rejects a
+     * base + new_size that would wrap past VM_USER_HI. */
+    if (!user_range_valid(base, new_size))
+        return -EINVAL;
+
+    bool shrink = new_size < old_size;
+    uint64_t delta_pages = (shrink ? old_size - new_size : new_size - old_size) / PAGE_SIZE;
+    struct vm_region *freed[2];
+    unsigned nf = 0;
+    int rc = 0;
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, (vaddr_t)base);
+    if (r == NULL) {
+        rc = -EFAULT;
+        goto out;
+    }
+    if (r->kind != VM_REGION_ANON || r->base != base || r->size != old_size) {
+        rc = -EINVAL;   /* not a whole anonymous region */
+        goto out;
+    }
+    if (r->flags & VM_REGION_QUIESCED) {
+        rc = -EBUSY;    /* a replacement owns it between its teardown and swap */
+        goto out;
+    }
+
+    if (shrink) {
+        r->size = new_size;   /* the guard, if any, rides down with the top */
+        space->mapped_pages -= delta_pages;
+    } else {
+        /* The grown footprint (guard pages included) must be clear. */
+        vaddr_t lo, hi;
+        region_footprint(r, &lo, &hi);
+        hi += new_size - old_size;
+        if (!range_free_except(space, lo, hi, r)) {
+            rc = -ENOMEM;   /* the space after is not free */
+            goto out;
+        }
+        if (space->mapped_pages + delta_pages > space->limit_mapped_pages) {
+            rc = -ENOMEM;   /* COSMO_RLIMIT_AS */
+            goto out;
+        }
+        r->size = new_size;
+        space->mapped_pages += delta_pages;
+        nf = region_merge_forward(space, r, freed, 2);   /* absorb an adjacent twin, if any */
+    }
+out:
+    spin_unlock_irqrestore(&space->lock, s);
+
+    if (rc == 0 && shrink)
+        user_range_teardown(space, (vaddr_t)(base + new_size), old_size - new_size);
+    for (unsigned i = 0; i < nf; i++)
+        kmem_cache_free(g_region_cache, freed[i]);
     return rc;
 }
 
