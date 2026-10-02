@@ -17,6 +17,7 @@ void waitqueue_init(struct waitqueue *wq, const char *name)
 {
     spinlock_init(&wq->lock, name);
     list_init(&wq->waiters);
+    wq->wake_gen = 0;
 }
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
@@ -62,6 +63,10 @@ void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e)
 static unsigned wake(struct waitqueue *wq, bool all)
 {
     unsigned n = 0;
+    /* Advance the generation on every wake, even one that transitions no
+     * waiter: a poller not currently blocked (epoll EPOLLET) learns from the
+     * change that an event occurred while it was away. */
+    __atomic_fetch_add(&wq->wake_gen, 1, __ATOMIC_RELEASE);
     arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
     struct wait_entry *e, *tmp;
     list_for_each_entry_safe(e, tmp, &wq->waiters, link) {

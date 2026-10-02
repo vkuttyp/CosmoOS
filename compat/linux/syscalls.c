@@ -940,14 +940,11 @@ static int64_t lx_epoll_ctl(struct syscall_args *a)
         kobject_put(ep);
         return -EFAULT;
     }
-    if (ev.events & LX_EPOLLET) {   /* edge-triggered is deferred */
-        kobject_put(ep);
-        return -EINVAL;
-    }
     unsigned want = epoll_events_to_io(ev.events);
     bool oneshot = (ev.events & LX_EPOLLONESHOT) != 0;
+    bool edge = (ev.events & LX_EPOLLET) != 0;   /* edge-triggered: report only on a transition */
     if (op == LX_EPOLL_CTL_MOD) {
-        rc = epoll_obj_mod(ep, fd, want, ev.events, ev.data, oneshot);
+        rc = epoll_obj_mod(ep, fd, want, ev.events, ev.data, oneshot, edge);
         kobject_put(ep);
         return rc;
     }
@@ -962,7 +959,7 @@ static int64_t lx_epoll_ctl(struct syscall_args *a)
         kobject_put(ep);
         return -EINVAL;   /* nesting an epoll in an epoll */
     }
-    rc = epoll_obj_add(ep, fd, target, want, ev.events, ev.data, oneshot);   /* takes target's ref on success */
+    rc = epoll_obj_add(ep, fd, target, want, ev.events, ev.data, oneshot, edge);   /* takes target's ref on success */
     if (rc)
         kobject_put(target);
     kobject_put(ep);
@@ -999,10 +996,12 @@ static int64_t do_epoll_wait(int epfd, uint64_t uevents, int maxevents, int time
                 break;
         }
         if (i < n) {
-            /* The copy failed at i: re-arm the one-shots we could not deliver,
-             * so the event is not lost (collect already disabled them). */
+            /* The copy failed at i: re-arm what we could not deliver, so the
+             * event is not lost -- a one-shot collect disabled, and an edge
+             * member collect disarmed (its transition would otherwise be gone
+             * until the member is drained and refills). */
             for (int64_t j = i; j < n; j++)
-                if (buf[j].oneshot)
+                if (buf[j].oneshot || buf[j].edge)
                     epoll_obj_rearm(ep, buf[j].fd, buf[j].id);
             rc = i ? i : -EFAULT;
         }

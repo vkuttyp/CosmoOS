@@ -29,6 +29,7 @@ struct epoll_ready {
     uint32_t events;
     uint64_t data;
     bool oneshot;
+    bool edge;                /* EPOLLET: so an undelivered event re-arms the edge, not just a one-shot */
 };
 
 int epoll_obj_create(struct kobject **out);
@@ -43,15 +44,16 @@ struct kobject *epoll_obj_from_kobject(struct kobject *obj);
  * opaque `data` (both echoed to the waiter), and a one-shot flag. -EEXIST if
  * `fd` is already registered. */
 int epoll_obj_add(struct kobject *ep, int fd, struct kobject *target,
-                  unsigned want, uint32_t events, uint64_t data, bool oneshot);
-/* Update the registration keyed by `fd` and re-arm a one-shot. -ENOENT if not
- * registered. */
-int epoll_obj_mod(struct kobject *ep, int fd, unsigned want, uint32_t events, uint64_t data, bool oneshot);
+                  unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge);
+/* Update the registration keyed by `fd` and re-arm a one-shot (and an edge).
+ * -ENOENT if not registered. */
+int epoll_obj_mod(struct kobject *ep, int fd, unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge);
 /* Remove the registration keyed by `fd`, dropping its held reference. -ENOENT
  * if not registered. */
 int epoll_obj_del(struct kobject *ep, int fd);
-/* Re-arm the one-shot arm `(fd, id)` whose event the door could not deliver,
- * and wake the set. A no-op unless that exact arm is still the current one:
+/* Re-arm the arm `(fd, id)` whose event the door could not deliver -- a fired
+ * one-shot's suppression or a reported edge's -- and wake the set. A no-op
+ * unless that exact arm is still the current one:
  * if the fd was removed (or removed and re-added), or the registration was
  * MOD-re-armed since, `id` no longer matches and nothing is re-enabled -- so an
  * event another waiter already received cannot be reported a second time. */

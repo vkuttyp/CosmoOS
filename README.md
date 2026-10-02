@@ -3926,6 +3926,15 @@ See [docs/development.md](docs/development.md).
   dequeue and now keeps a *blocked* ignored signal pending (so a `signalfd` for
   `SIGCHLD`, whose default is ignore, sees child exits). `SIGKILL`/`SIGSTOP`
   are never reportable; non-RT coalescing (one record per signal number). (PR #299)
+- **Edge-triggered epoll (`EPOLLET`).** The epoll object now honours `EPOLLET`
+  instead of refusing it: an edge member is reported only on a transition into
+  readiness, not on every wait while it stays ready. Each registration carries
+  an `armed` flag beside the one-shot `disabled`; `collect` reports an edge
+  member only while armed and disarms it on report, re-arming when the member is
+  drained or on a real (non-timeout) wake, and the wait's sleep decision gates
+  on `armed` so a disarmed-but-readable member sleeps rather than spinning.
+  Level-triggered behaviour is unchanged; an undelivered edge is re-armed, not
+  lost. (PR #301)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
