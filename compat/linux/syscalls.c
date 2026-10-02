@@ -67,6 +67,7 @@ struct linux_state {
     uint64_t brk_start, brk;
     unsigned unknown_syscalls;
     struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
+    spinlock_t shm_lock;                  /* guards shm_attaches (threads share it) */
 };
 
 /* --- process hooks (kernel/process/process.c) --------------------------------- */
@@ -81,6 +82,7 @@ int linux_process_init(struct process *p, const struct elf_info *info)
         return -ENOMEM;
     ls->brk_start = page_align_up(info->hi);
     ls->brk = ls->brk_start;
+    spinlock_init(&ls->shm_lock, "lx-shm-attach");
     p->linux = ls;
     return linux_sigtramp_map(p);
 }
@@ -91,8 +93,14 @@ void linux_process_release(struct process *p)
     /* Detach any shm segments still attached: drop each one's live-attach count
      * and the attach's reference on its record (freeing the record and its
      * backing if it was the last and the segment was removed). The mappings
-     * themselves are freed by the address-space teardown. */
-    for (struct lx_shm_attach *a = ls->shm_attaches; a != NULL;) {
+     * themselves are freed by the address-space teardown. Detach the whole
+     * list under the lock first, then drop the references outside it (the free
+     * path must not run under a spinlock). */
+    arch_irq_state_t st = spin_lock_irqsave(&ls->shm_lock);
+    struct lx_shm_attach *a = ls->shm_attaches;
+    ls->shm_attaches = NULL;
+    spin_unlock_irqrestore(&ls->shm_lock, st);
+    while (a != NULL) {
         struct lx_shm_attach *next = a->next;
         shm_detach(a->seg);
         kfree(a);
@@ -1607,8 +1615,13 @@ static int64_t lx_mremap(struct syscall_args *a)
  * docs/audit/next-subsystem-shm.md. */
 static int64_t lx_shmget(struct syscall_args *a)
 {
+    unsigned shmflg = (unsigned)a->a[2];
+    /* v1 honours only IPC_CREAT/IPC_EXCL and the mode; SHM_HUGETLB and any
+     * other flag must fail, not silently create ordinary memory. */
+    if (shmflg & ~(unsigned)(LX_IPC_CREAT | LX_IPC_EXCL | 0777))
+        return -EINVAL;
     struct process *p = process_current();
-    return shm_get((int32_t)a->a[0], (size_t)a->a[1], (unsigned)a->a[2], p->cred.euid, p->cred.egid);
+    return shm_get((int32_t)a->a[0], (size_t)a->a[1], shmflg, p->cred.euid, p->cred.egid);
 }
 
 static int64_t lx_shmat(struct syscall_args *a)
@@ -1621,11 +1634,22 @@ static int64_t lx_shmat(struct syscall_args *a)
     if (rc)
         return rc;        /* -EINVAL: no such live segment */
 
+    struct process *p = process_current();
+    bool rdonly = (shmflg & LX_SHM_RDONLY) != 0;
+    /* ipc_perm: read is always needed, write unless SHM_RDONLY. */
+    rc = shm_access(seg, p->cred.euid, p->cred.egid, 04 | (rdonly ? 0 : 02));
+    if (rc) {
+        shm_unref(seg);
+        return rc;        /* -EACCES */
+    }
+
     size_t size = shm_size(seg);
     struct vnode *vn = shm_vnode(seg);
-    vm_prot_t prot = VM_PROT_READ | ((shmflg & LX_SHM_RDONLY) ? 0 : VM_PROT_WRITE);
-    vm_prot_t maxprot = VM_PROT_READ | VM_PROT_WRITE;
-    struct vm_space *space = process_current()->space;
+    vm_prot_t prot = VM_PROT_READ | (rdonly ? 0 : VM_PROT_WRITE);
+    /* A read-only attach keeps a read-only ceiling, so a later mprotect cannot
+     * add write access to the shared segment. */
+    vm_prot_t maxprot = prot;
+    struct vm_space *space = p->space;
     uint64_t shmaddr = a->a[1];
     uint64_t base;
     if (shmaddr == 0) {
@@ -1655,8 +1679,10 @@ static int64_t lx_shmat(struct syscall_args *a)
     at->size = size;
     at->seg = seg;   /* the lookup's reference becomes the attach's */
     struct linux_state *ls = lx();
+    arch_irq_state_t st = spin_lock_irqsave(&ls->shm_lock);
     at->next = ls->shm_attaches;
     ls->shm_attaches = at;
+    spin_unlock_irqrestore(&ls->shm_lock, st);
     shm_attached(seg);   /* nattch++ */
     return (int64_t)base;
 }
@@ -1665,28 +1691,41 @@ static int64_t lx_shmdt(struct syscall_args *a)
 {
     uint64_t shmaddr = a->a[0];
     struct linux_state *ls = lx();
+    struct lx_shm_attach *at = NULL;
+    arch_irq_state_t st = spin_lock_irqsave(&ls->shm_lock);
     for (struct lx_shm_attach **pp = &ls->shm_attaches; *pp != NULL; pp = &(*pp)->next) {
-        struct lx_shm_attach *at = *pp;
-        if (at->addr == shmaddr) {
+        if ((*pp)->addr == shmaddr) {
+            at = *pp;
             *pp = at->next;
-            vm_user_unmap(process_current()->space, at->addr, at->size, 0);
-            shm_detach(at->seg);   /* nattch-- and drop the attach's reference */
-            kfree(at);
-            return 0;
+            break;
         }
     }
-    return -EINVAL;   /* no attach at that address */
+    spin_unlock_irqrestore(&ls->shm_lock, st);
+    if (at == NULL)
+        return -EINVAL;   /* no attach at that address */
+
+    struct vm_space *space = process_current()->space;
+    /* Only unmap if the address still holds this segment: a mapping the program
+     * replaced (its own munmap then a fresh mmap) must not be torn down as if
+     * it were the attach. */
+    bool matched = vm_user_range_maps_vnode(space, at->addr, at->size, shm_vnode(at->seg));
+    if (matched)
+        vm_user_unmap(space, at->addr, at->size, 0);
+    shm_detach(at->seg);   /* nattch-- and drop the attach's reference */
+    kfree(at);
+    return matched ? 0 : -EINVAL;
 }
 
 static int64_t lx_shmctl(struct syscall_args *a)
 {
+    struct process *p = process_current();
     int shmid = (int)a->a[0];
     switch ((int)a->a[1]) {
     case LX_IPC_RMID:
-        return shm_rmid(shmid);
+        return shm_rmid(shmid, p->cred.euid);
     case LX_IPC_STAT: {
         struct shm_stat st;
-        int rc = shm_stat_id(shmid, &st);
+        int rc = shm_stat_id(shmid, p->cred.euid, p->cred.egid, &st);
         if (rc)
             return rc;
         struct lx_shmid_ds ds;

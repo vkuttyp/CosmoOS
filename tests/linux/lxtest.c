@@ -966,7 +966,23 @@ int main(int argc, char **argv)
         CHECKV(kid >= 0, kid);
         CHECKV(sc3(LX_shmget, 0x5109, 4096, LX_IPC_CREAT | LX_IPC_EXCL | 0600) == -17, 0);   /* -EEXIST */
         CHECKV(sc3(LX_shmctl, kid, LX_IPC_RMID, 0) == 0, 0);
-        lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed-addr, stat, rmid-on-last-detach\n");
+        /* SHM_RDONLY: a read-only attach's ceiling bars mprotect from adding write */
+        int rid = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 4096, LX_IPC_CREAT | 0600);
+        CHECKV(rid >= 0, rid);
+        long ro = sc3(LX_shmat, rid, 0, LX_SHM_RDONLY);
+        CHECKV(ro > 0, ro);
+        CHECKV(sc3(LX_mprotect, ro, 4096, LX_PROT_READ | LX_PROT_WRITE) == -13, 0);   /* -EACCES */
+        CHECKV(sc1(LX_shmdt, ro) == 0, 0);
+        CHECKV(sc3(LX_shmctl, rid, LX_IPC_RMID, 0) == 0, 0);
+        /* IPC_STAT reports the REQUESTED size, not the page-rounded one */
+        int bid = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 100, LX_IPC_CREAT | 0600);
+        CHECKV(bid >= 0, bid);
+        CHECKV(sc3(LX_shmctl, bid, LX_IPC_STAT, &ds) == 0, 0);
+        CHECK(ds.shm_segsz == 100);
+        CHECKV(sc3(LX_shmctl, bid, LX_IPC_RMID, 0) == 0, 0);
+        /* an unsupported flag (SHM_HUGETLB) is rejected, not silently honoured */
+        CHECKV(sc3(LX_shmget, LX_IPC_PRIVATE, 4096, LX_IPC_CREAT | 04000 | 0600) == -22, 0);
+        lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed-addr, stat, rmid, perms, rdonly-ceiling\n");
     }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */

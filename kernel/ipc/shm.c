@@ -29,7 +29,8 @@ struct shm_segment {
     int           id;
     int32_t       key;       /* 0 for an IPC_PRIVATE (keyless) segment */
     struct vnode *vn;        /* the anonymous ramfs file */
-    size_t        size;      /* page-rounded */
+    size_t        size;      /* page-rounded, for mapping */
+    size_t        req_size;  /* as requested, for IPC_STAT and the size check */
     uint32_t      mode;      /* low nine bits of shmflg */
     uint32_t      cuid, cgid;
     uint32_t      nattch;    /* live attaches, for IPC_STAT */
@@ -71,6 +72,31 @@ static struct shm_segment *unref_locked(struct shm_segment *s)
     return --s->refs == 0 ? s : NULL;
 }
 
+/* SysV ipc_perm access: root passes; otherwise the owner, group or other
+ * triad of the mode is chosen by the caller's ids and must grant every `want`
+ * bit (4 read, 2 write). Returns 0 or -EACCES. */
+static int access_check(const struct shm_segment *s, uint32_t uid, uint32_t gid, unsigned want)
+{
+    if (uid == 0)
+        return 0;
+    unsigned granted;
+    if (uid == s->cuid)
+        granted = (s->mode >> 6) & 7;
+    else if (gid == s->cgid)
+        granted = (s->mode >> 3) & 7;
+    else
+        granted = s->mode & 7;
+    return (granted & want) == want ? 0 : -EACCES;
+}
+
+int shm_access(struct shm_segment *seg, uint32_t uid, uint32_t gid, unsigned want)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_shm_lock);
+    int rc = access_check(seg, uid, gid, want);
+    spin_unlock_irqrestore(&g_shm_lock, s);
+    return rc;
+}
+
 static void free_seg(struct shm_segment *s)
 {
     vnode_put(s->vn);   /* the record's reference on the backing */
@@ -86,12 +112,15 @@ int shm_get(int32_t key, size_t size, unsigned shmflg, uint32_t uid, uint32_t gi
         struct shm_segment *seg = find_by_key_locked(key);
         if (seg != NULL) {
             int id = seg->id;
-            size_t have = seg->size;
+            size_t have = seg->req_size;
+            int acc = access_check(seg, uid, gid, 04);
             spin_unlock_irqrestore(&g_shm_lock, s);
             if ((shmflg & LX_IPC_CREAT) && (shmflg & LX_IPC_EXCL))
                 return -EEXIST;
             if (size > have)
                 return -EINVAL;   /* asked for more than the segment holds */
+            if (acc)
+                return acc;       /* -EACCES: no read permission */
             return id;
         }
         bool may_create = (shmflg & LX_IPC_CREAT) != 0;
@@ -122,6 +151,7 @@ int shm_get(int32_t key, size_t size, unsigned shmflg, uint32_t uid, uint32_t gi
     seg->key = (key == LX_IPC_PRIVATE) ? 0 : key;
     seg->vn = vn;
     seg->size = rsize;
+    seg->req_size = size;
     seg->mode = shmflg & 0777;
     seg->cuid = uid;
     seg->cgid = gid;
@@ -132,9 +162,15 @@ int shm_get(int32_t key, size_t size, unsigned shmflg, uint32_t uid, uint32_t gi
         struct shm_segment *race = find_by_key_locked(key);
         if (race != NULL) {
             int id = race->id;
+            size_t have = race->req_size;
+            int acc = access_check(race, uid, gid, 04);
             spin_unlock_irqrestore(&g_shm_lock, s);
             free_seg(seg);   /* discard ours; nothing else references it yet */
-            return (shmflg & LX_IPC_EXCL) ? -EEXIST : id;
+            if (shmflg & LX_IPC_EXCL)
+                return -EEXIST;
+            if (size > have)
+                return -EINVAL;   /* the winner's segment is smaller than asked */
+            return acc ? acc : id;
         }
     }
     seg->id = g_next_id++;
@@ -187,29 +223,37 @@ void shm_unref(struct shm_segment *seg)
         free_seg(dead);
 }
 
-int shm_stat_id(int shmid, struct shm_stat *out)
+int shm_stat_id(int shmid, uint32_t uid, uint32_t gid, struct shm_stat *out)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_shm_lock);
     struct shm_segment *seg = find_by_id_locked(shmid);
+    int rc = -EINVAL;
     if (seg != NULL) {
-        out->key = seg->key;
-        out->size = seg->size;
-        out->mode = seg->mode;
-        out->cuid = seg->cuid;
-        out->cgid = seg->cgid;
-        out->nattch = seg->nattch;
+        rc = access_check(seg, uid, gid, 04);   /* IPC_STAT needs read */
+        if (rc == 0) {
+            out->key = seg->key;
+            out->size = seg->req_size;   /* the requested size, as Linux reports */
+            out->mode = seg->mode;
+            out->cuid = seg->cuid;
+            out->cgid = seg->cgid;
+            out->nattch = seg->nattch;
+        }
     }
     spin_unlock_irqrestore(&g_shm_lock, s);
-    return seg != NULL ? 0 : -EINVAL;
+    return rc;
 }
 
-int shm_rmid(int shmid)
+int shm_rmid(int shmid, uint32_t uid)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_shm_lock);
     struct shm_segment *seg = find_by_id_locked(shmid);
     if (seg == NULL) {
         spin_unlock_irqrestore(&g_shm_lock, s);
         return -EINVAL;
+    }
+    if (uid != 0 && uid != seg->cuid) {   /* only the creator or root may remove */
+        spin_unlock_irqrestore(&g_shm_lock, s);
+        return -EPERM;
     }
     list_remove(&seg->link);
     seg->removed = true;

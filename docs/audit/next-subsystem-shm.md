@@ -189,15 +189,14 @@ not on this counter.
 
 ## APIs
 
-Planned for the implementation. The four Linux `shm*(2)` calls, over a new
-native segment registry (`kernel/ipc/shm.c`) that composes the existing
-`ramfs_anon_reg` / `vfs_ftruncate` / `vm_user_map_file` machinery; no on-disk
-or native user ABI change beyond the registry's own kernel-internal interface.
+Built in PR #297: the four Linux `shm*(2)` calls, over a new native segment
+registry (`kernel/ipc/shm.c`) that composes the existing `ramfs_anon_reg` /
+`vfs_ftruncate` / `vm_user_map_file` machinery; no on-disk or native user ABI
+change beyond the registry's own kernel-internal interface.
 
 ## Tests
 
-Planned for the implementation (`tests/linux/lxtest.c`, which runs in the
-standard boot).
+Built in PR #297 (`tests/linux/lxtest.c`, which runs in the standard boot).
 
 | test | proves |
 |---|---|

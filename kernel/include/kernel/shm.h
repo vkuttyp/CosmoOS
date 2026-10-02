@@ -43,6 +43,10 @@ int shm_lookup_ref(int shmid, struct shm_segment **out);
 struct vnode *shm_vnode(struct shm_segment *seg);
 size_t shm_size(struct shm_segment *seg);
 
+/* Check SysV ipc_perm access for a segment the caller holds a reference to:
+ * `want` is 04 (read) and/or 02 (write). 0 if granted, -EACCES otherwise. */
+int shm_access(struct shm_segment *seg, uint32_t uid, uint32_t gid, unsigned want);
+
 /* A successful attach bumps the segment's live-attach count; the reference
  * taken by shm_lookup_ref becomes the attach's. */
 void shm_attached(struct shm_segment *seg);
@@ -55,11 +59,13 @@ void shm_detach(struct shm_segment *seg);
  * that failed after the lookup). */
 void shm_unref(struct shm_segment *seg);
 
-/* IPC_STAT: fill *out for a live segment. 0 or -EINVAL. */
-int shm_stat_id(int shmid, struct shm_stat *out);
+/* IPC_STAT: fill *out for a live segment the caller may read. 0, -EINVAL (no
+ * such id) or -EACCES (no read permission). */
+int shm_stat_id(int shmid, uint32_t uid, uint32_t gid, struct shm_stat *out);
 
 /* IPC_RMID: unlink the segment from the id/key tables and drop the registry
- * reference; live attaches keep it alive until they detach. 0 or -EINVAL. */
-int shm_rmid(int shmid);
+ * reference; live attaches keep it alive until they detach. Only the creator
+ * (cuid) or root (uid 0) may remove. 0, -EINVAL (no such id) or -EPERM. */
+int shm_rmid(int shmid, uint32_t uid);
 
 #endif /* KERNEL_SHM_H */
