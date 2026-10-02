@@ -997,14 +997,16 @@ int main(int argc, char **argv)
         CHECK(((volatile unsigned int *)rep)[0] == 0x7777);
         CHECKV(sc2(LX_munmap, rep, 4096) == 0, 0);
         CHECKV(sc3(LX_shmctl, xid, LX_IPC_RMID, 0) == 0, 0);
-        /* a partial self-unmap still lets shmdt free the segment's remaining page */
-        int pid2 = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 8192, LX_IPC_CREAT | 0600);
+        /* a partial self-unmap of the MIDDLE page still lets shmdt free the
+         * attach's remaining pieces (both the first and third page) */
+        int pid2 = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 12288, LX_IPC_CREAT | 0600);
         CHECKV(pid2 >= 0, pid2);
         long pa = sc3(LX_shmat, pid2, 0, 0);
         CHECKV(pa > 0, pa);
-        CHECKV(sc2(LX_munmap, pa + 4096, 4096) == 0, 0);   /* drop the 2nd page by hand */
-        CHECKV(sc1(LX_shmdt, pa) == 0, 0);                 /* detaches the remaining 1st page */
-        CHECKV(sc3(LX_mprotect, pa, 4096, LX_PROT_READ) == -12, 0);   /* -ENOMEM: now unmapped */
+        CHECKV(sc2(LX_munmap, pa + 4096, 4096) == 0, 0);   /* drop the middle page by hand */
+        CHECKV(sc1(LX_shmdt, pa) == 0, 0);                 /* detaches the first AND third pages */
+        CHECKV(sc3(LX_mprotect, pa, 4096, LX_PROT_READ) == -12, 0);          /* page 1 unmapped */
+        CHECKV(sc3(LX_mprotect, pa + 8192, 4096, LX_PROT_READ) == -12, 0);   /* page 3 unmapped */
         CHECKV(sc3(LX_shmctl, pid2, LX_IPC_RMID, 0) == 0, 0);
         lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed, stat, rmid, perms, rdonly, partial-dt\n");
     }

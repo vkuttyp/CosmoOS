@@ -60,6 +60,7 @@ struct lx_shm_attach {
     struct lx_shm_attach *next;
     uint64_t addr;
     size_t size;
+    uint64_t tag;              /* the mapping's VM identity, for shmdt */
     struct shm_segment *seg;
 };
 
@@ -1651,16 +1652,17 @@ static int64_t lx_shmat(struct syscall_args *a)
     vm_prot_t maxprot = prot;
     struct vm_space *space = p->space;
     uint64_t shmaddr = a->a[1];
-    uint64_t base;
+    uint64_t base, tag;
     if (shmaddr == 0) {
-        rc = vm_user_map_file_free(space, USER_MMAP_BASE, size, prot, maxprot, VM_MAP_SHARED, vn, 0, "shm", &base);
+        base = USER_MMAP_BASE;
+        rc = vm_user_map_shm(space, 0, &base, size, prot, maxprot, vn, "shm", &tag);
     } else {
         if (!is_page_aligned(shmaddr)) {   /* SHM_RND rounding is deferred */
             shm_unref(seg);
             return -EINVAL;
         }
         base = shmaddr;
-        rc = vm_user_map_file(space, base, size, prot, maxprot, VM_MAP_SHARED, vn, 0, "shm");
+        rc = vm_user_map_shm(space, base, NULL, size, prot, maxprot, vn, "shm", &tag);
         if (rc == -EEXIST)
             rc = -ENOMEM;   /* the requested address is occupied; no silent relocation */
     }
@@ -1671,12 +1673,13 @@ static int64_t lx_shmat(struct syscall_args *a)
 
     struct lx_shm_attach *at = kzalloc(sizeof(*at));
     if (at == NULL) {
-        vm_user_unmap(space, base, size, 0);
+        vm_user_unmap_tag(space, tag);
         shm_unref(seg);
         return -ENOMEM;
     }
     at->addr = base;
     at->size = size;
+    at->tag = tag;
     at->seg = seg;   /* the lookup's reference becomes the attach's */
     /* Count the attach BEFORE publishing the record: once it is on the list a
      * sibling thread can detach it, and that detach drops the attach's
@@ -1708,11 +1711,12 @@ static int64_t lx_shmdt(struct syscall_args *a)
         return -EINVAL;   /* no attach at that address */
 
     struct vm_space *space = process_current()->space;
-    /* Detach the mapping that starts at this address, if it is still the
-     * segment's: SysV keys on the attach's base, so another attach of the same
-     * segment, or a mapping the program put here after its own munmap, is left
-     * alone. Atomic against a concurrent map/unmap of the range. */
-    vm_user_unmap_shm(space, at->addr, shm_vnode(at->seg));
+    /* Unmap exactly this attach's mapping(s), by the tag the map handed back:
+     * all its remaining pieces (after any partial self-unmap) go, while a
+     * re-attach of the same segment or a replacement mapping -- which carry a
+     * different tag or none -- is left alone. Atomic against a concurrent
+     * map/unmap of the ranges. */
+    vm_user_unmap_tag(space, at->tag);
     shm_detach(at->seg);   /* nattch-- and drop the attach's reference */
     kfree(at);
     return 0;
