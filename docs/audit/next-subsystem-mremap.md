@@ -47,8 +47,9 @@ after a failed check.
   direct callers fail. `realloc` of `mmap`-backed blocks is the common path.
 - **It is in pattern and the mechanism exists.** Grow is `vm_user_map_anon` at
   the mapping's end (which merges), shrink is `vm_user_unmap` of the tail; both
-  are the primitives `mmap`/`munmap` already use. This unit adds the door and a
-  small snapshot helper, not a new VM mechanism.
+  are the primitives `mmap`/`munmap` already use. The implementation (the PR
+  that follows this report) adds the door and a small snapshot helper, not a new
+  VM mechanism.
 
 ## The implementation before this unit
 
