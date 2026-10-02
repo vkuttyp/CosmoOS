@@ -11,15 +11,26 @@
 > be made at all.
 >
 > **Built in PR #301.** The implementation added `edge`/`armed` to
-> `struct epoll_item`, the `collect` gating, the `epoll_obj_wait` re-arm (drained
-> or woken, but not on a timeout-only wake) and the §3a sleep-decision gating,
-> the `edge` parameter on `epoll_obj_add`/`epoll_obj_mod`, the `epoll_obj_rearm`
+> `struct epoll_item`, the `collect` gating, the §3a sleep-decision gating, the
+> `edge` parameter on `epoll_obj_add`/`epoll_obj_mod`, the `epoll_obj_rearm`
 > extension for an undelivered edge, and the door change — as described below.
 > The tests landed in `tests/linux/lxtest.c`. Both arches boot PASS and
 > `host-test` passes. Every present-tense statement below describes the state
-> the report measured, before this implementation. One refinement over the plan:
-> the re-arm deliberately skips a timeout-only wake, since a deadline elapsing is
-> not an event and would otherwise re-report a disarmed, still-ready edge member.
+> the report measured, before this implementation.
+>
+> **One change from the planned re-arm (§3).** The plan re-armed an edge member
+> on an observed drain or a coarse per-wait wake. Review found both lose edges: a
+> drain+refill between two non-blocking `epoll_wait(0)` calls never lets
+> `collect` observe the not-ready trough, and a member wake that races the
+> deadline is indistinguishable from a bare timeout. The built re-arm instead
+> drives off the **member's own wake**: `struct waitqueue` gained a wake
+> generation (bumped on every `waitqueue_wake_*`, even with no waiter), each edge
+> member records its poll queue's generation, and `collect` re-arms it whenever
+> that generation has advanced — a drain+refill, a new event on a still-ready
+> member, or a deadline-racing wake all advance it; a bare timeout (not a wake)
+> does not. The §3a sleep decision re-reads the generation after the wait entries
+> are armed, closing the collect-to-arm window. This removes the `!alarm.fired`
+> bookkeeping the plan implied.
 
 ## Problem
 
