@@ -29,9 +29,21 @@ struct wait_entry {
 struct waitqueue {
     spinlock_t lock;
     struct list_node waiters;
+    uint64_t wake_gen;          /* bumped on every wake, even with no waiters: lets a
+                                 * poller (epoll EPOLLET) learn a wake happened while it
+                                 * was not blocked, without a per-waiter callback */
 };
 
-#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters) }
+#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters), .wake_gen = 0 }
+
+/* The current wake generation: it advances by at least one on every
+ * waitqueue_wake_one/all call. A reader that saw value G and later sees a
+ * different value knows the queue was woken in between (an event may have
+ * occurred). Monotonic within a boot; wrap is not a concern at 64 bits. */
+static inline uint64_t waitqueue_wake_gen(const struct waitqueue *wq)
+{
+    return __atomic_load_n(&wq->wake_gen, __ATOMIC_ACQUIRE);
+}
 
 void waitqueue_init(struct waitqueue *wq, const char *name);
 
