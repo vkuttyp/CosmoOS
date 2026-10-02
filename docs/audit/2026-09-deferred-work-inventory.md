@@ -250,7 +250,7 @@ IPv6 routing beyond loopback and ND against a real peer.
   ~~`pselect6` -- musl's `select` is `pselect6` on both architectures, so
   every `select` caller gets `-ENOSYS`~~ **BUILT (the device-readiness
   unit, `docs/audit/next-subsystem-device-readiness.md`: `select` 23 and
-  `pselect6` 270/72 over `io_poll`)**; `sysinfo` (`lx_nosys`); and ~~a
+  `pselect6` 270/72 over `io_poll`)**; ~~`sysinfo` (`lx_nosys`)~~ (**BUILT — the sysinfo unit, `docs/audit/next-subsystem-sysinfo.md`, PR #293**: `lx_sysinfo` fills `struct sysinfo` from `pmm_get_stats` (totalram/freeram, mem_unit 1), `clock_now_ns` (uptime) and `process_count`, zeroing the load-average/swap/high fields the system lacks); and ~~a
   real directory fd -- `check_dirfd` returns `-ENOSYS` for any `dirfd`
   but `AT_FDCWD` (`:133-137`), so an `openat` relative to an opened
   directory fails~~ **BUILT (the dirfd unit,
@@ -259,8 +259,8 @@ IPv6 routing beyond loopback and ND against a real peer.
   through `vfs_rename2`, and `fchdir` publishes a directory file's
   recorded name with its vnode (invariant **P31**). Measured first by
   `tools/dirfd-probe.py`: all nine `*at` calls and `fchdir` answered
-  `ENOSYS` to a real descriptor, both architectures. `sysinfo` is the one
-  of the three still open.
+  `ENOSYS` to a real descriptor, both architectures. All three are now
+  built.
 - `/proc` and `/sys` compatibility for Linux binaries (the native `/proc`
   holds process facts only); running a real distribution userland
   (phase 4).
