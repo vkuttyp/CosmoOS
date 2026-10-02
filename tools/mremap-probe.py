@@ -38,13 +38,13 @@ NEW_TEST = OLD_TEST + """    /* LXMREMAP probe (tools/mremap-probe.py): mremap h
     {
         long mrp = sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE,
                        LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
-        if (mrp > 0) {
-            long mrrc = sc5(LX_mremap, mrp, 4096, 8192, 0, 0);
-            CHECKV(mrrc == -38, mrrc);   /* -ENOSYS */
-            if (mrrc == -38)
-                lx_puts("LXMREMAP: mremap unimplemented -> -ENOSYS; no in-place resize\\n");
+        CHECKV(mrp > 0, mrp);   /* a failed setup must fail, not skip the check */
+        long mrrc = sc5(LX_mremap, mrp, 4096, 8192, 0, 0);
+        CHECKV(mrrc == -38, mrrc);   /* -ENOSYS */
+        if (mrrc == -38)
+            lx_puts("LXMREMAP: mremap unimplemented -> -ENOSYS; no in-place resize\\n");
+        if (mrp > 0)
             sc2(LX_munmap, mrp, 4096);
-        }
     }
 """
 

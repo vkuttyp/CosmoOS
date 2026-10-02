@@ -71,7 +71,8 @@ could free the region. The unit adds a small helper that copies the fields out
 
 ```c
 struct vm_region_info { uint64_t base; size_t size; vm_prot_t prot;
-                        enum vm_region_kind kind; unsigned flags; };
+                        enum vm_region_kind kind; unsigned flags;
+                        const char *name; };   /* the grow re-uses it so the new piece merges */
 bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out);
 ```
 
@@ -89,7 +90,11 @@ pointer escapes the lock, so `lx_mremap` reasons about a stable snapshot.
 - Snapshot the region at `old_addr` with `vm_user_region_at`; `-EFAULT` if
   none. It must be **`VM_REGION_ANON`** and the request must name the **whole**
   region (`old_addr == info.base && old_size == info.size`); otherwise `-EINVAL`
-  (file/shared mappings and sub-range resizes are out of scope for v1).
+  (a `VM_REGION_FILE` or `VM_REGION_PHYS` mapping, and a sub-range resize, are
+  out of scope for v1). The kind check does not distinguish `MAP_SHARED` from
+  `MAP_PRIVATE` anonymous mappings — the VM region carries no such flag — but
+  it need not: with no `fork`, an anonymous `MAP_SHARED` mapping has no second
+  sharer, so resizing it in place is the same operation as for a private one.
 - **Same size**: return `old_addr` (no-op).
 - **Shrink** (`new_size < old_size`): `vm_user_unmap(space, old_addr + new_size,
   old_size - new_size, 0)`; return `old_addr`.
@@ -159,14 +164,21 @@ None.
   cannot absorb is `-ENOMEM` (§3); `realloc` handles that, and a relocating
   `mremap` is a follow-up. `MREMAP_FIXED` and `MREMAP_DONTUNMAP` are rejected.
 - **Whole anonymous region only.** v1 resizes a mapping named by its exact base
-  and full size, and only `VM_REGION_ANON`; a sub-range resize or a file/shared
-  mapping is `-EINVAL`. This covers the `realloc`/large-buffer case; the general
-  form is a later unit.
+  and full size, and only `VM_REGION_ANON`; a sub-range resize or a
+  `VM_REGION_FILE`/`VM_REGION_PHYS` mapping is `-EINVAL`. Anonymous `MAP_SHARED`
+  is resized like any anonymous mapping (no `fork`, so no second sharer). This
+  covers the `realloc`/large-buffer case; the general form is a later unit.
 - **Snapshot-then-act race.** `lx_mremap` snapshots the region, then calls
-  `vm_user_unmap`/`vm_user_map_anon`, each atomic under the space lock. A
-  concurrent `mremap`/`munmap` of the *same* mapping in the gap is a caller
-  error; it cannot corrupt memory (the snapshot is by value, and the grow's
-  `vm_user_map_anon` rechecks overlap atomically), at worst returning `-ENOMEM`.
+  `vm_user_unmap`/`vm_user_map_anon`, each atomic under the space lock — but not
+  the two together. A thread that `munmap`s this mapping and maps something else
+  in the same range between the snapshot and the call races: a shrink would then
+  `vm_user_unmap` whatever now occupies the tail, and a grow's
+  `vm_user_map_anon` would `-EEXIST` (→ `-ENOMEM`) or merge with the wrong
+  neighbour. No memory is corrupted (the snapshot is by value and every map/
+  unmap is internally locked), but a concurrent resize/unmap of the *same*
+  mapping is a caller error with an unspecified result. A fully atomic resize
+  would need a single `vm_user_remap` primitive under one hold of the space
+  lock — a follow-up; it is not needed for the single-threaded `realloc` path.
 
 ## Alternatives considered
 
