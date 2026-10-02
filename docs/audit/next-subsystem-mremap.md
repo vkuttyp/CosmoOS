@@ -59,11 +59,11 @@ after a failed check.
 - **Resize without a copy.** `mremap` is how a program grows a large mapping in
   place; its absence forces an allocate-copy-free on every growth and makes
   direct callers fail. `realloc` of `mmap`-backed blocks is the common path.
-- **It is in pattern and the mechanism exists.** Grow is `vm_user_map_anon` at
-  the mapping's end (which merges), shrink is `vm_user_unmap` of the tail; both
-  are the primitives `mmap`/`munmap` already use. The implementation (the PR
-  that follows this report) adds the door and a small snapshot helper, not a new
-  VM mechanism.
+- **It is in pattern and the mechanism exists.** Grow extends the region at the
+  mapping's end, shrink trims it and tears down the tail — the region-list and
+  teardown machinery `mmap`/`munmap` already use. The implementation (the PR
+  that follows this report) adds the door and one `vm_user_remap` primitive that
+  composes that machinery under the space lock, not a new VM mechanism.
 
 ## The implementation before this unit
 
@@ -77,22 +77,33 @@ after a failed check.
 
 ## Design
 
-### 1. A region-snapshot helper
+> **As built (PR #295).** The sections below sketch the design the report
+> planned: a `vm_user_region_at` snapshot feeding separate `vm_user_unmap`/
+> `vm_user_map_anon` calls. Review replaced that with a single
+> `vm_user_remap` primitive — see the "Built" note at the top. The text here
+> is updated to match what shipped.
+
+### 1. An in-place resize primitive
 
 `vm_find_region` hands back a pointer into the region list after releasing the
-space lock, so reading its fields races a concurrent `munmap`/`mremap` that
-could free the region. The unit adds a small helper that copies the fields out
-**under the lock**:
+space lock, so reading its fields — then acting on them with a *second* locked
+call — races a concurrent `munmap`/`mremap`/`mmap` of the same range. Rather
+than snapshot and act, the unit adds one primitive that does the whole thing
+under the space lock:
 
 ```c
-struct vm_region_info { uint64_t base; size_t size; vm_prot_t prot;
-                        enum vm_region_kind kind; unsigned flags;
-                        const char *name; };   /* the grow re-uses it so the new piece merges */
-bool vm_user_region_at(struct vm_space *space, uint64_t va, struct vm_region_info *out);
+int vm_user_remap(struct vm_space *space, uint64_t base, size_t old_size, size_t new_size);
 ```
 
-It returns whether a region contains `va` and fills `*out` by value — no live
-pointer escapes the lock, so `lx_mremap` reasons about a stable snapshot.
+It finds the region at `base`, checks it is a whole `VM_REGION_ANON` mapping
+(`-EFAULT`/`-EINVAL`/`-EBUSY`), and resizes it by extending or trimming the
+region record itself. A grow runs under one lock hold after checking the space
+above is free. A shrink must free the tail, and `user_range_teardown` takes the
+lock per chunk, so it runs outside the hold: the tail is first split into its
+own region and marked `VM_REGION_QUIESCED` under `space->replace_lock` — the
+claim-then-free discipline `map_replace` uses — so nothing can map the range or
+fault it in while the teardown runs, and the record is unlinked only once the
+teardown is done.
 
 ### 2. The Linux door (bounded: anonymous, whole-region, in place)
 
@@ -100,26 +111,31 @@ pointer escapes the lock, so `lx_mremap` reasons about a stable snapshot.
 
 - `flags` must be a subset of `MREMAP_MAYMOVE | MREMAP_FIXED`; `MREMAP_FIXED` is
   rejected `-EINVAL` (v1 does not place at a chosen address).
-- `old_addr` must be page-aligned and `new_size` non-zero (`-EINVAL`); both
-  sizes are rounded up to pages.
-- Snapshot the region at `old_addr` with `vm_user_region_at`; `-EFAULT` if
-  none. It must be **`VM_REGION_ANON`** and the request must name the **whole**
-  region (`old_addr == info.base && old_size == info.size`); otherwise `-EINVAL`
-  (a `VM_REGION_FILE` or `VM_REGION_PHYS` mapping, and a sub-range resize, are
-  out of scope for v1). The kind check does not distinguish `MAP_SHARED` from
-  `MAP_PRIVATE` anonymous mappings — the VM region carries no such flag — but
-  it need not: with no `fork`, an anonymous `MAP_SHARED` mapping has no second
-  sharer, so resizing it in place is the same operation as for a private one.
-- **Same size**: return `old_addr` (no-op).
-- **Shrink** (`new_size < old_size`): `vm_user_unmap(space, old_addr + new_size,
-  old_size - new_size, 0)`; return `old_addr`.
-- **Grow** (`new_size > old_size`): `vm_user_map_anon(space, old_addr +
-  old_size, new_size - old_size, info.prot, 0, info.name)`. If it merges (it
-  will, same kind/prot/name) the mapping is extended in place; return
-  `old_addr`. `-EEXIST` means the space after is occupied — return `-ENOMEM`.
+- `old_addr` must be page-aligned and both lengths non-zero (`-EINVAL`); each
+  length is bounded against the user window (`> VM_USER_HI - VM_USER_LO` is
+  `-EINVAL`) **before** rounding up to pages, so a length near `UINT64_MAX`
+  cannot round to zero.
+- Call `vm_user_remap(space, old_addr, old_size, new_size)`, which validates
+  under the lock: a region must exist at `old_addr` (`-EFAULT`), be
+  **`VM_REGION_ANON`** and name the **whole** region (`old_addr == base &&
+  old_size == size`); otherwise `-EINVAL` (a `VM_REGION_FILE`/`VM_REGION_PHYS`
+  mapping or a sub-range resize is out of scope for v1), and `-EBUSY` if a
+  `MAP_FIXED` replacement owns it. The kind check does not distinguish
+  `MAP_SHARED` from `MAP_PRIVATE` anonymous mappings — the VM region carries no
+  such flag — but it need not: with no `fork`, an anonymous `MAP_SHARED`
+  mapping has no second sharer, so resizing it in place is the same operation
+  as for a private one.
+- **Same size**: validated, then a no-op (an unmapped address still gets
+  `-EFAULT`, not a bogus success).
+- **Shrink** (`new_size < old_size`): trim the region record, tearing down the
+  tail under the claim described in §1.
+- **Grow** (`new_size > old_size`): check the space above is free and extend the
+  region record in place; `-ENOMEM` if it is occupied. Because the region grows
+  in place, its flags (guard pages, name) are preserved and there is never a
+  second region to fail a later whole-region check.
 
-`mremap` returns the (unchanged) address on success, so the handler returns
-`old_addr`.
+`mremap` returns the (unchanged) address on success, so `lx_mremap` returns
+`old_addr` when `vm_user_remap` returns 0.
 
 ### 3. MREMAP_MAYMOVE
 
@@ -134,7 +150,7 @@ hole, remap the pages, unmap the old) is a larger, separate unit. A program that
 
 | file | change |
 |---|---|
-| `kernel/memory/vmm.c`, `kernel/include/kernel/vmm.h` | `vm_user_region_at` + `struct vm_region_info` |
+| `kernel/memory/vmm.c`, `kernel/include/kernel/vmm.h` | `vm_user_remap` (in-place whole-anon resize under the space lock) |
 | `compat/linux/linux_abi.h` | `MREMAP_MAYMOVE`/`MREMAP_FIXED`/`MREMAP_DONTUNMAP` |
 | `compat/linux/syscalls.c` | `lx_mremap` + `[LX_mremap]` in the table |
 | `tests/linux/lxtest.c` | the mremap checks |
@@ -145,8 +161,11 @@ No syscall-number header change: `LX_mremap` is already defined (25 / 216).
 ## APIs
 
 The Linux `mremap(2)` system call, in place (grow/shrink) on an anonymous
-mapping. No native ABI change: it composes the existing `vm_user_map_anon`/
-`vm_user_unmap` primitives; the gap this closes is the Linux one.
+mapping. One new native entry point, `vm_user_remap`, which composes the
+existing region-list and teardown machinery (`region_split`,
+`region_merge_forward`, `user_range_teardown`, the `VM_REGION_QUIESCED` claim)
+under the space lock; no on-disk or user ABI change. The gap this closes is the
+Linux one.
 
 ## Tests
 
@@ -164,10 +183,10 @@ standard boot).
 - grow mapping fresh (non-merging) pages but not preserving the old region's
   contents — e.g. `VM_REGION_POPULATED` zeroing over the whole range: the grow
   test's sentinel-survives check fails.
-- shrink not unmapping the tail (return without `vm_user_unmap`): the
-  shrink test's "freed page faults" check fails (the page is still mapped).
-- the blocked-grow path returning the address instead of `-ENOMEM` when
-  `vm_user_map_anon` gives `-EEXIST`: the blocked-grow check fails.
+- shrink not trimming the region (a no-op resize that reports success): the
+  shrink test's `mprotect`→`-ENOMEM` check fails (the tail is still mapped).
+- the grow ignoring the free-space check and extending over an occupied range:
+  the blocked-grow check fails (it returns the address, not `-ENOMEM`).
 
 ## Benchmarks
 
@@ -183,17 +202,15 @@ None.
   `VM_REGION_FILE`/`VM_REGION_PHYS` mapping is `-EINVAL`. Anonymous `MAP_SHARED`
   is resized like any anonymous mapping (no `fork`, so no second sharer). This
   covers the `realloc`/large-buffer case; the general form is a later unit.
-- **Snapshot-then-act race.** `lx_mremap` snapshots the region, then calls
-  `vm_user_unmap`/`vm_user_map_anon`, each atomic under the space lock — but not
-  the two together. A thread that `munmap`s this mapping and maps something else
-  in the same range between the snapshot and the call races: a shrink would then
-  `vm_user_unmap` whatever now occupies the tail, and a grow's
-  `vm_user_map_anon` would `-EEXIST` (→ `-ENOMEM`) or merge with the wrong
-  neighbour. No memory is corrupted (the snapshot is by value and every map/
-  unmap is internally locked), but a concurrent resize/unmap of the *same*
-  mapping is a caller error with an unspecified result. A fully atomic resize
-  would need a single `vm_user_remap` primitive under one hold of the space
-  lock — a follow-up; it is not needed for the single-threaded `realloc` path.
+- **Concurrent resize (resolved as built).** The report planned a
+  snapshot-then-act handler and noted its race: snapshot the region, then call
+  `vm_user_unmap`/`vm_user_map_anon` separately, so a concurrent `munmap`+remap
+  of the same range could make a shrink tear down the replacement's pages. As
+  built this does not happen: `vm_user_remap` finds, validates and resizes under
+  one hold of the space lock, and the shrink keeps the tail claimed
+  (`VM_REGION_QUIESCED`) while its teardown runs, so a concurrent `mmap(NULL,
+  …)` cannot be handed the range. No `vm_user_remap` follow-up is outstanding —
+  it is this unit's primitive.
 
 ## Alternatives considered
 
@@ -206,6 +223,8 @@ None.
   a per-signal bitmask); `setsockopt` has almost no per-socket backing to honor
   (`SO_REUSEADDR`/`TCP_NODELAY`/buffer sizes would stay `-ENOPROTOOPT`). `mremap`
   reuses mature VM primitives, so it is the better-bounded pick.
-- **Reading the region through `vm_find_region` directly.** Its pointer is live
-  past the lock; reading it under a concurrent unmap is a use-after-free, so the
-  unit adds the by-value `vm_user_region_at` snapshot instead.
+- **Reading the region through `vm_find_region`, then acting.** Its pointer is
+  live past the lock, and a snapshot-then-act handler (even reading the fields
+  by value) still races a concurrent resize across the two calls. The unit does
+  the lookup, the checks and the resize inside one `vm_user_remap` under the
+  space lock instead.
