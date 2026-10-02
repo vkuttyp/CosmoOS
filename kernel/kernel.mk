@@ -79,6 +79,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/io/aio.c \
 	kernel/io/timerobj.c \
 	kernel/io/eventfd.c \
+	kernel/io/signalfd.c \
 	kernel/io/epoll.c \
 	kernel/io/poll.c \
 	kernel/io/polltest.c \

@@ -423,6 +423,7 @@ struct cosmo_siginfo {
 #define COSMO_SI_USER   0   /* kill() */
 #define COSMO_SI_KERNEL 1   /* the kernel's own doing */
 #define COSMO_SI_FAULT  2   /* a trap: addr is set */
+#define COSMO_SI_CHILD  3   /* SIGCHLD: pid is the child, detail its exit code or signal */
 
 /*
  * What a program may change about its terminal. Four flags and two

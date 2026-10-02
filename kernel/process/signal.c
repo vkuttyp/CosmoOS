@@ -150,6 +150,90 @@ uint64_t signal_pending_set(void)
     return v;
 }
 
+/*
+ * Consume the lowest-numbered pending signal in `mask` for the current thread
+ * or its process, blocked or not, into *out; returns whether one was found.
+ * Unlike dequeue_locked this takes blocked signals (a signalfd reads signals
+ * the process has blocked) and orders strictly by signal number (a signalfd
+ * reports in order). For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
+ */
+bool signal_consume_mask(uint64_t mask, struct signal_info *out, bool *from_shared)
+{
+    struct thread *t = thread_current();
+    struct process *p = t->proc;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint64_t cand = (t->sig_pending | p->sig_shared_pending) & mask;
+    bool got = cand != 0;
+    if (got) {
+        int sig = __builtin_ctzll(cand) + 1;
+        /* Clear the pending bit but leave sig_info[sig-1] untouched: a
+         * signalfd that cannot copy this record out puts the signal back by
+         * re-setting the bit alone (signal_reinject_sets), and the detail is
+         * still in the slot. */
+        if (t->sig_pending & SIGMASK(sig)) {
+            t->sig_pending &= ~SIGMASK(sig);
+            *out = t->sig_info[sig - 1];
+            *from_shared = false;
+        } else {
+            p->sig_shared_pending &= ~SIGMASK(sig);
+            *out = p->sig_shared_info[sig - 1];
+            *from_shared = true;
+        }
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    return got;
+}
+
+/*
+ * Put back signals a signalfd read consumed but could not copy to user: for
+ * each set, re-set the pending bit of every signal in `thr`/`shr` that no
+ * newer instance has re-made pending (coalesced -- the newer one, already in
+ * the slot, wins, so this must not clobber it). signal_consume_mask cleared
+ * only the pending bit, never the siginfo slot, so re-setting the bit restores
+ * the signal in full. For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
+ *
+ * Waking matters as much as the bit: whatever route_locked woke when the
+ * signal first arrived, it must be woken again. A sibling that woke on the
+ * arrival, found the signal already taken by the reader, and slept again
+ * would otherwise never be told it is back, and sleep until the next signal.
+ * So re-set the bit and wake exactly as route_locked's queue does -- a
+ * thread-directed signal wakes its thread, a process-directed one the first
+ * thread that does not block it.
+ */
+void signal_reinject_sets(uint64_t thr, uint64_t shr)
+{
+    if ((thr | shr) == 0)
+        return;
+    struct thread *t = thread_current();
+    struct process *p = t->proc;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint64_t already = t->sig_pending | p->sig_shared_pending;
+    uint64_t did_thr = thr & ~already;
+    uint64_t did_shr = shr & ~already;
+    t->sig_pending |= did_thr;
+    p->sig_shared_pending |= did_shr;
+    /* The thread-directed signals went back to the reader's own thread (that
+     * is the only set signal_consume_mask takes them from); it is the running
+     * reader, so this wake is a no-op, but keep it in step with route_locked. */
+    if (did_thr)
+        sched_wake(t);
+    /* Each restored process-directed signal: wake the first thread that can
+     * take it, as route_locked's shared branch does. */
+    uint64_t m = did_shr;
+    while (m) {
+        int sig = __builtin_ctzll(m) + 1;
+        m &= m - 1;
+        struct thread *o;
+        list_for_each_entry(o, &p->threads, proc_link) {
+            if (!(o->sig_blocked & SIGMASK(sig))) {
+                sched_wake(o);
+                break;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
 /* --- sending -------------------------------------------------------------------- */
 
 static void fill_info(struct signal_info *slot, int sig, const struct signal_info *info)
@@ -223,8 +307,28 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
         }
     }
     const struct sigaction_k *a = action_locked(p, sig);
-    if (a->handler == SIG_IGN || (a->handler == SIG_DFL && signal_default_is_ignore(sig)))
-        return true;   /* discarded, blocked or not (a recorded deviation: Linux keeps a blocked one) */
+    if (a->handler == SIG_IGN || (a->handler == SIG_DFL && signal_default_is_ignore(sig))) {
+        /*
+         * An ignored signal is discarded -- unless it is blocked, in which
+         * case Linux keeps it pending (so sigwait/rt_sigpending, and a
+         * signalfd, can still see it; it is flushed if still ignored when
+         * unblocked, or discarded at delivery). A signalfd for SIGCHLD, whose
+         * default action is ignore, depends on this. See
+         * docs/audit/next-subsystem-signalfd.md.
+         */
+        bool blocked_everywhere = true;
+        if (t) {
+            blocked_everywhere = (t->sig_blocked & SIGMASK(sig)) != 0;
+        } else {
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link)
+                if (!(o->sig_blocked & SIGMASK(sig)))
+                    blocked_everywhere = false;
+        }
+        if (!blocked_everywhere)
+            return true;   /* discarded */
+        goto queue;        /* blocked: keep it pending */
+    }
     /*
      * The stop signals' default. The process stops as a unit: its own
      * flag is the authority, and every thread gets a reason to reach a
@@ -318,12 +422,20 @@ queue:
  * be done under the lock -- the first takes a wait queue's lock and the
  * second sends a signal to another process.
  */
-static void signal_after_route(struct process *p, bool woke_stopped, bool stopped_now)
+static void signal_after_route(struct process *p, bool woke_stopped)
 {
-    if (woke_stopped)
+    if (woke_stopped) {
         waitqueue_wake_all(&p->stopped_wq);
-    if (woke_stopped || stopped_now)
-        process_notify_parent_event(p);
+        process_notify_parent_event(p);   /* the continue: CLD_CONTINUED to the parent */
+    }
+    /* A stop's parent notice is NOT sent here: a stop is only posted at this
+     * point, not complete, and sending a CLD_STOPPED record now would report
+     * the stop before every thread has parked. The authoritative notice comes
+     * from process_stop_park once the last thread parks. */
+    /* Wake any signalfd waiting on this process: a signal may now be pending
+     * that one reports. Done here, after p->lock is released, so the wait
+     * queue's lock never nests under p->lock. Pollers re-check their mask. */
+    waitqueue_wake_all(&p->signalfd_wqh);
 }
 
 /*
@@ -350,10 +462,9 @@ bool signal_raise_stop_self(int sig, const struct signal_info *info)
     bool ignored = p->sigactions[sig - 1].handler == SIG_IGN || (t->sig_blocked & SIGMASK(sig)) != 0;
     if (!ignored)
         route_locked(p, NULL, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
     if (!ignored)
-        signal_after_route(p, woke_stopped, stopped_now);
+        signal_after_route(p, woke_stopped);
     return !ignored;
 }
 
@@ -364,9 +475,8 @@ int signal_send(struct process *p, int sig, const struct signal_info *info)
     bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     route_locked(p, NULL, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
-    signal_after_route(p, woke_stopped, stopped_now);
+    signal_after_route(p, woke_stopped);
     return 0;
 }
 
@@ -380,9 +490,8 @@ int signal_send_thread(struct thread *t, int sig, const struct signal_info *info
     bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     route_locked(p, t, sig, info, &woke_stopped);
-    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
-    signal_after_route(p, woke_stopped, stopped_now);
+    signal_after_route(p, woke_stopped);
     return 0;
 }
 

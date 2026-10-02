@@ -124,6 +124,12 @@ struct thread {
      * park anything. Under proc->lock. */
     bool sig_must_stop;
     struct signal_info *sig_info;       /* SIG_MAX entries, the pending signals' details; user threads only */
+    /* signalfd: the signals a signalfd read has consumed out of the pending
+     * set but not yet copied to user, by the set each came from, so a
+     * faulting copy can put them back (signal_reinject_sets). Written by this
+     * thread's own signalfd read before the copy; never read across a sleep by
+     * another path. Under proc->lock when restored. */
+    uint64_t sigfd_undo_thread, sigfd_undo_shared;
     struct sigaltstack_k altstack;
     uint64_t syscall_nr, syscall_arg0;  /* the call in progress, for SA_RESTART */
     uint64_t clear_child_tid;           /* Linux: zeroed and futex-woken at exit */

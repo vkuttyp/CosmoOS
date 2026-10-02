@@ -370,6 +370,34 @@ struct lx_statx {
 #define LX_TFD_NONBLOCK      LX_O_NONBLOCK
 #define LX_TFD_TIMER_ABSTIME 1u
 
+/* signalfd4 flags: SFD_CLOEXEC/SFD_NONBLOCK are O_CLOEXEC/O_NONBLOCK. */
+#define LX_SFD_CLOEXEC   LX_O_CLOEXEC
+#define LX_SFD_NONBLOCK  LX_O_NONBLOCK
+
+/* The record signalfd read() returns, one per pending signal (128 bytes, the
+ * same on both architectures). */
+struct lx_signalfd_siginfo {
+    uint32_t ssi_signo;
+    int32_t  ssi_errno;
+    int32_t  ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t  ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t  ssi_status;
+    int32_t  ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint8_t  __pad[46];
+};
+_Static_assert(sizeof(struct lx_signalfd_siginfo) == 128, "signalfd_siginfo is 128 bytes");
+
 /* memfd_create flags (MFD_*): their own small bitset, not the O_* bits.
  * Only MFD_CLOEXEC is supported; sealing and hugepages are out of scope. */
 #define LX_MFD_CLOEXEC       0x0001u
@@ -577,6 +605,7 @@ struct lx_siginfo {              /* 128 bytes, the same on both architectures */
     union {
         struct { int32_t pid; uint32_t uid; } kill;
         struct { uint64_t addr; } fault;
+        struct { int32_t pid; uint32_t uid; int32_t status; } child;   /* SIGCHLD */
         uint8_t fill[112];
     } u;
 };

@@ -73,15 +73,22 @@ struct sigaltstack_k {
 };
 
 /* How a signal arrived, for siginfo. */
-enum signal_source { SIGSRC_USER, SIGSRC_TKILL, SIGSRC_FAULT, SIGSRC_KERNEL };
+enum signal_source { SIGSRC_USER, SIGSRC_TKILL, SIGSRC_FAULT, SIGSRC_KERNEL, SIGSRC_CHILD };
+
+/* SIGCHLD cause codes (SIGSRC_CHILD, carried in `code`), the CLD_* values. */
+#define SI_CLD_EXITED    1   /* child called _exit */
+#define SI_CLD_KILLED    2   /* child died on a signal */
+#define SI_CLD_STOPPED   5   /* child stopped */
+#define SI_CLD_CONTINUED 6   /* child continued */
 
 struct signal_info {
     int sig;
     enum signal_source source;
     uint64_t fault_addr;   /* SIGSRC_FAULT */
-    uint32_t code;         /* SIGSRC_FAULT: 1 = the address is unmapped, 2 = a protection fault */
-    uint32_t sender_pid;   /* pid_t; kernel/process.h includes this header */      /* SIGSRC_USER/TKILL */
+    uint32_t code;         /* SIGSRC_FAULT: 1 unmapped, 2 protection; SIGSRC_CHILD: the SI_CLD_* cause */
+    uint32_t sender_pid;   /* pid_t; SIGSRC_USER/TKILL sender, SIGSRC_CHILD the child */
     uint32_t sender_uid;
+    int32_t  status;       /* SIGSRC_CHILD: exit code, or the signal that killed/stopped the child */
 };
 
 /* What the personality must do to run a handler: rewrite `regs` (already
@@ -111,6 +118,17 @@ void signal_get_action(struct process *p, int sig, struct sigaction_k *out);
 uint64_t signal_blocked(void);
 void signal_set_blocked(uint64_t mask);
 uint64_t signal_pending_set(void);   /* pending on the thread or the process, blocked or not */
+
+/* Consume the lowest pending signal in `mask` (thread- or process-directed,
+ * blocked or not) for the current thread into *out; true if one was found.
+ * *from_shared says which set it came from, so signal_reinject_sets can put
+ * it back there on a failed copy. Clears only the pending bit, not the
+ * siginfo slot. For signalfd(2). */
+bool signal_consume_mask(uint64_t mask, struct signal_info *out, bool *from_shared);
+/* Put back signals signal_consume_mask took but a signalfd could not copy to
+ * user: re-set the pending bit of each signal in `thr`/`shr`, skipping any a
+ * newer instance has already re-made pending. For signalfd(2). */
+void signal_reinject_sets(uint64_t thr, uint64_t shr);
 /* A call that swaps the mask while it waits (rt_sigsuspend, ppoll):
  * the mask the handler's frame records, and the one restored when no
  * handler runs, is `saved`, not the temporary one. */

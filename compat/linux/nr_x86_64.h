@@ -127,6 +127,8 @@
 #define LX_newfstatat 262
 #define LX_eventfd 284
 #define LX_eventfd2 290
+#define LX_signalfd 282
+#define LX_signalfd4 289
 #define LX_ftruncate 77
 #define LX_memfd_create 319
 #define LX_epoll_create 213

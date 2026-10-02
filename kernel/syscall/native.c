@@ -145,8 +145,15 @@ int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
     KASSERT(rc <= (int64_t)n);
     if (rc > (int64_t)n)
         rc = -EIO;
-    if (rc > 0 && copy_to_user(ubuf, b.buf, (size_t)rc))
+    if (rc > 0 && copy_to_user(ubuf, b.buf, (size_t)rc)) {
+        /* The copy to user faulted after the object already removed what it
+         * returned from its source. The read delivered nothing (an -EFAULT
+         * read's buffer is unspecified, so a caller cannot trust the bytes
+         * that did land); let the object put back what it took, if it can. */
+        if (io->read_undo)
+            io->read_undo(obj);
         rc = -EFAULT;
+    }
     syscall_bounce_put(&b);
     return rc;
 }

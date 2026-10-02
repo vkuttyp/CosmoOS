@@ -112,6 +112,15 @@ struct kobject_io_type {
      * should sleep on; it is woken whenever `ready` may have changed for
      * those bits. NULL means readiness never changes (a file). */
     struct waitqueue *(*poll_wq)(struct kobject *obj, unsigned events);
+    /* Optional. Called by syscall_obj_read only when copying a successful
+     * read's bytes to user space faults: an object that removed what it
+     * returned from its source (a signalfd drains pending signals) puts it
+     * back here, so the failed read -- which returns -EFAULT, i.e. delivered
+     * nothing -- loses none of it. On the reading thread, right after the
+     * object's read returned. NULL means a faulting copy simply returns
+     * -EFAULT: the object kept nothing removable, or accepts the loss (the
+     * eventfd/timerfd counter, re-derivable from the next event). */
+    void (*read_undo)(struct kobject *obj);
 };
 
 struct waitqueue;

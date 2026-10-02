@@ -78,6 +78,14 @@ static void fill_siginfo(struct lx_siginfo *si, const struct signal_info *info)
         si->si_code = info->code ? (int32_t)info->code : 1;
         si->u.fault.addr = info->fault_addr;
         break;
+    case SIGSRC_CHILD:
+        /* SIGCHLD: the CLD_* cause (SI_CLD_* match the Linux values), the
+         * child's pid/uid and its exit code or killing/stop signal. */
+        si->si_code = (int32_t)info->code;
+        si->u.child.pid = (int32_t)info->sender_pid;
+        si->u.child.uid = info->sender_uid;
+        si->u.child.status = info->status;
+        break;
     case SIGSRC_KERNEL:
     default:
         si->si_code = LX_SI_KERNEL;

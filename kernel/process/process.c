@@ -452,6 +452,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     list_init(&p->sibling);
     waitqueue_init(&p->child_wq, "children");
     waitqueue_init(&p->stopped_wq, "stopped");
+    waitqueue_init(&p->signalfd_wqh, "signalfd");
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");
@@ -1080,7 +1081,7 @@ void process_last_thread_gone(struct process *p)
           (unsigned long long)p->syscalls);
     complete(&p->exited);
     if (zombie)
-        waitqueue_wake_all(&parent->child_wq);
+        process_notify_parent_event(p);   /* SIGCHLD (CLD_EXITED/KILLED) + wake the parent's wait */
     else
         process_put(p); /* the table's reference */
 }
@@ -2073,10 +2074,33 @@ void process_notify_parent_event(struct process *p)
     struct process *parent = p->parent;
     if (parent != NULL)
         process_get(parent);
+    /* The SIGCHLD cause and status, decided from the state under this lock:
+     * an exit (the process is past RUNNING) reports CLD_EXITED with the exit
+     * code, or CLD_KILLED with the killing signal; otherwise a stop or a
+     * continue. */
+    uint32_t cld;
+    int32_t status;
+    if (p->state != PROCESS_RUNNING) {
+        if (p->kill_sig != 0) {
+            cld = SI_CLD_KILLED;
+            status = p->kill_sig;
+        } else {
+            cld = SI_CLD_EXITED;
+            status = p->exit_status;
+        }
+    } else if (p->stopped) {
+        cld = SI_CLD_STOPPED;
+        status = p->stop_sig;
+    } else {
+        cld = SI_CLD_CONTINUED;
+        status = SIGCONT;
+    }
+    uint32_t cuid = p->cred.ruid;
     spin_unlock_irqrestore(&p->lock, s);
     if (parent == NULL)
         return;
-    struct signal_info info = { .sig = SIGCHLD, .source = SIGSRC_KERNEL, .sender_pid = p->pid };
+    struct signal_info info = { .sig = SIGCHLD, .source = SIGSRC_CHILD, .code = cld,
+                                .sender_pid = p->pid, .sender_uid = cuid, .status = status };
     signal_send(parent, SIGCHLD, &info);
     waitqueue_wake_all(&parent->child_wq);
     process_put(parent);

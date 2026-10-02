@@ -174,6 +174,7 @@ struct process {
     struct sigaction_k *sigactions;    /* SIG_MAX entries, under lock */
     uint64_t sig_shared_pending;       /* signals sent to the process, not yet taken by a thread */
     struct signal_info *sig_shared_info;
+    struct waitqueue signalfd_wqh;     /* signalfds of this process poll here (Linux sighand->signalfd_wqh) */
     unsigned nr_live;                  /* threads that have not exited (nr_threads counts until reaped) */
     struct thread *main_thread;        /* the first thread; its Linux tid is the pid */
     uint64_t interp_base, exec_entry;  /* dynamic executables: the interpreter's bias, the program's entry */

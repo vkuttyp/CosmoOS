@@ -29,6 +29,7 @@
 #include <kernel/sched.h>
 #include <kernel/shm.h>
 #include <kernel/signal.h>
+#include <kernel/signalfd.h>
 #include <kernel/socket.h>
 #include <kernel/unix.h>
 #include <kernel/string.h>
@@ -667,6 +668,53 @@ static int64_t do_eventfd(uint32_t initval, unsigned flags)
 
 static int64_t lx_eventfd2(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], (unsigned)a->a[1]); }
 static __maybe_unused int64_t lx_eventfd(struct syscall_args *a) { return do_eventfd((uint32_t)a->a[0], 0); }   /* the older call: no flags */
+
+/* signalfd: a signal-reading fd on the signalfd kobject (kernel/io/signalfd.c).
+ * See docs/audit/next-subsystem-signalfd.md. */
+static int64_t do_signalfd(int fd, uint64_t umask, size_t sizemask, unsigned flags)
+{
+    if (flags & ~(unsigned)(LX_SFD_CLOEXEC | LX_SFD_NONBLOCK))
+        return -EINVAL;
+    if (sizemask != sizeof(uint64_t))
+        return -EINVAL;
+    uint64_t mask;
+    if (copy_from_user(&mask, umask, sizeof(mask)))
+        return -EFAULT;
+    mask &= ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));   /* never reportable via a signalfd */
+
+    if (fd != -1) {
+        /* Update an existing signalfd's mask; only -1 creates, as Linux
+         * documents (a negative fd other than -1 is -EBADF). The holder must
+         * have the read right, so a handle whose rights were narrowed cannot
+         * change what another holder reads. */
+        if (fd < 0)
+            return -EBADF;
+        struct kobject *obj = handle_lookup(&process_current()->handles, fd, HANDLE_RIGHT_READ);
+        if (obj == NULL)
+            return -EBADF;
+        int rc = signalfd_obj_set_mask(obj, mask);
+        kobject_put(obj);
+        return rc ? rc : fd;
+    }
+
+    struct kobject *obj;
+    int rc = signalfd_obj_create(mask, (flags & LX_SFD_NONBLOCK) != 0, &obj);
+    if (rc)
+        return rc;
+    /* SFD_CLOEXEC is accepted and ignored (the spawn model carries no fd across
+     * exec), as eventfd/timerfd do. */
+    int h = handle_install(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    kobject_put(obj);
+    return h;
+}
+static int64_t lx_signalfd4(struct syscall_args *a)
+{
+    return do_signalfd((int)a->a[0], a->a[1], (size_t)a->a[2], (unsigned)a->a[3]);
+}
+static __maybe_unused int64_t lx_signalfd(struct syscall_args *a)
+{
+    return do_signalfd((int)a->a[0], a->a[1], (size_t)a->a[2], 0);   /* the older call: no flags */
+}
 
 /* timerfd: a waitable timer fd on the timer kobject (kernel/io/timerobj.c).
  * See docs/audit/next-subsystem-timerfd.md. */
@@ -3488,6 +3536,10 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_eventfd2] = lx_eventfd2,
 #ifdef LX_eventfd
     [LX_eventfd] = lx_eventfd,   /* x86-64 only: the older number, no flags */
+#endif
+    [LX_signalfd4] = lx_signalfd4,
+#ifdef LX_signalfd
+    [LX_signalfd] = lx_signalfd,   /* x86-64 only: the older number, no flags */
 #endif
     [LX_timerfd_create] = lx_timerfd_create,
     [LX_timerfd_settime] = lx_timerfd_settime,
