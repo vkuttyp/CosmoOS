@@ -4,7 +4,14 @@
 > (`tools/mremap-probe.py`); the `vm_user_region_at` snapshot helper, the
 > `lx_mremap` handler and the `lxtest` check described under "Design" and the
 > edits in "Affected files" are planned work that lands in the implementation
-> PR that follows, gated on CI. As committed here, `mremap` returns `-ENOSYS`.
+> PR that follows, gated on CI. As the report was committed (before PR #295),
+> `mremap` returned `-ENOSYS`.
+>
+> **Built in PR #295.** The implementation added `vm_user_region_at` and the
+> `lx_mremap` handler (in-place grow/shrink of a whole anonymous mapping) and
+> wired `[LX_mremap]`; both arches boot PASS and `host-test` passes. Every
+> present-tense statement below describes the state the report measured,
+> before this implementation.
 
 ## Problem
 
