@@ -191,6 +191,14 @@ bool signal_consume_mask(uint64_t mask, struct signal_info *out, bool *from_shar
  * the slot, wins, so this must not clobber it). signal_consume_mask cleared
  * only the pending bit, never the siginfo slot, so re-setting the bit restores
  * the signal in full. For signalfd(2); see docs/audit/next-subsystem-signalfd.md.
+ *
+ * Waking matters as much as the bit: whatever route_locked woke when the
+ * signal first arrived, it must be woken again. A sibling that woke on the
+ * arrival, found the signal already taken by the reader, and slept again
+ * would otherwise never be told it is back, and sleep until the next signal.
+ * So re-set the bit and wake exactly as route_locked's queue does -- a
+ * thread-directed signal wakes its thread, a process-directed one the first
+ * thread that does not block it.
  */
 void signal_reinject_sets(uint64_t thr, uint64_t shr)
 {
@@ -200,8 +208,29 @@ void signal_reinject_sets(uint64_t thr, uint64_t shr)
     struct process *p = t->proc;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     uint64_t already = t->sig_pending | p->sig_shared_pending;
-    t->sig_pending |= thr & ~already;
-    p->sig_shared_pending |= shr & ~already;
+    uint64_t did_thr = thr & ~already;
+    uint64_t did_shr = shr & ~already;
+    t->sig_pending |= did_thr;
+    p->sig_shared_pending |= did_shr;
+    /* The thread-directed signals went back to the reader's own thread (that
+     * is the only set signal_consume_mask takes them from); it is the running
+     * reader, so this wake is a no-op, but keep it in step with route_locked. */
+    if (did_thr)
+        sched_wake(t);
+    /* Each restored process-directed signal: wake the first thread that can
+     * take it, as route_locked's shared branch does. */
+    uint64_t m = did_shr;
+    while (m) {
+        int sig = __builtin_ctzll(m) + 1;
+        m &= m - 1;
+        struct thread *o;
+        list_for_each_entry(o, &p->threads, proc_link) {
+            if (!(o->sig_blocked & SIGMASK(sig))) {
+                sched_wake(o);
+                break;
+            }
+        }
+    }
     spin_unlock_irqrestore(&p->lock, s);
 }
 
