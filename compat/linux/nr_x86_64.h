@@ -36,6 +36,10 @@
 #define LX_mremap 25
 #define LX_msync 26
 #define LX_madvise 28
+#define LX_shmget 29
+#define LX_shmat 30
+#define LX_shmctl 31
+#define LX_shmdt 67
 #define LX_dup 32
 #define LX_dup2 33
 #define LX_pause 34

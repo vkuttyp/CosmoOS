@@ -58,6 +58,7 @@ struct vm_file_map {
     bool text;
     vm_prot_t maxprot;       /* the most vm_user_protect may grant */
     unsigned regions;
+    uint64_t tag;            /* unique per map call; a SysV shm attach's identity */
     struct list_node link;   /* pagecache.mappings */
 };
 
@@ -352,6 +353,18 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
 /* True if every page of [addr, addr+len) is inside one or more regions
  * of `space` that all carry `prot`. */
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot);
+
+/* Map a vnode shared for a SysV shm attach, handing back the mapping's unique
+ * `tag` (its identity for shmdt). `base` non-NULL places in a free gap (its
+ * value is the hint and receives the result); otherwise map at `at`. */
+int vm_user_map_shm(struct vm_space *space, uint64_t at, uint64_t *base, size_t size, vm_prot_t prot,
+                    vm_prot_t maxprot, struct vnode *vn, const char *name, uint64_t *tag);
+
+/* Detach a SysV shm attach: unmap every region whose file-map carries `tag`.
+ * Removes exactly the original attach's remaining pieces -- a re-attach has a
+ * different tag, and a replacement mapping has none of ours. Atomic against a
+ * concurrent map/unmap of the ranges. */
+void vm_user_unmap_tag(struct vm_space *space, uint64_t tag);
 
 /* Resize a whole anonymous user mapping in place -- Linux mremap(2) with no
  * move. [base, base+old_size) must name a single VM_REGION_ANON region

@@ -7,6 +7,13 @@
 > are planned work that lands in the implementation PR that follows, gated on
 > CI. As the report was committed, the four calls were unlisted in
 > `linux_table`, so the dispatcher's `lx_unknown` returned `-ENOSYS`.
+>
+> **Built in PR #297.** The implementation added the four `LX_shm*` numbers,
+> the reference-counted registry `kernel/ipc/shm.c`, the `lx_shmget`/`shmat`/
+> `shmdt`/`shmctl` doors (with per-process attach records in `linux_state`) and
+> the `lxtest` checks, as described below; both arches boot PASS and
+> `host-test` passes. Every present-tense statement below describes the state
+> the report measured, before this implementation.
 
 ## Problem
 
@@ -182,15 +189,14 @@ not on this counter.
 
 ## APIs
 
-Planned for the implementation. The four Linux `shm*(2)` calls, over a new
-native segment registry (`kernel/ipc/shm.c`) that composes the existing
-`ramfs_anon_reg` / `vfs_ftruncate` / `vm_user_map_file` machinery; no on-disk
-or native user ABI change beyond the registry's own kernel-internal interface.
+Built in PR #297: the four Linux `shm*(2)` calls, over a new native segment
+registry (`kernel/ipc/shm.c`) that composes the existing `ramfs_anon_reg` /
+`vfs_ftruncate` / `vm_user_map_file` machinery; no on-disk or native user ABI
+change beyond the registry's own kernel-internal interface.
 
 ## Tests
 
-Planned for the implementation (`tests/linux/lxtest.c`, which runs in the
-standard boot).
+Built in PR #297 (`tests/linux/lxtest.c`, which runs in the standard boot).
 
 | test | proves |
 |---|---|

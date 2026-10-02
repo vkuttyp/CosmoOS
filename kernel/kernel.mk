@@ -75,6 +75,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/unix.c \
 	kernel/ipc/unixtest.c \
 	kernel/ipc/futex.c \
+	kernel/ipc/shm.c \
 	kernel/io/aio.c \
 	kernel/io/timerobj.c \
 	kernel/io/eventfd.c \

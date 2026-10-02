@@ -442,6 +442,45 @@ struct lx_sysinfo {
     uint32_t mem_unit;      /* the unit totalram etc. are counted in (bytes) */
 };
 
+/* System V shared memory (shmget/shmat/shmdt/shmctl). */
+#define LX_IPC_PRIVATE  0
+#define LX_IPC_CREAT    01000
+#define LX_IPC_EXCL     02000
+#define LX_IPC_RMID     0
+#define LX_IPC_SET      1
+#define LX_IPC_STAT     2
+#define LX_SHM_RDONLY   010000
+#define LX_SHM_RND      020000
+#define LX_SHM_REMAP    040000
+
+/* ipc64_perm / shmid64_ds, the LP64 asm-generic layout x86-64 and AArch64
+ * share (both have a 32-bit __kernel_mode_t, so no mode padding). */
+struct lx_ipc_perm {
+    int32_t  key;
+    uint32_t uid, gid, cuid, cgid;
+    uint32_t mode;
+    uint16_t seq;
+    uint16_t __pad2;
+    uint64_t __unused1, __unused2;
+};
+
+struct lx_shmid_ds {
+    struct lx_ipc_perm shm_perm;
+    uint64_t shm_segsz;        /* segment size in bytes */
+    int64_t  shm_atime;        /* last attach (0: not tracked) */
+    int64_t  shm_dtime;        /* last detach */
+    int64_t  shm_ctime;        /* last change */
+    int32_t  shm_cpid;         /* creator pid */
+    int32_t  shm_lpid;         /* last shmat/shmdt pid */
+    uint64_t shm_nattch;       /* live attaches */
+    uint64_t __unused4, __unused5;
+};
+
+_Static_assert(sizeof(struct lx_ipc_perm) == 48, "ipc64_perm LP64 layout");
+_Static_assert(sizeof(struct lx_shmid_ds) == 112, "shmid64_ds LP64 layout");
+_Static_assert(__builtin_offsetof(struct lx_shmid_ds, shm_segsz) == 48, "shm_segsz offset");
+_Static_assert(__builtin_offsetof(struct lx_shmid_ds, shm_nattch) == 88, "shm_nattch offset");
+
 struct lx_iovec {
     uint64_t iov_base;
     uint64_t iov_len;

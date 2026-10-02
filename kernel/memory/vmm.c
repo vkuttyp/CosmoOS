@@ -48,6 +48,7 @@ struct vm_space kernel_space;
 static struct kmem_cache *g_region_cache;
 static struct vm_stats g_stats;
 static bool g_initialized;
+static uint64_t g_map_tag = 1;   /* unique id per file-map record (0 = none) */
 
 /* --- region bookkeeping (space lock held) --- */
 
@@ -2045,7 +2046,7 @@ int vm_user_map_anon_replace(struct vm_space *space, uint64_t base, size_t size,
  */
 static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t size, vm_prot_t prot,
                     vm_prot_t maxprot, unsigned flags, struct vnode *vn, uint64_t off, const char *name,
-                    uint64_t *placed)
+                    uint64_t *placed, uint64_t *out_tag)
 {
     KASSERT(space->user);
     if (placed) {
@@ -2101,6 +2102,9 @@ static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t
     m->text = (flags & VM_MAP_TEXT) != 0;
     m->maxprot = maxprot;
     m->regions = 1;
+    m->tag = __atomic_fetch_add(&g_map_tag, 1, __ATOMIC_RELAXED);   /* this attach's identity */
+    if (out_tag)
+        *out_tag = m->tag;
     if (m->shared)
         __atomic_fetch_add(&space->shared_maps, 1u, __ATOMIC_ACQ_REL);   /* the futex classifies only in a space that shares */
     r->fmap = m;
@@ -2236,13 +2240,26 @@ static int map_file(struct vm_space *space, uint64_t base, uint64_t from, size_t
 int vm_user_map_file(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, vm_prot_t maxprot,
                      unsigned flags, struct vnode *vn, uint64_t off, const char *name)
 {
-    return map_file(space, base, 0, size, prot, maxprot, flags, vn, off, name, NULL);
+    return map_file(space, base, 0, size, prot, maxprot, flags, vn, off, name, NULL, NULL);
 }
 
 int vm_user_map_file_free(struct vm_space *space, uint64_t from, size_t size, vm_prot_t prot, vm_prot_t maxprot,
                           unsigned flags, struct vnode *vn, uint64_t off, const char *name, uint64_t *base)
 {
-    return map_file(space, 0, from, size, prot, maxprot, flags, vn, off, name, base);
+    return map_file(space, 0, from, size, prot, maxprot, flags, vn, off, name, base, NULL);
+}
+
+/* shmat's map: like the two above but also hands back the mapping's unique tag,
+ * which identifies this attach's region(s) for shmdt even after the program
+ * munmaps parts of it or re-attaches the same segment elsewhere. `base` non-
+ * NULL means place in a free gap (its value is the hint and receives the
+ * result); otherwise map at `at`. */
+int vm_user_map_shm(struct vm_space *space, uint64_t at, uint64_t *base, size_t size, vm_prot_t prot,
+                    vm_prot_t maxprot, struct vnode *vn, const char *name, uint64_t *tag)
+{
+    if (base)
+        return map_file(space, 0, *base, size, prot, maxprot, VM_MAP_SHARED, vn, 0, name, base, tag);
+    return map_file(space, at, 0, size, prot, maxprot, VM_MAP_SHARED, vn, 0, name, NULL, tag);
 }
 
 int vm_user_msync(struct vm_space *space, uint64_t base, size_t size)
@@ -2641,6 +2658,57 @@ bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_
     }
     spin_unlock_irqrestore(&space->lock, s);
     return ok;
+}
+
+/*
+ * Detach a System V shm attach: unmap every region whose file-map carries
+ * `tag` -- the identity vm_user_map_shm handed back at shmat. The tag is
+ * unique per map call and is copied to the pieces a split produces, so this
+ * removes exactly the original attach's remaining mapping(s): a part the
+ * program unmapped itself is simply gone, a re-attach of the same segment has
+ * a different tag, and a mapping the program put over the attach has none of
+ * ours. Each region is claimed (VM_REGION_QUIESCED) and torn down under the
+ * map_replace discipline -- one at a time, serialized with the other teardown
+ * path by replace_lock, the region claimed before the lock is released -- so
+ * there is no window for a concurrent mmap to be handed the range and then be
+ * removed. A whole region is unmapped each pass, so no split and no failure.
+ */
+void vm_user_unmap_tag(struct vm_space *space, uint64_t tag)
+{
+    KASSERT(space->user);
+    if (tag == 0)
+        return;
+
+    mutex_lock(&space->replace_lock);
+    for (;;) {
+        struct vm_region *r = NULL;
+        uint64_t base = 0, size = 0;
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        struct vm_region *it;
+        list_for_each_entry(it, &space->regions, link) {
+            if (it->kind == VM_REGION_FILE && it->fmap != NULL && it->fmap->tag == tag &&
+                !(it->flags & VM_REGION_QUIESCED)) {
+                r = it;
+                base = it->base;
+                size = it->size;
+                it->flags |= VM_REGION_QUIESCED;   /* claim: faults back off, no map takes it */
+                space->mapped_pages -= size / PAGE_SIZE;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&space->lock, s);
+        if (r == NULL)
+            break;   /* no more of this attach's regions */
+
+        user_range_teardown(space, (vaddr_t)base, size);
+        file_hold_release(space);
+
+        s = spin_lock_irqsave(&space->lock);
+        list_remove(&r->link);
+        spin_unlock_irqrestore(&space->lock, s);
+        region_put(r);   /* frees the region and drops its fmap/vnode reference */
+    }
+    mutex_unlock(&space->replace_lock);
 }
 
 /* --- diagnostics --- */

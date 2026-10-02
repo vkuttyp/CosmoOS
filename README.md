@@ -3904,6 +3904,17 @@ See [docs/development.md](docs/development.md).
   never relocates (so `realloc` falls back on its own), and
   `MREMAP_FIXED`/`MREMAP_DONTUNMAP`, file/physical mappings, and sub-range
   resizes are `-EINVAL`. (PR #295)
+- **System V shared memory for the Linux personality.** `shmget`/`shmat`/
+  `shmdt`/`shmctl`, backed by the memfd mechanism: a segment is an anonymous
+  ramfs file (`kernel/ipc/shm.c` holds the key/id registry), and `shmat` maps
+  it `MAP_SHARED` — at the kernel's choice, or at an exact page-aligned address
+  (`-ENOMEM` if occupied, no silent relocation), read-only under `SHM_RDONLY`.
+  The segment record is reference-counted (the registry holds one reference,
+  each live attach one), so `IPC_RMID` unlinks the id and drops the registry
+  reference while live attaches keep the pages until the last `shmdt` — SysV's
+  "destroyed on the last detach", straight from the refcount. `shmctl`
+  `IPC_STAT` reports the size and attach count; `IPC_SET`, `SHM_RND`,
+  `SHM_REMAP`, `SHM_HUGETLB`, resize and IPC namespaces are deferred. (PR #297)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and

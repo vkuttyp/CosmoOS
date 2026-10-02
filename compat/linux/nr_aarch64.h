@@ -36,6 +36,10 @@
 #define LX_dup 23
 #define LX_nanosleep 101
 #define LX_getpid 172
+#define LX_shmget 194
+#define LX_shmctl 195
+#define LX_shmat 196
+#define LX_shmdt 197
 #define LX_socket 198
 #define LX_connect 203
 #define LX_accept 202
