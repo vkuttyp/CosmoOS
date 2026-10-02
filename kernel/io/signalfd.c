@@ -66,13 +66,18 @@ static void fill_ssi(struct lx_signalfd_siginfo *ssi, const struct signal_info *
         ssi->ssi_code = info->code ? (int32_t)info->code : 1;
         ssi->ssi_addr = info->fault_addr;
         break;
+    case SIGSRC_CHILD:
+        /* SIGCHLD: the CLD_* cause, the child's pid/uid, and its exit code or
+         * the signal that killed/stopped it, so a parent can tell which child
+         * did what from the record alone. */
+        ssi->ssi_code = (int32_t)info->code;
+        ssi->ssi_pid = info->sender_pid;
+        ssi->ssi_uid = info->sender_uid;
+        ssi->ssi_status = info->status;
+        break;
     case SIGSRC_KERNEL:
     default:
         ssi->ssi_code = LX_SI_KERNEL;
-        /* SIGCHLD carries the child's pid in sender_pid; report it so a
-         * parent can tell which child the record is for (the exit status is
-         * not carried by signal_info -- the handler path lacks it too). */
-        ssi->ssi_pid = info->sender_pid;
         break;
     }
 }

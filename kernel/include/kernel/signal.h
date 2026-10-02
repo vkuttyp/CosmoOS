@@ -73,15 +73,22 @@ struct sigaltstack_k {
 };
 
 /* How a signal arrived, for siginfo. */
-enum signal_source { SIGSRC_USER, SIGSRC_TKILL, SIGSRC_FAULT, SIGSRC_KERNEL };
+enum signal_source { SIGSRC_USER, SIGSRC_TKILL, SIGSRC_FAULT, SIGSRC_KERNEL, SIGSRC_CHILD };
+
+/* SIGCHLD cause codes (SIGSRC_CHILD, carried in `code`), the CLD_* values. */
+#define SI_CLD_EXITED    1   /* child called _exit */
+#define SI_CLD_KILLED    2   /* child died on a signal */
+#define SI_CLD_STOPPED   5   /* child stopped */
+#define SI_CLD_CONTINUED 6   /* child continued */
 
 struct signal_info {
     int sig;
     enum signal_source source;
     uint64_t fault_addr;   /* SIGSRC_FAULT */
-    uint32_t code;         /* SIGSRC_FAULT: 1 = the address is unmapped, 2 = a protection fault */
-    uint32_t sender_pid;   /* pid_t; kernel/process.h includes this header */      /* SIGSRC_USER/TKILL */
+    uint32_t code;         /* SIGSRC_FAULT: 1 unmapped, 2 protection; SIGSRC_CHILD: the SI_CLD_* cause */
+    uint32_t sender_pid;   /* pid_t; SIGSRC_USER/TKILL sender, SIGSRC_CHILD the child */
     uint32_t sender_uid;
+    int32_t  status;       /* SIGSRC_CHILD: exit code, or the signal that killed/stopped the child */
 };
 
 /* What the personality must do to run a handler: rewrite `regs` (already

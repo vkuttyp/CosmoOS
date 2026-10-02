@@ -605,6 +605,7 @@ struct lx_siginfo {              /* 128 bytes, the same on both architectures */
     union {
         struct { int32_t pid; uint32_t uid; } kill;
         struct { uint64_t addr; } fault;
+        struct { int32_t pid; uint32_t uid; int32_t status; } child;   /* SIGCHLD */
         uint8_t fill[112];
     } u;
 };

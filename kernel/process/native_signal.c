@@ -78,6 +78,11 @@ static void fill_siginfo(struct cosmo_siginfo *si, const struct signal_info *inf
         si->detail = info->code;
         si->addr = info->fault_addr;
         break;
+    case SIGSRC_CHILD:
+        si->code = COSMO_SI_CHILD;
+        si->pid = (int32_t)info->sender_pid;
+        si->detail = (uint32_t)info->status;   /* exit code, or the signal */
+        break;
     case SIGSRC_KERNEL:
     default:
         si->code = COSMO_SI_KERNEL;
