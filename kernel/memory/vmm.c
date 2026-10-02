@@ -1685,6 +1685,149 @@ out:
     return rc;
 }
 
+/* No region other than `self` has a footprint touching [lo, hi). Lock held. */
+static bool range_free_except(struct vm_space *space, vaddr_t lo, vaddr_t hi, const struct vm_region *self)
+{
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r == self)
+            continue;
+        vaddr_t rlo, rhi;
+        region_footprint(r, &rlo, &rhi);
+        if (lo < rhi && rlo < hi)
+            return false;
+    }
+    return true;
+}
+
+/* The region at `base` must be a whole anonymous mapping of exactly
+ * old_size, and not one a replacement has claimed. Lock held. 0 and *out
+ * on success; -EFAULT (nothing there), -EINVAL (not a whole anonymous
+ * region) or -EBUSY (claimed). */
+static int remap_lookup(struct vm_space *space, uint64_t base, size_t old_size, struct vm_region **out)
+{
+    struct vm_region *r = space_find(space, (vaddr_t)base);
+    if (r == NULL)
+        return -EFAULT;
+    if (r->kind != VM_REGION_ANON || r->base != base || r->size != old_size)
+        return -EINVAL;
+    if (r->flags & VM_REGION_QUIESCED)
+        return -EBUSY;
+    *out = r;
+    return 0;
+}
+
+/*
+ * In-place resize of a whole anonymous user mapping -- Linux mremap(2)
+ * with no move. The region named by [base, base+old_size) must be a single
+ * VM_REGION_ANON region; it is found and validated under the space lock,
+ * and the region record ITSELF is extended or trimmed, so its flags (guard
+ * pages, name) ride along and there is never a second region to fail a
+ * later whole-region check. Demand-zero throughout -- the grown span
+ * faults in zero pages like any anonymous mapping; user anonymous regions
+ * are never VM_REGION_POPULATED (only the in-kernel allocator sets it), and
+ * even a populated one is served by the anon fault path.
+ *
+ * A grow extends the region under one hold of the space lock, after
+ * checking the space above is free -- no window for a concurrent map. A
+ * shrink has to free the tail, and user_range_teardown takes the lock per
+ * chunk, so it runs outside the hold; the tail is first split into its own
+ * region and marked VM_REGION_QUIESCED under space->replace_lock, exactly
+ * as a MAP_FIXED replacement claims its range (map_replace). While the
+ * teardown runs the tail stays claimed, so faults there back off and a
+ * concurrent mmap(NULL, ...) cannot be handed the range and have its page
+ * torn down underneath it; the record is unlinked only once teardown is
+ * done.
+ *
+ * On success returns 0 and the mapping stays at `base`. Otherwise:
+ *   -EFAULT  nothing is mapped at `base`
+ *   -EINVAL  not anonymous, not the whole region (base and old_size must
+ *            name it exactly), or new_size names an invalid user range
+ *   -EBUSY   a MAP_FIXED replacement owns the region right now
+ *   -ENOMEM  a grow the space after cannot absorb, or over COSMO_RLIMIT_AS
+ *
+ * The caller passes page-aligned, non-zero sizes (new_size may equal
+ * old_size: the region is still validated, then left unchanged).
+ */
+int vm_user_remap(struct vm_space *space, uint64_t base, size_t old_size, size_t new_size)
+{
+    KASSERT(space->user);
+    KASSERT(is_page_aligned(base) && is_page_aligned(old_size) && is_page_aligned(new_size));
+    KASSERT(old_size > 0 && new_size > 0);
+
+    /* The new extent must sit inside the user window; this also rejects a
+     * base + new_size that would wrap past VM_USER_HI. */
+    if (!user_range_valid(base, new_size))
+        return -EINVAL;
+
+    struct vm_region *r;
+    int rc;
+
+    if (new_size < old_size) {
+        /* Shrink: split off the tail, claim it, tear it down outside the
+         * lock, then unlink it -- serialized with the other teardown path
+         * (map_replace) so two tear-downs cannot interleave. */
+        struct vm_region *tail = region_new(0, 0, 0, VM_CACHE_WB, VM_REGION_ANON, 0, 0, NULL);
+        if (tail == NULL)
+            return -ENOMEM;
+
+        mutex_lock(&space->replace_lock);
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        rc = remap_lookup(space, base, old_size, &r);
+        if (rc != 0) {
+            spin_unlock_irqrestore(&space->lock, s);
+            mutex_unlock(&space->replace_lock);
+            kmem_cache_free(g_region_cache, tail);
+            return rc;
+        }
+        region_split(r, tail, (vaddr_t)(base + new_size));   /* r = head, tail = [base+new, base+old) */
+        tail->flags |= VM_REGION_QUIESCED;
+        space->mapped_pages -= (old_size - new_size) / PAGE_SIZE;   /* charge the final state now */
+        spin_unlock_irqrestore(&space->lock, s);
+
+        /* Faults on the tail find the claim and install nothing; nothing
+         * else can map the range while it is linked and claimed. */
+        user_range_teardown(space, (vaddr_t)(base + new_size), old_size - new_size);
+
+        s = spin_lock_irqsave(&space->lock);
+        list_remove(&tail->link);   /* the range is now genuinely free */
+        spin_unlock_irqrestore(&space->lock, s);
+        mutex_unlock(&space->replace_lock);
+        kmem_cache_free(g_region_cache, tail);
+        return 0;
+    }
+
+    /* Grow, or a no-op equal-size request: one hold, no teardown. */
+    struct vm_region *freed[2];
+    unsigned nf = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    rc = remap_lookup(space, base, old_size, &r);
+    if (rc != 0 || new_size == old_size)
+        goto out;   /* equal size: validated, nothing to change */
+
+    /* The grown footprint (guard pages included) must be clear. */
+    vaddr_t lo, hi;
+    region_footprint(r, &lo, &hi);
+    hi += new_size - old_size;
+    if (!range_free_except(space, lo, hi, r)) {
+        rc = -ENOMEM;   /* the space after is not free */
+        goto out;
+    }
+    uint64_t delta_pages = (new_size - old_size) / PAGE_SIZE;
+    if (space->mapped_pages + delta_pages > space->limit_mapped_pages) {
+        rc = -ENOMEM;   /* COSMO_RLIMIT_AS */
+        goto out;
+    }
+    r->size = new_size;
+    space->mapped_pages += delta_pages;
+    nf = region_merge_forward(space, r, freed, 2);   /* absorb an adjacent twin, if any */
+out:
+    spin_unlock_irqrestore(&space->lock, s);
+    for (unsigned i = 0; i < nf; i++)
+        kmem_cache_free(g_region_cache, freed[i]);
+    return rc;
+}
+
 /*
  * Pages of [base, base+size) that the regions covering it account for.
  * Lock held. Used to charge the replacement before anything is changed.

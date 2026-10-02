@@ -1545,6 +1545,40 @@ static int64_t lx_munmap(struct syscall_args *a)
     return vm_user_unmap(process_current()->space, addr, page_align_up(len), 0);
 }
 
+/* mremap: resize a whole anonymous mapping in place (grow or shrink).
+ * See docs/audit/next-subsystem-mremap.md. */
+static int64_t lx_mremap(struct syscall_args *a)
+{
+    uint64_t old_addr = a->a[0];
+    size_t raw_old = (size_t)a->a[1], raw_new = (size_t)a->a[2];
+    unsigned flags = (unsigned)a->a[3];
+    if (flags & ~(unsigned)(LX_MREMAP_MAYMOVE | LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
+        return -EINVAL;
+    if (flags & (LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP))
+        return -EINVAL;   /* v1 places nothing at a chosen address and always unmaps a shrink */
+    if (!is_page_aligned(old_addr))
+        return -EINVAL;
+    /* Bound the lengths against the user window BEFORE rounding: a size
+     * near UINT64_MAX would make page_align_up wrap to 0, and a 0 old_size
+     * is the shareable-dup form v1 does not support. (As lx_mmap does.) */
+    if (raw_old == 0 || raw_old > (size_t)(USER_HI - USER_LO))
+        return -EINVAL;
+    if (raw_new == 0 || raw_new > (size_t)(USER_HI - USER_LO))
+        return -EINVAL;
+    size_t old_size = page_align_up(raw_old);
+    size_t new_size = page_align_up(raw_new);
+
+    /* vm_user_remap finds and validates the mapping (whole anonymous
+     * region) and resizes it -- all guarding the space lock -- so even an
+     * equal-size request reports -EFAULT for an unmapped address rather
+     * than a bogus success. A concurrent munmap/MAP_FIXED cannot slip a
+     * different mapping into the range mid-resize. MAYMOVE is accepted but
+     * never relocates: a grow the space after cannot absorb is -ENOMEM
+     * (realloc falls back to allocate-copy-free). */
+    int rc = vm_user_remap(process_current()->space, old_addr, old_size, new_size);
+    return rc ? rc : (int64_t)old_addr;
+}
+
 static int64_t lx_mprotect(struct syscall_args *a)
 {
     uint64_t addr = a->a[0];
@@ -3132,6 +3166,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_mmap] = lx_mmap,
     [LX_mprotect] = lx_mprotect,
     [LX_munmap] = lx_munmap,
+    [LX_mremap] = lx_mremap,
     [LX_msync] = lx_msync,
     [LX_brk] = lx_brk,
     [LX_rt_sigaction] = lx_rt_sigaction,

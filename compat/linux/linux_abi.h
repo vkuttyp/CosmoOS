@@ -81,6 +81,12 @@ struct lx_rlimit {
 #define LX_MAP_ANONYMOUS 0x20
 #define LX_MAP_NORESERVE 0x4000
 #define LX_MAP_STACK 0x20000
+
+/* mremap flags. v1 honours none of them to relocate: MAYMOVE never moves,
+ * FIXED/DONTUNMAP are rejected. */
+#define LX_MREMAP_MAYMOVE   1
+#define LX_MREMAP_FIXED     2
+#define LX_MREMAP_DONTUNMAP 4
 #define LX_MAP_POPULATE 0x8000
 #define LX_MS_ASYNC 1
 #define LX_MS_INVALIDATE 2
