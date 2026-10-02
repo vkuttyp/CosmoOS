@@ -1621,7 +1621,7 @@ static int64_t lx_shmget(struct syscall_args *a)
     if (shmflg & ~(unsigned)(LX_IPC_CREAT | LX_IPC_EXCL | 0777))
         return -EINVAL;
     struct process *p = process_current();
-    return shm_get((int32_t)a->a[0], (size_t)a->a[1], shmflg, p->cred.euid, p->cred.egid);
+    return shm_get((int32_t)a->a[0], (size_t)a->a[1], shmflg, &p->cred);
 }
 
 static int64_t lx_shmat(struct syscall_args *a)
@@ -1637,7 +1637,7 @@ static int64_t lx_shmat(struct syscall_args *a)
     struct process *p = process_current();
     bool rdonly = (shmflg & LX_SHM_RDONLY) != 0;
     /* ipc_perm: read is always needed, write unless SHM_RDONLY. */
-    rc = shm_access(seg, p->cred.euid, p->cred.egid, 04 | (rdonly ? 0 : 02));
+    rc = shm_access(seg, &p->cred, 04 | (rdonly ? 0 : 02));
     if (rc) {
         shm_unref(seg);
         return rc;        /* -EACCES */
@@ -1678,12 +1678,15 @@ static int64_t lx_shmat(struct syscall_args *a)
     at->addr = base;
     at->size = size;
     at->seg = seg;   /* the lookup's reference becomes the attach's */
+    /* Count the attach BEFORE publishing the record: once it is on the list a
+     * sibling thread can detach it, and that detach drops the attach's
+     * reference -- so `seg` must not be touched afterwards. */
+    shm_attached(seg);   /* nattch++ */
     struct linux_state *ls = lx();
     arch_irq_state_t st = spin_lock_irqsave(&ls->shm_lock);
     at->next = ls->shm_attaches;
     ls->shm_attaches = at;
     spin_unlock_irqrestore(&ls->shm_lock, st);
-    shm_attached(seg);   /* nattch++ */
     return (int64_t)base;
 }
 
@@ -1705,15 +1708,13 @@ static int64_t lx_shmdt(struct syscall_args *a)
         return -EINVAL;   /* no attach at that address */
 
     struct vm_space *space = process_current()->space;
-    /* Only unmap if the address still holds this segment: a mapping the program
-     * replaced (its own munmap then a fresh mmap) must not be torn down as if
-     * it were the attach. */
-    bool matched = vm_user_range_maps_vnode(space, at->addr, at->size, shm_vnode(at->seg));
-    if (matched)
-        vm_user_unmap(space, at->addr, at->size, 0);
+    /* Unmap only the segment's own pages in the recorded range: a part the
+     * program unmapped itself is skipped, and a mapping it put in that range
+     * (its own munmap then a fresh mmap) is left untouched. */
+    vm_user_unmap_vnode(space, at->addr, at->size, shm_vnode(at->seg));
     shm_detach(at->seg);   /* nattch-- and drop the attach's reference */
     kfree(at);
-    return matched ? 0 : -EINVAL;
+    return 0;
 }
 
 static int64_t lx_shmctl(struct syscall_args *a)
@@ -1722,10 +1723,10 @@ static int64_t lx_shmctl(struct syscall_args *a)
     int shmid = (int)a->a[0];
     switch ((int)a->a[1]) {
     case LX_IPC_RMID:
-        return shm_rmid(shmid, p->cred.euid);
+        return shm_rmid(shmid, &p->cred);
     case LX_IPC_STAT: {
         struct shm_stat st;
-        int rc = shm_stat_id(shmid, p->cred.euid, p->cred.egid, &st);
+        int rc = shm_stat_id(shmid, &p->cred, &st);
         if (rc)
             return rc;
         struct lx_shmid_ds ds;

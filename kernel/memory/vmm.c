@@ -2643,38 +2643,41 @@ bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_
     return ok;
 }
 
-/* True if every page of [addr, addr+len) is a file mapping of `vn`. Used by
- * shmdt to confirm the address still holds the segment it recorded, so a
- * mapping the program replaced (munmap + a fresh mmap) is not torn down as
- * if it were the attach. */
-bool vm_user_range_maps_vnode(struct vm_space *space, uint64_t addr, size_t len, struct vnode *vn)
+/* Unmap only the parts of [addr, addr+len) that are file mappings of `vn`,
+ * leaving any other region (a gap, or a mapping the program put there) in
+ * place. Used by shmdt so a detach frees exactly the segment's own pages --
+ * never a mapping that replaced part of the attach, and never leaving the
+ * segment's remaining pages behind after a partial unmap. Each matching
+ * sub-range is removed through vm_user_unmap, so the split/teardown/shootdown
+ * are the ordinary ones; the scan restarts after each removal because the
+ * region list changed. */
+void vm_user_unmap_vnode(struct vm_space *space, uint64_t addr, size_t len, struct vnode *vn)
 {
     KASSERT(space->user);
-    if (len == 0)
-        return true;
     uint64_t end = addr + len;
-    if (end < addr)
-        return false;
+    if (len == 0 || end < addr)
+        return;
 
-    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
-    uint64_t cursor = page_align_down(addr);
-    struct vm_region *r;
-    bool ok = false;
-    list_for_each_entry(r, &space->regions, link) {
-        if (r->base + r->size <= cursor)
-            continue;
-        if (r->base > cursor)
-            break; /* gap */
-        if (r->kind != VM_REGION_FILE || r->fmap == NULL || r->fmap->vn != vn)
-            break; /* not this segment's backing */
-        cursor = r->base + r->size;
-        if (cursor >= end) {
-            ok = true;
-            break;
+    for (;;) {
+        uint64_t lo = 0, hi = 0;
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        struct vm_region *r;
+        list_for_each_entry(r, &space->regions, link) {
+            if (r->base + r->size <= addr)
+                continue;
+            if (r->base >= end)
+                break;
+            if (r->kind == VM_REGION_FILE && r->fmap != NULL && r->fmap->vn == vn) {
+                lo = r->base > addr ? r->base : addr;
+                hi = (r->base + r->size) < end ? (r->base + r->size) : end;
+                break;
+            }
         }
+        spin_unlock_irqrestore(&space->lock, s);
+        if (hi == 0)
+            return;   /* no segment-backed page left in the range */
+        vm_user_unmap(space, lo, hi - lo, 0);
     }
-    spin_unlock_irqrestore(&space->lock, s);
-    return ok;
 }
 
 /* --- diagnostics --- */

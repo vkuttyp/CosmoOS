@@ -982,7 +982,31 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_shmctl, bid, LX_IPC_RMID, 0) == 0, 0);
         /* an unsupported flag (SHM_HUGETLB) is rejected, not silently honoured */
         CHECKV(sc3(LX_shmget, LX_IPC_PRIVATE, 4096, LX_IPC_CREAT | 04000 | 0600) == -22, 0);
-        lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed-addr, stat, rmid, perms, rdonly-ceiling\n");
+        /* shmdt detaches only the segment's own pages: a mapping the program
+         * put over a detached attach is left alone */
+        int xid = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 4096, LX_IPC_CREAT | 0600);
+        CHECKV(xid >= 0, xid);
+        long xa = sc3(LX_shmat, xid, 0, 0);
+        CHECKV(xa > 0, xa);
+        CHECKV(sc2(LX_munmap, xa, 4096) == 0, 0);   /* drop the attach's mapping by hand */
+        long rep = sc6(LX_mmap, xa, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                       LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(rep == xa, rep);                     /* foreign anon at the same address */
+        ((volatile unsigned int *)rep)[0] = 0x7777;
+        CHECKV(sc1(LX_shmdt, xa) == 0, 0);          /* must NOT tear the foreign mapping down */
+        CHECK(((volatile unsigned int *)rep)[0] == 0x7777);
+        CHECKV(sc2(LX_munmap, rep, 4096) == 0, 0);
+        CHECKV(sc3(LX_shmctl, xid, LX_IPC_RMID, 0) == 0, 0);
+        /* a partial self-unmap still lets shmdt free the segment's remaining page */
+        int pid2 = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 8192, LX_IPC_CREAT | 0600);
+        CHECKV(pid2 >= 0, pid2);
+        long pa = sc3(LX_shmat, pid2, 0, 0);
+        CHECKV(pa > 0, pa);
+        CHECKV(sc2(LX_munmap, pa + 4096, 4096) == 0, 0);   /* drop the 2nd page by hand */
+        CHECKV(sc1(LX_shmdt, pa) == 0, 0);                 /* detaches the remaining 1st page */
+        CHECKV(sc3(LX_mprotect, pa, 4096, LX_PROT_READ) == -12, 0);   /* -ENOMEM: now unmapped */
+        CHECKV(sc3(LX_shmctl, pid2, LX_IPC_RMID, 0) == 0, 0);
+        lx_puts("LXSHM: shmget/at/dt/ctl: shared, fixed, stat, rmid, perms, rdonly, partial-dt\n");
     }
 #ifdef LX_stat
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */

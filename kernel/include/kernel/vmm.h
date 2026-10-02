@@ -353,9 +353,10 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
  * of `space` that all carry `prot`. */
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot);
 
-/* True if every page of [addr, addr+len) is a file mapping of `vn` (used by
- * shmdt to confirm the address still holds the recorded segment). */
-bool vm_user_range_maps_vnode(struct vm_space *space, uint64_t addr, size_t len, struct vnode *vn);
+/* Unmap only the parts of [addr, addr+len) that are file mappings of `vn`,
+ * leaving any other region in place (used by shmdt to detach exactly the
+ * segment's own pages). */
+void vm_user_unmap_vnode(struct vm_space *space, uint64_t addr, size_t len, struct vnode *vn);
 
 /* Resize a whole anonymous user mapping in place -- Linux mremap(2) with no
  * move. [base, base+old_size) must name a single VM_REGION_ANON region
