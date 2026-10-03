@@ -1394,3 +1394,98 @@ and the full harness in 130.5 s. `lockdep-contention` remained 21 ms and
 budget failure remains recorded; one successful rerun does not establish
 its cause. The inventory now reflects PR #306's merged status and this
 local cleanup continuation separately.
+
+## Queued mutex acquisition continuation
+
+Phase 1 adds `lockdep-mutex-bench`, an equal-workload debug LOCKDEP=0/1
+measurement of the public mutex acquisition path under verified queue
+contention. The owner holds a private mutex before releasing a worker's
+start gate, yields until the real wait queue is nonempty, holds for another
+1 ms, then releases. The waiter measures `mutex_lock` on its pinned CPU
+through ownership, checks protected-data publication and ownership, then
+unlocks. The owner drains exit completion before joining or checking any
+failure. Queue and exit guards are one second. An exit timeout retains
+the worker reference and stack probe and fails stop. Two warmups precede
+nine samples; the same mutex and two lock classes are reused. Thread
+creation, validation, unlock and join are outside the timed acquisition.
+The UP case yields to a waiter on the same CPU and uses the same queue
+protocol. This proves the slow path was entered without assuming that a
+fixed delay schedules the waiter; it does not prescribe context switches.
+
+The result includes controlled holding time, scheduling and wakeup, not
+only lockdep instructions. The hold is never subtracted and no performance
+threshold or overhead ratio determines success. Waiters use the default
+priority; no priority donation workload is deliberately induced. Broader
+mutex workloads, contended spin, graph-size sweeps, PI and native costs
+remain open.
+
+Phase 2 exercised failure cleanup in temporary x86 clones. Withholding
+the start gate until the queue guard expires must return failure only
+after an unlocked mutex, empty queue, joined worker and normal IRQ and
+preemption state are observed. Withholding exit after worker unlock must
+produce the explicit waiter-exit retention panic. Both targeted harnesses
+passed in 14.7/13.9 s, requiring exact diagnostics and failure exit.
+Artifacts: `out/lockdep-mutex-bench-probe-{queue,exit}/{build,boot}.log`
+and corresponding top-level `-result.log` files. Neither is a full-suite
+pass, and the injections are not committed.
+
+Full validation also exposed a separate pre-existing fixture lifetime
+bug. `elf-text-ro` and `elf-data-private` still ran `init --block`, despite
+the shared-text fixture documentation requiring `--spin`. That program
+reads one console byte and exits with status 5; the process reference
+does not retain its address space past exit. The initial AArch64 run
+reported a keyboard-input mismatch, then the later text fixture exited
+with status 5 before `vm_user_protect(p->space, ...)`, causing a kernel
+NULL-space fault at offset 0xd0. Both fixtures now use the existing
+`--spin` mode and retain their explicit kill/wait/put cleanup. Protection,
+zero-tail and private-data assertions are unchanged. The keyboard mismatch
+preceded creation of the text fixture; this fix prevents residual console
+input from ending the fixture, and does not claim to explain that mismatch.
+
+Initial validation failures are retained in
+`out/lockdep-mutex-bench-{x86_64,aarch64}-on{,-result}.log`: x86's
+`process-user` exceeded its internal 15-second bound (19,054 ms); AArch64
+had the keyboard mismatch and NULL-space panic. After the fixture fix,
+an isolated AArch64 boot passed the benchmark and both ELF inspections,
+but `syscall-fuzz` took 10,135 ms against its 8,000 ms budget and emitted
+the watchdog marker (`out/lockdep-mutex-bench-aarch64-on-fixed{,-result}.log`).
+This budget failure was also seen before this increment (recorded above);
+budgets and watchdog checks were not relaxed. Later matrix runs are
+serialized, and their results are recorded separately below.
+
+Phase 3's final serialized matrix passed all 422 self-tests and the full
+harness in all six configurations. Guest nanoseconds for the nine queued
+acquisitions, including the controlled 1 ms hold:
+
+| Architecture | Lockdep | CPUs | Min | Median | Max | Full boot seconds |
+|---|---|---:|---:|---:|---:|---:|
+| x86-64 | on | 4 | 1066412 | 1070426 | 1078451 | 133.5 |
+| x86-64 | off | 4 | 1038246 | 1040249 | 1048258 | 110.9 |
+| AArch64 | on | 4 | 1060000 | 1064992 | 1156992 | 142.7 |
+| AArch64 | off | 4 | 1030000 | 1032000 | 1034992 | 122.2 |
+| x86-64 | on | 1 | 1046628 | 1047628 | 1056634 | 115.8 |
+| AArch64 | on | 1 | 1046992 | 1049008 | 1055008 | 117.5 |
+
+Logs: `out/lockdep-mutex-bench-{x86_64,aarch64}-{on,off}-final.log`,
+`out/lockdep-mutex-bench-{x86_64,aarch64}-on-up.log`, and corresponding
+`-result.log` files. A parser verified one measurement row per boot, nine
+samples, configured hold, enabled state, placement, ordered min/median/max,
+422-test success and full harness success. Both release kernels built
+(`out/lockdep-mutex-bench-{x86_64,aarch64}-release-result.log`). No host
+suite was repeated for these kernel-test-only changes. Final green boots
+do not erase the earlier failures or establish their timing-related causes.
+
+A targeted AArch64 console-input comparison also reproduced the fixture
+cause independently of the initial keyboard mismatch. Temporary clones
+run the text-inspection fixture first, inject `x\n` into the console, and
+wait 100 ms for child exit. The old `--block` mode exits with status 5 and
+a NULL address space; the fixed `--spin` mode stays alive and completes
+the original protection and zero-tail checks before normal kill/wait/put
+cleanup. The harness requires the exact old-state panic or the successful
+fixture marker plus final result panic, so a skipped test cannot pass the
+fixed control. These expected-failure probes passed in 9.3/9.4 s; they are
+not full-suite boots. Logs: `out/elf-fixture-probe-final-{old,fixed}/{build,boot}.log`
+and `out/elf-fixture-{old,fixed}-final-result.log`. The injected input,
+early test placement and probe panics are not committed. Temporary probe
+setup/build failures were corrected before these successful runs; they
+provided no regression evidence. `git diff --check` passed.

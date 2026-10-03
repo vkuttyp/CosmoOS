@@ -677,6 +677,8 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Deterministic graph-search work bounds~~ | **BUILT (PR #306)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
 | ~~Uncontended first-acquisition measurements against the live graph~~ | **BUILT (PR #306)**: public spin, irqsave, nested-spin and mutex acquisitions include first class/usage/edge checks and held-stack publication, then compare reuse. Three fresh samples per path consume 18 classes. Matched debug LOCKDEP=0/1 boots cover both architectures; timings remain descriptive QEMU observations, not worst-case or native-hardware bounds. |
 | ~~Contention-test lock/timer cleanup on a missed callback window~~ | **FIXED (local continuation after PR #306)**: release the spinlock, synchronously cancel the stack timer and join the completed holder before returning failure. Readiness and exit guards fail stop with the thread retained. Old/fixed missed-timer probes validate state on both architectures; x86 probes validate both timeout diagnostics. The timing window itself and stopped-owner spin waits remain outside this fix. |
+| ~~Controlled queued-mutex acquisition measurements~~ | **BUILT (local continuation after PR #306)**: verify the waiter entered the real mutex queue before a controlled 1 ms owner hold and release; two warmups and nine samples time public acquisition through ownership. Tests check protected-data handoff and lifetime-safe queue/exit failure paths. These are total wait times, not isolated lockdep or priority-inheritance overhead. |
+| ~~Console-dependent lifetime of ELF inspection fixtures~~ | **FIXED (local continuation after PR #306)**: `elf-text-ro` and `elf-data-private` use `init --spin` until explicit kill/wait cleanup. Their former `--block` child could read console input and exit before address-space inspection; a process reference alone does not preserve that space. Protection and data assertions remain intact. |
 
 Still open for the next milestone:
 
@@ -687,7 +689,7 @@ Still open for the next milestone:
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
 - Worst-case wall-clock search latency, first-acquisition graph-size sweeps,
-  contended spin/mutex paths, priority-inheritance waits, and native-hardware
+  contended spin paths and broader mutex workloads, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
   host graph/held-stack and interrupt-publication tests, kernel writer/IPI

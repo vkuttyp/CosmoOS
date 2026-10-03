@@ -761,6 +761,102 @@ bool selftest_lockdep_first_bench(const char **reason)
     return true;
 }
 
+struct mutex_bench_probe {
+    struct mutex mutex;
+    unsigned go, acquired;
+    unsigned value, expected;
+    bool owned, payload_ok;
+    uint64_t elapsed;
+};
+
+static void mutex_bench_waiter(void *arg)
+{
+    struct mutex_bench_probe *p = arg;
+    while (!__atomic_load_n(&p->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    uint64_t begin = clock_now_ns();
+    mutex_lock(&p->mutex);
+    p->elapsed = clock_since_ns(begin);
+    p->owned = p->mutex.owner == thread_current();
+    p->payload_ok = p->value == p->expected;
+    p->value++;
+    __atomic_store_n(&p->acquired, 1u, __ATOMIC_RELEASE);
+    mutex_unlock(&p->mutex);
+}
+
+static bool mutex_contention_bench_pinned(const char **reason)
+{
+    enum { WARMUP = 2, SAMPLES = 9, HOLD_US = 1000 };
+    unsigned me = arch_cpu_id(), other = me;
+    for (unsigned i = 1; i < cpu_count(); i++)
+        if (cpu_online((me + i) % cpu_count())) {
+            other = (me + i) % cpu_count();
+            break;
+        }
+    struct mutex_bench_probe p = {0};
+    mutex_init(&p.mutex, "lockdep-bench-contended-mutex");
+    /* Register classes and owner-side edges before creating any worker.
+     * The two warmup rounds also exercise the queued waiter path. */
+    mutex_lock(&p.mutex);
+    mutex_unlock(&p.mutex);
+    uint64_t elapsed[SAMPLES];
+    for (unsigned round = 0; round < WARMUP + SAMPLES; round++) {
+        __atomic_store_n(&p.go, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&p.acquired, 0u, __ATOMIC_RELAXED);
+        p.owned = p.payload_ok = false;
+        p.elapsed = 0;
+        p.value = 0;
+        p.expected = round + 1;
+        struct thread *waiter = thread_create_on(mutex_bench_waiter, &p, "mutex-bench",
+                                                 SCHED_PRIO_DEFAULT, CPUMASK_OF(other));
+        CHECK(waiter != NULL); /* no lock held or worker published on failure */
+        mutex_lock(&p.mutex);
+        __atomic_store_n(&p.go, 1u, __ATOMIC_RELEASE);
+        uint64_t begin = clock_now_ns();
+        bool queued;
+        while (!(queued = !waitqueue_empty(&p.mutex.wq)) && clock_since_ns(begin) < 1000000000ULL)
+            sched_yield();
+        /* Same CPU works too: yielding above lets the waiter queue and
+         * block. Hold time is workload, never a performance threshold. */
+        if (queued)
+            udelay(HOLD_US);
+        bool excluded = __atomic_load_n(&p.acquired, __ATOMIC_ACQUIRE) == 0;
+        p.value = p.expected; /* publication must come through the mutex */
+        mutex_unlock(&p.mutex);
+        /* Even a queue-observation failure must release the owner and
+         * drain the worker before the stack probe can expire. */
+        if (!wait_for_completion_timeout(&waiter->exited, 1000000000ULL))
+            panic("selftest lockdep-mutex-bench: waiter exit timeout; retaining thread and probe");
+        thread_join(waiter);
+        CHECK(queued && excluded && p.owned && p.payload_ok && p.value == p.expected + 1);
+        CHECK(!mutex_is_locked(&p.mutex) && waitqueue_empty(&p.mutex.wq));
+        if (round >= WARMUP)
+            elapsed[round - WARMUP] = p.elapsed;
+    }
+    for (unsigned i = 1; i < SAMPLES; i++) {
+        uint64_t value = elapsed[i];
+        unsigned j = i;
+        while (j && elapsed[j - 1] > value) {
+            elapsed[j] = elapsed[j - 1];
+            j--;
+        }
+        elapsed[j] = value;
+    }
+    kinfo("lockdep-mutex-bench: enabled=%u placement=%s samples=%u hold-us=%u ns/acquisition min=%llu median=%llu max=%llu",
+          (unsigned)CONFIG_LOCKDEP, other == me ? "same-cpu" : "cross-cpu", SAMPLES, HOLD_US,
+          (unsigned long long)elapsed[0], (unsigned long long)elapsed[SAMPLES / 2],
+          (unsigned long long)elapsed[SAMPLES - 1]);
+    return true;
+}
+
+bool selftest_lockdep_mutex_bench(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool ok = mutex_contention_bench_pinned(reason);
+    thread_set_affinity_self(saved);
+    return ok;
+}
+
 #if CONFIG_LOCKDEP
 /* Private graph: new-edge searches must not consume live classes or
  * reset dependencies used by the rest of the kernel. "New" describes

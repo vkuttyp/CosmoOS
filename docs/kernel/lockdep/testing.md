@@ -41,6 +41,7 @@ released normally.
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
 | `lockdep-first-bench` | public spin, irqsave, nested-spin and mutex acquisitions with fresh classes, then reuse; three samples per path | verifies ownership, class registration and nested search; descriptive timing only |
+| `lockdep-mutex-bench` | a private mutex owner waits for verified waiter queue entry, holds another 1 ms, then releases; two warmups and nine samples | queued acquisition, ownership and data handoff; descriptive timing only |
 | `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
@@ -105,6 +106,46 @@ clock granularity can produce zero for short intervals, especially with
 lockdep disabled; those values cannot support overhead ratios. QEMU/TCG
 timings include host scheduling and translation effects. Contended locks,
 priority inheritance and native hardware remain separate measurements.
+
+### Queued mutex acquisition measurement
+
+`lockdep-mutex-bench` uses the same workload in debug LOCKDEP=0/1 builds.
+The owner is pinned and each waiter is created with a single-CPU affinity
+on another online CPU, or the owner's CPU on UP. A start flag prevents the
+waiter from attempting acquisition until the owner holds the private
+mutex. The owner yields while checking the real wait queue under its lock.
+Only after observing a queued waiter does it delay for 1 ms and release.
+This proves entry into the mutex slow path; it does not assume a fixed
+sleep lets the waiter reach it or require a particular number of context
+switches. UP uses the same protocol and permits the waiter to block.
+
+The waiter times the complete public `mutex_lock` call on its own CPU,
+stopping before validation and unlock. Each round checks that acquisition
+did not finish while the owner still held the lock, the waiter owns it,
+protected data written before release is visible, and the lock and queue
+are empty after the waiter exits. Two warmup rounds precede nine reported
+samples. One mutex and its internal spinlock class are reused throughout;
+thread creation, owner-side setup, joins, validation and output are outside
+the timed call. A new waiter thread is created each round, so this is not
+a reused-thread/cache benchmark. Global graph state is never reset.
+
+Queue observation and waiter exit each have a one-second guard. A missed
+queue observation releases the owner and drains the waiter before returning
+failure; a missing exit fails stop with the thread and stack probe retained.
+Failure assertions never return with a worker still using the probe.
+An x86 negative control withheld the start flag until the queue guard
+expired, then required failure with an unlocked mutex, empty queue, joined
+worker and restored IRQ/preemption state. Another withheld worker exit
+after unlock and required the named retention panic.
+
+Reported min/median/max guest nanoseconds include the deliberate hold,
+queue observation delay, scheduling, wakeup and mutex/lockdep work. They
+are total contended acquisition times, not isolated lockdep overhead; the
+1 ms hold is not subtracted. Neither time nor enabled/disabled ratios are
+pass criteria. Waiters use the normal default priority; no priority boost
+is deliberately induced. Priority-inheritance donation measurements,
+contended spin timings, graph-size sweeps and native-hardware costs remain
+open. The log distinguishes `same-cpu` and `cross-cpu` placement.
 
 ### New-edge core measurement
 
