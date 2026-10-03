@@ -653,7 +653,7 @@ struct graph_bench_result {
     uint16_t path[8], safe, unsafe;
 };
 
-static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned kind)
+static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned kind, bool dense)
 {
     memset(g, 0, sizeof(*g));
     for (unsigned i = 0; i < nodes; i++) {
@@ -662,10 +662,18 @@ static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned k
         if (lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) != (int)i)
             return false;
     }
-    /* Two disjoint chains, or one full chain for the cycle case. */
-    for (unsigned i = 1; i < nodes; i++)
-        if (kind == 1 || i != nodes / 2)
-            lockdep_core_add_edge(g, lockdep_node(i - 1, 0), lockdep_node(i, 0));
+    /* Two disjoint components, or one for cycle rejection. Dense DAGs
+     * contain every forward edge within each component. */
+    for (unsigned i = 0; i < nodes; i++)
+        for (unsigned j = i + 1; j < nodes; j++)
+            if ((dense || j == i + 1) &&
+                (kind == 1 || (i < nodes / 2) == (j < nodes / 2)))
+                lockdep_core_add_edge(g, lockdep_node(i, 0), lockdep_node(j, 0));
+    unsigned expected = dense ? (kind == 1 ? nodes * (nodes - 1) / 2 :
+                                 (nodes / 2) * (nodes / 2 - 1)) :
+                                nodes - (kind == 1 ? 1 : 2);
+    if (g->nr_edges != expected)
+        return false;
     if (kind == 2) {
         /* Each component is valid; only the proposed bridge would join
          * an IRQ-used ancestor to an IRQ-enabled descendant. */
@@ -692,7 +700,7 @@ static void graph_bench_insert(struct lockdep_graph *g, struct lockdep_scratch *
 bool selftest_lockdep_graph_bench(const char **reason)
 {
     enum { SAMPLES = 9, WARMUP = 2 };
-    static const unsigned sizes[] = { 16, 64, 256 };
+    static const unsigned sizes[] = { 16, 64, 256, LOCKDEP_MAX_CLASSES };
     static const char *const paths[] = { "insert", "cycle", "irq-bridge" };
     struct lockdep_graph *g = kmalloc(sizeof(*g), 0);
     struct lockdep_scratch *scratch = kmalloc(sizeof(*scratch), 0);
@@ -704,52 +712,57 @@ bool selftest_lockdep_graph_bench(const char **reason)
     }
     bool ok = true;
     cpumask_t saved = thread_pin_self();
-    for (unsigned size = 0; size < ARRAY_SIZE(sizes) && ok; size++) {
-        unsigned nodes = sizes[size];
-        for (unsigned kind = 0; kind < ARRAY_SIZE(paths) && ok; kind++) {
-            uint64_t elapsed[SAMPLES];
-            uint16_t from = lockdep_node(kind == 1 ? nodes - 1 : nodes / 2 - 1, 0);
-            uint16_t to = lockdep_node(kind == 1 ? 0 : nodes / 2, 0);
-            for (unsigned sample = 0; sample < WARMUP + SAMPLES; sample++) {
-                if (!graph_bench_seed(g, nodes, kind) || lockdep_core_has_edge(g, from, to)) {
-                    ok = false;
-                    break;
+    for (unsigned topology = 0; topology < 2 && ok; topology++) {
+        bool dense = topology != 0;
+        for (unsigned size = 0; size < ARRAY_SIZE(sizes) && ok; size++) {
+            unsigned nodes = sizes[size];
+            for (unsigned kind = 0; kind < ARRAY_SIZE(paths) && ok; kind++) {
+                uint64_t elapsed[SAMPLES];
+                uint16_t from = lockdep_node(kind == 1 ? nodes - 1 : nodes / 2 - 1, 0);
+                uint16_t to = lockdep_node(kind == 1 ? 0 : nodes / 2, 0);
+                for (unsigned sample = 0; sample < WARMUP + SAMPLES; sample++) {
+                    if (!graph_bench_seed(g, nodes, kind, dense) || lockdep_core_has_edge(g, from, to)) {
+                        ok = false;
+                        break;
+                    }
+                    unsigned edges = g->nr_edges;
+                    struct graph_bench_result r = {0};
+                    uint64_t begin = clock_now_ns();
+                    graph_bench_insert(g, scratch, from, to, &r);
+                    uint64_t ns = clock_since_ns(begin);
+                    /* Validate every measured operation, outside its interval.
+                     * Rejected proposals must leave the edge set unchanged. */
+                    ok = r.kind == kind && g->nr_edges == edges + (kind == 0) &&
+                         lockdep_core_has_edge(g, from, to) == (kind == 0);
+                    if (kind == 1)
+                        ok = ok && r.path_len == (dense ? 2 : ARRAY_SIZE(r.path)) &&
+                             r.path[0] == (dense ? to : lockdep_node(nodes - ARRAY_SIZE(r.path), 0)) &&
+                             r.path[r.path_len - 1] == from;
+                    for (unsigned i = 1; i < r.path_len && ok; i++)
+                        ok = lockdep_core_has_edge(g, r.path[i - 1], r.path[i]);
+                    if (kind == 2)
+                        ok = ok && r.safe == lockdep_node(0, 0) &&
+                             r.unsafe == lockdep_node(nodes - 1, 0);
+                    if (!ok)
+                        break;
+                    if (sample >= WARMUP)
+                        elapsed[sample - WARMUP] = ns;
                 }
-                unsigned edges = g->nr_edges;
-                struct graph_bench_result r = {0};
-                uint64_t begin = clock_now_ns();
-                graph_bench_insert(g, scratch, from, to, &r);
-                uint64_t ns = clock_since_ns(begin);
-                /* Validate every measured operation, outside its interval.
-                 * Rejected proposals must leave the edge set unchanged. */
-                ok = r.kind == kind && g->nr_edges == edges + (kind == 0) &&
-                     lockdep_core_has_edge(g, from, to) == (kind == 0);
-                if (kind == 1)
-                    ok = ok && r.path_len == ARRAY_SIZE(r.path) &&
-                         r.path[0] == lockdep_node(nodes - ARRAY_SIZE(r.path), 0) &&
-                         r.path[r.path_len - 1] == from;
-                if (kind == 2)
-                    ok = ok && r.safe == lockdep_node(0, 0) &&
-                         r.unsafe == lockdep_node(nodes - 1, 0);
                 if (!ok)
                     break;
-                if (sample >= WARMUP)
-                    elapsed[sample - WARMUP] = ns;
-            }
-            if (!ok)
-                break;
-            for (unsigned i = 1; i < SAMPLES; i++) {
-                uint64_t value = elapsed[i];
-                unsigned j = i;
-                while (j && elapsed[j - 1] > value) {
-                    elapsed[j] = elapsed[j - 1];
-                    j--;
+                for (unsigned i = 1; i < SAMPLES; i++) {
+                    uint64_t value = elapsed[i];
+                    unsigned j = i;
+                    while (j && elapsed[j - 1] > value) {
+                        elapsed[j] = elapsed[j - 1];
+                        j--;
+                    }
+                    elapsed[j] = value;
                 }
-                elapsed[j] = value;
+                kinfo("lockdep-graph-bench: topology=%s nodes=%u edges=%u path=%s samples=%u ns/operation min=%llu median=%llu max=%llu",
+                      dense ? "dense" : "chain", nodes, g->nr_edges - (kind == 0), paths[kind], SAMPLES, (unsigned long long)elapsed[0],
+                      (unsigned long long)elapsed[SAMPLES / 2], (unsigned long long)elapsed[SAMPLES - 1]);
             }
-            kinfo("lockdep-graph-bench: nodes=%u path=%s samples=%u ns/operation min=%llu median=%llu max=%llu",
-                  nodes, paths[kind], SAMPLES, (unsigned long long)elapsed[0],
-                  (unsigned long long)elapsed[SAMPLES / 2], (unsigned long long)elapsed[SAMPLES - 1]);
         }
     }
     thread_set_affinity_self(saved);

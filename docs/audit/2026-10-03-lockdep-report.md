@@ -879,3 +879,51 @@ after the backtrace. Logs: `out/lockdep-thread-crash-{x86_64,aarch64}-result.log
 and `out/{x86_64,aarch64}-debug-crash/boot-test-crash.log`.
 `git diff --check` passed. The inventory marks this bounded snapshot work
 complete while retaining simultaneous global snapshots as deferred.
+
+## Dense graph measurement continuation
+
+Base: `fc64d2c2`. Phase 1 extends the private graph benchmark to dense
+acyclic components and adds the 320-class limit to both chain and dense
+cases. Only subclass zero is active. Dense components contain every
+forward edge: the full 320-node cycle graph has 51,040 edges, while the
+two-component insertion/IRQ graphs have 25,440 before the proposed bridge.
+Graph setup remains outside each timed operation and checks these counts.
+
+Phase 2 validates every warmup and measured operation: expected verdict,
+edge count, proposed-edge presence, cycle path length/endpoints and every
+path edge, or the IRQ-conflict endpoints. The dense cycle case finds a
+direct first-to-last path, unlike the chain's long truncated path. The
+bridge cases exhaust the second component in the unsuccessful reverse
+reachability check. No classes or dependencies enter the live validator.
+
+Phase 3 measures all 24 topology/size/operation combinations on both
+architectures, with two warmups and nine samples per case. Representative
+320-node results below are guest nanoseconds (min / median / max):
+
+| Topology | Operation | x86-64 | AArch64 |
+|---|---|---|---|
+| chain | insert | 25103 / 25103 / 28115 | 18000 / 19008 / 20992 |
+| chain | cycle | 44181 / 45185 / 106437 | 32000 / 33008 / 34000 |
+| chain | irq-bridge | 68280 / 69284 / 74305 | 52000 / 52992 / 54000 |
+| dense | insert | 24098 / 24099 / 26107 | 18000 / 18000 / 19008 |
+| dense | cycle | 2009 / 3012 / 7029 | 2000 / 2992 / 4000 |
+| dense | irq-bridge | 66271 / 67276 / 69285 | 48992 / 50000 / 58000 |
+
+Density is not a worst-case latency bound: these bitmaps skip visited
+neighbors, and dense cycle rejection terminates on a direct edge. Small
+samples can also fall below guest clock resolution (including zero);
+there is no timing pass threshold. These QEMU measurements exclude class
+lookup, held-stack processing, the raw lock, statistics and reporting.
+They neither measure native overhead nor cover all 1,280 subclass nodes.
+Complete acquisition, contention and worst-case bounds remain deferred.
+
+The expanded benchmark passed in 511 ms on x86-64 and 487 ms on AArch64.
+Release kernels built on both architectures; logs:
+`out/lockdep-dense-release-{x86_64,aarch64}.log`. The production core and
+host algorithms are unchanged in this increment.
+Both four-CPU debug boots passed all 418 self-tests and the complete boot
+harness: x86-64 in 129.7 s and AArch64 in 129.6 s. Full measurements and
+validation logs are `out/lockdep-dense-{x86_64,aarch64}.log` and matching
+`-result.log` files. `git diff --check` passed. The inventory marks the
+dense subclass-zero measurements complete, retaining broader performance
+coverage as deferred work.
