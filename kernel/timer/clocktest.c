@@ -218,8 +218,24 @@ static bool bracket_all_pairs(struct bracket *worst, const char **reason)
     memset(worst, 0, sizeof(*worst));
     unsigned n = cpu_count();
     if (n < 2) {
-        *reason = "a cross-CPU claim needs two CPUs";
-        return false;
+        /* No cross-CPU pair exists on UP. Keep a local monotonic bracket
+         * as the control, without claiming to have measured CPU skew.
+         * SMP still runs every distinct online pair below. */
+        cpumask_t saved = thread_pin_self();
+        for (unsigned i = 0; i < BRACKET_ROUNDS; i++) {
+            uint64_t t0 = clock_now_ns();
+            uint64_t tb = clock_now_ns();
+            uint64_t t1 = clock_now_ns();
+            if (tb < t0 || tb > t1) {
+                thread_set_affinity_self(saved);
+                *reason = "UP clock reading fell outside its local bracket";
+                return false;
+            }
+            worst->rounds++;
+        }
+        thread_set_affinity_self(saved);
+        kinfo("selftest: clock bracket: UP local monotonic control, no cross-CPU pairs");
+        return true;
     }
     for (unsigned a = 0; a < n; a++) {
         for (unsigned b = 0; b < n; b++) {
