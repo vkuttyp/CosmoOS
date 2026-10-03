@@ -1061,7 +1061,7 @@ factor, not a proven cause. The failures are retained in
 `out/pr305-review-x86_64.log`; no test threshold or assertion was changed.
 The isolated x86 rerun completed in 137.1 s with one failure remaining:
 `lockup-sample` did not receive the required CPU response (107 ms).
-`lockdep-mutex` passed, as did the other 418 tests. This repeated failure
+`lockdep-mutex` was among the 418 passing tests. This repeated failure
 remains unresolved; the x86 full suite is not reported green for this
 review follow-up (`out/pr305-review-x86_64-retry.log`).
 
