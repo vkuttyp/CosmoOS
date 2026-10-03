@@ -55,13 +55,14 @@ struct lockdep_held {
     const void *lock;
 };
 
-/* CPU-local writer, with IRQs masked; remote diagnostic readers never
- * wait. All shared writes and snapshot reads are sequentially consistent:
+/* One owner writes each stack: a CPU with IRQs masked, or the owning
+ * thread (which may be preempted/migrate). Diagnostic readers never wait.
+ * All shared writes and snapshot reads are sequentially consistent:
  * equal even sequence reads enclose no writer in the atomic total order.
  * Field stores need not be one atomic struct store: a reader crossing any
  * part of a bracketed update sees an odd or changed sequence and rejects
  * all copied fields. Callers must not use output from a failed snapshot.
- * Ordinary local reads remain safe because there is only one writer. */
+ * Ordinary owner reads remain safe because there is only one writer. */
 static inline void lockdep_core_held_begin(uint64_t *seq)
 {
     __atomic_fetch_add(seq, 1u, __ATOMIC_SEQ_CST);
@@ -83,9 +84,11 @@ static inline void lockdep_core_held_store(struct lockdep_held *dst,
 
 /* One bounded attempt. Output is usable only on success. A stuck writer
  * leaves an odd sequence and cannot stall the reporting CPU. No memory
- * allocation, graph lock, or retry loop is required. */
+ * allocation, graph lock, or retry loop is required. capacity bounds both
+ * source and destination; the caller also guarantees the source lifetime. */
 static inline bool lockdep_core_held_snapshot(const uint64_t *seq,
                                                const struct lockdep_held *held,
+                                               unsigned capacity,
                                                const unsigned *count,
                                                struct lockdep_held *out,
                                                unsigned *out_count)
@@ -95,7 +98,7 @@ static inline bool lockdep_core_held_snapshot(const uint64_t *seq,
     if (before & 1u)
         return false;
     unsigned n = __atomic_load_n(count, __ATOMIC_SEQ_CST);
-    if (n > LOCKDEP_MAX_HELD)
+    if (n > capacity)
         return false;
     for (unsigned i = 0; i < n; i++) {
         out[i].node = __atomic_load_n(&held[i].node, __ATOMIC_SEQ_CST);

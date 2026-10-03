@@ -228,6 +228,16 @@ across every entry and field. The kernel `lockdep-order` regression checks
 snapshot publication from real acquisitions, irqsave metadata, a release
 out of order, and the final empty stack.
 
+The same host generation test also runs with the eight-entry mutex capacity,
+allocating exactly that many source/output entries. An oversized count must
+be refused before any array access. `lockdep-mutex` checks actual mutex and
+trylock metadata, removal out of order, an unfinished writer, and the final
+empty stack. It also reads a referenced writer thread's initial held pair,
+samples during 1024 acquire/release rounds, and retains an extra reference
+across join to verify the exited stack is empty. The accepted concurrent
+sample count is logged; busy reads are allowed and must return count zero.
+This extends single-target snapshot coverage, not simultaneous global state.
+
 On x86-64, `trap-paranoid` adds real local-APIC NMI delivery while the
 validator graph raw lock is held. The handler takes only the bounded
 held-stack snapshot: a stable stack must show the held irqsave lock,

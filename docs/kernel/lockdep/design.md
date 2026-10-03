@@ -152,9 +152,17 @@ consistent, so an accepted copy cannot span a writer in the atomic total
 order (assuming no sequence wrap during the bounded attempt). An odd or
 changed sequence yields an unavailable message, with no retry, allocation,
 or target-owned lock. The cost is eight bytes per CPU plus atomic writes
-on debug held-stack updates. Local-only reads and thread mutex stacks
-retain their existing ownership rules. This does not make NMI writers
-reentrant or provide simultaneous snapshots of all CPUs.
+on debug held-stack updates. Owner-local reads retain their existing rules.
+
+Thread mutex stacks use the same atomic protocol with an explicit capacity
+of eight entries and an additional 64-bit sequence at the end of `thread`.
+Only the owning thread writes; preemption or migration during an update
+leaves an odd sequence until that thread resumes. Remote readers must keep
+the thread object alive with a reference; current-thread diagnostics already
+have that lifetime guarantee. Pushes, shifted removals and counts are atomic.
+Panic diagnostics now snapshot each local stack independently and report
+unavailable on an interrupted update. This does not make NMI writers
+reentrant or provide a simultaneous CPU/thread view or mutex-owner snapshot.
 
 The x86 `trap-paranoid` regression verifies the read-only NMI boundary
 with real local-APIC delivery while the graph raw lock is held, including

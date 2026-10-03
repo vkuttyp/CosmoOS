@@ -641,8 +641,8 @@ portability, performance):
 
 Completed work from the October lockdep session is struck through below.
 PRs #303 and #304 are merged. The continuation from `aede0142` adds
-counter consistency, mutex/new-edge measurements, and interrupt writer
-serialization;
+counter consistency, mutex/new-edge measurements, interrupt writer
+serialization, and thread mutex snapshots;
 those rows record local implementation, not a merge or remote CI result.
 Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
@@ -664,13 +664,14 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Matched debug LOCKDEP=0/1 warmed mutex-path measurements~~ | **BUILT (post-#304 continuation)**: adds private mutex lock/unlock and successful trylock/unlock paths. Contended waits and priority inheritance remain unmeasured. |
 | ~~New-edge core search measurements on sparse chains~~ | **BUILT (post-#304 continuation)**: private 16/64/256-node graphs exercise allowed insertion, cycle rejection, and transitive IRQ-conflict rejection. Setup is outside every sample; these are core costs, not cold-cache or complete acquisition timings. |
 | ~~Concurrent interrupt-table writer and diagnostic data races~~ | **FIXED (post-#304 continuation)**: per-vector raw writer serialization prevents competing registrations/removals; atomic count/name reads support concurrent diagnostics. Actual-source host tests cover publication and writer races; dispatch stays lock-free and record reuse still requires a grace period. |
+| ~~Bounded thread mutex-stack snapshots~~ | **BUILT (post-#304 continuation)**: atomic single-writer publication and capacity-aware reads with caller-owned thread lifetime. Panic diagnostics copy each local stack or report unavailable. Separate CPU/thread snapshots do not form a global view. |
 
 Still open for the next milestone:
 
 - NMI/#MC lockdep writer and raw-lock reentrancy; the x86 read-only test
   does not cover arbitrary tracked acquisitions or AArch64 NMI delivery.
-- Global held-state snapshots across CPUs and threads (counter snapshots
-  are now consistent separately).
+- Simultaneous global held-state snapshots across CPUs and threads;
+  individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
 - Dense/worst-case graph search costs, complete first-acquisition timings,

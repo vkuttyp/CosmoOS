@@ -138,6 +138,7 @@ struct thread {
                                            thread id and a pid can never collide. Distinct from `tid`
                                            above, which is the scheduler's own and never leaves the
                                            kernel. */
+    uint64_t held_mutex_seq;   /* lockdep: bounded readers reject active/changed writes */
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation

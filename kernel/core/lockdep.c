@@ -131,11 +131,20 @@ static void print_held(const char *who, const struct lockdep_held *h, unsigned n
 
 void lockdep_dump_held(void)
 {
-    struct lockdep_cpu *lc = my_cpu();
+    STATIC_ASSERT(LOCKDEP_MAX_HELD_MUTEX <= LOCKDEP_MAX_HELD, "diagnostic buffer fits both stacks");
     struct thread *t = me();
-    print_held("this CPU", lc->held, lc->nr_held);
-    if (t)
-        print_held(t->name, t->held_mutex, t->nr_held_mutex);
+    struct lockdep_held held[LOCKDEP_MAX_HELD];
+    unsigned n;
+    if (lockdep_snapshot_held_cpu(raw_cpu_id(), held, &n))
+        print_held("this CPU", held, n);
+    else
+        kprintf("  held by this CPU: unavailable (stack busy, changed, or invalid)\n");
+    if (t) {
+        if (lockdep_snapshot_held_thread(t, held, &n))
+            print_held(t->name, held, n);
+        else
+            kprintf("  held by %s: unavailable (stack busy, changed, or invalid)\n", t->name);
+    }
 }
 
 /* Another CPU may be stuck or updating its stack. Make one bounded
@@ -146,7 +155,16 @@ bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned 
     if (cpu >= CONFIG_MAX_CPUS)
         return false;
     struct lockdep_cpu *lc = &g_cpus[cpu];
-    return lockdep_core_held_snapshot(&lc->held_seq, lc->held, &lc->nr_held, out, count);
+    return lockdep_core_held_snapshot(&lc->held_seq, lc->held, LOCKDEP_MAX_HELD, &lc->nr_held, out, count);
+}
+
+bool lockdep_snapshot_held_thread(const struct thread *t, struct lockdep_held *out, unsigned *count)
+{
+    *count = 0;
+    if (t == NULL)
+        return false;
+    return lockdep_core_held_snapshot(&t->held_mutex_seq, t->held_mutex, LOCKDEP_MAX_HELD_MUTEX,
+                                      &t->nr_held_mutex, out, count);
 }
 
 void lockdep_dump_held_cpu(unsigned cpu)
@@ -543,7 +561,11 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
             report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "per-thread mutex stack full", NULL, 0);
             return;
         }
-        t->held_mutex[t->nr_held_mutex++] = e;
+        unsigned count = t->nr_held_mutex;
+        lockdep_core_held_begin(&t->held_mutex_seq);
+        lockdep_core_held_store(&t->held_mutex[count], &e);
+        __atomic_store_n(&t->nr_held_mutex, count + 1u, __ATOMIC_SEQ_CST);
+        lockdep_core_held_end(&t->held_mutex_seq);
     } else {
         struct lockdep_cpu *lc = my_cpu();
         if (lc->nr_held == LOCKDEP_MAX_HELD) {
@@ -557,13 +579,15 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
     }
 }
 
-static bool remove_entry(struct lockdep_held *held, unsigned *n, const void *lock)
+static bool remove_entry(struct lockdep_held *held, unsigned *n, uint64_t *seq, const void *lock)
 {
     for (unsigned i = *n; i-- > 0;) {
         if (held[i].lock == lock) {
+            lockdep_core_held_begin(seq);
             for (unsigned j = i; j + 1 < *n; j++)
-                held[j] = held[j + 1];
-            (*n)--;
+                lockdep_core_held_store(&held[j], &held[j + 1]);
+            __atomic_store_n(n, *n - 1u, __ATOMIC_SEQ_CST);
+            lockdep_core_held_end(seq);
             return true;
         }
     }
@@ -624,7 +648,7 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
         struct thread *t = me();
         if (t == NULL)
             return;
-        if (!remove_entry(t->held_mutex, &t->nr_held_mutex, lock))
+        if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
             report(LOCKDEP_R_UNHELD, NULL, 0, ip, "mutex_unlock of a mutex this thread does not hold", NULL, 0);
         return;
     }

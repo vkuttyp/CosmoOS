@@ -143,7 +143,8 @@ static void *reader(void *opaque)
     return NULL;
 }
 struct held_model {
-    struct lockdep_held held[LOCKDEP_MAX_HELD];
+    struct lockdep_held *held;
+    unsigned capacity;
     uint64_t seq;
     unsigned count, done;
 };
@@ -165,7 +166,7 @@ static void *held_writer(void *opaque)
 {
     struct held_model *m = opaque;
     for (unsigned gen = 1; gen <= ROUNDS; gen++) {
-        unsigned count = 1u + gen % LOCKDEP_MAX_HELD;
+        unsigned count = 1u + gen % m->capacity;
         lockdep_core_held_begin(&m->seq);
         for (unsigned i = 0; i < count; i++) {
             struct lockdep_held e = {
@@ -189,26 +190,28 @@ static void *held_reader(void *opaque)
     struct lockdep_held copy[LOCKDEP_MAX_HELD];
     unsigned count;
     do {
-        if (lockdep_core_held_snapshot(&m->seq, m->held, &m->count, copy, &count))
+        if (lockdep_core_held_snapshot(&m->seq, m->held, m->capacity, &m->count, copy, &count))
             check_held_copy(copy, count);
     } while (!__atomic_load_n(&m->done, __ATOMIC_ACQUIRE));
     return NULL;
 }
 
-static void test_held_snapshots(void)
+static void test_held_snapshots(unsigned capacity)
 {
-    struct held_model m = {0};
-    struct lockdep_held copy[LOCKDEP_MAX_HELD];
+    struct held_model m = { .capacity = capacity };
+    m.held = calloc(capacity, sizeof(*m.held));
+    struct lockdep_held *copy = calloc(capacity, sizeof(*copy));
+    assert(m.held && copy);
     unsigned count;
-    assert(lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(lockdep_core_held_snapshot(&m.seq, m.held, m.capacity, &m.count, copy, &count));
     assert(count == 0);
     /* A stopped CPU mid-update must return immediately, not spin. */
     lockdep_core_held_begin(&m.seq);
-    assert(!lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(!lockdep_core_held_snapshot(&m.seq, m.held, m.capacity, &m.count, copy, &count));
     assert(count == 0);
     lockdep_core_held_end(&m.seq);
-    m.count = LOCKDEP_MAX_HELD + 1u;
-    assert(!lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    m.count = capacity + 1u;
+    assert(!lockdep_core_held_snapshot(&m.seq, m.held, m.capacity, &m.count, copy, &count));
     assert(count == 0);
     m.count = 0;
     pthread_t w, r[READERS];
@@ -218,10 +221,12 @@ static void test_held_snapshots(void)
     assert(pthread_join(w, NULL) == 0);
     for (unsigned i = 0; i < READERS; i++)
         assert(pthread_join(r[i], NULL) == 0);
-    assert(lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(lockdep_core_held_snapshot(&m.seq, m.held, m.capacity, &m.count, copy, &count));
     assert(count > 0);
     check_held_copy(copy, count);
-    puts("lockdep-held-snapshot: PASS (busy, bounds, concurrent generations)");
+    free(copy);
+    free(m.held);
+    printf("lockdep-held-snapshot: PASS (capacity=%u, busy, bounds, concurrent generations)\n", capacity);
 }
 
 int main(void)
@@ -265,7 +270,8 @@ int main(void)
                                   !(m->graph.classes[b].usage & LOCKDEP_HELD_IRQS_ON));
     }
     free(m);
-    test_held_snapshots();
+    test_held_snapshots(LOCKDEP_MAX_HELD);
+    test_held_snapshots(LOCKDEP_MAX_HELD_MUTEX);
     puts("lockdep-threads: PASS (publication, writers, readers, closure oracle)");
     return 0;
 }

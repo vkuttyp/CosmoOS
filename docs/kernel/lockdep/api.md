@@ -70,8 +70,11 @@ Called by `thread_exit`: a thread exiting with a mutex held is a report.
 
 ### `void lockdep_dump_held(void)`
 Prints both held stacks (class, subclass, acquiring address, `[irq]`,
-`[irqs-on]`, `[try]`). `panic()` calls it after the backtrace, so every
-crash report shows what the CPU and thread held.
+`[irqs-on]`, `[try]`). `panic()` calls it after the backtrace to report
+the CPU and thread's available held-state snapshots.
+Each stack is captured with one bounded attempt before printing; a busy,
+changing, or invalid stack is reported unavailable. The two copies are
+independent, not one simultaneous view of CPU and thread state.
 
 ### `bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)`
 One bounded attempt to capture a CPU's spinlock stack. `out` must have
@@ -82,6 +85,17 @@ the copy. With lockdep disabled it always returns false. It allocates
 nothing, acquires no lock, and never waits for the target CPU. It captures
 neither the thread mutex stack nor a globally simultaneous CPU snapshot.
 `lockdep_dump_held_cpu` prints this copy or an explicit unavailable message.
+
+### `bool lockdep_snapshot_held_thread(const struct thread *t, struct lockdep_held *out, unsigned *count)`
+One bounded attempt to capture a thread's published mutex tracking stack.
+`out` must hold `LOCKDEP_MAX_HELD_MUTEX` entries. The caller must keep `t`
+alive throughout the call, using an owned thread reference or the current
+thread; the function does not acquire a reference from an arbitrary pointer.
+Null targets, oversized counts, odd/changed sequences, and disabled lockdep
+return false with zero count and unusable output. No allocation, locks or
+retries occur. A stopped/preempted writer cannot block the reader. This is
+one thread's tracking state, not a snapshot of mutex owner fields or of all
+threads and CPUs together.
 
 ### `void lockdep_dump_graph(void)`
 Prints a consistent snapshot of observed edges (`kdebug`), `'a'#n -> 'b'#m`

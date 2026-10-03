@@ -838,3 +838,44 @@ architectures (`out/interrupt-writers-release-{x86_64,aarch64}.log`). The
 interrupt architecture, design, API, invariant and testing descriptions
 were reconciled with the actual record publication/lifetime protocol.
 `git diff --check` passed.
+
+## Thread mutex-stack snapshot continuation
+
+Base: `e886d6d7`. Phase 1 extends the bounded held-stack reader to a
+referenced thread's mutex stack. The common helper now takes an explicit
+capacity, rejecting oversized counts before reading either stack. The
+owning thread brackets atomic entry/count writes with a sequence; readers
+make one attempt and reject busy or changed state. Preemption or migration
+of the writer cannot make a reader wait. The caller must retain the thread
+object throughout the read; the API cannot acquire lifetime from an
+arbitrary pointer.
+
+Phase 2 changes panic held-state output to snapshot the current CPU and
+thread separately, or print unavailable. It no longer walks a partially
+updated local stack directly. This adds an eight-byte sequence at the end
+of `struct thread`, preserving existing member offsets, plus atomic writes
+on debug mutex tracking updates. No isolated overhead comparison was made
+for this increment. It does not add reentrant NMI writers, freeze mutex
+owner fields, or provide a simultaneous global held-state view.
+
+Phase 3 extends the sanitizer generation test to both 24-entry CPU and
+eight-entry mutex capacities, including exactly sized source/output arrays
+for bounds checks and refusal of a stopped writer. The kernel mutex test
+checks trylock metadata, shifted removal, busy refusal, and empty state.
+It also snapshots a referenced live thread through 1024 acquisition/release
+rounds and keeps an extra reference across join to check its exited stack.
+
+The full ASan/UBSan host suite and lockdep TSan target passed:
+`out/lockdep-thread-host.log` and `out/lockdep-thread-tsan.log`. Both final
+four-CPU debug boots passed all 418 self-tests and the full harness, in
+146.4 s on x86-64 and 145.8 s on AArch64. The remote mutex test accepted
+7591 and 6404 concurrent samples respectively, as well as checking the
+initial pair and exited empty stack. Logs:
+`out/lockdep-thread-final-{x86_64,aarch64}.log`. Both release kernels built
+successfully (`out/lockdep-thread-release-{x86_64,aarch64}.log`).
+The deliberate panic regressions also passed on both architectures (112.9 s
+and 111.0 s), with both current-CPU and `kmain` empty-stack snapshots printed
+after the backtrace. Logs: `out/lockdep-thread-crash-{x86_64,aarch64}-result.log`
+and `out/{x86_64,aarch64}-debug-crash/boot-test-crash.log`.
+`git diff --check` passed. The inventory marks this bounded snapshot work
+complete while retaining simultaneous global snapshots as deferred.

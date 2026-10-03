@@ -16,6 +16,7 @@
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
+#include <kernel/sched.h>
 #include <kernel/percpu.h>
 #include <kernel/selftest.h>
 #include <kernel/spinlock.h>
@@ -332,6 +333,75 @@ bool selftest_lockdep_sleep(const char **reason)
 
 /* --- lockdep-mutex: the per-thread stack and mutex ordering --- */
 
+struct mutex_snapshot_probe {
+    struct mutex a, b;
+    unsigned ready, proceed, done;
+};
+
+static void mutex_snapshot_writer(void *arg)
+{
+    struct mutex_snapshot_probe *p = arg;
+    mutex_lock(&p->a);
+    mutex_lock(&p->b);
+    __atomic_store_n(&p->ready, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&p->proceed, __ATOMIC_ACQUIRE))
+        sched_yield();
+    mutex_unlock(&p->a);
+    mutex_unlock(&p->b);
+    for (unsigned i = 0; i < 1024; i++) {
+        mutex_lock(&p->a);
+        mutex_lock(&p->b);
+        mutex_unlock(&p->a); /* shift the remaining entry */
+        mutex_unlock(&p->b);
+        if (!(i % 8))
+            sched_yield();
+    }
+    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
+}
+
+static bool test_remote_mutex_snapshot(const char **reason)
+{
+    struct mutex_snapshot_probe p = {0};
+    mutex_init(&p.a, "snapshot-thread-a");
+    mutex_init(&p.b, "snapshot-thread-b");
+    struct thread *t = thread_create(mutex_snapshot_writer, &p, "snapshot-writer", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    struct lockdep_held copy[LOCKDEP_MAX_HELD_MUTEX];
+    unsigned count;
+    uint64_t start = clock_now_ns();
+    while (!__atomic_load_n(&p.ready, __ATOMIC_ACQUIRE) && clock_since_ns(start) < 1000000000ULL)
+        sched_yield();
+    bool ok = __atomic_load_n(&p.ready, __ATOMIC_ACQUIRE) &&
+              lockdep_snapshot_held_thread(t, copy, &count) && count == 2 &&
+              copy[0].lock == &p.a && copy[1].lock == &p.b;
+    __atomic_store_n(&p.proceed, 1u, __ATOMIC_RELEASE);
+    start = clock_now_ns();
+    unsigned accepted = 0;
+    while (!__atomic_load_n(&p.done, __ATOMIC_ACQUIRE) && clock_since_ns(start) < 2000000000ULL) {
+        if (lockdep_snapshot_held_thread(t, copy, &count)) {
+            accepted++;
+            ok = ok && count <= 2;
+            if (count == 1)
+                ok = ok && (copy[0].lock == &p.a || copy[0].lock == &p.b);
+            if (count == 2)
+                ok = ok && copy[0].lock == &p.a && copy[1].lock == &p.b;
+        } else {
+            ok = ok && count == 0;
+        }
+        sched_yield();
+    }
+    ok = ok && __atomic_load_n(&p.done, __ATOMIC_ACQUIRE);
+    /* The creator reference covers the reads above. Retain another
+     * reference before join drops it, then inspect the exited object. */
+    thread_get(t);
+    thread_join(t);
+    bool empty = lockdep_snapshot_held_thread(t, copy, &count) && count == 0;
+    thread_put(t);
+    CHECK(ok && empty);
+    kinfo("selftest: lockdep-mutex: remote initial pair, %u concurrent snapshots, exited stack empty", accepted);
+    return true;
+}
+
 bool selftest_lockdep_mutex(const char **reason)
 {
     static struct mutex m1, m2;
@@ -359,6 +429,27 @@ bool selftest_lockdep_mutex(const char **reason)
     mutex_unlock(&m2);
     CHECK(hits == 1);
 
+    /* Snapshot actual mutex publication, trylock metadata and removal
+     * out of order. A busy writer is refused without waiting for us. */
+    struct thread *self = thread_current();
+    struct lockdep_held copy[LOCKDEP_MAX_HELD_MUTEX];
+    unsigned count;
+    CHECK(!lockdep_snapshot_held_thread(NULL, copy, &count) && count == 0);
+    CHECK(mutex_trylock(&m1));
+    mutex_lock(&m2);
+    bool snap = lockdep_snapshot_held_thread(self, copy, &count);
+    bool pair = snap && count == 2 && copy[0].lock == &m1 && copy[1].lock == &m2 &&
+                (copy[0].flags & LOCKDEP_HF_TRYLOCK);
+    mutex_unlock(&m1);
+    snap = lockdep_snapshot_held_thread(self, copy, &count);
+    bool shifted = snap && count == 1 && copy[0].lock == &m2;
+    lockdep_core_held_begin(&self->held_mutex_seq);
+    bool busy = !lockdep_snapshot_held_thread(self, copy, &count) && count == 0;
+    lockdep_core_held_end(&self->held_mutex_seq);
+    mutex_unlock(&m2);
+    CHECK(pair && shifted && busy);
+    CHECK(lockdep_snapshot_held_thread(self, copy, &count) && count == 0);
+
     /* A mutex under a spinlock is a sleep report (might_sleep in
      * mutex_lock). A fresh spinlock and mutex, so no recorded order is
      * involved: the sleep report is the only one. */
@@ -375,7 +466,7 @@ bool selftest_lockdep_mutex(const char **reason)
     mutex_unlock(&m3);
     spin_unlock_irqrestore(&under2, s);
     CHECK(lockdep_expected_hits() == 1);
-    return true;
+    return test_remote_mutex_snapshot(reason);
 }
 
 /* --- lockdep-contention: a lock waited for is not held ---
