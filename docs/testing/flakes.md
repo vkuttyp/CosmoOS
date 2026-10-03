@@ -859,6 +859,16 @@ a real test with it.
 
 ## `irq-route`'s interrupt count, and the failure it manufactured
 
+**Count check corrected 2026-10-04, PR #307:** the test now waits for
+five deliveries with a 1 s deadline, sleeping between atomic counter
+reads. The former fixed 50 ms window assumed a minimum delivered rate;
+AArch64's source rearms from a kernel-timer callback, so delayed callbacks
+also delay subsequent source assertions. A slower real-source probe
+reproduces the old count failure and validates the new wait. Missing
+delivery still fails at its deadline, and masking assertions are retained.
+See [interrupt testing](../kernel/interrupt/testing.md) for the probes.
+The sightings and earlier cleanup correction below remain as history.
+
 **Seen once, 2026-09-20**, AArch64 debug, on the virtio-removal branch:
 `irq-route ... FAIL: check failed: hits >= 5` — a count of PIT
 interrupts over a fixed `udelay(50000)` (200 Hz, so ten expected and
@@ -900,8 +910,8 @@ again failed `hits >= 5` (`schedtest.c:282`, 71 ms), the sole failure among
 422 self-tests. `net-nat` passed in 1,358 ms and `net-nicbench` in 2,127 ms;
 `irq-affinity` also passed. The fixed-interval interrupt-count check remains
 unchanged. The complete failing run is retained in
-`out/nat-expiry-aarch64-chaos-result.log` and
-`out/aarch64-debug-chaos/boot-test-chaos.log`.
+`out/nat-expiry-aarch64-chaos-result.log` (including the captured boot
+output; the target's default boot-log path is reused by later runs).
 
 ## The count
 

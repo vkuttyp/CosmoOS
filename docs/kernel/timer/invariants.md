@@ -70,7 +70,8 @@ checked for NULL on every tick. Check: review.
 **T12. Delays are busy-waits with no side effects.** `ndelay`/`udelay`
 never block or take locks, so they are usable before the scheduler and
 in interrupt context. Check: review; used by the `timer` and
-`irq-route` tests inside thread 0 before any sleep facility is proven.
+`irq-route` tests' mask-observation windows inside thread 0. The latter's
+delivery phase uses a bounded sleeping wait for an interrupt count.
 
 **T13. A callback may re-arm its own timer.** `timer_start` accepts a
 timer in state IDLE or RUNNING; only PENDING is a double start and

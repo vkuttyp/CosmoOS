@@ -1668,3 +1668,69 @@ Full-boot follow-up validation:
 
 Python syntax compilation and `git diff --check` passed. The production
 NAT implementation, timeouts and test budgets are unchanged.
+
+## PR #307 follow-up: IRQ delivery-count window (2026-10-04)
+
+The AArch64 chaos run during NAT validation failed `irq-route` at
+`hits >= 5` in 71 ms. That log provides neither the observed hit count
+nor a trace of timer-source assertions, so it cannot identify the exact
+host scheduling gap. Source inspection establishes that the test assumed
+a minimum delivery rate: it requested 200 Hz, waited 50 ms, then demanded
+five hits. The earlier sightings span both architectures.
+
+On AArch64, `arch_test_periodic_irq_start` uses a kernel timer to raise a
+spare GIC SPI. Its callback rearms relative to the callback's execution,
+and expiry is tick-grained. With a 4 ms tick, a callback rearming for
+5 ms normally needs two more ticks even without host delay, already
+leaving less slack than the old comment's ten expected hits. A late
+callback pushes subsequent assertions back; the tick also skips missed periods rather than delivering every
+elapsed tick. Consequently the nominal source frequency cannot guarantee
+five delivered interrupts in that window. x86 uses the PIT but likewise
+cannot require a descheduled vCPU to observe every nominal period.
+
+`irq-route` now waits for the same five hits, sleeping between checks,
+with `clock_deadline_ns` / `clock_deadline_passed` enforcing a 1 s bound.
+A broken route reports the observed count and returns failure; the
+runner's existing deferred cleanup releases the line and source. Counter
+accesses are atomic because chaos can migrate the test away from the
+IRQ's target CPU. Relaxed ordering suffices: the counter publishes no
+other data. The existing two mask-observation windows, duplicate-request,
+vector and release assertions remain unchanged. No controller, periodic
+source implementation or whole-test watchdog budget changed.
+
+`tools/irq-route-probe.py` runs in isolated clones. Old/fixed modes slow
+the real source to 20 Hz, making the former rate assumption fail while
+still delivering five interrupts within the new bound. This is a
+controlled slower-source comparison, not a replay of the failed host's
+scheduling. The silent mode leaves the line masked and requires the
+zero-hit deadline diagnostic. The broken-mask mode keeps delivery enabled
+at 200 Hz and requires the mask assertion to fail. Each negative requires
+two deferred releases, and every mode then runs `irq-affinity` before
+the expected panic shutdown. AArch64 must deliver to all four CPUs;
+x86 has no manually raisable spare line and explicitly skips affinity.
+A skipped routing test cannot
+satisfy the fixed mode's required delivery-count marker.
+
+All eight controlled probes passed: old, fixed, silent and broken-mask
+on x86-64 and AArch64. Here a negative probe passes only when its expected
+failure, cleanup count and architecture-specific affinity outcome are
+all observed.
+Both fixed probes observed exactly five deliveries. Logs are
+`out/irq-route-{x86_64,aarch64}-{old,fixed,silent,broken-mask}-result.log`,
+with retained images and boot logs in the corresponding `run-*` directory.
+
+The complete AArch64 `test-chaos` boot passed all 422 self-tests and the
+full harness in 138.2 s; `irq-route` passed in 85 ms. Logs:
+`out/irq-route-aarch64-chaos-result.log` and
+`out/irq-route-aarch64-chaos.log`. The earlier failed chaos run remains
+in `out/nat-expiry-aarch64-chaos-result.log`, including its captured boot
+output. This new pass does not erase that observation.
+
+The complete x86-64 standard boot also passed all 422 self-tests and the
+full harness in 138.7 s; `irq-route` passed in 75 ms. Logs:
+`out/irq-route-x86_64-normal-result.log` and
+`out/irq-route-x86_64-normal.log`. Python syntax compilation and
+`git diff --check` passed. After making the probe's affinity marker
+architecture-specific, all eight retained boot logs were checked against
+that additional requirement: real four-CPU delivery on AArch64 and the
+explicit unsupported-source skip on x86.
