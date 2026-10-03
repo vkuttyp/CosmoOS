@@ -226,7 +226,7 @@ under concurrent host load are not presented as lock-overhead measurements.
 ## 21. Known limitations
 
 Eight-node printed cycle tail, bounded 320 classes/held stacks, no global
-snapshot protocol for concurrent diagnostics/statistics, no sanitizer model
+snapshot protocol for concurrent held-stack diagnostics/statistics, no sanitizer model
 of kernel execution-context state, and no general callback-wait graph remain.
 The host graph model described below covers publication and shared graph
 access under TSan. Timer cancellation now
@@ -404,3 +404,35 @@ held stacks, interrupt entry, migration, callback profile lifetime, or
 NMI/#MC execution. Graph diagnostic reads remain a live view, not a
 globally consistent snapshot. TSan execution on the Linux CI host remains
 unverified; the new model is included in its existing ASan/UBSan host step.
+
+## Consistent graph dump increment
+
+`lockdep_dump_graph` now allocates a private bounded graph, copies the
+source under the raw writer lock, and prints from that copy after unlocking.
+The emitted header and edge list describe the same instant. Allocation,
+logging, and freeing never run while holding the raw lock. The snapshot
+owns its class metadata as well as its bitmap; module metadata lifetime
+rules remain intact. Allocation failure emits an explicit unavailable
+message. The 232968-byte copy uses a temporary 256 KiB heap allocation,
+with no permanent second graph and no additional acquisition-path work.
+The raw lock and masked interrupts do cover the bounded copy.
+
+The host `snapshot` regression changes and frees the source graph before
+checking the captured metadata, counts, and subclass edges. The threaded
+model now also captures snapshots during concurrent writes and checks
+their counts and endpoint ranges after releasing the writer lock. Both
+the complete ASan/UBSan host suite and the separate TSan model pass; release
+kernels build for x86-64 and AArch64. Logs are
+`out/lockdep-snapshot-host.log`, `out/lockdep-snapshot-tsan.log`, and
+`out/lockdep-snapshot-release-build.log`.
+
+Four-CPU debug boots pass all 416 self-tests and the complete boot harness:
+x86-64 in 121.5 s and AArch64 in 128.5 s. The captured logs contain 275
+classes each; printed edge counts exactly match their headers (1254 on
+x86-64, 1240 on AArch64). Logs: `out/lockdep-snapshot-x86_64.log` and
+`out/lockdep-snapshot-aarch64.log`. `git diff --check` passes.
+
+This normal diagnostic API requires a working allocator and raw lock.
+Panic/NMI paths do not call it. Concurrent remote held-stack inspection,
+global statistics consistency, and NMI/#MC reentrancy remain unresolved;
+a consistent graph alone does not freeze those execution states.

@@ -98,7 +98,9 @@ void lockdep_dump_held_cpu(unsigned cpu);
 void lockdep_get_stats(struct lockdep_stats *out);
 
 /* Print every recorded edge as "'a'#n -> 'b'#m" (kdebug), one per line:
- * the lock order the tree actually has, for docs to compare against. */
+ * a consistent graph snapshot for docs to compare against. Requires a
+ * working heap and raw lock; not a panic/NMI diagnostic. Allocation
+ * failure prints an explicit unavailable message. */
 void lockdep_dump_graph(void);
 
 /* Self-tests: the next report of `kind` counts instead of panicking, and

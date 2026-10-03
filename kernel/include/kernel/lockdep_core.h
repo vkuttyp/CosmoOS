@@ -62,6 +62,15 @@ struct lockdep_graph {
     uint64_t before[LOCKDEP_MAX_NODES][LOCKDEP_NODE_WORDS];   /* bit b of before[a]: b was taken while a was held */
 };
 
+/* Caller holds the graph writer lock for the entire copy. Destination
+ * is private, separately allocated storage; it owns metadata as well as
+ * edges and may be traversed after the lock is released. */
+static inline void lockdep_core_snapshot(const struct lockdep_graph *graph,
+                                          struct lockdep_graph *snapshot)
+{
+    *snapshot = *graph;
+}
+
 /* Scratch for the reachability search; the caller serialises its use. */
 struct lockdep_scratch {
     uint64_t visited[LOCKDEP_NODE_WORDS];

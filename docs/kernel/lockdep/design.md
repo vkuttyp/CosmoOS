@@ -121,10 +121,18 @@ Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
 tracked. `lockdep_core_add_edge` requires that caller serialization; its
 atomic bitmap write supports unlocked readers, not concurrent writers.
-Graph dumps capture the class range and edge count under the raw lock,
-then read bitmap words atomically and print outside it. They skip edges
-to newer classes; immutable names/kinds in the captured range are safe
-to read, but growing edges mean the dump is not a point-in-time snapshot.
+Normal graph dumps allocate private storage before taking the raw lock,
+copy the complete bounded graph under it, and print from that snapshot
+after releasing it. Counts, metadata, and edges therefore describe one
+instant even if logging or another CPU adds dependencies during output.
+The copy is 232968 bytes (about 228 KiB); the heap temporarily reserves
+a 256 KiB page allocation and frees it after printing. There is no extra
+permanent graph or acquisition-path cost. The raw lock and disabled IRQs
+cover only the copy, never allocation, printing, or freeing. Allocation
+failure prints an explicit unavailable message. This API requires a
+working allocator and raw lock and is not used by panic/NMI diagnostics.
+Held-stack diagnostics and statistics retain their separate consistency
+limits; the graph snapshot does not freeze global execution state.
 The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a

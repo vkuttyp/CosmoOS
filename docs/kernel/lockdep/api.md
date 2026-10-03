@@ -74,13 +74,14 @@ Prints both held stacks (class, subclass, acquiring address, `[irq]`,
 crash report shows what the CPU and thread held.
 
 ### `void lockdep_dump_graph(void)`
-Prints observed edges (`kdebug`) within the class range captured at entry, `'a'#n -> 'b'#m` meaning b was taken
-while a was held. `selftest_run_all` calls it once at the end of the run so
-the debug boot log carries the tree's real lock order; `testing.md`
-reproduces the interesting part. Class names/kinds are immutable after
-publication; bitmap reads are atomic. Concurrent additions can change the
-edge set during printing, so the header count and emitted edges need not
-match. This is not a consistent snapshot.
+Prints a consistent snapshot of observed edges (`kdebug`), `'a'#n -> 'b'#m`
+meaning b was taken while a was held. `selftest_run_all` calls it once at
+the end of the run so the debug boot log carries the tree's real lock
+order. The complete graph is copied under the raw writer lock into private
+heap storage; printing and freeing happen outside the lock. The header
+count matches the captured edge list. If allocation fails, prints an
+explicit unavailable message instead. Requires a working allocator and
+raw lock; not a panic/NMI reporting API.
 
 ### `void lockdep_get_stats(struct lockdep_stats *out)`
 Classes, edges, acquisitions, reachability searches, reports.

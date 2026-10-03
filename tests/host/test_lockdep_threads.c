@@ -76,6 +76,29 @@ static void *writer(void *opaque)
     }
     return NULL;
 }
+/* Validate a private snapshot outside the writer lock while the source
+ * may grow. Its edge total and metadata range must describe one graph. */
+static void check_snapshot(const struct lockdep_graph *g)
+{
+    unsigned edges = 0;
+    unsigned nodes = g->nr_classes * LOCKDEP_SUBCLASSES;
+    for (unsigned c = 0; c < g->nr_classes; c++) {
+        assert(g->classes[c].kind == LOCKDEP_KIND_SPIN);
+        assert(strncmp(g->classes[c].name, "concurrent-", 11) == 0);
+    }
+    for (unsigned a = 0; a < LOCKDEP_MAX_NODES; a++)
+        for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
+            uint64_t bits = g->before[a][w];
+            edges += (unsigned)__builtin_popcountll(bits);
+            while (bits) {
+                unsigned b = w * 64u + (unsigned)__builtin_ctzll(bits);
+                assert(a < nodes && b < nodes);
+                bits &= bits - 1;
+            }
+        }
+    assert(edges == g->nr_edges);
+}
+
 static void *reader(void *opaque)
 {
     struct arg *a = opaque;
@@ -90,9 +113,17 @@ static void *reader(void *opaque)
         if (edges) break;
         sched_yield();
     }
+    struct lockdep_graph *snapshot = malloc(sizeof(*snapshot));
+    assert(snapshot);
     for (unsigned i = 0; i < ROUNDS; i++) {
-        /* The kernel dump captures this range under raw_lock, then reads
-         * immutable names/kinds and growing atomic bitmaps outside it. */
+        if (!(i % 128)) {
+            take(m);
+            lockdep_core_snapshot(&m->graph, snapshot);
+            drop(m);
+            check_snapshot(snapshot);
+        }
+        /* Also retain the unlocked-reader publication model: capture the
+         * range, then inspect immutable metadata and atomic bitmaps. */
         take(m);
         unsigned count = m->graph.nr_classes;
         drop(m);
@@ -108,6 +139,7 @@ static void *reader(void *opaque)
         }
         sched_yield();
     }
+    free(snapshot);
     return NULL;
 }
 int main(void)

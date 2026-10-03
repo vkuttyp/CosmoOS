@@ -162,7 +162,10 @@ cannot be combined with ASan); it builds a distinct host binary and fails
 on a race report. This requires a host compiler and runtime supporting
 TSan. The model checks graph publication and access discipline, not kernel
 interrupt entry, CPU migration, held stacks, timer-profile lifetime, or
-NMI reentrancy. It does not make the diagnostic dump a consistent snapshot.
+NMI reentrancy. Readers additionally capture private graph snapshots under
+the raw lock and verify their edge counts and metadata ranges outside it
+while writers continue. The single-threaded `snapshot` case mutates and
+frees its source graph before verifying that the captured graph is intact.
 
 ### Failure detection and boundary cases
 

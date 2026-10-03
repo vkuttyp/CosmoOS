@@ -272,8 +272,35 @@ static void test_irq_oracle(void)
     free(g);
 }
 
+static void test_snapshot(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_graph *copy = malloc(sizeof(*copy));
+    EXPECT(g && copy);
+    int a = lockdep_core_class(g, "snapshot-a", LOCKDEP_KIND_SPIN);
+    int b = lockdep_core_class(g, "snapshot-b", LOCKDEP_KIND_MUTEX);
+    EXPECT(a == 0 && b == 1);
+    uint16_t from = lockdep_node((unsigned)a, 3), to = lockdep_node((unsigned)b, 2);
+    EXPECT(lockdep_core_add_edge(g, from, to));
+    lockdep_core_snapshot(g, copy);
+    /* Later registration/edges cannot change the captured count or list,
+     * and even releasing source metadata must leave the copy usable. */
+    EXPECT(lockdep_core_class(g, "later", LOCKDEP_KIND_SPIN) == 2);
+    EXPECT(lockdep_core_add_edge(g, to, lockdep_node(2, 0)));
+    memset(g, 0xa5, sizeof(*g));
+    free(g);
+    EXPECT(copy->nr_classes == 2 && copy->nr_edges == 1);
+    EXPECT(strcmp(copy->classes[0].name, "snapshot-a") == 0);
+    EXPECT(strcmp(copy->classes[1].name, "snapshot-b") == 0);
+    EXPECT(copy->classes[1].kind == LOCKDEP_KIND_MUTEX);
+    EXPECT(lockdep_core_has_edge(copy, from, to));
+    EXPECT(!lockdep_core_has_edge(copy, to, lockdep_node(2, 0)));
+    free(copy);
+}
+
 static const struct host_test tests[] = {
     { "classes", test_classes },
+    { "snapshot", test_snapshot },
     { "edges-and-cycles", test_edges_and_cycles },
     { "decision", test_decision },
     { "metadata-lifetime", test_metadata_lifetime },

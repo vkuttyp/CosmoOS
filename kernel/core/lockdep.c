@@ -16,6 +16,7 @@ STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
               "lockdep timer profile table must cover every concurrent CPU callback");
 
 #include <kernel/console.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -664,32 +665,37 @@ bool lockdep_is_held(const void *lock, unsigned kind)
 
 void lockdep_dump_graph(void)
 {
-    /* Publish a fixed class range before reading immutable names/kinds.
-     * Never print under the raw lock: logging acquires tracked locks.
-     * Edges may grow during the dump; this is not a point-in-time snapshot. */
+    /* Normal diagnostics only: allocate before taking the raw lock, then
+     * copy a bounded graph and print from private storage. Neither heap
+     * operations nor logging may run under the validator's raw lock. */
+    struct lockdep_graph *snapshot = kmalloc(sizeof(*snapshot), 0);
+    if (!snapshot) {
+        kwarn("lockdep: graph dump unavailable: snapshot allocation failed");
+        return;
+    }
     arch_irq_state_t s = raw_lock();
-    unsigned nr_classes = g_graph.nr_classes;
-    unsigned nr_edges = g_graph.nr_edges;
+    lockdep_core_snapshot(&g_graph, snapshot);
     raw_unlock(s);
+    unsigned nr_classes = snapshot->nr_classes;
+    unsigned nr_edges = snapshot->nr_edges;
     unsigned nr_nodes = nr_classes * LOCKDEP_SUBCLASSES;
     kdebug("lockdep: %u classes, %u edges (a -> b: b was taken while a was held)", nr_classes, nr_edges);
     for (unsigned a = 0; a < nr_nodes; a++) {
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
-            uint64_t bits = __atomic_load_n(&g_graph.before[a][w], __ATOMIC_RELAXED);
+            uint64_t bits = snapshot->before[a][w];
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
                 bits &= bits - 1;
                 unsigned b = w * 64u + bit;
-                if (b >= nr_nodes)
-                    continue;   /* class registered after the initial snapshot */
-                const struct lock_class *ca = &g_graph.classes[lockdep_node_class((uint16_t)a)];
-                const struct lock_class *cb = &g_graph.classes[lockdep_node_class((uint16_t)b)];
+                const struct lock_class *ca = &snapshot->classes[lockdep_node_class((uint16_t)a)];
+                const struct lock_class *cb = &snapshot->classes[lockdep_node_class((uint16_t)b)];
                 kdebug("lockdep: edge %s '%s'#%u -> %s '%s'#%u", ca->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
                        ca->name, lockdep_node_subclass((uint16_t)a), cb->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
                        cb->name, lockdep_node_subclass((uint16_t)b));
             }
         }
     }
+    kfree(snapshot);
 }
 
 void lockdep_get_stats(struct lockdep_stats *out)
