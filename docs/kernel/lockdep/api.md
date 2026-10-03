@@ -91,7 +91,8 @@ report of `kind` increments a counter and returns instead of panicking,
 and the operation proceeds. `lockdep_expected_hits` returns and clears the
 counter. Report kinds: `LOCKDEP_R_INVERSION`, `LOCKDEP_R_RECURSION`,
 `LOCKDEP_R_IRQ`, `LOCKDEP_R_SLEEP`, `LOCKDEP_R_OVERFLOW`,
-`LOCKDEP_R_UNHELD`, `LOCKDEP_R_EXIT_HELD`.
+`LOCKDEP_R_UNHELD`, `LOCKDEP_R_EXIT_HELD`, `LOCKDEP_R_IRQ_STATE`,
+`LOCKDEP_R_CALLBACK`.
 
 ## The core (`kernel/include/kernel/lockdep_core.h`)
 

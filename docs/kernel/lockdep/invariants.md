@@ -22,14 +22,17 @@ another of the same class is held is a report unless the inner one is a
 `*_lock_nested` subclass. Check: `lockdep-recursion`; every annotation is
 in L5.
 
-**L3. A lock taken in interrupt context is never held with interrupts
-enabled.** The class is marked IRQ-safe at its first interrupt-context
-acquisition and held-with-IRQs-on at its first `spin_lock` with interrupts
-enabled; both bits is a report naming both sites. Check: `lockdep-irq` (a
-class first held with interrupts on, then taken in a real self-IPI
-handler). Gap: a class that acquires the two bits in the other order is
-reported at the second acquisition too; both are covered by the same code
-path.
+**L3. No IRQ-used lock can reach a lock acquired with interrupts enabled.**
+A blocking IRQ-context acquisition marks a class IRQ-used. A successful
+acquisition with IRQs enabled (including trylock) marks it IRQ-enabled.
+The validator checks both usage-after-edges and edges-after-usage across
+all subclasses. An IRQ trylock itself is nonblocking and adds no IRQ-used
+label; a failed trylock adds no usage or edge. Check: `lockdep-irq` uses
+self-IPIs for direct, edge-last, safe-label-last and trylock cases; host
+`irq-dependencies` covers a maximum-node path and `irq-oracle` compares
+BFS against independent transitive closure. Timer cancellation has a
+separate observed-lock-profile check (L15); arbitrary callback completion
+and NMI/#MC relationships remain outside these models.
 
 **L4. No sleeping call in atomic context.** `might_sleep()` at the entry
 of every sleeping primitive and every user-memory copy panics when a
@@ -123,3 +126,19 @@ Reachability searches all nodes; path output retains at most the caller's
 capacity and returns the stored count, including zero for a zero-capacity
 request. Check: ASan/UBSan `path-bounds` drives a 1280-node chain and the
 printer's loop; `lockdep-order` detects a ten-lock cycle through real hooks.
+
+**L14. `spin_unlock_irqrestore` restores the state saved for its lock and
+does not enable interrupts while another spinlock remains held.** Manual
+`spin_unlock` followed by `arch_irq_restore` is outside this pair check.
+Check: `lockdep-irq` directly probes wrong state and nested-enable cases,
+then performs matching real releases. Gap: manual raw save/restore sites
+are not paired with lock identities.
+
+**L15. `timer_cancel_sync` does not wait while holding a lock its running
+callback has acquired.** A callback records blocking spinlock objects in a
+bounded per-callback profile; cancellation checks the caller's held
+spinlock and mutex stacks before each wait. Check: `timer-cancel-sync`
+holds the callback-needed lock while a real callback blocks on it, then
+verifies the expected report returns from the synchronous wait. Gap: only
+observed callback paths and up to 16 locks per callback are represented;
+other callback/wait relationships remain unmodeled.

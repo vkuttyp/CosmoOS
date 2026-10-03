@@ -227,9 +227,14 @@ under concurrent host load are not presented as lock-overhead measurements.
 
 Eight-node printed cycle tail, bounded 320 classes/held stacks, no global
 snapshot protocol for concurrent diagnostics/statistics, no TSan validator
-model, no transitive IRQ validation, no callback-wait graph or IRQ-restore
-ownership validation. NMI/#MC instrumentation remains unsupported without
-proving raw-lock reentrancy. Release-with-lockdep was built, not exercised.
+model, and no general callback-wait graph remain. Timer cancellation now
+checks only the lock paths learned from active timer callbacks; it does not
+model other callback classes or arbitrary wait dependencies. IRQ dependency
+validation is transitive for modeled lock-class paths. `spin_unlock_irqrestore`
+validates the restored enabled/disabled state against the matching held-lock
+record, but raw `arch_irq_restore` ownership/pairing remains unchecked.
+NMI/#MC instrumentation remains unsupported without proving raw-lock
+reentrancy. Release-with-lockdep was built, not exercised.
 
 ## 22. Deferred work
 
@@ -289,3 +294,56 @@ module's copied class name. Logs: `out/lockdep-review-host.log`,
 and each architecture's `lockdep-review-smp.log`. These boots exercise the
 dump but are not a proof of all possible concurrent interleavings; the
 shared-access argument also relies on the lock/publication inspection.
+
+## Active milestone continuation
+
+The later milestone work extends the original IRQ model with forward and
+reverse transitive-path checks. Successful trylocks from IRQ context add
+neither IRQ-use labels nor blocking edges; IRQ-enabled thread trylocks remain
+unsafe. The IRQ integration cases cover either endpoint arriving last,
+transitive chains, subclasses, and trylocks. `spin_unlock_irqrestore` now
+checks that its lock was acquired with the same saved interrupt state and
+that enabling interrupts will not expose another spinlock acquired with
+interrupts disabled.
+
+Timer callback profiling records up to 16 distinct spinlocks per active
+timer callback. A contended `timer_cancel_sync` wait checks
+the caller-held spin and mutex stacks against that observed profile after
+dropping the timer queue lock. Profiles learn only executed callback paths.
+Full boots exposed profile exhaustion during TCP PCB churn: first, stale
+profiles remained after cancellation; releasing them at synchronous cancel
+still allowed many live timers to occupy every slot on UP. The active
+implementation now allocates a profile only when a callback starts and
+releases it after the timer queue clears `running`. The fixed table has 64
+slots, one for every possible active CPU callback, and each profile tracks
+16 distinct locks. `g_timer_profiles` occupies 0x4400 bytes (17 KiB) in the
+x86-64 debug ELF, down from 0x22000 bytes in the first version. Lookups use
+a bounded hash probe. The regression
+holds a callback-needed lock while a real callback blocks on it, then checks
+that `timer_cancel_sync` reports and returns. UP x86-64 and AArch64 now both
+pass all 416 tests plus the full boot harness with active-callback profile
+allocation (115.9 s and 112.5 s). Logs:
+`out/milestone-callback-active-up-x86.log` and
+`out/milestone-callback-active-up-arm.log`. Both report timer cancellation
+success and `net-accept-race` completes in under 60 ms. Final SMP x86-64
+and AArch64 debug boots also pass all 416 tests plus the full harness
+(126.1 s and 139.5 s). Logs:
+`out/milestone-callback-active-smp-x86.log` and
+`out/milestone-callback-active-smp-arm.log`. All four UP/SMP debug
+combinations pass with the active-callback profile lifetime. The host suite
+passes after graph/IRQ work.
+
+The earlier IRQ and irqrestore integration runs passed all 416 tests on
+both SMP architectures before callback profiling was added. With the final
+64-slot callback profile table, both SMP debug architectures pass all 416
+tests and the full boot harness: x86-64 in 126.4 s and AArch64 in 129.0 s
+(`out/milestone-callback-64slots-x86.log` and
+`out/milestone-callback-64slots-arm.log`). The final 64-slot table also
+passes UP x86-64 and AArch64 (110.8 s and 113.9 s;
+`out/milestone-callback-64slots-up-x86.log` and
+`out/milestone-callback-64slots-up-arm.log`), so all four final UP/SMP
+debug configurations pass. `g_timer_profiles` is 0x4400 bytes (17 KiB) in
+the x86-64 debug ELF. NMI/#MC reentrancy, raw architecture IRQ restore pairing,
+global concurrent diagnostic snapshots, TSan modeling, generalized callback
+wait dependencies, and isolated performance measurement remain unresolved.
+The inventory now carries these limits forward.
