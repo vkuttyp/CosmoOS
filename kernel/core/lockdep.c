@@ -746,4 +746,18 @@ unsigned lockdep_expected_hits(void)
     return __atomic_exchange_n(&g_expected_hits[raw_cpu_id()], 0u, __ATOMIC_ACQ_REL);
 }
 
+#if CONFIG_SELFTEST
+void lockdep_test_snapshot_context(bool updating, void (*probe)(void *), void *arg)
+{
+    arch_irq_state_t s = raw_lock();
+    struct lockdep_cpu *lc = my_cpu();
+    if (updating)
+        lockdep_core_held_begin(&lc->held_seq);
+    probe(arg);
+    if (updating)
+        lockdep_core_held_end(&lc->held_seq);
+    raw_unlock(s);
+}
+#endif
+
 #endif /* CONFIG_LOCKDEP */

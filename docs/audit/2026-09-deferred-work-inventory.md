@@ -649,7 +649,9 @@ so their counts and edge lists are consistent. Panic reports now name the
 actual current thread and IRQ/preemption nesting instead of always claiming
 early boot; the deliberate crash harness requires that context.
 Remote CPU spinlock dumps now use one bounded atomic snapshot attempt,
-reporting unavailable rather than reading a changing stack. NMI/#MC
+reporting unavailable rather than reading a changing stack. The x86
+`trap-paranoid` test now validates this read-only API through real NMI
+delivery with the graph lock held and with a busy held-stack writer. NMI/#MC
 raw-lock reentrancy, global held-state/statistics snapshots across CPUs and threads,
 generalized callback waits and raw IRQ-restore pairing remain open.
 The warmed spin-path benchmark now permits matched debug LOCKDEP=0/1

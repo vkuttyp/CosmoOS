@@ -147,6 +147,14 @@ or target-owned lock. The cost is eight bytes per CPU plus atomic writes
 on debug held-stack updates. Local-only reads and thread mutex stacks
 retain their existing ownership rules. This does not make NMI writers
 reentrant or provide simultaneous snapshots of all CPUs.
+
+The x86 `trap-paranoid` regression verifies the read-only NMI boundary
+with real local-APIC delivery while the graph raw lock is held, including
+an interrupted held-stack update. Current lockup NMI sampling and corrected
+machine-check handlers avoid tracked locking. General lockdep writer
+instrumentation from NMI/#MC remains unsupported; passing the snapshot
+test does not make the graph raw lock reentrant.
+
 The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a

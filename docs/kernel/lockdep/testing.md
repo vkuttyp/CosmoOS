@@ -196,6 +196,15 @@ across every entry and field. The kernel `lockdep-order` regression checks
 snapshot publication from real acquisitions, irqsave metadata, a release
 out of order, and the final empty stack.
 
+On x86-64, `trap-paranoid` adds real local-APIC NMI delivery while the
+validator graph raw lock is held. The handler takes only the bounded
+held-stack snapshot: a stable stack must show the held irqsave lock,
+and an interrupted update with an odd sequence must return unavailable.
+The test requires actual handler completion in each case. Its raw-lock
+probe hook exists only with `CONFIG_LOCKDEP && CONFIG_SELFTEST`; it is not
+a production callback API. This validates the NMI-safe snapshot reader,
+not tracked lock acquisitions or graph mutations from NMI/#MC handlers.
+
 ### Failure detection and boundary cases
 
 The valid IRQ-restore control runs without arming a report expectation.

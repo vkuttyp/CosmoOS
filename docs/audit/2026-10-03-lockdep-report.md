@@ -556,3 +556,30 @@ of 1024 iterations, the matching configuration flag, and ordered
 min/median/max output. Logs: `out/lockdep-bench-{on,off}-{x86_64,aarch64}.log`.
 Release kernels also build on both architectures
 (`out/lockdep-bench-release-build.log`). `git diff --check` passes.
+
+## Hardware NMI held-stack snapshot increment
+
+Extended x86 `trap-paranoid` with two local-APIC hardware NMIs while the
+validator graph raw lock is held and local IRQs are masked. The first
+handler must capture the private irqsave lock on the interrupted CPU's
+held stack, with the expected per-CPU block, interrupt depth and IST stack.
+The second interrupts an unfinished held-stack update (odd sequence) and
+must return unavailable with zero entries. Handler completion is published
+with a release/acquire hit counter; the delivery wait is bounded to 100 ms.
+The graph-lock probe hook is compiled only with lockdep and self-tests.
+
+Inspection found that current NMI lockup sampling and corrected machine-check
+handlers avoid tracked lock acquisitions. This increment validates the
+read-only snapshot boundary, rather than changing those handlers or claiming
+general NMI/#MC writer reentrancy. Acquiring a tracked lock from such a
+handler remains unsupported. AArch64 has no corresponding NMI test here.
+
+Both four-CPU debug boots pass all 417 self-tests and the complete boot
+harness: x86-64 in 144.0 s and AArch64 in 128.4 s. The x86 log explicitly
+confirms successful hardware NMI capture and refusal of the busy writer;
+the AArch64 boot provides cross-architecture regression coverage only.
+Logs: `out/lockdep-nmi-{x86_64,aarch64}.log` and matching `-result.log`
+files. Default x86 release and release with `LOCKDEP=1` kernels build
+successfully (`out/lockdep-nmi-release-build.log`), covering the self-test
+configuration boundary. The core snapshot algorithm is unchanged; the
+prior host sanitizer model remains its concurrency evidence.

@@ -112,6 +112,12 @@ void lockdep_expect(enum lockdep_report_kind kind);
 unsigned lockdep_expected_hits(void);
 const char *lockdep_report_name(enum lockdep_report_kind kind);
 
+#if CONFIG_SELFTEST
+/* Test-only: invoke a nonblocking probe with the graph raw lock held,
+ * optionally during an unfinished local held-stack update. */
+void lockdep_test_snapshot_context(bool updating, void (*probe)(void *), void *arg);
+#endif
+
 #define lockdep_assert_held(lock, kind)     KASSERT(lockdep_is_held((lock), (kind)))
 #define lockdep_assert_not_held(lock, kind) KASSERT(!lockdep_is_held((lock), (kind)))
 
