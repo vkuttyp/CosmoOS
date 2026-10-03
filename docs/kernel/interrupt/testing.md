@@ -22,6 +22,31 @@ and what each proves:
 | `irq-sync` (`kernel/core/quiescetest.c`): a handler spinning 20 ms on CPU 1, raised with `arch_ipi_send`; `interrupt_unregister_sync` returns only after the handler set its `done` flag (≥ 10 ms) | a handler is a read-side section; `synchronize_irq` outlasts it (`docs/kernel/quiesce/testing.md`) |
 | register on `arch_trap_vector_count()` → `-EINVAL`; NULL fn → `-EINVAL` | argument validation |
 
+### `irq-writers` self-test (`kernel/core/quiescetest.c`)
+
+For 16 rounds, two pinned threads rendezvous and compete to register one
+allocated vector. Exactly one must succeed and the other return `-EBUSY`.
+A real IPI then calls the winner; distinct handlers check their argument
+identity, vector and frame. Two threads subsequently compete to unregister
+the winning handler, with one success and one `-ENOENT`. After joining the
+writers, the caller waits through `synchronize_irq` before checking exact
+handler/dispatch counts and reusing either record or probe storage.
+
+SMP runs place writers on separate CPUs and deliver the IPI to the remote
+CPU. UP runs keep the same rendezvous and checks on one CPU, using a
+self-IPI; they do not prove simultaneous writer contention. This test
+combines mutation serialization, real entry/dispatch and grace-period
+reuse. Dispatch is triggered after registration finishes, so overlap of
+publication with dispatch remains covered by the host test, not this test.
+The existing `irq-sync` test separately proves a grace period outlasts a
+handler deliberately held active.
+
+Allocation/rendezvous failures release and join any created workers,
+unpublish any registration, and wait before releasing storage. An IPI
+delivery timeout fails stop with the vector, handler and stack probes
+retained: returning would let a delayed IPI access expired storage. This
+is not NMI/#MC mutation coverage or exhaustive interrupt-entry validation.
+
 ### Unhandled-exception path (`make test-crash`)
 
 A `#PF` with no handler registered must reach `arch_trap_unhandled` and
@@ -71,7 +96,7 @@ the controller drivers.
   free vector).
 - Exhaustive architecture interrupt-entry interleavings and NMI/#MC
   mutation. Host publication tests do not model those entry protocols;
-  `irq-sync` separately tests the real SMP grace-period path.
+  `irq-sync` and `irq-writers` exercise real IPIs and grace-period paths.
 - Out-of-range vector into `interrupt_dispatch` (panic path). Only an
   arch bug can produce it; a host-side unit test with a stubbed arch layer
   is the right vehicle once host tests exist.
@@ -96,8 +121,8 @@ IRQ masking is a host no-op: the real per-vector lock must serialize
 writers. Dispatch threads are joined before unregister/reuse, and the
 grace-period function is a stub; this test does not prove the kernel's
 epoch protocol. Invalid-vector dispatch panic and real spurious-vector
-policy remain outside this host test. The existing `irq-sync` and trap
-boot tests supply separate integration evidence.
+policy remain outside this host test. The `irq-sync`, `irq-writers` and trap
+boot tests supply integration evidence.
 
 The pre-fix source fails TSan on the plain counter load versus atomic
 dispatch increment. A second negative control, retaining atomic diagnostics

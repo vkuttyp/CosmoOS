@@ -642,7 +642,8 @@ portability, performance):
 Completed work from the October lockdep session is struck through below.
 PRs #303 and #304 are merged. The continuation from `aede0142` adds
 counter consistency, mutex/new-edge measurements, interrupt writer
-serialization, thread mutex snapshots, and dense/full-capacity graph measurements;
+serialization, thread mutex snapshots, dense/full-capacity graph measurements,
+and kernel interrupt writer/IPI validation;
 those rows record local implementation, not a merge or remote CI result.
 Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
@@ -667,6 +668,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Bounded thread mutex-stack snapshots~~ | **BUILT (post-#304 continuation)**: atomic single-writer publication and capacity-aware reads with caller-owned thread lifetime. Panic diagnostics copy each local stack or report unavailable. Separate CPU/thread snapshots do not form a global view. |
 | ~~Dense DAG core search measurements through the class limit~~ | **BUILT (post-#304 continuation)**: chain/dense 16/64/256/320-node cases validate allowed insertion, cycle rejection, and IRQ-bridge rejection. Only subclass zero is active; these measurements do not establish worst-case bounds. |
 | ~~All-subclass graph search measurements at full capacity~~ | **BUILT (post-#304 continuation)**: 1,280-node chain/dense cases cover all subclasses, with explicit IRQ endpoint checks and sanitizer coverage of full BFS queues. Worst-case latency bounds remain open. |
+| ~~Kernel interrupt writer, IPI and grace-period reuse regression~~ | **BUILT (post-#304 continuation)**: 16 rounds race two registrations/removals, validate the winning handler via real IPI, and wait before reuse. Dispatch follows registration; arbitrary entry interleavings remain open. |
 
 Still open for the next milestone:
 
@@ -680,5 +682,5 @@ Still open for the next milestone:
   contended spin/mutex paths, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
-  host graph/held-stack and interrupt-publication tests and the bounded
-  x86 NMI reader test.
+  host graph/held-stack and interrupt-publication tests, kernel writer/IPI
+  reuse regression, and bounded x86 NMI reader test.

@@ -980,3 +980,48 @@ The idle test completed in 4 ms with no kick and the graph benchmark in
 1241 ms. The initial failure did not reproduce; its cause remains open.
 `git diff --check` passed. The inventory strikes out all-subclass capacity
 measurements while retaining worst-case latency bounds and contention work.
+
+## Kernel interrupt writer/IPI continuation
+
+Base: `52d14a30`. Phase 1 adds `irq-writers`, a kernel integration test
+for the existing per-vector writer serialization. Two pinned threads
+rendezvous and race to register the same allocated vector. Exactly one
+must succeed and the other must return `-EBUSY`. A real IPI dispatches
+the winner; distinct handlers validate their own argument identity, the
+vector and a non-null trap frame. Two threads then race to remove that
+handler: one success and one `-ENOENT` are required.
+
+Phase 2 checks reuse over 16 rounds. After joining removal threads, the
+caller waits through `synchronize_irq`, checks exact handler/dispatch
+counts and absent publication, then permits stack probe and alternating
+record reuse. SMP writers run on distinct CPUs; UP uses the same yielding
+rendezvous and self-IPI, without claiming simultaneous contention.
+Allocation/rendezvous failure joins any created workers and cleans up
+publication through a grace period. IPI timeout explicitly fails stop
+while retaining the vector, handler and live probes, because delayed
+delivery cannot safely return to freed storage.
+
+Dispatch starts after the registration race, so this test does not claim
+publication/dispatch overlap; the actual-source host test covers that.
+The existing `irq-sync` test separately holds a handler active during
+unregister. Arbitrary entry interleavings, NMI/#MC mutation and generalized
+callback dependencies remain deferred. The production interrupt path is
+unchanged in this increment.
+
+Phase 3: both four-CPU debug boots passed all 419 self-tests and the full
+harness (x86-64 142.1 s, AArch64 138.2 s). The new test passed in 64 ms
+and 66 ms respectively, with writers on CPUs 2 and 3. Logs:
+`out/irq-writers-kernel-{x86_64,aarch64}.log` and matching `-result.log`.
+Both release kernels built successfully:
+`out/irq-writers-kernel-release-{x86_64,aarch64}.log`.
+The single-CPU branch also completed all 16 rounds on each architecture
+(x86-64 13 ms, AArch64 23 ms). Failure cleanup and timeout retention were
+reviewed, not fault-injected in this increment. Host sanitizer tests were
+not repeated: neither the production interrupt source nor its host model
+changed; their earlier evidence remains in the writer-serialization section.
+Both single-CPU boots passed all 419 self-tests and the complete harness:
+x86-64 in 118.8 s and AArch64 in 124.4 s. Logs:
+`out/irq-writers-kernel-up-{x86_64,aarch64}.log` and matching `-result.log`.
+`git diff --check` passed. Interrupt invariant/testing and quiescence test
+documentation now state the complementary host/kernel coverage, and the
+inventory strikes out this integration regression with its scope limits.
