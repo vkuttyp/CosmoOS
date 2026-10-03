@@ -226,8 +226,10 @@ under concurrent host load are not presented as lock-overhead measurements.
 ## 21. Known limitations
 
 Eight-node printed cycle tail, bounded 320 classes/held stacks, no global
-snapshot protocol for concurrent diagnostics/statistics, no TSan validator
-model, and no general callback-wait graph remain. Timer cancellation now
+snapshot protocol for concurrent diagnostics/statistics, no sanitizer model
+of kernel execution-context state, and no general callback-wait graph remain.
+The host graph model described below covers publication and shared graph
+access under TSan. Timer cancellation now
 checks only the lock paths learned from active timer callbacks; it does not
 model other callback classes or arbitrary wait dependencies. IRQ dependency
 validation is transitive for modeled lock-class paths. `spin_unlock_irqrestore`
@@ -371,3 +373,34 @@ the full user-mode/network harness, including `lockdep-irq` and
 `timer-cancel-sync`: x86-64 in 129.6 s and AArch64 in 137.9 s. Logs are
 `out/pr303-review-x86_64.log` and `out/pr303-review-aarch64.log`.
 `git diff --check` passes.
+
+## Concurrent graph model increment
+
+Added `tests/host/test_lockdep_threads.c`: four writers and two unlocked
+diagnostic readers use the real `lockdep_core.h` helpers. The writer lock
+uses the same acquire/release atomic-word protocol as the kernel raw lock.
+Writers serialize class registration, usage validation, cycle detection,
+and edge insertion. Readers take the lock to obtain a published class
+range, then inspect immutable metadata and atomic usage/edge fields. A
+final independent closure oracle verifies edge totals, acyclicity, and
+that no IRQ-used class reaches an IRQ-enabled class. This supplements the
+single-threaded graph oracle with actual concurrent memory accesses.
+
+The model runs in the ordinary ASan/UBSan host suite and separately via
+`gmake host-test-lockdep-tsan`. The TSan binary has its own output name,
+so changing sanitizer modes cannot reuse an ASan build. On the macOS
+AArch64 development host, both sanitizer modes pass. As a negative control,
+a temporary copy of `lockdep_core_has_edge` used a plain bitmap read;
+TSan reported its race with the atomic write in `lockdep_core_add_edge`
+and exited unsuccessfully. The repository helper remains atomic. Logs:
+`out/lockdep-threads-tsan.log`, `out/lockdep-threads-host.log`, and
+`out/lockdep-tsan-negative.log`.
+
+The complete `gmake host-test` suite, including its Python harness tests,
+passes after integration; `git diff --check` also passes.
+
+This increment changes no kernel runtime code. It does not cover CPU-local
+held stacks, interrupt entry, migration, callback profile lifetime, or
+NMI/#MC execution. Graph diagnostic reads remain a live view, not a
+globally consistent snapshot. TSan execution on the Linux CI host remains
+unverified; the new model is included in its existing ASan/UBSan host step.

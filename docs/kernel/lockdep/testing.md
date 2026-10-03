@@ -144,6 +144,28 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 
 ## October hardening regression coverage
 
+### Concurrent graph model
+
+`tests/host/test_lockdep_threads.c` runs four writers and two diagnostic
+readers against the real graph helpers. An acquire/release atomic word
+models the kernel raw writer lock. Writers register classes, validate IRQ
+usage, and check and insert edges under that lock; readers capture the
+published class range under the lock, then inspect immutable names/kinds,
+atomic usage flags, and atomic edge words without it. Opposing edge
+attempts and changed usage labels exercise rejected cycles and IRQ paths.
+After joining, an independent transitive-closure oracle checks acyclicity,
+edge counts, and the absence of IRQ-used to IRQ-enabled paths.
+
+`make host-test` includes this model under ASan/UBSan. Run
+`make host-test-lockdep-tsan` separately for ThreadSanitizer (the runtime
+cannot be combined with ASan); it builds a distinct host binary and fails
+on a race report. This requires a host compiler and runtime supporting
+TSan. The model checks graph publication and access discipline, not kernel
+interrupt entry, CPU migration, held stacks, timer-profile lifetime, or
+NMI reentrancy. It does not make the diagnostic dump a consistent snapshot.
+
+### Failure detection and boundary cases
+
 The valid IRQ-restore control runs without arming a report expectation.
 Only deliberately invalid operations arm one: a zero-report control must
 not leave an expectation that could suppress a later real violation.

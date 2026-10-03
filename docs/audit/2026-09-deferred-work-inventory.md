@@ -640,8 +640,11 @@ tracked here. The IRQ dependency graph, IRQ-state restoration checks, and
 timer-callback lock profiles have been implemented on the active milestone
 branch. Profiles are bounded to active callback executions and learn only
 locks observed in those executions, so they do not prove every callback
-path. NMI/#MC raw-lock reentrancy, global diagnostic snapshots, TSan
-modeling, generalized callback waits, raw IRQ-restore pairing, and isolated
+path. A threaded host graph model now covers publication, serialized
+writers, and unlocked diagnostic readers under ASan/UBSan and TSan;
+kernel interrupt/held-stack/callback protocols remain outside that model.
+NMI/#MC raw-lock reentrancy, global diagnostic snapshots,
+generalized callback waits, raw IRQ-restore pairing, and isolated
 performance measurement remain open. See
 `docs/audit/2026-10-03-lockdep-report.md` and its continuation notes for
 the evidence and precise limits.
