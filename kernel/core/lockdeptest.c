@@ -471,3 +471,67 @@ bool selftest_lockdep_mutex(const char **reason) { return skip(reason, "lockdep-
 bool selftest_lockdep_contention(const char **reason) { return skip(reason, "lockdep-contention"); }
 
 #endif
+
+/* Same workload in debug LOCKDEP=0 and LOCKDEP=1. This measures warmed,
+ * uncontended spin paths, not contended waits or first-edge graph searches.
+ * Keep IRQs and scheduling enabled; pinning makes elapsed counter samples
+ * CPU-local, while the distribution exposes interrupt/scheduling noise. */
+static spinlock_t g_bench_a = SPINLOCK_INIT("lockdep-bench-a");
+static spinlock_t g_bench_b = SPINLOCK_INIT("lockdep-bench-b");
+
+static void bench_iteration(unsigned kind)
+{
+    if (kind == 0) {
+        __asm__ volatile("" ::: "memory");
+    } else if (kind == 1) {
+        spin_lock(&g_bench_a);
+        spin_unlock(&g_bench_a);
+    } else if (kind == 2) {
+        arch_irq_state_t s = spin_lock_irqsave(&g_bench_a);
+        spin_unlock_irqrestore(&g_bench_a, s);
+    } else {
+        arch_irq_state_t s = spin_lock_irqsave(&g_bench_a);
+        spin_lock(&g_bench_b);
+        spin_unlock(&g_bench_b);
+        spin_unlock_irqrestore(&g_bench_a, s);
+    }
+}
+
+bool selftest_lockdep_bench(const char **reason)
+{
+    (void)reason;
+    enum { SAMPLES = 9, ITERATIONS = 1024, WARMUP = 64 };
+    static const char *const paths[] = { "empty", "spin", "irqsave", "nested" };
+    uint64_t elapsed[4][SAMPLES];
+    cpumask_t saved = thread_pin_self();
+    for (unsigned kind = 0; kind < 4; kind++) {
+        for (unsigned i = 0; i < WARMUP; i++)
+            bench_iteration(kind);
+        for (unsigned sample = 0; sample < SAMPLES; sample++) {
+            uint64_t begin = clock_now_ns();
+            for (unsigned i = 0; i < ITERATIONS; i++)
+                bench_iteration(kind);
+            elapsed[kind][sample] = clock_since_ns(begin);
+        }
+    }
+    thread_set_affinity_self(saved);
+    /* Print only after timing. No background CPU is asked to stop; these
+     * guest-clock observations are descriptive, never pass thresholds. */
+    for (unsigned kind = 0; kind < 4; kind++) {
+        for (unsigned i = 1; i < SAMPLES; i++) {
+            uint64_t value = elapsed[kind][i];
+            unsigned j = i;
+            while (j && elapsed[kind][j - 1] > value) {
+                elapsed[kind][j] = elapsed[kind][j - 1];
+                j--;
+            }
+            elapsed[kind][j] = value;
+        }
+        kinfo("lockdep-bench: enabled=%u path=%s samples=%u iterations=%u ns/iteration min=%llu median=%llu max=%llu",
+              (unsigned)CONFIG_LOCKDEP, paths[kind], SAMPLES, ITERATIONS,
+              (unsigned long long)(elapsed[kind][0] / ITERATIONS),
+              (unsigned long long)(elapsed[kind][SAMPLES / 2] / ITERATIONS),
+              (unsigned long long)(elapsed[kind][SAMPLES - 1] / ITERATIONS));
+    }
+    return true;
+}

@@ -220,8 +220,9 @@ graph, rather than retaining pointers. Scratch is 5280 bytes. This storage
 and validator runtime functions are absent from the debug-disabled ELF.
 Primitive/thread layouts remain stable, including the pre-existing class
 fields and thread held array. Cached lookups avoid repeated string scans.
-No isolated acquisition microbenchmark was run; boot timing differences
-under concurrent host load are not presented as lock-overhead measurements.
+The initial pass did not run an acquisition microbenchmark. The warmed
+spin-path increment below now records matched debug LOCKDEP=0/1 samples;
+whole-boot timing differences are not lock-overhead measurements.
 
 ## 21. Known limitations
 
@@ -502,3 +503,56 @@ simultaneous CPU/thread state. It does not make writer instrumentation
 NMI-reentrant. Global statistics consistency, thread-stack snapshots,
 NMI/#MC reentrancy, generalized callback dependencies, and raw IRQ-state
 pairing retain their existing limitations.
+
+## Warmed spin-path benchmark increment
+
+Added `lockdep-bench`, compiled identically into debug builds with lockdep
+enabled or disabled. It measures an empty loop/dispatch control, one plain
+spin acquire/release pair, one irqsave pair, and an outer irqsave plus
+inner plain pair with a warmed dependency edge. Each path has 64 warmup
+iterations followed by nine samples of 1024 iterations; output reports
+minimum, median, and maximum guest-clock nanoseconds per iteration.
+The thread is pinned for CPU-local clock readings. IRQs, scheduling,
+and other CPUs remain active, so their interference is included. Logging
+and affinity changes are outside the measured intervals.
+
+The benchmark is descriptive and has no timing pass threshold. Separate
+debug output trees for `LOCKDEP=1` and `LOCKDEP=0` avoid comparing other
+debug/release differences. QEMU/TCG timings are not native-hardware
+performance claims. Cold graph searches, contended object locks, mutex
+paths, and precise attribution of individual instrumentation costs remain
+outside this benchmark.
+
+Initial measurements: QEMU 11.1.1/TCG on an arm64 macOS host, Apple clang
+21.0.0, four virtual CPUs, 256 MiB, default `qemu64,+nx,+svm,+npt` and
+`cortex-a72` CPU models. Each architecture was booted once per configuration;
+the architecture pair ran concurrently, with enabled and disabled pairs
+run sequentially. Host load and emulator/code-layout differences are not
+controlled tightly enough to attribute every timing difference to a
+particular hook. Values below are min/median/max ns per iteration, with
+the empty control left unsubtracted.
+
+| Architecture | Path | LOCKDEP=0 | LOCKDEP=1 |
+|---|---|---:|---:|
+| x86-64 | empty | 42 / 42 / 57 | 29 / 30 / 78 |
+| x86-64 | spin | 384 / 386 / 430 | 1605 / 1634 / 1698 |
+| x86-64 | irqsave | 695 / 698 / 716 | 2004 / 2033 / 2295 |
+| x86-64 | nested | 1058 / 1063 / 1127 | 3346 / 3862 / 4400 |
+| AArch64 | empty | 13 / 13 / 25 | 13 / 13 / 24 |
+| AArch64 | spin | 210 / 210 / 212 | 1062 / 1102 / 1114 |
+| AArch64 | irqsave | 346 / 347 / 381 | 1527 / 1568 / 1705 |
+| AArch64 | nested | 636 / 638 / 673 | 2574 / 2603 / 2666 |
+
+The distributions expose measurable debug instrumentation cost in these
+emulated workloads. They do not isolate the remote-snapshot atomics from
+the existing class lookup, usage validation, graph checks, stack tracking,
+and IRQ masking; a native run or a separate controlled comparison is
+needed for that attribution.
+
+All four debug SMP boots pass all 417 self-tests and the full boot harness:
+x86-64 enabled 125.0 s / disabled 113.3 s; AArch64 enabled 129.1 s /
+disabled 119.3 s. Each log contains all four expected paths, nine samples
+of 1024 iterations, the matching configuration flag, and ordered
+min/median/max output. Logs: `out/lockdep-bench-{on,off}-{x86_64,aarch64}.log`.
+Release kernels also build on both architectures
+(`out/lockdep-bench-release-build.log`). `git diff --check` passes.

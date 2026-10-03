@@ -39,6 +39,28 @@ released normally.
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
+| `lockdep-bench` | warmed uncontended spin paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+
+### Spin-path measurement
+
+`lockdep-bench` runs with either `LOCKDEP=0` or `LOCKDEP=1` when self-tests
+are enabled. Compare debug builds in separate output trees, changing only
+the lockdep setting; release builds change more than the checker and are
+not a matched control. For example, with the same architecture and QEMU
+settings, run `make BUILD=debug LOCKDEP=1 test` and
+`make BUILD=debug LOCKDEP=0 OUT=out/bench-off test`.
+
+The test warms each path 64 times, then reports min/median/max guest-clock
+nanoseconds per iteration across nine batches of 1024 iterations. `spin`
+and `irqsave` each contain one acquire/release pair; `nested` contains an
+outer irqsave pair and an inner plain pair with a previously recorded edge.
+`empty` is a loop/dispatch/clock control, reported separately without
+subtracting it. Pinning keeps clock readings CPU-local. Interrupts and
+scheduling remain enabled, other CPUs continue running, and results include
+their interference. Printing and affinity changes are outside the samples.
+These measurements cover warmed uncontended object locks, not cold graph
+searches, lock contention, mutexes, or a hardware-independent overhead
+ratio. QEMU/TCG results describe that emulator and host workload only.
 
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 

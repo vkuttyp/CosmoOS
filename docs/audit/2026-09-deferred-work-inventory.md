@@ -651,7 +651,9 @@ early boot; the deliberate crash harness requires that context.
 Remote CPU spinlock dumps now use one bounded atomic snapshot attempt,
 reporting unavailable rather than reading a changing stack. NMI/#MC
 raw-lock reentrancy, global held-state/statistics snapshots across CPUs and threads,
-generalized callback waits, raw IRQ-restore pairing, and isolated
-performance measurement remain open. See
+generalized callback waits and raw IRQ-restore pairing remain open.
+The warmed spin-path benchmark now permits matched debug LOCKDEP=0/1
+measurements; cold graph searches, mutexes, contention, and native-hardware
+overhead remain unmeasured. See
 `docs/audit/2026-10-03-lockdep-report.md` and its continuation notes for
 the evidence and precise limits.
