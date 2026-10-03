@@ -276,6 +276,10 @@ void lockdep_timer_cancel_done(const void *timer)
 
 void lockdep_timer_enter(const void *timer)
 {
+    /* run_expired executes callbacks serially with IRQs masked, and
+     * clears each profile before starting another callback on that CPU.
+     * Thus at most CONFIG_MAX_CPUS profiles can be live; the static
+     * assertion above makes capacity independent of timer queue depth. */
     struct lockdep_cpu *lc = my_cpu();
     arch_irq_state_t s = raw_lock();
     int slot = timer_profile_find(timer);

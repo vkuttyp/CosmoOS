@@ -144,6 +144,10 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 
 ## October hardening regression coverage
 
+The valid IRQ-restore control runs without arming a report expectation.
+Only deliberately invalid operations arm one: a zero-report control must
+not leave an expectation that could suppress a later real violation.
+
 Host `irq-dependencies` covers a maximum-node path and usage-last conflicts; `irq-oracle` compares every pair against an independent transitive-closure implementation over 32 generated DAGs. Host `metadata-lifetime` frees/reuses a name buffer and checks content
 identity, kind separation, maximum length and overlong rejection.
 `path-bounds` builds a 1280-node chain, iterates the returned bounded path

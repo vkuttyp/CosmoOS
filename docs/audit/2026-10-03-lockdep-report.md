@@ -347,3 +347,27 @@ the x86-64 debug ELF. NMI/#MC reentrancy, raw architecture IRQ restore pairing,
 global concurrent diagnostic snapshots, TSan modeling, generalized callback
 wait dependencies, and isolated performance measurement remain unresolved.
 The inventory now carries these limits forward.
+
+## PR #303 review follow-up
+
+The valid IRQ-restore control incorrectly armed `LOCKDEP_R_IRQ_STATE`
+while expecting zero reports. Reading the hit counter does not disarm an
+expectation, so a later real violation on that CPU could have been consumed.
+Removed the expectation from the valid control; deliberately invalid probes
+still arm and consume exactly one expected report.
+
+The reported 64-slot timer-profile exhaustion is not reachable through
+the current timer execution model. `run_expired` is called only from the
+local timer interrupt and runs callbacks serially with interrupts masked.
+It clears the profile before starting the next callback on that CPU, so
+live profiles cannot exceed `CONFIG_MAX_CPUS` (64). The existing static
+assertion requires at least that many slots. Pending timers consume none;
+hash probing visits every slot and reuses tombstones. Documented this
+bound at profile allocation rather than increasing the table without a
+reachable exhaustion case.
+
+Review validation: both four-CPU debug boots pass all 416 self-tests and
+the full user-mode/network harness, including `lockdep-irq` and
+`timer-cancel-sync`: x86-64 in 129.6 s and AArch64 in 137.9 s. Logs are
+`out/pr303-review-x86_64.log` and `out/pr303-review-aarch64.log`.
+`git diff --check` passes.

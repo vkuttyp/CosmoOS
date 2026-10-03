@@ -289,7 +289,8 @@ bool selftest_lockdep_irq(const char **reason)
     spin_unlock_irqrestore(&nested, rs);
 
     rs = spin_lock_irqsave(&inner);
-    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    /* A valid restore must run with no expectation armed: otherwise a
+     * later real IRQ-state violation could consume this unused probe. */
     lockdep_irqrestore_check(&inner, arch_irq_state_enabled(rs),
                              (uintptr_t)__builtin_return_address(0));
     CHECK(lockdep_expected_hits() == 0);
