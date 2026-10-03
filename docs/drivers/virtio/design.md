@@ -174,6 +174,11 @@ loses a line instead of every line after it. Dropped bytes are counted
 and reported at removal. A single sink instance is allowed (`-EBUSY`
 for a second console device). Remove unregisters the sink, resets,
 frees.
+In irreversible console panic mode, this sink returns before taking its
+device or queue locks. It cannot safely use the normal polled transport
+when an interrupted or stopped CPU may own those locks; fatal output
+continues through the serial and framebuffer sinks. Panic-skipped bytes
+are not charged to the normal device-drop counter.
 
 **virtio_net** (`virtio_net.c`, Phase 8): features `MAC` and `STATUS`
 (a device without `MAC` is refused with `-ENODEV`), and since network

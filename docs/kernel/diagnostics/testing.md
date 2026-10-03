@@ -59,6 +59,17 @@ The masked spinners stay well under the TLB shootdown's one-second
 acknowledgement bound and are all stopped before any thread is joined
 (a join frees a stack; the shootdown waits for every CPU).
 
+### Panic with the validator or log-ring lock held
+
+The separate `tools/lockdep-reentry-probe.py --mode ring` regression enters
+panic while holding the actual log-ring lock. Both architectures support
+`--lockdep 0` and `--lockdep 1`; each boot requires the exact panic, full
+termination marker and failure exit. `--old-ring` deliberately removes the
+ring bypass and must fail. Its direct and x86 hardware-NMI modes additionally
+require fatal output while the validator raw lock is held. These probes
+load the VirtIO console and exercise its panic-mode skip while serial still
+prints. See [lockdep testing](../lockdep/testing.md#raw-lock-re-entry-failure-boundary).
+
 ### Replies during the deadline read
 
 `python3 tools/lockup-deadline-probe.py --arch x86_64` builds a temporary
