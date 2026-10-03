@@ -47,7 +47,7 @@ HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 HOST_LOCKUP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockup.c
 HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c tests/host/test_fbvalid.c
 
-HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev
+HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev
 
 $(HOST_OUT)/test_fbvalid: $(addprefix $(ROOT)/,$(HOST_FBVALID_SRCS))
 	$(call log,HOSTCC,$@)
@@ -211,4 +211,19 @@ $(HOST_OUT)/test_lockdep_threads_tsan: $(ROOT)/tests/host/test_lockdep_threads.c
 
 .PHONY: host-test-lockdep-tsan
 host-test-lockdep-tsan: $(HOST_OUT)/test_lockdep_threads_tsan
+	$(Q)TSAN_OPTIONS=halt_on_error=1 $<
+
+HOST_INTERRUPT_SRCS := $(ROOT)/tests/host/test_interrupt.c $(ROOT)/kernel/interrupt/interrupt.c
+$(HOST_OUT)/test_interrupt: $(HOST_INTERRUPT_SRCS)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -pthread $^ $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_interrupt_tsan: $(HOST_INTERRUPT_SRCS)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(filter-out $(HOST_LDFLAGS) -fno-sanitize-recover=undefined,$(HOST_CFLAGS)) -fsanitize=thread -pthread $^ -o $@
+
+.PHONY: host-test-interrupt-tsan
+host-test-interrupt-tsan: $(HOST_OUT)/test_interrupt_tsan
 	$(Q)TSAN_OPTIONS=halt_on_error=1 $<

@@ -32,23 +32,25 @@ interrupts disabled; must not sleep, allocate, or take sleeping locks;
 - **Outputs**: `0`, `-EINVAL` (vector out of range or `fn` NULL),
   `-EBUSY` (already registered).
 - **Ownership**: the table does not own `arg` or `name`. The registrant
-  keeps them valid until `interrupt_unregister_sync` returns, or until a
-  plain `interrupt_unregister` has been followed by `synchronize_irq`.
-- **Concurrency**: disables local interrupts for the update; writes an
-  immutable `{fn, arg, name}` record and publishes its pointer with a
-  release store (dispatch loads it once with acquire, so a handler never
-  runs with another registration's argument). Safe to call from any
-  context including a handler (it is non-blocking), though registering
-  from inside a handler is unusual.
+  keeps `arg` and handler code valid until `interrupt_unregister_sync`
+  returns, or until plain unregister has been followed by `synchronize_irq`.
+  Names are immortal, including after removal.
+- **Concurrency**: a per-vector raw writer lock with local IRQs masked
+  serializes table mutations across CPUs. An immutable function/argument
+  record is published with release ordering and consumed with acquire.
+  Boot, thread and ordinary IRQ contexts are supported; mutation from
+  NMI/#MC is not. Dispatch does not take this lock. Existing grace-period
+  and owner coordination requirements still apply before record reuse.
 - **ABI**: internal.
 
 ### `int interrupt_unregister(unsigned vector, interrupt_handler_fn fn)`
 - **Purpose**: remove `fn` from `vector`.
 - **Outputs**: `0`, `-EINVAL` (bad vector or NULL `fn`), `-ENOENT` (`fn`
   is not the installed handler).
-- **Lifetime**: after return the handler will not *start* again, but may
-  still be *running* on another CPU: `arg` stays alive until
-  `synchronize_irq(vector)`. Any context.
+- **Lifetime**: new lookups cannot obtain the removed record, but a
+  dispatcher that already loaded it may still call or execute the handler.
+  `arg` stays alive until `synchronize_irq(vector)`. Same mutation-context
+  restrictions as registration.
 
 ### `void synchronize_irq(unsigned vector)` *(exported)*
 - **Purpose**: wait until no CPU is executing the handler that was
@@ -74,13 +76,14 @@ interrupts disabled; must not sleep, allocate, or take sleeping locks;
 - **Purpose**: diagnostics. Number of dispatches of `vector` since
   `interrupt_init`, handled or not.
 - **Outputs**: 0 for an out-of-range vector.
-- **Concurrency**: unsynchronised read; may be momentarily stale under
-  SMP.
+- **Concurrency**: atomic relaxed sample; does not imply handler completion.
 
 ### `const char *interrupt_handler_name(unsigned vector)`
 - **Purpose**: diagnostics. Name given at registration.
 - **Outputs**: NULL if unregistered or out of range. The string belongs
-  to the registrant.
+  to the registrant and must be immortal. Atomic pointer sampling can
+  return an old or reused record's name during replacement; it does not
+  identify a stable registration or synchronize with handler completion.
 
 ---
 

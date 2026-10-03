@@ -26,7 +26,7 @@ and what each proves:
 
 A `#PF` with no handler registered must reach `arch_trap_unhandled` and
 panic with a complete report; `tests/boot/run_boot_test.py --expect-panic`
-verifies the markers and exit code 35. This covers the `fn == NULL`
+verifies the markers and exit code 35. This covers the `record == NULL`
 branch of `interrupt_dispatch` for an exception.
 
 ### `acpi` self-test (`kernel/scheduler/schedtest.c`)
@@ -64,26 +64,45 @@ the controller drivers.
 
 ## Not yet covered
 
-- The `fn == NULL` branch for a non-exception vector (spurious IRQ
+- The `record == NULL` branch for a real non-exception vector (spurious IRQ
   logging). Needs a way to raise an arbitrary vector; `int $N` with a
   runtime `N` requires either a jump table of stubs or self-modifying
   code, so this will come with the LAPIC (send a self-IPI on a known
   free vector).
-- Concurrency: registration racing dispatch on another CPU; grace period
-  on unregister. Requires SMP (Phase 3) and will be a stress test plus, if
-  feasible, a model-checked version of the publish/consume protocol.
+- Exhaustive architecture interrupt-entry interleavings and NMI/#MC
+  mutation. Host publication tests do not model those entry protocols;
+  `irq-sync` separately tests the real SMP grace-period path.
 - Out-of-range vector into `interrupt_dispatch` (panic path). Only an
   arch bug can produce it; a host-side unit test with a stubbed arch layer
   is the right vehicle once host tests exist.
 - Handler re-entrancy: a handler that triggers the same vector. Currently
   undefined and unwanted; a lock-diagnostics layer should detect it.
 
-## Host-side unit tests (planned)
+## Concurrent host tests
 
-`interrupt.c` depends on only four arch functions, all trivially stubbed.
-A host test binary compiling `interrupt.c` against a fake `arch/` can
-cover every return code and the dispatch branches without QEMU. This is
-the first candidate for the host test harness in `tests/`.
+`tests/host/test_interrupt.c` compiles the actual `interrupt.c` with host
+architecture shims. It is included in `make host-test` (ASan/UBSan), with
+`make host-test-interrupt-tsan` providing a separate TSan binary.
+
+For 64 rounds, four writers race to register one empty vector while four
+other threads dispatch it. Exactly one registration must succeed; all
+handlers check their function/argument identity. Every handled and
+unhandled dispatch contributes to an exact final counter. Four removers
+then race and exactly one succeeds. A diagnostic reader runs throughout,
+including record reuse, sampling counts and immortal names. Argument
+validation and wrong-handler removal are checked too.
+
+IRQ masking is a host no-op: the real per-vector lock must serialize
+writers. Dispatch threads are joined before unregister/reuse, and the
+grace-period function is a stub; this test does not prove the kernel's
+epoch protocol. Invalid-vector dispatch panic and real spurious-vector
+policy remain outside this host test. The existing `irq-sync` and trap
+boot tests supply separate integration evidence.
+
+The pre-fix source fails TSan on the plain counter load versus atomic
+dispatch increment. A second negative control, retaining atomic diagnostics
+but removing writer exclusion, fails on racing slot publication. Neither
+mutation is part of the source tree.
 
 ## Running
 

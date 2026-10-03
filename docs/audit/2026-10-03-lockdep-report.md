@@ -783,3 +783,58 @@ cases checked. Logs: `out/lockdep-graph-bench-{x86_64,aarch64}.log` and
 matching `-result.log` files. Debug LOCKDEP=0 and release kernels built
 on both architectures (`out/lockdep-graph-bench-config-{x86_64,aarch64}.log`).
 The pure core algorithms are unchanged. `git diff --check` passed.
+
+
+## Interrupt writer serialization continuation
+
+Base: `b6351212`. The next phases moved from measurements to a confirmed
+interrupt concurrency defect: table mutation masked local IRQs but did
+not exclude a writer on another CPU. Competing registrations could both
+observe an empty slot and race over the alternating record and publication.
+The dispatch count also paired atomic increments with a plain load;
+diagnostic name lookup could race a reused record's name store.
+
+Phase 1 adds a raw writer lock per vector, preserving early-boot use and
+avoiding any global dispatch lock. Registration/removal hold it with local
+IRQs masked, and never allocate, dispatch a handler, or wait for a grace
+period under it. Dispatch still acquires one published record pointer and
+takes no writer lock. Count reads and diagnostic name stores/loads are now
+atomic. Names remain immortal and are samples, not registration handles.
+NMI/#MC table mutation is explicitly unsupported; read-only NMI dispatch
+and name lookup still take no writer lock.
+
+Phase 2 compiles the actual `kernel/interrupt/interrupt.c` into a pthread
+host test. For 64 rounds, four registrations compete while four other
+threads dispatch the same vector; exactly one writer must win and handled
+calls must use its matching function/argument. Unhandled calls are counted
+too. After dispatchers join, four removers compete and exactly one wins.
+A diagnostic reader overlaps all rounds, including record reuse. The test
+checks exact final dispatch counts, wrong-function removal, and invalid
+arguments. It runs in the regular ASan/UBSan suite and separately via
+`make host-test-interrupt-tsan`.
+
+Host IRQ masking is a no-op, so exclusion depends on the real slot lock.
+The host grace-period function is a stub: joined dispatchers provide the
+lifetime boundary, not a simulation of kernel quiescence. The existing
+caller requirement to coordinate unregister, grace period and subsequent
+record reuse is unchanged. This increment does not prove generalized
+callback wait dependencies, arbitrary hardware entry interleavings, or
+NMI-safe mutation.
+
+Negative controls verified that the test exposes the defects: the original
+source fails TSan on `interrupt_count` versus atomic dispatch increments;
+a second temporary copy with atomic diagnostics retained but the writer
+lock removed fails TSan on competing slot publication. Neither temporary
+source is in the repository. Logs: `out/interrupt-writers-baseline-tsan.log`
+and `out/interrupt-writers-mutation-tsan.log`. Corrected code passes TSan
+(`out/interrupt-writers-tsan.log`) and the full ASan/UBSan host suite
+(`out/interrupt-writers-host.log`).
+
+Phase 3: both four-CPU debug boots passed all 418 self-tests and the full
+boot harness: x86-64 in 128.6 s and AArch64 in 137.4 s. Existing breakpoint,
+IRQ synchronization and x86 NMI snapshot tests remained enabled. Logs:
+`out/interrupt-writers-{x86_64,aarch64}.log`. Release kernels built on both
+architectures (`out/interrupt-writers-release-{x86_64,aarch64}.log`). The
+interrupt architecture, design, API, invariant and testing descriptions
+were reconciled with the actual record publication/lifetime protocol.
+`git diff --check` passed.

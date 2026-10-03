@@ -641,7 +641,8 @@ portability, performance):
 
 Completed work from the October lockdep session is struck through below.
 PRs #303 and #304 are merged. The continuation from `aede0142` adds
-counter consistency, mutex measurements, and new-edge core measurements;
+counter consistency, mutex/new-edge measurements, and interrupt writer
+serialization;
 those rows record local implementation, not a merge or remote CI result.
 Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
@@ -662,6 +663,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Consistent lockdep statistics snapshots~~ | **BUILT (post-#304 continuation)**: all counter updates and the snapshot copy share the graph raw lock. Operations can still be in progress; held stacks are not frozen. |
 | ~~Matched debug LOCKDEP=0/1 warmed mutex-path measurements~~ | **BUILT (post-#304 continuation)**: adds private mutex lock/unlock and successful trylock/unlock paths. Contended waits and priority inheritance remain unmeasured. |
 | ~~New-edge core search measurements on sparse chains~~ | **BUILT (post-#304 continuation)**: private 16/64/256-node graphs exercise allowed insertion, cycle rejection, and transitive IRQ-conflict rejection. Setup is outside every sample; these are core costs, not cold-cache or complete acquisition timings. |
+| ~~Concurrent interrupt-table writer and diagnostic data races~~ | **FIXED (post-#304 continuation)**: per-vector raw writer serialization prevents competing registrations/removals; atomic count/name reads support concurrent diagnostics. Actual-source host tests cover publication and writer races; dispatch stays lock-free and record reuse still requires a grace period. |
 
 Still open for the next milestone:
 
@@ -675,4 +677,5 @@ Still open for the next milestone:
   contended spin/mutex paths, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
-  host graph/held-stack models and the bounded x86 NMI reader test.
+  host graph/held-stack and interrupt-publication tests and the bounded
+  x86 NMI reader test.

@@ -33,6 +33,7 @@
 #include <kernel/string.h>
 
 #include <arch/irq.h>
+#include <arch/cpu.h>
 #include <arch/trap.h>
 
 /* Upper bound on vectors any architecture we target has. x86-64 has 256;
@@ -46,6 +47,7 @@ struct interrupt_record {
 };
 
 struct interrupt_slot {
+    uint32_t writer;                   /* raw per-vector writer lock; dispatch never takes it */
     struct interrupt_record *cur;      /* published registration, NULL when none */
     struct interrupt_record recs[2];
     unsigned next_rec;                 /* index the next registration writes */
@@ -54,6 +56,24 @@ struct interrupt_slot {
 
 static struct interrupt_slot g_slots[INTERRUPT_MAX_VECTORS];
 static unsigned g_vector_count;
+
+/* Registration can run before the scheduler and heap exist. Serialize
+ * writers without tracked locks, allocation, or a global dispatch lock.
+ * Normal IRQs cannot interrupt a local writer; NMI/#MC mutation is not
+ * supported. Never wait for a grace period or call a handler under this. */
+static arch_irq_state_t slot_lock(struct interrupt_slot *slot)
+{
+    arch_irq_state_t s = arch_irq_save();
+    while (__atomic_exchange_n(&slot->writer, 1u, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    return s;
+}
+
+static void slot_unlock(struct interrupt_slot *slot, arch_irq_state_t s)
+{
+    __atomic_store_n(&slot->writer, 0u, __ATOMIC_RELEASE);
+    arch_irq_restore(s);
+}
 
 void quiesce_count_irq_sync(void);   /* quiesce.c statistics */
 
@@ -72,9 +92,9 @@ int interrupt_register(unsigned vector, interrupt_handler_fn fn, void *arg, cons
     if (vector >= g_vector_count || fn == NULL)
         return -EINVAL;
 
-    arch_irq_state_t s = arch_irq_save();
     int rc;
     struct interrupt_slot *slot = &g_slots[vector];
+    arch_irq_state_t s = slot_lock(slot);
 
     if (slot->cur != NULL) {
         rc = -EBUSY;
@@ -83,14 +103,16 @@ int interrupt_register(unsigned vector, interrupt_handler_fn fn, void *arg, cons
         slot->next_rec++;
         r->fn = fn;
         r->arg = arg;
-        r->name = name ? name : "?";
+        /* Diagnostic readers need not participate in a grace period.
+         * They may see an old or reused record's immortal name. */
+        __atomic_store_n(&r->name, name ? name : "?", __ATOMIC_RELAXED);
         /* Release: the record's fields are complete before any CPU can
          * load the pointer (dispatch pairs with an acquire load). */
         __atomic_store_n(&slot->cur, r, __ATOMIC_RELEASE);
         rc = 0;
     }
 
-    arch_irq_restore(s);
+    slot_unlock(slot, s);
     return rc;
 }
 
@@ -100,8 +122,8 @@ static int unpublish(unsigned vector, interrupt_handler_fn fn)
     if (vector >= g_vector_count)
         return -EINVAL;
 
-    arch_irq_state_t s = arch_irq_save();
     struct interrupt_slot *slot = &g_slots[vector];
+    arch_irq_state_t s = slot_lock(slot);
     struct interrupt_record *r = slot->cur;
     int rc;
     if (r == NULL || (fn != NULL && r->fn != fn)) {
@@ -113,7 +135,7 @@ static int unpublish(unsigned vector, interrupt_handler_fn fn)
         __atomic_store_n(&slot->cur, NULL, __ATOMIC_RELEASE);
         rc = 0;
     }
-    arch_irq_restore(s);
+    slot_unlock(slot, s);
     return rc;
 }
 
@@ -175,7 +197,7 @@ uint64_t interrupt_count(unsigned vector)
 {
     if (vector >= g_vector_count)
         return 0;
-    return g_slots[vector].count;
+    return __atomic_load_n(&g_slots[vector].count, __ATOMIC_RELAXED);
 }
 
 const char *interrupt_handler_name(unsigned vector)
@@ -183,7 +205,7 @@ const char *interrupt_handler_name(unsigned vector)
     if (vector >= g_vector_count)
         return NULL;
     struct interrupt_record *r = __atomic_load_n(&g_slots[vector].cur, __ATOMIC_ACQUIRE);
-    return r ? r->name : NULL;
+    return r ? __atomic_load_n(&r->name, __ATOMIC_RELAXED) : NULL;
 }
 
 /* Module ABI exports (docs/kernel/module/api.md). */
