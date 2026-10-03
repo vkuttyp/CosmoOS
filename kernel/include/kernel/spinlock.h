@@ -66,4 +66,16 @@ void spin_unlock_irqrestore(spinlock_t *lock, arch_irq_state_t state);
 /* True if the calling CPU holds the lock (diagnostics and assertions). */
 bool spin_is_held(const spinlock_t *lock);
 
+/* Self-test observation: CPU has failed an exchange for this lock and
+ * has not acquired it yet. Callers pin their workers and retain the lock
+ * until those workers exit. A nested interrupt wait temporarily replaces
+ * the interrupted one. Never use this snapshot for synchronization in
+ * production or infer lock ownership from it. No module ABI change. */
+#if CONFIG_SELFTEST
+bool spin_test_waiting_on(unsigned cpu, const spinlock_t *lock);
+#else
+static inline bool spin_test_waiting_on(unsigned cpu, const spinlock_t *lock)
+{ (void)cpu; (void)lock; return false; }
+#endif
+
 #endif /* KERNEL_SPINLOCK_H */

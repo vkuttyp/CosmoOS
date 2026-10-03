@@ -141,10 +141,9 @@ bool clock_is_common(void);
  * below both measure against the same quantity -- the corrected clock
  * where every CPU agrees on it, and a machine-wide tick where they do
  * not -- so where a deadline is built and where it is tested no longer
- * matters. Every deadline in the kernel goes through them except four
- * that cannot (see their own comments: `ndelay`, `timer_start`, and the
- * lockup sampler's two windows, all below a tick or same-CPU by
- * construction).
+ * matters. Same-CPU exceptions document why they cannot use the tick
+ * fallback: `ndelay`, `timer_start`, the lockup sampler's windows and
+ * self-test spin-owner guards that run with IRQs masked.
  *
  * They also fix something smaller and real: `clock_now_ns() + budget`
  * wraps into the past for a large budget and expires at once, which
@@ -183,8 +182,10 @@ bool clock_is_common(void);
 uint64_t clock_deadline_ns(uint64_t budget_ns);
 bool clock_deadline_passed(uint64_t deadline);
 
-/* This CPU's counter with no cross-CPU correction applied. For the
- * measurement that produces the correction, and for nothing else. */
+/* This CPU's counter with no cross-CPU correction applied. Used by the
+ * offset measurement and self-test spin-owner guards that cannot migrate
+ * or depend on tick progress while IRQs are masked. Never compare stamps
+ * taken on different CPUs through this API. */
 uint64_t clock_raw_ns(void);
 
 /* Measure every AP's offset against CPU 0 and, when the counter is one

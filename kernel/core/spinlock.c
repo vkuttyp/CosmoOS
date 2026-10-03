@@ -14,6 +14,19 @@
 
 #include <arch/cpu.h>
 
+#if CONFIG_SELFTEST
+/* Only the owning CPU writes its slot, with preemption disabled. A
+ * nested interrupt contender saves/restores the interrupted wait. This
+ * is an observation for tests, not an ownership or lifetime reference. */
+static const spinlock_t *g_test_waiting[CONFIG_MAX_CPUS];
+
+bool spin_test_waiting_on(unsigned cpu, const spinlock_t *lock)
+{
+    return cpu < CONFIG_MAX_CPUS && lock != NULL &&
+           __atomic_load_n(&g_test_waiting[cpu], __ATOMIC_ACQUIRE) == lock;
+}
+#endif
+
 void spinlock_init(spinlock_t *lock, const char *name)
 {
     lock->locked = 0;
@@ -44,6 +57,10 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
     preempt_disable();
     unsigned cpu = arch_cpu_id();
     bool irqs_on = arch_irq_enabled();
+#if CONFIG_SELFTEST
+    bool waiting = false;
+    const spinlock_t *previous = NULL;
+#endif
     /* The order check runs before the wait: a deadlocking acquisition is
      * reported instead of hanging. The push waits for ownership: while we
      * spin with interrupts enabled a handler may run here and must not see
@@ -55,6 +72,10 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
         arch_irq_state_t s = arch_irq_save();
 #endif
         if (try_acquire(lock)) {
+#if CONFIG_SELFTEST
+            if (waiting)
+                __atomic_store_n(&g_test_waiting[cpu], previous, __ATOMIC_RELEASE);
+#endif
             __atomic_store_n(&lock->owner_cpu, cpu, __ATOMIC_RELAXED);
             lockdep_acquired(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, false, irqs_on, ip);
 #if CONFIG_LOCKDEP
@@ -67,6 +88,13 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
 #endif
         if (__atomic_load_n(&lock->owner_cpu, __ATOMIC_RELAXED) == cpu)
             panic("spinlock '%s' re-acquired on CPU %u (deadlock)", lock->name ? lock->name : "?", cpu);
+#if CONFIG_SELFTEST
+        if (!waiting) {
+            previous = __atomic_load_n(&g_test_waiting[cpu], __ATOMIC_RELAXED);
+            __atomic_store_n(&g_test_waiting[cpu], lock, __ATOMIC_RELEASE);
+            waiting = true;
+        }
+#endif
         arch_cpu_relax();
     }
 }
