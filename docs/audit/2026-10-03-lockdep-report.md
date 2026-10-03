@@ -1127,3 +1127,206 @@ Logs: `out/lockup-deadline-final-{x86_64,aarch64}.log` and corresponding
 `-result.log` files. Both release kernels built; logs:
 `out/lockup-deadline-release-{x86_64,aarch64}.log`. Probe syntax checking
 and `git diff --check` passed.
+
+## Unhandled IPI continuation after PR #305
+
+Base: merged PR #305 (`9e7c2274`). Phase 1 closes the ordinary
+unregistered-vector integration gap: `irq-unhandled` allocates and binds
+a vector without a handler, sends two rounds of IPIs to every online CPU
+(including itself), and requires exact dispatch counts. A grace period
+after each observed round finishes entry/dispatch/EOI before the next
+round or registration change. A handler is then installed on the same
+vector and its self-IPI identity/count checked before synchronous removal.
+The test fails stop on missing delivery or unsafe registration/cleanup
+state, preserving the allocated vector and any live stack probe.
+
+Phase 2 fixes a related confirmed data race found by inspection: both
+architectures incremented their shared unhandled-interrupt warning total
+with a plain read/modify/write. Concurrent CPUs could lose increments.
+They now use atomic fetch-add and log its returned total. This is a
+diagnostic count, so relaxed ordering is sufficient. The log order itself
+is not necessarily numeric: CPUs serialize their warning output after
+receiving their distinct counts. No dispatch lock or new allocation was
+introduced.
+
+This is the generic unregistered non-exception path, not the LAPIC's
+hardware-spurious vector, GIC spurious INTIDs, or fatal exception policy.
+The test's ordinary IPI delivery and reuse do not establish NMI mutation
+safety or arbitrary nested-handler behavior. The inventory was reconciled
+with PR #305's merge and marks this continuation separately.
+
+Phase 3: final four-CPU debug boots passed all 420 self-tests and the
+full harness (x86-64 133.1 s, AArch64 138.2 s). `irq-unhandled` took
+24/22 ms. Each controlled test segment had eight unhandled warnings on
+one allocated vector and eight unique consecutive diagnostic totals;
+the log order was allowed to differ from increment order. Logs:
+`out/irq-unhandled-final-{x86_64,aarch64}.log` and matching `-result.log`.
+Both release kernels built successfully:
+`out/irq-unhandled-release-{x86_64,aarch64}.log`.
+Single-CPU boots also passed all 420 self-tests and the full harness:
+x86-64 in 131.7 s and AArch64 in 136.7 s. Each controlled log segment
+contains exactly two unhandled warnings on the test vector, followed by
+successful handled reuse. Logs: `out/irq-unhandled-up-{x86_64,aarch64}.log`
+and matching `-result.log` files. The UP test took 12/1 ms respectively.
+
+A temporary x86 UP negative control skipped `arch_irqc_eoi` only for
+unregistered vectors. The first self-IPI produced one unhandled warning;
+the second remained pending and the exact `irq-unhandled` delivery-timeout
+panic fired. The targeted harness required that panic and the failure
+exit, completing in 8.1 s; it was not a full-suite pass. Logs:
+`out/irq-unhandled-noeoi.log`, `out/irq-unhandled-noeoi-result.log` and
+`out/irq-unhandled-noeoi-build.log`. The clone was separate from normal
+source/images and its mutation is not committed. This tests the missing
+EOI failure and retention path; other cleanup failures were reviewed,
+not injected. `git diff --check` passed.
+
+## Interrupt boundary continuation after PR #305
+
+This increment follows the local unhandled-IPI work. Phase 1 closes the
+explicit out-of-range dispatcher testing gap using the actual
+`kernel/interrupt/interrupt.c` under the existing host shims. Tests use
+both a 16-vector architecture and the full 1344-slot capacity, dispatch
+the last valid slot, and require `panic_frame` for the first invalid
+vector and `UINT_MAX`, preserving the supplied frame pointer and exact
+diagnostic. A NULL frame is checked separately. Oversized architecture
+counts of 1345 and `UINT_MAX` must call the initialization panic. Panic
+interception is confined to the single-threaded setup phase; the table
+is reinitialized after each intercepted initialization failure.
+
+Phase 2 checks synchronous-removal wrapper behavior: invalid vectors,
+NULL/wrong functions, and absent registrations fail without a grace
+period; failed mutations preserve a live handler. Both successful sync
+variants unpublish before the stub grace period and count synchronization
+exactly once afterwards. Dispatch counts remain cumulative through
+unregistration and record reuse. These assertions supplement the existing
+64-round competing-writer/dispatcher/diagnostic-reader test.
+
+Phase 3 validation passed `gmake host-test` (all host ASan/UBSan tests and
+boot-harness Python checks) and `gmake host-test-interrupt-tsan`. Logs:
+`out/interrupt-boundaries-host.log` and
+`out/interrupt-boundaries-tsan.log`. Three temporary ASan/UBSan source
+mutations each failed at the intended assertion: dispatch `>=` changed
+to `>`, disabled oversized-init guard, and synchronization even after
+failed removal. Logs: `out/interrupt-boundaries-negative-dispatch-off-by-one.log`,
+`out/interrupt-boundaries-negative-oversized-init.log`, and
+`out/interrupt-boundaries-negative-failed-removal-sync.log`. Mutated
+sources and binaries were isolated in a temporary directory and removed.
+
+Production kernel code is unchanged in this increment; no additional
+QEMU boots or architecture builds were run. The host panic shim validates
+the dispatch/init decision and diagnostic, not panic rendering or CPU
+shutdown. Stub synchronization checks wrapper ordering, not real epoch
+completion. The previous increment's cross-architecture integration
+evidence and the remaining NMI/callback concurrency gaps still apply.
+The inventory and interrupt test/invariant documents now reflect this
+bounded coverage. `git diff --check` passed.
+
+## Deterministic graph-search bounds continuation
+
+Phase 1 adds host-only work accounting to the existing shared graph
+helpers, enabled only by `tests/host/test_lockdep.c`. It counts visited
+clears, seed checks, enqueue/dequeue operations, adjacency-word loads and
+parent reconstruction. Counts accumulate across composite IRQ checks.
+Kernel scratch layout and generated operations exclude all of this
+instrumentation. The search algorithm and its decisions are unchanged.
+
+Phase 2 adds full-capacity `search-work` regressions. The visited-on-enqueue
+rule limits each search to 1280 queue entries and at most 25,600 adjacency
+word loads. Dense and cyclic complete traversals attain the read bound;
+a 1280-node chain attains the 2,559-step reconstruction bound, including
+when output capacity is zero. Tests also cover an isolated target,
+zero/all predecessor sources, self reachability, fresh and warmed usage,
+usage conflicts, and one/two-search IRQ-edge checks. Documentation derives
+the bound from the implementation, with a conservative 100-search ceiling
+for acquisition decision paths (four usage searches plus up to three for
+each of 32 held entries). This excludes class/profile scans, statistics,
+diagnostics and lock contention; it is not a latency guarantee or a claim
+that every individual maximum is jointly attainable.
+
+Phase 3 validation passed the full `gmake host-test` ASan/UBSan and Python
+harness suite, `gmake host-test-lockdep-tsan`, and debug kernel builds for
+x86-64 and AArch64. Logs: `out/lockdep-search-bounds-host.log`,
+`out/lockdep-search-bounds-tsan.log`, and
+`out/lockdep-search-bounds-{x86_64,aarch64}-build.log`.
+
+A temporary mutation repeated each usage-search adjacency-word scan.
+Graph answers and the existing closure-oracle test remained correct,
+while the new general read bound and exact-count assertions failed.
+Log: `out/lockdep-search-bounds-negative.log`. Optimized freestanding
+wrappers for reachability, usage search, IRQ-edge checking, usage marking
+and scratch size produced identical before/after assembly on both targets
+with instrumentation disabled. The comparison result is recorded in
+`out/lockdep-search-bounds-controls.log`; this comparison covers those
+wrappers, not whole kernel binaries. Temporary sources/binaries were
+removed. No additional QEMU boots or release builds were run for this
+host-instrumentation increment. `git diff --check` passed.
+
+The inventory marks deterministic search work as covered and retains
+wall-clock maxima, first-acquisition timings, contention, priority
+inheritance and native measurements as open. The design's stale
+depth-first-search description now correctly says breadth-first search.
+
+## First-acquisition measurement continuation
+
+Phase 1 adds `lockdep-first-bench`, using the real public spinlock,
+irqsave, nested-spin and mutex acquisition paths against the live graph.
+Each path has three fresh-name samples and a subsequent reuse sample on
+each object. The clock stops after acquisition, while ownership is still
+held; release, validation, statistics snapshots and output are excluded.
+The nested case times two acquisitions together. An empty branch/clock
+control is reported separately, without subtraction. Class caches start
+empty, become populated with lockdep enabled and remain stable on reuse.
+Ownership/release checks apply with either setting. Class-count growth
+and a nested new-edge search are checked outside timing; global deltas
+are lower bounds because other CPUs keep running.
+
+The test adds 18 classes, using static names and leaving all graph state
+intact. Three samples deliberately limit consumption of the 320-class
+pool; no graph reset or capacity increase was introduced. Final graph
+dumps reached 302 classes on x86-64 and 301 on AArch64. This is a
+first-use measurement, not a CPU-cache-cold guarantee. The graph grows
+across samples, and each path reports its before/after class range.
+
+Phase 2 ran matched debug LOCKDEP=1/0 four-CPU boots on both architectures,
+using separate output trees and the same QEMU settings. All four passed
+421 self-tests and the complete boot harness. Enabled x86-64/AArch64 runs
+completed in 146.9/150.3 s; disabled runs in 121.1/127.8 s. Logs:
+`out/lockdep-first-{x86_64,aarch64}-{on,off}.log` and corresponding
+`-result.log` files. The enabled benchmark itself took 16/38 ms.
+These total boot durations are validation outcomes, not overhead estimates.
+
+Observed median guest nanoseconds per acquisition interval (nested is a
+pair), each from only three samples:
+
+| Architecture | Path | Enabled first | Enabled reuse | Disabled first | Disabled reuse |
+|---|---|---:|---:|---:|---:|
+| x86_64 | spin | 66105 | 1002 | 1006 | 0 |
+| x86_64 | irqsave | 5008 | 2003 | 1007 | 1006 |
+| x86_64 | nested | 25040 | 3004 | 1007 | 1007 |
+| x86_64 | mutex | 10016 | 3005 | 1007 | 1006 |
+| aarch64 | spin | 60992 | 992 | 1008 | 0 |
+| aarch64 | irqsave | 4992 | 1008 | 0 | 0 |
+| aarch64 | nested | 25008 | 2992 | 1008 | 0 |
+| aarch64 | mutex | 9008 | 3008 | 992 | 992 |
+
+Full min/median/max and empty controls are in the logs. Short intervals
+frequently meet guest-clock granularity and can read zero; do not derive
+ratios from these values. QEMU translation, host scheduling, interrupts
+and other CPUs affect the observations. Some builds/boots overlapped on
+the host; this was not an isolated performance experiment. No timing
+threshold determines success. These data do not establish native cost,
+worst-case latency, contention/PI overhead or a graph-size sweep.
+
+Phase 3 used a temporary clone with sample indices removed from class
+names. The second spin sample then reused an existing class and the fresh
+class-growth assertion failed. The targeted harness required the exact
+`FIRSTPROBE: result=0 reason=check failed: ok` panic and failure exit;
+it passed that negative-control check in 15.3 s, not a full suite.
+Logs: `out/lockdep-first-negative/{build,boot}.log` and
+`out/lockdep-first-negative-result.log`. The mutation is not committed.
+Both release kernels also built successfully; logs:
+`out/lockdep-first-{x86_64,aarch64}-release-build.log`. Log parsing checked
+all ten rows per boot, ordered min/median/max and disabled class counts.
+`git diff --check` passed. Host tests were not repeated for this kernel
+benchmark-only increment. The inventory now distinguishes this completed
+live-graph baseline from remaining graph-size, contention and native work.

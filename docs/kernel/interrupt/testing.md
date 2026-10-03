@@ -47,6 +47,29 @@ delivery timeout fails stop with the vector, handler and stack probes
 retained: returning would let a delayed IPI access expired storage. This
 is not NMI/#MC mutation coverage or exhaustive interrupt-entry validation.
 
+### `irq-unhandled` self-test (`kernel/core/quiescetest.c`)
+
+Allocate and bind a vector without installing a handler, then send two
+rounds of real IPIs to every online CPU, including the caller. Each round
+requires the exact dispatch-count increase and a grace period before the
+next send. Repeated delivery on the same vector checks that the unhandled
+path returns through interrupt completion (EOI). The test then registers
+a handler on that vector, sends a self-IPI, verifies its identity and
+count, and unregisters synchronously before freeing the vector.
+
+On four CPUs the boot log contains eight architecture-specific unhandled
+warnings; on UP it contains two. Architecture-wide unhandled totals use
+atomic increments; their log lines can appear out of numeric order.
+A missing delivery fails stop at a one-second guard, retaining the vector
+and any live probe. Grace periods follow observed dispatch, not merely
+sending an IPI. This covers ordinary unregistered-vector policy, not the
+LAPIC's hardware-spurious vector, GIC spurious INTIDs, or fatal exceptions.
+A temporary x86 UP negative control suppressed EOI only when no handler
+was registered: the first self-IPI logged normally, the second remained
+pending, and the exact delivery-timeout panic fired. The normal UP case
+passes both rounds. This proves the repeated-send check detects a missing
+EOI; the injection is not part of the production source.
+
 ### Unhandled-exception path (`make test-crash`)
 
 A `#PF` with no handler registered must reach `arch_trap_unhandled` and
@@ -89,25 +112,35 @@ the controller drivers.
 
 ## Not yet covered
 
-- The `record == NULL` branch for a real non-exception vector (spurious IRQ
-  logging). The real IPI path already exists via `arch_ipi_bind` and
-  `arch_ipi_send`, including self-IPIs in `irq-sync` and `irq-writers`.
-  Those tests install handlers before sending; a dedicated test sending
-  to an allocated, bound vector with no handler is still missing.
 - Exhaustive architecture interrupt-entry interleavings and NMI/#MC
   mutation. Host publication tests do not model those entry protocols;
   `irq-sync` and `irq-writers` exercise real IPIs and grace-period paths.
-- Out-of-range vector into `interrupt_dispatch` (panic path). Only an
-  arch bug can produce it; a host-side unit test with a stubbed arch layer
-  is the right vehicle once host tests exist.
 - Handler re-entrancy: a handler that triggers the same vector. Currently
   undefined and unwanted; a lock-diagnostics layer should detect it.
 
-## Concurrent host tests
+## Host tests
 
 `tests/host/test_interrupt.c` compiles the actual `interrupt.c` with host
 architecture shims. It is included in `make host-test` (ASan/UBSan), with
 `make host-test-interrupt-tsan` providing a separate TSan binary.
+
+Before starting threads, the test exercises runtime vector counts of 16
+and the full 1344-slot table capacity (I-INT-10). The last valid vector
+accepts registration and dispatch, preserving the handler's argument and
+frame. Dispatching the first invalid vector or `UINT_MAX` must call
+`panic_frame` with the original frame and exact diagnostic; a NULL frame
+is checked too. Architecture counts of 1345 and `UINT_MAX` must instead
+call `panic` during initialization. Panic interception uses `longjmp`
+only in this single-threaded phase, with reinitialization after a failed
+init; it does not exercise the kernel panic renderer or shutdown path.
+
+Invalid-vector API calls, NULL and wrong-function removals, duplicate
+registration, and absent-handler removals must return the documented
+errors without damaging a live registration or triggering a grace period.
+Both successful synchronous-removal variants must unpublish before the
+stub grace period and increment its statistic once afterwards. Dispatch
+counts remain cumulative across removal and reuse. This checks wrapper
+ordering and error handling, not real grace-period completion.
 
 For 64 rounds, four writers race to register one empty vector while four
 other threads dispatch it. Exactly one registration must succeed; all
@@ -120,14 +153,21 @@ validation and wrong-handler removal are checked too.
 IRQ masking is a host no-op: the real per-vector lock must serialize
 writers. Dispatch threads are joined before unregister/reuse, and the
 grace-period function is a stub; this test does not prove the kernel's
-epoch protocol. Invalid-vector dispatch panic and real spurious-vector
-policy remain outside this host test. The `irq-sync`, `irq-writers` and trap
+epoch protocol. Real spurious-vector policy remains outside this host
+test. The `irq-sync`, `irq-writers`, `irq-unhandled` and trap
 boot tests supply integration evidence.
 
 The pre-fix source fails TSan on the plain counter load versus atomic
 dispatch increment. A second negative control, retaining atomic diagnostics
 but removing writer exclusion, fails on racing slot publication. Neither
 mutation is part of the source tree.
+
+Boundary negative controls each fail at the intended assertion: changing
+the dispatch guard from `>=` to `>` permits the first invalid vector to
+return; disabling the initialization guard accepts an oversized table;
+and synchronizing after a failed removal reaches the grace-period stub
+while the registration is still published. These temporary source
+mutations are not part of the production dispatcher.
 
 ## Running
 

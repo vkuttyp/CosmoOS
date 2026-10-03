@@ -397,14 +397,14 @@ void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame)
         panic_frame(frame, "unhandled exception %u (%s)", vector, arch_trap_name(vector));
     }
 
-    g_spurious_count++;
+    uint64_t count = __atomic_add_fetch(&g_spurious_count, 1u, __ATOMIC_RELAXED);
     if (vector >= X86_VECTOR_IRQ_BASE && vector < X86_VECTOR_IRQ_BASE + X86_VECTOR_IRQ_COUNT &&
         pic_is_spurious(vector - X86_VECTOR_IRQ_BASE)) {
         kdebug("x86: spurious legacy IRQ %u", vector - X86_VECTOR_IRQ_BASE);
         return;
     }
     kwarn("x86: unhandled interrupt vector %u (%llu total unhandled)",
-          vector, (unsigned long long)g_spurious_count);
+          vector, (unsigned long long)count);
 }
 
 void arch_debug_break(void)

@@ -44,6 +44,9 @@ An atomic increment precedes lookup and `interrupt_count` loads atomically.
 **Checked by** exact IPI counts in `irq-writers`, `breakpoint-trap`, and
 the concurrent host test, which counts
 handled and unhandled dispatches exactly after joining the dispatchers.
+`irq-unhandled` checks real unregistered delivery on every online CPU,
+repeated delivery after EOI, and handled reuse. Architecture-wide unhandled
+totals also increment atomically so concurrent warning paths cannot lose updates.
 
 ## I-INT-7: The table owns nothing
 
@@ -69,4 +72,7 @@ on another CPU is outlasted by `interrupt_unregister_sync`).
 
 An architecture with more vectors must raise the constant, not truncate
 (the constant became 1344 when AArch64 arrived with 1312 vectors).
-**Checked by** the panic in `interrupt_init`.
+**Checked by** the panic in `interrupt_init` and actual-source host tests
+accepting 1344 vectors and rejecting 1345 and `UINT_MAX` with the expected
+panic diagnostic. Host dispatch tests also reject vectors at or above
+the configured architecture limit and exercise the last valid slot.
