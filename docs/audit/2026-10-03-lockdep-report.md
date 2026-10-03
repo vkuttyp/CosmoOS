@@ -1734,3 +1734,54 @@ full harness in 138.7 s; `irq-route` passed in 75 ms. Logs:
 architecture-specific, all eight retained boot logs were checked against
 that additional requirement: real four-CPU delivery on AArch64 and the
 explicit unsupported-source skip on x86.
+
+## PR #307 follow-up: AArch64 CI timing limits (2026-10-04)
+
+[CI run 37154202680, AArch64 job 111294098641](https://github.com/vkuttyp/CosmoOS/actions/runs/37154202680/job/111294098641)
+failed the chaos boot at commit `a2fbf47f`. The ordinary, alternate-GIC
+and protection-capable boots passed in 165.4, 163.6 and 167.2 s.
+Chaos returned success from all 422 self-tests, including `irq-route`
+(85 ms) and `net-nat`, but failed two time limits:
+
+- `net-nicbench` completed in 8,360 ms against the default 8,000 ms.
+  The watchdog captured the second interface's UDP send loop, and the
+  benchmark finished shortly afterward. Its reported UDP rates were
+  6,272 and 2,082 sends/s, with two 10,000-attempt rounds. The workload
+  also includes 2,000 ARP requests per interface and receive drains.
+- Kernel self-tests totaled 137.459 s versus 124–127 s in the passing
+  boots. The shell harness exhausted its 170 s whole-run deadline before
+  advancing to command 15 (`echo after-fg-ok`); QEMU then hit its 180 s
+  limit. The captured log contains exactly 15 newline-prefixed prompts,
+  ends with that fifteenth prompt, and records the foreground sleep's
+  exit with status 130. Thus the final prompt is recognizable and the
+  signal did terminate the job. The log has no per-line host timestamps,
+  so its precise arrival time is not established; a late prompt after
+  deadline exhaustion fits the retained log and the harness's exit path.
+
+The benchmark now has a named 20 s entry in the kernel budget table,
+which drives both the watchdog and harness. Sample counts, ARP assertions,
+receive-drain checks and packet paths are unchanged. This follows the
+existing policy for composite tests, rather than reducing measurement
+work to fit a single-test default. `make test-chaos` now passes an explicit
+240 s total timeout, giving the shell 230 s; ordinary boots remain at
+180 s. Signal-response latency checks and per-test watchdogs remain active.
+No IRQ, NAT, controller or scheduler implementation changed in this fix.
+
+The original artifact is retained under
+`out/ci-37154202680-aarch64/aarch64-debug-chaos/boot-test-chaos.log`.
+An offline replay (`out/ci-budget-replay-result.log`) verifies that the
+archived 8,360 ms duration fails the old budget and fits the explicit one,
+while 20,001 ms still fails. With a controlled clock, the archived
+fifteenth prompt is accepted when time remains and rejected after the
+old deadline. That replay establishes harness behavior, not the original
+prompt's timestamp. The existing budget-parser suite passed all 10 checks.
+
+The updated `gmake -j4 ARCH=aarch64 test-chaos` passed all 422 self-tests
+and the complete harness in 136.7 s. Its launch reports 240 s total,
+the network harness reports 210 s, and the kernel budget line includes
+`net-nicbench=20000`; no watchdog fired. The benchmark completed in
+2,464 ms locally. Logs: `out/ci-budget-aarch64-chaos-result.log` and
+`out/ci-budget-aarch64-chaos.log`. This verifies the configuration and
+full boot locally; it does not reproduce the CI host's slowdown.
+`git diff --check` passed. The prior GitHub x86 job completed successfully;
+the updated AArch64 limits still need the next CI run's validation.

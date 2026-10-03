@@ -2743,6 +2743,12 @@ for part of the window. Recorded, not attributed.
 
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
+**Budget corrected 2026-10-04, PR #307:** the combined two-interface
+benchmark now has an explicit 20 s budget, shared by the watchdog and
+harness. CI run `37154202680` captured the second UDP round at 8 s and
+completed the full workload at 8,360 ms. Samples and assertions remain.
+The original no-dump sighting below is retained as history.
+
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent
 unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
@@ -2901,6 +2907,10 @@ phase and the word.
   was phase 1's, and the check asserted a race's outcome, not a defect.
 
 ## `net-nicbench` over the per-test budget, second sighting, 2026-09-30
+
+**Budget corrected 2026-10-04, PR #307:** the combined benchmark now has
+an explicit 20 s watchdog/harness budget; see the earlier `net-nicbench`
+entry and the PR #307 audit follow-up. The original sighting follows.
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent

@@ -1399,6 +1399,12 @@ offload decision they gate are in `docs/drivers/e1000e/design.md`
 about 60 % of that on aarch64, a checksum share of 1–2 %, and the two
 drivers within noise of each other.
 
+The combined two-interface benchmark has an explicit 20 s watchdog and
+harness budget. AArch64 chaos CI completed all samples in 8,360 ms while
+the former default 8 s watchdog fired during the second UDP round.
+Sample counts, assertions and bounded receive-drain waits remain intact.
+The shared budget entry is in `kernel/core/selftest.c`.
+
 Two things it found on its first run. An open-loop sender lost
 three quarters of its replies in the receive queue — the driver had
 received every one — which is why the ARP loop is windowed: a round
