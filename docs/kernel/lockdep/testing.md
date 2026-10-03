@@ -167,6 +167,13 @@ the raw lock and verify their edge counts and metadata ranges outside it
 while writers continue. The single-threaded `snapshot` case mutates and
 frees its source graph before verifying that the captured graph is intact.
 
+The same sanitizer binary also tests remote held-stack snapshots: a
+stopped mid-update writer is refused immediately, an oversized count is
+rejected, and readers racing a writer must see one complete generation
+across every entry and field. The kernel `lockdep-order` regression checks
+snapshot publication from real acquisitions, irqsave metadata, a release
+out of order, and the final empty stack.
+
 ### Failure detection and boundary cases
 
 The valid IRQ-restore control runs without arming a report expectation.

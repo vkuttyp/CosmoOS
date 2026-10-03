@@ -92,6 +92,9 @@ bool lockdep_is_held(const void *lock, unsigned kind);
 
 /* Print the held stacks (the panic report calls this). */
 void lockdep_dump_held(void);
+/* One nonblocking snapshot attempt. out has LOCKDEP_MAX_HELD entries;
+ * output is usable only on success. Does not capture thread mutexes. */
+bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count);
 /* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
 void lockdep_dump_held_cpu(unsigned cpu);
 
@@ -137,6 +140,8 @@ static inline bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}
+static inline bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)
+{ (void)cpu; (void)out; *count = 0; return false; }
 static inline void lockdep_dump_held_cpu(unsigned cpu) { (void)cpu; }
 static inline void lockdep_dump_graph(void) {}
 static inline void lockdep_get_stats(struct lockdep_stats *out) { *out = (struct lockdep_stats){ 0 }; }

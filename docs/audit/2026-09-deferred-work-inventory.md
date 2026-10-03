@@ -642,13 +642,15 @@ branch. Profiles are bounded to active callback executions and learn only
 locks observed in those executions, so they do not prove every callback
 path. A threaded host graph model now covers publication, serialized
 writers, and unlocked diagnostic readers under ASan/UBSan and TSan;
-kernel interrupt/held-stack/callback protocols remain outside that model.
+the held-stack model now also checks bounded atomic snapshot publication.
+Kernel interrupt entry and callback protocols remain outside those models.
 Normal graph dumps now copy a private graph under the raw writer lock,
 so their counts and edge lists are consistent. Panic reports now name the
 actual current thread and IRQ/preemption nesting instead of always claiming
 early boot; the deliberate crash harness requires that context.
-NMI/#MC raw-lock reentrancy,
-concurrent held-stack diagnostics and global statistics snapshots,
+Remote CPU spinlock dumps now use one bounded atomic snapshot attempt,
+reporting unavailable rather than reading a changing stack. NMI/#MC
+raw-lock reentrancy, global held-state/statistics snapshots across CPUs and threads,
 generalized callback waits, raw IRQ-restore pairing, and isolated
 performance measurement remain open. See
 `docs/audit/2026-10-03-lockdep-report.md` and its continuation notes for

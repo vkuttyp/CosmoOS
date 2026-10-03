@@ -29,6 +29,7 @@ STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
 struct lockdep_cpu {
     struct lockdep_held held[LOCKDEP_MAX_HELD];
     unsigned nr_held;
+    uint64_t held_seq;
     const void *callback_timer;
     unsigned callback_profile;
 };
@@ -128,20 +129,30 @@ void lockdep_dump_held(void)
         print_held(t->name, t->held_mutex, t->nr_held_mutex);
 }
 
-/* Another CPU's spinlock stack, read racily from here: a lockup report
- * names what a CPU that does not answer is holding, so a deadlock between
- * two of them shows its pair. */
+/* Another CPU may be stuck or updating its stack. Make one bounded
+ * atomic snapshot attempt; never wait on a CPU being diagnosed. */
+bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)
+{
+    *count = 0;
+    if (cpu >= CONFIG_MAX_CPUS)
+        return false;
+    struct lockdep_cpu *lc = &g_cpus[cpu];
+    return lockdep_core_held_snapshot(&lc->held_seq, lc->held, &lc->nr_held, out, count);
+}
+
 void lockdep_dump_held_cpu(unsigned cpu)
 {
     if (cpu >= CONFIG_MAX_CPUS)
         return;
-    struct lockdep_cpu *lc = &g_cpus[cpu];
-    unsigned n = lc->nr_held;
-    if (n > LOCKDEP_MAX_HELD)
-        n = LOCKDEP_MAX_HELD;
+    struct lockdep_held held[LOCKDEP_MAX_HELD];
+    unsigned n;
+    if (!lockdep_snapshot_held_cpu(cpu, held, &n)) {
+        kprintf("  held by cpu %u: unavailable (stack busy, changed, or invalid)\n", cpu);
+        return;
+    }
     char who[16];
     ksnprintf(who, sizeof(who), "cpu %u", cpu);
-    print_held(who, lc->held, n);
+    print_held(who, held, n);
 }
 
 /* --- reports ---------------------------------------------------------------- */
@@ -528,7 +539,10 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
             report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "per-CPU spinlock stack full", NULL, 0);
             return;
         }
-        lc->held[lc->nr_held++] = e;
+        lockdep_core_held_begin(&lc->held_seq);
+        lockdep_core_held_store(&lc->held[lc->nr_held], &e);
+        __atomic_store_n(&lc->nr_held, lc->nr_held + 1u, __ATOMIC_SEQ_CST);
+        lockdep_core_held_end(&lc->held_seq);
     }
 }
 
@@ -550,9 +564,13 @@ void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         if (lc->held[i].lock == lock) {
-            lc->held[i].flags |= LOCKDEP_HF_IRQSAVE;
+            struct lockdep_held e = lc->held[i];
+            e.flags |= LOCKDEP_HF_IRQSAVE;
             if (irq_was_enabled)
-                lc->held[i].flags |= LOCKDEP_HF_IRQSAVE_ON;
+                e.flags |= LOCKDEP_HF_IRQSAVE_ON;
+            lockdep_core_held_begin(&lc->held_seq);
+            lockdep_core_held_store(&lc->held[i], &e);
+            lockdep_core_held_end(&lc->held_seq);
             return;
         }
     }
@@ -612,7 +630,11 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
     if (irqrestore && !was_irqsave)
         report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip,
                "irqrestore used for a lock acquired without irqsave", NULL, 0);
-    (void)remove_entry(lc->held, &lc->nr_held, lock);
+    lockdep_core_held_begin(&lc->held_seq);
+    for (unsigned i = found; i + 1u < old_nr; i++)
+        lockdep_core_held_store(&lc->held[i], &lc->held[i + 1u]);
+    __atomic_store_n(&lc->nr_held, old_nr - 1u, __ATOMIC_SEQ_CST);
+    lockdep_core_held_end(&lc->held_seq);
 }
 
 /* --- the other checks ----------------------------------------------------- */

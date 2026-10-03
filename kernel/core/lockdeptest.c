@@ -73,10 +73,20 @@ bool selftest_lockdep_order(const char **reason)
     /* Releasing out of order is legal. */
     s = spin_lock_irqsave(&a);
     spin_lock(&b);
+    struct lockdep_held copy[LOCKDEP_MAX_HELD];
+    unsigned count;
+    unsigned cpu = raw_cpu_id();
+    bool captured = lockdep_snapshot_held_cpu(cpu, copy, &count) && count == 2 &&
+                    copy[0].lock == &a && copy[1].lock == &b &&
+                    (copy[0].flags & LOCKDEP_HF_IRQSAVE) &&
+                    (((copy[0].flags & LOCKDEP_HF_IRQSAVE_ON) != 0) == arch_irq_state_enabled(s));
     spin_unlock(&a);
+    bool shifted = lockdep_snapshot_held_cpu(cpu, copy, &count) && count == 1 && copy[0].lock == &b;
     CHECK(!lockdep_is_held(&a, LOCKDEP_KIND_SPIN) && lockdep_is_held(&b, LOCKDEP_KIND_SPIN));
     spin_unlock(&b);
+    bool empty = lockdep_snapshot_held_cpu(cpu, copy, &count) && count == 0;
     arch_irq_restore(s);
+    CHECK(captured && shifted && empty);
 
     /* A long cycle uses the real hooks, not the host decision model.
      * Each pair is observed independently so closing the chain needs a

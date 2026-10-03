@@ -142,6 +142,88 @@ static void *reader(void *opaque)
     free(snapshot);
     return NULL;
 }
+struct held_model {
+    struct lockdep_held held[LOCKDEP_MAX_HELD];
+    uint64_t seq;
+    unsigned count, done;
+};
+
+static void check_held_copy(const struct lockdep_held *held, unsigned count)
+{
+    assert(count <= LOCKDEP_MAX_HELD);
+    if (!count) return;
+    uintptr_t generation = held[0].ip;
+    for (unsigned i = 0; i < count; i++) {
+        assert(held[i].ip == generation);
+        assert(held[i].node == (generation + i) % LOCKDEP_MAX_NODES);
+        assert(held[i].flags == (uint8_t)(generation + i));
+        assert(held[i].lock == (const void *)(generation + i + 1u));
+    }
+}
+
+static void *held_writer(void *opaque)
+{
+    struct held_model *m = opaque;
+    for (unsigned gen = 1; gen <= ROUNDS; gen++) {
+        unsigned count = 1u + gen % LOCKDEP_MAX_HELD;
+        lockdep_core_held_begin(&m->seq);
+        for (unsigned i = 0; i < count; i++) {
+            struct lockdep_held e = {
+                .node = (uint16_t)((gen + i) % LOCKDEP_MAX_NODES),
+                .flags = (uint8_t)(gen + i), .ip = gen,
+                .lock = (const void *)(uintptr_t)(gen + i + 1u),
+            };
+            lockdep_core_held_store(&m->held[i], &e);
+        }
+        __atomic_store_n(&m->count, count, __ATOMIC_SEQ_CST);
+        lockdep_core_held_end(&m->seq);
+        sched_yield();
+    }
+    __atomic_store_n(&m->done, 1u, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *held_reader(void *opaque)
+{
+    struct held_model *m = opaque;
+    struct lockdep_held copy[LOCKDEP_MAX_HELD];
+    unsigned count;
+    do {
+        if (lockdep_core_held_snapshot(&m->seq, m->held, &m->count, copy, &count))
+            check_held_copy(copy, count);
+    } while (!__atomic_load_n(&m->done, __ATOMIC_ACQUIRE));
+    return NULL;
+}
+
+static void test_held_snapshots(void)
+{
+    struct held_model m = {0};
+    struct lockdep_held copy[LOCKDEP_MAX_HELD];
+    unsigned count;
+    assert(lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(count == 0);
+    /* A stopped CPU mid-update must return immediately, not spin. */
+    lockdep_core_held_begin(&m.seq);
+    assert(!lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(count == 0);
+    lockdep_core_held_end(&m.seq);
+    m.count = LOCKDEP_MAX_HELD + 1u;
+    assert(!lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(count == 0);
+    m.count = 0;
+    pthread_t w, r[READERS];
+    for (unsigned i = 0; i < READERS; i++)
+        assert(pthread_create(&r[i], NULL, held_reader, &m) == 0);
+    assert(pthread_create(&w, NULL, held_writer, &m) == 0);
+    assert(pthread_join(w, NULL) == 0);
+    for (unsigned i = 0; i < READERS; i++)
+        assert(pthread_join(r[i], NULL) == 0);
+    assert(lockdep_core_held_snapshot(&m.seq, m.held, &m.count, copy, &count));
+    assert(count > 0);
+    check_held_copy(copy, count);
+    puts("lockdep-held-snapshot: PASS (busy, bounds, concurrent generations)");
+}
+
 int main(void)
 {
     struct model *m = calloc(1, sizeof(*m));
@@ -183,6 +265,7 @@ int main(void)
                                   !(m->graph.classes[b].usage & LOCKDEP_HELD_IRQS_ON));
     }
     free(m);
+    test_held_snapshots();
     puts("lockdep-threads: PASS (publication, writers, readers, closure oracle)");
     return 0;
 }

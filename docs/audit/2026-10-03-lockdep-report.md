@@ -465,3 +465,40 @@ passes (8.7 s), verifying the context with lockdep disabled. Logs are
 `out/aarch64-release-wxn/boot-test-wxn.log`. Early-boot and IRQ-context
 branches were inspected but not exercised by these deliberately
 thread-context faults. `git diff --check` passes.
+
+## Remote held-stack snapshot increment
+
+`lockdep_dump_held_cpu` previously read another CPU's mutable stack with
+ordinary loads and printed it directly. A release shifting entries or an
+irqsave metadata update could race with that traversal. The dump now uses
+one bounded atomic snapshot attempt and prints only a successful private
+copy; a busy, changed, or invalid stack produces an unavailable message.
+It neither allocates nor acquires a target-owned lock, and an unresponsive
+writer cannot make it spin.
+
+CPU-local writers already mask interrupts for these updates. They now
+bracket pushes, irqsave flag updates, and removals with a 64-bit sequence
+and use atomic field/count stores. Snapshot readers accept only equal
+even sequence values around atomic field reads. All protocol operations
+are sequentially consistent, so a successful bounded copy cannot cross a
+writer in the atomic order. This adds eight bytes per possible CPU and
+atomic operations to debug held-stack updates; isolated overhead remains
+unmeasured. Thread mutex tracking is unchanged.
+
+The sanitizer model checks immediate failure with a writer stopped at an
+odd sequence, rejects oversized counts, and races readers against complete
+generation changes. The kernel `lockdep-order` case checks real push,
+irqsave flags, out-of-order release shifting, and empty-stack publication.
+The full ASan/UBSan host suite and TSan model pass; release builds pass on
+both architectures. Four-CPU debug boots pass all 416 tests and the full
+harness: x86-64 in 130.4 s and AArch64 in 133.6 s. Logs:
+`out/lockdep-held-host.log`, `out/lockdep-held-tsan.log`,
+`out/lockdep-held-release-build.log`, and
+`out/lockdep-held-{x86_64,aarch64}.log`. Both debug kernels were rebuilt
+after clarifying the unavailable-message wording. `git diff --check` passes.
+
+The snapshot covers a single CPU's spinlock stack at one instant, not
+simultaneous CPU/thread state. It does not make writer instrumentation
+NMI-reentrant. Global statistics consistency, thread-stack snapshots,
+NMI/#MC reentrancy, generalized callback dependencies, and raw IRQ-state
+pairing retain their existing limitations.

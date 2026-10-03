@@ -73,6 +73,16 @@ Prints both held stacks (class, subclass, acquiring address, `[irq]`,
 `[irqs-on]`, `[try]`). `panic()` calls it after the backtrace, so every
 crash report shows what the CPU and thread held.
 
+### `bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)`
+One bounded attempt to capture a CPU's spinlock stack. `out` must have
+`LOCKDEP_MAX_HELD` entries. On success, `count` describes a consistent
+copy; on failure it is zero and the output must not be used. Failure
+includes an invalid CPU, oversized stack, active update, or update during
+the copy. With lockdep disabled it always returns false. It allocates
+nothing, acquires no lock, and never waits for the target CPU. It captures
+neither the thread mutex stack nor a globally simultaneous CPU snapshot.
+`lockdep_dump_held_cpu` prints this copy or an explicit unavailable message.
+
 ### `void lockdep_dump_graph(void)`
 Prints a consistent snapshot of observed edges (`kdebug`), `'a'#n -> 'b'#m`
 meaning b was taken while a was held. `selftest_run_all` calls it once at

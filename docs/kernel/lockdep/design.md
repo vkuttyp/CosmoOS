@@ -133,6 +133,20 @@ failure prints an explicit unavailable message. This API requires a
 working allocator and raw lock and is not used by panic/NMI diagnostics.
 Held-stack diagnostics and statistics retain their separate consistency
 limits; the graph snapshot does not freeze global execution state.
+
+Remote CPU spinlock-stack dumps use a separate bounded snapshot protocol.
+The CPU-local writer already has IRQs masked for pushes, releases, and
+irqsave flag updates. It increments a 64-bit sequence before and after
+each update and writes each shared field atomically. Remote readers load
+an even sequence, copy up to 24 entries using atomic reads, and accept
+only if the sequence is unchanged. These operations are sequentially
+consistent, so an accepted copy cannot span a writer in the atomic total
+order (assuming no sequence wrap during the bounded attempt). An odd or
+changed sequence yields an unavailable message, with no retry, allocation,
+or target-owned lock. The cost is eight bytes per CPU plus atomic writes
+on debug held-stack updates. Local-only reads and thread mutex stacks
+retain their existing ownership rules. This does not make NMI writers
+reentrant or provide simultaneous snapshots of all CPUs.
 The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a

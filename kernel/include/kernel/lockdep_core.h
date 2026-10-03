@@ -55,6 +55,57 @@ struct lockdep_held {
     const void *lock;
 };
 
+/* CPU-local writer, with IRQs masked; remote diagnostic readers never
+ * wait. All shared writes and snapshot reads are sequentially consistent:
+ * equal even sequence reads enclose no writer in the atomic total order.
+ * Ordinary local reads remain safe because there is only one writer. */
+static inline void lockdep_core_held_begin(uint64_t *seq)
+{
+    __atomic_fetch_add(seq, 1u, __ATOMIC_SEQ_CST);
+}
+
+static inline void lockdep_core_held_end(uint64_t *seq)
+{
+    __atomic_fetch_add(seq, 1u, __ATOMIC_SEQ_CST);
+}
+
+static inline void lockdep_core_held_store(struct lockdep_held *dst,
+                                           const struct lockdep_held *src)
+{
+    __atomic_store_n(&dst->node, src->node, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&dst->flags, src->flags, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&dst->ip, src->ip, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&dst->lock, src->lock, __ATOMIC_SEQ_CST);
+}
+
+/* One bounded attempt. Output is usable only on success. A stuck writer
+ * leaves an odd sequence and cannot stall the reporting CPU. No memory
+ * allocation, graph lock, or retry loop is required. */
+static inline bool lockdep_core_held_snapshot(const uint64_t *seq,
+                                               const struct lockdep_held *held,
+                                               const unsigned *count,
+                                               struct lockdep_held *out,
+                                               unsigned *out_count)
+{
+    *out_count = 0;
+    uint64_t before = __atomic_load_n(seq, __ATOMIC_SEQ_CST);
+    if (before & 1u)
+        return false;
+    unsigned n = __atomic_load_n(count, __ATOMIC_SEQ_CST);
+    if (n > LOCKDEP_MAX_HELD)
+        return false;
+    for (unsigned i = 0; i < n; i++) {
+        out[i].node = __atomic_load_n(&held[i].node, __ATOMIC_SEQ_CST);
+        out[i].flags = __atomic_load_n(&held[i].flags, __ATOMIC_SEQ_CST);
+        out[i].ip = __atomic_load_n(&held[i].ip, __ATOMIC_SEQ_CST);
+        out[i].lock = __atomic_load_n(&held[i].lock, __ATOMIC_SEQ_CST);
+    }
+    if (__atomic_load_n(seq, __ATOMIC_SEQ_CST) != before)
+        return false;
+    *out_count = n;
+    return true;
+}
+
 struct lockdep_graph {
     struct lock_class classes[LOCKDEP_MAX_CLASSES];
     unsigned nr_classes;
