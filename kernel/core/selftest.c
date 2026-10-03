@@ -504,6 +504,7 @@ static const struct selftest tests[] = {
     { "quiesce-call",    selftest_quiesce_call },
     { "irq-sync",        selftest_irq_sync },
     { "irq-writers",     selftest_irq_writers },
+    { "irq-unhandled",   selftest_irq_unhandled },
     { "timer-cancel-sync", selftest_timer_cancel_sync },
     { "quiesce-stress",  selftest_quiesce_stress },
     /*

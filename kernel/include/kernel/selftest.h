@@ -91,6 +91,7 @@ bool selftest_quiesce_grace(const char **reason);
 bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);
 bool selftest_irq_writers(const char **reason);
+bool selftest_irq_unhandled(const char **reason);
 bool selftest_timer_cancel_sync(const char **reason);
 bool selftest_quiesce_stress(const char **reason);
 bool selftest_lockdep_order(const char **reason);

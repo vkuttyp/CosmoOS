@@ -50,7 +50,9 @@ interrupt_dispatch(v, frame):
 ```
 
 One acquire load selects the function and argument together. The count is
-incremented before lookup, including unhandled dispatches. No writer lock
+incremented before lookup, including unhandled dispatches. Architecture
+unhandled-warning totals likewise use atomic increments and print the
+returned value; concurrent warning lines need not appear in count order. No writer lock
 is taken, including on the x86 paranoid/NMI entry path.
 
 ## Handler context

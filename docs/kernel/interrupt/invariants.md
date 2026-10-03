@@ -44,6 +44,9 @@ An atomic increment precedes lookup and `interrupt_count` loads atomically.
 **Checked by** exact IPI counts in `irq-writers`, `breakpoint-trap`, and
 the concurrent host test, which counts
 handled and unhandled dispatches exactly after joining the dispatchers.
+`irq-unhandled` checks real unregistered delivery on every online CPU,
+repeated delivery after EOI, and handled reuse. Architecture-wide unhandled
+totals also increment atomically so concurrent warning paths cannot lose updates.
 
 ## I-INT-7: The table owns nothing
 

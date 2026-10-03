@@ -256,8 +256,8 @@ void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame)
 {
     if (arch_trap_is_exception(vector))
         panic_frame(frame, "unhandled exception %u (%s)", vector, arch_trap_name(vector));
-    g_unhandled++;
-    kwarn("aarch64: unhandled interrupt vector %u (%llu total unhandled)", vector, (unsigned long long)g_unhandled);
+    uint64_t count = __atomic_add_fetch(&g_unhandled, 1u, __ATOMIC_RELAXED);
+    kwarn("aarch64: unhandled interrupt vector %u (%llu total unhandled)", vector, (unsigned long long)count);
 }
 
 void arch_debug_break(void)

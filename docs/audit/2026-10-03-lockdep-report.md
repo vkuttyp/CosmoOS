@@ -1127,3 +1127,55 @@ Logs: `out/lockup-deadline-final-{x86_64,aarch64}.log` and corresponding
 `-result.log` files. Both release kernels built; logs:
 `out/lockup-deadline-release-{x86_64,aarch64}.log`. Probe syntax checking
 and `git diff --check` passed.
+
+## Unhandled IPI continuation after PR #305
+
+Base: merged PR #305 (`9e7c2274`). Phase 1 closes the ordinary
+unregistered-vector integration gap: `irq-unhandled` allocates and binds
+a vector without a handler, sends two rounds of IPIs to every online CPU
+(including itself), and requires exact dispatch counts. A grace period
+after each observed round finishes entry/dispatch/EOI before the next
+round or registration change. A handler is then installed on the same
+vector and its self-IPI identity/count checked before synchronous removal.
+The test fails stop on missing delivery or unsafe registration/cleanup
+state, preserving the allocated vector and any live stack probe.
+
+Phase 2 fixes a related confirmed data race found by inspection: both
+architectures incremented their shared unhandled-interrupt warning total
+with a plain read/modify/write. Concurrent CPUs could lose increments.
+They now use atomic fetch-add and log its returned total. This is a
+diagnostic count, so relaxed ordering is sufficient. The log order itself
+is not necessarily numeric: CPUs serialize their warning output after
+receiving their distinct counts. No dispatch lock or new allocation was
+introduced.
+
+This is the generic unregistered non-exception path, not the LAPIC's
+hardware-spurious vector, GIC spurious INTIDs, or fatal exception policy.
+The test's ordinary IPI delivery and reuse do not establish NMI mutation
+safety or arbitrary nested-handler behavior. The inventory was reconciled
+with PR #305's merge and marks this continuation separately.
+
+Phase 3: final four-CPU debug boots passed all 420 self-tests and the
+full harness (x86-64 133.1 s, AArch64 138.2 s). `irq-unhandled` took
+24/22 ms. Each controlled test segment had eight unhandled warnings on
+one allocated vector and eight unique consecutive diagnostic totals;
+the log order was allowed to differ from increment order. Logs:
+`out/irq-unhandled-final-{x86_64,aarch64}.log` and matching `-result.log`.
+Both release kernels built successfully:
+`out/irq-unhandled-release-{x86_64,aarch64}.log`.
+Single-CPU boots also passed all 420 self-tests and the full harness:
+x86-64 in 131.7 s and AArch64 in 136.7 s. Each controlled log segment
+contains exactly two unhandled warnings on the test vector, followed by
+successful handled reuse. Logs: `out/irq-unhandled-up-{x86_64,aarch64}.log`
+and matching `-result.log` files. The UP test took 12/1 ms respectively.
+
+A temporary x86 UP negative control skipped `arch_irqc_eoi` only for
+unregistered vectors. The first self-IPI produced one unhandled warning;
+the second remained pending and the exact `irq-unhandled` delivery-timeout
+panic fired. The targeted harness required that panic and the failure
+exit, completing in 8.1 s; it was not a full-suite pass. Logs:
+`out/irq-unhandled-noeoi.log`, `out/irq-unhandled-noeoi-result.log` and
+`out/irq-unhandled-noeoi-build.log`. The clone was separate from normal
+source/images and its mutation is not committed. This tests the missing
+EOI failure and retention path; other cleanup failures were reviewed,
+not injected. `git diff --check` passed.

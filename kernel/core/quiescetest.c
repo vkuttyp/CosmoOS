@@ -1106,6 +1106,71 @@ bool selftest_irq_writers(const char **reason)
 }
 
 
+/* --- irq-unhandled: real unregistered delivery and completion --- */
+
+static bool irq_unhandled_wait(unsigned vector, uint64_t expected)
+{
+    uint64_t start = clock_now_ns();
+    while (interrupt_count(vector) < expected) {
+        if (clock_since_ns(start) > MS(1000))
+            panic("selftest irq-unhandled: delivery timeout; retaining vector and probe");
+        sched_yield();
+    }
+    /* Dispatch increments before lookup. Wait for the actual interrupt
+     * path and EOI to finish before resending or changing registration. */
+    synchronize_irq(vector);
+    return interrupt_count(vector) == expected;
+}
+
+static bool selftest_irq_unhandled_pinned(const char **reason)
+{
+    int allocated = arch_vector_alloc();
+    CHECK(allocated >= 0);
+    unsigned vector = (unsigned)allocated;
+    arch_ipi_bind(vector);
+    cpumask_t targets = cpu_online_mask();
+    unsigned nr_targets = (unsigned)__builtin_popcountll(targets);
+    if (interrupt_handler_name(vector) != NULL)
+        panic("selftest irq-unhandled: allocated vector already registered");
+    bool ok = true;
+    uint64_t expected = interrupt_count(vector);
+    for (unsigned round = 0; round < 2 && ok; round++) {
+        for (unsigned cpu = 0; cpu < cpu_count(); cpu++)
+            if (targets & CPUMASK_OF(cpu))
+                arch_ipi_send(cpu, vector);
+        expected += nr_targets;
+        ok = irq_unhandled_wait(vector, expected) && interrupt_handler_name(vector) == NULL;
+    }
+    /* Register only after all unhandled deliveries finished. A handled
+     * self-IPI proves the same vector remains usable after both rounds. */
+    struct irq_writer_probe p = { .vector = vector, .identity = 0 };
+    if (ok) {
+        int rc = interrupt_register(vector, irq_writer_a, &p, "selftest-unhandled-reuse");
+        if (rc != 0)
+            panic("selftest irq-unhandled: registration failed; retaining vector");
+        arch_ipi_send(arch_cpu_id(), vector);
+        ok = irq_unhandled_wait(vector, expected + 1);
+        /* Unpublish and wait even if an exact-count check failed. */
+        int removed = interrupt_unregister_sync(vector, irq_writer_a);
+        if (removed != 0)
+            panic("selftest irq-unhandled: cleanup failed; retaining vector and probe");
+        ok = ok && p.hits == 1 && p.bad == 0;
+    }
+    arch_vector_free(vector);
+    CHECK(ok);
+    kinfo("selftest: irq-unhandled: %u CPUs, two unhandled IPI rounds and handled reuse", nr_targets);
+    return true;
+}
+
+bool selftest_irq_unhandled(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool result = selftest_irq_unhandled_pinned(reason);
+    thread_set_affinity_self(saved);
+    return result;
+}
+
+
 /* --- timer-cancel-sync: the wait outlasts a running callback; re-arming loses --- */
 
 struct timer_probe {

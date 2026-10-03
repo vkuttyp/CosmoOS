@@ -5,7 +5,7 @@
 | Level | What | Command |
 |---|---|---|
 | Host (ASan/UBSan, real threads) | `test_quiesce`: the epoch arithmetic, a negative model, and four reader threads against an updater that frees after each grace period (2000 generations) | `make host-test` |
-| Target self-tests (debug builds) | `quiesce-grace`, `quiesce-call`, `irq-sync`, `irq-writers`, `timer-cancel-sync`, `quiesce-stress`, `blk-lifetime`, `net-netif-lifetime`, `net-accept-race`, `module-unload-busy` | `make test` |
+| Target self-tests (debug builds) | `quiesce-grace`, `quiesce-call`, `irq-sync`, `irq-writers`, `irq-unhandled`, `timer-cancel-sync`, `quiesce-stress`, `blk-lifetime`, `net-netif-lifetime`, `net-accept-race`, `module-unload-busy` | `make test` |
 | Single CPU | the same tests take their one-CPU branches (the calling CPU is quiescent by construction; self-IPI for `irq-sync`) | `QEMU_SMP=1 make test` |
 | AArch64 | everything above; `irq-sync` uses an SGI through `arch_ipi_send` | `make ARCH=aarch64 test` |
 
@@ -28,6 +28,7 @@ Every test above ran and passed on x86-64 (4 CPUs and 1 CPU) and AArch64
 | `quiesce-call` | eight `call_quiesce` heads, half submitted with preemption and interrupts off; all run once, in submission order, with `irq_depth == 0 && preempt_count == 0`, after one grace period | Q4, Q5 |
 | `irq-sync` | a vector from `arch_vector_alloc`, a handler that spins 20 ms; raised on CPU 1 with `arch_ipi_send`; once entered, `interrupt_unregister_sync` on CPU 0 returns only after the handler set `done` (≥ 10 ms); `irq_syncs` +1; a second unregister is `-ENOENT`; the argument is poisoned and freed. One CPU: self-IPI, then the sync form is immediate | Q7. Measured: unregister_sync took 22–23 ms against a 20 ms handler |
 | `irq-writers` | 16 rounds of competing registration/removal threads, a real IPI identifying the winning handler/argument, and `synchronize_irq` before record/probe reuse; two CPUs on SMP, self-IPI on UP | writer serialization plus Q7 integration; deliberately overlapping handler lifetime remains `irq-sync` coverage |
+| `irq-unhandled` | two unregistered IPI rounds to all online CPUs, each followed by a grace period; then handled self-IPI reuse and synchronous removal | unhandled dispatch completes before reuse; repeated delivery exercises EOI |
 | `timer-cancel-sync` | pending timer: `cancel_sync` true then false; a callback spinning 20 ms armed on CPU 1 by a pinned thread: `cancel_sync` returns after `done`, ≥ 10 ms, `timer_sync_waits` +1; a callback that re-arms every 1 ms: after `cancel_sync` the state is IDLE and the fire count is unchanged 30 ms later | Q8. Measured: cancel_sync took 20 ms; the re-arming timer stopped after 2 fires |
 | `quiesce-stress` | readers on every other CPU spin in `quiesce_read_lock` sections checking the current object's magic (yielding every 1024 reads); the updater replaces the object for 400 ms alternating `synchronize_quiesce` + free and `call_quiesce`; all deferred frees drain; zero bad reads; every CPU's read depth is 0 afterwards | Q1 under load. Measured: 3 readers, 4.2–5.8 M reads, 101 synchronous + 100 deferred generations in 400 ms (≈ 4 ms per grace period) |
 
