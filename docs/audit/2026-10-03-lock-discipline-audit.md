@@ -194,3 +194,7 @@ preemption migration barrier, timer cancellation and thread lifetime
 protocols remain the design boundaries. General callback wait modeling,
 raw IRQ pairing, NMI writer support, global snapshots and worst-case
 latency bounds remain separate work.
+
+Implementation and validation outcomes, including retained failures and
+the busy-guard clock refinement, are in the
+[October 4 report](2026-10-04-spin-contention-report.md).

@@ -647,8 +647,9 @@ and the lockup deadline-read correction. PR #306 adds unhandled-IPI and
 interrupt-boundary coverage, deterministic graph-search bounds and first-use
 acquisition measurements. Subsequent rows explicitly marked local
 continuation are not a merge or remote CI result.
-Evidence and validation
-limits are in [the lockdep report](2026-10-03-lockdep-report.md).
+Evidence and validation limits are in
+[the lockdep report](2026-10-03-lockdep-report.md) and the
+[observed-spin continuation](2026-10-04-spin-contention-report.md).
 
 | Completed item | Implementation and scope |
 |---|---|
@@ -676,7 +677,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Interrupt dispatch bounds and synchronous-removal error-path coverage~~ | **BUILT (PR #306)**: actual-source host tests check invalid dispatch and oversized-init panic diagnostics, logical/full-table boundaries, preserved registrations on failure, and synchronous-removal wrapper ordering. ASan/UBSan, TSan and three failing mutation controls validate the tests; real panic shutdown and epoch completion are outside these host shims. |
 | ~~Deterministic graph-search work bounds~~ | **BUILT (PR #306)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
 | ~~Uncontended first-acquisition measurements against the live graph~~ | **BUILT (PR #306)**: public spin, irqsave, nested-spin and mutex acquisitions include first class/usage/edge checks and held-stack publication, then compare reuse. Three fresh samples per path consume 18 classes. Matched debug LOCKDEP=0/1 boots cover both architectures; timings remain descriptive QEMU observations, not worst-case or native-hardware bounds. |
-| ~~Contention-test lock/timer cleanup on a missed callback window~~ | **FIXED (local continuation after PR #306)**: release the spinlock, synchronously cancel the stack timer and join the completed holder before returning failure. Readiness and exit guards fail stop with the thread retained. Old/fixed missed-timer probes validate state on both architectures; x86 probes validate both timeout diagnostics. The timing window itself and stopped-owner spin waits remain outside this fix. |
+| ~~Contention-test lock/timer cleanup on a missed callback window~~ | **FIXED (local continuation after PR #306)**: release the spinlock, synchronously cancel the stack timer and join the completed holder before returning failure. Readiness and exit guards fail stop with the thread retained. Old/fixed missed-timer probes validate state on both architectures; x86 probes validate both timeout diagnostics. The timing window is addressed by the October 4 continuation below; stopped-owner spin waits remain open. |
 | ~~Controlled queued-mutex acquisition measurements~~ | **BUILT (local continuation after PR #306)**: verify the waiter entered the real mutex queue before a controlled 1 ms owner hold and release; two warmups and nine samples time public acquisition through ownership. Tests check protected-data handoff and lifetime-safe queue/exit failure paths. These are total wait times, not isolated lockdep or priority-inheritance overhead. |
 | ~~Console-dependent lifetime of ELF inspection fixtures~~ | **FIXED (local continuation after PR #306)**: `elf-text-ro` and `elf-data-private` use `init --spin` until explicit kill/wait cleanup. Their former `--block` child could read console input and exit before address-space inspection; a process reference alone does not preserve that space. Protection and data assertions remain intact. |
 | ~~Unbounded same-CPU lockdep raw-lock re-entry~~ | **FIXED (local continuation after PR #306)**: the acquiring CAS publishes CPU ownership in the raw word. Re-entry fails stop without stealing or clearing the interrupted owner's lock. Direct probes and real x86 NMI exercise the diagnostic, including a busy held-stack writer. Arbitrary NMI/#MC tracking and cross-CPU wait cycles remain open. |
@@ -684,6 +685,8 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~NAT expiry test racing unfinished flood packets~~ | **FIXED (PR #307 follow-up)**: `net-nat` counts flood outcomes relative to its baseline and asserts completion before aging. Lifetime counters survived `nat_flush`, allowing four earlier translations to hide four pending packets. Controlled real-worker probes reproduce the old post-sweep entries and validate the fix on both architectures; a withheld-tail control fails before aging. Production NAT timeouts and expiry/quota assertions are unchanged. |
 | ~~IRQ routing test assuming five deliveries within 50 ms~~ | **FIXED (PR #307 follow-up)**: wait for five atomic-counted deliveries with a 1 s migration-safe deadline instead of sampling after a fixed delay. Missing delivery still fails, while the existing mask checks and deferred cleanup remain. Slow-source and negative probes are documented in [interrupt testing](../kernel/interrupt/testing.md). |
 | ~~Composite NIC benchmark and chaos boot outgrowing default timing limits~~ | **ADJUSTED (PR #307 follow-up)**: CI completed the two-interface benchmark in 8,360 ms and all 422 self-tests, but exceeded the default watchdog and shell deadlines. The unchanged benchmark workload now has a shared 20 s watchdog/harness budget; chaos boots have 240 s total. Ordinary boot limits and signal-response checks remain. See the [audit evidence](2026-10-03-lockdep-report.md). |
+| ~~Contention-test reliance on a fixed holder/callback timing window~~ | **FIXED (local October 4 continuation)**: a self-test-only observer publishes actual failed spin exchanges. The holder waits for the callback's observed contention; early callbacks rearm. A nested IRQ spin wait must restore the outer observation. Early-callback, short-hold and lost-restoration controls validate the protocol on both architectures; cleanup and masked-IRQ guard probes cover failure paths. Arbitrary stopped owners remain outside the bound. |
+| ~~Controlled contended plain-spin and irqsave acquisition measurements~~ | **BUILT (local October 4 continuation)**: a pinned remote waiter must fail an exchange before the owner holds another 1 ms and releases. Two warmups and nine samples per path verify exclusion, ownership, protected-data handoff and IRQ/preemption state. Matched debug LOCKDEP=0/1 boots cover both architectures; UP explicitly skips. These are total acquisition times under QEMU, including observer cost. Broader workloads and native-hardware bounds remain open. |
 
 Still open for the next milestone:
 
@@ -696,8 +699,12 @@ Still open for the next milestone:
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
 - Worst-case wall-clock search latency, first-acquisition graph-size sweeps,
-  contended spin paths and broader mutex workloads, priority-inheritance waits, and native-hardware
+  broader spin/mutex contention workloads, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
   host graph/held-stack and interrupt-publication tests, kernel writer/IPI
   and unregistered-delivery regressions, and bounded x86 NMI reader test.
+- Two-CPU full-suite validation: the VirtIO removal overlap needs a third
+  CPU with its current placement helper; `sched-spread` and
+  `sched-balance-pair` failures observed on two CPUs remain unattributed.
+  See the [October 4 report](2026-10-04-spin-contention-report.md).

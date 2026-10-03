@@ -38,10 +38,11 @@ released normally.
 | `lockdep-irq` | direct and transitive IRQ conflicts in both observation orders, thread trylock classification, successful/failed IRQ trylock, wrong irqrestore state, and enabling with another spinlock held; self-IPI handler drives real interrupt acquisitions | L3, L14 |
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
-| `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
+| `lockdep-contention` | remote holder keeps L until a timer observes this CPU's failed exchange; the callback makes a nested wait and verifies restoration of the outer observation, then takes M; afterwards M → L is checked without acquiring L and must report IRQ usage, not a phantom inversion | L11 (a waited-for lock is not held); real slow-path and nested-observer validation |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
 | `lockdep-first-bench` | public spin, irqsave, nested-spin and mutex acquisitions with fresh classes, then reuse; three samples per path | verifies ownership, class registration and nested search; descriptive timing only |
 | `lockdep-mutex-bench` | a private mutex owner waits for verified waiter queue entry, holds another 1 ms, then releases; two warmups and nine samples | queued acquisition, ownership and data handoff; descriptive timing only |
+| `lockdep-spin-bench` | private spinlock owner observes a failed exchange on another CPU before holding 1 ms and releasing; plain and irqsave paths, two warmups and nine samples each | contention, ownership, exclusion, data handoff and restored IRQ/preemption state; UP explicitly skips |
 | `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
@@ -144,8 +145,41 @@ are total contended acquisition times, not isolated lockdep overhead; the
 1 ms hold is not subtracted. Neither time nor enabled/disabled ratios are
 pass criteria. Waiters use the normal default priority; no priority boost
 is deliberately induced. Priority-inheritance donation measurements,
-contended spin timings, graph-size sweeps and native-hardware costs remain
+broader spin workloads, graph-size sweeps and native-hardware costs remain
 open. The log distinguishes `same-cpu` and `cross-cpu` placement.
+
+### Observed spin acquisition measurement
+
+`lockdep-spin-bench` runs identical plain/irqsave workloads with lockdep
+enabled and disabled. The owner and waiter are pinned to distinct CPUs;
+UP logs an explicit skip. A start flag holds the waiter until the owner
+has the lock. The owner then waits for `spin_test_waiting_on` to observe
+a real failed exchange, holds for 1 ms, writes protected data and releases.
+Each path has two warmups and nine samples; each sample times the waiter's
+public acquisition on its own CPU, without subtracting the hold interval.
+
+Every round verifies exclusion, ownership, protected-data handoff, IRQ
+state and preemption count during ownership and after release, and a
+cleared wait observation. The owner releases and joins even if the
+one-second observation guard expires. A missing waiter exit fails stop
+with its thread and stack probe retained. A fresh thread per round and
+the self-test observer contribute to these measurements; they are not
+isolated lockdep overhead or native-hardware latency bounds.
+
+`tools/spin-contention-probe.py` uses temporary clones and exact panic
+outcomes. `early` forces a timer callback before the waiter and delays
+the waiter 50 ms; `early-short-hold` restores the former 20 ms holder guard and
+requires a missed-callback failure after cleanup. `missing-wait` withholds
+the observer and requires the same safe failure. `nested-restore` clears
+the interrupted observation instead of restoring it and requires the
+callback assertion to catch that loss. `bench-unobserved` withholds the
+owner's observation and requires a failure after unlock/join;
+`bench-irqguard` does that with two CPUs, irqsave acquisition and the
+clock forced non-common: the owner's pinned hardware-clock guard must
+expire even though both CPUs have IRQs masked. `bench-exit` withholds
+exit and requires the retention panic. Images and
+logs stay under `out/spin-probe-*/run-*`. These are controlled tests;
+arbitrary stopped CPUs or NMI writer nesting remain outside their scope.
 
 ### New-edge core measurement
 
@@ -333,7 +367,7 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 `lockdep-contention` checks IRQ state before creating its remote holder
 or publishing the stack timer. Holder readiness has a one-second guard;
 expiry panics with the thread retained. After acquisition, the test saves
-whether the callback met its original window, releases the spinlock and
+whether the callback observed the actual wait, releases the spinlock and
 synchronously cancels the timer before waiting for holder exit. Exit
 completion has a one-second timeout before `thread_join`; only after
 cleanup can a failed callback-window assertion return. A late callback
@@ -344,9 +378,14 @@ Previously, the callback-window assertion returned with the spinlock held
 and its stack timer still published. Readiness failure could also return
 without joining the created thread. The corrected failure order preserves
 the original test assertion and makes the resource lifetimes explicit.
-It does not make the 5 ms callback versus 20 ms holder timing deterministic
-under arbitrary host scheduling, or bound a primitive spin wait if its
-owner stops making progress.
+The October 4 continuation also removes the fixed 20 ms hold: the holder
+keeps L until the callback observes an actual failed exchange, or a 1 s
+guard expires. An early callback rearms without taking M. In the observed
+callback, a second lock held by the remote holder forces a nested spin
+wait; the holder observes and releases it, and the callback verifies that
+the outer wait was restored before taking M. Both real waits are required
+for a pass. This does not bound a primitive spin wait if its owner stops
+making progress. Guard failure still follows the existing cleanup order.
 
 `tools/lockdep-contention-probe.py` builds isolated temporary clones and
 requires specific panic state and failure exit, rather than accepting any
