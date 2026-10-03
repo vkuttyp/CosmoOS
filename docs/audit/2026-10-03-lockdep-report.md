@@ -1489,3 +1489,110 @@ and `out/elf-fixture-{old,fixed}-final-result.log`. The injected input,
 early test placement and probe panics are not committed. Temporary probe
 setup/build failures were corrected before these successful runs; they
 provided no regression evidence. `git diff --check` passed.
+
+## Continuation: same-CPU raw-lock re-entry and panic output
+
+Phase 1 replaces the validator's exchange-and-spin word with an owner
+word: zero means free, otherwise CPU plus one. The successful acquire CAS
+publishes ownership in the same operation; a separate owner store would
+leave an NMI window. Local IRQ masking prevents migration until the
+release store. A failed CAS observing this CPU as owner invokes the exact
+`lockdep: graph raw lock re-entry on CPU ...` panic without releasing or
+stealing the interrupted owner's lock. Other CPUs keep the usual waiting
+behavior. This adds no table, class, lock-object field or release-build
+validator cost. It does add CPU identification and a failed-CAS ownership
+comparison to enabled builds; existing measurements are not a quantified
+performance claim for this new implementation.
+
+Phase 2 found and corrected a prerequisite in fatal diagnostics. The
+initial x86 NMI and direct-statistics probes timed out before printing the
+diagnostic. Panic already bypassed the console lock, but `kprintf` still
+acquired the tracked log-ring lock. Bypassing the ring alone still timed
+out: a debugger captured the first panic at the intended raw-lock re-entry
+and the second panic inside `vcon_write`'s tracked `virtio-console` lock.
+Repeated recursion eventually exhausted the IST stack and corrupted the
+raw word. The captured stacks are in `out/lockdep-reentry-lldb{,2}.log`;
+initial failures are in `out/lockdep-reentry-{direct,nmi-acquire-busy,
+nmi-acquire-busy-fixed}-result.log`. Diagnostic boot runs with debugger
+stops are investigation artifacts, not test passes.
+
+The console's irreversible panic-mode flag now uses atomic access and an
+additive `console_in_panic_mode` module export. In that mode logging skips
+ring writes and the VirtIO console returns before touching device/queue
+locks. Serial and framebuffer output remains available, with neither a
+new sink layout nor an ABI version change. Fatal output intentionally no
+longer appends to the ring or VirtIO transport; the ring is not a frozen
+failure-time snapshot. This fixes actual tracked acquisitions on the
+panic output path instead of suppressing raw-lock reports or disabling
+validation globally. General sink faults, sink-list lifetime during
+catastrophic failure and a VirtIO panic transport remain separate concerns.
+
+Phase 3 adds `tools/lockdep-reentry-probe.py`. Isolated builds use the
+working sources and a fresh retained output directory, avoiding dependency
+files that refer to deleted temporary clones. Direct mode exercises normal
+statistics and public spin acquisition under the held raw lock on both
+architectures. x86 NMI mode first completes two software interrupt checks,
+then injects the operation on real APIC delivery. Busy mode interrupts an
+unfinished held-stack update and requires the panic's explicit unavailable
+snapshot. Ring mode injects panic while holding the actual log-ring lock,
+with lockdep enabled or disabled. Probes require the exact diagnostic,
+correct context, completed panic output and failure exit; an unrelated
+panic or timeout cannot pass. Old-lock and old-ring controls restore the
+unsafe implementations and deliberately fail that same harness. One ring
+probe setup initially omitted the panic declaration; its compile failure
+was corrected before the runtime comparisons and is not regression evidence.
+
+This increment detects and terminates same-CPU raw-lock recursion. It does
+not make arbitrary NMI/#MC tracked acquisitions supported, make held-stack
+writers reentrant, detect cross-CPU raw-lock cycles, bound waits on stopped
+owners, or add AArch64 NMI delivery. The source header and concurrency
+section no longer claim unrestricted reentrancy safety. Read-only NMI
+snapshot tests remain part of normal boots.
+
+The ten corrected expected-panic probes passed:
+
+| Probe | x86-64 seconds | AArch64 seconds |
+|---|---:|---:|
+| Direct statistics re-entry | 12.0 | 15.8 |
+| Direct spin acquisition, busy held stack | 11.9 | 15.4 |
+| Real NMI statistics re-entry | 5.2 | unsupported |
+| Real NMI spin acquisition, busy held stack | 5.2 | unsupported |
+| Held-ring panic, LOCKDEP=1 | 5.5 | 8.8 |
+| Held-ring panic, LOCKDEP=0 | 5.2 | 8.6 |
+
+The x86 old-lock NMI control timed out and failed the harness in 34.1 s;
+the old-ring LOCKDEP=0 control likewise failed in 34.6 s. Both reached
+their explicit probe-armed markers but lacked the required completed panic
+report. These are successful negative-control observations, not passing
+boots. Final probe result logs are
+`out/lockdep-reentry-{x86_64,aarch64}-{direct-stats,direct-acquire,ring-ld1,ring-ld0}-result.log`,
+`out/lockdep-reentry-nmi-{stats,acquire-busy-final,old-lock}-result.log`,
+and `out/lockdep-reentry-ring-old-ld0-result.log`. Each names the retained
+`run-*` directory with its image, build and boot logs. No injected panic or
+handler change is present in the production kernel source.
+
+The final serialized normal-boot matrix passed all 422 self-tests and the
+full harness in every configuration. No normal boot required a retry or
+relaxed budget in this increment:
+
+| Architecture | Lockdep | CPUs | Full boot seconds |
+|---|---|---:|---:|
+| x86_64 | on | 4 | 132.7 |
+| x86_64 | on | 1 | 114.4 |
+| x86_64 | off | 4 | 107.4 |
+| aarch64 | on | 4 | 133.7 |
+| aarch64 | on | 1 | 119.1 |
+| aarch64 | off | 4 | 122.0 |
+
+Logs are `out/lockdep-reentry-{x86_64,aarch64}-{on-smp,on-up,off-smp}.log`
+and corresponding `-result.log` files. A parser checked the exact 422-test
+success marker, full harness pass and absence of kernel panic in all six
+logs. Both release kernels built successfully, and `gmake host-test`
+passed the existing ASan/UBSan suites and boot-harness unit tests. These
+host suites do not execute the new kernel raw-lock implementation; that
+boundary is exercised by the kernel probes and normal boots. Release and
+host results are `out/lockdep-reentry-{x86_64-release,aarch64-release,host}-result.log`.
+`out/lockdep-reentry-validation-progress.log` records the serialized run,
+including the corrected ring-probe setup failure. Python syntax validation
+and `git diff --check` passed. The pre-fix panic-path failures remain
+recorded above; final green results do not erase them.

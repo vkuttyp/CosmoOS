@@ -85,10 +85,17 @@ futex race test; the lost-wake argument is by construction.
 
 ## Rules the checker keeps
 
-**L9. The checker allocates nothing and takes no tracked lock.** All
+**L9. Acquisition tracking allocates nothing and takes no tracked lock.** All
 tables are static (320 classes, 1280 nodes, 24 held per CPU, 8 mutexes per
-thread); the raw lock is a word. Exhaustion of any table is a report, not
-an overrun. Check: host `test_lockdep` (class table full → -1); review.
+thread); the raw lock is a word containing zero or the owning CPU plus one.
+Ownership is published by the acquiring CAS and cleared by a release store,
+with local IRQs masked throughout. Re-entry on the owning CPU panics before
+waiting, without clearing or stealing the interrupted owner's lock.
+Exhaustion of any table is a report, not an overrun. Normal graph dumps
+allocate their private snapshot before taking the raw lock. Check: host
+`test_lockdep` (class table full → -1); `tools/lockdep-reentry-probe.py`
+(direct recursion and real x86 NMI, including an interrupted stack update).
+Gap: general NMI/#MC writer nesting and cross-CPU raw-lock wait cycles.
 
 **L10. Classes are keyed by name contents and lock kind, with kernel-owned
 name storage.** Equal names share a class; a mutex and its internal

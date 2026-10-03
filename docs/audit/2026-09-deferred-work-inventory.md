@@ -679,11 +679,15 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Contention-test lock/timer cleanup on a missed callback window~~ | **FIXED (local continuation after PR #306)**: release the spinlock, synchronously cancel the stack timer and join the completed holder before returning failure. Readiness and exit guards fail stop with the thread retained. Old/fixed missed-timer probes validate state on both architectures; x86 probes validate both timeout diagnostics. The timing window itself and stopped-owner spin waits remain outside this fix. |
 | ~~Controlled queued-mutex acquisition measurements~~ | **BUILT (local continuation after PR #306)**: verify the waiter entered the real mutex queue before a controlled 1 ms owner hold and release; two warmups and nine samples time public acquisition through ownership. Tests check protected-data handoff and lifetime-safe queue/exit failure paths. These are total wait times, not isolated lockdep or priority-inheritance overhead. |
 | ~~Console-dependent lifetime of ELF inspection fixtures~~ | **FIXED (local continuation after PR #306)**: `elf-text-ro` and `elf-data-private` use `init --spin` until explicit kill/wait cleanup. Their former `--block` child could read console input and exit before address-space inspection; a process reference alone does not preserve that space. Protection and data assertions remain intact. |
+| ~~Unbounded same-CPU lockdep raw-lock re-entry~~ | **FIXED (local continuation after PR #306)**: the acquiring CAS publishes CPU ownership in the raw word. Re-entry fails stop without stealing or clearing the interrupted owner's lock. Direct probes and real x86 NMI exercise the diagnostic, including a busy held-stack writer. Arbitrary NMI/#MC tracking and cross-CPU wait cycles remain open. |
+| ~~Tracked log-ring and VirtIO queue locking during panic output~~ | **FIXED (local continuation after PR #306)**: irreversible panic mode skips ring writes and the VirtIO console transport, retaining serial/framebuffer output. This prevents diagnostic recursion into an interrupted validator and waiting for those lock owners. Held-ring probes cover both architectures with lockdep enabled and disabled; general sink faults and a VirtIO panic transport remain outside this fix. |
 
 Still open for the next milestone:
 
-- NMI/#MC lockdep writer and raw-lock reentrancy; the x86 read-only test
-  does not cover arbitrary tracked acquisitions or AArch64 NMI delivery.
+- General NMI/#MC lockdep writer reentrancy and cross-CPU wait cycles;
+  same-CPU raw-lock re-entry now fails stop. Reader tests and the deliberate
+  writer-failure probe do not permit arbitrary tracked acquisitions or
+  establish AArch64 NMI delivery.
 - Simultaneous global held-state snapshots across CPUs and threads;
   individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.

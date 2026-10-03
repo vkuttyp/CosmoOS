@@ -419,6 +419,40 @@ probe hook exists only with `CONFIG_LOCKDEP && CONFIG_SELFTEST`; it is not
 a production callback API. This validates the NMI-safe snapshot reader,
 not tracked lock acquisitions or graph mutations from NMI/#MC handlers.
 
+### Raw-lock re-entry failure boundary
+
+`python3 tools/lockdep-reentry-probe.py` builds the working lockdep source
+in a temporary clone and requires the exact graph raw-lock re-entry panic,
+the correct thread/interrupt context, completed panic output and failure
+exit. Direct mode calls a normal statistics snapshot while already holding
+the raw lock; `--operation acquire` instead attempts a public spinlock
+acquisition. Both support `--arch x86_64` and `--arch aarch64`.
+`--mode nmi` is x86-only and injects that operation into the existing
+`trap-paranoid` handler on real APIC NMI delivery, after the two software
+interrupt checks. `--busy` selects the interrupted held-stack update,
+exercising the panic reader's unavailable path. There is no recoverable
+expectation or suppression of raw-lock recursion.
+
+`--old-lock` restores the former exchange-and-spin implementation in the
+temporary clone. This is a deliberately failing control: the same harness
+must reject its hang and missing diagnostic. A timeout is never a passing
+test of the fix. Each invocation retains its image, build and boot logs in
+a fresh `out/lockdep-reentry-*/run-*` directory so dependency files cannot
+refer to a previous, deleted clone. These probes do not add boot self-tests
+or demonstrate that arbitrary NMI writers, #MC delivery, cross-CPU cycles,
+or stopped owners are supported. Full normal boots separately exercise
+cross-CPU serialization and the successful NMI snapshot reader.
+
+`--mode ring` injects panic after taking the actual log-ring lock, before
+writing its trigger line, and requires the named panic plus completed
+output and failure exit. It supports both architectures and `--lockdep 0`
+as well as the default `1`. `--old-ring` removes the panic bypass in the
+temporary clone and must fail the harness. This checks that fatal output
+does not acquire even its own already-held ring lock. The VirtIO sink is
+loaded during these probes and must skip its tracked queue transport;
+normal boots still require its ordinary output. Fatal text is no longer
+appended to the in-memory log ring or VirtIO console.
+
 ### Failure detection and boundary cases
 
 The valid IRQ-restore control runs without arming a report expectation.

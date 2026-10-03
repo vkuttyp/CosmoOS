@@ -4,8 +4,9 @@
  *
  * The algorithm is lockdep_core.h. This file owns the per-CPU spinlock
  * stacks, the per-thread mutex stacks, the raw lock that serialises graph
- * updates, and the report path. It takes no tracked lock and allocates
- * nothing, so it is safe from every context a lock is taken in.
+ * updates, and the report path. Acquisition tracking takes no tracked
+ * lock and allocates nothing. NMI/#MC writers remain unsupported; raw
+ * lock re-entry on its owning CPU fails stop rather than waiting forever.
  */
 
 #include <kernel/lockdep.h>
@@ -52,21 +53,32 @@ static struct lockdep_cpu g_cpus[CONFIG_MAX_CPUS];
 static struct lockdep_timer_profile g_timer_profiles[LOCKDEP_MAX_TIMER_PROFILES];
 #define TIMER_PROFILE_TOMBSTONE ((const void *)(uintptr_t)1)
 static struct lockdep_stats g_stats;
-static bool g_off;                          /* after a report that panicked, or during panic */
+static bool g_off;                          /* fatal lockdep report in progress */
 
 /* Self-test expectations. */
 static int g_expect[CONFIG_MAX_CPUS];
 static bool g_expect_armed[CONFIG_MAX_CPUS];
 static unsigned g_expected_hits[CONFIG_MAX_CPUS];
 
-/* The checker's own lock: a raw word, never tracked. */
+/* The checker's own lock: zero when free, otherwise owning CPU + 1.
+ * Publish ownership in the acquisition itself: a separate owner store
+ * would leave a window in which an NMI could wait on its interrupted CPU. */
 static uint32_t g_raw;
 
 static arch_irq_state_t raw_lock(void)
 {
     arch_irq_state_t s = arch_irq_save();
-    while (__atomic_exchange_n(&g_raw, 1u, __ATOMIC_ACQUIRE) != 0)
+    unsigned cpu = arch_cpu_id();   /* IRQ masking prevents migration */
+    uint32_t owner = cpu + 1u;
+    for (;;) {
+        uint32_t expected = 0;
+        if (__atomic_compare_exchange_n(&g_raw, &expected, owner, false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            break;
+        if (expected == owner)
+            panic("lockdep: graph raw lock re-entry on CPU %u", cpu);
         arch_cpu_relax();
+    }
     return s;
 }
 
