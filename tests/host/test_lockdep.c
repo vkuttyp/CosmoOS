@@ -6,6 +6,7 @@
 
 #include "harness.h"
 
+#define LOCKDEP_CORE_TEST_WORK 1
 #include <kernel/lockdep_core.h>
 
 #include <stdio.h>
@@ -330,6 +331,124 @@ static void test_snapshot(void)
     free(copy);
 }
 
+/* Deterministic operation bounds, independent of host/guest clocks. The
+ * hooks count the actual shared searches, including composite IRQ checks. */
+static void expect_work_bound(const struct lockdep_scratch *s, unsigned searches)
+{
+    uint64_t n = LOCKDEP_MAX_NODES, w = LOCKDEP_NODE_WORDS;
+    EXPECT(s->work.searches == searches);
+    EXPECT(s->work.visited_words == searches * w);
+    EXPECT(s->work.seed_checks <= searches * n);
+    EXPECT(s->work.queued <= searches * n);
+    EXPECT(s->work.popped <= searches * n);
+    EXPECT(s->work.bitmap_words <= searches * n * w);
+    EXPECT(s->work.parent_steps <= searches * (2 * n - 1));
+}
+
+static void test_search_work(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_scratch *s = calloc(1, sizeof(*s));
+    EXPECT(g != NULL && s != NULL);
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++) {
+        char name[24];
+        snprintf(name, sizeof(name), "work-%u", i);
+        EXPECT(lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) == (int)i);
+    }
+    const unsigned n = LOCKDEP_MAX_NODES, w = LOCKDEP_NODE_WORDS;
+    uint16_t last = n - 1, endpoint, safe, unsafe;
+    unsigned len;
+    /* Dense DAG, absent label: every node and every bitmap word is
+     * visited, despite the quadratic number of recorded edges. */
+    for (unsigned i = 0; i < n; i++)
+        for (unsigned j = i + 1; j < n; j++)
+            EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)j));
+    EXPECT(!lockdep_core_find_usage(g, s, 0, LOCKDEP_HELD_IRQS_ON, false, &endpoint));
+    expect_work_bound(s, 1);
+    EXPECT(s->work.queued == n && s->work.popped == n);
+    EXPECT(s->work.bitmap_words == n * w);
+    EXPECT(s->work.seed_checks == n && s->work.parent_steps == 0);
+
+    /* No predecessor seeds means no traversal. All nodes as seeds must
+     * also fit the queue once each, with no duplicate discoveries. */
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(!lockdep_core_find_usage(g, s, last, LOCKDEP_USED_IN_IRQ, true, &endpoint));
+    expect_work_bound(s, 1);
+    EXPECT(s->work.seed_checks == n && s->work.queued == 0 && s->work.bitmap_words == 0);
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++)
+        g->classes[i].usage = LOCKDEP_USED_IN_IRQ;
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_find_usage(g, s, last, LOCKDEP_USED_IN_IRQ, true, &endpoint));
+    expect_work_bound(s, 1);
+    EXPECT(endpoint == last && s->work.queued == n && s->work.popped == n);
+    EXPECT(s->work.bitmap_words == (n - 1) * w && s->work.parent_steps == 0);
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++)
+        g->classes[i].usage = 0;
+
+    /* An unreachable target forces reachability through the entire
+     * dense component, rather than stopping at its first outgoing row. */
+    for (unsigned i = 0; i < n - 1; i++)
+        g->before[i][last / 64u] &= ~((uint64_t)1 << (last % 64u));
+    g->nr_edges -= n - 1;
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(!lockdep_core_reaches(g, s, 0, last, NULL, 0, &len) && len == 0);
+    expect_work_bound(s, 1);
+    EXPECT(s->work.queued == n - 1 && s->work.popped == n - 1);
+    EXPECT(s->work.bitmap_words == (n - 1) * w);
+
+    /* A full chain attains the reconstruction bound, even when the
+     * caller requests no output path. A cycle must still terminate. */
+    memset(g->before, 0, sizeof(g->before));
+    g->nr_edges = 0;
+    for (unsigned i = 0; i < n - 1; i++)
+        EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)(i + 1)));
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_reaches(g, s, 0, last, NULL, 0, &len) && len == 0);
+    expect_work_bound(s, 1);
+    EXPECT(s->work.queued == n && s->work.parent_steps == 2 * n - 1);
+    EXPECT(lockdep_core_add_edge(g, last, 0));
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(!lockdep_core_find_usage(g, s, 0, LOCKDEP_HELD_IRQS_ON, false, &endpoint));
+    expect_work_bound(s, 1);
+    EXPECT(s->work.queued == n && s->work.popped == n && s->work.bitmap_words == n * w);
+    /* Restore a valid DAG before checking composite usage operations. */
+    g->before[last][0] = 0;
+    g->nr_edges--;
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_mark_usage(g, s, 0, LOCKDEP_USED_IN_IRQ, 1, &safe, &unsafe));
+    expect_work_bound(s, LOCKDEP_SUBCLASSES);
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_mark_usage(g, s, 0, LOCKDEP_USED_IN_IRQ, 2, &safe, &unsafe));
+    expect_work_bound(s, 0); /* warmed usage performs no search */
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(!lockdep_core_mark_usage(g, s, LOCKDEP_MAX_CLASSES - 1,
+                                   LOCKDEP_HELD_IRQS_ON, 3, &safe, &unsafe));
+    expect_work_bound(s, 1);
+    EXPECT(safe == LOCKDEP_SUBCLASSES - 1 && unsafe == n - LOCKDEP_SUBCLASSES);
+    EXPECT(s->work.parent_steps == n - 2 * LOCKDEP_SUBCLASSES + 1);
+    EXPECT(g->classes[LOCKDEP_MAX_CLASSES - 1].usage == 0);
+
+    /* Split into valid labelled components: the proposed bridge needs
+     * both searches, and each contributes to the composite bound. */
+    unsigned split = n / 2;
+    g->before[split - 1][split / 64u] &= ~((uint64_t)1 << (split % 64u));
+    g->nr_edges--;
+    g->classes[LOCKDEP_MAX_CLASSES - 1].usage = LOCKDEP_HELD_IRQS_ON;
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_irq_edge(g, s, split - 1, split, &safe, &unsafe));
+    expect_work_bound(s, 2);
+    EXPECT(safe == LOCKDEP_SUBCLASSES - 1 && unsafe == n - LOCKDEP_SUBCLASSES);
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(!lockdep_core_irq_edge(g, s, last, 0, &safe, &unsafe));
+    expect_work_bound(s, 1); /* first search fails; second is skipped */
+    memset(&s->work, 0, sizeof(s->work));
+    EXPECT(lockdep_core_reaches(g, s, 7, 7, NULL, 0, &len) && len == 0);
+    expect_work_bound(s, 1);
+    EXPECT(s->work.queued == 1 && s->work.popped == 0 && s->work.bitmap_words == 0);
+    free(s);
+    free(g);
+}
+
 static const struct host_test tests[] = {
     { "classes", test_classes },
     { "snapshot", test_snapshot },
@@ -338,6 +457,7 @@ static const struct host_test tests[] = {
     { "metadata-lifetime", test_metadata_lifetime },
     { "path-bounds", test_path_bounds },
     { "dense-capacity", test_dense_capacity },
+    { "search-work", test_search_work },
     { "irq-dependencies", test_irq_dependencies },
     { "irq-oracle", test_irq_oracle },
 };

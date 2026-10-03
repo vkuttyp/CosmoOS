@@ -115,6 +115,35 @@ usage label, and initializes every node as a BFS source. These exercise
 queue capacity and duplicate suppression under ASan/UBSan.
 The benchmark never registers its classes or edges in the live graph.
 
+### Deterministic search work
+
+Host `search-work` enables `LOCKDEP_CORE_TEST_WORK` only in
+`tests/host/test_lockdep.c`. Counters in that translation unit's scratch
+count search starts, visited clears, seed candidates, queue operations,
+adjacency-word reads and parent steps in the actual shared helpers.
+Normal kernel and threaded-host builds have no counter fields or updates.
+Tests reset counters between operations; composite IRQ helpers accumulate
+all searches rather than silently replacing the count with the last one.
+
+The test covers all 1280 nodes: an absent usage label on a dense DAG
+attains 25,600 adjacency-word reads; all nodes as initial sources test
+duplicate suppression; an isolated target forces an exhaustive failed
+reachability search; a full chain attains 2,559 parent steps even with no
+output path; and a cyclic graph still terminates within the bound. It also
+checks empty-source and self-reachability shortcuts, four-search fresh
+usage validation, zero-search warmed usage, usage-conflict rejection and
+both one- and two-search IRQ-edge decisions. General per-search bounds are
+checked alongside exact counts for these chosen topologies.
+
+A temporary negative control repeats every usage-search adjacency-word
+scan. Its graph answers still pass the existing tests and closure oracle,
+but `search-work` fails the read bound. ASan/UBSan cover the instrumented
+helpers; the existing threaded TSan test covers the uninstrumented ones.
+An optimized freestanding wrapper comparison for x86-64 and AArch64 found
+identical before/after assembly for the search helpers and scratch-size
+function with counters disabled. These checks establish work counts, not
+a wall-clock maximum, complete acquisition cost, or NMI safety.
+
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 
 Two threads pinned to CPU 0 and CPU 1 (or both on CPU 0 with one CPU):

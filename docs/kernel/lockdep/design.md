@@ -91,7 +91,7 @@ check, included in the stacks):
 
 1. If any Aᵢ has B's node: recursive acquisition report (unless B is a
    subclass annotation, in which case the node differs by construction).
-2. If B reaches any Aᵢ in the graph (`before[B] ⊇* Aᵢ`, a depth-first search
+2. If B reaches any Aᵢ in the graph (`before[B] ⊇* Aᵢ`, a breadth-first search
    over the bitmaps with a visited set): **lock-order inversion**. The
    report shows the held stack, B's acquisition, and the recorded chain
    B → … → Aᵢ. Long diagnostic paths keep their last eight nodes and are
@@ -141,6 +141,51 @@ The copy can include operations in progress: a whole acquisition is not
 one transaction. Neither this counter snapshot nor the graph snapshot
 freezes CPU/thread held state. Statistics are a normal diagnostic API,
 not a panic/NMI API.
+
+### Search work bounds
+
+Let N = `LOCKDEP_MAX_NODES` (1280), W = `LOCKDEP_NODE_WORDS` (20),
+and C = the registered class count. Under caller serialization and valid
+node/class indices, each search has the following conservative bounds:
+
+| Work per search | Bound |
+|---|---|
+| Clear visited bitmap | W writes |
+| Usage-search seed candidates | 4C ≤ N checks; none for reachability |
+| Queue insertions and removals | at most N each |
+| Adjacency bitmap loads | at most NW = 25,600 words |
+| Newly discovered neighbor iterations | at most N minus the initial sources |
+| Reachability path reconstruction | at most 2N − 1 = 2,559 parent steps |
+| Usage-search predecessor reconstruction | at most N − 1 parent steps |
+
+Nodes are marked visited when enqueued, including every initial source.
+Consequently each node can enter the queue only once. Each dequeued node
+scans at most W words, regardless of edge density. Parent pointers lead
+to earlier discoveries, so reconstruction cannot loop, even if the input
+contains a cycle. A missing label on a fully reachable graph attains NW
+adjacency reads; a full chain attains 2N − 1 reconstruction steps. A
+zero-capacity output path still performs reconstruction in the current
+implementation. These are algorithmic work bounds, not instruction counts
+or elapsed-time guarantees.
+
+An IRQ edge check runs at most two searches. Publishing one new usage bit
+runs at most four, one per subclass; a direct mixed-usage conflict returns
+before searching. An acquisition can check at most 32 held entries (24
+spinlocks plus eight mutexes), with one reachability and up to two IRQ
+searches per missing edge. Including usage validation gives a conservative
+100-search ceiling, or 2,560,000 adjacency-word loads, for those decision
+paths. This is a loose bound, not a claim that one graph attains every
+maximum together. It excludes class lookup, held-stack/profile scans,
+statistics, diagnostic searches/printing and raw-lock contention. It does
+not bound interrupt-disabled wall time or lock acquisition latency.
+
+Host `search-work` tests instrument the shared helpers under
+`LOCKDEP_CORE_TEST_WORK`, accumulating counts across composite checks.
+The extra scratch fields and increments compile out unless that host-test
+macro is defined. Full-capacity chain, dense, disconnected and cyclic
+cases validate the bounds and selected exact maxima; see `testing.md`.
+
+### Remote held-stack snapshots
 
 Remote CPU spinlock-stack dumps use a separate bounded snapshot protocol.
 The CPU-local writer already has IRQs masked for pushes, releases, and

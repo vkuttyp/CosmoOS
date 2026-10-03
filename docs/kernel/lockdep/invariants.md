@@ -166,3 +166,14 @@ early refusals and expected reports; searches count under the graph hold.
 The snapshot may include operations in progress and does not freeze held
 stacks. Check: audit all `g_stats` accesses for raw-lock coverage;
 `lockdep-order` checks acquisition/report deltas and graph search reuse.
+
+**L18. A graph search enqueues each node at most once.**
+With serialized graph access and valid node/class indices, nodes are marked
+visited at enqueue time, including all initial sources. At most 1280 nodes
+are dequeued, each scanning at most 20 adjacency words. Parent chains lead
+to earlier discoveries. Check: host `search-work` counts the actual shared
+helpers on full-capacity dense, disconnected, chain and cyclic graphs,
+including multi-source and composite IRQ checks. A duplicate-scan negative
+control fails the work bound while preserving reachability results.
+See `design.md` for composite bounds and exclusions; this is not a bound
+on raw-lock wait time or complete acquisition latency.

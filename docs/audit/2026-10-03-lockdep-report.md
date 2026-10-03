@@ -1220,3 +1220,48 @@ completion. The previous increment's cross-architecture integration
 evidence and the remaining NMI/callback concurrency gaps still apply.
 The inventory and interrupt test/invariant documents now reflect this
 bounded coverage. `git diff --check` passed.
+
+## Deterministic graph-search bounds continuation
+
+Phase 1 adds host-only work accounting to the existing shared graph
+helpers, enabled only by `tests/host/test_lockdep.c`. It counts visited
+clears, seed checks, enqueue/dequeue operations, adjacency-word loads and
+parent reconstruction. Counts accumulate across composite IRQ checks.
+Kernel scratch layout and generated operations exclude all of this
+instrumentation. The search algorithm and its decisions are unchanged.
+
+Phase 2 adds full-capacity `search-work` regressions. The visited-on-enqueue
+rule limits each search to 1280 queue entries and at most 25,600 adjacency
+word loads. Dense and cyclic complete traversals attain the read bound;
+a 1280-node chain attains the 2,559-step reconstruction bound, including
+when output capacity is zero. Tests also cover an isolated target,
+zero/all predecessor sources, self reachability, fresh and warmed usage,
+usage conflicts, and one/two-search IRQ-edge checks. Documentation derives
+the bound from the implementation, with a conservative 100-search ceiling
+for acquisition decision paths (four usage searches plus up to three for
+each of 32 held entries). This excludes class/profile scans, statistics,
+diagnostics and lock contention; it is not a latency guarantee or a claim
+that every individual maximum is jointly attainable.
+
+Phase 3 validation passed the full `gmake host-test` ASan/UBSan and Python
+harness suite, `gmake host-test-lockdep-tsan`, and debug kernel builds for
+x86-64 and AArch64. Logs: `out/lockdep-search-bounds-host.log`,
+`out/lockdep-search-bounds-tsan.log`, and
+`out/lockdep-search-bounds-{x86_64,aarch64}-build.log`.
+
+A temporary mutation repeated each usage-search adjacency-word scan.
+Graph answers and the existing closure-oracle test remained correct,
+while the new general read bound and exact-count assertions failed.
+Log: `out/lockdep-search-bounds-negative.log`. Optimized freestanding
+wrappers for reachability, usage search, IRQ-edge checking, usage marking
+and scratch size produced identical before/after assembly on both targets
+with instrumentation disabled. The comparison result is recorded in
+`out/lockdep-search-bounds-controls.log`; this comparison covers those
+wrappers, not whole kernel binaries. Temporary sources/binaries were
+removed. No additional QEMU boots or release builds were run for this
+host-instrumentation increment. `git diff --check` passed.
+
+The inventory marks deterministic search work as covered and retains
+wall-clock maxima, first-acquisition timings, contention, priority
+inheritance and native measurements as open. The design's stale
+depth-first-search description now correctly says breadth-first search.

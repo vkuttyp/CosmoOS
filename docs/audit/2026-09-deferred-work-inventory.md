@@ -672,6 +672,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Stale lockup response mask after delayed deadline read~~ | **FIXED (PR #305)**: both polling APIs read expiry before collecting responses. A controlled real-IPI/NMI probe reproduces the old missing-mask failure and validates the fix on both architectures; the five-millisecond deadline remains unchanged. |
 | ~~Real unregistered-vector delivery and concurrent unhandled totals~~ | **BUILT/FIXED (local continuation after PR #305)**: real IPIs exercise unhandled dispatch, repeated delivery after EOI, and handled reuse. Architecture warning totals use atomic increments. Hardware-spurious vectors and fatal exceptions are separate paths. |
 | ~~Interrupt dispatch bounds and synchronous-removal error-path coverage~~ | **BUILT (local continuation after PR #305)**: actual-source host tests check invalid dispatch and oversized-init panic diagnostics, logical/full-table boundaries, preserved registrations on failure, and synchronous-removal wrapper ordering. ASan/UBSan, TSan and three failing mutation controls validate the tests; real panic shutdown and epoch completion are outside these host shims. |
+| ~~Deterministic graph-search work bounds~~ | **BUILT (local continuation after PR #305)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
 
 Still open for the next milestone:
 
@@ -681,7 +682,7 @@ Still open for the next milestone:
   individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Worst-case graph search bounds, complete first-acquisition timings,
+- Worst-case wall-clock search latency, complete first-acquisition timings,
   contended spin/mutex paths, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the

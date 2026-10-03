@@ -133,7 +133,22 @@ struct lockdep_scratch {
     uint64_t visited[LOCKDEP_NODE_WORDS];
     uint16_t parent[LOCKDEP_MAX_NODES];
     uint16_t queue[LOCKDEP_MAX_NODES];
+#ifdef LOCKDEP_CORE_TEST_WORK
+    /* Host-only work accounting. Tests reset between operations, allowing
+     * composite IRQ checks to accumulate all of their searches. No fields
+     * or increments exist in the kernel's scratch or generated code. */
+    struct {
+        uint64_t searches, visited_words, seed_checks, queued, popped;
+        uint64_t bitmap_words, parent_steps;
+    } work;
+#endif
 };
+
+#ifdef LOCKDEP_CORE_TEST_WORK
+#define LOCKDEP_WORK(s, field) ((s)->work.field++)
+#else
+#define LOCKDEP_WORK(s, field) ((void)0)
+#endif
 
 static inline uint16_t lockdep_node(unsigned class_index, unsigned subclass)
 {
@@ -210,16 +225,22 @@ static inline bool lockdep_core_add_edge(struct lockdep_graph *g, uint16_t a, ui
 static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lockdep_scratch *s, uint16_t from,
                                         uint16_t to, uint16_t *path, unsigned path_max, unsigned *path_len)
 {
-    for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++)
+    LOCKDEP_WORK(s, searches);
+    for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
+        LOCKDEP_WORK(s, visited_words);
         s->visited[w] = 0;
+    }
     unsigned head = 0, tail = 0;
     s->queue[tail++] = from;
+    LOCKDEP_WORK(s, queued);
     s->visited[from / 64u] |= (uint64_t)1 << (from % 64u);
     s->parent[from] = from;
     bool found = from == to;
     while (head < tail && !found) {
         uint16_t n = s->queue[head++];
+        LOCKDEP_WORK(s, popped);
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS && !found; w++) {
+            LOCKDEP_WORK(s, bitmap_words);
             uint64_t bits = __atomic_load_n(&g->before[n][w], __ATOMIC_RELAXED) & ~s->visited[w];
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
@@ -228,6 +249,7 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
                 s->visited[w] |= (uint64_t)1 << bit;
                 s->parent[m] = n;
                 s->queue[tail++] = m;
+                LOCKDEP_WORK(s, queued);
                 if (m == to) {
                     found = true;
                     break;
@@ -241,8 +263,10 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
     }
     /* Walk parents back from `to`, then reverse into `path`. */
     unsigned len = 1;
-    for (uint16_t n = to; n != from; n = s->parent[n])
+    for (uint16_t n = to; n != from; n = s->parent[n]) {
+        LOCKDEP_WORK(s, parent_steps);
         len++;
+    }
     unsigned keep = len < path_max ? len : path_max;
     *path_len = keep;
     unsigned skip = len - keep;   /* drop the oldest entries when truncating */
@@ -251,6 +275,7 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
         if (i >= skip)
             path[i - skip] = n;
         n = s->parent[n];
+        LOCKDEP_WORK(s, parent_steps);
     }
     return true;
 }
@@ -263,27 +288,36 @@ static inline bool lockdep_core_find_usage(const struct lockdep_graph *g, struct
                                            uint16_t node, unsigned usage, bool predecessors,
                                            uint16_t *endpoint)
 {
-    for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++)
+    LOCKDEP_WORK(s, searches);
+    for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
+        LOCKDEP_WORK(s, visited_words);
         s->visited[w] = 0;
+    }
     unsigned head = 0, tail = 0;
     unsigned nr_nodes = g->nr_classes * LOCKDEP_SUBCLASSES;
     for (unsigned i = 0; i < nr_nodes; i++) {
+        LOCKDEP_WORK(s, seed_checks);
         if (predecessors ? !(__atomic_load_n(&g->classes[lockdep_node_class((uint16_t)i)].usage, __ATOMIC_RELAXED) & usage) : i != node)
             continue;
         s->queue[tail++] = (uint16_t)i;
+        LOCKDEP_WORK(s, queued);
         s->visited[i / 64u] |= (uint64_t)1 << (i % 64u);
         s->parent[i] = (uint16_t)i;
     }
     while (head < tail) {
         uint16_t n = s->queue[head++];
+        LOCKDEP_WORK(s, popped);
         if (predecessors ? n == node : (__atomic_load_n(&g->classes[lockdep_node_class(n)].usage, __ATOMIC_RELAXED) & usage) != 0) {
             if (predecessors)
-                while (s->parent[n] != n)
+                while (s->parent[n] != n) {
                     n = s->parent[n];
+                    LOCKDEP_WORK(s, parent_steps);
+                }
             *endpoint = n;
             return true;
         }
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
+            LOCKDEP_WORK(s, bitmap_words);
             uint64_t bits = __atomic_load_n(&g->before[n][w], __ATOMIC_RELAXED) & ~s->visited[w];
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
@@ -292,6 +326,7 @@ static inline bool lockdep_core_find_usage(const struct lockdep_graph *g, struct
                 s->visited[w] |= (uint64_t)1 << bit;
                 s->parent[m] = n;
                 s->queue[tail++] = m;
+                LOCKDEP_WORK(s, queued);
             }
         }
     }
@@ -350,5 +385,7 @@ static inline bool lockdep_core_mark_usage(struct lockdep_graph *g, struct lockd
     __atomic_store_n(&c->usage, before | add, __ATOMIC_RELEASE);
     return true;
 }
+
+#undef LOCKDEP_WORK
 
 #endif /* KERNEL_LOCKDEP_CORE_H */
