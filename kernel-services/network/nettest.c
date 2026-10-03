@@ -4990,31 +4990,36 @@ bool selftest_net_nat(const char **reason)
     CHECK(tap_inject(u, frame, flen) == 0);
     CHECK(nettest_recv_ip(g) == NULL);                             /* corrupt error not forwarded */
 
-    /* (5) Table exhaustion: many distinct flows fill the table; further ones
-     * are dropped, and the table does not grow past its bound. */
+    /* (5) Share exhaustion: distinct flows fill this guest's quota;
+     * further ones are dropped without consuming another guest's slots. */
     nat_flush();
     struct nat_stats ns0, ns1;
     nat_get_stats(&ns0);
-    for (unsigned i = 0; i < NAT_TABLE_SIZE + 8; i++) {
+    const unsigned injected = NAT_TABLE_SIZE + 8;
+    for (unsigned i = 0; i < injected; i++) {
         l4len = nettest_mk_udp(l4, guest, peer, (uint16_t)(10000 + i), 9, payload, 4);
         flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
-        tap_inject(g, frame, flen);
+        CHECK(tap_inject(g, frame, flen) == 0);
         if ((i & 31) == 31) {                 /* keep the uplink queue drained */
             struct mbuf *d;
             while ((d = tap_recv(u)) != NULL)
                 m_freem(d);
         }
     }
+    /* nat_flush clears entries, not lifetime counters. Count only this
+     * flood's outcomes: earlier round trips must not let us age the table
+     * while tail packets can still create entries behind that sweep. */
     for (unsigned i = 0; i < 200; i++) {
         struct mbuf *d;
         while ((d = tap_recv(u)) != NULL)
             m_freem(d);
         nat_get_stats(&ns1);
-        if (ns1.out_new + ns1.out_drop_share >= NAT_TABLE_SIZE + 8)
+        if ((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) >= injected)
             break;
         thread_sleep_ms(10);
     }
     nat_get_stats(&ns1);
+    CHECK((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) == injected);
     CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* one guest is capped at its quota */
     CHECK(ns1.out_drop_share > ns0.out_drop_share);      /* new flows dropped once the share is full */
     CHECK(ns1.out_drop_table == ns0.out_drop_table);      /* the share, not the table: 32 of 256 in use */
@@ -5030,7 +5035,8 @@ bool selftest_net_nat(const char **reason)
     nt_tap_destroy(u);
     nt_tap_destroy(g);
     kinfo("selftest: net-nat: UDP/TCP/ICMP round trips masqueraded and restored (checksums valid), "
-          "an ICMP error translated back, the table bounded at %u and its entries expiring", NAT_TABLE_SIZE);
+          "an ICMP error translated back, the guest capped at %u entries and the flood accounted for before expiry",
+          NAT_QUOTA_PER_GUEST);
     return true;
 }
 

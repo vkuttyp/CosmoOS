@@ -305,13 +305,37 @@ checksum valid, payload intact); an ICMP dest-unreach quoting a NAT'd packet
 translated back with its inner source and port un-NAT'd (and a corrupt-
 checksum ICMP error is *not* translated); a guest frame forged with an
 uplink-subnet source is dropped by the reverse-path check, never emitted;
-the lent port is disjoint from the host ephemeral range; the table bounded
-(a flood of distinct flows fills it, further ones dropped, `entries` never
-exceeding `NAT_TABLE_SIZE`); and the entries reclaimed by `nat_age`. Proved
+the lent port is disjoint from the host ephemeral range; the guest bounded
+to `NAT_QUOTA_PER_GUEST` entries (further flows drop for the share, not for
+global table exhaustion); and the entries reclaimed by `nat_age`. Proved
 by reintroducing a missing pseudo-header checksum fixup (the uplink reads an
 invalid checksum), a table that clobbers instead of dropping when full
 (`out_drop_share`, formerly `out_drop_full`, never rises), and an age that reclaims nothing (the entries
 never expire).
+
+The flood checks each injection and waits for `out_new` plus
+`out_drop_share` **deltas from its own baseline** to account for all 264
+packets, then asserts that exact sum before aging. `nat_flush()` removes
+entries but preserves lifetime statistics. The former absolute-counter
+wait could credit four earlier round trips to the flood and finish while
+four tail packets were still pending. Those packets could create entries
+after the future-time sweep; sleeping longer or weakening the empty-table
+assertion would not establish the missing ordering. The existing 200 ×
+10 ms polling bound, quota checks and expiry checks are unchanged. This
+wait accounts for NAT outcomes, not all downstream transmission work.
+
+`python3 tools/nat-expiry-probe.py --arch x86_64 --mode old` reproduces the
+race in a temporary clone with the real receive workers: the last four
+flood packets pause before translation, leaving baseline 4 / completed
+260 / pending 4. The old predicate ages first and the released tail creates
+four entries. `--mode fixed` releases the tail only after the predicate
+refuses premature completion; the original expiry assertion passes with
+zero entries. `--mode stalled` keeps the tail blocked and requires the
+completion assertion to fail before aging. Each mode requires its exact
+result, completed panic output and failure exit; a gate timeout cannot
+pass. Repeat old/fixed with `--arch aarch64`. Images and build/boot logs
+remain in fresh `out/nat-expiry-*/run-*` directories. The injected gate and
+early test placement are confined to the temporary clone.
 
 **`net-dnat`**: two taps and a static port-forward rule (`tcp:8080 →
 10.77.5.15:80`). A client SYN to the host's uplink address port 8080 is read

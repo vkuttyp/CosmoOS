@@ -895,6 +895,14 @@ so the line goes first. With `irq-route`'s count forced to fail,
 `irq-affinity` passes on both architectures. A third sighting, 2026-09-29
 (aarch64), came before the repair.
 
+**2026-10-03, PR #307 NAT follow-up validation:** AArch64 `test-chaos`
+again failed `hits >= 5` (`schedtest.c:282`, 71 ms), the sole failure among
+422 self-tests. `net-nat` passed in 1,358 ms and `net-nicbench` in 2,127 ms;
+`irq-affinity` also passed. The fixed-interval interrupt-count check remains
+unchanged. The complete failing run is retained in
+`out/nat-expiry-aarch64-chaos-result.log` and
+`out/aarch64-debug-chaos/boot-test-chaos.log`.
+
 ## The count
 
 `net-harness` sightings live here, in one place, because six different
@@ -1831,6 +1839,17 @@ twenty minutes and the control takes four.
 
 ## `net-nat`'s expiry step found an entry after aging the table
 
+**Resolved 2026-10-03, PR #307:** a controlled delayed-tail probe now
+reproduces the race below. The wait used lifetime `out_new + out_drop_share`
+counts even though `nat_flush()` only clears entries. Four earlier
+translations could hide four unprocessed flood packets, which then created
+entries after aging. The test now waits on baseline-relative counts and
+asserts that every injection has a NAT outcome before aging. The original
+expiry and quota assertions remain. Old/fixed probes on both architectures
+are described in [network testing](../kernel-services/network/testing.md).
+Periodic `nat_age` only removes entries; it cannot create the new mapping.
+The original observation below is retained as history.
+
 **2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
 first CI run (`60ccfd7`)** — a change to the memory syscalls that
 touches nothing in the network stack, and a test that had passed four
@@ -1960,6 +1979,17 @@ and the useful part of this entry is that the bisect above takes
 twenty minutes and the control takes four.
 
 ## `net-nat`'s expiry step found an entry after aging the table
+
+**Resolved 2026-10-03, PR #307:** a controlled delayed-tail probe now
+reproduces the race below. The wait used lifetime `out_new + out_drop_share`
+counts even though `nat_flush()` only clears entries. Four earlier
+translations could hide four unprocessed flood packets, which then created
+entries after aging. The test now waits on baseline-relative counts and
+asserts that every injection has a NAT outcome before aging. The original
+expiry and quota assertions remain. Old/fixed probes on both architectures
+are described in [network testing](../kernel-services/network/testing.md).
+Periodic `nat_age` only removes entries; it cannot create the new mapping.
+The original observation below is retained as history.
 
 **2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
 first CI run (`60ccfd7`)** — a change to the memory syscalls that

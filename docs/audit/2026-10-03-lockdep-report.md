@@ -1596,3 +1596,75 @@ host results are `out/lockdep-reentry-{x86_64-release,aarch64-release,host}-resu
 including the corrected ring-probe setup failure. Python syntax validation
 and `git diff --check` passed. The pre-fix panic-path failures remain
 recorded above; final green results do not erase them.
+
+## PR #307 follow-up: NAT expiry-test completion race
+
+The x86-64 harness-retry job in CI run `37150697619` failed
+`net-nat` at `ns1.entries == 0 && ns1.expired > ns0.expired`, after
+1,323 ms. The failure is the same assertion recorded in the September 20
+flake history. This run did not print the counter values at failure;
+the mechanism below is established by source inspection and a controlled
+reproduction of that assertion, rather than inferred from duration alone.
+
+`nat_flush()` clears entries but leaves lifetime statistics intact. The
+flood wait incorrectly compared absolute `out_new + out_drop_share`
+against its 264 injections. Earlier UDP, TCP, ICMP and ICMP-error setup
+had already created four mappings. Thus 260 flood outcomes could satisfy
+the wait while four packets were still pending. After the test aged the
+existing entries using a future timestamp, those packets could create
+fresh entries before the statistics check. Periodic aging only removes
+entries and cannot create a mapping. This is a test completion race; the
+production aging implementation requires no change.
+
+The wait now subtracts the pre-flood baseline, checks each injection, and
+asserts exactly 264 outcomes before aging. Its existing 200 × 10 ms polling
+bound and quota/expiry assertions remain. The completion sum accounts for
+NAT state changes, not for all downstream transmission work. The success
+message now describes the actual per-guest quota being tested.
+
+`tools/nat-expiry-probe.py` builds isolated clones and pauses the final four
+real receive packets before entering NAT translation, without holding a
+NAT lock or receive-hook quiescence section. It establishes the state
+baseline=4 / completed=260 / pending=4 before evaluating the wait. The old
+predicate exits immediately; after aging, releasing the tail creates four
+entries and fails the original expiry assertion. The fixed predicate
+refuses that state, releases the tail and accounts for all 264 outcomes;
+the original expiry assertion then passes with zero entries. A stalled
+control never releases the tail and requires the new completion assertion
+to fail before aging. Exact diagnostics and panic exit are required;
+unrelated panics or gate timeouts cannot pass. Production sources contain
+none of these injected gates or early test placement.
+
+Both old/fixed comparisons passed on x86-64 and AArch64; the stalled
+control passed on x86-64. Logs and retained image directories are named by
+`out/nat-expiry-{x86_64,aarch64}-{old,fixed}-result.log` and
+`out/nat-expiry-x86_64-stalled-result.log`. The first x86 fixed probe
+reported successful test completion and zero entries, but the harness
+incorrectly expected `reason=none` rather than the runner's empty success
+reason. The probe now normalizes successful reasons; the corrected probe
+passed. The initial harness failure remains in
+`out/nat-expiry-x86_64-fixed-initial-result.log` and was not counted as a
+passing run. The historical flake entries and network test documentation
+now record the established cause and correction.
+
+Full-boot follow-up validation:
+
+- x86-64 `gmake -j4 ARCH=x86_64 test-harness-retry` passed all 422
+  self-tests and the complete harness (134.7 s). The network harness
+  recovered on attempt two after the deliberately broken first attempt.
+  Log: `out/nat-expiry-x86_64-hbreak-result.log`.
+- AArch64 `gmake -j4 ARCH=aarch64 test-chaos` completed with one failure:
+  `irq-route`'s existing `hits >= 5` fixed-interval interrupt count
+  (`schedtest.c:282`, 71 ms). `net-nat` passed in 1,358 ms and
+  `net-nicbench` in 2,127 ms. This is a failed full run, preserved in
+  `out/nat-expiry-aarch64-chaos-result.log`; it does not establish a fix
+  for the earlier CI `net-nicbench` timing failure. The IRQ sighting is
+  also recorded in the flake history. No IRQ or benchmark checks changed.
+- AArch64 standard `gmake -j4 ARCH=aarch64 test` passed all 422
+  self-tests and the complete harness (136.9 s); `net-nat` passed in
+  1,426 ms. Logs: `out/nat-expiry-aarch64-normal-result.log` and
+  `out/nat-expiry-aarch64-normal.log`. This pass does not replace the
+  failed chaos result above.
+
+Python syntax compilation and `git diff --check` passed. The production
+NAT implementation, timeouts and test budgets are unchanged.
