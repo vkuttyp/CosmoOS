@@ -13,6 +13,7 @@
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
+#include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/selftest.h>
 #include <kernel/spinlock.h>
@@ -53,6 +54,7 @@ bool selftest_lockdep_order(const char **reason)
     CHECK(!lockdep_is_held(&a, LOCKDEP_KIND_SPIN));
     lockdep_get_stats(&s1);
     CHECK(s1.edges >= s0.edges + 1);
+    CHECK(s1.acquisitions >= s0.acquisitions + 2);
     uint64_t searches = s1.searches;
     s = spin_lock_irqsave(&a);
     spin_lock(&b);
@@ -113,6 +115,7 @@ bool selftest_lockdep_order(const char **reason)
 
     /* Validate ownership reporting without unlocking an actual unowned
      * primitive or changing preemption state. */
+    lockdep_get_stats(&s0);
     lockdep_expect(LOCKDEP_R_UNHELD);
     s = arch_irq_save();
     lockdep_release(&chain[0], LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0), false);
@@ -120,6 +123,7 @@ bool selftest_lockdep_order(const char **reason)
     arch_irq_restore(s);
     CHECK(hits == 1);
     lockdep_get_stats(&s1);
+    CHECK(s1.reports >= s0.reports + 1);
     kinfo("selftest: lockdep-order: %u classes, %u edges, %llu acquisitions, %llu searches so far", s1.classes,
           s1.edges, (unsigned long long)s1.acquisitions, (unsigned long long)s1.searches);
     return true;
@@ -473,11 +477,12 @@ bool selftest_lockdep_contention(const char **reason) { return skip(reason, "loc
 #endif
 
 /* Same workload in debug LOCKDEP=0 and LOCKDEP=1. This measures warmed,
- * uncontended spin paths, not contended waits or first-edge graph searches.
+ * uncontended spin/mutex paths, not contended waits or first-edge searches.
  * Keep IRQs and scheduling enabled; pinning makes elapsed counter samples
  * CPU-local, while the distribution exposes interrupt/scheduling noise. */
 static spinlock_t g_bench_a = SPINLOCK_INIT("lockdep-bench-a");
 static spinlock_t g_bench_b = SPINLOCK_INIT("lockdep-bench-b");
+static struct mutex g_bench_mutex;
 
 static void bench_iteration(unsigned kind)
 {
@@ -489,11 +494,19 @@ static void bench_iteration(unsigned kind)
     } else if (kind == 2) {
         arch_irq_state_t s = spin_lock_irqsave(&g_bench_a);
         spin_unlock_irqrestore(&g_bench_a, s);
-    } else {
+    } else if (kind == 3) {
         arch_irq_state_t s = spin_lock_irqsave(&g_bench_a);
         spin_lock(&g_bench_b);
         spin_unlock(&g_bench_b);
         spin_unlock_irqrestore(&g_bench_a, s);
+    } else if (kind == 4) {
+        mutex_lock(&g_bench_mutex);
+        mutex_unlock(&g_bench_mutex);
+    } else {
+        /* Private object: success is guaranteed without a contending
+         * owner. Keep the call in LOCKDEP=0 builds too. */
+        KASSERT(mutex_trylock(&g_bench_mutex));
+        mutex_unlock(&g_bench_mutex);
     }
 }
 
@@ -501,10 +514,11 @@ bool selftest_lockdep_bench(const char **reason)
 {
     (void)reason;
     enum { SAMPLES = 9, ITERATIONS = 1024, WARMUP = 64 };
-    static const char *const paths[] = { "empty", "spin", "irqsave", "nested" };
-    uint64_t elapsed[4][SAMPLES];
+    static const char *const paths[] = { "empty", "spin", "irqsave", "nested", "mutex", "mutex-try" };
+    uint64_t elapsed[ARRAY_SIZE(paths)][SAMPLES];
+    mutex_init(&g_bench_mutex, "lockdep-bench-mutex");
     cpumask_t saved = thread_pin_self();
-    for (unsigned kind = 0; kind < 4; kind++) {
+    for (unsigned kind = 0; kind < ARRAY_SIZE(paths); kind++) {
         for (unsigned i = 0; i < WARMUP; i++)
             bench_iteration(kind);
         for (unsigned sample = 0; sample < SAMPLES; sample++) {
@@ -517,7 +531,7 @@ bool selftest_lockdep_bench(const char **reason)
     thread_set_affinity_self(saved);
     /* Print only after timing. No background CPU is asked to stop; these
      * guest-clock observations are descriptive, never pass thresholds. */
-    for (unsigned kind = 0; kind < 4; kind++) {
+    for (unsigned kind = 0; kind < ARRAY_SIZE(paths); kind++) {
         for (unsigned i = 1; i < SAMPLES; i++) {
             uint64_t value = elapsed[kind][i];
             unsigned j = i;

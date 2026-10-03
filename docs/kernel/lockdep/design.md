@@ -133,8 +133,14 @@ failure prints an explicit unavailable message. This API requires a
 working allocator and raw lock and is not used by panic/NMI diagnostics.
 Panic calls `lockdep_dump_held()` to print the current CPU's spinlock stack
 and the current thread's mutex stack; it does not dump the dependency graph.
-Held-stack diagnostics and statistics retain their separate consistency
-limits; the graph snapshot does not freeze global execution state.
+Statistics use the same raw lock for all counter updates and the complete
+`lockdep_get_stats` copy, so classes, edges, acquisitions, searches and
+reports describe one instant. Acquisition and report counting each add a
+short raw-lock hold; searches are counted inside the existing graph hold.
+The copy can include operations in progress: a whole acquisition is not
+one transaction. Neither this counter snapshot nor the graph snapshot
+freezes CPU/thread held state. Statistics are a normal diagnostic API,
+not a panic/NMI API.
 
 Remote CPU spinlock-stack dumps use a separate bounded snapshot protocol.
 The CPU-local writer already has IRQs masked for pushes, releases, and

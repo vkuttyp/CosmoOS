@@ -76,6 +76,15 @@ static void raw_unlock(arch_irq_state_t s)
     arch_irq_restore(s);
 }
 
+/* Share graph serialization so get_stats can capture all counters at one
+ * instant. Called outside g_raw, including early-refused acquisitions. */
+static void count_acquisition(void)
+{
+    arch_irq_state_t s = raw_lock();
+    g_stats.acquisitions++;
+    raw_unlock(s);
+}
+
 static const char *const g_kind_names[LOCKDEP_R_COUNT] = {
     [LOCKDEP_R_INVERSION] = "lock-order inversion",
     [LOCKDEP_R_RECURSION] = "recursive acquisition of one lock class",
@@ -162,7 +171,9 @@ void lockdep_dump_held_cpu(unsigned cpu)
 static void report(enum lockdep_report_kind kind, const char *name, unsigned subclass, uintptr_t ip, const char *detail,
                    const uint16_t *path, unsigned path_len)
 {
-    __atomic_fetch_add(&g_stats.reports, 1u, __ATOMIC_RELAXED);
+    arch_irq_state_t stats_irq = raw_lock();
+    g_stats.reports++;
+    raw_unlock(stats_irq);
     unsigned cpu = raw_cpu_id();
     int expected = (int)kind;
     bool armed = true;
@@ -410,7 +421,7 @@ static void acquire_check(const void *lock, uint16_t *class_slot, const char *na
     if (n < 0)
         return;
     uint16_t node = (uint16_t)n;
-    __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
+    count_acquisition();
     if (kind == LOCKDEP_KIND_SPIN && in_irq && lc->callback_timer)
         timer_profile_note(lc->callback_timer, lc->callback_profile, lock, node);
 
@@ -453,7 +464,7 @@ static void acquire_check(const void *lock, uint16_t *class_slot, const char *na
         for (unsigned i = 0; i < nheld[k]; i++) {
             if (lockdep_core_has_edge(&g_graph, held[k][i].node, node))
                 continue;
-            __atomic_fetch_add(&g_stats.searches, 1u, __ATOMIC_RELAXED);
+            g_stats.searches++;   /* g_raw held */
             if (lockdep_core_reaches(&g_graph, &g_scratch, node, held[k][i].node, path, 8, &path_len)) {
                 cycle = true;
                 against = held[k][i].node;
@@ -515,7 +526,7 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
     if (n < 0)
         return;
     if (trylock) {
-        __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
+        count_acquisition();
         (void)check_usage((uint16_t)n, in_irq, irqs_on, true, ip);
     }
     struct lockdep_held e = { .node = (uint16_t)n,
@@ -722,15 +733,13 @@ void lockdep_dump_graph(void)
 
 void lockdep_get_stats(struct lockdep_stats *out)
 {
-    /* Counters are individually atomic; this is a live sample, not a
-     * globally frozen acquisition history. Class/edge totals share the
-     * writer lock and cannot tear against registration or insertion. */
+    /* Every counter and graph mutation shares g_raw. The copy describes
+     * one instant, which can include acquisitions still in progress;
+     * it does not freeze the CPU/thread held stacks. Normal context only. */
     arch_irq_state_t s = raw_lock();
+    *out = g_stats;
     out->classes = g_graph.nr_classes;
     out->edges = g_graph.nr_edges;
-    out->acquisitions = __atomic_load_n(&g_stats.acquisitions, __ATOMIC_RELAXED);
-    out->searches = __atomic_load_n(&g_stats.searches, __ATOMIC_RELAXED);
-    out->reports = __atomic_load_n(&g_stats.reports, __ATOMIC_RELAXED);
     raw_unlock(s);
 }
 

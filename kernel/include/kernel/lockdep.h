@@ -98,6 +98,8 @@ bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned 
 /* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
 void lockdep_dump_held_cpu(unsigned cpu);
 
+/* One instant of counters under the graph raw lock. Normal diagnostics
+ * only; not a panic/NMI API or a snapshot of CPU/thread held stacks. */
 void lockdep_get_stats(struct lockdep_stats *out);
 
 /* Print every recorded edge as "'a'#n -> 'b'#m" (kdebug), one per line:

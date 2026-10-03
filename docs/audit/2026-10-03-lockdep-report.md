@@ -644,3 +644,84 @@ explicit in the design document. Cross-checked the API, invariants,
 diagnostics documentation, and audit descriptions against `panic_common`
 and all `lockdep_dump_graph` call sites: panic calls `lockdep_dump_held`,
 while the normal graph dump is called at the end of the self-test run.
+
+
+## Post-#304 continuation: statistics and mutex measurement
+
+Base: merged PR #304 (`aede0142`). This continuation proceeds in three
+phases: serialize the statistics snapshot, extend the matched benchmark,
+then validate both configurations on both architectures. The larger NMI
+writer, callback-wait, raw IRQ pairing, and global held-state questions
+remain separate work.
+
+### Phase 1: consistent statistics
+
+Previously, `lockdep_get_stats` held the graph lock while reading three
+independently changing atomic counters. Class/edge totals were stable,
+but acquisitions and reports could change between field reads. All
+counter writes now share the graph raw lock with the complete copy.
+Search counting uses its existing graph hold; acquisition and report
+counting each add a short hold at the same counting point as before.
+Every `g_stats` access and every report call site was audited: reports
+are entered after any graph hold is released, so counting does not recurse
+on the raw lock. Printing remains outside it.
+
+This yields a snapshot of counter values at one instant, not a transaction
+covering a whole acquisition. A class may already exist while its first
+acquisition is still in progress; reports and acquisitions retain their
+existing meanings. CPU/thread held stacks are not frozen. The API requires
+normal diagnostic context and may wait for the raw lock; no NMI/panic
+safety is claimed. The actual kernel `lockdep-order` case now also checks
+acquisition/report deltas, alongside its existing search-reuse assertions.
+The proof of cross-field consistency is common-lock coverage, not the
+older host graph model (which does not run this statistics API).
+
+### Phase 2: warmed mutex measurements
+
+The existing identical debug LOCKDEP=0/1 workload now includes a private
+mutex lock/unlock pair and a successful mutex trylock/unlock pair. The
+trylock result is asserted so a refused acquisition cannot be counted as
+a fast successful one. Initialization and 64 warmup iterations precede
+nine batches of 1024 timed iterations for each of six paths. Mutex paths
+include their internal spinlock and bookkeeping costs. Thread pinning,
+interrupt/scheduling noise, and descriptive-only output remain unchanged.
+
+The additional statistics serialization affects enabled-build timings.
+These runs measure the full current hooks, not an isolated before/after
+cost for that serialization. Cold graph searches, contended waits,
+priority inheritance, and native hardware remain outside this experiment.
+
+### Phase 3: cross-architecture validation
+
+Measurements below are min/median/max guest nanoseconds per iteration.
+Environment remains QEMU 11.1.1/TCG on arm64 macOS, Apple clang 21.0.0,
+four virtual CPUs and 256 MiB, with default qemu64 and cortex-a72 models.
+The architecture pair ran concurrently; the enabled pair ran before the
+disabled pair, using separate matched debug output trees. Host load is
+not controlled and no timing is a pass threshold. The empty control is
+not subtracted.
+
+| Architecture | Path | LOCKDEP=0 | LOCKDEP=1 |
+|---|---|---:|---:|
+| x86_64 | empty | 44 / 45 / 59 | 42 / 43 / 55 |
+| x86_64 | spin | 391 / 393 / 446 | 2195 / 2219 / 2296 |
+| x86_64 | irqsave | 707 / 1074 / 1639 | 2615 / 2658 / 2691 |
+| x86_64 | nested | 1077 / 1084 / 1138 | 4280 / 4344 / 4463 |
+| x86_64 | mutex | 3007 / 3033 / 3251 | 11477 / 11595 / 11757 |
+| x86_64 | mutex-try | 2786 / 2817 / 2952 | 11011 / 11150 / 11372 |
+| aarch64 | empty | 13 / 13 / 25 | 12 / 13 / 24 |
+| aarch64 | spin | 305 / 305 / 669 | 1281 / 1321 / 1389 |
+| aarch64 | irqsave | 540 / 583 / 863 | 1771 / 1854 / 2001 |
+| aarch64 | nested | 917 / 980 / 1370 | 3054 / 3108 / 3159 |
+| aarch64 | mutex | 2348 / 2376 / 2411 | 8072 / 8215 / 8372 |
+| aarch64 | mutex-try | 2269 / 2351 / 2395 | 7956 / 7992 / 8131 |
+
+All four debug SMP boots passed all 417 self-tests and the complete boot
+harness: x86-64 enabled 131.1 s / disabled 111.4 s; AArch64 enabled
+132.4 s / disabled 118.5 s. Each log has all six expected paths, nine
+samples of 1024 iterations, matching configuration, and ordered
+min/median/max values. Logs: `out/lockdep-stats-{on,off}-{x86_64,aarch64}.log`.
+Both release kernels built (`out/lockdep-stats-release-{x86_64,aarch64}.log`).
+`git diff --check` passed. The host core algorithms are unchanged; prior
+host sanitizer results are retained rather than claimed as fresh evidence
+for kernel statistics serialization.

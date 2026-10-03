@@ -95,6 +95,12 @@ raw lock; not a panic/NMI reporting API.
 
 ### `void lockdep_get_stats(struct lockdep_stats *out)`
 Classes, edges, acquisitions, reachability searches, reports.
+All fields are copied under the graph raw lock, which also serializes every
+counter update. The result describes one instant of the counters, including
+in-progress operations; it is not a transaction over a whole acquisition
+or a simultaneous snapshot of CPU/thread held stacks. No allocation is
+required. Normal diagnostics only: this may wait for the raw lock and must
+not be used from panic/NMI context. Disabled builds return zeroes.
 
 ### `void lockdep_expect(enum lockdep_report_kind kind)`, `unsigned lockdep_expected_hits(void)`, `const char *lockdep_report_name(kind)`
 Self-tests only. `lockdep_expect` arms a one-shot expectation: the next

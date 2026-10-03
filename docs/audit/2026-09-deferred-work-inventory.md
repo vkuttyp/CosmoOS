@@ -401,7 +401,7 @@ validation~~, ~~IRQ trylock classification~~, ~~timer-cancellation callback-lock
 checks for observed active callbacks~~, and ~~spinlock irqrestore state
 validation~~. Section 7 records the completed diagnostic and validation
 increments in PR #304. Remaining: NMI/#MC validator writer reentrancy,
-global held-state/statistics snapshots across CPUs and threads, raw
+global held-state snapshots across CPUs and threads, raw
 `arch_irq_restore` ownership/pairing, and callback wait relationships beyond
 observed timer callback paths. Direct class checks and ordinary dependency
 edges must not be presented as proof of those broader relationships.
@@ -640,9 +640,9 @@ portability, performance):
 ## 7. Lockdep milestone follow-ups (2026-10-03)
 
 Completed work from the October lockdep session is struck through below.
-PR #303 is merged; PR #304 contains the subsequent implementations and
-review fixes. **BUILT** records implementation, not a claim that PR #304
-has merged or that all remote CI checks have passed. Evidence and validation
+PRs #303 and #304 are merged. The continuation from `aede0142` adds
+counter consistency and mutex measurements; those rows record local
+implementation, not a merge or remote CI result. Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 
 | Completed item | Implementation and scope |
@@ -658,15 +658,18 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Read-only held-stack snapshot validation from x86 NMI~~ | **BUILT (PR #304)**: real NMIs exercise a held graph lock and a busy stack writer. Delivery timeout retains the handler and live argument, releases test locks, and fails stop explicitly; injected first/second timeouts validate cleanup. This does not establish NMI writer reentrancy. |
 | ~~Matched debug LOCKDEP=0/1 warmed spin-path measurements~~ | **BUILT (PR #304)**: empty, spin, irqsave, and nested paths report min/median/max on both architectures under QEMU. No performance threshold or native-hardware claim. |
 | ~~Excessive initial user-stack builder scratch on the kernel stack~~ | **FIXED (PR #304 review/CI follow-up)**: private heap scratch reduces the local AArch64 builder frame from 5,328 to 192 bytes; allocation failure follows process cleanup. The protection-capable boot and post-self-test workload pass locally. |
+| ~~Consistent lockdep statistics snapshots~~ | **BUILT (post-#304 continuation)**: all counter updates and the snapshot copy share the graph raw lock. Operations can still be in progress; held stacks are not frozen. |
+| ~~Matched debug LOCKDEP=0/1 warmed mutex-path measurements~~ | **BUILT (post-#304 continuation)**: adds private mutex lock/unlock and successful trylock/unlock paths. Contended waits and priority inheritance remain unmeasured. |
 
 Still open for the next milestone:
 
 - NMI/#MC lockdep writer and raw-lock reentrancy; the x86 read-only test
   does not cover arbitrary tracked acquisitions or AArch64 NMI delivery.
-- Global held-state/statistics snapshots across CPUs and threads.
+- Global held-state snapshots across CPUs and threads (counter snapshots
+  are now consistent separately).
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Cold graph searches, mutex paths, contention, and native-hardware lockdep
-  overhead measurements.
+- Cold graph searches, contended spin/mutex paths, priority-inheritance waits,
+  and native-hardware lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
   host graph/held-stack models and the bounded x86 NMI reader test.
