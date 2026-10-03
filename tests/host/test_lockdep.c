@@ -138,6 +138,38 @@ static void test_path_bounds(void)
     free(g);
 }
 
+/* Fill every queue slot and bitmap word under ASan/UBSan. An absent
+ * usage label forces a complete traversal even in a dense graph. */
+static void test_dense_capacity(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_scratch *s = calloc(1, sizeof(*s));
+    EXPECT(g != NULL && s != NULL);
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++) {
+        char name[24];
+        snprintf(name, sizeof(name), "dense-%u", i);
+        EXPECT(lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) == (int)i);
+    }
+    for (unsigned i = 0; i < LOCKDEP_MAX_NODES; i++)
+        for (unsigned j = i + 1; j < LOCKDEP_MAX_NODES; j++)
+            EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)j));
+    EXPECT(g->nr_edges == LOCKDEP_MAX_NODES * (LOCKDEP_MAX_NODES - 1) / 2);
+    uint16_t last = LOCKDEP_MAX_NODES - 1, path[2], endpoint;
+    unsigned len;
+    EXPECT(lockdep_core_reaches(g, s, 0, last, path, 2, &len));
+    EXPECT(len == 2 && path[0] == 0 && path[1] == last);
+    EXPECT(!lockdep_core_reaches(g, s, last, 0, path, 2, &len) && len == 0);
+    EXPECT(!lockdep_core_find_usage(g, s, 0, LOCKDEP_HELD_IRQS_ON, false, &endpoint));
+    /* All nodes become initial BFS sources: no neighbor can be queued
+     * twice, and the final source still fits the fixed scratch queue. */
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++)
+        g->classes[i].usage = LOCKDEP_USED_IN_IRQ;
+    EXPECT(lockdep_core_find_usage(g, s, last, LOCKDEP_USED_IN_IRQ, true, &endpoint));
+    EXPECT(endpoint == last);
+    free(s);
+    free(g);
+}
+
 /* The kernel's decision procedure, modelled: acquiring `node` with a held
  * set is an inversion iff node reaches a held node; otherwise edges from
  * every held node are added. Replays the ABBA and the three-lock cycle. */
@@ -305,6 +337,7 @@ static const struct host_test tests[] = {
     { "decision", test_decision },
     { "metadata-lifetime", test_metadata_lifetime },
     { "path-bounds", test_path_bounds },
+    { "dense-capacity", test_dense_capacity },
     { "irq-dependencies", test_irq_dependencies },
     { "irq-oracle", test_irq_oracle },
 };

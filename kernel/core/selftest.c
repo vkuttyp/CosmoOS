@@ -503,6 +503,7 @@ static const struct selftest tests[] = {
     { "quiesce-grace",   selftest_quiesce_grace },
     { "quiesce-call",    selftest_quiesce_call },
     { "irq-sync",        selftest_irq_sync },
+    { "irq-writers",     selftest_irq_writers },
     { "timer-cancel-sync", selftest_timer_cancel_sync },
     { "quiesce-stress",  selftest_quiesce_stress },
     /*
@@ -526,6 +527,7 @@ static const struct selftest tests[] = {
     { "lockdep-mutex",   selftest_lockdep_mutex },
     { "lockdep-contention", selftest_lockdep_contention },
     { "lockdep-bench", selftest_lockdep_bench },
+    { "lockdep-graph-bench", selftest_lockdep_graph_bench },
     { "fpu-switch",      test_fpu_switch },
     { "fpu-bench",       test_fpu_bench },
     { "objects",         selftest_objects },

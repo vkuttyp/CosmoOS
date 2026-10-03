@@ -644,3 +644,486 @@ explicit in the design document. Cross-checked the API, invariants,
 diagnostics documentation, and audit descriptions against `panic_common`
 and all `lockdep_dump_graph` call sites: panic calls `lockdep_dump_held`,
 while the normal graph dump is called at the end of the self-test run.
+
+
+## Post-#304 continuation: statistics and mutex measurement
+
+Base: merged PR #304 (`aede0142`). This continuation proceeds in three
+phases: serialize the statistics snapshot, extend the matched benchmark,
+then validate both configurations on both architectures. The larger NMI
+writer, callback-wait, raw IRQ pairing, and global held-state questions
+remain separate work.
+
+### Phase 1: consistent statistics
+
+Previously, `lockdep_get_stats` held the graph lock while reading three
+independently changing atomic counters. Class/edge totals were stable,
+but acquisitions and reports could change between field reads. All
+counter writes now share the graph raw lock with the complete copy.
+Search counting uses its existing graph hold; acquisition and report
+counting each add a short hold at the same counting point as before.
+Every `g_stats` access and every report call site was audited: reports
+are entered after any graph hold is released, so counting does not recurse
+on the raw lock. Printing remains outside it.
+
+This yields a snapshot of counter values at one instant, not a transaction
+covering a whole acquisition. A class may already exist while its first
+acquisition is still in progress; reports and acquisitions retain their
+existing meanings. CPU/thread held stacks are not frozen. The API requires
+normal diagnostic context and may wait for the raw lock; no NMI/panic
+safety is claimed. The actual kernel `lockdep-order` case now also checks
+acquisition/report deltas, alongside its existing search-reuse assertions.
+The proof of cross-field consistency is common-lock coverage, not the
+older host graph model (which does not run this statistics API).
+
+### Phase 2: warmed mutex measurements
+
+The existing identical debug LOCKDEP=0/1 workload now includes a private
+mutex lock/unlock pair and a successful mutex trylock/unlock pair. The
+trylock result is asserted so a refused acquisition cannot be counted as
+a fast successful one. Initialization and 64 warmup iterations precede
+nine batches of 1024 timed iterations for each of six paths. Mutex paths
+include their internal spinlock and bookkeeping costs. Thread pinning,
+interrupt/scheduling noise, and descriptive-only output remain unchanged.
+
+The additional statistics serialization affects enabled-build timings.
+These runs measure the full current hooks, not an isolated before/after
+cost for that serialization. Cold graph searches, contended waits,
+priority inheritance, and native hardware remain outside this experiment.
+
+### Phase 3: cross-architecture validation
+
+Measurements below are min/median/max guest nanoseconds per iteration.
+Environment remains QEMU 11.1.1/TCG on arm64 macOS, Apple clang 21.0.0,
+four virtual CPUs and 256 MiB, with default qemu64 and cortex-a72 models.
+The architecture pair ran concurrently; the enabled pair ran before the
+disabled pair, using separate matched debug output trees. Host load is
+not controlled and no timing is a pass threshold. The empty control is
+not subtracted.
+
+| Architecture | Path | LOCKDEP=0 | LOCKDEP=1 |
+|---|---|---:|---:|
+| x86_64 | empty | 44 / 45 / 59 | 42 / 43 / 55 |
+| x86_64 | spin | 391 / 393 / 446 | 2195 / 2219 / 2296 |
+| x86_64 | irqsave | 707 / 1074 / 1639 | 2615 / 2658 / 2691 |
+| x86_64 | nested | 1077 / 1084 / 1138 | 4280 / 4344 / 4463 |
+| x86_64 | mutex | 3007 / 3033 / 3251 | 11477 / 11595 / 11757 |
+| x86_64 | mutex-try | 2786 / 2817 / 2952 | 11011 / 11150 / 11372 |
+| aarch64 | empty | 13 / 13 / 25 | 12 / 13 / 24 |
+| aarch64 | spin | 305 / 305 / 669 | 1281 / 1321 / 1389 |
+| aarch64 | irqsave | 540 / 583 / 863 | 1771 / 1854 / 2001 |
+| aarch64 | nested | 917 / 980 / 1370 | 3054 / 3108 / 3159 |
+| aarch64 | mutex | 2348 / 2376 / 2411 | 8072 / 8215 / 8372 |
+| aarch64 | mutex-try | 2269 / 2351 / 2395 | 7956 / 7992 / 8131 |
+
+All four debug SMP boots passed all 417 self-tests and the complete boot
+harness: x86-64 enabled 131.1 s / disabled 111.4 s; AArch64 enabled
+132.4 s / disabled 118.5 s. Each log has all six expected paths, nine
+samples of 1024 iterations, matching configuration, and ordered
+min/median/max values. Logs: `out/lockdep-stats-{on,off}-{x86_64,aarch64}.log`.
+Both release kernels built (`out/lockdep-stats-release-{x86_64,aarch64}.log`).
+`git diff --check` passed. The host core algorithms are unchanged; prior
+host sanitizer results are retained rather than claimed as fresh evidence
+for kernel statistics serialization.
+
+
+## New-edge core benchmark continuation
+
+Base: `64c492e6`. This increment addresses sparse new-edge search costs in
+three phases: define reproducible private topologies, implement timed core
+validation with checked results, then run both architectures and disabled
+configuration builds. It does not alter live acquisition policy.
+
+`lockdep-graph-bench` allocates a private graph and scratch, with one active
+subclass-zero node per class at sizes 16, 64, and 256. For insertion and
+IRQ rejection, two chains have a missing middle edge. The IRQ case marks
+only the first class IRQ-used and the last IRQ-enabled, so both components
+are individually valid and only the proposed bridge creates a conflict.
+The cycle case has a full chain and proposes last-to-first. Each operation
+uses the real reachability, IRQ-edge, and insertion helpers in the kernel
+check order. Checks outside timing validate the outcome, edge count,
+proposed-edge presence, truncated cycle endpoints, and IRQ endpoints.
+
+The graph is rebuilt before every operation, including two warmup samples
+and nine timed samples per case. Allocation, setup, validation, and output
+are outside the measured interval; allocation and affinity are cleaned up
+on failure as well as success. The private classes and edges never enter
+the live validator. Disabled builds skip this benchmark.
+
+These measurements characterize the core algorithm for a previously absent
+edge, not cold CPU caches: rebuilding and warmup can populate caches.
+They exclude raw-lock acquisition/contention, class registration, held-stack
+scanning, statistics, and report output. Single-operation timing includes
+clock overhead and is visibly quantized around a microsecond in these runs;
+small differences at the smallest size are not meaningful. Dense graphs,
+complete first-acquisition cost, and native hardware remain open.
+
+Same QEMU 11.1.1/TCG arm64 macOS environment, Apple clang 21.0.0, four CPUs
+and 256 MiB; both architecture boots ran concurrently. Values are
+min/median/max guest nanoseconds per operation, with no pass threshold.
+
+| Active nodes | Operation | x86-64 | AArch64 |
+|---:|---|---:|---:|
+| 16 | insert | 1002 / 2004 / 2005 | 992 / 2000 / 2000 |
+| 16 | cycle | 2004 / 2005 / 3007 | 992 / 2000 / 2992 |
+| 16 | irq-bridge | 4009 / 4010 / 8019 | 2992 / 3008 / 4000 |
+| 64 | insert | 5012 / 5012 / 6015 | 4000 / 4000 / 5008 |
+| 64 | cycle | 9021 / 9022 / 11026 | 6992 / 6992 / 7008 |
+| 64 | irq-bridge | 13031 / 14034 / 15036 | 10992 / 12000 / 52000 |
+| 256 | insert | 19045 / 21050 / 60145 | 14992 / 15008 / 18000 |
+| 256 | cycle | 35084 / 36086 / 38092 | 26000 / 27008 / 51008 |
+| 256 | irq-bridge | 54130 / 55132 / 60144 | 44992 / 46000 / 48000 |
+
+Both four-CPU debug boots passed all 418 self-tests and the complete
+harness: x86-64 reported 133.5 s and AArch64 143.8 s. The x86 harness
+retried once because firmware did not hand over within 30 s on the first
+attempt; the successful attempt ran all tests. The benchmark itself took
+132 ms on x86-64 and 137 ms on AArch64, with all nine topology/operation
+cases checked. Logs: `out/lockdep-graph-bench-{x86_64,aarch64}.log` and
+matching `-result.log` files. Debug LOCKDEP=0 and release kernels built
+on both architectures (`out/lockdep-graph-bench-config-{x86_64,aarch64}.log`).
+The pure core algorithms are unchanged. `git diff --check` passed.
+
+
+## Interrupt writer serialization continuation
+
+Base: `b6351212`. The next phases moved from measurements to a confirmed
+interrupt concurrency defect: table mutation masked local IRQs but did
+not exclude a writer on another CPU. Competing registrations could both
+observe an empty slot and race over the alternating record and publication.
+The dispatch count also paired atomic increments with a plain load;
+diagnostic name lookup could race a reused record's name store.
+
+Phase 1 adds a raw writer lock per vector, preserving early-boot use and
+avoiding any global dispatch lock. Registration/removal hold it with local
+IRQs masked, and never allocate, dispatch a handler, or wait for a grace
+period under it. Dispatch still acquires one published record pointer and
+takes no writer lock. Count reads and diagnostic name stores/loads are now
+atomic. Names remain immortal and are samples, not registration handles.
+NMI/#MC table mutation is explicitly unsupported; read-only NMI dispatch
+and name lookup still take no writer lock.
+
+Phase 2 compiles the actual `kernel/interrupt/interrupt.c` into a pthread
+host test. For 64 rounds, four registrations compete while four other
+threads dispatch the same vector; exactly one writer must win and handled
+calls must use its matching function/argument. Unhandled calls are counted
+too. After dispatchers join, four removers compete and exactly one wins.
+A diagnostic reader overlaps all rounds, including record reuse. The test
+checks exact final dispatch counts, wrong-function removal, and invalid
+arguments. It runs in the regular ASan/UBSan suite and separately via
+`make host-test-interrupt-tsan`.
+
+Host IRQ masking is a no-op, so exclusion depends on the real slot lock.
+The host grace-period function is a stub: joined dispatchers provide the
+lifetime boundary, not a simulation of kernel quiescence. The existing
+caller requirement to coordinate unregister, grace period and subsequent
+record reuse is unchanged. This increment does not prove generalized
+callback wait dependencies, arbitrary hardware entry interleavings, or
+NMI-safe mutation.
+
+Negative controls verified that the test exposes the defects: the original
+source fails TSan on `interrupt_count` versus atomic dispatch increments;
+a second temporary copy with atomic diagnostics retained but the writer
+lock removed fails TSan on competing slot publication. Neither temporary
+source is in the repository. Logs: `out/interrupt-writers-baseline-tsan.log`
+and `out/interrupt-writers-mutation-tsan.log`. Corrected code passes TSan
+(`out/interrupt-writers-tsan.log`) and the full ASan/UBSan host suite
+(`out/interrupt-writers-host.log`).
+
+Phase 3: both four-CPU debug boots passed all 418 self-tests and the full
+boot harness: x86-64 in 128.6 s and AArch64 in 137.4 s. Existing breakpoint,
+IRQ synchronization and x86 NMI snapshot tests remained enabled. Logs:
+`out/interrupt-writers-{x86_64,aarch64}.log`. Release kernels built on both
+architectures (`out/interrupt-writers-release-{x86_64,aarch64}.log`). The
+interrupt architecture, design, API, invariant and testing descriptions
+were reconciled with the actual record publication/lifetime protocol.
+`git diff --check` passed.
+
+## Thread mutex-stack snapshot continuation
+
+Base: `e886d6d7`. Phase 1 extends the bounded held-stack reader to a
+referenced thread's mutex stack. The common helper now takes an explicit
+capacity, rejecting oversized counts before reading either stack. The
+owning thread brackets atomic entry/count writes with a sequence; readers
+make one attempt and reject busy or changed state. Preemption or migration
+of the writer cannot make a reader wait. The caller must retain the thread
+object throughout the read; the API cannot acquire lifetime from an
+arbitrary pointer.
+
+Phase 2 changes panic held-state output to snapshot the current CPU and
+thread separately, or print unavailable. It no longer walks a partially
+updated local stack directly. This adds an eight-byte sequence at the end
+of `struct thread`, preserving existing member offsets, plus atomic writes
+on debug mutex tracking updates. No isolated overhead comparison was made
+for this increment. It does not add reentrant NMI writers, freeze mutex
+owner fields, or provide a simultaneous global held-state view.
+
+Phase 3 extends the sanitizer generation test to both 24-entry CPU and
+eight-entry mutex capacities, including exactly sized source/output arrays
+for bounds checks and refusal of a stopped writer. The kernel mutex test
+checks trylock metadata, shifted removal, busy refusal, and empty state.
+It also snapshots a referenced live thread through 1024 acquisition/release
+rounds and keeps an extra reference across join to check its exited stack.
+
+The full ASan/UBSan host suite and lockdep TSan target passed:
+`out/lockdep-thread-host.log` and `out/lockdep-thread-tsan.log`. Both final
+four-CPU debug boots passed all 418 self-tests and the full harness, in
+146.4 s on x86-64 and 145.8 s on AArch64. The remote mutex test accepted
+7591 and 6404 concurrent samples respectively, as well as checking the
+initial pair and exited empty stack. Logs:
+`out/lockdep-thread-final-{x86_64,aarch64}.log`. Both release kernels built
+successfully (`out/lockdep-thread-release-{x86_64,aarch64}.log`).
+The deliberate panic regressions also passed on both architectures (112.9 s
+and 111.0 s), with both current-CPU and `kmain` empty-stack snapshots printed
+after the backtrace. Logs: `out/lockdep-thread-crash-{x86_64,aarch64}-result.log`
+and `out/{x86_64,aarch64}-debug-crash/boot-test-crash.log`.
+`git diff --check` passed. The inventory marks this bounded snapshot work
+complete while retaining simultaneous global snapshots as deferred.
+
+## Dense graph measurement continuation
+
+Base: `fc64d2c2`. Phase 1 extends the private graph benchmark to dense
+acyclic components and adds the 320-class limit to both chain and dense
+cases. Only subclass zero is active. Dense components contain every
+forward edge: the full 320-node cycle graph has 51,040 edges, while the
+two-component insertion/IRQ graphs have 25,440 before the proposed bridge.
+Graph setup remains outside each timed operation and checks these counts.
+
+Phase 2 validates every warmup and measured operation: expected verdict,
+edge count, proposed-edge presence, cycle path length/endpoints and every
+path edge, or the IRQ-conflict endpoints. The dense cycle case finds a
+direct first-to-last path, unlike the chain's long truncated path. The
+bridge cases exhaust the second component in the unsuccessful reverse
+reachability check. No classes or dependencies enter the live validator.
+
+Phase 3 measures all 24 topology/size/operation combinations on both
+architectures, with two warmups and nine samples per case. Representative
+320-node results below are guest nanoseconds (min / median / max):
+
+| Topology | Operation | x86-64 | AArch64 |
+|---|---|---|---|
+| chain | insert | 25103 / 25103 / 28115 | 18000 / 19008 / 20992 |
+| chain | cycle | 44181 / 45185 / 106437 | 32000 / 33008 / 34000 |
+| chain | irq-bridge | 68280 / 69284 / 74305 | 52000 / 52992 / 54000 |
+| dense | insert | 24098 / 24099 / 26107 | 18000 / 18000 / 19008 |
+| dense | cycle | 2009 / 3012 / 7029 | 2000 / 2992 / 4000 |
+| dense | irq-bridge | 66271 / 67276 / 69285 | 48992 / 50000 / 58000 |
+
+Density is not a worst-case latency bound: these bitmaps skip visited
+neighbors, and dense cycle rejection terminates on a direct edge. Small
+samples can also fall below guest clock resolution (including zero);
+there is no timing pass threshold. These QEMU measurements exclude class
+lookup, held-stack processing, the raw lock, statistics and reporting.
+They neither measure native overhead nor cover all 1,280 subclass nodes.
+Complete acquisition, contention and worst-case bounds remain deferred.
+
+The expanded benchmark passed in 511 ms on x86-64 and 487 ms on AArch64.
+Release kernels built on both architectures; logs:
+`out/lockdep-dense-release-{x86_64,aarch64}.log`. The production core and
+host algorithms are unchanged in this increment.
+Both four-CPU debug boots passed all 418 self-tests and the complete boot
+harness: x86-64 in 129.7 s and AArch64 in 129.6 s. Full measurements and
+validation logs are `out/lockdep-dense-{x86_64,aarch64}.log` and matching
+`-result.log` files. `git diff --check` passed. The inventory marks the
+dense subclass-zero measurements complete, retaining broader performance
+coverage as deferred work.
+
+## Full-capacity graph continuation
+
+Base: `ac166445`. Phase 1 extends the private chain/dense benchmark to
+all 1,280 class/subclass nodes, retaining the previous subclass-zero cases.
+The full dense cycle graph contains 818,560 edges and the two-component
+bridge graphs 408,960. All 30 cases validate every warmup and timed result;
+setup and validation remain outside the timed operation.
+
+Phase 2 checks class-wide IRQ usage explicitly. In the full chain, the
+multi-source predecessor search reaches the proposed bridge from subclass
+3 of the first class; in the dense graph it reaches from subclass 0.
+Both descendant searches stop at subclass 0 of the last class. The cycle
+cases check the expected truncated chain or direct dense path and verify
+each returned edge. The host `dense-capacity` test fills every bitmap word,
+uses a two-entry output path, exhausts a full dense traversal without a
+matching usage label, and seeds the BFS queue with all 1,280 nodes. This
+exercises full queue capacity and duplicate suppression under ASan/UBSan.
+
+The full host sanitizer suite passed (`out/lockdep-full-host.log`). Both
+release kernels built (`out/lockdep-full-release-{x86_64,aarch64}.log`).
+The production core is unchanged. These are bounded-capacity workloads,
+not a proof of worst-case execution time or complete acquisition costs.
+
+Phase 3 measured both architectures under four-CPU QEMU. Full-capacity
+results from the first runs are guest nanoseconds (min / median / max):
+
+| Topology | Operation | x86-64 | AArch64 |
+|---|---|---|---|
+| chain | insert | 90125 / 105800 / 281152 | 64000 / 64992 / 214992 |
+| chain | cycle | 184170 / 217476 / 331113 | 130000 / 136000 / 218000 |
+| chain | irq-bridge | 258621 / 368338 / 952195 | 186992 / 194992 / 632000 |
+| dense | insert | 90125 / 91105 / 98942 | 64992 / 68000 / 107008 |
+| dense | cycle | 11755 / 11756 / 12735 | 10000 / 10992 / 14000 |
+| dense | irq-bridge | 250784 / 322296 / 706309 | 179008 / 191008 / 238992 |
+
+The benchmark passed in 1597 ms on x86-64 and 1201 ms on AArch64, below
+the existing self-test budget. AArch64 passed all 418 self-tests and the
+full harness in 147.0 s. The initial x86 run completed 418 tests with one
+failure: `quiesce-straggler-idle` observed a kick instead of zero (15 ms).
+It ran before the graph benchmark; neither its code nor the quiescence
+implementation changed. The test assumes idle publication beats the
+two-tick kick threshold. Host scheduling delay is a possible explanation,
+not an established root cause. The graph benchmark itself passed all 30
+cases. Logs: `out/lockdep-full-{x86_64,aarch64}.log` and matching
+`-result.log` files. No test assertion or timeout was relaxed.
+
+An isolated x86 rerun passed all 418 self-tests and the complete harness
+in 130.9 s (`out/lockdep-full-x86_64-retry.log` and matching `-result.log`).
+The idle test completed in 4 ms with no kick and the graph benchmark in
+1241 ms. The initial failure did not reproduce; its cause remains open.
+`git diff --check` passed. The inventory strikes out all-subclass capacity
+measurements while retaining worst-case latency bounds and contention work.
+
+## Kernel interrupt writer/IPI continuation
+
+Base: `52d14a30`. Phase 1 adds `irq-writers`, a kernel integration test
+for the existing per-vector writer serialization. Two pinned threads
+rendezvous and race to register the same allocated vector. Exactly one
+must succeed and the other must return `-EBUSY`. A real IPI dispatches
+the winner; distinct handlers validate their own argument identity, the
+vector and a non-null trap frame. Two threads then race to remove that
+handler: one success and one `-ENOENT` are required.
+
+Phase 2 checks reuse over 16 rounds. After joining removal threads, the
+caller waits through `synchronize_irq`, checks exact handler/dispatch
+counts and absent publication, then permits stack probe and alternating
+record reuse. SMP writers run on distinct CPUs; UP uses the same yielding
+rendezvous and self-IPI, without claiming simultaneous contention.
+Allocation/rendezvous failure joins any created workers and cleans up
+publication through a grace period. IPI timeout explicitly fails stop
+while retaining the vector, handler and live probes, because delayed
+delivery cannot safely return to freed storage.
+
+Dispatch starts after the registration race, so this test does not claim
+publication/dispatch overlap; the actual-source host test covers that.
+The existing `irq-sync` test separately holds a handler active during
+unregister. Arbitrary entry interleavings, NMI/#MC mutation and generalized
+callback dependencies remain deferred. The production interrupt path is
+unchanged in this increment.
+
+Phase 3: both four-CPU debug boots passed all 419 self-tests and the full
+harness (x86-64 142.1 s, AArch64 138.2 s). The new test passed in 64 ms
+and 66 ms respectively, with writers on CPUs 2 and 3. Logs:
+`out/irq-writers-kernel-{x86_64,aarch64}.log` and matching `-result.log`.
+Both release kernels built successfully:
+`out/irq-writers-kernel-release-{x86_64,aarch64}.log`.
+The single-CPU branch also completed all 16 rounds on each architecture
+(x86-64 13 ms, AArch64 23 ms). Failure cleanup and timeout retention were
+reviewed, not fault-injected in this increment. Host sanitizer tests were
+not repeated: neither the production interrupt source nor its host model
+changed; their earlier evidence remains in the writer-serialization section.
+Both single-CPU boots passed all 419 self-tests and the complete harness:
+x86-64 in 118.8 s and AArch64 in 124.4 s. Logs:
+`out/irq-writers-kernel-up-{x86_64,aarch64}.log` and matching `-result.log`.
+`git diff --check` passed. Interrupt invariant/testing and quiescence test
+documentation now state the complementary host/kernel coverage, and the
+inventory strikes out this integration regression with its scope limits.
+
+## PR #305 review follow-up
+
+Both initial review findings were valid. The interrupt testing guide now
+states that real/self-IPIs already exist; the missing coverage is a test
+that deliberately dispatches a bound vector without a registered handler.
+The affected interrupt documentation was searched for repeated future-LAPIC
+claims; none remain.
+
+The mutex snapshot test previously fell through its two-second completion
+deadline into an unbounded join. It now explicitly panics if the worker
+has not acknowledged completion, retaining the creator reference and the
+stack-owned mutex probe. It joins only after the acknowledgement. This
+covers a worker stalled in its tested mutex operations; it does not make
+the scheduler or thread-exit implementation universally timeout-safe.
+
+A separate temporary clone replaced the worker's completion publication
+with an endless yielding loop. Its x86-64 image reached the exact new
+completion-timeout panic and the expected failure exit in 14.8 s total
+boot time, rather than hanging in join. The boot harness used a targeted
+panic marker for this injection, with its ordinary failure-exit check;
+it did not require the normal deliberate page-fault marker. Logs:
+`out/pr305-timeout-result.log` and `out/pr305-timeout-x86_64.log`.
+The injected source and image are outside the PR; normal source/images
+were never modified by this experiment.
+
+The normal four-CPU AArch64 boot passed all 419 self-tests and the full
+harness in 156.3 s (`out/pr305-review-aarch64.log`). The concurrent x86
+run passed the changed mutex test but failed `smp-ticks` (tick count),
+`lockup-sample` (response mask), and `lockup-hard` (answered mask), all
+before the mutex test. These source paths are unchanged. The normal
+boots overlapped the isolated injection build/run; host load is a possible
+factor, not a proven cause. The failures are retained in
+`out/pr305-review-x86_64.log`; no test threshold or assertion was changed.
+The isolated x86 rerun completed in 137.1 s with one failure remaining:
+`lockup-sample` did not receive the required CPU response (107 ms).
+`lockdep-mutex` was among the 418 passing tests. This repeated failure
+remains unresolved; the x86 full suite is not reported green for this
+review follow-up (`out/pr305-review-x86_64-retry.log`).
+
+The pre-fix AArch64 CI job 111238579811 in run 37135325697 likewise
+passed all 419 self-tests, then exceeded the 180-second boot deadline
+before the rc/interactive-shell completion markers. Its log is retained
+at `out/pr305-ci-aarch64-job.log`; this is separate from either review
+finding. `git diff --check` passed for the review fixes.
+
+## Lockup sampling deadline investigation
+
+The repeated x86 failure was the missing-spinner bit in the returned
+mask, not the previously repaired interrupted-stack/leaf-PC check. In
+`out/pr305-review-x86_64-retry.log` all remote CPUs were omitted, while
+later output showed their ticks and subsequent NMI samples. Those logs
+lack publication timestamps at the failing deadline, so they do not
+prove whether every original omission was this race or truly late
+interrupt delivery. An instrumented normal boot and 32 additional
+unforced samples passed during investigation; that does not discharge
+the reported failures.
+
+Inspection found a concrete stale-observation race in both sampling
+APIs. They checked response sequence(s) before reading the deadline
+clock. If the reporter was interrupted or its host vCPU descheduled in
+between, other CPUs could publish their answers before it resumed, but
+the expired clock check returned the earlier incomplete mask. The
+single-target form could likewise return false for an available answer.
+
+Both loops now read deadline expiry first, then acquire-load response
+publication before deciding to return. This preserves one original
+five-millisecond deadline, adds no retry window or additional request,
+and leaves truly absent targets absent. A final bounded response sweep
+can accept publications made while the reporter was delayed; the mask
+represents available samples, not a delivery-latency guarantee. The
+`lockup-sample` test also copies fields only for an acknowledged response,
+avoiding a read racing an unfinished responder on failure.
+
+`tools/lockup-deadline-probe.py` builds a temporary clone, gates the first
+sample's responders, then lets them finish during a simulated pause in
+the reporter's deadline read. It resumes after the original deadline.
+With `--old-order`, both x86-64 and AArch64 fail specifically at the same
+missing-spinner mask assertion; with the corrected order, both pass the
+existing mask, stack and timestamp assertions. Both modes use real
+NMI/IPI response publication, and guard expiry is rejected rather than
+counted as reproduction. The probe stops at a named panic and checks
+that exact outcome and failure exit; this is targeted evidence, not a
+full-suite pass. Its all-CPU case exercises the observed failure; the
+single-target loop received the same ordering correction by inspection.
+
+Probe logs: `out/lockup-deadline-{x86_64,aarch64}-{old,fixed}/boot.log`
+and corresponding top-level `-result.log` files. The old/fixed x86 probes
+completed in 9.6/8.3 s; both AArch64 probes completed in 11.4 s. No code
+that gates responders is linked into normal kernels. The production
+change does not guarantee that an unscheduled remote vCPU answers within
+five milliseconds; genuine late delivery can still yield an absent bit.
+
+Final normal four-CPU boots passed all 419 self-tests and complete
+harnesses: x86-64 in 151.1 s and AArch64 in 160.3 s. The existing
+`lockup-sample-busy` test still verified one deadline and genuinely
+unanswered masked targets (observed waits 5035/5200 us). The x86 network
+harness recovered on attempt 2 of 3, a recorded QEMU reset sighting.
+Logs: `out/lockup-deadline-final-{x86_64,aarch64}.log` and corresponding
+`-result.log` files. Both release kernels built; logs:
+`out/lockup-deadline-release-{x86_64,aarch64}.log`. Probe syntax checking
+and `git diff --check` passed.

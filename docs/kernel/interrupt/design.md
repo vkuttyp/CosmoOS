@@ -14,40 +14,44 @@ into this space in its arch layer (`docs/kernel/arch/aarch64/design.md`,
 
 ## Registration
 
+Registration and removal hold a raw per-vector writer lock with local
+IRQs masked. Competing CPUs cannot both claim an empty slot or overwrite
+its alternating record index. No allocation, tracked lock, handler call,
+or grace-period wait occurs under this lock; it also works during early
+boot. Mutations from NMI/#MC are unsupported because they could interrupt
+a writer on the same CPU. Ordinary IRQ writers are safe because IRQs are
+masked during each hold. Dispatch never takes the writer lock.
+
 ```
 interrupt_register(v, fn, arg, name):
-    v >= g_vector_count || fn == NULL  → -EINVAL
-    s = arch_irq_save()
-    slot.fn != NULL                    → -EBUSY
-    slot.arg = arg; slot.name = name
-    barrier()
-    atomic_store_release(&slot.fn, fn)
-    arch_irq_restore(s)
+    validate v and fn
+    lock slot.writer with local IRQs masked
+    slot.cur != NULL → unlock and return -EBUSY
+    fill next alternating record: fn, arg, immortal name
+    atomic_store_release(&slot.cur, record)
+    unlock and restore IRQ state
 ```
 
-`arg` and `name` are written before `fn` is published with release
-semantics, so a dispatcher that observes `fn` (acquire) also observes the
-fields it needs. Local interrupts are disabled around the update so a
-trap on the same CPU cannot observe a half-written slot.
-
-Unregistration is the mirror image: clear `fn` first (release), then
-`arg`/`name`. It returns `-ENOENT` if `fn` is not the function currently
-installed, which catches a subsystem unregistering someone else's handler.
+Unregistration checks the current record's function under the same lock,
+returning `-ENOENT` on mismatch, then clears only `slot.cur`. It never
+clears a record a dispatcher may still hold. A grace period remains
+necessary before freeing handler state or reusing a registration record;
+writer serialization does not replace the owner's lifecycle coordination.
 
 ## Dispatch
 
 ```
 interrupt_dispatch(v, frame):
     v >= g_vector_count → panic_frame(...)        arch bug
-    slot.count++
-    fn = atomic_load_acquire(&slot.fn)
-    fn == NULL → arch_trap_unhandled(v, frame); return
-    fn(v, frame, slot.arg)
+    atomic_fetch_add_relaxed(&slot.count, 1)
+    record = atomic_load_acquire(&slot.cur)
+    record == NULL → arch_trap_unhandled(v, frame); return
+    record.fn(v, frame, record.arg)
 ```
 
-The count is incremented before the lookup so unhandled vectors are
-counted too; `interrupt_count` therefore answers "how often did this
-vector fire", not "how often was it handled".
+One acquire load selects the function and argument together. The count is
+incremented before lookup, including unhandled dispatches. No writer lock
+is taken, including on the x86 paranoid/NMI entry path.
 
 ## Handler context
 
@@ -65,28 +69,20 @@ Anything longer is deferred; the deferred-work mechanism arrives with the
 scheduler in Phase 3 and will be the recommended pattern from constitution
 section 53 (minimal handler → queue work → worker thread).
 
-## SMP plan
+## SMP publication and lifetime
 
-The single-CPU version is already written in the shape SMP needs:
+The published record pointer uses release/acquire ordering. Per-vector
+writer serialization protects slot ownership and record selection across
+CPUs; different vectors do not share a writer lock. Dispatch counts use
+atomic increments and loads.
 
-1. Publish/consume of `fn` is release/acquire, so a handler installed on
-   CPU A is seen complete by CPU B.
-2. The grace period on unregistration exists since the lifetime pass:
-   CPU B may have loaded the record just before CPU A cleared it and
-   still be running the handler, so `interrupt_unregister_sync` (and the
-   IRQ layer's release paths) call `synchronize_irq`, one
-   `synchronize_quiesce`, before `arg` may be freed
-   (`docs/kernel/quiesce/design.md`). Each slot publishes a pointer to an
-   immutable `{fn, arg, name}` record (two per slot, alternating), so a
-   dispatcher that loaded a record uses a coherent pair even while the
-   slot is being re-registered.
-3. Registration from two CPUs racing for the same slot needs a
-   compare-and-swap instead of load-then-store; that change is local to
-   `interrupt_register`.
-4. `count` becomes a per-CPU counter or an atomic increment; per-CPU is
-   the section 21 recommendation for high-frequency counters.
-
-No global lock is planned (Invariant 12).
+A CPU may load a record just before unregistration clears it, then invoke
+the handler afterwards. `interrupt_unregister_sync` and the IRQ release
+paths call `synchronize_irq` (one `synchronize_quiesce`) before handler
+state may be freed. Record storage alternates between two entries. The
+existing caller requirement to coordinate unregister, grace period and
+re-registration remains: the writer lock alone does not make rapid record
+reuse safe against an older dispatch. See `docs/kernel/quiesce/design.md`.
 
 ## Relationship with the architecture layer
 
@@ -111,10 +107,13 @@ mismatch between the stub count and `arch_trap_vector_count`.
 
 ## Diagnostics
 
-`interrupt_count(v)` and `interrupt_handler_name(v)` are read without
-synchronisation; they are for logs and a future `/proc`-style view, not
-for control flow. `arch_trap_unhandled` uses the count of unhandled
-interrupts in its warning line.
+`interrupt_count(v)` uses an atomic relaxed load; it samples a counter
+without promising the current handler's completion. Name lookup acquires
+the published pointer and atomically samples its immortal name. It can
+observe an old or reused record's name during replacement, but never a
+non-atomic pointer race. This deliberately avoids a writer lock or grace
+period in diagnostics, including NMI name lookup. Neither accessor pairs
+its result with the other accessor's result or with a registration handle.
 
 ## Memory
 

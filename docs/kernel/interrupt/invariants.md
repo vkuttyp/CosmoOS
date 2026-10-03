@@ -4,7 +4,7 @@
 
 A slot holds at most one function. Sharing is not supported; a second
 registration returns `-EBUSY`. **Checked by** `interrupt_register` and the
-`breakpoint-trap` self-test.
+`breakpoint-trap` and `irq-writers` self-tests and concurrent host registration test.
 
 ## I-INT-2: Generic code never contains a literal vector number
 
@@ -15,17 +15,21 @@ the first argument.
 
 ## I-INT-3: `fn` is published after `arg` and `name`
 
-Release store on install, acquire load on dispatch; clear `fn` first on
-removal. A dispatcher that sees a non-NULL `fn` sees a complete slot.
-**Checked by** the `__atomic_store_n(..., __ATOMIC_RELEASE)` /
-`__atomic_load_n(..., __ATOMIC_ACQUIRE)` pair in `interrupt.c`; a
-concurrency test needs SMP and is future work.
+Release publication of an immutable record pointer, acquire load on
+dispatch; clear the pointer on removal. The function and argument come
+from the same loaded record. **Checked by** concurrent host registration
+and dispatch using distinct function/argument identities; `irq-writers` checks
+the winning identity via real IPI and reuse after a grace period, while
+`irq-sync` holds a handler active across unregister.
 
-## I-INT-4: Table updates run with local interrupts disabled
+## I-INT-4: Per-vector writers serialize with local IRQs disabled
 
-`interrupt_register`/`interrupt_unregister` wrap their update in
-`arch_irq_save`/`arch_irq_restore`. **Checked by** code structure; the
-`irq-state` self-test validates the primitive they rely on.
+`interrupt_register` and removal share a raw per-vector writer lock and
+restore the caller's IRQ state. There is no allocation, handler call, or
+grace-period wait under it. NMI/#MC table mutation is unsupported.
+**Checked by** code structure, competing host writers under TSan, kernel
+`irq-writers` registration/removal races, and
+`irq-state`/`breakpoint-trap` for the IRQ-state primitives and trap path.
 
 ## I-INT-5: An unregistered exception is fatal
 
@@ -36,8 +40,10 @@ exit code 35.
 
 ## I-INT-6: Every dispatch is counted, handled or not
 
-`slot.count++` precedes the lookup. **Checked by** the `breakpoint-trap`
-self-test comparing `interrupt_count` before and after.
+An atomic increment precedes lookup and `interrupt_count` loads atomically.
+**Checked by** exact IPI counts in `irq-writers`, `breakpoint-trap`, and
+the concurrent host test, which counts
+handled and unhandled dispatches exactly after joining the dispatchers.
 
 ## I-INT-7: The table owns nothing
 
@@ -48,10 +54,11 @@ yet.
 ## I-INT-8: Handlers do not sleep, allocate, or take sleeping locks
 
 Interrupt context rule from constitution section 53. **Checked by
-review** today; lock diagnostics (a "might sleep" assertion that knows
-the current context) are planned with the scheduler.
+review** and `might_sleep()` at sleeping primitive entry, with IRQ context
+tracked by the architecture entry path. Allocation remains a review rule;
+`kmalloc` currently does not sleep.
 
-## I-INT-9: No global lock
+## I-INT-9: Dispatch takes no writer lock
 
 Dispatch is lock-free by design: release/acquire on the record pointer
 plus a grace period on removal (`synchronize_irq`; constitution

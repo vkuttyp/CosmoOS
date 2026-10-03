@@ -401,7 +401,7 @@ validation~~, ~~IRQ trylock classification~~, ~~timer-cancellation callback-lock
 checks for observed active callbacks~~, and ~~spinlock irqrestore state
 validation~~. Section 7 records the completed diagnostic and validation
 increments in PR #304. Remaining: NMI/#MC validator writer reentrancy,
-global held-state/statistics snapshots across CPUs and threads, raw
+global held-state snapshots across CPUs and threads, raw
 `arch_irq_restore` ownership/pairing, and callback wait relationships beyond
 observed timer callback paths. Direct class checks and ordinary dependency
 edges must not be presented as proof of those broader relationships.
@@ -640,9 +640,12 @@ portability, performance):
 ## 7. Lockdep milestone follow-ups (2026-10-03)
 
 Completed work from the October lockdep session is struck through below.
-PR #303 is merged; PR #304 contains the subsequent implementations and
-review fixes. **BUILT** records implementation, not a claim that PR #304
-has merged or that all remote CI checks have passed. Evidence and validation
+PRs #303 and #304 are merged. The continuation from `aede0142` adds
+counter consistency, mutex/new-edge measurements, interrupt writer
+serialization, thread mutex snapshots, dense/full-capacity graph measurements,
+and kernel interrupt writer/IPI validation;
+those rows record local implementation, not a merge or remote CI result.
+Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 
 | Completed item | Implementation and scope |
@@ -658,15 +661,27 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Read-only held-stack snapshot validation from x86 NMI~~ | **BUILT (PR #304)**: real NMIs exercise a held graph lock and a busy stack writer. Delivery timeout retains the handler and live argument, releases test locks, and fails stop explicitly; injected first/second timeouts validate cleanup. This does not establish NMI writer reentrancy. |
 | ~~Matched debug LOCKDEP=0/1 warmed spin-path measurements~~ | **BUILT (PR #304)**: empty, spin, irqsave, and nested paths report min/median/max on both architectures under QEMU. No performance threshold or native-hardware claim. |
 | ~~Excessive initial user-stack builder scratch on the kernel stack~~ | **FIXED (PR #304 review/CI follow-up)**: private heap scratch reduces the local AArch64 builder frame from 5,328 to 192 bytes; allocation failure follows process cleanup. The protection-capable boot and post-self-test workload pass locally. |
+| ~~Consistent lockdep statistics snapshots~~ | **BUILT (post-#304 continuation)**: all counter updates and the snapshot copy share the graph raw lock. Operations can still be in progress; held stacks are not frozen. |
+| ~~Matched debug LOCKDEP=0/1 warmed mutex-path measurements~~ | **BUILT (post-#304 continuation)**: adds private mutex lock/unlock and successful trylock/unlock paths. Contended waits and priority inheritance remain unmeasured. |
+| ~~New-edge core search measurements on sparse chains~~ | **BUILT (post-#304 continuation)**: private 16/64/256-node graphs exercise allowed insertion, cycle rejection, and transitive IRQ-conflict rejection. Setup is outside every sample; these are core costs, not cold-cache or complete acquisition timings. |
+| ~~Concurrent interrupt-table writer and diagnostic data races~~ | **FIXED (post-#304 continuation)**: per-vector raw writer serialization prevents competing registrations/removals; atomic count/name reads support concurrent diagnostics. Actual-source host tests cover publication and writer races; dispatch stays lock-free and record reuse still requires a grace period. |
+| ~~Bounded thread mutex-stack snapshots~~ | **BUILT (post-#304 continuation)**: atomic single-writer publication and capacity-aware reads with caller-owned thread lifetime. Panic diagnostics copy each local stack or report unavailable. Separate CPU/thread snapshots do not form a global view. |
+| ~~Dense DAG core search measurements through the class limit~~ | **BUILT (post-#304 continuation)**: chain/dense 16/64/256/320-node cases validate allowed insertion, cycle rejection, and IRQ-bridge rejection. Only subclass zero is active; these measurements do not establish worst-case bounds. |
+| ~~All-subclass graph search measurements at full capacity~~ | **BUILT (post-#304 continuation)**: 1,280-node chain/dense cases cover all subclasses, with explicit IRQ endpoint checks and sanitizer coverage of full BFS queues. Worst-case latency bounds remain open. |
+| ~~Kernel interrupt writer, IPI and grace-period reuse regression~~ | **BUILT (post-#304 continuation)**: 16 rounds race two registrations/removals, validate the winning handler via real IPI, and wait before reuse. Dispatch follows registration; arbitrary entry interleavings remain open. |
+| ~~Stale lockup response mask after delayed deadline read~~ | **FIXED (PR #305 follow-up)**: both polling APIs read expiry before collecting responses. A controlled real-IPI/NMI probe reproduces the old missing-mask failure and validates the fix on both architectures; the five-millisecond deadline remains unchanged. |
 
 Still open for the next milestone:
 
 - NMI/#MC lockdep writer and raw-lock reentrancy; the x86 read-only test
   does not cover arbitrary tracked acquisitions or AArch64 NMI delivery.
-- Global held-state/statistics snapshots across CPUs and threads.
+- Simultaneous global held-state snapshots across CPUs and threads;
+  individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Cold graph searches, mutex paths, contention, and native-hardware lockdep
-  overhead measurements.
+- Worst-case graph search bounds, complete first-acquisition timings,
+  contended spin/mutex paths, priority-inheritance waits, and native-hardware
+  lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
-  host graph/held-stack models and the bounded x86 NMI reader test.
+  host graph/held-stack and interrupt-publication tests, kernel writer/IPI
+  reuse regression, and bounded x86 NMI reader test.

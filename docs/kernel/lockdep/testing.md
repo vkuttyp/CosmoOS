@@ -39,9 +39,10 @@ released normally.
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
-| `lockdep-bench` | warmed uncontended spin paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+| `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+| `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
-### Spin-path measurement
+### Spin and mutex path measurement
 
 `lockdep-bench` runs with either `LOCKDEP=0` or `LOCKDEP=1` when self-tests
 are enabled. Compare debug builds in separate output trees, changing only
@@ -54,13 +55,65 @@ The test warms each path 64 times, then reports min/median/max guest-clock
 nanoseconds per iteration across nine batches of 1024 iterations. `spin`
 and `irqsave` each contain one acquire/release pair; `nested` contains an
 outer irqsave pair and an inner plain pair with a previously recorded edge.
+`mutex` is a blocking acquire/release pair on a private mutex; `mutex-try`
+is a successful trylock/release pair on the same object. Initialization
+and first-use class/edge registration happen before timed samples. The
+trylock path asserts success so a refused acquisition cannot look faster.
 `empty` is a loop/dispatch/clock control, reported separately without
 subtracting it. Pinning keeps clock readings CPU-local. Interrupts and
 scheduling remain enabled, other CPUs continue running, and results include
 their interference. Printing and affinity changes are outside the samples.
 These measurements cover warmed uncontended object locks, not cold graph
-searches, lock contention, mutexes, or a hardware-independent overhead
+searches, lock contention, priority-inheritance waits, or a hardware-independent overhead
 ratio. QEMU/TCG results describe that emulator and host workload only.
+
+### New-edge core measurement
+
+`lockdep-graph-bench` runs only with lockdep enabled. It allocates a private
+graph and search scratch, then measures the real reachability, IRQ-edge,
+and insertion helpers in the same order as acquisition checking. Each
+graph has 16, 64, 256, or 320 classes with one active node per class (subclass
+zero). An additional 1,280-node case populates all four subclasses of
+every class; the core's fixed bitmap capacity is unchanged.
+
+The `insert` and `irq-bridge` cases start with two disjoint chains and
+propose their missing middle edge. In `irq-bridge`, only the first class
+is IRQ-used and the last is IRQ-enabled, so the bridge must be refused.
+The `cycle` case starts with one chain and proposes last-to-first, which
+must be refused with the expected truncated cycle path.
+
+Each case also runs on dense DAGs containing every forward edge within
+its component(s). At 320 active nodes the cycle graph has 51,040 edges;
+the two-component insertion/IRQ graphs have 25,440. Their absent bridge
+requires an unsuccessful reverse-reachability search over the entire
+second component. Dense cycle rejection finds the direct first-to-last
+edge and returns a two-node path, so density does not imply worst-case
+latency. Setup checks the expected edge count. Every operation checks its
+result, edge count, and proposed-edge presence; returned cycle paths check
+their expected endpoints/length and each consecutive edge, and rejected
+IRQ edges check both reported endpoints.
+
+Each of nine samples times one operation after two warmup samples. Graph
+setup, allocation, validation and logging are outside the interval. Setup
+rebuilds the graph before every sample, so no sample takes the live
+validator's known-edge shortcut. “New edge” does not mean a cold CPU cache:
+setup and warmup can populate caches. The pinned thread leaves IRQs and
+scheduling enabled. Results report min/median/max guest nanoseconds.
+These are core algorithm costs, excluding raw-lock contention, class
+registration, held-stack scans, statistics, and reports. They do not
+measure end-to-end acquisition latency or establish a worst-case bound.
+The full-capacity dense cycle graph has 818,560 edges; its two-component
+cases have 408,960. IRQ labels apply to all subclasses: the full chain's
+safe endpoint is subclass 3 of the first class, while the dense case uses
+subclass 0; both reach subclass 0 of the last IRQ-enabled class. The tests
+check these endpoints explicitly. Output identifies topology and the
+pre-operation edge count for each of the 30 cases.
+
+The host `dense-capacity` sanitizer test fills the same 1,280-node dense
+DAG, checks a two-entry path buffer, forces a full traversal with an absent
+usage label, and initializes every node as a BFS source. These exercise
+queue capacity and duplicate suppression under ASan/UBSan.
+The benchmark never registers its classes or edges in the live graph.
 
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 
@@ -195,6 +248,20 @@ rejected, and readers racing a writer must see one complete generation
 across every entry and field. The kernel `lockdep-order` regression checks
 snapshot publication from real acquisitions, irqsave metadata, a release
 out of order, and the final empty stack.
+
+The same host generation test also runs with the eight-entry mutex capacity,
+allocating exactly that many source/output entries. An oversized count must
+be refused before any array access. `lockdep-mutex` checks actual mutex and
+trylock metadata, removal out of order, an unfinished writer, and the final
+empty stack. It also reads a referenced writer thread's initial held pair,
+samples during 1024 acquire/release rounds, and retains an extra reference
+across join to verify the exited stack is empty. The accepted concurrent
+sample count is logged; busy reads are allowed and must return count zero.
+If the worker does not acknowledge completion within two seconds, the test
+panics while retaining its thread reference and stack-owned probe; it must
+neither block in join nor return while the worker can still access the probe.
+Only an acknowledged worker is joined for the exited-stack check.
+This extends single-target snapshot coverage, not simultaneous global state.
 
 On x86-64, `trap-paranoid` adds real local-APIC NMI delivery while the
 validator graph raw lock is held. The handler takes only the bounded

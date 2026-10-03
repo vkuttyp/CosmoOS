@@ -175,7 +175,12 @@ static bool selftest_lockup_sample_pinned(const char **reason)
     cpumask_t m = 0;
     bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
     uint64_t t1 = clock_now_ns();
-    const struct cpu_sample *sm = &percpu_get((unsigned)k)->sample;
+    /* Only an acknowledged response has published its fields. A late
+     * responder may still be writing when the returned mask omits it. */
+    struct cpu_sample snapshot = {0};
+    if (ok && (m & CPUMASK_OF((unsigned)k)))
+        snapshot = percpu_get((unsigned)k)->sample;
+    const struct cpu_sample *sm = &snapshot;
     /* Read the fields before the print releases the slot. */
     uintptr_t pc = sm->pc, tr1 = sm->depth > 1 ? sm->trace[1] : 0;
     unsigned depth = sm->depth;

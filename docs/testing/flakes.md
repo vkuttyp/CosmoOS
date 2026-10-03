@@ -2931,3 +2931,29 @@ was in; the forced run matches it. The step now asks which client it
 accepted and bounds its receive. `net-accept-order` runs the same step in
 the forced order on every debug boot.
 
+
+## `lockup-sample`: stale mask at deadline expiry, 2026-10-03
+
+PR #305 local x86 boots repeatedly failed the returned-mask assertion
+(`m & CPUMASK_OF(k)`), before the spinner stack checks. One log omitted
+all remote CPUs. This is distinct from the interrupted-leaf failure above.
+The original logs cannot distinguish late delivery from an answer arriving
+while the reporter was delayed between its response sweep and clock read.
+
+A controlled probe proves the latter is a real sampler bug: gate real
+responders, let their sequence publications complete during a pause in the
+reporter's deadline read, then resume past the original deadline. The old
+polling order returns its stale incomplete mask; the fixed order reads
+expiry first and collects the published answers before returning. Both
+outcomes were verified on x86-64 and AArch64 with
+`tools/lockup-deadline-probe.py` (add `--old-order` for the negative control).
+The single-target API has the same ordering repair. No deadline or test
+assertion was relaxed. A truly late response remains a legitimate timeout;
+this fix does not prove that every historical missing response had this
+cause. Detailed logs and limits are in the October lockdep audit report.
+
+The final fixed x86 boot passed all 419 tests and the full harness in
+151.1 s, with the network harness recovering on attempt 2 of 3 (the QEMU
+reset family, not a sampling failure). The AArch64 boot passed all 419
+and the full harness in 160.3 s. Logs:
+`out/lockup-deadline-final-{x86_64,aarch64}.log` and `-result.log`.

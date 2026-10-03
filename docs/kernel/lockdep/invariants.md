@@ -151,3 +151,18 @@ successful copy. It takes no target-owned lock and does not retry a stuck
 writer. Check: the threaded sanitizer model validates whole generations
 and immediate refusal of a stopped writer; `lockdep-order` checks actual
 push, irqsave flags, out-of-order removal, and empty-stack publication.
+Thread mutex stacks use the same protocol, bounded to their smaller capacity.
+Their only writer is the owning thread, which may be preempted or migrate;
+readers must retain the thread's lifetime. `lockdep-mutex` checks real push,
+trylock flags, shifted removal, busy refusal, another live thread, and an
+exited thread retained across join. The host model checks both capacities.
+Panic copies the CPU and thread stacks separately; this is not one global
+snapshot and need not agree atomically with a mutex's owner field.
+
+**L17. Statistics fields describe one instant of the counters.**
+All counter writes and the `lockdep_get_stats` copy hold the graph raw lock.
+Acquisitions and reports count at their existing hook points, including
+early refusals and expected reports; searches count under the graph hold.
+The snapshot may include operations in progress and does not freeze held
+stacks. Check: audit all `g_stats` accesses for raw-lock coverage;
+`lockdep-order` checks acquisition/report deltas and graph search reuse.

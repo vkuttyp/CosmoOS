@@ -16,6 +16,7 @@
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/percpu.h>
+#include <kernel/panic.h>
 #include <kernel/quiesce.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -966,6 +967,142 @@ bool selftest_irq_sync(const char **reason)
     bool r = selftest_irq_sync_pinned(reason);
     thread_set_affinity_self(saved);
     return r;
+}
+
+
+/* --- irq-writers: competing mutations followed by real dispatch/reuse --- */
+struct irq_writer_probe {
+    unsigned vector, identity, hits, bad;
+};
+
+static void irq_writer_hit(unsigned vector, struct arch_trap_frame *frame,
+                           void *arg, unsigned identity)
+{
+    struct irq_writer_probe *p = arg;
+    if (p->identity != identity || p->vector != vector || frame == NULL)
+        p->bad++;
+    __atomic_fetch_add(&p->hits, 1u, __ATOMIC_RELEASE);
+}
+
+static void irq_writer_a(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    irq_writer_hit(vector, frame, arg, 0);
+}
+
+static void irq_writer_b(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    irq_writer_hit(vector, frame, arg, 1);
+}
+
+struct irq_writer_attempt {
+    struct irq_writer_probe *probe;
+    interrupt_handler_fn fn;
+    unsigned *go;
+    unsigned ready;
+    bool remove;
+    int rc;
+};
+
+static void irq_writer_main(void *arg)
+{
+    struct irq_writer_attempt *a = arg;
+    __atomic_store_n(&a->ready, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(a->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    a->rc = a->remove ? interrupt_unregister(a->probe->vector, a->fn) :
+                       interrupt_register(a->probe->vector, a->fn, a->probe, "selftest-irqwriter");
+}
+
+static bool irq_writer_race(struct irq_writer_attempt a[2], unsigned cpu)
+{
+    unsigned go = 0;
+    a[0].go = a[1].go = &go;
+    struct thread *t[2];
+    t[0] = thread_create_on(irq_writer_main, &a[0], "irq-writer-a", SCHED_PRIO_DEFAULT,
+                            CPUMASK_OF(arch_cpu_id()));
+    t[1] = thread_create_on(irq_writer_main, &a[1], "irq-writer-b", SCHED_PRIO_DEFAULT,
+                            CPUMASK_OF(cpu));
+    uint64_t start = clock_now_ns();
+    while (t[0] && t[1] &&
+           (!__atomic_load_n(&a[0].ready, __ATOMIC_ACQUIRE) ||
+            !__atomic_load_n(&a[1].ready, __ATOMIC_ACQUIRE)) && clock_since_ns(start) < MS(1000))
+        sched_yield();
+    bool ready = t[0] && t[1] && __atomic_load_n(&a[0].ready, __ATOMIC_ACQUIRE) &&
+                 __atomic_load_n(&a[1].ready, __ATOMIC_ACQUIRE);
+    /* Release and join even after allocation/rendezvous failure: no
+     * worker may retain a pointer into this caller's stack. */
+    __atomic_store_n(&go, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < 2; i++)
+        if (t[i])
+            thread_join(t[i]);
+    return ready;
+}
+
+static bool selftest_irq_writers_pinned(const char **reason)
+{
+    enum { ROUNDS = 16 };
+    int vec = arch_vector_alloc();
+    CHECK(vec >= 0);
+    arch_ipi_bind((unsigned)vec);
+    unsigned cpu = other_cpu();
+    bool ok = true;
+    for (unsigned round = 0; round < ROUNDS && ok; round++) {
+        struct irq_writer_probe p[2] = {
+            { .vector = (unsigned)vec, .identity = 0 },
+            { .vector = (unsigned)vec, .identity = 1 },
+        };
+        struct irq_writer_attempt a[2] = {
+            { .probe = &p[0], .fn = irq_writer_a },
+            { .probe = &p[1], .fn = irq_writer_b },
+        };
+        ok = irq_writer_race(a, cpu);
+        ok = ok && ((a[0].rc == 0 && a[1].rc == -EBUSY) ||
+                    (a[1].rc == 0 && a[0].rc == -EBUSY));
+        if (ok) {
+            unsigned winner = a[0].rc == 0 ? 0 : 1;
+            uint64_t before = interrupt_count((unsigned)vec);
+            arch_ipi_send(cpu, (unsigned)vec);
+            /* A timed-out IPI may still arrive. Keep the handler, probes
+             * and vector alive by failing stop, never return/free/reuse. */
+            uint64_t start = clock_now_ns();
+            while (!__atomic_load_n(&p[0].hits, __ATOMIC_ACQUIRE) &&
+                   !__atomic_load_n(&p[1].hits, __ATOMIC_ACQUIRE)) {
+                if (clock_since_ns(start) > MS(1000))
+                    panic("selftest irq-writers: IPI timeout; retaining vector and probes");
+                arch_cpu_relax();
+            }
+            struct irq_writer_attempt remove[2] = {
+                { .probe = &p[winner], .fn = a[winner].fn, .remove = true },
+                { .probe = &p[winner], .fn = a[winner].fn, .remove = true },
+            };
+            ok = irq_writer_race(remove, cpu);
+            ok = ok && ((remove[0].rc == 0 && remove[1].rc == -ENOENT) ||
+                        (remove[1].rc == 0 && remove[0].rc == -ENOENT));
+            /* Always unpublish on failure too. The grace period below
+             * covers the handler before inspecting ordinary fields. */
+            interrupt_unregister_vector((unsigned)vec);
+            synchronize_irq((unsigned)vec);
+            ok = ok && p[winner].hits == 1 && p[1 - winner].hits == 0 &&
+                 p[0].bad == 0 && p[1].bad == 0 && interrupt_count((unsigned)vec) == before + 1;
+        } else {
+            interrupt_unregister_vector((unsigned)vec);
+            synchronize_irq((unsigned)vec);
+        }
+        ok = ok && interrupt_handler_name((unsigned)vec) == NULL;
+    }
+    arch_vector_free((unsigned)vec);
+    CHECK(ok);
+    kinfo("selftest: irq-writers: %u rounds, competing writers on CPUs %u/%u, real IPI and grace-period reuse",
+          ROUNDS, arch_cpu_id(), cpu);
+    return true;
+}
+
+bool selftest_irq_writers(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool result = selftest_irq_writers_pinned(reason);
+    thread_set_affinity_self(saved);
+    return result;
 }
 
 

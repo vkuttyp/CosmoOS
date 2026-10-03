@@ -72,11 +72,17 @@ never a literal. See `api.md`.
 ## Data structures
 
 ```c
+struct interrupt_record {
+    interrupt_handler_fn fn;
+    void *arg;                 /* not owned */
+    const char *name;          /* immortal string, atomically sampled */
+};
 struct interrupt_slot {
-    interrupt_handler_fn fn;    /* NULL = unregistered */
-    void *arg;                  /* not owned */
-    const char *name;           /* immortal string, not owned */
-    uint64_t count;             /* dispatches, including unhandled */
+    uint32_t writer;           /* raw writer lock, never used by dispatch */
+    struct interrupt_record *cur; /* release/acquire publication */
+    struct interrupt_record recs[2];
+    unsigned next_rec;
+    uint64_t count;            /* atomic dispatch count */
 };
 static struct interrupt_slot g_slots[INTERRUPT_MAX_VECTORS];
 static unsigned g_vector_count;   /* from arch_trap_vector_count() */
@@ -87,17 +93,20 @@ nothing it points to.
 
 ## Concurrency model
 
-Registration and unregistration run with local interrupts disabled
-(`arch_irq_save`) and publish `fn` with a release store; dispatch reads
-`fn` with an acquire load and takes no lock. On one CPU this is complete.
-The SMP plan is described in `design.md`; the memory ordering is already
-what that plan needs.
+Registration and removal serialize on a raw per-vector lock with local
+IRQs masked. Boot, thread and ordinary IRQ mutations are supported, not
+NMI/#MC mutations. Dispatch acquires the published record pointer once
+and takes no writer lock. Counts and diagnostic name pointers are atomic
+samples. See `design.md` for publication and record reuse rules.
 
 ## Memory ownership
 
-No allocation anywhere. `arg` and `name` belong to the registrant, which
-must keep them valid until `interrupt_unregister` returns (and, once SMP
-exists, until a grace period after it).
+The table allocates nothing. The registrant retains `arg` and handler code
+through `interrupt_unregister_sync`, or plain unregister followed by
+`synchronize_irq`. Names must be immortal because diagnostic readers can
+sample them without a grace-period read section. Writers must coordinate
+the full unregister/grace-period/re-registration lifecycle; serializing
+table mutation alone does not make early record reuse safe.
 
 ## Error handling
 

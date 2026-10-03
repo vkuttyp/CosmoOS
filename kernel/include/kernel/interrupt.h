@@ -17,6 +17,9 @@
  * locks. A handler is a read-side section of docs/kernel/quiesce/ (it runs
  * with preemption disabled), so a grace period after unregistration
  * proves no CPU is still inside it.
+ * Mutations serialize on a raw per-vector writer lock with local IRQs
+ * masked. Boot/thread/ordinary IRQ mutation is supported, not NMI/#MC.
+ * The writer lock does not replace the grace period before record reuse.
  *
  * Ownership: the table does not own `arg`. The registrant keeps `arg`
  * alive until interrupt_unregister_sync() returns, or until a plain
@@ -42,9 +45,9 @@ void interrupt_init(void);
 int interrupt_register(unsigned vector, interrupt_handler_fn fn, void *arg, const char *name);
 
 /* Remove `fn` from `vector`. Returns 0, -EINVAL, or -ENOENT if `fn` is not
- * the registered handler. Any context. On return the handler will not
- * START again, but may still be RUNNING on another CPU: `arg` stays
- * alive until synchronize_irq(). */
+ * the registered handler. Same mutation contexts as registration. A
+ * dispatcher that loaded the record before removal may still invoke it;
+ * `arg` stays alive until synchronize_irq(). */
 int interrupt_unregister(unsigned vector, interrupt_handler_fn fn);
 
 /* Remove whatever handler `vector` has. For owners of the vector (the

@@ -268,6 +268,14 @@ test checks it without a clock (a guest's wall clock measures
 its host: the lockup-bound unit). The slot is held until `lockup_print_samples` returns, so no
 later request overwrites a buffer under the printer.
 
+Both all-CPU and single-CPU polling read the deadline before loading the
+response sequence(s). Even when the deadline has elapsed, they perform
+that final response check. Otherwise an interrupt or host descheduling
+during the clock read can leave a stale unanswered mask despite responses
+already being published when the reporter resumes. This does not rearm
+or extend the deadline: still-missing CPUs remain missing after the final
+check. It reports available samples, not a promise about delivery latency.
+
 **The answer.** `lockup_answer(frame, nmi)`: if this CPU's `sample.want`
 equals its `sample.seq` no request is pending for it and it returns
 `false`; otherwise it fills `pc`, `sp`, the trace (`arch_backtrace`

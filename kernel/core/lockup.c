@@ -147,12 +147,16 @@ bool lockup_sample_all_info(const struct arch_trap_frame *self, uint64_t timeout
     info->wait_ns = deadline - armed;   /* the interval actually armed, read back from the deadline */
     cpumask_t got = 0;
     for (;;) {
+        /* Read the deadline before the response sweep. A clock read can
+         * be interrupted (or its vCPU descheduled) while answers arrive.
+         * Even on expiry, collect those publications before returning. */
+        bool expired = clock_now_ns() >= deadline;
         for (unsigned c = 0; c < cpu_count(); c++) {
             if ((targets & CPUMASK_OF(c)) && !(got & CPUMASK_OF(c)) &&
                 __atomic_load_n(&percpu_get(c)->sample.seq, __ATOMIC_ACQUIRE) == seq)
                 got |= CPUMASK_OF(c);
         }
-        if (got == targets || clock_now_ns() >= deadline)
+        if (got == targets || expired)
             break;
         arch_cpu_relax();
     }
@@ -185,8 +189,13 @@ bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out
      * CPU. */
     uint64_t deadline = clock_now_ns() + timeout_ns;
     bool got = false;
-    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && clock_now_ns() < deadline)
+    for (;;) {
+        bool expired = clock_now_ns() >= deadline;
+        got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq;
+        if (got || expired)
+            break;
         arch_cpu_relax();
+    }
     if (got)
         *out = pc->sample;
     __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE);

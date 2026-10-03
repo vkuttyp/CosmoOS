@@ -1,6 +1,7 @@
 /*
- * Host shim for arch/irq.h. Host unit tests are single-threaded; the
- * interrupt state is a no-op that always reports "enabled".
+ * Host shim for arch/irq.h. Interrupt state is a no-op that always
+ * reports "enabled". Threaded tests must use their real atomic/lock
+ * protocol; this shim provides no inter-thread serialization.
  */
 
 #ifndef HOST_SHIM_ARCH_IRQ_H
