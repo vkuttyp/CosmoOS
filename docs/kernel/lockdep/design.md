@@ -41,7 +41,7 @@ raw lock. The field exists in every build so the module ABI has one layout:
 The graph and the class table are one `struct lockdep_state` behind pure
 inline functions in `lockdep_core.h` (class lookup, edge add, reachability),
 so the host test drives them under the sanitizers. The bitmap is 1280 nodes
-(320 classes × 4 subclasses) × 160 bytes = 200 KiB, debug builds only.
+(320 classes × 4 subclasses) × 160 bytes = 200 KiB when `LOCKDEP=1`.
 
 ## Classes and nodes
 
@@ -114,12 +114,18 @@ interrupts: with the checker on, `spin_lock` wins the lock and pushes it,
 and `spin_unlock` pops it and releases it, with interrupts masked, so a
 handler never runs between an ownership change and the stack that records
 it (it would otherwise see an owned lock as not held and miss a real
-dependency; the second review finding on PR #18). Release builds compile
+dependency; the second review finding on PR #18). `LOCKDEP=0` compiles
 the masking out with the checker.
 
 Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
-tracked. The search is bounded by the node count (1280) and runs only when
+tracked. `lockdep_core_add_edge` requires that caller serialization; its
+atomic bitmap write supports unlocked readers, not concurrent writers.
+Graph dumps capture the class range and edge count under the raw lock,
+then read bitmap words atomically and print outside it. They skip edges
+to newer classes; immutable names/kinds in the captured range are safe
+to read, but growing edges mean the dump is not a point-in-time snapshot.
+The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a
 bitmap test per held lock.
@@ -150,9 +156,9 @@ The one annotation for "this call may block": a report if
 `mutex_lock`, `wait_event` (`waitqueue_prepare`), `semaphore_down`,
 `wait_for_completion`, `thread_sleep_ns`, `synchronize_quiesce`,
 `copy_from_user`, `copy_to_user`, `strncpy_from_user` (a demand fault
-allocates), and `vm_kernel_alloc`. In release builds it is the
+allocates), and `vm_kernel_alloc`. With `LOCKDEP=0` it is the
 `preempt_count`/`irq_depth` panic those primitives already had (the sleep
-check is correctness, not diagnostics, so it stays on); in debug builds it
+check is correctness, not diagnostics, so it stays on); with `LOCKDEP=1` it
 also prints the stacks.
 
 ## Reports
@@ -172,8 +178,9 @@ report fails on the counter.
 
 ## Cost and scope
 
-Debug builds only, apart from the `class` field and `might_sleep`'s
-always-on half. Per acquisition: a per-CPU stack push, a class lookup (cached
+Enabled by `LOCKDEP=1` (the debug default; release defaults to 0).
+Lock/thread layouts and `might_sleep`'s always-on half remain with it off.
+Per acquisition: a per-CPU stack push, a class lookup (cached
 after the first), a recursion scan of the held set (≤ 24 entries), a bitmap
 test per held lock, and, for a new edge, the raw lock and a bounded search.
 No allocation anywhere: every table is static, sized for the tree with
@@ -250,17 +257,16 @@ a wake that ran between the read and the enqueue bumped the counter. The
 copy now runs with no spinlock held, which `might_sleep` in
 `copy_from_user` enforces.
 
-### Scheduler: the run-queue lock is a leaf (S2/S4)
+### Scheduler: remove GIC nesting and specify runqueue successors (S2/S4)
 
-S2 says nothing is acquired under `runqueue.lock`; on AArch64
-`request_resched` → `ipi_send` → `arch_ipi_send` → `sgi_for_vector` took
-the GIC lock under it. The SGI for an IPI vector is now bound once, at
-`ipi_init`, through `arch_ipi_bind(vector)` (a no-op on x86-64), and
-`arch_ipi_send` reads the binding without a lock. S4 ("`waitqueue.lock` →
-`runqueue.lock`") is generalised to "the run-queue lock is a leaf that any
-lock may precede" (`process.lock`, the futex bucket, `tty.lock` and
-`waitqueue.lock` all do), which the checker verifies as the absence of
-edges out of the run-queue class.
+The original audit found `request_resched` → `ipi_send` → `arch_ipi_send`
+→ `sgi_for_vector` taking the GIC lock under a runqueue on AArch64.
+Binding the SGI once at `ipi_init` through `arch_ipi_bind` makes sending
+lock-free. Current runqueues are not leaves: migration takes ordered
+runqueue pairs (S24), and address-space switching can take `asid`.
+Expected self-test reports also record logging locks under a runqueue.
+See L6 and `testing.md` for the observed edges; the old zero-successor
+rule no longer describes the kernel.
 
 ### Network
 
@@ -287,25 +293,27 @@ tracked lock and allocates nothing.
 ## Memory
 
 200 KiB graph, 320 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
-thread. Debug builds only for all but the `class` field.
+thread. The graph exists only with `LOCKDEP=1`; lock/thread layouts stay
+stable when disabled.
 
 ## Error handling
 
-Every violation is a panic in debug builds with the full report; there is
+With `LOCKDEP=1`, every validator violation panics with the full report;
+there is
 no "warn once" mode, because a lock-order bug that fires once is a deadlock
 that will fire later. Table exhaustion (classes, held entries) is itself a
 report.
 
 ## Performance
 
-Not measured for release builds (no code). Debug-build acquisition cost is a
+With `LOCKDEP=0` the validator hooks compile out. Enabled acquisition cost is a
 few dozen instructions on the hot path (cached class, recursion scan of a
 short stack, bitmap tests); a new edge takes the raw lock and a bounded
 search once. `testing.md` records the debug boot-test time before and after.
 
 ## Security
 
-The checker runs only in debug builds and has no user-facing surface. The
+The checker runs with `LOCKDEP=1` and has no user-facing surface. The
 fixes close a local denial of service (a futex fault leaving a bucket locked
 for every process), a local corruption (duplicate vnodes for one inode) and
 a two-process deadlock (rename versus rmdir).

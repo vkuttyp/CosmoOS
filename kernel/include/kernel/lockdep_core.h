@@ -115,7 +115,10 @@ static inline bool lockdep_core_has_edge(const struct lockdep_graph *g, uint16_t
     return (__atomic_load_n(&g->before[a][b / 64u], __ATOMIC_RELAXED) >> (b % 64u)) & 1u;
 }
 
-/* Record "b was taken while a was held". True if the edge is new. */
+/* Record "b was taken while a was held". True if the edge is new.
+ * Caller must serialize graph writers (the kernel holds raw_lock across
+ * cycle checking and insertion). The atomic bitmap update permits unlocked
+ * readers; it does not make the check/increment or cycle decision lock-free. */
 static inline bool lockdep_core_add_edge(struct lockdep_graph *g, uint16_t a, uint16_t b)
 {
     if (lockdep_core_has_edge(g, a, b))

@@ -40,6 +40,8 @@ Same-class multi-object nesting needs a documented subclass invariant.
 Vnode parent/second-parent/child use subclasses 0/1/2. Two futex buckets
 use stable address order, with the second annotated subclass 1. Runqueue
 pairs use increasing CPU-id order and separate `runqueueN` classes.
+Address-space switching can take `asid` under the local runqueue;
+diagnostic logging also nests below runqueues (scheduler S2, lockdep L6).
 An annotation does not permit recursively acquiring the same object.
 
 ## Names and metadata

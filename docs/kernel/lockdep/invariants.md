@@ -4,12 +4,12 @@ Rules the checker enforces and rules the checker itself keeps. Each has a
 **Check** and, where honest, a **Gap**. Changing a rule means changing
 this file and the code together.
 
-## Rules enforced on the tree (debug builds, every boot)
+## Rules enforced on the tree (LOCKDEP=1, default in debug)
 
 **L1. No lock-order inversion.** For every pair of lock classes taken
 nested, the tree takes them in one order only; an acquisition that would
 close a cycle in the recorded graph panics with both held stacks and the
-chain. Check: every debug boot and every self-test run under the checker;
+chain. Check: every boot with LOCKDEP=1 and every self-test run under the checker;
 `lockdep-order` and `lockdep-mutex` prove the detector fires on a
 constructed ABBA (spinlocks and mutexes); host `test_lockdep` proves the
 graph search (direct, transitive, subclass nodes, truncation). Gap: an
@@ -52,11 +52,15 @@ if it ever can, it gets one.
 reference scan proved exclusive access, with the root locked, and a lock
 per level would nest the class to arbitrary depth.
 
-**L6. Runqueue locks are leaves except for ordered runqueue pairs (S24).**
-No other lock family is acquired while a runqueue is held;
-`arch_ipi_send` reads a binding made by `arch_ipi_bind` at `ipi_init` and
-takes no lock (scheduler invariant S2). Check: the recorded graph has no
-edge out of `runqueue` (`testing.md`); `lockdep-order`'s dump each boot.
+**L6. Runqueue successors follow explicit rules.** Pairs nest in increasing
+CPU-id order (S24). Address-space switching may take `asid` while the local
+runqueue is held (`arch_thread_switch_prepare` → `vm_space_switch` →
+`asid_switch_prepare`); the current AArch64 graph observes this edge.
+`arch_ipi_send` reads a binding made at `ipi_init` and takes no GIC lock.
+Check: inspect outgoing `runqueueN` edges in the final graph (`testing.md`)
+for ordered pairs, ASID allocation, and logging from expected diagnostics;
+`lockdep-rq-order` verifies that the reversed pair is rejected. The graph
+is not expected to have zero outgoing runqueue edges.
 
 **L7. The VFS order is `g_mounts_lock` → `rename_lock` → `vnode->lock`
 (parent, `PARENT2`, `CHILD`) → `pagecache.lock` → filesystem private
@@ -93,8 +97,8 @@ on reload, and the final graph dump reads its name after unload.
 
 **L11. Held stacks are per CPU for spinlocks and per thread for mutexes,
 and a lock is on a stack exactly while it is owned.** Ownership and the
-push, the pop and the release, happen with interrupts masked (debug
-builds), so no handler observes one without the other. The run-queue lock
+push, the pop and the release, happen with interrupts masked (LOCKDEP=1),
+so no handler observes one without the other. The run-queue lock
 handed across a context switch and interrupt-context acquisitions are
 therefore tracked correctly without special cases, and a lock still being
 waited for (a contended plain `spin_lock` with interrupts enabled, during

@@ -4,15 +4,17 @@
 
 | Level | What | Command |
 |---|---|---|
-| Every debug boot | the checker runs on every acquisition through boot, all self-tests, the userland test script and the network harness; any report is a panic, so `make test` fails | `make test`, `QEMU_SMP=1 make test`, `make ARCH=aarch64 test` |
+| Every boot with LOCKDEP=1 (debug default) | the checker runs on every acquisition through boot, all self-tests, the userland test script and the network harness; any report is a panic, so `make test` fails | `make test`, `QEMU_SMP=1 make test`, `make ARCH=aarch64 test` |
 | Host (ASan/UBSan) | `test_lockdep`: the class table, edges and reachability, the decision procedure on an ABBA, a three-lock cycle and subclass nodes | `make host-test` |
 | Target self-tests (debug builds) | `lockdep-order`, `lockdep-recursion`, `lockdep-irq`, `lockdep-sleep`, `lockdep-mutex`, `lockdep-contention` (the detector fires on constructed violations and stays silent on a contended wait); `vfs-concurrency` (the fixed races, on two CPUs) | `make test` |
-| Release | the checker is compiled out; `might_sleep`'s panic half stays | `make BUILD=release test` |
+| Release default (LOCKDEP=0) | the checker is compiled out; `might_sleep`'s panic half stays | `make BUILD=release test` |
 
-Every test above ran and passed on x86-64 (4 CPUs and 1 CPU) and AArch64 (4
-CPUs) when this milestone was verified. The debug boot test takes 16.4 s on
-x86-64 against 15.5 s before the checker (about 100 000 checked
-acquisitions per boot), 18.8 s against 17.8 s on AArch64.
+At the original lockdep milestone, these tests passed on x86-64 (4 CPUs
+and 1 CPU) and AArch64 (4 CPUs). Current October results, including UP
+baseline failures, are in [the hardening report](../../audit/2026-10-03-lockdep-report.md).
+The original debug boot took 16.4 s on x86-64 against 15.5 s before the
+checker (about 100 000 checked acquisitions per boot), and 18.8 s against
+17.8 s on AArch64.
 
 ## Host test (`tests/host/test_lockdep.c`)
 
@@ -60,16 +62,25 @@ start).
 
 ## The recorded lock order
 
-`selftest_run_all` ends with `lockdep_dump_graph()`, so every debug boot log
-contains the edges the run recorded (`lockdep: edge …`, `a -> b` meaning b
-was taken while a was held; 133 classes and 415 edges on x86-64 with 4
-CPUs). The parts the documents make claims about:
+`selftest_run_all` ends with `lockdep_dump_graph()`, so a debug boot with
+`LOCKDEP=1` contains the edges the run recorded (`lockdep: edge …`, `a -> b` meaning b
+was taken while a was held; the original milestone recorded 133 classes
+and 415 edges on x86-64 with 4 CPUs). The VFS and network excerpts below
+are from that original run; the scheduler section uses the October graph.
 
-**Scheduler (S2, S4).** No edge leaves `spin 'runqueue'`: it is a leaf on
-both architectures (the AArch64 GIC lock no longer follows it). Its
-predecessors are every wait queue (`'sleep'`, `'g_worker_wq'`,
-`'thread-exit'`, `'smp_call'`, …), `spin 'process'`, `spin 'tty'`,
-`spin 'socket'`, `mutex 'socket'` and the VFS mutexes: what S4 now says.
+**Scheduler (S2, S4, S24; current October graph).** The per-CPU classes
+`runqueue0` through `runqueue3` have edges to higher-numbered runqueues on
+both architectures. AArch64 also records each runqueue → `asid` from
+address-space switching; this path also applies to x86-64 when address-space
+tags are available. `lockdep-rq-order`'s expected diagnostic while holding
+`runqueue1` records edges to `klog-ring`, `console`, `virtio-console`,
+`virtio-pci` and `virtq` on both architectures. ASID rollover can also log
+under its lock. These diagnostic paths are real observed dependencies,
+not evidence that arbitrary subsystem locks may nest under a runqueue.
+No GIC edge is expected from IPI sending. Check new outgoing edges against
+these call paths and the increasing-CPU pair rule, rather than requiring
+zero successors. The complete current graph is
+[`2026-10-03-lock-order.tsv`](../../audit/2026-10-03-lock-order.tsv).
 
 **VFS (V7).**
 
@@ -109,18 +120,19 @@ To regenerate the lists: `grep 'lockdep: edge' out/x86_64-debug/boot-test.log | 
 ## Running
 
 ```sh
-make test                          # debug: checker live, 91 self-tests
+make test                          # debug default: checker live
 QEMU_SMP=1 make test
 make ARCH=aarch64 test
 make host-test                     # test_lockdep among the host tests
-make BUILD=release all test        # checker compiled out
+make BUILD=release all test        # LOCKDEP=0 by default
+make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 ```
 
 ## Gaps
 
 - The graph covers what the boot runs exercise; a lock order only a
   production workload takes is recorded only when that workload runs on a
-  debug build.
+  build with `LOCKDEP=1`.
 - No kernel-level futex race test; the lost-wake argument for `wake_seq` is
   by construction and exercised by the musl tests.
 - The `vfs-concurrency` stress found no fault before the fixes were applied
@@ -141,5 +153,6 @@ an invalid primitive unlock. `module-load` now uses a fixture lock with a
 name in unloadable module rodata, checks stable class count on reload, and
 the final graph dump accesses that copied name after unmapping the module.
 
-`LOCKDEP=0 OUT=...` tests debug without instrumentation. Use separate output
+`LOCKDEP=0 OUT=...` tests debug without instrumentation; `BUILD=release
+LOCKDEP=1 OUT=...` enables the checker in release. Use separate output
 trees for flag overrides; make does not track changes to command lines.

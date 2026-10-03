@@ -18,15 +18,16 @@ the entry. Check: review; `policy_rr` asserts `list_empty` on enqueue
 and non-empty on dequeue so a double transition corrupts nothing
 silently.
 
-**S2. `runqueue.lock` is a leaf.** Nothing is acquired while it is held.
-`schedule()` calls `arch_context_switch` with it held and the resumed
-thread releases it; `sched_finish_switch` unlocks *before* calling
-`thread_put`, which takes `kernel_space.lock` and slab locks. The AArch64
-IPI path used to take the GIC lock under it (`request_resched` →
-`arch_ipi_send` → the SGI table); `arch_ipi_bind` at `ipi_init` now makes
-that lookup lock-free. Check: the lock-order checker records no edge out
-of the `runqueue` class on either architecture (`docs/kernel/lockdep/
-testing.md`); the spinlock owner check would panic on a self-deadlock.
+**S2. Runqueue successors are ordered pairs, ASID allocation and diagnostic
+logging.** A second runqueue is acquired only in increasing CPU-id order
+(S24). `schedule()` calls `arch_thread_switch_prepare` with the local
+runqueue held; `vm_space_switch` can take `asid` for address-space tags.
+Expected lockdep reports and ASID rollover can acquire logging locks.
+`sched_finish_switch` unlocks before `thread_put`, which takes
+`kernel_space.lock` and slab locks. IPI sending uses the binding made at
+`ipi_init` and takes no GIC lock. Check: compare outgoing `runqueueN` edges
+with these paths (`docs/kernel/lockdep/testing.md`), and run
+`lockdep-rq-order` for reversed-pair detection.
 
 **S3. The run-queue lock is held across the context switch and
 released by whoever runs next.** A resumed thread releases it in
@@ -36,12 +37,13 @@ calling its entry. `rq->prev_exited` is the only state handed across the
 switch. Check: assert (`spin_unlock` asserts the lock is held); test
 `thread` (a first-run thread reaches its entry with interrupts enabled).
 
-**S4. `runqueue.lock` may be preceded by any lock, and a primitive's own
+**S4. Waker state locks precede `runqueue.lock`, and a primitive's own
 lock precedes its wait queue's lock.** Wakers hold their own state lock
 when they call `sched_wake`: every wait queue's lock, `process.lock`
 (`process_kill`), the futex bucket, `tty.lock`, the SMP call and sleep
-locks all precede `runqueue.lock` in the recorded graph; since S2 makes
-the run-queue lock a leaf no order among them is implied by it. (The
+locks all precede `runqueue.lock` in the recorded graph. A shared runqueue
+successor alone implies no order among those predecessors; callers must
+still respect S2 and avoid a reverse path from a runqueue successor. (The
 previous text, "`waitqueue.lock` → `runqueue.lock`" alone, was
 incomplete.) Check: the recorded graph, `docs/kernel/lockdep/testing.md`.
 

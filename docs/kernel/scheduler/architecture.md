@@ -122,7 +122,9 @@ Locks, outermost first:
 ```text
 waitqueue.lock → runqueue.lock (one CPU's)
 mutex/semaphore/completion internal lock → waitqueue.lock
-runqueue.lock is a leaf: nothing is taken under it.
+runqueue pair: lower CPU id → higher CPU id (S24)
+runqueue.lock → asid during tagged address-space switching (S2)
+runqueue/asid → logging locks during diagnostics (S2)
 ```
 
 Every lock is a spinlock taken with interrupts disabled; run-queue and

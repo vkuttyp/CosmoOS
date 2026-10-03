@@ -15,7 +15,7 @@ Milestone 3 of the post-roadmap plan (`docs/audit/2026-09-post-roadmap-audit.md`
   might_sleep()  (mutex, wait_event, semaphore, completion, sleep, uaccess, synchronize_quiesce)
             │
             ▼
-  lockdep_acquire / lockdep_release / lockdep_might_sleep              (kernel/core/lockdep.c, debug builds)
+  lockdep_acquire / lockdep_release / lockdep_might_sleep              (kernel/core/lockdep.c, CONFIG_LOCKDEP)
             │
             ├── lock classes            one per name contents and kind, cached in the lock (`class` field)
             ├── held-lock stacks        per CPU for spinlocks (interrupt context nests on top),
@@ -28,8 +28,8 @@ Milestone 3 of the post-roadmap plan (`docs/audit/2026-09-post-roadmap-audit.md`
                                         (self-tests arm an expectation and count instead)
 ```
 
-Release builds compile the hooks to nothing; the `class` field stays so the
-module ABI has one layout. The always-on checks that predate this milestone
+With `LOCKDEP=0` (the release default), the hooks compile to nothing; the
+`class` field stays so the module ABI has one layout. The always-on checks that predate this milestone
 stay always on: a spinlock re-acquired on its CPU panics, a sleeping
 primitive entered with `preempt_count != 0` or in interrupt context panics.
 
@@ -40,10 +40,10 @@ checked by review, and the audit found three of them wrong (scheduler S2/S4,
 VFS V7, the network order) and one real ABBA (VFS rename). The lifetime pass
 added rules of the same kind: `synchronize_quiesce` never under a spinlock,
 `timer_cancel_sync` only under locks the callback never takes, `transmit`
-never sleeping. This subsystem turns each into a debug-build panic at the
-first violation, on the first boot that runs the path, with the held-lock
-stacks in the report. The same milestone fixes what the checker and the
-audit found: the rename order, the vnode cache's check-then-get, the futex
+never sleeping. With `LOCKDEP=1`, recorded lock-order and atomic-context
+violations produce a panic with the held-lock stacks in the report. Callback-wait
+dependencies such as `timer_cancel_sync` remain outside the graph. The
+original milestone fixed what the checker and the audit found: the rename order, the vnode cache's check-then-get, the futex
 copy under a spinlock, `vfs_sync` holding the mount list across a commit,
 and the aarch64 IPI path taking the GIC lock under the run-queue lock.
 
@@ -78,7 +78,8 @@ and the aarch64 IPI path taking the GIC lock under the run-queue lock.
   graph. `might_sleep()` covers the illegal case (blocking under a
   spinlock).
 - It does not track locks taken by user-mode code or by guests.
-- It is not a performance tool; debug builds only.
+- It is a correctness checker, enabled by default in debug builds.
+  `LOCKDEP=0/1` overrides the default in either debug or release builds.
 
 ## Interfaces at a glance
 
