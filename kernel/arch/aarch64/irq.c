@@ -4,6 +4,11 @@
 #include <kernel/percpu.h>
 #include <aarch64/sysreg.h>
 
+bool arch_irq_state_enabled(arch_irq_state_t state)
+{
+    return (state & DAIF_I) == 0;
+}
+
 arch_irq_state_t arch_irq_save(void)
 {
     uint64_t daif = READ_SYSREG(daif);

@@ -48,7 +48,7 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
      * reported instead of hanging. The push waits for ownership: while we
      * spin with interrupts enabled a handler may run here and must not see
      * this lock as held. */
-    lockdep_acquire_check(&lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, irqs_on, ip);
+    lockdep_acquire_check(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, irqs_on, ip);
 
     for (;;) {
 #if CONFIG_LOCKDEP
@@ -84,7 +84,7 @@ void spin_lock_nested(spinlock_t *lock, unsigned subclass)
 void spin_lock_check_order(spinlock_t *lock)
 {
 #if CONFIG_LOCKDEP
-    lockdep_acquire_check(&lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, arch_irq_enabled(),
+    lockdep_acquire_check(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, arch_irq_enabled(),
                           (uintptr_t)__builtin_return_address(0));
 #else
     (void)lock;
@@ -112,13 +112,13 @@ bool spin_trylock(spinlock_t *lock)
     return got;
 }
 
-void spin_unlock(spinlock_t *lock)
+static void spin_unlock_common(spinlock_t *lock, bool irqrestore)
 {
     KASSERT(__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0);
 #if CONFIG_LOCKDEP
     arch_irq_state_t s = arch_irq_save();
 #endif
-    lockdep_release(lock, LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0));
+    lockdep_release(lock, LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0), irqrestore);
     __atomic_store_n(&lock->owner_cpu, SPINLOCK_NO_OWNER, __ATOMIC_RELAXED);
     __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
 #if CONFIG_LOCKDEP
@@ -131,6 +131,7 @@ arch_irq_state_t spin_lock_irqsave(spinlock_t *lock)
 {
     arch_irq_state_t state = arch_irq_save();
     lock_common(lock, 0, (uintptr_t)__builtin_return_address(0));
+    lockdep_irqsave_acquired(lock, arch_irq_state_enabled(state));
     return state;
 }
 
@@ -138,12 +139,22 @@ arch_irq_state_t spin_lock_irqsave_nested(spinlock_t *lock, unsigned subclass)
 {
     arch_irq_state_t state = arch_irq_save();
     lock_common(lock, subclass, (uintptr_t)__builtin_return_address(0));
+    lockdep_irqsave_acquired(lock, arch_irq_state_enabled(state));
     return state;
+}
+
+void spin_unlock(spinlock_t *lock)
+{
+    spin_unlock_common(lock, false);
 }
 
 void spin_unlock_irqrestore(spinlock_t *lock, arch_irq_state_t state)
 {
-    spin_unlock(lock);
+#if CONFIG_LOCKDEP
+    lockdep_irqrestore_check(lock, arch_irq_state_enabled(state),
+                             (uintptr_t)__builtin_return_address(0));
+#endif
+    spin_unlock_common(lock, true);
     arch_irq_restore(state);
 }
 

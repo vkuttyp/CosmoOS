@@ -13,6 +13,7 @@
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
 #include <kernel/kmalloc.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/percpu.h>
 #include <kernel/quiesce.h>
@@ -972,14 +973,18 @@ bool selftest_irq_sync(const char **reason)
 
 struct timer_probe {
     struct timer t;
+    spinlock_t callback_lock;
     unsigned magic;
     volatile unsigned entered;
     volatile unsigned done;
     unsigned hold_ms;
+    uint64_t arm_delay_ns;
     unsigned fires;
     unsigned bad;
     bool rearm;
+    bool take_callback_lock;
     volatile unsigned stop;
+    volatile unsigned arm_go;
 };
 
 static void timer_probe_fn(struct timer *t, void *arg)
@@ -990,6 +995,10 @@ static void timer_probe_fn(struct timer *t, void *arg)
     if (p->magic != MAGIC_LIVE)
         p->bad++;
     __atomic_store_n(&p->entered, 1u, __ATOMIC_RELEASE);
+    if (p->take_callback_lock) {
+        arch_irq_state_t s = spin_lock_irqsave(&p->callback_lock);
+        spin_unlock_irqrestore(&p->callback_lock, s);
+    }
     uint64_t end = clock_now_ns() + MS(p->hold_ms);
     while (clock_now_ns() < end)
         arch_cpu_relax();
@@ -1002,8 +1011,18 @@ static void timer_probe_fn(struct timer *t, void *arg)
 static void timer_arm_main(void *arg)
 {
     struct timer_probe *p = arg;
-    timer_start(&p->t, MS(2));
+    timer_start(&p->t, p->arm_delay_ns ? p->arm_delay_ns : MS(2));
 }
+
+#if CONFIG_LOCKDEP
+static void timer_arm_gated(void *arg)
+{
+    struct timer_probe *p = arg;
+    while (!__atomic_load_n(&p->arm_go, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    timer_arm_main(p);
+}
+#endif
 
 static bool selftest_timer_cancel_sync_pinned(const char **reason)
 {
@@ -1012,6 +1031,7 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
     CHECK(p != NULL);
     p->magic = MAGIC_LIVE;
     p->hold_ms = 20;
+    spinlock_init(&p->callback_lock, "timer-probe-callback-lock");
     timer_setup(&p->t, timer_probe_fn, p);
 
     /* 1. Pending, not running: behaves as timer_cancel. */
@@ -1031,12 +1051,19 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
         CHECK(wait_flag(&p->done, 1000));
         CHECK(!timer_cancel_sync(&p->t));
         CHECK(p->fires == 1 && p->bad == 0);
+#if CONFIG_LOCKDEP
+        p->take_callback_lock = true;
+        p->done = 0;
+        timer_start(&p->t, MS(1));
+        CHECK(wait_flag(&p->done, 1000));
+#endif
         kfree(p);
-        kinfo("selftest: timer-cancel-sync: one CPU, cancel of a fired timer is immediate");
+        kinfo("selftest: timer-cancel-sync: one CPU cancellation and callback-lock dependency checks passed");
         return true;
     }
 
     /* 2. Running on another CPU: the wait spans the callback. */
+    p->take_callback_lock = true;
     struct thread *t = thread_create_on(timer_arm_main, p, "qtimer", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
     CHECK(t != NULL);
     thread_join(t);
@@ -1049,6 +1076,30 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
     CHECK(sync_ns >= MS(10));
     quiesce_get_stats(&after);
     CHECK(after.timer_sync_waits == before.timer_sync_waits + 1);
+
+#if CONFIG_LOCKDEP
+    /* Hold the callback lock while a second callback starts and blocks on
+     * it. The synchronous cancel must report and return rather than wait
+     * forever with the dependency lock held. */
+    p->entered = 0;
+    p->done = 0;
+    p->hold_ms = 1;
+    p->arm_delay_ns = MS(20);
+    p->arm_go = 0;
+    t = thread_create_on(timer_arm_gated, p, "qtimer-lockwait", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    arch_irq_state_t held_s = spin_lock_irqsave(&p->callback_lock);
+    __atomic_store_n(&p->arm_go, 1u, __ATOMIC_RELEASE);
+    CHECK(wait_flag(&p->entered, 1000));
+    lockdep_expect(LOCKDEP_R_CALLBACK);
+    CHECK(!timer_cancel_sync(&p->t));
+    CHECK(lockdep_expected_hits() == 1);
+    spin_unlock_irqrestore(&p->callback_lock, held_s);
+    thread_join(t);
+    CHECK(wait_flag(&p->done, 1000));
+    CHECK(!timer_cancel_sync(&p->t));
+    p->arm_delay_ns = 0;
+#endif
 
     /* 3. A self-re-arming callback: cancel_sync must catch the re-arm
      * made after our first cancel and leave the timer idle for good. */

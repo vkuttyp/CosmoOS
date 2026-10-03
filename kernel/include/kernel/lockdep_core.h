@@ -21,6 +21,8 @@
 #define LOCKDEP_MAX_HELD       24u   /* per CPU: spinlocks, interrupt context included */
 #define LOCKDEP_MAX_HELD_MUTEX 8u    /* per thread */
 #define LOCKDEP_CLASS_NAME_MAX 64u  /* including NUL; owned by the graph */
+#define LOCKDEP_MAX_TIMER_PROFILES 64u  /* one active callback per possible CPU */
+#define LOCKDEP_MAX_TIMER_LOCKS   16u
 
 /* Lock kinds: a mutex and its internal spinlock share a name but are
  * different classes. */
@@ -35,6 +37,8 @@
 #define LOCKDEP_HF_TRYLOCK (1u << 0)
 #define LOCKDEP_HF_IN_IRQ  (1u << 1)
 #define LOCKDEP_HF_IRQS_ON (1u << 2)
+#define LOCKDEP_HF_IRQSAVE (1u << 3)
+#define LOCKDEP_HF_IRQSAVE_ON (1u << 4)
 
 struct lock_class {
     char name[LOCKDEP_CLASS_NAME_MAX];
@@ -150,7 +154,7 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
     while (head < tail && !found) {
         uint16_t n = s->queue[head++];
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS && !found; w++) {
-            uint64_t bits = g->before[n][w] & ~s->visited[w];
+            uint64_t bits = __atomic_load_n(&g->before[n][w], __ATOMIC_RELAXED) & ~s->visited[w];
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
                 bits &= bits - 1;
@@ -182,6 +186,102 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
             path[i - skip] = n;
         n = s->parent[n];
     }
+    return true;
+}
+
+/* Find a usage-labelled descendant of node, or a labelled predecessor.
+ * Predecessor search is a forward multi-source BFS, avoiding a second
+ * 200 KiB reverse bitmap. Class usage labels every subclass, but traversal
+ * never invents edges between subclasses. Caller holds the graph lock. */
+static inline bool lockdep_core_find_usage(const struct lockdep_graph *g, struct lockdep_scratch *s,
+                                           uint16_t node, unsigned usage, bool predecessors,
+                                           uint16_t *endpoint)
+{
+    for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++)
+        s->visited[w] = 0;
+    unsigned head = 0, tail = 0;
+    unsigned nr_nodes = g->nr_classes * LOCKDEP_SUBCLASSES;
+    for (unsigned i = 0; i < nr_nodes; i++) {
+        if (predecessors ? !(__atomic_load_n(&g->classes[lockdep_node_class((uint16_t)i)].usage, __ATOMIC_RELAXED) & usage) : i != node)
+            continue;
+        s->queue[tail++] = (uint16_t)i;
+        s->visited[i / 64u] |= (uint64_t)1 << (i % 64u);
+        s->parent[i] = (uint16_t)i;
+    }
+    while (head < tail) {
+        uint16_t n = s->queue[head++];
+        if (predecessors ? n == node : (__atomic_load_n(&g->classes[lockdep_node_class(n)].usage, __ATOMIC_RELAXED) & usage) != 0) {
+            if (predecessors)
+                while (s->parent[n] != n)
+                    n = s->parent[n];
+            *endpoint = n;
+            return true;
+        }
+        for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
+            uint64_t bits = __atomic_load_n(&g->before[n][w], __ATOMIC_RELAXED) & ~s->visited[w];
+            while (bits) {
+                unsigned bit = (unsigned)__builtin_ctzll(bits);
+                bits &= bits - 1;
+                uint16_t m = (uint16_t)(w * 64u + bit);
+                s->visited[w] |= (uint64_t)1 << bit;
+                s->parent[m] = n;
+                s->queue[tail++] = m;
+            }
+        }
+    }
+    return false;
+}
+
+/* Would adding from -> to connect an IRQ-used class to one acquired with
+ * interrupts on? Existing graph is assumed valid. No mutation on failure. */
+static inline bool lockdep_core_irq_edge(const struct lockdep_graph *g, struct lockdep_scratch *s,
+                                         uint16_t from, uint16_t to, uint16_t *safe, uint16_t *unsafe)
+{
+    return lockdep_core_find_usage(g, s, from, LOCKDEP_USED_IN_IRQ, true, safe) &&
+           lockdep_core_find_usage(g, s, to, LOCKDEP_HELD_IRQS_ON, false, unsafe);
+}
+
+/* A trylock in an IRQ cannot wait for the interrupted holder. Conversely,
+ * a successful trylock with IRQs on can be interrupted while held. */
+static inline unsigned lockdep_core_usage(bool in_irq, bool irqs_on, bool trylock)
+{
+    return (in_irq && !trylock ? LOCKDEP_USED_IN_IRQ : 0u) |
+           (irqs_on ? LOCKDEP_HELD_IRQS_ON : 0u);
+}
+
+/* Validate newly observed usage against existing paths before publishing
+ * it. Rejection leaves the graph valid even when a self-test consumes the
+ * report and continues. Caller serializes both usage and graph writers. */
+static inline bool lockdep_core_mark_usage(struct lockdep_graph *g, struct lockdep_scratch *s,
+                                           unsigned cls, unsigned add, uintptr_t ip,
+                                           uint16_t *safe, uint16_t *unsafe)
+{
+    struct lock_class *c = &g->classes[cls];
+    unsigned before = __atomic_load_n(&c->usage, __ATOMIC_RELAXED);
+    unsigned fresh = add & ~before;
+    if (((before | add) & (LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON)) ==
+        (LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON)) {
+        *safe = *unsafe = lockdep_node(cls, 0);
+        return false;
+    }
+    for (unsigned sub = 0; sub < LOCKDEP_SUBCLASSES; sub++) {
+        uint16_t n = lockdep_node(cls, sub);
+        if ((fresh & LOCKDEP_USED_IN_IRQ) &&
+            lockdep_core_find_usage(g, s, n, LOCKDEP_HELD_IRQS_ON, false, unsafe)) {
+            *safe = n;
+            return false;
+        }
+        if ((fresh & LOCKDEP_HELD_IRQS_ON) &&
+            lockdep_core_find_usage(g, s, n, LOCKDEP_USED_IN_IRQ, true, safe)) {
+            *unsafe = n;
+            return false;
+        }
+    }
+    if (fresh & LOCKDEP_USED_IN_IRQ)
+        c->irq_ip = ip;
+    if (fresh & LOCKDEP_HELD_IRQS_ON)
+        c->irqs_on_ip = ip;
+    __atomic_store_n(&c->usage, before | add, __ATOMIC_RELEASE);
     return true;
 }
 

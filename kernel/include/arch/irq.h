@@ -16,6 +16,8 @@ typedef unsigned long arch_irq_state_t;
 
 /* Disable interrupts and return the previous state for restore. */
 arch_irq_state_t arch_irq_save(void);
+/* Whether a saved state restores IRQ delivery as enabled. */
+bool arch_irq_state_enabled(arch_irq_state_t state);
 void arch_irq_restore(arch_irq_state_t state);
 
 void arch_irq_enable(void);
