@@ -59,6 +59,25 @@ The masked spinners stay well under the TLB shootdown's one-second
 acknowledgement bound and are all stopped before any thread is joined
 (a join frees a stack; the shootdown waits for every CPU).
 
+### Replies during the deadline read
+
+`python3 tools/lockup-deadline-probe.py --arch x86_64` builds a temporary
+clone and gates the first sample's responders. It releases them during a
+simulated interruption of the reporter's deadline read, waits for every
+response, and resumes after the original five-millisecond deadline. The
+unchanged `lockup-sample` mask, stack and timestamp checks must pass.
+`--old-order` restores the response-before-clock polling order and must
+fail specifically at the spinner's missing-mask assertion. Repeat both
+commands with `--arch aarch64` for the ordinary-IPI path. Guard expiry is
+an explicit failure, not an accepted reproduction.
+
+The probe exits through a named panic after the target test; its harness
+checks that marker and the failure exit status. It is not a full-suite
+pass. Logs and images are under `out/lockup-deadline-<arch>-<mode>/`.
+The normal self-test copies a sample only when its response was published;
+an unanswered buffer may still be under construction. The sampler's total
+five-millisecond deadline and the `lockup-sample-busy` checks are unchanged.
+
 ### The framebuffer console
 
 **`fb-console`** (both architectures, whenever the machine has a

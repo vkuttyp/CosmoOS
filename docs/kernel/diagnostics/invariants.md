@@ -124,7 +124,7 @@ own handler (an NMI on x86-64), writes only that CPU's `percpu.sample`,
 takes no lock and prints nothing; `seq` is stored last with release and
 is the claim that the rest is complete. Whoever asked reads and prints.
 Nothing walks another CPU's live stack. **Checked by** `lockup-sample`
-(the sample's PC lies in the spinner, the second frame in its caller)
+(the spinner's recorded return address appears on the sampled stack)
 and `lockup-sample-irqoff` (recorded through an interrupt mask on
 x86-64); by review of `lockup_answer` and the paranoid path.
 
@@ -142,7 +142,11 @@ slot, with one claim attempt and no wait; two targets made unable to
 answer on both architectures -- masked, and that call's NMI suppressed by
 `LOCKUP_SAMPLE_IPI_ONLY` -- cost one wait of exactly the timeout). Not by a stopwatch:
 the wall-clock bound that used to carry this failed on host stalls, not
-on the sampler (the lockup-bound unit).
+on the sampler (the lockup-bound unit). Both polling APIs check
+response publication after their deadline read, including its expired
+case; a reporter delayed in the clock read cannot discard already-visible
+answers based on an earlier sweep. The deadline probe forces this order
+and rejects the old polling order on both architectures.
 
 ## I-DIAG-20: A registered NMI handler sees every NMI
 

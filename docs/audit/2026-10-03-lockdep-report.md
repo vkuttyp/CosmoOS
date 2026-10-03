@@ -1070,3 +1070,60 @@ passed all 419 self-tests, then exceeded the 180-second boot deadline
 before the rc/interactive-shell completion markers. Its log is retained
 at `out/pr305-ci-aarch64-job.log`; this is separate from either review
 finding. `git diff --check` passed for the review fixes.
+
+## Lockup sampling deadline investigation
+
+The repeated x86 failure was the missing-spinner bit in the returned
+mask, not the previously repaired interrupted-stack/leaf-PC check. In
+`out/pr305-review-x86_64-retry.log` all remote CPUs were omitted, while
+later output showed their ticks and subsequent NMI samples. Those logs
+lack publication timestamps at the failing deadline, so they do not
+prove whether every original omission was this race or truly late
+interrupt delivery. An instrumented normal boot and 32 additional
+unforced samples passed during investigation; that does not discharge
+the reported failures.
+
+Inspection found a concrete stale-observation race in both sampling
+APIs. They checked response sequence(s) before reading the deadline
+clock. If the reporter was interrupted or its host vCPU descheduled in
+between, other CPUs could publish their answers before it resumed, but
+the expired clock check returned the earlier incomplete mask. The
+single-target form could likewise return false for an available answer.
+
+Both loops now read deadline expiry first, then acquire-load response
+publication before deciding to return. This preserves one original
+five-millisecond deadline, adds no retry window or additional request,
+and leaves truly absent targets absent. A final bounded response sweep
+can accept publications made while the reporter was delayed; the mask
+represents available samples, not a delivery-latency guarantee. The
+`lockup-sample` test also copies fields only for an acknowledged response,
+avoiding a read racing an unfinished responder on failure.
+
+`tools/lockup-deadline-probe.py` builds a temporary clone, gates the first
+sample's responders, then lets them finish during a simulated pause in
+the reporter's deadline read. It resumes after the original deadline.
+With `--old-order`, both x86-64 and AArch64 fail specifically at the same
+missing-spinner mask assertion; with the corrected order, both pass the
+existing mask, stack and timestamp assertions. Both modes use real
+NMI/IPI response publication, and guard expiry is rejected rather than
+counted as reproduction. The probe stops at a named panic and checks
+that exact outcome and failure exit; this is targeted evidence, not a
+full-suite pass. Its all-CPU case exercises the observed failure; the
+single-target loop received the same ordering correction by inspection.
+
+Probe logs: `out/lockup-deadline-{x86_64,aarch64}-{old,fixed}/boot.log`
+and corresponding top-level `-result.log` files. The old/fixed x86 probes
+completed in 9.6/8.3 s; both AArch64 probes completed in 11.4 s. No code
+that gates responders is linked into normal kernels. The production
+change does not guarantee that an unscheduled remote vCPU answers within
+five milliseconds; genuine late delivery can still yield an absent bit.
+
+Final normal four-CPU boots passed all 419 self-tests and complete
+harnesses: x86-64 in 151.1 s and AArch64 in 160.3 s. The existing
+`lockup-sample-busy` test still verified one deadline and genuinely
+unanswered masked targets (observed waits 5035/5200 us). The x86 network
+harness recovered on attempt 2 of 3, a recorded QEMU reset sighting.
+Logs: `out/lockup-deadline-final-{x86_64,aarch64}.log` and corresponding
+`-result.log` files. Both release kernels built; logs:
+`out/lockup-deadline-release-{x86_64,aarch64}.log`. Probe syntax checking
+and `git diff --check` passed.

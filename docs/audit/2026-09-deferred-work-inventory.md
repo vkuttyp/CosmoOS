@@ -669,6 +669,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Dense DAG core search measurements through the class limit~~ | **BUILT (post-#304 continuation)**: chain/dense 16/64/256/320-node cases validate allowed insertion, cycle rejection, and IRQ-bridge rejection. Only subclass zero is active; these measurements do not establish worst-case bounds. |
 | ~~All-subclass graph search measurements at full capacity~~ | **BUILT (post-#304 continuation)**: 1,280-node chain/dense cases cover all subclasses, with explicit IRQ endpoint checks and sanitizer coverage of full BFS queues. Worst-case latency bounds remain open. |
 | ~~Kernel interrupt writer, IPI and grace-period reuse regression~~ | **BUILT (post-#304 continuation)**: 16 rounds race two registrations/removals, validate the winning handler via real IPI, and wait before reuse. Dispatch follows registration; arbitrary entry interleavings remain open. |
+| ~~Stale lockup response mask after delayed deadline read~~ | **FIXED (PR #305 follow-up)**: both polling APIs read expiry before collecting responses. A controlled real-IPI/NMI probe reproduces the old missing-mask failure and validates the fix on both architectures; the five-millisecond deadline remains unchanged. |
 
 Still open for the next milestone:
 
