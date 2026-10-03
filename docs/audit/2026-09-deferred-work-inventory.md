@@ -390,6 +390,27 @@ tree.
 
 ## 4. The quiesce report's remaining risks and debt
 
+The 2026-10-03 renewed lock-discipline audit found two defects in the
+already-built validator, rather than a missing milestone: unbounded
+printing of a truncated cycle path and graph names pointing into freed
+module rodata. Both are corrected in the October hardening pass, with
+ASan/UBSan path/storage regressions and a real module fixture. See
+`2026-10-03-lock-discipline-audit.md` and `2026-10-03-lockdep-report.md`.
+Still deferred: transitive IRQ-safe/unsafe dependency validation, trylock
+IRQ classification, callback-wait dependencies (timer_cancel_sync),
+NMI/#MC validator reentrancy, broader concurrent diagnostic snapshots and
+IRQ-state restoration validation. Direct class checks and ordinary
+dependency edges must not be presented as proof of those relationships.
+
+The same validation found **UP suite prerequisites**: unchanged HEAD fails
+cwdtest's progress assertion on x86-64 and AArch64; AArch64 additionally
+fails two clock tests whose helper requires two CPUs. Preserve the checks
+while making the single-CPU workload meaningful. A LOCKDEP=0 boot also
+showed `rlimit-unpriv`'s assumed 80-write burst taking long enough for the
+log bucket to refill (exit 19); the unchanged assertions pass on rerun.
+These failures and analyzer warnings are detailed in the October report;
+none is silently counted as passing validation.
+
 `docs/audit/2026-09-lifetime-quiesce-report.md` §7-8 (2026-09-05). Its
 "NEXT SUBSYSTEM", lockdep, was built as milestone 3. Still standing:
 

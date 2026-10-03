@@ -128,3 +128,18 @@ make BUILD=release all test        # checker compiled out
   rename order; the pre-fix ABBA was reproduced only by review.
 - Trylock acquisitions are pushed but never checked; a trylock cannot
   deadlock, but an order it implies is not recorded either.
+
+## October hardening regression coverage
+
+Host `metadata-lifetime` frees/reuses a name buffer and checks content
+identity, kind separation, maximum length and overlong rejection.
+`path-bounds` builds a 1280-node chain, iterates the returned bounded path
+under ASan/UBSan, checks a zero-capacity request and self reachability.
+`lockdep-order` additionally observes nine edges independently, detects
+the closing ten-lock cycle, and checks an unheld release without performing
+an invalid primitive unlock. `module-load` now uses a fixture lock with a
+name in unloadable module rodata, checks stable class count on reload, and
+the final graph dump accesses that copied name after unmapping the module.
+
+`LOCKDEP=0 OUT=...` tests debug without instrumentation. Use separate output
+trees for flag overrides; make does not track changes to command lines.

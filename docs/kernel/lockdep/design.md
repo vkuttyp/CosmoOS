@@ -3,14 +3,14 @@
 ## Data structures (`kernel/include/kernel/lockdep_core.h`, `kernel/core/lockdep.c`)
 
 ```c
-#define LOCKDEP_MAX_CLASSES   256       /* classes in the tree today: ~165 (a mutex and its spinlock are two) */
+#define LOCKDEP_MAX_CLASSES   320       /* includes separate runqueue classes */
 #define LOCKDEP_SUBCLASSES    4         /* nesting levels per class */
 #define LOCKDEP_MAX_NODES     (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_MAX_HELD      24        /* per CPU: spinlocks, interrupt context included */
 #define LOCKDEP_MAX_HELD_MUTEX 8        /* per thread */
 
 struct lock_class {
-    const char *name;                   /* the init-site literal; the class key */
+    char name[64];                      /* owned copy; contents plus kind are the key */
     unsigned usage;                     /* LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON */
     uintptr_t irq_ip, irqs_on_ip;       /* where each usage was first seen */
 };
@@ -45,17 +45,18 @@ so the host test drives them under the sanitizers. The bitmap is 1280 nodes
 
 ## Classes and nodes
 
-A class is a lock's initialisation name: the pointer passed to
-`SPINLOCK_INIT`, `spinlock_init` or `mutex_init`. Locks initialised from one
-site share the name pointer and are one class (every `vnode->lock`, every
-`socket->lock`); the linker merges identical literals from different sites,
-which is what the rule wants (two locks named `"tcp"` are the same class).
-A name built at run time is a valid key only in storage that lives as long
-as the lock and is never rebuilt: the run queues use one, a static table of
-`"runqueue0"`, `"runqueue1"`, ... in `sched.c`, so that each queue's lock is
-its own class and the increasing-CPU-id order of two of them (scheduler S24)
-is an order this checker sees. A name on the stack or in a freed buffer is
-not a valid key, and the tree has none.
+A class is a lock's initialisation name: the contents passed to
+`SPINLOCK_INIT`, `spinlock_init` or `mutex_init`. Equal names of one kind
+share a class (every `vnode->lock`, every `socket->lock`), independently
+of literal merging or the mapping chosen for a reloaded module. The graph
+copies at most 63 characters plus NUL into permanent kernel-owned storage.
+Overlong names report metadata overflow; they are never truncated keys.
+NULL names normalize to `"?"`; meaningful names distinguish unrelated
+families. The original name must stay valid and unchanged during the
+lock's lifetime because primitives also use it directly. After its last
+use, graph diagnostics need no reference to that storage. The run queues
+use a static table of `"runqueue0"`, `"runqueue1"`, ... in `sched.c`, so
+each queue has its own class and increasing CPU-id order (S24) is checked.
 
 A node is (class, subclass). Subclass 0 is the default. A lock taken while
 another lock of the same class is held is a **recursive acquisition** report
@@ -93,7 +94,9 @@ check, included in the stacks):
 2. If B reaches any Aᵢ in the graph (`before[B] ⊇* Aᵢ`, a depth-first search
    over the bitmaps with a visited set): **lock-order inversion**. The
    report shows the held stack, B's acquisition, and the recorded chain
-   B → … → Aᵢ.
+   B → … → Aᵢ. Long diagnostic paths keep their last eight nodes and are
+   labeled accordingly; the output length is the stored count, so printing
+   cannot overrun the buffer. Detection still searches all 1280 nodes.
 3. Otherwise set `before[Aᵢ] |= B` for every Aᵢ (edges from every held lock,
    not only the innermost, so a chain seen once in pieces is still caught).
 
@@ -116,7 +119,7 @@ the masking out with the checker.
 
 Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
-tracked. The search is bounded by the node count (640) and runs only when
+tracked. The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a
 bitmap test per held lock.
@@ -268,9 +271,9 @@ document and the graph can be compared.
 
 ## Ownership and lifetime
 
-All checker state is static. A lock's class index lives in the lock and is
-never reused; a class is never freed (a freed lock's name literal outlives
-it). Held entries are removed at release; a thread that exits with mutexes
+All checker state is static. A lock's cached class index lives in the lock;
+class records and their copied names are never freed. Original name storage
+may disappear after the lock's last use, including on module unload. Held entries are removed at release; a thread that exits with mutexes
 held is a report.
 
 ## Concurrency
@@ -283,7 +286,7 @@ tracked lock and allocates nothing.
 
 ## Memory
 
-128 KiB graph, 256 classes × 40 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
+200 KiB graph, 320 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
 thread. Debug builds only for all but the `class` field.
 
 ## Error handling
@@ -315,3 +318,13 @@ a two-process deadlock (rename versus rmdir).
 - A "chain" cache (Linux's `lock_chain`) if the recursion scan becomes
   measurable.
 - Lock statistics (contention, hold time) on the same hooks.
+
+## Configuration
+
+`LOCKDEP=0/1` maps to `CONFIG_LOCKDEP` through the normal make configuration.
+The default is 1 in debug and 0 in release. Use a distinct `OUT` for each
+configuration: the build rules do not track command-line flag changes.
+Lock layouts and module ABI are stable across this option; the thread held
+array also remains in the layout. The graph and runtime hooks compile out
+when disabled. Atomic class-cache publication and graph bitmap hot-path
+accesses do not rely on unsynchronized shared loads/stores.

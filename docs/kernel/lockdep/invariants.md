@@ -52,7 +52,8 @@ if it ever can, it gets one.
 reference scan proved exclusive access, with the root locked, and a lock
 per level would nest the class to arbitrary depth.
 
-**L6. `runqueue.lock` is a leaf.** Nothing is acquired while it is held;
+**L6. Runqueue locks are leaves except for ordered runqueue pairs (S24).**
+No other lock family is acquired while a runqueue is held;
 `arch_ipi_send` reads a binding made by `arch_ipi_bind` at `ipi_init` and
 takes no lock (scheduler invariant S2). Check: the recorded graph has no
 edge out of `runqueue` (`testing.md`); `lockdep-order`'s dump each boot.
@@ -78,14 +79,17 @@ futex race test; the lost-wake argument is by construction.
 ## Rules the checker keeps
 
 **L9. The checker allocates nothing and takes no tracked lock.** All
-tables are static (256 classes, 1024 nodes, 24 held per CPU, 8 mutexes per
+tables are static (320 classes, 1280 nodes, 24 held per CPU, 8 mutexes per
 thread); the raw lock is a word. Exhaustion of any table is a report, not
 an overrun. Check: host `test_lockdep` (class table full → -1); review.
 
-**L10. Classes are keyed by the initialisation name pointer and the lock
-kind.** One site, one class; a mutex and its internal spinlock are two
-classes. Check: host `test_lockdep` (`classes`); the tree's names are
-literals (review: `grep spinlock_init\|mutex_init\|SPINLOCK_INIT`).
+**L10. Classes are keyed by name contents and lock kind, with kernel-owned
+name storage.** Equal names share a class; a mutex and its internal
+spinlock are separate kinds. Names exceeding 63 characters are rejected
+without truncation. Check: host `classes` and `metadata-lifetime`, including
+freed and reused source buffers, maximum name length and exhaustion;
+`module-load` uses a fixture lock in unloadable rodata, checks no new class
+on reload, and the final graph dump reads its name after unload.
 
 **L11. Held stacks are per CPU for spinlocks and per thread for mutexes,
 and a lock is on a stack exactly while it is owned.** Ownership and the
@@ -104,6 +108,14 @@ mutex's acquisition check, and `lockdep_is_held` asked by a preemptible
 thread, read it with interrupts off, since a thread moved between the
 read and the scan would be scanning another CPU's stack.
 
-**L12. Release builds carry no checker code beyond the `class` field and
-`might_sleep`'s always-on half.** Check: `BUILD=release` in the
-verification chain; `lockdep.c` is `#if CONFIG_LOCKDEP`.
+**L12. With LOCKDEP=0 the runtime hooks and graph compile out.** Release
+defaults to this configuration; it can also be selected in debug. Lock
+layouts and the thread held array remain stable across the option, and
+`might_sleep` retains its always-on half. Check: disabled debug/release
+builds and ELF symbol inspection; `lockdep.c` is `#if CONFIG_LOCKDEP`.
+
+**L13. A returned diagnostic path length never exceeds its buffer.**
+Reachability searches all nodes; path output retains at most the caller's
+capacity and returns the stored count, including zero for a zero-capacity
+request. Check: ASan/UBSan `path-bounds` drives a 1280-node chain and the
+printer's loop; `lockdep-order` detects a ten-lock cycle through real hooks.

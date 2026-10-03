@@ -1,0 +1,259 @@
+# Lockdep hardening report — 2026-10-03
+
+## 1. Executive summary
+
+The requested subsystem already existed. This pass audited and extended
+it rather than building a second validator. Two memory-safety defects were
+reproduced against the unchanged core under ASan and corrected: truncated
+cycle diagnostics reading beyond their buffer, and class names retained
+after their source memory was freed. Both reproducers pass against the
+fixed core. The first hardening increment is implemented and tested;
+this report does **not** declare every completion criterion in the new
+prompt satisfied. Remaining validator model gaps and UP suite failures
+are recorded below.
+
+## 2. Baseline state
+
+HEAD at investigation: `b1512a8477993216960dea20d19fe548a55b51db`.
+User changes to reviewer.yaml and prompts/Next-Milestone.md were preserved.
+macOS arm64, GNU make and LLVM cross-compilation, QEMU TCG. Unmodified
+SMP debug boots passed 416 selftests on each architecture (x86 121.0 s,
+AArch64 127.2 s). Host C sanitizer suites and Python harness unit tests
+passed. Initial socket-bind permission failures were sandbox restrictions
+and were rerun with approval. Logs: `out/lockdep-baseline-{host,x86,arm}.log`.
+
+UP coverage was expanded after implementation and compared with an
+unchanged HEAD checkout under `out/lockdep-baseline-tree`; see §15 for
+the distinction between passing lockdep tests and failing complete boots.
+
+## 3. Locking architecture discovered
+
+Spinlocks (plain, irqsave, nested, try), sleeping mutexes with priority
+inheritance, wait queues, semaphores, completions, futex buckets, atomics,
+references, preemption control, IRQ masking/depth and epoch quiescence.
+No kernel rwlock. Native userland condition variables use futexes.
+Canonical rules: `docs/kernel/lockdep/locking-rules.md`. The initial audit
+is `2026-10-03-lock-discipline-audit.md`.
+
+`2026-10-03-lock-sites.tsv` records 232 direct and helper initialization
+or definition sites, with file and line. It is a searchable source-site
+inventory, not a claim that lexical matching enumerates every runtime
+lock instance or proves each callback order.
+
+## 4. Existing problems found before implementation
+
+The path search returned the complete path length but copied only eight
+nodes to its caller; the reporter indexed the small buffer with that
+complete length. The graph also kept name pointers permanently, including
+driver names in unloadable module rodata. Raw addresses reused for another
+module could silently become the old class key. Class-cache publication,
+IRQ usage and bitmap hot-path reads also mixed shared plain access with
+serialized writes. The old VFS/futex bugs in the prompt are already fixed,
+and the scheduler now has ordered runqueue pairs rather than one class.
+
+## 5. Lockdep architecture
+
+Preserved the existing allocation-free raw lock, class table, graph,
+pre-acquisition check and post-ownership push. No scheduler policy change,
+new reclamation mechanism or replacement lock API. `LOCKDEP=0/1` now maps
+to CONFIG_LOCKDEP through ordinary make configuration; defaults remain
+debug enabled / release disabled. Separate OUT directories avoid stale
+objects because build rules do not track changed command-line flags.
+
+## 6. Lock-class model
+
+Name **contents plus kind** identify a class. This implements the prior
+documented intent that equal names share a family without relying on
+linker string pooling, source addresses or module mappings. Each record
+owns 64 bytes of name storage. Names longer than 63 characters are rejected
+with a metadata-overflow report, never truncated into another key. NULL
+normalizes to `?`. Cached class indices use acquire/release atomic access.
+Original names must still outlive their lock's use by primitive diagnostics.
+
+## 7. Dependency graph implementation
+
+Unchanged 320 classes × four subclasses, 1280 bitmap nodes and breadth-first
+cycle search. Hot edge reads and updates are atomic; graph modification
+and search remain serialized by the raw lock. Path output now returns the
+number of entries actually stored, supports zero-capacity/NULL output and
+self reachability. Detection is not truncated; kernel diagnostics retain
+the last eight path nodes and label this limit explicitly.
+
+`2026-10-03-lock-order.tsv` records the final SMP observations by architecture:
+1197 x86 edges, 1210 AArch64 edges, 1288 in their union. Kahn traversal
+found each graph and their union acyclic. These include test classes and
+observed acquisition attempts; they are not exhaustive workload proof.
+
+## 8. Atomic-context model
+
+Existing might_sleep checks preempt_count or irq_depth, covering spinlocks,
+explicit preemption disabling and quiesce readers. Existing blocking and
+faulting-copy boundaries remain. IRQ masking alone is not part of this
+predicate; no claim that a zero count makes arbitrary blocking safe.
+
+## 9. IRQ-safety model
+
+Preserved direct per-class IRQ-use / acquired-with-IRQs-on checks. Usage
+loads/stores are atomic and the report decision uses the before/after
+values from one serialized update. Successful trylock IRQ classification
+and transitive safe→unsafe graph relationships remain gaps.
+
+## 10. Preemption interaction
+
+Spin stacks remain per CPU; mutex stacks remain per thread. Runqueue lock
+handoff across a same-CPU context switch and thread migration are unchanged.
+Existing positive-count assertion on preempt_enable remains. Both SMP
+boots exercised scheduler/PI/migration tests without unexpected lockdep
+reports; no broad preemption redesign was performed.
+
+## 11. Lifetime/quiescence interaction
+
+No changes to unlink, prevent-new-access, drain, grace-period or final-put
+ordering. IRQ unregister, timer cancellation, module zombie handling and
+device/network removal retain their existing implementations. Copying
+graph names removes its dependency on freed module image storage. The
+fixture exercises a class in module rodata through unload and reload.
+Callback-wait dependencies such as timer_cancel_sync are still not graph
+edges; their existing rule must be preserved explicitly.
+
+## 12. Diagnostics
+
+Held entries now print the lock object's address as well as its acquisition
+address. Fatal reporting masks interrupts and enters existing console
+panic mode before printing, avoiding re-acquisition of console.lock when
+the violation originated in a sink. This ordering is code-reviewed;
+normal boots use expected-report tests rather than inducing a fatal
+console failure. NMI/#MC raw-lock reentrancy and sink-specific catastrophic
+failure behavior are not proven by this change.
+
+## 13. Tests added
+
+- Host metadata-lifetime: changed/freed source storage, equal names in
+  different storage, kind separation, maximum name length, overlong and
+  NULL handling; exhaustion uses unique names rather than duplicate keys.
+- Host path-bounds: 1280-node chain and the reporter's iteration under
+  ASan/UBSan, empty output, self reachability and disconnected reverse.
+- Kernel lockdep-order: independently observed ten-lock chain, closing
+  cycle through real instrumentation, unheld release without performing
+  a corrupting primitive unlock.
+- Module-load: fixture lock named in module rodata, no new class on reload;
+  end-of-suite graph dump dereferences the copied name after image teardown.
+
+Negative reproducers compiled against HEAD's core failed with ASan
+stack-buffer-overflow and heap-use-after-free. Identical reproducers
+against the fixed core exited zero. Artifacts:
+`out/lockdep-negative-repro/{path,metadata}{,-fixed}.log`.
+
+## 14. Stress testing
+
+Normal debug boots exercised all 416 selftests, userland, shell and host
+network harness: scheduler/migration/PI, VFS rename/cache/put races,
+filesystem replay and fault injection, TCP timers and teardown, device
+removal and module zombie tests, lifetime/quiescence stress. No new random
+stress hook or broad warning suppression was introduced. Separate chaos,
+fuzz, guard and panic variants were not rerun in this increment.
+
+## 15. Cross-architecture results
+
+| Run | Result |
+|---|---|
+| Final x86-64 debug SMP | PASS, 416 tests, 118.8 s (`out/lockdep-final-x86.log`) |
+| Final AArch64 debug SMP | PASS, 416 tests, 121.8 s (`out/lockdep-final-arm.log`) |
+| x86-64 release | PASS, 17.3 s |
+| AArch64 release | PASS, 20.4 s |
+| Host ASan/UBSan + Python harness units | PASS (`out/lockdep-final-host.log`) |
+| Fresh debug LOCKDEP=0 image + boot | Initial FAIL process-rlimit; rerun PASS, 416 tests, 116.4 s |
+| Fresh release LOCKDEP=1 kernel | Builds successfully (`out/lockdep-release-enabled-build.log`); not booted |
+| x86-64 UP | Kernel selftests pass; complete boot FAIL cwdtest `checked > 0`, shell marker absent |
+| AArch64 UP | FAIL two cross-CPU clock tests and cwdtest progress assertions |
+| Unchanged HEAD AArch64 UP | Reproduces both clock failures and both cwdtest failures; baseline defect |
+| Unchanged HEAD x86-64 UP | Reproduces cwdtest `checked > 0` failure; all 416 kernel tests pass (`out/lockdep-baseline-x86-up.log`) |
+| Analyzer, both architectures | Targets exit successfully; changed-source incremental runs report no warning. Full runs report existing warnings in unchanged sources, below |
+
+All lockdep-specific UP tests pass. AArch64 clocktest's bracket helper
+returns false when fewer than two CPUs are online; this is unchanged in
+HEAD. cwdtest's progress assertions reject an unexercised comparison and
+are preserved, not skipped. The complete UP suite is not green.
+
+Full analyzer runs emitted twenty-seven x86 and nineteen AArch64 warnings in
+unchanged sources (scheduler, list callers, epoll, syscall, device tests,
+guest memory, VFS/CosmoFS tests, networking and NVMe). Logs:
+`out/lockdep-analyze-{x86,arm}.log`. The make target prints "clean" even
+after these warnings because analyzer diagnostics do not fail the current
+rule; its successful exit must not be presented as a warning-free audit.
+
+## 16. Findings against the existing kernel
+
+Final debug SMP runs contain nine expected validator reports (including
+the new cycle/unheld checks and runqueue-order test) and no unexpected
+report. Their module-class edge prints after unloading the fixture.
+The intermediate AArch64 SMP run recovered from the known QEMU reset
+on back-connection attempt two; final rerun succeeded on attempt one.
+The sighting and updated tally are in docs/testing/flakes.md.
+
+## 17. Real bugs discovered
+
+Confirmed/reproduced: unsafe long-cycle path consumption and stale class
+name dereferences after storage reclamation. Confirmed by review: shared
+non-atomic cache/usage/bitmap access and reporter re-acquisition of the
+console lock before panic mode. No new subsystem ABBA was observed in the
+passing debug boots.
+
+## 18. Bugs fixed
+
+Bounded path output, permanent copied class metadata with content identity,
+atomic cache/usage/bitmap access, and fatal console-mode ordering. Existing
+lock-order and lifetime rules were preserved. Public lock/thread layouts
+and module ABI did not change.
+
+## 19. False positives encountered
+
+No new unexpected lockdep report or suppression. The same-name grouping
+continues to match tested workloads. That evidence cannot establish that
+every future identically named lock belongs to one logical class.
+
+## 20. Performance/overhead
+
+ELF symbol inspection: graph is 232968 bytes (200 KiB bitmap plus owned
+class records); copying names adds 17920 bytes (17.5 KiB) to the enabled
+graph, rather than retaining pointers. Scratch is 5280 bytes. This storage
+and validator runtime functions are absent from the debug-disabled ELF.
+Primitive/thread layouts remain stable, including the pre-existing class
+fields and thread held array. Cached lookups avoid repeated string scans.
+No isolated acquisition microbenchmark was run; boot timing differences
+under concurrent host load are not presented as lock-overhead measurements.
+
+## 21. Known limitations
+
+Eight-node printed cycle tail, bounded 320 classes/held stacks, no global
+snapshot protocol for concurrent diagnostics/statistics, no TSan validator
+model, no transitive IRQ validation, no callback-wait graph or IRQ-restore
+ownership validation. NMI/#MC instrumentation remains unsupported without
+proving raw-lock reentrancy. Release-with-lockdep was built, not exercised.
+
+## 22. Deferred work
+
+Updated main inventory with the fixed defects and remaining model gaps.
+UP test validity needs its own correction before claiming full cross-
+configuration validation. The disabled boot's process-rlimit failure
+was exit 19 from rlimit-unpriv: 80 console writes over roughly 1.4 s let
+the 64-token bucket refill at 16/s, so its assumed instantaneous burst
+observed no EAGAIN. Rerun passed without changing assertions; this is a
+timing-sensitive test, not evidence that lockdep code executes when disabled.
+
+## 23. Remaining concurrency risks
+
+Wait-for-callback edges, IRQ-safe chains through another lock, interrupted
+diagnostic readers, long preemption-disabled populate sections and formal
+memory-order validation remain separate correctness questions. Runtime
+coverage only detects executed relationships. Copied source names do not
+make numeric acquisition addresses symbolize after a module is unmapped.
+
+## 24. Recommended next subsystem
+
+Finish validator context/dependency modeling: successful trylock IRQ usage
+and transitive IRQ-safe→unsafe relationships, with deterministic failure
+tests, then callback wait dependencies and fatal/NMI diagnostics. Before
+expanding this implementation, correct the demonstrated UP harness
+prerequisites and obtain a green full UP run without removing progress or
+cross-CPU correctness assertions.

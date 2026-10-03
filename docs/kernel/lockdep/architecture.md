@@ -1,5 +1,8 @@
 # Lock discipline and lockdep: architecture
 
+Start with [locking-rules.md](locking-rules.md) for canonical primitive,
+context, ordering, callback and metadata rules.
+
 Milestone 3 of the post-roadmap plan (`docs/audit/2026-09-post-roadmap-audit.md`
 §19), the subsystem the lifetime pass named as its successor
 (`docs/audit/2026-09-lifetime-quiesce-report.md` §9).
@@ -14,7 +17,7 @@ Milestone 3 of the post-roadmap plan (`docs/audit/2026-09-post-roadmap-audit.md`
             ▼
   lockdep_acquire / lockdep_release / lockdep_might_sleep              (kernel/core/lockdep.c, debug builds)
             │
-            ├── lock classes            one per init-site name, cached in the lock (`class` field)
+            ├── lock classes            one per name contents and kind, cached in the lock (`class` field)
             ├── held-lock stacks        per CPU for spinlocks (interrupt context nests on top),
             │                           per thread for mutexes (held across sleeps)
             ├── dependency graph        class×subclass bitmap, "A was held when B was taken";
@@ -90,3 +93,8 @@ and the aarch64 IPI path taking the GIC lock under the run-queue lock.
 
 Documents: `design.md` (data structures, algorithm, the fixes),
 `api.md`, `invariants.md`, `testing.md`.
+
+The October hardening pass copies class names into kernel-owned storage,
+so graph reports survive module unload, and bounds diagnostic path output.
+See `docs/audit/2026-10-03-lock-discipline-audit.md` for remaining model
+limits and `LOCKDEP=0/1` for the independently selectable configuration.
