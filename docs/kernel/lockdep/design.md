@@ -131,6 +131,8 @@ permanent graph or acquisition-path cost. The raw lock and disabled IRQs
 cover only the copy, never allocation, printing, or freeing. Allocation
 failure prints an explicit unavailable message. This API requires a
 working allocator and raw lock and is not used by panic/NMI diagnostics.
+Panic calls `lockdep_dump_held()` to print the current CPU's spinlock stack
+and the current thread's mutex stack; it does not dump the dependency graph.
 Held-stack diagnostics and statistics retain their separate consistency
 limits; the graph snapshot does not freeze global execution state.
 

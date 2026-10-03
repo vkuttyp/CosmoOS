@@ -636,3 +636,11 @@ Validation of the review fixes:
   were removed and the normal x86 image rebuilt successfully.
 - `git diff --check` passed. Remote CI still needs to validate the pushed
   revision; one local passing guard boot is not a claim about all schedules.
+
+The subsequent inventory review correctly identified a documentation
+error: panic reports have held-lock diagnostics, not a best-effort graph
+dump. Corrected the inventory and PR description, and made the distinction
+explicit in the design document. Cross-checked the API, invariants,
+diagnostics documentation, and audit descriptions against `panic_common`
+and all `lockdep_dump_graph` call sites: panic calls `lockdep_dump_held`,
+while the normal graph dump is called at the end of the self-test run.
