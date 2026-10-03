@@ -1330,3 +1330,458 @@ all ten rows per boot, ordered min/median/max and disabled class counts.
 `git diff --check` passed. Host tests were not repeated for this kernel
 benchmark-only increment. The inventory now distinguishes this completed
 live-graph baseline from remaining graph-size, contention and native work.
+
+## Contention-test failure cleanup after PR #306
+
+Base: merged PR #306 (`6201baff`). Phase 1, while investigating remaining
+contention coverage, found a concrete cleanup bug in the existing
+`lockdep-contention` self-test. Its callback-window `CHECK` ran immediately
+after acquiring the contended spinlock. If the timer had not fired, the
+macro returned without unlocking, cancelling its stack timer or joining
+the holder. This leaked preemption disable and left a published timer in
+expired stack storage. The readiness assertion also returned without
+draining the created worker. The successful path had an unbounded join.
+
+Phase 2 preserves the original test outcome while making cleanup precede
+any returning failure. IRQ-state validation happens before worker/timer
+publication. Atomic handshake flags are reset before creation and read
+atomically. After acquisition the timer observation is saved, the lock is
+released, the timer synchronously cancelled, and holder exit completion
+awaited with a one-second guard before joining. Only then is the saved
+observation checked. A late callback cannot retroactively satisfy the
+test. Readiness or exit timeout fails stop with the creator reference
+retained, rather than returning or entering an unbounded join. Selection
+of another CPU now defaults to self so the skip also covers no other
+online CPU. This does not bound a spin primitive waiting on a stopped
+owner or guarantee the callback window under arbitrary host delays.
+
+Phase 3 adds `tools/lockdep-contention-probe.py`, which builds temporary
+clones and checks exact fatal diagnostics and emulator failure exit.
+The missed-timer mode delays the callback to five seconds; `--old-order`
+restores the early assertion before cleanup. Both architectures reproduce
+the old failure state (`held=1 cancelled=0 joined=0 irq=1 preempt=1`) and
+validate the fixed failure state (`held=0 cancelled=1 joined=1 irq=1
+preempt=0`). The fixed test still reports its missed callback. Targeted
+old/fixed probe times were 16.8/12.5 s on x86-64 and 15.6/19.0 s on AArch64.
+Separate x86 probes withhold readiness or exit and require the named
+timeout panic; they passed in 13.2/13.6 s. No probe is a full-suite pass.
+No delayed timer, stalled worker or probe panic enters normal builds.
+
+Probe artifacts: `out/lockdep-cont-probe-{x86_64,aarch64}-missed-timer-{old,fixed}/`
+and `out/lockdep-cont-probe-x86_64-{readiness,exit}-fixed/`, each with
+`build.log` and `boot.log`; top-level `-result.log` files record outcomes.
+Both release kernels built, with logs at
+`out/lockdep-cont-cleanup-{x86_64,aarch64}-release.log`. Python syntax
+compilation and `git diff --check` passed. Host tests were not repeated
+because the change is confined to the kernel self-test and probe tool.
+
+The x86-64 four-CPU full boot passed all 421 self-tests and the complete
+harness in 139.7 s (`out/lockdep-cont-cleanup-x86_64{,-result}.log`). The
+initial AArch64 run passed the modified contention test in 21 ms but
+failed the harness: `syscall-fuzz` took 13,055 ms against its 8,000 ms
+budget and emitted the no-progress watchdog diagnostic at 8,005 ms.
+The watchdog showed the fuzzing process running and logging syscalls;
+the fuzzer later reported success and the kernel shut down normally.
+Probe builds/boots overlapped on the host. This is a recorded validation
+failure, not evidence establishing host load as its cause. Its artifacts
+are `out/lockdep-cont-cleanup-aarch64{,-result}.log`; the budget and
+watchdog checks were not changed.
+
+An isolated rerun of the unchanged AArch64 image passed all 421 self-tests
+and the full harness in 130.5 s. `lockdep-contention` remained 21 ms and
+`syscall-fuzz` took 3,840 ms without a watchdog marker. Logs:
+`out/lockdep-cont-cleanup-aarch64-retry{,-result}.log`. The initial
+budget failure remains recorded; one successful rerun does not establish
+its cause. The inventory now reflects PR #306's merged status and this
+local cleanup continuation separately.
+
+## Queued mutex acquisition continuation
+
+Phase 1 adds `lockdep-mutex-bench`, an equal-workload debug LOCKDEP=0/1
+measurement of the public mutex acquisition path under verified queue
+contention. The owner holds a private mutex before releasing a worker's
+start gate, yields until the real wait queue is nonempty, holds for another
+1 ms, then releases. The waiter measures `mutex_lock` on its pinned CPU
+through ownership, checks protected-data publication and ownership, then
+unlocks. The owner drains exit completion before joining or checking any
+failure. Queue and exit guards are one second. An exit timeout retains
+the worker reference and stack probe and fails stop. Two warmups precede
+nine samples; the same mutex and two lock classes are reused. Thread
+creation, validation, unlock and join are outside the timed acquisition.
+The UP case yields to a waiter on the same CPU and uses the same queue
+protocol. This proves the slow path was entered without assuming that a
+fixed delay schedules the waiter; it does not prescribe context switches.
+
+The result includes controlled holding time, scheduling and wakeup, not
+only lockdep instructions. The hold is never subtracted and no performance
+threshold or overhead ratio determines success. Waiters use the default
+priority; no priority donation workload is deliberately induced. Broader
+mutex workloads, contended spin, graph-size sweeps, PI and native costs
+remain open.
+
+Phase 2 exercised failure cleanup in temporary x86 clones. Withholding
+the start gate until the queue guard expires must return failure only
+after an unlocked mutex, empty queue, joined worker and normal IRQ and
+preemption state are observed. Withholding exit after worker unlock must
+produce the explicit waiter-exit retention panic. Both targeted harnesses
+passed in 14.7/13.9 s, requiring exact diagnostics and failure exit.
+Artifacts: `out/lockdep-mutex-bench-probe-{queue,exit}/{build,boot}.log`
+and corresponding top-level `-result.log` files. Neither is a full-suite
+pass, and the injections are not committed.
+
+Full validation also exposed a separate pre-existing fixture lifetime
+bug. `elf-text-ro` and `elf-data-private` still ran `init --block`, despite
+the shared-text fixture documentation requiring `--spin`. That program
+reads one console byte and exits with status 5; the process reference
+does not retain its address space past exit. The initial AArch64 run
+reported a keyboard-input mismatch, then the later text fixture exited
+with status 5 before `vm_user_protect(p->space, ...)`, causing a kernel
+NULL-space fault at offset 0xd0. Both fixtures now use the existing
+`--spin` mode and retain their explicit kill/wait/put cleanup. Protection,
+zero-tail and private-data assertions are unchanged. The keyboard mismatch
+preceded creation of the text fixture; this fix prevents residual console
+input from ending the fixture, and does not claim to explain that mismatch.
+
+Initial validation failures are retained in
+`out/lockdep-mutex-bench-{x86_64,aarch64}-on{,-result}.log`: x86's
+`process-user` exceeded its internal 15-second bound (19,054 ms); AArch64
+had the keyboard mismatch and NULL-space panic. After the fixture fix,
+an isolated AArch64 boot passed the benchmark and both ELF inspections,
+but `syscall-fuzz` took 10,135 ms against its 8,000 ms budget and emitted
+the watchdog marker (`out/lockdep-mutex-bench-aarch64-on-fixed{,-result}.log`).
+This budget failure was also seen before this increment (recorded above);
+budgets and watchdog checks were not relaxed. Later matrix runs are
+serialized, and their results are recorded separately below.
+
+Phase 3's final serialized matrix passed all 422 self-tests and the full
+harness in all six configurations. Guest nanoseconds for the nine queued
+acquisitions, including the controlled 1 ms hold:
+
+| Architecture | Lockdep | CPUs | Min | Median | Max | Full boot seconds |
+|---|---|---:|---:|---:|---:|---:|
+| x86-64 | on | 4 | 1066412 | 1070426 | 1078451 | 133.5 |
+| x86-64 | off | 4 | 1038246 | 1040249 | 1048258 | 110.9 |
+| AArch64 | on | 4 | 1060000 | 1064992 | 1156992 | 142.7 |
+| AArch64 | off | 4 | 1030000 | 1032000 | 1034992 | 122.2 |
+| x86-64 | on | 1 | 1046628 | 1047628 | 1056634 | 115.8 |
+| AArch64 | on | 1 | 1046992 | 1049008 | 1055008 | 117.5 |
+
+Logs: `out/lockdep-mutex-bench-{x86_64,aarch64}-{on,off}-final.log`,
+`out/lockdep-mutex-bench-{x86_64,aarch64}-on-up.log`, and corresponding
+`-result.log` files. A parser verified one measurement row per boot, nine
+samples, configured hold, enabled state, placement, ordered min/median/max,
+422-test success and full harness success. Both release kernels built
+(`out/lockdep-mutex-bench-{x86_64,aarch64}-release-result.log`). No host
+suite was repeated for these kernel-test-only changes. Final green boots
+do not erase the earlier failures or establish their timing-related causes.
+
+A targeted AArch64 console-input comparison also reproduced the fixture
+cause independently of the initial keyboard mismatch. Temporary clones
+run the text-inspection fixture first, inject `x\n` into the console, and
+wait 100 ms for child exit. The old `--block` mode exits with status 5 and
+a NULL address space; the fixed `--spin` mode stays alive and completes
+the original protection and zero-tail checks before normal kill/wait/put
+cleanup. The harness requires the exact old-state panic or the successful
+fixture marker plus final result panic, so a skipped test cannot pass the
+fixed control. These expected-failure probes passed in 9.3/9.4 s; they are
+not full-suite boots. Logs: `out/elf-fixture-probe-final-{old,fixed}/{build,boot}.log`
+and `out/elf-fixture-{old,fixed}-final-result.log`. The injected input,
+early test placement and probe panics are not committed. Temporary probe
+setup/build failures were corrected before these successful runs; they
+provided no regression evidence. `git diff --check` passed.
+
+## Continuation: same-CPU raw-lock re-entry and panic output
+
+Phase 1 replaces the validator's exchange-and-spin word with an owner
+word: zero means free, otherwise CPU plus one. The successful acquire CAS
+publishes ownership in the same operation; a separate owner store would
+leave an NMI window. Local IRQ masking prevents migration until the
+release store. A failed CAS observing this CPU as owner invokes the exact
+`lockdep: graph raw lock re-entry on CPU ...` panic without releasing or
+stealing the interrupted owner's lock. Other CPUs keep the usual waiting
+behavior. This adds no table, class, lock-object field or release-build
+validator cost. It does add CPU identification and a failed-CAS ownership
+comparison to enabled builds; existing measurements are not a quantified
+performance claim for this new implementation.
+
+Phase 2 found and corrected a prerequisite in fatal diagnostics. The
+initial x86 NMI and direct-statistics probes timed out before printing the
+diagnostic. Panic already bypassed the console lock, but `kprintf` still
+acquired the tracked log-ring lock. Bypassing the ring alone still timed
+out: a debugger captured the first panic at the intended raw-lock re-entry
+and the second panic inside `vcon_write`'s tracked `virtio-console` lock.
+Repeated recursion eventually exhausted the IST stack and corrupted the
+raw word. The captured stacks are in `out/lockdep-reentry-lldb{,2}.log`;
+initial failures are in `out/lockdep-reentry-{direct,nmi-acquire-busy,
+nmi-acquire-busy-fixed}-result.log`. Diagnostic boot runs with debugger
+stops are investigation artifacts, not test passes.
+
+The console's irreversible panic-mode flag now uses atomic access and an
+additive `console_in_panic_mode` module export. In that mode logging skips
+ring writes and the VirtIO console returns before touching device/queue
+locks. Serial and framebuffer output remains available, with neither a
+new sink layout nor an ABI version change. Fatal output intentionally no
+longer appends to the ring or VirtIO transport; the ring is not a frozen
+failure-time snapshot. This fixes actual tracked acquisitions on the
+panic output path instead of suppressing raw-lock reports or disabling
+validation globally. General sink faults, sink-list lifetime during
+catastrophic failure and a VirtIO panic transport remain separate concerns.
+
+Phase 3 adds `tools/lockdep-reentry-probe.py`. Isolated builds use the
+working sources and a fresh retained output directory, avoiding dependency
+files that refer to deleted temporary clones. Direct mode exercises normal
+statistics and public spin acquisition under the held raw lock on both
+architectures. x86 NMI mode first completes two software interrupt checks,
+then injects the operation on real APIC delivery. Busy mode interrupts an
+unfinished held-stack update and requires the panic's explicit unavailable
+snapshot. Ring mode injects panic while holding the actual log-ring lock,
+with lockdep enabled or disabled. Probes require the exact diagnostic,
+correct context, completed panic output and failure exit; an unrelated
+panic or timeout cannot pass. Old-lock and old-ring controls restore the
+unsafe implementations and deliberately fail that same harness. One ring
+probe setup initially omitted the panic declaration; its compile failure
+was corrected before the runtime comparisons and is not regression evidence.
+
+This increment detects and terminates same-CPU raw-lock recursion. It does
+not make arbitrary NMI/#MC tracked acquisitions supported, make held-stack
+writers reentrant, detect cross-CPU raw-lock cycles, bound waits on stopped
+owners, or add AArch64 NMI delivery. The source header and concurrency
+section no longer claim unrestricted reentrancy safety. Read-only NMI
+snapshot tests remain part of normal boots.
+
+The ten corrected expected-panic probes passed:
+
+| Probe | x86-64 seconds | AArch64 seconds |
+|---|---:|---:|
+| Direct statistics re-entry | 12.0 | 15.8 |
+| Direct spin acquisition, busy held stack | 11.9 | 15.4 |
+| Real NMI statistics re-entry | 5.2 | unsupported |
+| Real NMI spin acquisition, busy held stack | 5.2 | unsupported |
+| Held-ring panic, LOCKDEP=1 | 5.5 | 8.8 |
+| Held-ring panic, LOCKDEP=0 | 5.2 | 8.6 |
+
+The x86 old-lock NMI control timed out and failed the harness in 34.1 s;
+the old-ring LOCKDEP=0 control likewise failed in 34.6 s. Both reached
+their explicit probe-armed markers but lacked the required completed panic
+report. These are successful negative-control observations, not passing
+boots. Final probe result logs are
+`out/lockdep-reentry-{x86_64,aarch64}-{direct-stats,direct-acquire,ring-ld1,ring-ld0}-result.log`,
+`out/lockdep-reentry-nmi-{stats,acquire-busy-final,old-lock}-result.log`,
+and `out/lockdep-reentry-ring-old-ld0-result.log`. Each names the retained
+`run-*` directory with its image, build and boot logs. No injected panic or
+handler change is present in the production kernel source.
+
+The final serialized normal-boot matrix passed all 422 self-tests and the
+full harness in every configuration. No normal boot required a retry or
+relaxed budget in this increment:
+
+| Architecture | Lockdep | CPUs | Full boot seconds |
+|---|---|---:|---:|
+| x86_64 | on | 4 | 132.7 |
+| x86_64 | on | 1 | 114.4 |
+| x86_64 | off | 4 | 107.4 |
+| aarch64 | on | 4 | 133.7 |
+| aarch64 | on | 1 | 119.1 |
+| aarch64 | off | 4 | 122.0 |
+
+Logs are `out/lockdep-reentry-{x86_64,aarch64}-{on-smp,on-up,off-smp}.log`
+and corresponding `-result.log` files. A parser checked the exact 422-test
+success marker, full harness pass and absence of kernel panic in all six
+logs. Both release kernels built successfully, and `gmake host-test`
+passed the existing ASan/UBSan suites and boot-harness unit tests. These
+host suites do not execute the new kernel raw-lock implementation; that
+boundary is exercised by the kernel probes and normal boots. Release and
+host results are `out/lockdep-reentry-{x86_64-release,aarch64-release,host}-result.log`.
+`out/lockdep-reentry-validation-progress.log` records the serialized run,
+including the corrected ring-probe setup failure. Python syntax validation
+and `git diff --check` passed. The pre-fix panic-path failures remain
+recorded above; final green results do not erase them.
+
+## PR #307 follow-up: NAT expiry-test completion race
+
+The x86-64 harness-retry job in CI run `37150697619` failed
+`net-nat` at `ns1.entries == 0 && ns1.expired > ns0.expired`, after
+1,323 ms. The failure is the same assertion recorded in the September 20
+flake history. This run did not print the counter values at failure;
+the mechanism below is established by source inspection and a controlled
+reproduction of that assertion, rather than inferred from duration alone.
+
+`nat_flush()` clears entries but leaves lifetime statistics intact. The
+flood wait incorrectly compared absolute `out_new + out_drop_share`
+against its 264 injections. Earlier UDP, TCP, ICMP and ICMP-error setup
+had already created four mappings. Thus 260 flood outcomes could satisfy
+the wait while four packets were still pending. After the test aged the
+existing entries using a future timestamp, those packets could create
+fresh entries before the statistics check. Periodic aging only removes
+entries and cannot create a mapping. This is a test completion race; the
+production aging implementation requires no change.
+
+The wait now subtracts the pre-flood baseline, checks each injection, and
+asserts exactly 264 outcomes before aging. Its existing 200 × 10 ms polling
+bound and quota/expiry assertions remain. The completion sum accounts for
+NAT state changes, not for all downstream transmission work. The success
+message now describes the actual per-guest quota being tested.
+
+`tools/nat-expiry-probe.py` builds isolated clones and pauses the final four
+real receive packets before entering NAT translation, without holding a
+NAT lock or receive-hook quiescence section. It establishes the state
+baseline=4 / completed=260 / pending=4 before evaluating the wait. The old
+predicate exits immediately; after aging, releasing the tail creates four
+entries and fails the original expiry assertion. The fixed predicate
+refuses that state, releases the tail and accounts for all 264 outcomes;
+the original expiry assertion then passes with zero entries. A stalled
+control never releases the tail and requires the new completion assertion
+to fail before aging. Exact diagnostics and panic exit are required;
+unrelated panics or gate timeouts cannot pass. Production sources contain
+none of these injected gates or early test placement.
+
+Both old/fixed comparisons passed on x86-64 and AArch64; the stalled
+control passed on x86-64. Logs and retained image directories are named by
+`out/nat-expiry-{x86_64,aarch64}-{old,fixed}-result.log` and
+`out/nat-expiry-x86_64-stalled-result.log`. The first x86 fixed probe
+reported successful test completion and zero entries, but the harness
+incorrectly expected `reason=none` rather than the runner's empty success
+reason. The probe now normalizes successful reasons; the corrected probe
+passed. The initial harness failure remains in
+`out/nat-expiry-x86_64-fixed-initial-result.log` and was not counted as a
+passing run. The historical flake entries and network test documentation
+now record the established cause and correction.
+
+Full-boot follow-up validation:
+
+- x86-64 `gmake -j4 ARCH=x86_64 test-harness-retry` passed all 422
+  self-tests and the complete harness (134.7 s). The network harness
+  recovered on attempt two after the deliberately broken first attempt.
+  Log: `out/nat-expiry-x86_64-hbreak-result.log`.
+- AArch64 `gmake -j4 ARCH=aarch64 test-chaos` completed with one failure:
+  `irq-route`'s existing `hits >= 5` fixed-interval interrupt count
+  (`schedtest.c:282`, 71 ms). `net-nat` passed in 1,358 ms and
+  `net-nicbench` in 2,127 ms. This is a failed full run, preserved in
+  `out/nat-expiry-aarch64-chaos-result.log`; it does not establish a fix
+  for the earlier CI `net-nicbench` timing failure. The IRQ sighting is
+  also recorded in the flake history. No IRQ or benchmark checks changed.
+- AArch64 standard `gmake -j4 ARCH=aarch64 test` passed all 422
+  self-tests and the complete harness (136.9 s); `net-nat` passed in
+  1,426 ms. Logs: `out/nat-expiry-aarch64-normal-result.log` and
+  `out/nat-expiry-aarch64-normal.log`. This pass does not replace the
+  failed chaos result above.
+
+Python syntax compilation and `git diff --check` passed. The production
+NAT implementation, timeouts and test budgets are unchanged.
+
+## PR #307 follow-up: IRQ delivery-count window (2026-10-04)
+
+The AArch64 chaos run during NAT validation failed `irq-route` at
+`hits >= 5` in 71 ms. That log provides neither the observed hit count
+nor a trace of timer-source assertions, so it cannot identify the exact
+host scheduling gap. Source inspection establishes that the test assumed
+a minimum delivery rate: it requested 200 Hz, waited 50 ms, then demanded
+five hits. The earlier sightings span both architectures.
+
+On AArch64, `arch_test_periodic_irq_start` uses a kernel timer to raise a
+spare GIC SPI. Its callback rearms relative to the callback's execution,
+and expiry is tick-grained. With a 4 ms tick, a callback rearming for
+5 ms normally needs two more ticks even without host delay, already
+leaving less slack than the old comment's ten expected hits. A late
+callback pushes subsequent assertions back; the tick also skips missed periods rather than delivering every
+elapsed tick. Consequently the nominal source frequency cannot guarantee
+five delivered interrupts in that window. x86 uses the PIT but likewise
+cannot require a descheduled vCPU to observe every nominal period.
+
+`irq-route` now waits for the same five hits, sleeping between checks,
+with `clock_deadline_ns` / `clock_deadline_passed` enforcing a 1 s bound.
+A broken route reports the observed count and returns failure; the
+runner's existing deferred cleanup releases the line and source. Counter
+accesses are atomic because chaos can migrate the test away from the
+IRQ's target CPU. Relaxed ordering suffices: the counter publishes no
+other data. The existing two mask-observation windows, duplicate-request,
+vector and release assertions remain unchanged. No controller, periodic
+source implementation or whole-test watchdog budget changed.
+
+`tools/irq-route-probe.py` runs in isolated clones. Old/fixed modes slow
+the real source to 20 Hz, making the former rate assumption fail while
+still delivering five interrupts within the new bound. This is a
+controlled slower-source comparison, not a replay of the failed host's
+scheduling. The silent mode leaves the line masked and requires the
+zero-hit deadline diagnostic. The broken-mask mode keeps delivery enabled
+at 200 Hz and requires the mask assertion to fail. Each negative requires
+two deferred releases, and every mode then runs `irq-affinity` before
+the expected panic shutdown. AArch64 must deliver to all four CPUs;
+x86 has no manually raisable spare line and explicitly skips affinity.
+A skipped routing test cannot
+satisfy the fixed mode's required delivery-count marker.
+
+All eight controlled probes passed: old, fixed, silent and broken-mask
+on x86-64 and AArch64. Here a negative probe passes only when its expected
+failure, cleanup count and architecture-specific affinity outcome are
+all observed.
+Both fixed probes observed exactly five deliveries. Logs are
+`out/irq-route-{x86_64,aarch64}-{old,fixed,silent,broken-mask}-result.log`,
+with retained images and boot logs in the corresponding `run-*` directory.
+
+The complete AArch64 `test-chaos` boot passed all 422 self-tests and the
+full harness in 138.2 s; `irq-route` passed in 85 ms. Logs:
+`out/irq-route-aarch64-chaos-result.log` and
+`out/irq-route-aarch64-chaos.log`. The earlier failed chaos run remains
+in `out/nat-expiry-aarch64-chaos-result.log`, including its captured boot
+output. This new pass does not erase that observation.
+
+The complete x86-64 standard boot also passed all 422 self-tests and the
+full harness in 138.7 s; `irq-route` passed in 75 ms. Logs:
+`out/irq-route-x86_64-normal-result.log` and
+`out/irq-route-x86_64-normal.log`. Python syntax compilation and
+`git diff --check` passed. After making the probe's affinity marker
+architecture-specific, all eight retained boot logs were checked against
+that additional requirement: real four-CPU delivery on AArch64 and the
+explicit unsupported-source skip on x86.
+
+## PR #307 follow-up: AArch64 CI timing limits (2026-10-04)
+
+[CI run 37154202680, AArch64 job 111294098641](https://github.com/vkuttyp/CosmoOS/actions/runs/37154202680/job/111294098641)
+failed the chaos boot at commit `a2fbf47f`. The ordinary, alternate-GIC
+and protection-capable boots passed in 165.4, 163.6 and 167.2 s.
+Chaos returned success from all 422 self-tests, including `irq-route`
+(85 ms) and `net-nat`, but failed two time limits:
+
+- `net-nicbench` completed in 8,360 ms against the default 8,000 ms.
+  The watchdog captured the second interface's UDP send loop, and the
+  benchmark finished shortly afterward. Its reported UDP rates were
+  6,272 and 2,082 sends/s, with two 10,000-attempt rounds. The workload
+  also includes 2,000 ARP requests per interface and receive drains.
+- Kernel self-tests totaled 137.459 s versus 124–127 s in the passing
+  boots. The shell harness exhausted its 170 s whole-run deadline before
+  advancing to command 15 (`echo after-fg-ok`); QEMU then hit its 180 s
+  limit. The captured log contains exactly 15 newline-prefixed prompts,
+  ends with that fifteenth prompt, and records the foreground sleep's
+  exit with status 130. Thus the final prompt is recognizable and the
+  signal did terminate the job. The log has no per-line host timestamps,
+  so its precise arrival time is not established; a late prompt after
+  deadline exhaustion fits the retained log and the harness's exit path.
+
+The benchmark now has a named 20 s entry in the kernel budget table,
+which drives both the watchdog and harness. Sample counts, ARP assertions,
+receive-drain checks and packet paths are unchanged. This follows the
+existing policy for composite tests, rather than reducing measurement
+work to fit a single-test default. `make test-chaos` now passes an explicit
+240 s total timeout, giving the shell 230 s; ordinary boots remain at
+180 s. Signal-response latency checks and per-test watchdogs remain active.
+No IRQ, NAT, controller or scheduler implementation changed in this fix.
+
+The original artifact is retained under
+`out/ci-37154202680-aarch64/aarch64-debug-chaos/boot-test-chaos.log`.
+An offline replay (`out/ci-budget-replay-result.log`) verifies that the
+archived 8,360 ms duration fails the old budget and fits the explicit one,
+while 20,001 ms still fails. With a controlled clock, the archived
+fifteenth prompt is accepted when time remains and rejected after the
+old deadline. That replay establishes harness behavior, not the original
+prompt's timestamp. The existing budget-parser suite passed all 10 checks.
+
+The updated `gmake -j4 ARCH=aarch64 test-chaos` passed all 422 self-tests
+and the complete harness in 136.7 s. Its launch reports 240 s total,
+the network harness reports 210 s, and the kernel budget line includes
+`net-nicbench=20000`; no watchdog fired. The benchmark completed in
+2,464 ms locally. Logs: `out/ci-budget-aarch64-chaos-result.log` and
+`out/ci-budget-aarch64-chaos.log`. This verifies the configuration and
+full boot locally; it does not reproduce the CI host's slowdown.
+`git diff --check` passed. The prior GitHub x86 job completed successfully;
+the updated AArch64 limits still need the next CI run's validation.

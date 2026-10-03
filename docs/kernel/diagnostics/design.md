@@ -118,6 +118,17 @@ larger than the 24-byte digit scratch is used.
 
 ## panic.c: fatal error reporting
 
+Fatal output uses the console's irreversible panic mode. In this mode
+`kprintf` and `klog` skip log-ring writes as well as the console lock:
+either lock's owner may have been interrupted or stopped, and even an
+uncontended tracked lock could recurse into an interrupted lockdep raw
+critical section. Existing ring contents are left intact; fatal text goes
+directly to eligible sinks. The VirtIO console returns before touching its
+tracked device/queue locks, leaving serial and framebuffer output available.
+`console_in_panic_mode()` is an additive module export for this check; no
+console-sink layout or module ABI version changes. This does not provide a
+panic transport over VirtIO or a snapshot of the ring at the failure instant.
+
 Semantics follow constitution section 56:
 
 | Primitive | Meaning | Returns |

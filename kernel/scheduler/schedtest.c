@@ -210,14 +210,14 @@ bool selftest_timer(const char **reason)
 
 /* --- IRQ routing through the I/O APIC --- */
 
-static volatile unsigned g_pit_hits;
+static unsigned g_pit_hits;      /* handler and test may run on different CPUs */
 
 static void pit_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
     (void)frame;
     (void)arg;
-    g_pit_hits++;
+    __atomic_fetch_add(&g_pit_hits, 1u, __ATOMIC_RELAXED);
 }
 
 /*
@@ -259,7 +259,7 @@ bool selftest_irq_route(const char **reason)
     unsigned flags;
     irq_t gsi = irq_legacy_to_gsi((unsigned)isa, &flags);
 
-    g_pit_hits = 0;
+    __atomic_store_n(&g_pit_hits, 0u, __ATOMIC_RELAXED);
     int rc = irq_request(gsi, pit_handler, NULL, "selftest-pit", flags, raw_cpu_id());   /* a target for the line, not a claim about this thread */
     if (rc == -ENODEV) {
         selftest_release(&g_route_source);
@@ -277,14 +277,25 @@ bool selftest_irq_route(const char **reason)
     CHECK(irq_vector_of(gsi) >= 48);
 
     CHECK(irq_enable(gsi) == 0);
-    udelay(50000);
-    unsigned hits = g_pit_hits;
-    CHECK(hits >= 5);            /* 200 Hz over 50 ms = 10, allow slack */
+    /* Prove repeated delivery, not a minimum interrupt rate. The ARM
+     * source re-arms from a tick callback and a descheduled vCPU can miss
+     * several nominal periods. Leave the source running until five hits
+     * arrive, with a deadline so a broken route still fails. */
+    uint64_t deadline = clock_deadline_ns(MS(1000));
+    unsigned hits;
+    while ((hits = __atomic_load_n(&g_pit_hits, __ATOMIC_RELAXED)) < 5) {
+        if (clock_deadline_passed(deadline)) {
+            kinfo("selftest: irq-route: delivery deadline expired with %u of 5 hits", hits);
+            *reason = "IRQ route did not deliver five interrupts before its deadline";
+            return false;
+        }
+        thread_sleep_ms(1);
+    }
     CHECK(irq_disable(gsi) == 0);
     udelay(20000);
-    unsigned after_mask = g_pit_hits;
+    unsigned after_mask = __atomic_load_n(&g_pit_hits, __ATOMIC_RELAXED);
     udelay(20000);
-    CHECK(g_pit_hits == after_mask);
+    CHECK(__atomic_load_n(&g_pit_hits, __ATOMIC_RELAXED) == after_mask);
 
     CHECK(irq_release(gsi) == 0);
     selftest_forget(&g_route_gsi);   /* released, and checked, by the test itself */

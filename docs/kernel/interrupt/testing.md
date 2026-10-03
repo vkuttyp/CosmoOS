@@ -87,7 +87,8 @@ that the controllers depend on.
 ### `irq-route` self-test (`kernel/scheduler/schedtest.c`)
 
 End-to-end hardware interrupt through the I/O APIC, using the PIT as a
-test source via `arch/testhooks.h` (`kernel/arch/x86_64/pit.c`):
+test source via `arch/testhooks.h` (`kernel/arch/x86_64/pit.c`). AArch64
+uses a spare GIC SPI raised by a rearming kernel-timer callback:
 
 | Step | Proves |
 |---|---|
@@ -96,7 +97,7 @@ test source via `arch/testhooks.h` (`kernel/arch/x86_64/pit.c`):
 | `irq_request(gsi, pit_handler, ...)` == 0 | vector allocated (49 on a fresh boot), handler installed, redirection entry programmed masked |
 | second `irq_request` on the GSI → `-EBUSY` | one owner per line |
 | `irq_vector_of(gsi) >= 48` | dynamic range |
-| `irq_enable`, `udelay(50 ms)`, `hits >= 5` | unmask → IOAPIC → LAPIC → vector → `interrupt_dispatch` → handler, with `arch_irqc_eoi` after each (10 expected, 5 required for TCG slack) |
+| `irq_enable`, wait for five hits with a 1 s deadline | repeated delivery through the controller, vector dispatch and handler, with EOI after each; no minimum interrupt rate assumed |
 | `irq_disable`, no new hits over a further 20 ms window | mask stops delivery |
 | `irq_release` == 0, `irq_vector_of` == -1 | handler removed, vector returned |
 | `arch_test_periodic_irq_stop()` | PIT quiesced |
@@ -104,6 +105,26 @@ test source via `arch/testhooks.h` (`kernel/arch/x86_64/pit.c`):
 The test skips itself (logging why) when there is no periodic ISA
 source or no I/O APIC covers the GSI, so it does not fail on platforms
 that lack them; QEMU q35 has both.
+
+The delivery wait sleeps between atomic counter reads and uses the
+migration-safe deadline API. A missing route fails with the observed hit
+count; the existing defer list then releases both the line and source.
+The former five-hits-in-50-ms check could fail when timer callbacks or
+vCPUs were delayed. AArch64 rearms the source from each callback, so the
+nominal 200 Hz is not a guaranteed delivery rate. The mask windows and
+five-delivery threshold remain unchanged; this is not a latency benchmark.
+
+`python3 tools/irq-route-probe.py --arch aarch64 --mode old` slows the
+real source to 20 Hz and requires the former count check to fail.
+`--mode fixed` requires the same slow source to pass the bounded wait.
+`--mode silent` leaves the line masked and requires the delivery deadline
+to fail at zero hits; `--mode broken-mask` omits masking at the normal
+rate and requires the unchanged mask check to fail. Every mode runs the
+runner's deferred cleanup and then `irq-affinity`: on AArch64 it must
+deliver to all four CPUs; x86 logs its existing unsupported-source skip.
+Exact diagnostics and panic shutdown are required, not
+just a nonzero exit. Both architectures are supported; mutations stay
+in temporary clones, with logs/images under `out/irq-route-*/run-*`.
 
 ### Static analysis
 

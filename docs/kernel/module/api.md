@@ -79,10 +79,9 @@ gained a `class` field for the lock-order checker, which changes the size
 of every exported structure embedding one. An older module is refused by
 `modelf_check_info`.
 
-The kernel image exports 135 symbols (Phase 5's 43, the Phase 6 device,
-PCI, DMA, block, entropy and console-sink interfaces, the Phase 8 mbuf
-and network-interface surface a NIC driver needs, and the lifetime pass's
-quiescence, timer and object interfaces). Adding one is compatible;
+The exports include device, PCI, DMA, block, entropy and console-sink
+interfaces, the mbuf and network-interface surface a NIC driver needs,
+and quiescence, timer and object interfaces. Adding one is compatible;
 removing or changing one bumps the version.
 
 | Area | Symbols |
@@ -99,7 +98,7 @@ removing or changing one bumps the version.
 | PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
 | Block (`kernel/blk.h`) | `blk_register`, `blk_register_named`, `blk_unregister`, `blk_submit`, `bio_complete`, `bio_segment`, `blk_read`, `blk_write`, `blk_write_flags`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
-| Console (`kernel/console.h`) | `console_register`, `console_unregister` |
+| Console (`kernel/console.h`) | `console_register`, `console_unregister`, `console_in_panic_mode` (additive; lock-taking sinks must skip their transport during fatal output) |
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
 | Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_rx_on`, `net_flow_hash`, `netif_set_ipv4`, `netif_set_up`; `m_csum_complete` (`kernel/net/cksum.h`) |
 

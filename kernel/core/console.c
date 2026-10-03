@@ -12,7 +12,7 @@
 
 static struct console_sink *g_sinks;
 static spinlock_t g_console_lock = SPINLOCK_INIT("console");
-static volatile bool g_panic_mode;
+static bool g_panic_mode;
 
 void console_register(struct console_sink *sink)
 {
@@ -56,7 +56,7 @@ static void write_unlocked(const char *s, size_t len)
 
 void console_write(const char *s, size_t len)
 {
-    if (g_panic_mode) {
+    if (console_in_panic_mode()) {
         write_unlocked(s, len);
         return;
     }
@@ -82,10 +82,16 @@ void console_puts(const char *s)
 
 void console_set_panic_mode(void)
 {
-    g_panic_mode = true;
+    __atomic_store_n(&g_panic_mode, true, __ATOMIC_RELEASE);
+}
+
+bool console_in_panic_mode(void)
+{
+    return __atomic_load_n(&g_panic_mode, __ATOMIC_ACQUIRE);
 }
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(console_register);
 EXPORT_SYMBOL(console_unregister);
+EXPORT_SYMBOL(console_in_panic_mode);

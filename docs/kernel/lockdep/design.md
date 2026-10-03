@@ -121,6 +121,13 @@ Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
 tracked. `lockdep_core_add_edge` requires that caller serialization; its
 atomic bitmap write supports unlocked readers, not concurrent writers.
+The raw word is zero when free and otherwise contains the owning CPU plus
+one. An acquire CAS publishes ownership atomically; no separate owner
+store leaves an NMI window. IRQ masking prevents migration until release.
+An unsuccessful CAS that observes this CPU as owner panics with
+`lockdep: graph raw lock re-entry on CPU ...` instead of spinning on the
+interrupted owner. Other CPUs still wait normally. The panic path uses
+bounded held-stack snapshots and does not acquire this raw lock.
 Normal graph dumps allocate private storage before taking the raw lock,
 copy the complete bounded graph under it, and print from that snapshot
 after releasing it. Counts, metadata, and edges therefore describe one
@@ -214,7 +221,10 @@ with real local-APIC delivery while the graph raw lock is held, including
 an interrupted held-stack update. Current lockup NMI sampling and corrected
 machine-check handlers avoid tracked locking. General lockdep writer
 instrumentation from NMI/#MC remains unsupported; passing the snapshot
-test does not make the graph raw lock reentrant.
+test does not make the graph raw lock reentrant. Same-CPU raw-lock re-entry
+now fails stop, including from NMI, but this is not permission to take
+tracked locks in NMI/#MC handlers. Re-entry outside a raw critical section,
+held-stack writer nesting, and cross-CPU wait cycles remain unsupported.
 
 The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
@@ -403,11 +413,13 @@ held is a report.
 
 ## Concurrency
 
-The checker's raw lock (`g_lockdep_lock`, irqsave, untracked) covers the
+The checker's raw lock (`g_raw`, irqsave, untracked) covers the
 class table and the graph. Held stacks are per CPU (written only by that
 CPU) and per thread (written only by that thread). Class `usage` bits are
-set under the raw lock. The checker is re-entrancy safe: it takes no
-tracked lock and allocates nothing.
+set under the raw lock. Acquisition tracking takes no tracked lock and
+allocates nothing. Same-CPU raw-lock recursion fails stop; arbitrary
+NMI/#MC writer reentrancy is unsupported. Normal graph dumps allocate
+private snapshot storage before acquiring the raw lock.
 
 ## Memory
 
