@@ -1179,3 +1179,44 @@ exit, completing in 8.1 s; it was not a full-suite pass. Logs:
 source/images and its mutation is not committed. This tests the missing
 EOI failure and retention path; other cleanup failures were reviewed,
 not injected. `git diff --check` passed.
+
+## Interrupt boundary continuation after PR #305
+
+This increment follows the local unhandled-IPI work. Phase 1 closes the
+explicit out-of-range dispatcher testing gap using the actual
+`kernel/interrupt/interrupt.c` under the existing host shims. Tests use
+both a 16-vector architecture and the full 1344-slot capacity, dispatch
+the last valid slot, and require `panic_frame` for the first invalid
+vector and `UINT_MAX`, preserving the supplied frame pointer and exact
+diagnostic. A NULL frame is checked separately. Oversized architecture
+counts of 1345 and `UINT_MAX` must call the initialization panic. Panic
+interception is confined to the single-threaded setup phase; the table
+is reinitialized after each intercepted initialization failure.
+
+Phase 2 checks synchronous-removal wrapper behavior: invalid vectors,
+NULL/wrong functions, and absent registrations fail without a grace
+period; failed mutations preserve a live handler. Both successful sync
+variants unpublish before the stub grace period and count synchronization
+exactly once afterwards. Dispatch counts remain cumulative through
+unregistration and record reuse. These assertions supplement the existing
+64-round competing-writer/dispatcher/diagnostic-reader test.
+
+Phase 3 validation passed `gmake host-test` (all host ASan/UBSan tests and
+boot-harness Python checks) and `gmake host-test-interrupt-tsan`. Logs:
+`out/interrupt-boundaries-host.log` and
+`out/interrupt-boundaries-tsan.log`. Three temporary ASan/UBSan source
+mutations each failed at the intended assertion: dispatch `>=` changed
+to `>`, disabled oversized-init guard, and synchronization even after
+failed removal. Logs: `out/interrupt-boundaries-negative-dispatch-off-by-one.log`,
+`out/interrupt-boundaries-negative-oversized-init.log`, and
+`out/interrupt-boundaries-negative-failed-removal-sync.log`. Mutated
+sources and binaries were isolated in a temporary directory and removed.
+
+Production kernel code is unchanged in this increment; no additional
+QEMU boots or architecture builds were run. The host panic shim validates
+the dispatch/init decision and diagnostic, not panic rendering or CPU
+shutdown. Stub synchronization checks wrapper ordering, not real epoch
+completion. The previous increment's cross-architecture integration
+evidence and the remaining NMI/callback concurrency gaps still apply.
+The inventory and interrupt test/invariant documents now reflect this
+bounded coverage. `git diff --check` passed.
