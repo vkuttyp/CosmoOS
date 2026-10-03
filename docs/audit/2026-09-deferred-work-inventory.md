@@ -644,7 +644,10 @@ path. A threaded host graph model now covers publication, serialized
 writers, and unlocked diagnostic readers under ASan/UBSan and TSan;
 kernel interrupt/held-stack/callback protocols remain outside that model.
 Normal graph dumps now copy a private graph under the raw writer lock,
-so their counts and edge lists are consistent. NMI/#MC raw-lock reentrancy,
+so their counts and edge lists are consistent. Panic reports now name the
+actual current thread and IRQ/preemption nesting instead of always claiming
+early boot; the deliberate crash harness requires that context.
+NMI/#MC raw-lock reentrancy,
 concurrent held-stack diagnostics and global statistics snapshots,
 generalized callback waits, raw IRQ-restore pairing, and isolated
 performance measurement remain open. See

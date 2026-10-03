@@ -12,8 +12,10 @@
 #include <kernel/log.h>
 #include <kernel/lockdep.h>
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
 #include <kernel/printf.h>
 #include <kernel/smp.h>
+#include <kernel/thread.h>
 
 #include <arch/backtrace.h>
 #include <arch/cpu.h>
@@ -74,6 +76,14 @@ panic_common(const struct arch_trap_frame *frame, const char *fmt, va_list ap)
         arch_cpu_halt_forever();
     }
 
+    /* IRQs are masked: current and this CPU's nesting state cannot move.
+     * Capture before stopping peers or printing, without scheduler locks
+     * or allocation. The current thread remains alive on this CPU. */
+    struct percpu *pc = raw_this_cpu();
+    struct thread *t = pc->current;
+    unsigned irq_depth = pc->irq_depth;
+    int preempt_count = pc->preempt_count;
+
     /* Stop the other CPUs before printing so they cannot interleave or
      * keep mutating the state being reported, then drop the console lock
      * (one of them may have been holding it). */
@@ -82,7 +92,10 @@ panic_common(const struct arch_trap_frame *frame, const char *fmt, va_list ap)
 
     kprintf("\nKERNEL PANIC: ");
     kvprintf(fmt, ap);
-    kprintf("\nCPU: %u  context: boot (no threads yet)\n", arch_cpu_id());
+    kprintf("\nCPU: %u  context: %s  thread: %u '%.*s'  irq_depth: %u  preempt_count: %d\n",
+            cpu, irq_depth ? "interrupt" : t ? "thread" : "boot",
+            t ? (unsigned)t->tid : 0u, THREAD_NAME_MAX, t ? t->name : "(none)",
+            irq_depth, preempt_count);
 
     if (frame != NULL)
         arch_trap_frame_dump(frame);

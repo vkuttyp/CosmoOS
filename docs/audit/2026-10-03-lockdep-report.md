@@ -436,3 +436,32 @@ This normal diagnostic API requires a working allocator and raw lock.
 Panic/NMI paths do not call it. Concurrent remote held-stack inspection,
 global statistics consistency, and NMI/#MC reentrancy remain unresolved;
 a consistent graph alone does not freeze those execution states.
+
+## Panic execution-context increment
+
+The AArch64 CI panic-path log exposed a stale diagnostic: it reported
+`context: boot (no threads yet)` while its held-lock section named `kmain`.
+`panic_common` printed that boot label unconditionally. It now captures
+the local current thread, IRQ depth, and preemption count after masking
+interrupts and before stopping peers or printing. The report distinguishes
+thread, interrupt, and early-boot context, and prints thread ID and a bounded
+name alongside nesting counts. No allocation or scheduler lock is added.
+This improves fatal locking/atomic-context diagnostics without claiming
+NMI/#MC reentrancy or safety for corrupt current-thread pointers.
+
+Both deliberate fault harness modes now require the known `kmain` thread
+context with zero IRQ depth and preemption count. The previous CI output
+is rejected by this marker, closing the validation gap that let the stale
+label pass. Synchronous exceptions are distinguished by their trap dump;
+they do not imply execution in an interrupt handler.
+
+Validation: four-CPU debug `test-crash` passes on x86-64 (106.7 s) and
+AArch64 (113.2 s), including all 416 self-tests followed by the deliberate
+page fault. The panic names thread 1 `kmain`, with both nesting counts
+zero, on CPU 2 and CPU 1 respectively. AArch64 release `test-wxn` also
+passes (8.7 s), verifying the context with lockdep disabled. Logs are
+`out/panic-context-{x86_64,aarch64}-result.log`, their corresponding
+`out/<arch>-debug-crash/boot-test-crash.log`, and
+`out/aarch64-release-wxn/boot-test-wxn.log`. Early-boot and IRQ-context
+branches were inspected but not exercised by these deliberately
+thread-context faults. `git diff --check` passes.

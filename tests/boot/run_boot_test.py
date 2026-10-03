@@ -525,7 +525,14 @@ else:
         r"^RIP=[0-9a-f]{16} CS=",
         r"^CR2=ffff900000000000 \(not-present write kernel\)",
     ]
+# Both deliberate faults run in kmain after scheduling is initialized,
+# outside IRQ/atomic context. A hard-coded early-boot label is incorrect.
+PANIC_CONTEXT_MARKER = (
+    r"^CPU: [0-9]+  context: thread  thread: [1-9][0-9]* 'kmain'"
+    r"  irq_depth: 0  preempt_count: 0$"
+)
 PANIC_REQUIRED_MARKERS = BOOT_MARKERS + [
+    PANIC_CONTEXT_MARKER,
     r"^\[ INFO\] crash test: writing to an unmapped address",
     r"^KERNEL PANIC: page fault: kernel write at 0xffff900000000000 \(not present\): no region",
 ] + PANIC_ARCH_MARKERS + [
@@ -545,6 +552,7 @@ PANIC_FORBIDDEN_MARKERS = [
 # page-fault path's existing wording (kernel/memory/vmm.c,
 # kernel/arch/aarch64/trap.c). The page is the fault test's hole.
 WXN_REQUIRED_MARKERS = BOOT_MARKERS + [
+    PANIC_CONTEXT_MARKER,
     r"^\[ INFO\] crash test: executing a writable page on purpose",
     r"^KERNEL PANIC: page fault: kernel execute at 0xffff900000000000 \(protection\): ",
     r"^trap 1029 ",
