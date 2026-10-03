@@ -12,6 +12,7 @@
 
 #if CONFIG_LOCKDEP
 
+#include <kernel/console.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -86,8 +87,10 @@ static void print_held(const char *who, const struct lockdep_held *h, unsigned n
     kprintf("  held by %s (%u):\n", who, n);
     for (unsigned i = 0; i < n; i++) {
         const struct lock_class *c = &g_graph.classes[lockdep_node_class(h[i].node)];
-        kprintf("    [%u] %s '%s'#%u at %p%s%s%s\n", i, c->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin", c->name,
-                lockdep_node_subclass(h[i].node), (void *)h[i].ip, (h[i].flags & LOCKDEP_HF_IN_IRQ) ? " [irq]" : "",
+        kprintf("    [%u] %s '%s'#%u lock %p acquired at %p%s%s%s\n", i,
+                c->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin", c->name,
+                lockdep_node_subclass(h[i].node), h[i].lock, (void *)h[i].ip,
+                (h[i].flags & LOCKDEP_HF_IN_IRQ) ? " [irq]" : "",
                 (h[i].flags & LOCKDEP_HF_IRQS_ON) ? " [irqs-on]" : "",
                 (h[i].flags & LOCKDEP_HF_TRYLOCK) ? " [try]" : "");
     }
@@ -134,6 +137,12 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
         return;
     }
     g_off = true;
+    /* A failure can originate while console.lock is held by this CPU.
+     * Enter the existing fatal-output mode before the first print, and
+     * freeze CPU identity/held stacks before dumping them. panic() will
+     * claim the panic and stop the other CPUs in its normal way. */
+    arch_irq_disable();
+    console_set_panic_mode();
     struct thread *t = me();
     kprintf("\nlockdep: %s\n", g_kind_names[kind]);
     kprintf("  lock '%s'#%u at %p, CPU %u, thread '%s', irq_depth %u, preempt_count %d\n", name ? name : "-",
@@ -143,7 +152,7 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
         kprintf("  %s\n", detail);
     lockdep_dump_held();
     if (path_len) {
-        kprintf("  recorded chain that closes the cycle:");
+        kprintf("  recorded chain that closes the cycle (last 8 nodes at most):");
         for (unsigned i = 0; i < path_len; i++) {
             const struct lock_class *c = &g_graph.classes[lockdep_node_class(path[i])];
             kprintf("%s '%s'#%u", i ? " ->" : "", c->name, lockdep_node_subclass(path[i]));
@@ -158,19 +167,23 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
 /* Classify (cached) and return the node; -1 when the class table is full. */
 static int node_of(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, uintptr_t ip)
 {
-    if (*class_slot == 0) {
+    uint16_t cached = __atomic_load_n(class_slot, __ATOMIC_ACQUIRE);
+    if (cached == 0) {
         arch_irq_state_t s = raw_lock();
         int c = lockdep_core_class(&g_graph, name, kind);
         raw_unlock(s);
         if (c < 0) {
-            report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "lock class table full (LOCKDEP_MAX_CLASSES)", NULL, 0);
+            report(LOCKDEP_R_OVERFLOW, name, subclass, ip,
+                   c == -2 ? "lock class name exceeds LOCKDEP_CLASS_NAME_MAX" :
+                             "lock class table full (LOCKDEP_MAX_CLASSES)", NULL, 0);
             return -1;
         }
-        *class_slot = (uint16_t)(c + 1);
+        cached = (uint16_t)(c + 1);
+        __atomic_store_n(class_slot, cached, __ATOMIC_RELEASE);
     }
     if (subclass >= LOCKDEP_SUBCLASSES)
         panic("lockdep: subclass %u out of range for '%s'", subclass, name);
-    return (int)lockdep_node(*class_slot - 1u, subclass);
+    return (int)lockdep_node(cached - 1u, subclass);
 }
 
 /*
@@ -200,18 +213,19 @@ static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind,
     if (kind == LOCKDEP_KIND_SPIN) {
         const unsigned both = LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON;
         unsigned add = (in_irq ? LOCKDEP_USED_IN_IRQ : 0u) | (irqs_on ? LOCKDEP_HELD_IRQS_ON : 0u);
-        if (add && (c->usage & add) != add) {
+        if (add && (__atomic_load_n(&c->usage, __ATOMIC_ACQUIRE) & add) != add) {
             arch_irq_state_t s = raw_lock();
-            unsigned before = c->usage;
+            unsigned before = __atomic_load_n(&c->usage, __ATOMIC_RELAXED);
             if ((add & LOCKDEP_USED_IN_IRQ) && !(before & LOCKDEP_USED_IN_IRQ))
                 c->irq_ip = ip;
             if ((add & LOCKDEP_HELD_IRQS_ON) && !(before & LOCKDEP_HELD_IRQS_ON))
                 c->irqs_on_ip = ip;
-            c->usage |= add;
+            unsigned after = before | add;
+            __atomic_store_n(&c->usage, after, __ATOMIC_RELEASE);
             raw_unlock(s);
             /* Report the acquisition that completes the conflict, once
              * per class: the class keeps both bits afterwards. */
-            if ((before & both) != both && (c->usage & both) == both) {
+            if ((before & both) != both && (after & both) == both) {
                 char detail[128];
                 ksnprintf(detail, sizeof(detail),
                           "taken in interrupt context at %p and with interrupts enabled at %p", (void *)c->irq_ip,
@@ -412,15 +426,24 @@ bool lockdep_is_held(const void *lock, unsigned kind)
 
 void lockdep_dump_graph(void)
 {
-    kdebug("lockdep: %u classes, %u edges (a -> b: b was taken while a was held)", g_graph.nr_classes,
-           g_graph.nr_edges);
-    for (unsigned a = 0; a < g_graph.nr_classes * LOCKDEP_SUBCLASSES; a++) {
+    /* Publish a fixed class range before reading immutable names/kinds.
+     * Never print under the raw lock: logging acquires tracked locks.
+     * Edges may grow during the dump; this is not a point-in-time snapshot. */
+    arch_irq_state_t s = raw_lock();
+    unsigned nr_classes = g_graph.nr_classes;
+    unsigned nr_edges = g_graph.nr_edges;
+    raw_unlock(s);
+    unsigned nr_nodes = nr_classes * LOCKDEP_SUBCLASSES;
+    kdebug("lockdep: %u classes, %u edges (a -> b: b was taken while a was held)", nr_classes, nr_edges);
+    for (unsigned a = 0; a < nr_nodes; a++) {
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
-            uint64_t bits = g_graph.before[a][w];
+            uint64_t bits = __atomic_load_n(&g_graph.before[a][w], __ATOMIC_RELAXED);
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
                 bits &= bits - 1;
                 unsigned b = w * 64u + bit;
+                if (b >= nr_nodes)
+                    continue;   /* class registered after the initial snapshot */
                 const struct lock_class *ca = &g_graph.classes[lockdep_node_class((uint16_t)a)];
                 const struct lock_class *cb = &g_graph.classes[lockdep_node_class((uint16_t)b)];
                 kdebug("lockdep: edge %s '%s'#%u -> %s '%s'#%u", ca->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",

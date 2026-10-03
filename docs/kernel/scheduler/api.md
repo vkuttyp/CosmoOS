@@ -15,8 +15,9 @@ kernel ABI; nothing here is visible to user space.
 - **Lock order** (outermost first): `waitqueue.lock` →
   `runqueue.lock`. The primitives' own locks (`mutex.lock`,
   `semaphore.lock`, `completion.lock`) are taken before their wait
-  queue's lock. `runqueue.lock` is a leaf: nothing is acquired while it is
-  held except that `schedule()` calls `arch_context_switch` with it held.
+  queue's lock. Runqueue pairs follow increasing CPU-id order (S24).
+  Address-space switching can take `asid` under the local runqueue;
+  diagnostic logging also nests below it (S2).
 - **Interrupt context**: anything that can block (`schedule`,
   `sched_yield`, `sched_block_current`, `wait_event`, `mutex_lock`,
   `semaphore_down`, `wait_for_completion`, `thread_sleep_ns`,

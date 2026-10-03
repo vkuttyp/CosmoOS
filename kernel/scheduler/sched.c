@@ -33,7 +33,7 @@ static uint64_t g_migrations;
 
 /*
  * One lockdep class per run queue. lockdep keys a class by the name
- * pointer, so every queue initialised from the one literal "runqueue"
+ * contents, so every queue initialised from the one name "runqueue"
  * was one class, and the order of two of them -- increasing CPU id,
  * S24 -- was a rule it could not check: a second acquisition read as
  * recursion. A name per instance, in storage that lives as long as the

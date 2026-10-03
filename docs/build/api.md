@@ -98,6 +98,7 @@ Purpose: print the target table and the effective `ARCH`, `BUILD`,
 |---|---|---|---|
 | `ARCH` | string | `x86_64` | must have `build/arch/$(ARCH).mk` and `kernel/arch/$(ARCH)/arch.mk` |
 | `BUILD` | `debug`\|`release` | `debug` | validated; anything else is `$(error)` |
+| `LOCKDEP` | `0`\|`1` | 1 in debug, 0 in release | runtime dependency validation; use a separate `OUT` when changing flags |
 | `OUT` | path | `$(ROOT)/out/$(ARCH)-$(BUILD)` | absolute or relative to the make invocation directory |
 | `V` | `0`\|`1` | `0` | `1` echoes full commands |
 | `SELFTEST` | `0`\|`1` | `1` for debug, `0` for release | becomes `CONFIG_SELFTEST` |

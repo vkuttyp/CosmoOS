@@ -9,6 +9,19 @@ ARCH ?= x86_64
 #          self-tests off.
 BUILD ?= debug
 
+# Dependency validation defaults to debug-only, independently selectable
+# for auditing a release kernel or checking a debug kernel without it.
+ifeq ($(BUILD),debug)
+LOCKDEP ?= 1
+else
+LOCKDEP ?= 0
+endif
+ifneq ($(LOCKDEP),0)
+ifneq ($(LOCKDEP),1)
+$(error LOCKDEP must be 0 or 1, got '$(LOCKDEP)')
+endif
+endif
+
 ifeq ($(filter $(BUILD),debug release),)
 $(error BUILD must be debug or release, got '$(BUILD)')
 endif

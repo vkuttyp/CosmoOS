@@ -9,6 +9,7 @@
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/ksym.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/modelf.h>
 #include <kernel/modsig.h>
@@ -378,9 +379,15 @@ bool selftest_module_load(const char **reason)
     CHECK(module_symbol_lookup("cosmotest_answer", NULL) == 0);
     CHECK(module_unload("cosmotest") == -ENOENT);
 
-    /* Reload works, and everything is released afterwards. */
+    /* Reload must reuse the logical class even if its metadata moves to
+     * another mapping. The end-of-suite graph dump also dereferences the
+     * copied name after this module's rodata has been unmapped. */
+    struct lockdep_stats locks_before, locks_after;
+    lockdep_get_stats(&locks_before);
     CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
     CHECK(module_unload("cosmotest") == 0);
+    lockdep_get_stats(&locks_after);
+    CHECK(locks_after.classes == locks_before.classes);
     struct vm_stats after;
     vm_get_stats(&after);
     CHECK(after.regions == before.regions);

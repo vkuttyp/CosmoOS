@@ -14,12 +14,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LOCKDEP_MAX_CLASSES    320u   /* the tree has ~213 (both kinds, tests included), plus a class per run queue (S24): up to CONFIG_MAX_CPUS more */
+#define LOCKDEP_MAX_CLASSES    320u   /* bounded pool, including one class per run queue (S24) */
 #define LOCKDEP_SUBCLASSES     4u
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)
 #define LOCKDEP_MAX_HELD       24u   /* per CPU: spinlocks, interrupt context included */
 #define LOCKDEP_MAX_HELD_MUTEX 8u    /* per thread */
+#define LOCKDEP_CLASS_NAME_MAX 64u  /* including NUL; owned by the graph */
 
 /* Lock kinds: a mutex and its internal spinlock share a name but are
  * different classes. */
@@ -36,7 +37,7 @@
 #define LOCKDEP_HF_IRQS_ON (1u << 2)
 
 struct lock_class {
-    const char *name;
+    char name[LOCKDEP_CLASS_NAME_MAX];
     unsigned kind;
     unsigned usage;
     uintptr_t irq_ip;      /* first acquisition in interrupt context */
@@ -79,18 +80,30 @@ static inline unsigned lockdep_node_subclass(uint16_t node)
     return node % LOCKDEP_SUBCLASSES;
 }
 
-/* Class index for (name, kind), creating it; -1 when the table is full.
- * The name pointer is the key: one initialisation site, one class. */
+/* Class index for (name contents, kind), creating it; -1 when full,
+ * -2 for an overlong name. Copy before publication: a module's rodata
+ * can disappear after its last lock is released. Never truncate keys. */
 static inline int lockdep_core_class(struct lockdep_graph *g, const char *name, unsigned kind)
 {
+    if (name == NULL)
+        name = "?";
+    unsigned len = 0;
+    while (len < LOCKDEP_CLASS_NAME_MAX && name[len] != '\0')
+        len++;
+    if (len == LOCKDEP_CLASS_NAME_MAX)
+        return -2;
     for (unsigned i = 0; i < g->nr_classes; i++) {
-        if (g->classes[i].name == name && g->classes[i].kind == kind)
+        unsigned j = 0;
+        while (j < len && g->classes[i].name[j] == name[j])
+            j++;
+        if (j == len && g->classes[i].name[j] == '\0' && g->classes[i].kind == kind)
             return (int)i;
     }
     if (g->nr_classes == LOCKDEP_MAX_CLASSES)
         return -1;
     unsigned i = g->nr_classes++;
-    g->classes[i].name = name;
+    for (unsigned j = 0; j <= len; j++)
+        g->classes[i].name[j] = name[j];
     g->classes[i].kind = kind;
     g->classes[i].usage = 0;
     g->classes[i].irq_ip = g->classes[i].irqs_on_ip = 0;
@@ -99,15 +112,18 @@ static inline int lockdep_core_class(struct lockdep_graph *g, const char *name, 
 
 static inline bool lockdep_core_has_edge(const struct lockdep_graph *g, uint16_t a, uint16_t b)
 {
-    return (g->before[a][b / 64u] >> (b % 64u)) & 1u;
+    return (__atomic_load_n(&g->before[a][b / 64u], __ATOMIC_RELAXED) >> (b % 64u)) & 1u;
 }
 
-/* Record "b was taken while a was held". True if the edge is new. */
+/* Record "b was taken while a was held". True if the edge is new.
+ * Caller must serialize graph writers (the kernel holds raw_lock across
+ * cycle checking and insertion). The atomic bitmap update permits unlocked
+ * readers; it does not make the check/increment or cycle decision lock-free. */
 static inline bool lockdep_core_add_edge(struct lockdep_graph *g, uint16_t a, uint16_t b)
 {
     if (lockdep_core_has_edge(g, a, b))
         return false;
-    g->before[a][b / 64u] |= (uint64_t)1 << (b % 64u);
+    __atomic_fetch_or(&g->before[a][b / 64u], (uint64_t)1 << (b % 64u), __ATOMIC_RELAXED);
     g->nr_edges++;
     return true;
 }
@@ -116,7 +132,10 @@ static inline bool lockdep_core_add_edge(struct lockdep_graph *g, uint16_t a, ui
  * Is `to` reachable from `from` along recorded edges? Breadth-first over the
  * bitmaps. On success `path` receives the chain from `from` to `to`
  * inclusive (at most `path_max` entries, truncated from the start when
- * longer) and *path_len its length.
+ * longer) and *path_len the number of entries actually stored. The
+ * returned length is always safe to use when iterating `path`; callers
+ * wanting the whole chain supply LOCKDEP_MAX_NODES entries. With
+ * path_max == 0, path may be NULL and reachability is still checked.
  */
 static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lockdep_scratch *s, uint16_t from,
                                         uint16_t to, uint16_t *path, unsigned path_max, unsigned *path_len)
@@ -127,7 +146,7 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
     s->queue[tail++] = from;
     s->visited[from / 64u] |= (uint64_t)1 << (from % 64u);
     s->parent[from] = from;
-    bool found = false;
+    bool found = from == to;
     while (head < tail && !found) {
         uint16_t n = s->queue[head++];
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS && !found; w++) {
@@ -154,8 +173,8 @@ static inline bool lockdep_core_reaches(const struct lockdep_graph *g, struct lo
     unsigned len = 1;
     for (uint16_t n = to; n != from; n = s->parent[n])
         len++;
-    *path_len = len;
     unsigned keep = len < path_max ? len : path_max;
+    *path_len = keep;
     unsigned skip = len - keep;   /* drop the oldest entries when truncating */
     uint16_t n = to;
     for (unsigned i = len; i-- > 0;) {

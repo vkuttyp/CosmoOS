@@ -1,9 +1,9 @@
 # Lock discipline and lockdep: API
 
 All interfaces are kernel-internal unless marked *(exported)*. The checker
-exists in debug builds (`CONFIG_LOCKDEP`, which defaults to `CONFIG_DEBUG`);
-in release builds every function below except `might_sleep()`'s always-on
-check compiles to nothing. Each entry follows constitution section 52.
+exists when `CONFIG_LOCKDEP=1` (selected by `LOCKDEP`, defaulting to 1 in
+debug and 0 in release). With `LOCKDEP=0`, its hooks and checks compile out
+except `might_sleep()`'s always-on check. Each entry follows constitution section 52.
 
 ## Annotations used by ordinary code
 
@@ -27,11 +27,11 @@ For a self-test that wants an inversion report on purpose: taking the
 reversed pair for real spins for a lock that a correct-order holder on
 another CPU may be waiting to pair with, which is the deadlock the report
 is about (`lockdep-rq-order` hung every CPU that way under the chaos
-migrator). Nothing in release builds.
+migrator). No check with `LOCKDEP=0`.
 
 ### `might_sleep()`
-- Purpose: declare that the calling function may block. Reports (debug) or
-  panics (release) when `preempt_count != 0` or `irq_depth != 0`.
+- Purpose: declare that the calling function may block. Reports (`LOCKDEP=1`) or
+  panics (`LOCKDEP=0`) when `preempt_count != 0` or `irq_depth != 0`.
 - Placed in: `mutex_lock`, `waitqueue_prepare` (every `wait_event`),
   `semaphore_down`, `wait_for_completion`, `synchronize_quiesce`,
   `copy_from_user`, `copy_to_user`, `strncpy_from_user`. A new sleeping
@@ -41,7 +41,7 @@ migrator). Nothing in release builds.
 ### `lockdep_assert_held(lock, kind)`, `lockdep_assert_not_held(lock, kind)`
 Debug assertions that the calling CPU (spinlocks, `LOCKDEP_KIND_SPIN`) or
 thread (mutexes, `LOCKDEP_KIND_MUTEX`) holds / does not hold `lock`. No-ops
-in release builds.
+with `LOCKDEP=0`.
 
 ## Checker interface (`kernel/include/kernel/lockdep.h`, `kernel/core/lockdep.c`)
 
@@ -74,10 +74,13 @@ Prints both held stacks (class, subclass, acquiring address, `[irq]`,
 crash report shows what the CPU and thread held.
 
 ### `void lockdep_dump_graph(void)`
-Prints every recorded edge (`kdebug`), `'a'#n -> 'b'#m` meaning b was taken
+Prints observed edges (`kdebug`) within the class range captured at entry, `'a'#n -> 'b'#m` meaning b was taken
 while a was held. `selftest_run_all` calls it once at the end of the run so
 the debug boot log carries the tree's real lock order; `testing.md`
-reproduces the interesting part.
+reproduces the interesting part. Class names/kinds are immutable after
+publication; bitmap reads are atomic. Concurrent additions can change the
+edge set during printing, so the header count and emitted edges need not
+match. This is not a consistent snapshot.
 
 ### `void lockdep_get_stats(struct lockdep_stats *out)`
 Classes, edges, acquisitions, reachability searches, reports.
@@ -94,7 +97,8 @@ counter. Report kinds: `LOCKDEP_R_INVERSION`, `LOCKDEP_R_RECURSION`,
 
 Pure inline functions over `struct lockdep_graph` (class table and edge
 bitmaps) and `struct lockdep_scratch`, with no kernel dependency:
-`lockdep_core_class` (lookup or create; -1 when full),
+`lockdep_core_class` (lookup or create by name contents and kind; -1 when
+full, -2 for a name longer than 63 characters),
 `lockdep_core_has_edge`, `lockdep_core_add_edge` (true when new),
 `lockdep_core_reaches` (breadth-first reachability with the path). The
 host test `tests/host/test_lockdep.c` drives them; `lockdep.c` wraps them.
@@ -113,8 +117,16 @@ Because `spinlock_t` is embedded in exported structures, the module ABI is
   (unhash-before-drop; `docs/kernel-services/vfs/api.md`).
 - `arch_ipi_bind(vector)` in `kernel/include/arch/irqc.h`: binds an IPI
   vector to its controller resource once, so `arch_ipi_send` takes no lock
-  (the run-queue lock is a leaf). Called by `ipi_init` and by any test that
+  (so the GIC lock does not nest under a runqueue). Called by `ipi_init` and by any test that
   raises its own IPI vector.
 - `futex_wait` copies the user word with no spinlock held and uses the
   bucket's wake sequence to keep the compare-and-enqueue atomic against
   wakers (`docs/compat/linux/design.md`, "futex").
+
+`lockdep_core_reaches` returns the count actually written to `path`, never
+the full count of a truncated path. `path_max=0` permits a NULL path and
+still checks reachability. The kernel retains the last eight nodes of a
+long path and labels that diagnostic limit explicitly.
+
+Build with `LOCKDEP=0/1` to override the debug/release default; use a
+different `OUT` for each configuration so stale objects cannot be reused.
