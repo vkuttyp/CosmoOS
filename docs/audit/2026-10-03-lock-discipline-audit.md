@@ -156,3 +156,41 @@ kernel long-cycle and unheld-release checks, existing IRQ/sleep/recursion
 tests, host ASan/UBSan, x86/AArch64 SMP and UP, disabled debug and release
 builds, analyzer. Residual risks above must remain explicit even when the
 first increment passes.
+
+## 2026-10-04 increment: observed spin contention
+
+Baseline: commit `2ee2d783`, CI run `37155497752`, passed both architecture
+jobs, including chaos, release, host sanitizers, fuzzing, analysis,
+reproducibility and panic tests. PR #307 remains open; this increment is
+on `milestone/lockdep-spin-contention`, based on that reviewed branch.
+
+The inventory still defers contended spin measurements. Source inspection
+also confirms `lockdep-contention` holds its remote lock for only 20 ms
+and starts a local callback for 5 ms later: it can miss the intended
+interleaving on a slow host, and a callback before the wait does not prove
+that an awaited lock is absent from the held stack. Cleanup was fixed in
+PR #307; the timing premise was deliberately left open.
+
+Planned phases:
+
+1. Add a self-test-only per-CPU observation of an actual failed spin-lock
+   exchange. Publish once on entering the slow path, restore any interrupted
+   wait when acquisition completes, and expose a read-only identity query.
+   No lock layout/module ABI changes, allocation or tracked locks; compile
+   out with SELFTEST=0. The observation is not a general deadlock detector.
+2. Make `lockdep-contention` keep its holder until a callback observes the
+   real wait, with a bounded holder deadline and existing lifetime cleanup.
+   A premature callback rearms without taking its test lock.
+3. Measure plain and irqsave contended acquisitions on distinct CPUs,
+   with two warmups and nine samples, a controlled 1 ms hold after the
+   observed failed exchange, and ownership/exclusion/protected-data checks.
+   UP explicitly skips; timings include the observer and controlled hold.
+4. Validate enabled/disabled lockdep SMP boots on both architectures,
+   UP skip behavior, release compile-out, and controlled failure paths.
+   Update the inventory only for evidence-backed completed scope.
+
+The established per-CPU spin ownership, per-thread mutex ownership,
+preemption migration barrier, timer cancellation and thread lifetime
+protocols remain the design boundaries. General callback wait modeling,
+raw IRQ pairing, NMI writer support, global snapshots and worst-case
+latency bounds remain separate work.
