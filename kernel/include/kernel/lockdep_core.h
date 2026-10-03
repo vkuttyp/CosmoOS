@@ -58,6 +58,9 @@ struct lockdep_held {
 /* CPU-local writer, with IRQs masked; remote diagnostic readers never
  * wait. All shared writes and snapshot reads are sequentially consistent:
  * equal even sequence reads enclose no writer in the atomic total order.
+ * Field stores need not be one atomic struct store: a reader crossing any
+ * part of a bracketed update sees an odd or changed sequence and rejects
+ * all copied fields. Callers must not use output from a failed snapshot.
  * Ordinary local reads remain safe because there is only one writer. */
 static inline void lockdep_core_held_begin(uint64_t *seq)
 {

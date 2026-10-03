@@ -237,9 +237,18 @@ static bool arch_test_paranoid_entry_pinned(const char **why)
         bool stable = !p.delivery_failed && p.snapshot_ok && p.held_count == 1 &&
                       p.held[0].lock == &held && (p.held[0].flags & LOCKDEP_HF_IRQSAVE) &&
                       p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top);
-        lockdep_test_snapshot_context(true, paranoid_nmi_trigger, &p);
+        /* Never send a second NMI after an unaccounted delivery: NMIs
+         * can coalesce, so a late first delivery cannot identify either
+         * probe. A sent NMI cannot be cancelled safely. */
+        if (!p.delivery_failed)
+            lockdep_test_snapshot_context(true, paranoid_nmi_trigger, &p);
         bool busy = !p.delivery_failed && !p.snapshot_ok && p.held_count == 0;
         spin_unlock_irqrestore(&held, s);
+        /* Fail stop with the handler registered and its stack storage
+         * live. Unregistering or returning could turn a late NMI into an
+         * unhandled exception or a write through an expired argument. */
+        if (p.delivery_failed)
+            panic("SELFTEST: trap-paranoid: NMI delivery failed or timed out; handler retained");
         ok = stable && busy;
         if (!ok)
             *why = "NMI held-stack snapshot failed with graph lock held or writer busy";

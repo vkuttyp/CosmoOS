@@ -583,3 +583,56 @@ files. Default x86 release and release with `LOCKDEP=1` kernels build
 successfully (`out/lockdep-nmi-release-build.log`), covering the self-test
 configuration boundary. The core snapshot algorithm is unchanged; the
 prior host sanitizer model remains its concurrency evidence.
+
+## PR #304 review follow-up
+
+The late-NMI finding is valid: returning after the delivery deadline could
+unregister the handler while a sent NMI remained pending. The test now
+suppresses the second probe after a failed delivery, releases both test
+locks, and fails stop with an explicit `SELFTEST: trap-paranoid` panic.
+The handler remains registered and its stack argument remains live. A
+hardware NMI cannot be safely cancelled, so a bounded timeout cannot also
+promise safe normal return. The success path still unregisters normally.
+
+The field-consistency finding is a false positive for the implemented
+protocol. Every writer brackets its field/count stores with sequence
+increments; all those accesses and snapshot loads are sequentially
+consistent. An accepted snapshot's equal even sequence loads exclude an
+intervening writer in that total order (assuming no full 64-bit wrap during
+one copy). Separate field stores therefore cannot produce an accepted
+mixed entry. Failed output is unusable. The header now explains this
+explicitly; the existing host model checks every field against its
+generation, stopped odd writers, and invalid counts.
+
+CI run `37126012073`, AArch64 job `111211325103`, passed both ordinary and
+GIC debug boots but faulted in the protection-capable CPU boot after all
+417 self-tests. The `thrtest` spawn path was interrupted in
+`random_get_bytes` beneath `build_initial_stack`; timer/scheduler lock
+entry exhausted the kernel stack. This is distinct from the earlier
+net-nicbench timing failure. Local AArch64 disassembly showed 5,328 bytes
+for `build_initial_stack` alone, with large spawn and ELF-loading callers
+still live. Its two temporary arrays now use private heap scratch, reducing
+that frame to 192 bytes with the same local compiler. Scratch is freed on
+success; allocation failure returns `-ENOMEM` through the existing process
+cleanup path. The 16 KiB kernel stack and interrupt/lockdep checks remain
+unchanged.
+
+Validation of the review fixes:
+
+- Four-CPU x86 debug boot: all 417 self-tests and full harness passed in
+  134.0 s (`out/lockdep-review-x86_64.log`).
+- Four-CPU AArch64 `test-guard` on cortex-a76: all 417 self-tests and full
+  harness passed in 137.3 s (`out/aarch64-debug/boot-test-guard.log`). This
+  includes the post-self-test `thrtest` workload that faulted in CI.
+- Full host ASan/UBSan suite and lockdep TSan model passed
+  (`out/lockdep-review-{host,tsan}.log`). Release kernels built on both
+  architectures (`out/lockdep-review-release-{x86_64,aarch64}.log`).
+- Temporary fault injections suppressed first and second hardware NMI
+  sends independently, forcing the actual 100 ms timeout. Each injected
+  a late software NMI entry after lock cleanup and before panic. Both
+  reached the explicit timeout diagnostic without an unhandled/recursive
+  exception, with zero IRQ/preemption nesting and empty held stacks.
+  Logs: `out/lockdep-review-nmi-timeout-{first,second}.log`. The mutations
+  were removed and the normal x86 image rebuilt successfully.
+- `git diff --check` passed. Remote CI still needs to validate the pushed
+  revision; one local passing guard boot is not a claim about all schedules.

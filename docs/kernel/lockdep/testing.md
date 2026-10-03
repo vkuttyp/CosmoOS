@@ -201,6 +201,11 @@ validator graph raw lock is held. The handler takes only the bounded
 held-stack snapshot: a stable stack must show the held irqsave lock,
 and an interrupted update with an odd sequence must return unavailable.
 The test requires actual handler completion in each case. Its raw-lock
+probe stops after a 100 ms delivery timeout; after releasing test locks,
+the caller panics with an explicit diagnostic while retaining the handler
+and its live stack argument. A pending NMI cannot be safely cancelled,
+so the failure path must neither return nor send another probe.
+The raw-lock
 probe hook exists only with `CONFIG_LOCKDEP && CONFIG_SELFTEST`; it is not
 a production callback API. This validates the NMI-safe snapshot reader,
 not tracked lock acquisitions or graph mutations from NMI/#MC handlers.
