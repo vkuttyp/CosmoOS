@@ -39,6 +39,28 @@ released normally.
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
+| `lockdep-bench` | warmed uncontended spin paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+
+### Spin-path measurement
+
+`lockdep-bench` runs with either `LOCKDEP=0` or `LOCKDEP=1` when self-tests
+are enabled. Compare debug builds in separate output trees, changing only
+the lockdep setting; release builds change more than the checker and are
+not a matched control. For example, with the same architecture and QEMU
+settings, run `make BUILD=debug LOCKDEP=1 test` and
+`make BUILD=debug LOCKDEP=0 OUT=out/bench-off test`.
+
+The test warms each path 64 times, then reports min/median/max guest-clock
+nanoseconds per iteration across nine batches of 1024 iterations. `spin`
+and `irqsave` each contain one acquire/release pair; `nested` contains an
+outer irqsave pair and an inner plain pair with a previously recorded edge.
+`empty` is a loop/dispatch/clock control, reported separately without
+subtracting it. Pinning keeps clock readings CPU-local. Interrupts and
+scheduling remain enabled, other CPUs continue running, and results include
+their interference. Printing and affinity changes are outside the samples.
+These measurements cover warmed uncontended object locks, not cold graph
+searches, lock contention, mutexes, or a hardware-independent overhead
+ratio. QEMU/TCG results describe that emulator and host workload only.
 
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 
@@ -143,6 +165,52 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
   IRQ-safety validation.
 
 ## October hardening regression coverage
+
+### Concurrent graph model
+
+`tests/host/test_lockdep_threads.c` runs four writers and two diagnostic
+readers against the real graph helpers. An acquire/release atomic word
+models the kernel raw writer lock. Writers register classes, validate IRQ
+usage, and check and insert edges under that lock; readers capture the
+published class range under the lock, then inspect immutable names/kinds,
+atomic usage flags, and atomic edge words without it. Opposing edge
+attempts and changed usage labels exercise rejected cycles and IRQ paths.
+After joining, an independent transitive-closure oracle checks acyclicity,
+edge counts, and the absence of IRQ-used to IRQ-enabled paths.
+
+`make host-test` includes this model under ASan/UBSan. Run
+`make host-test-lockdep-tsan` separately for ThreadSanitizer (the runtime
+cannot be combined with ASan); it builds a distinct host binary and fails
+on a race report. This requires a host compiler and runtime supporting
+TSan. The model checks graph publication and access discipline, not kernel
+interrupt entry, CPU migration, held stacks, timer-profile lifetime, or
+NMI reentrancy. Readers additionally capture private graph snapshots under
+the raw lock and verify their edge counts and metadata ranges outside it
+while writers continue. The single-threaded `snapshot` case mutates and
+frees its source graph before verifying that the captured graph is intact.
+
+The same sanitizer binary also tests remote held-stack snapshots: a
+stopped mid-update writer is refused immediately, an oversized count is
+rejected, and readers racing a writer must see one complete generation
+across every entry and field. The kernel `lockdep-order` regression checks
+snapshot publication from real acquisitions, irqsave metadata, a release
+out of order, and the final empty stack.
+
+On x86-64, `trap-paranoid` adds real local-APIC NMI delivery while the
+validator graph raw lock is held. The handler takes only the bounded
+held-stack snapshot: a stable stack must show the held irqsave lock,
+and an interrupted update with an odd sequence must return unavailable.
+The test requires actual handler completion in each case. Its raw-lock
+probe stops after a 100 ms delivery timeout; after releasing test locks,
+the caller panics with an explicit diagnostic while retaining the handler
+and its live stack argument. A pending NMI cannot be safely cancelled,
+so the failure path must neither return nor send another probe.
+The raw-lock
+probe hook exists only with `CONFIG_LOCKDEP && CONFIG_SELFTEST`; it is not
+a production callback API. This validates the NMI-safe snapshot reader,
+not tracked lock acquisitions or graph mutations from NMI/#MC handlers.
+
+### Failure detection and boundary cases
 
 The valid IRQ-restore control runs without arming a report expectation.
 Only deliberately invalid operations arm one: a zero-report control must

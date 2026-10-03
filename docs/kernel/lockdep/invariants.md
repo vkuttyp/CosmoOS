@@ -142,3 +142,12 @@ holds the callback-needed lock while a real callback blocks on it, then
 verifies the expected report returns from the synchronous wait. Gap: only
 observed callback paths and up to 16 locks per callback are represented;
 other callback/wait relationships remain unmodeled.
+
+**L16. Remote held-stack diagnostics print only a consistent copy.**
+The CPU-local writer masks IRQs and brackets atomic stack changes with a
+sequence update. The remote reader makes one bounded attempt, rejects odd
+or changing sequences and oversized counts, and prints only after a
+successful copy. It takes no target-owned lock and does not retry a stuck
+writer. Check: the threaded sanitizer model validates whole generations
+and immediate refusal of a stopped writer; `lockdep-order` checks actual
+push, irqsave flags, out-of-order removal, and empty-stack publication.

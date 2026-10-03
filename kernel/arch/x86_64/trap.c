@@ -12,6 +12,7 @@
 #include <kernel/extable.h>
 #include <kernel/interrupt.h>
 #include <kernel/lockup.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -21,8 +22,11 @@
 #include <kernel/sched.h>
 #include <kernel/signal.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
+#include <kernel/spinlock.h>
 
 #include <arch/irq.h>
+#include <arch/cpu.h>
 #include <arch/irqc.h>
 #include <arch/testhooks.h>
 #include <arch/trap.h>
@@ -147,17 +151,45 @@ struct paranoid_probe {
     uintptr_t frame;
     struct percpu *pc;
     unsigned irq_depth;
+#if CONFIG_LOCKDEP && CONFIG_SELFTEST
+    bool snapshot_ok;
+    bool delivery_failed;
+    unsigned held_count;
+    struct lockdep_held held[LOCKDEP_MAX_HELD];
+#endif
 };
 
 static void paranoid_probe_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     struct paranoid_probe *p = arg;
     (void)vector;
-    p->hits++;
     p->frame = (uintptr_t)frame;   /* lives on whatever stack the CPU switched to */
     p->pc = this_cpu();
     p->irq_depth = this_cpu()->irq_depth;
+#if CONFIG_LOCKDEP && CONFIG_SELFTEST
+    p->snapshot_ok = lockdep_snapshot_held_cpu(raw_cpu_id(), p->held, &p->held_count);
+#endif
+    __atomic_fetch_add(&p->hits, 1u, __ATOMIC_RELEASE);
 }
+
+#if CONFIG_LOCKDEP && CONFIG_SELFTEST
+static void paranoid_nmi_trigger(void *arg)
+{
+    struct paranoid_probe *p = arg;
+    unsigned before = __atomic_load_n(&p->hits, __ATOMIC_ACQUIRE);
+    /* This callback runs under lockdep's raw lock with IRQs masked.
+     * Hardware NMI delivery must still work and its reader must not try
+     * to acquire that lock. No printing or tracked acquisition here. */
+    p->delivery_failed = !arch_ipi_send_nmi(raw_cpu_id());
+    if (p->delivery_failed)
+        return;
+    uint64_t start = clock_now_ns();
+    while (__atomic_load_n(&p->hits, __ATOMIC_ACQUIRE) == before &&
+           clock_since_ns(start) < 100000000u)
+        arch_cpu_relax();
+    p->delivery_failed = __atomic_load_n(&p->hits, __ATOMIC_ACQUIRE) != before + 1u;
+}
+#endif
 
 static bool on_ist(uintptr_t frame, uintptr_t top)
 {
@@ -177,7 +209,7 @@ static bool arch_test_paranoid_entry_pinned(const char **why)
 
     /* 1. A software NMI from ordinary kernel context: IST stack, interrupt depth. */
     __asm__ volatile("int $2" ::: "memory");
-    bool ok = p.hits == 1 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top);
+    bool ok = __atomic_load_n(&p.hits, __ATOMIC_ACQUIRE) == 1 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top);
     if (!ok)
         *why = "NMI from kernel context: wrong stack, per-CPU block or depth";
 
@@ -191,13 +223,42 @@ static bool arch_test_paranoid_entry_pinned(const char **why)
         __asm__ volatile("swapgs\n\tint $2\n\tswapgs" ::: "memory");
         uint64_t gs_after = rdmsr(0xC0000101u);   /* MSR_GS_BASE */
         arch_irq_restore(s);
-        ok = p.hits == 2 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top) &&
+        ok = __atomic_load_n(&p.hits, __ATOMIC_ACQUIRE) == 2 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top) &&
              gs_after == (uint64_t)(uintptr_t)me && this_cpu() == me;
         if (!ok)
             *why = "NMI with the user's GS base: per-CPU block not recovered or not restored";
     }
 
+#if CONFIG_LOCKDEP && CONFIG_SELFTEST
+    if (ok) {
+        static spinlock_t held = SPINLOCK_INIT("nmi-snapshot-probe");
+        arch_irq_state_t s = spin_lock_irqsave(&held);
+        lockdep_test_snapshot_context(false, paranoid_nmi_trigger, &p);
+        bool stable = !p.delivery_failed && p.snapshot_ok && p.held_count == 1 &&
+                      p.held[0].lock == &held && (p.held[0].flags & LOCKDEP_HF_IRQSAVE) &&
+                      p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top);
+        /* Never send a second NMI after an unaccounted delivery: NMIs
+         * can coalesce, so a late first delivery cannot identify either
+         * probe. A sent NMI cannot be cancelled safely. */
+        if (!p.delivery_failed)
+            lockdep_test_snapshot_context(true, paranoid_nmi_trigger, &p);
+        bool busy = !p.delivery_failed && !p.snapshot_ok && p.held_count == 0;
+        spin_unlock_irqrestore(&held, s);
+        /* Fail stop with the handler registered and its stack storage
+         * live. Unregistering or returning could turn a late NMI into an
+         * unhandled exception or a write through an expired argument. */
+        if (p.delivery_failed)
+            panic("SELFTEST: trap-paranoid: NMI delivery failed or timed out; handler retained");
+        ok = stable && busy;
+        if (!ok)
+            *why = "NMI held-stack snapshot failed with graph lock held or writer busy";
+    }
+#endif
     interrupt_unregister(X86_TRAP_NMI, paranoid_probe_handler);
+#if CONFIG_LOCKDEP && CONFIG_SELFTEST
+    if (ok)
+        kinfo("selftest: trap-paranoid: hardware NMI captured a held lock with graph lock held, and refused a busy held-stack writer");
+#endif
     if (ok)
         *why = NULL;
     return ok;

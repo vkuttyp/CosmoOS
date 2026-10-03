@@ -47,7 +47,16 @@ These self-tests in `kernel/core/selftest.c` target this layer:
   context and one with the user's GS base live (`swapgs; int $2; swapgs`
   with interrupts off), and checks each ran on the NMI IST stack of this
   CPU, saw the right per-CPU block and `irq_depth 1`, and that the GS
-  base afterwards is the kernel's again. AArch64 reports nothing to test.
+  base afterwards is the kernel's again. With lockdep and self-tests on,
+  it also delivers two hardware NMIs through the local APIC while the
+  graph raw lock is held. The first must capture a private held irqsave
+  lock; the second interrupts an odd held-stack sequence and must report
+  the snapshot unavailable. Both must return without acquiring the graph
+  lock or waiting on the interrupted writer. If delivery fails or exceeds
+  100 ms, the test releases its locks and panics with a specific self-test
+  diagnostic, retaining the handler and its live argument for any late NMI.
+  It never sends a second NMI after a delivery failure. AArch64 reports
+  nothing to test.
 - **fpu-switch**: `arch_test_fpu_switch` (x86-64 `fpu.c`) runs two
   state-owning threads pinned to the calling CPU that load distinct
   xmm0-15 patterns and, across 400 yields each, verify their registers

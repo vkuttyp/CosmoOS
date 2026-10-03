@@ -219,12 +219,13 @@ void process_init(void)
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
  * stack, writing through the direct map into the populated top pages.
  * Native processes get the CosmoOS auxiliary vector, Linux processes the
- * Linux one (compat/linux). Returns the initial user rsp, or 0 if the
- * frame does not fit.
+ * Linux one (compat/linux). Publishes the initial user stack pointer on
+ * success; returns -EINVAL for an invalid frame or -ENOMEM for scratch
+ * allocation failure.
  */
-static uint64_t build_initial_stack(struct process *p, const struct elf_info *info, uint64_t stack_top,
+static int build_initial_stack(struct process *p, const struct elf_info *info, uint64_t stack_top,
                                     const char *const argv[], const char *const envp[], const char *execfn,
-                                    uint64_t interp_base)
+                                    uint64_t interp_base, uint64_t *sp_out)
 {
     unsigned argc = 0, envc = 0;
     size_t strings = 0;
@@ -233,7 +234,7 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
     for (; envp && envp[envc]; envc++)
         strings += strlen(envp[envc]) + 1;
     if (argc + envc > INITIAL_STRINGS_MAX)
-        return 0;
+        return -EINVAL;
     const char *platform = LINUX_PLATFORM;   /* AT_PLATFORM: the string Linux gives on this machine */
     strings += strlen(execfn) + 1 + strlen(platform) + 1;
     const size_t span = INITIAL_STACK_PAGES * PAGE_SIZE;
@@ -241,7 +242,7 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
     size_t words = 1 + (argc + 1) + (envc + 1) + 40;
     size_t need = strings + 16 + words * 8 + 32;
     if (need > span - 64)
-        return 0;
+        return -EINVAL;
     uint64_t base_va = stack_top - span;
     /* The populated pages need not be contiguous in the direct map: every
      * byte is written through the page it lands in. */
@@ -249,13 +250,23 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
     for (unsigned i = 0; i < INITIAL_STACK_PAGES; i++) {
         paddr_t pa;
         if (!arch_mmu_query(&p->space->mmu, (vaddr_t)(base_va + i * PAGE_SIZE), &pa, NULL, NULL, NULL))
-            return 0;
+            return -EINVAL;
         pages[i] = phys_to_virt(pa);
     }
 #define AT(va) (pages[((va) - base_va) / PAGE_SIZE] + (((va) - base_va) % PAGE_SIZE))
     /* Strings grow down from the top; a copy may straddle the page boundary. */
     uint64_t sp = stack_top;
-    uint64_t str_addrs[INITIAL_STRINGS_MAX];
+    /* Spawn already has several caller frames live. Keep these 5 KiB of
+     * scratch off the 16 KiB kernel stack so interrupt entry and its
+     * lockdep hooks still have room. Storage is private to this spawn. */
+    struct initial_stack_scratch {
+        uint64_t str_addrs[INITIAL_STRINGS_MAX];
+        uint64_t words[1 + INITIAL_STRINGS_MAX + 2 + 40];
+    };
+    struct initial_stack_scratch *scratch = kmalloc(sizeof(*scratch), 0);
+    if (scratch == NULL)
+        return -ENOMEM;
+    uint64_t *str_addrs = scratch->str_addrs;
     for (unsigned i = 0; i < argc + envc; i++) {
         const char *str = i < argc ? argv[i] : envp[i - argc];
         size_t n = strlen(str) + 1;
@@ -288,9 +299,9 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
         for (size_t k = 0; k < 16; k++)
             *AT(sp + k) = rnd[k];
     }
-    /* Word area, 16-byte aligned at the final rsp; built in a kernel
+    /* Word area, 16-byte aligned at the final rsp; built in the scratch
      * array then copied, since it may straddle the boundary too. */
-    uint64_t w[1 + INITIAL_STRINGS_MAX + 2 + 40];
+    uint64_t *w = scratch->words;
     unsigned k = 0;
     w[k++] = argc;
     for (unsigned i = 0; i < argc; i++)
@@ -338,7 +349,9 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
             *AT(va + b) = (uint8_t)(w[i] >> (8 * b));
     }
 #undef AT
-    return sp;
+    kfree(scratch);
+    *sp_out = sp;
+    return 0;
 }
 
 /* --- user thread start --- */
@@ -625,11 +638,10 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         p->space->anon_pages++;
     }
 
-    uint64_t sp = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp, p->exec_path, p->interp_base);
-    if (sp == 0) {
-        rc = -EINVAL; /* argument/environment strings do not fit the initial pages */
+    uint64_t sp;
+    rc = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp, p->exec_path, p->interp_base, &sp);
+    if (rc)
         goto fail;
-    }
 
     /* Handles: exactly what the parent maps; kernel-created processes
      * get the console as 0, 1, 2. */

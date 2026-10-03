@@ -121,10 +121,42 @@ Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
 tracked. `lockdep_core_add_edge` requires that caller serialization; its
 atomic bitmap write supports unlocked readers, not concurrent writers.
-Graph dumps capture the class range and edge count under the raw lock,
-then read bitmap words atomically and print outside it. They skip edges
-to newer classes; immutable names/kinds in the captured range are safe
-to read, but growing edges mean the dump is not a point-in-time snapshot.
+Normal graph dumps allocate private storage before taking the raw lock,
+copy the complete bounded graph under it, and print from that snapshot
+after releasing it. Counts, metadata, and edges therefore describe one
+instant even if logging or another CPU adds dependencies during output.
+The copy is 232968 bytes (about 228 KiB); the heap temporarily reserves
+a 256 KiB page allocation and frees it after printing. There is no extra
+permanent graph or acquisition-path cost. The raw lock and disabled IRQs
+cover only the copy, never allocation, printing, or freeing. Allocation
+failure prints an explicit unavailable message. This API requires a
+working allocator and raw lock and is not used by panic/NMI diagnostics.
+Panic calls `lockdep_dump_held()` to print the current CPU's spinlock stack
+and the current thread's mutex stack; it does not dump the dependency graph.
+Held-stack diagnostics and statistics retain their separate consistency
+limits; the graph snapshot does not freeze global execution state.
+
+Remote CPU spinlock-stack dumps use a separate bounded snapshot protocol.
+The CPU-local writer already has IRQs masked for pushes, releases, and
+irqsave flag updates. It increments a 64-bit sequence before and after
+each update and writes each shared field atomically. Remote readers load
+an even sequence, copy up to 24 entries using atomic reads, and accept
+only if the sequence is unchanged. These operations are sequentially
+consistent, so an accepted copy cannot span a writer in the atomic total
+order (assuming no sequence wrap during the bounded attempt). An odd or
+changed sequence yields an unavailable message, with no retry, allocation,
+or target-owned lock. The cost is eight bytes per CPU plus atomic writes
+on debug held-stack updates. Local-only reads and thread mutex stacks
+retain their existing ownership rules. This does not make NMI writers
+reentrant or provide simultaneous snapshots of all CPUs.
+
+The x86 `trap-paranoid` regression verifies the read-only NMI boundary
+with real local-APIC delivery while the graph raw lock is held, including
+an interrupted held-stack update. Current lockup NMI sampling and corrected
+machine-check handlers avoid tracked locking. General lockdep writer
+instrumentation from NMI/#MC remains unsupported; passing the snapshot
+test does not make the graph raw lock reentrant.
+
 The search is bounded by the node count (1280) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a

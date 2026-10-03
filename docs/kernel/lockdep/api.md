@@ -73,14 +73,25 @@ Prints both held stacks (class, subclass, acquiring address, `[irq]`,
 `[irqs-on]`, `[try]`). `panic()` calls it after the backtrace, so every
 crash report shows what the CPU and thread held.
 
+### `bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)`
+One bounded attempt to capture a CPU's spinlock stack. `out` must have
+`LOCKDEP_MAX_HELD` entries. On success, `count` describes a consistent
+copy; on failure it is zero and the output must not be used. Failure
+includes an invalid CPU, oversized stack, active update, or update during
+the copy. With lockdep disabled it always returns false. It allocates
+nothing, acquires no lock, and never waits for the target CPU. It captures
+neither the thread mutex stack nor a globally simultaneous CPU snapshot.
+`lockdep_dump_held_cpu` prints this copy or an explicit unavailable message.
+
 ### `void lockdep_dump_graph(void)`
-Prints observed edges (`kdebug`) within the class range captured at entry, `'a'#n -> 'b'#m` meaning b was taken
-while a was held. `selftest_run_all` calls it once at the end of the run so
-the debug boot log carries the tree's real lock order; `testing.md`
-reproduces the interesting part. Class names/kinds are immutable after
-publication; bitmap reads are atomic. Concurrent additions can change the
-edge set during printing, so the header count and emitted edges need not
-match. This is not a consistent snapshot.
+Prints a consistent snapshot of observed edges (`kdebug`), `'a'#n -> 'b'#m`
+meaning b was taken while a was held. `selftest_run_all` calls it once at
+the end of the run so the debug boot log carries the tree's real lock
+order. The complete graph is copied under the raw writer lock into private
+heap storage; printing and freeing happen outside the lock. The header
+count matches the captured edge list. If allocation fails, prints an
+explicit unavailable message instead. Requires a working allocator and
+raw lock; not a panic/NMI reporting API.
 
 ### `void lockdep_get_stats(struct lockdep_stats *out)`
 Classes, edges, acquisitions, reachability searches, reports.

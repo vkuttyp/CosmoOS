@@ -392,14 +392,16 @@ tree.
 
 The 2026-10-03 renewed lock-discipline audit found two defects in the
 already-built validator, rather than a missing milestone: unbounded
-printing of a truncated cycle path and graph names pointing into freed
-module rodata. Both are corrected in the October hardening pass, with
+~~printing of a truncated cycle path~~ and ~~graph names pointing into freed
+module rodata~~. **CLOSED (PR #302)** in the October hardening pass, with
 ASan/UBSan path/storage regressions and a real module fixture. See
 `2026-10-03-lock-discipline-audit.md` and `2026-10-03-lockdep-report.md`.
-The active milestone closes transitive IRQ-safe/unsafe dependency
-validation, IRQ trylock classification, timer-cancellation callback-lock
-checks, and spinlock irqrestore state validation. Remaining: NMI/#MC
-validator reentrancy, broader concurrent diagnostic snapshots, raw
+**CLOSED (PR #303):** ~~transitive IRQ-safe/unsafe dependency
+validation~~, ~~IRQ trylock classification~~, ~~timer-cancellation callback-lock
+checks for observed active callbacks~~, and ~~spinlock irqrestore state
+validation~~. Section 7 records the completed diagnostic and validation
+increments in PR #304. Remaining: NMI/#MC validator writer reentrancy,
+global held-state/statistics snapshots across CPUs and threads, raw
 `arch_irq_restore` ownership/pairing, and callback wait relationships beyond
 observed timer callback paths. Direct class checks and ordinary dependency
 edges must not be presented as proof of those broader relationships.
@@ -520,8 +522,10 @@ none is silently counted as passing validation.
   phase coincidence no deterministic test can arrange. Deleting it,
   bounding it, or proving it are three different units
   (`docs/audit/next-subsystem-lifetime-windows.md`).
-- **ordering verified by review and sanitizers only**: no TSan model, no
-  litmus tests (Prompt #3 §23 asked for them "where possible").
+- **quiesce ordering verified by review and sanitizers only**: no TSan model, no
+  litmus tests (Prompt #3 §23 asked for them "where possible"). The lockdep
+  graph/held-stack model completed in PR #304 does not close this lifetime
+  protocol gap.
 - **unexplained**: the AArch64 virtio-console flake seen once in four
   runs on 2026-09-05 (the console file lacked the last line while the
   serial log was complete).
@@ -635,13 +639,34 @@ portability, performance):
 
 ## 7. Lockdep milestone follow-ups (2026-10-03)
 
-The lockdep milestone in `prompts/Next-Milestone.md` adds the validator work
-tracked here. The IRQ dependency graph, IRQ-state restoration checks, and
-timer-callback lock profiles have been implemented on the active milestone
-branch. Profiles are bounded to active callback executions and learn only
-locks observed in those executions, so they do not prove every callback
-path. NMI/#MC raw-lock reentrancy, global diagnostic snapshots, TSan
-modeling, generalized callback waits, raw IRQ-restore pairing, and isolated
-performance measurement remain open. See
-`docs/audit/2026-10-03-lockdep-report.md` and its continuation notes for
-the evidence and precise limits.
+Completed work from the October lockdep session is struck through below.
+PR #303 is merged; PR #304 contains the subsequent implementations and
+review fixes. **BUILT** records implementation, not a claim that PR #304
+has merged or that all remote CI checks have passed. Evidence and validation
+limits are in [the lockdep report](2026-10-03-lockdep-report.md).
+
+| Completed item | Implementation and scope |
+|---|---|
+| ~~Transitive IRQ-safe/unsafe dependency validation and IRQ trylock classification~~ | **BUILT (PR #303)**: IRQ dependency graph checks, beyond direct class checks. |
+| ~~Spinlock IRQ-state restoration validation~~ | **BUILT (PR #303)**: validates tracked irqsave/irqrestore state; raw architecture IRQ ownership/pairing remains open. |
+| ~~Timer-cancellation callback-lock checks~~ | **BUILT (PR #303)**: profiles learn locks from observed active timer callback executions; unobserved paths and other callback waits remain open. |
+| ~~UP validation prerequisites in cwd progress and clock tests~~ | **FIXED (PR #303)**: explicit mover rendezvous and local monotonic clock brackets preserve the assertions on one CPU. |
+| ~~Concurrent lockdep graph and held-stack host models~~ | **BUILT (PR #304)**: ASan/UBSan and TSan cover graph publication, serialized writers, diagnostic readers, and bounded atomic held-stack snapshots. Kernel interrupt entry and callback protocols are outside these models. |
+| ~~Consistent normal graph diagnostics~~ | **BUILT (PR #304)**: counts and edges print from a private graph copied under the raw writer lock. Panic reports print held-lock diagnostics, not a graph dump. |
+| ~~Accurate panic thread and IRQ/preemption context~~ | **BUILT (PR #304)**: reports the actual context instead of always claiming boot; deliberate crash tests require that context. |
+| ~~Bounded remote CPU spinlock-stack snapshots~~ | **BUILT (PR #304)**: one atomic snapshot attempt returns a consistent private copy or unavailable, without waiting on the target. Thread stacks and global state are not covered. |
+| ~~Read-only held-stack snapshot validation from x86 NMI~~ | **BUILT (PR #304)**: real NMIs exercise a held graph lock and a busy stack writer. Delivery timeout retains the handler and live argument, releases test locks, and fails stop explicitly; injected first/second timeouts validate cleanup. This does not establish NMI writer reentrancy. |
+| ~~Matched debug LOCKDEP=0/1 warmed spin-path measurements~~ | **BUILT (PR #304)**: empty, spin, irqsave, and nested paths report min/median/max on both architectures under QEMU. No performance threshold or native-hardware claim. |
+| ~~Excessive initial user-stack builder scratch on the kernel stack~~ | **FIXED (PR #304 review/CI follow-up)**: private heap scratch reduces the local AArch64 builder frame from 5,328 to 192 bytes; allocation failure follows process cleanup. The protection-capable boot and post-self-test workload pass locally. |
+
+Still open for the next milestone:
+
+- NMI/#MC lockdep writer and raw-lock reentrancy; the x86 read-only test
+  does not cover arbitrary tracked acquisitions or AArch64 NMI delivery.
+- Global held-state/statistics snapshots across CPUs and threads.
+- Callback wait dependencies beyond observed active timer callback paths.
+- Raw `arch_irq_restore` ownership and pairing.
+- Cold graph searches, mutex paths, contention, and native-hardware lockdep
+  overhead measurements.
+- Kernel interrupt-entry and callback concurrency validation beyond the
+  host graph/held-stack models and the bounded x86 NMI reader test.

@@ -16,6 +16,7 @@ STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
               "lockdep timer profile table must cover every concurrent CPU callback");
 
 #include <kernel/console.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -28,6 +29,7 @@ STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
 struct lockdep_cpu {
     struct lockdep_held held[LOCKDEP_MAX_HELD];
     unsigned nr_held;
+    uint64_t held_seq;
     const void *callback_timer;
     unsigned callback_profile;
 };
@@ -127,20 +129,30 @@ void lockdep_dump_held(void)
         print_held(t->name, t->held_mutex, t->nr_held_mutex);
 }
 
-/* Another CPU's spinlock stack, read racily from here: a lockup report
- * names what a CPU that does not answer is holding, so a deadlock between
- * two of them shows its pair. */
+/* Another CPU may be stuck or updating its stack. Make one bounded
+ * atomic snapshot attempt; never wait on a CPU being diagnosed. */
+bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)
+{
+    *count = 0;
+    if (cpu >= CONFIG_MAX_CPUS)
+        return false;
+    struct lockdep_cpu *lc = &g_cpus[cpu];
+    return lockdep_core_held_snapshot(&lc->held_seq, lc->held, &lc->nr_held, out, count);
+}
+
 void lockdep_dump_held_cpu(unsigned cpu)
 {
     if (cpu >= CONFIG_MAX_CPUS)
         return;
-    struct lockdep_cpu *lc = &g_cpus[cpu];
-    unsigned n = lc->nr_held;
-    if (n > LOCKDEP_MAX_HELD)
-        n = LOCKDEP_MAX_HELD;
+    struct lockdep_held held[LOCKDEP_MAX_HELD];
+    unsigned n;
+    if (!lockdep_snapshot_held_cpu(cpu, held, &n)) {
+        kprintf("  held by cpu %u: unavailable (stack busy, changed, or invalid)\n", cpu);
+        return;
+    }
     char who[16];
     ksnprintf(who, sizeof(who), "cpu %u", cpu);
-    print_held(who, lc->held, n);
+    print_held(who, held, n);
 }
 
 /* --- reports ---------------------------------------------------------------- */
@@ -527,7 +539,10 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
             report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "per-CPU spinlock stack full", NULL, 0);
             return;
         }
-        lc->held[lc->nr_held++] = e;
+        lockdep_core_held_begin(&lc->held_seq);
+        lockdep_core_held_store(&lc->held[lc->nr_held], &e);
+        __atomic_store_n(&lc->nr_held, lc->nr_held + 1u, __ATOMIC_SEQ_CST);
+        lockdep_core_held_end(&lc->held_seq);
     }
 }
 
@@ -549,9 +564,13 @@ void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         if (lc->held[i].lock == lock) {
-            lc->held[i].flags |= LOCKDEP_HF_IRQSAVE;
+            struct lockdep_held e = lc->held[i];
+            e.flags |= LOCKDEP_HF_IRQSAVE;
             if (irq_was_enabled)
-                lc->held[i].flags |= LOCKDEP_HF_IRQSAVE_ON;
+                e.flags |= LOCKDEP_HF_IRQSAVE_ON;
+            lockdep_core_held_begin(&lc->held_seq);
+            lockdep_core_held_store(&lc->held[i], &e);
+            lockdep_core_held_end(&lc->held_seq);
             return;
         }
     }
@@ -611,7 +630,11 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
     if (irqrestore && !was_irqsave)
         report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip,
                "irqrestore used for a lock acquired without irqsave", NULL, 0);
-    (void)remove_entry(lc->held, &lc->nr_held, lock);
+    lockdep_core_held_begin(&lc->held_seq);
+    for (unsigned i = found; i + 1u < old_nr; i++)
+        lockdep_core_held_store(&lc->held[i], &lc->held[i + 1u]);
+    __atomic_store_n(&lc->nr_held, old_nr - 1u, __ATOMIC_SEQ_CST);
+    lockdep_core_held_end(&lc->held_seq);
 }
 
 /* --- the other checks ----------------------------------------------------- */
@@ -664,32 +687,37 @@ bool lockdep_is_held(const void *lock, unsigned kind)
 
 void lockdep_dump_graph(void)
 {
-    /* Publish a fixed class range before reading immutable names/kinds.
-     * Never print under the raw lock: logging acquires tracked locks.
-     * Edges may grow during the dump; this is not a point-in-time snapshot. */
+    /* Normal diagnostics only: allocate before taking the raw lock, then
+     * copy a bounded graph and print from private storage. Neither heap
+     * operations nor logging may run under the validator's raw lock. */
+    struct lockdep_graph *snapshot = kmalloc(sizeof(*snapshot), 0);
+    if (!snapshot) {
+        kwarn("lockdep: graph dump unavailable: snapshot allocation failed");
+        return;
+    }
     arch_irq_state_t s = raw_lock();
-    unsigned nr_classes = g_graph.nr_classes;
-    unsigned nr_edges = g_graph.nr_edges;
+    lockdep_core_snapshot(&g_graph, snapshot);
     raw_unlock(s);
+    unsigned nr_classes = snapshot->nr_classes;
+    unsigned nr_edges = snapshot->nr_edges;
     unsigned nr_nodes = nr_classes * LOCKDEP_SUBCLASSES;
     kdebug("lockdep: %u classes, %u edges (a -> b: b was taken while a was held)", nr_classes, nr_edges);
     for (unsigned a = 0; a < nr_nodes; a++) {
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
-            uint64_t bits = __atomic_load_n(&g_graph.before[a][w], __ATOMIC_RELAXED);
+            uint64_t bits = snapshot->before[a][w];
             while (bits) {
                 unsigned bit = (unsigned)__builtin_ctzll(bits);
                 bits &= bits - 1;
                 unsigned b = w * 64u + bit;
-                if (b >= nr_nodes)
-                    continue;   /* class registered after the initial snapshot */
-                const struct lock_class *ca = &g_graph.classes[lockdep_node_class((uint16_t)a)];
-                const struct lock_class *cb = &g_graph.classes[lockdep_node_class((uint16_t)b)];
+                const struct lock_class *ca = &snapshot->classes[lockdep_node_class((uint16_t)a)];
+                const struct lock_class *cb = &snapshot->classes[lockdep_node_class((uint16_t)b)];
                 kdebug("lockdep: edge %s '%s'#%u -> %s '%s'#%u", ca->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
                        ca->name, lockdep_node_subclass((uint16_t)a), cb->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
                        cb->name, lockdep_node_subclass((uint16_t)b));
             }
         }
     }
+    kfree(snapshot);
 }
 
 void lockdep_get_stats(struct lockdep_stats *out)
@@ -717,5 +745,19 @@ unsigned lockdep_expected_hits(void)
 {
     return __atomic_exchange_n(&g_expected_hits[raw_cpu_id()], 0u, __ATOMIC_ACQ_REL);
 }
+
+#if CONFIG_SELFTEST
+void lockdep_test_snapshot_context(bool updating, void (*probe)(void *), void *arg)
+{
+    arch_irq_state_t s = raw_lock();
+    struct lockdep_cpu *lc = my_cpu();
+    if (updating)
+        lockdep_core_held_begin(&lc->held_seq);
+    probe(arg);
+    if (updating)
+        lockdep_core_held_end(&lc->held_seq);
+    raw_unlock(s);
+}
+#endif
 
 #endif /* CONFIG_LOCKDEP */

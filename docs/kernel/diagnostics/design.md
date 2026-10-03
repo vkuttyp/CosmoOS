@@ -132,7 +132,7 @@ Output order in `panic_common`, chosen so the most useful line survives
 even if the rest is lost:
 
 1. `KERNEL PANIC: <reason>`
-2. `CPU: <id>  context: boot (no threads yet)`
+2. `CPU: <id>  context: <thread|interrupt|boot>  thread: <tid> '<name>'  irq_depth: <depth>  preempt_count: <count>`
 3. register dump via `arch_trap_frame_dump` when a frame was supplied
 4. `stack trace:` followed by `  #n 0x...` lines from `backtrace_print`
 5. `halting.`
@@ -144,6 +144,21 @@ Recursion guard: `g_panicking` is set on entry; a second panic prints
 `KERNEL PANIC (recursive)` with its reason only, requests failure exit,
 and halts. Interrupts are disabled at the start of every panic so a
 handler cannot interleave with the report.
+
+The context is captured on the reporting CPU after masking interrupts and
+before stopping peers or printing. A nonzero IRQ depth selects `interrupt`;
+otherwise an installed current thread selects `thread`, and no current
+thread selects `boot` (ID 0, name `(none)`). An interrupt report names the
+interrupted current thread as well. Thread names are bounded to
+`THREAD_NAME_MAX`; reporting takes no scheduler lock and allocates nothing.
+Synchronous faults in thread context remain labeled `thread`; their trap
+register dump identifies the exception. These fields do not add NMI/#MC
+reentrancy guarantees or validate potentially corrupted thread pointers.
+
+The deliberate unmapped-write and WXN crash harnesses require `kmain` in
+thread context with IRQ depth and preemption count both zero. A stale
+early-boot label therefore fails the crash test even if registers and the
+expected failure exit are otherwise correct.
 
 `backtrace_print(from)` collects up to 32 frames with `arch_backtrace`
 and prints each as `#n <addr>`, marking addresses outside kernel text

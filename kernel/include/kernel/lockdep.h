@@ -92,13 +92,18 @@ bool lockdep_is_held(const void *lock, unsigned kind);
 
 /* Print the held stacks (the panic report calls this). */
 void lockdep_dump_held(void);
+/* One nonblocking snapshot attempt. out has LOCKDEP_MAX_HELD entries;
+ * output is usable only on success. Does not capture thread mutexes. */
+bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count);
 /* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
 void lockdep_dump_held_cpu(unsigned cpu);
 
 void lockdep_get_stats(struct lockdep_stats *out);
 
 /* Print every recorded edge as "'a'#n -> 'b'#m" (kdebug), one per line:
- * the lock order the tree actually has, for docs to compare against. */
+ * a consistent graph snapshot for docs to compare against. Requires a
+ * working heap and raw lock; not a panic/NMI diagnostic. Allocation
+ * failure prints an explicit unavailable message. */
 void lockdep_dump_graph(void);
 
 /* Self-tests: the next report of `kind` counts instead of panicking, and
@@ -106,6 +111,12 @@ void lockdep_dump_graph(void);
 void lockdep_expect(enum lockdep_report_kind kind);
 unsigned lockdep_expected_hits(void);
 const char *lockdep_report_name(enum lockdep_report_kind kind);
+
+#if CONFIG_SELFTEST
+/* Test-only: invoke a nonblocking probe with the graph raw lock held,
+ * optionally during an unfinished local held-stack update. */
+void lockdep_test_snapshot_context(bool updating, void (*probe)(void *), void *arg);
+#endif
 
 #define lockdep_assert_held(lock, kind)     KASSERT(lockdep_is_held((lock), (kind)))
 #define lockdep_assert_not_held(lock, kind) KASSERT(!lockdep_is_held((lock), (kind)))
@@ -135,6 +146,8 @@ static inline bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}
+static inline bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned *count)
+{ (void)cpu; (void)out; *count = 0; return false; }
 static inline void lockdep_dump_held_cpu(unsigned cpu) { (void)cpu; }
 static inline void lockdep_dump_graph(void) {}
 static inline void lockdep_get_stats(struct lockdep_stats *out) { *out = (struct lockdep_stats){ 0 }; }
