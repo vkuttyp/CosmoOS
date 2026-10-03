@@ -90,10 +90,10 @@ the controller drivers.
 ## Not yet covered
 
 - The `record == NULL` branch for a real non-exception vector (spurious IRQ
-  logging). Needs a way to raise an arbitrary vector; `int $N` with a
-  runtime `N` requires either a jump table of stubs or self-modifying
-  code, so this will come with the LAPIC (send a self-IPI on a known
-  free vector).
+  logging). The real IPI path already exists via `arch_ipi_bind` and
+  `arch_ipi_send`, including self-IPIs in `irq-sync` and `irq-writers`.
+  Those tests install handlers before sending; a dedicated test sending
+  to an allocated, bound vector with no handler is still missing.
 - Exhaustive architecture interrupt-entry interleavings and NMI/#MC
   mutation. Host publication tests do not model those entry protocols;
   `irq-sync` and `irq-writers` exercise real IPIs and grace-period paths.

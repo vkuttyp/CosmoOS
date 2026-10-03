@@ -1025,3 +1025,48 @@ x86-64 in 118.8 s and AArch64 in 124.4 s. Logs:
 `git diff --check` passed. Interrupt invariant/testing and quiescence test
 documentation now state the complementary host/kernel coverage, and the
 inventory strikes out this integration regression with its scope limits.
+
+## PR #305 review follow-up
+
+Both initial review findings were valid. The interrupt testing guide now
+states that real/self-IPIs already exist; the missing coverage is a test
+that deliberately dispatches a bound vector without a registered handler.
+The affected interrupt documentation was searched for repeated future-LAPIC
+claims; none remain.
+
+The mutex snapshot test previously fell through its two-second completion
+deadline into an unbounded join. It now explicitly panics if the worker
+has not acknowledged completion, retaining the creator reference and the
+stack-owned mutex probe. It joins only after the acknowledgement. This
+covers a worker stalled in its tested mutex operations; it does not make
+the scheduler or thread-exit implementation universally timeout-safe.
+
+A separate temporary clone replaced the worker's completion publication
+with an endless yielding loop. Its x86-64 image reached the exact new
+completion-timeout panic and the expected failure exit in 14.8 s total
+boot time, rather than hanging in join. The boot harness used a targeted
+panic marker for this injection, with its ordinary failure-exit check;
+it did not require the normal deliberate page-fault marker. Logs:
+`out/pr305-timeout-result.log` and `out/pr305-timeout-x86_64.log`.
+The injected source and image are outside the PR; normal source/images
+were never modified by this experiment.
+
+The normal four-CPU AArch64 boot passed all 419 self-tests and the full
+harness in 156.3 s (`out/pr305-review-aarch64.log`). The concurrent x86
+run passed the changed mutex test but failed `smp-ticks` (tick count),
+`lockup-sample` (response mask), and `lockup-hard` (answered mask), all
+before the mutex test. These source paths are unchanged. The normal
+boots overlapped the isolated injection build/run; host load is a possible
+factor, not a proven cause. The failures are retained in
+`out/pr305-review-x86_64.log`; no test threshold or assertion was changed.
+The isolated x86 rerun completed in 137.1 s with one failure remaining:
+`lockup-sample` did not receive the required CPU response (107 ms).
+`lockdep-mutex` passed, as did the other 418 tests. This repeated failure
+remains unresolved; the x86 full suite is not reported green for this
+review follow-up (`out/pr305-review-x86_64-retry.log`).
+
+The pre-fix AArch64 CI job 111238579811 in run 37135325697 likewise
+passed all 419 self-tests, then exceeded the 180-second boot deadline
+before the rc/interactive-shell completion markers. Its log is retained
+at `out/pr305-ci-aarch64-job.log`; this is separate from either review
+finding. `git diff --check` passed for the review fixes.

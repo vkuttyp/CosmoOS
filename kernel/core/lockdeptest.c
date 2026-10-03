@@ -390,7 +390,10 @@ static bool test_remote_mutex_snapshot(const char **reason)
         }
         sched_yield();
     }
-    ok = ok && __atomic_load_n(&p.done, __ATOMIC_ACQUIRE);
+    /* A stuck worker may still use p and its mutexes. Do not join it
+     * without a completion acknowledgement, or return and expire p. */
+    if (!__atomic_load_n(&p.done, __ATOMIC_ACQUIRE))
+        panic("selftest lockdep-mutex: worker completion timeout; retaining thread and probe");
     /* The creator reference covers the reads above. Retain another
      * reference before join drops it, then inspect the exited object. */
     thread_get(t);

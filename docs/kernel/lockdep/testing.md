@@ -257,6 +257,10 @@ empty stack. It also reads a referenced writer thread's initial held pair,
 samples during 1024 acquire/release rounds, and retains an extra reference
 across join to verify the exited stack is empty. The accepted concurrent
 sample count is logged; busy reads are allowed and must return count zero.
+If the worker does not acknowledge completion within two seconds, the test
+panics while retaining its thread reference and stack-owned probe; it must
+neither block in join nor return while the worker can still access the probe.
+Only an acknowledged worker is joined for the exited-stack check.
 This extends single-target snapshot coverage, not simultaneous global state.
 
 On x86-64, `trap-paranoid` adds real local-APIC NMI delivery while the
