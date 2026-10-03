@@ -2,7 +2,7 @@
  * lockdep.h - Runtime lock-order and sleep-in-atomic checking
  * (docs/kernel/lockdep/).
  *
- * Debug builds (CONFIG_DEBUG) record every spinlock and mutex acquisition
+ * CONFIG_LOCKDEP (default on in debug builds) records every spinlock and mutex acquisition
  * on a held-lock stack (per CPU for spinlocks, per thread for mutexes),
  * classify locks by their initialisation name, keep the "taken while held"
  * graph and panic with both stacks on:
@@ -15,7 +15,8 @@
  *   - a release of a lock that is not held, a thread exiting with a mutex
  *     held, or a held stack overflowing.
  *
- * Release builds keep only the always-on half of might_sleep().
+ * With CONFIG_LOCKDEP disabled, only the always-on half of might_sleep()
+ * remains. LOCKDEP=0/1 selects this through the make configuration.
  */
 
 #ifndef KERNEL_LOCKDEP_H

@@ -24,13 +24,14 @@ static void test_classes(void)
     EXPECT(lockdep_core_class(g, k_a, LOCKDEP_KIND_MUTEX) == 2);            /* same name, other kind: new class */
     EXPECT(g->nr_classes == 3);
     /* Exhaustion is reported, not overrun. */
-    char names[LOCKDEP_MAX_CLASSES][4];
+    char names[LOCKDEP_MAX_CLASSES][5];
     int rc = 0;
     for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES && rc >= 0; i++) {
         names[i][0] = 'x';
         names[i][1] = (char)('0' + i % 10);
         names[i][2] = (char)('0' + (i / 10) % 10);
-        names[i][3] = '\0';
+        names[i][3] = (char)('0' + (i / 100) % 10);
+        names[i][4] = '\0';
         rc = lockdep_core_class(g, names[i], LOCKDEP_KIND_SPIN);
     }
     EXPECT(rc == -1);
@@ -72,13 +73,66 @@ static void test_edges_and_cycles(void)
     for (unsigned i = 10; i < 30; i++)
         EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)(i + 1)));
     EXPECT(lockdep_core_reaches(g, s, 10, 30, path, 8, &len));
-    EXPECT(len == 21 && path[7] == 30 && path[0] == 23);
+    EXPECT(len == 8 && path[7] == 30 && path[0] == 23);
 
     /* Highest node works. */
     uint16_t hi = LOCKDEP_MAX_NODES - 1;
     EXPECT(lockdep_core_add_edge(g, c, hi));
     EXPECT(lockdep_core_reaches(g, s, a, hi, path, 8, &len) && len == 4 && path[3] == hi);
     EXPECT(!lockdep_core_reaches(g, s, hi, a, path, 8, &len));
+    free(s);
+    free(g);
+}
+
+static void test_metadata_lifetime(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    char *name = malloc(LOCKDEP_CLASS_NAME_MAX);
+    EXPECT(g != NULL && name != NULL);
+    strcpy(name, "unloadable-driver");
+    int c = lockdep_core_class(g, name, LOCKDEP_KIND_SPIN);
+    EXPECT(c == 0);
+    /* Reuse the original address for unrelated metadata, then free it.
+     * Neither class identity nor diagnostics may depend on this storage. */
+    strcpy(name, "replacement-driver");
+    EXPECT(lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) == 1);
+    free(name);
+    EXPECT(strcmp(g->classes[c].name, "unloadable-driver") == 0);
+    EXPECT(lockdep_core_class(g, "unloadable-driver", LOCKDEP_KIND_SPIN) == c);
+    EXPECT(lockdep_core_class(g, "unloadable-driver", LOCKDEP_KIND_MUTEX) == 2);
+    char long_name[LOCKDEP_CLASS_NAME_MAX + 1];
+    memset(long_name, 'x', sizeof(long_name));
+    long_name[LOCKDEP_CLASS_NAME_MAX] = '\0';
+    EXPECT(lockdep_core_class(g, long_name, LOCKDEP_KIND_SPIN) == -2);
+    EXPECT(g->nr_classes == 3);
+    long_name[LOCKDEP_CLASS_NAME_MAX - 1] = '\0';
+    EXPECT(lockdep_core_class(g, long_name, LOCKDEP_KIND_SPIN) == 3);
+    EXPECT(strlen(g->classes[3].name) == LOCKDEP_CLASS_NAME_MAX - 1);
+    EXPECT(lockdep_core_class(g, NULL, LOCKDEP_KIND_SPIN) == 4);
+    free(g);
+}
+
+static void test_path_bounds(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_scratch *s = calloc(1, sizeof(*s));
+    EXPECT(g != NULL && s != NULL);
+    for (unsigned i = 0; i + 1 < LOCKDEP_MAX_NODES; i++)
+        EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)(i + 1)));
+    uint16_t path[8];
+    unsigned len;
+    EXPECT(lockdep_core_reaches(g, s, 0, LOCKDEP_MAX_NODES - 1, path, 8, &len));
+    EXPECT(len == 8);
+    /* This is the panic printer's iteration. Previously len was 1280
+     * and ASan detects the overread rather than a misleading panic. */
+    for (unsigned i = 0; i < len; i++)
+        EXPECT(path[i] == LOCKDEP_MAX_NODES - 8 + i);
+    EXPECT(lockdep_core_reaches(g, s, 0, LOCKDEP_MAX_NODES - 1, NULL, 0, &len));
+    EXPECT(len == 0);
+    EXPECT(lockdep_core_reaches(g, s, 7, 7, path, 8, &len));
+    EXPECT(len == 1 && path[0] == 7);
+    EXPECT(!lockdep_core_reaches(g, s, LOCKDEP_MAX_NODES - 1, 0, path, 8, &len));
+    EXPECT(len == 0);
     free(s);
     free(g);
 }
@@ -127,6 +181,8 @@ static const struct host_test tests[] = {
     { "classes", test_classes },
     { "edges-and-cycles", test_edges_and_cycles },
     { "decision", test_decision },
+    { "metadata-lifetime", test_metadata_lifetime },
+    { "path-bounds", test_path_bounds },
 };
 
 int main(void)

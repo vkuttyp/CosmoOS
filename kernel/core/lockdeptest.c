@@ -77,6 +77,38 @@ bool selftest_lockdep_order(const char **reason)
     CHECK(!lockdep_is_held(&a, LOCKDEP_KIND_SPIN) && lockdep_is_held(&b, LOCKDEP_KIND_SPIN));
     spin_unlock(&b);
     arch_irq_restore(s);
+
+    /* A long cycle uses the real hooks, not the host decision model.
+     * Each pair is observed independently so closing the chain needs a
+     * transitive search longer than the diagnostic's eight-node buffer. */
+    static spinlock_t chain[10];
+    static const char *const names[] = {
+        "lockdep-chain-0", "lockdep-chain-1", "lockdep-chain-2", "lockdep-chain-3", "lockdep-chain-4",
+        "lockdep-chain-5", "lockdep-chain-6", "lockdep-chain-7", "lockdep-chain-8", "lockdep-chain-9",
+    };
+    for (unsigned i = 0; i < 10; i++)
+        spinlock_init(&chain[i], names[i]);
+    for (unsigned i = 0; i < 9; i++) {
+        s = spin_lock_irqsave(&chain[i]);
+        spin_lock(&chain[i + 1]);
+        spin_unlock(&chain[i + 1]);
+        spin_unlock_irqrestore(&chain[i], s);
+    }
+    s = spin_lock_irqsave(&chain[9]);
+    lockdep_expect(LOCKDEP_R_INVERSION);
+    spin_lock_check_order(&chain[0]);
+    hits = lockdep_expected_hits();
+    spin_unlock_irqrestore(&chain[9], s);
+    CHECK(hits == 1);
+
+    /* Validate ownership reporting without unlocking an actual unowned
+     * primitive or changing preemption state. */
+    lockdep_expect(LOCKDEP_R_UNHELD);
+    s = arch_irq_save();
+    lockdep_release(&chain[0], LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0));
+    hits = lockdep_expected_hits();
+    arch_irq_restore(s);
+    CHECK(hits == 1);
     lockdep_get_stats(&s1);
     kinfo("selftest: lockdep-order: %u classes, %u edges, %llu acquisitions, %llu searches so far", s1.classes,
           s1.edges, (unsigned long long)s1.acquisitions, (unsigned long long)s1.searches);

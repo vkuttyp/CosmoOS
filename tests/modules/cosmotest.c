@@ -10,6 +10,7 @@
 #include <kernel/log.h>
 #include <kernel/module.h>
 #include <kernel/object.h>
+#include <kernel/spinlock.h>
 #include <kernel/string.h>
 
 /* rodata: a table the dependant reads through a relocated pointer. */
@@ -27,12 +28,17 @@ static char cosmotest_scratch[256];
 static int (*const cosmotest_ops[])(void) = { NULL };
 
 int cosmotest_answer(void);
+/* Both object and class name live in the unloadable image. The graph
+ * must keep its own metadata after module-unload frees this rodata. */
+static spinlock_t cosmotest_lock = SPINLOCK_INIT("cosmotest-unloadable-lock");
 
 int cosmotest_answer(void)
 {
+    arch_irq_state_t s = spin_lock_irqsave(&cosmotest_lock);
     int sum = 0;
     for (unsigned i = 0; i < 4; i++)
         sum += cosmotest_table[i];
+    spin_unlock_irqrestore(&cosmotest_lock, s);
     return sum;   /* 42 */
 }
 EXPORT_SYMBOL(cosmotest_answer);
