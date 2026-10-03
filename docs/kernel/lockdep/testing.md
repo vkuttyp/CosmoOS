@@ -35,7 +35,7 @@ released normally.
 |---|---|---|
 | `lockdep-order` | A → B twice (the second time runs no search: the edge is known); B → A is an inversion; releasing out of order is legal; `lockdep_is_held` tracks the stack | L1, L11 |
 | `lockdep-recursion` | two spinlocks from one init site nested is a recursion report; the same with `spin_lock_nested(…, 1)` is silent | L2 |
-| `lockdep-irq` | a lock first taken with `spin_lock` and interrupts enabled, then taken inside a real self-IPI handler (`arch_vector_alloc`, `interrupt_register`, `arch_ipi_bind`, `arch_ipi_send`): the interrupt-context acquisition is the IRQ report | L3 |
+| `lockdep-irq` | direct and transitive IRQ conflicts in both observation orders, thread trylock classification, successful/failed IRQ trylock, wrong irqrestore state, and enabling with another spinlock held; self-IPI handler drives real interrupt acquisitions | L3, L14 |
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
@@ -138,12 +138,17 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 - The `vfs-concurrency` stress found no fault before the fixes were applied
   under the checker's own boots because the checker already refuses the old
   rename order; the pre-fix ABBA was reproduced only by review.
-- Trylock acquisitions are pushed but never checked; a trylock cannot
-  deadlock, but an order it implies is not recorded either.
+- Trylocks add no blocking edge. Successful IRQ trylocks add no IRQ-use
+  label, while successful thread trylocks with IRQs enabled are included in
+  IRQ-safety validation.
 
 ## October hardening regression coverage
 
-Host `metadata-lifetime` frees/reuses a name buffer and checks content
+The valid IRQ-restore control runs without arming a report expectation.
+Only deliberately invalid operations arm one: a zero-report control must
+not leave an expectation that could suppress a later real violation.
+
+Host `irq-dependencies` covers a maximum-node path and usage-last conflicts; `irq-oracle` compares every pair against an independent transitive-closure implementation over 32 generated DAGs. Host `metadata-lifetime` frees/reuses a name buffer and checks content
 identity, kind separation, maximum length and overlong rejection.
 `path-bounds` builds a 1280-node chain, iterates the returned bounded path
 under ASan/UBSan, checks a zero-capacity request and self reachability.
@@ -152,6 +157,11 @@ the closing ten-lock cycle, and checks an unheld release without performing
 an invalid primitive unlock. `module-load` now uses a fixture lock with a
 name in unloadable module rodata, checks stable class count on reload, and
 the final graph dump accesses that copied name after unmapping the module.
+
+`timer-cancel-sync` holds a lock while a real timer callback blocks on it
+and attempts synchronous cancellation. The expected callback-lock report
+returns the test from the wait; after releasing the lock, the callback
+completes and a subsequent cancellation confirms it is idle.
 
 `LOCKDEP=0 OUT=...` tests debug without instrumentation; `BUILD=release
 LOCKDEP=1 OUT=...` enables the checker in release. Use separate output

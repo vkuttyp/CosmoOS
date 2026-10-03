@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,28 +270,61 @@ static int start_all(cosmo_thread_t *t, unsigned n, void *(*fn)(void *), int pas
     return -1;
 }
 
-/* Stop the writers and wait until every one of them is parked. */
-static void quiesce_writers(unsigned n)
+/* Step 3 gives both writers one down-move per comparison. Each round
+ * starts together and parks only after the down-move, so UP cannot stop
+ * both writers at the top checkpoint or exhaust them before observation.
+ * The mutex protects the rendezvous, not the competing chdir operations. */
+static unsigned coherent_round;
+
+static void *coherent_writer(void *arg)
 {
+    const char *top = (unsigned long)arg ? Q_TOP : P_TOP;
+    unsigned seen = 0;
     cosmo_mutex_lock(&m);
-    quiesce = 1;
-    cosmo_cond_broadcast(&c);
-    while (parked < n && !writers_stop)
-        cosmo_cond_wait(&c, &m);
+    while (!writers_stop) {
+        while (seen == coherent_round && !writers_stop)
+            cosmo_cond_wait(&c, &m);
+        if (writers_stop)
+            break;
+        seen = coherent_round;
+        cosmo_mutex_unlock(&m);
+        (void)chdir(top);
+        (void)chdir("s");
+        cosmo_mutex_lock(&m);
+        parked++;
+        cosmo_cond_broadcast(&c);
+    }
     cosmo_mutex_unlock(&m);
+    return NULL;
 }
 
-static void release_writers(void)
+static void coherent_run_round(void)
 {
     cosmo_mutex_lock(&m);
-    quiesce = 0;
+    parked = 0;
+    coherent_round++;
     cosmo_cond_broadcast(&c);
+    while (parked < 2 && !writers_stop)
+        cosmo_cond_wait(&c, &m);
     cosmo_mutex_unlock(&m);
 }
 
 /* --- step 4: the victim directory ---------------------------------------- */
 #define VICTIM "vic"
 static volatile unsigned vic_walks, vic_frees_seen;
+static bool vic_entered;
+
+/* The first walk must run while the mover is inside the victim. This
+ * handshake supplies progress on UP without depending on a timer tick
+ * landing between chdir(vic) and chdir(..). Removal and walking still
+ * race, and the remaining rounds retain unrestricted churn. */
+static void vic_wait_entered(void)
+{
+    cosmo_mutex_lock(&m);
+    while (!vic_entered && !writers_stop)
+        cosmo_cond_wait(&c, &m);
+    cosmo_mutex_unlock(&m);
+}
 
 /* Move the process in and out of the victim. The `chdir("..")` is the put
  * that can be the last one, once the killer has removed the entry. */
@@ -298,8 +332,16 @@ static void *vic_mover(void *arg)
 {
     (void)arg;
     for (unsigned i = 0; i < ROUNDS && !writers_stop; i++) {
-        if (chdir(VICTIM) == 0)
+        if (chdir(VICTIM) == 0) {
+            cosmo_mutex_lock(&m);
+            vic_entered = true;
+            cosmo_cond_broadcast(&c);
+            while (vic_walks == 0 && !writers_stop)
+                cosmo_cond_wait(&c, &m);
+            cosmo_mutex_unlock(&m);
+            cosmo_yield();
             (void)chdir("..");
+        }
     }
     publish_stop();
     return NULL;
@@ -310,6 +352,7 @@ static void *vic_mover(void *arg)
 static void *vic_killer(void *arg)
 {
     (void)arg;
+    vic_wait_entered();
     while (!writers_stop) {
         (void)rmdir("/tmp/cwdr/" VICTIM);
         (void)mkdir("/tmp/cwdr/" VICTIM, 0755);
@@ -323,6 +366,7 @@ static void *vic_killer(void *arg)
 static void *vic_walker(void *arg)
 {
     (void)arg;
+    vic_wait_entered();
     char buf[256];
     while (!writers_stop) {
         int fd = open("f", O_RDONLY);
@@ -330,10 +374,15 @@ static void *vic_walker(void *arg)
             close(fd);
         } else if (errno != ENOENT && errno != ENOTDIR) {
             bad_errno = (unsigned)errno;
+            publish_stop();
             break;
         }
-        if (getcwd(buf, sizeof(buf)) != NULL && strstr(buf, VICTIM) != NULL)
+        if (getcwd(buf, sizeof(buf)) != NULL && strstr(buf, VICTIM) != NULL) {
+            cosmo_mutex_lock(&m);
             vic_walks++;
+            cosmo_cond_broadcast(&c);
+            cosmo_mutex_unlock(&m);
+        }
     }
     return NULL;
 }
@@ -681,13 +730,14 @@ step2_done:;
          * from different directories is a path and a vnode that name
          * different places -- which the marker files below detect.
          */
-        if (start_all(w, 2, depth_writer, 1) != 0) {
+        coherent_round = 0;
+        if (start_all(w, 2, coherent_writer, 1) != 0) {
             CHECK(0);   /* reported by start_all; the step cannot run */
             goto step3_done;
         }
         unsigned checked = 0;
         for (unsigned i = 0; i < 200u && !writers_stop; i++) {
-            quiesce_writers(2);
+            coherent_run_round();
             if (writers_stop)
                 break;
             if (getcwd(buf, sizeof(buf)) != NULL) {
@@ -715,7 +765,6 @@ step2_done:;
                     }
                 }
             }
-            release_writers();
         }
         publish_stop();
         CHECK(cosmo_thread_join(&w[0], NULL) == 0);
@@ -752,6 +801,7 @@ step3_done:;
         (void)mkdir(VICTIM, 0755);
         writers_stop = quiesce = parked = bad_errno = 0;
         vic_walks = vic_frees_seen = 0;
+        vic_entered = false;
         /* The mover is the one that ends this step; the other two loop on
          * its flag, so it starts first and the rest bail if refused. */
         if (cosmo_thread_start(&mv, vic_mover, NULL, 32u * 1024u) != 0) {

@@ -396,18 +396,22 @@ printing of a truncated cycle path and graph names pointing into freed
 module rodata. Both are corrected in the October hardening pass, with
 ASan/UBSan path/storage regressions and a real module fixture. See
 `2026-10-03-lock-discipline-audit.md` and `2026-10-03-lockdep-report.md`.
-Still deferred: transitive IRQ-safe/unsafe dependency validation, trylock
-IRQ classification, callback-wait dependencies (timer_cancel_sync),
-NMI/#MC validator reentrancy, broader concurrent diagnostic snapshots and
-IRQ-state restoration validation. Direct class checks and ordinary
-dependency edges must not be presented as proof of those relationships.
+The active milestone closes transitive IRQ-safe/unsafe dependency
+validation, IRQ trylock classification, timer-cancellation callback-lock
+checks, and spinlock irqrestore state validation. Remaining: NMI/#MC
+validator reentrancy, broader concurrent diagnostic snapshots, raw
+`arch_irq_restore` ownership/pairing, and callback wait relationships beyond
+observed timer callback paths. Direct class checks and ordinary dependency
+edges must not be presented as proof of those broader relationships.
 
-The same validation found **UP suite prerequisites**: unchanged HEAD fails
+The same validation found **UP suite prerequisites**: unchanged HEAD failed
 cwdtest's progress assertion on x86-64 and AArch64; AArch64 additionally
-fails two clock tests whose helper requires two CPUs. Preserve the checks
-while making the single-CPU workload meaningful. A LOCKDEP=0 boot also
-showed `rlimit-unpriv`'s assumed 80-write burst taking long enough for the
-log bucket to refill (exit 19); the unchanged assertions pass on rerun.
+failed two clock tests whose helper required two CPUs. Both prerequisites
+are corrected while preserving their assertions: the mover rendezvous makes
+progress observable, and the clock test uses a local monotonic bracket on
+UP. A LOCKDEP=0 boot also showed `rlimit-unpriv`'s assumed 80-write burst
+taking long enough for the log bucket to refill (exit 19); the unchanged
+assertions pass on rerun.
 These failures and analyzer warnings are detailed in the October report;
 none is silently counted as passing validation.
 
@@ -628,3 +632,16 @@ portability, performance):
    why they are gaps rather than units.
 3. Which entry here does the report **close**, by name? Strike it
    through in the documents commit.
+
+## 7. Lockdep milestone follow-ups (2026-10-03)
+
+The lockdep milestone in `prompts/Next-Milestone.md` adds the validator work
+tracked here. The IRQ dependency graph, IRQ-state restoration checks, and
+timer-callback lock profiles have been implemented on the active milestone
+branch. Profiles are bounded to active callback executions and learn only
+locks observed in those executions, so they do not prove every callback
+path. NMI/#MC raw-lock reentrancy, global diagnostic snapshots, TSan
+modeling, generalized callback waits, raw IRQ-restore pairing, and isolated
+performance measurement remain open. See
+`docs/audit/2026-10-03-lockdep-report.md` and its continuation notes for
+the evidence and precise limits.

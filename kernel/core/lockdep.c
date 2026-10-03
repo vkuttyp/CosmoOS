@@ -1,6 +1,6 @@
 /*
  * lockdep.c - Held-lock stacks, the dependency graph and the reports
- * (docs/kernel/lockdep/design.md). Debug builds only.
+ * (docs/kernel/lockdep/design.md). Enabled by CONFIG_LOCKDEP.
  *
  * The algorithm is lockdep_core.h. This file owns the per-CPU spinlock
  * stacks, the per-thread mutex stacks, the raw lock that serialises graph
@@ -11,6 +11,9 @@
 #include <kernel/lockdep.h>
 
 #if CONFIG_LOCKDEP
+
+STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
+              "lockdep timer profile table must cover every concurrent CPU callback");
 
 #include <kernel/console.h>
 #include <kernel/log.h>
@@ -25,17 +28,34 @@
 struct lockdep_cpu {
     struct lockdep_held held[LOCKDEP_MAX_HELD];
     unsigned nr_held;
+    const void *callback_timer;
+    unsigned callback_profile;
+};
+
+struct lockdep_timer_lock {
+    const void *lock;
+    uint16_t node;
+};
+
+struct lockdep_timer_profile {
+    const void *timer;
+    unsigned nr_locks;
+    bool overflow;
+    struct lockdep_timer_lock locks[LOCKDEP_MAX_TIMER_LOCKS];
 };
 
 static struct lockdep_graph g_graph;
 static struct lockdep_scratch g_scratch;   /* used under g_raw only */
 static struct lockdep_cpu g_cpus[CONFIG_MAX_CPUS];
+static struct lockdep_timer_profile g_timer_profiles[LOCKDEP_MAX_TIMER_PROFILES];
+#define TIMER_PROFILE_TOMBSTONE ((const void *)(uintptr_t)1)
 static struct lockdep_stats g_stats;
 static bool g_off;                          /* after a report that panicked, or during panic */
 
 /* Self-test expectations. */
-static int g_expect = -1;
-static unsigned g_expected_hits;
+static int g_expect[CONFIG_MAX_CPUS];
+static bool g_expect_armed[CONFIG_MAX_CPUS];
+static unsigned g_expected_hits[CONFIG_MAX_CPUS];
 
 /* The checker's own lock: a raw word, never tracked. */
 static uint32_t g_raw;
@@ -62,6 +82,8 @@ static const char *const g_kind_names[LOCKDEP_R_COUNT] = {
     [LOCKDEP_R_OVERFLOW] = "held-lock stack overflow",
     [LOCKDEP_R_UNHELD] = "release of a lock that is not held",
     [LOCKDEP_R_EXIT_HELD] = "thread exit with a mutex held",
+    [LOCKDEP_R_IRQ_STATE] = "mismatched irqsave acquisition and restoration",
+    [LOCKDEP_R_CALLBACK] = "timer cancellation waits while holding a callback lock",
 };
 
 const char *lockdep_report_name(enum lockdep_report_kind kind)
@@ -128,15 +150,20 @@ void lockdep_dump_held_cpu(unsigned cpu)
 static void report(enum lockdep_report_kind kind, const char *name, unsigned subclass, uintptr_t ip, const char *detail,
                    const uint16_t *path, unsigned path_len)
 {
-    g_stats.reports++;
-    if (g_expect == (int)kind) {
-        g_expect = -1;
-        g_expected_hits++;
+    __atomic_fetch_add(&g_stats.reports, 1u, __ATOMIC_RELAXED);
+    unsigned cpu = raw_cpu_id();
+    int expected = (int)kind;
+    bool armed = true;
+    if (__atomic_load_n(&g_expect_armed[cpu], __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&g_expect[cpu], __ATOMIC_RELAXED) == expected &&
+        __atomic_compare_exchange_n(&g_expect_armed[cpu], &armed, false, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        __atomic_fetch_add(&g_expected_hits[cpu], 1u, __ATOMIC_RELAXED);
         kdebug("lockdep: expected report: %s ('%s'#%u at %p)", g_kind_names[kind], name ? name : "-", subclass,
                (void *)ip);
         return;
     }
-    g_off = true;
+    __atomic_store_n(&g_off, true, __ATOMIC_RELEASE);
     /* A failure can originate while console.lock is held by this CPU.
      * Enter the existing fatal-output mode before the first print, and
      * freeze CPU identity/held stacks before dumping them. panic() will
@@ -186,6 +213,172 @@ static int node_of(uint16_t *class_slot, const char *name, unsigned kind, unsign
     return (int)lockdep_node(cached - 1u, subclass);
 }
 
+/* Usage and edge conflicts report outside the raw lock. Names are owned
+ * and immutable; record both endpoints, not just the acquired class. */
+static void report_irq(const char *name, unsigned subclass, uintptr_t ip,
+                       uint16_t safe, uint16_t unsafe, const char *change)
+{
+    char detail[384];
+    ksnprintf(detail, sizeof(detail),
+              "%s connects IRQ-used '%s'#%u to IRQ-enabled '%s'#%u",
+              change, g_graph.classes[lockdep_node_class(safe)].name, lockdep_node_subclass(safe),
+              g_graph.classes[lockdep_node_class(unsafe)].name, lockdep_node_subclass(unsafe));
+    report(LOCKDEP_R_IRQ, name, subclass, ip, detail, NULL, 0);
+}
+
+static bool check_usage(uint16_t node, bool in_irq, bool irqs_on, bool trylock, uintptr_t ip)
+{
+    unsigned cls = lockdep_node_class(node);
+    struct lock_class *c = &g_graph.classes[cls];
+    unsigned add = lockdep_core_usage(in_irq, irqs_on, trylock);
+    if (c->kind != LOCKDEP_KIND_SPIN || !add ||
+        (__atomic_load_n(&c->usage, __ATOMIC_ACQUIRE) & add) == add)
+        return true;
+    uint16_t safe, unsafe;
+    arch_irq_state_t s = raw_lock();
+    bool valid = lockdep_core_mark_usage(&g_graph, &g_scratch, cls, add, ip, &safe, &unsafe);
+    raw_unlock(s);
+    if (!valid)
+        report_irq(c->name, lockdep_node_subclass(node), ip, safe, unsafe, "new class usage");
+    return valid;
+}
+
+static unsigned timer_profile_start(const void *timer)
+{
+    uintptr_t key = (uintptr_t)timer >> 4;
+    key ^= key >> 13;
+    key *= (uintptr_t)0x9e3779b1u;
+    return (unsigned)(key % LOCKDEP_MAX_TIMER_PROFILES);
+}
+
+static int timer_profile_find(const void *timer)
+{
+    unsigned first = timer_profile_start(timer);
+    for (unsigned n = 0; n < LOCKDEP_MAX_TIMER_PROFILES; n++) {
+        unsigned i = (first + n) % LOCKDEP_MAX_TIMER_PROFILES;
+        if (g_timer_profiles[i].timer == timer)
+            return (int)i;
+        if (g_timer_profiles[i].timer == NULL)
+            return -1;
+    }
+    return -1;
+}
+
+void lockdep_timer_cancel_done(const void *timer)
+{
+    arch_irq_state_t s = raw_lock();
+    int slot = timer_profile_find(timer);
+    if (slot >= 0) {
+        g_timer_profiles[slot] = (struct lockdep_timer_profile){ .timer = TIMER_PROFILE_TOMBSTONE };
+    }
+    raw_unlock(s);
+}
+
+void lockdep_timer_enter(const void *timer)
+{
+    /* run_expired executes callbacks serially with IRQs masked, and
+     * clears each profile before starting another callback on that CPU.
+     * Thus at most CONFIG_MAX_CPUS profiles can be live; the static
+     * assertion above makes capacity independent of timer queue depth. */
+    struct lockdep_cpu *lc = my_cpu();
+    arch_irq_state_t s = raw_lock();
+    int slot = timer_profile_find(timer);
+    if (slot >= 0) {
+        g_timer_profiles[slot] = (struct lockdep_timer_profile){ .timer = timer };
+    } else {
+        unsigned first = timer_profile_start(timer);
+        for (unsigned n = 0; n < LOCKDEP_MAX_TIMER_PROFILES; n++) {
+            unsigned i = (first + n) % LOCKDEP_MAX_TIMER_PROFILES;
+            if (g_timer_profiles[i].timer == NULL || g_timer_profiles[i].timer == TIMER_PROFILE_TOMBSTONE) {
+                slot = (int)i;
+                g_timer_profiles[slot] = (struct lockdep_timer_profile){ .timer = timer };
+                break;
+            }
+        }
+    }
+    raw_unlock(s);
+    if (slot < 0) {
+        report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
+               "timer callback has no registered lock profile", NULL, 0);
+        return;
+    }
+    lc->callback_timer = timer;
+    lc->callback_profile = (unsigned)slot;
+}
+
+void lockdep_timer_exit(const void *timer)
+{
+    struct lockdep_cpu *lc = my_cpu();
+    if (lc->callback_timer != timer)
+        report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
+               "timer callback context nesting mismatch", NULL, 0);
+    lc->callback_timer = NULL;
+}
+
+static void timer_profile_note(const void *timer, unsigned profile, const void *lock, uint16_t node)
+{
+    arch_irq_state_t s = raw_lock();
+    if (profile < LOCKDEP_MAX_TIMER_PROFILES && g_timer_profiles[profile].timer == timer) {
+        struct lockdep_timer_profile *p = &g_timer_profiles[profile];
+        bool found = false;
+        for (unsigned i = 0; i < p->nr_locks; i++)
+            if (p->locks[i].lock == lock) { found = true; break; }
+        if (!found) {
+            if (p->nr_locks == LOCKDEP_MAX_TIMER_LOCKS)
+                p->overflow = true;
+            else
+                p->locks[p->nr_locks++] = (struct lockdep_timer_lock){ lock, node };
+        }
+    }
+    bool overflow = profile >= LOCKDEP_MAX_TIMER_PROFILES || g_timer_profiles[profile].overflow;
+    raw_unlock(s);
+    if (overflow)
+        report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
+               "timer callback lock profile exceeded its bounded storage", NULL, 0);
+}
+
+bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
+{
+    preempt_disable();
+    struct lockdep_cpu *lc = my_cpu();
+    struct thread *t = me();
+    arch_irq_state_t s = raw_lock();
+    int slot = timer_profile_find(timer);
+    bool conflict = false, overflow = false;
+    const struct lockdep_timer_lock callback_lock = { 0 };
+    struct lockdep_timer_lock found = callback_lock;
+    if (slot >= 0) {
+        struct lockdep_timer_profile *p = &g_timer_profiles[slot];
+        overflow = p->overflow;
+        for (unsigned i = 0; i < p->nr_locks && !conflict; i++) {
+            for (unsigned j = 0; j < lc->nr_held; j++)
+                if (lc->held[j].lock == p->locks[i].lock) {
+                    conflict = true; found = p->locks[i]; break;
+                }
+            if (t)
+                for (unsigned j = 0; j < t->nr_held_mutex && !conflict; j++)
+                    if (t->held_mutex[j].lock == p->locks[i].lock) {
+                        conflict = true; found = p->locks[i]; break;
+                    }
+        }
+    }
+    raw_unlock(s);
+    if (overflow) {
+        report(LOCKDEP_R_OVERFLOW, NULL, 0, ip, "timer callback lock profile overflowed", NULL, 0);
+        preempt_enable();
+        return false;
+    }
+    if (conflict) {
+        unsigned cls = lockdep_node_class(found.node);
+        report(LOCKDEP_R_CALLBACK, g_graph.classes[cls].name, lockdep_node_subclass(found.node), ip,
+               "timer_cancel_sync holds an object lock acquired by this timer's callback", NULL, 0);
+        preempt_enable();
+        return false;
+    }
+    preempt_enable();
+    return true;
+}
+
 /*
  * The check, before the acquisition waits. Nothing is pushed here: a lock
  * that is still contended is not held, and an interrupt arriving during
@@ -193,8 +386,8 @@ static int node_of(uint16_t *class_slot, const char *name, unsigned kind, unsign
  * the stack. Edges record "attempted while held", which is the order
  * relation the checker wants whether or not the attempt has completed.
  */
-static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
-                          uintptr_t ip)
+static void acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
+                          unsigned subclass, bool irqs_on, uintptr_t ip)
 {
     struct percpu *pc = raw_this_cpu();   /* identity: irq_depth is the same wherever the thread runs */
     bool in_irq = pc->irq_depth != 0;
@@ -205,35 +398,13 @@ static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind,
     if (n < 0)
         return;
     uint16_t node = (uint16_t)n;
-    unsigned cls = lockdep_node_class(node);
     __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
+    if (kind == LOCKDEP_KIND_SPIN && in_irq && lc->callback_timer)
+        timer_profile_note(lc->callback_timer, lc->callback_profile, lock, node);
 
-    /* 1. Interrupt safety. */
-    struct lock_class *c = &g_graph.classes[cls];
-    if (kind == LOCKDEP_KIND_SPIN) {
-        const unsigned both = LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON;
-        unsigned add = (in_irq ? LOCKDEP_USED_IN_IRQ : 0u) | (irqs_on ? LOCKDEP_HELD_IRQS_ON : 0u);
-        if (add && (__atomic_load_n(&c->usage, __ATOMIC_ACQUIRE) & add) != add) {
-            arch_irq_state_t s = raw_lock();
-            unsigned before = __atomic_load_n(&c->usage, __ATOMIC_RELAXED);
-            if ((add & LOCKDEP_USED_IN_IRQ) && !(before & LOCKDEP_USED_IN_IRQ))
-                c->irq_ip = ip;
-            if ((add & LOCKDEP_HELD_IRQS_ON) && !(before & LOCKDEP_HELD_IRQS_ON))
-                c->irqs_on_ip = ip;
-            unsigned after = before | add;
-            __atomic_store_n(&c->usage, after, __ATOMIC_RELEASE);
-            raw_unlock(s);
-            /* Report the acquisition that completes the conflict, once
-             * per class: the class keeps both bits afterwards. */
-            if ((before & both) != both && (after & both) == both) {
-                char detail[128];
-                ksnprintf(detail, sizeof(detail),
-                          "taken in interrupt context at %p and with interrupts enabled at %p", (void *)c->irq_ip,
-                          (void *)c->irqs_on_ip);
-                report(LOCKDEP_R_IRQ, name, subclass, ip, detail, NULL, 0);
-            }
-        }
-    }
+    /* 1. Interrupt safety, including paths observed before this usage. */
+    if (!check_usage(node, in_irq, irqs_on, false, ip))
+        return;
 
     /* 2. The held set: this CPU's spinlocks, plus the thread's mutexes in thread context. */
     const struct lockdep_held *held[2] = { lc->held, t ? t->held_mutex : NULL };
@@ -262,16 +433,22 @@ static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind,
         return;
     uint16_t path[8];
     unsigned path_len = 0;
-    bool cycle = false;
+    bool cycle = false, irq_conflict = false;
+    uint16_t safe = 0, unsafe = 0;
     uint16_t against = 0;
     arch_irq_state_t s = raw_lock();
-    for (unsigned k = 0; k < 2 && !cycle; k++) {
+    for (unsigned k = 0; k < 2 && !cycle && !irq_conflict; k++) {
         for (unsigned i = 0; i < nheld[k]; i++) {
             if (lockdep_core_has_edge(&g_graph, held[k][i].node, node))
                 continue;
-            g_stats.searches++;
+            __atomic_fetch_add(&g_stats.searches, 1u, __ATOMIC_RELAXED);
             if (lockdep_core_reaches(&g_graph, &g_scratch, node, held[k][i].node, path, 8, &path_len)) {
                 cycle = true;
+                against = held[k][i].node;
+                break;
+            }
+            if (lockdep_core_irq_edge(&g_graph, &g_scratch, held[k][i].node, node, &safe, &unsafe)) {
+                irq_conflict = true;
                 against = held[k][i].node;
                 break;
             }
@@ -279,6 +456,12 @@ static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind,
         }
     }
     raw_unlock(s);
+    if (irq_conflict) {
+        char change[160];
+        ksnprintf(change, sizeof(change), "new edge '%s'#%u -> '%s'#%u",
+                  g_graph.classes[lockdep_node_class(against)].name, lockdep_node_subclass(against), name, subclass);
+        report_irq(name, subclass, ip, safe, unsafe, change);
+    }
     if (cycle) {
         char detail[128];
         const struct lock_class *ac = &g_graph.classes[lockdep_node_class(against)];
@@ -294,17 +477,17 @@ static void acquire_check(uint16_t *class_slot, const char *name, unsigned kind,
  * CPU's only while the thread cannot move (S25). A spinlock's arrives
  * with preemption already off; the save costs it nothing it notices.
  */
-void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
-                           uintptr_t ip)
+void lockdep_acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
+                           unsigned subclass, bool irqs_on, uintptr_t ip)
 {
-    if (g_off)
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         return;
     if (kind == LOCKDEP_KIND_MUTEX) {
         arch_irq_state_t s = arch_irq_save();
-        acquire_check(class_slot, name, kind, subclass, irqs_on, ip);
+        acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip);
         arch_irq_restore(s);
     } else {
-        acquire_check(class_slot, name, kind, subclass, irqs_on, ip);
+        acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip);
     }
 }
 
@@ -312,15 +495,17 @@ void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind
 void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
                       bool trylock, bool irqs_on, uintptr_t ip)
 {
-    if (g_off)
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         return;
     struct percpu *pc = raw_this_cpu();   /* identity */
     bool in_irq = pc->irq_depth != 0;
     int n = node_of(class_slot, name, kind, subclass, ip);
     if (n < 0)
         return;
-    if (trylock)
+    if (trylock) {
         __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
+        (void)check_usage((uint16_t)n, in_irq, irqs_on, true, ip);
+    }
     struct lockdep_held e = { .node = (uint16_t)n,
                               .flags = (uint8_t)((trylock ? LOCKDEP_HF_TRYLOCK : 0u) |
                                                  (in_irq ? LOCKDEP_HF_IN_IRQ : 0u) |
@@ -359,9 +544,51 @@ static bool remove_entry(struct lockdep_held *held, unsigned *n, const void *loc
     return false;
 }
 
-void lockdep_release(const void *lock, unsigned kind, uintptr_t ip)
+void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
 {
-    if (g_off)
+    struct lockdep_cpu *lc = my_cpu();
+    for (unsigned i = lc->nr_held; i-- > 0;) {
+        if (lc->held[i].lock == lock) {
+            lc->held[i].flags |= LOCKDEP_HF_IRQSAVE;
+            if (irq_was_enabled)
+                lc->held[i].flags |= LOCKDEP_HF_IRQSAVE_ON;
+            return;
+        }
+    }
+    report(LOCKDEP_R_UNHELD, NULL, 0, (uintptr_t)__builtin_return_address(0),
+           "irqsave acquisition is missing from the per-CPU held stack", NULL, 0);
+}
+
+void lockdep_irqrestore_check(const void *lock, bool irq_will_enable, uintptr_t ip)
+{
+    struct lockdep_cpu *lc = my_cpu();
+    for (unsigned i = lc->nr_held; i-- > 0;) {
+        struct lockdep_held *h = &lc->held[i];
+        if (h->lock != lock)
+            continue;
+        if (!(h->flags & LOCKDEP_HF_IRQSAVE) ||
+            (((h->flags & LOCKDEP_HF_IRQSAVE_ON) != 0) != irq_will_enable)) {
+            report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip,
+                   "restored interrupt state differs from this lock's irqsave state", NULL, 0);
+        }
+        if (irq_will_enable) {
+            for (unsigned j = 0; j < lc->nr_held; j++) {
+                if (j != i && !(lc->held[j].flags & LOCKDEP_HF_IRQS_ON)) {
+                    report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip,
+                           "interrupts would be enabled while a lock acquired with IRQs off remains held", NULL, 0);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    report(LOCKDEP_R_UNHELD, NULL, 0, ip,
+           "irqrestore does not match a spinlock held by this CPU", NULL, 0);
+}
+
+void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrestore)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         return;
     if (kind == LOCKDEP_KIND_MUTEX) {
         struct thread *t = me();
@@ -372,15 +599,26 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip)
         return;
     }
     struct lockdep_cpu *lc = my_cpu();
-    if (!remove_entry(lc->held, &lc->nr_held, lock))
+    unsigned old_nr = lc->nr_held;
+    unsigned found = old_nr;
+    for (unsigned i = old_nr; i-- > 0;)
+        if (lc->held[i].lock == lock) { found = i; break; }
+    if (found == old_nr) {
         report(LOCKDEP_R_UNHELD, NULL, 0, ip, "spin_unlock of a spinlock this CPU does not hold", NULL, 0);
+        return;
+    }
+    bool was_irqsave = (lc->held[found].flags & LOCKDEP_HF_IRQSAVE) != 0;
+    if (irqrestore && !was_irqsave)
+        report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip,
+               "irqrestore used for a lock acquired without irqsave", NULL, 0);
+    (void)remove_entry(lc->held, &lc->nr_held, lock);
 }
 
 /* --- the other checks ----------------------------------------------------- */
 
 void lockdep_might_sleep(uintptr_t ip)
 {
-    if (g_off)
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         return;
     char detail[96];
     ksnprintf(detail, sizeof(detail), "preempt_count %d, irq_depth %u", raw_this_cpu()->preempt_count,
@@ -390,7 +628,7 @@ void lockdep_might_sleep(uintptr_t ip)
 
 void lockdep_thread_exit(struct thread *t)
 {
-    if (g_off || t->nr_held_mutex == 0)
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE) || t->nr_held_mutex == 0)
         return;
     const struct lock_class *c = &g_graph.classes[lockdep_node_class(t->held_mutex[0].node)];
     report(LOCKDEP_R_EXIT_HELD, c->name, lockdep_node_subclass(t->held_mutex[0].node), t->held_mutex[0].ip, NULL,
@@ -456,21 +694,28 @@ void lockdep_dump_graph(void)
 
 void lockdep_get_stats(struct lockdep_stats *out)
 {
-    *out = g_stats;
+    /* Counters are individually atomic; this is a live sample, not a
+     * globally frozen acquisition history. Class/edge totals share the
+     * writer lock and cannot tear against registration or insertion. */
+    arch_irq_state_t s = raw_lock();
     out->classes = g_graph.nr_classes;
     out->edges = g_graph.nr_edges;
+    out->acquisitions = __atomic_load_n(&g_stats.acquisitions, __ATOMIC_RELAXED);
+    out->searches = __atomic_load_n(&g_stats.searches, __ATOMIC_RELAXED);
+    out->reports = __atomic_load_n(&g_stats.reports, __ATOMIC_RELAXED);
+    raw_unlock(s);
 }
 
 void lockdep_expect(enum lockdep_report_kind kind)
 {
-    g_expect = (int)kind;
+    unsigned cpu = raw_cpu_id();
+    __atomic_store_n(&g_expect[cpu], (int)kind, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_expect_armed[cpu], true, __ATOMIC_RELEASE);
 }
 
 unsigned lockdep_expected_hits(void)
 {
-    unsigned n = g_expected_hits;
-    g_expected_hits = 0;
-    return n;
+    return __atomic_exchange_n(&g_expected_hits[raw_cpu_id()], 0u, __ATOMIC_ACQ_REL);
 }
 
 #endif /* CONFIG_LOCKDEP */

@@ -150,6 +150,7 @@ struct bracket {
     uint64_t worst_bracket;     /* widest bracket seen */
     uint64_t at_bracket;        /* the bracket width of the worst round */
     unsigned rounds;
+    bool cpu_pairs;
 };
 
 /* Spin until `cond`, giving up after a second rather than hanging the
@@ -217,9 +218,29 @@ static bool bracket_all_pairs(struct bracket *worst, const char **reason)
 {
     memset(worst, 0, sizeof(*worst));
     unsigned n = cpu_count();
-    if (n < 2) {
-        *reason = "a cross-CPU claim needs two CPUs";
-        return false;
+    unsigned online = 0;
+    for (unsigned c = 0; c < n; c++)
+        if (cpu_online(c))
+            online++;
+    if (online < 2) {
+        /* No cross-CPU pair exists on UP. Keep a local monotonic bracket
+         * as the control, without claiming to have measured CPU skew.
+         * SMP still runs every distinct online pair below. */
+        cpumask_t saved = thread_pin_self();
+        for (unsigned i = 0; i < BRACKET_ROUNDS; i++) {
+            uint64_t t0 = clock_now_ns();
+            uint64_t tb = clock_now_ns();
+            uint64_t t1 = clock_now_ns();
+            if (tb < t0 || tb > t1) {
+                thread_set_affinity_self(saved);
+                *reason = "UP clock reading fell outside its local bracket";
+                return false;
+            }
+            worst->rounds++;
+        }
+        thread_set_affinity_self(saved);
+        kinfo("selftest: clock bracket: UP local monotonic control, no cross-CPU pairs");
+        return true;
     }
     for (unsigned a = 0; a < n; a++) {
         for (unsigned b = 0; b < n; b++) {
@@ -257,6 +278,7 @@ static bool bracket_all_pairs(struct bracket *worst, const char **reason)
                 *reason = "the pinned threads did not run where they were pinned";
                 return false;
             }
+            worst->cpu_pairs = true;
             if (outside > worst->worst_outside) {
                 worst->worst_outside = outside;
                 worst->at_bracket = at;
@@ -302,6 +324,10 @@ bool selftest_clock_cross_cpu(const char **reason)
         *reason = "a reading fell further outside the bracket than the advertised bound allows";
         return false;
     }
+    if (!w.cpu_pairs) {
+        kinfo("selftest: clock-cross-cpu: UP local monotonic control passed; no cross-CPU pair was available");
+        return true;
+    }
     kinfo("selftest: clock-cross-cpu: %u handshakes over every online pair; worst reading %llu ns outside its bracket (widest bracket %llu ns, advertised bound %llu ns)",
           w.rounds, (unsigned long long)w.worst_outside, (unsigned long long)w.worst_bracket,
           (unsigned long long)clock_worst_offset_ns());
@@ -340,6 +366,10 @@ bool selftest_clock_scope_aarch64(const char **reason)
                w.bcpu, (unsigned long long)w.worst_outside, w.acpu, (unsigned long long)w.at_bracket);
         *reason = "a reading fell outside its bracket on a shared counter";
         return false;
+    }
+    if (!w.cpu_pairs) {
+        kinfo("selftest: clock-scope-aarch64: local monotonic control passed; system-wide scope has fewer than two CPUs to measure");
+        return true;
     }
     kinfo("selftest: clock-scope-aarch64: %u handshakes over every online pair; every reading inside its bracket (widest %llu ns), advertised bound 0",
           w.rounds, (unsigned long long)w.worst_bracket);

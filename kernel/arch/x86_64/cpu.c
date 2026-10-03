@@ -199,6 +199,11 @@ void arch_cpu_halt_forever(void)
 
 /* --- arch/irq.h --- */
 
+bool arch_irq_state_enabled(arch_irq_state_t state)
+{
+    return (state & RFLAGS_IF) != 0;
+}
+
 arch_irq_state_t arch_irq_save(void)
 {
     uint64_t flags = read_rflags();

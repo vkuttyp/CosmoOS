@@ -122,7 +122,7 @@ static void lock_common(struct mutex *m, unsigned subclass, uintptr_t ip)
         panic("mutex_lock('%s'): recursive lock by '%s'", m->name, cur->name);
     /* The order check runs before the wait so a deadlocking acquisition
      * is reported, not hung on; the push waits for ownership. */
-    lockdep_acquire_check(&m->class, m->name, LOCKDEP_KIND_MUTEX, subclass, false, ip);
+    lockdep_acquire_check(m, &m->class, m->name, LOCKDEP_KIND_MUTEX, subclass, false, ip);
 
     if (!try_take(m, cur)) {
         /* Contended. Enqueue and, each time the owner still holds it, donate
@@ -193,7 +193,7 @@ void mutex_unlock(struct mutex *m)
     if (m->owner != cur)
         panic("mutex_unlock('%s') by '%s' but owner is '%s'", m->name, cur->name,
               m->owner ? m->owner->name : "nobody");
-    lockdep_release(m, LOCKDEP_KIND_MUTEX, (uintptr_t)__builtin_return_address(0));
+    lockdep_release(m, LOCKDEP_KIND_MUTEX, (uintptr_t)__builtin_return_address(0), false);
     __atomic_store_n(&m->owner, NULL, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&m->lock, s);
 

@@ -8,6 +8,7 @@
 
 #include <kernel/lockdep_core.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -177,12 +178,108 @@ static void test_decision(void)
     free(g);
 }
 
+static void test_irq_dependencies(void)
+{
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_scratch *s = calloc(1, sizeof(*s));
+    EXPECT(g != NULL && s != NULL);
+    for (unsigned i = 0; i < LOCKDEP_MAX_CLASSES; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "irq-%u", i);
+        EXPECT(lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) == (int)i);
+    }
+    uint16_t safe, unsafe;
+    uint16_t last = LOCKDEP_MAX_NODES - 1;
+    EXPECT(lockdep_core_mark_usage(g, s, 0, LOCKDEP_USED_IN_IRQ, 1, &safe, &unsafe));
+    EXPECT(lockdep_core_mark_usage(g, s, LOCKDEP_MAX_CLASSES - 1, LOCKDEP_HELD_IRQS_ON, 2, &safe, &unsafe));
+    /* A long chain, split in the middle: only the joining edge conflicts.
+     * Include every subclass; labels apply to all four nodes of a class. */
+    unsigned split = LOCKDEP_MAX_NODES / 2;
+    for (unsigned i = 0; i + 1 < LOCKDEP_MAX_NODES; i++)
+        if (i != split)
+            EXPECT(lockdep_core_add_edge(g, (uint16_t)i, (uint16_t)(i + 1)));
+    EXPECT(lockdep_core_irq_edge(g, s, (uint16_t)split, (uint16_t)(split + 1), &safe, &unsafe));
+    EXPECT(lockdep_node_class(safe) == 0);
+    EXPECT(lockdep_node_class(unsafe) == LOCKDEP_MAX_CLASSES - 1);
+    EXPECT(!lockdep_core_irq_edge(g, s, last, 0, &safe, &unsafe));
+    EXPECT(!lockdep_core_has_edge(g, (uint16_t)split, (uint16_t)(split + 1)));
+
+    /* Usage-last: the same path is invalid whichever endpoint is labelled
+     * last. Rejected mutations do not poison subsequent checks. */
+    g->classes[0].usage = 0;
+    EXPECT(lockdep_core_add_edge(g, (uint16_t)split, (uint16_t)(split + 1)));
+    EXPECT(!lockdep_core_mark_usage(g, s, 0, LOCKDEP_USED_IN_IRQ, 3, &safe, &unsafe));
+    EXPECT(g->classes[0].usage == 0 && g->classes[0].irq_ip == 1);
+    g->classes[LOCKDEP_MAX_CLASSES - 1].usage = 0;
+    EXPECT(lockdep_core_mark_usage(g, s, 0, LOCKDEP_USED_IN_IRQ, 4, &safe, &unsafe));
+    EXPECT(!lockdep_core_mark_usage(g, s, LOCKDEP_MAX_CLASSES - 1, LOCKDEP_HELD_IRQS_ON, 5, &safe, &unsafe));
+    EXPECT(g->classes[LOCKDEP_MAX_CLASSES - 1].usage == 0);
+    EXPECT(!lockdep_core_mark_usage(g, s, 0, LOCKDEP_HELD_IRQS_ON, 6, &safe, &unsafe));
+    EXPECT(g->classes[0].usage == LOCKDEP_USED_IN_IRQ);
+
+    EXPECT(lockdep_core_usage(true, false, true) == 0);  /* IRQ trylock cannot wait */
+    EXPECT(lockdep_core_usage(false, true, true) == LOCKDEP_HELD_IRQS_ON);
+    EXPECT(lockdep_core_usage(true, false, false) == LOCKDEP_USED_IN_IRQ);
+    free(s);
+    free(g);
+}
+
+/* Compare the BFS decision to an independent transitive-closure oracle
+ * across every pair of a small graph, with disconnected subclass nodes. */
+static void test_irq_oracle(void)
+{
+    enum { N = 16 };
+    struct lockdep_graph *g = calloc(1, sizeof(*g));
+    struct lockdep_scratch *s = calloc(1, sizeof(*s));
+    EXPECT(g != NULL && s != NULL);
+    g->nr_classes = N / LOCKDEP_SUBCLASSES;
+    for (unsigned seed = 1; seed <= 32; seed++) {
+        memset(g->before, 0, sizeof(g->before));
+        g->nr_edges = 0;
+        for (unsigned c = 0; c < g->nr_classes; c++)
+            g->classes[c].usage = 0;
+        g->classes[seed % 4].usage |= LOCKDEP_USED_IN_IRQ;
+        g->classes[(seed / 4) % 4].usage |= LOCKDEP_HELD_IRQS_ON;
+        bool reach[N][N] = { { false } };
+        unsigned rng = seed;
+        for (unsigned a = 0; a < N; a++) {
+            reach[a][a] = true;
+            for (unsigned b = a + 1; b < N; b++) {
+                rng = rng * 1664525u + 1013904223u;
+                if ((rng >> 28) < 3) {
+                    reach[a][b] = true;
+                    lockdep_core_add_edge(g, (uint16_t)a, (uint16_t)b);
+                }
+            }
+        }
+        for (unsigned k = 0; k < N; k++)
+            for (unsigned a = 0; a < N; a++)
+                for (unsigned b = 0; b < N; b++)
+                    reach[a][b] |= reach[a][k] && reach[k][b];
+        for (unsigned a = 0; a < N; a++) {
+            for (unsigned b = 0; b < N; b++) {
+                bool pred = false, succ = false;
+                for (unsigned n = 0; n < N; n++) {
+                    pred |= reach[n][a] && (g->classes[n / 4].usage & LOCKDEP_USED_IN_IRQ);
+                    succ |= reach[b][n] && (g->classes[n / 4].usage & LOCKDEP_HELD_IRQS_ON);
+                }
+                uint16_t safe, unsafe;
+                EXPECT(lockdep_core_irq_edge(g, s, (uint16_t)a, (uint16_t)b, &safe, &unsafe) == (pred && succ));
+            }
+        }
+    }
+    free(s);
+    free(g);
+}
+
 static const struct host_test tests[] = {
     { "classes", test_classes },
     { "edges-and-cycles", test_edges_and_cycles },
     { "decision", test_decision },
     { "metadata-lifetime", test_metadata_lifetime },
     { "path-bounds", test_path_bounds },
+    { "irq-dependencies", test_irq_dependencies },
+    { "irq-oracle", test_irq_oracle },
 };
 
 int main(void)

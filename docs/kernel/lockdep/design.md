@@ -132,21 +132,49 @@ bitmap test per held lock.
 
 ## Interrupt safety
 
-A class acquired in interrupt context (`irq_depth > 0`) is **IRQ-safe**; a
-class acquired by `spin_lock` with interrupts enabled at the time is
-**held-with-IRQs-on**. A class that is both is a report: an interrupt
-arriving while the lock is held on this CPU would take the same lock and
-spin forever. `spin_lock_irqsave` never sets the second bit;
-`spin_lock` with interrupts already off (inside another irqsave section)
-does not either. Each bit records the first instruction that set it so the
-report names both sites. Mutexes are never interrupt-safe and the existing
-panic on `mutex_lock` in interrupt context stays.
+A blocking acquisition in interrupt context (`irq_depth > 0`) marks the
+class IRQ-used. A successful acquisition while interrupts are enabled,
+including a successful thread trylock, marks it IRQ-enabled. Failed
+trylocks record nothing. A successful IRQ trylock does not make a class
+IRQ-used because it will not wait on the interrupted holder. Mutexes are
+never interrupt-safe and the existing panic on `mutex_lock` in interrupt
+context stays.
 
-Because of this rule, the graph does not need edges between interrupt
-context and the interrupted thread: the only cross-context deadlock (thread
-holds L with interrupts on, interrupt takes L) is exactly the two-bit
-conflict, and every other cross-CPU ordering is an ordinary ABBA the graph
-sees.
+The validator rejects a new edge when an IRQ-used node can reach its
+source and its destination can reach an IRQ-enabled node. It also checks
+existing edges when either endpoint first receives a usage label. Labels
+apply to every subclass of a class; traversal preserves the observed node
+edges. The search is breadth-first with one preallocated scratch area under
+the graph raw lock; conflict reports run after releasing that lock. A
+rejected edge or usage label is not published, including when a self-test
+consumes the report.
+
+This represents blocking lock cycles through IRQ paths. Timer callback
+completion waits use a separate bounded lock profile (below); this is not a
+general callback graph. NMI/#MC reentrancy remains unsupported. Trylock edges are not
+recorded at the attempted acquisition, since a failed try cannot wait;
+locks held after a successful trylock participate in subsequent blocking
+acquisition edges.
+
+## Timer cancellation waits
+
+When a timer callback starts, it reserves a profile keyed by the timer
+object's address. While its callback is active, blocking spinlock acquisitions add the exact
+lock object and class node to that profile. Before `timer_cancel_sync`
+re-enters a wait for a running callback, it compares the caller's held
+spinlock and mutex objects with the observed profile. A match reports
+`LOCKDEP_R_CALLBACK` rather than waiting while holding a callback-needed
+lock. The queue lock is released before this check.
+
+Profiles have fixed storage (one active callback address per possible CPU,
+64 total, and 16 distinct locks each). Completion releases a profile after
+the timer queue clears `running`; a later callback execution reserves a
+fresh profile. Exhaustion is a validator report. Interrupt masking permits
+at most one active timer callback on each CPU, so this covers the maximum
+configured CPU count.
+Profiles cover only callback executions already observed, so unexecuted
+callback paths are not proved safe. This does not cover IRQ unregister,
+quiescence, module teardown, or arbitrary completion waits.
 
 ## `might_sleep()`
 

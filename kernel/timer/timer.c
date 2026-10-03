@@ -12,6 +12,7 @@
 #include <kernel/percpu.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
+#include <kernel/lockdep.h>
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -456,6 +457,7 @@ bool timer_cancel_sync(struct timer *t)
         arch_irq_state_t s = spin_lock_irqsave(&q->lock);
         was_pending |= cancel_locked(q, t);
         if (q->running != t) {
+            lockdep_timer_cancel_done(t);
             spin_unlock_irqrestore(&q->lock, s);
             break;
         }
@@ -463,6 +465,8 @@ bool timer_cancel_sync(struct timer *t)
             panic("timer_cancel_sync: timer %p cancelled from its own callback", (void *)t);
         spin_unlock_irqrestore(&q->lock, s);
         waited = true;
+        if (!lockdep_timer_cancel_check(t, (uintptr_t)__builtin_return_address(0)))
+            return was_pending;
 #if CONFIG_DEBUG
         /* A test waits for this to move before releasing the callback it
          * parked: it says the cancel is really waiting, where the
@@ -503,10 +507,13 @@ static void run_expired(struct timer_queue *q, uint64_t now)
         q->running = t;
         spin_unlock(&q->lock);
 
+        lockdep_timer_enter(t);
         t->fn(t, t->arg);
+        lockdep_timer_exit(t);
 
         spin_lock(&q->lock);
         q->running = NULL;
+        lockdep_timer_cancel_done(t);
     }
     spin_unlock(&q->lock);
 }

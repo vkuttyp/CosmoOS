@@ -45,6 +45,8 @@ enum lockdep_report_kind {
     LOCKDEP_R_OVERFLOW,
     LOCKDEP_R_UNHELD,
     LOCKDEP_R_EXIT_HELD,
+    LOCKDEP_R_IRQ_STATE,
+    LOCKDEP_R_CALLBACK,
     LOCKDEP_R_COUNT,
 };
 
@@ -67,11 +69,17 @@ struct thread;
  * lock is owned. Trylock callers use only the push. `class_slot` is the
  * lock's cached class (0 = unknown); `irqs_on` says interrupts were
  * enabled at the acquisition; `ip` is the caller's return address. */
-void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
+void lockdep_acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
                            uintptr_t ip);
 void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
                       bool trylock, bool irqs_on, uintptr_t ip);
-void lockdep_release(const void *lock, unsigned kind, uintptr_t ip);
+void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrestore);
+void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled);
+void lockdep_irqrestore_check(const void *lock, bool irq_will_enable, uintptr_t ip);
+void lockdep_timer_cancel_done(const void *timer);
+void lockdep_timer_enter(const void *timer);
+void lockdep_timer_exit(const void *timer);
+bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip);
 
 /* The debug half of might_sleep(): a report with the held stacks. */
 void lockdep_might_sleep(uintptr_t ip);
@@ -104,17 +112,26 @@ const char *lockdep_report_name(enum lockdep_report_kind kind);
 
 #else
 
-static inline void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
+static inline void lockdep_acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
                                          bool irqs_on, uintptr_t ip)
 {
-    (void)class_slot; (void)name; (void)kind; (void)subclass; (void)irqs_on; (void)ip;
+    (void)lock; (void)class_slot; (void)name; (void)kind; (void)subclass; (void)irqs_on; (void)ip;
 }
 static inline void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
                                     unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)
 {
     (void)lock; (void)class_slot; (void)name; (void)kind; (void)subclass; (void)trylock; (void)irqs_on; (void)ip;
 }
-static inline void lockdep_release(const void *lock, unsigned kind, uintptr_t ip) { (void)lock; (void)kind; (void)ip; }
+static inline void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrestore)
+{ (void)lock; (void)kind; (void)ip; (void)irqrestore; }
+static inline void lockdep_irqsave_acquired(const void *lock, bool enabled) { (void)lock; (void)enabled; }
+static inline void lockdep_irqrestore_check(const void *lock, bool enabled, uintptr_t ip)
+{ (void)lock; (void)enabled; (void)ip; }
+static inline void lockdep_timer_cancel_done(const void *timer) { (void)timer; }
+static inline void lockdep_timer_enter(const void *timer) { (void)timer; }
+static inline void lockdep_timer_exit(const void *timer) { (void)timer; }
+static inline bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
+{ (void)timer; (void)ip; return true; }
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}

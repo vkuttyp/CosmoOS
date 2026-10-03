@@ -105,7 +105,7 @@ bool selftest_lockdep_order(const char **reason)
      * primitive or changing preemption state. */
     lockdep_expect(LOCKDEP_R_UNHELD);
     s = arch_irq_save();
-    lockdep_release(&chain[0], LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0));
+    lockdep_release(&chain[0], LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0), false);
     hits = lockdep_expected_hits();
     arch_irq_restore(s);
     CHECK(hits == 1);
@@ -145,41 +145,156 @@ bool selftest_lockdep_recursion(const char **reason)
 
 /* --- lockdep-irq: a lock held with interrupts enabled and taken in an interrupt --- */
 
-static spinlock_t g_irq_lock = SPINLOCK_INIT("lockdep-test-irq");
-static volatile unsigned g_irq_hits;
+struct irq_probe {
+    spinlock_t *lock;
+    bool trylock;
+    bool got;
+    unsigned done;
+};
 
 static void irq_lock_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
     (void)frame;
-    (void)arg;
-    spin_lock(&g_irq_lock);   /* interrupt context: the class becomes IRQ-safe */
-    spin_unlock(&g_irq_lock);
-    __atomic_store_n(&g_irq_hits, 1u, __ATOMIC_RELEASE);
+    struct irq_probe *p = arg;
+    if (p->trylock)
+        p->got = spin_trylock(p->lock);
+    else {
+        spin_lock(p->lock);
+        p->got = true;
+    }
+    if (p->got)
+        spin_unlock(p->lock);
+    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
+}
+
+/* A real self-IPI. Unregister and free even when an assertion fails so
+ * the stack-backed handler argument never survives the test. */
+static bool irq_probe_run(spinlock_t *lock, bool trylock, bool held, unsigned expected, const char **reason)
+{
+    struct irq_probe p = { .lock = lock, .trylock = trylock };
+    int vec = arch_vector_alloc();
+    CHECK(vec >= 0);
+    int rc = interrupt_register((unsigned)vec, irq_lock_handler, &p, "selftest-lockdep-irq");
+    if (rc != 0) {
+        arch_vector_free((unsigned)vec);
+        CHECK(rc == 0);
+    }
+    arch_ipi_bind((unsigned)vec);
+    if (expected)
+        lockdep_expect(LOCKDEP_R_IRQ);
+    if (held)
+        spin_lock(lock);   /* only used with a nonblocking handler */
+    arch_ipi_send(raw_cpu_id(), (unsigned)vec);
+    uint64_t end = clock_now_ns() + 1000000000ULL;
+    while (__atomic_load_n(&p.done, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
+        arch_cpu_relax();
+    bool done = __atomic_load_n(&p.done, __ATOMIC_ACQUIRE) != 0;
+    if (held)
+        spin_unlock(lock);
+    unsigned hits = lockdep_expected_hits();
+    rc = interrupt_unregister_sync((unsigned)vec, irq_lock_handler);
+    arch_vector_free((unsigned)vec);
+    CHECK(rc == 0);
+    CHECK(done);
+    CHECK(p.got == !held);
+    CHECK(hits == expected);
+    return true;
+}
+
+static void observe_pair(spinlock_t *a, spinlock_t *b)
+{
+    arch_irq_state_t s = spin_lock_irqsave(a);
+    spin_lock(b);
+    spin_unlock(b);
+    spin_unlock_irqrestore(a, s);
 }
 
 bool selftest_lockdep_irq(const char **reason)
 {
-    /* First: held with interrupts enabled (a plain spin_lock from thread
-     * context), legal on its own. */
+    static spinlock_t direct = SPINLOCK_INIT("lockdep-test-irq");
+    static spinlock_t tryheld = SPINLOCK_INIT("lockdep-irq-try-held");
+    static spinlock_t irqtry = SPINLOCK_INIT("lockdep-irq-try-handler");
     CHECK(arch_irq_enabled());
-    spin_lock(&g_irq_lock);
-    spin_unlock(&g_irq_lock);
+    spin_lock(&direct);
+    spin_unlock(&direct);
+    CHECK(irq_probe_run(&direct, false, false, 1, reason));
 
-    int vec = arch_vector_alloc();
-    CHECK(vec >= 0);
-    CHECK(interrupt_register((unsigned)vec, irq_lock_handler, NULL, "selftest-lockdep-irq") == 0);
-    arch_ipi_bind((unsigned)vec);
+    /* Successful thread trylock must be classified. IRQ trylock, both
+     * successful and failed against an interrupted holder, must not be
+     * mistaken for a blocking IRQ acquisition. */
+    CHECK(spin_trylock(&tryheld));
+    spin_unlock(&tryheld);
+    CHECK(irq_probe_run(&tryheld, false, false, 1, reason));
+    spin_lock(&irqtry);
+    spin_unlock(&irqtry);
+    CHECK(irq_probe_run(&irqtry, true, false, 0, reason));
+    CHECK(irq_probe_run(&irqtry, true, true, 0, reason));
+
+    static spinlock_t a[3], b[3], c[3];
+    static const char *const an[] = { "irq-edge-a", "irq-safe-last-a", "irq-unsafe-last-a" };
+    static const char *const bn[] = { "irq-edge-b", "irq-safe-last-b", "irq-unsafe-last-b" };
+    static const char *const cn[] = { "irq-edge-c", "irq-safe-last-c", "irq-unsafe-last-c" };
+    for (unsigned i = 0; i < 3; i++) {
+        spinlock_init(&a[i], an[i]);
+        spinlock_init(&b[i], bn[i]);
+        spinlock_init(&c[i], cn[i]);
+        if (i != 0)
+            observe_pair(&a[i], &b[i]);
+        observe_pair(&b[i], &c[i]);
+    }
+    /* Edge last: IRQ A, B -> C, IRQ-enabled C; new A -> B is invalid. */
+    CHECK(irq_probe_run(&a[0], false, false, 0, reason));
+    spin_lock(&c[0]);
+    spin_unlock(&c[0]);
+    arch_irq_state_t saved = spin_lock_irqsave(&a[0]);
     lockdep_expect(LOCKDEP_R_IRQ);
-    arch_ipi_send(raw_cpu_id(), (unsigned)vec);   /* self-IPI: the handler runs on the CPU this was read on, and any CPU serves the check */
-    uint64_t end = clock_now_ns() + 1000000000ULL;
-    while (__atomic_load_n(&g_irq_hits, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
-        arch_cpu_relax();
-    CHECK(g_irq_hits == 1);
+    spin_lock_check_order(&b[0]);
     unsigned hits = lockdep_expected_hits();
-    CHECK(interrupt_unregister_sync((unsigned)vec, irq_lock_handler) == 0);
-    arch_vector_free((unsigned)vec);
+    spin_unlock_irqrestore(&a[0], saved);
     CHECK(hits == 1);
+
+    /* Safe label last, with both dependency edges already observed. */
+    spin_lock(&c[1]);
+    spin_unlock(&c[1]);
+    CHECK(irq_probe_run(&a[1], false, false, 1, reason));
+
+    /* Unsafe label last, via successful trylock. */
+    CHECK(irq_probe_run(&a[2], false, false, 0, reason));
+    lockdep_expect(LOCKDEP_R_IRQ);
+    CHECK(spin_trylock(&c[2]));
+    spin_unlock(&c[2]);
+    CHECK(lockdep_expected_hits() == 1);
+
+    /* A restore must match the IRQ state saved with this exact lock.
+     * These probes call the checker without actually enabling interrupts
+     * under a held lock; the real, matching restore follows each probe. */
+    static spinlock_t restore = SPINLOCK_INIT("lockdep-irq-restore");
+    arch_irq_state_t rs = spin_lock_irqsave(&restore);
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    lockdep_irqrestore_check(&restore, !arch_irq_state_enabled(rs),
+                             (uintptr_t)__builtin_return_address(0));
+    CHECK(lockdep_expected_hits() == 1);
+    spin_unlock_irqrestore(&restore, rs);
+
+    static spinlock_t nested = SPINLOCK_INIT("lockdep-irq-restore-nested");
+    static spinlock_t inner = SPINLOCK_INIT("lockdep-irq-restore-inner");
+    rs = spin_lock_irqsave(&nested);
+    spin_lock(&inner);
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    lockdep_irqrestore_check(&nested, arch_irq_state_enabled(rs),
+                             (uintptr_t)__builtin_return_address(0));
+    CHECK(lockdep_expected_hits() == 1);
+    spin_unlock(&inner);
+    spin_unlock_irqrestore(&nested, rs);
+
+    rs = spin_lock_irqsave(&inner);
+    /* A valid restore must run with no expectation armed: otherwise a
+     * later real IRQ-state violation could consume this unused probe. */
+    lockdep_irqrestore_check(&inner, arch_irq_state_enabled(rs),
+                             (uintptr_t)__builtin_return_address(0));
+    CHECK(lockdep_expected_hits() == 0);
+    spin_unlock_irqrestore(&inner, rs);
     return true;
 }
 
@@ -305,12 +420,15 @@ static bool selftest_lockdep_contention_pinned(const char **reason)
     spin_unlock(&g_cont_l);
     thread_join(h);
 
-    /* M -> L must be a fresh, legal order: no phantom L -> M was recorded. */
+    /* No phantom L -> M may have been recorded: that would report an
+     * inversion. M -> L itself is now rejected as IRQ-used -> IRQ-enabled,
+     * so check the order without performing a potentially unsafe wait. */
     arch_irq_state_t s = spin_lock_irqsave(&g_cont_m);
-    spin_lock(&g_cont_l);
-    spin_unlock(&g_cont_l);
+    lockdep_expect(LOCKDEP_R_IRQ);
+    spin_lock_check_order(&g_cont_l);
+    unsigned hits = lockdep_expected_hits();
     spin_unlock_irqrestore(&g_cont_m, s);
-    CHECK(lockdep_expected_hits() == 0);
+    CHECK(hits == 1);
     return true;
 }
 
