@@ -10,13 +10,16 @@
  */
 
 #include <kernel/interrupt.h>
+#include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
+#include <kernel/printf.h>
 #include <kernel/percpu.h>
 #include <kernel/selftest.h>
 #include <kernel/spinlock.h>
+#include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 
@@ -549,3 +552,125 @@ bool selftest_lockdep_bench(const char **reason)
     }
     return true;
 }
+
+#if CONFIG_LOCKDEP
+/* Private graph: new-edge searches must not consume live classes or
+ * reset dependencies used by the rest of the kernel. "New" describes
+ * the absent edge, not a cold CPU cache. Setup is outside each sample. */
+struct graph_bench_result {
+    unsigned kind, path_len;
+    uint16_t path[8], safe, unsafe;
+};
+
+static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned kind)
+{
+    memset(g, 0, sizeof(*g));
+    for (unsigned i = 0; i < nodes; i++) {
+        char name[32];
+        ksnprintf(name, sizeof(name), "graph-bench-%u", i);
+        if (lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) != (int)i)
+            return false;
+    }
+    /* Two disjoint chains, or one full chain for the cycle case. */
+    for (unsigned i = 1; i < nodes; i++)
+        if (kind == 1 || i != nodes / 2)
+            lockdep_core_add_edge(g, lockdep_node(i - 1, 0), lockdep_node(i, 0));
+    if (kind == 2) {
+        /* Each component is valid; only the proposed bridge would join
+         * an IRQ-used ancestor to an IRQ-enabled descendant. */
+        g->classes[0].usage = LOCKDEP_USED_IN_IRQ;
+        g->classes[nodes - 1].usage = LOCKDEP_HELD_IRQS_ON;
+    }
+    return true;
+}
+
+static void graph_bench_insert(struct lockdep_graph *g, struct lockdep_scratch *scratch,
+                               uint16_t from, uint16_t to, struct graph_bench_result *r)
+{
+    /* Same check/search/insertion order as acquire_check, without its
+     * class lookup, held-stack scan, statistics, raw lock, or reports. */
+    if (lockdep_core_reaches(g, scratch, to, from, r->path, ARRAY_SIZE(r->path), &r->path_len)) {
+        r->kind = 1;
+    } else if (lockdep_core_irq_edge(g, scratch, from, to, &r->safe, &r->unsafe)) {
+        r->kind = 2;
+    } else {
+        r->kind = lockdep_core_add_edge(g, from, to) ? 0 : 3;
+    }
+}
+
+bool selftest_lockdep_graph_bench(const char **reason)
+{
+    enum { SAMPLES = 9, WARMUP = 2 };
+    static const unsigned sizes[] = { 16, 64, 256 };
+    static const char *const paths[] = { "insert", "cycle", "irq-bridge" };
+    struct lockdep_graph *g = kmalloc(sizeof(*g), 0);
+    struct lockdep_scratch *scratch = kmalloc(sizeof(*scratch), 0);
+    if (!g || !scratch) {
+        kfree(scratch);
+        kfree(g);
+        *reason = "graph benchmark allocation failed";
+        return false;
+    }
+    bool ok = true;
+    cpumask_t saved = thread_pin_self();
+    for (unsigned size = 0; size < ARRAY_SIZE(sizes) && ok; size++) {
+        unsigned nodes = sizes[size];
+        for (unsigned kind = 0; kind < ARRAY_SIZE(paths) && ok; kind++) {
+            uint64_t elapsed[SAMPLES];
+            uint16_t from = lockdep_node(kind == 1 ? nodes - 1 : nodes / 2 - 1, 0);
+            uint16_t to = lockdep_node(kind == 1 ? 0 : nodes / 2, 0);
+            for (unsigned sample = 0; sample < WARMUP + SAMPLES; sample++) {
+                if (!graph_bench_seed(g, nodes, kind) || lockdep_core_has_edge(g, from, to)) {
+                    ok = false;
+                    break;
+                }
+                unsigned edges = g->nr_edges;
+                struct graph_bench_result r = {0};
+                uint64_t begin = clock_now_ns();
+                graph_bench_insert(g, scratch, from, to, &r);
+                uint64_t ns = clock_since_ns(begin);
+                /* Validate every measured operation, outside its interval.
+                 * Rejected proposals must leave the edge set unchanged. */
+                ok = r.kind == kind && g->nr_edges == edges + (kind == 0) &&
+                     lockdep_core_has_edge(g, from, to) == (kind == 0);
+                if (kind == 1)
+                    ok = ok && r.path_len == ARRAY_SIZE(r.path) &&
+                         r.path[0] == lockdep_node(nodes - ARRAY_SIZE(r.path), 0) &&
+                         r.path[r.path_len - 1] == from;
+                if (kind == 2)
+                    ok = ok && r.safe == lockdep_node(0, 0) &&
+                         r.unsafe == lockdep_node(nodes - 1, 0);
+                if (!ok)
+                    break;
+                if (sample >= WARMUP)
+                    elapsed[sample - WARMUP] = ns;
+            }
+            if (!ok)
+                break;
+            for (unsigned i = 1; i < SAMPLES; i++) {
+                uint64_t value = elapsed[i];
+                unsigned j = i;
+                while (j && elapsed[j - 1] > value) {
+                    elapsed[j] = elapsed[j - 1];
+                    j--;
+                }
+                elapsed[j] = value;
+            }
+            kinfo("lockdep-graph-bench: nodes=%u path=%s samples=%u ns/operation min=%llu median=%llu max=%llu",
+                  nodes, paths[kind], SAMPLES, (unsigned long long)elapsed[0],
+                  (unsigned long long)elapsed[SAMPLES / 2], (unsigned long long)elapsed[SAMPLES - 1]);
+        }
+    }
+    thread_set_affinity_self(saved);
+    kfree(scratch);
+    kfree(g);
+    if (!ok)
+        *reason = "graph benchmark topology or validation result mismatch";
+    return ok;
+}
+#else
+bool selftest_lockdep_graph_bench(const char **reason)
+{
+    return skip(reason, "lockdep-graph-bench");
+}
+#endif

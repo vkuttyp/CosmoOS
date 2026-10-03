@@ -40,6 +40,7 @@ released normally.
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+| `lockdep-graph-bench` | private 16/64/256-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
 
@@ -65,6 +66,33 @@ their interference. Printing and affinity changes are outside the samples.
 These measurements cover warmed uncontended object locks, not cold graph
 searches, lock contention, priority-inheritance waits, or a hardware-independent overhead
 ratio. QEMU/TCG results describe that emulator and host workload only.
+
+### New-edge core measurement
+
+`lockdep-graph-bench` runs only with lockdep enabled. It allocates a private
+graph and search scratch, then measures the real reachability, IRQ-edge,
+and insertion helpers in the same order as acquisition checking. Each
+graph has 16, 64, or 256 classes with one active node per class (subclass
+zero); the core's fixed bitmap capacity is unchanged.
+
+The `insert` and `irq-bridge` cases start with two disjoint chains and
+propose their missing middle edge. In `irq-bridge`, only the first class
+is IRQ-used and the last is IRQ-enabled, so the bridge must be refused.
+The `cycle` case starts with one chain and proposes last-to-first, which
+must be refused with the expected truncated cycle path. Every operation
+checks its result, edge count, and proposed-edge presence; rejected IRQ
+edges also check both reported endpoints.
+
+Each of nine samples times one operation after two warmup samples. Graph
+setup, allocation, validation and logging are outside the interval. Setup
+rebuilds the graph before every sample, so no sample takes the live
+validator's known-edge shortcut. “New edge” does not mean a cold CPU cache:
+setup and warmup can populate caches. The pinned thread leaves IRQs and
+scheduling enabled. Results report min/median/max guest nanoseconds.
+These are core algorithm costs, excluding raw-lock contention, class
+registration, held-stack scans, statistics, and reports. They do not
+measure end-to-end acquisition latency or dense/worst-case topologies.
+The benchmark never registers its classes or edges in the live graph.
 
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 

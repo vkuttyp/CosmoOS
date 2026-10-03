@@ -725,3 +725,61 @@ Both release kernels built (`out/lockdep-stats-release-{x86_64,aarch64}.log`).
 `git diff --check` passed. The host core algorithms are unchanged; prior
 host sanitizer results are retained rather than claimed as fresh evidence
 for kernel statistics serialization.
+
+
+## New-edge core benchmark continuation
+
+Base: `64c492e6`. This increment addresses sparse new-edge search costs in
+three phases: define reproducible private topologies, implement timed core
+validation with checked results, then run both architectures and disabled
+configuration builds. It does not alter live acquisition policy.
+
+`lockdep-graph-bench` allocates a private graph and scratch, with one active
+subclass-zero node per class at sizes 16, 64, and 256. For insertion and
+IRQ rejection, two chains have a missing middle edge. The IRQ case marks
+only the first class IRQ-used and the last IRQ-enabled, so both components
+are individually valid and only the proposed bridge creates a conflict.
+The cycle case has a full chain and proposes last-to-first. Each operation
+uses the real reachability, IRQ-edge, and insertion helpers in the kernel
+check order. Checks outside timing validate the outcome, edge count,
+proposed-edge presence, truncated cycle endpoints, and IRQ endpoints.
+
+The graph is rebuilt before every operation, including two warmup samples
+and nine timed samples per case. Allocation, setup, validation, and output
+are outside the measured interval; allocation and affinity are cleaned up
+on failure as well as success. The private classes and edges never enter
+the live validator. Disabled builds skip this benchmark.
+
+These measurements characterize the core algorithm for a previously absent
+edge, not cold CPU caches: rebuilding and warmup can populate caches.
+They exclude raw-lock acquisition/contention, class registration, held-stack
+scanning, statistics, and report output. Single-operation timing includes
+clock overhead and is visibly quantized around a microsecond in these runs;
+small differences at the smallest size are not meaningful. Dense graphs,
+complete first-acquisition cost, and native hardware remain open.
+
+Same QEMU 11.1.1/TCG arm64 macOS environment, Apple clang 21.0.0, four CPUs
+and 256 MiB; both architecture boots ran concurrently. Values are
+min/median/max guest nanoseconds per operation, with no pass threshold.
+
+| Active nodes | Operation | x86-64 | AArch64 |
+|---:|---|---:|---:|
+| 16 | insert | 1002 / 2004 / 2005 | 992 / 2000 / 2000 |
+| 16 | cycle | 2004 / 2005 / 3007 | 992 / 2000 / 2992 |
+| 16 | irq-bridge | 4009 / 4010 / 8019 | 2992 / 3008 / 4000 |
+| 64 | insert | 5012 / 5012 / 6015 | 4000 / 4000 / 5008 |
+| 64 | cycle | 9021 / 9022 / 11026 | 6992 / 6992 / 7008 |
+| 64 | irq-bridge | 13031 / 14034 / 15036 | 10992 / 12000 / 52000 |
+| 256 | insert | 19045 / 21050 / 60145 | 14992 / 15008 / 18000 |
+| 256 | cycle | 35084 / 36086 / 38092 | 26000 / 27008 / 51008 |
+| 256 | irq-bridge | 54130 / 55132 / 60144 | 44992 / 46000 / 48000 |
+
+Both four-CPU debug boots passed all 418 self-tests and the complete
+harness: x86-64 reported 133.5 s and AArch64 143.8 s. The x86 harness
+retried once because firmware did not hand over within 30 s on the first
+attempt; the successful attempt ran all tests. The benchmark itself took
+132 ms on x86-64 and 137 ms on AArch64, with all nine topology/operation
+cases checked. Logs: `out/lockdep-graph-bench-{x86_64,aarch64}.log` and
+matching `-result.log` files. Debug LOCKDEP=0 and release kernels built
+on both architectures (`out/lockdep-graph-bench-config-{x86_64,aarch64}.log`).
+The pure core algorithms are unchanged. `git diff --check` passed.

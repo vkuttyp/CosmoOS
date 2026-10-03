@@ -641,8 +641,9 @@ portability, performance):
 
 Completed work from the October lockdep session is struck through below.
 PRs #303 and #304 are merged. The continuation from `aede0142` adds
-counter consistency and mutex measurements; those rows record local
-implementation, not a merge or remote CI result. Evidence and validation
+counter consistency, mutex measurements, and new-edge core measurements;
+those rows record local implementation, not a merge or remote CI result.
+Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 
 | Completed item | Implementation and scope |
@@ -660,6 +661,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Excessive initial user-stack builder scratch on the kernel stack~~ | **FIXED (PR #304 review/CI follow-up)**: private heap scratch reduces the local AArch64 builder frame from 5,328 to 192 bytes; allocation failure follows process cleanup. The protection-capable boot and post-self-test workload pass locally. |
 | ~~Consistent lockdep statistics snapshots~~ | **BUILT (post-#304 continuation)**: all counter updates and the snapshot copy share the graph raw lock. Operations can still be in progress; held stacks are not frozen. |
 | ~~Matched debug LOCKDEP=0/1 warmed mutex-path measurements~~ | **BUILT (post-#304 continuation)**: adds private mutex lock/unlock and successful trylock/unlock paths. Contended waits and priority inheritance remain unmeasured. |
+| ~~New-edge core search measurements on sparse chains~~ | **BUILT (post-#304 continuation)**: private 16/64/256-node graphs exercise allowed insertion, cycle rejection, and transitive IRQ-conflict rejection. Setup is outside every sample; these are core costs, not cold-cache or complete acquisition timings. |
 
 Still open for the next milestone:
 
@@ -669,7 +671,8 @@ Still open for the next milestone:
   are now consistent separately).
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Cold graph searches, contended spin/mutex paths, priority-inheritance waits,
-  and native-hardware lockdep overhead measurements.
+- Dense/worst-case graph search costs, complete first-acquisition timings,
+  contended spin/mutex paths, priority-inheritance waits, and native-hardware
+  lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the
   host graph/held-stack models and the bounded x86 NMI reader test.
