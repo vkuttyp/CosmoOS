@@ -673,6 +673,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Real unregistered-vector delivery and concurrent unhandled totals~~ | **BUILT/FIXED (local continuation after PR #305)**: real IPIs exercise unhandled dispatch, repeated delivery after EOI, and handled reuse. Architecture warning totals use atomic increments. Hardware-spurious vectors and fatal exceptions are separate paths. |
 | ~~Interrupt dispatch bounds and synchronous-removal error-path coverage~~ | **BUILT (local continuation after PR #305)**: actual-source host tests check invalid dispatch and oversized-init panic diagnostics, logical/full-table boundaries, preserved registrations on failure, and synchronous-removal wrapper ordering. ASan/UBSan, TSan and three failing mutation controls validate the tests; real panic shutdown and epoch completion are outside these host shims. |
 | ~~Deterministic graph-search work bounds~~ | **BUILT (local continuation after PR #305)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
+| ~~Uncontended first-acquisition measurements against the live graph~~ | **BUILT (local continuation after PR #305)**: public spin, irqsave, nested-spin and mutex acquisitions include first class/usage/edge checks and held-stack publication, then compare reuse. Three fresh samples per path consume 18 classes. Matched debug LOCKDEP=0/1 boots cover both architectures; timings remain descriptive QEMU observations, not worst-case or native-hardware bounds. |
 
 Still open for the next milestone:
 
@@ -682,7 +683,7 @@ Still open for the next milestone:
   individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Worst-case wall-clock search latency, complete first-acquisition timings,
+- Worst-case wall-clock search latency, first-acquisition graph-size sweeps,
   contended spin/mutex paths, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the

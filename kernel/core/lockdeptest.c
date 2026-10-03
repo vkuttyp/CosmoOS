@@ -647,6 +647,109 @@ bool selftest_lockdep_bench(const char **reason)
     return true;
 }
 
+/* Measure the public acquisition call(s), stopping the clock while the
+ * private lock is still owned. Release and assertions are outside timing.
+ * Even a failed ownership check must release everything before returning. */
+static uint64_t first_bench_acquire(unsigned kind, spinlock_t *a, spinlock_t *b,
+                                    struct mutex *m, bool *owned)
+{
+    arch_irq_state_t state = 0;
+    uint64_t begin = clock_now_ns();
+    if (kind == 1)
+        spin_lock(a);
+    else if (kind == 2 || kind == 3) {
+        state = spin_lock_irqsave(a);
+        if (kind == 3)
+            spin_lock(b);
+    } else if (kind == 4)
+        mutex_lock(m);
+    uint64_t elapsed = clock_since_ns(begin);
+    *owned = kind == 0 || (kind == 4 ? m->owner == thread_current() : spin_is_held(a));
+    if (kind == 3) {
+        *owned = *owned && spin_is_held(b);
+        spin_unlock(b);
+    }
+    if (kind == 1)
+        spin_unlock(a);
+    else if (kind == 2 || kind == 3)
+        spin_unlock_irqrestore(a, state);
+    else if (kind == 4)
+        mutex_unlock(m);
+    return elapsed;
+}
+
+bool selftest_lockdep_first_bench(const char **reason)
+{
+    /* Three fresh samples consume 18 live classes in total: do not
+     * reset the graph or grow its capacity for benchmark repetition. */
+    enum { SAMPLES = 3, PATHS = 5 };
+    static const char *const paths[PATHS] = { "empty", "spin", "irqsave", "nested", "mutex" };
+    static char names[PATHS][SAMPLES][2][40];
+    uint64_t elapsed[PATHS][2][SAMPLES];
+    unsigned classes_before[PATHS], classes_after[PATHS];
+    bool ok = true;
+    cpumask_t saved = thread_pin_self();
+    for (unsigned kind = 0; kind < PATHS && ok; kind++) {
+        struct lockdep_stats before, after;
+        lockdep_get_stats(&before);
+        classes_before[kind] = before.classes;
+        for (unsigned sample = 0; sample < SAMPLES && ok; sample++) {
+            spinlock_t a, b;
+            struct mutex m;
+            ksnprintf(names[kind][sample][0], sizeof(names[kind][sample][0]),
+                      "lockdep-first-%s-%u-a", paths[kind], sample);
+            ksnprintf(names[kind][sample][1], sizeof(names[kind][sample][1]),
+                      "lockdep-first-%s-%u-b", paths[kind], sample);
+            spinlock_init(&a, names[kind][sample][0]);
+            spinlock_init(&b, names[kind][sample][1]);
+            mutex_init(&m, names[kind][sample][0]);
+            lockdep_get_stats(&before);
+            bool owned;
+            ok = a.class == 0 && b.class == 0 && m.class == 0 && m.lock.class == 0;
+            elapsed[kind][0][sample] = first_bench_acquire(kind, &a, &b, &m, &owned);
+            ok = ok && owned && !a.locked && !b.locked && !m.owner;
+            lockdep_get_stats(&after);
+#if CONFIG_LOCKDEP
+            unsigned added = kind == 0 ? 0 : kind >= 3 ? 2 : 1;
+            ok = ok && after.classes >= before.classes + added;
+            if (kind == 1 || kind == 2 || kind == 3)
+                ok = ok && a.class != 0;
+            if (kind == 3)
+                ok = ok && b.class != 0 && b.class != a.class && after.searches > before.searches;
+            if (kind == 4)
+                ok = ok && m.class != 0 && m.lock.class != 0 && m.class != m.lock.class;
+#endif
+            uint16_t ca = a.class, cb = b.class, cm = m.class, ci = m.lock.class;
+            elapsed[kind][1][sample] = first_bench_acquire(kind, &a, &b, &m, &owned);
+            ok = ok && owned && !a.locked && !b.locked && !m.owner &&
+                 a.class == ca && b.class == cb && m.class == cm && m.lock.class == ci;
+        }
+        lockdep_get_stats(&after);
+        classes_after[kind] = after.classes;
+    }
+    thread_set_affinity_self(saved);
+    CHECK(ok);
+    for (unsigned kind = 0; kind < PATHS; kind++) {
+        for (unsigned phase = 0; phase < 2; phase++) {
+            uint64_t *ns = elapsed[kind][phase];
+            for (unsigned i = 1; i < SAMPLES; i++) {
+                uint64_t value = ns[i];
+                unsigned j = i;
+                while (j && ns[j - 1] > value) {
+                    ns[j] = ns[j - 1];
+                    j--;
+                }
+                ns[j] = value;
+            }
+            kinfo("lockdep-first-bench: enabled=%u path=%s phase=%s samples=%u ns/acquisition min=%llu median=%llu max=%llu classes=%u..%u",
+                  (unsigned)CONFIG_LOCKDEP, paths[kind], phase ? "reuse" : "first", SAMPLES,
+                  (unsigned long long)ns[0], (unsigned long long)ns[SAMPLES / 2],
+                  (unsigned long long)ns[SAMPLES - 1], classes_before[kind], classes_after[kind]);
+        }
+    }
+    return true;
+}
+
 #if CONFIG_LOCKDEP
 /* Private graph: new-edge searches must not consume live classes or
  * reset dependencies used by the rest of the kernel. "New" describes

@@ -1265,3 +1265,68 @@ The inventory marks deterministic search work as covered and retains
 wall-clock maxima, first-acquisition timings, contention, priority
 inheritance and native measurements as open. The design's stale
 depth-first-search description now correctly says breadth-first search.
+
+## First-acquisition measurement continuation
+
+Phase 1 adds `lockdep-first-bench`, using the real public spinlock,
+irqsave, nested-spin and mutex acquisition paths against the live graph.
+Each path has three fresh-name samples and a subsequent reuse sample on
+each object. The clock stops after acquisition, while ownership is still
+held; release, validation, statistics snapshots and output are excluded.
+The nested case times two acquisitions together. An empty branch/clock
+control is reported separately, without subtraction. Class caches start
+empty, become populated with lockdep enabled and remain stable on reuse.
+Ownership/release checks apply with either setting. Class-count growth
+and a nested new-edge search are checked outside timing; global deltas
+are lower bounds because other CPUs keep running.
+
+The test adds 18 classes, using static names and leaving all graph state
+intact. Three samples deliberately limit consumption of the 320-class
+pool; no graph reset or capacity increase was introduced. Final graph
+dumps reached 302 classes on x86-64 and 301 on AArch64. This is a
+first-use measurement, not a CPU-cache-cold guarantee. The graph grows
+across samples, and each path reports its before/after class range.
+
+Phase 2 ran matched debug LOCKDEP=1/0 four-CPU boots on both architectures,
+using separate output trees and the same QEMU settings. All four passed
+421 self-tests and the complete boot harness. Enabled x86-64/AArch64 runs
+completed in 146.9/150.3 s; disabled runs in 121.1/127.8 s. Logs:
+`out/lockdep-first-{x86_64,aarch64}-{on,off}.log` and corresponding
+`-result.log` files. The enabled benchmark itself took 16/38 ms.
+These total boot durations are validation outcomes, not overhead estimates.
+
+Observed median guest nanoseconds per acquisition interval (nested is a
+pair), each from only three samples:
+
+| Architecture | Path | Enabled first | Enabled reuse | Disabled first | Disabled reuse |
+|---|---|---:|---:|---:|---:|
+| x86_64 | spin | 66105 | 1002 | 1006 | 0 |
+| x86_64 | irqsave | 5008 | 2003 | 1007 | 1006 |
+| x86_64 | nested | 25040 | 3004 | 1007 | 1007 |
+| x86_64 | mutex | 10016 | 3005 | 1007 | 1006 |
+| aarch64 | spin | 60992 | 992 | 1008 | 0 |
+| aarch64 | irqsave | 4992 | 1008 | 0 | 0 |
+| aarch64 | nested | 25008 | 2992 | 1008 | 0 |
+| aarch64 | mutex | 9008 | 3008 | 992 | 992 |
+
+Full min/median/max and empty controls are in the logs. Short intervals
+frequently meet guest-clock granularity and can read zero; do not derive
+ratios from these values. QEMU translation, host scheduling, interrupts
+and other CPUs affect the observations. Some builds/boots overlapped on
+the host; this was not an isolated performance experiment. No timing
+threshold determines success. These data do not establish native cost,
+worst-case latency, contention/PI overhead or a graph-size sweep.
+
+Phase 3 used a temporary clone with sample indices removed from class
+names. The second spin sample then reused an existing class and the fresh
+class-growth assertion failed. The targeted harness required the exact
+`FIRSTPROBE: result=0 reason=check failed: ok` panic and failure exit;
+it passed that negative-control check in 15.3 s, not a full suite.
+Logs: `out/lockdep-first-negative/{build,boot}.log` and
+`out/lockdep-first-negative-result.log`. The mutation is not committed.
+Both release kernels also built successfully; logs:
+`out/lockdep-first-{x86_64,aarch64}-release-build.log`. Log parsing checked
+all ten rows per boot, ordered min/median/max and disabled class counts.
+`git diff --check` passed. Host tests were not repeated for this kernel
+benchmark-only increment. The inventory now distinguishes this completed
+live-graph baseline from remaining graph-size, contention and native work.

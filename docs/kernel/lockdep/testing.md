@@ -40,6 +40,7 @@ released normally.
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
+| `lockdep-first-bench` | public spin, irqsave, nested-spin and mutex acquisitions with fresh classes, then reuse; three samples per path | verifies ownership, class registration and nested search; descriptive timing only |
 | `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
@@ -66,6 +67,44 @@ their interference. Printing and affinity changes are outside the samples.
 These measurements cover warmed uncontended object locks, not cold graph
 searches, lock contention, priority-inheritance waits, or a hardware-independent overhead
 ratio. QEMU/TCG results describe that emulator and host workload only.
+
+### First-acquisition measurement
+
+`lockdep-first-bench` runs the same public acquisition calls in debug
+`LOCKDEP=0/1` builds. Three samples each use new names for plain spin,
+irqsave, nested spin (outer irqsave plus inner plain), and mutex locks.
+The live graph is preserved. With lockdep enabled, these samples consume
+18 permanent classes: three each for spin and irqsave, six for nested
+pairs, and six for mutexes and their internal spinlocks. Names have static
+storage; no class pointer refers to expired scratch. Repetition is limited
+to keep headroom in the 320-class pool, which is not enlarged for timing.
+
+Each sample initializes private objects outside timing, verifies empty
+class caches, times the acquisition through ownership, then releases and
+checks the result outside timing. A second acquisition of those same
+objects measures reuse without reinitialization. Class caches must remain
+stable. Enabled builds require class-count growth and a new-edge search
+for nested pairs; the global deltas use lower bounds because other CPUs
+can add unrelated classes or dependencies. No expected-report suppression
+is armed. A temporary negative control gave every sample the same class
+names: the second spin sample failed the fresh-class check as intended.
+
+The interval includes clock reads, path selection, primitive acquisition,
+class lookup/registration, applicable usage/edge checks, and held-stack
+publication. Unlock, validation, statistics snapshots, printing and
+affinity changes are outside it. The nested value covers **two** public
+acquisitions, without dividing by two. A separate empty-path control is
+reported, never subtracted. Three values produce min/median/max, not a
+statistical confidence claim. Pinning keeps clock reads on one CPU;
+interrupts and scheduling follow the ordinary primitive's rules, and
+other CPUs continue running. New classes do not imply cold CPU caches.
+
+Results describe first use against the live boot graph at the reported
+class range, not a graph-size sweep or a worst-case acquisition. Guest
+clock granularity can produce zero for short intervals, especially with
+lockdep disabled; those values cannot support overhead ratios. QEMU/TCG
+timings include host scheduling and translation effects. Contended locks,
+priority inheritance and native hardware remain separate measurements.
 
 ### New-edge core measurement
 
