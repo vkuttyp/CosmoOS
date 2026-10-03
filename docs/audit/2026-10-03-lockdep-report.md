@@ -927,3 +927,56 @@ validation logs are `out/lockdep-dense-{x86_64,aarch64}.log` and matching
 `-result.log` files. `git diff --check` passed. The inventory marks the
 dense subclass-zero measurements complete, retaining broader performance
 coverage as deferred work.
+
+## Full-capacity graph continuation
+
+Base: `ac166445`. Phase 1 extends the private chain/dense benchmark to
+all 1,280 class/subclass nodes, retaining the previous subclass-zero cases.
+The full dense cycle graph contains 818,560 edges and the two-component
+bridge graphs 408,960. All 30 cases validate every warmup and timed result;
+setup and validation remain outside the timed operation.
+
+Phase 2 checks class-wide IRQ usage explicitly. In the full chain, the
+multi-source predecessor search reaches the proposed bridge from subclass
+3 of the first class; in the dense graph it reaches from subclass 0.
+Both descendant searches stop at subclass 0 of the last class. The cycle
+cases check the expected truncated chain or direct dense path and verify
+each returned edge. The host `dense-capacity` test fills every bitmap word,
+uses a two-entry output path, exhausts a full dense traversal without a
+matching usage label, and seeds the BFS queue with all 1,280 nodes. This
+exercises full queue capacity and duplicate suppression under ASan/UBSan.
+
+The full host sanitizer suite passed (`out/lockdep-full-host.log`). Both
+release kernels built (`out/lockdep-full-release-{x86_64,aarch64}.log`).
+The production core is unchanged. These are bounded-capacity workloads,
+not a proof of worst-case execution time or complete acquisition costs.
+
+Phase 3 measured both architectures under four-CPU QEMU. Full-capacity
+results from the first runs are guest nanoseconds (min / median / max):
+
+| Topology | Operation | x86-64 | AArch64 |
+|---|---|---|---|
+| chain | insert | 90125 / 105800 / 281152 | 64000 / 64992 / 214992 |
+| chain | cycle | 184170 / 217476 / 331113 | 130000 / 136000 / 218000 |
+| chain | irq-bridge | 258621 / 368338 / 952195 | 186992 / 194992 / 632000 |
+| dense | insert | 90125 / 91105 / 98942 | 64992 / 68000 / 107008 |
+| dense | cycle | 11755 / 11756 / 12735 | 10000 / 10992 / 14000 |
+| dense | irq-bridge | 250784 / 322296 / 706309 | 179008 / 191008 / 238992 |
+
+The benchmark passed in 1597 ms on x86-64 and 1201 ms on AArch64, below
+the existing self-test budget. AArch64 passed all 418 self-tests and the
+full harness in 147.0 s. The initial x86 run completed 418 tests with one
+failure: `quiesce-straggler-idle` observed a kick instead of zero (15 ms).
+It ran before the graph benchmark; neither its code nor the quiescence
+implementation changed. The test assumes idle publication beats the
+two-tick kick threshold. Host scheduling delay is a possible explanation,
+not an established root cause. The graph benchmark itself passed all 30
+cases. Logs: `out/lockdep-full-{x86_64,aarch64}.log` and matching
+`-result.log` files. No test assertion or timeout was relaxed.
+
+An isolated x86 rerun passed all 418 self-tests and the complete harness
+in 130.9 s (`out/lockdep-full-x86_64-retry.log` and matching `-result.log`).
+The idle test completed in 4 ms with no kick and the graph benchmark in
+1241 ms. The initial failure did not reproduce; its cause remains open.
+`git diff --check` passed. The inventory strikes out all-subclass capacity
+measurements while retaining worst-case latency bounds and contention work.

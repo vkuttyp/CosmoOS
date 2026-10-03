@@ -642,7 +642,7 @@ portability, performance):
 Completed work from the October lockdep session is struck through below.
 PRs #303 and #304 are merged. The continuation from `aede0142` adds
 counter consistency, mutex/new-edge measurements, interrupt writer
-serialization, thread mutex snapshots, and dense graph measurements;
+serialization, thread mutex snapshots, and dense/full-capacity graph measurements;
 those rows record local implementation, not a merge or remote CI result.
 Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
@@ -666,6 +666,7 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~Concurrent interrupt-table writer and diagnostic data races~~ | **FIXED (post-#304 continuation)**: per-vector raw writer serialization prevents competing registrations/removals; atomic count/name reads support concurrent diagnostics. Actual-source host tests cover publication and writer races; dispatch stays lock-free and record reuse still requires a grace period. |
 | ~~Bounded thread mutex-stack snapshots~~ | **BUILT (post-#304 continuation)**: atomic single-writer publication and capacity-aware reads with caller-owned thread lifetime. Panic diagnostics copy each local stack or report unavailable. Separate CPU/thread snapshots do not form a global view. |
 | ~~Dense DAG core search measurements through the class limit~~ | **BUILT (post-#304 continuation)**: chain/dense 16/64/256/320-node cases validate allowed insertion, cycle rejection, and IRQ-bridge rejection. Only subclass zero is active; these measurements do not establish worst-case bounds. |
+| ~~All-subclass graph search measurements at full capacity~~ | **BUILT (post-#304 continuation)**: 1,280-node chain/dense cases cover all subclasses, with explicit IRQ endpoint checks and sanitizer coverage of full BFS queues. Worst-case latency bounds remain open. |
 
 Still open for the next milestone:
 
@@ -675,7 +676,7 @@ Still open for the next milestone:
   individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
 - Raw `arch_irq_restore` ownership and pairing.
-- Worst-case/all-subclass graph search costs, complete first-acquisition timings,
+- Worst-case graph search bounds, complete first-acquisition timings,
   contended spin/mutex paths, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.
 - Kernel interrupt-entry and callback concurrency validation beyond the

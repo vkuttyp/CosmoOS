@@ -653,10 +653,18 @@ struct graph_bench_result {
     uint16_t path[8], safe, unsafe;
 };
 
+/* Existing sizes spread subclass-zero nodes across the bitmap; the
+ * maximum size fills every class/subclass slot. */
+static uint16_t graph_bench_node(unsigned index, unsigned nodes)
+{
+    return nodes == LOCKDEP_MAX_NODES ? (uint16_t)index : lockdep_node(index, 0);
+}
+
 static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned kind, bool dense)
 {
     memset(g, 0, sizeof(*g));
-    for (unsigned i = 0; i < nodes; i++) {
+    unsigned classes = nodes == LOCKDEP_MAX_NODES ? LOCKDEP_MAX_CLASSES : nodes;
+    for (unsigned i = 0; i < classes; i++) {
         char name[32];
         ksnprintf(name, sizeof(name), "graph-bench-%u", i);
         if (lockdep_core_class(g, name, LOCKDEP_KIND_SPIN) != (int)i)
@@ -668,7 +676,7 @@ static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned k
         for (unsigned j = i + 1; j < nodes; j++)
             if ((dense || j == i + 1) &&
                 (kind == 1 || (i < nodes / 2) == (j < nodes / 2)))
-                lockdep_core_add_edge(g, lockdep_node(i, 0), lockdep_node(j, 0));
+                lockdep_core_add_edge(g, graph_bench_node(i, nodes), graph_bench_node(j, nodes));
     unsigned expected = dense ? (kind == 1 ? nodes * (nodes - 1) / 2 :
                                  (nodes / 2) * (nodes / 2 - 1)) :
                                 nodes - (kind == 1 ? 1 : 2);
@@ -678,7 +686,7 @@ static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned k
         /* Each component is valid; only the proposed bridge would join
          * an IRQ-used ancestor to an IRQ-enabled descendant. */
         g->classes[0].usage = LOCKDEP_USED_IN_IRQ;
-        g->classes[nodes - 1].usage = LOCKDEP_HELD_IRQS_ON;
+        g->classes[classes - 1].usage = LOCKDEP_HELD_IRQS_ON;
     }
     return true;
 }
@@ -700,7 +708,7 @@ static void graph_bench_insert(struct lockdep_graph *g, struct lockdep_scratch *
 bool selftest_lockdep_graph_bench(const char **reason)
 {
     enum { SAMPLES = 9, WARMUP = 2 };
-    static const unsigned sizes[] = { 16, 64, 256, LOCKDEP_MAX_CLASSES };
+    static const unsigned sizes[] = { 16, 64, 256, LOCKDEP_MAX_CLASSES, LOCKDEP_MAX_NODES };
     static const char *const paths[] = { "insert", "cycle", "irq-bridge" };
     struct lockdep_graph *g = kmalloc(sizeof(*g), 0);
     struct lockdep_scratch *scratch = kmalloc(sizeof(*scratch), 0);
@@ -718,8 +726,8 @@ bool selftest_lockdep_graph_bench(const char **reason)
             unsigned nodes = sizes[size];
             for (unsigned kind = 0; kind < ARRAY_SIZE(paths) && ok; kind++) {
                 uint64_t elapsed[SAMPLES];
-                uint16_t from = lockdep_node(kind == 1 ? nodes - 1 : nodes / 2 - 1, 0);
-                uint16_t to = lockdep_node(kind == 1 ? 0 : nodes / 2, 0);
+                uint16_t from = graph_bench_node(kind == 1 ? nodes - 1 : nodes / 2 - 1, nodes);
+                uint16_t to = graph_bench_node(kind == 1 ? 0 : nodes / 2, nodes);
                 for (unsigned sample = 0; sample < WARMUP + SAMPLES; sample++) {
                     if (!graph_bench_seed(g, nodes, kind, dense) || lockdep_core_has_edge(g, from, to)) {
                         ok = false;
@@ -736,13 +744,21 @@ bool selftest_lockdep_graph_bench(const char **reason)
                          lockdep_core_has_edge(g, from, to) == (kind == 0);
                     if (kind == 1)
                         ok = ok && r.path_len == (dense ? 2 : ARRAY_SIZE(r.path)) &&
-                             r.path[0] == (dense ? to : lockdep_node(nodes - ARRAY_SIZE(r.path), 0)) &&
+                             r.path[0] == (dense ? to : graph_bench_node(nodes - ARRAY_SIZE(r.path), nodes)) &&
                              r.path[r.path_len - 1] == from;
                     for (unsigned i = 1; i < r.path_len && ok; i++)
                         ok = lockdep_core_has_edge(g, r.path[i - 1], r.path[i]);
-                    if (kind == 2)
-                        ok = ok && r.safe == lockdep_node(0, 0) &&
-                             r.unsafe == lockdep_node(nodes - 1, 0);
+                    if (kind == 2) {
+                        /* Usage labels all subclasses. In a full chain,
+                         * multi-source BFS reaches from subclass 3 of the
+                         * first class; dense edges reach from subclass 0.
+                         * The first unsafe node is subclass 0 of the last. */
+                        bool full = nodes == LOCKDEP_MAX_NODES;
+                        uint16_t safe = full && !dense ? LOCKDEP_SUBCLASSES - 1 : 0;
+                        uint16_t unsafe = full ? lockdep_node(LOCKDEP_MAX_CLASSES - 1, 0) :
+                                                graph_bench_node(nodes - 1, nodes);
+                        ok = ok && r.safe == safe && r.unsafe == unsafe;
+                    }
                     if (!ok)
                         break;
                     if (sample >= WARMUP)
