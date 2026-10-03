@@ -1330,3 +1330,67 @@ all ten rows per boot, ordered min/median/max and disabled class counts.
 `git diff --check` passed. Host tests were not repeated for this kernel
 benchmark-only increment. The inventory now distinguishes this completed
 live-graph baseline from remaining graph-size, contention and native work.
+
+## Contention-test failure cleanup after PR #306
+
+Base: merged PR #306 (`6201baff`). Phase 1, while investigating remaining
+contention coverage, found a concrete cleanup bug in the existing
+`lockdep-contention` self-test. Its callback-window `CHECK` ran immediately
+after acquiring the contended spinlock. If the timer had not fired, the
+macro returned without unlocking, cancelling its stack timer or joining
+the holder. This leaked preemption disable and left a published timer in
+expired stack storage. The readiness assertion also returned without
+draining the created worker. The successful path had an unbounded join.
+
+Phase 2 preserves the original test outcome while making cleanup precede
+any returning failure. IRQ-state validation happens before worker/timer
+publication. Atomic handshake flags are reset before creation and read
+atomically. After acquisition the timer observation is saved, the lock is
+released, the timer synchronously cancelled, and holder exit completion
+awaited with a one-second guard before joining. Only then is the saved
+observation checked. A late callback cannot retroactively satisfy the
+test. Readiness or exit timeout fails stop with the creator reference
+retained, rather than returning or entering an unbounded join. Selection
+of another CPU now defaults to self so the skip also covers no other
+online CPU. This does not bound a spin primitive waiting on a stopped
+owner or guarantee the callback window under arbitrary host delays.
+
+Phase 3 adds `tools/lockdep-contention-probe.py`, which builds temporary
+clones and checks exact fatal diagnostics and emulator failure exit.
+The missed-timer mode delays the callback to five seconds; `--old-order`
+restores the early assertion before cleanup. Both architectures reproduce
+the old failure state (`held=1 cancelled=0 joined=0 irq=1 preempt=1`) and
+validate the fixed failure state (`held=0 cancelled=1 joined=1 irq=1
+preempt=0`). The fixed test still reports its missed callback. Targeted
+old/fixed probe times were 16.8/12.5 s on x86-64 and 15.6/19.0 s on AArch64.
+Separate x86 probes withhold readiness or exit and require the named
+timeout panic; they passed in 13.2/13.6 s. No probe is a full-suite pass.
+No delayed timer, stalled worker or probe panic enters normal builds.
+
+Probe artifacts: `out/lockdep-cont-probe-{x86_64,aarch64}-missed-timer-{old,fixed}/`
+and `out/lockdep-cont-probe-x86_64-{readiness,exit}-fixed/`, each with
+`build.log` and `boot.log`; top-level `-result.log` files record outcomes.
+Both release kernels built, with logs at
+`out/lockdep-cont-cleanup-{x86_64,aarch64}-release.log`. Python syntax
+compilation and `git diff --check` passed. Host tests were not repeated
+because the change is confined to the kernel self-test and probe tool.
+
+The x86-64 four-CPU full boot passed all 421 self-tests and the complete
+harness in 139.7 s (`out/lockdep-cont-cleanup-x86_64{,-result}.log`). The
+initial AArch64 run passed the modified contention test in 21 ms but
+failed the harness: `syscall-fuzz` took 13,055 ms against its 8,000 ms
+budget and emitted the no-progress watchdog diagnostic at 8,005 ms.
+The watchdog showed the fuzzing process running and logging syscalls;
+the fuzzer later reported success and the kernel shut down normally.
+Probe builds/boots overlapped on the host. This is a recorded validation
+failure, not evidence establishing host load as its cause. Its artifacts
+are `out/lockdep-cont-cleanup-aarch64{,-result}.log`; the budget and
+watchdog checks were not changed.
+
+An isolated rerun of the unchanged AArch64 image passed all 421 self-tests
+and the full harness in 130.5 s. `lockdep-contention` remained 21 ms and
+`syscall-fuzz` took 3,840 ms without a watchdog marker. Logs:
+`out/lockdep-cont-cleanup-aarch64-retry{,-result}.log`. The initial
+budget failure remains recorded; one successful rerun does not establish
+its cause. The inventory now reflects PR #306's merged status and this
+local cleanup continuation separately.

@@ -640,11 +640,13 @@ portability, performance):
 ## 7. Lockdep milestone follow-ups (2026-10-03)
 
 Completed work from the October lockdep session is struck through below.
-PRs #303, #304 and #305 are merged. PR #305 includes counter consistency,
+PRs #303, #304, #305 and #306 are merged. PR #305 includes counter consistency,
 mutex/new-edge measurements, interrupt writer serialization, thread mutex
 snapshots, dense/full-capacity graph measurements, kernel writer/IPI tests,
-and the lockup deadline-read correction. Subsequent rows explicitly marked
-local continuation are not a merge or remote CI result.
+and the lockup deadline-read correction. PR #306 adds unhandled-IPI and
+interrupt-boundary coverage, deterministic graph-search bounds and first-use
+acquisition measurements. Subsequent rows explicitly marked local
+continuation are not a merge or remote CI result.
 Evidence and validation
 limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 
@@ -670,10 +672,11 @@ limits are in [the lockdep report](2026-10-03-lockdep-report.md).
 | ~~All-subclass graph search measurements at full capacity~~ | **BUILT (PR #305)**: 1,280-node chain/dense cases cover all subclasses, with explicit IRQ endpoint checks and sanitizer coverage of full BFS queues. Worst-case latency bounds remain open. |
 | ~~Kernel interrupt writer, IPI and grace-period reuse regression~~ | **BUILT (PR #305)**: 16 rounds race two registrations/removals, validate the winning handler via real IPI, and wait before reuse. Dispatch follows registration; arbitrary entry interleavings remain open. |
 | ~~Stale lockup response mask after delayed deadline read~~ | **FIXED (PR #305)**: both polling APIs read expiry before collecting responses. A controlled real-IPI/NMI probe reproduces the old missing-mask failure and validates the fix on both architectures; the five-millisecond deadline remains unchanged. |
-| ~~Real unregistered-vector delivery and concurrent unhandled totals~~ | **BUILT/FIXED (local continuation after PR #305)**: real IPIs exercise unhandled dispatch, repeated delivery after EOI, and handled reuse. Architecture warning totals use atomic increments. Hardware-spurious vectors and fatal exceptions are separate paths. |
-| ~~Interrupt dispatch bounds and synchronous-removal error-path coverage~~ | **BUILT (local continuation after PR #305)**: actual-source host tests check invalid dispatch and oversized-init panic diagnostics, logical/full-table boundaries, preserved registrations on failure, and synchronous-removal wrapper ordering. ASan/UBSan, TSan and three failing mutation controls validate the tests; real panic shutdown and epoch completion are outside these host shims. |
-| ~~Deterministic graph-search work bounds~~ | **BUILT (local continuation after PR #305)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
-| ~~Uncontended first-acquisition measurements against the live graph~~ | **BUILT (local continuation after PR #305)**: public spin, irqsave, nested-spin and mutex acquisitions include first class/usage/edge checks and held-stack publication, then compare reuse. Three fresh samples per path consume 18 classes. Matched debug LOCKDEP=0/1 boots cover both architectures; timings remain descriptive QEMU observations, not worst-case or native-hardware bounds. |
+| ~~Real unregistered-vector delivery and concurrent unhandled totals~~ | **BUILT/FIXED (PR #306)**: real IPIs exercise unhandled dispatch, repeated delivery after EOI, and handled reuse. Architecture warning totals use atomic increments. Hardware-spurious vectors and fatal exceptions are separate paths. |
+| ~~Interrupt dispatch bounds and synchronous-removal error-path coverage~~ | **BUILT (PR #306)**: actual-source host tests check invalid dispatch and oversized-init panic diagnostics, logical/full-table boundaries, preserved registrations on failure, and synchronous-removal wrapper ordering. ASan/UBSan, TSan and three failing mutation controls validate the tests; real panic shutdown and epoch completion are outside these host shims. |
+| ~~Deterministic graph-search work bounds~~ | **BUILT (PR #306)**: host-only counters in shared search helpers check queue, bitmap and parent-walk bounds on full-capacity graphs and composite IRQ checks. Dense/cyclic traversal attains 25,600 adjacency-word reads; a full chain attains 2,559 parent steps. A duplicate-scan control fails the bound. This does not bound wall-clock latency or raw-lock contention. |
+| ~~Uncontended first-acquisition measurements against the live graph~~ | **BUILT (PR #306)**: public spin, irqsave, nested-spin and mutex acquisitions include first class/usage/edge checks and held-stack publication, then compare reuse. Three fresh samples per path consume 18 classes. Matched debug LOCKDEP=0/1 boots cover both architectures; timings remain descriptive QEMU observations, not worst-case or native-hardware bounds. |
+| ~~Contention-test lock/timer cleanup on a missed callback window~~ | **FIXED (local continuation after PR #306)**: release the spinlock, synchronously cancel the stack timer and join the completed holder before returning failure. Readiness and exit guards fail stop with the thread retained. Old/fixed missed-timer probes validate state on both architectures; x86 probes validate both timeout diagnostics. The timing window itself and stopped-owner spin waits remain outside this fix. |
 
 Still open for the next milestone:
 

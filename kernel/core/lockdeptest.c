@@ -481,7 +481,7 @@ bool selftest_lockdep_mutex(const char **reason)
  */
 static spinlock_t g_cont_l = SPINLOCK_INIT("lockdep-test-cont-l");
 static spinlock_t g_cont_m = SPINLOCK_INIT("lockdep-test-cont-m");
-static volatile unsigned g_cont_holding, g_cont_timer_ran;
+static unsigned g_cont_holding, g_cont_timer_ran;
 
 static void cont_holder(void *arg)
 {
@@ -505,7 +505,7 @@ static void cont_timer(struct timer *t, void *arg)
 
 static bool selftest_lockdep_contention_pinned(const char **reason)
 {
-    unsigned other = 0, me = arch_cpu_id();   /* pinned by the wrapper */
+    unsigned me = arch_cpu_id(), other = me;   /* pinned by the wrapper */
     for (unsigned i = 1; i < cpu_count(); i++)
         if (cpu_online((me + i) % cpu_count())) {
             other = (me + i) % cpu_count();
@@ -515,21 +515,32 @@ static bool selftest_lockdep_contention_pinned(const char **reason)
         kinfo("selftest: lockdep-contention: one CPU, nothing to contend with");
         return true;
     }
+    /* Check preconditions before creating a worker or publishing a timer.
+     * Every returning path after publication must drain those lifetimes. */
+    CHECK(arch_irq_enabled());
+    __atomic_store_n(&g_cont_holding, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_cont_timer_ran, 0u, __ATOMIC_RELAXED);
     struct thread *h = thread_create_on(cont_holder, NULL, "cont-holder", SCHED_PRIO_DEFAULT, CPUMASK_OF(other));
     CHECK(h != NULL);
     uint64_t end = clock_now_ns() + 1000000000ULL;
     while (__atomic_load_n(&g_cont_holding, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
         arch_cpu_relax();
-    CHECK(g_cont_holding == 1);
+    if (!__atomic_load_n(&g_cont_holding, __ATOMIC_ACQUIRE))
+        panic("selftest lockdep-contention: holder readiness timeout; retaining thread");
 
     struct timer t;
     timer_setup(&t, cont_timer, NULL);
     timer_start(&t, 5000000ULL);   /* fires on this CPU while we spin below */
-    CHECK(arch_irq_enabled());
     spin_lock(&g_cont_l);          /* contended for ~15 ms with interrupts enabled */
-    CHECK(g_cont_timer_ran == 1);  /* the interrupt landed inside the wait */
+    /* Preserve the observation before cleanup: a late timer callback
+     * must not turn a missed-window failure into a pass. */
+    bool timer_ran = __atomic_load_n(&g_cont_timer_ran, __ATOMIC_ACQUIRE) == 1;
     spin_unlock(&g_cont_l);
+    timer_cancel_sync(&t);        /* stack timer cannot outlive this frame */
+    if (!wait_for_completion_timeout(&h->exited, 1000000000ULL))
+        panic("selftest lockdep-contention: holder exit timeout; retaining thread");
     thread_join(h);
+    CHECK(timer_ran);             /* only now may a failure return safely */
 
     /* No phantom L -> M may have been recorded: that would report an
      * inversion. M -> L itself is now rejected as IRQ-used -> IRQ-enabled,

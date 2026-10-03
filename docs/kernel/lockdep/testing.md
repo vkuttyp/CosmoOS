@@ -287,6 +287,39 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 
 ## October hardening regression coverage
 
+### Contention-test failure cleanup
+
+`lockdep-contention` checks IRQ state before creating its remote holder
+or publishing the stack timer. Holder readiness has a one-second guard;
+expiry panics with the thread retained. After acquisition, the test saves
+whether the callback met its original window, releases the spinlock and
+synchronously cancels the timer before waiting for holder exit. Exit
+completion has a one-second timeout before `thread_join`; only after
+cleanup can a failed callback-window assertion return. A late callback
+during cleanup cannot change the saved result into a pass. Successful
+runs still perform the original lock-order/IRQ-safety checks.
+
+Previously, the callback-window assertion returned with the spinlock held
+and its stack timer still published. Readiness failure could also return
+without joining the created thread. The corrected failure order preserves
+the original test assertion and makes the resource lifetimes explicit.
+It does not make the 5 ms callback versus 20 ms holder timing deterministic
+under arbitrary host scheduling, or bound a primitive spin wait if its
+owner stops making progress.
+
+`tools/lockdep-contention-probe.py` builds isolated temporary clones and
+requires specific panic state and failure exit, rather than accepting any
+crash. `--mode missed-timer` moves the callback five seconds out: the
+corrected test returns failure with its lock released, timer cancelled,
+holder joined, IRQs enabled and preemption count zero. `--old-order`
+restores the early assertion and demonstrates the held lock, uncancelled
+timer, unjoined holder and preemption count one. Both controls run on
+x86-64 and AArch64. `--mode readiness` withholds the ready flag and
+`--mode exit` stops the holder after unlock; each must produce its named
+timeout panic. The latter two have been validated on x86-64. These are
+targeted failure probes, not full-suite passes; no injected stalls or
+delayed timers are linked into normal kernels.
+
 ### Concurrent graph model
 
 `tests/host/test_lockdep_threads.c` runs four writers and two diagnostic
