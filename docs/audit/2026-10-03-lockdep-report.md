@@ -257,3 +257,35 @@ tests, then callback wait dependencies and fatal/NMI diagnostics. Before
 expanding this implementation, correct the demonstrated UP harness
 prerequisites and obtain a green full UP run without removing progress or
 cross-CPU correctness assertions.
+
+
+## PR #302 review follow-up
+
+Corrected the runqueue rules throughout the lockdep and scheduler pages:
+increasing-CPU pairs, address-space tag allocation (`asid`, observed on
+AArch64), and logging during expected diagnostics explain the outgoing
+edges. The old leaf/zero-successor claim was stale. Configuration guidance
+now consistently distinguishes `LOCKDEP=0/1` from its debug/release defaults.
+
+`lockdep_dump_graph` now captures class/edge counts under the raw lock,
+reads bitmap words atomically, and restricts names/kinds to the published
+class range. Printing remains outside the raw lock. Edges can grow during
+the dump; it is not a consistent snapshot, and the general statistics
+snapshot limitation remains deferred.
+
+The reported double increment in `lockdep_core_add_edge` is not reachable
+through the current kernel caller: `lockdep_acquire` holds `raw_lock`
+across the duplicate recheck, cycle search and insertion. Host callers are
+single-threaded. The helper now explicitly documents this serialization
+requirement; atomic bitmap updates support unlocked readers, not concurrent
+writers or lock-free cycle decisions.
+
+Review validation: `gmake host-test` passes (ASan/UBSan and Python harness
+units); both kernel builds pass; x86-64 and AArch64 debug SMP boot suites
+pass all 416 self-tests in 172.6 s and 171.3 s respectively. Each prints
+nine expected reports, no unexpected lockdep report, and the unloaded
+module's copied class name. Logs: `out/lockdep-review-host.log`,
+`out/lockdep-review-{x86,arm}-build.log`, `out/lockdep-review-{x86,arm}.log`,
+and each architecture's `lockdep-review-smp.log`. These boots exercise the
+dump but are not a proof of all possible concurrent interleavings; the
+shared-access argument also relies on the lock/publication inspection.
