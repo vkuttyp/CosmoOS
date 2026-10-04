@@ -125,7 +125,7 @@ separate retry suffix above for AArch64 off/4.
 | x86-64 | LOCKDEP=1, 1 CPU (`on1`) | PASS, 120.3 s |
 | x86-64 | LOCKDEP=0, 4 CPUs (`off4`) | PASS, 109.7 s |
 
-After the raw-clock guard correction, the final implementation
+After the raw-clock guard correction, the initial implementation
 (`95dc0286`) passed all 423 self-tests and the full harness with four CPUs
 and LOCKDEP=1 on both architectures: AArch64 in 135.3 s and x86-64 in
 125.2 s. Logs: `out/spin-refined-<arch>-on4.log` and
@@ -197,6 +197,56 @@ The AArch64 disabled values come from the passing retry.
 
 The 6.2 ms x86 plain sample and slower disabled AArch64 medians illustrate
 why these observations cannot support an isolated lockdep overhead ratio.
+
+## PR #308 CI follow-up: runnable is not ready
+
+The first remote CI run,
+[37186753332](https://github.com/vkuttyp/CosmoOS/actions/runs/37186753332),
+failed its x86 debug boot after the plain spin benchmark. CPU 0's reaper
+panicked in a kernel-stack TLB shootdown with two of three acknowledgments.
+CPU 3, running `kmain`, reported 1,000 ms without a tick. In this placement
+the benchmark's waiter was pinned to CPU 0 and the owner was CPU 3.
+
+Creating a runnable waiter did not guarantee it could run. The irqsave
+owner masked interrupts and waited for that waiter to fail an exchange.
+Meanwhile the reaper could occupy the waiter's CPU, nonpreemptibly waiting
+for the owner's TLB acknowledgment. The one-second owner guard competed
+with the one-second shootdown deadline. Raising either budget would leave
+that circular startup dependency intact.
+
+The waiter now publishes readiness with IRQs enabled and preemption
+disabled. The owner waits for that readiness before acquiring the test
+lock or masking IRQs. The waiter cannot be replaced by the reaper between
+readiness and acquisition; other CPUs' shootdowns can still interrupt its
+startup wait. After acquisition it drops the extra startup pin, retaining
+the lock's pin, before ownership/context checks. Readiness is outside the
+timed acquisition; a readiness timeout fails stop with the thread and stack
+probe retained. No shootdown or test budget changes.
+
+The contention self-test had the analogous setup risk: its holder could
+mask IRQs while the main test thread was replaced by a reaper. A two-way
+ready/start handshake now establishes both participants as nonpreemptible
+with IRQs enabled before the holder takes L. Each transfers its startup
+pin to L after acquisition. The early-callback control uses an IRQ-enabled
+busy delay instead of sleeping inside this startup interval.
+
+`bench-startup` delays the waiter and frees a populated kernel mapping
+before publishing readiness. With the owner ready gate removed, the
+x86 control records `startup free owner-held=1`, stalls in the real
+shootdown, and fails the wait-observation assertion after unlock/join.
+With the gate present, it records `owner-held=0` and completes both the
+shootdown and benchmark. The control reproduces the dependency and safe
+guard failure; it does not claim to reproduce the CI panic's deadline race.
+Initial results: old-gate control PASS in 6.4 s after the harness's firmware
+retry; fixed control PASS in 5.6 s. Artifacts are recorded in
+`out/pr308-startup-old-result.log` and `out/pr308-startup-fixed-result.log`.
+
+CosmoReview's first round on `087a55c` reported confidence 5/5 with two
+informational observations. The suggested completion-timeout issue is not
+present: the API returns `bool`, and every false return enters the explicit
+panic branch. Exact probe anchors deliberately reject changed source
+instead of silently applying a different mutation. These review results
+did not supersede the failing CI boot or remove the need for this fix.
 
 ## Remaining scope
 

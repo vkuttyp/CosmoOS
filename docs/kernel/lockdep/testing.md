@@ -152,15 +152,22 @@ open. The log distinguishes `same-cpu` and `cross-cpu` placement.
 
 `lockdep-spin-bench` runs identical plain/irqsave workloads with lockdep
 enabled and disabled. The owner and waiter are pinned to distinct CPUs;
-UP logs an explicit skip. A start flag holds the waiter until the owner
-has the lock. The owner then waits for `spin_test_waiting_on` to observe
+UP logs an explicit skip. Before the owner takes the lock or masks IRQs,
+the waiter reports ready with IRQs enabled and preemption disabled. This
+prevents a reaper on the waiter's CPU from starting a TLB shootdown and
+waiting for the masked owner while that owner waits for the waiter to run.
+A start flag holds the ready waiter until the owner has the lock. The
+startup preemption pin is dropped after acquisition, when the lock's own
+pin prevents scheduling; the acquisition timer excludes readiness and
+dropping that pin. The owner then waits for `spin_test_waiting_on` to observe
 a real failed exchange, holds for 1 ms, writes protected data and releases.
 Each path has two warmups and nine samples; each sample times the waiter's
 public acquisition on its own CPU, without subtracting the hold interval.
 
 Every round verifies exclusion, ownership, protected-data handoff, IRQ
 state and preemption count during ownership and after release, and a
-cleared wait observation. The owner releases and joins even if the
+cleared wait observation. Missing readiness fails stop with the thread and
+probe retained, before the owner holds any test lock. The owner releases and joins even if the
 one-second observation guard expires. A missing waiter exit fails stop
 with its thread and stack probe retained. A fresh thread per round and
 the self-test observer contribute to these measurements; they are not
@@ -177,7 +184,14 @@ owner's observation and requires a failure after unlock/join;
 `bench-irqguard` does that with two CPUs, irqsave acquisition and the
 clock forced non-common: the owner's pinned hardware-clock guard must
 expire even though both CPUs have IRQs masked. `bench-exit` withholds
-exit and requires the retention panic. Images and
+exit and requires the retention panic; `bench-ready` withholds startup
+readiness and requires its separate retention panic. `bench-startup` frees
+a populated kernel mapping on the waiter before readiness, forcing a real
+shootdown while the owner must still accept interrupts. The x86-only
+`bench-startup-old` removes the owner's ready gate and requires the same
+free to find the owner holding the lock, then the benchmark to fail after
+safe cleanup. This isolates the startup dependency, not host scheduling
+latency or arbitrary shootdown failures. Images and
 logs stay under `out/spin-probe-*/run-*`. These are controlled tests;
 arbitrary stopped CPUs or NMI writer nesting remain outside their scope.
 
@@ -378,7 +392,12 @@ Previously, the callback-window assertion returned with the spinlock held
 and its stack timer still published. Readiness failure could also return
 without joining the created thread. The corrected failure order preserves
 the original test assertion and makes the resource lifetimes explicit.
-The October 4 continuation also removes the fixed 20 ms hold: the holder
+The October 4 continuation also removes the fixed 20 ms hold. A two-way
+startup rendezvous keeps both participants nonpreemptible with IRQs enabled
+before the holder may mask IRQs. This keeps either participant from being
+scheduled behind a reaper waiting for the other CPU's TLB acknowledgment.
+Each startup pin is dropped after that participant acquires L, transferring
+the preemption barrier to the lock. The holder
 keeps L until the callback observes an actual failed exchange, or a 1 s
 guard expires. An early callback rearms without taking M. In the observed
 callback, a second lock held by the remote holder forces a nested spin

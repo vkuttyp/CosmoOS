@@ -26,8 +26,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=['x86_64', 'aarch64'], default='x86_64')
     parser.add_argument('--mode', choices=['early', 'early-short-hold', 'missing-wait', 'nested-restore',
-                                         'bench-unobserved', 'bench-irqguard', 'bench-exit'], default='early')
+                                         'bench-unobserved', 'bench-irqguard', 'bench-exit', 'bench-ready',
+                                         'bench-startup', 'bench-startup-old'], default='early')
     args = parser.parse_args()
+    if args.mode == 'bench-startup-old' and args.arch != 'x86_64':
+        parser.error('bench-startup-old exercises x86 IPI-based TLB shootdown')
     root = Path(__file__).resolve().parent.parent
     parent = root / 'out' / ('spin-probe-' + args.arch + '-' + args.mode)
     parent.mkdir(parents=True, exist_ok=True)
@@ -49,9 +52,9 @@ def main():
     while (!__atomic_load_n(&probe_early, __ATOMIC_ACQUIRE)) {
         if (clock_deadline_passed(probe_deadline))
             panic("SPINPROBE: early callback guard expired");
-        thread_sleep_ms(1);
+        arch_cpu_relax();
     }
-    thread_sleep_ms(50);
+    udelay(50000); /* owner startup pin is nonpreemptible, IRQs remain on */
     kinfo("SPINPROBE: early callback observed before contender");
 ''')
         if args.mode == 'early-short-hold':
@@ -71,6 +74,28 @@ def main():
                           '    for (unsigned path = 1; path < 2; path++) {')
             source = once(source, '    struct spin_bench_probe p = {0};',
                           '    clock_test_force_uncommon(true);\n    struct spin_bench_probe p = {0};')
+    elif args.mode == 'bench-ready':
+        source = once(source, '    preempt_disable();\n    __atomic_store_n(&p->ready, 1u, __ATOMIC_RELEASE);',
+                      '    preempt_disable();\n    /* deliberately withhold readiness */')
+    elif args.mode.startswith('bench-startup'):
+        source = once(source, '#include <kernel/interrupt.h>',
+                      '#include <kernel/vmm.h>\n#include <kernel/interrupt.h>')
+        source = once(source, '    unsigned ready, go, acquired;',
+                      '    unsigned ready, go, acquired;\n    vaddr_t probe_map;')
+        source = once(source, '    struct spin_bench_probe *p = arg;', '''    struct spin_bench_probe *p = arg;
+    thread_sleep_ms(20); /* let the owner reach its startup protocol */
+    kinfo("SPINPROBE: startup free owner-held=%u", __atomic_load_n(&p->lock.locked, __ATOMIC_ACQUIRE));
+    vm_kernel_free(p->probe_map); /* real shootdown, before waiter readiness */''')
+        source = once(source, '    for (unsigned path = 0; path < 2; path++) {',
+                      '    for (unsigned path = 1; path < 2; path++) {')
+        anchor = '            struct thread *waiter = thread_create_on(spin_bench_waiter, &p, "spin-bench",'
+        source = once(source, anchor, '''            p.probe_map = vm_kernel_alloc(4096, VM_KALLOC_POPULATE, VM_PROT_RW);
+            KASSERT(p.probe_map != 0);
+''' + anchor)
+        if args.mode.endswith('-old'):
+            start = source.index('            uint64_t ready_end = clock_deadline_ns(')
+            end = source.index('            arch_irq_state_t s = 0;', start)
+            source = source[:start] + source[end:] # only remove the owner readiness gate
     else:
         anchor = '    p->context_ok = p->context_ok && arch_irq_enabled() && raw_this_cpu()->preempt_count == 0;'
         source = once(source, anchor, anchor + '\n    for (;;) arch_cpu_relax(); /* deliberately withhold exit */')
@@ -98,7 +123,7 @@ def main():
     runner = once(runner, 'static const struct selftest tests[] = {\n',
                   'static const struct selftest tests[] = {\n' + entry)
     required = [r'^halting\.$']
-    if args.mode == 'early':
+    if args.mode in ('early', 'bench-startup'):
         required += [r'^KERNEL PANIC: SPINPROBE: result=1 reason=none$']
     elif args.mode in ('early-short-hold', 'missing-wait'):
         required += [r'^KERNEL PANIC: SPINPROBE: result=0 reason=check failed: timer_ran at line [0-9]+$']
@@ -106,6 +131,8 @@ def main():
         required += [r'^KERNEL PANIC: assertion failed: ' + re.escape('spin_test_waiting_on(arch_cpu_id(), &g_cont_l)') + r' at .* \(cont_timer\)$']
     elif args.mode == 'bench-exit':
         required += [r'^KERNEL PANIC: selftest lockdep-spin-bench: waiter exit timeout; retaining thread and probe$']
+    elif args.mode == 'bench-ready':
+        required += [r'^KERNEL PANIC: selftest lockdep-spin-bench: waiter readiness timeout; retaining thread and probe$']
     else:
         required += [r'^KERNEL PANIC: SPINPROBE: result=0 reason=check failed: waiting && excluded .* at line [0-9]+$',
                      r'SPINPROBE: bench cleanup locked=0 waiting=0 acquired=1 irq=1 preempt=0$']
@@ -113,6 +140,8 @@ def main():
         required += [r'SPINPROBE: contention cleanup held=0 timer-idle=1 waiting=0 irq=1 preempt=0$']
     if args.mode.startswith('early'):
         required += [r'SPINPROBE: early callback observed before contender$']
+    if args.mode.startswith('bench-startup'):
+        required += [r'SPINPROBE: startup free owner-held=' + ('1' if args.mode.endswith('-old') else '0') + r'$']
     with tempfile.TemporaryDirectory(prefix='cosmo-spin-contention-') as tmp:
         subprocess.run(['git', 'clone', '--quiet', '--shared', str(root), tmp], check=True)
         work = Path(tmp)

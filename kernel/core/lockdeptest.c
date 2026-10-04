@@ -483,13 +483,19 @@ bool selftest_lockdep_mutex(const char **reason)
 static spinlock_t g_cont_l = SPINLOCK_INIT("lockdep-test-cont-l");
 static spinlock_t g_cont_m = SPINLOCK_INIT("lockdep-test-cont-m");
 static unsigned g_cont_holding, g_cont_timer_ran;
+static unsigned g_cont_ready, g_cont_start;
 static spinlock_t g_cont_nested = SPINLOCK_INIT("lockdep-test-cont-nested");
 static unsigned g_cont_cpu, g_cont_nested_seen;
 
 static void cont_holder(void *arg)
 {
     (void)arg;
+    preempt_disable();
+    __atomic_store_n(&g_cont_ready, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_cont_start, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
     arch_irq_state_t s = spin_lock_irqsave(&g_cont_l);
+    preempt_enable(); /* the held lock now keeps this CPU nonpreemptible */
     spin_lock(&g_cont_nested);
     __atomic_store_n(&g_cont_holding, 1u, __ATOMIC_RELEASE);
     /* This CPU cannot migrate while holding L. Do not use the deadline
@@ -537,11 +543,23 @@ static bool selftest_lockdep_contention_pinned(const char **reason)
     CHECK(arch_irq_enabled());
     __atomic_store_n(&g_cont_holding, 0u, __ATOMIC_RELAXED);
     __atomic_store_n(&g_cont_timer_ran, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_cont_ready, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_cont_start, 0u, __ATOMIC_RELAXED);
     __atomic_store_n(&g_cont_nested_seen, 0u, __ATOMIC_RELAXED);
     g_cont_cpu = me;
     struct thread *h = thread_create_on(cont_holder, NULL, "cont-holder", SCHED_PRIO_DEFAULT, CPUMASK_OF(other));
     CHECK(h != NULL);
     uint64_t end = clock_deadline_ns(1000000000ULL);
+    while (!__atomic_load_n(&g_cont_ready, __ATOMIC_ACQUIRE) && !clock_deadline_passed(end))
+        sched_yield();
+    if (!__atomic_load_n(&g_cont_ready, __ATOMIC_ACQUIRE))
+        panic("selftest lockdep-contention: holder readiness timeout; retaining thread");
+    /* Both participants must be running before the holder masks IRQs.
+     * Otherwise a reaper on this CPU can wait for that holder's TLB ack
+     * while the holder waits for this thread to start its callback. */
+    preempt_disable();
+    __atomic_store_n(&g_cont_start, 1u, __ATOMIC_RELEASE);
+    end = clock_deadline_ns(1000000000ULL);
     while (__atomic_load_n(&g_cont_holding, __ATOMIC_ACQUIRE) == 0 && !clock_deadline_passed(end))
         arch_cpu_relax();
     if (!__atomic_load_n(&g_cont_holding, __ATOMIC_ACQUIRE))
@@ -551,6 +569,7 @@ static bool selftest_lockdep_contention_pinned(const char **reason)
     timer_setup(&t, cont_timer, NULL);
     timer_start(&t, 5000000ULL);   /* fires on this CPU while we spin below */
     spin_lock(&g_cont_l);          /* holder releases only after the observed callback, or its guard */
+    preempt_enable();             /* the acquired lock replaces the startup pin */
     /* Preserve the observation before cleanup: a late timer callback
      * must not turn a missed-window failure into a pass. */
     bool timer_ran = __atomic_load_n(&g_cont_timer_ran, __ATOMIC_ACQUIRE) == 1;
@@ -784,7 +803,7 @@ bool selftest_lockdep_first_bench(const char **reason)
 
 struct spin_bench_probe {
     spinlock_t lock;
-    unsigned go, acquired;
+    unsigned ready, go, acquired;
     unsigned value, expected;
     bool irqsave, owned, payload_ok, context_ok;
     uint64_t elapsed;
@@ -793,9 +812,15 @@ struct spin_bench_probe {
 static void spin_bench_waiter(void *arg)
 {
     struct spin_bench_probe *p = arg;
-    while (!__atomic_load_n(&p->go, __ATOMIC_ACQUIRE))
-        sched_yield();
     bool entry_ok = arch_irq_enabled() && raw_this_cpu()->preempt_count == 0;
+    /* Be running before the owner can mask IRQs. A merely runnable
+     * waiter can be behind the reaper's TLB shootdown, which then waits
+     * for an acknowledgment from that owner. Keep IRQs enabled here so
+     * other CPUs' shootdowns still complete during the rendezvous. */
+    preempt_disable();
+    __atomic_store_n(&p->ready, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&p->go, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
     uint64_t begin = clock_now_ns();
     arch_irq_state_t s = 0;
     if (p->irqsave)
@@ -803,6 +828,7 @@ static void spin_bench_waiter(void *arg)
     else
         spin_lock(&p->lock);
     p->elapsed = clock_since_ns(begin);
+    preempt_enable(); /* transfer the startup pin to the acquired lock */
     p->owned = spin_is_held(&p->lock);
     p->context_ok = entry_ok && raw_this_cpu()->preempt_count == 1 &&
                     arch_irq_enabled() == !p->irqsave &&
@@ -839,6 +865,7 @@ static bool spin_contention_bench_pinned(const char **reason)
         p.irqsave = path != 0;
         uint64_t elapsed[SAMPLES];
         for (unsigned round = 0; round < WARMUP + SAMPLES; round++) {
+            __atomic_store_n(&p.ready, 0u, __ATOMIC_RELAXED);
             __atomic_store_n(&p.go, 0u, __ATOMIC_RELAXED);
             __atomic_store_n(&p.acquired, 0u, __ATOMIC_RELAXED);
             p.owned = p.payload_ok = p.context_ok = false;
@@ -848,6 +875,11 @@ static bool spin_contention_bench_pinned(const char **reason)
             struct thread *waiter = thread_create_on(spin_bench_waiter, &p, "spin-bench",
                                                      SCHED_PRIO_DEFAULT, CPUMASK_OF(other));
             CHECK(waiter != NULL);
+            uint64_t ready_end = clock_deadline_ns(1000000000ULL);
+            while (!__atomic_load_n(&p.ready, __ATOMIC_ACQUIRE) && !clock_deadline_passed(ready_end))
+                sched_yield();
+            if (!__atomic_load_n(&p.ready, __ATOMIC_ACQUIRE))
+                panic("selftest lockdep-spin-bench: waiter readiness timeout; retaining thread and probe");
             arch_irq_state_t s = 0;
             if (p.irqsave)
                 s = spin_lock_irqsave(&p.lock);

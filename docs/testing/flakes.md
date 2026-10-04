@@ -2850,6 +2850,24 @@ The spin-contention checks passed. The failed run is retained as
 assertions were not changed for this increment. This matches the earlier
 failure shape without establishing the cause of this particular slowdown.
 
+## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
+
+PR #308's first x86 CI debug boot failed with a TLB shootdown acknowledged
+by two of three CPUs. The reaper was on CPU 0, where the new benchmark's
+waiter was queued; the irqsave owner on CPU 3 masked IRQs while awaiting
+that waiter. The reaper's shootdown waited for CPU 3, preventing CPU 0 from
+running the waiter. The owner's one-second guard raced the shootdown's
+one-second deadline. This is a startup dependency, not evidence that the
+shootdown budget should grow.
+
+The fix requires waiter readiness with IRQs enabled and preemption disabled
+before the owner masks IRQs. The contention callback test gains a two-way
+startup rendezvous for the same reason. A real kernel-memory free before
+waiter readiness reproduces the dependency when the owner gate is removed
+and completes with the gate present. See the
+[PR #308 follow-up](../audit/2026-10-04-spin-contention-report.md#pr-308-ci-follow-up-runnable-is-not-ready)
+for CI evidence, exact control outcomes and validation limits.
+
 ## Two-CPU full-suite limitations during observed-spin validation, 2026-10-04
 
 Two AArch64 debug LOCKDEP=1 boots with `QEMU_SMP=2` failed
