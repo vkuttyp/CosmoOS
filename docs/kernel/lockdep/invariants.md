@@ -115,8 +115,9 @@ waited for (a contended plain `spin_lock` with interrupts enabled, during
 which a handler may run) is not seen as held by that handler. Check: every
 boot (a mismatch would report an unheld release at the first schedule);
 `lockdep-order` (release out of order is legal); `lockdep-contention` (a
-timer handler inside a contended wait records no edge from the awaited
-lock). The per-CPU stack is read only where the reader cannot move
+timer handler inside an observed contended wait records no edge from the
+awaited lock, and a nested IRQ spin wait restores the outer observation).
+The per-CPU stack is read only where the reader cannot move
 (scheduler S25): a spinlock's acquisition has preemption off already; a
 mutex's acquisition check, and `lockdep_is_held` asked by a preemptible
 thread, read it with interrupts off, since a thread moved between the

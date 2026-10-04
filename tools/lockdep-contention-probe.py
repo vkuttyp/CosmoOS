@@ -31,8 +31,10 @@ def main():
         parser.error('--old-order applies only to missed-timer')
     root = Path(__file__).resolve().parent.parent
     tag = 'lockdep-cont-probe-' + args.arch + '-' + args.mode + ('-old' if args.old_order else '-fixed')
-    out = root / 'out' / tag
-    out.mkdir(parents=True, exist_ok=True)
+    parent = root / 'out' / tag
+    parent.mkdir(parents=True, exist_ok=True)
+    out = Path(tempfile.mkdtemp(prefix='run-', dir=parent))
+    print('contention-probe: artifacts: ' + str(out), flush=True)
     source = (root / 'kernel/core/lockdeptest.c').read_text()
     if args.mode == 'missed-timer':
         source = replace_once(source, 'static unsigned g_cont_holding, g_cont_timer_ran;',
@@ -66,6 +68,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='cosmo-lockdep-contention-') as tmp:
         subprocess.run(['git', 'clone', '--quiet', '--shared', str(root), tmp], check=True)
         work = Path(tmp)
+        for name in ('kernel/core/spinlock.c', 'kernel/include/kernel/spinlock.h',
+                     'kernel/include/kernel/selftest.h', 'kernel/core/selftest.c'):
+            (work / name).write_text((root / name).read_text())
         (work / 'kernel/core/lockdeptest.c').write_text(source)
         with (out / 'build.log').open('w') as log:
             subprocess.run(['gmake', '-j4', 'ARCH=' + args.arch, 'BUILD=debug', 'LOCKDEP=1',

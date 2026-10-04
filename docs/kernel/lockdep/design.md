@@ -437,6 +437,17 @@ report.
 
 ## Performance
 
+Self-test builds keep an atomic per-CPU pointer to the innermost observed
+spin wait. `lock_common` publishes only after an exchange fails, saving
+any interrupted wait, and restores that pointer on acquisition before
+returning or restoring IRQs in LOCKDEP=1. An uncontended nested acquisition
+does not touch it. The single CPU writer cannot migrate while spinning;
+remote tests read the pointer atomically and retain the referenced lock's
+lifetime themselves. No diagnostic dereferences it. This test aid takes
+no locks, changes no spinlock layout or module ABI, and compiles out with
+SELFTEST=0. It is not an ownership API or a global deadlock detector.
+Contended spin measurements include its slow-path stores and owner polls.
+
 With `LOCKDEP=0` the validator hooks compile out. Enabled acquisition cost is a
 few dozen instructions on the hot path (cached class, recursion scan of a
 short stack, bitmap tests); a new edge takes the raw lock and a bounded

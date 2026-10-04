@@ -2840,6 +2840,51 @@ only `sched-balance-hysteresis` and records pulls in
 the harness's budget failed it. The first sighting was over by 305 ms,
 this one by 1641 ms. Recorded, not attributed.
 
+**2026-10-04, observed-spin increment:** AArch64 debug LOCKDEP=0,
+four CPUs, completed all 423 self-tests and the full shell workload,
+but `syscall-fuzz` took 8,240 ms against 8,000 ms. The rearmed watchdog
+dump shows `kmain` waiting for completion and its `init` child running;
+the child completed all 20,000 calls with the expected fixed seed.
+The spin-contention checks passed. The failed run is retained as
+`out/spin-final-aarch64-off4{,-result}.log`; the test's budget and
+assertions were not changed for this increment. This matches the earlier
+failure shape without establishing the cause of this particular slowdown.
+
+## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
+
+PR #308's first x86 CI debug boot failed with a TLB shootdown acknowledged
+by two of three CPUs. The reaper was on CPU 0, where the new benchmark's
+waiter was queued; the irqsave owner on CPU 3 masked IRQs while awaiting
+that waiter. The reaper's shootdown waited for CPU 3, preventing CPU 0 from
+running the waiter. The owner's one-second guard raced the shootdown's
+one-second deadline. This is a startup dependency, not evidence that the
+shootdown budget should grow.
+
+The fix requires waiter readiness with IRQs enabled and preemption disabled
+before the owner masks IRQs. The contention callback test gains a two-way
+startup rendezvous for the same reason. A real kernel-memory free before
+waiter readiness reproduces the dependency when the owner gate is removed
+and completes with the gate present. See the
+[PR #308 follow-up](../audit/2026-10-04-spin-contention-report.md#pr-308-ci-follow-up-runnable-is-not-ready)
+for CI evidence, exact control outcomes and validation limits.
+
+## Two-CPU full-suite limitations during observed-spin validation, 2026-10-04
+
+Two AArch64 debug LOCKDEP=1 boots with `QEMU_SMP=2` failed
+`virtio-remove-inflight`'s `++order_attempts < 4` check and
+`sched-spread` (all eight workers on one CPU). The retry also failed
+`sched-balance-pair`'s yielding-pair assertion. The new contention tests
+passed in both boots. These are retained failures, not full-suite passes.
+
+The VirtIO overlap requires another CPU beyond the caller and submitter:
+`other_cpu_than` falls back to the submitter's CPU on a two-CPU machine,
+placing the nonpreemptible holder and remover on the same CPU. The logs
+show every teardown entered after the holder's section ended. The
+scheduler failures remain unattributed; no baseline two-CPU comparison
+was run. Bounds and assertions remain unchanged. See the
+[spin report](../audit/2026-10-04-spin-contention-report.md) for logs and
+the separate targeted two-CPU spin-guard result.
+
 ## `lockup-sample-irqoff`: the restored CPU did not answer the second sample, 2026-09-29
 
 `SELFTEST: lockup-sample-irqoff ... FAIL: check failed: m2 &
