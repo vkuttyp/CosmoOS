@@ -105,7 +105,7 @@ bool nat_in(struct netif *nif, struct mbuf *m,
  * nat_alloc reclaims them on demand, so a missed sweep is never a
  * correctness bug, only delayed reclamation. */
 void nat_age(uint64_t now_ns);
-void nat_flush(void);                 /* drop every entry (test isolation) */
+void nat_flush(void);                 /* drop every entry; lifetime statistics are preserved */
 
 /* Every refusal counter has one cause (docs/audit/next-subsystem-net-flows.md
  * §3): the operator reads them through the control channel, and a counter

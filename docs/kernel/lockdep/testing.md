@@ -41,6 +41,7 @@ released normally.
 | `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
 | `lockdep-first-bench` | public spin, irqsave, nested-spin and mutex acquisitions with fresh classes, then reuse; three samples per path | verifies ownership, class registration and nested search; descriptive timing only |
+| `lockdep-mutex-bench` | a private mutex owner waits for verified waiter queue entry, holds another 1 ms, then releases; two warmups and nine samples | queued acquisition, ownership and data handoff; descriptive timing only |
 | `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
@@ -105,6 +106,46 @@ clock granularity can produce zero for short intervals, especially with
 lockdep disabled; those values cannot support overhead ratios. QEMU/TCG
 timings include host scheduling and translation effects. Contended locks,
 priority inheritance and native hardware remain separate measurements.
+
+### Queued mutex acquisition measurement
+
+`lockdep-mutex-bench` uses the same workload in debug LOCKDEP=0/1 builds.
+The owner is pinned and each waiter is created with a single-CPU affinity
+on another online CPU, or the owner's CPU on UP. A start flag prevents the
+waiter from attempting acquisition until the owner holds the private
+mutex. The owner yields while checking the real wait queue under its lock.
+Only after observing a queued waiter does it delay for 1 ms and release.
+This proves entry into the mutex slow path; it does not assume a fixed
+sleep lets the waiter reach it or require a particular number of context
+switches. UP uses the same protocol and permits the waiter to block.
+
+The waiter times the complete public `mutex_lock` call on its own CPU,
+stopping before validation and unlock. Each round checks that acquisition
+did not finish while the owner still held the lock, the waiter owns it,
+protected data written before release is visible, and the lock and queue
+are empty after the waiter exits. Two warmup rounds precede nine reported
+samples. One mutex and its internal spinlock class are reused throughout;
+thread creation, owner-side setup, joins, validation and output are outside
+the timed call. A new waiter thread is created each round, so this is not
+a reused-thread/cache benchmark. Global graph state is never reset.
+
+Queue observation and waiter exit each have a one-second guard. A missed
+queue observation releases the owner and drains the waiter before returning
+failure; a missing exit fails stop with the thread and stack probe retained.
+Failure assertions never return with a worker still using the probe.
+An x86 negative control withheld the start flag until the queue guard
+expired, then required failure with an unlocked mutex, empty queue, joined
+worker and restored IRQ/preemption state. Another withheld worker exit
+after unlock and required the named retention panic.
+
+Reported min/median/max guest nanoseconds include the deliberate hold,
+queue observation delay, scheduling, wakeup and mutex/lockdep work. They
+are total contended acquisition times, not isolated lockdep overhead; the
+1 ms hold is not subtracted. Neither time nor enabled/disabled ratios are
+pass criteria. Waiters use the normal default priority; no priority boost
+is deliberately induced. Priority-inheritance donation measurements,
+contended spin timings, graph-size sweeps and native-hardware costs remain
+open. The log distinguishes `same-cpu` and `cross-cpu` placement.
 
 ### New-edge core measurement
 
@@ -287,6 +328,39 @@ make BUILD=release LOCKDEP=1 OUT=out/release-lockdep kernel # checker enabled
 
 ## October hardening regression coverage
 
+### Contention-test failure cleanup
+
+`lockdep-contention` checks IRQ state before creating its remote holder
+or publishing the stack timer. Holder readiness has a one-second guard;
+expiry panics with the thread retained. After acquisition, the test saves
+whether the callback met its original window, releases the spinlock and
+synchronously cancels the timer before waiting for holder exit. Exit
+completion has a one-second timeout before `thread_join`; only after
+cleanup can a failed callback-window assertion return. A late callback
+during cleanup cannot change the saved result into a pass. Successful
+runs still perform the original lock-order/IRQ-safety checks.
+
+Previously, the callback-window assertion returned with the spinlock held
+and its stack timer still published. Readiness failure could also return
+without joining the created thread. The corrected failure order preserves
+the original test assertion and makes the resource lifetimes explicit.
+It does not make the 5 ms callback versus 20 ms holder timing deterministic
+under arbitrary host scheduling, or bound a primitive spin wait if its
+owner stops making progress.
+
+`tools/lockdep-contention-probe.py` builds isolated temporary clones and
+requires specific panic state and failure exit, rather than accepting any
+crash. `--mode missed-timer` moves the callback five seconds out: the
+corrected test returns failure with its lock released, timer cancelled,
+holder joined, IRQs enabled and preemption count zero. `--old-order`
+restores the early assertion and demonstrates the held lock, uncancelled
+timer, unjoined holder and preemption count one. Both controls run on
+x86-64 and AArch64. `--mode readiness` withholds the ready flag and
+`--mode exit` stops the holder after unlock; each must produce its named
+timeout panic. The latter two have been validated on x86-64. These are
+targeted failure probes, not full-suite passes; no injected stalls or
+delayed timers are linked into normal kernels.
+
 ### Concurrent graph model
 
 `tests/host/test_lockdep_threads.c` runs four writers and two diagnostic
@@ -344,6 +418,40 @@ The raw-lock
 probe hook exists only with `CONFIG_LOCKDEP && CONFIG_SELFTEST`; it is not
 a production callback API. This validates the NMI-safe snapshot reader,
 not tracked lock acquisitions or graph mutations from NMI/#MC handlers.
+
+### Raw-lock re-entry failure boundary
+
+`python3 tools/lockdep-reentry-probe.py` builds the working lockdep source
+in a temporary clone and requires the exact graph raw-lock re-entry panic,
+the correct thread/interrupt context, completed panic output and failure
+exit. Direct mode calls a normal statistics snapshot while already holding
+the raw lock; `--operation acquire` instead attempts a public spinlock
+acquisition. Both support `--arch x86_64` and `--arch aarch64`.
+`--mode nmi` is x86-only and injects that operation into the existing
+`trap-paranoid` handler on real APIC NMI delivery, after the two software
+interrupt checks. `--busy` selects the interrupted held-stack update,
+exercising the panic reader's unavailable path. There is no recoverable
+expectation or suppression of raw-lock recursion.
+
+`--old-lock` restores the former exchange-and-spin implementation in the
+temporary clone. This is a deliberately failing control: the same harness
+must reject its hang and missing diagnostic. A timeout is never a passing
+test of the fix. Each invocation retains its image, build and boot logs in
+a fresh `out/lockdep-reentry-*/run-*` directory so dependency files cannot
+refer to a previous, deleted clone. These probes do not add boot self-tests
+or demonstrate that arbitrary NMI writers, #MC delivery, cross-CPU cycles,
+or stopped owners are supported. Full normal boots separately exercise
+cross-CPU serialization and the successful NMI snapshot reader.
+
+`--mode ring` injects panic after taking the actual log-ring lock, before
+writing its trigger line, and requires the named panic plus completed
+output and failure exit. It supports both architectures and `--lockdep 0`
+as well as the default `1`. `--old-ring` removes the panic bypass in the
+temporary clone and must fail the harness. This checks that fatal output
+does not acquire even its own already-held ring lock. The VirtIO sink is
+loaded during these probes and must skip its tracked queue transport;
+normal boots still require its ordinary output. Fatal text is no longer
+appended to the in-memory log ring or VirtIO console.
 
 ### Failure detection and boundary cases
 

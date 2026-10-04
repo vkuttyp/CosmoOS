@@ -36,6 +36,15 @@ checked at compile time; a non-literal format is a build error.
   saved), so one call's bytes are not interleaved with another's; after
   `console_set_panic_mode` it writes without the lock.
 
+### `void console_set_panic_mode(void)` / `bool console_in_panic_mode(void)`
+- **Purpose**: irreversibly enter/query fatal-output mode. The getter is
+  also exported to modules; both accesses use atomics.
+- **Concurrency**: output bypasses the console lock and log-ring writes.
+  Sinks that need tracked locks must return before touching their transport;
+  VirtIO console does this, while serial and framebuffer continue printing.
+  This is not a ring snapshot or a new VirtIO panic transport. `klog_copy`
+  still takes the ring lock and is not a panic/NMI API.
+
 ### `arch_irq_state_t console_hold(void)` / `void console_release(arch_irq_state_t st)`
 - **Purpose**: hold every `console_write` off for a short window -- the
   PL011's `console-rx-clear` self-test uses it so no log line is looped

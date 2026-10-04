@@ -6,8 +6,9 @@
  * are truncated, never dropped. kprintf() writes raw text without prefix
  * for banners and test output.
  *
- * Context: safe in interrupt and panic context; never sleeps or
- * allocates. Uses about KLOG_LINE_MAX + 64 bytes of stack.
+ * Context: output never sleeps or allocates. Panic callers first enter
+ * console panic mode, which skips the ring and lock-taking sinks. Uses
+ * about KLOG_LINE_MAX + 64 bytes of stack for formatting.
  */
 
 #ifndef KERNEL_LOG_H
@@ -39,7 +40,8 @@ enum klog_level klog_get_level(void);
 void kprintf(const char *fmt, ...) __printf(1, 2);
 
 /* The log ring (dmesg): copy the newest whole lines that fit into `buf`,
- * oldest first; returns the byte count. Reading does not consume. */
+ * oldest first; returns the byte count. Reading does not consume. Takes
+ * the ring lock; not a panic/NMI snapshot API. Panic output skips writes. */
 #define KLOG_RING_SIZE 32768u
 size_t klog_copy(char *buf, size_t len);
 void kvprintf(const char *fmt, va_list ap) __printf(1, 0);

@@ -10,7 +10,12 @@ compiler enforces it today.
 ## I-DIAG-2: No diagnostic path sleeps or takes a sleeping lock
 
 All of it must work from interrupt and panic context. **Checked by
-review**; a lock-diagnostics layer is planned.
+review** and lockdep during normal boots. Panic mode bypasses the console
+and log-ring locks and skips the VirtIO console transport, which needs
+tracked device/queue locks. Serial and framebuffer sinks take no locks.
+**Checked by** the raw-lock and held-ring probes in
+`tools/lockdep-reentry-probe.py`; arbitrary sink faults remain outside this
+guarantee.
 
 ## I-DIAG-3: A log line is formatted completely before it reaches the console
 

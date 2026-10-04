@@ -6,6 +6,23 @@ Run from thread 0 after the SMP tests (and, since Phase 7, last in the
 table so `init --selftest` finds the cosmofs the filesystem tests leave
 behind); each leaves the process count where it found it.
 
+### ELF inspection fixture lifetime
+
+`elf-text-ro` and `elf-data-private` run `init --spin` until their explicit
+kill/wait cleanup, matching the other shared-text fixtures. A reference to
+the process object does not preserve its address space after exit. The
+former `--block` fixture read one console byte and returned status 5;
+queued harness input could therefore make `p->space` disappear before
+protection or physical-page inspection. These fixtures must not read from
+the console as a way to stay alive. The text-protection, zero-tail and
+private-data assertions remain unchanged.
+
+A temporary AArch64 control injected console input before inspection:
+`--block` exited with status 5 and cleared its address space; `--spin`
+stayed alive and passed the original text-protection and zero-tail checks
+before kill/wait/put cleanup. The targeted harness required those exact
+outcomes; normal tests contain no input injection or probe panic.
+
 ### `objects`
 
 | Step | Proves |

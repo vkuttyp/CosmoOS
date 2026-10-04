@@ -1410,7 +1410,9 @@ bool selftest_elf_data_private(const char **reason)
         return true;
     }
 
-    static const char *const argv[] = { "init", "--block", NULL };
+    /* Keep the address space alive until our explicit kill. A console
+     * read can consume harness input and exit before these inspections. */
+    static const char *const argv[] = { "init", "--spin", NULL };
     struct process *p1 = NULL, *p2 = NULL;
     bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p1) == 0 &&
               process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p2) == 0;
@@ -1488,7 +1490,9 @@ bool selftest_elf_text_ro(const char **reason)
             ((sg->file_vaddr + sg->filesz) & (PAGE_SIZE - 1)) != 0)
             tail_va = sg->file_vaddr + sg->filesz;
     }
-    static const char *const argv[] = { "init", "--block", NULL };
+    /* Keep the address space alive until our explicit kill. A console
+     * read can consume harness input and exit before these inspections. */
+    static const char *const argv[] = { "init", "--spin", NULL };
     struct process *p = NULL;
     bool ok = process_create_from_images(&img, NULL, "init", argv, NULL, NULL, &p) == 0;
     free_image_with_vnode(&img);

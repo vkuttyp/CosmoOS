@@ -103,6 +103,7 @@ bool selftest_lockdep_contention(const char **reason);
 bool selftest_lockdep_graph_bench(const char **reason);
 bool selftest_lockdep_bench(const char **reason);
 bool selftest_lockdep_first_bench(const char **reason);
+bool selftest_lockdep_mutex_bench(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
 bool selftest_vfs_put_race(const char **reason);
 bool selftest_vfs_chrdev_open(const char **reason);

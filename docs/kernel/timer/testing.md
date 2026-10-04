@@ -37,7 +37,10 @@ calibration test. Measured on QEMU TCG: TSC 996–1060 MHz, LAPIC
 
 Every `preempt`, `mutex`, `semaphore`, `completion`, and `waitqueue`
 self-test depends on the tick (slices) and on sleep timers; the
-`irq-route` test uses `udelay` windows to count PIT interrupts.
+`irq-route` test waits for five periodic interrupts with a bounded,
+sleeping deadline, then uses `udelay` windows to check masking. The source
+is the PIT on x86-64 and a rearming timer callback raising a GIC SPI on
+AArch64; neither source's nominal rate is a delivery-time guarantee.
 
 ## Bug the build caught
 

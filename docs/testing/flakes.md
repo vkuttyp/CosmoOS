@@ -859,6 +859,16 @@ a real test with it.
 
 ## `irq-route`'s interrupt count, and the failure it manufactured
 
+**Count check corrected 2026-10-04, PR #307:** the test now waits for
+five deliveries with a 1 s deadline, sleeping between atomic counter
+reads. The former fixed 50 ms window assumed a minimum delivered rate;
+AArch64's source rearms from a kernel-timer callback, so delayed callbacks
+also delay subsequent source assertions. A slower real-source probe
+reproduces the old count failure and validates the new wait. Missing
+delivery still fails at its deadline, and masking assertions are retained.
+See [interrupt testing](../kernel/interrupt/testing.md) for the probes.
+The sightings and earlier cleanup correction below remain as history.
+
 **Seen once, 2026-09-20**, AArch64 debug, on the virtio-removal branch:
 `irq-route ... FAIL: check failed: hits >= 5` — a count of PIT
 interrupts over a fixed `udelay(50000)` (200 Hz, so ten expected and
@@ -894,6 +904,14 @@ registered when it starts, and the line's release when it is requested,
 so the line goes first. With `irq-route`'s count forced to fail,
 `irq-affinity` passes on both architectures. A third sighting, 2026-09-29
 (aarch64), came before the repair.
+
+**2026-10-03, PR #307 NAT follow-up validation:** AArch64 `test-chaos`
+again failed `hits >= 5` (`schedtest.c:282`, 71 ms), the sole failure among
+422 self-tests. `net-nat` passed in 1,358 ms and `net-nicbench` in 2,127 ms;
+`irq-affinity` also passed. The fixed-interval interrupt-count check remains
+unchanged. The complete failing run is retained in
+`out/nat-expiry-aarch64-chaos-result.log` (including the captured boot
+output; the target's default boot-log path is reused by later runs).
 
 ## The count
 
@@ -1831,6 +1849,17 @@ twenty minutes and the control takes four.
 
 ## `net-nat`'s expiry step found an entry after aging the table
 
+**Resolved 2026-10-03, PR #307:** a controlled delayed-tail probe now
+reproduces the race below. The wait used lifetime `out_new + out_drop_share`
+counts even though `nat_flush()` only clears entries. Four earlier
+translations could hide four unprocessed flood packets, which then created
+entries after aging. The test now waits on baseline-relative counts and
+asserts that every injection has a NAT outcome before aging. The original
+expiry and quota assertions remain. Old/fixed probes on both architectures
+are described in [network testing](../kernel-services/network/testing.md).
+Periodic `nat_age` only removes entries; it cannot create the new mapping.
+The original observation below is retained as history.
+
 **2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
 first CI run (`60ccfd7`)** — a change to the memory syscalls that
 touches nothing in the network stack, and a test that had passed four
@@ -1960,6 +1989,17 @@ and the useful part of this entry is that the bisect above takes
 twenty minutes and the control takes four.
 
 ## `net-nat`'s expiry step found an entry after aging the table
+
+**Resolved 2026-10-03, PR #307:** a controlled delayed-tail probe now
+reproduces the race below. The wait used lifetime `out_new + out_drop_share`
+counts even though `nat_flush()` only clears entries. Four earlier
+translations could hide four unprocessed flood packets, which then created
+entries after aging. The test now waits on baseline-relative counts and
+asserts that every injection has a NAT outcome before aging. The original
+expiry and quota assertions remain. Old/fixed probes on both architectures
+are described in [network testing](../kernel-services/network/testing.md).
+Periodic `nat_age` only removes entries; it cannot create the new mapping.
+The original observation below is retained as history.
 
 **2026-09-20, x86-64 CI, the debug boot, on the `mprotect` unit's
 first CI run (`60ccfd7`)** — a change to the memory syscalls that
@@ -2703,6 +2743,12 @@ for part of the window. Recorded, not attributed.
 
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
+**Budget corrected 2026-10-04, PR #307:** the combined two-interface
+benchmark now has an explicit 20 s budget, shared by the watchdog and
+harness. CI run `37154202680` captured the second UDP round at 8 s and
+completed the full workload at 8,360 ms. Samples and assertions remain.
+The original no-dump sighting below is retained as history.
+
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent
 unit (PR #267, `docs/audit/next-subsystem-watchdog-spent.md`) arms it per
@@ -2861,6 +2907,10 @@ phase and the word.
   was phase 1's, and the check asserted a race's outcome, not a defect.
 
 ## `net-nicbench` over the per-test budget, second sighting, 2026-09-30
+
+**Budget corrected 2026-10-04, PR #307:** the combined benchmark now has
+an explicit 20 s watchdog/harness budget; see the earlier `net-nicbench`
+entry and the PR #307 audit follow-up. The original sighting follows.
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent

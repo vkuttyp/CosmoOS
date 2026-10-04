@@ -66,6 +66,12 @@ static const struct selftest_budget {
      * on CI before docs/audit/next-subsystem-fsctl.md gave it its own
      * budget; the harness names its slowest section. */
     { "process-user",   20000 },
+    /* Two NICs, each with 2000 ARP round trips and 10000 UDP sends,
+     * plus receive draining. AArch64 chaos CI completed all of it in
+     * 8360 ms while the default watchdog fired in the second UDP round.
+     * Keep the workload and assertions; give the combined benchmark a
+     * budget with room for both drivers and their bounded drain waits. */
+    { "net-nicbench",   20000 },
     /* One line is not one test: it mounts and structurally checks every
      * prefix of a recorded write stream, 410 filesystem images, and grows
      * whenever a transaction writes another block -- by design, twice so
@@ -529,6 +535,7 @@ static const struct selftest tests[] = {
     { "lockdep-contention", selftest_lockdep_contention },
     { "lockdep-bench", selftest_lockdep_bench },
     { "lockdep-first-bench", selftest_lockdep_first_bench },
+    { "lockdep-mutex-bench", selftest_lockdep_mutex_bench },
     { "lockdep-graph-bench", selftest_lockdep_graph_bench },
     { "fpu-switch",      test_fpu_switch },
     { "fpu-bench",       test_fpu_bench },

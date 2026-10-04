@@ -78,6 +78,11 @@ static bool vcon_send(struct vcon *c, size_t len)
 
 static void vcon_write(struct console_sink *sink, const char *s, size_t len)
 {
+    /* Fatal output cannot wait for an interrupted queue/lock owner or
+     * recurse into lockdep. Serial and framebuffer sinks remain usable;
+     * this queue has no lock-free panic transport. */
+    if (console_in_panic_mode())
+        return;
     struct vcon *c = container_of(sink, struct vcon, sink);
     if (c->dead)
         return;

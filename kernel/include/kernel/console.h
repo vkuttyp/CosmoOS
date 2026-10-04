@@ -1,17 +1,16 @@
 /*
  * console.h - Kernel console output sinks.
  *
- * The console is a fan-out of registered sinks (serial now, framebuffer
- * later). It is the only path by which diagnostic text leaves the kernel.
+ * The console is a fan-out of registered serial, framebuffer and device
+ * sinks. It is the path by which diagnostic text leaves the kernel.
  *
- * Concurrency: sinks are registered at boot before other CPUs exist and
- * the list is never modified afterwards. console_write itself takes no
- * lock; until the SMP work in Phase 3 adds one, output from concurrent
- * contexts may interleave but cannot corrupt state.
+ * Concurrency: normal writes and unregister use the console spinlock.
+ * Panic output bypasses that lock because its owner may be stopped.
  *
  * Context: console_write is callable from interrupt and panic context. A
  * sink's write callback must therefore never sleep, allocate, or take a
- * sleeping lock.
+ * sleeping lock. A sink needing tracked locks must return without touching
+ * its transport when console_in_panic_mode() is true.
  */
 
 #ifndef KERNEL_CONSOLE_H
@@ -44,8 +43,9 @@ void console_puts(const char *s);
 arch_irq_state_t console_hold(void);
 void console_release(arch_irq_state_t st);
 
-/* Panic mode: stop taking the console lock so a report can be printed
- * even if another (now halted) CPU holds it. Irreversible. */
+/* Panic mode: bypass console and log-ring locks so a report can be printed
+ * even if an interrupted or halted CPU holds them. Irreversible. */
 void console_set_panic_mode(void);
+bool console_in_panic_mode(void);
 
 #endif /* KERNEL_CONSOLE_H */

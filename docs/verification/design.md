@@ -209,7 +209,7 @@ that only just finishes is noticed before it becomes a timeout.
 **The budgets are the kernel's, and each is also the watchdog's period.**
 `selftest.c`'s `budgets` table names the tests that are not held to the
 default of 8000 ms. Before the first test the runner prints
-`SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000`,
+`SELFTEST: budgets default=8000 process-user=20000 net-nicbench=20000 cosmofs-replay=40000`,
 and the harness judges durations by that line alone: a run that ran tests
 and printed no such line fails. A budget naming no test panics the run, so
 a typo cannot quietly mean the default. Before each test the runner arms
@@ -243,9 +243,22 @@ there to catch a hang, not to cap a suite.
 
 Such a test gets a budget sized for what it is, in the kernel's
 `budgets` table, beside the default rather than instead of it:
-`process-user` has 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
+`process-user` and `net-nicbench` have 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
 suite that hangs must still be caught. The list is deliberately short
 and each entry is an admission that the line reports too little.
+
+`net-nicbench` combines two interfaces' 2,000 ARP round trips and 10,000
+UDP sends each, plus bounded receive drains. AArch64 chaos CI completed
+that workload in 8,360 ms; its watchdog dump captured the second UDP
+round, and all 422 self-tests subsequently passed. Its explicit 20 s
+budget preserves the sample counts and drain checks instead of cutting
+work to fit the default 8 s. The harness and watchdog use the same entry.
+
+`make test-chaos` gives the complete boot 240 s, including 230 s for the
+shell harness, rather than the ordinary 180 s / 170 s. The corresponding
+CI run's ordinary boots took 164–167 s; chaos added about 11 s of kernel
+self-tests and exhausted the shell deadline. Per-test watchdogs, the
+shell's 3 s signal-response check and the final boot timeout remain active.
 
 **`process-user` now reports its sections** (the better answer this
 section used to name and defer;

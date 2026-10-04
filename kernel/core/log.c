@@ -21,6 +21,11 @@ static spinlock_t g_ring_lock = SPINLOCK_INIT("klog-ring");
 
 static void ring_put(const char *s, size_t n)
 {
+    /* Panic may interrupt this lock's owner or the lockdep raw owner.
+     * Preserve the existing ring and send fatal output to the sinks only;
+     * even an uncontended tracked acquisition can recurse into lockdep. */
+    if (console_in_panic_mode())
+        return;
     arch_irq_state_t st = spin_lock_irqsave(&g_ring_lock);
     for (size_t i = 0; i < n; i++)
         g_ring[(g_ring_head + i) % KLOG_RING_SIZE] = s[i];

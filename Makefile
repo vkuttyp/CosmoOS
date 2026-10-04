@@ -115,12 +115,15 @@ endif
 # a ready thread to another CPU every few ticks for no reason
 # (SCHED_CHAOS=1, docs/kernel/scheduler/design.md "Migration"), built
 # into a sibling output tree. The harness requires the migrator to have
-# moved something.
+# moved something. CI's ordinary AArch64 boots take up to 167 s; chaos
+# added 11 s of self-test work and exhausted the shell's 170 s deadline
+# under the default 180 s total. Allow 240 s for this heavier full boot;
+# individual self-test watchdogs and shell signal-latency checks remain.
 test-chaos:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos --timeout 240 \
 		--image $(OUT)-chaos/cosmoos.img --log $(OUT)-chaos/boot-test-chaos.log \
 		--kernel $(OUT)-chaos/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
