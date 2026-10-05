@@ -672,8 +672,13 @@ static bool selftest_lockdep_callback_pinned(const char **reason)
     pending = timer_cancel_sync(&t2);
     hits = lockdep_expected_hits();
     spin_unlock_irqrestore(&g_cb_a, s);
+    bool idle = t2.state == TIMER_IDLE;
+    /* Before any check can return: t2 lives in this frame, and a cancel
+     * that went wrong may have left it armed. No lock is held now, so
+     * this cancel reports nothing and leaves it idle either way. */
+    (void)timer_cancel_sync(&t2);
     CHECK(pending);                     /* it was pending, and the report did not hide that */
-    CHECK(t2.state == TIMER_IDLE);
+    CHECK(idle);
     CHECK(hits == 1);
 
     /* No false positive: a lock no cb_a callback reaches. */
