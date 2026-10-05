@@ -54,6 +54,7 @@
  * lands between the two uses the slots above and cannot corrupt this one. */
 struct lockdep_irq_saves {
     unsigned depth;
+    unsigned lost;   /* saves beyond capacity: counted, not stored; always the innermost */
     struct {
         unsigned long state;
         uintptr_t ip;

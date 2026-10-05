@@ -785,9 +785,20 @@ static bool selftest_lockdep_irq_pairing_pinned(const char **reason)
     thread_join(t);
     CHECK(lockdep_expected_hits() == 1);
 
+    /* 5. One save past capacity: reported once -- the report's own raw
+     * lock saves again at full depth, and must not report (and so save,
+     * and report) again -- and every restore still pairs afterwards. */
+    arch_irq_state_t deep[LOCKDEP_MAX_IRQ_SAVES + 1];
+    lockdep_expect(LOCKDEP_R_OVERFLOW);
+    for (unsigned i = 0; i <= LOCKDEP_MAX_IRQ_SAVES; i++)
+        deep[i] = arch_irq_save();
+    for (unsigned i = LOCKDEP_MAX_IRQ_SAVES + 1; i-- > 0;)
+        arch_irq_restore(deep[i]);
+    CHECK(lockdep_expected_hits() == 1);
+
     CHECK(arch_irq_enabled());
     kinfo("selftest: lockdep-irq-pairing: a restore without a save, out of order, with interrupts enabled inside, "
-          "and a save left at thread exit were each reported");
+          "a save left at thread exit and a save past capacity were each reported once");
     return true;
 }
 

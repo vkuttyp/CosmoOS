@@ -36,11 +36,23 @@ printf '%s\n' "$phdrs" | awk '
 # before the next is made. A link compiled as a call grows the stack by a
 # frame per resumption of a busy thread: lockdep's raw-pairing wrapper did,
 # and a one-CPU boot double faulted on the idle thread's stack
-# (docs/audit/2026-10-06-lockdep-irq-pairing-report.md). A symbol a build
-# does not have (the wrapper is inline without lockdep) is skipped.
+# (docs/audit/2026-10-06-lockdep-irq-pairing-report.md). Only a symbol the
+# symbol table confirms absent is skipped (the wrapper is inline without
+# lockdep); a disassembly that fails is a failure, never a pass.
+syms=$("$objdump" -t "$elf")
 tail_call() {
     caller=$1 callee=$2
-    body=$("$objdump" -d --no-show-raw-insn --disassemble-symbols="$caller" "$elf" 2>/dev/null) || return 0
+    if ! printf '%s\n' "$syms" | grep -E "[[:space:]]$caller\$" >/dev/null; then
+        return 0
+    fi
+    if ! body=$("$objdump" -d --no-show-raw-insn --disassemble-symbols="$caller" "$elf"); then
+        echo "check-kernel-elf: cannot disassemble $caller to check the restore chain" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$body" | grep -E "<$caller>:" >/dev/null; then
+        echo "check-kernel-elf: the disassembly of $caller is empty; the restore chain is unchecked" >&2
+        exit 1
+    fi
     if printf '%s\n' "$body" | grep -E "[[:space:]](call|callq|bl|blr)[[:space:]].*<$callee>" >/dev/null; then
         echo "check-kernel-elf: $caller calls $callee instead of tail-calling it;" \
              "the preempt-at-restore recursion through schedule() would grow the stack" >&2

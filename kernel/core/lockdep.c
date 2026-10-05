@@ -906,8 +906,14 @@ arch_irq_state_t arch_irq_save(void)
     if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE) && (st = irq_saves_here()) != NULL) {
         unsigned d = st->depth;
         if (d == LOCKDEP_MAX_IRQ_SAVES) {
-            report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
-                   "raw interrupt saves nested deeper than LOCKDEP_MAX_IRQ_SAVES", NULL, 0);
+            /* Counted, not stored, and reported once: the report itself
+             * takes the raw lock, whose save lands here again -- reporting
+             * each one would recurse until the stack ran out (found in
+             * review). Saves beyond capacity are the innermost, so their
+             * restores come first and uncount them. */
+            if (st->lost++ == 0)
+                report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
+                       "raw interrupt saves nested deeper than LOCKDEP_MAX_IRQ_SAVES", NULL, 0);
         } else {
             st->depth = d + 1u;                    /* reserve ... */
             __atomic_signal_fence(__ATOMIC_SEQ_CST);
@@ -924,6 +930,10 @@ static __attribute__((noinline)) void irq_restore_track(arch_irq_state_t state, 
     struct lockdep_irq_saves *st = irq_saves_here();
     if (st == NULL)
         return;
+    if (st->lost != 0) {
+        st->lost--;   /* the innermost save was beyond capacity and not stored */
+        return;
+    }
     unsigned d = st->depth;
     if (d == 0) {
         report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip, "arch_irq_restore with no outstanding arch_irq_save in this context",
