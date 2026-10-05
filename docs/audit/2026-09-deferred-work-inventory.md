@@ -730,7 +730,12 @@ Still open for the next milestone:
 - Simultaneous global held-state snapshots across CPUs and threads;
   individual CPU/thread stacks and counter snapshots are consistent separately.
 - Callback wait dependencies beyond observed active timer callback paths.
-- Raw `arch_irq_restore` ownership and pairing.
+  *2026-10-05: timer callback waits are in the lock graph (callback classes,
+  PR #312, [report](2026-10-05-lockdep-callback-classes-report.md)); unexecuted
+  callback paths and completion waits remain.*
+- ~~Raw `arch_irq_restore` ownership and pairing.~~ **Built 2026-10-06**: per-context
+  save stacks with restore and thread-exit checks under lockdep; see the
+  [raw-pairing report](2026-10-06-lockdep-irq-pairing-report.md).
 - Worst-case wall-clock search latency, first-acquisition graph-size sweeps,
   broader spin/mutex contention workloads, priority-inheritance waits, and native-hardware
   lockdep overhead measurements.

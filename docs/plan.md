@@ -69,9 +69,15 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   Still open, and the reason this item stays unchecked: callback paths
   never executed contribute no edges, and `wait_for_completion` on a
   callback-signalled completion has no function to key a class on. See the [callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md).
-- [ ] **Implementation/validation — raw IRQ pairing.** Track or validate
+- [x] **Implementation/validation — raw IRQ pairing.** Track or validate
   ownership and pairing of raw `arch_irq_save`/`arch_irq_restore` operations
   beyond the checks already applied to tracked spinlock wrappers.
+  *Completed 2026-10-06.* With lockdep, each context (thread, or CPU before
+  one) keeps its outstanding saves; a restore with none outstanding, out of
+  order, or with interrupts enabled inside the region is reported, as is a
+  thread exiting with one outstanding (`lockdep-irq-pairing`, four negative
+  controls). The tree reported no violation. Plain `arch_irq_enable`/
+  `arch_irq_disable` are outside this item. See the [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
 - [ ] **Validation — interrupt and callback interleavings.** Broaden actual
   kernel entry/concurrency coverage beyond host graph models, publication
   tests, writer/IPI regressions and bounded x86 NMI reader tests.
@@ -181,6 +187,13 @@ and [SMP design](kernel/smp/design.md).
   interrupted kernel per-CPU accesses are absent. Existing measurements did
   not establish a persistently stranded user-thread pair. See the
   [balance-movable report](audit/next-subsystem-balance-movable.md).
+- [ ] **Implementation — bounded preempt-at-restore recursion.** `schedule()`
+  ends in `arch_irq_restore`, whose preemption point can re-enter
+  `schedule()`; the stack stays bounded only because every link is a tail
+  call, which `scripts/check-kernel-elf.sh` now enforces after a lockdep
+  wrapper that broke the chain double faulted a one-CPU boot. A loop would
+  remove the dependency on code generation. See the
+  [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
 - [ ] **Conditional/deferred — kernel rwlocks.** Introduce a reader/writer
   primitive only with a concrete workload, ownership rules and lockdep model.
 - [ ] **Implementation — quiescent lookup structures.** Assess extending the
@@ -483,7 +496,8 @@ their deferred status here; this section does not schedule them for implementati
    Done 2026-10-05 ([quiescence memory-order report](audit/2026-10-05-quiesce-memory-order-report.md)).
 3. Extend callback-wait and raw IRQ-pairing coverage within the established
    locking and lifetime architecture. Timer callback waits done 2026-10-05
-   ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing is next.
+   ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing done
+   2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md)).
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
 

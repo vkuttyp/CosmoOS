@@ -325,6 +325,51 @@ same route. Arbitrary completion waits (`wait_for_completion` on a
 completion a callback signals) have no function to key a class on, and
 remain outside the graph.
 
+## Raw interrupt-state pairing
+
+The spinlock wrappers check their own `irqsave`/`irqrestore` (L14). Raw
+`arch_irq_save`/`arch_irq_restore`, used directly by the scheduler, the
+interrupt table, the FPU, the hypervisor backends and lockdep itself, had
+no check. With `LOCKDEP=1` the two are lockdep's wrappers around the
+architectures' `arch_irq_save_hw`/`arch_irq_restore_hw`; without it they
+are inline pass-throughs, and release kernels contain only the hardware
+functions.
+
+Each context keeps a stack of its outstanding saves (`struct
+lockdep_irq_saves`, 16 deep): the current thread's, in `struct thread`, or
+the CPU's before the CPU has a current thread. An interrupt handler shares
+the interrupted thread's stack, because its own pairs are balanced before
+it returns and so nest above the thread's. A context switch needs nothing:
+`schedule_internal` saves on the outgoing thread, sets `current` before the
+switch, and the incoming thread restores the save in its own earlier
+frame. A new thread starts in `thread_trampoline` with
+`arch_irq_enable()`, not a restore, so it pops nothing it did not push.
+
+A restore reports `LOCKDEP_R_IRQ_STATE` when:
+
+- the context has no outstanding save;
+- the state differs from the innermost save's (out of order). The slot is
+  consumed anyway, one restore per save;
+- interrupts are enabled when it runs. The save masked them, and something
+  in the region enabled them. The architectures diverge here: AArch64's
+  restore of a masked state writes DAIF and masks them again, while
+  x86-64's restore of a masked state does nothing and leaves them on. The
+  check makes the bug fail on both.
+
+`lockdep_thread_exit` reports a thread that exits with a save outstanding.
+It runs before `thread_exit` disables interrupts and enters the scheduler,
+whose own save is never undone by an exiting thread.
+
+The bookkeeping runs with interrupts masked, after the hardware save and
+before the hardware restore, so the context cannot change under it. An
+NMI can still land anywhere, so a push reserves its slot (`depth`) before
+filling it, and a pop reads before releasing. A balanced NMI between the
+two uses the slots above. During a fatal report (`g_off`) nothing is
+tracked. Plain `arch_irq_enable`/`arch_irq_disable` are not tracked: they
+belong to boot code and the scheduler's own transitions. The
+enabled-inside check catches the case where one of them breaks a saved
+region.
+
 ## `might_sleep()`
 
 The one annotation for "this call may block": a report if
@@ -472,8 +517,10 @@ private snapshot storage before acquiring the raw lock.
 ## Memory
 
 288 KiB graph, 384 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
-thread. The graph exists only with `LOCKDEP=1`; lock/thread layouts stay
-stable when disabled.
+thread, and 264 bytes per thread (and per CPU) of raw interrupt saves. The
+graph and the per-CPU save stacks exist only with `LOCKDEP=1`; lock/thread
+layouts stay stable when disabled (the per-thread save stack is in every
+build, unused without lockdep).
 
 ## Error handling
 

@@ -199,3 +199,16 @@ with `tools/lockdep-callback-probe.py` removing the wait check or the class
 and requiring the first case to go unreported. Gap: a callback path never
 executed contributes no edges, and `wait_for_completion` on a completion a
 callback signals has no function to key a class on.
+
+**L20. A raw interrupt restore undoes the innermost outstanding save of its
+context, with interrupts still masked.** `arch_irq_save` pushes onto the
+current thread's (or, before a thread, the CPU's) stack of outstanding
+saves; `arch_irq_restore` reports a restore with none outstanding, one whose
+state differs from the innermost save's, and one that finds interrupts
+enabled; a thread may not exit with one outstanding. Check:
+`lockdep-irq-pairing` (one report per case, through the real wrappers),
+with `tools/lockdep-irq-pairing-probe.py` removing each check in turn and
+requiring the failure at that check's own case. A full debug boot of the
+tree reported no violation. Gap: plain `arch_irq_enable`/`arch_irq_disable`
+are not tracked; two saves with equal states restored in swapped order are
+indistinguishable.
