@@ -665,8 +665,10 @@ bool selftest_sched_spread(const char **reason)
 
     unsigned made = 0;
     bool ok = true;
+    cpumask_t creator = 0;   /* where this thread was when it created each worker: a diagnostic */
     for (unsigned i = 0; i < N && ok; i++) {
         memset(&p[i], 0, sizeof(p[i]));
+        creator |= CPUMASK_OF(raw_cpu_id());
         completion_init(&p[i].started, "spread");
         completion_init(&p[i].release, "spread-rel");
         t[i] = thread_create(placed_main, &p[i], "spread", SCHED_PRIO_DEFAULT);
@@ -726,14 +728,16 @@ bool selftest_sched_spread(const char **reason)
      * a single CPU.
      */
     if (distinct < 2 || worst > N / 2) {
-        kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u",
-               made, distinct, n, worst, worst_cpu);
+        kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u "
+               "(created from CPU mask %#llx)",
+               made, distinct, n, worst, worst_cpu, (unsigned long long)creator);
         *reason = "threads created on an idle machine piled onto one CPU";
         return false;
     }
     CHECK(threads_settle(before));
-    kinfo("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, at most %u on any one",
-          (unsigned)N, distinct, n, worst);
+    kinfo("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, at most %u on any one "
+          "(created from CPU mask %#llx)",
+          (unsigned)N, distinct, n, worst, (unsigned long long)creator);
     return true;
 }
 
@@ -1223,10 +1227,11 @@ static unsigned pair_cpu(unsigned self)
     return self;
 }
 
-static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *took_ms)
+static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *took_ms, struct sched_balance_stats *d)
 {
     unsigned n = cpu_count();
     *took_ms = 0;
+    memset(d, 0, sizeof(*d));
     static struct bal_worker w[2];
     struct thread *t[2] = { NULL, NULL };
     unsigned made = 0;
@@ -1292,6 +1297,10 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
             all |= CPUMASK_OF(k);
     for (unsigned i = 0; i < 2; i++)
         thread_set_affinity(t[i], all);
+    /* What the balancer did in the window, machine-wide: a diagnostic for
+     * the log, never asserted (other CPUs scan too). */
+    struct sched_balance_stats b0, b1;
+    sched_balance_stats(&b0);
     uint64_t start = clock_now_ns();
     deadline = clock_deadline_ns(1000ull * 1000000ull);
     r = PAIR_TOGETHER;
@@ -1305,6 +1314,12 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
         thread_sleep_ms(2);
     }
     *took_ms = (clock_now_ns() - start) / 1000000ull;
+    sched_balance_stats(&b1);
+    d->scans = b1.scans - b0.scans;
+    d->pulls = b1.pulls - b0.pulls;
+    d->no_candidate = b1.no_candidate - b0.no_candidate;
+    for (unsigned k = 0; k < SCHED_MIGRATE_RESULT_COUNT; k++)
+        d->refused[k] = b1.refused[k] - b0.refused[k];
 out:
     for (unsigned i = 0; i < made; i++)
         __atomic_store_n(&w[i].stop, 1u, __ATOMIC_RELEASE);
@@ -1322,8 +1337,15 @@ static bool sched_balance_pair_pinned(const char **reason)
     }
     unsigned before = thread_count(), yc = c, sc = c;
     uint64_t yms, sms;
-    enum pair_result y = balance_pair(1, c, &yms);
-    enum pair_result sp = balance_pair(0, c, &sms);
+    struct sched_balance_stats yd, sd;
+    enum pair_result y = balance_pair(1, c, &yms, &yd);
+    enum pair_result sp = balance_pair(0, c, &sms, &sd);
+    kinfo("selftest: sched-balance-pair: balancer in the yielding window: %llu scans, %llu pulls, %llu no candidate, "
+          "refused gap %llu not-ready %llu preempted %llu current %llu",
+          (unsigned long long)yd.scans, (unsigned long long)yd.pulls, (unsigned long long)yd.no_candidate,
+          (unsigned long long)yd.refused[SCHED_MIGRATE_GAP], (unsigned long long)yd.refused[SCHED_MIGRATE_NOT_READY],
+          (unsigned long long)yd.refused[SCHED_MIGRATE_PREEMPTED], (unsigned long long)yd.refused[SCHED_MIGRATE_CURRENT]);
+    (void)sd;
     kinfo("selftest: sched-balance-pair: yielding pair on cpu %u %s after %llu ms; spinning pair on cpu %u %s",
           yc, y == PAIR_APART ? "separated" : "NOT separated", (unsigned long long)yms, sc,
           sp == PAIR_TOGETHER ? "stayed together (S26)" : "did not stay together");
