@@ -3062,3 +3062,31 @@ The final fixed x86 boot passed all 419 tests and the full harness in
 reset family, not a sampling failure). The AArch64 boot passed all 419
 and the full harness in 160.3 s. Logs:
 `out/lockup-deadline-final-{x86_64,aarch64}.log` and `-result.log`.
+
+## `prio-inversion`: the medium thread finished first, 2026-10-05
+
+`SELFTEST: prio-inversion ... FAIL: priority was not inherited: the medium
+thread finished before the high thread acquired (57 ms)`, local, AArch64
+debug, four CPUs, on the lockdep callback-classes branch (timer callbacks
+now enter and leave a lockdep class in the tick ISR, and the class table
+grew from 320 to 384). First sighting: the test had passed in every one of
+about forty-five AArch64 boots earlier the same day, and passed in the next
+six boots of the same tree (four of them repeats for this purpose).
+
+Not attributed. What was ruled out:
+
+- **Not reproducible in isolation.** A probe that ran the scenario 300 times
+  in one boot, with L's priority, H's donation link and the thread states
+  snapshotted before the release, saw 0 failures with the change and 0 on
+  `main` (600 iterations).
+- **Not the obvious window.** `waitqueue_prepare` marks the high thread
+  BLOCKED before `mutex_lock` donates, so the test can see BLOCKED before
+  the boost. But a thread preempted in that window is re-queued READY by
+  `schedule_internal`'s preempt path, so it runs again and donates before
+  it truly blocks; the test cannot read BLOCKED at a moment the donation is
+  still owed.
+
+The test took 57 ms in the failing boot and 53-58 ms in passing boots of
+the tree, against 47-50 ms on `main`: the change makes timer callbacks
+heavier, which moves every timing window in the suite. Watch for a second
+sighting; with one, instrument the full-suite run rather than the loop.

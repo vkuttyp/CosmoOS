@@ -3,7 +3,7 @@
 ## Data structures (`kernel/include/kernel/lockdep_core.h`, `kernel/core/lockdep.c`)
 
 ```c
-#define LOCKDEP_MAX_CLASSES   320       /* includes separate runqueue classes */
+#define LOCKDEP_MAX_CLASSES   384       /* includes runqueue and callback classes */
 #define LOCKDEP_SUBCLASSES    4         /* nesting levels per class */
 #define LOCKDEP_MAX_NODES     (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_MAX_HELD      24        /* per CPU: spinlocks, interrupt context included */
@@ -40,8 +40,8 @@ raw lock. The field exists in every build so the module ABI has one layout:
 
 The graph and the class table are one `struct lockdep_state` behind pure
 inline functions in `lockdep_core.h` (class lookup, edge add, reachability),
-so the host test drives them under the sanitizers. The bitmap is 1280 nodes
-(320 classes × 4 subclasses) × 160 bytes = 200 KiB when `LOCKDEP=1`.
+so the host test drives them under the sanitizers. The bitmap is 1536 nodes
+(384 classes × 4 subclasses) × 192 bytes = 288 KiB when `LOCKDEP=1`.
 
 ## Classes and nodes
 
@@ -96,7 +96,7 @@ check, included in the stacks):
    report shows the held stack, B's acquisition, and the recorded chain
    B → … → Aᵢ. Long diagnostic paths keep their last eight nodes and are
    labeled accordingly; the output length is the stored count, so printing
-   cannot overrun the buffer. Detection still searches all 1280 nodes.
+   cannot overrun the buffer. Detection still searches all 1536 nodes.
 3. Otherwise set `before[Aᵢ] |= B` for every Aᵢ (edges from every held lock,
    not only the innermost, so a chain seen once in pieces is still caught).
 
@@ -151,7 +151,7 @@ not a panic/NMI API.
 
 ### Search work bounds
 
-Let N = `LOCKDEP_MAX_NODES` (1280), W = `LOCKDEP_NODE_WORDS` (20),
+Let N = `LOCKDEP_MAX_NODES` (1536), W = `LOCKDEP_NODE_WORDS` (24),
 and C = the registered class count. Under caller serialization and valid
 node/class indices, each search has the following conservative bounds:
 
@@ -226,7 +226,7 @@ now fails stop, including from NMI, but this is not permission to take
 tracked locks in NMI/#MC handlers. Re-entry outside a raw critical section,
 held-stack writer nesting, and cross-CPU wait cycles remain unsupported.
 
-The search is bounded by the node count (1280) and runs only when
+The search is bounded by the node count (1536) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a
 bitmap test per held lock.
@@ -251,8 +251,8 @@ rejected edge or usage label is not published, including when a self-test
 consumes the report.
 
 This represents blocking lock cycles through IRQ paths. Timer callback
-completion waits use a separate bounded lock profile (below); this is not a
-general callback graph. NMI/#MC reentrancy remains unsupported. Trylock edges are not
+completion waits are in the graph through callback classes (below), with
+the bounded per-object profile kept beside them. NMI/#MC reentrancy remains unsupported. Trylock edges are not
 recorded at the attempted acquisition, since a failed try cannot wait;
 locks held after a successful trylock participate in subsequent blocking
 acquisition edges.
@@ -273,9 +273,56 @@ the timer queue clears `running`; a later callback execution reserves a
 fresh profile. Exhaustion is a validator report. Interrupt masking permits
 at most one active timer callback on each CPU, so this covers the maximum
 configured CPU count.
-Profiles cover only callback executions already observed, so unexecuted
-callback paths are not proved safe. This does not cover IRQ unregister,
-quiescence, module teardown, or arbitrary completion waits.
+Profiles cover only the callback execution in progress on the timer being
+cancelled. Callback classes, below, cover every execution of the same
+function the graph has seen.
+
+## Callback classes
+
+A synchronous wait for a callback deadlocks when the waiter holds a lock
+the callback needs, directly or through a chain. The graph expresses this
+by giving each timer callback **function** a pseudo-class, kind
+`LOCKDEP_KIND_CALLBACK`, named `callback <address>` and cached in
+`struct timer`'s `lockdep_class` (reset by `timer_setup`):
+
+- `run_expired` brackets each callback with `lockdep_callback_enter` and
+  `lockdep_callback_exit`. Enter acquires the class and holds it on the
+  CPU's stack, so every lock the callback takes records the edge
+  `callback → lock`. Exit names only the function, because the timer may
+  be freed by the time the callback returns.
+- `timer_cancel_sync` calls `lockdep_callback_wait` on **every** call,
+  before it looks at the queue. The wait acquires the class without
+  holding it, recording `held lock → callback` for each held spinlock and
+  mutex: "this was waited for while those were held". A cancel may wait
+  whether or not the callback is running at that moment, so the
+  dependency is recorded unconditionally.
+
+The ordinary cycle check then answers the question in both orders and
+transitively. A wait that holds a lock any callback of the function took,
+or a lock such a lock reaches, is reported as `LOCKDEP_R_CALLBACK`, and
+`timer_cancel_sync` returns without waiting. A callback that first takes
+a lock already recorded before its class, by an earlier wait, is reported
+as an inversion whose chain names the class. A callback that waits for a
+callback of its own function is reported as `LOCKDEP_R_CALLBACK`
+(recursion). Two timers sharing a function share the class. That is the
+point: what one timer's callback did answers a wait on another. It is
+also the usual lockdep conservatism, since the class says "a callback of
+this function", not "this timer's callback".
+
+The class has no interrupt-usage labels of its own (`check_usage` labels
+spinlock classes only). The locks taken inside the callback carry the
+callback's interrupt context as before. Callback classes share the class
+table (`LOCKDEP_MAX_CLASSES`, raised to 384 for them: a full debug boot
+creates 17), and a cached class reuses the graph's copy of its name, so a
+callback that runs every tick formats nothing.
+
+**What is not covered.** `synchronize_irq` and `interrupt_unregister_sync`
+wait through `synchronize_quiesce`, which calls `might_sleep`: the waiter
+can hold no spinlock, and an interrupt handler can take no mutex, so no
+lock cycle through that wait exists to model. Module teardown waits by the
+same route. Arbitrary completion waits (`wait_for_completion` on a
+completion a callback signals) have no function to key a class on, and
+remain outside the graph.
 
 ## `might_sleep()`
 
@@ -423,7 +470,7 @@ private snapshot storage before acquiring the raw lock.
 
 ## Memory
 
-200 KiB graph, 320 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
+288 KiB graph, 384 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
 thread. The graph exists only with `LOCKDEP=1`; lock/thread layouts stay
 stable when disabled.
 
