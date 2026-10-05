@@ -10,7 +10,7 @@ and Linux ABI compatibility at the boundary. The project name is temporary.
 ## Governing document
 
 Everything in this repository is governed by the master prompt in
-[`prompts/`](prompts/). It defines the vision, the kernel architecture,
+[`prompts/`](prompts/), extended by the later prompts kept beside it. It defines the vision, the kernel architecture,
 fifteen architectural invariants, coding rules, the development workflow,
 and the phased roadmap. Read it before contributing.
 
@@ -27,7 +27,8 @@ and the phased roadmap. Read it before contributing.
 ## Targets
 
 - **x86-64** first, booted via UEFI under QEMU.
-- **AArch64** designed for from day one, implemented in Phase 13.
+- **AArch64** designed for from day one and implemented in Phase 13,
+  booted via UEFI under QEMU's `virt` machine (`make ARCH=aarch64`).
 
 ## Development environment
 
@@ -50,9 +51,11 @@ depends on Parallels-specific hardware and never runs natively on macOS.
 | `tools/`, `scripts/` | Host-side tooling and automation |
 | `tests/` | Host, integration, QEMU, property, and fuzz tests |
 | `docs/` | Subsystem documentation |
+| `modules/` | Loadable kernel modules packed into the boot archive |
 | `build/` | Build system definitions; output goes to git-ignored `out/` |
+| `prompts/` | The governing prompts (see above) |
 
-Each directory has a `README.md` stating its ownership boundary.
+Each source directory has a `README.md` stating its ownership boundary.
 
 ## Quick start
 
@@ -60,16 +63,20 @@ On an ARM64 or x86-64 Debian/Ubuntu host (the primary environment is an
 ARM64 Ubuntu VM under Parallels):
 
 ```sh
-scripts/setup-dev-linux.sh   # clang, lld, llvm, make, mtools, qemu, ovmf
+scripts/setup-dev-linux.sh   # clang, lld, llvm, make, mtools, qemu-system-x86, ovmf
 make check-tools             # verify the cross toolchain
-make                         # kernel ELF + UEFI loader (x86-64, debug)
+make                         # kernel, UEFI loader, libc, userland, packages, modules, test guests (x86-64, debug)
 make image                   # FAT boot image
 make test                    # boot under QEMU, PASS/FAIL from serial + exit code
 make run                     # interactive boot on the terminal
 ```
 
+For AArch64, also install `qemu-system-arm` and `qemu-efi-aarch64` (as CI
+does) and pass `ARCH=aarch64`.
+
 Other targets: `make BUILD=release`, `make analyze`, `make reproducible`,
-`make test-crash`, `make host-test`, `make compile-commands`, `make help`.
+`make test-crash`, `make host-test`, `make fuzz`, `make check-secrets`,
+`make compile-commands`, `make help`.
 See [docs/development.md](docs/development.md).
 
 ## Status
@@ -108,8 +115,9 @@ See [docs/development.md](docs/development.md).
   ELF images run on the host, six self-tests load, call, and unload
   fixture modules on the target.
 - **Phase 6 (done):** device infrastructure. A bus/device/driver model
-  with resources and probing, a DMA API (no IOMMU yet, but no driver
-  assumes virtual equals physical), PCI enumeration over ECAM with BAR
+  with resources and probing, a DMA API (no IOMMU at the time -- DMA
+  remapping came later, below -- but no driver assumes virtual equals
+  physical), PCI enumeration over ECAM with BAR
   sizing, capabilities and MSI/MSI-X through the interrupt layer, a
   block layer (`blkdev`/`bio` with synchronous helpers), an entropy pool
   and console sinks. VirtIO is the first real driver stack and lives
@@ -1526,10 +1534,11 @@ See [docs/development.md](docs/development.md).
   startup it made installing the pointer two syscalls, the second also
   denied. Proven by `thrtest` steps 12-16 and six bug-proofs, one of
   which failed to fail and sent the test back for an assertion about the
-  *layout* rather than about `errno`, plus one more for the filter. `strerror` and `getcwd(NULL)` stay
-  shared -- now fixable, since there is somewhere per-thread to put them --
-  and compiler `__thread` with ELF `PT_TLS` remains a later unit that this
-  one is the prerequisite for.
+  *layout* rather than about `errno`, plus one more for the filter. `strerror` and `getcwd(NULL)` stayed
+  shared -- then fixable, since there was somewhere per-thread to put them --
+  and compiler `__thread` with ELF `PT_TLS` was left to a later unit that this
+  one was the prerequisite for; all three have since landed (the `__thread`
+  entry below).
 - **A thread per vCPU, and a way to stop one** (`docs/audit/next-subsystem-vcpu-threads.md`,
   `docs/kernel-services/virtualization/design.md`). The consumer the thread
   arc was built for. `vmctl --machine` ran a guest's vCPUs on **one thread,
@@ -3195,7 +3204,8 @@ See [docs/development.md](docs/development.md).
   optional `vnode_ops` (`ready`, `poll_wq`, `set_nonblock`) that the
   file kobject type delegates to, so `ioready`, `setnonblock`, `poll`
   and the async ring work on a FIFO handle; `chrdev_ops` gained the
-  same three and no existing device sets them yet. The Linux door's
+  same three and no device set them yet (the terminal and the tap do
+  since PR #211). The Linux door's
   `mknodat` (`S_IFIFO`; `S_IFSOCK` `EINVAL`, the rest `EPERM`) and an
   `O_NONBLOCK` that reaches the kernel; libc `mkfifo`; a `mkfifo`
   coreutil and a FIFO in the shell test (a pipeline whose two commands
@@ -3885,8 +3895,9 @@ See [docs/development.md](docs/development.md).
   `pwait` are wired (create and wait on x86-64; create1, ctl and pwait on
   both), level-triggered, with `EPOLLONESHOT`. A finite timeout wakes the
   waiter directly; `epoll_ctl` wakes the set so a concurrent waiter
-  re-evaluates. `EPOLLET`, nesting an epoll, and auto-remove-on-close are
-  deferred (explicit `EPOLL_CTL_DEL`). (PR #291)
+  re-evaluates. Nesting an epoll and auto-remove-on-close are deferred
+  (explicit `EPOLL_CTL_DEL`); `EPOLLET` was deferred here and landed in
+  PR #301. (PR #291)
 - **`sysinfo(2)` for the Linux personality.** The coarse machine snapshot, no
   longer a stub: `lx_sysinfo` fills `struct sysinfo` from the stats the kernel
   already keeps — `uptime` from the monotonic clock, `totalram`/`freeram` from
@@ -3935,6 +3946,86 @@ See [docs/development.md](docs/development.md).
   on `armed` so a disarmed-but-readable member sleeps rather than spinning.
   Level-triggered behaviour is unchanged; an undelivered edge is re-armed, not
   lost. (PR #301)
+- **Lockdep hardening: bounded diagnostics and module-safe class names.**
+  The start of the lock-discipline milestone
+  (`docs/audit/2026-10-03-lock-discipline-audit.md`). A long dependency
+  cycle could overread the diagnostic path buffer, and lock-class names
+  pointed into module memory that unload could reclaim. Returned paths are
+  now bounded, class names are copied into kernel-owned storage with an
+  identity that survives a module reload, the shared class-cache, IRQ-usage
+  and graph accesses are atomic, panic enters console mode before reporting,
+  and `LOCKDEP=0/1` overrides the build default. ASan reproduced both the
+  overread and the use-after-free before the fix; 416 self-tests on both
+  architectures. Report: `docs/audit/2026-10-03-lockdep-report.md`.
+  (PR #302)
+- **Lockdep validates IRQ dependencies, restoration and timer
+  cancellation.** Transitive IRQ-safe to IRQ-unsafe dependencies are
+  caught whichever of the usage label or the edge arrives last, with IRQ
+  trylocks classified apart from successful IRQ-enabled thread trylocks.
+  Spinlock irqrestore is checked against the state its irqsave saved, and
+  cancelling a timer while holding a lock its active callback needs is
+  reported, from a bounded 64-slot table of locks learned from observed
+  callbacks (unobserved paths and other callback waits remain open). The
+  cwd and clock tests gained UP-safe controls without weakening their
+  assertions; 416 self-tests, UP and SMP, on both architectures. Plan:
+  `docs/audit/2026-10-03-lockdep-context-plan.md`. (PR #303)
+- **Consistent lockdep diagnostics and concurrent-reader validation.**
+  Normal graph dumps print from a private consistent copy, remote CPU
+  held stacks are read through bounded atomic snapshots that never wait on
+  the target, and panic reports the actual thread and IRQ/preemption
+  nesting instead of always naming boot. A host model drives the real
+  graph and snapshot helpers under TSan (`host-test-lockdep-tsan`), real
+  x86 NMIs check that a snapshot is stable under the graph lock and refused
+  while the interrupted writer is busy, and a matched `LOCKDEP=0/1`
+  benchmark measures warmed spin paths. Review also cut the AArch64
+  initial user-stack builder frame from 5,328 to 192 bytes. 417
+  self-tests. (PR #304)
+- **Serialised interrupt writers and consistent thread snapshots.**
+  Registration and removal of an interrupt vector take a raw per-vector
+  lock, so concurrent writers can no longer race the publication record
+  while dispatch stays lock-free. Lockdep counter snapshots are taken
+  under the graph lock and thread mutex stacks publish through a
+  single-writer sequence, so panic diagnostics print a consistent stack or
+  say it is unavailable. Host tests race the real interrupt source under
+  TSan, a kernel test races writers against a real IPI, and graph searches
+  are measured through all 1,280 class/subclass nodes. The lockup sampler's
+  response/deadline ordering race is fixed. 419 self-tests on 1 and 4
+  CPUs. (PR #305)
+- **Unhandled-interrupt totals and lockdep search bounds.** Both
+  architectures' unhandled-interrupt warning totals are now atomic, and
+  `irq-unhandled` sends repeated IPIs to unregistered vectors on every CPU
+  before checking handled reuse. Host tests cover invalid dispatch,
+  oversized initialisation and failed synchronous removal. Host-only
+  counters bound the graph search's queue, bitmap and reconstruction work
+  at full capacity (compiled out of the kernel), and `lockdep-first-bench`
+  times first public acquisitions against reuse. 421 self-tests with
+  lockdep on and off. (PR #306)
+- **Lockdep failure paths that cannot hang.** Re-entry into the
+  validator's graph raw lock by the CPU that owns it now fails stop with a
+  named diagnostic instead of spinning, exercised by direct probes and
+  real x86 NMIs. Fatal output skips the log ring and the VirtIO console's
+  tracked locks, keeping serial and framebuffer. The contention test
+  drains its lock, timer and worker before reporting a missed callback,
+  and `lockdep-mutex-bench` times verified queued mutex acquisitions
+  after a controlled 1 ms hold. CI exposed three test assumptions, fixed
+  without weakening them: `net-nat` waits for its flood outcomes before
+  aging, `irq-route` waits for five counted deliveries, and the NIC
+  benchmark and chaos boots get measured budgets. 422 self-tests.
+  Probes: `tools/lockdep-contention-probe.py`,
+  `tools/lockdep-reentry-probe.py`. (PR #307)
+- **Observed spin contention and acquisition handoff.** The contention
+  self-test no longer relies on a 5 ms callback landing inside a 20 ms
+  hold: a self-test-only per-CPU observer publishes actual failed spin
+  exchanges, and a nested IRQ wait must restore the outer observation.
+  `lockdep-spin-bench` measures plain and irqsave cross-CPU handoff after
+  an observed wait and a controlled 1 ms hold. The first CI boot found a
+  startup dependency -- an IRQ-masked owner waiting for a runnable waiter
+  whose CPU the reaper held, waiting on that owner's TLB acknowledgment --
+  fixed by having both participants rendezvous with IRQs enabled, with no
+  budget changed. 423 self-tests on both architectures; no two-CPU full
+  suite pass is claimed. Report:
+  `docs/audit/2026-10-04-spin-contention-report.md`; probe:
+  `tools/spin-contention-probe.py`. (PR #308)
 - **Devices that can be waited on: readiness for the terminal and the
   tap, and `select` for the Linux door.** The named-pipes unit gave a
   `struct file` and `chrdev_ops` the three readiness operations and
@@ -3977,8 +4068,10 @@ See [docs/development.md](docs/development.md).
   the audits set for later, what is deliberately not done and on what
   condition it would be revisited, and what must not be proposed again
   are gathered in one place and cross-checked against the tree:
-  **`docs/audit/2026-09-deferred-work-inventory.md`**. The next report is
-  chosen from it and names the entry it closes. Section **68** is not a
+  **`docs/audit/2026-09-deferred-work-inventory.md`**, and
+  **`docs/plan.md`** groups what remains after the lockdep milestone
+  (PRs #302-#308). The next report is chosen from them and names the
+  entry it closes. Section **68** is not a
   list of deferrals: it is the instruction to stop after the audit, name
   one subsystem in a fixed shape and wait. Design documents first, one
   subsystem at a time.
