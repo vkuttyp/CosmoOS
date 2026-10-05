@@ -85,6 +85,13 @@ jobs:
       - name: Boot test on a protection-capable CPU (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
 
+      # Every other boot uses four CPUs. Three self-tests needed a third
+      # CPU without saying so and failed at two, unseen here
+      # (docs/audit/2026-10-05-two-cpu-validation-report.md); this boot
+      # keeps the two-CPU premises honest.
+      - name: Boot test with two CPUs (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-smp2
+
       # The same suite with a migrator in the tick moving ready threads
       # between CPUs for no reason (docs/kernel/scheduler/design.md,
       # "Migration"): every concurrency test, with threads moving under it.

@@ -2260,3 +2260,8 @@ See the [history index](README.md).
   four CPUs on both architectures. Report:
   `docs/audit/2026-10-05-two-cpu-validation-report.md`; probe:
   `tools/two-cpu-probe.py`; runner: `tools/two-cpu-matrix.sh`.
+- **Two-CPU CI boot.** `make test-smp2` boots the debug suite with
+  `QEMU_SMP=2` into its own `boot-test-smp2.log`, and CI runs it on both
+  architectures beside the four-CPU boots, so a self-test that needs a
+  third CPU without saying so fails in CI rather than only on a local
+  two-CPU run.
