@@ -13,6 +13,7 @@
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
 #   make test-harness-retry  boot with net-harness's first back-connection broken on purpose
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
+#   make litmus       check the quiescence litmus tests against the C11 model (needs herd7)
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
 #   make reproducible build twice into separate trees and compare outputs
@@ -29,7 +30,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -181,6 +182,14 @@ ifeq ($(ARCH),aarch64)
 else
 	@echo "test-wxn: $(ARCH) has no WXN; nothing to do"
 endif
+
+# The quiescence protocol's memory-order litmus tests, checked by herd7
+# against the RC11 model: verdicts, reachability witnesses and negative
+# controls (tests/litmus/run_litmus.py, docs/kernel/quiesce/testing.md).
+# herdtools7 comes from opam or Debian testing/sid; CI runs it in a job
+# of its own.
+litmus:
+	$(Q)$(PYTHON) $(ROOT)/tests/litmus/run_litmus.py
 
 analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
 	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)
