@@ -642,20 +642,46 @@ static void placed_main(void *arg)
  * target's `nr_running` and the next scan sees it -- so a test that
  * created four spinners would have passed on the broken code and proved
  * nothing. What does not spread is threads that **block**: a kernel
- * thread waits on a queue almost all of its life, `nr_running` drains
- * back to zero between creations, every CPU ties, and a scan that keeps
- * its first winner hands every one of them to CPU 0.
+ * thread waits on a queue almost all of its life, the queues drain back
+ * to zero between creations, the idle CPUs tie, and a scan that keeps
+ * its first winner hands every one of them to the same CPU.
  *
  * So each worker here signals and then blocks, and the next is created
  * only once the previous has stopped being runnable. That is the
  * condition this kernel is actually in, and the one the measurement in
  * the report came from: 8 of 14 threads on CPU 0.
+ *
+ * **The creator's CPU does not tie.** Placement reads `sched_cpu_load`,
+ * which counts a CPU's running thread (S29), and this thread is running
+ * on its own CPU when it creates each worker. So only the *other* online
+ * CPUs tie, and the rotation decides among them. This test was written
+ * when placement read `nr_running` and every CPU tied (`d2babd03`: 4 of 4
+ * CPUs); its `worst > N/2` bound came from then. Under S29 the scan hands
+ * the creator's turn to the next CPU in scan order, so with three CPUs one
+ * of the two eligible CPUs is due 6 of 8, with four CPUs 4 of 8 -- the old
+ * bound failed every three-CPU boot and passed four-CPU boots at exactly
+ * its limit (docs/audit/2026-10-05-two-cpu-validation-report.md). The
+ * claim kept is the defect's own signature, every worker on one CPU; a
+ * scan that stops rotating produces it at any CPU count with two or more
+ * eligible CPUs.
+ *
+ * **Two CPUs cannot show it.** With one eligible CPU, least-loaded
+ * placement sends every worker there whatever the tie rule, so a broken
+ * rotation and a working one place identically; the test says so and
+ * does not claim anything.
+ *
+ * Pinned, so "the creator's CPU" is one CPU for the whole test.
  */
-bool selftest_sched_spread(const char **reason)
+static bool sched_spread_pinned(const char **reason)
 {
-    unsigned n = cpu_count();
-    if (n < 2) {
-        kinfo("selftest: sched-spread: one CPU; skipping");
+    unsigned n = cpu_count(), self = arch_cpu_id();   /* pinned by the wrapper */
+    unsigned eligible = 0;
+    for (unsigned c = 0; c < n; c++)
+        if (c != self && cpu_online(c))
+            eligible++;
+    if (eligible < 2) {
+        kinfo("selftest: sched-spread: %u CPU(s) besides the creator's; placement has no tie to rotate; skipping",
+              eligible);
         return true;
     }
     unsigned before = thread_count();
@@ -665,10 +691,8 @@ bool selftest_sched_spread(const char **reason)
 
     unsigned made = 0;
     bool ok = true;
-    cpumask_t creator = 0;   /* where this thread was when it created each worker: a diagnostic */
     for (unsigned i = 0; i < N && ok; i++) {
         memset(&p[i], 0, sizeof(p[i]));
-        creator |= CPUMASK_OF(raw_cpu_id());
         completion_init(&p[i].started, "spread");
         completion_init(&p[i].release, "spread-rel");
         t[i] = thread_create(placed_main, &p[i], "spread", SCHED_PRIO_DEFAULT);
@@ -720,25 +744,32 @@ bool selftest_sched_spread(const char **reason)
         }
     }
     /*
-     * Deliberately not `distinct == n`. Other threads in the suite may
-     * be runnable while this runs, and the rule is still "least loaded
-     * first" -- the rotation only decides ties -- so a CPU that happens
-     * to be busy can legitimately be skipped. What the defect looked
-     * like is unmissable against either bound: every one of the eight on
-     * a single CPU.
+     * Deliberately not `distinct == eligible`. Other threads in the suite
+     * may be runnable while this runs, and the rule is still "least
+     * loaded first" -- the rotation only decides ties -- so a CPU that
+     * happens to be busy can legitimately be skipped. What the defect
+     * looks like is unmissable: every one of the eight on a single CPU.
      */
-    if (distinct < 2 || worst > N / 2) {
+    if (distinct < 2) {
         kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u "
-               "(created from CPU mask %#llx)",
-               made, distinct, n, worst, worst_cpu, (unsigned long long)creator);
+               "(created from CPU %u)",
+               made, distinct, n, worst, worst_cpu, self);
         *reason = "threads created on an idle machine piled onto one CPU";
         return false;
     }
     CHECK(threads_settle(before));
     kinfo("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, at most %u on any one "
-          "(created from CPU mask %#llx)",
-          (unsigned)N, distinct, n, worst, (unsigned long long)creator);
+          "(created from CPU %u, which got %u)",
+          (unsigned)N, distinct, n, worst, self, on_cpu[self]);
     return true;
+}
+
+bool selftest_sched_spread(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = sched_spread_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
 }
 
 /* ======================================================================
@@ -1013,6 +1044,8 @@ struct bal_worker {
     unsigned yielding;          /* give the CPU up voluntarily: see below */
     uint64_t iters;
     unsigned cpu;               /* where it was last seen running; BAL_CPU_UNSEEN until it has run its loop */
+    struct completion *left;    /* if set: completed the first time the loop runs on a CPU other than `home` */
+    unsigned home;
 };
 
 /*
@@ -1031,10 +1064,16 @@ static void bal_worker_main(void *arg)
     complete(&w->started);
     wait_for_completion(&w->release);
     uint64_t n = 0;
+    bool left = false;
     while (__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE) == 0) {
         preempt_disable();
-        __atomic_store_n(&w->cpu, arch_cpu_id(), __ATOMIC_RELAXED);
+        unsigned cpu = arch_cpu_id();
+        __atomic_store_n(&w->cpu, cpu, __ATOMIC_RELAXED);
         preempt_enable();
+        if (w->left != NULL && !left && cpu != w->home) {
+            left = true;
+            complete(w->left);   /* the observer blocks on this rather than polling: see balance_pair */
+        }
         for (volatile unsigned k = 0; k < 256; k++)
             ;
         n++;
@@ -1233,12 +1272,16 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
     *took_ms = 0;
     memset(d, 0, sizeof(*d));
     static struct bal_worker w[2];
+    static struct completion left;
     struct thread *t[2] = { NULL, NULL };
     unsigned made = 0;
     enum pair_result r = PAIR_NO_WORKER;
+    completion_init(&left, "pair-left");
     for (unsigned i = 0; i < 2; i++) {
         memset(&w[i], 0, sizeof(w[i]));
         w[i].cpu = BAL_CPU_UNSEEN;
+        w[i].left = &left;
+        w[i].home = c;
         completion_init(&w[i].started, "pair-start");
         completion_init(&w[i].release, "pair-rel");
         w[i].runs = 1;
@@ -1304,14 +1347,29 @@ static enum pair_result balance_pair(unsigned yielding, unsigned c, uint64_t *to
     uint64_t start = clock_now_ns();
     deadline = clock_deadline_ns(1000ull * 1000000ull);
     r = PAIR_TOGETHER;
-    while (!clock_deadline_passed(deadline)) {
-        unsigned c0 = __atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED);
-        unsigned c1 = __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED);
-        if (c0 != BAL_CPU_UNSEEN && c1 != BAL_CPU_UNSEEN && c0 != c1) {   /* two real CPUs */
-            r = PAIR_APART;
-            break;
+    /*
+     * Block until a worker reports running somewhere else, rather than
+     * poll. With two CPUs the only receiver is this thread's own CPU, and
+     * the balancer takes from an idle CPU's tick; a poll that sleeps 2 ms
+     * expires on every tick (timers run before the tick's balance), so the
+     * receiver was never idle when it looked, and the pair stayed together
+     * in about half of two-CPU boots on both architectures
+     * (docs/audit/2026-10-05-two-cpu-validation-report.md). One timer, at
+     * the deadline, leaves the receiver idle at every tick in between.
+     * The poll below then only confirms "two real CPUs", once something
+     * has moved. Both halves wait the same way, so the yield is still the
+     * only difference between them.
+     */
+    if (wait_for_completion_timeout(&left, 1000ull * 1000000ull)) {
+        while (!clock_deadline_passed(deadline)) {
+            unsigned c0 = __atomic_load_n(&w[0].cpu, __ATOMIC_RELAXED);
+            unsigned c1 = __atomic_load_n(&w[1].cpu, __ATOMIC_RELAXED);
+            if (c0 != BAL_CPU_UNSEEN && c1 != BAL_CPU_UNSEEN && c0 != c1) {   /* two real CPUs */
+                r = PAIR_APART;
+                break;
+            }
+            thread_sleep_ms(2);
         }
-        thread_sleep_ms(2);
     }
     *took_ms = (clock_now_ns() - start) / 1000000ull;
     sched_balance_stats(&b1);
