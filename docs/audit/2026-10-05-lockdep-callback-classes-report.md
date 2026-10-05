@@ -93,6 +93,7 @@ worktrees, both architectures):
 |---|---|---|
 | `no-wait` | the wait check (only the per-object profile remains) | `lockdep-callback` fails at case 1's `hits == 1`: the old mechanism does not see it |
 | `no-class` | the callback's class (enter/exit no-ops) | fails at the same check |
+| `early-return` | the cancel after a report (returns `false` first: the defect review found) | fails at case 1's `pending` check, both architectures |
 
 The existing `timer-cancel-sync` self-test still gets exactly one
 `LOCKDEP_R_CALLBACK`. Its case is now caught by the class check at the
