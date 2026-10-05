@@ -40,6 +40,9 @@ impact:
   architecture_paths: [kernel/arch/, boot/uefi/arch/]
 
 llm:
+  # Use the logged-in local Claude Code provider for this repo so reviews run on the model-backed path.
+  provider: claude-code
+  model: claude-opus-5
   # One analyst call in flight, and eight attempts at a busy provider.
   #
   # The reviewer's default is three at a time, and the account it runs on allows three requests a minute for the
