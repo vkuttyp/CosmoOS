@@ -30,8 +30,9 @@ no kernel, scheduler-policy or VirtIO-synchronization code was changed.
 After the test fixes, every boot at one, two, three and four CPUs passes
 the full suite on both architectures (§20), and four negative-control
 mutations (nine boots) fail each fixed test for its stated reason (§19).
-CI does not boot two CPUs (`.github/workflows`: every `test*` job uses the
-default `QEMU_SMP=4`), which is why these never appeared there.
+When this report was written CI did not boot two CPUs (`.github/workflows`:
+every `test*` job used the default `QEMU_SMP=4`), which is why these never
+appeared there. *Update: CI boots two CPUs since PR #310 (`make test-smp2`, both architectures).*
 
 ## 2. Repository Baseline
 
@@ -509,7 +510,7 @@ subjects this branch does not touch); CPU counts above four; remote CI.
 - §4: a new conditional item records the two policy observations (§§8–9)
   without proposing a change.
 - §12: the CPU-matrix item records one- to four-CPU local passes and that
-  CI still boots only four.
+  CI still booted only four at the time. *Update: CI boots two CPUs since PR #310 (`make test-smp2`, both architectures).*
 - "Suggested next increments": item 1 struck through as done, with the
   two-CPU CI boot named as the way to keep it done.
 
@@ -521,7 +522,7 @@ the October 4 entry in `docs/testing/flakes.md` (attribution appended), and
 
 1. Add a two-CPU (and possibly three-CPU) debug boot to CI, now that it
    passes: without it, a placement fallback like the one above can regress
-   silently, since every CI boot uses four CPUs.
+   silently, since every CI boot uses four CPUs. *Update: CI boots two CPUs since PR #310 (`make test-smp2`, both architectures).*
 2. Then the plan's next item: quiescence memory-order models and targeted
    negative controls.
 3. Separately, if desired: decide whether placement should rotate

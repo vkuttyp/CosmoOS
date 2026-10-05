@@ -370,8 +370,9 @@ Sources: inventory §§2.10, 2.11 and 3,
   coverage, include the two-CPU prerequisites in §2, and test AArch64 firmware
   variants or document a supported minimum EDK2/AAVMF version.
   *2026-10-05:* the two-CPU prerequisites are done; full suites pass locally
-  at one to four CPUs on both architectures, but CI still boots only four
-  CPUs. Adding a two-CPU CI boot is the next step ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §23).
+  at one to four CPUs on both architectures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)).
+  CI now also boots the debug suite with two CPUs on both architectures
+  (`make test-smp2`). One- and three-CPU boots remain local-only.
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.
@@ -460,7 +461,8 @@ their deferred status here; this section does not schedule them for implementati
 
 1. ~~Establish a trustworthy two-CPU validation baseline and address the
    VirtIO/scheduler failures without weakening their intended contracts.~~
-   Done 2026-10-05 ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)); add a two-CPU CI boot so it stays done.
+   Done 2026-10-05 ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)); CI boots two CPUs
+   (`make test-smp2`) so it stays done.
 2. Add quiescence memory-order models and targeted negative controls.
 3. Extend callback-wait and raw IRQ-pairing coverage within the established
    locking and lifetime architecture.

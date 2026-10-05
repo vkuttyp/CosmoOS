@@ -7,6 +7,7 @@
 #   make test         automated QEMU boot test with PASS/FAIL exit code
 #   make test-gic     AArch64: the same boot test on the GICv3 machine
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
+#   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
@@ -28,7 +29,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -93,6 +94,20 @@ else
 	$(Q)QEMU_GUARD=1 QEMU_CPU='qemu64,+nx,+svm,+npt,+smep,+smap,+umip' $(MAKE) --no-print-directory -C $(ROOT) \
 		ARCH=$(ARCH) BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-guard.log test
 endif
+
+# The same boot test with two CPUs. Every other boot here uses the
+# default four, and a test that needs a third CPU without saying so passes
+# them all: `virtio-remove-inflight`, `sched-spread` and `sched-balance-pair`
+# each failed at two CPUs, unseen by CI
+# (docs/audit/2026-10-05-two-cpu-validation-report.md). This boot catches a
+# test that wrongly assumes a third CPU. It does not run every SMP test:
+# those that genuinely need three or more CPUs (`sched-spread`,
+# `sched-migrate` and others) skip here with their reason, and the
+# four-CPU boots run them. One CPU is covered by `QEMU_SMP=1 make test`
+# locally.
+test-smp2:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) QEMU_SMP=2 \
+		BOOT_LOG=$(OUT)/boot-test-smp2.log test
 
 # QEMU's virt machine defaults to gic-version=2, so `test` exercises one
 # of the two AArch64 interrupt controllers and never the other. This runs
