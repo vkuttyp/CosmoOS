@@ -656,20 +656,24 @@ static bool selftest_lockdep_callback_pinned(const char **reason)
 {
     struct timer t1, t2;
     arch_irq_state_t s;
-    bool waited;
+    bool pending;
     unsigned hits;
 
-    /* 1. The same function, another timer, never run, not running: a
-     * held lock that any cb_a callback has taken is a dependency. */
+    /* 1. The same function, another timer -- armed, never run, not
+     * running: a held lock that any cb_a callback has taken is a
+     * dependency. The report skips only the wait: the timer is still
+     * cancelled and the result still says it was pending. */
     timer_setup(&t1, cb_a, NULL);
     CHECK(cb_run_once(&t1));
     timer_setup(&t2, cb_a, NULL);
+    timer_start(&t2, 500000000ULL);   /* armed, far off: the report must still cancel it */
     s = spin_lock_irqsave(&g_cb_a);
     lockdep_expect(LOCKDEP_R_CALLBACK);
-    waited = timer_cancel_sync(&t2);
+    pending = timer_cancel_sync(&t2);
     hits = lockdep_expected_hits();
     spin_unlock_irqrestore(&g_cb_a, s);
-    CHECK(!waited);
+    CHECK(pending);                     /* it was pending, and the report did not hide that */
+    CHECK(t2.state == TIMER_IDLE);
     CHECK(hits == 1);
 
     /* No false positive: a lock no cb_a callback reaches. */
@@ -688,10 +692,10 @@ static bool selftest_lockdep_callback_pinned(const char **reason)
     spin_unlock_irqrestore(&g_cb_b1, s);
     s = spin_lock_irqsave(&g_cb_b2);
     lockdep_expect(LOCKDEP_R_CALLBACK);
-    waited = timer_cancel_sync(&t1);
+    pending = timer_cancel_sync(&t1);
     hits = lockdep_expected_hits();
     spin_unlock_irqrestore(&g_cb_b2, s);
-    CHECK(!waited);
+    CHECK(!pending);
     CHECK(hits == 1);
 
     /* 3. The other order: the wait comes first, with no callback of cb_c
@@ -700,9 +704,9 @@ static bool selftest_lockdep_callback_pinned(const char **reason)
      * an inversion reported in the callback itself. */
     timer_setup(&t1, cb_c, NULL);
     s = spin_lock_irqsave(&g_cb_c);
-    waited = timer_cancel_sync(&t1);
+    pending = timer_cancel_sync(&t1);
     spin_unlock_irqrestore(&g_cb_c, s);
-    CHECK(!waited);
+    CHECK(!pending);
     lockdep_expect(LOCKDEP_R_INVERSION);
     CHECK(cb_run_once(&t1));
     CHECK(lockdep_expected_hits() == 1);

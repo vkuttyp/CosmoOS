@@ -300,7 +300,8 @@ by giving each timer callback **function** a pseudo-class, kind
 The ordinary cycle check then answers the question in both orders and
 transitively. A wait that holds a lock any callback of the function took,
 or a lock such a lock reaches, is reported as `LOCKDEP_R_CALLBACK`, and
-`timer_cancel_sync` returns without waiting. A callback that first takes
+`timer_cancel_sync` still cancels a pending timer and returns whether it was
+pending, but does not wait for a running callback. A callback that first takes
 a lock already recorded before its class, by an earlier wait, is reported
 as an inversion whose chain names the class. A callback that waits for a
 callback of its own function is reported as `LOCKDEP_R_CALLBACK`

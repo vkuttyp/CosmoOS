@@ -51,8 +51,11 @@ from the source:
   other than the one a particular callback would take.
 - **The wait is recorded on every call**, not only when the callback is
   running, because a synchronous cancel may wait whenever it is called.
-- **A report returns without waiting**, as the profile check already did,
-  so a self-test can consume the report and continue.
+- **A report skips only the wait.** The timer is still cancelled and the
+  result still says whether it was pending; only a running callback is not
+  waited for, as with the profile check. A self-test can consume the report
+  and continue, and a `false` return never leaves the timer armed (found in
+  review).
 - **The class has no interrupt-usage labels.** `check_usage` labels
   spinlock classes only. The locks taken inside the callback carry its
   interrupt context as before.
@@ -73,7 +76,8 @@ case 3 lands on the expecting CPU):
 
 1. callback A takes `a` once; the thread holds `a` and cancels a **different
    timer** with the same function that has never run: `LOCKDEP_R_CALLBACK`,
-   and the cancel returns without waiting. An unrelated lock across the
+   and the cancel, made with that timer armed, still cancels it and returns
+   true (it was pending) without waiting. An unrelated lock across the
    same cancel reports nothing;
 2. callback B takes `b1`, and `b1 → b2` is recorded elsewhere; holding `b2`
    across a B cancel is reported (`b2 → B → b1 → b2`). The callback never

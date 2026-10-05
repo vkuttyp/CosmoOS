@@ -451,9 +451,11 @@ bool timer_cancel_sync(struct timer *t)
      * it: record the wait against the callback's class, so a held lock
      * that any callback of this function takes (or reaches) is reported
      * here, not only when one happens to be running (lockdep design.md,
-     * "Callback classes"). After a report the caller must not wait. */
-    if (!lockdep_callback_wait((const void *)t->fn, &t->lockdep_class, (uintptr_t)__builtin_return_address(0)))
-        return false;
+     * "Callback classes"). After a report the timer is still cancelled
+     * and the result is still "was pending"; only the wait for a running
+     * callback is skipped -- a false return must never leave it armed. */
+    bool may_wait = lockdep_callback_wait((const void *)t->fn, &t->lockdep_class,
+                                          (uintptr_t)__builtin_return_address(0));
 
     /* The callback runs under q->running with the queue lock dropped and
      * takes the lock again when it returns. Holding the lock while
@@ -473,6 +475,8 @@ bool timer_cancel_sync(struct timer *t)
         if (t->cpu == arch_cpu_id())
             panic("timer_cancel_sync: timer %p cancelled from its own callback", (void *)t);
         spin_unlock_irqrestore(&q->lock, s);
+        if (!may_wait)
+            return was_pending;   /* reported: cancelled, but no wait while holding the lock */
         waited = true;
         if (!lockdep_timer_cancel_check(t, (uintptr_t)__builtin_return_address(0)))
             return was_pending;
