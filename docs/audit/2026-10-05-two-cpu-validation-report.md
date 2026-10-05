@@ -312,3 +312,57 @@ Classification: **CONFIRMED TEST BUG** — the observer's own wake-ups
 occupy the only receiving CPU at the balancer's decision point. The
 balancer behaved as documented (idle CPU every tick; busy CPU every 16
 ticks at a difference of two). A policy note follows in §10.
+
+### 16:30 — First fix (`637f2793`), 18 boots
+
+Logs: `out/matrix/fix-<arch>-smp<N>-<rep>.serial`.
+
+| Arch | CPUs | Boots | Harness | Notes |
+|---|---|---|---|---|
+| x86-64 | 1 | 1 | PASS | `sched-spread` skips: "0 CPU(s) besides the creator's" |
+| x86-64 | 2 | 4 | 4 FAIL | only `virtio-remove-inflight` (below) |
+| x86-64 | 3 | 2 | 2 PASS | spread "2 of 3 CPUs, at most 6", creator got 0 |
+| x86-64 | 4 | 2 | 2 PASS | spread "3 of 4, at most 4", creator got 0 |
+| AArch64 | 1 | 1 | PASS | as x86-64 |
+| AArch64 | 2 | 4 | 4 FAIL | only `virtio-remove-inflight` |
+| AArch64 | 3 | 2 | 2 PASS | spread "2 of 3, at most 5" |
+| AArch64 | 4 | 2 | 2 PASS | spread "3 of 4, at most 4" |
+
+- `sched-balance-pair`: separated in 0–5 ms in all 16 multi-CPU boots,
+  including all eight two-CPU boots (each: 1 scan, 1 pull). The spinning
+  half stayed together everywhere.
+- `sched-spread`: skips with the stated reason at one and two CPUs; passes
+  at three and four with the creator's CPU receiving no worker.
+- `virtio-remove-inflight` at three and four CPUs: the five stamps in
+  order in all eight boots, e.g. "a read-side section opened at 191 on cpu
+  2; the removal started at 192 on cpu 0 and entered the queue teardown at
+  196 with it open, the section ended at 197 and only then did the slot
+  walk begin".
+- `virtio-remove-inflight` at two CPUs still failed all 16 attempts, but
+  **differently**: the teardown was now entered 2–3 stamps after the
+  section ended (e.g. entered 431, ended 429), against ~200–260 at
+  baseline. The removal now started promptly on the test thread's CPU and
+  was held up *inside* the removal before the teardown stamp.
+
+Mechanism: `vblk_remove` begins with `blk_unregister`
+(`kernel/block/blk.c`), which publishes `gone` and then spins until
+`bd->submitting` is zero — the drain of submits already inside the
+driver, a documented part of the lifetime protocol
+(`docs/kernel/quiesce/design.md`, "Block devices"). With two CPUs the
+holder runs on the submitter's CPU. When the submitter is preempted at a
+slice end inside `blk_submit` (most of its time is spent there; an MMIO
+notify is a TCG exit), `submitting` stays raised, the nonpreemptible
+holder takes the CPU, and the drain cannot finish until the section ends.
+The teardown stamp follows a few stamps later, as observed. With three or
+more CPUs the submitter has its own CPU and finishes its submit at once.
+
+Classification: **CONFIRMED TEST BUG** (second half). The kernel is right
+to wait: weakening the drain would let `vblk_remove` free state under an
+in-progress submit. Fix (`9a765c5c`): when the holder must share the
+submitter's CPU, the submitter is first parked between submits through a
+`pause`/`paused` handshake, so it is not counted in `submitting`, and
+resumed after the removal (it is then refused, as in the other passes).
+The drain's wait count (`blk_test_unregister_spins`, existing) is now
+logged with each attempt. A negative control removes the parking
+(`tools/two-cpu-probe.py --mode share-cpu`) and must fail with the drain
+seen waiting.

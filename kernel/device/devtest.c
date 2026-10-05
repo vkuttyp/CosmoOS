@@ -1530,13 +1530,15 @@ static bool rm_irq_order_pass(struct blkdev *bd, struct pci_device *pdev, unsign
     blkdev_put(bd);
     bd = NULL;
     RM_CHECK(threads_settle_blk(threads0));
-    kinfo("selftest: virtio-remove-inflight: irq-order: a read-side section opened at %llu on cpu %u; the removal "
-          "started at %llu on cpu %u and entered the queue teardown at %llu with it open, the section ended at %llu "
-          "and only then did the slot walk begin, at %llu; %u accepted, %u found in flight, %u completed -EIO, "
-          "%u -ENODEV, %u ok; submitter %s",
+    /* Two lines: one line of the log holds 256 bytes. */
+    kinfo("selftest: virtio-remove-inflight: irq-order: section opened %llu on cpu %u, removal started %llu on cpu %u, "
+          "teardown entered %llu, section ended %llu, slot walk %llu",
           (unsigned long long)held_from, hold_cpu, (unsigned long long)remove_start, arch_cpu_id(),
-          (unsigned long long)before_irq, (unsigned long long)held_until, (unsigned long long)walk, s.ok, found,
-          s.c_eio, s.c_enodev, s.c_ok, hold_cpu == cpu ? "parked beside the holder" : "running on its own CPU");
+          (unsigned long long)before_irq, (unsigned long long)held_until, (unsigned long long)walk);
+    kinfo("selftest: virtio-remove-inflight: irq-order: %u accepted, %u found in flight, %u -EIO, %u -ENODEV, %u ok; "
+          "drain waited %u times; submitter %s",
+          s.ok, found, s.c_eio, s.c_enodev, s.c_ok, drain_spins,
+          hold_cpu == cpu ? "parked beside the holder" : "on its own CPU");
 
 out:
     __atomic_store_n(&h.stop, 1u, __ATOMIC_RELEASE);
