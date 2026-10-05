@@ -4,7 +4,9 @@
 
 | Level | What | Command |
 |---|---|---|
-| Host (ASan/UBSan, real threads) | `test_quiesce`: the epoch arithmetic, a negative model, and four reader threads against an updater that frees after each grace period (2000 generations) | `make host-test` |
+| Host (ASan/UBSan, real threads) | `test_quiesce`: the epoch arithmetic, a negative model, four reader threads against an updater that frees after each grace period (2000 generations), two concurrent waiters, and CPUs coming online mid-run | `make host-test` |
+| Host (TSan, real threads) | the same `test_quiesce` with every reader access required to happen-before its free, plus two negative builds (Q2 or W2 relaxed) that must report a race | `make host-test-quiesce-tsan` |
+| C11 model (herd7, RC11) | six litmus tests of the protocol's orderings, a reachability witness per forbidden conjunct, eight negative controls | `make litmus` |
 | Target self-tests (debug builds) | `quiesce-grace`, `quiesce-call`, `irq-sync`, `irq-writers`, `irq-unhandled`, `timer-cancel-sync`, `quiesce-stress`, `blk-lifetime`, `net-netif-lifetime`, `net-accept-race`, `module-unload-busy` | `make test` |
 | Single CPU | the same tests take their one-CPU branches (the calling CPU is quiescent by construction; self-IPI for `irq-sync`) | `QEMU_SMP=1 make test` |
 | AArch64 | everything above; `irq-sync` uses an SGI through `arch_ipi_send` | `make ARCH=aarch64 test` |
@@ -19,6 +21,8 @@ Every test above ran and passed on x86-64 (4 CPUs and 1 CPU) and AArch64
 | `epoch-math` | record size and alignment (64 bytes); nobody pending after everyone published; offline CPUs never counted; two waiters advancing twice are both satisfied by one later publish (`>=`); the highest CPU slot (63) |
 | `negative-model` | with one CPU unpublished the algorithm refuses to declare the grace period over; it does once that CPU publishes |
 | `threads` | four reader "CPUs" alternate 64-read sections with a quiescent point; the updater swaps the pointer, waits, poisons and frees 2000 objects. Any reader past its section would read freed memory: ASan fails the run. Zero bad magics observed |
+| `two-waiters` | two updaters reclaim their own slots concurrently against readers of both, each publishing its own CPU while it waits (a waiting CPU is quiescent); the epoch ends at exactly 2000 -- no advance lost between the waiters |
+| `online-late` | four CPUs come online one by one (CPU *c* after generation 300*c*) in the kernel's order -- release store of `online`, Q0, publish -- while the updater reads the mask after W1 and W1b; the run must see the mask grow and end with every CPU online |
 
 ## Target self-tests (`kernel/core/quiescetest.c`)
 
@@ -61,10 +65,48 @@ preempted until the next tick.
 | Reclaim generations under 3 readers, 400 ms | 201 | 199 | ≈ 4 ms per grace period; `call_quiesce` batches pay one period for the batch |
 | Read-side section cost | one `preempt_disable`/`enable` pair | | no atomics, no shared writes |
 
+## Memory ordering
+
+The orderings in `design.md` ("The epoch algorithm and its memory
+ordering") are checked three ways, because each covers what the others
+cannot:
+
+- **Litmus tests against the C11 model** (`tests/litmus/quiesce/`,
+  `make litmus`). herd7 enumerates every execution RC11 permits, so a
+  verdict is exhaustive for the pattern it states. `gp` (no data race
+  between a section's read and the free), `unlink` (a CPU that published
+  the new epoch sees the unlink), `two-waiters` (the release sequence
+  through W1's RMW), `online` (the onlining fences) and `wake` (no lost
+  grace-period wake) are forbidden or race-free; `online-old` records
+  that the order before the onlining fences allowed the bad outcome.
+  `tests/litmus/run_litmus.py` also checks that each conjunct of a
+  forbidden outcome is reachable on its own, and eight negative controls
+  -- Q1, Q2, W1 or W2 weakened, the release sequence broken, either
+  onlining fence removed, the waitqueue read without its lock -- must
+  each flip the verdict. The litmus files are transcriptions: a change
+  to an order in `quiesce_core.h`, `quiesce.c` or `sched_start_cpu`
+  must be made in the matching file too.
+- **TSan** (`make host-test-quiesce-tsan`) runs the threaded host model
+  with real code from `quiesce_core.h`: every reader access must
+  happen-before the free through the protocol's atomics, whether or not
+  the hardware reordered anything on that run. The orders are named
+  macros, and the target builds two negative controls, Q2 relaxed and W2
+  relaxed, which must report a data race. The model's poison begins with
+  a scalar store, because TSan's `memset` interceptor does not report a
+  race against earlier reads on this platform: with `memset` alone the
+  model ran clean with every order relaxed.
+- **Hardware** cannot prove an absence, only show a presence. On the
+  Apple M1 the onlining store-buffering shape with the old orders
+  produced the forbidden outcome 5 times in 2,000,000 iterations (and 0
+  in the next 2,000,000); with the fences, 0 in both. That is evidence
+  the pattern is real on shipping hardware, not a test.
+
 ## Running
 
 ```sh
 make host-test                      # test_quiesce among the host tests
+make host-test-quiesce-tsan         # the same model under TSan, with negative controls
+make litmus                         # the litmus tests against RC11 (needs herd7)
 make test                           # every self-test, 4 CPUs
 QEMU_SMP=1 make test                # one CPU
 make ARCH=aarch64 test
@@ -81,7 +123,6 @@ make ARCH=aarch64 test
   virtio-blk with the driver's slot table full — asserting what the
   removal completed, in what order, and that the function can be
   re-probed (`docs/kernel/device/testing.md`).
-- No thread-sanitizer run of the host model.
 - `synchronize_quiesce` latency is tick-bound (one to two ticks with idle
   CPUs); a wake-on-publish design would shorten it and is listed under
   architectural debt in the final report.

@@ -2265,3 +2265,17 @@ See the [history index](README.md).
   architectures beside the four-CPU boots, so a self-test that needs a
   third CPU without saying so fails in CI rather than only on a local
   two-CPU run.
+- **Quiescence memory ordering.** Six litmus tests check the epoch
+  protocol against the C11 model with herd7 (`make litmus`): the grace
+  period race-free, unlink visibility, the release sequence through two
+  waiters, onlining and the grace-period wake, each with reachability
+  witnesses and negative controls that weaken one order and must flip the
+  verdict. The epoch-core host model runs under TSan
+  (`make host-test-quiesce-tsan`) with two new models and two
+  negative builds that must report a race. Both are in CI, the litmus
+  tests in a `debian:sid` job where herdtools7 is packaged. The model found
+  a real hole: a grace period read the online CPUs before W1 while a CPU
+  coming online published before marking itself online, so a reader on
+  the new CPU could keep an unlinked object past its free (allowed under
+  RC11; seen 5 times in 2,000,000 on an M1). Two `seq_cst` fences, W1b and
+  Q0, close it. Report: `docs/audit/2026-10-05-quiesce-memory-order-report.md`.

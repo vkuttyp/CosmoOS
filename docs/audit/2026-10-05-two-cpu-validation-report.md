@@ -470,7 +470,7 @@ Every row ran; the verdict is the tool's own line.
 | Release build + boot | `gmake -j6 ARCH=<arch> BUILD=release all test` | x86-64 PASS 16.7 s, AArch64 PASS 20.3 s |
 | Chaos migrator (4 CPUs) | `gmake -j6 ARCH=<arch> BUILD=debug test-chaos` | x86-64 PASS 129.9 s, AArch64 PASS 131.8 s; all 423 self-tests, the three changed tests included |
 | Host tests | `gmake -j6 ARCH=x86_64 host-test` | rc 0 |
-| Static analysis | `gmake -j6 ARCH=<arch> analyze` | "static analysis: clean", both. Two analyzer warnings print in code this branch does not touch (`sched.c:662` shift width; `sched-balance-affinity`'s `t[2]` read uninitialised on a failed first create in `smptest.c`); pre-existing and not gating |
+| Static analysis | `gmake -j6 ARCH=<arch> analyze` | "static analysis: clean", both. The full run prints 27 analyzer warnings (first written here as two: a grep for "1 warning generated" saw two of them; corrected by the [memory-order report](2026-10-05-quiesce-memory-order-report.md)), none in code this branch touched -- among them `sched.c:662` (shift width), `smptest.c:1763` (`sched-balance-affinity`'s `t[2]` read uninitialised on a failed first create) and `devtest.c:481`; pre-existing and not gating |
 | Lockdep | every debug boot above, `LOCKDEP=1` | only `expected report:` lines: 14 at one CPU, 17 otherwise, identical to baseline |
 | Negative controls | `tools/two-cpu-probe.py` | 9 of 9 required failures (§19) |
 
