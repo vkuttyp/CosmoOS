@@ -1,6 +1,6 @@
 # Remaining milestone work
 
-Status snapshot: 2026-10-04, after merging [PR #307](https://github.com/vkuttyp/CosmoOS/pull/307).
+Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308).
 
 This plan consolidates the remaining work from the
 [deferred-work inventory](audit/2026-09-deferred-work-inventory.md), the
@@ -9,10 +9,11 @@ subsystem reports. The inventory's §5 records the original ten roadmap
 milestones as built. The entries below are their follow-ups and later
 capabilities, not a proposal to rebuild those milestones.
 
-The spin-contention continuation is implemented and pushed on
-`milestone/lockdep-spin-contention` through `087a55cc`, but was not merged
-with PR #307. Its implementation commit is `95dc0286`; its evidence is in
-the [October 4 report](https://github.com/vkuttyp/CosmoOS/blob/087a55cc240e02bb20a7bce108acd7e91ad17cf7/docs/audit/2026-10-04-spin-contention-report.md).
+The spin-contention continuation merged with PR #308 (`24ed5c45`). Its
+implementation commit is `95dc0286`; `e324a62b` fixes the startup dependency
+that failed the first remote x86 boot (run 37186753332). Remote CI run
+37187562158 passed on x86-64 and AArch64. Evidence is in the
+[October 4 report](audit/2026-10-04-spin-contention-report.md).
 
 ## How to use this plan
 
@@ -39,12 +40,15 @@ the completion evidence and PR. Keep failures and limitations explicit.
 Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-milestone-follow-ups-2026-10-03),
 [lockdep design](kernel/lockdep/design.md),
 [lockdep testing](kernel/lockdep/testing.md), and the
-[spin-contention report](https://github.com/vkuttyp/CosmoOS/blob/087a55cc240e02bb20a7bce108acd7e91ad17cf7/docs/audit/2026-10-04-spin-contention-report.md).
+[spin-contention report](audit/2026-10-04-spin-contention-report.md).
 
-- [ ] **Integration — spin-contention increment.** Open its PR, review the
-  findings, run remote CI and merge. The increment observes failed spin
-  exchanges, checks nested IRQ wait restoration, and measures plain and
-  irqsave acquisition handoff. Local results do not substitute for merge.
+- [x] **Integration — spin-contention increment.** Merged with PR #308 after
+  remote CI run 37187562158 passed on both architectures. The increment
+  observes failed spin exchanges, checks nested IRQ wait restoration, and
+  measures plain and irqsave acquisition handoff. Its CI follow-up makes
+  both contention protocols rendezvous with IRQs enabled before either
+  participant masks them; no shootdown or test budget changed. See the
+  [PR #308 follow-up](audit/2026-10-04-spin-contention-report.md#pr-308-ci-follow-up-runnable-is-not-ready).
 - [ ] **Implementation/validation — NMI/#MC writers and cross-CPU waits.**
   Establish safe validator behavior for general NMI/machine-check writer
   entry and cross-CPU raw-lock wait cycles. Existing same-CPU re-entry
@@ -71,7 +75,7 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
 
 ## 2. Immediate suite failures and timing investigations
 
-Sources: [October 4 validation report](https://github.com/vkuttyp/CosmoOS/blob/087a55cc240e02bb20a7bce108acd7e91ad17cf7/docs/audit/2026-10-04-spin-contention-report.md),
+Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.md),
 [flake history](testing/flakes.md), and inventory §§1.3, 3 and 7.
 
 - [ ] **Validation/fix — two-CPU VirtIO removal test.** Its placement helper
@@ -401,13 +405,12 @@ their deferred status here; this section does not schedule them for implementati
 
 ## Suggested next increments
 
-1. Integrate the pushed spin-contention work with review and remote CI.
-2. Establish a trustworthy two-CPU validation baseline and address the
+1. Establish a trustworthy two-CPU validation baseline and address the
    VirtIO/scheduler failures without weakening their intended contracts.
-3. Add quiescence memory-order models and targeted negative controls.
-4. Extend callback-wait and raw IRQ-pairing coverage within the established
+2. Add quiescence memory-order models and targeted negative controls.
+3. Extend callback-wait and raw IRQ-pairing coverage within the established
    locking and lifetime architecture.
-5. Select later features from the sections above by demonstrated correctness
+4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
 
 This ordering is a proposal for subsequent increments, not a claim that all
