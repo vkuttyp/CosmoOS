@@ -8,6 +8,10 @@ repository's own documents defer, delay or set for later, in one place,
 cross-checked against the code so that a report proposes something that
 is actually open and does not re-propose something already built.
 
+The README's Status section has since moved, verbatim, to
+[`docs/history/`](../history/README.md). A `README.md:N` citation below
+names line N of the README at 0318119 (`git show 0318119:README.md`).
+
 Sources read in full: `README.md` (the Status section, lines 75-1933),
 `docs/audit/2026-09-post-roadmap-audit.md`,
 `docs/audit/2026-09-lifetime-quiesce-report.md`, and the three prompts
