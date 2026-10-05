@@ -1,6 +1,7 @@
 # Remaining milestone work
 
-Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308).
+Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
+§2's two-CPU items updated by the two-CPU validation increment the same day.
 
 This plan consolidates the remaining work from the
 [deferred-work inventory](audit/2026-09-deferred-work-inventory.md), the
@@ -78,22 +79,39 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
 Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.md),
 [flake history](testing/flakes.md), and inventory §§1.3, 3 and 7.
 
-- [ ] **Validation/fix — two-CPU VirtIO removal test.** Its placement helper
+- [x] **Validation/fix — two-CPU VirtIO removal test.** Its placement helper
   assigns the nonpreemptible read-side holder and remover to the same CPU
   when there is no third CPU, preventing the required overlap. Correct the
   test arrangement or explicitly define its supported CPU-count premise.
-- [ ] **Validation — two-CPU scheduler failures.** Diagnose `sched-spread`
+  *Completed 2026-10-05 — test bug, two layers; two CPUs suffice.* The
+  removal now runs on the test thread with the holder on another CPU; a
+  submitter preempted inside `blk_submit` behind the holder also kept
+  `blk_unregister`'s (correct) drain waiting, so the submitter is parked
+  first. Five stamps prove the overlap. No kernel change. See the [two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §§5–6.
+- [x] **Validation — two-CPU scheduler failures.** Diagnose `sched-spread`
   placing all eight workers on one CPU and the observed `sched-balance-pair`
   failure. The spin increment did not establish their cause or compare them
   against a baseline two-CPU boot.
+  *Completed 2026-10-05 — both test bugs; no scheduler defect.* Unchanged
+  `main` also failed `sched-spread` at three CPUs: its bound predates S29,
+  under which the running creator's CPU never ties. Two CPUs have no tie to
+  observe, so the test skips there with that reason. `sched-balance-pair`'s
+  2 ms poll expired on every tick before `balance_tick` on the only
+  receiving CPU, so it never scanned as idle (x86-64 too). See the [two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §§7–10.
 - [ ] **Validation — syscall-fuzz duration excursions.** Investigate the
   recorded AArch64 budget failures, including 8,240 ms against 8,000 ms during
   the spin increment. An unchanged-image retry passed; that does not explain
   the slowdown or justify weakening the assertions.
+  *2026-10-05: not reproduced* — 3,545–3,921 ms in 35 AArch64 boots at one to
+  four CPUs, boots run one at a time; cause still unestablished ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
 - [ ] **Validation — other timing assumptions.** Revisit the remaining
   `thrtest`/`cwdtest` assumptions and the rare long `net-bench` run with
   evidence that distinguishes scheduling delay from a mechanism failure.
   See the [suite-waits report](audit/next-subsystem-suite-waits.md).
+  *2026-10-05:* `thrtest`'s counts are workload sizes with clock-deadline
+  waits; `cwdtest --held` still bounds seam waits by 200,000 yields (a count
+  standing in for a duration), not failing in 68 boots; `net-bench` took
+  1.2–3.5 s throughout ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
 - [ ] **Validation — slirp connection resets.** The guest-side network test
   now makes up to three attempts and the host harness records each exchange, but the specific slirp defect remains unidentified.
   Continue with host-loopback capture or slirp source investigation; do not
@@ -102,6 +120,7 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
 - [ ] **Validation — AArch64 virtio-console output loss.** Explain the
   historical missing final console line while the serial log was complete.
   This remains an unexplained observation, not a demonstrated root cause.
+  *2026-10-05: not reproduced* in 35 AArch64 captures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
 
 ## 3. Lifetime and quiescence
 
@@ -136,6 +155,11 @@ and [SMP design](kernel/smp/design.md).
   requirements for fairness, real-time, deadline and interactive policies,
   plus CPU isolation, beyond the existing fixed-priority round-robin policy.
   Its 64 priority levels have no user-facing priority or policy syscalls.
+- [ ] **Conditional/deferred — placement and idle-balance policy quality.**
+  Two policy observations from the [two-CPU report](audit/2026-10-05-two-cpu-validation-report.md) (§§8–9), within documented rules:
+  `pick_cpu`'s tie rotation favours the CPU after a busy creator's (2:1 at
+  three CPUs), and a CPU whose own sleeper expires on every tick never
+  balances as idle. Change only with workload measurements.
 - [ ] **Validation/implementation — user-mode preempted-thread migration.**
   Assess relaxing the restriction for threads preempted in user mode, where
   interrupted kernel per-CPU accesses are absent. Existing measurements did
@@ -345,6 +369,9 @@ Sources: inventory §§2.10, 2.11 and 3,
 - [ ] **Validation — CPU and firmware matrices.** Expand routine CPU-count
   coverage, include the two-CPU prerequisites in §2, and test AArch64 firmware
   variants or document a supported minimum EDK2/AAVMF version.
+  *2026-10-05:* the two-CPU prerequisites are done; full suites pass locally
+  at one to four CPUs on both architectures, but CI still boots only four
+  CPUs. Adding a two-CPU CI boot is the next step ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §23).
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.
@@ -431,8 +458,9 @@ their deferred status here; this section does not schedule them for implementati
 
 ## Suggested next increments
 
-1. Establish a trustworthy two-CPU validation baseline and address the
-   VirtIO/scheduler failures without weakening their intended contracts.
+1. ~~Establish a trustworthy two-CPU validation baseline and address the
+   VirtIO/scheduler failures without weakening their intended contracts.~~
+   Done 2026-10-05 ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)); add a two-CPU CI boot so it stays done.
 2. Add quiescence memory-order models and targeted negative controls.
 3. Extend callback-wait and raw IRQ-pairing coverage within the established
    locking and lifetime architecture.

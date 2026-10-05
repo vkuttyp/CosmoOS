@@ -731,7 +731,10 @@ Still open for the next milestone:
 - Kernel interrupt-entry and callback concurrency validation beyond the
   host graph/held-stack and interrupt-publication tests, kernel writer/IPI
   and unregistered-delivery regressions, and bounded x86 NMI reader test.
-- Two-CPU full-suite validation: the VirtIO removal overlap needs a third
+- ~~Two-CPU full-suite validation: the VirtIO removal overlap needs a third
   CPU with its current placement helper; `sched-spread` and
   `sched-balance-pair` failures observed on two CPUs remain unattributed.
-  See the [October 4 report](2026-10-04-spin-contention-report.md).
+  See the [October 4 report](2026-10-04-spin-contention-report.md).~~
+  **Resolved 2026-10-05:** all three were test defects (no kernel change);
+  the full suite now passes at one to four CPUs on both architectures. See
+  the [two-CPU validation report](2026-10-05-two-cpu-validation-report.md).

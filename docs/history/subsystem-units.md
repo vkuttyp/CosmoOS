@@ -2246,3 +2246,17 @@ See the [history index](README.md).
   suite pass is claimed. Report:
   `docs/audit/2026-10-04-spin-contention-report.md`; probe:
   `tools/spin-contention-probe.py`. (PR #308)
+- **Two-CPU validation.** Unchanged `main` failed every two-CPU boot and,
+  for `sched-spread`, every three-CPU boot; all three failures were test
+  defects, with no kernel change. `virtio-remove-inflight`'s `irq-order`
+  pass put its nonpreemptible holder and remover on one CPU, and then a
+  submitter preempted inside `blk_submit` behind the holder kept
+  `blk_unregister`'s drain waiting. The removal now runs on the test thread
+  with the submitter parked, and five stamps prove the overlap.
+  `sched-spread`'s bound predated S29, under which the running creator's
+  CPU never ties; two CPUs skip with that reason. `sched-balance-pair`'s
+  2 ms poll expired on every tick before `balance_tick` on the only
+  receiving CPU; it now blocks on a move signal. Full suite at one to
+  four CPUs on both architectures. Report:
+  `docs/audit/2026-10-05-two-cpu-validation-report.md`; probe:
+  `tools/two-cpu-probe.py`; runner: `tools/two-cpu-matrix.sh`.

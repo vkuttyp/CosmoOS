@@ -2885,6 +2885,16 @@ was run. Bounds and assertions remain unchanged. See the
 [spin report](../audit/2026-10-04-spin-contention-report.md) for logs and
 the separate targeted two-CPU spin-guard result.
 
+**Attributed and fixed, 2026-10-05.** All three were test defects,
+reproduced on both architectures against unchanged `main`; `sched-spread`
+also failed every three-CPU boot. `virtio-remove-inflight`: the placement
+above, then a submitter preempted inside `blk_submit` behind the holder,
+which `blk_unregister`'s drain correctly waits for. `sched-spread`: a bound
+from before S29, under which the creator's CPU never ties.
+`sched-balance-pair`: the observer's 2 ms sleep expired on every tick
+before `balance_tick` on the only receiving CPU (x86-64 failed it too).
+See the [two-CPU report](../audit/2026-10-05-two-cpu-validation-report.md).
+
 ## `lockup-sample-irqoff`: the restored CPU did not answer the second sample, 2026-09-29
 
 `SELFTEST: lockup-sample-irqoff ... FAIL: check failed: m2 &
