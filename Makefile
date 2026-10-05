@@ -99,9 +99,12 @@ endif
 # default four, and a test that needs a third CPU without saying so passes
 # them all: `virtio-remove-inflight`, `sched-spread` and `sched-balance-pair`
 # each failed at two CPUs, unseen by CI
-# (docs/audit/2026-10-05-two-cpu-validation-report.md). Two is the smallest
-# count at which every SMP test has something to prove; one CPU is covered
-# by `QEMU_SMP=1 make test` locally.
+# (docs/audit/2026-10-05-two-cpu-validation-report.md). This boot catches a
+# test that wrongly assumes a third CPU. It does not run every SMP test:
+# those that genuinely need three or more CPUs (`sched-spread`,
+# `sched-migrate` and others) skip here with their reason, and the
+# four-CPU boots run them. One CPU is covered by `QEMU_SMP=1 make test`
+# locally.
 test-smp2:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) QEMU_SMP=2 \
 		BOOT_LOG=$(OUT)/boot-test-smp2.log test
