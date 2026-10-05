@@ -25,7 +25,7 @@
 #endif
 #define N 2000000
 static _Atomic int P, online;
-static _Atomic unsigned phase_w, phase_a;   /* round each thread has finished */
+static _Atomic unsigned phase_a;   /* the round the new-CPU thread has finished */
 static _Atomic unsigned start;
 static int r_online[N], r_p[N];
 
