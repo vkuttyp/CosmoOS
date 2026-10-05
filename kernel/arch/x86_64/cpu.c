@@ -204,14 +204,14 @@ bool arch_irq_state_enabled(arch_irq_state_t state)
     return (state & RFLAGS_IF) != 0;
 }
 
-arch_irq_state_t arch_irq_save(void)
+arch_irq_state_t arch_irq_save_hw(void)
 {
     uint64_t flags = read_rflags();
     __asm__ volatile("cli" ::: "memory");
     return (arch_irq_state_t)flags;
 }
 
-void arch_irq_restore(arch_irq_state_t state)
+void arch_irq_restore_hw(arch_irq_state_t state)
 {
     if (state & RFLAGS_IF) {
         __asm__ volatile("sti" ::: "memory");

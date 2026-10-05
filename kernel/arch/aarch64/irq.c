@@ -9,14 +9,14 @@ bool arch_irq_state_enabled(arch_irq_state_t state)
     return (state & DAIF_I) == 0;
 }
 
-arch_irq_state_t arch_irq_save(void)
+arch_irq_state_t arch_irq_save_hw(void)
 {
     uint64_t daif = READ_SYSREG(daif);
     __asm__ volatile("msr daifset, #2" ::: "memory");
     return (arch_irq_state_t)daif;
 }
 
-void arch_irq_restore(arch_irq_state_t state)
+void arch_irq_restore_hw(arch_irq_state_t state)
 {
     WRITE_SYSREG(daif, state);
     /* After the write, not before: the predicate reads DAIF

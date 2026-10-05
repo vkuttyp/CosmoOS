@@ -14,11 +14,27 @@
 
 typedef unsigned long arch_irq_state_t;
 
-/* Disable interrupts and return the previous state for restore. */
-arch_irq_state_t arch_irq_save(void);
 /* Whether a saved state restores IRQ delivery as enabled. */
 bool arch_irq_state_enabled(arch_irq_state_t state);
+
+/* The hardware operations, per architecture. */
+arch_irq_state_t arch_irq_save_hw(void);
+void arch_irq_restore_hw(arch_irq_state_t state);
+
+/*
+ * Disable interrupts and return the previous state; restore it. With
+ * lockdep these also check the pairing (docs/kernel/lockdep/design.md,
+ * "Raw interrupt-state pairing"): a restore must undo the innermost
+ * outstanding save of the same context, with interrupts still masked
+ * inside it. Without lockdep they are the hardware operations.
+ */
+#if defined(CONFIG_LOCKDEP) && CONFIG_LOCKDEP
+arch_irq_state_t arch_irq_save(void);
 void arch_irq_restore(arch_irq_state_t state);
+#else
+static inline arch_irq_state_t arch_irq_save(void) { return arch_irq_save_hw(); }
+static inline void arch_irq_restore(arch_irq_state_t state) { arch_irq_restore_hw(state); }
+#endif
 
 void arch_irq_enable(void);
 void arch_irq_disable(void);

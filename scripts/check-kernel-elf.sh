@@ -5,6 +5,7 @@
 # turn into confusing boot failures:
 #   - every PT_LOAD is either writable or executable, never both (W^X)
 #   - a PT_NOTE segment exists (the loader reads the cosmoboot note there)
+#   - the scheduler's restore chain is tail calls (below)
 set -eu
 
 objdump=$1
@@ -28,3 +29,27 @@ printf '%s\n' "$phdrs" | awk '
     }
     END { exit bad ? 1 : 0 }
 '
+
+# schedule() ends by restoring interrupts, and that restore's preemption
+# point may enter schedule() again ("one more trip"). The recursion is
+# bounded only because every link is a tail call, so each frame is gone
+# before the next is made. A link compiled as a call grows the stack by a
+# frame per resumption of a busy thread: lockdep's raw-pairing wrapper did,
+# and a one-CPU boot double faulted on the idle thread's stack
+# (docs/audit/2026-10-06-lockdep-irq-pairing-report.md). A symbol a build
+# does not have (the wrapper is inline without lockdep) is skipped.
+tail_call() {
+    caller=$1 callee=$2
+    body=$("$objdump" -d --no-show-raw-insn --disassemble-symbols="$caller" "$elf" 2>/dev/null) || return 0
+    if printf '%s\n' "$body" | grep -E "[[:space:]](call|callq|bl|blr)[[:space:]].*<$callee>" >/dev/null; then
+        echo "check-kernel-elf: $caller calls $callee instead of tail-calling it;" \
+             "the preempt-at-restore recursion through schedule() would grow the stack" >&2
+        exit 1
+    fi
+}
+tail_call schedule_internal arch_irq_restore
+tail_call schedule_internal arch_irq_restore_hw
+tail_call arch_irq_restore arch_irq_restore_hw
+tail_call arch_irq_restore_hw preempt_point
+tail_call preempt_point sched_preempt
+tail_call sched_preempt schedule_internal
