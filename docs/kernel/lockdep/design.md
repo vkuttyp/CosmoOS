@@ -160,9 +160,9 @@ node/class indices, each search has the following conservative bounds:
 | Clear visited bitmap | W writes |
 | Usage-search seed candidates | 4C ≤ N checks; none for reachability |
 | Queue insertions and removals | at most N each |
-| Adjacency bitmap loads | at most NW = 25,600 words |
+| Adjacency bitmap loads | at most NW = 36,864 words |
 | Newly discovered neighbor iterations | at most N minus the initial sources |
-| Reachability path reconstruction | at most 2N − 1 = 2,559 parent steps |
+| Reachability path reconstruction | at most 2N − 1 = 3,071 parent steps |
 | Usage-search predecessor reconstruction | at most N − 1 parent steps |
 
 Nodes are marked visited when enqueued, including every initial source.
@@ -180,7 +180,7 @@ runs at most four, one per subclass; a direct mixed-usage conflict returns
 before searching. An acquisition can check at most 32 held entries (24
 spinlocks plus eight mutexes), with one reachability and up to two IRQ
 searches per missing edge. Including usage validation gives a conservative
-100-search ceiling, or 2,560,000 adjacency-word loads, for those decision
+100-search ceiling, or 3,686,400 adjacency-word loads, for those decision
 paths. This is a loose bound, not a claim that one graph attains every
 maximum together. It excludes class lookup, held-stack/profile scans,
 statistics, diagnostic searches/printing and raw-lock contention. It does

@@ -202,7 +202,7 @@ arbitrary stopped CPUs or NMI writer nesting remain outside their scope.
 graph and search scratch, then measures the real reachability, IRQ-edge,
 and insertion helpers in the same order as acquisition checking. Each
 graph has 16, 64, 256, or 384 classes with one active node per class (subclass
-zero). An additional 1,280-node case populates all four subclasses of
+zero). An additional 1,536-node case populates all four subclasses of
 every class; the core's fixed bitmap capacity is unchanged.
 
 The `insert` and `irq-bridge` cases start with two disjoint chains and
@@ -231,14 +231,14 @@ scheduling enabled. Results report min/median/max guest nanoseconds.
 These are core algorithm costs, excluding raw-lock contention, class
 registration, held-stack scans, statistics, and reports. They do not
 measure end-to-end acquisition latency or establish a worst-case bound.
-The full-capacity dense cycle graph has 818,560 edges; its two-component
-cases have 408,960. IRQ labels apply to all subclasses: the full chain's
+The full-capacity dense cycle graph has 1,178,880 edges; its two-component
+cases have 589,056. IRQ labels apply to all subclasses: the full chain's
 safe endpoint is subclass 3 of the first class, while the dense case uses
 subclass 0; both reach subclass 0 of the last IRQ-enabled class. The tests
 check these endpoints explicitly. Output identifies topology and the
 pre-operation edge count for each of the 30 cases.
 
-The host `dense-capacity` sanitizer test fills the same 1,280-node dense
+The host `dense-capacity` sanitizer test fills the same 1,536-node dense
 DAG, checks a two-entry path buffer, forces a full traversal with an absent
 usage label, and initializes every node as a BFS source. These exercise
 queue capacity and duplicate suppression under ASan/UBSan.
@@ -255,9 +255,9 @@ Tests reset counters between operations; composite IRQ helpers accumulate
 all searches rather than silently replacing the count with the last one.
 
 The test covers all 1536 nodes: an absent usage label on a dense DAG
-attains 25,600 adjacency-word reads; all nodes as initial sources test
+attains 36,864 adjacency-word reads; all nodes as initial sources test
 duplicate suppression; an isolated target forces an exhaustive failed
-reachability search; a full chain attains 2,559 parent steps even with no
+reachability search; a full chain attains 3,071 parent steps even with no
 output path; and a cyclic graph still terminates within the bound. It also
 checks empty-source and self-reachability shortcuts, four-search fresh
 usage validation, zero-search warmed usage, usage-conflict rejection and

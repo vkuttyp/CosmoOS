@@ -640,8 +640,12 @@ static bool cb_run_once(struct timer *t)
     timer_start(t, 1000000ULL);
     uint64_t end = clock_now_ns() + 1000000000ULL;
     while (__atomic_load_n(&g_cb_ran, __ATOMIC_ACQUIRE) == before) {
-        if (clock_now_ns() > end)
+        if (clock_now_ns() > end) {
+            /* The timer lives on the caller's stack: it must be idle and
+             * its callback finished before the failure unwinds the frame. */
+            (void)timer_cancel_sync(t);
             return false;
+        }
         thread_sleep_ms(1);
     }
     (void)timer_cancel_sync(t);
