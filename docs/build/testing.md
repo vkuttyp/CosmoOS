@@ -119,7 +119,7 @@ behind a passing `make test`.
 `.github/workflows/ci.yml` runs on push and pull request on
 `ubuntu-24.04`:
 
-1. `apt-get install clang lld llvm make mtools qemu-system-x86 ovmf python3`
+1. `apt-get install clang lld llvm libclang-rt-dev make mtools musl-tools python3 qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64`
 2. `make check-tools`
 3. `make BUILD=debug test`
 4. `make BUILD=release test`

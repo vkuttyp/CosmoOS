@@ -1,6 +1,7 @@
 # CosmoOS top-level build.
 #
-#   make [ARCH=x86_64|aarch64] [BUILD=debug|release] [V=1]   build loader + kernel
+#   make [ARCH=x86_64|aarch64] [BUILD=debug|release] [V=1]   build loader, kernel, libc, userland,
+#                     packages, modules and test guests
 #   make image        FAT boot image with loader and kernel
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
@@ -15,7 +16,8 @@
 #   make analyze      clang static analyzer over all target sources
 #   make reproducible build twice into separate trees and compare outputs
 #   make compile-commands  compile_commands.json for clangd with cross flags
-#   make check-tools  verify the cross toolchain is usable
+#   make check-tools  verify the cross toolchain is usable (and run check-secrets)
+#   make check-secrets  fail if a private or revoked module-signing key is tracked
 #   make clean        remove $(OUT)
 #
 # Host and target are separate concepts throughout. See docs/build/.
@@ -196,7 +198,7 @@ clean:
 	$(Q)rm -rf $(OUT)
 
 help:
-	@sed -n '2,16p' $(ROOT)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,/^#   make clean/p' $(ROOT)/Makefile | sed 's/^# \{0,1\}//'
 	@echo
 	@echo "ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT)"
 	@echo "HOST=$(HOST_OS)/$(HOST_ARCH) CC=$(CC) LD=$(LD)"

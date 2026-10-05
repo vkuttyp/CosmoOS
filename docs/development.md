@@ -27,8 +27,9 @@ Run once, inside the VM:
 make check-tools
 ```
 
-The script installs `clang lld llvm make git mtools qemu-system-x86 ovmf
-python3` with apt. Any Linux distribution works if the same tools are
+The script installs `clang lld llvm libclang-rt-dev make git mtools
+musl-tools qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 python3`
+with apt, the same set CI installs. Any Linux distribution works if the same tools are
 present; only Debian/Ubuntu is scripted.
 
 ## Secondary host: macOS with Homebrew
