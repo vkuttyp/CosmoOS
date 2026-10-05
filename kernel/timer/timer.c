@@ -349,6 +349,7 @@ void timer_setup(struct timer *t, timer_fn fn, void *arg)
     t->arg = arg;
     t->cpu = 0;
     t->state = TIMER_IDLE;
+    t->lockdep_class = 0;   /* a new function is a new callback class */
 }
 
 void timer_start(struct timer *t, uint64_t delay_ns)
@@ -446,6 +447,14 @@ bool timer_cancel_sync(struct timer *t)
     bool was_pending = false;
     bool waited = false;
 
+    /* Whether or not the callback is running now, this call may wait for
+     * it: record the wait against the callback's class, so a held lock
+     * that any callback of this function takes (or reaches) is reported
+     * here, not only when one happens to be running (lockdep design.md,
+     * "Callback classes"). After a report the caller must not wait. */
+    if (!lockdep_callback_wait((const void *)t->fn, &t->lockdep_class, (uintptr_t)__builtin_return_address(0)))
+        return false;
+
     /* The callback runs under q->running with the queue lock dropped and
      * takes the lock again when it returns. Holding the lock while
      * q->running != t therefore means the callback is not executing;
@@ -507,9 +516,15 @@ static void run_expired(struct timer_queue *q, uint64_t now)
         q->running = t;
         spin_unlock(&q->lock);
 
+        /* The callback class is named by the function, read while the
+         * timer is certainly alive; exit names only the function, since
+         * the timer may be gone by then (above). */
+        timer_fn fn = t->fn;
+        lockdep_callback_enter((const void *)fn, &t->lockdep_class);
         lockdep_timer_enter(t);
-        t->fn(t, t->arg);
+        fn(t, t->arg);
         lockdep_timer_exit(t);
+        lockdep_callback_exit((const void *)fn);
 
         spin_lock(&q->lock);
         q->running = NULL;

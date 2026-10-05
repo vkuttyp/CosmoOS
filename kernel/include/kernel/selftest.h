@@ -99,6 +99,7 @@ bool selftest_lockdep_recursion(const char **reason);
 bool selftest_lockdep_irq(const char **reason);
 bool selftest_lockdep_sleep(const char **reason);
 bool selftest_lockdep_mutex(const char **reason);
+bool selftest_lockdep_callback(const char **reason);   /* a timer wait checked against every observed callback of its function */
 bool selftest_lockdep_contention(const char **reason);
 bool selftest_lockdep_graph_bench(const char **reason);
 bool selftest_lockdep_bench(const char **reason);

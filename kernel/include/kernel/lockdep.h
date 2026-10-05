@@ -80,6 +80,20 @@ void lockdep_timer_cancel_done(const void *timer);
 void lockdep_timer_enter(const void *timer);
 void lockdep_timer_exit(const void *timer);
 bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip);
+/*
+ * Callback classes (design.md, "Callback classes"): one pseudo-class per
+ * callback function `fn`, cached in `*class_slot`. A callback executes
+ * between enter and exit, so every lock it takes is recorded as taken
+ * under its class; a synchronous wait for such a callback records the
+ * waiter's held locks before the class, as if it acquired it. The graph
+ * then reports a wait that could deadlock against any callback of that
+ * function ever observed, or against a lock it reaches, in either order.
+ * The wait returns false after a report (the caller must not wait).
+ * Exit names only `fn`: the object holding the slot may be gone.
+ */
+void lockdep_callback_enter(const void *fn, uint16_t *class_slot);
+void lockdep_callback_exit(const void *fn);
+bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip);
 
 /* The debug half of might_sleep(): a report with the held stacks. */
 void lockdep_might_sleep(uintptr_t ip);
@@ -149,6 +163,10 @@ static inline void lockdep_timer_enter(const void *timer) { (void)timer; }
 static inline void lockdep_timer_exit(const void *timer) { (void)timer; }
 static inline bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
 { (void)timer; (void)ip; return true; }
+static inline void lockdep_callback_enter(const void *fn, uint16_t *class_slot) { (void)fn; (void)class_slot; }
+static inline void lockdep_callback_exit(const void *fn) { (void)fn; }
+static inline bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip)
+{ (void)fn; (void)class_slot; (void)ip; return true; }
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}

@@ -607,6 +607,117 @@ bool selftest_lockdep_contention(const char **reason)
 }
 
 
+/*
+ * Callback classes (design.md, "Callback classes"): a synchronous wait for
+ * a timer callback is checked against every callback of that function the
+ * graph has seen, transitively and in either order. Each case below is one
+ * the per-object profile (lockdep_timer_cancel_check) cannot see: it only
+ * knows the locks taken by the callback execution in progress on the very
+ * timer being cancelled.
+ */
+static spinlock_t g_cb_a = SPINLOCK_INIT("lockdep-cb-a");
+static spinlock_t g_cb_b1 = SPINLOCK_INIT("lockdep-cb-b1");
+static spinlock_t g_cb_b2 = SPINLOCK_INIT("lockdep-cb-b2");
+static spinlock_t g_cb_c = SPINLOCK_INIT("lockdep-cb-c");
+static spinlock_t g_cb_d = SPINLOCK_INIT("lockdep-cb-d");
+static unsigned g_cb_ran;
+
+static void cb_take(spinlock_t *l)
+{
+    spin_lock(l);
+    spin_unlock(l);
+    __atomic_fetch_add(&g_cb_ran, 1u, __ATOMIC_RELEASE);
+}
+static void cb_a(struct timer *t, void *arg) { (void)t; (void)arg; cb_take(&g_cb_a); }
+static void cb_b(struct timer *t, void *arg) { (void)t; (void)arg; cb_take(&g_cb_b1); }
+static void cb_c(struct timer *t, void *arg) { (void)t; (void)arg; cb_take(&g_cb_c); }
+
+/* Arm on this (pinned) CPU, wait for the callback, then synchronise with
+ * the queue's tail holding nothing, so the stack timer may be reused. */
+static bool cb_run_once(struct timer *t)
+{
+    unsigned before = __atomic_load_n(&g_cb_ran, __ATOMIC_ACQUIRE);
+    timer_start(t, 1000000ULL);
+    uint64_t end = clock_now_ns() + 1000000000ULL;
+    while (__atomic_load_n(&g_cb_ran, __ATOMIC_ACQUIRE) == before) {
+        if (clock_now_ns() > end)
+            return false;
+        thread_sleep_ms(1);
+    }
+    (void)timer_cancel_sync(t);
+    return true;
+}
+
+static bool selftest_lockdep_callback_pinned(const char **reason)
+{
+    struct timer t1, t2;
+    arch_irq_state_t s;
+    bool waited;
+    unsigned hits;
+
+    /* 1. The same function, another timer, never run, not running: a
+     * held lock that any cb_a callback has taken is a dependency. */
+    timer_setup(&t1, cb_a, NULL);
+    CHECK(cb_run_once(&t1));
+    timer_setup(&t2, cb_a, NULL);
+    s = spin_lock_irqsave(&g_cb_a);
+    lockdep_expect(LOCKDEP_R_CALLBACK);
+    waited = timer_cancel_sync(&t2);
+    hits = lockdep_expected_hits();
+    spin_unlock_irqrestore(&g_cb_a, s);
+    CHECK(!waited);
+    CHECK(hits == 1);
+
+    /* No false positive: a lock no cb_a callback reaches. */
+    s = spin_lock_irqsave(&g_cb_d);
+    (void)timer_cancel_sync(&t2);
+    spin_unlock_irqrestore(&g_cb_d, s);
+
+    /* 2. Transitive: cb_b takes b1, and b1 -> b2 is recorded elsewhere,
+     * so holding b2 across the wait closes b2 -> cb_b -> b1 -> b2. The
+     * callback never took b2. */
+    timer_setup(&t1, cb_b, NULL);
+    CHECK(cb_run_once(&t1));
+    s = spin_lock_irqsave(&g_cb_b1);
+    spin_lock(&g_cb_b2);
+    spin_unlock(&g_cb_b2);
+    spin_unlock_irqrestore(&g_cb_b1, s);
+    s = spin_lock_irqsave(&g_cb_b2);
+    lockdep_expect(LOCKDEP_R_CALLBACK);
+    waited = timer_cancel_sync(&t1);
+    hits = lockdep_expected_hits();
+    spin_unlock_irqrestore(&g_cb_b2, s);
+    CHECK(!waited);
+    CHECK(hits == 1);
+
+    /* 3. The other order: the wait comes first, with no callback of cb_c
+     * ever run, so nothing is known and nothing is reported. The first
+     * callback then takes c under its class, closing c -> cb_c -> c --
+     * an inversion reported in the callback itself. */
+    timer_setup(&t1, cb_c, NULL);
+    s = spin_lock_irqsave(&g_cb_c);
+    waited = timer_cancel_sync(&t1);
+    spin_unlock_irqrestore(&g_cb_c, s);
+    CHECK(!waited);
+    lockdep_expect(LOCKDEP_R_INVERSION);
+    CHECK(cb_run_once(&t1));
+    CHECK(lockdep_expected_hits() == 1);
+
+    kinfo("selftest: lockdep-callback: a wait is checked against every observed callback of the function: "
+          "another timer, a transitive lock, and the callback after the wait all reported");
+    return true;
+}
+
+/* Pinned: expectations are per CPU, and timer_start arms the timer on the
+ * caller's CPU, so case 3's report in the callback lands on this CPU. */
+bool selftest_lockdep_callback(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockdep_callback_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 #else
 
 static bool skip(const char **reason, const char *name)
@@ -621,6 +732,7 @@ bool selftest_lockdep_irq(const char **reason) { return skip(reason, "lockdep-ir
 bool selftest_lockdep_sleep(const char **reason) { return skip(reason, "lockdep-sleep"); }
 bool selftest_lockdep_mutex(const char **reason) { return skip(reason, "lockdep-mutex"); }
 bool selftest_lockdep_contention(const char **reason) { return skip(reason, "lockdep-contention"); }
+bool selftest_lockdep_callback(const char **reason) { return skip(reason, "lockdep-callback"); }
 
 #endif
 
