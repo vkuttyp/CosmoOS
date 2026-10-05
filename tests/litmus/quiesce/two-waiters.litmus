@@ -1,0 +1,16 @@
+C quiesce-two-waiters
+"Two waiters and W1's read-modify-write. P0 unlinks and advances the epoch from 0 to 1; P1, a second waiter, advances it from 1 to 2; P2 publishes having read 2 -- the second waiter's value, not the first's. Forbidden: P2 published 2 yet missed P0's unlink. Only the release sequence through P1's RMW orders it: a CPU is told the truth by any later epoch, which is why the comparison is >=."
+{ }
+P0 (atomic_int* p, atomic_int* epoch) {
+  atomic_store_explicit(p, 1, memory_order_relaxed);
+  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);
+}
+P1 (atomic_int* epoch) {
+  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);
+}
+P2 (atomic_int* p, atomic_int* epoch, atomic_int* seen) {
+  int e = atomic_load_explicit(epoch, memory_order_acquire);
+  int prev = atomic_exchange_explicit(seen, e, memory_order_acq_rel);
+  int r = atomic_load_explicit(p, memory_order_relaxed);
+}
+exists (0:t=0 /\ 1:t=1 /\ 2:e=2 /\ 2:r=0)

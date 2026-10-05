@@ -357,7 +357,7 @@ above; the built ones are kept here so the coverage is visible.
 | "Design future support for device add, remove, driver bind, unbind, device reset" | Prompt #2 §41 | built: add/remove for USB and AHCI; driver bind and unbind through the device model -- `driver_register` probes matching devices, `driver_unregister` runs remove and clears bindings (kernel/device/device.c:283-320, tests in `docs/kernel/device/testing.md`). Open: binding or unbinding one device independently of registering its driver outside debug builds (`device_test_bind`/`device_test_unbind` exist under `CONFIG_DEBUG`). ~~a generic device reset operation~~ -- **BUILT (the device-reset unit, `docs/audit/next-subsystem-device-reset.md`, PR #277)**: `device_reset(dev)` + a `reset` op on `struct device_driver`; virtio-blk resets in place on the same `blkdev` (`blk_reset` + the removal teardown and probe rebuild), `device-reset` proves it (3) |
 | async I/O "must work for files, sockets, devices, timers, IPC, VM operations" | Prompt #2 §23 | the ring drives any object with a readiness operation and has its own alarm timer; **devices shown since the device-readiness unit** (`docs/audit/next-subsystem-device-readiness.md`: a `READ` and a `POLL` on `/dev/net/tap` park and complete on a transmitted frame, the `devices` section); VM operations not shown by any test; ~~a timer as a submittable object~~ -- **BUILT (the aio-timer unit, `docs/audit/next-subsystem-aio-timer.md`, PR #275)**: `timer_create` returns a timer kobject that rides the ring's POLL/READ path, `aio-timer` exercises it. Still open: VM operations as submittable |
 | quiesce performance "16 CPUs, 64 CPUs, 256 CPUs where test infrastructure permits" | Prompt #3 §24 | measured at 1 and 4 CPUs only (lifetime report §6) |
-| "TSan-compatible host models where possible" | Prompt #3 §23 | built for lockdep and interrupt dispatch (PRs #304, #305); not done for quiesce (4) |
+| "TSan-compatible host models where possible" | Prompt #3 §23 | built for lockdep and interrupt dispatch (PRs #304, #305); ~~not done for quiesce (4)~~ **built for quiesce 2026-10-05** (`make host-test-quiesce-tsan`, with negative controls; see the [quiescence memory-order report](2026-10-05-quiesce-memory-order-report.md)) |
 | the populate loops that hold the space lock across every page "until milestone 5 adds preemption points" | lifetime report §7.2 | milestone 5 landed; whether it shortened those sections is **not verified** here (`VM_KALLOC_POPULATE` still exists) -- a report touching them checks first |
 
 ---
@@ -541,10 +541,16 @@ none is silently counted as passing validation.
   phase coincidence no deterministic test can arrange. Deleting it,
   bounding it, or proving it are three different units
   (`docs/audit/next-subsystem-lifetime-windows.md`).
-- **quiesce ordering verified by review and sanitizers only**: no TSan model, no
+- ~~**quiesce ordering verified by review and sanitizers only**: no TSan model, no
   litmus tests (Prompt #3 §23 asked for them "where possible"). The lockdep
   graph/held-stack model completed in PR #304 does not close this lifetime
-  protocol gap.
+  protocol gap.~~ **BUILT 2026-10-05**: six litmus tests checked by herd7
+  against RC11 (`make litmus`, with reachability witnesses and eight
+  negative controls) and the epoch-core host model under TSan with two
+  negative builds (`make host-test-quiesce-tsan`), both in CI. The litmus
+  model found a real ordering hole -- a CPU coming online could be missed
+  by a grace period while its reader missed the unlink -- fixed by two
+  `seq_cst` fences (W1b, Q0). See the [quiescence memory-order report](2026-10-05-quiesce-memory-order-report.md).
 - **unexplained**: the AArch64 virtio-console flake seen once in four
   runs on 2026-09-05 (the console file lacked the last line while the
   serial log was complete).

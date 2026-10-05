@@ -18,6 +18,29 @@
 #define QUIESCE_MAX_CPUS 64u
 #endif
 
+/*
+ * The memory orders, by the names design.md gives them. Only the host's
+ * negative-control builds override one (tests/host/host.mk,
+ * host-test-quiesce-tsan), to show the TSan model fails when that order
+ * is weakened; the kernel always uses these defaults. The litmus tests in
+ * tests/litmus/quiesce/ check the same orders against the C11 model.
+ */
+#ifndef QUIESCE_MO_Q1
+#define QUIESCE_MO_Q1 __ATOMIC_ACQUIRE     /* publisher: load the epoch */
+#endif
+#ifndef QUIESCE_MO_Q2
+#define QUIESCE_MO_Q2 __ATOMIC_ACQ_REL     /* publisher: exchange its seen epoch */
+#endif
+#ifndef QUIESCE_MO_W1
+#define QUIESCE_MO_W1 __ATOMIC_SEQ_CST     /* waiter: advance the epoch */
+#endif
+#ifndef QUIESCE_MO_W2
+#define QUIESCE_MO_W2 __ATOMIC_ACQUIRE     /* waiter: load a CPU's seen epoch */
+#endif
+#ifndef QUIESCE_MO_FENCE
+#define QUIESCE_MO_FENCE __ATOMIC_SEQ_CST  /* W1b and Q0, the two online fences below */
+#endif
+
 /* Per-CPU record, one cache line each so publishing never shares a line
  * with another CPU's record or with the global epoch. */
 struct quiesce_cpu {
@@ -44,8 +67,8 @@ struct quiesce_state {
  * (docs/kernel/quiesce/invariants.md, Q19). */
 static inline bool quiesce_core_publish(struct quiesce_state *st, unsigned cpu)
 {
-    uint64_t e = __atomic_load_n(&st->epoch, __ATOMIC_ACQUIRE);
-    uint64_t prev = __atomic_exchange_n(&st->cpus[cpu].seen_epoch, e, __ATOMIC_ACQ_REL);
+    uint64_t e = __atomic_load_n(&st->epoch, QUIESCE_MO_Q1);
+    uint64_t prev = __atomic_exchange_n(&st->cpus[cpu].seen_epoch, e, QUIESCE_MO_Q2);
     st->cpus[cpu].transitions++;
     return prev != e;
 }
@@ -55,7 +78,33 @@ static inline bool quiesce_core_publish(struct quiesce_state *st, unsigned cpu)
  * any CPU. Returns the epoch every online CPU must publish. */
 static inline uint64_t quiesce_core_begin(struct quiesce_state *st)
 {
-    return __atomic_add_fetch(&st->epoch, 1u, __ATOMIC_SEQ_CST);
+    return __atomic_add_fetch(&st->epoch, 1u, QUIESCE_MO_W1);
+}
+
+/*
+ * W1b and Q0: the two halves of "which CPUs does a grace period wait
+ * for" (docs/kernel/quiesce/design.md, "CPUs coming online").
+ *
+ * A waiter reads the online CPUs AFTER W1, behind W1b; a CPU coming
+ * online (sched_start_cpu) publishes, marks itself online, passes Q0,
+ * and only then runs a read section. That is the store-buffering shape
+ * -- waiter: unlink, W1, read online; new CPU: write online, look the
+ * object up -- and with a sequentially consistent fence on both sides at
+ * least one of them sees the other: either the waiter's snapshot
+ * includes the new CPU, and it waits for that CPU's next publish (which
+ * follows the section), or the new CPU's section sees the unlink and
+ * cannot find the object. Release/acquire alone permits both to miss,
+ * which is what the order before these fences did
+ * (tests/litmus/quiesce/online-*.litmus).
+ */
+static inline void quiesce_core_after_begin(void)
+{
+    __atomic_thread_fence(QUIESCE_MO_FENCE);   /* W1b */
+}
+
+static inline void quiesce_core_after_online(void)
+{
+    __atomic_thread_fence(QUIESCE_MO_FENCE);   /* Q0 */
 }
 
 /* W2: the CPUs in `online` that have not yet published `target` (or a
@@ -69,7 +118,7 @@ static inline uint64_t quiesce_core_pending(const struct quiesce_state *st, uint
     for (unsigned c = 0; c < QUIESCE_MAX_CPUS && (online >> c) != 0; c++) {
         if (!((online >> c) & 1u))
             continue;
-        if (__atomic_load_n(&st->cpus[c].seen_epoch, __ATOMIC_ACQUIRE) < target)
+        if (__atomic_load_n(&st->cpus[c].seen_epoch, QUIESCE_MO_W2) < target)
             pending |= (uint64_t)1 << c;
     }
     return pending;

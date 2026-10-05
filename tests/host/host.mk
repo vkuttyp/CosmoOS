@@ -213,6 +213,46 @@ $(HOST_OUT)/test_lockdep_threads_tsan: $(ROOT)/tests/host/test_lockdep_threads.c
 host-test-lockdep-tsan: $(HOST_OUT)/test_lockdep_threads_tsan
 	$(Q)TSAN_OPTIONS=halt_on_error=1 $<
 
+# The epoch core under TSan (docs/kernel/quiesce/testing.md, "Memory
+# ordering"). TSan checks that every reader access happens-before the free
+# through the protocol's own atomics, so it reports a missing pairing even
+# on a run where the hardware reordered nothing. The two negative controls
+# build the same test with one pairing weakened to relaxed -- the
+# publisher's release (Q2) or the waiter's acquire (W2) -- and must be
+# reported: a TSan model that passes them both would prove nothing.
+QUIESCE_TSAN_CFLAGS = $(filter-out $(HOST_LDFLAGS) -fno-sanitize-recover=undefined,$(HOST_CFLAGS)) -fsanitize=thread -pthread
+QUIESCE_TSAN_DEPS = $(addprefix $(ROOT)/,$(HOST_QUIESCE_SRCS)) $(ROOT)/kernel/include/kernel/quiesce_core.h
+
+$(HOST_OUT)/test_quiesce_tsan: $(QUIESCE_TSAN_DEPS)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) $(addprefix $(ROOT)/,$(HOST_QUIESCE_SRCS)) -o $@
+
+$(HOST_OUT)/test_quiesce_tsan_neg_q2: $(QUIESCE_TSAN_DEPS)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) -DQUIESCE_MO_Q2=__ATOMIC_RELAXED $(addprefix $(ROOT)/,$(HOST_QUIESCE_SRCS)) -o $@
+
+$(HOST_OUT)/test_quiesce_tsan_neg_w2: $(QUIESCE_TSAN_DEPS)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) -DQUIESCE_MO_W2=__ATOMIC_RELAXED $(addprefix $(ROOT)/,$(HOST_QUIESCE_SRCS)) -o $@
+
+.PHONY: host-test-quiesce-tsan
+host-test-quiesce-tsan: $(HOST_OUT)/test_quiesce_tsan $(HOST_OUT)/test_quiesce_tsan_neg_q2 $(HOST_OUT)/test_quiesce_tsan_neg_w2
+	$(Q)TSAN_OPTIONS=halt_on_error=1 $(HOST_OUT)/test_quiesce_tsan
+	$(Q)for n in q2 w2; do \
+		echo "== negative control: $$n relaxed (TSan must report a data race)"; \
+		if TSAN_OPTIONS=halt_on_error=1 $(HOST_OUT)/test_quiesce_tsan_neg_$$n > $(HOST_OUT)/test_quiesce_tsan_neg_$$n.log 2>&1; then \
+			echo "FAIL: the $$n-weakened model ran clean"; exit 1; \
+		fi; \
+		if ! grep -q "WARNING: ThreadSanitizer: data race" $(HOST_OUT)/test_quiesce_tsan_neg_$$n.log; then \
+			echo "FAIL: the $$n-weakened model failed without a data-race report:"; \
+			tail -20 $(HOST_OUT)/test_quiesce_tsan_neg_$$n.log; exit 1; \
+		fi; \
+		echo "ok: data race reported ($(HOST_OUT)/test_quiesce_tsan_neg_$$n.log)"; \
+	done
+
 HOST_INTERRUPT_SRCS := $(ROOT)/tests/host/test_interrupt.c $(ROOT)/kernel/interrupt/interrupt.c
 $(HOST_OUT)/test_interrupt: $(HOST_INTERRUPT_SRCS)
 	$(call log,HOSTCC,$@)

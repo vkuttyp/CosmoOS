@@ -128,10 +128,17 @@ Sources: [inventory §4](audit/2026-09-deferred-work-inventory.md#4-the-quiesce-
 [lifetime report](audit/2026-09-lifetime-quiesce-report.md), and
 [quiescence design](kernel/quiesce/design.md).
 
-- [ ] **Validation — memory ordering.** Add suitable TSan host models and
+- [x] **Validation — memory ordering.** Add suitable TSan host models and
   memory-order litmus tests for the lifetime protocol itself. The existing
   threaded epoch-core host test runs under ASan/UBSan only, and the lockdep
   graph/held-stack host models do not close this gap.
+  *Completed 2026-10-05.* Six litmus tests checked by herd7 against RC11
+  (`make litmus`) and the epoch-core model under TSan
+  (`make host-test-quiesce-tsan`), each with negative controls and both in
+  CI. The litmus model found that a CPU coming online could be missed by a
+  grace period while its reader missed the unlink; two `seq_cst` fences
+  fix it. Remaining: the litmus files are hand transcriptions of the code's
+  orders. See the [quiescence memory-order report](audit/2026-10-05-quiesce-memory-order-report.md).
 - [ ] **Validation — scaling and long disabled regions.** Measure at higher
   CPU counts and identify long preemption-disabled sections, including VM
   population loops. Recheck what later VMM work already shortened before
@@ -463,7 +470,8 @@ their deferred status here; this section does not schedule them for implementati
    VirtIO/scheduler failures without weakening their intended contracts.~~
    Done 2026-10-05 ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)); CI boots two CPUs
    (`make test-smp2`) so it stays done.
-2. Add quiescence memory-order models and targeted negative controls.
+2. ~~Add quiescence memory-order models and targeted negative controls.~~
+   Done 2026-10-05 ([quiescence memory-order report](audit/2026-10-05-quiesce-memory-order-report.md)).
 3. Extend callback-wait and raw IRQ-pairing coverage within the established
    locking and lifetime architecture.
 4. Select later features from the sections above by demonstrated correctness

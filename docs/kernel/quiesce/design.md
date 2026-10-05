@@ -75,8 +75,10 @@ The reclamation protocol is: unlink the object → `synchronize_quiesce()`
 
 ```c
 uint64_t target = __atomic_add_fetch(&g_epoch, 1, __ATOMIC_SEQ_CST);      /* (W1) */
+__atomic_thread_fence(__ATOMIC_SEQ_CST);                                    /* (W1b) */
+online = cpu_online_mask();            /* the CPUs to wait for: read after W1b */
 publish own epoch;
-for each online CPU c (snapshot of cpu_online_mask at W1):
+for each CPU c in online:
     wait until __atomic_load_n(&g_cpus[c].seen_epoch, __ATOMIC_ACQUIRE) >= target;   /* (W2) */
 ```
 
@@ -84,8 +86,12 @@ The quiescent point:
 
 ```c
 uint64_t e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);                   /* (Q1) */
-__atomic_store_n(&g_cpus[cpu].seen_epoch, e, __ATOMIC_RELEASE);            /* (Q2) */
+__atomic_exchange_n(&g_cpus[cpu].seen_epoch, e, __ATOMIC_ACQ_REL);         /* (Q2) */
 ```
+
+The orders are named macros in `quiesce_core.h` (`QUIESCE_MO_Q1` and so
+on); the kernel never overrides them, and the host's negative-control
+builds weaken one at a time (`docs/kernel/quiesce/testing.md`).
 
 Why each ordering exists:
 
@@ -98,10 +104,11 @@ Why each ordering exists:
   a reader that publishes epoch `target` at Q2 observed `g_epoch == target`
   at Q1, and every read section it enters afterwards sees the unlink that
   preceded W1.
-- **Q2 is a release store**: it orders every load and store the CPU made
-  in the read-side sections that preceded the quiescent point before the
-  epoch value. Nothing about the reader's earlier accesses is reordered
-  past it.
+- **Q2 is a release** (an `acq_rel` exchange, so the publisher also
+  learns whether it advanced its own epoch, Q19): it orders every load
+  and store the CPU made in the read-side sections that preceded the
+  quiescent point before the epoch value. Nothing about the reader's
+  earlier accesses is reordered past it.
 - **W2 is an acquire load**: paired with Q2 it gives release/acquire
   synchronisation per CPU. Once the waiter has observed `seen_epoch >=
   target` from every online CPU, every access those CPUs made to the
@@ -112,9 +119,45 @@ Why each ordering exists:
 - The `>=` comparison, not `==`, because two waiters may advance the
   epoch twice before a CPU passes one quiescent point; the CPU publishes
   the latest epoch, which satisfies both.
-- Only the CPUs online at W1 are waited for. A CPU that comes online
-  later publishes the current epoch before running anything, so it can
-  hold no reference from before W1.
+- Only the CPUs in the snapshot are waited for; see "CPUs coming online"
+  below for why that is enough, and why the snapshot follows W1b.
+
+### CPUs coming online
+
+A CPU coming online (`sched_start_cpu`) publishes, marks itself online
+with a release store, passes **Q0** (`quiesce_core_after_online`, a
+`seq_cst` fence), and only then runs anything. The waiter reads the
+online CPUs after W1 and **W1b** (`quiesce_core_after_begin`, a `seq_cst`
+fence). Between them the two fences close a store-buffering pattern:
+
+```
+waiter: unlink; W1; W1b; read online[c]       new CPU: online[c] = 1; Q0; read section looks up the object
+```
+
+With a sequentially consistent fence on both sides, at least one side
+sees the other's store. Either the snapshot includes the new CPU, and the
+waiter waits for that CPU's next publish (which follows its read
+section), or the new CPU's section sees the unlink and cannot find the
+object. Release/acquire alone permits both to miss, and so did the order
+before these fences, which read the mask before W1: the new CPU's reader
+could find an unlinked object that the waiter, not waiting for that CPU,
+went on to free. RC11 allows that outcome for the old order and forbids it
+for this one, and removing either fence allows it again
+(`tests/litmus/quiesce/online-old.litmus`, `online.litmus`). The window
+was AP bring-up, because `quiesce_init` precedes `smp_init`; CPU hotplug
+would make it routine. On x86-64 each fence is a `lock or` of the stack
+(W1's `lock xadd` is already a full barrier there); on AArch64 a
+`dmb ish`. A grace period costs milliseconds, so the fences cost nothing
+measurable.
+
+The grace-period wake (`quiesce_note_quiescent_preemptible`) is not a
+store-buffering race either, although it looks like one: the publisher
+reads the waitqueue under its lock (`waitqueue_empty`) and the waiter
+enqueues under the same lock before re-reading the CPUs' epochs, so
+whichever lock section comes second sees the first
+(`tests/litmus/quiesce/wake.litmus`; reading the queue without the lock
+would lose the wake). The deadline on the wait remains a defence, as Q18
+describes, not a cover for a known race.
 
 The waiter **blocks on a queue with a deadline** —
 `wait_event_timeout(&g_gp_wq, pending == 0, TICK_NS / 2)` — never spins

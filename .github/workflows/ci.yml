@@ -115,6 +115,11 @@ jobs:
       - name: Host unit tests (ASan + UBSan)
         run: make ARCH=${{ matrix.arch }} host-test
 
+      # The quiescence epoch core under TSan, with its two negative
+      # controls (one pairing weakened each) required to report a race.
+      - name: Host TSan model of the quiescence protocol
+        run: make ARCH=${{ matrix.arch }} host-test-quiesce-tsan
+
       - name: Fuzz targets (ASan + UBSan, bounded run)
         # Host binaries, identical on either job: run them once.
         if: matrix.arch == 'x86_64'
@@ -153,3 +158,24 @@ jobs:
             out/${{ matrix.arch }}-debug/cosmoos.img
             out/${{ matrix.arch }}-release/kernel/kernel.elf
             out/${{ matrix.arch }}-release/boot/*.EFI
+
+  # The quiescence protocol's litmus tests against the C11 (RC11) model.
+  # herdtools7 is packaged in Debian testing and sid but not trixie, so
+  # this runs in its own small container rather than the build job's.
+  litmus:
+    name: memory-order litmus (herd7)
+    runs-on: ubuntu-24.04
+    container: debian:sid
+    timeout-minutes: 10
+    steps:
+      - name: Install herdtools7
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends herdtools7 python3 ca-certificates
+          herd7 -version
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Litmus verdicts, witnesses and negative controls
+        run: python3 tests/litmus/run_litmus.py

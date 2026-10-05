@@ -1,0 +1,16 @@
+C quiesce-wake
+"The grace-period wake. P0 publishes (Q2), then checks the waitqueue for waiters under its lock (waitqueue_empty); P1 is the waiter, which enqueues under the same lock (waitqueue_prepare) and then re-reads the CPU's seen epoch. Each lock section is an acquire RMW at entry and a release RMW at exit on lk; the condition keeps only executions where the two sections do not overlap (entry reads 0 and the other entry reads 2). Bad: the publisher found no waiter, and the waiter found the CPU not yet published -- a lost wake. Forbidden: whichever section is second synchronises with the first."
+{ }
+P0 (atomic_int* seen, atomic_int* wq, atomic_int* lk) {
+  int prev = atomic_exchange_explicit(seen, 1, memory_order_acq_rel);
+  int a = atomic_fetch_add_explicit(lk, 1, memory_order_acquire);
+  int w = atomic_load_explicit(wq, memory_order_relaxed);
+  int b = atomic_fetch_add_explicit(lk, 1, memory_order_release);
+}
+P1 (atomic_int* seen, atomic_int* wq, atomic_int* lk) {
+  int a = atomic_fetch_add_explicit(lk, 1, memory_order_acquire);
+  atomic_store_explicit(wq, 1, memory_order_relaxed);
+  int b = atomic_fetch_add_explicit(lk, 1, memory_order_release);
+  int s = atomic_load_explicit(seen, memory_order_acquire);
+}
+exists (((0:a=0 /\ 1:a=2) \/ (1:a=0 /\ 0:a=2)) /\ 0:w=0 /\ 1:s=0)

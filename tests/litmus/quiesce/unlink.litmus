@@ -1,0 +1,13 @@
+C quiesce-unlink
+"Unlink visibility. P0 is the waiter: it unlinks (a relaxed store: W1's release is what orders it), then W1. P1 is a CPU that publishes after the epoch moved: Q1 acquire, Q2, then a read section looks the object up. Forbidden: the CPU published the new epoch yet its later section still found the object."
+{ }
+P0 (atomic_int* p, atomic_int* epoch) {
+  atomic_store_explicit(p, 1, memory_order_relaxed);
+  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);
+}
+P1 (atomic_int* p, atomic_int* epoch, atomic_int* seen) {
+  int e = atomic_load_explicit(epoch, memory_order_acquire);
+  int prev = atomic_exchange_explicit(seen, e, memory_order_acq_rel);
+  int r = atomic_load_explicit(p, memory_order_relaxed);
+}
+exists (1:e=1 /\ 1:r=0)

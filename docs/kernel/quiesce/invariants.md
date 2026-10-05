@@ -26,12 +26,19 @@ and the grace period lasts the whole hold (≥ 20 ms asserted); review of
 path; that path never records by construction.
 
 **Q3. Every barrier is documented and no weaker.** W1 `seq_cst` RMW; W2
-acquire loads; Q1 acquire load; Q2 release store; the `>=` comparison
-tolerates concurrent waiters. Check: `design.md` "The epoch algorithm and
-its memory ordering" is the normative text; host `test_quiesce`
-(`epoch-math`) exercises the arithmetic including two waiters and the
-highest CPU slot; the threaded test runs under ASan/UBSan. Gap: no TSan
-run (Apple clang lacks it for this target); no litmus-level model check.
+acquire loads; Q1 acquire load; Q2 `acq_rel` exchange; W1b and Q0
+`seq_cst` fences around the online mask (a waiter reads it after W1, a
+CPU coming online fences after marking itself online); the `>=`
+comparison tolerates concurrent waiters. Check: `design.md` "The epoch
+algorithm and its memory ordering" is the normative text; `make litmus`
+checks six litmus tests against RC11, with reachability witnesses and
+eight negative controls that weaken one order or drop one fence each;
+`make host-test-quiesce-tsan` runs the threaded host model (including two
+concurrent waiters and CPUs coming online) under TSan, with Q2-relaxed and
+W2-relaxed builds that must report a race; host `test_quiesce`
+(`epoch-math`) covers the arithmetic and the highest CPU slot.
+`docs/kernel/quiesce/testing.md`, "Memory ordering". Gap: the litmus
+files are hand transcriptions of the code's orders, not generated from it.
 
 **Q4. `synchronize_quiesce` is never called from interrupt context or
 with a spinlock held.** Asserted on entry (`irq_depth`, `preempt_count`).

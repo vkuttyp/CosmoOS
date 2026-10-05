@@ -166,8 +166,19 @@ static unsigned sync_quiesce_counting(unsigned *timeouts)
         panic("synchronize_quiesce in interrupt context");
     might_sleep();   /* a spinlock or a read-side section is held: a report with the stacks */
 
-    cpumask_t online = cpu_online_mask();
     uint64_t target = quiesce_core_begin(&g_state);
+    /*
+     * Which CPUs to wait for is read AFTER W1, behind W1b. Read before
+     * W1, a CPU coming online could be missed by the snapshot while its
+     * publish missed W1: the store-buffering shape, which the release
+     * store of `online` and these acquire loads do not forbid.
+     * A reader on that CPU could then find the unlinked object and keep
+     * it past the free. W1b here and Q0 in sched_start_cpu forbid it
+     * (tests/litmus/quiesce/online{,-old}.litmus, docs/kernel/quiesce/
+     * design.md, "CPUs coming online").
+     */
+    quiesce_core_after_begin();
+    cpumask_t online = cpu_online_mask();
     quiesce_note_quiescent();   /* this CPU: thread context, no read section open */
 
     if (!g_ready) {
