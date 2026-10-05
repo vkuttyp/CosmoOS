@@ -161,6 +161,19 @@ The first round put the branch about 3% slower. The final round is within
 this small, so the honest bound is "at most a few percent of a debug
 self-test run". Release kernels are unchanged.
 
+## CI timing margin
+
+On CI, the branch's AArch64 `test-gic` step failed once by **time**, not by
+a test: its first boot passed in 176.3 s and its second exceeded the
+harness's 180 s whole-boot timeout in the shell stage (run 37388584414).
+The previous run of the same branch passed with boots near 150 s. `main`'s
+own recent AArch64 CI boots range from 120 s to **173.1 s**, so the 180 s
+budget has under 4% headroom on a slow runner before this change. A
+debug overhead of a few percent narrows it further. The job was re-run,
+not the budget raised: one run is not evidence for a new number, and the
+margin is `main`'s problem as much as this branch's. It is recorded in the
+plan (§12) for a measured decision.
+
 ## Remaining
 
 None in this item's scope. Out of scope: plain `arch_irq_enable`/
