@@ -5,9 +5,9 @@
  * address itself: dma_alloc hands out coherent, physically contiguous
  * memory with its bus address, dma_map translates an existing
  * direct-map buffer, and the sync calls are the single place a
- * non-coherent port or an IOMMU would hook in. There is no IOMMU in
- * this phase, so a bus address equals a physical address, but callers
- * must not rely on that.
+ * non-coherent port would hook in. A device behind an IOMMU is given an
+ * I/O virtual address (kernel/iommu); without one a bus address equals
+ * a physical address. Callers must not rely on either.
  */
 
 #ifndef KERNEL_DMA_H

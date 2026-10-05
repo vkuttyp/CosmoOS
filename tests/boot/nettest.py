@@ -47,10 +47,11 @@ BACK_BACKLOG = 8
 # How long to keep accepting after every connection that arrived has
 # resolved without delivering the request.
 #
-# The guest makes exactly one back-connection attempt and never retries
-# (kernel-services/network/nettest.c), so once a connection has arrived
-# and died without the request, waiting out the rest of the run's budget
-# cannot help -- and it actively hurts: it leaves no budget for the rest
+# The guest makes at most HARNESS_ATTEMPTS back-connection attempts
+# (kernel-services/network/nettest.c), each starting once the previous
+# one has failed, so once a connection has arrived and died without the
+# request and no further attempt arrives within the grace below, waiting
+# out the rest of the run's budget cannot help -- and it actively hurts: it leaves no budget for the rest
 # of the boot, turning one harness failure into a run-wide timeout with
 # every later marker missing. Seen on PR #177's own CI, which gave up at
 # 157.0s where the previous harness gave up at 100.9s.

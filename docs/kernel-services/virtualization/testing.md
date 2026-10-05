@@ -311,8 +311,8 @@ window is short and always exercised.
 - The `-EPERM` refusal of `vm_create` with a handle that is not
   `/dev/vmm`, and a non-root caller (rc.test runs as uid 0).
 - String I/O (`INS`/`OUTS`) exits, `vm_mem_rw` across several regions,
-  the 16-region and 8-VM limits, and concurrent runs of two vCPUs of one
-  VM on different host CPUs.
+  and the 16-region and 8-VM limits. Concurrent vCPU runs are covered
+  only in AArch64 machine mode (the peak-concurrency marker above).
 - **The VMX backend is never executed here.** QEMU's TCG emulates AMD-V
   and reports `vmx: false` for every CPU model
   (`query-cpu-model-expansion` on `max`), and the development host is

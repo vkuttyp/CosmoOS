@@ -94,8 +94,8 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
   `thrtest`/`cwdtest` assumptions and the rare long `net-bench` run with
   evidence that distinguishes scheduling delay from a mechanism failure.
   See the [suite-waits report](audit/next-subsystem-suite-waits.md).
-- [ ] **Validation — slirp connection resets.** The harness now retries and
-  records the exchange, but the specific slirp defect remains unidentified.
+- [ ] **Validation — slirp connection resets.** The guest-side network test
+  now makes up to three attempts and the host harness records each exchange, but the specific slirp defect remains unidentified.
   Continue with host-loopback capture or slirp source investigation; do not
   relabel the existing diagnosis as a kernel send-path defect. See the
   [network retry report](audit/next-subsystem-nettest-retry.md).
@@ -110,14 +110,16 @@ Sources: [inventory §4](audit/2026-09-deferred-work-inventory.md#4-the-quiesce-
 [quiescence design](kernel/quiesce/design.md).
 
 - [ ] **Validation — memory ordering.** Add suitable TSan host models and
-  memory-order litmus tests for the lifetime protocol itself. The lockdep
+  memory-order litmus tests for the lifetime protocol itself. The existing
+  threaded epoch-core host test runs under ASan/UBSan only, and the lockdep
   graph/held-stack host models do not close this gap.
 - [ ] **Validation — scaling and long disabled regions.** Measure at higher
   CPU counts and identify long preemption-disabled sections, including VM
   population loops. Recheck what later VMM work already shortened before
   proposing preemption points. Counts beyond 64 require separate CPU-mask work.
 - [ ] **Validation — straggler-kick attribution.** Widen the sample and
-  identify which execution contexts benefit from kick IPIs. Preserve the
+  identify which execution contexts benefit from kick IPIs; per-CPU counts of
+  kick-driven publications already exist. Preserve the
   distinction between an IPI sent and a publication that advances the epoch.
   See the [straggler-kick report](audit/next-subsystem-straggler-kick.md).
 - [ ] **Conditional/deferred — further grace-period latency reduction.**
@@ -132,7 +134,8 @@ and [SMP design](kernel/smp/design.md).
 
 - [ ] **Conditional/deferred — additional scheduling policies.** Define
   requirements for fairness, real-time, deadline and interactive policies,
-  plus CPU isolation, beyond the existing round-robin policy.
+  plus CPU isolation, beyond the existing fixed-priority round-robin policy.
+  Its 64 priority levels have no user-facing priority or policy syscalls.
 - [ ] **Validation/implementation — user-mode preempted-thread migration.**
   Assess relaxing the restriction for threads preempted in user mode, where
   interrupted kernel per-CPU accesses are absent. Existing measurements did
@@ -178,16 +181,20 @@ are listed in §8 rather than being described as absent shared-memory support.
 Sources: inventory §§2.4 and 3 and the
 [post-roadmap audit](audit/2026-09-post-roadmap-audit.md), §8.
 
-- [ ] **Implementation — VFS lookup and identity.** Add a dentry cache and a
-  defined inode/generation identity where needed, with invalidation and lifetime rules.
+- [ ] **Implementation — VFS lookup and identity.** Add a name (dentry) cache
+  and a defined inode/generation identity where needed, with invalidation and
+  lifetime rules. A per-mount vnode cache keyed by inode number exists, but
+  every lookup still calls the filesystem.
 - [ ] **Implementation — VFS namespace features.** Add hard links, mount
-  options, bind mounts and overlay stacking as independently validated units.
+  options beyond read-only, bind mounts and overlay stacking as independently
+  validated units.
 - [ ] **Implementation — snapshot derivatives.** Extend existing snapshots
   to writable clones, rollback and boot environments with explicit crash semantics.
 - [ ] **Implementation — incremental send/receive.** Define the stream format,
   ancestry validation and interruption/recovery behavior for snapshot transfer.
-- [ ] **Implementation — pool layouts.** Add striping and RAID-Z-like parity
-  with failure, replay and repair coverage beyond existing mirrors.
+- [ ] **Implementation — pool layouts.** Add fixed-width striping and
+  RAID-Z-like parity with failure, replay and repair coverage beyond existing
+  mirrors. Multi-member pools already spread allocations to the emptiest member.
 - [ ] **Implementation — pool maintenance.** Support device replacement,
   resilvering and hot spares; a member that missed commits currently needs a
   mechanism to catch up before rejoining the mirror.
@@ -203,18 +210,24 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
 - [ ] **Implementation — filter scope and actions.** Add per-interface host
   chains, rate-limit/logging targets, IPv6 filtering and fuller TCP state tracking.
 - [ ] **Implementation — translation and guest connectivity.** Add IPv6 NAT
-  and DNAT, hairpin/NAT reflection, an L2 bridge, and guest limits beyond NAT quotas.
+  and DNAT, hairpin/NAT reflection, an L2 bridge, and guest limits beyond NAT
+  quotas. IPv4 masquerade and port-forward DNAT, with control-channel rules,
+  already exist.
 - [ ] **Implementation — runtime controls.** Expose the remaining forwarding,
   masquerade, resolver and tap up/down settings through the control channel.
 - [ ] **Implementation — DHCP/DNS extensions.** Evaluate a general DHCP server,
   caching resolver, DHCPv6, DNS-over-TCP and DNSSEC beyond the present proxy service.
 - [ ] **Implementation — TCP/IP extensions.** Add window scaling, SACK,
-  timestamps, ECN, fast recovery and Nagle behavior; implement IP fragmentation
-  and reassembly with resource bounds and hostile-input tests.
-- [ ] **Validation/implementation — IPv6 beyond local tests.** Exercise routing
-  beyond loopback and neighbor discovery against a real peer.
+  timestamps, ECN, fast recovery and Nagle behavior; three-duplicate-ACK fast
+  retransmit already exists. Implement IP fragmentation and reassembly with
+  resource bounds and hostile-input tests; IPv4 fragments are currently dropped.
+- [ ] **Implementation/validation — IPv6 beyond the local link.** Implement
+  global routing (the route lookup returns none beyond loopback, link-local and
+  multicast) and router discovery, then exercise neighbor discovery against a
+  real peer. Link-local neighbor discovery exists.
 - [ ] **Conditional/deferred — faster data paths.** Measure the case for
-  zero-copy buffers, device multiqueue, TSO/LRO, jumbo frames, NAPI-style
+  zero-copy buffers, device multiqueue (software flow steering to per-CPU
+  receive queues exists), TSO/LRO, jumbo frames, NAPI-style
   polling, interrupt moderation and busy polling. QEMU's user-mode backend
   constrains what can be demonstrated; complexity must earn its place.
 
@@ -240,8 +253,9 @@ and [Linux compatibility API](compat/linux/api.md).
   fcntl semantics; huge-page support depends on the memory work in §5.
   See the [memfd report](audit/next-subsystem-memfd.md).
 - [ ] **Implementation — System V shared-memory extensions.** Address address
-  rounding/remapping, huge pages, resize, IPC_SET, locking/info operations,
-  full ownership/permission checks and IPC namespaces. See the
+  rounding/remapping, huge pages, IPC_SET, locking/info operations, separate
+  owner and creator identities and IPC namespaces. Mode-bit permission checks
+  and creator-or-root removal exist. See the
   [shared-memory report](audit/next-subsystem-shm.md), Risks.
 - [ ] **Implementation/validation — broader Linux environment.** Extend
   Linux-facing `/proc` and `/sys` behavior and validate a real distribution
@@ -255,17 +269,21 @@ Sources: inventory §§1.2, 1.3 and 2.7 and
 - [ ] **Validation — VMX execution.** Run the existing backend on suitable
   Intel hardware or KVM infrastructure; pure host logic tests do not prove VM entry.
 - [ ] **Validation — guest concurrency.** Exercise device models with multiple
-  guest CPUs using an appropriate guest-side VirtIO driver.
+  guest CPUs using an appropriate guest-side VirtIO driver. Multi-vCPU AArch64
+  guests already run under `vmctl run --machine -c`; the VirtIO test guests
+  are single-vCPU.
 - [ ] **Validation — reproducible Linux guest demonstrations.** Make guest
   image/root-filesystem provisioning reproducible and suitable for CI; demonstrate
   a guest reaching the external network through the host's real NIC.
 - [ ] **Implementation — x86 guest fidelity.** Resolve documented interception,
-  string-I/O, TSC virtualization, debug-register and CPUID-exposure gaps,
-  including WBINVD/RDPMC/RDTSCP behavior.
+  string-I/O, TSC virtualization, debug-register and remaining CPUID-exposure
+  gaps, including WBINVD/RDPMC/RDTSCP behavior. CPUID leaves are already
+  filtered; VMX enables MOV-DR and RDPMC exits that it does not yet handle.
 - [ ] **Implementation — dirty tracking and ballooning.** Define memory ownership,
   guest coordination and accounting needed for these services.
 - [ ] **Conditional/deferred — VM snapshots and live migration.** Extend the
-  UAPI to capture/restore vCPU and device state before attempting snapshot or transfer.
+  UAPI to capture/restore complete vCPU and device state before attempting
+  snapshot or transfer; vCPU register get/set already exists.
 - [ ] **Conditional/deferred — device passthrough.** Establish DMA and interrupt
   isolation, assignment lifetime and reset behavior on appropriate hardware.
 - [ ] **Conditional/deferred — nested virtualization.** Requires a separately
@@ -281,10 +299,12 @@ Sources: inventory §§2.9 and 3 and [security design](kernel/security/design.md
   storage/transport and behavior under resource pressure.
 - [ ] **Implementation — stronger isolation/accounting.** Extend capabilities
   beyond handle rights, add network namespaces and cgroups-style accounting
-  beyond current rlimits; coordinate IPC namespaces with §8.
+  beyond current rlimits; coordinate IPC namespaces with §8. Mount and UTS
+  namespaces and process domains already exist.
 - [ ] **Implementation/validation — stack and memory hardening.** Evaluate kernel
   stack protection, broader interrupt-stack isolation and kernel sanitizer builds.
-  Recheck existing architecture-specific exception stacks before declaring them absent.
+  x86-64 already uses IST stacks for double fault, NMI, machine check and
+  debug; AArch64 takes EL1 exceptions on the current stack.
 - [ ] **Implementation — entropy sources.** Supplement virtio-rng with supported
   CPU or other sources and define health, seeding and unavailable-entropy behavior.
 - [ ] **Implementation/validation — speculative-execution policy.** Document
@@ -314,8 +334,9 @@ Sources: inventory §§2.10, 2.11 and 3,
 [verification testing](verification/testing.md), and [flake history](testing/flakes.md).
 
 - [ ] **Implementation — missing fuzz/property coverage.** Add network packet
-  parser, PCI configuration, ACPI table and VFS-path fuzzing, plus suitable
-  property-based tests. Preserve the existing parser and syscall fuzzers.
+  parser, PCI configuration, ACPI table and generated VFS-path fuzzing, plus
+  property-based tests beyond the randomized lockdep graph oracles. Preserve the
+  existing parser and syscall fuzzers; the latter draws paths from a fixed list.
 - [ ] **Implementation/validation — remaining fault injection.** Cover CPU
   starvation, device-reset faults and VM-exit storms. Generic device reset and
   packet-duplication injection already exist; these are broader failure scenarios.
@@ -328,9 +349,10 @@ Sources: inventory §§2.10, 2.11 and 3,
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.
 - [ ] **Implementation/validation — broader benchmarks.** Measure allocation,
-  page faults, mmap, context switches, wakeups, IPI round trips, fsync, filesystem
-  metadata and VM exits, and build baseline-versus-change regression tracking.
-  Existing network/block/FPU and lockdep measurements remain useful baselines.
+  page faults, mmap, IPI round trips, fsync, filesystem metadata and VM exits,
+  and build baseline-versus-change regression tracking. Existing network, block,
+  FPU/context-switch, futex wakeup, IPC round-trip, VFS read/write, balancer
+  and lockdep measurements remain useful baselines.
 
 ## 13. Devices, architecture and portability
 
@@ -342,7 +364,8 @@ Sources: inventory §§1.4, 2.11 and 3 and [device design](kernel/device/design.
 - [ ] **Implementation — hotplug and power management.** Add CPU hotplug, PCI
   rescan and power-management lifecycles beyond existing device-removal support.
 - [ ] **Implementation — independent bind/unbind.** Expose per-device operations
-  without requiring registration or removal of the whole driver.
+  without requiring registration or removal of the whole driver. Per-device
+  test bind/unbind hooks exist only in debug builds.
 - [ ] **Conditional/deferred — IOMMU variants.** Extend interrupt remapping,
   AMD-Vi, huge pages, IOVA caching, PASID/ATS, larger stream IDs and bridge
   requester aliases only with a target and validation path. Small-output-width
@@ -366,11 +389,15 @@ Sources: inventory §§2.1, 2.10 and 2.11 and [package design](pkg/design.md).
 
 - [ ] **Implementation — package provenance and reproducibility.** Add SBOMs,
   dependency locking, build sandboxing and multiarchitecture package handling.
-- [ ] **Implementation — upgrade rollback.** Define transactional package/database
-  recovery and its relationship to filesystem boot environments.
-- [ ] **Implementation — container tooling.** Compose existing rights, roots,
-  domains, namespaces, syscall filtering, rlimits and service management into
-  usable tooling. The primitives exist; broader isolation gaps are listed in §10.
+  Package archives are already built deterministically.
+- [ ] **Implementation — upgrade rollback.** Define multi-package transactions,
+  recovery of interrupted installs and the relationship to filesystem boot
+  environments. A single package install already stages files and commits its
+  record before renaming them into place.
+- [ ] **Implementation — container tooling.** Build usable tooling over the
+  existing primitives. The service manager already composes roots, mount/UTS
+  namespaces, domains, rlimits and handle rights per service; syscall filtering
+  is not yet part of it. Broader isolation gaps are listed in §10.
 - [ ] **Implementation/validation — async VM operations.** Define and exercise
   submittable VM operations through the async-I/O interface; existing file,
   socket, device and timer readiness does not demonstrate this contract.
@@ -393,10 +420,9 @@ their deferred status here; this section does not schedule them for implementati
 | Device multiqueue, TSO/LRO, jumbo frames and zero-copy sockets | The inventory requires measured benefit and notes the limits of the current QEMU network backend; see §7. |
 | AHCI NCQ | Existing measurements reached about 87% of NVMe aggregate throughput with four streams; revisit with evidence from a real disk. |
 | e1000e checksum offload | Prior measurement suggested roughly a 2% benefit; establish a worthwhile workload before adding complexity. |
-| USB scatter-gather | Existing USB block results were within measurement noise of NVMe; revisit when a workload exposes a benefit. |
 | x86 PCID | The inventory records no usable TCG CPU model for validation; obtain a hardware or virtualization test path first. |
 | vGIC on GICv2 hosts | Existing virtual GIC support is GICv3-only and advertises that capability; add GICv2 support only for a supported target. |
-| Remaining termios flags/control characters | Implement actual semantics when needed rather than accepting and ignoring unsupported settings. |
+| Remaining termios flags/control characters | Unsupported settings are currently masked off silently. Implement actual semantics when needed, or report them as unsupported. |
 | Native `/sys` | Previously deferred because sysctl held the available information; Linux `/sys` compatibility is a distinct requirement in §8. |
 | PID renumbering | The process-domain design deliberately avoids it; reopening requires an architectural argument, not merely a missing-feature label. |
 | Lazy FPU switching | Eager switching was measured as a modest part of context-switch cost; revisit with new performance evidence and security analysis. |

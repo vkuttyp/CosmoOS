@@ -93,7 +93,7 @@ held across a `transmit`. Timers (ARP/ND ageing, TCP) run in interrupt context
 and only queue a `struct net_work` for the worker; they never send
 directly.
 
-### Address resolution (`arp.c`, `nd.c`)
+### Address resolution (`arp.c`, `ipv6.c`)
 
 ```c
 struct arp_entry { uint32_t ip; uint8_t mac[6]; enum { ARP_INCOMPLETE, ARP_REACHABLE } state;

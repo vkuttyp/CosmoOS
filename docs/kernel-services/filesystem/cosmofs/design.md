@@ -1321,8 +1321,8 @@ room for more.
   and the rest are their own units. Without resilver, a copy left out
   for being stale stays out: the pool runs degraded until it is
   reformatted.
-- Scrub is a kernel entry point and a self-test; no system call or shell
-  command reaches it yet.
+- Scrub is a kernel entry point and a self-test, and user space reaches
+  it through the filesystem control call (`fsctl scrub <id>`).
 - Compression and encryption: two separate units, in that order, each
   with its own format extension.
 - Rollback (making a snapshot the live tree), sending or receiving a

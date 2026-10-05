@@ -30,7 +30,7 @@ struct x86_cpu_info {
     bool has_x2apic;
     bool has_fsgsbase;
     bool has_invariant_tsc;
-    bool has_pcid;       /* CPUID.1:ECX[17]; CR4.PCIDE is set when true */
+    bool has_pcid;       /* CPUID.1:ECX[17]; reported only, CR4.PCIDE is never set (cpu.c) */
     bool has_invpcid;    /* CPUID.7:EBX[10]: invalidate a PCID that is not current */
 };
 
