@@ -30,9 +30,10 @@ all subclasses. An IRQ trylock itself is nonblocking and adds no IRQ-used
 label; a failed trylock adds no usage or edge. Check: `lockdep-irq` uses
 self-IPIs for direct, edge-last, safe-label-last and trylock cases; host
 `irq-dependencies` covers a maximum-node path and `irq-oracle` compares
-BFS against independent transitive closure. Timer cancellation has a
-separate observed-lock-profile check (L15); arbitrary callback completion
-and NMI/#MC relationships remain outside these models.
+BFS against independent transitive closure. Timer cancellation is in the
+graph through callback classes (L19) and keeps an observed-lock-profile
+check (L15); arbitrary callback completion and NMI/#MC relationships
+remain outside these models.
 
 **L4. No sleeping call in atomic context.** `might_sleep()` at the entry
 of every sleeping primitive and every user-memory copy panics when a
@@ -86,7 +87,7 @@ futex race test; the lost-wake argument is by construction.
 ## Rules the checker keeps
 
 **L9. Acquisition tracking allocates nothing and takes no tracked lock.** All
-tables are static (320 classes, 1280 nodes, 24 held per CPU, 8 mutexes per
+tables are static (384 classes, 1536 nodes, 24 held per CPU, 8 mutexes per
 thread); the raw lock is a word containing zero or the owning CPU plus one.
 Ownership is published by the acquiring CAS and cleared by a release store,
 with local IRQs masked throughout. Re-entry on the owning CPU panics before
@@ -132,7 +133,7 @@ builds and ELF symbol inspection; `lockdep.c` is `#if CONFIG_LOCKDEP`.
 **L13. A returned diagnostic path length never exceeds its buffer.**
 Reachability searches all nodes; path output retains at most the caller's
 capacity and returns the stored count, including zero for a zero-capacity
-request. Check: ASan/UBSan `path-bounds` drives a 1280-node chain and the
+request. Check: ASan/UBSan `path-bounds` drives a 1536-node chain and the
 printer's loop; `lockdep-order` detects a ten-lock cycle through real hooks.
 
 **L14. `spin_unlock_irqrestore` restores the state saved for its lock and
@@ -147,9 +148,9 @@ callback has acquired.** A callback records blocking spinlock objects in a
 bounded per-callback profile; cancellation checks the caller's held
 spinlock and mutex stacks before each wait. Check: `timer-cancel-sync`
 holds the callback-needed lock while a real callback blocks on it, then
-verifies the expected report returns from the synchronous wait. Gap: only
-observed callback paths and up to 16 locks per callback are represented;
-other callback/wait relationships remain unmodeled.
+verifies the expected report returns from the synchronous wait. Scope:
+the execution in progress on this timer, up to 16 locks; every other
+execution of the same function is L19's.
 
 **L16. Remote held-stack diagnostics print only a consistent copy.**
 The CPU-local writer masks IRQs and brackets atomic stack changes with a
@@ -177,11 +178,24 @@ stacks. Check: audit all `g_stats` accesses for raw-lock coverage;
 
 **L18. A graph search enqueues each node at most once.**
 With serialized graph access and valid node/class indices, nodes are marked
-visited at enqueue time, including all initial sources. At most 1280 nodes
-are dequeued, each scanning at most 20 adjacency words. Parent chains lead
+visited at enqueue time, including all initial sources. At most 1536 nodes
+are dequeued, each scanning at most 24 adjacency words. Parent chains lead
 to earlier discoveries. Check: host `search-work` counts the actual shared
 helpers on full-capacity dense, disconnected, chain and cyclic graphs,
 including multi-source and composite IRQ checks. A duplicate-scan negative
 control fails the work bound while preserving reachability results.
 See `design.md` for composite bounds and exclusions; this is not a bound
 on raw-lock wait time or complete acquisition latency.
+
+**L19. A synchronous timer wait is a dependency on every observed callback
+of its function.** Each timer callback function has a callback class, held
+while a callback runs (`callback -> lock` for each lock it takes) and
+acquired without being held by every `timer_cancel_sync` (`held -> callback`
+for each held lock), so the cycle check reports a wait that could deadlock
+against any callback of that function the graph has seen, in either order
+and through any chain. Check: `lockdep-callback` (another timer of the same
+function that never ran; a transitive lock; the callback after the wait),
+with `tools/lockdep-callback-probe.py` removing the wait check or the class
+and requiring the first case to go unreported. Gap: a callback path never
+executed contributes no edges, and `wait_for_completion` on a completion a
+callback signals has no function to key a class on.

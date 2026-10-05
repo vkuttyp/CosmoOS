@@ -14,7 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LOCKDEP_MAX_CLASSES    320u   /* bounded pool, including one class per run queue (S24) */
+/* Bounded pool, including one class per run queue (S24) and one per timer
+ * callback function (design.md, "Callback classes"). A debug boot reached
+ * 307 of the earlier 320 before callback classes existed. */
+#define LOCKDEP_MAX_CLASSES    384u
 #define LOCKDEP_SUBCLASSES     4u
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)
@@ -25,9 +28,13 @@
 #define LOCKDEP_MAX_TIMER_LOCKS   16u
 
 /* Lock kinds: a mutex and its internal spinlock share a name but are
- * different classes. */
-#define LOCKDEP_KIND_SPIN  0u
-#define LOCKDEP_KIND_MUTEX 1u
+ * different classes. A callback class is not a lock: it stands for "a
+ * callback of this function is executing", held on the CPU stack while
+ * one runs and acquired (never held) by a synchronous wait for one
+ * (design.md, "Callback classes"). */
+#define LOCKDEP_KIND_SPIN     0u
+#define LOCKDEP_KIND_MUTEX    1u
+#define LOCKDEP_KIND_CALLBACK 2u
 
 /* Class usage bits. Both at once is a report. */
 #define LOCKDEP_USED_IN_IRQ   (1u << 0)   /* acquired with irq_depth > 0 */

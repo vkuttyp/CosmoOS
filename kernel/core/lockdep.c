@@ -127,13 +127,18 @@ static struct thread *me(void)
     return raw_this_cpu()->current;   /* identity */
 }
 
+static const char *kind_name(unsigned kind)
+{
+    return kind == LOCKDEP_KIND_MUTEX ? "mutex" : kind == LOCKDEP_KIND_CALLBACK ? "callback" : "spin";
+}
+
 static void print_held(const char *who, const struct lockdep_held *h, unsigned n)
 {
     kprintf("  held by %s (%u):\n", who, n);
     for (unsigned i = 0; i < n; i++) {
         const struct lock_class *c = &g_graph.classes[lockdep_node_class(h[i].node)];
         kprintf("    [%u] %s '%s'#%u lock %p acquired at %p%s%s%s\n", i,
-                c->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin", c->name,
+                kind_name(c->kind), c->name,
                 lockdep_node_subclass(h[i].node), h[i].lock, (void *)h[i].ip,
                 (h[i].flags & LOCKDEP_HF_IN_IRQ) ? " [irq]" : "",
                 (h[i].flags & LOCKDEP_HF_IRQS_ON) ? " [irqs-on]" : "",
@@ -439,17 +444,23 @@ bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
  * the stack. Edges record "attempted while held", which is the order
  * relation the checker wants whether or not the attempt has completed.
  */
-static void acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
-                          unsigned subclass, bool irqs_on, uintptr_t ip)
+static bool acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
+                          unsigned subclass, bool irqs_on, uintptr_t ip, bool wait)
 {
     struct percpu *pc = raw_this_cpu();   /* identity: irq_depth is the same wherever the thread runs */
     bool in_irq = pc->irq_depth != 0;
     struct lockdep_cpu *lc = my_cpu();
     struct thread *t = in_irq ? NULL : me();
+    /* A synchronous wait for a callback reports as a callback dependency,
+     * whichever check finds it. A lock taken inside a callback that
+     * closes the same cycle from the other side is an ordinary inversion
+     * whose chain names the callback class. */
+    enum lockdep_report_kind recursion = wait ? LOCKDEP_R_CALLBACK : LOCKDEP_R_RECURSION;
+    enum lockdep_report_kind inversion = wait ? LOCKDEP_R_CALLBACK : LOCKDEP_R_INVERSION;
 
     int n = node_of(class_slot, name, kind, subclass, ip);
     if (n < 0)
-        return;
+        return false;
     uint16_t node = (uint16_t)n;
     count_acquisition();
     if (kind == LOCKDEP_KIND_SPIN && in_irq && lc->callback_timer)
@@ -457,20 +468,22 @@ static void acquire_check(const void *lock, uint16_t *class_slot, const char *na
 
     /* 1. Interrupt safety, including paths observed before this usage. */
     if (!check_usage(node, in_irq, irqs_on, false, ip))
-        return;
+        return false;
 
     /* 2. The held set: this CPU's spinlocks, plus the thread's mutexes in thread context. */
     const struct lockdep_held *held[2] = { lc->held, t ? t->held_mutex : NULL };
     unsigned nheld[2] = { lc->nr_held, t ? t->nr_held_mutex : 0 };
 
-    /* 2a. Same node already held: recursion. */
+    /* 2a. Same node already held: recursion. For a wait, the waiter is
+     * inside a callback of the function it waits for. */
     for (unsigned k = 0; k < 2; k++) {
         for (unsigned i = 0; i < nheld[k]; i++) {
             if (held[k][i].node == node) {
-                report(LOCKDEP_R_RECURSION, name, subclass, ip,
-                       "the same lock class is already held; nest with a *_lock_nested subclass if this is intended",
+                report(recursion, name, subclass, ip,
+                       wait ? "a callback waits synchronously for a callback of its own function" :
+                              "the same lock class is already held; nest with a *_lock_nested subclass if this is intended",
                        NULL, 0);
-                return;   /* expected by a test: add no edges */
+                return false;   /* expected by a test: add no edges */
             }
         }
     }
@@ -483,7 +496,7 @@ static void acquire_check(const void *lock, uint16_t *class_slot, const char *na
                 break;
             }
     if (!need_edges)
-        return;
+        return true;
     uint16_t path[8];
     unsigned path_len = 0;
     bool cycle = false, irq_conflict = false;
@@ -516,12 +529,17 @@ static void acquire_check(const void *lock, uint16_t *class_slot, const char *na
         report_irq(name, subclass, ip, safe, unsafe, change);
     }
     if (cycle) {
-        char detail[128];
+        char detail[160];
         const struct lock_class *ac = &g_graph.classes[lockdep_node_class(against)];
-        ksnprintf(detail, sizeof(detail), "'%s'#%u is held, and '%s'#%u was recorded before it elsewhere", ac->name,
-                  lockdep_node_subclass(against), name, subclass);
-        report(LOCKDEP_R_INVERSION, name, subclass, ip, detail, path, path_len);
+        if (wait)
+            ksnprintf(detail, sizeof(detail), "'%s'#%u is held across a wait for '%s', which reaches it",
+                      ac->name, lockdep_node_subclass(against), name);
+        else
+            ksnprintf(detail, sizeof(detail), "'%s'#%u is held, and '%s'#%u was recorded before it elsewhere", ac->name,
+                      lockdep_node_subclass(against), name, subclass);
+        report(inversion, name, subclass, ip, detail, path, path_len);
     }
+    return !cycle && !irq_conflict;
 }
 
 /*
@@ -537,10 +555,10 @@ void lockdep_acquire_check(const void *lock, uint16_t *class_slot, const char *n
         return;
     if (kind == LOCKDEP_KIND_MUTEX) {
         arch_irq_state_t s = arch_irq_save();
-        acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip);
+        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, false);
         arch_irq_restore(s);
     } else {
-        acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip);
+        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, false);
     }
 }
 
@@ -684,6 +702,60 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
     lockdep_core_held_end(&lc->held_seq);
 }
 
+/* --- callback classes ------------------------------------------------------ */
+
+/*
+ * One class per callback function, named by its address: the graph copies
+ * the name, and two timers with one function share the class -- which is
+ * what makes a wait for one timer answerable from what another's callback
+ * did (design.md, "Callback classes").
+ */
+/* The class's name: the graph's own copy once the slot is cached, so a
+ * callback that runs every tick does not format a string every tick. The
+ * class table only grows, so a cached index stays valid. */
+static const char *callback_name(char *buf, size_t len, const void *fn, const uint16_t *class_slot)
+{
+    uint16_t cached = __atomic_load_n(class_slot, __ATOMIC_ACQUIRE);
+    if (cached != 0)
+        return g_graph.classes[cached - 1u].name;
+    ksnprintf(buf, len, "callback %p", fn);
+    return buf;
+}
+
+void lockdep_callback_enter(const void *fn, uint16_t *class_slot)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
+    char buf[LOCKDEP_CLASS_NAME_MAX];
+    const char *name = callback_name(buf, sizeof(buf), fn, class_slot);
+    uintptr_t ip = (uintptr_t)__builtin_return_address(0);
+    bool irqs_on = arch_irq_enabled();
+    /* Held while the callback runs, like a lock the callback holds: every
+     * lock taken inside is recorded under it. */
+    (void)acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, irqs_on, ip, false);
+    lockdep_acquired(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, false, irqs_on, ip);
+}
+
+void lockdep_callback_exit(const void *fn)
+{
+    lockdep_release(fn, LOCKDEP_KIND_CALLBACK, (uintptr_t)__builtin_return_address(0), false);
+}
+
+bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return true;
+    char buf[LOCKDEP_CLASS_NAME_MAX];
+    const char *name = callback_name(buf, sizeof(buf), fn, class_slot);
+    /* Acquired, never held: the edges say "this was waited for while the
+     * held locks were held". Interrupts off for the CPU's held stack, as
+     * for a mutex acquisition. */
+    arch_irq_state_t s = arch_irq_save();
+    bool ok = acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, arch_irq_state_enabled(s), ip, true);
+    arch_irq_restore(s);
+    return ok;
+}
+
 /* --- the other checks ----------------------------------------------------- */
 
 void lockdep_might_sleep(uintptr_t ip)
@@ -758,9 +830,9 @@ void lockdep_dump_graph(void)
                 unsigned b = w * 64u + bit;
                 const struct lock_class *ca = &snapshot->classes[lockdep_node_class((uint16_t)a)];
                 const struct lock_class *cb = &snapshot->classes[lockdep_node_class((uint16_t)b)];
-                kdebug("lockdep: edge %s '%s'#%u -> %s '%s'#%u", ca->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
-                       ca->name, lockdep_node_subclass((uint16_t)a), cb->kind == LOCKDEP_KIND_MUTEX ? "mutex" : "spin",
-                       cb->name, lockdep_node_subclass((uint16_t)b));
+                kdebug("lockdep: edge %s '%s'#%u -> %s '%s'#%u", kind_name(ca->kind), ca->name,
+                       lockdep_node_subclass((uint16_t)a), kind_name(cb->kind), cb->name,
+                       lockdep_node_subclass((uint16_t)b));
             }
         }
     }

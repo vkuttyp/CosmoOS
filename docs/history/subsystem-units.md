@@ -2279,3 +2279,14 @@ See the [history index](README.md).
   the new CPU could keep an unlinked object past its free (allowed under
   RC11; seen 5 times in 2,000,000 on an M1). Two `seq_cst` fences, W1b and
   Q0, close it. Report: `docs/audit/2026-10-05-quiesce-memory-order-report.md`.
+- **Lockdep callback classes.** Each timer callback function is a lockdep
+  pseudo-class (`LOCKDEP_KIND_CALLBACK`): a callback holds it while it
+  runs, and every `timer_cancel_sync` acquires it without holding it, so the
+  ordinary cycle check reports a wait that could deadlock against any
+  observed callback of the function -- on another timer, through a chain,
+  or with the callback arriving after the wait -- where the per-object
+  profile saw only the execution in progress. No existing code reported.
+  The class table grew from 320 to 384 (a debug boot had reached 307
+  before; callback classes add 17). `lockdep-callback` with
+  `tools/lockdep-callback-probe.py`'s two negative controls; 424 self-tests.
+  Report: `docs/audit/2026-10-05-lockdep-callback-classes-report.md`.

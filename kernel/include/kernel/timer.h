@@ -30,6 +30,7 @@ struct timer {
     void *arg;
     unsigned cpu;
     enum timer_state state;
+    uint16_t lockdep_class;   /* the callback function's lockdep class, cached (0 = not yet) */
 };
 
 struct timer_queue {

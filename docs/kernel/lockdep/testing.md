@@ -6,7 +6,7 @@
 |---|---|---|
 | Every boot with LOCKDEP=1 (debug default) | the checker runs on every acquisition through boot, all self-tests, the userland test script and the network harness; any report is a panic, so `make test` fails | `make test`, `QEMU_SMP=1 make test`, `make ARCH=aarch64 test` |
 | Host (ASan/UBSan) | `test_lockdep`: the class table, edges and reachability, the decision procedure on an ABBA, a three-lock cycle and subclass nodes | `make host-test` |
-| Target self-tests (debug builds) | `lockdep-order`, `lockdep-recursion`, `lockdep-irq`, `lockdep-sleep`, `lockdep-mutex`, `lockdep-contention` (the detector fires on constructed violations and stays silent on a contended wait); `vfs-concurrency` (the fixed races, on two CPUs) | `make test` |
+| Target self-tests (debug builds) | `lockdep-order`, `lockdep-recursion`, `lockdep-irq`, `lockdep-sleep`, `lockdep-mutex`, `lockdep-contention`, `lockdep-callback` (the detector fires on constructed violations and stays silent on a contended wait); `vfs-concurrency` (the fixed races, on two CPUs) | `make test` |
 | Release default (LOCKDEP=0) | the checker is compiled out; `might_sleep`'s panic half stays | `make BUILD=release test` |
 
 At the original lockdep milestone, these tests passed on x86-64 (4 CPUs
@@ -38,12 +38,13 @@ released normally.
 | `lockdep-irq` | direct and transitive IRQ conflicts in both observation orders, thread trylock classification, successful/failed IRQ trylock, wrong irqrestore state, and enabling with another spinlock held; self-IPI handler drives real interrupt acquisitions | L3, L14 |
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
+| `lockdep-callback` | callback classes: a held lock that one timer's callback took is reported when another timer of the same function, armed but never run, is cancelled -- and that timer is still cancelled and reported as pending; a lock that callback only reaches (b1 → b2 recorded elsewhere) is reported the same way; a wait made before any callback of the function ran is caught by that callback's own acquisition, as an inversion; an unrelated lock across a cancel reports nothing | design.md "Callback classes"; `tools/lockdep-callback-probe.py` removes the wait check (`no-wait`) or the class (`no-class`) and requires the first case to go unreported, and restores a return before the cancel (`early-return`) and requires the armed timer's `pending` check to fail |
 | `lockdep-contention` | remote holder keeps L until a timer observes this CPU's failed exchange; the callback makes a nested wait and verifies restoration of the outer observation, then takes M; afterwards M → L is checked without acquiring L and must report IRQ usage, not a phantom inversion | L11 (a waited-for lock is not held); real slow-path and nested-observer validation |
 | `lockdep-bench` | warmed uncontended spin and mutex paths, nine batches of 1024 iterations, pinned thread | descriptive timing only; no performance pass threshold |
 | `lockdep-first-bench` | public spin, irqsave, nested-spin and mutex acquisitions with fresh classes, then reuse; three samples per path | verifies ownership, class registration and nested search; descriptive timing only |
 | `lockdep-mutex-bench` | a private mutex owner waits for verified waiter queue entry, holds another 1 ms, then releases; two warmups and nine samples | queued acquisition, ownership and data handoff; descriptive timing only |
 | `lockdep-spin-bench` | private spinlock owner observes a failed exchange on another CPU before holding 1 ms and releasing; plain and irqsave paths, two warmups and nine samples each | contention, ownership, exclusion, data handoff and restored IRQ/preemption state; UP explicitly skips |
-| `lockdep-graph-bench` | private chain/dense 16/64/256/320/1280-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
+| `lockdep-graph-bench` | private chain/dense 16/64/256/384/1536-node graphs, allowed insertion, cycle rejection, and transitive IRQ-conflict rejection | validates each result; timing is descriptive, with no performance pass threshold |
 
 ### Spin and mutex path measurement
 
@@ -79,7 +80,7 @@ The live graph is preserved. With lockdep enabled, these samples consume
 18 permanent classes: three each for spin and irqsave, six for nested
 pairs, and six for mutexes and their internal spinlocks. Names have static
 storage; no class pointer refers to expired scratch. Repetition is limited
-to keep headroom in the 320-class pool, which is not enlarged for timing.
+to keep headroom in the 384-class pool, which is not enlarged for timing.
 
 Each sample initializes private objects outside timing, verifies empty
 class caches, times the acquisition through ownership, then releases and
@@ -200,8 +201,8 @@ arbitrary stopped CPUs or NMI writer nesting remain outside their scope.
 `lockdep-graph-bench` runs only with lockdep enabled. It allocates a private
 graph and search scratch, then measures the real reachability, IRQ-edge,
 and insertion helpers in the same order as acquisition checking. Each
-graph has 16, 64, 256, or 320 classes with one active node per class (subclass
-zero). An additional 1,280-node case populates all four subclasses of
+graph has 16, 64, 256, or 384 classes with one active node per class (subclass
+zero). An additional 1,536-node case populates all four subclasses of
 every class; the core's fixed bitmap capacity is unchanged.
 
 The `insert` and `irq-bridge` cases start with two disjoint chains and
@@ -211,8 +212,8 @@ The `cycle` case starts with one chain and proposes last-to-first, which
 must be refused with the expected truncated cycle path.
 
 Each case also runs on dense DAGs containing every forward edge within
-its component(s). At 320 active nodes the cycle graph has 51,040 edges;
-the two-component insertion/IRQ graphs have 25,440. Their absent bridge
+its component(s). At 384 active nodes the cycle graph has 73,536 edges;
+the two-component insertion/IRQ graphs have 36,672. Their absent bridge
 requires an unsuccessful reverse-reachability search over the entire
 second component. Dense cycle rejection finds the direct first-to-last
 edge and returns a two-node path, so density does not imply worst-case
@@ -230,14 +231,14 @@ scheduling enabled. Results report min/median/max guest nanoseconds.
 These are core algorithm costs, excluding raw-lock contention, class
 registration, held-stack scans, statistics, and reports. They do not
 measure end-to-end acquisition latency or establish a worst-case bound.
-The full-capacity dense cycle graph has 818,560 edges; its two-component
-cases have 408,960. IRQ labels apply to all subclasses: the full chain's
+The full-capacity dense cycle graph has 1,178,880 edges; its two-component
+cases have 589,056. IRQ labels apply to all subclasses: the full chain's
 safe endpoint is subclass 3 of the first class, while the dense case uses
 subclass 0; both reach subclass 0 of the last IRQ-enabled class. The tests
 check these endpoints explicitly. Output identifies topology and the
 pre-operation edge count for each of the 30 cases.
 
-The host `dense-capacity` sanitizer test fills the same 1,280-node dense
+The host `dense-capacity` sanitizer test fills the same 1,536-node dense
 DAG, checks a two-entry path buffer, forces a full traversal with an absent
 usage label, and initializes every node as a BFS source. These exercise
 queue capacity and duplicate suppression under ASan/UBSan.
@@ -253,10 +254,10 @@ Normal kernel and threaded-host builds have no counter fields or updates.
 Tests reset counters between operations; composite IRQ helpers accumulate
 all searches rather than silently replacing the count with the last one.
 
-The test covers all 1280 nodes: an absent usage label on a dense DAG
-attains 25,600 adjacency-word reads; all nodes as initial sources test
+The test covers all 1536 nodes: an absent usage label on a dense DAG
+attains 36,864 adjacency-word reads; all nodes as initial sources test
 duplicate suppression; an isolated target forces an exhaustive failed
-reachability search; a full chain attains 2,559 parent steps even with no
+reachability search; a full chain attains 3,071 parent steps even with no
 output path; and a cyclic graph still terminates within the bound. It also
 checks empty-source and self-reachability shortcuts, four-search fresh
 usage validation, zero-search warmed usage, usage-conflict rejection and
@@ -519,7 +520,7 @@ not leave an expectation that could suppress a later real violation.
 
 Host `irq-dependencies` covers a maximum-node path and usage-last conflicts; `irq-oracle` compares every pair against an independent transitive-closure implementation over 32 generated DAGs. Host `metadata-lifetime` frees/reuses a name buffer and checks content
 identity, kind separation, maximum length and overlong rejection.
-`path-bounds` builds a 1280-node chain, iterates the returned bounded path
+`path-bounds` builds a 1536-node chain, iterates the returned bounded path
 under ASan/UBSan, checks a zero-capacity request and self reachability.
 `lockdep-order` additionally observes nine edges independently, detects
 the closing ten-lock cycle, and checks an unheld release without performing

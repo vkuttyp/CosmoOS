@@ -60,6 +60,15 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
 - [ ] **Implementation — callback-wait dependencies.** Extend coverage beyond
   locks learned from observed active timer callbacks, including other
   synchronous callback waits and paths not yet observed.
+  *2026-10-05, partly done:* timer callback functions are lockdep classes: a
+  callback holds its class, and every `timer_cancel_sync` acquires it, so
+  the graph checks each wait against every observed callback of the
+  function, transitively and in either order (`lockdep-callback`, with
+  negative controls). IRQ-handler and module waits go through
+  `synchronize_quiesce`, whose `might_sleep` rules out a lock cycle.
+  Still open, and the reason this item stays unchecked: callback paths
+  never executed contribute no edges, and `wait_for_completion` on a
+  callback-signalled completion has no function to key a class on. See the [callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md).
 - [ ] **Implementation/validation — raw IRQ pairing.** Track or validate
   ownership and pairing of raw `arch_irq_save`/`arch_irq_restore` operations
   beyond the checks already applied to tracked spinlock wrappers.
@@ -473,7 +482,8 @@ their deferred status here; this section does not schedule them for implementati
 2. ~~Add quiescence memory-order models and targeted negative controls.~~
    Done 2026-10-05 ([quiescence memory-order report](audit/2026-10-05-quiesce-memory-order-report.md)).
 3. Extend callback-wait and raw IRQ-pairing coverage within the established
-   locking and lifetime architecture.
+   locking and lifetime architecture. Timer callback waits done 2026-10-05
+   ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing is next.
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
 
