@@ -15,6 +15,7 @@
 #include <kernel/percpu.h>
 #include <kernel/printf.h>
 #include <kernel/quiesce.h>
+#include <kernel/quiesce_core.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -158,6 +159,10 @@ void sched_start_cpu(void)
     rq->idle->last_start_ns = clock_now_ns();
     quiesce_note_quiescent();   /* a CPU coming online holds no reference from before */
     __atomic_store_n(&pc->online, true, __ATOMIC_RELEASE);
+    /* Q0: before any read section on this CPU, so a grace period either
+     * sees this CPU online (and waits for it) or this CPU sees that grace
+     * period's unlink (quiesce_core.h; the waiter's half is W1b). */
+    quiesce_core_after_online();
     arch_thread_switch_prepare(NULL, rq->idle);
     arch_context_switch(&dead, &rq->idle->ctx);
     panic("sched: AP bootstrap context resumed");

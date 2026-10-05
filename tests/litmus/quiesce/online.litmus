@@ -1,0 +1,17 @@
+C quiesce-online
+"A CPU coming online, in the kernel's order. P0 is the waiter (sync_quiesce_counting): it unlinks, W1, the W1b fence, and only then reads which CPUs are online. P1 is the new CPU (sched_start_cpu): it publishes, marks itself online, the Q0 fence, and then its first read section looks the object up. Forbidden: the waiter did not see the CPU online (so never waits for it) and the CPU's section still found the object. With a seq_cst fence on both sides one of them sees the other's store; a CPU the waiter does see is waited for until its next publish, which follows its section."
+{ }
+P0 (atomic_int* p, atomic_int* epoch, atomic_int* online) {
+  atomic_store_explicit(p, 1, memory_order_release);
+  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);
+  atomic_thread_fence(memory_order_seq_cst);
+  int m = atomic_load_explicit(online, memory_order_acquire);
+}
+P1 (atomic_int* p, atomic_int* epoch, atomic_int* seen, atomic_int* online) {
+  int e = atomic_load_explicit(epoch, memory_order_acquire);
+  int prev = atomic_exchange_explicit(seen, e, memory_order_acq_rel);
+  atomic_store_explicit(online, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r = atomic_load_explicit(p, memory_order_acquire);
+}
+exists (0:m=0 /\ 1:r=0)

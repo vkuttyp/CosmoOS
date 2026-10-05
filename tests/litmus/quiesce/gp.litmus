@@ -1,0 +1,14 @@
+C quiesce-gp
+"The grace period. P0 is a CPU: a read-side section reads the object (a plain, non-atomic access, as the kernel's readers make), then the quiescent point publishes (Q1 acquire load of the epoch, Q2 acq_rel exchange of its seen epoch). P1 is the waiter: W1 advances the epoch (seq_cst RMW), W2 reads the CPU's seen epoch (acquire) and, having seen the target, frees -- modelled as a plain write to the object. The claim is that no execution in which the free happens has a data race between the section's read and the free (RC11 marks such an execution undefined); the condition only asks that the free is reachable."
+{ }
+P0 (int* obj, atomic_int* epoch, atomic_int* seen) {
+  int r0 = *obj;
+  int e = atomic_load_explicit(epoch, memory_order_acquire);
+  int prev = atomic_exchange_explicit(seen, e, memory_order_acq_rel);
+}
+P1 (int* obj, atomic_int* epoch, atomic_int* seen) {
+  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);
+  int s = atomic_load_explicit(seen, memory_order_acquire);
+  if (s == 1) { *obj = 1; }
+}
+exists (1:s=1)
