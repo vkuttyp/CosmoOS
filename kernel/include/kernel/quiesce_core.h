@@ -86,15 +86,16 @@ static inline uint64_t quiesce_core_begin(struct quiesce_state *st)
  * for" (docs/kernel/quiesce/design.md, "CPUs coming online").
  *
  * A waiter reads the online CPUs AFTER W1, behind W1b; a CPU coming
- * online marks itself online, then Q0, then publishes. That is the
- * store-buffering shape -- waiter: unlink, W1, read online; new CPU:
- * write online, read the epoch -- and with a sequentially consistent
- * fence on both sides at least one of them sees the other: either the
- * waiter's snapshot includes the new CPU and it waits for that CPU's
- * next publish, or the new CPU's publish reads the advanced epoch and
- * (Q1 against W1) every read section it enters afterwards sees the
- * unlink. Release/acquire alone permits both to miss, which is what the
- * order before these fences did (tests/litmus/quiesce/online-*.litmus).
+ * online (sched_start_cpu) publishes, marks itself online, passes Q0,
+ * and only then runs a read section. That is the store-buffering shape
+ * -- waiter: unlink, W1, read online; new CPU: write online, look the
+ * object up -- and with a sequentially consistent fence on both sides at
+ * least one of them sees the other: either the waiter's snapshot
+ * includes the new CPU, and it waits for that CPU's next publish (which
+ * follows the section), or the new CPU's section sees the unlink and
+ * cannot find the object. Release/acquire alone permits both to miss,
+ * which is what the order before these fences did
+ * (tests/litmus/quiesce/online-*.litmus).
  */
 static inline void quiesce_core_after_begin(void)
 {

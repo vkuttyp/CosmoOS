@@ -321,8 +321,10 @@ static void test_two_waiters(void)
 
 /*
  * The kernel's onlining order, modelled with its own helpers: a new CPU
- * marks itself online (a release store, as sched_start_cpu does), passes
- * Q0 and publishes before it runs any reader; the waiter advances the
+ * publishes, marks itself online (a release store), and passes Q0
+ * before it runs any reader, in sched_start_cpu's order -- so a waiter
+ * can see the early publish while the CPU still reads as offline; the
+ * waiter advances the
  * epoch, passes W1b and only then reads which CPUs are online (as
  * sync_quiesce_counting does). Readers come online one by one while the
  * updater reclaims. Under TSan, a new CPU that read the old object
@@ -366,9 +368,9 @@ static void *late_main(void *p)
      * generation 300c), so every one of them joins mid-run. */
     while (atomic_load_explicit(&m->gen, memory_order_acquire) < r->cpu * 300u)
         sched_yield();
+    quiesce_core_publish(&m->st, r->cpu);       /* sched_start_cpu publishes first */
     atomic_store_explicit(&m->online[r->cpu], true, memory_order_release);
-    quiesce_core_after_online();                /* Q0 */
-    quiesce_core_publish(&m->st, r->cpu);       /* before any reader */
+    quiesce_core_after_online();                /* Q0, before any reader */
     while (!atomic_load_explicit(&m->stop, memory_order_acquire)) {
         for (unsigned i = 0; i < 64; i++) {
             struct obj *o = atomic_load_explicit(&m->cur, memory_order_acquire);

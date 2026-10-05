@@ -22,7 +22,7 @@ Every test above ran and passed on x86-64 (4 CPUs and 1 CPU) and AArch64
 | `negative-model` | with one CPU unpublished the algorithm refuses to declare the grace period over; it does once that CPU publishes |
 | `threads` | four reader "CPUs" alternate 64-read sections with a quiescent point; the updater swaps the pointer, waits, poisons and frees 2000 objects. Any reader past its section would read freed memory: ASan fails the run. Zero bad magics observed |
 | `two-waiters` | two updaters reclaim their own slots concurrently against readers of both, each publishing its own CPU while it waits (a waiting CPU is quiescent); the epoch ends at exactly 2000 -- no advance lost between the waiters |
-| `online-late` | four CPUs come online one by one (CPU *c* after generation 300*c*) in the kernel's order -- release store of `online`, Q0, publish -- while the updater reads the mask after W1 and W1b; the run must see the mask grow and end with every CPU online |
+| `online-late` | four CPUs come online one by one (CPU *c* after generation 300*c*) in `sched_start_cpu`'s order -- publish, release store of `online`, Q0, then readers -- while the updater reads the mask after W1 and W1b; the run must see the mask grow and end with every CPU online |
 
 ## Target self-tests (`kernel/core/quiescetest.c`)
 
