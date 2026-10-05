@@ -1078,6 +1078,7 @@ struct rm_submitter {
     void *buf;
     struct rm_bio pool[RM_POOL];
     volatile unsigned started, stop;
+    volatile unsigned pause, paused;               /* `irq-order` with two CPUs: parked outside blk_submit */
     volatile unsigned ok, refused, other;          /* blk_submit's answers */
     volatile unsigned c_ok, c_eio, c_enodev, c_other, c_double;   /* completions by status */
     volatile uint64_t max_seq;                     /* the latest completion's stamp */
@@ -1115,6 +1116,15 @@ static void rm_submitter_main(void *arg)
     __atomic_store_n(&s->started, 1u, __ATOMIC_RELEASE);
     unsigned next = 0;
     while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&s->pause, __ATOMIC_ACQUIRE)) {
+            /* Between submits, so not counted in the device's
+             * `submitting`: see rm_irq_order_pass. */
+            __atomic_store_n(&s->paused, 1u, __ATOMIC_RELEASE);
+            while (__atomic_load_n(&s->pause, __ATOMIC_ACQUIRE) && !__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE))
+                sched_yield();
+            __atomic_store_n(&s->paused, 0u, __ATOMIC_RELEASE);
+            continue;
+        }
         struct rm_bio *rb = &s->pool[next];
         next = (next + 1) % RM_POOL;
         if (__atomic_load_n(&rb->busy, __ATOMIC_ACQUIRE)) {
@@ -1455,16 +1465,32 @@ static bool rm_irq_order_pass(struct blkdev *bd, struct pci_device *pdev, unsign
      * on the submitter's CPU, and the holder on `other_cpu_than` that
      * one. With two CPUs that is the same CPU, and every attempt failed
      * to overlap (docs/audit/2026-10-05-two-cpu-validation-report.md).
+     *
+     * Sharing a CPU with the submitter has a condition of its own. The
+     * removal's first step, `blk_unregister`, waits for every submit
+     * already inside the driver (`bd->submitting`) -- correctly: that is
+     * the drain. A submitter preempted mid-submit when the holder takes
+     * its CPU stays there until the section ends, and the removal waits
+     * for it before it can reach the teardown. So the submitter is parked
+     * first, between submits, and resumed after the removal (it is then
+     * refused, as in the other passes).
      */
     unsigned hold_cpu = other_cpu_than(cpu);
     RM_CHECK(hold_cpu != arch_cpu_id());
+    if (hold_cpu == cpu) {
+        __atomic_store_n(&s.pause, 1u, __ATOMIC_RELEASE);
+        RM_CHECK(wait_flag_blk(&s.paused, 2000));
+    }
+    unsigned spins0 = blk_test_unregister_spins();
     ht = thread_create_on(rm_holder_main, &h, "vrmhold", SCHED_PRIO_DEFAULT, CPUMASK_OF(hold_cpu));
     RM_CHECK(ht != NULL);
     RM_CHECK(wait_flag_blk(&h.held, 2000));       /* the section is open */
     uint64_t remove_start = blk_test_tick();
     int rc = pci_test_remove(pdev);
+    unsigned drain_spins = blk_test_unregister_spins() - spins0;   /* the drain's waits: a diagnostic */
     thread_join(ht);
     ht = NULL;
+    __atomic_store_n(&s.pause, 0u, __ATOMIC_RELEASE);
     RM_CHECK(rc == 0);
 
     uint64_t before_irq = g_rm->before_irq_seq(), walk = g_rm->walk_seq(), held_until = h.exit_seq;
@@ -1486,8 +1512,8 @@ static bool rm_irq_order_pass(struct blkdev *bd, struct pci_device *pdev, unsign
     *caught = before_irq != 0 && held_until != 0 && before_irq < held_until;
     if (!*caught) {
         kinfo("selftest: virtio-remove-inflight: irq-order: the teardown did not overlap the read-side section "
-              "(entered %llu, section ended %llu); retrying",
-              (unsigned long long)before_irq, (unsigned long long)held_until);
+              "(entered %llu, section ended %llu; the unregister drain waited %u times); retrying",
+              (unsigned long long)before_irq, (unsigned long long)held_until, drain_spins);
         goto out;
     }
     /* The whole order, from one sequence: the section opened before the
@@ -1507,10 +1533,10 @@ static bool rm_irq_order_pass(struct blkdev *bd, struct pci_device *pdev, unsign
     kinfo("selftest: virtio-remove-inflight: irq-order: a read-side section opened at %llu on cpu %u; the removal "
           "started at %llu on cpu %u and entered the queue teardown at %llu with it open, the section ended at %llu "
           "and only then did the slot walk begin, at %llu; %u accepted, %u found in flight, %u completed -EIO, "
-          "%u -ENODEV, %u ok",
+          "%u -ENODEV, %u ok; submitter %s",
           (unsigned long long)held_from, hold_cpu, (unsigned long long)remove_start, arch_cpu_id(),
           (unsigned long long)before_irq, (unsigned long long)held_until, (unsigned long long)walk, s.ok, found,
-          s.c_eio, s.c_enodev, s.c_ok);
+          s.c_eio, s.c_enodev, s.c_ok, hold_cpu == cpu ? "parked beside the holder" : "running on its own CPU");
 
 out:
     __atomic_store_n(&h.stop, 1u, __ATOMIC_RELEASE);
