@@ -167,28 +167,40 @@ void preempt_enable(void)
  * true, and `arch_irq_restore` calls here after enabling them
  * (docs/audit/next-subsystem-wake-preempt.md).
  *
- * The two internal callers of `arch_irq_restore` pass through unharmed
- * by the predicate alone: the lockdep bracket inside `spin_unlock`
- * restores while the lock's `preempt_disable` still holds (count > 0),
- * and the tail of `schedule()` restores its caller's state with the
- * count at zero, where a pending reschedule means one more trip through
- * `schedule()` -- the same thing a tick landing there would do.
+ * The lockdep bracket inside `spin_unlock` restores while the lock's
+ * `preempt_disable` still holds (count > 0) and passes through by the
+ * predicate alone. The tail of `schedule()` does not come here: it asks
+ * `preempt_point_due` before its restore and takes a pending reschedule
+ * by looping, because a call from here would be a `schedule()` inside
+ * `schedule()`, one stack frame per reschedule pending at its restore
+ * (docs/kernel/scheduler/invariants.md S31).
  */
 static uint64_t g_restore_preempts[CONFIG_MAX_CPUS];
 
 void preempt_point(void)
 {
     struct percpu *pc = raw_this_cpu();   /* identity: the predicate below is false on any CPU a movable thread runs on */
-    bool take = pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled();
-#if CONFIG_DEBUG
-    sched_tail_trip_note(pc->cpu_id, take);
-#endif
-    if (take) {
-        /* This CPU's word, written only here; atomic because the scheduler
-         * dump reads every CPU's from wherever it runs. */
+    if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled()) {
+        /* This CPU's word, written only here and in preempt_point_due;
+         * atomic because the scheduler dump reads every CPU's from
+         * wherever it runs. */
         __atomic_fetch_add(&g_restore_preempts[pc->cpu_id], 1, __ATOMIC_RELAXED);
         sched_preempt();
     }
+}
+
+/*
+ * The same predicate for a restore of `s` not yet made, interrupts off:
+ * whether the restore would preempt. A yes is counted as the point's
+ * switch, which the caller -- `schedule()`'s restore loop -- then takes.
+ */
+bool preempt_point_due(arch_irq_state_t s)
+{
+    struct percpu *pc = raw_this_cpu();   /* interrupts are off: this CPU's */
+    if (!(arch_irq_state_enabled(s) && pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0))
+        return false;
+    __atomic_fetch_add(&g_restore_preempts[pc->cpu_id], 1, __ATOMIC_RELAXED);
+    return true;
 }
 
 uint64_t preempt_point_count(unsigned cpu)

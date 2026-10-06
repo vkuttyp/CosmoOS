@@ -170,6 +170,111 @@ when `prev->state == EXITED`), releases the run-queue lock and restores
 interrupts as they were for the resumed thread, then `thread_put`s the
 exited thread outside the lock.
 
+### The restore loop
+
+`schedule()` ends by restoring its caller's interrupt state, and a
+restore that enables interrupts is a preemption point (below). A
+reschedule requested while the switch ran -- the reaper woken for an
+exited thread in `sched_finish_switch`, a same-CPU wake made by the
+thread switched to before it switched back -- is pending at exactly that
+moment. Until the restore-loop unit
+(`docs/audit/2026-10-06-sched-restore-loop-report.md`) the restore's
+`preempt_point` took it by entering `schedule()` again from inside the
+first call's tail: a recursion, one level per resumption that found a
+reschedule pending, bounded only because every link (`schedule_internal`,
+`arch_irq_restore`, `arch_irq_restore_hw`, `preempt_point`,
+`sched_preempt`) happened to compile to a tail call. A lockdep wrapper
+that kept one frame made a one-CPU boot double fault on the idle
+thread's stack.
+
+The reschedule is now taken by looping in the first call's frame:
+
+```text
+schedule_internal(preempt):
+    assert irq_depth == 0, preempt_count == 0, and that this thread is
+           not already inside schedule_internal (S31)
+    s = arch_irq_save()                 /* the caller's state, saved once */
+    loop:
+        pc = this_cpu(); rq = pc->rq    /* re-read: the thread may have moved while switched out */
+        note quiescent; lock rq; requeue prev; pick next; need_resched = false
+        switch (or not: next == prev); sched_finish_switch()   /* rq unlocked */
+        if preempt_point_due(s):        /* the restore point's predicate, for the restore not yet made */
+            preempt = true; continue    /* one more trip, in this frame */
+        break
+    arch_irq_restore_nopoint(s)         /* the hardware restore without its preemption point */
+```
+
+`preempt_point_due(s)` is the restore point's predicate evaluated
+*before* the restore it describes: `s` enables interrupts, `need_resched`
+is set, `preempt_count == 0`, `irq_depth == 0`. A true answer is counted
+in `preempt_point_count`, as the restore point counted the switches it
+took, so the scheduler dump's `restore-preempts` keeps its meaning. A
+trip is a pass with `preempt = true`, exactly as `preempt_point` called
+`sched_preempt`: the thread is marked `THREAD_FLAG_PREEMPTED` and
+re-queued at the head if its slice is not spent. Which thread runs next
+does not change; the second pass runs in the first pass's frame instead
+of a new one.
+
+**State at each point of the loop**, the same on both architectures
+(x86-64 masks with `cli` and tests `RFLAGS.IF`; AArch64 masks with
+`msr daifset, #2` and tests `PSTATE.I`):
+
+| Point | Interrupts | `preempt_count` | `irq_depth` | Run-queue lock |
+|---|---|---|---|---|
+| entry, before the save | the caller's: on from a thread, off from a trap return | 0 (asserted) | 0 (asserted) | not held |
+| top of a pass | off | 0 | 0 | not held |
+| locked body, through `arch_context_switch` | off | 1 (the lock's `preempt_disable`) | 0 | held, handed across the switch (S3) |
+| after `sched_finish_switch` | off | 0 | 0 | released |
+| `preempt_point_due(s)` | off | 0 | 0 | not held |
+| after `arch_irq_restore_nopoint(s)` | the caller's again | 0 | 0 | not held |
+
+A pass that resumes after a switch is executed by the thread switched
+back in, on whichever CPU it now runs; `pc` and `rq` are read again at
+the top of every pass with interrupts off (S25). On the interrupt-return
+path (`sched_preempt` from `x86_trap_dispatch` or the AArch64 IRQ
+handler) `s` has interrupts masked, so `preempt_point_due(s)` is false and
+that call is a single pass: the `iretq` or `eret` re-enables interrupts,
+and a reschedule pending then is the next trap return's -- as before.
+
+**Why no reschedule is missed.** The predicate is read with interrupts
+off and the restore follows with nothing in between that can set
+`need_resched` on this CPU. Every writer of the flag is one of:
+
+- code on this CPU: `request_resched` for the local queue
+  (`sched_wake`, `sched_enqueue_new`, `sched_reprioritize`, migration).
+  Between the read and the restore this CPU runs only the scheduler's
+  tail, which wakes nothing -- the reaper's wake in `sched_finish_switch`
+  comes before the read. A local set is therefore before the read, and
+  the loop takes it, or after the restore, in code with its own
+  preemption points;
+- an interrupt handler on this CPU (`rr_tick` and the idle tick in
+  `sched_tick` run in the timer interrupt): masked until the restore,
+  then delivered, and its return is a preemption point, because the frame
+  it interrupted has interrupts on, `preempt_count == 0` and
+  `irq_depth == 0`;
+- another CPU: `request_resched` for a remote queue stores the flag and
+  then sends `IPI_RESCHEDULE` whenever the target is online. The IPI
+  stays pending while interrupts are masked, is taken at the restore, and
+  its return is the preemption point.
+
+The old structure evaluated the predicate just *after* the enable, so a
+remote store in the instant between the two could be taken by the
+restore point rather than the IPI's return. Either way it is taken before
+the thread runs on; the IPI is the path every other remote wake already
+relies on.
+
+**What still preempts by calling.** `preempt_enable`, and the restores
+outside the scheduler through `preempt_point`, still call `sched_preempt`
+from wherever they are. That is one level on the caller's stack and does
+not recurse: the `schedule()` it enters takes every further pending
+reschedule by looping and returns through the no-point restore. The trap
+return calls it with interrupts masked, a single pass. The idle loop
+calls `schedule()` when `need_resched` is set, and `schedule()` returns to
+it with no reschedule pending at the restore. So on one thread's stack at
+most one `schedule_internal` is ever inside its interrupts-off body
+(S31); a trap can stack a second only where interrupts are on, which is
+before that body's save or after its restore.
+
 ### Blocking and waking
 
 ```c
@@ -204,13 +309,13 @@ RUNNING thread is a no-op (this is what makes the wait protocol safe).
   same-CPU wake of a higher-priority thread therefore ran at the next
   tick, up to 4 ms later. The predicate is the same four conditions as
   `preempt_enable`'s, tested at the other moment the last of them can
-  become true. The two internal restores it passes through are harmless
-  by the predicate alone: the lockdep bracket in `spin_unlock` restores
-  with the count still non-zero, and the tail of `schedule()` restores
-  with the count at zero, where a reschedule set during the switch means
-  one more trip through `schedule()`, which a tick landing there would
-  also cause. `preempt_point_count(cpu)` counts the switches taken here
-  (the scheduler dump's `restore-preempts`).
+  become true. The lockdep bracket in `spin_unlock` passes through it
+  harmlessly, restoring with the count still non-zero. The tail of
+  `schedule()` does not pass through it at all: it evaluates the same
+  predicate before its restore (`preempt_point_due`), takes a pending
+  reschedule by looping, and restores with `arch_irq_restore_nopoint`
+  ("The restore loop", above). `preempt_point_count(cpu)` counts the
+  switches taken at either (the scheduler dump's `restore-preempts`).
 - Explicit `sched_yield()` / blocking calls.
 
 `schedule_internal`, the idle loop before `hlt`/`wfi`, and
@@ -221,7 +326,9 @@ spinlock and is in no read-side section.
 
 `idle_thread_main`: loop `{ if need_resched: schedule(); else
 arch_cpu_wait_for_interrupt(); }`. The idle thread never sits on a run
-queue; `pick_next` returning NULL selects it.
+queue; `pick_next` returning NULL selects it. Each `schedule()` it calls
+is one level on its stack: a reschedule pending when the idle thread is
+resumed is taken by the restore loop, not by a nested call.
 
 ## 3a. Migration
 

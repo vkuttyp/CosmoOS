@@ -94,10 +94,18 @@ struct thread {
      * written in debug builds only (docs/audit/next-subsystem-smp-wake.md). */
     bool wake_resched;
     uint64_t wake_ipi_base;
-    /* (own) reschedules taken in a row at this thread's restores in
-     * schedule(), written in debug builds only
-     * (docs/audit/2026-10-06-sched-restore-loop-report.md). */
+    /* (own) schedule()'s restore loop, debug builds only
+     * (docs/kernel/scheduler/invariants.md S31): whether this thread is
+     * inside schedule_internal's interrupts-off body and the most it has
+     * been at once; the restore-loop trips it has taken, in all and the
+     * most in one call; the deepest stack it entered schedule() on. */
+    uint32_t sched_nest, sched_nest_max;
     uint32_t sched_chain;
+    uint64_t sched_trips;
+    size_t sched_depth_max;
+    /* (own) sched-restore-loop's seam, self-test builds only: the next
+     * this many resumptions in schedule() find a reschedule pending. */
+    uint32_t test_resume_resched;
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */
     struct waitqueue *waiting_on;       /* diagnostics */

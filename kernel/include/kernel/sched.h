@@ -180,8 +180,8 @@ void sched_dump(void);
 void sched_dump_register(const char *name, void (*fn)(void));
 uint64_t sched_switch_count(unsigned cpu);
 #if CONFIG_DEBUG
-/* The restore-loop measurements (docs/audit/2026-10-06-sched-restore-loop-report.md). */
-void sched_tail_trip_note(unsigned cpu, bool taken);
+/* The restore loop's trips and schedule()'s deepest entry per CPU, printed
+ * once at the end of a boot (docs/audit/2026-10-06-sched-restore-loop-report.md). */
 void sched_report_depth(void);
 #endif
 

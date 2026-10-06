@@ -962,20 +962,30 @@ static __attribute__((noinline)) void irq_restore_track(arch_irq_state_t state, 
 }
 
 /*
- * The hardware restore is this function's last action and must compile to
- * a tail call. `schedule()` ends in arch_irq_restore, whose preemption
- * point may enter `schedule()` again ("one more trip"); that recursion is
- * bounded only because every link -- schedule_internal, arch_irq_restore,
- * arch_irq_restore_hw, preempt_point, sched_preempt -- is a tail call. A
- * frame kept here (the checks inline, with their buffer) grew the idle
- * thread's stack by one level per resumption until a one-CPU boot double
- * faulted (docs/audit/2026-10-06-lockdep-irq-pairing-report.md).
+ * The checks stay out of line in `irq_restore_track`, so the wrapper keeps
+ * no frame of its own around the hardware restore. That once mattered for
+ * correctness: `schedule()` ended in this restore and its preemption point
+ * entered `schedule()` again, a recursion bounded only by every link being
+ * a tail call, and a frame kept here double faulted a one-CPU boot
+ * (docs/audit/2026-10-06-lockdep-irq-pairing-report.md). `schedule()` now
+ * takes that reschedule by looping and restores through
+ * `arch_irq_restore_nopoint` (docs/kernel/scheduler/invariants.md S31), so
+ * a frame here costs one level per restore point, not one per reschedule.
  */
 void arch_irq_restore(arch_irq_state_t state)
 {
     if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         irq_restore_track(state, (uintptr_t)__builtin_return_address(0));
     arch_irq_restore_hw(state);
+}
+
+/* The same pairing check, then the restore without its preemption point:
+ * for `schedule()`, which has already taken any reschedule pending. */
+void arch_irq_restore_nopoint(arch_irq_state_t state)
+{
+    if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        irq_restore_track(state, (uintptr_t)__builtin_return_address(0));
+    arch_irq_write_hw(state);
 }
 
 #if CONFIG_SELFTEST

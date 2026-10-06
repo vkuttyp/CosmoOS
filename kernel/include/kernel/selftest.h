@@ -52,6 +52,7 @@ bool selftest_preempt_wake_direct(const char **reason);
 bool selftest_preempt_wake_locked(const char **reason);
 bool selftest_prio_inversion(const char **reason);   /* a mutex owner is boosted to a blocked waiter's priority */
 bool selftest_irqrestore_bench(const char **reason);
+bool selftest_sched_restore_loop(const char **reason);
 /* The sysctl-driven probe behind init's preempt-wake-syscall step (debug builds). */
 int sched_preempt_probe_sysctl(char *out, size_t n);
 bool selftest_sleep(const char **reason);

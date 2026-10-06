@@ -308,59 +308,52 @@ void sched_finish_switch(void)
 
 #if CONFIG_DEBUG
 /*
- * What the reschedule taken at `schedule()`'s own tail costs, per CPU:
- * docs/audit/2026-10-06-sched-restore-loop-report.md. A "trip" is that
- * restore's preemption point entering `schedule()` again; a "chain" is
- * the trips one thread takes in a row, each from inside the last, which
- * is how many frames deep the recursion would be if its links were calls.
- * Recorded: the deepest stack `schedule()` is entered on at all, the
- * deepest a trip enters it on, and the longest chain, with the thread
- * each was seen on. Read once, at the end of a boot (`sched_report_depth`).
+ * What the restore loop does, per CPU (docs/audit/2026-10-06-sched-restore-
+ * loop-report.md): its trips -- reschedules pending at the restore and
+ * taken by another pass -- in all and the most in one call, and the
+ * deepest stack `schedule()` is entered on, each with the thread it was
+ * seen on. Read once, at the end of a boot (`sched_report_depth`). The
+ * per-thread half is what `sched-restore-loop` asserts on.
  */
 struct entry_depth {
-    size_t entry, trip_entry;
+    size_t entry;
     uint32_t chain;
     uint64_t trips;
-    char entry_thread[THREAD_NAME_MAX], trip_thread[THREAD_NAME_MAX], chain_thread[THREAD_NAME_MAX];
+    char entry_thread[THREAD_NAME_MAX], chain_thread[THREAD_NAME_MAX];
 };
 static struct entry_depth g_depth[CONFIG_MAX_CPUS];
-static bool g_tail_armed[CONFIG_MAX_CPUS];   /* the restore about to run is schedule()'s tail */
-static bool g_trip_next[CONFIG_MAX_CPUS];    /* and it took a reschedule: the next entry is a trip */
 
-static void note_entry_depth(const struct runqueue *rq, struct thread *t, uintptr_t fp)
+/* Interrupts off: after schedule_internal's save. */
+static void note_entry(struct thread *t, uintptr_t fp)
 {
-    struct entry_depth *e = &g_depth[rq->cpu];
-    bool trip = g_trip_next[rq->cpu];
-    g_trip_next[rq->cpu] = false;
-    t->sched_chain = trip ? t->sched_chain + 1u : 0u;
-    if (t->sched_chain > e->chain) {
-        e->chain = t->sched_chain;
-        strlcpy(e->chain_thread, t->name, THREAD_NAME_MAX);
-    }
+    if (t->sched_nest != 0)
+        panic("schedule() entered on thread '%s' from inside its own (S31)", t->name);
+    t->sched_nest++;
+    if (t->sched_nest > t->sched_nest_max)
+        t->sched_nest_max = t->sched_nest;
+    t->sched_chain = 0;
     if (!thread_stack_contains(t, fp))
         return;
     size_t d = t->stack_base + t->stack_size - fp;
+    if (d > t->sched_depth_max)
+        t->sched_depth_max = d;
+    struct entry_depth *e = &g_depth[raw_this_cpu()->cpu_id];
     if (d > e->entry) {
         e->entry = d;
         strlcpy(e->entry_thread, t->name, THREAD_NAME_MAX);
     }
-    if (trip && d > e->trip_entry) {
-        e->trip_entry = d;
-        strlcpy(e->trip_thread, t->name, THREAD_NAME_MAX);
-    }
 }
 
-/* Called by preempt_point on entry: whether this restore is schedule()'s
- * own tail, which armed it just before with interrupts off, and whether
- * it takes the reschedule. */
-void sched_tail_trip_note(unsigned cpu, bool taken)
+/* Interrupts off: a pending reschedule taken by another pass. */
+static void note_trip(struct thread *t)
 {
-    if (cpu >= CONFIG_MAX_CPUS || !g_tail_armed[cpu])
-        return;
-    g_tail_armed[cpu] = false;
-    if (taken) {
-        g_depth[cpu].trips++;
-        g_trip_next[cpu] = true;
+    struct entry_depth *e = &g_depth[raw_this_cpu()->cpu_id];
+    t->sched_trips++;
+    t->sched_chain++;
+    e->trips++;
+    if (t->sched_chain > e->chain) {
+        e->chain = t->sched_chain;
+        strlcpy(e->chain_thread, t->name, THREAD_NAME_MAX);
     }
 }
 
@@ -368,61 +361,42 @@ void sched_report_depth(void)
 {
     for (unsigned c = 0; c < cpu_count(); c++) {
         const struct entry_depth *e = &g_depth[c];
-        kinfo("sched: cpu %u: trips %llu, longest chain %u ('%s'), deepest entry %zu bytes ('%s'), "
-              "deepest trip entry %zu bytes ('%s')",
-              c, (unsigned long long)e->trips, e->chain, e->chain_thread, e->entry, e->entry_thread,
-              e->trip_entry, e->trip_thread);
+        kinfo("sched: cpu %u: trips %llu, longest chain %u ('%s'), deepest entry %zu bytes ('%s')",
+              c, (unsigned long long)e->trips, e->chain, e->chain_thread, e->entry, e->entry_thread);
     }
 }
-#define ARM_TAIL(rq, s) (g_tail_armed[(rq)->cpu] = arch_irq_state_enabled(s))
-#else
-#define ARM_TAIL(rq, s) ((void)0)
 #endif
 
 /*
+ * One pass of the scheduler: re-queue the current thread, pick the next,
+ * switch. Interrupts are off on entry and on return, and the run-queue lock
+ * is not held at either; a pass that switched returns in the thread that
+ * was switched back in, on whichever CPU it now runs.
+ *
  * `preempt` distinguishes an involuntary switch (interrupt return,
- * preempt_enable) from a voluntary one (block, yield, exit). The
- * difference matters for a thread that has marked itself BLOCKED in
- * waitqueue_prepare but has not yet evaluated its condition: a
+ * preempt_enable, the restore point) from a voluntary one (block, yield,
+ * exit). The difference matters for a thread that has marked itself
+ * BLOCKED in waitqueue_prepare but has not yet evaluated its condition: a
  * preemption in that window must keep it runnable, otherwise it is
  * switched out on no queue and no wait list and is lost. When it runs
  * again its wait loop sees state RUNNING, yields once, re-prepares, and
  * re-checks the condition, so no wakeup is missed.
  */
-static void schedule_internal(bool preempt)
+static void schedule_pass(bool preempt)
 {
-    KASSERT(g_initialized);
-    {
-        /* Identity reads: both counts are zero on any CPU a caller that
-         * may switch is running on, and non-zero only where it cannot move. */
-        struct percpu *chk = raw_this_cpu();
-        if (chk->irq_depth != 0)
-            panic("schedule() called from interrupt context (depth %u)", chk->irq_depth);
-        if (chk->preempt_count != 0)
-            panic("schedule() called with preemption disabled (count %d), a spinlock is held",
-                  chk->preempt_count);
-    }
-
-    /* Interrupts off before the per-CPU block is read: a caller arrives
-     * here preemptible, and a tick between reading `pc` and taking its
-     * run-queue lock could move this thread to another CPU, which would
-     * then switch on the state of the CPU it left (S25; the corruption
-     * that removed the first balancer, docs/audit/next-subsystem-percpu-
-     * migration.md). The lock below is the same irqsave lock, split. */
-    arch_irq_state_t s = arch_irq_save();
+    /* Read per pass: a thread switched out and back in may have moved,
+     * and interrupts are off, so the block is this CPU's (S25). */
     struct percpu *pc = this_cpu();
 
-    /* Quiescent: preempt_count is 0 here (asserted above), so no read-side
-     * section is open on this CPU (docs/kernel/quiesce/design.md). */
+    /* Quiescent: preempt_count is 0 here (asserted on entry to
+     * schedule_internal), so no read-side section is open on this CPU
+     * (docs/kernel/quiesce/design.md). */
     quiesce_note_quiescent();
 
     struct runqueue *rq = pc->rq;
     spin_lock(&rq->lock);
 
     struct thread *prev = rq->current;
-#if CONFIG_DEBUG
-    note_entry_depth(rq, prev, (uintptr_t)__builtin_frame_address(0));
-#endif
     uint64_t now = clock_now_ns();
     /* `last_start_ns` was stamped by whichever CPU last ran this thread,
      * which need not be this one. */
@@ -466,8 +440,6 @@ static void schedule_internal(bool preempt)
         prev->flags &= ~THREAD_FLAG_PREEMPTED;
         prev->last_start_ns = now;
         spin_unlock(&rq->lock);
-        ARM_TAIL(rq, s);
-        arch_irq_restore(s);
         return;
     }
 
@@ -488,8 +460,73 @@ static void schedule_internal(bool preempt)
     /* Resumed as `prev`, holding the run-queue lock taken by whoever
      * switched to us. */
     sched_finish_switch();
-    ARM_TAIL(this_cpu()->rq, s);
-    arch_irq_restore(s);
+}
+
+/*
+ * The restore loop (docs/kernel/scheduler/design.md, "The restore loop";
+ * S31). A reschedule pending when this is about to restore its caller's
+ * interrupt state -- the reaper woken by `sched_finish_switch`, a wake
+ * made by the thread switched to -- is the restore point's to take. It is
+ * taken here, by another pass in this frame, and the restore that ends the
+ * call has no preemption point. Taking it in the restore instead would be
+ * a `schedule()` inside this one, a frame per reschedule pending, bounded
+ * only while every link of that chain compiled to a tail call; a lockdep
+ * wrapper that kept one frame double faulted a one-CPU boot
+ * (docs/audit/2026-10-06-lockdep-irq-pairing-report.md).
+ *
+ * Not inlined, so that scripts/check-kernel-elf.sh finds it by name and
+ * can confirm it calls no preempting restore.
+ */
+static __noinline void schedule_internal(bool preempt)
+{
+    KASSERT(g_initialized);
+    {
+        /* Identity reads: both counts are zero on any CPU a caller that
+         * may switch is running on, and non-zero only where it cannot move. */
+        struct percpu *chk = raw_this_cpu();
+        if (chk->irq_depth != 0)
+            panic("schedule() called from interrupt context (depth %u)", chk->irq_depth);
+        if (chk->preempt_count != 0)
+            panic("schedule() called with preemption disabled (count %d), a spinlock is held",
+                  chk->preempt_count);
+    }
+
+    /* Interrupts off before the per-CPU block is read: a caller arrives
+     * here preemptible, and a tick between reading `pc` and taking its
+     * run-queue lock could move this thread to another CPU, which would
+     * then switch on the state of the CPU it left (S25; the corruption
+     * that removed the first balancer, docs/audit/next-subsystem-percpu-
+     * migration.md). The lock in each pass is the same irqsave lock, split. */
+    arch_irq_state_t s = arch_irq_save();
+#if CONFIG_DEBUG
+    note_entry(thread_current(), (uintptr_t)__builtin_frame_address(0));
+#endif
+
+    for (;;) {
+        schedule_pass(preempt);
+#if CONFIG_SELFTEST
+        /* sched-restore-loop's seam: resumed with a reschedule pending, as
+         * a wake made while this thread was switched out leaves it, and
+         * with its slice spent so the pass re-queues it behind its partner. */
+        struct thread *cur = thread_current();
+        if (cur->test_resume_resched != 0) {
+            cur->test_resume_resched--;
+            cur->slice_left_ns = 0;
+            raw_this_cpu()->need_resched = true;
+        }
+#endif
+        if (!preempt_point_due(s))
+            break;
+        preempt = true;   /* the restore point's switch: a preemption, as sched_preempt made it */
+#if CONFIG_DEBUG
+        note_trip(thread_current());
+#endif
+    }
+
+#if CONFIG_DEBUG
+    thread_current()->sched_nest--;
+#endif
+    arch_irq_restore_nopoint(s);
 }
 
 void schedule(void)
