@@ -129,9 +129,12 @@ big lock. Either way the measured rate is the host's drain rate.
 
 **In the guest.** The test now times each send and prints, per NIC, a
 log2 histogram from 16 us to 16 ms, the share of the window spent inside
-the driver's transmit (`netif_tx_probe`, around `nif->ops->transmit`),
-the ring's peak occupancy (a new optional `tx_pending` op in both
-drivers), how often the sender was switched out or moved CPU, and the
+the driver's transmit (`netif_tx_probe`, around `nif->ops->transmit`,
+counting the benchmark thread's sends on the measured interface and no
+others), the ring's peak occupancy (a new optional `tx_pending` op in
+both drivers, read under the read-side section that keeps a ring alive
+across removal -- review found the first version read it bare), how
+often the sender was switched out or moved CPU, and the
 gateway's ARP entry and counters before and after. The first instrumented
 x86-64 boot, with the slow mode off:
 

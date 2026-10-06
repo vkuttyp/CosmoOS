@@ -627,14 +627,21 @@ void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
 }
 
 #if CONFIG_SELFTEST
-static bool g_tx_probe_on;
+/* The probe is one thread's sends on one interface: the benchmark's.
+ * Anything else that transmits during the window -- an ARP retry on the
+ * worker, a reply on the other NIC -- is not counted, so the share and
+ * the maximum it reports are the measured driver's and nobody else's. */
+static struct netif *g_tx_probe_nif;
+static struct thread *g_tx_probe_thread;
 static struct netif_tx_probe g_tx_probe;
 
-void netif_tx_probe_set(bool on)
+void netif_tx_probe_set(struct netif *nif)
 {
-    if (on)
+    if (nif != NULL) {
         memset(&g_tx_probe, 0, sizeof(g_tx_probe));
-    __atomic_store_n(&g_tx_probe_on, on, __ATOMIC_RELEASE);
+        g_tx_probe_thread = thread_current();
+    }
+    __atomic_store_n(&g_tx_probe_nif, nif, __ATOMIC_RELEASE);
 }
 
 void netif_tx_probe_read(struct netif_tx_probe *out)
@@ -650,8 +657,16 @@ bool netif_tx_pending(struct netif *nif, unsigned *pending, unsigned *capacity)
 {
     if (nif->ops->tx_pending == NULL)
         return false;
-    *pending = nif->ops->tx_pending(nif, capacity);
-    return true;
+    /* The same read-side section as a transmit: netif_unregister sets
+     * GONE and waits a grace period before the driver frees its queues,
+     * so a read that saw the interface live reads a live ring. A caller's
+     * reference on the netif alone does not keep the ring. */
+    quiesce_read_lock();
+    bool live = !(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_GONE);
+    if (live)
+        *pending = nif->ops->tx_pending(nif, capacity);
+    quiesce_read_unlock();
+    return live;
 }
 
 int netif_transmit(struct netif *nif, struct mbuf *m)
@@ -682,16 +697,15 @@ int netif_transmit(struct netif *nif, struct mbuf *m)
     }
     uint32_t len = m->pkt.len;
 #if CONFIG_SELFTEST
-    bool probe = __atomic_load_n(&g_tx_probe_on, __ATOMIC_RELAXED);
+    bool probe = __atomic_load_n(&g_tx_probe_nif, __ATOMIC_ACQUIRE) == nif && g_tx_probe_thread == thread_current();
     uint64_t t0 = probe ? clock_now_ns() : 0;
 #endif
     int rc = nif->ops->transmit(nif, m);
 #if CONFIG_SELFTEST
     if (probe) {
-        /* One sender at a time is the probe's user (the benchmark); the
-         * adds are atomic so a concurrent transmit from a worker (an ARP
-         * retry, a reply) cannot tear a counter, and the max is the
-         * benchmark's own thread's as near as a statistic needs. */
+        /* Only the probing thread's sends on the probed interface reach
+         * here, so plain updates would do; they stay atomic so a reader on
+         * another CPU (none today) could never see a torn counter. */
         uint64_t dt = clock_since_ns(t0);
         __atomic_fetch_add(&g_tx_probe.calls, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_tx_probe.ns_total, dt, __ATOMIC_RELAXED);

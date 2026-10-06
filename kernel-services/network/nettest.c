@@ -4067,7 +4067,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     uint64_t switches0 = self->switches;
     int cpu = (int)raw_cpu_id();   /* a statistic: where the sender was, to count its moves */
     uint64_t tx0 = nif->stats.tx_packets;
-    netif_tx_probe_set(true);
+    netif_tx_probe_set(nif);
     struct netif_tx_probe pr0, pr1;
     netif_tx_probe_read(&pr0);
     uint64_t t0 = clock_now_ns(), t_end = t0 + NICBENCH_UDP_WINDOW_NS;
@@ -4112,7 +4112,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     }
     st->dt_ns = clock_since_ns(t0);
     netif_tx_probe_read(&pr1);
-    netif_tx_probe_set(false);
+    netif_tx_probe_set(NULL);
     st->driver_ns = pr1.ns_total;
     st->driver_calls = pr1.calls;
     st->switches = self->switches - switches0;

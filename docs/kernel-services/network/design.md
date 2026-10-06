@@ -1815,9 +1815,11 @@ machine has, bringing the default down to reach the second exactly as
   gap -- and, so that a slow reading carries its own diagnosis: a
   per-send histogram (log2 buckets from 16 us to 16 ms), the share of the
   window spent inside the driver's transmit (`netif_tx_probe`, timed
-  around `nif->ops->transmit`; on a device model that transmits
+  around `nif->ops->transmit` for the benchmark thread's own sends on the
+  measured interface and nobody else's; on a device model that transmits
   synchronously this is the backend's cost), the transmit ring's peak
-  occupancy (the drivers' optional `tx_pending` op), how often the sender
+  occupancy (the drivers' optional `tx_pending` op, read inside the
+  read-side section that keeps a ring alive across removal), how often the sender
   was switched out or moved CPU, and the gateway's ARP entry before and
   after.
 - **The software checksum's share.** `in_cksum` over the same 1 KiB,
