@@ -50,10 +50,18 @@ static struct arp_stats g_stats;
 static struct timer g_timer;
 static struct net_work g_age_work;
 
-static struct arp_entry *find(uint32_t ip)
+/*
+ * An entry is (interface, address): the same address on two links is two
+ * neighbours, with two MACs, resolved and answered on two interfaces.
+ * Keyed by address alone (as this was until 2026-10-07) one interface's
+ * resolution found another's entry -- its MAC, or its incomplete entry
+ * whose retries went out on the other interface -- and a reply on one
+ * interface completed the other's entry (invariant N25).
+ */
+static struct arp_entry *find(const struct netif *nif, uint32_t ip)
 {
     for (unsigned i = 0; i < ARP_TABLE_SIZE; i++) {
-        if (g_table[i].state != ARP_FREE && g_table[i].ip == ip)
+        if (g_table[i].state != ARP_FREE && g_table[i].ip == ip && g_table[i].nif == nif)
             return &g_table[i];
     }
     return NULL;
@@ -122,7 +130,7 @@ int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mb
         return 0;
     }
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct arp_entry *e = find(ip);
+    struct arp_entry *e = find(nif, ip);
     if (e && e->state == ARP_REACHABLE) {
         memcpy(mac, e->mac, ETH_ALEN);
         spin_unlock_irqrestore(&g_lock, s);
@@ -153,10 +161,10 @@ int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mb
     return -EINPROGRESS;
 }
 
-bool arp_lookup(uint32_t ip, uint8_t mac[ETH_ALEN])
+bool arp_lookup(const struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN])
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct arp_entry *e = find(ip);
+    struct arp_entry *e = find(nif, ip);
     bool ok = e && e->state == ARP_REACHABLE;
     if (ok)
         memcpy(mac, e->mac, ETH_ALEN);
@@ -178,10 +186,16 @@ void arp_input(struct netif *nif, struct mbuf *m)
         return;   /* probes and our own address: nothing to learn */
 
     uint16_t op = ntohs(a.op);
+    /* A frame queued before the interface went down can arrive here after
+     * the down flushed its entries; learning from it would carry a MAC
+     * across the down transition into the link's return (N25). Nothing is
+     * learned or answered on an interface that is not up. */
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;
     bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct arp_entry *e = find(a.spa);
+    struct arp_entry *e = find(nif, a.spa);   /* this interface's entry: a reply here completes no other's */
     /*
      * ARP carries no authentication, so the table learns only what RFC 826
      * requires: a request addressed to us records (or refreshes) the asker,
@@ -242,10 +256,10 @@ void arp_flush(struct netif *nif)
     spin_unlock_irqrestore(&g_lock, s);
 }
 
-void arp_delete(uint32_t ip)
+void arp_delete(const struct netif *nif, uint32_t ip)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct arp_entry *e = find(ip);
+    struct arp_entry *e = find(nif, ip);
     if (e != NULL) {
         if (e->pending)
             g_stats.pending_dropped++;   /* counted like the flush and the timeout */

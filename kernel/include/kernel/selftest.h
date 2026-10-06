@@ -414,6 +414,8 @@ bool selftest_net_arp_retry_unregister(const char **reason);
 bool selftest_net_arp_flush_counts(const char **reason);
 bool selftest_net_nd_flush_counts(const char **reason);
 bool selftest_net_nd_retry_unregister(const char **reason);
+bool selftest_net_arp_per_interface(const char **reason);
+bool selftest_net_nd_per_interface(const char **reason);
 bool selftest_net_accept_race(const char **reason);
 bool selftest_net_tcp_syncache(const char **reason);   /* milestone 8: SYN cache and cookies */
 bool selftest_net_tcp_rfc5961(const char **reason);    /* blind RST/SYN/ACK earn challenge ACKs */

@@ -300,6 +300,18 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   global routing (the route lookup returns none beyond loopback, link-local and
   multicast) and router discovery, then exercise neighbor discovery against a
   real peer. Link-local neighbor discovery exists.
+- [x] **Fix — neighbour entries keyed by (interface, address).** The ARP
+  table and the ND cache matched the address alone, so the second of two
+  interfaces resolving a shared address found the first's entry, sent no
+  request, and parked its packet where the first's reply would send it out
+  of the wrong interface; QEMU's two backends hid it by sharing a gateway
+  MAC. *Completed 2026-10-07*: `find`/`nd_find` take the interface,
+  `arp_lookup`/`arp_delete` name it, an interface going down flushes its
+  entries (invariant N25); `net-arp-per-interface` and
+  `net-nd-per-interface` fail at the first check under the old keying
+  (`tools/arp-per-interface-probe.py --old`). `net-nicbench` fails again on
+  an unresolved gateway. See the
+  [report](audit/2026-10-07-neighbour-per-interface-report.md).
 - [ ] **Decision — UDP send when the transmit ring is full.** Today
   `vnet_transmit` and `e1000e_transmit` refuse a frame with `-ENOBUFS` when
   no descriptor is free, and `udp_sendto` hands that to the caller: a blocking

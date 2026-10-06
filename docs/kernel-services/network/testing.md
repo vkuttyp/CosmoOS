@@ -33,6 +33,23 @@ checksum stored at an odd offset verifies to zero when folded in two
 parts; a 1000-byte chain split 333/100/567 across three buffers gives
 the same checksum as the flat buffer, from offset 0 and from offset 7.
 
+**`net-arp-per-interface`** and **`net-nd-per-interface`** (N25): two
+fake interfaces with a transmit hook that records each frame's EtherType
+and destination, one neighbour address on both links (`10.75.0.254`;
+`fe80::1`), two MACs. Each interface's resolution sends its own request
+out of itself (the check the address-only keying fails: the second
+interface's transmit count stays 0, its packet parked on the first's
+entry), a reply or advertisement fed in as the first interface's
+completes only the first's entry and sends its packet out of the first to
+the first's MAC while the second stays incomplete, the second's reply
+completes only the second's; then the sighting's shape, the first's entry
+incomplete and the first interface down (which flushes it, the parked
+packet counted dropped; a reply arriving on it then teaches nothing), the
+second resolving with a request and an answer of its own. The tests do
+not move the table's clock with `arp_age`. `tools/arp-per-
+interface-probe.py --old` restores the old keying and shows both tests
+failing at that check.
+
 **`net-arp`**: an unknown address is not in the table; `arp_resolve`
 for `10.0.2.99` returns `-EINPROGRESS`, sends one request and adds
 one entry; `arp_age` advanced by four seconds times out the entry,

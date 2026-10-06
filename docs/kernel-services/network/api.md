@@ -322,9 +322,12 @@ Prepends the header (`type` in host order), pads to `ETH_ZLEN` (QEMU's
 user-mode backend drops runt frames) and calls `netif_transmit`.
 Thread context. Takes the packet.
 
-**ARP**: `ARP_TABLE_SIZE` 64 static entries under one spinlock.
+**ARP**: `ARP_TABLE_SIZE` 64 static entries under one spinlock, each
+keyed by (interface, address) (N25): the same address on two interfaces
+is two entries, and every call below that names an interface reads or
+writes that interface's entry only.
 **`int arp_resolve(nif, ip, mac, m)`** returns `0` with `mac` filled
-when the address is known; `-EINPROGRESS` when it queued `m` on the
+when `nif`'s entry for the address is reachable; `-EINPROGRESS` when it queued `m` on the
 entry (replacing and freeing an older pending packet, `pending_dropped`)
 and took ownership, sending a request when the entry is new (an
 incomplete entry already has one in flight). No other value is
@@ -338,9 +341,12 @@ answers requests for our address and records the asker (without
 evicting: a full table learns nothing), completes an incomplete entry
 from a reply addressed to us and transmits its pending packet, and
 ignores everything else: unsolicited replies (`unsolicited`) and
-requests for other hosts never create or change an entry. **`bool arp_lookup(ip,
-mac)`** reads the table without sending. **`void arp_flush(nif)`**
-drops that interface's entries. **`void arp_age(uint64_t now_ns)`**
+requests for other hosts never create or change an entry; a reply
+arriving on one interface completes no other interface's entry. **`bool
+arp_lookup(nif, ip, mac)`** reads `nif`'s entry without sending.
+**`void arp_flush(nif)`** drops that interface's entries; `netif_unregister`
+(step 5) and `netif_set_up(nif, false)` call it (N25). **`void
+arp_delete(nif, ip)`** drops one. **`void arp_age(uint64_t now_ns)`**
 runs the ageing pass as if `now_ns` were the current time (the 1 s
 timer queues it on the worker together with `nd_age`; tests call it
 directly). **`arp_get_stats`**: `requests_sent`, `replies_sent`,

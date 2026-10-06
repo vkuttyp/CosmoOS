@@ -83,10 +83,13 @@ static void solicited_node_mac(const struct in6_addr *ip, uint8_t mac[ETH_ALEN])
     mac[5] = ip->s6_addr[15];
 }
 
-static struct nd_entry *nd_find(const struct in6_addr *ip)
+/* Keyed by (interface, address), as arp.c's find: a link-local address
+ * is per link by definition, and the same one on two links is two
+ * neighbours (invariant N25). */
+static struct nd_entry *nd_find(const struct netif *nif, const struct in6_addr *ip)
 {
     for (unsigned i = 0; i < ND_TABLE_SIZE; i++) {
-        if (g_nd[i].state != ND_FREE && in6_equal(&g_nd[i].ip, ip))
+        if (g_nd[i].state != ND_FREE && g_nd[i].nif == nif && in6_equal(&g_nd[i].ip, ip))
             return &g_nd[i];
     }
     return NULL;
@@ -171,7 +174,7 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALE
         return 0;
     }
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
-    struct nd_entry *e = nd_find(ip);
+    struct nd_entry *e = nd_find(nif, ip);
     if (e && e->state == ND_REACHABLE) {
         memcpy(mac, e->mac, ETH_ALEN);
         spin_unlock_irqrestore(&g_nd_lock, s);
@@ -207,10 +210,12 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (!in6_equal(&nd.target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
         return;
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;   /* queued input on a down interface learns nothing (N25, as arp_input) */
     /* Learn the asker (never at the cost of an entry in use), answer with our address. */
     if (nd.opt_type == 1 && nd.opt_len == 1) {
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
-        struct nd_entry *e = nd_find(&ip6->src);
+        struct nd_entry *e = nd_find(nif, &ip6->src);
         if (e == NULL)
             e = nd_alloc(&ip6->src, nif, false);
         if (e) {
@@ -234,9 +239,11 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (nd.opt_type != 2 || nd.opt_len != 1)
         return;
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;   /* as above */
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
-    struct nd_entry *e = nd_find(&nd.target);
+    struct nd_entry *e = nd_find(nif, &nd.target);   /* this interface's entry: an advertisement here completes no other's */
     if (e && e->state == ND_INCOMPLETE) {   /* only the answer to our own solicitation */
         memcpy(e->mac, nd.opt_mac, ETH_ALEN);
         e->state = ND_REACHABLE;
