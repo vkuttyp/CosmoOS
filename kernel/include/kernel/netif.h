@@ -134,7 +134,6 @@ unsigned netif_rxq_count(const struct netif *nif);
  * has one, else false. A statistic. */
 bool netif_tx_pending(struct netif *nif, unsigned *pending, unsigned *capacity);
 
-#if CONFIG_SELFTEST
 /*
  * Where a send spends its time: while the probe is on, netif_transmit
  * times each call into the driver's transmit (the ring write and, on a
@@ -150,8 +149,16 @@ struct netif_tx_probe {
     uint64_t ns_max;        /* the longest one */
     uint64_t refused;       /* -ENOBUFS: the ring was full */
 };
+#if CONFIG_SELFTEST
 void netif_tx_probe_set(bool on);              /* on: zero and start; off: stop */
 void netif_tx_probe_read(struct netif_tx_probe *out);
+#else
+/* No self-tests: nothing times anything, and a reader sees zeros. */
+static inline void netif_tx_probe_set(bool on) { (void)on; }
+static inline void netif_tx_probe_read(struct netif_tx_probe *out)
+{
+    out->calls = out->ns_total = out->ns_max = out->refused = 0;
+}
 #endif
 
 /* Deferred work on the worker thread (timers hand off through this). */

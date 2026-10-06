@@ -404,4 +404,39 @@ No `SELFTEST: FAIL`, watchdog report or panic in any of the 22 boots.
 
 ## 5. Validation
 
-TODO
+On the final tree, one QEMU at a time, this host (eight cores, four of
+them efficiency cores), 21:07 to 21:40:
+
+| step | x86-64 | AArch64 |
+| --- | --- | --- |
+| `make host-test` | passed (62 s, host-native) | -- |
+| `make analyze` | clean | clean |
+| debug boot, 4 CPUs | PASS 134.8 s, 427 self-tests | PASS 134.4 s |
+| `make test-smp2` | PASS 140.5 s | PASS 135.0 s |
+| debug boot, 1 CPU | PASS 130.7 s | PASS 132.9 s |
+| `make test-chaos` | PASS 145.5 s | PASS 132.4 s |
+| release build and boot | PASS 17.2 s | PASS 20.1 s |
+
+The first release build failed: `nettest.c` is compiled without
+`CONFIG_SELFTEST` in a release kernel and the transmit probe's API was
+declared only under it. The header now carries no-op stubs for that
+build (zeros to a reader), as the fault-injection seams do; both release
+images then built and booted. `net-nicbench` in the eight debug boots:
+1,661-2,267 ms (§1.3's table). The eleven probe boots (§§1.5, 2, 3) ran
+on clones of the committed tree before the chain. No `SELFTEST: FAIL`,
+watchdog report, lockdep report or panic in any boot of this session
+other than the ones the probes ask for.
+
+## 6. What remains unattributed
+
+- The host condition that puts QEMU's UDP path into its slow mode
+  (§1.6). The instrumented test will show its histogram and the driver's
+  share the next time it is on; the test no longer fails for it.
+- The gradual drift of both benchmark columns since September (§1.4),
+  consistent with the debug kernel's growing lock instrumentation and not
+  bisected: it is not the sighting's shape and lands inside the per-boot
+  spread.
+- A real TLB shootdown sighting with the new report: none has happened
+  since the instrumentation was built. The probe shows the report's
+  content on a CPU made silent; what a natural one shows is still to be
+  seen.

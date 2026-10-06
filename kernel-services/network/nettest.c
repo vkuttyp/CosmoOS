@@ -3864,7 +3864,7 @@ bool selftest_net_second_nic(const char **reason)
  */
 #define NICBENCH_ARP     2000u
 #define NICBENCH_WINDOW  64u      /* requests in flight: the receive queue is short, and an open loop overruns it */
-#define NICBENCH_UDP     10000u
+#define NICBENCH_UDP     10000u   /* checksum samples (the UDP phase itself is a window: NICBENCH_UDP_WINDOW_NS) */
 #define NICBENCH_UDP_LEN 1024u
 #define NICBENCH_PORT    33434u   /* nobody listens on the host; the send is the measurement */
 
