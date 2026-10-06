@@ -106,6 +106,10 @@ def main():
     work = os.path.join(ROOT, 'out', 'sched-restore-loop-probe', f'{args.arch}-{args.mode}')
     tree = os.path.join(work, 'tree')
     if os.path.exists(tree):
+        listed = subprocess.run(['git', '-C', ROOT, 'worktree', 'list', '--porcelain'],
+                                capture_output=True, text=True).stdout
+        if f'worktree {os.path.realpath(tree)}\n' not in listed:
+            sys.exit(f'{tree} exists and is not a worktree of this probe; remove it yourself')
         subprocess.run(['git', '-C', ROOT, 'worktree', 'remove', '--force', tree], check=False)
         shutil.rmtree(tree, ignore_errors=True)
     os.makedirs(work, exist_ok=True)

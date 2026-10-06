@@ -261,17 +261,19 @@ included too.
 |---|---|---|---|
 | AArch64 save/restore pair | 296, 299, 453, 568 ns | 276, 276, 276, 292, 413, 415, 437 ns | no shift; the same two per-boot modes in both |
 | AArch64 switch | 4277, 4299, 6108, 6117 ns | 4141, 4211, 4211, 4251, 5729, 6005, 6542 ns | no shift; same two modes |
-| x86-64 save/restore pair (10 base, 12 fix boots) | median 360 ns (nine at 357–376, one at 463) | five at 399–403, seven at 492–525 | **slower**, see below |
-| x86-64 switch (same boots) | median 4,430 ns (eight at 4,298–4,885, two at 5,184–5,314) | five at 4,474–4,596, seven at 5,369–5,615 | **slower**, see below |
+| x86-64 save/restore pair (10 base, 12 fix boots) | median 360 ns (nine at 357–376, one at 463) | five at 399–403, seven at 492–525 | read as slower at the time; *no shift*, see the resolution below |
+| x86-64 switch (same boots) | median 4,430 ns (eight at 4,298–4,885, two at 5,184–5,314) | five at 4,474–4,596, seven at 5,369–5,615 | read as slower at the time; *no shift*, see the resolution below |
 | `preempt-wake`, `-direct`, `-locked` latency | 112–160, 32–49, 51–60 µs | 119–141, 31–44, 46–69 µs | within noise |
 | self-test time, 4-CPU pairs | 106.7–114.0 s | 105.6–113.8 s | within noise |
 | one-CPU x86-64 restore-point reschedules (excluding the test's 3,201) | 1083–1102 | 1076–1090 | unchanged |
 
-**AArch64: no measurable change.** **x86-64: an unexplained slowdown on
-the debug micro-benchmarks.** The fix's x86-64 boots fall into two
-per-boot modes, both above base's usual one: about +40 ns a save/restore
-pair and +150 ns a switch in the faster mode, +140 ns and +1,150 ns in the
-slower, which most fix boots landed in. What was checked:
+**AArch64: no measurable change.** **x86-64: the first reading of this
+sample was an unexplained slowdown on the debug micro-benchmarks; the
+resolution at the end of this section supersedes it.** As read at the
+time: the fix's x86-64 boots fall into two per-boot modes, both above
+base's usual one: about +40 ns a save/restore pair and +150 ns a switch
+in the faster mode, +140 ns and +1,150 ns in the slower, which most fix
+boots landed in. What was checked then:
 
 - The save/restore path never enters `schedule()`. Its disassembly differs
   from base only in `struct thread` offsets (`arch_irq_save`,

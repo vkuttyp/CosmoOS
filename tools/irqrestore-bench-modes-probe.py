@@ -21,7 +21,9 @@ or the tick. The fpu-bench line from each boot is printed beside it.
 
     tools/irqrestore-bench-modes-probe.py --base c9292e3d --fix 30c7a2f8 --pairs 6
 
-Logs stay under out/irqrestore-bench-modes/<label>-<n>.serial.
+Prints one line per boot and PROBE: PASS only when every boot passed and
+printed its measurement; a failed or unmeasured boot makes the exit
+status 1. Logs stay under out/irqrestore-bench-modes/<label>-<n>.serial.
 """
 import argparse
 import os
@@ -109,9 +111,17 @@ def patch_bench(tree):
     open(p, 'w').write(s[:start] + BODY + s[end:])
 
 
+def is_worktree(path):
+    out = subprocess.run(['git', '-C', ROOT, 'worktree', 'list', '--porcelain'],
+                         capture_output=True, text=True).stdout
+    return f'worktree {os.path.realpath(path)}\n' in out
+
+
 def worktree(work, label, commit):
     tree = os.path.join(work, label)
     if os.path.exists(tree):
+        if not is_worktree(tree):
+            sys.exit(f'{tree} exists and is not a worktree of this probe; remove it yourself')
         subprocess.run(['git', '-C', ROOT, 'worktree', 'remove', '--force', tree], check=False)
         shutil.rmtree(tree, ignore_errors=True)
     subprocess.run(['git', '-C', ROOT, 'worktree', 'add', '--detach', tree, commit], check=True,
@@ -140,6 +150,7 @@ def main():
                                   stdout=f, stderr=subprocess.STDOUT).returncode != 0:
                     print(f'PROBE: FAIL (build of {label} failed; {f.name})')
                     return 1
+        failed = 0
         for i in range(1, args.pairs + 1):
             for label in ('base', 'fix'):
                 log = os.path.join(work, f'{label}-{i}.serial')
@@ -152,8 +163,11 @@ def main():
                 serial = open(log, errors='replace').read() if os.path.exists(log) else ''
                 probe = next((l.split('BENCHPROBE: ', 1)[1] for l in serial.splitlines() if 'BENCHPROBE: ' in l), '(no BENCHPROBE line)')
                 fpu = next((l.split('fpu-bench: ', 1)[1] for l in serial.splitlines() if 'selftest: fpu-bench: ' in l), '')
+                ok = bool(verdict) and verdict[-1] == 'PASS' and probe.startswith('pair ')
+                failed += not ok
                 print(f'{label} {i} {verdict[-1] if verdict else "NO VERDICT"} | {probe} | {fpu}', flush=True)
-        return 0
+        print(f'PROBE: {"PASS" if failed == 0 else "FAIL"} ({2 * args.pairs - failed} of {2 * args.pairs} boots passed with a measurement)')
+        return 0 if failed == 0 else 1
     finally:
         for tree in trees.values():
             subprocess.run(['git', '-C', ROOT, 'worktree', 'remove', '--force', tree], check=False)
