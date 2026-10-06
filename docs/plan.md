@@ -402,13 +402,17 @@ Sources: inventory §§2.10, 2.11 and 3,
   at one to four CPUs on both architectures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)).
   CI now also boots the debug suite with two CPUs on both architectures
   (`make test-smp2`). One- and three-CPU boots remain local-only.
-- [ ] **Validation — AArch64 CI boot-time margin.** `main`'s AArch64 CI
+- [x] **Validation — AArch64 CI boot-time margin.** `main`'s AArch64 CI
   boots range from about 120 s to 173 s against the harness's 180 s
   whole-boot timeout; a debug boot of the raw-pairing branch exceeded it
   once on a slow runner (`test-gic`, the shell stage). Measure the
   distribution across runners and decide the budget from it, as was done
   for `test-chaos` (240 s), rather than from one run. See the
   [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
+  *Completed 2026-10-06 (PR #314):* over 257 AArch64 CI boots the median
+  was 154 s, p95 173 s, and four exceeded 180 s (two on earlier branches);
+  `BOOT_TIMEOUT` is 240 s on AArch64 and stays 180 s on x86-64 (p95 163 s,
+  max 169 s).
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.

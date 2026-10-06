@@ -171,8 +171,15 @@ own recent AArch64 CI boots range from 120 s to **173.1 s**, so the 180 s
 budget has under 4% headroom on a slow runner before this change. A
 debug overhead of a few percent narrows it further. The job was re-run,
 not the budget raised: one run is not evidence for a new number, and the
-margin is `main`'s problem as much as this branch's. It is recorded in the
-plan (§12) for a measured decision.
+margin is `main`'s problem as much as this branch's. It was recorded in
+the plan (§12) for a measured decision, and a second timeout followed on
+the next run. The measurement then settled it (PR #314): over 257 AArch64
+CI boots in 40 runs the median was 154 s and p95 173 s, and four boots
+exceeded 180 s -- two of them on branches before this one. The AArch64
+whole-boot timeout (`BOOT_TIMEOUT`) is now 240 s, the same as
+`test-chaos`; x86-64 stays at 180 s. Locally, back to back, this branch
+booted AArch64 in 132.3/132.5 s against `main`'s 135.8/134.3 s, so the
+branch itself adds no boot-level time there.
 
 ## Remaining
 
