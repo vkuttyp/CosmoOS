@@ -28,18 +28,24 @@ void ether_input(struct netif *nif, struct mbuf *m);
 /* Prepend a header and transmit. Takes the packet. */
 int ether_output(struct netif *nif, struct mbuf *m, const uint8_t dst[ETH_ALEN], uint16_t type);
 
-/* ARP (RFC 826). */
+/* ARP (RFC 826). Entries are keyed by (interface, address): the same
+ * address on two links is two neighbours (invariant N25). */
 #define ARP_TABLE_SIZE 64
 void arp_init(void);
 void arp_input(struct netif *nif, struct mbuf *m);
 /* MAC for `ip` on `nif`. 0: mac filled. -EINPROGRESS: `m` was queued
  * and a request sent (ownership taken). Other errno: `m` freed. */
 int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mbuf *m);
-bool arp_lookup(uint32_t ip, uint8_t mac[ETH_ALEN]);
+/* `nif`'s entry for `ip`, reachable: mac filled. Reads the table without sending. */
+bool arp_lookup(const struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN]);
+/* Drop every entry naming the interface: netif_unregister (step 5) and
+ * netif_set_up(false) -- a neighbour learned over a link that is down is
+ * not known to be there when it comes back, and a packet parked on one
+ * waits for a link that is not there (N25). */
 void arp_flush(struct netif *nif);
-/* Remove one entry by IP, if present (a pending packet is dropped and
- * counted, as the flush and the timeout do). */
-void arp_delete(uint32_t ip);
+/* Remove `nif`'s entry for `ip`, if present (a pending packet is dropped
+ * and counted, as the flush and the timeout do). */
+void arp_delete(const struct netif *nif, uint32_t ip);
 /* Test hook: run the ageing pass as if `now_ns` had passed. */
 void arp_age(uint64_t now_ns);
 struct arp_stats {

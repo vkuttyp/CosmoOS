@@ -541,12 +541,12 @@ bool selftest_net_arp(const char **reason)
 {
     uint8_t mac[6];
     uint32_t ip = IPV4_ADDR(10, 99, 0, 7);
-    CHECK(!arp_lookup(ip, mac));
     struct netif *nif = netif_default();
     if (nif == NULL) {
         kinfo("selftest: net-arp: no ethernet interface; table logic only");
         return true;
     }
+    CHECK(!arp_lookup(nif, ip, mac));
     netif_put(nif);   /* eth0 is never unregistered while the tests run; a borrowed pointer is enough here */
     struct arp_stats s0, s1;
     arp_get_stats(&s0);
@@ -563,7 +563,7 @@ bool selftest_net_arp(const char **reason)
     arp_age(now + 6ull * 1000000000ull);   /* give up: pending packet freed */
     arp_get_stats(&s1);
     CHECK(s1.timeouts == s0.timeouts + 1 && s1.entries == s0.entries && s1.pending_dropped == s0.pending_dropped + 1);
-    CHECK(!arp_lookup(ip, mac));
+    CHECK(!arp_lookup(nif, ip, mac));
 
     /* Admission: an unsolicited reply teaches nothing; a request addressed
      * to us records the asker. Frames are handed straight to arp_input. */
@@ -583,7 +583,7 @@ bool selftest_net_arp(const char **reason)
     memcpy(f->data + 18, nif->mac, 6);
     memcpy(f->data + 24, &nif->ip4.addr, 4);
     arp_input(nif, f);
-    CHECK(!arp_lookup(liar, mac));
+    CHECK(!arp_lookup(nif, liar, mac));
     arp_get_stats(&s1);
     CHECK(s1.unsolicited == s0.unsolicited + 1 && s1.entries == s0.entries);
     f = m_getcl();
@@ -599,10 +599,10 @@ bool selftest_net_arp(const char **reason)
     memcpy(f->data + 14, &asker, 4);
     memcpy(f->data + 24, &nif->ip4.addr, 4);
     arp_input(nif, f);
-    CHECK(arp_lookup(asker, mac) && memcmp(mac, forged_mac, 6) == 0);
+    CHECK(arp_lookup(nif, asker, mac) && memcmp(mac, forged_mac, 6) == 0);
     arp_get_stats(&s1);
     CHECK(s1.replies_sent == s0.replies_sent + 1 && s1.entries == s0.entries + 1);
-    arp_delete(asker);   /* remove only the entry this test added, not a real gateway entry */
+    arp_delete(nif, asker);   /* remove only the entry this test added, not a real gateway entry */
     /* The gateway resolves for real when a NIC is present (asynchronous). */
     if (nif->ip4.gateway) {
         struct mbuf *probe = m_getcl();
@@ -612,9 +612,9 @@ bool selftest_net_arp(const char **reason)
         CHECK(rc == 0 || rc == -EINPROGRESS);
         if (rc == 0)
             m_freem(probe);   /* already resolved (gateway still cached): arp_resolve took no ownership */
-        for (unsigned i = 0; i < 50 && !arp_lookup(nif->ip4.gateway, mac); i++)
+        for (unsigned i = 0; i < 50 && !arp_lookup(nif, nif->ip4.gateway, mac); i++)
             thread_sleep_ms(10);
-        if (arp_lookup(nif->ip4.gateway, mac))
+        if (arp_lookup(nif, nif->ip4.gateway, mac))
             kinfo("selftest: net-arp: gateway is %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3],
                   mac[4], mac[5]);
         else {
@@ -1231,9 +1231,9 @@ bool selftest_net_rx_dup(const char **reason)
             }
             uint8_t mac[ETH_ALEN];
             arp_doubled = a1.replies_sent >= a0.replies_sent + 2;
-            arp_one_entry = arp_lookup(asker, mac) && memcmp(mac, asker_mac, ETH_ALEN) == 0
+            arp_one_entry = arp_lookup(nif, asker, mac) && memcmp(mac, asker_mac, ETH_ALEN) == 0
                             && a1.entries == a0.entries + 1;
-            arp_delete(asker);   /* remove only the entry this test added */
+            arp_delete(nif, asker);   /* remove only the entry this test added */
         }
     }
 
@@ -1920,6 +1920,261 @@ bool selftest_net_nd_flush_counts(const char **reason)
           (unsigned long long)s0.nd_pending_dropped, (unsigned long long)s1.nd_pending_dropped);
     return true;
 }
+
+/* --- net-arp-per-interface / net-nd-per-interface -------------------------- *
+ *
+ * Invariant N25: a neighbour entry is (interface, address). Two
+ * interfaces on links that both have a host at the same address -- the
+ * ordinary case of two NICs each with a gateway at .1, and the boot
+ * test's own case, both QEMU backends answering 10.0.2.2 -- resolve it
+ * separately, each sending its request out of itself, each transmitting
+ * to the MAC its own link answered with, and a reply arriving on one
+ * never completes or changes the other's entry. Keyed by address alone
+ * the second interface's resolution found the first's entry: it sent no
+ * request (the first's retries went out on the first interface, down or
+ * not), and parked its packet where the first's reply would send it out
+ * of the wrong interface to the wrong MAC. Two fake interfaces whose
+ * transmit hook records what left and where; the replies are fed in by
+ * hand, one per interface, with different MACs.
+ */
+struct dual_nif {
+    struct netif nif;
+    unsigned transmits;
+    uint16_t last_type;          /* EtherType of the last frame out */
+    uint8_t last_dst[ETH_ALEN];  /* its destination */
+};
+
+static int dual_nif_transmit(struct netif *nif, struct mbuf *m)
+{
+    struct dual_nif *d = nif->priv;
+    uint8_t hdr[ETH_HLEN];
+    if (m_copydata(m, 0, sizeof(hdr), hdr)) {
+        memcpy(d->last_dst, hdr, ETH_ALEN);
+        d->last_type = (uint16_t)((hdr[12] << 8) | hdr[13]);
+    }
+    d->transmits++;
+    m_freem(m);
+    return 0;
+}
+
+static void dual_nif_release(struct netif *nif) { (void)nif; }
+
+static const struct netif_ops dual_nif_ops = { .transmit = dual_nif_transmit, .release = dual_nif_release };
+
+static void dual_nif_init(struct dual_nif *d, const char *name, uint8_t mac_last, uint32_t ip)
+{
+    memset(d, 0, sizeof(*d));
+    strlcpy(d->nif.name, name, sizeof(d->nif.name));
+    d->nif.mtu = 1500;
+    d->nif.ops = &dual_nif_ops;
+    d->nif.priv = d;
+    d->nif.flags = NETIF_UP | NETIF_NODEFAULT;
+    static const uint8_t base[ETH_ALEN] = { 0x02, 0x4e, 0x32, 0x35, 0x00, 0x00 };
+    memcpy(d->nif.mac, base, ETH_ALEN);
+    d->nif.mac[5] = mac_last;
+    d->nif.ip4.addr = ip;
+    d->nif.ip4.mask = htonl(0xffffff00);
+}
+
+/* An ARP reply from `spa` at `sha`, addressed to `nif`, handed straight to arp_input. */
+static bool dual_arp_reply(struct netif *nif, uint32_t spa, const uint8_t sha[ETH_ALEN])
+{
+    struct mbuf *f = m_getcl();
+    if (f == NULL)
+        return false;
+    memset(f->data, 0, 28);
+    f->len = f->pkt.len = 28;
+    f->data[1] = 1;
+    f->data[2] = 0x08;
+    f->data[4] = 6;
+    f->data[5] = 4;
+    f->data[7] = 2;   /* reply */
+    memcpy(f->data + 8, sha, ETH_ALEN);
+    memcpy(f->data + 14, &spa, 4);
+    memcpy(f->data + 18, nif->mac, ETH_ALEN);
+    memcpy(f->data + 24, &nif->ip4.addr, 4);
+    arp_input(nif, f);
+    return true;
+}
+
+static struct mbuf *dual_packet(void)
+{
+    struct mbuf *m = m_getcl();
+    if (m != NULL)
+        m->len = m->pkt.len = 20;
+    return m;
+}
+
+bool selftest_net_arp_per_interface(const char **reason)
+{
+    static struct dual_nif a, b;
+    static const uint8_t mac_a[ETH_ALEN] = { 0x02, 0xaa, 0x00, 0x00, 0x00, 0x0a };
+    static const uint8_t mac_b[ETH_ALEN] = { 0x02, 0xbb, 0x00, 0x00, 0x00, 0x0b };
+    const uint32_t gw = htonl(0x0a4b00fe);   /* 10.75.0.254, the same address on both links */
+    dual_nif_init(&a, "arpa0", 0x0a, htonl(0x0a4b0001));
+    dual_nif_init(&b, "arpb0", 0x0b, htonl(0x0a4b0002));
+    CHECK(nt_netif_register(&a.nif) == 0);
+    CHECK(nt_netif_register(&b.nif) == 0);
+    uint8_t mac[ETH_ALEN];
+    struct arp_stats s0, s1;
+    arp_get_stats(&s0);
+    CHECK(!arp_lookup(&a.nif, gw, mac) && !arp_lookup(&b.nif, gw, mac));
+
+    /* 1. Each interface's resolution sends its own request out of itself. */
+    struct mbuf *m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(arp_resolve(&a.nif, gw, mac, m) == -EINPROGRESS);
+    CHECK(a.transmits == 1 && a.last_type == ETH_P_ARP && memcmp(a.last_dst, eth_broadcast, ETH_ALEN) == 0);
+    CHECK(b.transmits == 0);
+    m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(arp_resolve(&b.nif, gw, mac, m) == -EINPROGRESS);
+    CHECK(b.transmits == 1);   /* keyed by address alone this is 0: the first's entry was found, nothing sent */
+    CHECK(b.last_type == ETH_P_ARP);
+    CHECK(a.transmits == 1);
+    arp_get_stats(&s1);
+    CHECK(s1.entries == s0.entries + 2 && s1.requests_sent == s0.requests_sent + 2);
+
+    /* 2. A retry goes out of the interface whose entry it is, one each. */
+    arp_age(clock_now_ns() + 1500ull * 1000000ull);
+    CHECK(a.transmits == 2 && b.transmits == 2);
+
+    /* 3. A reply on the first completes the first's entry and sends its
+     * packet out of the first to the first's MAC; the second's stays
+     * incomplete and nothing leaves it. */
+    CHECK(dual_arp_reply(&a.nif, gw, mac_a));
+    CHECK(arp_lookup(&a.nif, gw, mac) && memcmp(mac, mac_a, ETH_ALEN) == 0);
+    CHECK(a.transmits == 3 && a.last_type == ETH_P_IP && memcmp(a.last_dst, mac_a, ETH_ALEN) == 0);
+    CHECK(!arp_lookup(&b.nif, gw, mac));
+    CHECK(b.transmits == 2);
+
+    /* 4. The second's reply, with a different MAC, completes only the second's. */
+    CHECK(dual_arp_reply(&b.nif, gw, mac_b));
+    CHECK(arp_lookup(&b.nif, gw, mac) && memcmp(mac, mac_b, ETH_ALEN) == 0);
+    CHECK(b.transmits == 3 && b.last_type == ETH_P_IP && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
+    CHECK(arp_lookup(&a.nif, gw, mac) && memcmp(mac, mac_a, ETH_ALEN) == 0);
+    CHECK(a.transmits == 3);
+
+    /* 5. The sighting's shape: the first's entry incomplete and the first
+     * interface down, the second resolves. Down flushes the first's
+     * entries (its parked packet counted dropped); the second's resolution
+     * sends its own request and completes from its own link. */
+    arp_delete(&a.nif, gw);
+    arp_delete(&b.nif, gw);
+    arp_get_stats(&s0);
+    m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(arp_resolve(&a.nif, gw, mac, m) == -EINPROGRESS);
+    CHECK(a.transmits == 4);
+    netif_set_up(&a.nif, false);
+    arp_get_stats(&s1);
+    CHECK(!arp_lookup(&a.nif, gw, mac));
+    CHECK(s1.entries == s0.entries && s1.pending_dropped == s0.pending_dropped + 1);
+    m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(arp_resolve(&b.nif, gw, mac, m) == -EINPROGRESS);
+    CHECK(b.transmits == 4 && b.last_type == ETH_P_ARP);   /* a request of its own, not a park on the first's entry */
+    CHECK(dual_arp_reply(&b.nif, gw, mac_b));
+    CHECK(arp_lookup(&b.nif, gw, mac) && memcmp(mac, mac_b, ETH_ALEN) == 0);
+    CHECK(b.transmits == 5 && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
+    CHECK(a.transmits == 4);   /* nothing of the second's ever left the first */
+    netif_set_up(&a.nif, true);
+
+    nt_netif_unregister(&b.nif);
+    nt_netif_unregister(&a.nif);
+    kobject_put(&b.nif.obj);
+    kobject_put(&a.nif.obj);
+    kinfo("selftest: net-arp-per-interface: two interfaces, one neighbour address, two MACs, each resolved on its own link");
+    return true;
+}
+
+/* A neighbour advertisement for `target` at `mac`, handed to nd_input_na as `nif`'s. */
+static bool dual_nd_advert(struct netif *nif, const struct in6_addr *target, const uint8_t mac[ETH_ALEN])
+{
+    struct mbuf *f = m_getcl();
+    if (f == NULL)
+        return false;
+    struct {
+        uint8_t type, code;
+        uint16_t cksum;
+        uint32_t flags;
+        struct in6_addr target;
+        uint8_t opt_type, opt_len;
+        uint8_t opt_mac[ETH_ALEN];
+    } __packed na;
+    memset(&na, 0, sizeof(na));
+    na.type = ICMPV6_NA;
+    na.flags = htonl(0x60000000u);
+    na.target = *target;
+    na.opt_type = 2;
+    na.opt_len = 1;
+    memcpy(na.opt_mac, mac, ETH_ALEN);
+    memcpy(f->data, &na, sizeof(na));
+    f->len = f->pkt.len = sizeof(na);
+    struct ipv6_hdr ip6;
+    memset(&ip6, 0, sizeof(ip6));
+    ip6.src = *target;
+    ip6.dst = nif->ip6_ll;
+    nd_input_na(nif, f, &ip6);
+    return true;
+}
+
+bool selftest_net_nd_per_interface(const char **reason)
+{
+    static struct dual_nif a, b;
+    static const uint8_t mac_a[ETH_ALEN] = { 0x02, 0xaa, 0x00, 0x00, 0x00, 0x1a };
+    static const uint8_t mac_b[ETH_ALEN] = { 0x02, 0xbb, 0x00, 0x00, 0x00, 0x1b };
+    /* fe80::1 on both links: a link-local address is per link, so this is
+     * two neighbours, and the commonest case there is. */
+    const struct in6_addr peer = { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } };
+    dual_nif_init(&a, "nda0", 0x1a, htonl(0x0a4c0001));
+    dual_nif_init(&b, "ndb0", 0x1b, htonl(0x0a4c0002));
+    CHECK(nt_netif_register(&a.nif) == 0);
+    CHECK(nt_netif_register(&b.nif) == 0);
+    uint8_t mac[ETH_ALEN];
+
+    struct mbuf *m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(nd_resolve(&a.nif, &peer, mac, m) == -EINPROGRESS);
+    CHECK(a.transmits == 1 && a.last_type == ETH_P_IPV6 && b.transmits == 0);
+    m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(nd_resolve(&b.nif, &peer, mac, m) == -EINPROGRESS);
+    CHECK(b.transmits == 1);   /* keyed by address alone: 0, the first's entry found */
+    CHECK(b.last_type == ETH_P_IPV6 && a.transmits == 1);
+
+    CHECK(dual_nd_advert(&a.nif, &peer, mac_a));
+    CHECK(a.transmits == 2 && a.last_type == ETH_P_IPV6 && memcmp(a.last_dst, mac_a, ETH_ALEN) == 0);
+    CHECK(b.transmits == 1);
+    CHECK(nd_resolve(&a.nif, &peer, mac, NULL) == 0 && memcmp(mac, mac_a, ETH_ALEN) == 0);
+    m = dual_packet();
+    CHECK(m != NULL);
+    CHECK(nd_resolve(&b.nif, &peer, mac, m) == -EINPROGRESS);   /* still the second's own, still unresolved */
+    CHECK(b.transmits == 1);   /* parked on its own incomplete entry: no second solicitation */
+
+    CHECK(dual_nd_advert(&b.nif, &peer, mac_b));
+    CHECK(b.transmits == 2 && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
+    CHECK(nd_resolve(&b.nif, &peer, mac, NULL) == 0 && memcmp(mac, mac_b, ETH_ALEN) == 0);
+    CHECK(nd_resolve(&a.nif, &peer, mac, NULL) == 0 && memcmp(mac, mac_a, ETH_ALEN) == 0);
+    CHECK(a.transmits == 2);
+
+    /* Down flushes the interface's neighbours, as for ARP. */
+    netif_set_up(&a.nif, false);
+    m = dual_packet();
+    CHECK(m != NULL);
+    netif_set_up(&a.nif, true);
+    CHECK(nd_resolve(&a.nif, &peer, mac, m) == -EINPROGRESS);   /* resolution starts over */
+    CHECK(a.transmits == 3);
+    CHECK(nd_resolve(&b.nif, &peer, mac, NULL) == 0);           /* the second's entry untouched by the first's down */
+
+    nt_netif_unregister(&b.nif);
+    nt_netif_unregister(&a.nif);
+    kobject_put(&b.nif.obj);
+    kobject_put(&a.nif.obj);
+    kinfo("selftest: net-nd-per-interface: fe80::1 on two links resolved as two neighbours");
+    return true;
+}
+
 
 bool selftest_net_nd_retry_unregister(const char **reason)
 {
@@ -3793,15 +4048,15 @@ static bool second_nic_body(const char **reason, struct netif *second)
     CHECK(now == second);
     netif_put(now);
 
-    /* The ARP cache is keyed by address alone, and both backends answer
-     * the same gateway address, so an entry learned through the first
-     * interface would make this pass without a frame ever crossing the
-     * second. Age everything out first. */
-    arp_age(clock_now_ns() + 3600ull * NS_PER_SEC);
+    /* The table is keyed by (interface, address) since N25, so the first
+     * interface's entry for the shared gateway address cannot satisfy
+     * this; only the second's own could, if an earlier test resolved it.
+     * Remove that one, so a frame must cross the second interface. */
     uint8_t mac[ETH_ALEN];
     uint32_t gw = second->ip4.gateway;
     CHECK(gw != 0);
-    CHECK(!arp_lookup(gw, mac));
+    arp_delete(second, gw);
+    CHECK(!arp_lookup(second, gw, mac));
 
     uint64_t rx0 = second->stats.rx_packets, tx0 = second->stats.tx_packets;
     struct mbuf *m = m_getcl();
@@ -3812,7 +4067,7 @@ static bool second_nic_body(const char **reason, struct netif *second)
     bool resolved = rc == 0;
     for (unsigned waited = 0; waited < 2000 && !resolved; waited += 10) {
         thread_sleep_ms(10);
-        resolved = arp_lookup(gw, mac);
+        resolved = arp_lookup(second, gw, mac);
     }
     CHECK(resolved);   /* the reply came back: a frame out and a frame in through its rings */
     CHECK(second->stats.tx_packets > tx0);
@@ -4070,25 +4325,32 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
      * wait existed read `0 of 10000 frames left the driver` under a
      * normal-looking rate (docs/testing/flakes.md, "`net-nicbench`'s
      * second interface reported a rate for frames that never left"). The
-     * bound covers one ARP retry (ARP_RETRY_NS, 1 s). */
+     * bound covers one ARP retry (ARP_RETRY_NS, 1 s); past it the test
+     * fails (N25 made the entry this interface's own). */
     for (unsigned i = 0; i < 8; i++)
         (void)ksock_sendto(tx, payload, sizeof(payload), &to);
     uint8_t mac[ETH_ALEN];
     uint64_t t_gw = clock_now_ns();
-    while (!arp_lookup(nif->ip4.gateway, mac) && clock_since_ns(t_gw) < 1500ull * 1000000ull)
+    while (!arp_lookup(nif, nif->ip4.gateway, mac) && clock_since_ns(t_gw) < 1500ull * 1000000ull)
         thread_sleep_ms(1);
     st->gw_wait_ns = clock_since_ns(t_gw);
-    st->gw_before = arp_lookup(nif->ip4.gateway, mac);
+    st->gw_before = arp_lookup(nif, nif->ip4.gateway, mac);
     if (!st->gw_before) {
+        /* A failure, since N25: the entry is this interface's own, the ARP
+         * phase just proved 2,000 round trips on this link, and the wait
+         * covers a retry -- so an entry still incomplete here is a lost
+         * reply twice over or a defect, not another interface's state.
+         * The line says which way the request count points. */
         struct arp_stats now;
         arp_get_stats(&now);
-        kinfo("selftest: net-nicbench: %s: udp not measured: the gateway's ARP entry is still incomplete after %llu ms "
-              "(+%llu requests sent since the warm-up began, %llu pending dropped); nothing this window sent would leave",
-              nif->name, (unsigned long long)(st->gw_wait_ns / 1000000),
-              (unsigned long long)(now.requests_sent - st->arp0.requests_sent),
-              (unsigned long long)(now.pending_dropped - st->arp0.pending_dropped));
+        kerror("selftest: net-nicbench: %s: the gateway's ARP entry is still incomplete after %llu ms "
+               "(+%llu requests sent since the warm-up began, %llu pending dropped)",
+               nif->name, (unsigned long long)(st->gw_wait_ns / 1000000),
+               (unsigned long long)(now.requests_sent - st->arp0.requests_sent),
+               (unsigned long long)(now.pending_dropped - st->arp0.pending_dropped));
         nt_ksock_put(tx);
-        return true;   /* reported, not asserted: the ARP phase just proved the link; this is the table's state */
+        *reason = "the gateway's ARP entry did not resolve within 1.5 s on this interface";
+        return false;
     }
     thread_sleep_ms(20);
     struct thread *self = thread_current();
@@ -4146,7 +4408,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     st->switches = self->switches - switches0;
     thread_sleep_ms(20);   /* the driver's completions and counters settle */
     st->frames = nif->stats.tx_packets - tx0;
-    st->gw_after = arp_lookup(nif->ip4.gateway, mac);
+    st->gw_after = arp_lookup(nif, nif->ip4.gateway, mac);
     arp_get_stats(&st->arp1);
     nt_ksock_put(tx);
     CHECK(st->attempts > 0);
@@ -4200,7 +4462,7 @@ static uint64_t nicbench_cksum_ns(void)
     return (clock_since_ns(t0)) / NICBENCH_UDP;
 }
 
-static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns, bool *measured)
+static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
 {
     unsigned rt_s = 0;
     uint64_t ns_rt = 0;
@@ -4209,13 +4471,6 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
         return false;
     if (!nicbench_udp(reason, nif, &st))
         return false;
-    if (!st.gw_before) {
-        /* Said above; no rate is claimed for frames that could not leave. */
-        kinfo("selftest: net-nicbench: %s (caps 0x%x): arp %u rt/s (%llu ns per round trip); udp not measured (gateway unresolved)",
-              nif->name, nif->caps, rt_s, (unsigned long long)ns_rt);
-        return true;
-    }
-    *measured = true;
     nicbench_udp_report(nif, &st);
     unsigned accepted = st.accepted;
     uint64_t frames = st.frames;
@@ -4622,27 +4877,18 @@ bool selftest_net_nicbench(const char **reason)
         return true;
     }
     uint64_t cksum_ns = nicbench_cksum_ns();
-    bool measured = false;   /* at least one interface's UDP phase ran: a round that resolved no gateway is reported, two are a failure */
-    bool ok = nicbench_one(reason, first, cksum_ns, &measured);
+    bool ok = nicbench_one(reason, first, cksum_ns);
     struct netif *second = ok ? find_other_interface(first) : NULL;
     if (second != NULL) {
         /* The same numbers over the other driver, on the same host and
          * the same kind of backend: bring the default down so the stack
          * routes through the second, as net-second-nic does. */
-        netif_set_up(first, false);
-        arp_age(clock_now_ns() + 3600ull * NS_PER_SEC);
-        ok = nicbench_one(reason, second, cksum_ns, &measured);
+        netif_set_up(first, false);   /* down flushes the first's neighbours (N25); the second resolves its own */
+        ok = nicbench_one(reason, second, cksum_ns);
         netif_set_up(first, true);
         netif_put(second);
     }
     netif_put(first);
-    if (ok && !measured) {
-        /* Every interface's gateway stayed unresolved: a benchmark that
-         * measured nothing must not pass as if it had (the one-interface
-         * case is the only way a single unresolved round fails the test). */
-        *reason = "no interface resolved its gateway: the UDP phase measured nothing";
-        ok = false;
-    }
     return ok;
 }
 

@@ -397,6 +397,18 @@ void netif_set_up(struct netif *nif, bool up)
     else
         nif->flags &= ~NETIF_UP;
     spin_unlock_irqrestore(&nif->lock, s);
+    if (!up) {
+        /* Down drops the interface's neighbours as unregister does (step
+         * 5): a MAC learned over a link that is down is not known to be
+         * there when it comes back, and a packet parked on an incomplete
+         * entry waits for a link that is not there -- its retries would
+         * only fail at netif_transmit. Resolution starts over when the
+         * link does (N25). A transmit or receive already past the flag
+         * check finishes on the live interface; the flush takes only the
+         * table locks. */
+        arp_flush(nif);
+        nd_flush(nif);
+    }
 }
 
 void netif_set_forward(struct netif *nif, bool on)

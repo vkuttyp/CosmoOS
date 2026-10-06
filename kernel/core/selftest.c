@@ -747,6 +747,8 @@ static const struct selftest tests[] = {
     { "net-arp-flush-counts", selftest_net_arp_flush_counts },
     { "net-nd-flush-counts", selftest_net_nd_flush_counts },
     { "net-nd-retry-unregister", selftest_net_nd_retry_unregister },
+    { "net-arp-per-interface", selftest_net_arp_per_interface },
+    { "net-nd-per-interface", selftest_net_nd_per_interface },
     { "net-accept-race", selftest_net_accept_race },
     { "net-tcp-syncache", selftest_net_tcp_syncache },
     { "net-tcp-rfc5961", selftest_net_tcp_rfc5961 },

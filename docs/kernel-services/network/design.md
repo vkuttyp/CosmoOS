@@ -100,8 +100,13 @@ struct arp_entry { uint32_t ip; uint8_t mac[6]; enum { ARP_INCOMPLETE, ARP_REACH
                    uint64_t updated_ns; struct mbuf *pending; unsigned tries; struct netif *nif; };
 ```
 
-A fixed table (`ARP_TABLE_SIZE` 64, spinlock). When our own
-resolution finds the table full it evicts the least recently updated
+A fixed table (`ARP_TABLE_SIZE` 64, spinlock), keyed by (interface,
+address): the same address on two links is two neighbours, resolved on
+each link by a request out of that interface and completed only by a
+reply that arrived on it (invariant N25; keyed by address alone until
+2026-10-07, which the boot test's two backends sharing a gateway MAC
+hid). An interface going down drops its entries, as its removal does.
+When our own resolution finds the table full it evicts the least recently updated
 reachable entry (an incomplete one has a resolution in flight);
 learning from received traffic never evicts and simply learns nothing
 when the table is full. `arp_resolve(nif, ip, mac_out, m)`
