@@ -3163,6 +3163,24 @@ sample, not the code:
   hypothesis, not a measurement. AArch64 reads the same two modes on both
   trees (report, same table).
 
+**The benchmark as shipped reads the same.** The diagnostic above is a
+replacement benchmark, so it could show the modes without settling the
+report's gap inside the fast mode (base 357–376 against the fix's
+399–403; raised in review). Twelve more alternating four-CPU boots of the
+two trees *unmodified* -- the benchmark exactly as the report ran it:
+
+| tree | `irqrestore-bench`, ns a pair, boots 1–6 | fast / slow |
+|---|---|---|
+| base `c9292e3d` | 430, 430, 439, 438, 503, 340 | 1 / 5 |
+| fix `30c7a2f8` | 330, 445, 434, 447, 343, 346 | 3 / 3 |
+
+Fast is 330–346 on both trees, slow 430–503 on both; the gap inside the
+fast mode does not reproduce. (The fix's sixth boot first failed at 0.5 s
+on QEMU's `Could not set up host forwarding rule 'udp:127.0.0.1:60176-:7'`
+-- a host port collision before the kernel ran, seen once before in this
+unit -- and the 346 is its rerun.) In base 4 of this set, `fpu-bench`'s
+*both* switch legs read 11.8–12.1 µs, the same doubling as above.
+
 A benchmark number on x86-64 is a draw from one of two modes, so a
 base-against-fix comparison needs enough boots of each to see both, and
 alternated. Separately, `fpu-bench`'s no-FP switch read 11.7 µs in base 2

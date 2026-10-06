@@ -301,9 +301,13 @@ pairs with interrupts masked throughout and a pure-arithmetic control
 both trees** -- about 335 or 430–473 ns a pair -- with the control at
 5.1–5.5 M ns in every boot regardless of mode. The base drew the fast mode
 two times in six, the fix three; this table's base boots had drawn it
-nine times in ten and the fix's five in twelve. There is no shift between
-the trees; the modes are a per-boot property of the save/restore path
-under TCG whose cause is not known. Details and the table:
+nine times in ten and the fix's five in twelve. Twelve further
+alternating boots of the two trees unmodified, the benchmark exactly as
+this table ran it, read the same: fast 330–346 ns on both trees, slow
+430–503 on both (base 1 fast of 6, fix 3 of 6); the gap inside the fast
+mode above does not reproduce. There is no shift between the trees; the
+modes are a per-boot property of the save/restore path under TCG whose
+cause is not known. Details and the tables:
 `docs/testing/flakes.md`, "`irqrestore-bench` and `fpu-bench` read two
 per-boot modes on x86-64".
 
