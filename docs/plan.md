@@ -187,13 +187,17 @@ and [SMP design](kernel/smp/design.md).
   interrupted kernel per-CPU accesses are absent. Existing measurements did
   not establish a persistently stranded user-thread pair. See the
   [balance-movable report](audit/next-subsystem-balance-movable.md).
-- [ ] **Implementation — bounded preempt-at-restore recursion.** `schedule()`
-  ends in `arch_irq_restore`, whose preemption point can re-enter
-  `schedule()`; the stack stays bounded only because every link is a tail
-  call, which `scripts/check-kernel-elf.sh` now enforces after a lockdep
-  wrapper that broke the chain double faulted a one-CPU boot. A loop would
-  remove the dependency on code generation. See the
-  [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
+- [x] **Implementation — bounded preempt-at-restore recursion.** Done
+  2026-10-06 ([restore-loop report](audit/2026-10-06-sched-restore-loop-report.md)).
+  `schedule()` takes a reschedule pending at its restore by another pass
+  of a loop (`preempt_point_due`, then `arch_irq_restore_nopoint`), so it
+  never re-enters itself on one thread's stack (scheduler S31, asserted in
+  debug builds). `check-kernel-elf.sh` checks that structure instead of
+  per-link tail calls. `sched-restore-loop` drives 3,200 trips on one CPU;
+  its probe fails the old structure under a 192-byte forced call (6,288
+  bytes of growth) and passes the loop under the same call. Baseline: the
+  idle thread took chains of up to 72 such reschedules on a one-CPU
+  x86-64 boot, now one frame.
 - [ ] **Conditional/deferred — kernel rwlocks.** Introduce a reader/writer
   primitive only with a concrete workload, ownership rules and lockdep model.
 - [ ] **Implementation — quiescent lookup structures.** Assess extending the
@@ -511,6 +515,8 @@ their deferred status here; this section does not schedule them for implementati
    2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md)).
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
+   §4's bounded preempt-at-restore recursion done 2026-10-06
+   ([restore-loop report](audit/2026-10-06-sched-restore-loop-report.md)).
 
 This ordering is a proposal for subsequent increments, not a claim that all
 remaining projects belong in the current lockdep milestone.
