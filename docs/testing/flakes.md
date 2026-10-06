@@ -3223,5 +3223,7 @@ boot's time says why the prompt came late. The lesson is the one at the
 top of this file: read the harness's own verdict before the log's shape.
 
 First x86-64 timeout since #314's record; the aarch64 budget was raised
-to 240 s on four such timeouts. The failed job was re-run once; the
-result is recorded here when it lands.
+to 240 s on four such timeouts. The failed job re-run on another runner
+passed every step, its three debug boots in 115.3, 109.7 and 112.0 s --
+the guard boot 112.0 s against the 184 s that timed out. One sighting;
+a second is the case for giving x86-64 the margin #314 gave aarch64.
