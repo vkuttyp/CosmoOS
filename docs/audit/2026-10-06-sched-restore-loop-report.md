@@ -290,8 +290,20 @@ slower, which most fix boots landed in. What was checked:
 
 Release kernels do not run the benchmarks (`SELFTEST=1` with
 `BUILD=release` does not link on `main` either), so the release cost was
-not measured. The finding is recorded as unexplained, for the
-performance item in plan §1/§12, not as within noise.
+not measured.
+
+*Resolved after merge, 2026-10-06:* twelve more alternating four-CPU
+boots, with the benchmark replaced by a diagnostic that also times the
+pairs with interrupts masked throughout and a pure-arithmetic control
+(`tools/irqrestore-bench-modes-probe.py`), found **the same two modes on
+both trees** -- about 335 or 430–473 ns a pair -- with the control at
+5.1–5.5 M ns in every boot regardless of mode. The base drew the fast mode
+two times in six, the fix three; this table's base boots had drawn it
+nine times in ten and the fix's five in twelve. There is no shift between
+the trees; the modes are a per-boot property of the save/restore path
+under TCG whose cause is not known. Details and the table:
+`docs/testing/flakes.md`, "`irqrestore-bench` and `fpu-bench` read two
+per-boot modes on x86-64".
 
 ## Limits and what remains
 
@@ -302,8 +314,9 @@ performance item in plan §1/§12, not as within noise.
   coming back to `schedule_internal`'s tail by name; a new indirect path
   (a function pointer to a preempting restore) would pass it. The S31
   assertion would catch that at run time on the first trip.
-- **The x86-64 debug benchmark shift is unexplained** (Performance). It
-  is TCG-only evidence and AArch64 shows none, but the cause was not found.
+- **The x86-64 debug benchmark shift was the sample, not the code**
+  (Performance, resolved after merge): both trees read the same two
+  per-boot modes. What sets a boot's mode is still not known.
 - **Interrupts stay masked across a trip** where `main` opened a window of
   a few instructions. No test measures interrupt latency at this
   granularity; the argument is that the switched-to thread re-enables them.

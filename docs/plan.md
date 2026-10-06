@@ -198,10 +198,12 @@ and [SMP design](kernel/smp/design.md).
   its probe fails the old structure under a 192-byte forced call (6,288
   bytes of growth) and passes the loop under the same call. Baseline: the
   idle thread took chains of up to 72 such reschedules on a one-CPU
-  x86-64 boot, now one frame. Open: x86-64 debug micro-benchmarks under TCG read
-  slower on the fix (save/restore pair 360 → 400–525 ns, switch 4.4 →
-  4.5–5.6 µs, in two per-boot modes) while AArch64 shows no change; the
-  cause was not found (report, "Performance").
+  x86-64 boot, now one frame. The x86-64 debug micro-benchmarks that first
+  read slower on the fix (save/restore pair 360 → 400–525 ns) were twelve
+  draws from two per-boot modes that both trees share; twelve alternated
+  boots with a control show no shift
+  ([flakes.md](testing/flakes.md), "`irqrestore-bench` and `fpu-bench` read
+  two per-boot modes on x86-64"). What sets a boot's mode is not known.
 - [ ] **Conditional/deferred — kernel rwlocks.** Introduce a reader/writer
   primitive only with a concrete workload, ownership rules and lockdep model.
 - [ ] **Implementation — quiescent lookup structures.** Assess extending the

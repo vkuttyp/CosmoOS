@@ -3113,3 +3113,59 @@ The test took 57 ms in the failing boot and 53-58 ms in passing boots of
 the tree, against 47-50 ms on `main`: the change makes timer callbacks
 heavier, which moves every timing window in the suite. Watch for a second
 sighting; with one, instrument the full-suite run rather than the loop.
+
+## `irqrestore-bench` and `fpu-bench` read two per-boot modes on x86-64, 2026-10-06
+
+Not a failure: a measurement. The restore-loop report
+(`docs/audit/2026-10-06-sched-restore-loop-report.md`, "Performance")
+recorded x86-64 debug `irqrestore-bench` as slower on the fix than on its
+base (360 against 400–525 ns a pair) and could not say why. Twelve
+alternating four-CPU boots of the two trees (`c9292e3d` and `30c7a2f8`,
+each with the benchmark replaced by
+`tools/irqrestore-bench-modes-probe.py`'s diagnostic) say it was the
+sample, not the code:
+
+| boot | pair, ns | pair with interrupts masked throughout | control, 4 M dependent steps | `fpu-bench` switch without FP |
+|---|---|---|---|---|
+| base 1 | 473 | 363 | 5.49 M | 5425 |
+| fix 1 | 336 | 224 | 5.29 M | 4732 |
+| base 2 | 442 | 302 | 5.24 M | 11765 |
+| fix 2 | 433 | 309 | 5.12 M | 5398 |
+| base 3 | 429 | 309 | 5.22 M | 11711 |
+| fix 3 | 431 | 296 | 5.14 M | 5776 |
+| base 4 | 347 | 218 | 5.15 M | 3828 |
+| fix 4 | 447 | 297 | 5.25 M | 5425 |
+| base 5 | 336 | 220 | 5.29 M | 3789 |
+| fix 5 | 334 | 219 | 5.24 M | 4334 |
+| base 6 | 453 | 321 | 5.52 M | 5017 |
+| fix 6 | 334 | 230 | 5.23 M | 4368 |
+
+- **Two modes, on both trees.** About 335 ns a pair, or 430–473. Base
+  took the fast mode in two boots of six, the fix in three. The report's
+  ten base boots were mostly fast and its twelve fix boots mostly slow;
+  with the modes this uneven, that is what twenty-two draws can do.
+- **The mode is in the save/restore path, not the host.** The control
+  loop -- the same boot, interrupts masked, no interrupt code -- reads
+  5.1–5.5 M ns in every boot, fast or slow. The masked-throughout loop
+  shows the same two modes as the benchmark (about 220 against 300 ns), so
+  neither the tick nor the preemption point makes the difference. Within a
+  boot the mode is stable: the per-thousand chunks' minimum and median are
+  within 3 %.
+- **The switch follows the mode**: 3.8–4.7 µs in the fast-mode boots,
+  5.0–5.8 in the slow. The report's "+150 ns a switch" from the loop's
+  out-of-line call per pass is inside the spread of six samples each way.
+- **What sets the mode is not known.** The guest does the same work on
+  every boot; what differs per QEMU run is on the host -- where TCG's code
+  buffer lands, which host core the vCPU thread gets. The control being
+  unaffected argues against core type; the pair loop differs from it in its
+  calls and returns (each guest `ret` an indirect host branch through TCG's
+  lookup), which is where a per-run placement effect would show. That is a
+  hypothesis, not a measurement. AArch64 reads the same two modes on both
+  trees (report, same table).
+
+A benchmark number on x86-64 is a draw from one of two modes, so a
+base-against-fix comparison needs enough boots of each to see both, and
+alternated. Separately, `fpu-bench`'s no-FP switch read 11.7 µs in base 2
+and base 3 while the with-FP switch in the same boots was its usual
+5.2 µs, so the benchmark printed a negative save-and-restore cost; the leg
+absorbed something once in each boot, not seen in the other ten.
