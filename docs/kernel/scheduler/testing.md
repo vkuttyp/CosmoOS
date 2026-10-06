@@ -233,8 +233,9 @@ pinned: it moves too. A benchmark's rate is not a claim the migrator
 must keep (`net-nicbench` reports rather than asserts its reply rate in
 this build, after CI's slower host moved its sender behind the busy
 receive worker), and a test that names another CPU pins itself.
-The complete chaos boot has a 240 s timeout (ordinary boots retain
-180 s), so its shell harness can finish after the extra migration work.
+The complete chaos boot has a 240 s timeout (ordinary boots use
+`BOOT_TIMEOUT`: 180 s on x86-64, 240 s on AArch64), so its shell harness
+can finish after the extra migration work.
 Individual test budgets and signal-response checks still apply; see
 [verification timing](../../verification/design.md#6-per-test-timing-kernelcoreselftestc-testsbootrun_boot_testpy).
 

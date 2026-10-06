@@ -1181,7 +1181,8 @@ sends `QUIT`. When self-tests are enabled the run fails on any of:
 no ready line, TCP mismatch, fewer than 18 UDP echoes, the
 guest-initiated connection not received, QUIT not sent, or the
 `NETTEST: client ok` / `NETTEST: done .*quit=1` markers missing. The
-default timeout is 180 s (the harness gets timeout minus 30 s).
+boot timeout is `BOOT_TIMEOUT`, 180 s on x86-64 and 240 s on AArch64 (the
+harness gets timeout minus 30 s).
 
 ### The deadlines, and which event each is measured from
 

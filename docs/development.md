@@ -271,6 +271,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `QEMU_MEM` | `256M` | Guest RAM |
 | `MUSL_GCC` | `musl-gcc` if found | A musl C compiler used to build `tests/linux/hello_musl`; empty skips it and sets `HAVE_MUSL=0` for the harness |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour); `make test-smp2` runs it on two, as CI does |
+| `BOOT_TIMEOUT` | `180` (x86-64), `240` (AArch64) | Whole-boot timeout in seconds for `make test`, `test-harness-retry`, and `test-gic`/`test-guard`/`test-smp2` (through `test`): a hang guard, not a performance budget. `test-chaos` sets 240 s itself; `test-crash` and `test-wxn` keep the runner's 180 s. Rationale and CI measurements are in the Makefile comment |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
 | `QEMU_CPU` | `qemu64,+nx,+svm,+npt` (x86-64), `cortex-a72` (aarch64) | QEMU CPU model; the x86-64 default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host). On aarch64 `max` adds PAN and is also supported |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
