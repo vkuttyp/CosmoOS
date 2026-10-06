@@ -209,7 +209,7 @@ that only just finishes is noticed before it becomes a timeout.
 **The budgets are the kernel's, and each is also the watchdog's period.**
 `selftest.c`'s `budgets` table names the tests that are not held to the
 default of 8000 ms. Before the first test the runner prints
-`SELFTEST: budgets default=8000 process-user=20000 net-nicbench=20000 cosmofs-replay=40000`,
+`SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000`,
 and the harness judges durations by that line alone: a run that ran tests
 and printed no such line fails. A budget naming no test panics the run, so
 a typo cannot quietly mean the default. Before each test the runner arms
@@ -243,16 +243,19 @@ there to catch a hang, not to cap a suite.
 
 Such a test gets a budget sized for what it is, in the kernel's
 `budgets` table, beside the default rather than instead of it:
-`process-user` and `net-nicbench` have 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
+`process-user` has 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
 suite that hangs must still be caught. The list is deliberately short
 and each entry is an admission that the line reports too little.
 
-`net-nicbench` combines two interfaces' 2,000 ARP round trips and 10,000
-UDP sends each, plus bounded receive drains. AArch64 chaos CI completed
-that workload in 8,360 ms; its watchdog dump captured the second UDP
-round, and all 422 self-tests subsequently passed. Its explicit 20 s
-budget preserves the sample counts and drain checks instead of cutting
-work to fit the default 8 s. The harness and watchdog use the same entry.
+`net-nicbench` had a 20 s entry from 2026-10-04 to 2026-10-06. Its UDP
+phase then sent a fixed 10,000 datagrams, and under QEMU's user-mode
+network each one is a host `sendto` whose cost the guest does not set:
+AArch64 chaos CI took 8,360 ms, a slow local afternoon 21.5 s, with every
+number the test printed correct. That was the wrong kind of entry -- the
+test had not grown, the host had slowed -- and the fix was to the test:
+the phase is a 500 ms window, so the host's cost lowers the reported rate
+and no longer lengthens the test, and it is back on the default
+(`docs/audit/2026-10-06-flake-triage-report.md`).
 
 `make test-chaos` gives the complete boot 240 s, including 230 s for the
 shell harness. Ordinary boots use `BOOT_TIMEOUT`: 180 s (shell 170 s) on

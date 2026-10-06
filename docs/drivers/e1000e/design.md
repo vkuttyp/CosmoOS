@@ -134,6 +134,19 @@ The two drivers are within noise of each other, each faster on one
 column. That is a result too: the driver is not where this path spends
 its time, so a faster driver would not show.
 
+The UDP column is also the host's: under QEMU's user-mode network every
+datagram is a `sendto` on an unconnected host socket, and this model
+transmits synchronously in the `TDT` write, so the host's per-datagram
+cost (115 us idle on the macOS host that measured the table above, far
+more when it is busy) sits inside each send; virtio-net defers it to
+QEMU's main loop and its ring fills instead. The benchmark reports the
+driver's share of each send since 2026-10-06
+(`docs/audit/2026-10-06-flake-triage-report.md`), and on an idle host it
+is 43 % for this driver against 17 % for virtio-net -- the same path,
+paid in the register write rather than in refused descriptors. The
+conclusion stands: the checksum's share is a few percent of a send
+whichever side of the register write the rest is on.
+
 The benchmark also found a bug in this driver that nothing else had: it
 incremented `rx_packets`, `rx_bytes`, `tx_packets` and `tx_bytes` that
 `netif_rx` and `netif_transmit` already count, so every figure was

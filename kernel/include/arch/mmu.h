@@ -156,6 +156,14 @@ struct arch_mmu_shootdown_stats {
 
 void arch_mmu_shootdown_stats(struct arch_mmu_shootdown_stats *out);
 
+#if CONFIG_DEBUG
+/* x86-64 only (AArch64 broadcasts its invalidations and waits for no
+ * CPU): the next flush IPI `cpu` takes spins for `ns` before it
+ * acknowledges, so the one-second deadline's report can be exercised on
+ * a CPU made not to answer. For tools/tlb-shootdown-diag-probe.py. */
+void arch_mmu_shootdown_test_hold(unsigned cpu, uint64_t ns);
+#endif
+
 /* Body of the IPI_TLB_FLUSH handler; called by the generic IPI layer on
  * the target CPU in interrupt context. */
 void arch_mmu_shootdown_ipi_handler(void);

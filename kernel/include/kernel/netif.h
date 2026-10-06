@@ -36,6 +36,10 @@ struct netif_ops {
     /* Mandatory: last reference dropped after netif_unregister; free the
      * memory the netif is embedded in (netif_release_static for static). */
     void (*release)(struct netif *nif);
+    /* Optional diagnostic: descriptors handed to the device and not yet
+     * completed, and the ring's capacity in `*capacity`. A statistic
+     * (racy against the completion path); any context. NULL: unknown. */
+    unsigned (*tx_pending)(struct netif *nif, unsigned *capacity);
 };
 
 struct netif_stats {
@@ -126,6 +130,38 @@ void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
 int netif_transmit(struct netif *nif, struct mbuf *m);
 /* Test hook: -1, or the number of queued receive packets from `nif`. */
 unsigned netif_rxq_count(const struct netif *nif);
+/* The driver's view of its transmit ring: `tx_pending` when the driver
+ * has one and the interface is not GONE, else false. A statistic; read
+ * inside the read-side section that keeps the ring alive. */
+bool netif_tx_pending(struct netif *nif, unsigned *pending, unsigned *capacity);
+
+/*
+ * Where a send spends its time: while the probe is set, netif_transmit
+ * times each call the setting thread makes into the named interface's
+ * transmit (the ring write and, on a device model that transmits
+ * synchronously, the backend behind it) and counts the ones the driver
+ * refused for want of a descriptor. Other threads' and other
+ * interfaces' sends are not counted. For net-nicbench, which reads it
+ * around each send to split the send's cost into the stack's share and
+ * the driver's; off by default so no other boot pays the clock reads.
+ */
+struct netif_tx_probe {
+    uint64_t calls;         /* transmits timed */
+    uint64_t ns_total;      /* inside the driver, summed */
+    uint64_t ns_max;        /* the longest one */
+    uint64_t refused;       /* -ENOBUFS: the ring was full */
+};
+#if CONFIG_SELFTEST
+void netif_tx_probe_set(struct netif *nif);    /* an interface: zero and start, for the calling thread; NULL: stop */
+void netif_tx_probe_read(struct netif_tx_probe *out);
+#else
+/* No self-tests: nothing times anything, and a reader sees zeros. */
+static inline void netif_tx_probe_set(struct netif *nif) { (void)nif; }
+static inline void netif_tx_probe_read(struct netif_tx_probe *out)
+{
+    out->calls = out->ns_total = out->ns_max = out->refused = 0;
+}
+#endif
 
 /* Deferred work on the worker thread (timers hand off through this). */
 typedef void (*net_work_fn)(void *arg);

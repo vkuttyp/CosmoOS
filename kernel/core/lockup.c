@@ -231,6 +231,11 @@ static void print_one(unsigned c, const struct cpu_sample *s, bool self)
         kprintf("  (no frames)\n");
 }
 
+void lockup_print_sample(unsigned cpu, const struct cpu_sample *s)
+{
+    print_one(cpu, s, false);
+}
+
 void lockup_print_samples(cpumask_t answered)
 {
     /* No local `now`: every age below is a stamp another CPU wrote, and

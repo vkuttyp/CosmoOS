@@ -883,6 +883,7 @@ bool selftest_quiesce_call(const char **reason)
 struct irq_probe {
     unsigned magic;
     volatile unsigned entered;
+    uint64_t entered_ns;         /* the handler's own clock at entry: the lower bound is measured from here */
     volatile unsigned done;      /* set by the handler before it returns */
     unsigned hold_ms;
     unsigned hits;
@@ -897,6 +898,7 @@ static void irq_probe_handler(unsigned vector, struct arch_trap_frame *frame, vo
     p->hits++;
     if (p->magic != MAGIC_LIVE)
         p->bad++;
+    p->entered_ns = clock_now_ns();
     __atomic_store_n(&p->entered, 1u, __ATOMIC_RELEASE);
     /* A long handler: interrupts are masked on this CPU for the hold. */
     uint64_t end = clock_now_ns() + MS(p->hold_ms);
@@ -936,14 +938,20 @@ static bool selftest_irq_sync_pinned(const char **reason)
         arch_ipi_send(cpu, (unsigned)vec);
         CHECK(wait_flag(&p->entered, 1000));
         /* The handler is running on `cpu` right now, for ~20 ms. */
-        uint64_t t0 = clock_now_ns();
         CHECK(interrupt_unregister_sync((unsigned)vec, irq_probe_handler) == 0);
-        uint64_t sync_ns = clock_since_ns(t0);
+        /* Measured from the handler's own entry stamp, not from a point
+         * this thread reached later: a host that holds this vCPU between
+         * `entered` and the call only makes the span longer, so a correct
+         * sync cannot fail the bound on a loaded host (docs/testing/
+         * flakes.md, "`irq-sync` and `timer-cancel-sync`'s lower bounds").
+         * A sync that returned mid-handler would still fail `done` below
+         * and, 20 ms being the hold, this bound. */
+        uint64_t sync_ns = clock_since_ns(p->entered_ns);
         CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);   /* returned only after the handler */
         CHECK(sync_ns >= MS(10));
         CHECK(p->hits == 1 && p->bad == 0);
-        kinfo("selftest: irq-sync: handler on CPU %u held %u ms, unregister_sync took %llu ms", cpu, p->hold_ms,
-              (unsigned long long)(sync_ns / 1000000));
+        kinfo("selftest: irq-sync: handler on CPU %u held %u ms, unregister_sync returned %llu ms after it entered", cpu,
+              p->hold_ms, (unsigned long long)(sync_ns / 1000000));
     }
     quiesce_get_stats(&after);
     CHECK(after.irq_syncs == before.irq_syncs + 1);
@@ -1178,6 +1186,7 @@ struct timer_probe {
     spinlock_t callback_lock;
     unsigned magic;
     volatile unsigned entered;
+    uint64_t entered_ns;         /* the callback's own clock at entry: the lower bound is measured from here */
     volatile unsigned done;
     unsigned hold_ms;
     uint64_t arm_delay_ns;
@@ -1196,6 +1205,7 @@ static void timer_probe_fn(struct timer *t, void *arg)
     p->fires++;
     if (p->magic != MAGIC_LIVE)
         p->bad++;
+    p->entered_ns = clock_now_ns();
     __atomic_store_n(&p->entered, 1u, __ATOMIC_RELEASE);
     if (p->take_callback_lock) {
         arch_irq_state_t s = spin_lock_irqsave(&p->callback_lock);
@@ -1270,9 +1280,11 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
     CHECK(t != NULL);
     thread_join(t);
     CHECK(wait_flag(&p->entered, 1000));
-    uint64_t t0 = clock_now_ns();
     bool was_pending = timer_cancel_sync(&p->t);
-    uint64_t sync_ns = clock_since_ns(t0);
+    /* From the callback's own entry stamp, as irq-sync: a host holding
+     * this vCPU between `entered` and the cancel lengthens the span, never
+     * shortens it (docs/testing/flakes.md). */
+    uint64_t sync_ns = clock_since_ns(p->entered_ns);
     CHECK(!was_pending);
     CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);
     CHECK(sync_ns >= MS(10));
@@ -1322,7 +1334,7 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
     p->magic = MAGIC_DEAD;
     kfree(p);
     CHECK(threads_settle(threads0));
-    kinfo("selftest: timer-cancel-sync: callback on CPU %u held 20 ms, cancel_sync took %llu ms; re-arming timer stopped after %u fires",
+    kinfo("selftest: timer-cancel-sync: callback on CPU %u held 20 ms, cancel_sync returned %llu ms after it entered; re-arming timer stopped after %u fires",
           cpu, (unsigned long long)(sync_ns / 1000000), fires);
     return true;
 }

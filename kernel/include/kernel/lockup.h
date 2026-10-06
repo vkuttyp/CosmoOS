@@ -45,6 +45,9 @@ void lockup_print_samples(cpumask_t answered);
  * answer into `out` and releases. False when the slot is taken or the
  * CPU did not answer within the bound. */
 bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out);
+/* Print one sample the way lockup_print_samples does (pc, sp, how it was
+ * taken, the frames), for a caller that took it with lockup_sample_cpu. */
+void lockup_print_sample(unsigned cpu, const struct cpu_sample *s);
 
 /* `n` samples of `cpu`, `gap_ns` apart, one line each (the top three
  * frames): what a CPU that is not stalled in one place is cycling

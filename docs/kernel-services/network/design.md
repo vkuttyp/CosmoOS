@@ -1799,11 +1799,29 @@ machine has, bringing the default down to reach the second exactly as
   the IP stack out of the picture. Reported as round trips per second
   and nanoseconds per round trip.
 - **UDP transmit through the whole stack and out the NIC.** 1 KiB
-  datagrams to the gateway from an in-kernel socket, so the cost is the
-  socket, UDP, IPv4, Ethernet, the driver and the device model. Reported
-  as sends per second and nanoseconds per send, with how many frames the
-  driver actually transmitted beside how many the socket accepted -- a
-  driver that drops under load shows up as the gap.
+  datagrams to the gateway from an in-kernel socket for a 500 ms window,
+  so the cost is the socket, UDP, IPv4, Ethernet, the driver, the device
+  model -- and the backend behind it: under QEMU's user-mode network every
+  datagram is a `sendto` on an unconnected host socket, which an ARP
+  reply (answered inside QEMU) never is, so this rate is bounded by the
+  host's per-datagram cost and the ARP rate is not. The phase is a window
+  rather than a count for that reason: 10,000 sends took 10,000 times a
+  cost the guest does not set, and on a slow host put the test over its
+  budget while every number was correct (`docs/testing/flakes.md`,
+  "`net-nicbench`'s UDP rate"). Reported as sends per second and
+  nanoseconds per send, with how many frames the driver transmitted
+  beside how many the socket accepted and how many the driver refused for
+  want of a descriptor -- a driver that drops under load shows up as the
+  gap -- and, so that a slow reading carries its own diagnosis: a
+  per-send histogram (log2 buckets from 16 us to 16 ms), the share of the
+  window spent inside the driver's transmit (`netif_tx_probe`, timed
+  around `nif->ops->transmit` for the benchmark thread's own sends on the
+  measured interface and nobody else's; on a device model that transmits
+  synchronously this is the backend's cost), the transmit ring's peak
+  occupancy (the drivers' optional `tx_pending` op, read inside the
+  read-side section that keeps a ring alive across removal), how often the sender
+  was switched out or moved CPU, and the gateway's ARP entry before and
+  after.
 - **The software checksum's share.** `in_cksum` over the same 1 KiB,
   timed by itself, as a percentage of a send. This is the gate: a
   transmit checksum offload can save at most that share, so if it is a
