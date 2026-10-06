@@ -179,6 +179,11 @@ void sched_dump(void);
  * no lock another CPU may hold (a hung CPU's, say): print counters. */
 void sched_dump_register(const char *name, void (*fn)(void));
 uint64_t sched_switch_count(unsigned cpu);
+#if CONFIG_DEBUG
+/* The restore loop's trips and schedule()'s deepest entry per CPU, printed
+ * once at the end of a boot (docs/audit/2026-10-06-sched-restore-loop-report.md). */
+void sched_report_depth(void);
+#endif
 
 /* Hang watchdog: if sched_watchdog_kick() is not called for `timeout_ns`
  * while armed, the boot CPU's tick prints every thread and run queue --

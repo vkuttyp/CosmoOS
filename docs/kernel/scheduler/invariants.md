@@ -49,8 +49,8 @@ incomplete.) Check: the recorded graph, `docs/kernel/lockdep/testing.md`.
 
 **S5. Interrupts are re-enabled by the resumed thread, not by the
 switch.** `arch_context_switch` does not save RFLAGS; `schedule()`
-restores the caller's saved state with `arch_irq_restore(s)` after
-`sched_finish_switch`, and `thread_trampoline` does `arch_irq_enable()`.
+restores the caller's saved state with `arch_irq_restore_nopoint(s)`
+after `sched_finish_switch` and the restore loop (S31), and `thread_trampoline` does `arch_irq_enable()`.
 Check: test `breakpoint-trap` and every blocking test (a thread that
 returned with interrupts off would never take the next tick).
 
@@ -155,7 +155,9 @@ tail in `x86_trap_dispatch` when `irq_depth == 0`, `need_resched`,
 enabled; `arch_irq_restore` enabling interrupts under the same
 conditions (`preempt_point`, the wake-preempt unit -- the point a wake
 made under an `irqsave` lock reaches, since its unlock re-enables
-preemption before interrupts); or an explicit `schedule`/`sched_yield`/
+preemption before interrupts), which at the tail of `schedule()` is the
+same predicate taken as a loop trip before the restore rather than in it
+(`preempt_point_due`, S31); or an explicit `schedule`/`sched_yield`/
 block. Check: review; test `preempt` (a spinning thread is displaced by
 a woken sleeper, from interrupt context); tests `preempt-wake`,
 `preempt-wake-direct` and `preempt-wake-locked` (a same-CPU wake of a
@@ -332,6 +334,39 @@ it. Check:
 `completion-timeout` (200 completions lingered from another CPU, the
 completion's lock free on every return; it fails when the timeout wait
 drops its handshake) and, for the driver, `tools/nvme-admin-probe.py`.
+
+**S31. `schedule()` never re-enters itself while it runs with interrupts
+masked, and a burst of pending reschedules costs it one frame.** A
+reschedule pending when `schedule()` is about to restore its caller's
+interrupt state is taken by another pass of the loop in the same frame
+(`preempt_point_due(s)`, with interrupts off), and the restore that
+follows is `arch_irq_restore_nopoint`, which has no preemption point. So
+between its `arch_irq_save` and that restore -- the whole interval in
+which it runs with interrupts masked -- no second `schedule_internal`
+can start on the same thread: not by a restore point (it has none), not
+by `preempt_enable` (interrupts are off), not by a trap (masked). The
+stack a burst of reschedules needs is one frame, whatever the code
+generation. What S31 does not say is that one thread's stack never holds
+two `schedule_internal` frames: once the restore has enabled interrupts,
+a trap can land before the call returns, and its return path's
+`sched_preempt` starts a second one above it. That one was entered from
+the trap with interrupts masked in its saved state, so it takes a single
+pass and cannot itself be re-entered; the same holds for a trap landing
+before the save on entry. A thread's stack therefore holds at most two,
+the second only above a trap frame. Until the restore-loop unit it was one frame per pending
+reschedule, made constant only by tail calls
+(`docs/audit/2026-10-06-sched-restore-loop-report.md`). Check: assert
+(debug: a per-thread `sched_nest`, raised after the save and lowered
+before the restore, must be zero on entry); `scripts/check-kernel-elf.sh`
+(`schedule_internal`, and `schedule_pass` if the compiler keeps it out of
+line, reach none of `arch_irq_restore`, `arch_irq_restore_hw`,
+`preempt_point`, `sched_preempt`); test
+`sched-restore-loop` (a pinned thread resumed with a reschedule pending
+thousands of times in a row: its entry depth stays within a fixed bound
+of the test's own frame, its nesting at one, and every trip is counted),
+with `tools/sched-restore-loop-probe.py` showing the test fails on the
+recursive structure with a forced non-tail link and passes with the loop
+under the same link.
 
 ## Gaps (documented, not invariants)
 

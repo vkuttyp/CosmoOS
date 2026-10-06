@@ -136,8 +136,10 @@ thread is on, since nothing here moves it.
   Same-priority threads run before the caller returns.
 
 ### `void sched_preempt(void)`
-- Called by `preempt_enable` and the interrupt-return path. Asserts
-  `irq_depth == 0 && preempt_count == 0`, then `schedule()`.
+- Called by `preempt_enable`, `preempt_point` and the interrupt-return
+  path. Asserts `irq_depth == 0 && preempt_count == 0`, then `schedule()`.
+  Never called by `schedule()` itself: a reschedule pending at its own
+  restore is another pass of its loop (`invariants.md` S31).
 
 ### `bool sched_wake(struct thread *t)`
 - **Purpose**: BLOCKED → READY on the run queue of `t->cpu`; sets that

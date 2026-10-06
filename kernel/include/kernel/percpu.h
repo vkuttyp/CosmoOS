@@ -166,7 +166,15 @@ void preempt_enable(void);
  * enabled interrupts; safe to call anywhere, since every condition that
  * would make a switch wrong is in the predicate. */
 void preempt_point(void);
-/* How many times `preempt_point` switched on `cpu` (debug diagnostics; the scheduler dump prints it). */
+/* The same predicate, asked with interrupts off about a restore of `s`
+ * not yet made: true (and counted) if that restore would preempt. For
+ * `schedule()`, which takes the reschedule by looping and then restores
+ * with `arch_irq_restore_nopoint` (docs/kernel/scheduler/invariants.md
+ * S31). */
+bool preempt_point_due(unsigned long s);
+/* How many times the restore point switched on `cpu`, by `preempt_point`
+ * or by `schedule()`'s restore loop (debug diagnostics; the scheduler
+ * dump prints it). */
 uint64_t preempt_point_count(unsigned cpu);
 
 static inline bool preemptible(void)

@@ -289,6 +289,9 @@ void kernel_main(const struct cosmoboot_info *info)
               (unsigned long long)qs.straggler_ipis,
               (unsigned long long)qs.kick_publishes);
     }
+#if CONFIG_DEBUG
+    sched_report_depth();
+#endif
     kinfo("boot complete; nothing more to do in this phase");
     kernel_shutdown(failed ? KERNEL_EXIT_FAILURE : KERNEL_EXIT_SUCCESS);
 }

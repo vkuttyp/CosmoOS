@@ -211,6 +211,12 @@ arch_irq_state_t arch_irq_save_hw(void)
     return (arch_irq_state_t)flags;
 }
 
+void arch_irq_write_hw(arch_irq_state_t state)
+{
+    if (state & RFLAGS_IF)
+        __asm__ volatile("sti" ::: "memory");
+}
+
 void arch_irq_restore_hw(arch_irq_state_t state)
 {
     if (state & RFLAGS_IF) {

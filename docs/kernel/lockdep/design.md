@@ -331,9 +331,11 @@ The spinlock wrappers check their own `irqsave`/`irqrestore` (L14). Raw
 `arch_irq_save`/`arch_irq_restore`, used directly by the scheduler, the
 interrupt table, the FPU, the hypervisor backends and lockdep itself, had
 no check. With `LOCKDEP=1` the two are lockdep's wrappers around the
-architectures' `arch_irq_save_hw`/`arch_irq_restore_hw`; without it they
-are inline pass-throughs, and release kernels contain only the hardware
-functions.
+architectures' `arch_irq_save_hw`/`arch_irq_restore_hw`, and
+`arch_irq_restore_nopoint` -- `schedule()`'s restore, which has no
+preemption point (`docs/kernel/scheduler/invariants.md` S31) -- is the same
+check around `arch_irq_write_hw`; without it they are inline
+pass-throughs, and release kernels contain only the hardware functions.
 
 Each context keeps a stack of its outstanding saves (`struct
 lockdep_irq_saves`, 16 deep): the current thread's, in `struct thread`, or

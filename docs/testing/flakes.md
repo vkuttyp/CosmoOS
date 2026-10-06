@@ -2990,6 +2990,18 @@ branch changes only `smp-wake` and `sched_wake`'s debug record. The test
 passed; the harness's budget failed it, by 116 ms. The first sighting was
 over by 39 ms. Recorded, not attributed.
 
+## `net-nicbench` over the per-test budget, third sighting, 2026-10-06
+
+`self-test net-nicbench took 21523 ms (budget 20000 ms)`, local aarch64
+debug, four CPUs, the restore-loop unit's *baseline* boot: `main` at
+`c9292e3d` plus a debug-only measurement in `schedule()`, no scheduler
+change. Every self-test passed (425); the harness's budget failed it, by
+1.5 s over the 20 s budget PR #307 set. Its own numbers were slow on both
+NICs -- UDP 1037 and 903 sends/s, ARP 7378 and 7022 round trips/s -- and
+no watchdog report appears in the log. Other
+boots ran before it in the same sequence, one at a time. Recorded, not
+attributed (`docs/audit/2026-10-06-sched-restore-loop-report.md`).
+
 ## Two boots timed out on a host at load 100, and `lockup-hard` failed in one, 2026-09-30
 
 Two parallel debug boots (aarch64 and x86-64) of

@@ -2303,3 +2303,16 @@ See the [history index](README.md).
   line, and `check-kernel-elf.sh` fails a kernel whose restore chain is not
   tail calls. `lockdep-irq-pairing` with four negative controls;
   425 self-tests. Report: `docs/audit/2026-10-06-lockdep-irq-pairing-report.md`.
+- **Scheduler restore loop.** `schedule()` ended in `arch_irq_restore`,
+  whose preemption point entered `schedule()` again when a reschedule was
+  pending, bounded only by every link compiling to a tail call. Now the
+  pass is `schedule_pass()` and `schedule_internal()` loops while
+  `preempt_point_due(s)` -- the same predicate, asked with interrupts off
+  before the restore -- then restores with `arch_irq_restore_nopoint`. S31:
+  `schedule()` never re-enters itself with interrupts masked, asserted in
+  debug builds; `check-kernel-elf.sh` checks the structure, and its four
+  per-link tail-call checks are removed with reasons. Baseline: one-CPU
+  x86-64 idle chains of 47–72 reschedules; a 192-byte forced call put the
+  idle thread 13.8 KB deep on its 16 KB stack. `sched-restore-loop` (3,200
+  trips) with `tools/sched-restore-loop-probe.py`'s three controls; 426
+  self-tests. Report: `docs/audit/2026-10-06-sched-restore-loop-report.md`.

@@ -16,6 +16,11 @@ arch_irq_state_t arch_irq_save_hw(void)
     return (arch_irq_state_t)daif;
 }
 
+void arch_irq_write_hw(arch_irq_state_t state)
+{
+    WRITE_SYSREG(daif, state);
+}
+
 void arch_irq_restore_hw(arch_irq_state_t state)
 {
     WRITE_SYSREG(daif, state);

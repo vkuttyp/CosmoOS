@@ -817,6 +817,108 @@ bool selftest_irqrestore_bench(const char **reason)
     return true;
 }
 
+/* --- the restore loop: reschedules pending at schedule()'s restore, in a row ---
+ *
+ * A thread resumed inside `schedule()` with a reschedule pending takes it
+ * by another pass of the loop in the same frame (S31). Before the
+ * restore-loop unit it took it by entering `schedule()` again from the
+ * restore, one frame per reschedule unless every link was a tail call.
+ * This drives that case thousands of times on one CPU: the seam
+ * (`test_resume_resched`) leaves a reschedule pending and the slice spent
+ * at each of this thread's next RESTORE_RUN resumptions, and a partner of
+ * the same priority on the same CPU yields back each time, so every one
+ * is a real switch out and back. The claims, per run of trips: the stack
+ * this thread enters `schedule()` on stays within RESTORE_BOUND bytes of
+ * this function's own frame, it is never inside `schedule()` twice, and
+ * every armed resumption was a trip. tools/sched-restore-loop-probe.py
+ * shows the first claim fails on the recursive structure with one link
+ * forced to be a call and holds for the loop under the same link.
+ */
+enum {
+    RESTORE_RUNS = 100,
+    RESTORE_RUN = 32,       /* trips in a row: a recursion of 32 frames of 32 bytes or more clears the bound */
+    RESTORE_BOUND = 1024,   /* above this frame: a yield's two frames, or a trap frame and the trap return's preemption */
+};
+
+#if CONFIG_DEBUG
+struct restore_partner {
+    volatile bool stop;
+    uint64_t yields;
+};
+
+static void restore_partner_entry(void *arg)
+{
+    struct restore_partner *p = arg;
+    while (!__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE)) {
+        sched_yield();
+        p->yields++;
+    }
+}
+#endif
+
+static bool selftest_sched_restore_loop_pinned(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: sched-restore-loop: the per-thread record is written in debug builds only; skipped");
+    return true;
+#else
+    unsigned before = thread_count();
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
+    struct thread *self = thread_current();
+    struct restore_partner p = { .stop = false, .yields = 0 };
+    struct thread *t = thread_create_on(restore_partner_entry, &p, "restore-partner", self->priority,
+                                        CPUMASK_OF(here));
+    CHECK(t != NULL);
+
+    size_t base = self->stack_base + self->stack_size - (uintptr_t)__builtin_frame_address(0);
+    self->sched_depth_max = 0;
+    self->sched_nest_max = 0;
+    uint64_t trips0 = self->sched_trips;
+    uint32_t longest = 0;
+    size_t worst = 0;
+    unsigned runs = 0, unspent = 0;
+    uint64_t t0 = clock_now_ns();
+    for (; runs < RESTORE_RUNS; runs++) {
+        self->test_resume_resched = RESTORE_RUN;
+        sched_yield();
+        unspent = self->test_resume_resched;
+        worst = self->sched_depth_max;
+        if (self->sched_chain > longest)
+            longest = self->sched_chain;
+        if (unspent != 0 || worst > base + RESTORE_BOUND || self->sched_nest_max != 1)
+            break;
+    }
+    uint64_t dt = clock_since_ns(t0);
+    self->test_resume_resched = 0;
+    __atomic_store_n(&p.stop, true, __ATOMIC_RELEASE);
+    thread_join(t);
+
+    uint64_t trips = self->sched_trips - trips0;
+    kinfo("selftest: sched-restore-loop: %u runs of %u, %llu trips (longest %u in one call), %llu ns a trip; "
+          "deepest entry %zu bytes above this frame (bound %u), nesting %u; partner yielded %llu times",
+          runs, (unsigned)RESTORE_RUN, (unsigned long long)trips, longest,
+          (unsigned long long)(trips ? dt / trips : 0), worst > base ? worst - base : 0, (unsigned)RESTORE_BOUND,
+          self->sched_nest_max, (unsigned long long)p.yields);
+    CHECK(worst <= base + RESTORE_BOUND);
+    CHECK(self->sched_nest_max == 1);
+    CHECK(unspent == 0);
+    CHECK(runs == RESTORE_RUNS && trips >= (uint64_t)RESTORE_RUNS * RESTORE_RUN && longest >= RESTORE_RUN);
+    CHECK(threads_settle(before));
+    return true;
+#endif
+}
+
+/* Pinned: the partner must share this thread's CPU for every resumption
+ * to be a switch out and back on it. */
+bool selftest_sched_restore_loop(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_sched_restore_loop_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 bool selftest_sleep(const char **reason)
 {
     uint64_t t0 = clock_now_ns();

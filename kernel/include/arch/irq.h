@@ -17,9 +17,13 @@ typedef unsigned long arch_irq_state_t;
 /* Whether a saved state restores IRQ delivery as enabled. */
 bool arch_irq_state_enabled(arch_irq_state_t state);
 
-/* The hardware operations, per architecture. */
+/* The hardware operations, per architecture. `arch_irq_restore_hw` is a
+ * preemption point when it enables interrupts (`preempt_point`, docs/
+ * kernel/scheduler/design.md "Preemption points"); `arch_irq_write_hw` is
+ * the same restore without it. */
 arch_irq_state_t arch_irq_save_hw(void);
 void arch_irq_restore_hw(arch_irq_state_t state);
+void arch_irq_write_hw(arch_irq_state_t state);
 
 /*
  * Disable interrupts and return the previous state; restore it. With
@@ -31,9 +35,11 @@ void arch_irq_restore_hw(arch_irq_state_t state);
 #if defined(CONFIG_LOCKDEP) && CONFIG_LOCKDEP
 arch_irq_state_t arch_irq_save(void);
 void arch_irq_restore(arch_irq_state_t state);
+void arch_irq_restore_nopoint(arch_irq_state_t state);
 #else
 static inline arch_irq_state_t arch_irq_save(void) { return arch_irq_save_hw(); }
 static inline void arch_irq_restore(arch_irq_state_t state) { arch_irq_restore_hw(state); }
+static inline void arch_irq_restore_nopoint(arch_irq_state_t state) { arch_irq_write_hw(state); }
 #endif
 
 void arch_irq_enable(void);

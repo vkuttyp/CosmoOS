@@ -218,6 +218,13 @@ AHCI are the two entries from that list now built.
   measurement found no such pair stuck in twelve boots (one sharing, of
   16 ms, that resolved), so there is no measured defect yet.
 - ~~no priority inheritance in `mutex.c`~~ — **BUILT (the priority-inheritance unit, `docs/audit/next-subsystem-priority-inheritance.md`, PR #281)**: a mutex owner is boosted to the highest-priority thread blocked on it and up the chain, under a single `g_pi_lock` (the outermost PI lock; run-queue and wait-queue locks nest under it), and restored on release; `struct thread` gained `base_prio` with `priority` the effective value, and `sched_reprioritize` requeues a ready/running/blocked thread re-checking its CPU against a migration. `prio-inversion` proves it: the three-thread inversion on one CPU now resolves with the high thread acquiring before the medium thread finishes. Measured first by `tools/priority-inheritance-probe.py` (the inverted outcome, before the fix).
+- ~~`schedule()`'s preempt-at-restore recursion bounded only by tail
+  calls~~ — **BUILT (the restore-loop unit,
+  [report](2026-10-06-sched-restore-loop-report.md))**: a reschedule pending
+  at `schedule()`'s restore is another pass of a loop in the same frame
+  (S31), and the ELF check verifies that structure instead of code
+  generation. Found by the raw-pairing unit, whose first wrapper double
+  faulted a one-CPU boot.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
   routing tables or protocol lookup structures as §22 asks.

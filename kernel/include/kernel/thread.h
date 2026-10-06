@@ -140,6 +140,19 @@ struct thread {
                                            above, which is the scheduler's own and never leaves the
                                            kernel. */
     uint64_t held_mutex_seq;   /* lockdep: bounded readers reject active/changed writes */
+    /* (own) schedule()'s restore loop, debug builds only. Last, so the
+     * fields above keep their offsets
+     * (docs/kernel/scheduler/invariants.md S31): whether this thread is
+     * inside schedule_internal's interrupts-off body and the most it has
+     * been at once; the restore-loop trips it has taken, in all and the
+     * most in one call; the deepest stack it entered schedule() on. */
+    uint32_t sched_nest, sched_nest_max;
+    uint32_t sched_chain;
+    uint64_t sched_trips;
+    size_t sched_depth_max;
+    /* (own) sched-restore-loop's seam, self-test builds only: the next
+     * this many resumptions in schedule() find a reschedule pending. */
+    uint32_t test_resume_resched;
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation

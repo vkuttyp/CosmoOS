@@ -61,6 +61,35 @@ A million `arch_irq_save`/`arch_irq_restore` pairs with `need_resched`
 clear: the cost of the point's predicate on the hot path, printed with
 the CPU's count of restore-point preemptions so far.
 
+### `sched-restore-loop`
+S31: a reschedule pending at `schedule()`'s restore is taken by another
+pass of its loop, never by a `schedule()` inside it. Pinned (debug). A
+partner of the test thread's priority is created on the same CPU and
+yields in a loop; the test arms its seam (`test_resume_resched`, written
+by `schedule_internal` in self-test builds), which at each of the test
+thread's next 32 resumptions inside `schedule()` leaves a reschedule
+pending and the slice spent, and calls `sched_yield()` -- 100 times, 3,200
+trips. Each resumption is a real switch out and back, since the trip
+re-queues the thread behind its partner. Asserted, in this order: the
+deepest stack the test thread entered `schedule()` on stays within 1,024
+bytes of the test's own frame (room for a yield's frames, or a trap frame
+and the trap return's preemption); it was never inside `schedule()`'s
+interrupts-off body twice; every armed resumption was consumed; and the
+trips counted are at least the 3,200 armed, at least 32 in one call. It
+prints the trips, the cost of one, the depth above its frame and the
+nesting.
+
+`tools/sched-restore-loop-probe.py` (negative controls, both
+architectures): `--mode recursive` restores the old structure -- one pass,
+then `arch_irq_restore`, whose preemption point enters `schedule()` again
+-- with lockdep's `arch_irq_restore` forced to keep a 160-byte frame across
+the hardware restore (the shape that double faulted, confirmed a call in
+the disassembly), S31's entry assertion and the ELF check removed; the
+test must fail at its stack-bound check. `--mode loop` applies the same
+forced call to the loop; the test must pass. `--mode guard` restores the
+old structure and keeps the ELF check; the link must be refused naming
+`schedule_internal`.
+
 ### `debug.preempt_probe` (user mode, `init --selftest`)
 The read of this sysctl is the system call under test: it creates a
 priority-16 thread pinned to the caller's CPU, waits for it to block,
