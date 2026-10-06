@@ -186,6 +186,12 @@ void arp_input(struct netif *nif, struct mbuf *m)
         return;   /* probes and our own address: nothing to learn */
 
     uint16_t op = ntohs(a.op);
+    /* A frame queued before the interface went down can arrive here after
+     * the down flushed its entries; learning from it would carry a MAC
+     * across the down transition into the link's return (N25). Nothing is
+     * learned or answered on an interface that is not up. */
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;
     bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);

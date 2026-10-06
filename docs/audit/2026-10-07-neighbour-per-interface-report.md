@@ -52,17 +52,23 @@ in order:
    the old keying the second interface's transmit count stays 0: its
    resolution found the first's incomplete entry and parked its packet
    there. **This is the check that fails.**
-2. A retry (`arp_age`) goes out of each interface, one each.
-3. A reply fed in as the first interface's completes the first's entry and
+2. A reply fed in as the first interface's completes the first's entry and
    sends its packet out of the first to the first's MAC; the second stays
    incomplete, nothing leaves it.
-4. The second's reply, a different MAC, completes only the second's; the
+3. The second's reply, a different MAC, completes only the second's; the
    first's entry is unchanged.
-5. The sighting's shape: both entries deleted, the first resolves (entry
+4. The sighting's shape: both entries deleted, the first resolves (entry
    incomplete), the first interface goes down (its entry flushed, the
-   parked packet counted dropped), the second resolves: it must send a
-   request of its own and complete from its own reply; nothing of the
-   second's ever left the first.
+   parked packet counted dropped), a reply arriving on the down interface
+   teaches it nothing, the second resolves: it must send a request of its
+   own and complete from its own reply; nothing of the second's ever left
+   the first.
+
+The first version of the test also called `arp_age(now + 1.5 s)` to see a
+retry leave each interface. Review pointed out that this moves the shared
+table's clock -- the hazard of §3 -- so the step is gone; the retry's
+interface is the entry's own by construction (`retry[i].nif = e->nif`,
+unchanged, asserted by `net-arp-retry-unregister`).
 
 The ND test is the same shape over `nd_resolve`/`nd_input_na`, with
 `fe80::1`, and adds that the first interface going down starts its
@@ -82,7 +88,7 @@ Four boots of about 90 s to the verdict. The failing check is the first
 one that distinguishes the keyings: the second interface's resolution
 sent nothing because it found the first's entry. Under the old keying
 the tests do not reach the later checks, so the probe does not show the
-wrong-interface transmit directly; the test's steps 3-5 are what that
+wrong-interface transmit directly; the test's steps 2-4 are what that
 would have failed at.
 
 ## 3. The change
@@ -96,8 +102,11 @@ recorded the interface; ageing already retried on the entry's own.
 `arp_lookup` and `arp_delete` take the interface; the one-argument forms
 are gone and every caller names it (eleven sites, all in `nettest.c`).
 
-**Down** (`netif.c`): `netif_set_up(nif, false)` flushes the interface's
-ARP and ND entries, as `netif_unregister` step 5 does. The reasons, now
+**Down** (`netif.c`, `arp.c`, `ipv6.c`): `netif_set_up(nif, false)`
+flushes the interface's ARP and ND entries, as `netif_unregister` step 5
+does, and `arp_input`/`nd_input_*` learn and answer nothing on an
+interface that is not up (review: a frame queued before the down and
+input after the flush would otherwise carry a MAC across the transition). The reasons, now
 invariant **N25** in `docs/kernel-services/network/invariants.md`: a MAC
 learned over a link that is down is not known to be there when it comes
 back; a packet parked on an incomplete entry of a down interface waits

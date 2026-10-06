@@ -210,6 +210,8 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (!in6_equal(&nd.target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
         return;
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;   /* queued input on a down interface learns nothing (N25, as arp_input) */
     /* Learn the asker (never at the cost of an entry in use), answer with our address. */
     if (nd.opt_type == 1 && nd.opt_len == 1) {
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
@@ -237,6 +239,8 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (nd.opt_type != 2 || nd.opt_len != 1)
         return;
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+        return;   /* as above */
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
     struct nd_entry *e = nd_find(nif, &nd.target);   /* this interface's entry: an advertisement here completes no other's */

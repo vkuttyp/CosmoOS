@@ -2035,49 +2035,60 @@ bool selftest_net_arp_per_interface(const char **reason)
     arp_get_stats(&s1);
     CHECK(s1.entries == s0.entries + 2 && s1.requests_sent == s0.requests_sent + 2);
 
-    /* 2. A retry goes out of the interface whose entry it is, one each. */
-    arp_age(clock_now_ns() + 1500ull * 1000000ull);
-    CHECK(a.transmits == 2 && b.transmits == 2);
+    /* (A retry goes out of the interface whose entry it is: arp_age keys
+     * the retry on e->nif, unchanged here and asserted by
+     * net-arp-retry-unregister. Not exercised with arp_age(now + x) from
+     * this test, because arp_age stamps every incomplete entry it retries
+     * with the clock it is given and clock_delta_ns clamps a future stamp:
+     * moving the shared table's clock delays every other interface's
+     * retries by that much, the hazard net-second-nic's hour-forward hack
+     * had. A test asserts on its own interfaces and leaves the table's
+     * clock alone.) */
 
-    /* 3. A reply on the first completes the first's entry and sends its
+    /* 2. A reply on the first completes the first's entry and sends its
      * packet out of the first to the first's MAC; the second's stays
      * incomplete and nothing leaves it. */
     CHECK(dual_arp_reply(&a.nif, gw, mac_a));
     CHECK(arp_lookup(&a.nif, gw, mac) && memcmp(mac, mac_a, ETH_ALEN) == 0);
-    CHECK(a.transmits == 3 && a.last_type == ETH_P_IP && memcmp(a.last_dst, mac_a, ETH_ALEN) == 0);
+    CHECK(a.transmits == 2 && a.last_type == ETH_P_IP && memcmp(a.last_dst, mac_a, ETH_ALEN) == 0);
     CHECK(!arp_lookup(&b.nif, gw, mac));
-    CHECK(b.transmits == 2);
+    CHECK(b.transmits == 1);
 
-    /* 4. The second's reply, with a different MAC, completes only the second's. */
+    /* 3. The second's reply, with a different MAC, completes only the second's. */
     CHECK(dual_arp_reply(&b.nif, gw, mac_b));
     CHECK(arp_lookup(&b.nif, gw, mac) && memcmp(mac, mac_b, ETH_ALEN) == 0);
-    CHECK(b.transmits == 3 && b.last_type == ETH_P_IP && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
+    CHECK(b.transmits == 2 && b.last_type == ETH_P_IP && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
     CHECK(arp_lookup(&a.nif, gw, mac) && memcmp(mac, mac_a, ETH_ALEN) == 0);
-    CHECK(a.transmits == 3);
+    CHECK(a.transmits == 2);
 
-    /* 5. The sighting's shape: the first's entry incomplete and the first
+    /* 4. The sighting's shape: the first's entry incomplete and the first
      * interface down, the second resolves. Down flushes the first's
      * entries (its parked packet counted dropped); the second's resolution
-     * sends its own request and completes from its own link. */
+     * sends its own request and completes from its own link. A request
+     * arriving on the down interface learns nothing: queued input must not
+     * carry a MAC across the down transition. */
     arp_delete(&a.nif, gw);
     arp_delete(&b.nif, gw);
     arp_get_stats(&s0);
     m = dual_packet();
     CHECK(m != NULL);
     CHECK(arp_resolve(&a.nif, gw, mac, m) == -EINPROGRESS);
-    CHECK(a.transmits == 4);
+    CHECK(a.transmits == 3);
     netif_set_up(&a.nif, false);
     arp_get_stats(&s1);
     CHECK(!arp_lookup(&a.nif, gw, mac));
     CHECK(s1.entries == s0.entries && s1.pending_dropped == s0.pending_dropped + 1);
+    CHECK(dual_arp_reply(&a.nif, gw, mac_a));   /* late input on the down interface */
+    CHECK(!arp_lookup(&a.nif, gw, mac));
+    CHECK(a.transmits == 3);
     m = dual_packet();
     CHECK(m != NULL);
     CHECK(arp_resolve(&b.nif, gw, mac, m) == -EINPROGRESS);
-    CHECK(b.transmits == 4 && b.last_type == ETH_P_ARP);   /* a request of its own, not a park on the first's entry */
+    CHECK(b.transmits == 3 && b.last_type == ETH_P_ARP);   /* a request of its own, not a park on the first's entry */
     CHECK(dual_arp_reply(&b.nif, gw, mac_b));
     CHECK(arp_lookup(&b.nif, gw, mac) && memcmp(mac, mac_b, ETH_ALEN) == 0);
-    CHECK(b.transmits == 5 && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
-    CHECK(a.transmits == 4);   /* nothing of the second's ever left the first */
+    CHECK(b.transmits == 4 && memcmp(b.last_dst, mac_b, ETH_ALEN) == 0);
+    CHECK(a.transmits == 3);   /* nothing of the second's ever left the first */
     netif_set_up(&a.nif, true);
 
     nt_netif_unregister(&b.nif);
@@ -2158,8 +2169,10 @@ bool selftest_net_nd_per_interface(const char **reason)
     CHECK(nd_resolve(&a.nif, &peer, mac, NULL) == 0 && memcmp(mac, mac_a, ETH_ALEN) == 0);
     CHECK(a.transmits == 2);
 
-    /* Down flushes the interface's neighbours, as for ARP. */
+    /* Down flushes the interface's neighbours, as for ARP, and an
+     * advertisement arriving while it is down teaches nothing. */
     netif_set_up(&a.nif, false);
+    CHECK(dual_nd_advert(&a.nif, &peer, mac_a));
     m = dual_packet();
     CHECK(m != NULL);
     netif_set_up(&a.nif, true);

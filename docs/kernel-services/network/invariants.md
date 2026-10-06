@@ -452,17 +452,23 @@ with the link. A transmit or receive already past the flag check
 finishes on the live interface under its read-side section (N-L1); the
 flush takes only the table locks, so it is safe from the contexts
 `netif_set_up` is called from. The routing lookup never chooses a down
-interface (`netif_connected`, `netif_default` skip `!NETIF_UP`), so the
-only way a down interface gains an entry is a request addressed to it
-arriving on it, which is harmless and aged.
+interface (`netif_connected`, `netif_default` skip `!NETIF_UP`), and
+`arp_input`/`nd_input_*` learn and answer nothing on an interface that
+is not up -- a frame queued before the down and input after the flush
+would otherwise carry a MAC across the down transition into the link's
+return (review of PR #319).
 
 **Checked by** `net-arp-per-interface` and `net-nd-per-interface`: two
 fake interfaces, one neighbour address, two MACs; each resolution sends
 its own request out of its own interface (the check that fails under the
-old keying: the second's request count stays 0), a retry goes out of
-each, a reply on one completes only that one and sends its packet out of
-it to its MAC, and the sighting's shape -- the first's entry incomplete
-and the first interface down, the second resolving -- gets its own
-request and its own answer. `tools/arp-per-interface-probe.py --old`
+old keying: the second's request count stays 0), a reply on one completes
+only that one and sends its packet out of it to its MAC, and the
+sighting's shape -- the first's entry incomplete and the first interface
+down, the second resolving -- gets its own request and its own answer,
+while a reply arriving on the down interface teaches it nothing. (The
+retry's interface is the entry's own by construction, `retry[i].nif =
+e->nif`, asserted by `net-arp-retry-unregister`; the test does not call
+`arp_age` with a moved clock, which would delay every other interface's
+retries -- the hazard of §3 below.) `tools/arp-per-interface-probe.py --old`
 restores the address-only keying in both tables and shows both tests
 failing at that check, on both architectures.
