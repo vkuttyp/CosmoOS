@@ -59,7 +59,12 @@ waiter runs 20-77 µs after the wake, both architectures.
 ### `irqrestore-bench`
 A million `arch_irq_save`/`arch_irq_restore` pairs with `need_resched`
 clear: the cost of the point's predicate on the hot path, printed with
-the CPU's count of restore-point preemptions so far.
+the CPU's count of restore-point preemptions so far. On x86-64 under TCG
+one boot's figure is a draw from one of two per-boot modes (about 335 or
+450 ns a pair, both trees of any comparison); compare kernels only across
+alternated boots, enough of them to see both modes
+(`docs/testing/flakes.md`, "`irqrestore-bench` and `fpu-bench` read two
+per-boot modes on x86-64"; `tools/irqrestore-bench-modes-probe.py`).
 
 ### `sched-restore-loop`
 S31: a reschedule pending at `schedule()`'s restore is taken by another

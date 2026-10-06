@@ -3113,3 +3113,117 @@ The test took 57 ms in the failing boot and 53-58 ms in passing boots of
 the tree, against 47-50 ms on `main`: the change makes timer callbacks
 heavier, which moves every timing window in the suite. Watch for a second
 sighting; with one, instrument the full-suite run rather than the loop.
+
+## `irqrestore-bench` and `fpu-bench` read two per-boot modes on x86-64, 2026-10-06
+
+Not a failure: a measurement. The restore-loop report
+(`docs/audit/2026-10-06-sched-restore-loop-report.md`, "Performance")
+recorded x86-64 debug `irqrestore-bench` as slower on the fix than on its
+base (360 against 400–525 ns a pair) and could not say why. Twelve
+alternating four-CPU boots of the two trees (`c9292e3d` and `30c7a2f8`,
+each with the benchmark replaced by
+`tools/irqrestore-bench-modes-probe.py`'s diagnostic) say it was the
+sample, not the code:
+
+| boot | pair, ns | pair with interrupts masked throughout | control, 4 M dependent steps | `fpu-bench` switch without FP |
+|---|---|---|---|---|
+| base 1 | 473 | 363 | 5.49 M | 5425 |
+| fix 1 | 336 | 224 | 5.29 M | 4732 |
+| base 2 | 442 | 302 | 5.24 M | 11765 |
+| fix 2 | 433 | 309 | 5.12 M | 5398 |
+| base 3 | 429 | 309 | 5.22 M | 11711 |
+| fix 3 | 431 | 296 | 5.14 M | 5776 |
+| base 4 | 347 | 218 | 5.15 M | 3828 |
+| fix 4 | 447 | 297 | 5.25 M | 5425 |
+| base 5 | 336 | 220 | 5.29 M | 3789 |
+| fix 5 | 334 | 219 | 5.24 M | 4334 |
+| base 6 | 453 | 321 | 5.52 M | 5017 |
+| fix 6 | 334 | 230 | 5.23 M | 4368 |
+
+- **Two modes, on both trees.** About 335 ns a pair, or 430–473. Base
+  took the fast mode in two boots of six, the fix in three. The report's
+  ten base boots were mostly fast and its twelve fix boots mostly slow;
+  with the modes this uneven, that is what twenty-two draws can do.
+- **The mode is in the save/restore path, not the host.** The control
+  loop -- the same boot, interrupts masked, no interrupt code -- reads
+  5.1–5.5 M ns in every boot, fast or slow. The masked-throughout loop
+  shows the same two modes as the benchmark (about 220 against 300 ns), so
+  neither the tick nor the preemption point makes the difference. Within a
+  boot the mode is stable: the per-thousand chunks' minimum and median are
+  within 3 %.
+- **The switch follows the mode**: 3.8–4.7 µs in the fast-mode boots,
+  5.0–5.8 in the slow. The report's "+150 ns a switch" from the loop's
+  out-of-line call per pass is inside the spread of six samples each way.
+- **What sets the mode is not known.** The guest does the same work on
+  every boot; what differs per QEMU run is on the host -- where TCG's code
+  buffer lands, which host core the vCPU thread gets. The control being
+  unaffected argues against core type; the pair loop differs from it in its
+  calls and returns (each guest `ret` an indirect host branch through TCG's
+  lookup), which is where a per-run placement effect would show. That is a
+  hypothesis, not a measurement. AArch64 reads the same two modes on both
+  trees (report, same table).
+
+**The benchmark as shipped reads the same.** The diagnostic above is a
+replacement benchmark, so it could show the modes without settling the
+report's gap inside the fast mode (base 357–376 against the fix's
+399–403; raised in review). Twelve more alternating four-CPU boots of the
+two trees *unmodified* -- the benchmark exactly as the report ran it:
+
+| tree | `irqrestore-bench`, ns a pair, boots 1–6 | fast / slow |
+|---|---|---|
+| base `c9292e3d` | 430, 430, 439, 438, 503, 340 | 1 / 5 |
+| fix `30c7a2f8` | 330, 445, 434, 447, 343, 346 | 3 / 3 |
+
+Fast is 330–346 on both trees, slow 430–503 on both; the gap inside the
+fast mode does not reproduce. (The fix's sixth boot first failed at 0.5 s
+on QEMU's `Could not set up host forwarding rule 'udp:127.0.0.1:60176-:7'`
+-- a host port collision before the kernel ran, seen once before in this
+unit -- and the 346 is its rerun.) In base 4 of this set, `fpu-bench`'s
+*both* switch legs read 11.8–12.1 µs, the same doubling as above.
+
+A benchmark number on x86-64 is a draw from one of two modes, so a
+base-against-fix comparison needs enough boots of each to see both, and
+alternated. Separately, `fpu-bench`'s no-FP switch read 11.7 µs in base 2
+and base 3 while the with-FP switch in the same boots was its usual
+5.2 µs, so the benchmark printed a negative save-and-restore cost; the leg
+absorbed something once in each boot, not seen in the other ten.
+
+## An x86-64 debug guard boot over the 180 s budget on a slow runner, 2026-10-06
+
+**Run 37479540321, PR #316's x86-64 job (a branch of documentation and
+one tool, no kernel change), the protection-capable-CPU debug boot:**
+`boot-test: FAIL after 184.0s -- timed out after 180s`, `shell harness: no
+prompt before command 28 ('vmctl flows')`. The boot had reached
+`SELFTEST: PASS (426 tests)` and the harness had got through `sleep 1 &`,
+`jobs` and `pkg update && pkg install hello && hello && pkg list`; the
+serial log ends
+
+```
+[DEBUG] process: pid 420 'pkg' released
+cosmo$ [ INFO] process: pid 416 'sleep' exited with status 0 (3 syscalls)
+```
+
+That is the prompt the harness was waiting for -- the log holds the 28
+line-start prompts it needed -- arriving after its deadline. The same
+job's main debug boot, on the same runner, took **167.6 s**; the budget
+is 180 s, which PR #314 kept for x86-64 on the record that its boots ran
+p95 163 s and at most 169 s with no timeout (`Makefile`, `BOOT_TIMEOUT`).
+Recent `main` runs' three x86-64 debug boots took 121–129 s, 154–163 s
+and 122–126 s. This runner was at the slow end of that spread and the
+guard boot, the third of the job's boots, went 4 s over. Nothing stalled:
+the `sleep` exiting after the prompt rather than before it (as in the
+passing boot) is the four `pkg` processes taking more than a second on
+this runner.
+
+**Read wrong for an hour first**, because the serial log alone has the
+shape of the aarch64 console stall above (input stops right after a
+reaped background job, nothing echoed afterwards): the harness verdict
+says it never typed `vmctl flows`, so no input was lost, and the sibling
+boot's time says why the prompt came late. The lesson is the one at the
+top of this file: read the harness's own verdict before the log's shape.
+
+First x86-64 timeout since #314's record; the aarch64 budget was raised
+to 240 s on four such timeouts. The failed job re-run on another runner
+passed every step, its three debug boots in 115.3, 109.7 and 112.0 s --
+the guard boot 112.0 s against the 184 s that timed out. One sighting;
+a second is the case for giving x86-64 the margin #314 gave aarch64.
