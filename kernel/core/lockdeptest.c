@@ -731,6 +731,86 @@ bool selftest_lockdep_callback(const char **reason)
     return r;
 }
 
+/*
+ * Raw interrupt-state pairing (design.md, "Raw interrupt-state pairing"):
+ * each violation, through the real arch_irq_save/arch_irq_restore, made so
+ * that it produces exactly one report.
+ */
+static void irqp_leaky(void *arg)
+{
+    (void)arg;
+    (void)arch_irq_save();   /* never restored ... */
+    arch_irq_enable();       /* ... and interrupts back on, so the exit itself is legal */
+}
+
+static bool selftest_lockdep_irq_pairing_pinned(const char **reason)
+{
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
+    CHECK(arch_irq_enabled());
+    arch_irq_state_t s1, s2;
+
+    /* 1. A restore with nothing outstanding: the pair is complete, and a
+     * second restore has no save to undo. */
+    s1 = arch_irq_save();
+    arch_irq_restore(s1);
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    arch_irq_restore(s1);   /* restores "enabled", which it already is */
+    CHECK(lockdep_expected_hits() == 1);
+
+    /* 2. Out of order: the outer save's state restored while the inner
+     * save is innermost. It consumes the innermost slot and enables
+     * interrupts; masking again leaves the outer save to be undone
+     * cleanly, so this is the only report. */
+    s1 = arch_irq_save();
+    s2 = arch_irq_save();
+    CHECK(arch_irq_state_enabled(s1) && !arch_irq_state_enabled(s2));
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    arch_irq_restore(s1);
+    arch_irq_disable();
+    arch_irq_restore(s1);
+    CHECK(lockdep_expected_hits() == 1);
+
+    /* 3. Interrupts enabled inside a saved region. */
+    s1 = arch_irq_save();
+    arch_irq_enable();
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    arch_irq_restore(s1);
+    CHECK(lockdep_expected_hits() == 1);
+
+    /* 4. A thread that exits with a save outstanding, on this CPU so the
+     * report lands where the expectation is armed. */
+    lockdep_expect(LOCKDEP_R_IRQ_STATE);
+    struct thread *t = thread_create_on(irqp_leaky, NULL, "irqp-leak", SCHED_PRIO_DEFAULT, CPUMASK_OF(here));
+    CHECK(t != NULL);
+    thread_join(t);
+    CHECK(lockdep_expected_hits() == 1);
+
+    /* 5. One save past capacity: reported once -- the report's own raw
+     * lock saves again at full depth, and must not report (and so save,
+     * and report) again -- and every restore still pairs afterwards. */
+    arch_irq_state_t deep[LOCKDEP_MAX_IRQ_SAVES + 1];
+    lockdep_expect(LOCKDEP_R_OVERFLOW);
+    for (unsigned i = 0; i <= LOCKDEP_MAX_IRQ_SAVES; i++)
+        deep[i] = arch_irq_save();
+    for (unsigned i = LOCKDEP_MAX_IRQ_SAVES + 1; i-- > 0;)
+        arch_irq_restore(deep[i]);
+    CHECK(lockdep_expected_hits() == 1);
+
+    CHECK(arch_irq_enabled());
+    kinfo("selftest: lockdep-irq-pairing: a restore without a save, out of order, with interrupts enabled inside, "
+          "a save left at thread exit and a save past capacity were each reported once");
+    return true;
+}
+
+/* Pinned: expectations are per CPU. */
+bool selftest_lockdep_irq_pairing(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockdep_irq_pairing_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 #else
 
 static bool skip(const char **reason, const char *name)
@@ -746,6 +826,7 @@ bool selftest_lockdep_sleep(const char **reason) { return skip(reason, "lockdep-
 bool selftest_lockdep_mutex(const char **reason) { return skip(reason, "lockdep-mutex"); }
 bool selftest_lockdep_contention(const char **reason) { return skip(reason, "lockdep-contention"); }
 bool selftest_lockdep_callback(const char **reason) { return skip(reason, "lockdep-callback"); }
+bool selftest_lockdep_irq_pairing(const char **reason) { return skip(reason, "lockdep-irq-pairing"); }
 
 #endif
 

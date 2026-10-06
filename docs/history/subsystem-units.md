@@ -2290,3 +2290,16 @@ See the [history index](README.md).
   before; callback classes add 17). `lockdep-callback` with
   `tools/lockdep-callback-probe.py`'s two negative controls; 424 self-tests.
   Report: `docs/audit/2026-10-05-lockdep-callback-classes-report.md`.
+- **Lockdep raw interrupt-state pairing.** With `LOCKDEP=1`,
+  `arch_irq_save`/`arch_irq_restore` wrap the architectures'
+  `_hw` operations and keep each context's outstanding saves (the
+  thread's, or the CPU's before it has one). A restore is reported if
+  nothing is outstanding, if it is out of order, or if interrupts were
+  enabled inside the region, and a thread may not exit with a save
+  outstanding. The tree had no violation. The first version ran its checks
+  inline and so stopped tail-calling the hardware restore. `schedule()`'s
+  preempt-at-restore recursion is bounded only by tail calls, so a one-CPU
+  boot double faulted on the idle thread's stack. The checks are now out of
+  line, and `check-kernel-elf.sh` fails a kernel whose restore chain is not
+  tail calls. `lockdep-irq-pairing` with four negative controls;
+  425 self-tests. Report: `docs/audit/2026-10-06-lockdep-irq-pairing-report.md`.

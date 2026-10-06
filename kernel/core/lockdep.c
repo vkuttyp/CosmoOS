@@ -770,7 +770,15 @@ void lockdep_might_sleep(uintptr_t ip)
 
 void lockdep_thread_exit(struct thread *t)
 {
-    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE) || t->nr_held_mutex == 0)
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
+    unsigned saves = __atomic_load_n(&t->irq_saves.depth, __ATOMIC_RELAXED);
+    if (saves != 0) {
+        char detail[96];
+        ksnprintf(detail, sizeof(detail), "thread exits with %u raw interrupt save(s) outstanding", saves);
+        report(LOCKDEP_R_IRQ_STATE, NULL, 0, t->irq_saves.e[saves - 1].ip, detail, NULL, 0);
+    }
+    if (t->nr_held_mutex == 0)
         return;
     const struct lock_class *c = &g_graph.classes[lockdep_node_class(t->held_mutex[0].node)];
     report(LOCKDEP_R_EXIT_HELD, c->name, lockdep_node_subclass(t->held_mutex[0].node), t->held_mutex[0].ip, NULL,
@@ -861,6 +869,113 @@ void lockdep_expect(enum lockdep_report_kind kind)
 unsigned lockdep_expected_hits(void)
 {
     return __atomic_exchange_n(&g_expected_hits[raw_cpu_id()], 0u, __ATOMIC_ACQ_REL);
+}
+
+/* --- raw interrupt-state pairing ---------------------------------------------- */
+
+/*
+ * arch_irq_save/arch_irq_restore with the pairing checked (design.md, "Raw
+ * interrupt-state pairing"). Each context keeps a stack of its outstanding
+ * saves: the current thread's, which an interrupt handler shares (its own
+ * pairs are balanced before it returns, so they nest above the thread's),
+ * or the CPU's before there is a thread. A restore must undo the innermost
+ * save, and interrupts must still be masked when it does: the save masked
+ * them, and the region between is the save's.
+ *
+ * Interrupts are masked throughout the bookkeeping -- after the hardware
+ * save, before the hardware restore -- so the context cannot change under
+ * it. A balanced NMI can land anywhere, which is why depth is reserved
+ * before an entry is written and released after one is read.
+ */
+static struct lockdep_irq_saves g_cpu_irq_saves[CONFIG_MAX_CPUS];
+
+static struct lockdep_irq_saves *irq_saves_here(void)
+{
+    struct percpu *pc = raw_this_cpu();   /* interrupts are masked: this CPU's, and stays so */
+    if (pc == NULL)
+        return NULL;
+    if (pc->current != NULL)
+        return &pc->current->irq_saves;
+    return pc->cpu_id < CONFIG_MAX_CPUS ? &g_cpu_irq_saves[pc->cpu_id] : NULL;
+}
+
+arch_irq_state_t arch_irq_save(void)
+{
+    arch_irq_state_t state = arch_irq_save_hw();
+    struct lockdep_irq_saves *st;
+    if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE) && (st = irq_saves_here()) != NULL) {
+        unsigned d = st->depth;
+        if (d == LOCKDEP_MAX_IRQ_SAVES) {
+            /* Counted, not stored, and reported once: the report itself
+             * takes the raw lock, whose save lands here again -- reporting
+             * each one would recurse until the stack ran out (found in
+             * review). Saves beyond capacity are the innermost, so their
+             * restores come first and uncount them. */
+            if (st->lost++ == 0)
+                report(LOCKDEP_R_OVERFLOW, NULL, 0, (uintptr_t)__builtin_return_address(0),
+                       "raw interrupt saves nested deeper than LOCKDEP_MAX_IRQ_SAVES", NULL, 0);
+        } else {
+            st->depth = d + 1u;                    /* reserve ... */
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);
+            st->e[d].state = state;                /* ... then fill */
+            st->e[d].ip = (uintptr_t)__builtin_return_address(0);
+        }
+    }
+    return state;
+}
+
+/* The restore's checks, out of line: see arch_irq_restore. */
+static __attribute__((noinline)) void irq_restore_track(arch_irq_state_t state, uintptr_t ip)
+{
+    struct lockdep_irq_saves *st = irq_saves_here();
+    if (st == NULL)
+        return;
+    if (st->lost != 0) {
+        st->lost--;   /* the innermost save was beyond capacity and not stored */
+        return;
+    }
+    unsigned d = st->depth;
+    if (d == 0) {
+        report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip, "arch_irq_restore with no outstanding arch_irq_save in this context",
+               NULL, 0);
+        return;
+    }
+    unsigned long saved = st->e[d - 1].state;   /* read ... */
+    uintptr_t saved_ip = st->e[d - 1].ip;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    st->depth = d - 1u;                          /* ... then release */
+    /* Interrupts on now means something enabled them inside the region --
+     * on x86-64 a restore of a masked state would then leave them on,
+     * where AArch64's would mask them again. */
+    bool enabled_inside = arch_irq_enabled();
+    if (saved != state || enabled_inside) {
+        char detail[160];
+        if (saved != state)
+            ksnprintf(detail, sizeof(detail),
+                      "restores a state other than the innermost outstanding save's (that save at %p)",
+                      (void *)saved_ip);
+        else
+            ksnprintf(detail, sizeof(detail), "interrupts were enabled inside the region saved at %p",
+                      (void *)saved_ip);
+        report(LOCKDEP_R_IRQ_STATE, NULL, 0, ip, detail, NULL, 0);
+    }
+}
+
+/*
+ * The hardware restore is this function's last action and must compile to
+ * a tail call. `schedule()` ends in arch_irq_restore, whose preemption
+ * point may enter `schedule()` again ("one more trip"); that recursion is
+ * bounded only because every link -- schedule_internal, arch_irq_restore,
+ * arch_irq_restore_hw, preempt_point, sched_preempt -- is a tail call. A
+ * frame kept here (the checks inline, with their buffer) grew the idle
+ * thread's stack by one level per resumption until a one-CPU boot double
+ * faulted (docs/audit/2026-10-06-lockdep-irq-pairing-report.md).
+ */
+void arch_irq_restore(arch_irq_state_t state)
+{
+    if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        irq_restore_track(state, (uintptr_t)__builtin_return_address(0));
+    arch_irq_restore_hw(state);
 }
 
 #if CONFIG_SELFTEST

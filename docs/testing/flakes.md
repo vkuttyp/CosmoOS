@@ -1847,6 +1847,17 @@ adds a thread-creating self-test before those tests will hit this**,
 and the useful part of this entry is that the bisect above takes
 twenty minutes and the control takes four.
 
+**Sighting, 2026-10-06** (the raw IRQ-pairing branch): the same line,
+`mid.straggler_ipis > before.straggler_ipis`, once on AArch64 with four
+CPUs. Not the registry-order cause above: the branch's new thread-creating
+test, `lockdep-irq-pairing`, runs after the quiesce block. The next four
+boots of the same image passed (41-51 ms), and the test had passed in
+every earlier boot of the branch and of `main` that day, about a dozen on
+AArch64. Recorded, not attributed: the branch makes every raw interrupt
+save and restore do bookkeeping, which moves timing everywhere, and this
+test depends on where the waiter thread is placed while a spinner holds
+the other CPU.
+
 ## `net-nat`'s expiry step found an entry after aging the table
 
 **Resolved 2026-10-03, PR #307:** a controlled delayed-tail probe now

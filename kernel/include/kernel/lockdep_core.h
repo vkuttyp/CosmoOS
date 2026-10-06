@@ -23,6 +23,7 @@
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)
 #define LOCKDEP_MAX_HELD       24u   /* per CPU: spinlocks, interrupt context included */
 #define LOCKDEP_MAX_HELD_MUTEX 8u    /* per thread */
+#define LOCKDEP_MAX_IRQ_SAVES  16u   /* per thread (and per CPU without one): nested raw interrupt saves */
 #define LOCKDEP_CLASS_NAME_MAX 64u  /* including NUL; owned by the graph */
 #define LOCKDEP_MAX_TIMER_PROFILES 64u  /* one active callback per possible CPU */
 #define LOCKDEP_MAX_TIMER_LOCKS   16u
@@ -46,6 +47,19 @@
 #define LOCKDEP_HF_IRQS_ON (1u << 2)
 #define LOCKDEP_HF_IRQSAVE (1u << 3)
 #define LOCKDEP_HF_IRQSAVE_ON (1u << 4)
+
+/* One context's outstanding raw interrupt saves, innermost last
+ * (design.md, "Raw interrupt-state pairing"). `depth` is reserved before an
+ * entry is written and released after it is read, so a balanced NMI that
+ * lands between the two uses the slots above and cannot corrupt this one. */
+struct lockdep_irq_saves {
+    unsigned depth;
+    unsigned lost;   /* saves beyond capacity: counted, not stored; always the innermost */
+    struct {
+        unsigned long state;
+        uintptr_t ip;
+    } e[LOCKDEP_MAX_IRQ_SAVES];
+};
 
 struct lock_class {
     char name[LOCKDEP_CLASS_NAME_MAX];
