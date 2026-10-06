@@ -94,6 +94,10 @@ struct thread {
      * written in debug builds only (docs/audit/next-subsystem-smp-wake.md). */
     bool wake_resched;
     uint64_t wake_ipi_base;
+    /* (own) reschedules taken in a row at this thread's restores in
+     * schedule(), written in debug builds only
+     * (docs/audit/2026-10-06-sched-restore-loop-report.md). */
+    uint32_t sched_chain;
     struct list_node rq_link;           /* (rq) */
     struct list_node all_link;          /* global list, under thread_list_lock */
     struct waitqueue *waiting_on;       /* diagnostics */

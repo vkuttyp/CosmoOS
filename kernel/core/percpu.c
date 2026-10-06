@@ -179,7 +179,11 @@ static uint64_t g_restore_preempts[CONFIG_MAX_CPUS];
 void preempt_point(void)
 {
     struct percpu *pc = raw_this_cpu();   /* identity: the predicate below is false on any CPU a movable thread runs on */
-    if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled()) {
+    bool take = pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled();
+#if CONFIG_DEBUG
+    sched_tail_trip_note(pc->cpu_id, take);
+#endif
+    if (take) {
         /* This CPU's word, written only here; atomic because the scheduler
          * dump reads every CPU's from wherever it runs. */
         __atomic_fetch_add(&g_restore_preempts[pc->cpu_id], 1, __ATOMIC_RELAXED);

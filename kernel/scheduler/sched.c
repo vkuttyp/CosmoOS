@@ -306,6 +306,79 @@ void sched_finish_switch(void)
         thread_reap_later(exited);
 }
 
+#if CONFIG_DEBUG
+/*
+ * What the reschedule taken at `schedule()`'s own tail costs, per CPU:
+ * docs/audit/2026-10-06-sched-restore-loop-report.md. A "trip" is that
+ * restore's preemption point entering `schedule()` again; a "chain" is
+ * the trips one thread takes in a row, each from inside the last, which
+ * is how many frames deep the recursion would be if its links were calls.
+ * Recorded: the deepest stack `schedule()` is entered on at all, the
+ * deepest a trip enters it on, and the longest chain, with the thread
+ * each was seen on. Read once, at the end of a boot (`sched_report_depth`).
+ */
+struct entry_depth {
+    size_t entry, trip_entry;
+    uint32_t chain;
+    uint64_t trips;
+    char entry_thread[THREAD_NAME_MAX], trip_thread[THREAD_NAME_MAX], chain_thread[THREAD_NAME_MAX];
+};
+static struct entry_depth g_depth[CONFIG_MAX_CPUS];
+static bool g_tail_armed[CONFIG_MAX_CPUS];   /* the restore about to run is schedule()'s tail */
+static bool g_trip_next[CONFIG_MAX_CPUS];    /* and it took a reschedule: the next entry is a trip */
+
+static void note_entry_depth(const struct runqueue *rq, struct thread *t, uintptr_t fp)
+{
+    struct entry_depth *e = &g_depth[rq->cpu];
+    bool trip = g_trip_next[rq->cpu];
+    g_trip_next[rq->cpu] = false;
+    t->sched_chain = trip ? t->sched_chain + 1u : 0u;
+    if (t->sched_chain > e->chain) {
+        e->chain = t->sched_chain;
+        strlcpy(e->chain_thread, t->name, THREAD_NAME_MAX);
+    }
+    if (!thread_stack_contains(t, fp))
+        return;
+    size_t d = t->stack_base + t->stack_size - fp;
+    if (d > e->entry) {
+        e->entry = d;
+        strlcpy(e->entry_thread, t->name, THREAD_NAME_MAX);
+    }
+    if (trip && d > e->trip_entry) {
+        e->trip_entry = d;
+        strlcpy(e->trip_thread, t->name, THREAD_NAME_MAX);
+    }
+}
+
+/* Called by preempt_point on entry: whether this restore is schedule()'s
+ * own tail, which armed it just before with interrupts off, and whether
+ * it takes the reschedule. */
+void sched_tail_trip_note(unsigned cpu, bool taken)
+{
+    if (cpu >= CONFIG_MAX_CPUS || !g_tail_armed[cpu])
+        return;
+    g_tail_armed[cpu] = false;
+    if (taken) {
+        g_depth[cpu].trips++;
+        g_trip_next[cpu] = true;
+    }
+}
+
+void sched_report_depth(void)
+{
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        const struct entry_depth *e = &g_depth[c];
+        kinfo("sched: cpu %u: trips %llu, longest chain %u ('%s'), deepest entry %zu bytes ('%s'), "
+              "deepest trip entry %zu bytes ('%s')",
+              c, (unsigned long long)e->trips, e->chain, e->chain_thread, e->entry, e->entry_thread,
+              e->trip_entry, e->trip_thread);
+    }
+}
+#define ARM_TAIL(rq, s) (g_tail_armed[(rq)->cpu] = arch_irq_state_enabled(s))
+#else
+#define ARM_TAIL(rq, s) ((void)0)
+#endif
+
 /*
  * `preempt` distinguishes an involuntary switch (interrupt return,
  * preempt_enable) from a voluntary one (block, yield, exit). The
@@ -347,6 +420,9 @@ static void schedule_internal(bool preempt)
     spin_lock(&rq->lock);
 
     struct thread *prev = rq->current;
+#if CONFIG_DEBUG
+    note_entry_depth(rq, prev, (uintptr_t)__builtin_frame_address(0));
+#endif
     uint64_t now = clock_now_ns();
     /* `last_start_ns` was stamped by whichever CPU last ran this thread,
      * which need not be this one. */
@@ -390,6 +466,7 @@ static void schedule_internal(bool preempt)
         prev->flags &= ~THREAD_FLAG_PREEMPTED;
         prev->last_start_ns = now;
         spin_unlock(&rq->lock);
+        ARM_TAIL(rq, s);
         arch_irq_restore(s);
         return;
     }
@@ -411,6 +488,7 @@ static void schedule_internal(bool preempt)
     /* Resumed as `prev`, holding the run-queue lock taken by whoever
      * switched to us. */
     sched_finish_switch();
+    ARM_TAIL(this_cpu()->rq, s);
     arch_irq_restore(s);
 }
 
