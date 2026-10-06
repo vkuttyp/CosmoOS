@@ -255,7 +255,9 @@ budget preserves the sample counts and drain checks instead of cutting
 work to fit the default 8 s. The harness and watchdog use the same entry.
 
 `make test-chaos` gives the complete boot 240 s, including 230 s for the
-shell harness, rather than the ordinary 180 s / 170 s. The corresponding
+shell harness. Ordinary boots use `BOOT_TIMEOUT`: 180 s (shell 170 s) on
+x86-64, and 240 s on AArch64 since its CI boots were measured to exceed
+180 s on slow runners (the Makefile comment has the distribution). The corresponding
 CI run's ordinary boots took 164–167 s; chaos added about 11 s of kernel
 self-tests and exhausted the shell deadline. Per-test watchdogs, the
 shell's 3 s signal-response check and the final boot timeout remain active.

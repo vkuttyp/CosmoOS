@@ -287,7 +287,8 @@ harness tails the serial log during the run; on `ready` it echoes 256
 KiB through TCP in varying chunk sizes, exchanges 20 UDP datagrams (18
 must return), sends `QUIT`, and requires both markers plus its own
 verification. Without fw_cfg the self-test skips, so `make run` is
-unaffected. The harness timeout is 180 s; release builds create the
+unaffected. The harness deadline is the boot timeout (`BOOT_TIMEOUT`: 180 s on x86-64,
+240 s on AArch64) minus 30 s; release builds create the
 harness but only require the `virtio_net` and `eth0` boot markers.
 
 **Which connection is the guest's.** The harness listens on P3 from

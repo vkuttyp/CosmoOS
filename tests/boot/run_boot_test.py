@@ -461,11 +461,11 @@ if ARCH == "aarch64":
         # A vCPU the guest never starts: its thread is parked on a futex
         # when SYSTEM_OFF arrives, and the kick cannot reach it. Shutdown
         # must wake it as well, or the owner waits forever for a thread
-        # with no way out -- a 180-second boot, not a wrong value.
+        # with no way out -- a boot that runs to its timeout, not a wrong value.
         r"^HVTEST: parked ok$",
         # PSCI calls arriving from other vCPUs while the machine powers
         # off: it must still stop. A gross breakage of the shutdown path
-        # shows up as a 180-second boot rather than a wrong value, the
+        # shows up as a boot that runs to its timeout rather than a wrong value, the
         # same shape as offspin's. (The narrow CPU_ON-over-QUIT window
         # this guest is named for is not reliably reproducible; the guest
         # says so.)
