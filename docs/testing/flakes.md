@@ -3063,14 +3063,12 @@ the first's entry (keyed by IP alone, with both NICs' gateways at
 10.0.2.2) and sending nothing, the entry's retries going out on the
 first interface, which the test had just taken down -- and it is gone.
 The other is a lost reply; the request count on the failure line tells
-them apart (`+1`: a request without an answer; `+0`: an entry already
-there, now necessarily this interface's own). The counter
-the report now carries decides between the two candidates the next time:
-`+0 requests` means `arp_resolve` found an entry already there (keyed by
-IP alone, with both NICs' gateways at 10.0.2.2) and sent nothing, and the
-1 s retry goes out on that entry's interface, which for a stale `eth0`
-entry is the one the test has just taken down; `+1` means a request left
-`eth1` and no reply reached the table in 1.5 s.
+them apart. `+1` is a request that left this interface with no reply
+reaching the table in 1.5 s. `+0` is an entry already present when the
+warm-up ran -- which, since N25, can only be this interface's own
+incomplete entry left by an earlier test, never another interface's (the
+old keying's `+0`, a stale `eth0` entry whose retries went out on the
+downed interface, is the case the fix removed).
 
 ## `net-nicbench`'s UDP rate is the host's `sendto`; the phase is a window now, 2026-10-06
 
