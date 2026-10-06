@@ -2333,3 +2333,17 @@ See the [history index](README.md).
   CPU with its thread, IRQ/preempt state, last tick, NMI sample and held
   locks. Three probes. Report:
   `docs/audit/2026-10-06-flake-triage-report.md`.
+- **Host modes.** Two unexplained per-boot modes on the macOS development
+  host, tested against efficiency-core placement with a new `QEMU_WRAP`
+  (a command QEMU runs through). The background policy slows every
+  benchmark fourfold; the utility clamp with QEMU at nice 5 reproduces
+  `net-nicbench`'s ARP-normal, UDP-slow mode in a third of its rounds
+  (e1000e driver share 75 %), either alone does not; a foreground CPU load
+  halves everything together. The two-mode `irqrestore-bench` readings
+  are not core placement. `LOCKDEP=1` is about half of every debug
+  benchmark number, which settles the September-to-October drift. Found
+  on the way: the second interface's gateway sometimes stays unresolved
+  and the UDP rate was of frames that never left; the warm-up now waits
+  for the entry and reports `udp not measured` instead. A plan item
+  records that a full transmit ring refuses a UDP send with `-ENOBUFS`
+  where Linux blocks. Report: `docs/audit/2026-10-06-flake-triage-report.md`, §7.

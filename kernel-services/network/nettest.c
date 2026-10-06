@@ -4037,6 +4037,7 @@ struct nicbench_udp_stats {
     uint64_t switches;                               /* times the sender was switched out and back */
     unsigned cpu_moves;
     bool gw_before, gw_after;                        /* the gateway's ARP entry reachable */
+    uint64_t gw_wait_ns;                             /* how long the warm-up waited for it */
     struct arp_stats arp0, arp1;
 };
 
@@ -4056,13 +4057,40 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
     static uint8_t payload[NICBENCH_UDP_LEN];
     memset(st, 0, sizeof(*st));
-    /* Warm up: the first send resolves the gateway and parks behind it. */
+    /* The ARP counters from before the warm-up, so the report can say
+     * whether resolving the gateway sent a request at all (+0 with the
+     * entry still incomplete means an entry already there, on which
+     * arp_resolve sends nothing). */
+    arp_get_stats(&st->arp0);
+    /* Warm up: the first send resolves the gateway and parks behind it.
+     * Then wait for the entry: a window measured against an incomplete
+     * entry sends nothing (every datagram parks and evicts the one before)
+     * and the rate it would report is of frames that never left -- 5 of
+     * 325 x86-64 second-interface rounds in the two weeks before this
+     * wait existed read `0 of 10000 frames left the driver` under a
+     * normal-looking rate (docs/testing/flakes.md, "`net-nicbench`'s
+     * second interface reported a rate for frames that never left"). The
+     * bound covers one ARP retry (ARP_RETRY_NS, 1 s). */
     for (unsigned i = 0; i < 8; i++)
         (void)ksock_sendto(tx, payload, sizeof(payload), &to);
-    thread_sleep_ms(20);
     uint8_t mac[ETH_ALEN];
+    uint64_t t_gw = clock_now_ns();
+    while (!arp_lookup(nif->ip4.gateway, mac) && clock_since_ns(t_gw) < 1500ull * 1000000ull)
+        thread_sleep_ms(1);
+    st->gw_wait_ns = clock_since_ns(t_gw);
     st->gw_before = arp_lookup(nif->ip4.gateway, mac);
-    arp_get_stats(&st->arp0);
+    if (!st->gw_before) {
+        struct arp_stats now;
+        arp_get_stats(&now);
+        kinfo("selftest: net-nicbench: %s: udp not measured: the gateway's ARP entry is still incomplete after %llu ms "
+              "(+%llu requests sent since the warm-up began, %llu pending dropped); nothing this window sent would leave",
+              nif->name, (unsigned long long)(st->gw_wait_ns / 1000000),
+              (unsigned long long)(now.requests_sent - st->arp0.requests_sent),
+              (unsigned long long)(now.pending_dropped - st->arp0.pending_dropped));
+        nt_ksock_put(tx);
+        return true;   /* reported, not asserted: the ARP phase just proved the link; this is the table's state */
+    }
+    thread_sleep_ms(20);
     struct thread *self = thread_current();
     uint64_t switches0 = self->switches;
     int cpu = (int)raw_cpu_id();   /* a statistic: where the sender was, to count its moves */
@@ -4133,9 +4161,10 @@ static void nicbench_udp_report(const struct netif *nif, const struct nicbench_u
           nif->name, (unsigned long long)(st->dt_ns / 1000000), st->attempts, st->accepted, st->refused, st->failed,
           (unsigned long long)st->frames);
     kinfo("selftest: net-nicbench: %s: udp ring occupancy max %u of %u; sender switched out %llu times, moved CPU %u times; "
-          "gateway arp %s -> %s, +%llu requests, +%llu pending dropped",
+          "gateway arp %s (after %llu ms) -> %s, +%llu requests, +%llu pending dropped",
           nif->name, st->ring_max, st->ring_cap, (unsigned long long)st->switches, st->cpu_moves,
-          st->gw_before ? "reachable" : "incomplete", st->gw_after ? "reachable" : "incomplete",
+          st->gw_before ? "reachable" : "incomplete", (unsigned long long)(st->gw_wait_ns / 1000000),
+          st->gw_after ? "reachable" : "incomplete",
           (unsigned long long)(st->arp1.requests_sent - st->arp0.requests_sent),
           (unsigned long long)(st->arp1.pending_dropped - st->arp0.pending_dropped));
     char hist[160];
@@ -4180,6 +4209,12 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
         return false;
     if (!nicbench_udp(reason, nif, &st))
         return false;
+    if (!st.gw_before) {
+        /* Said above; no rate is claimed for frames that could not leave. */
+        kinfo("selftest: net-nicbench: %s (caps 0x%x): arp %u rt/s (%llu ns per round trip); udp not measured (gateway unresolved)",
+              nif->name, nif->caps, rt_s, (unsigned long long)ns_rt);
+        return true;
+    }
     nicbench_udp_report(nif, &st);
     unsigned accepted = st.accepted;
     uint64_t frames = st.frames;

@@ -3027,6 +3027,37 @@ boots ran before it in the same sequence, one at a time. Recorded, not
 attributed (`docs/audit/2026-10-06-sched-restore-loop-report.md`).
 **Diagnosed the same day, below.**
 
+## `net-nicbench`'s second interface reported a rate for frames that never left, 2026-10-07
+
+Found by the per-send report the entry below added. In two boots of the
+host-modes follow-up (x86-64, both on `eth1`, the e1000e NIC measured
+second) the UDP lines read `gateway arp incomplete -> incomplete, +0
+requests, +5299 pending dropped` and `0 frames left the driver`, while
+the summary line still said `udp 12563 sends/s`: every datagram parked
+behind an ARP entry that never completed, evicting the one before it,
+and the stack's "accepted" count became a rate. A third, AArch64 at
+`LOCKDEP=0`, read `udp 59692 sends/s` over `0 of 29847 frames left the
+driver`. The two-week tally of local logs has the same shape five times
+in 325 x86-64 `eth1` rounds (`0 of 10000 frames left the driver` under a
+normal-looking rate), never on `eth0`. In all three boots of this
+follow-up the second interface's own ARP phase, just before, had read
+2.7-3.6 k round trips/s against its usual 7-10 k. The warm-up slept
+20 ms after its first send and checked nothing.
+
+**The test now waits** up to 1.5 s (one ARP retry) for the gateway's
+entry, prints how long it waited, and if the entry is still incomplete
+says `udp not measured: the gateway's ARP entry is still incomplete
+after N ms (+R requests sent since the warm-up began, ...)` and claims no
+rate. Reported, not asserted: the ARP phase just before it proved 2,000
+round trips on the same link, so this is the ARP table's state, not the
+link's. **Why the entry stays incomplete is not attributed.** The counter
+the report now carries decides between the two candidates the next time:
+`+0 requests` means `arp_resolve` found an entry already there (keyed by
+IP alone, with both NICs' gateways at 10.0.2.2) and sent nothing, and the
+1 s retry goes out on that entry's interface, which for a stale `eth0`
+entry is the one the test has just taken down; `+1` means a request left
+`eth1` and no reply reached the table in 1.5 s.
+
 ## `net-nicbench`'s UDP rate is the host's `sendto`; the phase is a window now, 2026-10-06
 
 The third sighting's shape -- ARP at its usual 7-9 k round trips/s, UDP
@@ -3040,6 +3071,14 @@ read both. The twelve boots, the two-week tally of every local reading
 (650 readings, medians 12 k, nothing under 2 k but CI's) and the CI
 readings that survive are tabulated in
 `docs/audit/2026-10-06-flake-triage-report.md`, §1.
+
+**Reproduced on demand, 2026-10-07** (report §7.2): QEMU run under the
+utility QoS clamp *and* nice 5 together read this mode in three of twelve
+NIC rounds, with the e1000e driver share at 74-75 % (its fingerprint;
+39-45 % normally); the clamp alone, nice 5 alone, and a foreground CPU
+load did not; the background policy (`taskpolicy -b`) slows everything
+fourfold instead. What demoted the 25-minute sighting's QEMU is still
+not recorded; `docs/development.md`, "Benchmark runs", has the check.
 
 **The mechanism.** Under QEMU's user-mode network every datagram the
 guest sends is a `sendto` on an *unconnected* host socket -- 115 us on
@@ -3252,6 +3291,16 @@ on QEMU's `Could not set up host forwarding rule 'udp:127.0.0.1:60176-:7'`
 -- a host port collision before the kernel ran, seen once before in this
 unit -- and the 346 is its rerun.) In base 4 of this set, `fpu-bench`'s
 *both* switch legs read 11.8–12.1 µs, the same doubling as above.
+
+**Tested against core placement, 2026-10-07** (`docs/audit/2026-10-06-flake-triage-report.md`,
+§7): QEMU pinned to the efficiency cores by policy (`QEMU_WRAP="taskpolicy
+-b"`) reads every benchmark about four times slower, far past these
+modes' 1.3x; the utility QoS clamp, a lowered niceness, and a CPU-heavy
+foreground job each left the pair reading its usual two values. The
+modes are present at `LOCKDEP=0` too (167 against 211-216 ns on x86-64).
+Core type is not what separates them; the translation-buffer hypothesis
+above stands, untested. Separately, `LOCKDEP=1` -- the debug default --
+is about half of every benchmark number since October (§7.4).
 
 A benchmark number on x86-64 is a draw from one of two modes, so a
 base-against-fix comparison needs enough boots of each to see both, and

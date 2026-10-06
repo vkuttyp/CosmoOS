@@ -275,6 +275,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
 | `QEMU_CPU` | `qemu64,+nx,+svm,+npt` (x86-64), `cortex-a72` (aarch64) | QEMU CPU model; the x86-64 default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host). On aarch64 `max` adds PAN and is also supported |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
+| `QEMU_WRAP` | empty | A command QEMU is run through, word-split: `QEMU_WRAP="taskpolicy -b" make test` pins the whole QEMU process to a macOS host's efficiency cores, which the host-modes investigation used to test where the two benchmark modes come from ("Benchmark runs" below) |
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
 | `QEMU_RMDISK` | `<image dir>/rmdisk.img` | Raw backing file of the second virtio-blk, the disk `virtio-remove-inflight` removes and re-probes (`vdb` on q35, `vdc` on `virt`); created as 4 MiB of zeros when missing. `0` leaves the device out and the test skips. The boot test uses a fresh `boot-test.log.rmdisk.img` |
 | `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
@@ -425,6 +426,45 @@ and rejects any log containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`,
 or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
 kernel report failure through the same port. On hardware or an emulator without the device the port
 write is ignored and the kernel simply halts.
+
+## Benchmark runs
+
+A debug boot's benchmark lines (`net-nicbench`, `irqrestore-bench`,
+`fpu-bench`, `net-bench`, the lockdep benches) are a draw from the host as
+much as a measurement of the kernel, and on a macOS host with performance
+and efficiency cores two things are known to move them
+(`docs/audit/2026-10-06-flake-triage-report.md`, §§1 and 7):
+
+- **QEMU demoted below the host's other work.** Under the background
+  policy (`taskpolicy -b`) every number is about four times slower and
+  the tick-rate self-tests fail. Under the utility QoS clamp *together
+  with* a lowered priority (`taskpolicy -c utility` with QEMU at nice 5,
+  which is what zsh's default `BG_NICE` does to a job started with `&`)
+  a third of the NIC rounds read `net-nicbench`'s "ARP normal, UDP ten
+  times slower" mode, with the e1000e driver share at 75 % instead of
+  40 %: QEMU's synchronous host transmit running on a slow core. Either
+  alone did not reproduce it in ten boots. Before a measurement, check
+  the QEMU process is at its default priority --
+  `ps -o pid,pri,nice,comm -p $(pgrep -f qemu-system)` should read pri 31
+  nice 0; `taskpolicy -b` shows as pri 4 nice 5, the clamp as pri 20, a
+  zsh background job as nice 5 -- and start boot loops with
+  `setopt NO_BG_NICE` or from the harness rather than with `&`. To
+  reproduce the slow mode deliberately:
+  `QEMU_WRAP="taskpolicy -c utility nice -n 5" make test`.
+- **Lockdep.** A debug boot has `LOCKDEP=1` by default, and it costs about
+  half of every benchmark number (x86-64 `net-nicbench` UDP 12.7-13 k
+  sends/s against 28-36 k at `LOCKDEP=0`; the irqrestore pair 400 against
+  170-215 ns). Compare like with like, and say which in the report; a
+  `LOCKDEP=0` build goes in its own `OUT`.
+- **The two-mode x86-64 and AArch64 benchmark readings** (`irqrestore-bench`
+  at about 330 or about 450 ns a pair, `fpu-bench` following;
+  `docs/testing/flakes.md`) are *not* core placement: the clamp did not
+  select the mode and the certain demotion moves the number fourfold, not
+  1.3x. Alternate enough boots of each tree to see both modes.
+
+A CPU-heavy foreground job beside QEMU (four busy processes on eight
+cores) halves every number together, ARP with UDP, and puts the suite
+past its whole-boot budget: a loaded host, not a mode (report §7.3).
 
 ## Continuous integration
 
