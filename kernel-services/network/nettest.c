@@ -4011,34 +4011,150 @@ stop:;
     return true;
 }
 
-static bool nicbench_udp(const char **reason, struct netif *nif, unsigned *sends_per_s, uint64_t *ns_per_send,
-                         uint64_t *frames_out, unsigned *accepted)
+/*
+ * The UDP phase is a window, not a count. It used to send 10,000
+ * datagrams and time them; its duration was then 10,000 times a cost
+ * the guest does not set -- the backend's per-datagram work on the host
+ * (QEMU's user-mode network sends each one through an unconnected host
+ * socket; see docs/testing/flakes.md, "`net-nicbench`'s UDP rate") -- and
+ * a slow host put the whole test over its budget while every number it
+ * printed was correct. A fixed window measures the same rate and bounds
+ * the time. The histogram and the split below are the diagnosis a slow
+ * reading now carries with it.
+ */
+#define NICBENCH_UDP_WINDOW_NS (500ull * 1000000ull)
+#define NICBENCH_HIST 12u            /* log2 buckets: under 16 us, [16, 32) ... [8, 16) ms, and 16 ms and up */
+
+struct nicbench_udp_stats {
+    unsigned attempts, accepted, refused, failed;   /* refused: the driver's ring was full (-ENOBUFS) */
+    uint64_t frames;                                 /* the driver's own count of frames out */
+    uint64_t dt_ns;
+    uint32_t hist[NICBENCH_HIST];
+    uint64_t max_ns;
+    uint64_t slow_n, slow_ns;                        /* sends of 1 ms or more, and the time they held */
+    uint64_t driver_ns, driver_max_ns, driver_calls; /* inside the driver's transmit (netif_tx_probe) */
+    unsigned ring_max, ring_cap;                     /* transmit descriptors in flight, sampled after each send */
+    uint64_t switches;                               /* times the sender was switched out and back */
+    unsigned cpu_moves;
+    bool gw_before, gw_after;                        /* the gateway's ARP entry reachable */
+    struct arp_stats arp0, arp1;
+};
+
+static unsigned nicbench_bucket(uint64_t ns)
+{
+    uint64_t us = ns / 1000;
+    if (us < 16)
+        return 0;
+    unsigned b = 63u - (unsigned)__builtin_clzll(us) - 3u;   /* [16, 32) us is bucket 1 */
+    return b < NICBENCH_HIST ? b : NICBENCH_HIST - 1;
+}
+
+static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench_udp_stats *st)
 {
     struct socket *tx;
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
     struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
     static uint8_t payload[NICBENCH_UDP_LEN];
+    memset(st, 0, sizeof(*st));
     /* Warm up: the first send resolves the gateway and parks behind it. */
     for (unsigned i = 0; i < 8; i++)
         (void)ksock_sendto(tx, payload, sizeof(payload), &to);
     thread_sleep_ms(20);
+    uint8_t mac[ETH_ALEN];
+    st->gw_before = arp_lookup(nif->ip4.gateway, mac);
+    arp_get_stats(&st->arp0);
+    struct thread *self = thread_current();
+    uint64_t switches0 = self->switches;
+    int cpu = (int)raw_cpu_id();   /* a statistic: where the sender was, to count its moves */
     uint64_t tx0 = nif->stats.tx_packets;
-    uint64_t t0 = clock_now_ns();
-    unsigned sent = 0;
-    for (unsigned i = 0; i < NICBENCH_UDP; i++) {
-        if (ksock_sendto(tx, payload, sizeof(payload), &to) == (int64_t)sizeof(payload))
-            sent++;
-        if ((i & 63) == 63)
+    netif_tx_probe_set(true);
+    struct netif_tx_probe pr0, pr1;
+    netif_tx_probe_read(&pr0);
+    uint64_t t0 = clock_now_ns(), t_end = t0 + NICBENCH_UDP_WINDOW_NS;
+    for (;;) {
+        uint64_t a = clock_now_ns();
+        if (a >= t_end)
+            break;
+        int64_t rc = ksock_sendto(tx, payload, sizeof(payload), &to);
+        uint64_t dt = clock_since_ns(a);
+        netif_tx_probe_read(&pr1);
+        st->attempts++;
+        if (rc == (int64_t)sizeof(payload))
+            st->accepted++;
+        else if (rc == -ENOBUFS)
+            st->refused++;
+        else
+            st->failed++;
+        st->hist[nicbench_bucket(dt)]++;
+        if (dt > st->max_ns)
+            st->max_ns = dt;
+        if (dt >= 1000000ull) {
+            st->slow_n++;
+            st->slow_ns += dt;
+        }
+        uint64_t d = pr1.ns_total - pr0.ns_total;
+        if (d > st->driver_max_ns)
+            st->driver_max_ns = d;
+        pr0 = pr1;
+        unsigned pending, cap;
+        if (netif_tx_pending(nif, &pending, &cap)) {
+            st->ring_cap = cap;
+            if (pending > st->ring_max)
+                st->ring_max = pending;
+        }
+        int now_cpu = (int)raw_cpu_id();   /* a statistic */
+        if (now_cpu != cpu) {
+            st->cpu_moves++;
+            cpu = now_cpu;
+        }
+        if ((st->attempts & 63) == 0)
             sched_yield();
     }
-    uint64_t dt = clock_since_ns(t0);
+    st->dt_ns = clock_since_ns(t0);
+    netif_tx_probe_read(&pr1);
+    netif_tx_probe_set(false);
+    st->driver_ns = pr1.ns_total;
+    st->driver_calls = pr1.calls;
+    st->switches = self->switches - switches0;
     thread_sleep_ms(20);   /* the driver's completions and counters settle */
-    *frames_out = nif->stats.tx_packets - tx0;
+    st->frames = nif->stats.tx_packets - tx0;
+    st->gw_after = arp_lookup(nif->ip4.gateway, mac);
+    arp_get_stats(&st->arp1);
     nt_ksock_put(tx);
-    *accepted = sent;
-    *sends_per_s = dt ? (unsigned)(((uint64_t)sent * 1000000000ull) / dt) : 0;
-    *ns_per_send = sent ? dt / sent : 0;
+    CHECK(st->attempts > 0);
     return true;
+}
+
+/* Four lines, each under the log's 256-byte line. */
+static void nicbench_udp_report(const struct netif *nif, const struct nicbench_udp_stats *st)
+{
+    kinfo("selftest: net-nicbench: %s: udp window %llu ms: %u sends attempted, %u accepted, %u refused by the driver (ring full), "
+          "%u failed otherwise, %llu frames left the driver",
+          nif->name, (unsigned long long)(st->dt_ns / 1000000), st->attempts, st->accepted, st->refused, st->failed,
+          (unsigned long long)st->frames);
+    kinfo("selftest: net-nicbench: %s: udp ring occupancy max %u of %u; sender switched out %llu times, moved CPU %u times; "
+          "gateway arp %s -> %s, +%llu requests, +%llu pending dropped",
+          nif->name, st->ring_max, st->ring_cap, (unsigned long long)st->switches, st->cpu_moves,
+          st->gw_before ? "reachable" : "incomplete", st->gw_after ? "reachable" : "incomplete",
+          (unsigned long long)(st->arp1.requests_sent - st->arp0.requests_sent),
+          (unsigned long long)(st->arp1.pending_dropped - st->arp0.pending_dropped));
+    char hist[160];
+    size_t n = 0;
+    for (unsigned b = 0; b < NICBENCH_HIST && n < sizeof(hist); b++) {
+        unsigned lo = 8u << b;   /* bucket b covers [lo, 2 lo) us; bucket 0 everything under 16 */
+        if (b + 1 == NICBENCH_HIST)
+            n += (size_t)ksnprintf(hist + n, sizeof(hist) - n, " >=%u:%u", lo, st->hist[b]);
+        else
+            n += (size_t)ksnprintf(hist + n, sizeof(hist) - n, " <%u:%u", lo * 2, st->hist[b]);
+    }
+    kinfo("selftest: net-nicbench: %s: udp us per send:%s; max %llu", nif->name, hist,
+          (unsigned long long)(st->max_ns / 1000));
+    unsigned driver_pct = st->dt_ns ? (unsigned)((st->driver_ns * 100) / st->dt_ns) : 0;
+    kinfo("selftest: net-nicbench: %s: udp %llu sends of 1 ms or more held %llu of %llu ms; "
+          "in the driver %u%% of the window over %llu transmits (max %llu us)",
+          nif->name, (unsigned long long)st->slow_n, (unsigned long long)(st->slow_ns / 1000000),
+          (unsigned long long)(st->dt_ns / 1000000), driver_pct, (unsigned long long)st->driver_calls,
+          (unsigned long long)(st->driver_max_ns / 1000));
 }
 
 /* in_cksum over a datagram's worth, by itself: what a transmit checksum
@@ -4057,14 +4173,20 @@ static uint64_t nicbench_cksum_ns(void)
 
 static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
 {
-    unsigned rt_s = 0, sends_s = 0, accepted = 0;
-    uint64_t ns_rt = 0, ns_send = 0, frames = 0;
+    unsigned rt_s = 0;
+    uint64_t ns_rt = 0;
+    static struct nicbench_udp_stats st;   /* one at a time: the runner serialises tests */
     if (!nicbench_arp(reason, nif, &rt_s, &ns_rt))
         return false;
-    if (!nicbench_udp(reason, nif, &sends_s, &ns_send, &frames, &accepted))
+    if (!nicbench_udp(reason, nif, &st))
         return false;
+    nicbench_udp_report(nif, &st);
+    unsigned accepted = st.accepted;
+    uint64_t frames = st.frames;
+    unsigned sends_s = st.dt_ns ? (unsigned)(((uint64_t)accepted * 1000000000ull) / st.dt_ns) : 0;
+    uint64_t ns_send = accepted ? st.dt_ns / accepted : 0;
     /* Let this interface's echoes come home before the next interface's
-     * round: the UDP phase sends ten thousand datagrams whose replies are
+     * round: the UDP phase sends thousands of datagrams whose replies are
      * still arriving for most of a second on a slow host, and the next
      * interface's ARP replies then queue behind them on the same receive
      * worker -- CI's guard-capable boot saw 64 requests sent, none

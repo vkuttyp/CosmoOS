@@ -199,7 +199,18 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
 
 static void vnet_release(struct netif *nif);
 
-static const struct netif_ops vnet_ops = { .transmit = vnet_transmit, .release = vnet_release };
+/* Descriptors the device holds: the ring's size less the free list. A
+ * frame is one or two of them (the header is prepended into the first
+ * buffer; a chain of more mbufs is linearised above VNET_MAX_SEGS). */
+static unsigned vnet_tx_pending(struct netif *nif, unsigned *capacity)
+{
+    struct vnet *v = nif->priv;
+    *capacity = v->tx->size;
+    return v->tx->size - virtq_free_count(v->tx);
+}
+
+static const struct netif_ops vnet_ops = { .transmit = vnet_transmit, .release = vnet_release,
+                                           .tx_pending = vnet_tx_pending };
 
 static int vnet_probe(struct virtio_device *vdev)
 {

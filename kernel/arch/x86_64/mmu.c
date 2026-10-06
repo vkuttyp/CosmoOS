@@ -14,6 +14,11 @@
 
 #include <kernel/errno.h>
 #include <kernel/ipi.h>
+#include <kernel/lockdep.h>
+#include <kernel/lockup.h>
+#include <kernel/log.h>
+#include <kernel/printf.h>
+#include <kernel/thread.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -276,8 +281,24 @@ void arch_mmu_context_destroy(struct arch_mmu_context *ctx)
 static spinlock_t g_shootdown_lock = SPINLOCK_INIT("shootdown");
 static vaddr_t g_shootdown_va;
 static size_t g_shootdown_len;
-static volatile uint32_t g_shootdown_acks;
+/* Who has acknowledged, a bit per CPU rather than a count: when the
+ * deadline passes, the panic can name the CPUs that did not and say what
+ * each was doing (docs/testing/flakes.md, "the TLB shootdown deadline"). */
+static volatile cpumask_t g_shootdown_acked;
 static struct arch_mmu_shootdown_stats g_shootdown_stats[CONFIG_MAX_CPUS];
+
+#if CONFIG_DEBUG
+/* Test knob: the next IPI_TLB_FLUSH this CPU takes spins, interrupts
+ * masked, for `ns` before acknowledging -- a CPU that does not answer in
+ * time, made to order, so the deadline's report can be proved to name it
+ * (tools/tlb-shootdown-diag-probe.py). Never set outside a probe build. */
+static uint64_t g_shootdown_test_hold_ns[CONFIG_MAX_CPUS];
+
+void arch_mmu_shootdown_test_hold(unsigned cpu, uint64_t ns)
+{
+    __atomic_store_n(&g_shootdown_test_hold_ns[cpu], ns, __ATOMIC_RELEASE);
+}
+#endif
 
 /* IPI_TLB_FLUSH handler: invalidate the pending range and acknowledge. */
 void arch_mmu_shootdown_ipi_handler(void)
@@ -286,8 +307,60 @@ void arch_mmu_shootdown_ipi_handler(void)
     size_t len = g_shootdown_len;
     barrier();
     arch_mmu_invalidate(NULL, va, len);
-    g_shootdown_stats[arch_cpu_id()].handled++;
-    __atomic_fetch_add(&g_shootdown_acks, 1u, __ATOMIC_ACQ_REL);
+    unsigned me = arch_cpu_id();
+    g_shootdown_stats[me].handled++;
+#if CONFIG_DEBUG
+    uint64_t hold = __atomic_exchange_n(&g_shootdown_test_hold_ns[me], 0, __ATOMIC_ACQ_REL);
+    if (hold) {
+        uint64_t end = clock_now_ns() + hold;
+        while (clock_now_ns() < end)
+            arch_cpu_relax();
+    }
+#endif
+    __atomic_fetch_or(&g_shootdown_acked, CPUMASK_OF(me), __ATOMIC_ACQ_REL);
+}
+
+/*
+ * The deadline's report: for each CPU that has not acknowledged, what it
+ * is running, whether it is in an interrupt or has preemption off, when
+ * its tick last ran, and -- by the lockup unit's NMI sample, which a CPU
+ * with interrupts masked still answers -- where it is now. Then the
+ * panic, naming them. Called with g_shootdown_lock held and preemption
+ * off, interrupts on; nothing here waits for a silent CPU beyond the
+ * sample's own 5 ms bound.
+ */
+static void shootdown_report_missing(vaddr_t va, size_t len, cpumask_t missing, unsigned targets)
+{
+    char names[CONFIG_MAX_CPUS * 4 + 1];
+    size_t n = 0;
+    kprintf("mmu: TLB shootdown of %p+0x%zx: %u of %u CPUs acknowledged within 1 s\n", (void *)va, len,
+            targets - (unsigned)__builtin_popcountll(missing), targets);
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++) {
+        if (!(missing & CPUMASK_OF(c)))
+            continue;
+        if (n < sizeof(names) - 4)
+            n += (size_t)ksnprintf(names + n, sizeof(names) - n, "%s%u", n ? "," : "", c);
+        struct percpu *pc = percpu_get(c);
+        if (pc == NULL) {
+            kprintf("cpu %u: did not acknowledge; no per-CPU block\n", c);
+            continue;
+        }
+        struct thread *t = pc->current;
+        kprintf("cpu %u: did not acknowledge; running thread %u '%s', irq_depth %u, preempt_count %d, "
+                "last tick %llu ms ago at pc %p\n",
+                c, t ? (unsigned)t->tid : 0u, t ? t->name : "(none)", pc->irq_depth, pc->preempt_count,
+                (unsigned long long)(clock_since_ns(pc->last_tick_ns) / 1000000), (void *)pc->last_tick_pc);
+        struct cpu_sample smp;
+        if (lockup_sample_cpu(c, LOCKUP_SAMPLE_TIMEOUT_NS, &smp))
+            lockup_print_sample(c, &smp);
+        else
+            kprintf("cpu %u: no answer to a sample in %llu ms\n", c,
+                    (unsigned long long)(LOCKUP_SAMPLE_TIMEOUT_NS / 1000000));
+        lockdep_dump_held_cpu(c);   /* bounded snapshot: never waits for a silent CPU */
+    }
+    spin_unlock(&g_shootdown_lock);
+    panic("mmu: TLB shootdown of %p+0x%zx acknowledged by %u of %u CPUs; not by cpu %s", (void *)va, len,
+          targets - (unsigned)__builtin_popcountll(missing), targets, names);
 }
 
 void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
@@ -318,7 +391,7 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
     spin_lock(&g_shootdown_lock); /* preemption off, interrupts on */
     g_shootdown_va = va;
     g_shootdown_len = len;
-    __atomic_store_n(&g_shootdown_acks, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_shootdown_acked, 0, __ATOMIC_RELEASE);
     g_shootdown_stats[arch_cpu_id()].initiated++;
 
     for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
@@ -326,13 +399,13 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
             ipi_send(c, IPI_TLB_FLUSH);
     arch_mmu_invalidate(ctx, va, len);
 
-    uint64_t deadline = clock_deadline_ns(1000000000ULL);
-    while (__atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE) < targets) {
+    uint64_t deadline = clock_deadline_ns(1000000000ULL);   /* the bound is a defect's, not a test's: unchanged */
+    while ((__atomic_load_n(&g_shootdown_acked, __ATOMIC_ACQUIRE) & others) != others) {
         if (clock_deadline_passed(deadline)) {
-            unsigned got = __atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE);
-            spin_unlock(&g_shootdown_lock);
-            panic("mmu: TLB shootdown of %p+0x%zx acknowledged by %u of %u CPUs", (void *)va, len, got,
-                  targets);
+            cpumask_t missing = others & ~__atomic_load_n(&g_shootdown_acked, __ATOMIC_ACQUIRE);
+            if (missing == 0)
+                break;   /* the last acknowledgement landed on the deadline */
+            shootdown_report_missing(va, len, missing, targets);
         }
         arch_cpu_relax();
     }

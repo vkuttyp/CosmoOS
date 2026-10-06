@@ -626,6 +626,34 @@ void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
     __atomic_store_n(&g_rx_hook, fn, __ATOMIC_RELEASE);
 }
 
+#if CONFIG_SELFTEST
+static bool g_tx_probe_on;
+static struct netif_tx_probe g_tx_probe;
+
+void netif_tx_probe_set(bool on)
+{
+    if (on)
+        memset(&g_tx_probe, 0, sizeof(g_tx_probe));
+    __atomic_store_n(&g_tx_probe_on, on, __ATOMIC_RELEASE);
+}
+
+void netif_tx_probe_read(struct netif_tx_probe *out)
+{
+    out->calls = __atomic_load_n(&g_tx_probe.calls, __ATOMIC_RELAXED);
+    out->ns_total = __atomic_load_n(&g_tx_probe.ns_total, __ATOMIC_RELAXED);
+    out->ns_max = __atomic_load_n(&g_tx_probe.ns_max, __ATOMIC_RELAXED);
+    out->refused = __atomic_load_n(&g_tx_probe.refused, __ATOMIC_RELAXED);
+}
+#endif
+
+bool netif_tx_pending(struct netif *nif, unsigned *pending, unsigned *capacity)
+{
+    if (nif->ops->tx_pending == NULL)
+        return false;
+    *pending = nif->ops->tx_pending(nif, capacity);
+    return true;
+}
+
 int netif_transmit(struct netif *nif, struct mbuf *m)
 {
     /* Read-side section around the driver's transmit: netif_unregister
@@ -653,7 +681,26 @@ int netif_transmit(struct netif *nif, struct mbuf *m)
         return -EINVAL;
     }
     uint32_t len = m->pkt.len;
+#if CONFIG_SELFTEST
+    bool probe = __atomic_load_n(&g_tx_probe_on, __ATOMIC_RELAXED);
+    uint64_t t0 = probe ? clock_now_ns() : 0;
+#endif
     int rc = nif->ops->transmit(nif, m);
+#if CONFIG_SELFTEST
+    if (probe) {
+        /* One sender at a time is the probe's user (the benchmark); the
+         * adds are atomic so a concurrent transmit from a worker (an ARP
+         * retry, a reply) cannot tear a counter, and the max is the
+         * benchmark's own thread's as near as a statistic needs. */
+        uint64_t dt = clock_since_ns(t0);
+        __atomic_fetch_add(&g_tx_probe.calls, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_tx_probe.ns_total, dt, __ATOMIC_RELAXED);
+        if (dt > __atomic_load_n(&g_tx_probe.ns_max, __ATOMIC_RELAXED))
+            __atomic_store_n(&g_tx_probe.ns_max, dt, __ATOMIC_RELAXED);
+        if (rc == -ENOBUFS)
+            __atomic_fetch_add(&g_tx_probe.refused, 1, __ATOMIC_RELAXED);
+    }
+#endif
     quiesce_read_unlock();
     if (rc) {
         __atomic_fetch_add(&nif->stats.tx_errors, 1, __ATOMIC_RELAXED);

@@ -403,7 +403,21 @@ static void e1000e_release(struct netif *nif)
     kfree(nif->priv);   /* the last holder: a queued packet or a lookup may outlive remove */
 }
 
-static const struct netif_ops e1000e_ops = { .transmit = e1000e_transmit, .release = e1000e_release };
+/* Descriptors between head and tail: what the model has not completed.
+ * A frame is one per segment. Under the lock the two counters agree with
+ * each other; the answer is still a statistic by the time it is read. */
+static unsigned e1000e_tx_pending(struct netif *nif, unsigned *capacity)
+{
+    struct e1000e *e = nif->priv;
+    arch_irq_state_t s = spin_lock_irqsave(&e->lock);
+    unsigned used = e->tx_used;
+    spin_unlock_irqrestore(&e->lock, s);
+    *capacity = E1000E_RING;
+    return used;
+}
+
+static const struct netif_ops e1000e_ops = { .transmit = e1000e_transmit, .release = e1000e_release,
+                                             .tx_pending = e1000e_tx_pending };
 
 static void hw_quiesce(struct e1000e *e)
 {
