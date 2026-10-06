@@ -207,7 +207,15 @@ HEAD in a throwaway worktree with the 192-byte forced call above):
 
 ## Validation
 
-On the branch head (debug unless stated; serial logs copied per boot):
+On the branch (debug unless stated; serial logs copied per boot). The
+first release attempt failed to compile on both architectures: release
+builds compile `schedtest.c` with `CONFIG_DEBUG=0`, where the test is
+skipped and the partner thread's entry was an unused function under
+`-Werror`. Fixed in `74266cdd`; the release boots below are after it. The
+restore-loop fields were then moved to the end of `struct thread`
+(performance, below), and the x86-64 4-CPU (×3), AArch64 1- and 4-CPU
+debug boots, both release boots, `analyze` and `host-test` were run
+again on that layout and passed.
 
 | Run | x86-64 | AArch64 |
 |---|---|---|
@@ -216,9 +224,10 @@ On the branch head (debug unless stated; serial logs copied per boot):
 | debug boot, 1 CPU | PASS ×3 (122–140 s), 426 self-tests | PASS |
 | debug boot, 2 CPUs | PASS | PASS |
 | debug boot, 4 CPUs | PASS | PASS |
-| `make test-smp2` | RESULT_SMP2_X86 | RESULT_SMP2_A64 |
-| `make test-chaos` | RESULT_CHAOS_X86 | RESULT_CHAOS_A64 |
-| `make BUILD=release test` | RESULT_REL_X86 | RESULT_REL_A64 |
+| `make test-smp2` | PASS, 426 self-tests | PASS, 426 |
+| `make test-chaos` | PASS, 426 | PASS, 426 |
+| `make BUILD=release test` | PASS (17–18 s) | PASS (20 s) |
+| `tools/sched-restore-loop-probe.py`, all three modes | PROBE PASS | PROBE PASS |
 
 The restore loop under the boot's own load, from the end-of-boot line:
 
@@ -232,7 +241,49 @@ passes of one frame.
 
 ## Performance
 
-BENCH_SECTION
+Compared against the baseline tree (`main` plus the debug instrument),
+debug builds under TCG, from `irqrestore-bench` (a million save/restore
+pairs with no reschedule pending), `fpu-bench`'s switch cost without FP
+state (two pinned threads yielding), the `preempt-wake*` wake latencies
+and the self-test totals. Base and fix were booted alternately at 4 CPUs,
+four pairs on x86-64 and two on AArch64; every other boot of each tree is
+included too.
+
+| Measure | Base | Fix | Reading |
+|---|---|---|---|
+| AArch64 save/restore pair | 296, 299, 453, 568 ns | 276, 276, 276, 292, 413, 415, 437 ns | no shift; the same two per-boot modes in both |
+| AArch64 switch | 4277, 4299, 6108, 6117 ns | 4141, 4211, 4211, 4251, 5729, 6005, 6542 ns | no shift; same two modes |
+| x86-64 save/restore pair (10 base, 12 fix boots) | median 360 ns (nine at 357–376, one at 463) | five at 399–403, seven at 492–525 | **slower**, see below |
+| x86-64 switch (same boots) | median 4,430 ns (eight at 4,298–4,885, two at 5,184–5,314) | five at 4,474–4,596, seven at 5,369–5,615 | **slower**, see below |
+| `preempt-wake`, `-direct`, `-locked` latency | 112–160, 32–49, 51–60 µs | 119–141, 31–44, 46–69 µs | within noise |
+| self-test time, 4-CPU pairs | 106.7–114.0 s | 105.6–113.8 s | within noise |
+| one-CPU x86-64 restore-point reschedules (excluding the test's 3,201) | 1083–1102 | 1076–1090 | unchanged |
+
+**AArch64: no measurable change.** **x86-64: an unexplained slowdown on
+the debug micro-benchmarks.** The fix's x86-64 boots fall into two
+per-boot modes, both above base's usual one: about +40 ns a save/restore
+pair and +150 ns a switch in the faster mode, +140 ns and +1,150 ns in the
+slower, which most fix boots landed in. What was checked:
+
+- The save/restore path never enters `schedule()`. Its disassembly differs
+  from base only in `struct thread` offsets (`arch_irq_save`,
+  `irq_restore_track`) and in `preempt_point`, which is *shorter* on the
+  fix (base's instrument called out of it on every restore). The hot
+  functions sit on the same 4 KiB pages in both kernels, so TCG's
+  same-page block chaining does not distinguish them.
+- Moving the new fields to the end of `struct thread`, so every existing
+  offset is `main`'s, did not remove it: three more x86-64 boots read 401,
+  403 and 500 ns a pair against 360 for a base boot run between them. The
+  move was kept anyway.
+- `fpu-bench`'s switch does go through the loop, which adds per pass an
+  out-of-line `preempt_point_due` call and, in debug builds, the S31 and
+  depth bookkeeping. That plausibly accounts for the faster mode's 150 ns;
+  it does not account for the pair benchmark, which runs none of it.
+
+Release kernels do not run the benchmarks (`SELFTEST=1` with
+`BUILD=release` does not link on `main` either), so the release cost was
+not measured. The finding is recorded as unexplained, for the
+performance item in plan §1/§12, not as within noise.
 
 ## Limits and what remains
 
@@ -243,12 +294,15 @@ BENCH_SECTION
   coming back to `schedule_internal`'s tail by name; a new indirect path
   (a function pointer to a preempting restore) would pass it. The S31
   assertion would catch that at run time on the first trip.
+- **The x86-64 debug benchmark shift is unexplained** (Performance). It
+  is TCG-only evidence and AArch64 shows none, but the cause was not found.
 - **Interrupts stay masked across a trip** where `main` opened a window of
   a few instructions. No test measures interrupt latency at this
   granularity; the argument is that the switched-to thread re-enables them.
 - **One self-test seam** in `schedule_internal`, compiled only with
   `CONFIG_SELFTEST`; release kernels do not contain it.
 - **Per-thread fields**: `sched_nest`, `sched_nest_max`, `sched_chain`,
-  `sched_trips`, `sched_depth_max`, `test_resume_resched` are in every
-  build's `struct thread` (about 40 bytes) to keep its layout stable, written
-  only in debug or self-test builds, as `bal_pulls` and `wake_resched` are.
+  `sched_trips`, `sched_depth_max`, `test_resume_resched` are at the end of
+  every build's `struct thread` (about 40 bytes; every older field keeps
+  its offset), written only in debug or self-test builds, as `bal_pulls`
+  and `wake_resched` are.
