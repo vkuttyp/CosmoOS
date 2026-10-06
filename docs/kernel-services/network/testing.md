@@ -1391,20 +1391,33 @@ host; noisy, indicative):
 | steering on (per-CPU queues) | 34–51 MiB/s | 68–71 MiB/s | ~42 000 (470–9 900) |
 
 **`net-nicbench`** (reports; fails only if fewer than half the ARP
-replies return): per non-loopback interface, 2 000 ARP round trips
+replies return, or an interface's receive stream does not go quiet
+between rounds): per non-loopback interface, 2 000 ARP round trips
 through the driver's rings to the gateway with at most 64 in flight,
-10 000 UDP sends of 1 KiB through the whole stack and out the NIC, and
-the software checksum's share of a send. The results table and the
+500 ms of UDP sends of 1 KiB through the whole stack and out the NIC,
+and the software checksum's share of a send. The results table and the
 offload decision they gate are in `docs/drivers/e1000e/design.md`
 ("Offloads"): 12–14 k round trips/s and 20–23 k sends/s on x86_64,
 about 60 % of that on aarch64, a checksum share of 1–2 %, and the two
-drivers within noise of each other.
+drivers within noise of each other, when those were measured.
 
-The combined two-interface benchmark has an explicit 20 s watchdog and
-harness budget. AArch64 chaos CI completed all samples in 8,360 ms while
-the former default 8 s watchdog fired during the second UDP round.
-Sample counts, assertions and bounded receive-drain waits remain intact.
-The shared budget entry is in `kernel/core/selftest.c`.
+The UDP rate is a host figure as much as a guest one. Under QEMU's
+user-mode network each datagram is a `sendto` on an unconnected host
+socket (about 115 us on an idle macOS host, 700 us and more on a busy
+one), and the e1000e model transmits synchronously in the register write,
+so that cost is inside the guest's send; virtio-net defers it to QEMU's
+main loop and the ring fills instead. ARP is answered inside QEMU with
+no system call, which is why a boot can read a normal ARP rate beside a
+UDP rate ten times below its usual. The phase used to send a fixed
+10,000 datagrams and so took 10,000 times that cost; it now sends for
+500 ms, and prints with the rate a per-send histogram, the driver's share
+of the window, the ring's peak occupancy, the sender's switches and CPU
+moves, and the gateway's ARP state (the triage is in
+`docs/audit/2026-10-06-flake-triage-report.md`; the sightings in
+`docs/testing/flakes.md`). The test holds the default 8 s budget again:
+its phases are each bounded (the ARP window waits give up at 200 ms and
+500 ms, the UDP window is 500 ms, the receive drain fails the test at
+3 s), so a slow host lowers its numbers and no longer lengthens it.
 
 Two things it found on its first run. An open-loop sender lost
 three quarters of its replies in the receive queue — the driver had

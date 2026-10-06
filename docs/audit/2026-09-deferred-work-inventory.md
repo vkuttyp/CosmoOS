@@ -756,3 +756,13 @@ Still open for the next milestone:
   **Resolved 2026-10-05:** all three were test defects (no kernel change);
   the full suite now passes at one to four CPUs on both architectures. See
   the [two-CPU validation report](2026-10-05-two-cpu-validation-report.md).
+
+### 7.1 Flake triage follow-ups (2026-10-06)
+
+Report: [`2026-10-06-flake-triage-report.md`](2026-10-06-flake-triage-report.md).
+
+| Item | Outcome |
+|---|---|
+| ~~`net-nicbench` over its budget (three sightings; 20 s budget from PR #307)~~ | **DIAGNOSED and RESTATED**: the UDP rate is the host's per-datagram `sendto` through QEMU's user-mode network, which ARP never pays; a host state, on for ten consecutive boots of unchanged `main` and then off. The phase is a 500 ms window with a per-send histogram, the driver's share, ring occupancy and the sender's switches; the budget is the default 8 s again. The host's trigger for the slow mode is **not attributed**. |
+| ~~`timer-cancel-sync`'s lower bound measured from the test thread's return (two sightings)~~ | **FIXED**: `irq-sync` and `timer-cancel-sync` measure from the callback's own entry stamp; `tools/sync-lower-bound-probe.py` fails the old measurement and passes the new on both architectures. |
+| ~~TLB shootdown `acknowledged by N of M` with no word on which CPU (three sightings)~~ | **BUILT** (x86-64; AArch64 has no wait): a per-CPU acknowledgement mask; at the unchanged deadline each silent CPU's thread, `irq_depth`, `preempt_count`, last tick, NMI sample and held locks are printed and the panic names it. `tools/tlb-shootdown-diag-probe.py` forces a CPU to hold its acknowledgement. |

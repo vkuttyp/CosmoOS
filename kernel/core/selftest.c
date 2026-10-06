@@ -66,12 +66,12 @@ static const struct selftest_budget {
      * on CI before docs/audit/next-subsystem-fsctl.md gave it its own
      * budget; the harness names its slowest section. */
     { "process-user",   20000 },
-    /* Two NICs, each with 2000 ARP round trips and 10000 UDP sends,
-     * plus receive draining. AArch64 chaos CI completed all of it in
-     * 8360 ms while the default watchdog fired in the second UDP round.
-     * Keep the workload and assertions; give the combined benchmark a
-     * budget with room for both drivers and their bounded drain waits. */
-    { "net-nicbench",   20000 },
+    /* net-nicbench had 20 s here from 2026-10-04 to 2026-10-06, when its
+     * UDP phase was a count (10,000 sends) whose time was the host's
+     * per-datagram cost times 10,000 -- 21.5 s on a slow afternoon. The
+     * phase is a 500 ms window now and every other phase of the test is
+     * bounded by its own wait, so it is back on the default
+     * (docs/audit/2026-10-06-flake-triage-report.md). */
     /* One line is not one test: it mounts and structurally checks every
      * prefix of a recorded write stream, 410 filesystem images, and grows
      * whenever a transaction writes another block -- by design, twice so

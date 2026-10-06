@@ -73,6 +73,18 @@ never completes is a kernel defect, so widening it would hide the thing
 it exists to catch. A re-run distinguishes the two, as everywhere else
 here.
 
+**The instrumentation this record asked for exists since 2026-10-06**
+(`docs/audit/2026-10-06-flake-triage-report.md`, §3). The acknowledgement
+is a per-CPU bit, and at the unchanged one-second deadline the report
+names each CPU that did not answer and prints its current thread, its
+`irq_depth` and `preempt_count`, its last tick's age and PC, an NMI
+sample of its frames (`lockup_sample_cpu`) and the locks it holds; the
+panic line ends `; not by cpu N`. `tools/tlb-shootdown-diag-probe.py`
+makes CPU 1 hold its acknowledgement for 1.5 s and checks every one of
+those lines; its control holds for 100 ms and must not panic. AArch64
+broadcasts its invalidations and has no such wait. The next sighting
+answers the question the first three could not.
+
 **Observed once, not yet on the list: `timer-cancel-sync`'s lower
 bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
 against a callback holding for 20 ms on another CPU took at least
@@ -95,6 +107,15 @@ only aarch64 guests and vGIC tests, none of which x86-64 runs. It failed
 the same check, now at `quiescetest.c:1049`, and a rerun alone passed.
 Second sighting, both local, both on a loaded host. The fix named above is
 still the one: time from `entered`.
+
+**Fixed 2026-10-06** in both `timer-cancel-sync` and `irq-sync`, which had
+the same shape (`docs/audit/2026-10-06-flake-triage-report.md`, §2): the
+callback stamps its own entry (`entered_ns`) and the test measures the
+sync's return against that stamp, bound still `>= MS(10)`. A host holding
+the test's vCPU between `entered` and the sync now lengthens the span. A
+Restate (rule 2 below), not a widening. `tools/sync-lower-bound-probe.py`
+inserts a 15 ms spin at exactly that point: the old measurement fails both
+tests on `sync_ns >= MS(10)`, the new one passes, on both architectures.
 
 The first two were widened on 2026-09-14 after failing on a correct
 kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
@@ -2758,7 +2779,9 @@ for part of the window. Recorded, not attributed.
 benchmark now has an explicit 20 s budget, shared by the watchdog and
 harness. CI run `37154202680` captured the second UDP round at 8 s and
 completed the full workload at 8,360 ms. Samples and assertions remain.
-The original no-dump sighting below is retained as history.
+The original no-dump sighting below is retained as history. **Returned to
+the default on 2026-10-06**, when the UDP phase became a window (the
+2026-10-06 entry below).
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent
@@ -2977,6 +3000,7 @@ phase and the word.
 **Budget corrected 2026-10-04, PR #307:** the combined benchmark now has
 an explicit 20 s watchdog/harness budget; see the earlier `net-nicbench`
 entry and the PR #307 audit follow-up. The original sighting follows.
+**Returned to the default on 2026-10-06** (the entry of that date).
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
 which had already spent the run's one watchdog arming; the watchdog-spent
@@ -3001,6 +3025,54 @@ NICs -- UDP 1037 and 903 sends/s, ARP 7378 and 7022 round trips/s -- and
 no watchdog report appears in the log. Other
 boots ran before it in the same sequence, one at a time. Recorded, not
 attributed (`docs/audit/2026-10-06-sched-restore-loop-report.md`).
+**Diagnosed the same day, below.**
+
+## `net-nicbench`'s UDP rate is the host's `sendto`; the phase is a window now, 2026-10-06
+
+The third sighting's shape -- ARP at its usual 7-9 k round trips/s, UDP
+ten times under its usual on both NICs, about 1 ms a send -- was
+reproduced ten boots in a row on unchanged `main` this evening, one boot
+at a time, both architectures, four CPUs (1.2-7 k sends/s, the test
+3.7-15.3 s), and then stopped: the eleventh boot of the same image read
+13.6 k and 9.3 k with the test at 2.5 s. It is a host state lasting tens
+of minutes, not a per-boot coin, and not a regression: the same kernel
+read both. The twelve boots, the two-week tally of every local reading
+(650 readings, medians 12 k, nothing under 2 k but CI's) and the CI
+readings that survive are tabulated in
+`docs/audit/2026-10-06-flake-triage-report.md`, §1.
+
+**The mechanism.** Under QEMU's user-mode network every datagram the
+guest sends is a `sendto` on an *unconnected* host socket -- 115 us on
+this idle macOS host (a connected one is 3 us) and more when the host is
+busy -- while an ARP request is answered inside QEMU with no system call.
+The e1000e model transmits synchronously in the `TDT` write, so that cost
+is inside the guest's send; virtio-net defers it to QEMU's main loop and
+the guest's ring fills instead (the x86-64 boots of the slow mode showed
+`5,838 of 5,838 frames left the driver`: 4,162 sends refused for want of
+a descriptor, which the old summary line did not say). The sender does
+not sleep, yield or move: one switch in 6,627 sends, the gateway's ARP
+entry reachable throughout. The time is on the far side of the register
+write. What slowed the host for those twenty-five minutes is **not
+attributed**: a Python `sendto` from a fresh process still measured
+116 us during them while the guest's e1000e send took 700 us, so it is
+QEMU's path and not the host kernel's in general.
+
+**The test.** Its UDP phase sent a fixed 10,000 datagrams, so its
+duration was 10,000 times a cost the guest does not set -- and that was
+every one of the three budget sightings. The phase is a **500 ms window**
+now: the same rate over whatever was sent, bounded time. **Restate**
+(rule 2): the rate is observed as a rate; the count that stood in for it
+is gone. Not listed, not widened. With it the test prints, per NIC, a
+log2 histogram of the sends, the share of the window spent inside the
+driver's transmit, the ring's peak occupancy, the driver's refusals, the
+sender's switches and CPU moves and the gateway's ARP state -- so a slow
+reading carries its diagnosis. **The budget is the default 8 s again**;
+the 20 s entry of 2026-10-04 was sized for the count. Every phase is
+bounded by its own wait (ARP's 200 ms and 500 ms give-ups, the 500 ms
+window, the receive drain that fails the test at 3 s), so the worst case
+is under 5 s and a slow host lowers the numbers without lengthening the
+test. `tools/nicbench-host-cost-probe.py` boots the old phase and the new
+under a host-side flood and without, and prints what each read.
 
 ## Two boots timed out on a host at load 100, and `lockup-hard` failed in one, 2026-09-30
 

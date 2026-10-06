@@ -66,6 +66,7 @@ def main():
         if (a >= t_end)
             break;
         int64_t rc = ksock_sendto(tx, payload, sizeof(payload), &to);''', '''        uint64_t a = clock_now_ns();
+        (void)t_end;
         if (st->attempts >= 10000u)   /* NICPROBE --old: the count-bound phase */
             break;
         int64_t rc = ksock_sendto(tx, payload, sizeof(payload), &to);''')
@@ -114,15 +115,22 @@ def main():
         print('probe: the boot did not deliver the verdict (harness exit %s)' % rc)
         return 1
     ms = int(m.group(1))
-    print('probe: net-nicbench took %d ms (%s phase, %s)' % (ms, 'count-bound' if args.old else '500 ms window',
-                                                            'host load %d' % args.load if args.load else 'no added load'))
-    if args.old and args.load:
-        if ms <= 8000:
-            print('probe: FAIL -- expected the count-bound phase to exceed the former 8 s budget under load')
+    windows = [int(x) for x in re.findall(r'net-nicbench: eth\d: udp window (\d+) ms:', log)]
+    print('probe: net-nicbench took %d ms, its UDP phases %s ms (%s phase, %s)'
+          % (ms, ' and '.join(str(w) for w in windows), 'count-bound' if args.old else '500 ms window',
+             'host load %d' % args.load if args.load else 'no added load'))
+    if len(windows) != 2:
+        print('probe: FAIL -- expected two interfaces')
+        return 1
+    if args.old:
+        if args.load and min(windows) <= 1000:
+            print('probe: FAIL -- expected each count-bound phase to take over 1 s under host load '
+                  '(10,000 times the host\'s per-datagram cost)')
             return 1
-    elif not args.old:
-        if ms >= 8000:
-            print('probe: FAIL -- the windowed phase must keep the test under 8 s whatever the host does')
+    else:
+        if max(windows) >= 600 or ms >= 8000:
+            print('probe: FAIL -- the windowed phase must take about 500 ms and keep the test under 8 s '
+                  'whatever the host does')
             return 1
     print('probe: PASS')
     return 0

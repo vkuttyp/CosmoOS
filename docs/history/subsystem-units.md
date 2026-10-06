@@ -2316,3 +2316,20 @@ See the [history index](README.md).
   idle thread 13.8 KB deep on its 16 KB stack. `sched-restore-loop` (3,200
   trips) with `tools/sched-restore-loop-probe.py`'s three controls; 426
   self-tests. Report: `docs/audit/2026-10-06-sched-restore-loop-report.md`.
+- **Flake triage: `net-nicbench`, the sync lower bounds, the shootdown
+  report.** `net-nicbench`'s UDP rate is bounded by the host's
+  per-datagram `sendto` through QEMU's user-mode network -- 115 us idle on
+  the macOS host, 700 us and more in a slow mode that held for ten
+  consecutive boots of unchanged `main` and then lifted -- which an ARP
+  round trip, answered inside QEMU, never pays; the e1000e model pays it
+  synchronously in the `TDT` write, virtio-net by a full ring. The phase
+  is a 500 ms window rather than 10,000 sends, prints a per-send
+  histogram, the driver's share (`netif_tx_probe`), the ring's peak
+  occupancy (a `tx_pending` op in both drivers), refusals, the sender's
+  switches and the gateway's ARP state, and is back on the default 8 s
+  budget. `irq-sync` and `timer-cancel-sync` time their `>= 10 ms` bound
+  from the callback's own entry. The x86-64 TLB shootdown keeps a mask of
+  acknowledgements and, at its unchanged 1 s deadline, names each silent
+  CPU with its thread, IRQ/preempt state, last tick, NMI sample and held
+  locks. Three probes. Report:
+  `docs/audit/2026-10-06-flake-triage-report.md`.

@@ -119,6 +119,18 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
   the slowdown or justify weakening the assertions.
   *2026-10-05: not reproduced* — 3,545–3,921 ms in 35 AArch64 boots at one to
   four CPUs, boots run one at a time; cause still unestablished ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
+- [x] **Flake triage — `net-nicbench`'s UDP rate, the sync lower bounds, the
+  shootdown report.** *Completed 2026-10-06*
+  ([report](audit/2026-10-06-flake-triage-report.md)). The UDP rate is
+  bounded by the host's per-datagram `sendto` through QEMU's user-mode
+  network, which ARP never pays; the slow mode is a host state that was on
+  for ten consecutive boots of unchanged `main` and then off, not a
+  regression. The phase is a 500 ms window with a per-send histogram and
+  the driver's share; the budget is the default 8 s again. `irq-sync` and
+  `timer-cancel-sync` time from the callback's own entry. The x86-64 TLB
+  shootdown names each CPU that missed its unchanged 1 s deadline with its
+  thread, IRQ/preempt state and an NMI sample. Not attributed: what puts
+  the host in the slow mode.
 - [ ] **Validation — other timing assumptions.** Revisit the remaining
   `thrtest`/`cwdtest` assumptions and the rare long `net-bench` run with
   evidence that distinguishes scheduling delay from a mechanism failure.
