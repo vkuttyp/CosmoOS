@@ -23,6 +23,7 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     tag = 'tlb-shootdown-diag-' + ('control' if args.control else 'forced')
     out = root / 'out' / tag
+    shutil.rmtree(out, ignore_errors=True)   # a previous run's dependency files name a temporary clone that is gone
     out.mkdir(parents=True, exist_ok=True)
     hold_ns = 100 * 1000 * 1000 if args.control else 1500 * 1000 * 1000
     src = (root / 'kernel/core/selftest.c').read_text()

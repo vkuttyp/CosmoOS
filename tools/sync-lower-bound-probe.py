@@ -20,6 +20,7 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     tag = 'sync-lower-bound-' + args.arch + ('-old' if args.old else '-fixed')
     out = root / 'out' / tag
+    shutil.rmtree(out, ignore_errors=True)   # a previous run's dependency files name a temporary clone that is gone
     out.mkdir(parents=True, exist_ok=True)
     src = (root / 'kernel/core/quiescetest.c').read_text()
 

@@ -28,6 +28,7 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     tag = 'nicbench-host-cost-' + args.arch + ('-old' if args.old else '-fixed') + ('-load%d' % args.load if args.load else '')
     out = root / 'out' / tag
+    shutil.rmtree(out, ignore_errors=True)   # a previous run's dependency files name a temporary clone that is gone
     out.mkdir(parents=True, exist_ok=True)
 
     nettest = (root / 'kernel-services/network/nettest.c').read_text()
