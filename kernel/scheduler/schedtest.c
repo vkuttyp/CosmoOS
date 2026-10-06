@@ -836,10 +836,11 @@ bool selftest_irqrestore_bench(const char **reason)
  */
 enum {
     RESTORE_RUNS = 100,
-    RESTORE_RUN = 32,       /* trips in a row: a recursion of 32 frames of ~100 bytes and up clears the bound */
+    RESTORE_RUN = 32,       /* trips in a row: a recursion of 32 frames of 32 bytes or more clears the bound */
     RESTORE_BOUND = 1024,   /* above this frame: a yield's two frames, or a trap frame and the trap return's preemption */
 };
 
+#if CONFIG_DEBUG
 struct restore_partner {
     volatile bool stop;
     uint64_t yields;
@@ -853,6 +854,7 @@ static void restore_partner_entry(void *arg)
         p->yields++;
     }
 }
+#endif
 
 static bool selftest_sched_restore_loop_pinned(const char **reason)
 {
