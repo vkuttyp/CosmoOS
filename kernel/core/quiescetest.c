@@ -946,7 +946,7 @@ static bool selftest_irq_sync_pinned(const char **reason)
          * flakes.md, "`irq-sync` and `timer-cancel-sync`'s lower bounds").
          * A sync that returned mid-handler would still fail `done` below
          * and, 20 ms being the hold, this bound. */
-        uint64_t sync_ns = clock_since_ns(p->entered_ns);
+        uint64_t sync_ns = clock_since_ns(p->entered_ns);   /* two CPUs' clocks: relies on the monotonic clock agreeing across CPUs (docs/audit/next-subsystem-cpu-clock.md) */
         CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);   /* returned only after the handler */
         CHECK(sync_ns >= MS(10));
         CHECK(p->hits == 1 && p->bad == 0);
@@ -1284,7 +1284,7 @@ static bool selftest_timer_cancel_sync_pinned(const char **reason)
     /* From the callback's own entry stamp, as irq-sync: a host holding
      * this vCPU between `entered` and the cancel lengthens the span, never
      * shortens it (docs/testing/flakes.md). */
-    uint64_t sync_ns = clock_since_ns(p->entered_ns);
+    uint64_t sync_ns = clock_since_ns(p->entered_ns);   /* two CPUs' clocks, as irq-sync: relies on the monotonic clock agreeing across CPUs */
     CHECK(!was_pending);
     CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);
     CHECK(sync_ns >= MS(10));

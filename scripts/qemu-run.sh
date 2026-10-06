@@ -9,6 +9,9 @@
 #   QEMU_CPU    CPU model (default qemu64,+nx,+svm,+npt: TCG emulates AMD-V with nested
 #               paging, which the virtualization tests need; use `host` with kvm/hvf)
 #   QEMU_EXTRA  extra QEMU arguments
+#   QEMU_WRAP   a command QEMU is run through, word-split (for example
+#               `taskpolicy -b` on macOS to pin the whole process to the
+#               efficiency cores; docs/development.md, "Benchmark runs")
 #   OVMF_CODE   firmware image override
 #
 # The isa-debug-exit device lets the kernel terminate QEMU with an exit
@@ -226,7 +229,7 @@ if [ "$arch" = aarch64 ]; then
     # "Exception level 2"). QEMU_EL2=0 boots at EL1 as before.
     el2_machine=""
     [ "${QEMU_EL2:-1}" != "0" ] && el2_machine=",virtualization=on"
-    exec qemu-system-aarch64 \
+    exec ${QEMU_WRAP:-} qemu-system-aarch64 \
         -machine "virt,gic-version=${QEMU_GIC:-2}${gic_msi}${iommu_machine}${el2_machine},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
         -smp "${QEMU_SMP:-4}" \
@@ -262,7 +265,7 @@ fi
 # PCI devices (kernel/iommu); QEMU_IOMMU=0 leaves it out.
 iommu_dev=""
 [ "${QEMU_IOMMU:-1}" != "0" ] && iommu_dev="-device intel-iommu,intremap=off"
-exec qemu-system-x86_64 \
+exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
     $iommu_dev \
     -cpu "${QEMU_CPU:-qemu64,+nx,+svm,+npt}" \
