@@ -1414,7 +1414,7 @@ UDP rate ten times below its usual. The phase used to send a fixed
 of the window, the ring's peak occupancy, the sender's switches and CPU
 moves, and the gateway's ARP state; the warm-up waits up to 1.5 s for the
 gateway's entry and reports `udp not measured` rather than a rate when it
-stays incomplete (the triage is in
+stays incomplete; the test fails if no interface measured (the triage is in
 `docs/audit/2026-10-06-flake-triage-report.md`; the sightings in
 `docs/testing/flakes.md`). The test holds the default 8 s budget again:
 its phases are each bounded (the ARP window waits give up at 200 ms and

@@ -4200,7 +4200,7 @@ static uint64_t nicbench_cksum_ns(void)
     return (clock_since_ns(t0)) / NICBENCH_UDP;
 }
 
-static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
+static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns, bool *measured)
 {
     unsigned rt_s = 0;
     uint64_t ns_rt = 0;
@@ -4215,6 +4215,7 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
               nif->name, nif->caps, rt_s, (unsigned long long)ns_rt);
         return true;
     }
+    *measured = true;
     nicbench_udp_report(nif, &st);
     unsigned accepted = st.accepted;
     uint64_t frames = st.frames;
@@ -4621,7 +4622,8 @@ bool selftest_net_nicbench(const char **reason)
         return true;
     }
     uint64_t cksum_ns = nicbench_cksum_ns();
-    bool ok = nicbench_one(reason, first, cksum_ns);
+    bool measured = false;   /* at least one interface's UDP phase ran: a round that resolved no gateway is reported, two are a failure */
+    bool ok = nicbench_one(reason, first, cksum_ns, &measured);
     struct netif *second = ok ? find_other_interface(first) : NULL;
     if (second != NULL) {
         /* The same numbers over the other driver, on the same host and
@@ -4629,11 +4631,18 @@ bool selftest_net_nicbench(const char **reason)
          * routes through the second, as net-second-nic does. */
         netif_set_up(first, false);
         arp_age(clock_now_ns() + 3600ull * NS_PER_SEC);
-        ok = nicbench_one(reason, second, cksum_ns);
+        ok = nicbench_one(reason, second, cksum_ns, &measured);
         netif_set_up(first, true);
         netif_put(second);
     }
     netif_put(first);
+    if (ok && !measured) {
+        /* Every interface's gateway stayed unresolved: a benchmark that
+         * measured nothing must not pass as if it had (the one-interface
+         * case is the only way a single unresolved round fails the test). */
+        *reason = "no interface resolved its gateway: the UDP phase measured nothing";
+        ok = false;
+    }
     return ok;
 }
 

@@ -3048,9 +3048,11 @@ follow-up the second interface's own ARP phase, just before, had read
 entry, prints how long it waited, and if the entry is still incomplete
 says `udp not measured: the gateway's ARP entry is still incomplete
 after N ms (+R requests sent since the warm-up began, ...)` and claims no
-rate. Reported, not asserted: the ARP phase just before it proved 2,000
-round trips on the same link, so this is the ARP table's state, not the
-link's. **Why the entry stays incomplete is not attributed.** The counter
+rate. Reported, not asserted, for one interface: the ARP phase just before
+it proved 2,000 round trips on the same link, so this is the ARP table's
+state, not the link's; both interfaces unresolved fails the test, since a
+benchmark that measured nothing must not pass (review of PR #318). **Why
+the entry stays incomplete is not attributed.** The counter
 the report now carries decides between the two candidates the next time:
 `+0 requests` means `arp_resolve` found an entry already there (keyed by
 IP alone, with both NICs' gateways at 10.0.2.2) and sent nothing, and the
