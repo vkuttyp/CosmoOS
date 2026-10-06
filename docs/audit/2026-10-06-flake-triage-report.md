@@ -164,7 +164,33 @@ before the benchmark took 136 s instead of about 60. It reproduces a slow
 host, not the ARP-normal mode; the mode's trigger was not found
 (§1.6).
 
-TODO instrumented loop at 1/2/4 CPUs, both architectures, and any slow-mode boot it caught.
+**Nine instrumented boots** (the committed tree, one at a time, 20:33 to
+20:56, the slow mode off throughout):
+
+| boot | eth0 udp sends/s, driver share, ring max | eth1 udp sends/s, driver share, ring max | sends >= 1 ms | test ms |
+| --- | --- | --- | --- | --- |
+| AArch64 4 CPUs | 10,148, 15 %, 2 | 6,703, 43 %, 1 | 0 / 1 | 2,254 |
+| x86-64 2 CPUs | 10,598, 16 %, 4 | 7,637, 39 %, 1 | 0 / 0 | 1,735 |
+| AArch64 2 CPUs | 9,939, 15 %, 2 | 7,830, 41 %, 1 | 0 / 0 | 1,749 |
+| x86-64 1 CPU | 8,928, 12 %, 6 | 9,165, 41 %, 1 | 1 / 0 | 1,697 |
+| AArch64 1 CPU | 9,242, 20 %, 8 | 10,090, 45 %, 1 | 3 / 5 | 1,661 |
+| x86-64 4 CPUs | 12,772, 17 %, 5 | 9,341, 40 %, 1 | 0 / 0 | 1,733 |
+| AArch64 4 CPUs | 10,055, 15 %, 2 | 7,222, 42 %, 1 | 0 / 0 | 2,267 |
+| x86-64 4 CPUs | 10,615, 16 %, 2 | 7,640, 39 %, 1 | 0 / 0 | 1,762 |
+| AArch64 4 CPUs | 11,928, 16 %, 3 | 8,963, 45 %, 1 | 0 / 7 | 1,684 |
+
+The driver's share is the same figure on every CPU count and both
+architectures: 12-20 % for virtio-net, 39-45 % for e1000e. The sender was
+switched out at most four times a window (one CPU) and never moved. The
+ring never held more than 8 of 256. The gateway's entry was reachable
+before and after every window with no ARP request during it. The one
+excursion is the shape of the slow mode in miniature: the last boot's
+e1000e window had 7 sends of 1 ms or more holding 40 of its 508 ms, the
+longest 18.7 ms, with the driver's own maximum 8.6 ms -- the vCPU stood
+in the `TDT` write while the host did something else -- and the virtio
+window beside it had none. The slow mode did not return while the
+instrumented tree was booting, so its full histogram is still to be
+seen; what it will show is this excursion for most of a window.
 
 ### 1.4 Regression or mode?
 
@@ -205,8 +231,10 @@ already a closed loop with its own 200 ms and 500 ms give-ups; the
 receive drain already fails the test at 3 s rather than waiting.
 
 **The budget returns to the default 8 s** (the 20 s entry PR #307 added is
-removed). The data: with the window the test took 2,180 ms on x86-64 in
-its first boot and TODO; its worst case is one NIC's ARP phase at the
+removed). The data: with the window the test took 1,661-2,267 ms in the
+ten instrumented boots (the one in §1.3 and the nine in its table; both
+architectures, one to four CPUs),
+against 3,705-15,257 ms for the count in the slow mode; its worst case is one NIC's ARP phase at the
 slowest rate ever recorded (1.7 k rt/s: 1.2 s) plus 0.5 s plus a 3 s
 drain that fails it, under 5 s, and the second NIC does not run after a
 failure. The 20 s entry was sized for a count that no longer exists.
@@ -215,7 +243,26 @@ Probe: `tools/nicbench-host-cost-probe.py`. It boots a clone whose runner
 panics right after the benchmark with its verdict and duration, with the
 count-bound phase restored (`--old`) or not, and with or without the host
 flood (`--load N`), and prints both NICs' rates, histograms and driver
-shares. TODO results table (old/fixed × load/none, both architectures).
+shares. The flood is four processes doing the same unconnected `sendto`
+in a loop; as §1.3 says it slows the whole host (ARP falls with it), so it
+stands for a slow host rather than for the ARP-normal mode, which could
+not be summoned. What it shows is the structural claim: the count's
+duration follows the host's cost, the window's does not.
+
+| run | UDP phases (ms) | eth0 / eth1 sends/s | sends >= 1 ms | driver share | test ms |
+| --- | --- | --- | --- | --- | --- |
+| x86-64 count, no load | 783 + 1,185 | 12,762 / 8,437 | 0 / 0 | 17 % / 39 % | 2,700 |
+| x86-64 window, no load | 500 + 500 | 10,752 / 7,857 | 0 / 0 | 16 % / 39 % | 1,759 |
+| x86-64 count, load 4 | 1,817 + 2,286 | 5,503 / 4,373 | 104 / 110 | 19 % / 44 % | 6,228 |
+| x86-64 window, load 4 | 500 + 500 | 6,439 / 4,173 | 15 / 12 | 16 % / 41 % | 2,547 |
+| AArch64 count, load 4 | 2,162 + 2,441 | 4,624 / 4,095 | 189 / 151 | 17 % / 45 % | 6,422 |
+| AArch64 window, load 4 | 500 + 500 | 3,981 / 4,427 | 48 / 17 | 21 % / 46 % | 2,895 |
+
+The count's UDP phases grew 2.3-fold and 1.9-fold under the load; the
+window's stayed at 500 ms and the test under 3 s while reading the same
+slowed rates, with the same histogram shape and driver share. The probe
+asserts the count's phases exceed 1 s under load and the window's stay
+under 600 ms with the test under 8 s; it exits non-zero otherwise.
 
 ### 1.6 Not attributed
 
@@ -263,8 +310,16 @@ read at the point this thread reaches.
 
 | | x86-64 | AArch64 |
 | --- | --- | --- |
-| `--old` (clock from this thread's return) | TODO | TODO |
-| fixed (clock from the callback's entry) | TODO | TODO |
+| `--old` (clock from this thread's return) | both FAIL: `check failed: sync_ns >= MS(10)` (lines 956, 1305) | both FAIL, the same two checks |
+| fixed (clock from the callback's entry) | both PASS: `unregister_sync returned 20 ms after it entered`, `cancel_sync returned 20 ms after it entered` | both PASS, the same two lines (CPU 1) |
+
+Four boots, four CPUs each, 11-12 s to the verdict. The old measurement
+reads about 5 ms with the delay in place (20 ms of hold, 15 of them
+spent before the clock started); the new one reads 20 ms whatever the
+thread did in between, because the callback's hold is what it measures.
+The suite's own runs of the two tests (22 boots this session, one to four
+CPUs, both architectures) all passed, as they did before: the fix is for
+the loaded-host case the probe makes deterministic.
 
 ## 3. The TLB shootdown deadline's report
 
@@ -300,12 +355,52 @@ and issues one shootdown of a kernel page.
 
 | | hold | result |
 | --- | --- | --- |
-| forced | 1.5 s | TODO |
-| control | 100 ms | TODO |
+| forced | 1.5 s | the deadline passes; the report names CPU 1 and the panic ends `; not by cpu 1` (below) |
+| control | 100 ms | every CPU acknowledges; the shootdown returns after 100 ms and the probe's own panic says so; no `did not acknowledge` line |
+
+The forced run's report, 6 s into the boot, symbolized with
+`llvm-symbolizer` against the probe build's kernel:
+
+```
+mmu: TLB shootdown of 0xffffffff80177000+0x1000: 2 of 3 CPUs acknowledged within 1 s
+cpu 1: did not acknowledge; running thread 6 'idle', irq_depth 1, preempt_count 0, last tick 999 ms ago at pc 0xffffffff80084773
+cpu 1: pc 0xffffffff80084756 sp 0xffffc0001041dea0 (nmi, 94 us ago)
+  #0  0xffffffff80084756     arch_cpu_relax                   cpu.c:184
+  #1  0xffffffff80086eef     arch_mmu_shootdown_ipi_handler   mmu.c (the probe's hold loop)
+  #2  0xffffffff80085ba2     x86_trap_dispatch                trap.c:87
+  #3  0xffffffff8008407f     isr.S:145
+  #4  0xffffffff80018e35     idle_main                        sched.c:86
+  #5  0xffffffff800169a5     thread_trampoline                thread.c:40
+  held by cpu 1 (0):
+KERNEL PANIC: mmu: TLB shootdown of 0xffffffff80177000+0x1000 acknowledged by 2 of 3 CPUs; not by cpu 1
+CPU: 0  context: thread  thread: 1 'kmain'  irq_depth: 0  preempt_count: 1
+```
+
+That is the answer the three sightings could not give: which CPU, that
+it was inside an interrupt handler (`irq_depth 1`) with its tick stopped
+for the whole second (`last tick 999 ms ago`, at `arch_cpu_wait_for_
+interrupt` -- it was idle when the IPI arrived), and the frames it was
+in, taken by NMI through the masked interrupts. A real sighting's trace
+will show whatever that CPU was really doing; the lockup unit's existing
+`cpu N: no answer` fallback covers a CPU that cannot even take the NMI.
 
 ## 4. Watched, not acted on
 
-TODO
+Three items the unit was to watch and record only if they recurred. In
+the 22 full debug boots of this session (12 of `main`, 1 more of it, 9 of
+the instrumented tree at one, two and four CPUs, both architectures):
+
+- **`prio-inversion`** (one sighting, 2026-10-05): passed every boot,
+  52-59 ms on AArch64 at two and four CPUs, 316 ms on one, 368-420 ms on
+  x86-64. No recurrence.
+- **`syscall-fuzz` over budget** (plan §2): 3,182-3,423 ms on x86-64,
+  3,663-3,884 ms on AArch64, every boot. No recurrence.
+- **The x86-64 180 s boot budget**: the x86-64 boots took 131.8-148.4 s by
+  the harness's clock; the longest was `main` boot 3 at 148.4 s, in the
+  slow mode and beside this session's reading. No timeout. The second
+  sighting that would be the case for raising it has not happened.
+
+No `SELFTEST: FAIL`, watchdog report or panic in any of the 22 boots.
 
 ## 5. Validation
 
