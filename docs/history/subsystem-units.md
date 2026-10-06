@@ -2347,3 +2347,15 @@ See the [history index](README.md).
   for the entry and reports `udp not measured` instead. A plan item
   records that a full transmit ring refuses a UDP send with `-ENOBUFS`
   where Linux blocks. Report: `docs/audit/2026-10-06-flake-triage-report.md`, §7.
+- **Neighbour entries per interface.** The ARP table and the ND cache
+  were keyed by address alone, so the second of two interfaces resolving a
+  shared address found the first's entry: no request of its own, retries on
+  the first interface, its packet out of the wrong interface to the wrong
+  MAC. QEMU's two backends sharing a gateway MAC hid it. `find`/`nd_find`
+  take the interface, `arp_lookup`/`arp_delete` name it, an interface going
+  down flushes its entries as removal does (N25). `net-arp-per-interface`
+  and `net-nd-per-interface` (two fake interfaces, one address, two MACs)
+  fail at their first check under the old keying, restored by
+  `tools/arp-per-interface-probe.py --old`. `net-nicbench` fails again on an
+  unresolved gateway; no test moves the table's clock any more. Report:
+  `docs/audit/2026-10-07-neighbour-per-interface-report.md`.

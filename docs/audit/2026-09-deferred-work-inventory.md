@@ -766,3 +766,13 @@ Report: [`2026-10-06-flake-triage-report.md`](2026-10-06-flake-triage-report.md)
 | ~~`net-nicbench` over its budget (three sightings; 20 s budget from PR #307)~~ | **DIAGNOSED and RESTATED**: the UDP rate is the host's per-datagram `sendto` through QEMU's user-mode network, which ARP never pays; a host state, on for ten consecutive boots of unchanged `main` and then off. The phase is a 500 ms window with a per-send histogram, the driver's share, ring occupancy and the sender's switches; the budget is the default 8 s again. The host's trigger for the slow mode is **not attributed**. |
 | ~~`timer-cancel-sync`'s lower bound measured from the test thread's return (two sightings)~~ | **FIXED**: `irq-sync` and `timer-cancel-sync` measure from the callback's own entry stamp; `tools/sync-lower-bound-probe.py` fails the old measurement and passes the new on both architectures. |
 | ~~TLB shootdown `acknowledged by N of M` with no word on which CPU (three sightings)~~ | **BUILT** (x86-64; AArch64 has no wait): a per-CPU acknowledgement mask; at the unchanged deadline each silent CPU's thread, `irq_depth`, `preempt_count`, last tick, NMI sample and held locks are printed and the panic names it. `tools/tlb-shootdown-diag-probe.py` forces a CPU to hold its acknowledgement. |
+
+### 7.2 Neighbour table keying (2026-10-07)
+
+Report: [`2026-10-07-neighbour-per-interface-report.md`](2026-10-07-neighbour-per-interface-report.md).
+
+| Item | Outcome |
+|---|---|
+| ~~ARP table and ND cache keyed by address alone: one interface's resolution found another's entry (no request of its own; retries on the other interface; the packet out of the wrong interface to the wrong MAC); `arp_lookup` took no interface~~ | **FIXED**: entries are (interface, address) in both tables (N25); `arp_lookup`/`arp_delete` name the interface; down flushes an interface's entries as removal does; `net-arp-per-interface`, `net-nd-per-interface`, `tools/arp-per-interface-probe.py --old`. |
+| ~~`net-nicbench` reported `udp not measured` on an unresolved gateway (PR #318)~~ | **TIGHTENED**: a failure again, the entry being this interface's own; the line carries the request count that separates a lost reply from an entry already present. The 2026-10-06 sightings remain unattributed between the two. |
+| `ipv4_route`'s tie for two up interfaces on one subnet (first registered wins) | Recorded as a policy without a knob; not changed. |

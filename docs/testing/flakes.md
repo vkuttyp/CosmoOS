@@ -3046,13 +3046,25 @@ follow-up the second interface's own ARP phase, just before, had read
 
 **The test now waits** up to 1.5 s (one ARP retry) for the gateway's
 entry, prints how long it waited, and if the entry is still incomplete
-says `udp not measured: the gateway's ARP entry is still incomplete
-after N ms (+R requests sent since the warm-up began, ...)` and claims no
-rate. Reported, not asserted, for one interface: the ARP phase just before
-it proved 2,000 round trips on the same link, so this is the ARP table's
-state, not the link's; both interfaces unresolved fails the test, since a
-benchmark that measured nothing must not pass (review of PR #318). **Why
-the entry stays incomplete is not attributed.** The counter
+says so with the request count. From 2026-10-07 that is a **failure**
+(`the gateway's ARP entry did not resolve within 1.5 s on this
+interface`): the ARP table is keyed by (interface, address) since then
+(invariant N25, `docs/audit/2026-10-07-neighbour-per-interface-report.md`),
+so the entry the wait reads is this interface's own, and an interface
+whose ARP phase has just completed 2,000 round trips and whose gateway
+still does not answer a request and its retry is a lost reply twice over
+or a defect, not a thing to report and carry on from. **Why the entry
+stayed incomplete in the three sightings is not attributed**, and the
+logs cannot say: all three show the second interface's own ARP phase
+completing with every reply counted, and the old code took its request
+count after the warm-up. The address-only keying is a mechanism that
+produces exactly this shape -- the second interface's resolution finding
+the first's entry (keyed by IP alone, with both NICs' gateways at
+10.0.2.2) and sending nothing, the entry's retries going out on the
+first interface, which the test had just taken down -- and it is gone.
+The other is a lost reply; the request count on the failure line tells
+them apart (`+1`: a request without an answer; `+0`: an entry already
+there, now necessarily this interface's own). The counter
 the report now carries decides between the two candidates the next time:
 `+0 requests` means `arp_resolve` found an entry already there (keyed by
 IP alone, with both NICs' gateways at 10.0.2.2) and sent nothing, and the
