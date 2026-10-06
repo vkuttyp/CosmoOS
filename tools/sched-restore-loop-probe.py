@@ -60,6 +60,7 @@ def force_call(tree):
 {
     volatile char probe_frame[160];   /* PROBE: the pre-fix wrapper's buffer, live across the call */
     probe_frame[0] = 0;
+    __asm__ volatile("" : : "r"(probe_frame) : "memory");   /* PROBE: the address escapes, as ksnprintf's did */
     if (!__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         irq_restore_track(state, (uintptr_t)__builtin_return_address(0));
     arch_irq_restore_hw(state);
