@@ -3187,3 +3187,41 @@ alternated. Separately, `fpu-bench`'s no-FP switch read 11.7 µs in base 2
 and base 3 while the with-FP switch in the same boots was its usual
 5.2 µs, so the benchmark printed a negative save-and-restore cost; the leg
 absorbed something once in each boot, not seen in the other ten.
+
+## An x86-64 debug guard boot over the 180 s budget on a slow runner, 2026-10-06
+
+**Run 37479540321, PR #316's x86-64 job (a branch of documentation and
+one tool, no kernel change), the protection-capable-CPU debug boot:**
+`boot-test: FAIL after 184.0s -- timed out after 180s`, `shell harness: no
+prompt before command 28 ('vmctl flows')`. The boot had reached
+`SELFTEST: PASS (426 tests)` and the harness had got through `sleep 1 &`,
+`jobs` and `pkg update && pkg install hello && hello && pkg list`; the
+serial log ends
+
+```
+[DEBUG] process: pid 420 'pkg' released
+cosmo$ [ INFO] process: pid 416 'sleep' exited with status 0 (3 syscalls)
+```
+
+That is the prompt the harness was waiting for -- the log holds the 28
+line-start prompts it needed -- arriving after its deadline. The same
+job's main debug boot, on the same runner, took **167.6 s**; the budget
+is 180 s, which PR #314 kept for x86-64 on the record that its boots ran
+p95 163 s and at most 169 s with no timeout (`Makefile`, `BOOT_TIMEOUT`).
+Recent `main` runs' three x86-64 debug boots took 121–129 s, 154–163 s
+and 122–126 s. This runner was at the slow end of that spread and the
+guard boot, the third of the job's boots, went 4 s over. Nothing stalled:
+the `sleep` exiting after the prompt rather than before it (as in the
+passing boot) is the four `pkg` processes taking more than a second on
+this runner.
+
+**Read wrong for an hour first**, because the serial log alone has the
+shape of the aarch64 console stall above (input stops right after a
+reaped background job, nothing echoed afterwards): the harness verdict
+says it never typed `vmctl flows`, so no input was lost, and the sibling
+boot's time says why the prompt came late. The lesson is the one at the
+top of this file: read the harness's own verdict before the log's shape.
+
+First x86-64 timeout since #314's record; the aarch64 budget was raised
+to 240 s on four such timeouts. The failed job was re-run once; the
+result is recorded here when it lands.
