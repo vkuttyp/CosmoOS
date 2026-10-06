@@ -74,9 +74,17 @@ run: $(IMAGE)
 # BOOT_LOG: where the serial log goes; a variant boot names its own so
 # CI's artifact keeps both.
 BOOT_LOG ?= $(OUT)/boot-test.log
+# The whole-boot timeout: a hang guard, not a performance budget (each
+# self-test has its own budget). AArch64 under TCG is the slower guest, and
+# over 257 CI boots (40 runs, 2026-10-06) it took a median of 154 s, p95 173 s,
+# and exceeded 180 s four times on slow runners -- twice on branches before
+# the one that prompted this -- with every self-test passed. 240 s matches
+# test-chaos. x86-64 stays at 180 s: p95 163 s, maximum 169 s, no timeout.
+# The shell, network and key harnesses derive their deadlines from it.
+BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),240,180)
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(BOOT_LOG) \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
 		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer \
 		$(if $(filter release,$(BUILD)),--shell-burst)
 
@@ -153,7 +161,7 @@ test-harness-retry:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		HARNESS_BREAK=1 OUT=$(OUT)-hbreak image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --harness-retry \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --harness-retry --timeout $(BOOT_TIMEOUT) \
 		--image $(OUT)-hbreak/cosmoos.img --log $(OUT)-hbreak/boot-test-hbreak.log \
 		--kernel $(OUT)-hbreak/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
