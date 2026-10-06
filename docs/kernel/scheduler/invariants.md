@@ -335,7 +335,8 @@ it. Check:
 completion's lock free on every return; it fails when the timeout wait
 drops its handshake) and, for the driver, `tools/nvme-admin-probe.py`.
 
-**S31. `schedule()` never re-enters itself on one thread's stack.** A
+**S31. `schedule()` never re-enters itself while it runs with interrupts
+masked, and a burst of pending reschedules costs it one frame.** A
 reschedule pending when `schedule()` is about to restore its caller's
 interrupt state is taken by another pass of the loop in the same frame
 (`preempt_point_due(s)`, with interrupts off), and the restore that
@@ -345,13 +346,21 @@ which it runs with interrupts masked -- no second `schedule_internal`
 can start on the same thread: not by a restore point (it has none), not
 by `preempt_enable` (interrupts are off), not by a trap (masked). The
 stack a burst of reschedules needs is one frame, whatever the code
-generation; until the restore-loop unit it was one frame per pending
+generation. What S31 does not say is that one thread's stack never holds
+two `schedule_internal` frames: once the restore has enabled interrupts,
+a trap can land before the call returns, and its return path's
+`sched_preempt` starts a second one above it. That one was entered from
+the trap with interrupts masked in its saved state, so it takes a single
+pass and cannot itself be re-entered; the same holds for a trap landing
+before the save on entry. A thread's stack therefore holds at most two,
+the second only above a trap frame. Until the restore-loop unit it was one frame per pending
 reschedule, made constant only by tail calls
 (`docs/audit/2026-10-06-sched-restore-loop-report.md`). Check: assert
 (debug: a per-thread `sched_nest`, raised after the save and lowered
 before the restore, must be zero on entry); `scripts/check-kernel-elf.sh`
-(`schedule_internal` calls none of `arch_irq_restore`,
-`arch_irq_restore_hw`, `preempt_point`, `sched_preempt`); test
+(`schedule_internal`, and `schedule_pass` if the compiler keeps it out of
+line, reach none of `arch_irq_restore`, `arch_irq_restore_hw`,
+`preempt_point`, `sched_preempt`); test
 `sched-restore-loop` (a pinned thread resumed with a reschedule pending
 thousands of times in a row: its entry depth stays within a fixed bound
 of the test's own frame, its nesting at one, and every trip is counted),

@@ -22,7 +22,10 @@ interrupts off, before the restore -- and then restores through
 `arch_irq_restore_nopoint(s)`, which has no preemption point. The
 predicate, the `preempt = true` trip and the `restore-preempts` count are
 unchanged; the second pass runs in the first pass's frame. New invariant
-S31: `schedule()` never re-enters itself on one thread's stack. Debug
+S31: `schedule()` never re-enters itself while it runs with interrupts
+masked, so a burst of pending reschedules costs one frame. (A trap after
+the final restore can still start one more `schedule()` above it, as on
+`main`; that one is a single pass.) Debug
 builds assert it on every entry. The ELF check now verifies the structure
 (`schedule_internal` reaches no preempting restore) rather than code
 generation, and a new self-test with a probe shows the bound holds under
@@ -167,14 +170,19 @@ What the script checks now, failing on any branch or call whose target is
 the named function:
 
 - `schedule_internal` (required symbol) reaches none of `arch_irq_restore`,
-  `arch_irq_restore_hw`, `preempt_point`, `sched_preempt`;
+  `arch_irq_restore_hw`, `preempt_point`, `sched_preempt`, and neither does
+  `schedule_pass` when the compiler keeps it out of line (today it is
+  inlined on both architectures, so its code is checked as
+  `schedule_internal`'s; added after review);
 - `arch_irq_write_hw` (required) does not reach `preempt_point`;
 - `arch_irq_restore_nopoint` (present only with lockdep; skipped only when
   the symbol table confirms it absent) reaches none of `arch_irq_restore`,
   `arch_irq_restore_hw`, `preempt_point`.
 
 A missing required symbol or a failed disassembly fails the link, as the
-old check did. The removed checks are not silently dropped: the comment in
+old check did. The check reads only these functions' own code: a
+preempting restore added in a function they call would pass it, and the
+S31 assertion would catch it on the first trip at run time. The removed checks are not silently dropped: the comment in
 the script names them and points here. The guard's negative control is
 the probe's `guard` mode.
 

@@ -41,14 +41,18 @@ printf '%s\n' "$phdrs" | awk '
 # arch_irq_restore_nopoint (docs/kernel/scheduler/invariants.md S31), so
 # what is checked is that structure, not code generation: schedule_internal
 # must exist and must reach none of the preempting restores or the
-# preemption itself, by call or by jump; and the no-point restore must not
-# reach preempt_point. The per-link tail-call checks are gone, with the
+# preemption itself, by call or by jump; so must schedule_pass, the loop's
+# body, when the compiler keeps it out of line (inlined, it is
+# schedule_internal's own code); and the no-point restore must not reach
+# preempt_point. The check reads these functions' own code: a preempting
+# restore added further down, in a function they call, is the S31
+# assertion's to catch at run time. The per-link tail-call checks are gone, with the
 # reasons in docs/audit/2026-10-06-sched-restore-loop-report.md: a frame on
 # any of those links is now one level per restore point, not per
 # reschedule. A required symbol that is missing, or a disassembly that
-# fails, is a failure, never a pass; arch_irq_restore_nopoint is skipped
-# only when the symbol table confirms it absent (it is inline without
-# lockdep).
+# fails, is a failure, never a pass; schedule_pass and
+# arch_irq_restore_nopoint are skipped only when the symbol table confirms
+# them absent (inlined; the latter is inline without lockdep).
 syms=$("$objdump" -t "$elf")
 never_reaches() {
     required=$1 caller=$2
@@ -77,5 +81,6 @@ never_reaches() {
     done
 }
 never_reaches required schedule_internal arch_irq_restore arch_irq_restore_hw preempt_point sched_preempt
+never_reaches optional schedule_pass arch_irq_restore arch_irq_restore_hw preempt_point sched_preempt
 never_reaches required arch_irq_write_hw preempt_point
 never_reaches optional arch_irq_restore_nopoint arch_irq_restore arch_irq_restore_hw preempt_point

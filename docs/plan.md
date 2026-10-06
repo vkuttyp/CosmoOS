@@ -191,7 +191,8 @@ and [SMP design](kernel/smp/design.md).
   2026-10-06 ([restore-loop report](audit/2026-10-06-sched-restore-loop-report.md)).
   `schedule()` takes a reschedule pending at its restore by another pass
   of a loop (`preempt_point_due`, then `arch_irq_restore_nopoint`), so it
-  never re-enters itself on one thread's stack (scheduler S31, asserted in
+  never re-enters itself while interrupts are masked, so a burst of
+  pending reschedules costs one frame (scheduler S31, asserted in
   debug builds). `check-kernel-elf.sh` checks that structure instead of
   per-link tail calls. `sched-restore-loop` drives 3,200 trips on one CPU;
   its probe fails the old structure under a 192-byte forced call (6,288

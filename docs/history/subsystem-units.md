@@ -2309,7 +2309,7 @@ See the [history index](README.md).
   pass is `schedule_pass()` and `schedule_internal()` loops while
   `preempt_point_due(s)` -- the same predicate, asked with interrupts off
   before the restore -- then restores with `arch_irq_restore_nopoint`. S31:
-  `schedule()` never re-enters itself on one thread's stack, asserted in
+  `schedule()` never re-enters itself with interrupts masked, asserted in
   debug builds; `check-kernel-elf.sh` checks the structure, and its four
   per-link tail-call checks are removed with reasons. Baseline: one-CPU
   x86-64 idle chains of 47–72 reschedules; a 192-byte forced call put the
