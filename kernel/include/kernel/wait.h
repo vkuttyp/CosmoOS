@@ -104,7 +104,15 @@ void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e);
 unsigned waitqueue_wake_one(struct waitqueue *wq);
 unsigned waitqueue_wake_all(struct waitqueue *wq);
 
+/* No sleeping thread and no callback entry on the queue (a snapshot under
+ * its lock): a wake may be skipped. A callback entry counts -- it is owed a
+ * wake as a thread is -- so the test is never a reason to pass an epoll
+ * item over. */
 bool waitqueue_empty(struct waitqueue *wq);
+/* How many threads sleep on the queue right now (callback entries are not
+ * counted): the self-tests' proof that their waiters are enrolled, not a
+ * synchronisation primitive. */
+unsigned waitqueue_waiting(struct waitqueue *wq);
 
 #define wait_event(wq, cond)                                                   \
     do {                                                                       \

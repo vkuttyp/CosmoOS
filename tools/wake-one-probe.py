@@ -97,7 +97,16 @@ def main():
         if any(re.search(p, line) for p in LINES):
             print(line.rstrip())
     if args.tree != 'this':
-        print('(an older tree: the runner judges it by this tree\'s markers, so its verdict may say FAIL on a module ABI marker; the bench line is the product)')
+        # An older tree is judged by what it was asked for: the bench ran and
+        # printed its figures, and passed. The harness's own verdict says
+        # FAIL on this tree's module ABI marker (v7 against their v5/v6), which
+        # is expected and not the probe's failure; a boot that never reached
+        # the bench, or failed it, is.
+        measured = re.search(r'selftest: mutex-wake-bench: waiters', text) is not None
+        passed = re.search(r'^SELFTEST: mutex-wake-bench +\.\.\. ok', text, re.M) is not None
+        print('(an older tree: the harness judges it by this tree\'s markers and says FAIL on the module ABI one; '
+              'the probe\'s verdict is the bench\'s: %s)' % ('measured and passed' if measured and passed else 'NOT measured'))
+        return 0 if measured and passed else 1
     return rc
 
 

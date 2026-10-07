@@ -720,7 +720,7 @@ private snapshot storage before acquiring the raw lock.
 
 ## Memory
 
-512 KiB graph, 512 classes × 96 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
+800 KiB graph (2048 nodes squared, as a bitmap), 512 classes × 96 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
 thread, 264 bytes per thread (and per CPU) of raw interrupt saves, 1 KiB
 for the spinlock-class to completion-class table, and 40 bytes per thread
 for the pending `complete()` record. The

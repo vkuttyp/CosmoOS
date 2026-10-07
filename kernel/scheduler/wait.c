@@ -151,10 +151,24 @@ void waitqueue_unlock(struct waitqueue *wq, arch_irq_state_t s)
 
 bool waitqueue_empty(struct waitqueue *wq)
 {
+    /* Both lists: a caller skips a wake on an empty queue, and a wake is
+     * owed to a callback entry as much as to a thread (an epoll item on a
+     * pollable object's queue would otherwise be passed over). */
     arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
-    bool empty = list_empty(&wq->waiters);
+    bool empty = list_empty(&wq->waiters) && list_empty(&wq->callbacks);
     spin_unlock_irqrestore(&wq->lock, s);
     return empty;
+}
+
+unsigned waitqueue_waiting(struct waitqueue *wq)
+{
+    unsigned n = 0;
+    struct wait_entry *e;
+    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
+    list_for_each_entry(e, &wq->waiters, link)
+        n++;
+    spin_unlock_irqrestore(&wq->lock, s);
+    return n;
 }
 
 /* --- the timed wait --- */

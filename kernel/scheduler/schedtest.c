@@ -1014,14 +1014,12 @@ bool selftest_mutex(const char **reason)
 
 struct wake_bench {
     struct mutex m;
-    volatile unsigned blocked;    /* waiters that have reached mutex_lock (counted before they block) */
     volatile uint64_t first_at;   /* the first woken waiter's acquire time; 0 until then */
 };
 
 static void wake_bench_waiter(void *arg)
 {
     struct wake_bench *b = arg;
-    __atomic_fetch_add(&b->blocked, 1, __ATOMIC_ACQ_REL);
     mutex_lock(&b->m);
     uint64_t now = clock_now_ns();
     uint64_t zero = 0;
@@ -1043,6 +1041,20 @@ static void sort_ns(uint64_t *v, unsigned n)
     }
 }
 
+/* A round that cannot go on: release the mutex so the waiters already
+ * created can take it and leave, and join them, before the test reports
+ * its reason. A CHECK that returned with the mutex held would leave them
+ * blocked for the rest of the boot. */
+static bool wake_bench_abort(struct wake_bench *b, struct thread **th, unsigned created, const char **reason,
+                             const char *why)
+{
+    mutex_unlock(&b->m);
+    for (unsigned i = 0; i < created; i++)
+        thread_join(th[i]);
+    *reason = why;
+    return false;
+}
+
 static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unlock_ns, uint64_t *wake_ns)
 {
     static struct wake_bench b;
@@ -1056,23 +1068,27 @@ static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unl
          * budget by being quick (1.6 to 1.9 s for all four sizes on TCG),
          * not by a budget of its own. */
         sched_watchdog_kick();
-        b.blocked = 0;
         b.first_at = 0;
         mutex_lock(&b.m);
-        for (unsigned i = 0; i < nwaiters; i++) {
-            th[i] = thread_create(wake_bench_waiter, &b, "wake-bench-w", SCHED_PRIO_DEFAULT);
-            CHECK(th[i] != NULL);
+        unsigned created = 0;
+        for (; created < nwaiters; created++) {
+            th[created] = thread_create(wake_bench_waiter, &b, "wake-bench-w", SCHED_PRIO_DEFAULT);
+            if (th[created] == NULL)
+                return wake_bench_abort(&b, th, created, reason, "mutex-wake-bench: thread_create failed");
         }
-        /* Every waiter has reached mutex_lock; a settle lets the last of
-         * them block rather than spin on the way in. */
-        for (unsigned i = 0; i < 400 && __atomic_load_n(&b.blocked, __ATOMIC_ACQUIRE) < nwaiters; i++)
+        /* Every waiter is on the mutex's wait queue -- the queue's own
+         * count, under its lock, not a counter the waiter bumps on the way
+         * in nor a settle: what the unlock then walks is exactly nwaiters
+         * entries, and the first acquire it times is a wake. */
+        unsigned i;
+        for (i = 0; i < 400 && waitqueue_waiting(&b.m.wq) < nwaiters; i++)
             thread_sleep_ms(5);
-        CHECK(b.blocked == nwaiters);
-        thread_sleep_ms(10);
+        if (waitqueue_waiting(&b.m.wq) != nwaiters)
+            return wake_bench_abort(&b, th, created, reason, "mutex-wake-bench: the waiters did not all block in 2 s");
         uint64_t t0 = clock_now_ns();
         mutex_unlock(&b.m);
         uint64_t t1 = clock_now_ns();
-        for (unsigned i = 0; i < nwaiters; i++)
+        for (i = 0; i < nwaiters; i++)
             thread_join(th[i]);
         CHECK(b.first_at != 0 && b.first_at >= t0);
         unlock[r] = t1 - t0;

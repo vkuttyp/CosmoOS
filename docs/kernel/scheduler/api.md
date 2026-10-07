@@ -253,8 +253,12 @@ last (the lowest priority level's tail).
 ## wait.h
 
 ### `struct waitqueue`, `void waitqueue_init(struct waitqueue *wq, const char *name)`, `WAITQUEUE_INIT(name)`
-- A spinlock and a list of `struct wait_entry` (link + thread). Entries
-  live on the waiting thread's stack.
+- A spinlock and two lists of `struct wait_entry` (link, thread, `fn`):
+  `waiters`, the sleeping threads (entries on the waiting thread's stack),
+  and `callbacks`, the callback entries every wake runs under the lock
+  (`waitqueue_add_callback`; epoll's items). A `wake_one` runs the
+  callbacks list whole and stops at the first thread it transitions; a
+  `wake_all` wakes every thread.
 
 ### `wait_event(wq, cond)` (macro)
 - **Protocol**: `wait_entry_init(&e)` once; loop { `waitqueue_prepare(wq,
@@ -282,7 +286,15 @@ last (the lowest priority level's tail).
   Interrupt-safe.
 
 ### `bool waitqueue_empty(wq)`
-- Snapshot under the lock.
+- Snapshot under the lock: no sleeping thread *and* no callback entry.
+  Used to skip a wake; a callback entry is owed one like a thread, so the
+  test never passes an epoll item over.
+
+### `unsigned waitqueue_waiting(wq)`
+- How many threads sleep on the queue (callback entries not counted),
+  under the lock. For a self-test's proof that its waiters are enrolled
+  before it measures a wake (`mutex-wake-bench`); not a synchronisation
+  primitive.
 
 ### `wait_event_killable(wq, cond)` (macro, Phase 9)
 - The `wait_event` loop that also ends when the calling process is
