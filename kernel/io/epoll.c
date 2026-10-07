@@ -127,12 +127,11 @@ void epoll_init(void)
     mutex_init(&g_watch_lock, "epoll-watch");
 }
 
-/* g_watch_lock held. The list head is also read without the lock, by
- * epoll_last_handle_closed's first look, so it is stored atomically. */
+/* g_watch_lock held; the list head is read and written under it only. */
 static void watch_link(struct epoll_item *it)
 {
     it->obj_next = it->obj->watchers;
-    __atomic_store_n(&it->obj->watchers, it, __ATOMIC_RELEASE);
+    it->obj->watchers = it;
 }
 
 /* g_watch_lock held. The item is on its object's list exactly once. */
@@ -140,7 +139,7 @@ static void watch_unlink(struct epoll_item *it)
 {
     struct kobject *obj = it->obj;
     if (obj->watchers == it) {
-        __atomic_store_n(&obj->watchers, it->obj_next, __ATOMIC_RELEASE);
+        obj->watchers = it->obj_next;
     } else {
         struct epoll_item *prev = obj->watchers;
         while (prev->obj_next != it)
@@ -190,12 +189,12 @@ static void epoll_release(struct kobject *obj)
 
 void epoll_last_handle_closed(struct kobject *obj)
 {
-    /* Unlocked read first: the common object was never registered and
-     * must not pay for a mutex at every close. A registration made after
-     * this read happens under the lock, where the add re-checks the handle
-     * count and refuses an object with none (-EBADF), so nothing is missed. */
-    if (__atomic_load_n(&obj->watchers, __ATOMIC_ACQUIRE) == NULL)
-        return;
+    /* The lock first, even for the common object that was never
+     * registered: an add that passed its handle-count check under this
+     * lock and has not yet linked its item would be invisible to an
+     * unlocked look at `watchers`, and its registration would outlive the
+     * last descriptor (review of PR #324). The decision is made under the
+     * lock the add publishes under; the uncontended mutex is the cost. */
     mutex_lock(&g_watch_lock);
     /* A descriptor can have reappeared: a handle riding in a unix message
      * is installed at the receiver (handle_install raises the count) and
@@ -206,7 +205,7 @@ void epoll_last_handle_closed(struct kobject *obj)
         return;
     }
     struct epoll_item *gone = obj->watchers;
-    __atomic_store_n(&obj->watchers, NULL, __ATOMIC_RELEASE);
+    obj->watchers = NULL;
     for (struct epoll_item *it = gone; it != NULL; it = it->obj_next) {
         struct epoll_obj *ep = it->ep;   /* alive: its items leave this list in epoll_release */
         mutex_lock(&ep->lock);

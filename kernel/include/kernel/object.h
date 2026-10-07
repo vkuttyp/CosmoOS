@@ -49,8 +49,9 @@ struct kobject {
     uint32_t handles;
     struct module *owner;   /* module whose code the release lives in, or NULL for the kernel */
     /* The epoll entries registered on this object (kernel/io/epoll.c), a
-     * singly linked list through epoll_item.obj_next under epoll's own
-     * watch lock; NULL for the many objects never registered. */
+     * singly linked list through epoll_item.obj_next, read and written
+     * under epoll's own watch lock only; NULL for the many objects never
+     * registered. */
     struct epoll_item *watchers;
 };
 

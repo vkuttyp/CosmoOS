@@ -49,8 +49,12 @@ still be alive while its registrations go.
 its set (`it->ep`). The last close walks that list: for each item, under
 the set's `ep->lock`, the item leaves the set's list, `ep->nr` drops,
 and the set's queue is woken; the items' references are put outside every
-lock. Objects never registered pay one pointer and an unlocked NULL read
-at close.
+lock. Objects never registered pay one pointer and an uncontended mutex
+at their last close: the decision that there is nothing to remove is made
+under the lock the add publishes under (an unlocked look at the list was
+the first version, and review found the add that had passed its check
+and not yet linked -- a registration that would have outlived the last
+descriptor).
 
 **Locking.** One global mutex, `g_watch_lock` (Linux's `epmutex`),
 guards every `watchers` list and the handle-count check. The order is
@@ -63,6 +67,7 @@ lock is initialised at boot (`epoll_init`, after `futex_init`).
 
 | Race | Rule |
 |---|---|
+| the last close against an add in flight: the add passed its handle-count check under the watch lock and has not linked its item yet | the removal decides under the same lock, so it either sees the item or runs before the add's check (which then sees no handle) |
 | ADD against the last close: the door's lookup saw a slot, another thread emptied it before the add, the removal found no item | the add re-reads `handles` under the watch lock and refuses an object with none (`-EBADF`); Linux returns 0 and removes at the final fput, which cannot happen here because the item itself would hold the object |
 | a descriptor reappears: a handle riding in a unix message is installed at the receiver between `handle_close`'s decrement and the removal's lock | the removal re-reads `handles` under the lock and keeps the registrations when it is back |
 | the set closed while it holds entries, then a member's last close | `epoll_release` unlinks its items from their members' lists under the watch lock before freeing them |

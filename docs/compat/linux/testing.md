@@ -179,8 +179,9 @@ walker on `debug.cwd_hold`, and a Linux program has no sysctl. Prints
 After the package section, `rc.test` runs `/etc/rc.linux` when
 `/boot/tests/linux/lxhello` exists (both architectures since milestone
 10): `lxhello || exit 1`, `lxtest || exit 1`, `lxdyn || exit 1`, the
-eight `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then
-`hello_musl` and `epoll_musl` each only if the file exists. A failing
+eight `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then,
+in an inner `sh -c` that exits 0 when `hello_musl` is absent, `hello_musl`
+and `epoll_musl`, each failing the section when it fails. A failing
 Linux program therefore also fails `SHTEST`.
 
 The harness requires in self-test builds (`LINUXTEST_MARKERS`):

@@ -415,9 +415,10 @@ and [Linux compatibility API](compat/linux/api.md).
   per-thread registration/abort semantics and a new socket-family protocol surface.
 - [ ] **Implementation — socket options.** Add backing behavior for supported
   options; preserve explicit errors for options whose semantics remain unimplemented.
-- [x] **Implementation — epoll lifetime and nesting.** Add removal on final
-  descriptor close and nested sets with cycle detection. Edge-triggered operation
-  is already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
+- [x] **Implementation — epoll lifetime; decision — nesting.** Removal on
+  the final descriptor close is built; nested sets with cycle detection
+  are refused by decision (below). Edge-triggered operation
+  was already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
   [EPOLLET](audit/next-subsystem-epollet.md). *Removal completed
   2026-10-07*: the handle table counts an object's slots across every
   process and the close that empties the last one removes the object's

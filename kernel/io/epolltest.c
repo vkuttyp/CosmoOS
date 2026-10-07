@@ -66,7 +66,7 @@ static bool refcount_settles(struct kobject *obj, uint32_t n, unsigned ms)
 struct hold_server {
     struct netaddr addr;
     struct socket *ls, *c;
-    volatile bool accepted, stop, done;
+    volatile bool listening, accepted, stop, done;
     int result;
 };
 
@@ -78,6 +78,7 @@ static void hold_server_thread(void *arg)
         srv->result = ksock_bind(srv->ls, &srv->addr);
     if (srv->result == 0)
         srv->result = ksock_listen(srv->ls, 1);
+    __atomic_store_n(&srv->listening, true, __ATOMIC_RELEASE);   /* ready, or failed: the test looks at result */
     if (srv->result == 0)
         srv->result = ksock_accept(srv->ls, &srv->c, NULL);
     __atomic_store_n(&srv->accepted, true, __ATOMIC_RELEASE);
@@ -156,7 +157,9 @@ bool selftest_epoll_close(const char **reason)
     srv.addr.port = EPOLL_CLOSE_PORT;
     struct thread *st = thread_create(hold_server_thread, &srv, "epoll-hold", 32);
     CHECK(st != NULL);
-    thread_sleep_ms(20);   /* let it listen */
+    for (unsigned i = 0; i < 400 && !__atomic_load_n(&srv.listening, __ATOMIC_ACQUIRE); i++)
+        thread_sleep_ms(5);   /* until it listens (bounded at 2 s), not a fixed settle */
+    CHECK(srv.listening && srv.result == 0);
     struct socket *c;
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);

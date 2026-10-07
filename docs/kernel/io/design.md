@@ -259,7 +259,13 @@ The one lock added is a global mutex, `g_watch_lock` (as Linux's
 add makes. Order: `g_watch_lock` outside `ep->lock`, always -- the add,
 the DEL, the release and the last-close removal all take it first;
 `epoll_obj_wait` takes `ep->lock` alone and never the watch lock, so a
-waiter is never in the order. Three races are closed by it:
+waiter is never in the order. The removal takes it before deciding
+whether the object has watchers at all, even for the common object that
+was never registered: an add that has passed its handle-count check
+under the lock and not yet linked its item is invisible to an unlocked
+look at the list, and its registration would outlive the last descriptor
+(found in review). An uncontended mutex per last close is the cost. Three
+more races are closed by it:
 
 - *An add against the last close.* The door looked the descriptor up, so
   the object had a slot then; another thread's close can empty it before
