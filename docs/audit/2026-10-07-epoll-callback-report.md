@@ -275,3 +275,44 @@ x86-64 runner; the litmus job's `epoll/watched.litmus` verdicts are
 
 Plan §8's epoll item is complete; inventory §7.7 and the history carry the
 unit; the epoll unit's risks list strikes nesting.
+
+## 7. Follow-up: `wake_one` and the nesting limit
+
+Two things this unit left wrong, fixed in the follow-up PR (branch
+`wake-one-nesting`).
+
+**`wake_one` walked the whole queue.** Since §2's fix for the review,
+`wake_one` kept walking after the thread it woke so that every callback
+entry on the list ran -- correct for a queue with callbacks, and for a
+mutex's queue, a semaphore's or the quiesce worker's, which never carry
+one, a contended unlock that became O(waiters) under the queue's spinlock
+with interrupts off. `struct waitqueue` now has two lists, `waiters` and
+`callbacks` (Linux keeps its non-exclusive entries at the head and its
+exclusive ones at the tail for the same reason): a wake runs the callbacks
+list whole, then stops at the first thread it transitions. Module ABI 7.
+`mutex-wake-bench` is the measurement: 1, 8 and 32 waiters blocked on a
+mutex, the unlock call's duration and the time from the unlock to the first
+waiter's acquire, medians of ten. Three trees, through
+`tools/wake-one-probe.py`: before the unit (`95c635e2`), after it
+(`abf63098`), and the follow-up.
+
+TBD-WAKE-TABLE
+
+**The nesting limit was four; Linux's is five.** epoll_ctl(2) documents
+`ELOOP` for "a nesting depth of epoll instances greater than 5"; in the
+source `EP_MAX_NESTS` is 4 and the reverse-path check counts a file's
+depth from 0, so a file sits in at most five sets (the forward walk alone
+would let a chain of empty sets go one deeper, an edge the man page does
+not promise). `EPOLL_MAX_NESTS` is 5 and lockdep has five subclasses: a
+chain of five sets wakes at subclasses 0..4. The alternative the review
+of the plan named -- keep four subclasses and cap the forwarded wake's
+subclass at three -- was rejected on inspection: the top two sets of a
+five-chain would take the `epoll` queue lock at the same subclass, one
+inside the other, and lockdep would report a recursion in every debug
+boot that exercises the depth, a false positive it cannot tell from the
+inversion the subclasses exist to find. The fifth subclass costs 288 KiB
+of order graph in debug builds (800 KiB, from 512). A11, `epoll-nest`
+(five accepted, the sixth refused), `LXEPOLLNEST` (a chain of six) and
+the design say five.
+
+TBD-FOLLOWUP-VALIDATION
