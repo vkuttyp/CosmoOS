@@ -9,6 +9,7 @@
  * out and the tests report that.
  */
 
+#include <kernel/completion.h>
 #include <kernel/interrupt.h>
 #include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
@@ -811,6 +812,251 @@ bool selftest_lockdep_irq_pairing(const char **reason)
     return r;
 }
 
+
+/*
+ * Completion waits (design.md, "Completion waits"): a wait that holds a
+ * mutex its signaller needs is reported from whichever side closes the
+ * cycle, through the real APIs, and the shapes that cannot deadlock stay
+ * silent (a report there would panic the boot). Each case has its own
+ * completion name, so its edges are its own.
+ */
+static struct mutex g_cm_l1, g_cm_l2, g_cm_l3, g_cm_m3, g_cm_l4, g_cm_l5, g_cm_l6, g_cm_l7, g_cm_l8, g_cm_l9;
+static spinlock_t g_cm_spin = SPINLOCK_INIT("lockdep-cm-spin");
+static bool g_cm_init;
+
+struct cm_signal {
+    struct completion *c;
+    struct mutex *hold;   /* taken around the complete(), or NULL */
+    bool expect;          /* arm LOCKDEP_R_COMPLETION on this CPU before completing */
+    unsigned hits;
+};
+
+static void cm_signaller(void *arg)
+{
+    struct cm_signal *s = arg;
+    if (s->hold)
+        mutex_lock(s->hold);
+    if (s->expect)
+        lockdep_expect(LOCKDEP_R_COMPLETION);
+    complete(s->c);
+    if (s->hold)
+        mutex_unlock(s->hold);   /* a complete() under a mutex is committed to the graph here, and reported here */
+    if (s->expect)
+        s->hits = lockdep_expected_hits();
+}
+
+/* A signaller on `cpu` (this one: expectations are per CPU), joined. */
+static bool cm_signal(struct cm_signal *s, unsigned cpu)
+{
+    struct thread *t = thread_create_on(cm_signaller, s, "cm-signal", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    if (t == NULL)
+        return false;
+    thread_join(t);
+    return true;
+}
+
+static void cm_timer_cb(struct timer *t, void *arg)
+{
+    (void)t;
+    spin_lock(&g_cm_spin);
+    complete(arg);
+    spin_unlock(&g_cm_spin);
+}
+
+struct cm_irq {
+    struct completion *c;
+    unsigned done;
+};
+
+static void cm_irq_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    struct cm_irq *p = arg;
+    spin_lock(&g_cm_spin);
+    complete(p->c);
+    spin_unlock(&g_cm_spin);
+    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
+}
+
+static bool selftest_lockdep_completion_pinned(const char **reason)
+{
+    unsigned here = arch_cpu_id();   /* pinned by the wrapper */
+    if (!g_cm_init) {
+        mutex_init(&g_cm_l1, "lockdep-cm-l1");
+        mutex_init(&g_cm_l2, "lockdep-cm-l2");
+        mutex_init(&g_cm_l3, "lockdep-cm-l3");
+        mutex_init(&g_cm_m3, "lockdep-cm-m3");
+        mutex_init(&g_cm_l4, "lockdep-cm-l4");
+        mutex_init(&g_cm_l5, "lockdep-cm-l5");
+        mutex_init(&g_cm_l6, "lockdep-cm-l6");
+        mutex_init(&g_cm_l7, "lockdep-cm-l7");
+        mutex_init(&g_cm_l8, "lockdep-cm-l8");
+        mutex_init(&g_cm_l9, "lockdep-cm-l9");
+        g_cm_init = true;
+    }
+    struct completion c;
+    struct cm_signal s;
+
+    /* 1. The signal first, holding L1: C -> L1. A wait holding L1 then
+     * closes L1 -> C -> L1, and is reported at the wait although the
+     * completion is already done. */
+    completion_init(&c, "lockdep-cm-signal-first");
+    s = (struct cm_signal){ .c = &c, .hold = &g_cm_l1 };
+    CHECK(cm_signal(&s, here));
+    mutex_lock(&g_cm_l1);
+    lockdep_expect(LOCKDEP_R_COMPLETION);
+    wait_for_completion(&c);
+    unsigned hits_signal_first = lockdep_expected_hits();
+    mutex_unlock(&g_cm_l1);
+    CHECK(hits_signal_first == 1);
+
+    /* 2. The wait first, holding L2, signalled by a thread holding
+     * nothing: L2 -> C and no report. A later complete() of the same
+     * class holding L2 closes the cycle and is reported on the
+     * signaller's CPU when its complete() is committed: at its unlock of
+     * L2, the first event after the complete() that is not its own wait. */
+    completion_init(&c, "lockdep-cm-wait-first");
+    s = (struct cm_signal){ .c = &c };
+    mutex_lock(&g_cm_l2);
+    struct thread *t = thread_create_on(cm_signaller, &s, "cm-signal", SCHED_PRIO_DEFAULT, CPUMASK_OF(here));
+    if (t == NULL) {
+        mutex_unlock(&g_cm_l2);
+        CHECK(t != NULL);
+    }
+    wait_for_completion(&c);
+    mutex_unlock(&g_cm_l2);
+    thread_join(t);
+    struct completion c2;
+    completion_init(&c2, "lockdep-cm-wait-first");   /* the same class, another object */
+    s = (struct cm_signal){ .c = &c2, .hold = &g_cm_l2, .expect = true };
+    CHECK(cm_signal(&s, here));
+    unsigned hits_wait_first = s.hits;
+    CHECK(hits_wait_first == 1);
+
+    /* 3. Through a chain: M3 -> L3 is recorded elsewhere (L3 taken under
+     * M3), the signaller holds M3 (C -> M3), and a wait holding L3 closes
+     * L3 -> C -> M3 -> L3: a thread holding M3 and taking L3 would block
+     * on the waiter, and the signaller behind it on M3. The signaller
+     * never took L3. */
+    mutex_lock(&g_cm_m3);
+    mutex_lock(&g_cm_l3);
+    mutex_unlock(&g_cm_l3);
+    mutex_unlock(&g_cm_m3);
+    completion_init(&c, "lockdep-cm-chain");
+    s = (struct cm_signal){ .c = &c, .hold = &g_cm_m3 };
+    CHECK(cm_signal(&s, here));
+    mutex_lock(&g_cm_l3);
+    lockdep_expect(LOCKDEP_R_COMPLETION);
+    wait_for_completion(&c);
+    unsigned hits_chain = lockdep_expected_hits();
+    mutex_unlock(&g_cm_l3);
+    CHECK(hits_chain == 1);
+
+    /* 4. A timed wait records the same edges: C -> L4 from the signaller,
+     * then wait_for_completion_timeout holding L4 is reported. */
+    completion_init(&c, "lockdep-cm-timed");
+    s = (struct cm_signal){ .c = &c, .hold = &g_cm_l4 };
+    CHECK(cm_signal(&s, here));
+    mutex_lock(&g_cm_l4);
+    lockdep_expect(LOCKDEP_R_COMPLETION);
+    bool timed = wait_for_completion_timeout(&c, 1000000000ULL);
+    unsigned hits_timed = lockdep_expected_hits();
+    mutex_unlock(&g_cm_l4);
+    CHECK(timed);
+    CHECK(hits_timed == 1);
+
+    /* 5. Self-signalling after a timed-out wait, silent: a timed wait
+     * holding L5 that nobody signals gives up (L5 -> C recorded); this
+     * thread then completes its own object holding L5 and waits for the
+     * handshake, as usb_sync_msg and the AHCI cmd_sync do. The
+     * complete() is pending until the wait for the same object discards
+     * it. A thread cannot deadlock with itself, and the class alone could
+     * not tell: a report here panics the boot. */
+    completion_init(&c, "lockdep-cm-self");
+    mutex_lock(&g_cm_l5);
+    bool early = wait_for_completion_timeout(&c, 1000000ULL);
+    complete(&c);
+    wait_for_completion(&c);
+    mutex_unlock(&g_cm_l5);
+    CHECK(!early);
+
+    /* 6. A timer-callback signaller taking a spinlock, silent: it holds
+     * no mutex, and a spinlock reaches none. The waiter holds L6. */
+    completion_init(&c, "lockdep-cm-timer");
+    struct timer tm;
+    timer_setup(&tm, cm_timer_cb, &c);
+    mutex_lock(&g_cm_l6);
+    timer_start(&tm, 1000000ULL);
+    bool fired = wait_for_completion_timeout(&c, 1000000000ULL);
+    mutex_unlock(&g_cm_l6);
+    (void)timer_cancel_sync(&tm);   /* the timer lives in this frame */
+    CHECK(fired);
+
+    /* 7. An interrupt-context signaller taking a spinlock, silent, the
+     * waiter holding L7: a real self-IPI. */
+    completion_init(&c, "lockdep-cm-irq");
+    struct cm_irq p = { .c = &c };
+    int vec = arch_vector_alloc();
+    CHECK(vec >= 0);
+    int rc = interrupt_register((unsigned)vec, cm_irq_handler, &p, "selftest-lockdep-cm");
+    if (rc != 0) {
+        arch_vector_free((unsigned)vec);
+        CHECK(rc == 0);
+    }
+    arch_ipi_bind((unsigned)vec);
+    mutex_lock(&g_cm_l7);
+    arch_ipi_send(here, (unsigned)vec);
+    bool irq_done = wait_for_completion_timeout(&c, 1000000000ULL);
+    mutex_unlock(&g_cm_l7);
+    rc = interrupt_unregister_sync((unsigned)vec, cm_irq_handler);
+    arch_vector_free((unsigned)vec);
+    CHECK(rc == 0);
+    CHECK(irq_done);
+    CHECK(__atomic_load_n(&p.done, __ATOMIC_ACQUIRE) != 0);
+
+    /* 8. Control: a signaller holding L8 (C -> L8) against a waiter that
+     * released L8 before the wait records no edge into C and reports
+     * nothing. (Case 2's first half is the other control: a signaller
+     * holding nothing against a waiter holding L2.) */
+    completion_init(&c, "lockdep-cm-released");
+    s = (struct cm_signal){ .c = &c, .hold = &g_cm_l8 };
+    CHECK(cm_signal(&s, here));
+    mutex_lock(&g_cm_l8);
+    mutex_unlock(&g_cm_l8);
+    wait_for_completion(&c);
+
+    /* 9. Self-signalling before any wait, silent: the shape of a device
+     * that completes inside submit (ramblk) under the submitter's locks.
+     * This thread holds L9, completes its own object, then waits; the
+     * complete() is discarded by the wait and L9 -> C is all the graph
+     * gets, twice over (a second object of the class, the same way). */
+    completion_init(&c, "lockdep-cm-sync-submit");
+    mutex_lock(&g_cm_l9);
+    complete(&c);
+    wait_for_completion(&c);
+    mutex_unlock(&g_cm_l9);
+    completion_init(&c2, "lockdep-cm-sync-submit");
+    mutex_lock(&g_cm_l9);
+    complete(&c2);
+    wait_for_completion(&c2);
+    mutex_unlock(&g_cm_l9);
+
+    kinfo("selftest: lockdep-completion: a wait holding a lock its signaller needs was reported in both orders, "
+          "through a chain and on a timed wait; self-signals, a callback, an interrupt and a released lock were silent");
+    return true;
+}
+
+/* Pinned: expectations are per CPU, and the signaller threads run on this
+ * CPU so their reports land where the expectation is armed. */
+bool selftest_lockdep_completion(const char **reason)
+{
+    cpumask_t saved = thread_pin_self();
+    bool r = selftest_lockdep_completion_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
 #else
 
 static bool skip(const char **reason, const char *name)
@@ -827,6 +1073,7 @@ bool selftest_lockdep_mutex(const char **reason) { return skip(reason, "lockdep-
 bool selftest_lockdep_contention(const char **reason) { return skip(reason, "lockdep-contention"); }
 bool selftest_lockdep_callback(const char **reason) { return skip(reason, "lockdep-callback"); }
 bool selftest_lockdep_irq_pairing(const char **reason) { return skip(reason, "lockdep-irq-pairing"); }
+bool selftest_lockdep_completion(const char **reason) { return skip(reason, "lockdep-completion"); }
 
 #endif
 

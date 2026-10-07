@@ -104,6 +104,8 @@ struct thread {
     struct lockdep_held held_mutex[LOCKDEP_MAX_HELD_MUTEX];   /* lockdep: mutexes this thread holds */
     unsigned nr_held_mutex;
     struct lockdep_irq_saves irq_saves;   /* lockdep: this thread's outstanding raw interrupt saves */
+    struct lockdep_completion_pending completion_pending;   /* lockdep: this thread's last complete() with mutexes
+                                                               held, until committed or found to be its own wait's */
     /* (pi, under g_pi_lock in mutex.c) priority inheritance: the mutexes this
      * thread holds that have waiters, and the one it is itself blocked
      * acquiring (NULL otherwise) -- the donation chain walks the latter. */

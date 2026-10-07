@@ -471,8 +471,11 @@ Read before the lock -- the order until then -- the check could pass,
 the CPU go to the down, and the entry be made after the flush. Every
 writer of `nif->flags` (`netif_set_up`, `netif_set_forward`,
 `netif_set_masquerade`, `netif_unregister` step 1) holds `nif->lock` and
-publishes the whole word with a release store, so the lock-free acquire
-loads on the data paths see one word, never a torn read-modify-write;
+publishes the whole word with a release store, so the lock-free loads on
+the data paths see one word, never a torn read-modify-write (the
+`NETIF_UP` and `NETIF_GONE` readers acquire; the `NETIF_FORWARD`,
+`NETIF_MASQUERADE` and `NETIF_LOOPBACK` reads in `ipv4.c`, `fw.c` and
+`nat.c` are plain and repeated per packet: `docs/plan.md` §7);
 `netif_register`'s clear of `NETIF_GONE` is before the object is
 published and needs none. **Checked by** `net-neigh-down-race` (debug
 builds): `arp_test_hold_lock_entry`/`nd_test_hold_lock_entry` park the
@@ -480,10 +483,15 @@ next `arp_input`, `arp_resolve`, `nd_input_ns` or `nd_resolve` between
 its decision to proceed and its taking of the lock; the test takes the
 interface down while each is parked, releases it, and finds no entry
 (and `-ENETUNREACH` with the packet counted dropped from the resolves).
-`tools/neigh-down-race-probe.py --old` moves the input checks back before
-the lock and removes the resolve checks: the test fails at
-`!arp_lookup(&d.nif, r.ip4, mac)`, the asker learned on the down
-interface.
+`tools/neigh-down-race-probe.py --old <race>` restores the old order in
+one path at a time -- `arp-input` and `nd-input` move that input check
+back before the lock, `arp-resolve` and `nd-resolve` remove that resolve
+check -- and the test fails at that race's own check: the asker learned
+on the down interface (`!arp_lookup(&d.nif, r.ip4, mac)`; `nd_resolve`
+returning 0), or the resolve answering `-EINPROGRESS` instead of
+`-ENETUNREACH`. The advertisement path has no failing counterpart:
+`nd_input_na` never allocates, so a flush leaves it nothing to complete
+under either order.
 
 **Checked by** `net-arp-per-interface` and `net-nd-per-interface`: two
 fake interfaces, one neighbour address, two MACs; each resolution sends

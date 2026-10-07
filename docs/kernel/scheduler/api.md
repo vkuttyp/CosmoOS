@@ -355,6 +355,12 @@ last (the lowest priority level's tail).
   only after `complete` has let go of `c`, so the caller may free it) and
   false at the deadline (`c` may complete later, so the caller must stop
   whatever will complete it, or `wait_for_completion`, before freeing).
+- Lockdep (debug builds): the name given to `completion_init` is a lock
+  class. A wait holding a mutex that any `complete()` of the class is
+  recorded holding, or a `complete()` holding a mutex that any wait of the
+  class is recorded holding, is a `LOCKDEP_R_COMPLETION` report
+  (`docs/kernel/lockdep/invariants.md` L21). Name completions by purpose,
+  as locks are named: two unrelated uses sharing a name share a class.
   This is what a caller with a timeout uses: a poll of `completion_done`
   followed by a bare return races `complete` on another CPU (invariant
   S30), and this primitive removes the poll (the NVMe admin bug,

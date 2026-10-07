@@ -2367,5 +2367,25 @@ See the [history index](README.md).
   refused with the packet counted dropped; every writer of the flag word
   publishes with a release store. `net-neigh-down-race` parks each caller
   at the window with debug hooks while the interface goes down;
-  `tools/neigh-down-race-probe.py --old` restores the old order and fails
-  it. Report: `docs/audit/2026-10-07-neighbour-per-interface-report.md`, §8.
+  `tools/neigh-down-race-probe.py --old <race>` restores the old order in
+  one path at a time and fails at that race's own check. Report: `docs/audit/2026-10-07-neighbour-per-interface-report.md`, §8.
+- **Completion waits in the lock graph, and what the suite never drives.**
+  A wait holding a mutex that the completion's signaller needs was outside
+  lockdep: a completion had no class. Each completion name is one now
+  (`LOCKDEP_KIND_COMPLETION`, keyed through the completion's own spinlock
+  class, so `struct completion` gains no field): a wait records the
+  mutexes held across it, a thread-context `complete()` the mutexes held at
+  the call, deferred until the thread's next event and discarded when that
+  event is its own wait for the same object (the RAM block device completes
+  in `submit`; USB and AHCI cancel after a timed-out wait). Interrupt and
+  callback signallers record nothing: the waiter holds no spinlock and no
+  spinlock reaches a mutex, so they cannot be on such a cycle. No history,
+  which is where crossrelease and DEPT got their false positives. The tree
+  reported no violation; the class table went 384 → 512 (a boot had reached
+  382). The runner prints the timer callback functions set up and never run
+  and the completion classes never signalled or never waited for: one
+  callback (`delack_timer`) and one polled production class
+  (`xhci-first-scan`) on this tree.
+  `lockdep-completion` (four reports, five silent controls),
+  `tools/lockdep-completion-probe.py` (four modes). Report:
+  `docs/audit/2026-10-08-lockdep-completion-waits-report.md`.

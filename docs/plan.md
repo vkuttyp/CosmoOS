@@ -57,7 +57,7 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
 - [ ] **Implementation — global held-state snapshots.** Provide a defined
   consistency model across CPU spinlock stacks and thread mutex stacks;
   separately consistent snapshots do not form one simultaneous global view.
-- [ ] **Implementation — callback-wait dependencies.** Extend coverage beyond
+- [x] **Implementation — callback-wait dependencies.** Extend coverage beyond
   locks learned from observed active timer callbacks, including other
   synchronous callback waits and paths not yet observed.
   *2026-10-05, partly done:* timer callback functions are lockdep classes: a
@@ -66,9 +66,41 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   function, transitively and in either order (`lockdep-callback`, with
   negative controls). IRQ-handler and module waits go through
   `synchronize_quiesce`, whose `might_sleep` rules out a lock cycle.
-  Still open, and the reason this item stays unchecked: callback paths
-  never executed contribute no edges, and `wait_for_completion` on a
-  callback-signalled completion has no function to key a class on. See the [callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md).
+  See the [callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md).
+  *Completed 2026-10-08:* completion waits are in the graph through
+  completion classes keyed by the completion's name (L21): a wait records
+  the mutexes held across it, a `complete()` the mutexes held at the call
+  (deferred until the thread's next event, and discarded when that event
+  is its own wait for the same object: a device completing in `submit`, a
+  cancel after a timed-out wait). Interrupt and timer-callback signallers
+  cannot be on such a cycle (`might_sleep` at the wait; no spinlock
+  reaches a mutex) and record nothing. The tree reported no violation
+  (`lockdep-completion`, four negative controls). The unexecuted paths are
+  a listing now: the runner prints the timer callback functions set up and
+  never run and the completion classes never signalled or never waited
+  for, and the [completion-waits report](audit/2026-10-08-lockdep-completion-waits-report.md)
+  judges each entry. What remains is bounded and named in the next item.
+- [ ] **Validation — the paths the suite never drives.** The coverage
+  listing of 2026-10-08 names one timer callback function the whole debug
+  suite never runs, `delack_timer` (TCP's delayed acknowledgement, armed
+  on every second in-order segment and always cancelled by the
+  acknowledgement that goes out first), one production completion class
+  never waited for because its consumer polls (`xhci-first-scan`, under
+  `g_controllers_lock`), and one polled path inside an exercised class
+  (the NVMe admin fallback without a vector, whose `nvme-admin` class is
+  otherwise waited for and signalled). A delayed acknowledgement needs a receiver that gets
+  one segment and sends nothing for 40 ms: a loopback test of the shape
+  `net-lo-tcp` has would run it, and the callback's locks (`timer_kick`,
+  the same as `rexmit_timer`'s, which runs) would then be in the graph
+  under its own class. The NVMe fallback's self-signal through a poll is
+  the one completion shape the model takes for another thread's; a
+  handshake wait in the fallback would both make it visible and settle
+  the frame's lifetime by the primitive rather than by argument. Also
+  recorded: a completion signaller that takes and releases a mutex before
+  `complete()` records no edge for it (no production instance), and a
+  worker completing a barrier item depends on every item ahead of it (the
+  network worker's items take spinlocks only; the mechanism if that
+  changes is the callback class applied to the worker).
 - [x] **Implementation/validation — raw IRQ pairing.** Track or validate
   ownership and pairing of raw `arch_irq_save`/`arch_irq_restore` operations
   beyond the checks already applied to tracked spinlock wrappers.
@@ -317,6 +349,20 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   every flag writer a release store; `net-neigh-down-race` parks a caller
   between its decision and the lock while the interface goes down
   (report §8).
+- [ ] **Implementation — netif flag reads once per packet.** Every writer
+  of `nif->flags` publishes with a release store (the N25 follow-up), and
+  the readers whose order against another structure matters (`NETIF_UP`
+  under the neighbour tables' locks, `NETIF_GONE` in `netif_transmit` and
+  `netif_tx_pending`) use acquire loads. The data paths that consult
+  `NETIF_FORWARD`, `NETIF_MASQUERADE` and `NETIF_LOOPBACK` do not:
+  `ipv4.c`'s input, forward and output paths, `fw.c`'s direction and scope
+  and `nat.c`'s masquerade decision read the word with plain loads,
+  several times per packet, so a runtime toggle (`netif_set_forward`,
+  `netif_set_masquerade`) can be seen differently at two checks of one
+  packet -- forwarded by the first read, not masqueraded by the second.
+  Read the flag word once per packet with a relaxed atomic load and pass
+  the copy down the path; a toggle then takes effect between packets, not
+  inside one.
 - [ ] **Decision — UDP send when the transmit ring is full.** Today
   `vnet_transmit` and `e1000e_transmit` refuse a frame with `-ENOBUFS` when
   no descriptor is free, and `udp_sendto` hands that to the caller: a blocking
@@ -558,10 +604,12 @@ their deferred status here; this section does not schedule them for implementati
    (`make test-smp2`) so it stays done.
 2. ~~Add quiescence memory-order models and targeted negative controls.~~
    Done 2026-10-05 ([quiescence memory-order report](audit/2026-10-05-quiesce-memory-order-report.md)).
-3. Extend callback-wait and raw IRQ-pairing coverage within the established
-   locking and lifetime architecture. Timer callback waits done 2026-10-05
+3. ~~Extend callback-wait and raw IRQ-pairing coverage within the established
+   locking and lifetime architecture.~~ Timer callback waits done 2026-10-05
    ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing done
-   2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md)).
+   2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md));
+   completion waits and the coverage listing done 2026-10-08
+   ([completion-waits report](audit/2026-10-08-lockdep-completion-waits-report.md)).
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
    §4's bounded preempt-at-restore recursion done 2026-10-06

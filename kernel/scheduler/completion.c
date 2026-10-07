@@ -17,6 +17,9 @@ void completion_init(struct completion *c, const char *name)
     /* Its own lock class: complete() wakes with c->lock held, and two
      * locks of one class nested is what lockdep calls recursion. */
     waitqueue_init(&c->wq, "completion-wq");
+    /* The completion's lockdep class, keyed by name through its own
+     * spinlock's class (docs/kernel/lockdep/design.md, "Completion waits"). */
+    lockdep_completion_init(&c->lock.class, name, (uintptr_t)__builtin_return_address(0));
 }
 
 /*
@@ -32,6 +35,10 @@ void completion_init(struct completion *c, const char *name)
  */
 void complete_linger(struct completion *c, uint64_t linger_ns)
 {
+    /* In thread context with mutexes held: "to signal c, these were held"
+     * (completion -> mutex), and a report if a wait for c is recorded
+     * holding one of them. Interrupt context records nothing. */
+    lockdep_completion_signal(c, &c->lock.class, c->lock.name, (uintptr_t)__builtin_return_address(0));
     arch_irq_state_t s = spin_lock_irqsave(&c->lock);
     c->done = true;
     /* The window a poller races: `done` is visible, the wake has not run,
@@ -61,6 +68,9 @@ void wait_for_completion(struct completion *c)
     if (raw_this_cpu()->irq_depth != 0)   /* identity: zero on any CPU a sleeping caller runs on */
         panic("wait_for_completion in interrupt context");
     might_sleep();
+    /* Before the wait, done or not: held mutex -> completion, and a
+     * report if the completion already reaches a held mutex. */
+    lockdep_completion_wait(c, &c->lock.class, c->lock.name, (uintptr_t)__builtin_return_address(0));
     wait_event(&c->wq, completion_done(c));
     /* The handshake: complete() holds c->lock until its wake has
      * returned, so once this lock is ours nothing is still inside `c`. */
@@ -73,6 +83,7 @@ bool wait_for_completion_timeout(struct completion *c, uint64_t timeout_ns)
     if (raw_this_cpu()->irq_depth != 0)   /* identity: zero on any CPU a sleeping caller runs on */
         panic("wait_for_completion_timeout in interrupt context");
     might_sleep();
+    lockdep_completion_wait(c, &c->lock.class, c->lock.name, (uintptr_t)__builtin_return_address(0));
     if (!wait_event_timeout(&c->wq, completion_done(c), timeout_ns))
         return false;   /* the deadline: `c` may complete later, caller must not free it yet */
     /* Done: the same handshake wait_for_completion does, so the completer

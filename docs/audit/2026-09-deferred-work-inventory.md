@@ -736,10 +736,14 @@ Still open for the next milestone:
   establish AArch64 NMI delivery.
 - Simultaneous global held-state snapshots across CPUs and threads;
   individual CPU/thread stacks and counter snapshots are consistent separately.
-- Callback wait dependencies beyond observed active timer callback paths.
+- ~~Callback wait dependencies beyond observed active timer callback paths.~~
   *2026-10-05: timer callback waits are in the lock graph (callback classes,
-  PR #312, [report](2026-10-05-lockdep-callback-classes-report.md)); unexecuted
-  callback paths and completion waits remain.*
+  PR #312, [report](2026-10-05-lockdep-callback-classes-report.md)).*
+  **Built 2026-10-08**: completion waits are in the graph through completion
+  classes (L21), and the unexecuted paths are a listing the runner prints
+  after every debug suite; see the
+  [completion-waits report](2026-10-08-lockdep-completion-waits-report.md)
+  and §7.3.
 - ~~Raw `arch_irq_restore` ownership and pairing.~~ **Built 2026-10-06**: per-context
   save stacks with restore and thread-exit checks under lockdep; see the
   [raw-pairing report](2026-10-06-lockdep-irq-pairing-report.md).
@@ -776,4 +780,16 @@ Report: [`2026-10-07-neighbour-per-interface-report.md`](2026-10-07-neighbour-pe
 | ~~ARP table and ND cache keyed by address alone: one interface's resolution found another's entry (no request of its own; retries on the other interface; the packet out of the wrong interface to the wrong MAC); `arp_lookup` took no interface~~ | **FIXED**: entries are (interface, address) in both tables (N25); `arp_lookup`/`arp_delete` name the interface; down flushes an interface's entries as removal does; `net-arp-per-interface`, `net-nd-per-interface`, `tools/arp-per-interface-probe.py --old`. |
 | ~~`net-nicbench` reported `udp not measured` on an unresolved gateway (PR #318)~~ | **TIGHTENED**: a failure again, the entry being this interface's own; the line carries the request count that separates a lost reply from an entry already present. The 2026-10-06 sightings remain unattributed between the two. |
 | `ipv4_route`'s tie for two up interfaces on one subnet (first registered wins) | Recorded as a policy without a knob; not changed. |
-| ~~Two windows in "a down interface holds no entries": the input paths read `NETIF_UP` before the table lock, the resolve paths not at all~~ | **CLOSED (follow-up to PR #319)**: the flag is read under the table lock in input and resolve, a resolve on a down interface returns `-ENETUNREACH` with the packet counted dropped, every flag writer is a release store; `net-neigh-down-race` and `tools/neigh-down-race-probe.py --old` (report §8). |
+| ~~Two windows in "a down interface holds no entries": the input paths read `NETIF_UP` before the table lock, the resolve paths not at all~~ | **CLOSED (follow-up to PR #319)**: the flag is read under the table lock in input and resolve, a resolve on a down interface returns `-ENETUNREACH` with the packet counted dropped, every flag writer is a release store; `net-neigh-down-race` and `tools/neigh-down-race-probe.py --old <race>`, one mode per race (report §8). |
+
+### 7.3 Completion waits and the coverage listing (2026-10-08)
+
+Report: [`2026-10-08-lockdep-completion-waits-report.md`](2026-10-08-lockdep-completion-waits-report.md).
+
+| Item | Outcome |
+|---|---|
+| ~~`wait_for_completion` on a completion another context signals was outside the lock graph~~ | **BUILT**: one lockdep class per completion name, keyed through the completion's own spinlock class (no new field; module ABI v4 unchanged); the wait records held mutex → completion, a thread-context `complete()` records completion → held mutex, deferred until the thread's next event and discarded when that is its own wait for the same object; `LOCKDEP_R_COMPLETION` from whichever side closes a cycle; interrupt and callback signallers record nothing by the `might_sleep` argument. `lockdep-completion`, `tools/lockdep-completion-probe.py`. The tree reported no violation. |
+| ~~Callback paths never executed contributed no edges, invisibly~~ | **MEASURED**: `timer_setup` records every callback function and `run_expired` marks it run; completion classes record waits and signals; the self-test runner prints both listings after the suite. One timer callback of the debug suite never runs (`delack_timer`); one production completion class is polled rather than waited for (`xhci-first-scan`), and the NVMe no-vector fallback is a polled path inside an exercised class. Judged in the report; the tests that would drive them are a plan item. |
+| ~~`LOCKDEP_MAX_CLASSES` at 384 with a debug boot at 382~~ | **RAISED** to 512 (the graph 512 KiB in `LOCKDEP=1` builds); the host bounds follow the macros. |
+| A completion signaller that takes and releases a mutex before `complete()` | Recorded, not modelled: no production instance (the survey names every signaller's locks); crossrelease's history caught it at the price of its false positives. |
+| A worker thread's barrier depends on every item ahead of it | Recorded: the network worker's items take spinlocks only; the mechanism if that changes is the callback class applied to the worker. |

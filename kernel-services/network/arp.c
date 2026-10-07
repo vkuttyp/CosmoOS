@@ -319,6 +319,8 @@ void arp_test_release_lock_entry(void) { __atomic_store_n(&g_test_lock_entry_rel
 
 static void arp_test_park_before_lock(void)
 {
+    if (__atomic_load_n(&g_test_hold_lock_entry, __ATOMIC_RELAXED) == 0)
+        return;   /* not armed, the common case: no atomic read-modify-write on the input path */
     unsigned one = 1u;
     if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;   /* not armed, or another caller took the arming */

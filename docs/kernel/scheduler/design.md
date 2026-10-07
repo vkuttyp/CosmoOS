@@ -514,7 +514,11 @@ sleeping thread; `wait_event(&t->sleep_wq, timer fired)`.
   it. So the test is a reproducer on one architecture and a stress on the
   other; the fix follows from the sequence. One-shot.
   The wait queue's lock has its own class, `completion-wq`, because it is
-  taken inside the completion's own lock.
+  taken inside the completion's own lock. With lockdep, the completion's
+  name is also a class of its own (`LOCKDEP_KIND_COMPLETION`): a wait
+  records the mutexes held across it, a `complete()` in thread context
+  the mutexes held at the call, and a cycle between the two is reported
+  (`docs/kernel/lockdep/design.md`, "Completion waits"; L21).
 
 ## 6. Timer subsystem (summary; full text in docs/kernel/timer/)
 

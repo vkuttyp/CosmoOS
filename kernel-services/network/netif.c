@@ -391,13 +391,19 @@ void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t ga
 
 void netif_set_up(struct netif *nif, bool up)
 {
-    /* The flag word is read without the lock by the data paths
-     * (netif_transmit, netif_tx_pending, rx_common, arp_input,
-     * arp_resolve, nd_*), with acquire loads; every writer holds nif->lock
-     * and publishes with a release store, so a reader sees a whole word.
-     * For the down: the store happens before the flushes below take the
-     * neighbour tables' locks, so a reader that takes a table lock after
-     * the flush's critical section sees the flag cleared (N25). */
+    /* The flag word is read without the lock by the data paths; every
+     * writer holds nif->lock and publishes with a release store, so a
+     * reader sees a whole word. The readers whose order against another
+     * structure matters use acquire loads: NETIF_GONE in netif_transmit
+     * and netif_tx_pending, NETIF_UP under the neighbour tables' locks
+     * (arp_input, arp_resolve, nd_*). The NETIF_FORWARD, NETIF_MASQUERADE
+     * and NETIF_LOOPBACK reads in ipv4.c, fw.c and nat.c are plain loads,
+     * several per packet, so a toggle can be seen differently by two
+     * checks of one packet (docs/plan.md, section 7: read the word once
+     * per packet). For the down: the store happens before the flushes
+     * below take the neighbour tables' locks, so a reader that takes a
+     * table lock after the flush's critical section sees the flag
+     * cleared (N25). */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
     __atomic_store_n(&nif->flags, up ? (nif->flags | NETIF_UP) : (nif->flags & ~NETIF_UP), __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&nif->lock, s);

@@ -264,6 +264,12 @@ bool timer_cancel_sync(struct timer *t);
  * (docs/audit/next-subsystem-lifetime-windows.md). */
 unsigned timer_test_cancel_spins(void);
 void timer_test_reset_cancel_spins(void);
+/* Print the callback functions timer_setup registered this boot that never
+ * ran (kinfo, one per line, address and setup count) and a total: what the
+ * suite did not drive (docs/kernel/lockdep/design.md, "Coverage"). */
+void timer_dump_callbacks(void);
+#else
+static inline void timer_dump_callbacks(void) {}
 #endif
 
 /* Hook called from the tick on every CPU (the scheduler registers), with

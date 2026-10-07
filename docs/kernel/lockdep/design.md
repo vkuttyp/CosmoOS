@@ -3,7 +3,7 @@
 ## Data structures (`kernel/include/kernel/lockdep_core.h`, `kernel/core/lockdep.c`)
 
 ```c
-#define LOCKDEP_MAX_CLASSES   384       /* includes runqueue and callback classes */
+#define LOCKDEP_MAX_CLASSES   512       /* includes runqueue, callback and completion classes */
 #define LOCKDEP_SUBCLASSES    4         /* nesting levels per class */
 #define LOCKDEP_MAX_NODES     (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_MAX_HELD      24        /* per CPU: spinlocks, interrupt context included */
@@ -12,6 +12,7 @@
 struct lock_class {
     char name[64];                      /* owned copy; contents plus kind are the key */
     unsigned usage;                     /* LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON */
+    unsigned cover;                     /* completion classes: waited for, signalled (diagnostics) */
     uintptr_t irq_ip, irqs_on_ip;       /* where each usage was first seen */
 };
 
@@ -40,8 +41,8 @@ raw lock. The field exists in every build so the module ABI has one layout:
 
 The graph and the class table are one `struct lockdep_state` behind pure
 inline functions in `lockdep_core.h` (class lookup, edge add, reachability),
-so the host test drives them under the sanitizers. The bitmap is 1536 nodes
-(384 classes × 4 subclasses) × 192 bytes = 288 KiB when `LOCKDEP=1`.
+so the host test drives them under the sanitizers. The bitmap is 2048 nodes
+(512 classes × 4 subclasses) × 256 bytes = 512 KiB when `LOCKDEP=1`.
 
 ## Classes and nodes
 
@@ -96,7 +97,7 @@ check, included in the stacks):
    report shows the held stack, B's acquisition, and the recorded chain
    B → … → Aᵢ. Long diagnostic paths keep their last eight nodes and are
    labeled accordingly; the output length is the stored count, so printing
-   cannot overrun the buffer. Detection still searches all 1536 nodes.
+   cannot overrun the buffer. Detection still searches all 2048 nodes.
 3. Otherwise set `before[Aᵢ] |= B` for every Aᵢ (edges from every held lock,
    not only the innermost, so a chain seen once in pieces is still caught).
 
@@ -132,8 +133,8 @@ Normal graph dumps allocate private storage before taking the raw lock,
 copy the complete bounded graph under it, and print from that snapshot
 after releasing it. Counts, metadata, and edges therefore describe one
 instant even if logging or another CPU adds dependencies during output.
-The copy is 232968 bytes (about 228 KiB); the heap temporarily reserves
-a 256 KiB page allocation and frees it after printing. There is no extra
+The copy is 573,448 bytes (about 560 KiB); the heap temporarily reserves
+a page allocation of that order and frees it after printing. There is no extra
 permanent graph or acquisition-path cost. The raw lock and disabled IRQs
 cover only the copy, never allocation, printing, or freeing. Allocation
 failure prints an explicit unavailable message. This API requires a
@@ -151,7 +152,7 @@ not a panic/NMI API.
 
 ### Search work bounds
 
-Let N = `LOCKDEP_MAX_NODES` (1536), W = `LOCKDEP_NODE_WORDS` (24),
+Let N = `LOCKDEP_MAX_NODES` (2048), W = `LOCKDEP_NODE_WORDS` (32),
 and C = the registered class count. Under caller serialization and valid
 node/class indices, each search has the following conservative bounds:
 
@@ -160,9 +161,9 @@ node/class indices, each search has the following conservative bounds:
 | Clear visited bitmap | W writes |
 | Usage-search seed candidates | 4C ≤ N checks; none for reachability |
 | Queue insertions and removals | at most N each |
-| Adjacency bitmap loads | at most NW = 36,864 words |
+| Adjacency bitmap loads | at most NW = 65,536 words |
 | Newly discovered neighbor iterations | at most N minus the initial sources |
-| Reachability path reconstruction | at most 2N − 1 = 3,071 parent steps |
+| Reachability path reconstruction | at most 2N − 1 = 4,095 parent steps |
 | Usage-search predecessor reconstruction | at most N − 1 parent steps |
 
 Nodes are marked visited when enqueued, including every initial source.
@@ -180,7 +181,7 @@ runs at most four, one per subclass; a direct mixed-usage conflict returns
 before searching. An acquisition can check at most 32 held entries (24
 spinlocks plus eight mutexes), with one reachability and up to two IRQ
 searches per missing edge. Including usage validation gives a conservative
-100-search ceiling, or 3,686,400 adjacency-word loads, for those decision
+100-search ceiling, or 6,553,600 adjacency-word loads, for those decision
 paths. This is a loose bound, not a claim that one graph attains every
 maximum together. It excludes class lookup, held-stack/profile scans,
 statistics, diagnostic searches/printing and raw-lock contention. It does
@@ -226,7 +227,7 @@ now fails stop, including from NMI, but this is not permission to take
 tracked locks in NMI/#MC handlers. Re-entry outside a raw critical section,
 held-stack writer nesting, and cross-CPU wait cycles remain unsupported.
 
-The search is bounded by the node count (1536) and runs only when
+The search is bounded by the node count (2048) and runs only when
 the edge set changes or a cycle exists: a repeated acquisition whose edges
 are already recorded short-circuits after the recursion check with a
 bitmap test per held lock.
@@ -313,17 +314,195 @@ this function", not "this timer's callback".
 The class has no interrupt-usage labels of its own (`check_usage` labels
 spinlock classes only). The locks taken inside the callback carry the
 callback's interrupt context as before. Callback classes share the class
-table (`LOCKDEP_MAX_CLASSES`, raised to 384 for them: a full debug boot
-creates 17), and a cached class reuses the graph's copy of its name, so a
-callback that runs every tick formats nothing.
+table (`LOCKDEP_MAX_CLASSES`, raised to 384 for them in 2026-10-05 and to
+512 when the completion classes arrived: a full debug boot creates 20
+callback classes and 38 completion classes), and a cached class reuses the
+graph's copy of its name, so a callback that runs every tick formats
+nothing.
 
 **What is not covered.** `synchronize_irq` and `interrupt_unregister_sync`
 wait through `synchronize_quiesce`, which calls `might_sleep`: the waiter
 can hold no spinlock, and an interrupt handler can take no mutex, so no
 lock cycle through that wait exists to model. Module teardown waits by the
-same route. Arbitrary completion waits (`wait_for_completion` on a
-completion a callback signals) have no function to key a class on, and
-remain outside the graph.
+same route. Completion waits are the next section.
+
+## Completion waits
+
+A completion is a one-shot signal between contexts (`docs/kernel/scheduler/design.md`,
+"Mutex, semaphore, completion"): a waiter calls `wait_for_completion`,
+some other context calls `complete`. The deadlock a lock checker can see
+is a waiter that holds a lock L across the wait while the signaller must
+acquire L, directly or through a chain, before it can call `complete`.
+Until 2026-10-08 nothing modelled it: a completion had no class, and the
+callback-class report said there was "no function to key a class on".
+The key is the completion's **name**, which `completion_init` already
+requires.
+
+### What the kernel's rules make possible
+
+Three facts fix the shape of every such deadlock in this kernel, and the
+design follows from them:
+
+1. `wait_for_completion` and `wait_for_completion_timeout` begin with
+   `might_sleep()`. The waiter therefore holds no spinlock and is in no
+   `quiesce_read_lock` section; what it can hold across the wait is
+   **mutexes**, on its per-thread stack.
+2. A mutex is never acquired under a spinlock (`mutex_lock` is a sleeping
+   call) and never in interrupt context. In the recorded graph, every
+   edge into a mutex node therefore starts at a mutex node; no spinlock
+   node reaches a mutex node.
+3. A cycle through a completion wait has the form L → C → … → L with L a
+   mutex. By 2, every node on the C → … → L side is a mutex (or another
+   completion). The locks a **signaller** can contribute to such a cycle
+   are mutexes, and only a thread holds mutexes.
+
+So an interrupt handler or a timer callback that signals a completion
+cannot be party to a lock cycle through the wait: it takes spinlocks
+only, and a spinlock reaches no mutex. The deadlocks those signallers can
+cause are of another kind (the callback never scheduled, the interrupt
+never delivered) and are not lock-order facts; the timer half of that is
+what the callback-coverage listing below bounds. The thread signaller is
+the one the graph must see.
+
+### The model
+
+- **Class.** Each completion name is a class of kind
+  `LOCKDEP_KIND_COMPLETION`, created at `completion_init`. Like a callback
+  class it is never held: both sides *acquire* it. `struct completion`
+  gains no field (module ABI v4 is unchanged and the `LOCKDEP=0` layout is
+  identical): `completion_init` classifies the completion's own spinlock
+  at init, as its first acquisition would, and a table indexed by that
+  spinlock's class gives the completion class, so each hook below reads
+  one cached slot and one table entry and searches the class table only
+  the first time a name is seen.
+- **The wait side.** `wait_for_completion` and `wait_for_completion_timeout`
+  acquire the class without holding it, before they wait and on every
+  call, done or not (a wait that finds the completion done could have
+  waited): the edge `M → C` for each mutex M the thread holds, and a
+  `LOCKDEP_R_COMPLETION` report if C already reaches a held M. This is
+  `lockdep_callback_wait`'s primitive with a different report kind. A
+  timed wait records the same edges: a timed wait that must always time
+  out because its signaller needs a lock the waiter holds is the same
+  defect, bounded.
+- **The signal side.** `complete`, in thread context, records for each
+  mutex M the thread holds **at the call** the edge `C → M` ("to signal
+  C, M was held"), and reports `LOCKDEP_R_COMPLETION` if M already
+  reaches C. A signaller that holds M at `complete` cannot have got there
+  without taking M and still holds it, so a waiter holding M would block
+  it: the edge is a certainty, not a history. In interrupt context, or
+  with no mutex held, `complete` records nothing (fact 3; the common case
+  -- `thread_exit`, every interrupt-driven I/O completion -- costs one
+  load). Spinlocks held at `complete` are not recorded: no path from a
+  spinlock node reaches a mutex or a completion node, so the edge could
+  never be on a cycle, and it would only grow the graph. The edges are
+  not written at the call but kept **pending in the thread**
+  (`thread.completion_pending`: the object, its node, the held mutex
+  nodes) and committed, with the cycle check, at the thread's next
+  completion event, mutex release or exit. The one event that discards
+  them instead is the next paragraph's.
+- **Both orders.** The cycle check runs at whichever side closes it: a
+  wait after a signal that held L (`C → L` then `L → C`), or a signal
+  after a wait that held L (`L → C` then `C → L`). The report names the
+  completion, the lock and the chain. After a report the operation
+  proceeds (the tests use private objects), as every lockdep report does.
+- **Self-signalling.** A completion is sometimes signalled **inside the
+  waiter's own call chain**, with the waiter's locks merely inherited.
+  The RAM block device completes a bio synchronously in `submit`, so
+  `sync_io` under a VFS mutex completes its own `blk-sync` holding that
+  mutex and then waits; `usb_sync_msg` and the AHCI `cmd_sync`, when a
+  timed wait returns false, cancel the transfer or restart the port, which
+  completes the object, and then wait plainly for the handshake. A thread
+  cannot deadlock with itself, but the class cannot tell its own waiter
+  from another thread's: the thread holds M, completes C holding M
+  (`C → M`), then waits on C holding M (`M → C`): a cycle in the graph
+  and no deadlock in the machine -- and the `C → M` edge, once written,
+  would make every later wait of the class under M a false report. This
+  is why the signal side is pending rather than written: when the
+  thread's next completion event is **its own wait for the same object**,
+  the pending `complete` is discarded, and the wait itself records
+  nothing new (a timed wait that gave up has already recorded `M → C`,
+  which is true). Any other next event -- a wait for another object,
+  another `complete`, the release of a mutex, the thread's exit --
+  commits the edges, so a remover completing a transfer somebody else
+  waits for, under its own mutex, is in the graph by the time it drops
+  that mutex: the cross-thread case the model is for. The pending record
+  is 40 bytes in `struct thread`, present in every build so the layout is
+  stable. What this does not recognise: a self-signal followed by a
+  **poll** rather than a wait (the NVMe admin fallback without a vector,
+  which drives the queue itself and polls `completion_done`) commits at
+  the next mutex release; that path does not run under QEMU, and the
+  survey records it.
+- **Re-initialised completions.** `xhci_cmd` re-initialises one
+  completion per command; the memory hold seams and the reaper hold do so
+  per arming. The class is the name's, so each init finds the same class,
+  and re-init costs the spinlock classification the first acquisition
+  would have cost anyway.
+- **`completion_done`** is a query, not a wait, and records nothing. A
+  poll loop (the xHCI first-scan wait under `g_controllers_lock`, the
+  NVMe admin fallback without a vector) is therefore outside the graph;
+  the coverage listing shows such a class as waited by nobody.
+- **Interrupt-usage labels.** A completion class has none (`check_usage`
+  labels spinlock classes only), and nothing IRQ-used reaches it: its
+  only predecessors are mutexes. The new edge `C → M` still goes through
+  the ordinary IRQ-edge validation, for one code path.
+
+### Against crossrelease and DEPT
+
+Linux's **crossrelease** (4.14, reverted in 4.15) treated a completion
+wait as the acquisition of a "crosslock" and, at the release, added a
+dependency from the crosslock to every lock the *releasing context had
+acquired since the crosslock was taken*, read from a per-task lock
+history. The history is what produced the false positives: a kworker's
+history spans unrelated work items; a lock taken and dropped on the way
+to the release, for a reason that had nothing to do with it, became a
+prerequisite; the window closed only for crosslocks currently held, so a
+signal that happened to precede its wait recorded nothing. Hand
+annotation could not keep up and the feature was removed. **DEPT**
+(Byungchul Park's dependency tracker, RFCs 2022-2024, not merged)
+generalises the same idea to every wait/event pair -- wait queues,
+completions, page locks -- with per-context histories reset at context
+boundaries and classes split per site; the review objections were the
+same false positives on real workloads.
+
+This design records no history. The signal side records only what is
+**held at the signal**, which is a prerequisite by construction; the wait
+side records only what is **held at the wait**, as every lockdep edge
+does. Both orders are covered because both sides record persistently,
+not only while a wait is in flight. The price is the shape crossrelease
+caught and this does not: a signaller that takes and *releases* a mutex
+before `complete` ("lock, unlock, complete") records no edge for it,
+although a waiter holding that mutex would block it. That shape is the
+survey's business (`docs/audit/2026-10-08-lockdep-completion-waits-report.md`):
+every signaller in the tree is enumerated with the mutexes it takes on
+its way to `complete`. One class of signaller deserves its own note: a
+**worker thread** completing a barrier item depends on every item ahead
+of it in its queue, so a waiter must hold nothing any item may take. The
+network worker's items (`input_one` and the receive path, `age_work`,
+`pcb_work`, `barrier_fn`) take spinlocks only -- the only `mutex_lock`
+calls in `kernel-services/network` are `netif_unregister`'s own and the
+`ksock_*` system-call paths -- so no mutex-holding waiter can be blocked
+by it today. If an item ever takes a mutex, the mechanism is the callback
+class applied to the worker: the worker holds a pseudo-class while it
+runs any item and the barrier wait acquires it.
+
+### Coverage: callback and completion classes never exercised
+
+A class the boot never exercises contributes no edges, and the graph is
+silent about it. Debug builds now record what was *registered* and what
+*ran*, and the self-test runner prints the difference after the suite:
+
+- **Timer callbacks.** `timer_setup` records the callback function (and
+  the first setup site) in a bounded table in `timer.c`; `run_expired`
+  marks it run. `timer_dump_callbacks` lists the functions set up and
+  never run, with their setup counts.
+- **Completion classes.** The class records whether any `complete` and
+  any `wait_for_completion*` has named it; `lockdep_dump_completion_coverage`
+  lists classes never signalled or never waited.
+
+The listing is the evidence the plan item asks for: which paths the
+suite does not drive (error and teardown paths, mostly), judged one by
+one in the report, so that the gap is a named list rather than an
+unknown.
 
 ## Raw interrupt-state pairing
 
@@ -408,7 +587,8 @@ Per acquisition: a per-CPU stack push, a class lookup (cached
 after the first), a recursion scan of the held set (≤ 24 entries), a bitmap
 test per held lock, and, for a new edge, the raw lock and a bounded search.
 No allocation anywhere: every table is static, sized for the tree with
-headroom (`invariants.md` L9).
+headroom (`invariants.md` L9): 512 classes, of which a full debug boot
+uses 382.
 
 ## The fixes this milestone makes
 
@@ -518,8 +698,10 @@ private snapshot storage before acquiring the raw lock.
 
 ## Memory
 
-288 KiB graph, 384 classes × 88 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
-thread, and 264 bytes per thread (and per CPU) of raw interrupt saves. The
+512 KiB graph, 512 classes × 96 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
+thread, 264 bytes per thread (and per CPU) of raw interrupt saves, 1 KiB
+for the spinlock-class to completion-class table, and 40 bytes per thread
+for the pending `complete()` record. The
 graph and the per-CPU save stacks exist only with `LOCKDEP=1`; lock/thread
 layouts stay stable when disabled (the per-thread save stack is in every
 build, unused without lockdep).
