@@ -34,7 +34,7 @@ convention), documented in `docs/kernel/module/` (the archive) and
 main(argc, argv):
   --selftest → selftest(); exit(failures ? 1 : 0)        (as before, now on libc)
   --crash    → *(volatile int *)0 = 1
-  --block    → read(0, &c, 1); exit(5)                    (a killable console read, for the kernel test)
+  --block    → pipe(h); read(h[0], &c, 1); exit(5)        (a killable read nothing but the kill ends, for the kernel test)
   --spin     → for (;;) ;                                 (a CPU-bound loop, for the kernel test)
   print "init: CosmoOS userland, pid N"                   (N is 1 only when no self-tests ran first)
   setenv PATH=/bin:/sbin:/usr/bin:/usr/sbin HOME=/
