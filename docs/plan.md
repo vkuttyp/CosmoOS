@@ -317,6 +317,20 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   every flag writer a release store; `net-neigh-down-race` parks a caller
   between its decision and the lock while the interface goes down
   (report §8).
+- [ ] **Implementation — netif flag reads once per packet.** Every writer
+  of `nif->flags` publishes with a release store (the N25 follow-up), and
+  the readers whose order against another structure matters (`NETIF_UP`
+  under the neighbour tables' locks, `NETIF_GONE` in `netif_transmit` and
+  `netif_tx_pending`) use acquire loads. The data paths that consult
+  `NETIF_FORWARD`, `NETIF_MASQUERADE` and `NETIF_LOOPBACK` do not:
+  `ipv4.c`'s input, forward and output paths, `fw.c`'s direction and scope
+  and `nat.c`'s masquerade decision read the word with plain loads,
+  several times per packet, so a runtime toggle (`netif_set_forward`,
+  `netif_set_masquerade`) can be seen differently at two checks of one
+  packet -- forwarded by the first read, not masqueraded by the second.
+  Read the flag word once per packet with a relaxed atomic load and pass
+  the copy down the path; a toggle then takes effect between packets, not
+  inside one.
 - [ ] **Decision — UDP send when the transmit ring is full.** Today
   `vnet_transmit` and `e1000e_transmit` refuse a frame with `-ENOBUFS` when
   no descriptor is free, and `udp_sendto` hands that to the caller: a blocking

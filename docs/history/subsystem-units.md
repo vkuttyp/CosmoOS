@@ -2367,5 +2367,5 @@ See the [history index](README.md).
   refused with the packet counted dropped; every writer of the flag word
   publishes with a release store. `net-neigh-down-race` parks each caller
   at the window with debug hooks while the interface goes down;
-  `tools/neigh-down-race-probe.py --old` restores the old order and fails
-  it. Report: `docs/audit/2026-10-07-neighbour-per-interface-report.md`, §8.
+  `tools/neigh-down-race-probe.py --old <race>` restores the old order in
+  one path at a time and fails at that race's own check. Report: `docs/audit/2026-10-07-neighbour-per-interface-report.md`, §8.

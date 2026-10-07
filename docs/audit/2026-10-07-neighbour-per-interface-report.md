@@ -246,8 +246,11 @@ next `arp_input`/`arp_resolve` (`arp_test_hold_lock_entry`) or
 its decision to proceed and its taking of the lock; the test takes the
 fake interface down while the caller is parked, releases it, joins it,
 and looks: no entry, `-ENETUNREACH` from the resolves with the packet
-counted dropped. `tools/neigh-down-race-probe.py --old` restores the old
-order (input checks before the park point, no resolve checks):
+counted dropped. `tools/neigh-down-race-probe.py --old` restored the old
+order everywhere at once (input checks before the park point, no resolve
+checks) when the table below was made; it now takes one race at a time
+(`--old arp-input|arp-resolve|nd-input|nd-resolve`, each failing at that
+race's own check; results in the completion-waits report of 2026-10-08):
 
 | | x86-64 | AArch64 |
 | --- | --- | --- |
