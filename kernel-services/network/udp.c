@@ -210,13 +210,13 @@ bool udp_error_notify(const struct netaddr *local, const struct netaddr *remote,
     /* Held across the unlock, and a tryget for the same reason udp_input
      * gives: a release clears pcb->sock under g_lock but starts at count
      * zero (design.md, "UDP"). */
-    if (pcb && pcb->sock && kobject_tryget(&pcb->sock->obj))
-        sock = pcb->sock;
+    if (pcb)
+        sock = sock_wake_ref(pcb->sock);
     spin_unlock_irqrestore(&g_lock, s);
     if (sock == NULL)
         return false;
     sock_set_error(sock, err);   /* wakes; invariant N21 */
-    ksock_put(sock);
+    sock_wake_unref(sock);
     return true;
 }
 
@@ -291,8 +291,8 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         /* The wake happens after the unlock; hold the socket across it.
          * Its release clears pcb->sock under g_lock but starts at count
          * zero, so only a tryget is safe here (design.md, "UDP"). */
-        if (queued && pcb->sock && kobject_tryget(&pcb->sock->obj))
-            sock = pcb->sock;
+        if (queued)
+            sock = sock_wake_ref(pcb->sock);
     }
     spin_unlock_irqrestore(&g_lock, s);
     if (pcb == NULL && quiet) {
@@ -316,7 +316,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     }
     if (sock) {
         sock_wake(sock);
-        ksock_put(sock);
+        sock_wake_unref(sock);
     }
 }
 

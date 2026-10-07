@@ -1017,7 +1017,7 @@ static void sock_wake_after(struct socket *s)
 {
     if (s) {
         sock_wake(s);
-        ksock_put(s);
+        sock_wake_unref(s);
     }
 }
 
@@ -1026,9 +1026,7 @@ static void sock_wake_after(struct socket *s)
  * zero when it starts, so a plain get could race it: tryget. */
 static struct socket *sock_ref(struct tcp_pcb *pcb)
 {
-    if (pcb->sock && kobject_tryget(&pcb->sock->obj))
-        return pcb->sock;
-    return NULL;
+    return sock_wake_ref(pcb->sock);
 }
 
 /* pcb lock held. The pcb is out of the socket's hands and in FIN_WAIT_2. */

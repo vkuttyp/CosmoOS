@@ -17,6 +17,7 @@
 #include <uapi/cosmo/syscall.h>
 
 static uint32_t g_count;
+static uint32_t g_wake_refs;   /* sock_wake_ref references held */
 
 static void socket_release(struct kobject *obj)
 {
@@ -570,4 +571,96 @@ unsigned ksock_ready(struct socket *s)
 unsigned socket_count(void)
 {
     return __atomic_load_n(&g_count, __ATOMIC_RELAXED);
+}
+
+/* Counted before the tryget, uncounted after the put: there is no instant
+ * at which a wake reference exists and the count says none does. The
+ * release on the uncount orders a release the put made (and its g_count
+ * decrement) before a reader's acquire of the zero. */
+struct socket *sock_wake_ref(struct socket *s)
+{
+    if (s == NULL)
+        return NULL;
+    __atomic_fetch_add(&g_wake_refs, 1, __ATOMIC_RELAXED);
+    if (kobject_tryget(&s->obj))
+        return s;
+    __atomic_fetch_sub(&g_wake_refs, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+#if CONFIG_DEBUG
+static struct {
+    spinlock_t lock;
+    struct socket *target;   /* armed for; NULL when idle */
+    bool held, released, resumed, timed_out;
+    bool wq_ready;
+    struct waitqueue wq;     /* both sides wait here */
+} g_wake_hold = { .lock = SPINLOCK_INIT("sock-wake-hold") };
+
+static void wake_hold(struct socket *s)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_wake_hold.lock);
+    bool mine = g_wake_hold.target == s && !g_wake_hold.held;
+    if (mine)
+        g_wake_hold.held = true;
+    spin_unlock_irqrestore(&g_wake_hold.lock, st);
+    if (!mine)
+        return;
+    waitqueue_wake_all(&g_wake_hold.wq);
+    bool ok = wait_event_timeout(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.released, __ATOMIC_ACQUIRE),
+                                 10ull * 1000 * 1000 * 1000);
+    st = spin_lock_irqsave(&g_wake_hold.lock);
+    g_wake_hold.timed_out = !ok;
+    g_wake_hold.resumed = true;
+    spin_unlock_irqrestore(&g_wake_hold.lock, st);
+    waitqueue_wake_all(&g_wake_hold.wq);
+}
+
+void sock_test_wake_hold_arm(struct socket *s)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_wake_hold.lock);
+    if (!g_wake_hold.wq_ready) {
+        waitqueue_init(&g_wake_hold.wq, "sock-wake-hold");
+        g_wake_hold.wq_ready = true;
+    }
+    g_wake_hold.held = g_wake_hold.released = g_wake_hold.resumed = g_wake_hold.timed_out = false;
+    g_wake_hold.target = s;
+    spin_unlock_irqrestore(&g_wake_hold.lock, st);
+}
+
+bool sock_test_wake_hold_wait(uint64_t ns)
+{
+    return wait_event_timeout(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.held, __ATOMIC_ACQUIRE), ns);
+}
+
+bool sock_test_wake_hold_release(void)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_wake_hold.lock);
+    bool held = g_wake_hold.held;
+    g_wake_hold.target = NULL;   /* nothing new is held from here */
+    __atomic_store_n(&g_wake_hold.released, true, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_wake_hold.lock, st);
+    if (!held)
+        return true;
+    waitqueue_wake_all(&g_wake_hold.wq);
+    wait_event(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.resumed, __ATOMIC_ACQUIRE));
+    return !g_wake_hold.timed_out;
+}
+#else
+static inline void wake_hold(struct socket *s) { (void)s; }
+void sock_test_wake_hold_arm(struct socket *s) { (void)s; }
+bool sock_test_wake_hold_wait(uint64_t ns) { (void)ns; return false; }
+bool sock_test_wake_hold_release(void) { return true; }
+#endif
+
+void sock_wake_unref(struct socket *s)
+{
+    wake_hold(s);
+    ksock_put(s);
+    __atomic_fetch_sub(&g_wake_refs, 1, __ATOMIC_RELEASE);
+}
+
+unsigned socket_wake_refs(void)
+{
+    return __atomic_load_n(&g_wake_refs, __ATOMIC_ACQUIRE);
 }
