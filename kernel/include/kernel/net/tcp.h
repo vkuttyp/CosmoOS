@@ -139,6 +139,7 @@ struct tcp_pcb {
     uint64_t last_rx_ns;           /* last acceptable segment; keepalive idles from here */
     unsigned keep_probes;          /* unanswered keepalive probes */
     bool delack_pending, fin_queued, fin_sent, fin_rcvd;
+    bool ack_now;                  /* a pure acknowledgement is wanted on the next output (not merely owed to the timer) */
     /* passive open */
     struct tcp_pcb *listener;       /* a queued child's listener; cleared by accept or the listener's close */
     struct list_node accept_link;   /* in listener->accept_queue */
