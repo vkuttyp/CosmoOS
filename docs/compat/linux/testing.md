@@ -180,8 +180,8 @@ After the package section, `rc.test` runs `/etc/rc.linux` when
 `/boot/tests/linux/lxhello` exists (both architectures since milestone
 10): `lxhello || exit 1`, `lxtest || exit 1`, `lxdyn || exit 1`, the
 eight `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then
-`hello_musl` only if the file exists. A failing Linux program therefore
-also fails `SHTEST`.
+`hello_musl` and `epoll_musl` each only if the file exists. A failing
+Linux program therefore also fails `SHTEST`.
 
 The harness requires in self-test builds (`LINUXTEST_MARKERS`):
 
@@ -192,6 +192,7 @@ The harness requires in self-test builds (`LINUXTEST_MARKERS`):
 | `^lxinterp: ok$`, `^lxdyn: ok$` | the PIE pair |
 | `^lxsig <mode>: <status>$` (eight lines) | `lxsig` through `rc.linux` |
 | `^hello from musl on Linux x86_64 \(pid \d+\)$` (`MUSL_MARKER`) | `hello_musl`; required only when the environment has `HAVE_MUSL=1`, which `make test` sets from `tests/linux/linux.mk` |
+| `^epoll musl: auto-removal ok$` (`EPOLL_MUSL_MARKER`) | `epoll_musl` (`tests/linux/epoll_musl.c`, built and run as `hello_musl` is): an event loop's assumption through musl's wrappers -- a pipe's reader registered in an epoll set and closed without `EPOLL_CTL_DEL` leaves the writer with `EPIPE` (`SIGPIPE` ignored), a socket pair's registered end closed leaves its peer at end-of-file, a `dup` keeps the registration until the last close (the epoll-close unit, invariant A9) |
 
 Release builds run no `rc.test`, so the Linux programs run only in
 self-test builds (the release image still carries them).

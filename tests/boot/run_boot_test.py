@@ -422,6 +422,9 @@ LINUXTEST_MARKERS = [
     r"^lxsig session: 0$",
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
+# The musl event-loop program (tests/linux/epoll_musl.c): a closed fd leaves
+# every epoll set it was in (the epoll-close unit).
+EPOLL_MUSL_MARKER = r"^epoll musl: auto-removal ok$"
 
 # Virtualization (docs/kernel-services/virtualization/testing.md): both
 # machines have a backend now -- SVM + NPT on x86-64, EL2 with stage-2
@@ -951,6 +954,8 @@ def main():
             # The Linux musl program is x86-only (milestone 10).
             if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
                 failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
+            if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(EPOLL_MUSL_MARKER, ln) for ln in lines):
+                failures.append(f"missing marker /{EPOLL_MUSL_MARKER}/ (musl epoll program)")
         for pat in SNAPTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (filesystem snapshots)")

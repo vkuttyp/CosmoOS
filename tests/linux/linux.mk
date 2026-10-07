@@ -57,6 +57,14 @@ $(LINUX_TEST_OUT)/hello_musl: $(ROOT)/tests/linux/hello_musl.c
 	$(Q)$(MUSL_GCC) -static -Os -o $@ $<
 LINUX_TEST_ELFS += $(LINUX_TEST_OUT)/hello_musl
 LINUX_TEST_ARCHIVE_ENTRIES += tests/linux/hello_musl=$(LINUX_TEST_OUT)/hello_musl
+# A libc event loop's assumption: a closed fd leaves every epoll set it was
+# in (the epoll-close unit, docs/kernel/io/design.md "epoll").
+$(LINUX_TEST_OUT)/epoll_musl: $(ROOT)/tests/linux/epoll_musl.c
+	$(call log,MUSLCC,$<)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(MUSL_GCC) -static -Os -o $@ $<
+LINUX_TEST_ELFS += $(LINUX_TEST_OUT)/epoll_musl
+LINUX_TEST_ARCHIVE_ENTRIES += tests/linux/epoll_musl=$(LINUX_TEST_OUT)/epoll_musl
 endif
 
 .PHONY: linux-tests

@@ -22,5 +22,6 @@ echo "lxsig lastthread: $?"
 /boot/tests/linux/lxsig session
 echo "lxsig session: $?"
 ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
+ls /boot/tests/linux/epoll_musl 2> /tmp/.musl.probe && /boot/tests/linux/epoll_musl
 rm /tmp/.musl.probe
 exit 0
