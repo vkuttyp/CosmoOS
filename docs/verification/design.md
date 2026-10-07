@@ -23,6 +23,9 @@ target adds assertions (below).
 | `fuzz_linux` | `lx_sockaddr_to_netaddr`, `lx_sockaddr_from_netaddr`, `lx_dirents_from_native`, `lx_open_flags`, `lx_prot` (`compat/linux/convert.c`) | the output length never exceeds the capacity given |
 | `fuzz_virtq` | the split virtqueue (`drivers/virtio/virtqueue.c`) against a device model driven by the input | `virtq_pop` returns only cookies the driver added and not yet reclaimed; `num_free` never exceeds the size |
 | `fuzz_cosmofs` | cosmofs mount and tree walk (`cosmofs_core.c`, `cosmofs.c`) over a memory pool holding the input as the image | every block a header validates has a plausible kind; the walk terminates |
+| `fuzz_net_frame` | the whole receive path (`ether.c` through `tcp.c`, `nat.c`, `fw.c`) on a fake uplink and a fake guest tap with sockets, an established and a half-open connection | locks balanced; every transmitted frame well formed with correct checksums; neighbour, NAT and firewall tables within size; after teardown no mbuf or object alive, the tables empty once flushed |
+| `fuzz_tcp_segments` | one TCP connection fed a program of segments and host actions (`tcp.c`, `TCP_HOST_TEST`) | every state change an arc of RFC 793's machine; a bad checksum changes nothing; `snd_una <= snd_nxt <= snd_max`, buffers and the out-of-order queue within size; no leak |
+| `fuzz_dhcp_dns` | the tap services' DHCP filter and DNS proxy (`tapsvc.c`, `TAPSVC_HOST_TEST`) | a DHCP reply is a well-formed BOOTP reply to a claimed request; a query is relayed once with only its id changed, an answer only from the upstream with a lent id; pending queries bounded and expiring |
 
 `fuzz_virtq` interprets the input as a program: one byte selects an
 operation (add a chain of n buffers, the device completes a used element
@@ -42,6 +45,27 @@ arena. The target mounts the image, walks every directory through the
 `vnode_ops` (lookup, readdir), reads the first pages of every regular
 file, and unmounts. Inputs are one image of `CFS_MIN_BLOCKS` (64) blocks;
 the seed is `cosmofs_format` on the memory pool.
+
+### The network targets
+
+The three network targets run the real protocol layers -- `ether.c`,
+`arp.c`, `ipv4.c`, `ipv6.c`, `udp.c`, `tcp.c`, `nat.c`, `fw.c`, `mbuf.c`,
+`cksum.c`, `inet.c`, and `tapsvc.c` for the third -- unchanged on the host,
+over `tests/fuzz/shim_net.c`: the interface registry and `netif_transmit`
+(a fake interface captures every frame and runs the target's observer), the
+worker's work queue run when the target says, timers over a clock the target
+advances (every timer due by the new time fires in expiry order, queued work
+run after each, as the kernel's timer interrupt hands off to the network
+worker), `kmalloc` and the slab caches over `malloc` with a live count (ASan
+sees every object; a leak is a count), plain-count kobjects, `random_u64`
+reseeded per input. `tests/fuzz/netpkt.h` builds frames for the seeds and
+the handshakes, recomputes a mutated frame's checksums so an input reaches
+past the gates, and checks a transmitted frame's. The targets' input formats,
+oracles and corpus are in `docs/audit/2026-10-07-net-fuzz-report.md`; the
+network testing notes carry the summary. `fuzz_net_frame` also reads the
+checked-in corpus `tests/fuzz/corpus/net_frame` (frames from a boot's
+capture, one per shape, made by `tools/pcap-to-seeds.py`), which `make fuzz`
+passes to it.
 
 ### Driver
 

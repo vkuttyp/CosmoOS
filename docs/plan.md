@@ -533,6 +533,17 @@ Sources: inventory §§2.10, 2.11 and 3,
   parser, PCI configuration, ACPI table and generated VFS-path fuzzing, plus
   property-based tests beyond the randomized lockdep graph oracles. Preserve the
   existing parser and syscall fuzzers; the latter draws paths from a fixed list.
+  *2026-10-07:* the network packet parsers are fuzzed on the host
+  (`fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns` over the real
+  protocol layers and `tests/fuzz/shim_net.c`; in `make fuzz` and CI; a
+  corpus from a boot's capture), with lock balance, output checksums,
+  bounded tables, no-leak and the TCP state machine as oracles. First
+  finding: a peer's FIN acknowledging the last segment in flight stranded
+  a closed connection in CLOSING for ever, fixed with `net-fin-acks-last-data`
+  ([report](audit/2026-10-07-net-fuzz-report.md)). Not fuzzable on the host and
+  left: the virtio-net and e1000e receive descriptors (a device model's
+  shape), the tap device file, `netif.c`'s worker and steering. PCI, ACPI
+  and VFS-path fuzzing remain.
 - [ ] **Implementation/validation — remaining fault injection.** Cover CPU
   starvation, device-reset faults and VM-exit storms. Generic device reset and
   packet-duplication injection already exist; these are broader failure scenarios.

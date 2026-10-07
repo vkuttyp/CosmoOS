@@ -1089,6 +1089,61 @@ not the mechanism under test, and was replaced.
 (the probe read inside it). Under the old check each placement failed on
 both architectures (the report's table).
 
+## A FIN that acknowledges the last segment in flight (`net-fin-acks-last-data`)
+
+Found by `fuzz_tcp_segments` (below; `docs/audit/2026-10-07-net-fuzz-report.md`).
+The host had closed with data still held back by the peer's window -- its
+FIN queued behind the unsent bytes -- and the peer's FIN arrived carrying
+an acknowledgement of everything in flight. Until 2026-10-07 the FIN
+branch of `tcp_input` built a bare acknowledgement and did not run the
+output, and nothing else ever would: no send was coming (closed), no
+acknowledgement was left to come, and the retransmit timer retransmits
+only what is in flight or probes a closed window. The data and the host's
+FIN stayed queued, the pcb in CLOSING with its buffers and table slot for
+ever, the peer waiting for a FIN. The FIN branch now sets `ack_now` and
+runs `tcp_output_locked`: the data the window allows, the FIN behind it,
+the acknowledgement on the first segment or alone, the retransmit timer
+armed.
+
+**`net-fin-acks-last-data`** has its own uplink tap (`falu`,
+`10.77.13.1`, the world at `.99`) and a listener on `:2231`. The world
+completes the handshake by hand with a window of 20.
+
+1. 60 bytes are sent: 20 go out (`hin_recv_stream` over the first 20),
+   40 wait. The host closes: FIN_WAIT_1, the FIN queued behind the 40.
+2. The world's FIN acknowledges the 20 and opens its window. The 40
+   follow (`hin_recv_stream` over `iss + 1 .. iss + 61` with the first 20
+   covered, so a retransmission of them is allowed), then the host's FIN
+   at `iss + 61` acknowledging the world's (`7002`). Before the fix only a
+   bare acknowledgement came, and the stream check fails after its
+   retries.
+3. The world acknowledges the FIN; the connection ends through TIME_WAIT
+   and the leftover census at the end of the test sees nothing.
+
+`tools/net-fuzz-probe.py --old fin-output` boots a clone with the old
+branch restored: the test fails at (2) and nothing else does.
+
+## The host fuzz targets (`tests/fuzz/fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns`)
+
+The protocol layers compile unchanged on the host over
+`tests/fuzz/shim_net.c` (the interface registry, the work queue, timers over
+a clock the target advances, a counted allocator) and are fuzzed under ASan
+and UBSan by `make fuzz`, in CI with 50 000 mutations each. `fuzz_net_frame`
+feeds Ethernet frames into the whole receive path on an uplink and a guest
+tap with sockets, an established and a half-open connection, and a checked-in
+corpus of frames from a boot's capture (`tests/fuzz/corpus/net_frame`,
+`tools/pcap-to-seeds.py`); `fuzz_tcp_segments` feeds a program of segments
+and host actions into one connection, with every state change checked
+against RFC 793's machine through `tcp_test_state_change` (`TCP_HOST_TEST`);
+`fuzz_dhcp_dns` feeds the DHCP filter and the DNS proxy (`TAPSVC_HOST_TEST`).
+The oracles -- lock balance, well-formed and checksummed output, bounded
+tables, no leak after teardown, the TCP machine -- the input formats, the
+corpus, the runs and the finding above are in
+`docs/audit/2026-10-07-net-fuzz-report.md`; `docs/verification/design.md`
+has the shim. Not fuzzable on the host: the NIC receive descriptors
+(virtio-net, e1000e: a device model's shape), the tap device file, the
+worker and steering in `netif.c`, and anything two CPUs race over.
+
 ## Releases however a test returns (the net-leftover unit)
 
 `CHECK` returns at once. A network test used to release what it made
@@ -1555,10 +1610,10 @@ the numbers agree.
   are reviewed, not tested. Multi-queue negotiation (`VIRTIO_NET_F_MQ`)
   is not implemented for the same reason (`design.md`, "virtio-net
   offloads").
-- No host tests yet: the checksum and header parsers should get a
-  `tests/host/test_net.c` with a bit-flip fuzz loop (constitution
-  section 60); today only well-formed packets and QEMU's stack
-  exercise them.
+- Host fuzzing covers the protocol layers and the tap services (above);
+  not the NIC receive descriptors, the tap device file or `netif.c`'s
+  worker and steering, which the device-model and threading shims do not
+  reach (`docs/audit/2026-10-07-net-fuzz-report.md`, §6).
 - No duplication or window-shrink injection (reordering is injected by
   `net-tcp-reorder`).
 - No IPv6 traffic through `eth0` (QEMU's user-mode IPv6 is enabled but

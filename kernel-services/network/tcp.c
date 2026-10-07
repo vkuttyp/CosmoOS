@@ -352,8 +352,18 @@ static enum tcp_state state_of(const struct tcp_pcb *pcb)
     return __atomic_load_n(&pcb->state, __ATOMIC_ACQUIRE);
 }
 
+#ifdef TCP_HOST_TEST
+/* The host fuzz target's oracle (tests/fuzz/fuzz_tcp_segments.c): every
+ * state change passes here, before it is stored, and is checked against
+ * the documented state machine. Not compiled into the kernel. */
+void tcp_test_state_change(struct tcp_pcb *pcb, enum tcp_state from, enum tcp_state to);
+#endif
+
 static void set_state(struct tcp_pcb *pcb, enum tcp_state st)
 {
+#ifdef TCP_HOST_TEST
+    tcp_test_state_change(pcb, pcb->state, st);
+#endif
     __atomic_store_n(&pcb->state, st, __ATOMIC_RELEASE);
 }
 
@@ -2270,9 +2280,21 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         case TCP_FIN_WAIT_2: enter_time_wait(pcb); break;
         default: break;
         }
+        /* The acknowledgement -- and, when the peer's FIN also acknowledged
+         * the last segment in flight, whatever the send buffer still holds
+         * and the FIN queued behind it. Until 2026-10-07 this branch built
+         * a bare ACK and skipped the output below: the one path that
+         * advances snd_una without running the output, and once the host
+         * had closed (FIN_WAIT_1 -> CLOSING here) no later event ran it --
+         * no send, no acknowledgement left to come, the retransmit timer
+         * finding nothing in flight -- so the data, the FIN and the pcb
+         * (in the table, its buffers with it) stayed for ever and the peer
+         * waited for a FIN that never came. Found by fuzz_tcp_segments;
+         * net-fin-acks-last-data is the regression test. */
         pcb->delack_pending = false;
-        build_segment(pcb, &b, TH_ACK, pcb->snd_nxt, 0, false);
         timer_cancel(&pcb->delack);
+        pcb->ack_now = true;
+        tcp_output_locked(pcb, &b);
     } else if (pcb->state != TCP_CLOSED && pcb->state != TCP_TIME_WAIT) {
         tcp_output_locked(pcb, &b);   /* new window or ack may allow more data */
     }

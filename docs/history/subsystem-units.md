@@ -2471,3 +2471,26 @@ See the [history index](README.md).
   lockdep has a fifth subclass (800 KiB of order graph) rather than a
   capped subclass, which would report a false recursion at the fifth
   level. Report: the epoll-callback report's §7.
+- **Network packet-parser fuzzing (plan §12).** The protocol layers --
+  `ether.c` through `tcp.c`, `nat.c`, `fw.c` -- and the tap services compile
+  unchanged on the host over `tests/fuzz/shim_net.c` (the interface
+  registry with frame capture, the work queue run on demand, timers over a
+  clock the target advances, a counted allocator); `tests/fuzz/netpkt.h`
+  builds and checks frames. Three targets under ASan and UBSan in `make
+  fuzz` and CI: `fuzz_net_frame` (Ethernet frames into the whole receive
+  path on an uplink and a masquerading guest tap, with sockets, an
+  established and a half-open connection; a corpus of frames from a boot's
+  capture, `tools/pcap-to-seeds.py`), `fuzz_tcp_segments` (a program of
+  segments and host actions into one connection, every state change
+  checked against RFC 793 through `tcp_test_state_change`), `fuzz_dhcp_dns`
+  (the DHCP filter and the DNS proxy through `TAPSVC_HOST_TEST` doors). The
+  oracles: locks balanced, every transmitted frame well formed and
+  checksummed, tables bounded, nothing leaked after teardown, the TCP
+  machine. First finding: a peer's FIN acknowledging the last segment in
+  flight, after the host had closed with window-held data unsent, left the
+  connection in CLOSING for ever (the FIN branch of `tcp_input` built a
+  bare ACK and ran no output; nothing else would); fixed, with
+  `net-fin-acks-last-data` and `tools/net-fuzz-probe.py --old fin-output`.
+  Not host-fuzzable and recorded: the NIC receive descriptors, the tap
+  device file, `netif.c`'s worker. Report:
+  `docs/audit/2026-10-07-net-fuzz-report.md`.

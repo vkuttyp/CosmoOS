@@ -69,6 +69,13 @@ arch_irq_state_t spin_lock_irqsave(spinlock_t *lock)
     return 1;
 }
 
+arch_irq_state_t spin_lock_irqsave_nested(spinlock_t *lock, unsigned subclass)
+{
+    (void)subclass;   /* a lockdep annotation: the host has no lockdep */
+    spin_lock(lock);
+    return 1;
+}
+
 void spin_unlock_irqrestore(spinlock_t *lock, arch_irq_state_t state)
 {
     (void)state;
@@ -78,6 +85,11 @@ void spin_unlock_irqrestore(spinlock_t *lock, arch_irq_state_t state)
 bool spin_is_held(const spinlock_t *lock)
 {
     return lock->locked != 0;
+}
+
+unsigned harness_locks_held(void)
+{
+    return g_nheld;
 }
 
 void harness_release_all_locks(void)
