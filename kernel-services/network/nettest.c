@@ -124,6 +124,23 @@ void nettest_census(struct nettest_census *out)
      * abandoned count both change only on this thread: they are read as
      * one state without any retry. */
     nt_reap_abandoned();
+    /* A worker's wake reference (sock_wake_ref) is a socket's last for as
+     * long as the worker takes between sock_wake and its put: a test that
+     * has put every socket of its can return inside that window, and the
+     * count then holds one it does not own (`net-accept-race` under the
+     * chaos migrator, CI run 37679564267: "sockets 0 -> 1"). Counted only
+     * at an instant no wake reference is held: a barrier through every
+     * worker ends each window a worker had open, and a reference a thread
+     * holds across its own wake is waited out, to a deadline. Past it the
+     * count is taken anyway -- a socket a wake reference never lets go of
+     * is a leak, and the comparison then reports it. */
+    uint64_t deadline = clock_now_ns() + 2000ull * 1000 * 1000;
+    while (socket_wake_refs() != 0) {
+        net_workers_barrier();
+        if (socket_wake_refs() == 0 || clock_now_ns() >= deadline)
+            break;
+        thread_sleep_ms(1);
+    }
     unsigned sockets = socket_count();
     out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
 }
