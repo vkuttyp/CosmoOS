@@ -105,7 +105,22 @@ address): the same address on two links is two neighbours, resolved on
 each link by a request out of that interface and completed only by a
 reply that arrived on it (invariant N25; keyed by address alone until
 2026-10-07, which the boot test's two backends sharing a gateway MAC
-hid). An interface going down drops its entries, as its removal does.
+hid). An interface going down drops its entries, as its removal does,
+and neither table learns, answers or resolves on an interface that is
+not up. **The ordering that makes "a down interface holds no entries"
+true**: `netif_set_up(false)` clears `NETIF_UP` with a release store
+under `nif->lock`, releases it, and only then calls `arp_flush` and
+`nd_flush`, which take the table locks; `arp_input`, `arp_resolve`,
+`nd_input_*` and `nd_resolve` read the flag with an acquire load *while
+holding the same table lock*. The two critical sections on a table lock
+are totally ordered. If the reader's is first, whatever it learned or
+allocated is removed by the flush behind it. If the flush's is first,
+the flag store precedes the flush's lock release in the downer's program
+order and the reader's acquire of that lock synchronises with the
+release, so the reader sees the flag cleared and does nothing. A flag
+read before the lock (the order until 2026-10-07) has neither property:
+it could read "up", lose the CPU across the clear and the flush, and
+then learn or allocate on the down interface.
 When our own resolution finds the table full it evicts the least recently updated
 reachable entry (an incomplete one has a resolution in flight);
 learning from received traffic never evicts and simply learns nothing

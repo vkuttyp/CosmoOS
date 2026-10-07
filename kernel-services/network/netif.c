@@ -249,7 +249,7 @@ void netif_unregister(struct netif *nif)
     mutex_lock(&g_unregister_lock);
     /* 1. Down and gone: netif_transmit and netif_rx refuse from here. */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
-    nif->flags = (nif->flags & ~NETIF_UP) | NETIF_GONE;
+    __atomic_store_n(&nif->flags, (nif->flags & ~NETIF_UP) | NETIF_GONE, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&nif->lock, s);
 
     /* 2. Out of the registry: no new lookups. */
@@ -391,11 +391,15 @@ void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t ga
 
 void netif_set_up(struct netif *nif, bool up)
 {
+    /* The flag word is read without the lock by the data paths
+     * (netif_transmit, netif_tx_pending, rx_common, arp_input,
+     * arp_resolve, nd_*), with acquire loads; every writer holds nif->lock
+     * and publishes with a release store, so a reader sees a whole word.
+     * For the down: the store happens before the flushes below take the
+     * neighbour tables' locks, so a reader that takes a table lock after
+     * the flush's critical section sees the flag cleared (N25). */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
-    if (up)
-        nif->flags |= NETIF_UP;
-    else
-        nif->flags &= ~NETIF_UP;
+    __atomic_store_n(&nif->flags, up ? (nif->flags | NETIF_UP) : (nif->flags & ~NETIF_UP), __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&nif->lock, s);
     if (!up) {
         /* Down drops the interface's neighbours as unregister does (step
@@ -414,20 +418,14 @@ void netif_set_up(struct netif *nif, bool up)
 void netif_set_forward(struct netif *nif, bool on)
 {
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
-    if (on)
-        nif->flags |= NETIF_FORWARD;
-    else
-        nif->flags &= ~NETIF_FORWARD;
+    __atomic_store_n(&nif->flags, on ? (nif->flags | NETIF_FORWARD) : (nif->flags & ~NETIF_FORWARD), __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&nif->lock, s);
 }
 
 void netif_set_masquerade(struct netif *nif, bool on)
 {
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
-    if (on)
-        nif->flags |= NETIF_MASQUERADE;
-    else
-        nif->flags &= ~NETIF_MASQUERADE;
+    __atomic_store_n(&nif->flags, on ? (nif->flags | NETIF_MASQUERADE) : (nif->flags & ~NETIF_MASQUERADE), __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&nif->lock, s);
 }
 

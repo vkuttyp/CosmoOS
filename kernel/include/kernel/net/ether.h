@@ -34,7 +34,9 @@ int ether_output(struct netif *nif, struct mbuf *m, const uint8_t dst[ETH_ALEN],
 void arp_init(void);
 void arp_input(struct netif *nif, struct mbuf *m);
 /* MAC for `ip` on `nif`. 0: mac filled. -EINPROGRESS: `m` was queued
- * and a request sent (ownership taken). Other errno: `m` freed. */
+ * and a request sent (ownership taken). Other errno: `m` freed --
+ * -ENETUNREACH when `nif` is down (decided under the table lock, so a
+ * resolve never leaves an entry on a down interface; N25). */
 int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mbuf *m);
 /* `nif`'s entry for `ip`, reachable: mac filled. Reads the table without sending. */
 bool arp_lookup(const struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN]);
@@ -62,6 +64,13 @@ void arp_get_stats(struct arp_stats *out);
 void arp_test_hold_retry(bool on);
 bool arp_test_retry_parked(void);
 void arp_test_release_retry(void);
+/* Park the next arp_input or arp_resolve between its decision to proceed
+ * and its taking of the table lock, where the old NETIF_UP check (before
+ * the lock) could be overtaken by netif_set_up(false)'s flag clear and
+ * flush (N25 follow-up). One caller per arming. */
+void arp_test_hold_lock_entry(bool on);
+bool arp_test_lock_entry_parked(void);
+void arp_test_release_lock_entry(void);
 #endif
 
 #endif /* KERNEL_NET_ETHER_H */

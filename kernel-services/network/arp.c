@@ -58,6 +58,12 @@ static struct net_work g_age_work;
  * whose retries went out on the other interface -- and a reply on one
  * interface completed the other's entry (invariant N25).
  */
+#if CONFIG_DEBUG
+static void arp_test_park_before_lock(void);
+#else
+static inline void arp_test_park_before_lock(void) {}
+#endif
+
 static struct arp_entry *find(const struct netif *nif, uint32_t ip)
 {
     for (unsigned i = 0; i < ARP_TABLE_SIZE; i++) {
@@ -129,7 +135,22 @@ int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mb
         memcpy(mac, eth_broadcast, ETH_ALEN);
         return 0;
     }
+    arp_test_park_before_lock();
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    /* Under the table lock, so it orders against netif_set_up(false):
+     * the flag is cleared before the flush takes this lock, and whichever
+     * of the two critical sections is second sees the other's effect --
+     * a resolve that saw "up" is flushed by the down behind it, a resolve
+     * after the flush sees "down" (N25). No entry is made for a down
+     * interface, and the packet does not wait for a link that is not
+     * there. */
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
+        if (m)
+            g_stats.pending_dropped++;   /* counted like the flush and the timeout */
+        spin_unlock_irqrestore(&g_lock, s);
+        m_freem(m);
+        return -ENETUNREACH;
+    }
     struct arp_entry *e = find(nif, ip);
     if (e && e->state == ARP_REACHABLE) {
         memcpy(mac, e->mac, ETH_ALEN);
@@ -186,15 +207,21 @@ void arp_input(struct netif *nif, struct mbuf *m)
         return;   /* probes and our own address: nothing to learn */
 
     uint16_t op = ntohs(a.op);
+    bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
+    struct mbuf *pending = NULL;
+    arp_test_park_before_lock();
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     /* A frame queued before the interface went down can arrive here after
      * the down flushed its entries; learning from it would carry a MAC
      * across the down transition into the link's return (N25). Nothing is
-     * learned or answered on an interface that is not up. */
-    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
+     * learned or answered on an interface that is not up -- read under
+     * the table lock, which orders it against the down's flush: a read
+     * before the flush's critical section is undone by the flush, a read
+     * after it sees the flag the down cleared before taking this lock. */
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
+        spin_unlock_irqrestore(&g_lock, s);
         return;
-    bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
-    struct mbuf *pending = NULL;
-    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    }
     struct arp_entry *e = find(nif, a.spa);   /* this interface's entry: a reply here completes no other's */
     /*
      * ARP carries no authentication, so the table learns only what RFC 826
@@ -271,6 +298,35 @@ void arp_delete(const struct netif *nif, uint32_t ip)
 }
 
 #if CONFIG_DEBUG
+/*
+ * The window the N25 follow-up closes, held open on purpose: between a
+ * caller of arp_input or arp_resolve deciding to proceed and its taking
+ * of the table lock. The test parks the next such caller there, takes the
+ * interface down, and releases it -- the order the old code lost (its
+ * NETIF_UP check was before the lock; the flag could clear and the flush
+ * run in this window). One caller per arming, like the retry hook below.
+ */
+static unsigned g_test_hold_lock_entry, g_test_lock_entry_parked, g_test_lock_entry_release;
+
+void arp_test_hold_lock_entry(bool on)
+{
+    __atomic_store_n(&g_test_lock_entry_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_lock_entry_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_lock_entry, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool arp_test_lock_entry_parked(void) { return __atomic_load_n(&g_test_lock_entry_parked, __ATOMIC_ACQUIRE) != 0; }
+void arp_test_release_lock_entry(void) { __atomic_store_n(&g_test_lock_entry_release, 1u, __ATOMIC_RELEASE); }
+
+static void arp_test_park_before_lock(void)
+{
+    unsigned one = 1u;
+    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;   /* not armed, or another caller took the arming */
+    __atomic_store_n(&g_test_lock_entry_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_lock_entry_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+}
+
 /*
  * The window this unit closes, held open on purpose.
  *

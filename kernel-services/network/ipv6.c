@@ -86,6 +86,12 @@ static void solicited_node_mac(const struct in6_addr *ip, uint8_t mac[ETH_ALEN])
 /* Keyed by (interface, address), as arp.c's find: a link-local address
  * is per link by definition, and the same one on two links is two
  * neighbours (invariant N25). */
+#if CONFIG_DEBUG
+static void nd_test_park_before_lock(void);
+#else
+static inline void nd_test_park_before_lock(void) {}
+#endif
+
 static struct nd_entry *nd_find(const struct netif *nif, const struct in6_addr *ip)
 {
     for (unsigned i = 0; i < ND_TABLE_SIZE; i++) {
@@ -173,7 +179,15 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALE
         memcpy(mac + 2, ip->s6_addr + 12, 4);
         return 0;
     }
+    nd_test_park_before_lock();
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {   /* under the lock, as arp_resolve (N25) */
+        if (m)
+            STAT(nd_pending_dropped);
+        spin_unlock_irqrestore(&g_nd_lock, s);
+        m_freem(m);
+        return -ENETUNREACH;
+    }
     struct nd_entry *e = nd_find(nif, ip);
     if (e && e->state == ND_REACHABLE) {
         memcpy(mac, e->mac, ETH_ALEN);
@@ -210,11 +224,14 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (!in6_equal(&nd.target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
         return;
-    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
-        return;   /* queued input on a down interface learns nothing (N25, as arp_input) */
     /* Learn the asker (never at the cost of an entry in use), answer with our address. */
     if (nd.opt_type == 1 && nd.opt_len == 1) {
+        nd_test_park_before_lock();
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
+        if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
+            spin_unlock_irqrestore(&g_nd_lock, s);   /* queued input on a down interface learns nothing (N25): read under the lock */
+            return;
+        }
         struct nd_entry *e = nd_find(nif, &ip6->src);
         if (e == NULL)
             e = nd_alloc(&ip6->src, nif, false);
@@ -239,10 +256,13 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (nd.opt_type != 2 || nd.opt_len != 1)
         return;
-    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP))
-        return;   /* as above */
     struct mbuf *pending = NULL;
+    nd_test_park_before_lock();
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
+    if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
+        spin_unlock_irqrestore(&g_nd_lock, s);   /* as nd_input_ns */
+        return;
+    }
     struct nd_entry *e = nd_find(nif, &nd.target);   /* this interface's entry: an advertisement here completes no other's */
     if (e && e->state == ND_INCOMPLETE) {   /* only the answer to our own solicitation */
         memcpy(e->mac, nd.opt_mac, ETH_ALEN);
@@ -257,6 +277,28 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
 }
 
 #if CONFIG_DEBUG
+/* ND's twin of arp_test_park_before_lock (N25 follow-up). */
+static unsigned g_test_hold_lock_entry, g_test_lock_entry_parked, g_test_lock_entry_release;
+
+void nd_test_hold_lock_entry(bool on)
+{
+    __atomic_store_n(&g_test_lock_entry_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_lock_entry_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_lock_entry, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool nd_test_lock_entry_parked(void) { return __atomic_load_n(&g_test_lock_entry_parked, __ATOMIC_ACQUIRE) != 0; }
+void nd_test_release_lock_entry(void) { __atomic_store_n(&g_test_lock_entry_release, 1u, __ATOMIC_RELEASE); }
+
+static void nd_test_park_before_lock(void)
+{
+    unsigned one = 1u;
+    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_test_lock_entry_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_lock_entry_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+}
+
 /* ND's twin of arp_test_park_retry: the same one-unlock window, parked
  * the same way, because the defect is in both and a fix proved in one
  * is half a proof (invariant N22). */

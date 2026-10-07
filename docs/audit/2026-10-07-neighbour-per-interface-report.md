@@ -213,3 +213,45 @@ probe boots are in §2.
   reply (§4).
 - The two-way tie in `ipv4_route` for two up interfaces on one subnet
   (§5) is a policy without a knob; recorded, not changed.
+
+## 8. Addendum, 2026-10-07: the two windows left in "a down interface holds no entries"
+
+PR #319 said a down interface holds no neighbour entries, and left two
+windows in it:
+
+1. `arp_input` and `nd_input_*` tested `NETIF_UP` *before* taking the
+   table lock. An input that read "up", lost the CPU while
+   `netif_set_up(false)` cleared the flag and flushed, then took the lock
+   and learned the asker's MAC on the down interface.
+2. `arp_resolve` and `nd_resolve` did not test the flag. A send racing the
+   down allocated a fresh incomplete entry, packet parked, after the flush
+   -- an entry whose retries could only fail at `netif_transmit`.
+
+**The change.** Both tables read the flag under their lock, in input and
+in resolve; a resolve on a down interface frees the packet, counts it
+with the flush's drops (`pending_dropped`, `nd_pending_dropped`) and
+returns `-ENETUNREACH`, which `output_on` hands back as it does any
+resolve error. `netif_set_up` clears the flag with a release store under
+`nif->lock` and only then flushes; the other writers of the flag word
+(`netif_set_forward`, `netif_set_masquerade`, `netif_unregister` step 1)
+publish with the same release store, since the data paths read the word
+with lock-free acquire loads (`netif_register`'s clear of `GONE` is
+before publication). The argument is in the design document and N25:
+the two critical sections on a table lock are ordered, and whichever is
+second sees the other's effect.
+
+**Proof.** `net-neigh-down-race` (debug builds): a debug hook parks the
+next `arp_input`/`arp_resolve` (`arp_test_hold_lock_entry`) or
+`nd_input_ns`/`nd_resolve` (`nd_test_hold_lock_entry`) exactly between
+its decision to proceed and its taking of the lock; the test takes the
+fake interface down while the caller is parked, releases it, joins it,
+and looks: no entry, `-ENETUNREACH` from the resolves with the packet
+counted dropped. `tools/neigh-down-race-probe.py --old` restores the old
+order (input checks before the park point, no resolve checks):
+
+| | x86-64 | AArch64 |
+| --- | --- | --- |
+| `--old` | TODO | TODO |
+| fixed | TODO | TODO |
+
+Validation: TODO

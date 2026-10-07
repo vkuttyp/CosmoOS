@@ -114,6 +114,10 @@ void nd_flush(struct netif *nif);   /* drop every entry that names the interface
 void nd_test_hold_retry(bool on);
 bool nd_test_retry_parked(void);
 void nd_test_release_retry(void);
+/* ND's twin of arp_test_hold_lock_entry (N25 follow-up). */
+void nd_test_hold_lock_entry(bool on);
+bool nd_test_lock_entry_parked(void);
+void nd_test_release_lock_entry(void);
 #endif
 
 struct ip_stats {
