@@ -216,9 +216,9 @@ priority (no zsh `&`), 439 self-tests in every debug boot:
 |---|---|---|
 | `make host-test` | PASS | PASS |
 | `make analyze` | clean | clean |
-| debug boot, 4 CPUs | PASS 137.0 s | PASS 145.4 s |
+| debug boot, 4 CPUs | PASS 137.0 s; 135.6 s on the review follow-up | PASS 145.4 s; 146.8 s on the follow-up |
 | debug boot, 2 CPUs | PASS 143.6 s | PASS 147.1 s |
-| debug boot, 1 CPU | PASS 132.5 s | PASS 124.1 s |
+| debug boot, 1 CPU | PASS 132.5 s; 134.1 s on the review follow-up | PASS 124.1 s; 125.6 s on the follow-up |
 | `make test-smp2` | PASS 143.3 s | PASS 151.2 s |
 | `make test-chaos` | PASS 146.8 s | PASS 138.8 s |
 | release build and boot | PASS 16.6 s | PASS 20.3 s |
@@ -257,8 +257,19 @@ behind it unrun (it walks on for them). The fifth, a signalfd inherited by
 another process not waking that process's wait, is Linux's behaviour too
 and is recorded as a gap in `invariants.md`.
 
-No x86-64 boot approached the 180 s budget (the longest, `test-chaos`,
-146.8 s). The PR's CI boot times are added here when its run completes.
+No x86-64 boot approached the 180 s budget locally (the longest,
+`test-chaos`, 146.8 s). CI (PR #325, run 37648352208, on the review
+follow-up `6a793655`): the x86-64 job's debug boots took 151.2-154.8 s
+against the 180 s budget (release 16.9 s, the panic-path boot 139.7 s) --
+the highest of this series' three units (140.4-149.4 s for the epoll-close
+PR, 119.6-124.2 s for the delayed-ACK one, on runners of their own), with
+about 25 s of margin; no timeout, the flakes record unchanged, and the
+figure is recorded here for the budget question should it narrow further.
+The AArch64 job's 134.4-141.2 s against its 240 s (release 19.0 s), well
+below the previous unit's 171-186 s, which says more about the runner than
+about the tree. `epoll_musl` with its nested case compiled and ran on the
+x86-64 runner; the litmus job's `epoll/watched.litmus` verdicts are
+`Never`, both witnesses `Sometimes`, both controls `Sometimes`.
 
 ## 6. Plan
 
