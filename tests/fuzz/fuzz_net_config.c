@@ -721,7 +721,8 @@ static size_t put(uint8_t *buf, size_t cap, size_t at, uint8_t op, const uint8_t
     if (at + 1 + n > cap)
         return at;
     buf[at] = op;
-    memcpy(buf + at + 1, arg, n);
+    if (n)
+        memcpy(buf + at + 1, arg, n);   /* the operations without arguments pass NULL */
     return at + 1 + n;
 }
 
