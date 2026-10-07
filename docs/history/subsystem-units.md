@@ -2506,3 +2506,20 @@ See the [history index](README.md).
   test's last put) and `tools/census-wake-ref-probe.py`, whose
   `--adversary` reproduces the CI line on any tree, including #326's
   first parent. Record: `docs/testing/flakes.md`.
+- **Network fuzz oracles past the receive path.** Where the net-fuzz unit's
+  coverage stopped (its report's §5). `fuzz_net_frame` gains IPv6 sockets and
+  a connection on the link-local address, and host-action records: UDP sends
+  from eight socket shapes to sixteen destinations, a full transmit ring
+  (`-ENOBUFS`), IPv6 segments, and neighbour messages. Its oracles now
+  include a unicast frame's MAC matching its interface's ARP or ND entry
+  (N25, `nd_lookup`). The new `fuzz_net_config` drives the firewall and NAT
+  editors against a model of what was configured; fw.c's `FW_HOST_TEST`
+  hook checks that every rule deciding a frame is installed at that moment.
+  Fixed: `nat_pf_clear` kept its rules' translations (`net-pf-clear`); a
+  tap's release purged its guest before destroying the tap, so a queued
+  frame's masquerade entry outlived it into the next tap on the subnet
+  (`net-tap-release-order`). Made defensive: `pcb_kill_locked` runs once.
+  Coverage of the four net targets' union went from 68.2 % to 78.7 %
+  (`ipv6.c` 84 %, `udp.c` 79 %, `nat.c` 80 %, `fw.c` 92 %);
+  `tools/fuzz-coverage.py`. Report:
+  `docs/audit/2026-10-08-net-fuzz-oracles-report.md`.

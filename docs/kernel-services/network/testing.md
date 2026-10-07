@@ -1123,7 +1123,7 @@ completes the handshake by hand with a window of 20.
 `tools/net-fuzz-probe.py --old fin-output` boots a clone with the old
 branch restored: the test fails at (2) and nothing else does.
 
-## The host fuzz targets (`tests/fuzz/fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns`)
+## The host fuzz targets (`tests/fuzz/fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns`, `fuzz_net_config`)
 
 The protocol layers compile unchanged on the host over
 `tests/fuzz/shim_net.c` (the interface registry, the work queue, timers over
@@ -1143,6 +1143,24 @@ corpus, the runs and the finding above are in
 has the shim. Not fuzzable on the host: the NIC receive descriptors
 (virtio-net, e1000e: a device model's shape), the tap device file, the
 worker and steering in `netif.c`, and anything two CPUs race over.
+
+Since 2026-10-08 (`docs/audit/2026-10-08-net-fuzz-oracles-report.md`),
+`fuzz_net_frame` also has IPv6 sockets and a connection on the link-local
+address. Host-action records drive UDP sends, a full transmit ring,
+IPv6 segments and neighbour messages. It checks that every unicast frame
+goes to the neighbour its interface holds (N25, through `nd_lookup` and
+`arp_lookup`), and that `-ENOBUFS` is returned exactly when the ring
+refused the datagram. `fuzz_net_config` interleaves the firewall and NAT
+editors with frames against a model of what was configured, with a
+`FW_HOST_TEST` hook that reports every rule deciding a frame. It found
+two defects, both fixed:
+- `nat_pf_clear` kept the cleared forwards' translations
+  (`net-pf-clear`);
+- a tap's release purged its guest before the tap was gone, so a queued
+  frame's translation outlived the tap (`net-tap-release-order`).
+
+`tools/net-fuzz-probe.py --old pf-clear|tap-release-order` puts each one
+back. `tools/fuzz-coverage.py` reports a target's line coverage by file.
 
 ## Releases however a test returns (the net-leftover unit)
 
