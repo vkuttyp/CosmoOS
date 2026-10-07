@@ -554,8 +554,8 @@ Sources: inventory §§2.10, 2.11 and 3,
   [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
   *Completed 2026-10-06 (PR #314):* over 257 AArch64 CI boots the median
   was 154 s, p95 173 s, and four exceeded 180 s (two on earlier branches);
-  `BOOT_TIMEOUT` is 240 s on AArch64 and stays 180 s on x86-64 (p95 163 s,
-  max 169 s). *2026-10-07:* x86-64 followed. Over 81 boots of main's last
+  `BOOT_TIMEOUT` was made 240 s on AArch64 and left at 180 s on x86-64
+  (p95 163 s, max 169 s then). *2026-10-07:* x86-64 followed. Over 81 boots of main's last
   twelve CI runs the median was 141 s and the p95 170 s, the maximum 175 s
   passing, on runners of two speeds (about 125 s and about 165 s a boot);
   the suite had grown to within 5 s of the budget on the slow kind, and

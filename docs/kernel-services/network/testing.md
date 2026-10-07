@@ -1243,8 +1243,8 @@ no ready line, TCP mismatch, fewer than 18 UDP echoes, the
 guest-initiated connection not received, a write-write-read batch not
 completed or either `TCP_NODELAY` median over 25 ms, QUIT not sent, or the
 `NETTEST: client ok` / `NETTEST: done .*quit=1` / `NETTEST: wwr guest-client ...` markers missing. The
-boot timeout is `BOOT_TIMEOUT`, 180 s on x86-64 and 240 s on AArch64 (the
-harness gets timeout minus 30 s).
+boot timeout is `BOOT_TIMEOUT`, 240 s on both architectures (the harness
+gets timeout minus 30 s).
 
 ### The deadlines, and which event each is measured from
 

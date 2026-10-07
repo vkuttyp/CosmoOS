@@ -151,10 +151,10 @@ endif
 # into a sibling output tree. The harness requires the migrator to have
 # moved something. CI's ordinary AArch64 boots take up to 167 s; chaos
 # added 11 s of self-test work and exhausted the shell's 170 s deadline
-# under the default 180 s total. Allow 240 s for this heavier full boot;
+# under the then-default 180 s total. 240 s for this heavier full boot;
 # individual self-test watchdogs and shell signal-latency checks remain.
-# (AArch64's ordinary boots have had 240 s too since BOOT_TIMEOUT, above;
-# x86-64's chaos boot is the one this still lengthens.)
+# (Ordinary boots on both architectures have 240 s too since BOOT_TIMEOUT,
+# above, so this no longer lengthens anything; it stays explicit.)
 test-chaos:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
