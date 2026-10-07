@@ -2384,7 +2384,8 @@ See the [history index](README.md).
   reported no violation; the class table went 384 → 512 (a boot had reached
   382). The runner prints the timer callback functions set up and never run
   and the completion classes never signalled or never waited for: one
-  callback (`delack_timer`) and two polled classes on this tree.
+  callback (`delack_timer`) and one polled production class
+  (`xhci-first-scan`) on this tree.
   `lockdep-completion` (four reports, five silent controls),
   `tools/lockdep-completion-probe.py` (four modes). Report:
   `docs/audit/2026-10-08-lockdep-completion-waits-report.md`.

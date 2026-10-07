@@ -84,10 +84,11 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   listing of 2026-10-08 names one timer callback function the whole debug
   suite never runs, `delack_timer` (TCP's delayed acknowledgement, armed
   on every second in-order segment and always cancelled by the
-  acknowledgement that goes out first), and two production completion
-  classes never waited for because their consumers poll
-  (`xhci-first-scan` under `g_controllers_lock`, the NVMe admin fallback
-  without a vector). A delayed acknowledgement needs a receiver that gets
+  acknowledgement that goes out first), one production completion class
+  never waited for because its consumer polls (`xhci-first-scan`, under
+  `g_controllers_lock`), and one polled path inside an exercised class
+  (the NVMe admin fallback without a vector, whose `nvme-admin` class is
+  otherwise waited for and signalled). A delayed acknowledgement needs a receiver that gets
   one segment and sends nothing for 40 ms: a loopback test of the shape
   `net-lo-tcp` has would run it, and the callback's locks (`timer_kick`,
   the same as `rexmit_timer`'s, which runs) would then be in the graph

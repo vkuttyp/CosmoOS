@@ -44,6 +44,9 @@ NEED = {
     'no-self': None,   # a panic, not a failing check
 }
 PANIC = 'lockdep: a completion wait holds a lock its signaller needs'
+# The control's own objects, in the report's detail line: an unrelated
+# completion report elsewhere in the boot must not pass for it.
+PANIC_DETAIL = "complete() held 'lockdep-cm-l5'#0, and a wait for 'lockdep-cm-self' is recorded holding it"
 
 WAIT = 'void lockdep_completion_wait(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)\n{\n'
 SIGNAL = 'void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)\n{\n'
@@ -107,11 +110,13 @@ def main():
         need = NEED[args.mode]
         if need is None:
             panic = next((l for l in serial.splitlines() if PANIC in l), None)
+            detail = next((l for l in serial.splitlines() if PANIC_DETAIL in l), None)
             print(panic or '(no completion report in the serial log)')
+            print(detail or '(no detail line naming lockdep-cm-l5 and lockdep-cm-self)')
             print(line or '(no SELFTEST line for lockdep-completion, as required)')
-            ok = panic is not None and line is None
-            print(f'PROBE: {"PASS" if ok else "FAIL"} (required: the self-signal control panics with the completion report, '
-                  f'before any SELFTEST line for lockdep-completion)')
+            ok = panic is not None and detail is not None and line is None
+            print(f'PROBE: {"PASS" if ok else "FAIL"} (required: the self-signal control panics with the completion report '
+                  f'naming lockdep-cm-l5 and lockdep-cm-self, before any SELFTEST line for lockdep-completion)')
             return 0 if ok else 1
         print(line or '(no SELFTEST line for lockdep-completion: did it boot?)')
         ok = line is not None and ' FAIL' in line and need in line

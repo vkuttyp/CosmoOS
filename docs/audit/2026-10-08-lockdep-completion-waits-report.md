@@ -233,7 +233,7 @@ nothing in the checker changed.
 | `no-wait` | the wait hook | case 1, `hits_signal_first == 1` | required failure | required failure |
 | `no-signal` | the signal hook | case 1, `hits_signal_first == 1` | required failure | required failure |
 | `no-signal-check` | the signal-side cycle check (edges still recorded) | case 2, `hits_wait_first == 1` | required failure | required failure |
-| `no-self` | the discard of a thread's own pending complete() at its own wait | the boot panics with `lockdep: a completion wait holds a lock its signaller needs` inside the test | panic: `complete() held 'lockdep-cm-l5'#0, and a wait for 'lockdep-cm-self' is recorded holding it`, chain `'lockdep-cm-l5'#0 -> 'lockdep-cm-self'#0`, 22 s in | the same, 27 s in |
+| `no-self` | the discard of a thread's own pending complete() at its own wait | the boot panics with `lockdep: a completion wait holds a lock its signaller needs`, its detail naming `lockdep-cm-l5` and `lockdep-cm-self`, before the test's result line | panic: `complete() held 'lockdep-cm-l5'#0, and a wait for 'lockdep-cm-self' is recorded holding it`, chain `'lockdep-cm-l5'#0 -> 'lockdep-cm-self'#0`, 22 s in | the same, 27 s in |
 
 Eight of eight. The two modes that fail at the same check remove the two
 halves of one cycle (the wait's edge and the signal's edge), as the

@@ -810,11 +810,18 @@ static int completion_node(uint16_t *spin_slot, const char *name, uintptr_t ip)
     return n;
 }
 
+/* Written under g_raw, like a class's usage bits, so the graph snapshot
+ * (a plain copy under g_raw) sees no concurrent writer; read atomically by
+ * the coverage dump, which takes no lock. The common case -- the bit is
+ * set already -- costs one load. */
 static void completion_cover(uint16_t node, unsigned bit)
 {
     struct lock_class *c = &g_graph.classes[lockdep_node_class(node)];
-    if ((__atomic_load_n(&c->cover, __ATOMIC_RELAXED) & bit) == 0)
-        __atomic_fetch_or(&c->cover, bit, __ATOMIC_RELAXED);
+    if ((__atomic_load_n(&c->cover, __ATOMIC_RELAXED) & bit) != 0)
+        return;
+    arch_irq_state_t s = raw_lock();
+    __atomic_store_n(&c->cover, c->cover | bit, __ATOMIC_RELAXED);
+    raw_unlock(s);
 }
 
 void lockdep_completion_init(uint16_t *spin_slot, const char *name, uintptr_t ip)
