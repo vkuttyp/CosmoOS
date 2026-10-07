@@ -3048,6 +3048,7 @@ bool selftest_net_accept_race(const char **reason)
  * of its own so the test can see whether it returned while the worker
  * held on -- without the fix it does, at once, with the count one high.
  */
+#if CONFIG_DEBUG
 struct census_job {
     struct nettest_census out;
     struct completion done;
@@ -3067,6 +3068,8 @@ static void wake_hold_release_rel(void *arg)
     (void)arg;
     (void)sock_test_wake_hold_release();
 }
+
+#endif /* CONFIG_DEBUG */
 
 bool selftest_net_census_wake_ref(const char **reason)
 {
