@@ -1,6 +1,6 @@
 # Lockdep completion waits: completion classes, and what the suite never drives
 
-Date: 2026-10-08. Branch `lockdep-completion-waits` from `main` at
+Date: 2026-10-07. Branch `lockdep-completion-waits` from `main` at
 `e3d9e6fe`. Scope: the second half of `docs/plan.md` §1 "Implementation —
 callback-wait dependencies". Timer callback waits were done on 2026-10-05
 ([callback-classes report](2026-10-05-lockdep-callback-classes-report.md));

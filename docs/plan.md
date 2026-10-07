@@ -67,7 +67,7 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   negative controls). IRQ-handler and module waits go through
   `synchronize_quiesce`, whose `might_sleep` rules out a lock cycle.
   See the [callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md).
-  *Completed 2026-10-08:* completion waits are in the graph through
+  *Completed 2026-10-07:* completion waits are in the graph through
   completion classes keyed by the completion's name (L21): a wait records
   the mutexes held across it, a `complete()` the mutexes held at the call
   (deferred until the thread's next event, and discarded when that event
@@ -78,10 +78,10 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   (`lockdep-completion`, four negative controls). The unexecuted paths are
   a listing now: the runner prints the timer callback functions set up and
   never run and the completion classes never signalled or never waited
-  for, and the [completion-waits report](audit/2026-10-08-lockdep-completion-waits-report.md)
+  for, and the [completion-waits report](audit/2026-10-07-lockdep-completion-waits-report.md)
   judges each entry. What remains is bounded and named in the next item.
 - [ ] **Validation — the paths the suite never drives.** The coverage
-  listing of 2026-10-08 names one timer callback function the whole debug
+  listing of 2026-10-07 names one timer callback function the whole debug
   suite never runs, `delack_timer` (TCP's delayed acknowledgement, armed
   on every second in-order segment and always cancelled by the
   acknowledgement that goes out first), one production completion class
@@ -608,8 +608,8 @@ their deferred status here; this section does not schedule them for implementati
    locking and lifetime architecture.~~ Timer callback waits done 2026-10-05
    ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing done
    2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md));
-   completion waits and the coverage listing done 2026-10-08
-   ([completion-waits report](audit/2026-10-08-lockdep-completion-waits-report.md)).
+   completion waits and the coverage listing done 2026-10-07
+   ([completion-waits report](audit/2026-10-07-lockdep-completion-waits-report.md)).
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
    §4's bounded preempt-at-restore recursion done 2026-10-06

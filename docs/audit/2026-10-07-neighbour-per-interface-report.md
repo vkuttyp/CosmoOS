@@ -250,7 +250,7 @@ counted dropped. `tools/neigh-down-race-probe.py --old` restored the old
 order everywhere at once (input checks before the park point, no resolve
 checks) when the table below was made; it now takes one race at a time
 (`--old arp-input|arp-resolve|nd-input|nd-resolve`, each failing at that
-race's own check; results in the completion-waits report of 2026-10-08):
+race's own check; results in the completion-waits report of 2026-10-07):
 
 | | x86-64 | AArch64 |
 | --- | --- | --- |

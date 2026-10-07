@@ -333,7 +333,7 @@ A completion is a one-shot signal between contexts (`docs/kernel/scheduler/desig
 some other context calls `complete`. The deadlock a lock checker can see
 is a waiter that holds a lock L across the wait while the signaller must
 acquire L, directly or through a chain, before it can call `complete`.
-Until 2026-10-08 nothing modelled it: a completion had no class, and the
+Until 2026-10-07 nothing modelled it: a completion had no class, and the
 callback-class report said there was "no function to key a class on".
 The key is the completion's **name**, which `completion_init` already
 requires.
@@ -472,7 +472,7 @@ not only while a wait is in flight. The price is the shape crossrelease
 caught and this does not: a signaller that takes and *releases* a mutex
 before `complete` ("lock, unlock, complete") records no edge for it,
 although a waiter holding that mutex would block it. That shape is the
-survey's business (`docs/audit/2026-10-08-lockdep-completion-waits-report.md`):
+survey's business (`docs/audit/2026-10-07-lockdep-completion-waits-report.md`):
 every signaller in the tree is enumerated with the mutexes it takes on
 its way to `complete`. One class of signaller deserves its own note: a
 **worker thread** completing a barrier item depends on every item ahead

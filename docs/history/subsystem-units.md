@@ -2388,4 +2388,4 @@ See the [history index](README.md).
   (`xhci-first-scan`) on this tree.
   `lockdep-completion` (four reports, five silent controls),
   `tools/lockdep-completion-probe.py` (four modes). Report:
-  `docs/audit/2026-10-08-lockdep-completion-waits-report.md`.
+  `docs/audit/2026-10-07-lockdep-completion-waits-report.md`.

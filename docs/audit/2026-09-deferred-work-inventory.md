@@ -739,10 +739,10 @@ Still open for the next milestone:
 - ~~Callback wait dependencies beyond observed active timer callback paths.~~
   *2026-10-05: timer callback waits are in the lock graph (callback classes,
   PR #312, [report](2026-10-05-lockdep-callback-classes-report.md)).*
-  **Built 2026-10-08**: completion waits are in the graph through completion
+  **Built 2026-10-07**: completion waits are in the graph through completion
   classes (L21), and the unexecuted paths are a listing the runner prints
   after every debug suite; see the
-  [completion-waits report](2026-10-08-lockdep-completion-waits-report.md)
+  [completion-waits report](2026-10-07-lockdep-completion-waits-report.md)
   and §7.3.
 - ~~Raw `arch_irq_restore` ownership and pairing.~~ **Built 2026-10-06**: per-context
   save stacks with restore and thread-exit checks under lockdep; see the
@@ -782,9 +782,9 @@ Report: [`2026-10-07-neighbour-per-interface-report.md`](2026-10-07-neighbour-pe
 | `ipv4_route`'s tie for two up interfaces on one subnet (first registered wins) | Recorded as a policy without a knob; not changed. |
 | ~~Two windows in "a down interface holds no entries": the input paths read `NETIF_UP` before the table lock, the resolve paths not at all~~ | **CLOSED (follow-up to PR #319)**: the flag is read under the table lock in input and resolve, a resolve on a down interface returns `-ENETUNREACH` with the packet counted dropped, every flag writer is a release store; `net-neigh-down-race` and `tools/neigh-down-race-probe.py --old <race>`, one mode per race (report §8). |
 
-### 7.3 Completion waits and the coverage listing (2026-10-08)
+### 7.3 Completion waits and the coverage listing (2026-10-07)
 
-Report: [`2026-10-08-lockdep-completion-waits-report.md`](2026-10-08-lockdep-completion-waits-report.md).
+Report: [`2026-10-07-lockdep-completion-waits-report.md`](2026-10-07-lockdep-completion-waits-report.md).
 
 | Item | Outcome |
 |---|---|
