@@ -148,7 +148,7 @@ def measure(args):
         spec = importlib.util.spec_from_file_location('epoll_measure_boot', root / 'tests/boot/run_boot_test.py')
         harness = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(harness)
-        timeout = '240' if args.arch == 'aarch64' else '180'
+        timeout = '240'   # the whole-boot timeout, BOOT_TIMEOUT's value on both architectures
         log_path = out / 'boot.log'
         sys.argv = ['epoll-callback-probe', '--timeout', timeout, '--image', str(out / 'cosmoos.img'),
                     '--log', str(log_path), '--kernel', str(out / 'kernel/kernel.elf')]
