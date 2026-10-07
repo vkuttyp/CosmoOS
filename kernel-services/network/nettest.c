@@ -2114,6 +2114,8 @@ bool selftest_net_arp_per_interface(const char **reason)
  * interface down, releases it, and looks for an entry on the down
  * interface.
  */
+static bool dual_nd_advert(struct netif *nif, const struct in6_addr *target, const uint8_t mac[ETH_ALEN]);
+
 #if CONFIG_DEBUG
 struct down_race {
     struct netif *nif;
@@ -2180,6 +2182,14 @@ static void down_race_nd_input(void *arg)
         ip6.dst = r->nif->ip6_ll;
         nd_input_ns(r->nif, f, &ip6);
     }
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+static void down_race_nd_advert(void *arg)
+{
+    struct down_race *r = arg;
+    static const uint8_t peer_mac[ETH_ALEN] = { 0x02, 0xdd, 0x00, 0x00, 0x00, 0x03 };
+    dual_nd_advert(r->nif, &r->ip6, peer_mac);   /* an advertisement for the entry resolve made below */
     __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
 }
 
@@ -2260,13 +2270,36 @@ bool selftest_net_neigh_down_race(const char **reason)
     CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no entry: 0 would mean the asker was learned across the down */
     netif_set_up(&d.nif, false);   /* drops the entry the probe above made */
 
-    /* 4. ND resolve racing the down. */
+    /* 4. ND advertisement racing the down: an incomplete entry of ours
+     * exists (resolve made it), the advertisement that would complete it
+     * is parked before the lock, the down flushes the entry; the
+     * advertisement must complete nothing. (nd_input_na never allocates,
+     * so a flush leaves it nothing to complete under either order; the
+     * case pins the check's place under the lock.) */
+    netif_set_up(&d.nif, true);
+    uint8_t probe_mac[ETH_ALEN];
+    struct mbuf *probe = dual_packet();
+    CHECK(probe != NULL);
+    CHECK(nd_resolve(&d.nif, &peer6, probe_mac, probe) == -EINPROGRESS);
+    nd_test_hold_lock_entry(true);
+    parked = down_race_run(&r, down_race_nd_advert, nd_test_lock_entry_parked, nd_test_release_lock_entry);
+    nd_test_hold_lock_entry(false);
+    CHECK(parked);
+    netif_set_up(&d.nif, true);
+    CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no reachable entry: the advertisement completed nothing */
+    netif_set_up(&d.nif, false);
+
+    /* 5. ND resolve racing the down: refused, the packet counted dropped. */
+    struct ip_stats n0, n1;
+    ipv6_get_stats(&n0);
     netif_set_up(&d.nif, true);
     nd_test_hold_lock_entry(true);
     parked = down_race_run(&r, down_race_nd_resolve, nd_test_lock_entry_parked, nd_test_release_lock_entry);
     nd_test_hold_lock_entry(false);
     CHECK(parked);
     CHECK(r.rc == -ENETUNREACH);
+    ipv6_get_stats(&n1);
+    CHECK(n1.nd_pending_dropped == n0.nd_pending_dropped + 1);
     netif_set_up(&d.nif, true);
     CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* nothing left behind by the refused resolve */
     netif_set_up(&d.nif, false);
