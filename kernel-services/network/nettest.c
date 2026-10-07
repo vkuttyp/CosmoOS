@@ -1159,6 +1159,100 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
 
 static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
 
+/* --- net-tcp-delack: the delayed acknowledgement ---------------------------
+ *
+ * A receiver that takes one segment and sends nothing acknowledges it from
+ * the delayed-ACK timer, TCP_DELACK_NS after the segment (tcp.c: the first
+ * in-order segment arms it; the second, or any output, acknowledges at
+ * once and cancels it). Every other exchange in the suite acknowledges by
+ * output before the timer fires, so until this test the callback
+ * (delack_timer) never ran in a boot and had no class of its own in the
+ * lock graph (docs/audit/2026-10-07-lockdep-completion-waits-report.md,
+ * "Timer callbacks"). This server accepts and then does nothing until the
+ * test says so.
+ */
+static void tcp_quiet_thread(void *arg)
+{
+    struct tcp_server *srv = arg;
+    struct socket *ls, *c;
+    srv->result = ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
+    if (srv->result)
+        goto done;
+    tcp_server_publish(srv, &srv->ls, ls);
+    srv->result = ksock_bind(ls, &srv->addr);
+    if (srv->result == 0)
+        srv->result = ksock_listen(ls, 1);
+    if (srv->result == 0)
+        srv->result = ksock_accept(ls, &c, NULL);
+    if (srv->result) {
+        tcp_server_publish(srv, &srv->ls, NULL);
+        ksock_put(ls);
+        goto done;
+    }
+    tcp_server_publish(srv, &srv->c, c);
+    /* Quiet: no read, no write, so nothing but the timer acknowledges. */
+    for (unsigned i = 0; i < 400 && !srv->stop; i++)
+        thread_sleep_ms(5);
+    uint8_t buf[16];
+    int64_t n = ksock_recvfrom(c, buf, sizeof(buf), NULL);
+    if (n > 0)
+        srv->bytes_seen += (uint32_t)n;
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
+    ksock_put(c);
+    ksock_put(ls);
+done:
+    srv->done = true;
+    thread_exit(0);
+}
+
+bool selftest_net_tcp_delack(const char **reason)
+{
+    unsigned socks0 = socket_count();
+    static struct tcp_server srv;   /* its thread may outlive this frame */
+    memset(&srv, 0, sizeof(srv));
+    srv.addr = v4addr(INADDR_LOOPBACK_N, 6095);
+    CHECK(tcp_server_start(&srv, tcp_quiet_thread, "tcp-quiet", 32));
+    thread_sleep_ms(20);   /* let it listen */
+
+    struct socket *c;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv.addr) == 0);
+    thread_sleep_ms(20);   /* the handshake's last segment is the worker's; let it leave before counting */
+
+    /* One segment out; nothing comes back until the receiver's timer
+     * acknowledges it. Count segments the host sent: the data segment and
+     * then the acknowledgement, and the time the second one took. */
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    uint64_t sent_at = clock_now_ns();
+    CHECK(ksock_sendto(c, "d", 1, NULL) == 1);
+    uint64_t acked_at = 0;
+    for (unsigned i = 0; i < 200; i++) {
+        tcp_get_stats(&t1);
+        if (t1.segs_out >= t0.segs_out + 2) {
+            acked_at = clock_now_ns();
+            break;
+        }
+        thread_sleep_ms(5);
+    }
+    CHECK(acked_at != 0);                                   /* the acknowledgement came within a second */
+    uint64_t delay_ms = (acked_at - sent_at) / 1000000ull;
+    CHECK(delay_ms >= TCP_DELACK_NS / 1000000ull - 10);    /* ... and not before the timer could fire */
+    CHECK(t1.retransmits == t0.retransmits);               /* nor as a retransmission */
+
+    srv.stop = true;
+    for (unsigned i = 0; i < 300 && !srv.done; i++)
+        thread_sleep_ms(10);
+    CHECK(srv.done && srv.result == 0 && srv.bytes_seen == 1);
+    nt_ksock_put(c);
+    thread_sleep_ms(50);
+    CHECK(socket_count() == socks0);
+    kinfo("selftest: net-tcp-delack: a silent receiver acknowledged one segment after %llu ms, from the delayed-ACK timer",
+          (unsigned long long)delay_ms);
+    return true;
+}
+
 /* --- a duplicated received frame (FI_NET_RX_DUP) ----------------------------
  *
  * A frame delivered twice -- a link-layer retransmit, a switch flooding --

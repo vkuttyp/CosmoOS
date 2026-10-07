@@ -405,6 +405,7 @@ bool selftest_net_sockerr_accept(const char **reason);
 bool selftest_net_sockerr_locking(const char **reason);
 bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
+bool selftest_net_tcp_delack(const char **reason);   /* a receiver that stays silent gets its acknowledgement from the delayed-ACK timer */
 bool selftest_net_rx_dup(const char **reason);
 bool selftest_net_accept_order(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
