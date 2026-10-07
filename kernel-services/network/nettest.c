@@ -715,6 +715,7 @@ struct tcp_server {
     int result;
     volatile bool done;
     bool echo;               /* echo mode for the harness */
+    unsigned param;          /* a per-thread parameter (net-tcp-nagle-peer: the reader's delay in ms) */
     volatile bool stop;
     /* For its release (the net-leftover unit): the thread, and the
      * sockets it is blocked on, published under `lock` so the release can
@@ -1264,6 +1265,179 @@ bool selftest_net_tcp_delack(const char **reason)
     CHECK(socket_count() == socks0);
     kinfo("selftest: net-tcp-delack: a silent receiver acknowledged the odd segment after %llu ms, from the delayed-ACK timer",
           (unsigned long long)delay_ms);
+    return true;
+}
+
+/* --- net-tcp-nagle-peer: a Nagle sender's write-write-read -------------------
+ *
+ * A peer with Nagle on (Linux and macOS by default) that writes a small
+ * request in two parts holds the second part until the first is
+ * acknowledged, so a receiver that only acknowledges from the delayed-ACK
+ * timer costs it TCP_DELACK_NS per request. This stack has no Nagle of its
+ * own and QEMU's user-mode backend disables it on the connections it
+ * proxies (libslirp tcp_output.c: `(1 || idle || TF_NODELAY)`), so no peer
+ * in the suite can show the interaction; this test builds the peer. The
+ * client is a Nagle sender by construction: it sends the first half, waits
+ * until the send buffer is acknowledged (TCP_SNDBUF free again), and only
+ * then sends the second. The server reads both halves and replies, either
+ * as soon as the data arrives or after `param` ms away from the socket -- a
+ * busy application. The owed acknowledgement must leave with the read
+ * (tcp_recv, as Linux's tcp_cleanup_rbuf), so in both modes the first
+ * half is acknowledged before the timer could, and the exchange costs the
+ * server's delay and not TCP_DELACK_NS on top of it
+ * (docs/kernel-services/network/design.md, "TCP", N27).
+ */
+#define NAGLE_HALF   16u
+#define NAGLE_ROUNDS 20u
+
+static void tcp_wwr_server_thread(void *arg)
+{
+    struct tcp_server *srv = arg;
+    struct socket *ls, *c;
+    srv->result = ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
+    if (srv->result)
+        goto done;
+    tcp_server_publish(srv, &srv->ls, ls);
+    srv->result = ksock_bind(ls, &srv->addr);
+    if (srv->result == 0)
+        srv->result = ksock_listen(ls, 1);
+    if (srv->result == 0)
+        srv->result = ksock_accept(ls, &c, NULL);
+    if (srv->result) {
+        tcp_server_publish(srv, &srv->ls, NULL);
+        ksock_put(ls);
+        goto done;
+    }
+    tcp_server_publish(srv, &srv->c, c);
+    uint8_t req[2 * NAGLE_HALF];
+    while (!srv->stop) {
+        /* A busy application: away from the socket while the request's
+         * first half arrives, so nothing but the read can acknowledge it. */
+        if (srv->param)
+            thread_sleep_ms(srv->param);
+        size_t have = 0;
+        while (have < sizeof(req)) {
+            int64_t n = ksock_recvfrom(c, req + have, sizeof(req) - have, NULL);
+            if (n <= 0)
+                goto closed;
+            have += (size_t)n;
+        }
+        srv->bytes_seen += (uint32_t)have;
+        if (ksock_sendto(c, req, sizeof(req), NULL) != (int64_t)sizeof(req))
+            break;
+    }
+closed:
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
+    ksock_put(c);
+    ksock_put(ls);
+done:
+    srv->done = true;
+    thread_exit(0);
+}
+
+static void sort_u64(uint64_t *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; i++) {
+        uint64_t x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = x;
+    }
+}
+
+/* One mode: `busy_ms` is how long the server stays away from the socket
+ * before reading each request. Fills the sorted per-round acknowledgement
+ * and exchange times (us). */
+static bool nagle_peer_mode(const char **reason, uint16_t port, unsigned busy_ms,
+                            uint64_t ack_us[NAGLE_ROUNDS], uint64_t rtt_us[NAGLE_ROUNDS])
+{
+    static struct tcp_server srv[2];   /* a thread may outlive this frame; one per mode */
+    struct tcp_server *s = &srv[busy_ms ? 1 : 0];
+    memset(s, 0, sizeof(*s));
+    s->addr = v4addr(INADDR_LOOPBACK_N, port);
+    s->param = busy_ms;
+    CHECK(tcp_server_start(s, tcp_wwr_server_thread, "tcp-wwr", 32));
+    thread_sleep_ms(20);   /* let it listen */
+
+    struct socket *c;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &s->addr) == 0);
+    thread_sleep_ms(20);   /* the handshake's last segment is the worker's */
+
+    uint8_t half[NAGLE_HALF], reply[2 * NAGLE_HALF];
+    memset(half, 'n', sizeof(half));
+    bool ok = true;
+    for (unsigned r = 0; r < NAGLE_ROUNDS && ok; r++) {
+        uint64_t t0 = clock_now_ns();
+        ok = ksock_sendto(c, half, sizeof(half), NULL) == (int64_t)sizeof(half);
+        /* Nagle: the second small write waits for the first's acknowledgement
+         * (the send buffer whole again). Polled with yields, not sleeps: a
+         * sleep is quantised to the 4 ms tick (CONFIG_HZ) and would be most
+         * of the reading. Bounded at a second. */
+        uint64_t acked = 0;
+        while (ok && clock_now_ns() - t0 < 1000000000ull) {
+            if (tcp_send_space(c->tcp) == TCP_SNDBUF) {
+                acked = clock_now_ns();
+                break;
+            }
+            sched_yield();
+        }
+        ok = ok && acked != 0;
+        ok = ok && ksock_sendto(c, half, sizeof(half), NULL) == (int64_t)sizeof(half);
+        size_t have = 0;
+        while (ok && have < sizeof(reply)) {
+            int64_t n = ksock_recvfrom(c, reply + have, sizeof(reply) - have, NULL);
+            ok = n > 0;
+            if (ok)
+                have += (size_t)n;
+        }
+        uint64_t t1 = clock_now_ns();
+        ack_us[r] = (acked - t0) / 1000;
+        rtt_us[r] = (t1 - t0) / 1000;
+    }
+    s->stop = true;
+    ksock_shutdown(c, COSMO_SHUT_WR);   /* the server's read returns 0 */
+    for (unsigned i = 0; i < 300 && !s->done; i++)
+        thread_sleep_ms(10);
+    nt_ksock_put(c);
+    CHECK(ok);
+    CHECK(s->done && s->result == 0 && s->bytes_seen == NAGLE_ROUNDS * 2 * NAGLE_HALF);
+    sort_u64(ack_us, NAGLE_ROUNDS);
+    sort_u64(rtt_us, NAGLE_ROUNDS);
+    return true;
+}
+
+bool selftest_net_tcp_nagle_peer(const char **reason)
+{
+    unsigned socks0 = socket_count();
+    static const unsigned busy[2] = { 0, 5 };
+    uint64_t ack[2][NAGLE_ROUNDS], rtt[2][NAGLE_ROUNDS];
+    for (unsigned m = 0; m < 2; m++) {
+        if (!nagle_peer_mode(reason, (uint16_t)(6096 + m), busy[m], ack[m], rtt[m]))
+            return false;
+        kinfo("selftest: net-tcp-nagle-peer: server %s: first half acknowledged after %llu/%llu/%llu us, "
+              "exchange %llu/%llu/%llu us (min/median/max of %u)",
+              busy[m] ? "busy 5 ms before each read" : "reading at once",
+              (unsigned long long)ack[m][0], (unsigned long long)ack[m][NAGLE_ROUNDS / 2],
+              (unsigned long long)ack[m][NAGLE_ROUNDS - 1],
+              (unsigned long long)rtt[m][0], (unsigned long long)rtt[m][NAGLE_ROUNDS / 2],
+              (unsigned long long)rtt[m][NAGLE_ROUNDS - 1], NAGLE_ROUNDS);
+    }
+    /* The medians: a receiver acknowledging only from the timer costs every
+     * round TCP_DELACK_NS (40 ms); the read-driven acknowledgement costs the
+     * busy server's own delay and nothing more. A single slow round under
+     * load does not move a median of twenty. */
+    uint64_t bound_us = TCP_DELACK_NS / 1000 / 2;   /* 20 ms: half the timer */
+    CHECK(ack[0][NAGLE_ROUNDS / 2] < bound_us);     /* a reading server: acknowledged at once */
+    CHECK(rtt[0][NAGLE_ROUNDS / 2] < bound_us);
+    CHECK(ack[1][NAGLE_ROUNDS / 2] < bound_us);     /* a busy server: acknowledged by its read, before the timer */
+    CHECK(rtt[1][NAGLE_ROUNDS / 2] < bound_us);
+    thread_sleep_ms(50);
+    CHECK(socket_count() == socks0);
     return true;
 }
 
