@@ -732,6 +732,7 @@ static const struct selftest tests[] = {
     { "net-input",       selftest_net_input },
     { "net-hostinput",   selftest_net_hostinput },
     { "net-zero-window-probe", selftest_net_zero_window_probe },
+    { "net-fin-acks-last-data", selftest_net_fin_acks_last_data },
     { "net-hoststate",   selftest_net_hoststate },
     { "net-flows-nat",   selftest_net_flows_nat },
     { "net-flows-fw",    selftest_net_flows_fw },

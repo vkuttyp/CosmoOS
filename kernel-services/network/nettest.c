@@ -8812,6 +8812,84 @@ bool selftest_net_zero_window_probe(const char **reason)
     return true;
 }
 
+/*
+ * --- net-fin-acks-last-data ------------------------------------------------
+ *
+ * The world's FIN arrives while the host, having closed, still holds data it
+ * could not send -- the world's window held it back -- and that FIN
+ * acknowledges the last segment in flight. Until 2026-10-07 the FIN branch
+ * of tcp_input built a bare acknowledgement and did not run the output, and
+ * nothing else ever would: the host had closed, so no send was coming; the
+ * world had acknowledged everything in flight, so no acknowledgement was
+ * coming; and the retransmit timer, finding nothing in flight, retransmitted
+ * nothing and re-armed nothing. The 40 bytes and the host's own FIN stayed
+ * queued, the connection sat in CLOSING with its buffers and its table slot
+ * for ever, and the world waited for a FIN that never came. Found by
+ * fuzz_tcp_segments (docs/audit/2026-10-07-net-fuzz-report.md).
+ */
+bool selftest_net_fin_acks_last_data(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x1f, 0x00, 0x01 };
+    static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x1f, 0x00, 0x63 };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 13, 1), w = IPV4_ADDR(10, 77, 13, 99);
+    struct tap *u = nt_tap_create("falu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+    struct socket *ls = NULL;
+    CHECK(hin_tcp_listener(&ls, 2231));
+
+    uint8_t l4[160], data[60];
+    uint16_t l4len;
+    struct hin_seg sg;
+    for (unsigned i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)i;
+    hin_drain(u);
+
+    /* The handshake, the world side by hand, with a window of 20 bytes. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41002, 2231, 7000, 0, TH_SYN, 20, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 41002, &sg, HIN_TRIES) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+          sg.ack == 7001);
+    uint32_t iss = sg.seq;
+    l4len = hin_mk_tcp(l4, w, u_ip, 41002, 2231, 7001, iss + 1, TH_ACK, 20, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a = hin_accept(ls);
+    CHECK(a != NULL && a->tcp != NULL);
+    ksock_set_nonblock(a, true);
+
+    /* (1) 60 bytes into a window of 20: 20 go out, 40 wait. The host closes:
+     * its FIN queues behind the 40. */
+    CHECK(ksock_sendto(a, data, sizeof(data), NULL) == (int64_t)sizeof(data));
+    CHECK(hin_recv_stream(u, 41002, iss + 1, 0, 20, &sg, false));
+    nt_ksock_put(a);   /* FIN_WAIT_1 */
+
+    /* (2) The world's FIN acknowledges the 20 in flight and opens its window.
+     * The 40 bytes follow (a retransmission of the first 20 may come too,
+     * and is allowed), then the host's FIN at iss + 61, acknowledging the
+     * world's. Before the fix nothing but a bare acknowledgement came. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41002, 2231, 7001, iss + 21, TH_FIN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_stream(u, 41002, iss + 1, 20, 60, &sg, false));
+    bool fin = false;
+    for (unsigned k = 0; k < 8 && !fin; k++) {
+        CHECK(hin_recv(u, IPPROTO_TCP, 41002, &sg, HIN_TRIES));
+        fin = (sg.flags & TH_FIN) != 0;
+    }
+    CHECK(fin && sg.seq == iss + 61 && sg.ack == 7002);
+
+    /* (3) The world acknowledges the FIN: the connection is over (TIME_WAIT,
+     * then gone -- the leftover census at the end of the test sees it). */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41002, 2231, 7002, iss + 62, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    kinfo("selftest: net-fin-acks-last-data: the world's FIN that acknowledged the last segment in flight drew the "
+          "40 bytes held by its window and then the host's FIN; the connection ended\n");
+    return true;
+}
+
 bool selftest_net_hoststate(const char **reason)
 {
     *reason = NULL;
