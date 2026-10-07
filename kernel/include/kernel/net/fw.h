@@ -78,6 +78,11 @@ struct ipv4_hdr;
 
 enum fw_verdict { FW_DROP = 0, FW_ACCEPT = 1 };
 
+/* Every verdict that depends on an interface's flags takes the caller's
+ * one reading of that interface's flag word (`*_flags`), made at the
+ * packet's entry, never nif->flags itself: a runtime toggle then takes
+ * effect between packets, not between two checks of one (N26). */
+
 /* Directions. TO_UPLINK/TO_GUEST are decided by the egress in ipv4_forward
  * (the FORWARD chain); TO_HOST is a datagram a guest tap delivers to the host
  * itself, in ipv4_input (the INPUT chain); FROM_UPLINK is a datagram a real,
@@ -160,7 +165,7 @@ unsigned fw_guest_list(uint32_t *out, unsigned max);
  * transport header by copy (no pullup: m is never re-pointed). On FW_DROP the
  * caller frees m.
  */
-enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct mbuf *m,
+enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, unsigned out_flags, struct mbuf *m,
                                    const struct ipv4_hdr *iph, unsigned ihl);
 
 /*
@@ -221,8 +226,8 @@ struct fw_host_flow {
     uint16_t b_port;      /* the peer's port (0 for ICMP) */
     uint8_t  proto;
 };
-bool fw_host_flow_of(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto,
-                     struct fw_host_flow *f);
+bool fw_host_flow_of(struct netif *out, unsigned out_flags, struct mbuf *m, uint32_t src, uint32_t dst,
+                     uint8_t proto, struct fw_host_flow *f);
 void fw_host_record(const struct fw_host_flow *f);
 
 /*
@@ -239,7 +244,7 @@ void fw_host_record(const struct fw_host_flow *f);
  * answers the sender -EPERM: the party refused is local, and unlike the
  * strangers the other chains hide from, it can be told.
  */
-enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst,
+enum fw_verdict fw_output_verdict(struct netif *out, unsigned out_flags, struct mbuf *m, uint32_t src, uint32_t dst,
                                   uint8_t proto);
 
 /* Reclaim expired flows (the network worker's periodic tick, beside nat_age). */

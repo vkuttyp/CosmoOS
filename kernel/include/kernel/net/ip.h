@@ -108,6 +108,12 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_age(uint64_t now_ns);
 void nd_flush(struct netif *nif);   /* drop every entry that names the interface */
 #if CONFIG_DEBUG
+/* Park the next forwarded packet between ipv4_forward's anti-spoof check
+ * and its masquerade decision, while a test toggles the interface's flags
+ * (N26, net-netif-flags). */
+void ipv4_test_hold_forward(bool on);
+bool ipv4_test_forward_parked(void);
+void ipv4_test_release_forward(void);
 /* Park the next ND retry batch between its unlock and its send -- ND's
  * twin of arp_test_hold_retry, for the window a netif reference closes
  * (invariant N22). */

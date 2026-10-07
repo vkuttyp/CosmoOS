@@ -207,7 +207,14 @@ retransmits from `snd_una` with a doubled RTO, giving up after 8
 attempts (the connection is closed with `-ETIMEDOUT`). When the peer
 advertises a zero window the retransmit timer doubles as the persist
 probe. Delayed ACK: a
-pure ACK is sent at once when two segments are pending or after 40 ms.
+pure ACK is sent at once when two segments are pending or after 40 ms
+(`ack_now` says one is wanted on this output -- every second segment, a
+gap behind, a window update, the handshake, the application's read while
+one is owed, the timer -- and `delack_pending` that one is owed with the
+timer armed; until 2026-10-07
+the output routine sent the owed one on any output, and the receive
+path's output after every segment cancelled the timer it had just armed,
+so the timer never fired: `net-tcp-delack`).
 TIME_WAIT lasts 2 s in this phase (a constant, `TCP_TIMEWAIT_NS`) and
 restarts only for a retransmitted FIN. An orphaned FIN_WAIT_2 ends
 after `TCP_FIN_WAIT2_NS`; an idle established connection is probed
@@ -753,6 +760,23 @@ A stock Linux guest with the tap as its gateway reaching the host's network
 reproduction. The filtering firewall over this forwarding path is done ("A
 forwarding firewall", below); IPv6 NAT is a later unit; inbound
 port-forwarding (DNAT), once next, is done -- the next section.
+
+**One reading of the flag word per packet (N26, 2026-10-07).** The
+forwarding path makes several decisions from an interface's flags: the
+ingress's `NETIF_FORWARD` (forward at all), its `NETIF_MASQUERADE` (the
+anti-spoof's rule, whether to masquerade, the INPUT chain), the egress's
+`NETIF_FORWARD` (the firewall's direction, guest-to-guest or uplink) and
+`NETIF_LOOPBACK`. Each check used to read `nif->flags` again, and the
+writers (`netif_set_forward`, `netif_set_masquerade`) run at any time, so
+a toggle could land between two checks of one packet: anti-spoofed as a
+plain forwarder, then masqueraded. Now `ipv4_input` reads the ingress word
+once with a relaxed atomic load, `ipv4_forward` the egress's once after
+the route, `ipv4_output` the egress's once, and the readings travel down
+as `in_flags`/`out_flags` into `fw_forward_verdict`, `nat_out`,
+`fw_output_verdict` and `fw_host_flow_of`. A toggle takes effect between
+packets. The test `net-netif-flags` parks a datagram at the window with a
+debug hook (`ipv4_test_hold_forward`) and flips the flag; the probe
+`tools/netif-flags-probe.py --old` restores the live reads.
 
 ## Inbound port forwarding: DNAT (`nat.c`; audit unit "reaching the guest from outside")
 

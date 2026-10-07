@@ -396,11 +396,11 @@ void netif_set_up(struct netif *nif, bool up)
      * reader sees a whole word. The readers whose order against another
      * structure matters use acquire loads: NETIF_GONE in netif_transmit
      * and netif_tx_pending, NETIF_UP under the neighbour tables' locks
-     * (arp_input, arp_resolve, nd_*). The NETIF_FORWARD, NETIF_MASQUERADE
-     * and NETIF_LOOPBACK reads in ipv4.c, fw.c and nat.c are plain loads,
-     * several per packet, so a toggle can be seen differently by two
-     * checks of one packet (docs/plan.md, section 7: read the word once
-     * per packet). For the down: the store happens before the flushes
+     * (arp_input, arp_resolve, nd_*). The packet paths (ipv4_input,
+     * ipv4_forward, ipv4_output) read the word once per packet with a
+     * relaxed load and hand that reading to fw.c and nat.c, so a toggle of
+     * NETIF_FORWARD or NETIF_MASQUERADE takes effect between packets, never
+     * between two checks of one (N26). For the down: the store happens before the flushes
      * below take the neighbour tables' locks, so a reader that takes a
      * table lock after the flush's critical section sees the flag
      * cleared (N25). */

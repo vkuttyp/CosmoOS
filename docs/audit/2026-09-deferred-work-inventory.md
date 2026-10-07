@@ -739,10 +739,10 @@ Still open for the next milestone:
 - ~~Callback wait dependencies beyond observed active timer callback paths.~~
   *2026-10-05: timer callback waits are in the lock graph (callback classes,
   PR #312, [report](2026-10-05-lockdep-callback-classes-report.md)).*
-  **Built 2026-10-08**: completion waits are in the graph through completion
+  **Built 2026-10-07**: completion waits are in the graph through completion
   classes (L21), and the unexecuted paths are a listing the runner prints
   after every debug suite; see the
-  [completion-waits report](2026-10-08-lockdep-completion-waits-report.md)
+  [completion-waits report](2026-10-07-lockdep-completion-waits-report.md)
   and §7.3.
 - ~~Raw `arch_irq_restore` ownership and pairing.~~ **Built 2026-10-06**: per-context
   save stacks with restore and thread-exit checks under lockdep; see the
@@ -782,9 +782,9 @@ Report: [`2026-10-07-neighbour-per-interface-report.md`](2026-10-07-neighbour-pe
 | `ipv4_route`'s tie for two up interfaces on one subnet (first registered wins) | Recorded as a policy without a knob; not changed. |
 | ~~Two windows in "a down interface holds no entries": the input paths read `NETIF_UP` before the table lock, the resolve paths not at all~~ | **CLOSED (follow-up to PR #319)**: the flag is read under the table lock in input and resolve, a resolve on a down interface returns `-ENETUNREACH` with the packet counted dropped, every flag writer is a release store; `net-neigh-down-race` and `tools/neigh-down-race-probe.py --old <race>`, one mode per race (report §8). |
 
-### 7.3 Completion waits and the coverage listing (2026-10-08)
+### 7.3 Completion waits and the coverage listing (2026-10-07)
 
-Report: [`2026-10-08-lockdep-completion-waits-report.md`](2026-10-08-lockdep-completion-waits-report.md).
+Report: [`2026-10-07-lockdep-completion-waits-report.md`](2026-10-07-lockdep-completion-waits-report.md).
 
 | Item | Outcome |
 |---|---|
@@ -793,3 +793,15 @@ Report: [`2026-10-08-lockdep-completion-waits-report.md`](2026-10-08-lockdep-com
 | ~~`LOCKDEP_MAX_CLASSES` at 384 with a debug boot at 382~~ | **RAISED** to 512 (the graph 512 KiB in `LOCKDEP=1` builds); the host bounds follow the macros. |
 | A completion signaller that takes and releases a mutex before `complete()` | Recorded, not modelled: no production instance (the survey names every signaller's locks); crossrelease's history caught it at the price of its false positives. |
 | A worker thread's barrier depends on every item ahead of it | Recorded: the network worker's items take spinlocks only; the mechanism if that changes is the callback class applied to the worker. |
+
+### 7.4 The completion-waits tidy-up (2026-10-07)
+
+Report: [`2026-10-07-completion-waits-tidy-up-report.md`](2026-10-07-completion-waits-tidy-up-report.md).
+
+| Item | Outcome |
+|---|---|
+| ~~`delack_timer` never ran in a boot~~ | **FOUND AND FIXED**: the delayed acknowledgement could not fire -- the receive path's output after every segment sent the owed ACK at once and cancelled the timer it had just armed. `ack_now` separates "wanted now" from "owed"; `net-tcp-delack` sees the odd segment acknowledged from the timer; the listing reports 0 callbacks never run. |
+| ~~`xhci-first-scan` polled under `g_controllers_lock`; the NVMe admin fallback polled~~ | **FIXED**: both wait (`wait_for_completion_timeout`); `FI_NVME_ADMIN_POLL` forces the NVMe path and `nvme-admin-poll` runs it under lockdep. |
+| ~~`fw.c`, `ipv4.c`, `nat.c` read `nif->flags` once per check~~ | **FIXED (N26)**: one reading per interface per packet, passed down; `net-netif-flags`, `tools/netif-flags-probe.py --old`. |
+| ~~The class table's headroom was invisible until a boot overflowed it~~ | **BUILT**: the post-suite dump prints the peak against `LOCKDEP_MAX_CLASSES` and warns at 90%. |
+| A completion signaller blocked in another wait before its `complete()` | Recorded in the design document and the report: the classes are acquired and never held, so the chain through a second wait is not detected; no production instance closes it. |

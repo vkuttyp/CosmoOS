@@ -333,7 +333,7 @@ A completion is a one-shot signal between contexts (`docs/kernel/scheduler/desig
 some other context calls `complete`. The deadlock a lock checker can see
 is a waiter that holds a lock L across the wait while the signaller must
 acquire L, directly or through a chain, before it can call `complete`.
-Until 2026-10-08 nothing modelled it: a completion had no class, and the
+Until 2026-10-07 nothing modelled it: a completion had no class, and the
 callback-class report said there was "no function to key a class on".
 The key is the completion's **name**, which `completion_init` already
 requires.
@@ -472,7 +472,7 @@ not only while a wait is in flight. The price is the shape crossrelease
 caught and this does not: a signaller that takes and *releases* a mutex
 before `complete` ("lock, unlock, complete") records no edge for it,
 although a waiter holding that mutex would block it. That shape is the
-survey's business (`docs/audit/2026-10-08-lockdep-completion-waits-report.md`):
+survey's business (`docs/audit/2026-10-07-lockdep-completion-waits-report.md`):
 every signaller in the tree is enumerated with the mutexes it takes on
 its way to `complete`. One class of signaller deserves its own note: a
 **worker thread** completing a barrier item depends on every item ahead
@@ -484,6 +484,26 @@ calls in `kernel-services/network` are `netif_unregister`'s own and the
 by it today. If an item ever takes a mutex, the mechanism is the callback
 class applied to the worker: the worker holds a pseudo-class while it
 runs any item and the barrier wait acquires it.
+
+A second shape the model does not record follows from the classes being
+acquired and never held: **a signaller that is itself blocked in another
+wait** -- a completion, a `thread_join`, a `timer_cancel_sync` -- before
+its `complete()` contributes no edge for that wait. A waiter holds M and
+waits for C1; C1's signaller waits for C2 before completing C1; C2's
+signaller needs M: a deadlock the graph cannot close, because the wait
+for C2 records only what its waiter *holds* (mutexes), and a wait is not
+held. Closing it would mean a thread holding the class of the completion
+it waits for while it waits, which is what crossrelease did and where its
+nesting problems began (a wait inside a wait, orders between completion
+classes, every long-lived wait in the graph); the model stops at one
+level on purpose. The survey of 2026-10-07 named the signallers that wait
+before they complete: the xHCI port worker completes `xhci-first-scan`
+after a scan that waits for `xhci-cmd` and `usb-sync`; a USB removal
+completes `usb-sync` (through `ring_flush`) after `xhci_disable_device`'s
+waits for `xhci-cmd`; and threads that join children before exiting
+complete `thread-exit` after waits for other threads' `thread-exit`. None
+of their second-level signallers takes a mutex (the xHCI event handler
+and the exiting threads hold nothing), so no such chain exists today.
 
 ### Coverage: callback and completion classes never exercised
 

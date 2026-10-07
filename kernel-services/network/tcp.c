@@ -554,7 +554,7 @@ static void conn_reset_locked(struct tcp_pcb *pcb)
     ooo_flush(pcb);
     pcb->rcv_wnd = TCP_RCVBUF;
     __atomic_store_n(&pcb->error, 0, __ATOMIC_RELEASE);
-    pcb->fin_queued = pcb->fin_sent = pcb->fin_rcvd = pcb->delack_pending = false;
+    pcb->fin_queued = pcb->fin_sent = pcb->fin_rcvd = pcb->delack_pending = pcb->ack_now = false;
     pcb->rexmit_count = pcb->dupacks = pcb->keep_probes = 0;
     pcb->srtt_ns = pcb->rttvar_ns = 0;
     pcb->rtt_pending = false;
@@ -980,13 +980,21 @@ static void tcp_output_locked(struct tcp_pcb *pcb, struct tcp_batch *b)
             }
         }
     }
-    if (!sent && pcb->delack_pending && pcb->state != TCP_CLOSED && pcb->state != TCP_LISTEN &&
+    /* A pure acknowledgement only when one is wanted now (ack_now: every
+     * second segment, a gap behind, a window update, the handshake, the
+     * delayed-ACK timer). An owed acknowledgement (delack_pending, the
+     * timer armed) rides on the next segment or waits for the timer: until
+     * 2026-10-07 this branch sent it on any output, and the receive path
+     * runs the output after every segment, so the timer it had just armed
+     * was cancelled in the same call and never fired. */
+    if (!sent && pcb->ack_now && pcb->state != TCP_CLOSED && pcb->state != TCP_LISTEN &&
         pcb->state != TCP_SYN_SENT) {
         build_segment(pcb, b, TH_ACK, pcb->snd_nxt, 0, false);
         sent = true;
     }
     if (sent) {
         pcb->delack_pending = false;
+        pcb->ack_now = false;
         timer_cancel(&pcb->delack);
     }
     if (SEQ_GT(pcb->snd_nxt, pcb->snd_una) || (pcb->sndbuf.len && pcb->snd_wnd == 0))
@@ -1153,8 +1161,10 @@ static void pcb_work(void *arg)
         if (killed || pcb->state == TCP_CLOSED)
             goto out;
     }
-    if (flags & WORK_DELACK)
+    if (flags & WORK_DELACK) {
+        pcb->ack_now = pcb->delack_pending;   /* the timer: the owed acknowledgement, if still owed */
         tcp_output_locked(pcb, &b);
+    }
     if ((flags & WORK_REXMIT) && pcb->state != TCP_LISTEN && pcb->state != TCP_TIME_WAIT) {
         if (SEQ_GT(pcb->snd_max, pcb->snd_una) || pcb->state == TCP_SYN_SENT || pcb->state == TCP_SYN_RCVD ||
             (pcb->sndbuf.len && pcb->snd_wnd == 0)) {
@@ -1389,9 +1399,16 @@ int64_t tcp_recv(struct tcp_pcb *pcb, void *data, size_t len, bool *peer_closed)
         netbuf_drop(&pcb->rcvbuf, n);
         uint32_t old = pcb->rcv_wnd;
         pcb->rcv_wnd = netbuf_space(&pcb->rcvbuf);
-        /* Window update when the peer may be stalled on a small window. */
-        if (old < pcb->mss && pcb->rcv_wnd >= pcb->mss && pcb->state == TCP_ESTABLISHED) {
-            pcb->delack_pending = true;
+        /* Window update when the peer may be stalled on a small window; and
+         * the owed acknowledgement, if the timer still holds one, goes with
+         * the read (as Linux's tcp_cleanup_rbuf does): a sender that filled
+         * its window with an odd segment is waiting for exactly this, and
+         * on one CPU it waited the timer's 40 ms every round -- net-bench's
+         * loopback stream fell from 21 to 2 MiB/s there. A receiver that
+         * does not read still leaves the acknowledgement to the timer
+         * (net-tcp-delack). */
+        if ((old < pcb->mss && pcb->rcv_wnd >= pcb->mss && pcb->state == TCP_ESTABLISHED) || pcb->delack_pending) {
+            pcb->ack_now = true;
             tcp_output_locked(pcb, &b);
         }
     }
@@ -2035,7 +2052,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             pcb->snd_una = ack;
             established_locked(pcb, clock_now_ns());
             disarm_rexmit(pcb);
-            pcb->delack_pending = true;
+            pcb->ack_now = true;
             tcp_output_locked(pcb, &b);
             wake = sock_ref(pcb);
         } else {
@@ -2217,6 +2234,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             pcb->rcv_wnd = netbuf_space(&pcb->rcvbuf);
             wake = wake ? wake : sock_ref(pcb);
             if (pcb->delack_pending || pcb->ooo_n) {
+                pcb->ack_now = true;
                 tcp_output_locked(pcb, &b);   /* every second segment, or a gap behind: ACK now */
             } else {
                 pcb->delack_pending = true;

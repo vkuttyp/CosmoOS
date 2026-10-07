@@ -18,7 +18,7 @@
  * callback function (design.md, "Callback classes") and one per completion
  * name (design.md, "Completion waits"). A debug boot reached 307 of the
  * first 320 before callback classes existed, and 382 of 384 when the 38
- * completion classes arrived (2026-10-08). */
+ * completion classes arrived (2026-10-07). */
 #define LOCKDEP_MAX_CLASSES    512u
 #define LOCKDEP_SUBCLASSES     4u
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)

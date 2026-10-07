@@ -398,6 +398,59 @@ static void nvme_cpu_worker(void *arg)
     thread_exit(0);
 }
 
+/*
+ * The admin command's no-vector path (docs/drivers/nvme/design.md): the
+ * issuing thread drives the admin queue itself and completes its own
+ * waiter. It never runs on a machine with a vector, so FI_NVME_ADMIN_POLL
+ * forces it: admin_cmd takes the path and the interrupt handler leaves the
+ * admin queue alone. Under lockdep, the thread's wait records the admin
+ * mutex before the completion class, and its own complete() of the object
+ * is discarded as a self-signal (lockdep design.md, "Completion waits") --
+ * a report here would panic the boot. The command is Identify Controller
+ * into a page of ours, through the driver's debug_dma hook.
+ */
+bool selftest_nvme_admin_poll(const char **reason)
+{
+#if !CONFIG_FAULTINJECT
+    (void)reason;
+    kinfo("selftest: nvme-admin-poll: fault injection compiled out of this build; skipping");
+    return true;
+#else
+    struct blkdev *bd = blk_find("nvme0n1");
+    if (bd == NULL) {
+        kinfo("selftest: nvme-admin-poll: no nvme0n1; skipping");
+        return true;
+    }
+    CHECK(bd->ops->debug_dma != NULL);
+    dma_addr_t da;
+    uint8_t *page = dma_alloc(bd->dev, PAGE_SIZE, &da, DMA_ZERO);   /* mapped for this device: the controller must be able to write it */
+    CHECK(page != NULL);
+    faultinject_set(FI_NVME_ADMIN_POLL, 1, 0, NULL);   /* every admin command, from any thread, until cleared */
+    uint64_t t0 = clock_now_ns();
+    int rc = bd->ops->debug_dma(bd, da);
+    uint64_t took_ns = clock_now_ns() - t0;
+    struct fi_stats st;
+    faultinject_stats(FI_NVME_ADMIN_POLL, &st);
+    faultinject_clear(FI_NVME_ADMIN_POLL);
+    /* Identify Controller fills the page: the PCI vendor id in its first
+     * two bytes is not zero on any controller. */
+    bool filled = page[0] != 0 || page[1] != 0;
+    dma_free(bd->dev, PAGE_SIZE, page, da);
+    CHECK(rc == 0);
+    CHECK(filled);
+    /* The injection point's one hit is admin_cmd's decision to take the
+     * polled path; the handler stands aside on the controller's flag, set
+     * before the submit, so whatever completed the waiter in that branch
+     * was the issuing thread. Elapsed time is not evidence: a controller
+     * that has answered before the first queue_process makes the wait
+     * return at once (review of PR #322). */
+    CHECK(st.hits == 1);
+    kinfo("selftest: nvme-admin-poll: Identify completed by the issuing thread in %llu us (%llu injection hit), "
+          "the wait in the lock graph, no report", (unsigned long long)(took_ns / 1000), (unsigned long long)st.hits);
+    return true;
+#endif
+}
+
 bool selftest_nvme(const char **reason)
 {
     struct blkdev *bd = blk_find("nvme0n1");

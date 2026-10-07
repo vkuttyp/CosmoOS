@@ -2388,4 +2388,21 @@ See the [history index](README.md).
   (`xhci-first-scan`) on this tree.
   `lockdep-completion` (four reports, five silent controls),
   `tools/lockdep-completion-probe.py` (four modes). Report:
-  `docs/audit/2026-10-08-lockdep-completion-waits-report.md`.
+  `docs/audit/2026-10-07-lockdep-completion-waits-report.md`.
+- **Completion waits: the tidy-up.** Seven items from the completion-waits
+  unit, one commit each: the report dated when the work was done; the
+  blocked-signaller shape named as a limit of the model; `net-tcp-delack`,
+  which found that the delayed acknowledgement could never fire (the
+  receive path's output after every segment sent the owed ACK at once and
+  cancelled the timer it had just armed) and the correction (`ack_now`
+  against `delack_pending`) that makes it fire as the design document
+  always said; the NVMe no-vector admin path waiting on its completion,
+  forced by `FI_NVME_ADMIN_POLL` for `nvme-admin-poll`; the xHCI module
+  init waiting for the first scan instead of polling; an interface's flag
+  word read once per packet and handed down to the firewall and NAT (N26),
+  with `net-netif-flags` parking a datagram between two checks while the
+  flag flips and `tools/netif-flags-probe.py --old` showing the old reads
+  masquerade a source the masquerade's own anti-spoof refuses; and the
+  lockdep class-table peak printed against its capacity, warning at 90%.
+  The coverage listing reports no timer callback never run. Report:
+  `docs/audit/2026-10-07-completion-waits-tidy-up-report.md`.

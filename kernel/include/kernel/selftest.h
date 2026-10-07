@@ -397,6 +397,7 @@ bool selftest_net_tcpverdict(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);
+bool selftest_net_netif_flags(const char **reason);   /* one reading of an interface's flag word per packet (N26) */
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_sockerr_udp(const char **reason);
@@ -405,6 +406,7 @@ bool selftest_net_sockerr_accept(const char **reason);
 bool selftest_net_sockerr_locking(const char **reason);
 bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
+bool selftest_net_tcp_delack(const char **reason);   /* a receiver that stays silent gets its acknowledgement from the delayed-ACK timer */
 bool selftest_net_rx_dup(const char **reason);
 bool selftest_net_accept_order(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
@@ -437,6 +439,7 @@ bool selftest_device_reset(const char **reason);       /* in-place device reset 
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
+bool selftest_nvme_admin_poll(const char **reason);   /* the admin command's no-vector path, forced, under lockdep */
 bool selftest_usb_enum(const char **reason);     /* the device on the USB bus: descriptors, parent, endpoints */
 bool selftest_usb_storage(const char **reason);  /* sda through the block layer: round trips, segments, counters */
 bool selftest_usb_storage_timeout(const char **reason);   /* a CSW that never comes: the block layer's timeout, recovery */

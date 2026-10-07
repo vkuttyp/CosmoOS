@@ -1,6 +1,6 @@
 # Lockdep completion waits: completion classes, and what the suite never drives
 
-Date: 2026-10-08. Branch `lockdep-completion-waits` from `main` at
+Date: 2026-10-07. Branch `lockdep-completion-waits` from `main` at
 `e3d9e6fe`. Scope: the second half of `docs/plan.md` §1 "Implementation —
 callback-wait dependencies". Timer callback waits were done on 2026-10-05
 ([callback-classes report](2026-10-05-lockdep-callback-classes-report.md));
@@ -126,6 +126,20 @@ What the survey settles:
   releases a mutex on its way to `complete()`, which a waiter holding that
   mutex would block -- has no production instance: the thread signallers
   above hold their mutex *at* the call or take none.
+- **A signaller blocked in another wait** (added 2026-10-07, after the
+  unit): the classes are acquired and never held, so a signaller that
+  waits for C2 (or joins a thread, or cancels a timer synchronously)
+  before completing C1 contributes no edge for that wait, and the chain
+  "waiter holds M and waits C1; C1's signaller waits C2; C2's signaller
+  needs M" is not detected. The signallers in the table that wait before
+  they complete: the xHCI port worker (`port_scan`'s `xhci-cmd` and
+  `usb-sync` waits before `complete(first_scan)`), a USB removal
+  (`xhci_disable_device`'s `xhci-cmd` waits before `ring_flush` completes
+  `usb-sync`), and exiting threads that joined children (tests). Their
+  second-level signallers -- the xHCI event handler, exiting threads --
+  hold no mutex, so the chain has no instance today. Design.md,
+  "Completion waits", records the shape and why the model stops at one
+  level.
 
 ### 2. The design, in brief
 

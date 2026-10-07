@@ -71,6 +71,7 @@ enum fi_kind {
     FI_USB_CSW,       /* usb_storage: the CSW read queued without the doorbell */
     FI_AHCI_CI,       /* ahci: a slot filled, its PxCI bit never set */
     FI_NET_RX_DUP,    /* a received frame delivered a second time (link-layer retransmit, switch flood) */
+    FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path; the handler leaves the admin queue to the issuer */
     FI_KIND_COUNT,
 };
 /* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests

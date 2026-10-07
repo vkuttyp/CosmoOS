@@ -35,6 +35,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_HV_SELFCHECK] = "hv-selfcheck",
     [FI_FILE_READPAGE] = "file-readpage",
     [FI_NET_RX_DUP] = "net-rx-dup",
+    [FI_NVME_ADMIN_POLL] = "nvme-admin-poll",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)
