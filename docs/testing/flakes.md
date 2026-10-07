@@ -3375,7 +3375,10 @@ SELFTEST: net-accept-race  ... FAIL: it left network state behind (83 ms)
 
 Every check of the test passed; the runner's census (PR #257) failed it.
 The later steps of the job were skipped, and the aarch64 job passed. The
-summary of #326-#329 did not mention it.
+summary of #326-#329 did not mention it. The runs on the #328 and #329
+merge commits (37685081048, 37685205067) passed on both architectures, the
+chaos boots included, and none of their 30 debug boots had net-bench's
+slow mode (`net-bench` 1.9-4.2 s against its 8 s budget).
 
 **Not #326's (wake_one) and not #328's.** #328 merged after this commit,
 and the window is older than both. TCP and UDP wake a socket after
