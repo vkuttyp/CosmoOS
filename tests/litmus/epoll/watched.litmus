@@ -1,0 +1,14 @@
+C epoll-watched
+"The never-registered object's close skips the epoll watch lock. P0 is epoll_obj_add, under the watch lock: it publishes the object's `watched` flag (release store), fences (seq_cst), then reads the object's handle count and refuses the registration if it is zero. P1 is handle_close emptying the object's last slot: it takes the count to zero (the decrement, here a store), fences (seq_cst), then reads `watched` and takes the watch lock -- where it finds the add's item -- only if the flag is set. The forbidden outcome is both proceeding without seeing the other: the add reads the count still at one (r0=1) and the close reads the flag still clear (r1=0), a registration nothing would ever remove. Store-buffering: the two fences forbid it; either alone does not."
+{ handles = 1; }
+P0 (atomic_int* watched, atomic_int* handles) {
+  atomic_store_explicit(watched, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r0 = atomic_load_explicit(handles, memory_order_acquire);
+}
+P1 (atomic_int* watched, atomic_int* handles) {
+  atomic_store_explicit(handles, 0, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r1 = atomic_load_explicit(watched, memory_order_acquire);
+}
+exists (0:r0=1 /\ 1:r1=0)

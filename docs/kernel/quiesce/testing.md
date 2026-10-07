@@ -6,7 +6,7 @@
 |---|---|---|
 | Host (ASan/UBSan, real threads) | `test_quiesce`: the epoch arithmetic, a negative model, four reader threads against an updater that frees after each grace period (2000 generations), two concurrent waiters, and CPUs coming online mid-run | `make host-test` |
 | Host (TSan, real threads) | the same `test_quiesce` with every reader access required to happen-before its free, plus two negative builds (Q2 or W2 relaxed) that must report a race | `make host-test-quiesce-tsan` |
-| C11 model (herd7, RC11) | six litmus tests of the protocol's orderings, a reachability witness per forbidden conjunct, eight negative controls | `make litmus` |
+| C11 model (herd7, RC11) | six litmus tests of the protocol's orderings, a reachability witness per forbidden conjunct, eight negative controls (the same runner also checks epoll's `watched` flag, `tests/litmus/epoll/`) | `make litmus` |
 | Target self-tests (debug builds) | `quiesce-grace`, `quiesce-call`, `irq-sync`, `irq-writers`, `irq-unhandled`, `timer-cancel-sync`, `quiesce-stress`, `blk-lifetime`, `net-netif-lifetime`, `net-accept-race`, `module-unload-busy` | `make test` |
 | Single CPU | the same tests take their one-CPU branches (the calling CPU is quiescent by construction; self-IPI for `irq-sync`) | `QEMU_SMP=1 make test` |
 | AArch64 | everything above; `irq-sync` uses an SGI through `arch_ipi_send` | `make ARCH=aarch64 test` |
