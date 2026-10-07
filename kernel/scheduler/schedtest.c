@@ -996,6 +996,129 @@ bool selftest_mutex(const char **reason)
     return true;
 }
 
+/* --- mutex-wake-bench: a contended unlock against the number of waiters --------
+ *
+ * N threads block on a mutex the test holds; the test unlocks and measures
+ * two things, medians of the rounds: how long the unlock call itself takes
+ * (the wake runs under the wait queue's spinlock with interrupts off) and
+ * how long until the first woken waiter runs (unlock to the waiter's
+ * acquire). Between the epoll-callback unit and its wake_one follow-up,
+ * wake_one walked the whole list for callback entries, so the unlock grew
+ * with N; the callbacks list of their own gives wake_one back its one
+ * thread. Figures only, printed for the report; N = 1, 8, 32 and 256 (the
+ * walk of a 32-entry list is below what a 50 us unlock under TCG can show;
+ * 256 entries are a few microseconds).
+ */
+#define WAKE_BENCH_ROUNDS 10u
+#define WAKE_BENCH_MAX    256u
+
+struct wake_bench {
+    struct mutex m;
+    volatile uint64_t first_at;   /* the first woken waiter's acquire time; 0 until then */
+};
+
+static void wake_bench_waiter(void *arg)
+{
+    struct wake_bench *b = arg;
+    mutex_lock(&b->m);
+    uint64_t now = clock_now_ns();
+    uint64_t zero = 0;
+    __atomic_compare_exchange_n(&b->first_at, &zero, now, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    mutex_unlock(&b->m);
+    thread_exit(0);
+}
+
+static void sort_ns(uint64_t *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; i++) {
+        uint64_t x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = x;
+    }
+}
+
+/* A round that cannot go on: release the mutex so the waiters already
+ * created can take it and leave, and join them, before the test reports
+ * its reason. A CHECK that returned with the mutex held would leave them
+ * blocked for the rest of the boot. */
+static bool wake_bench_abort(struct wake_bench *b, struct thread **th, unsigned created, const char **reason,
+                             const char *why)
+{
+    mutex_unlock(&b->m);
+    for (unsigned i = 0; i < created; i++)
+        thread_join(th[i]);
+    *reason = why;
+    return false;
+}
+
+static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unlock_ns, uint64_t *wake_ns)
+{
+    static struct wake_bench b;
+    static struct thread *th[WAKE_BENCH_MAX];
+    uint64_t unlock[WAKE_BENCH_ROUNDS], wake[WAKE_BENCH_ROUNDS];
+    mutex_init(&b.m, "wake-bench");
+    for (unsigned r = 0; r < WAKE_BENCH_ROUNDS; r++) {
+        /* A round creates, settles and joins up to 256 threads: on a slow
+         * host the ten of a size add up, so the watchdog is kicked per
+         * round, not per size. The run stays under the harness's per-test
+         * budget by being quick (1.6 to 1.9 s for all four sizes on TCG),
+         * not by a budget of its own. */
+        sched_watchdog_kick();
+        b.first_at = 0;
+        mutex_lock(&b.m);
+        unsigned created = 0;
+        for (; created < nwaiters; created++) {
+            th[created] = thread_create(wake_bench_waiter, &b, "wake-bench-w", SCHED_PRIO_DEFAULT);
+            if (th[created] == NULL)
+                return wake_bench_abort(&b, th, created, reason, "mutex-wake-bench: thread_create failed");
+        }
+        /* Every waiter is on the mutex's wait queue -- the queue's own
+         * count, under its lock, not a counter the waiter bumps on the way
+         * in nor a settle: what the unlock then walks is exactly nwaiters
+         * entries, and the first acquire it times is a wake. */
+        unsigned i;
+        for (i = 0; i < 400 && waitqueue_waiting(&b.m.wq) < nwaiters; i++)
+            thread_sleep_ms(5);
+        if (waitqueue_waiting(&b.m.wq) != nwaiters)
+            return wake_bench_abort(&b, th, created, reason, "mutex-wake-bench: the waiters did not all block in 2 s");
+        uint64_t t0 = clock_now_ns();
+        mutex_unlock(&b.m);
+        uint64_t t1 = clock_now_ns();
+        for (i = 0; i < nwaiters; i++)
+            thread_join(th[i]);
+        CHECK(b.first_at != 0 && b.first_at >= t0);
+        unlock[r] = t1 - t0;
+        wake[r] = b.first_at - t0;
+    }
+    sort_ns(unlock, WAKE_BENCH_ROUNDS);
+    sort_ns(wake, WAKE_BENCH_ROUNDS);
+    *unlock_ns = unlock[WAKE_BENCH_ROUNDS / 2];
+    *wake_ns = wake[WAKE_BENCH_ROUNDS / 2];
+    return true;
+}
+
+bool selftest_mutex_wake_bench(const char **reason)
+{
+    unsigned before = thread_count();
+    static const unsigned sizes[4] = { 1, 8, 32, 256 };
+    uint64_t unlock_ns[4], wake_ns[4];
+    for (unsigned k = 0; k < 4; k++) {
+        if (!wake_bench_one(reason, sizes[k], &unlock_ns[k], &wake_ns[k]))
+            return false;
+    }
+    kinfo("selftest: mutex-wake-bench: waiters 1/8/32/256: unlock call %llu/%llu/%llu/%llu ns, unlock to the first waiter's "
+          "acquire %llu/%llu/%llu/%llu ns (medians of %u)",
+          (unsigned long long)unlock_ns[0], (unsigned long long)unlock_ns[1], (unsigned long long)unlock_ns[2],
+          (unsigned long long)unlock_ns[3], (unsigned long long)wake_ns[0], (unsigned long long)wake_ns[1],
+          (unsigned long long)wake_ns[2], (unsigned long long)wake_ns[3], WAKE_BENCH_ROUNDS);
+    CHECK(threads_settle(before));
+    return true;
+}
+
 /* --- semaphore --- */
 
 struct sem_test {

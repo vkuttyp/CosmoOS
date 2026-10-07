@@ -109,12 +109,12 @@ and acyclic.** An inner set's wake runs the outer set's callback (the
 outer's item hooks the inner's queue), taking the outer's ready-list and
 queue locks with a lockdep subclass equal to the depth below it; a set
 added to itself is `-EINVAL`, a set that reaches the outer or that would
-make a chain of more than `EPOLL_MAX_NESTS` (4) sets is `-ELOOP`, decided
+make a chain of more than `EPOLL_MAX_NESTS` (5, Linux's limit) sets is `-ELOOP`, decided
 under the watch lock with no set lock held. A set's readiness as a member
 is "its ready list has entries". Check: `epoll-nest` (an eventfd written
 from a thread while the outer blocks: the outer returns the inner's
 descriptor, the inner the eventfd's, drained neither reports; a loop
-`-ELOOP`, four sets accepted, the fifth `-ELOOP`, an event at the bottom
+`-ELOOP`, five sets accepted, the sixth `-ELOOP`, an event at the bottom
 of the chain reaching the top), `lxtest` (`LXEPOLLNEST`), `epoll_musl`
 (a set in a set, `ELOOP`); `tools/epoll-callback-probe.py --old
 no-loop-check` skips the check and `epoll-nest` fails at its first
@@ -129,9 +129,11 @@ no-loop-check` skips the check and `epoll-nest` fails at its first
 - A ring polled by another ring becomes readable only when the owner
   collects completions into the inner ring's queue, since parked entries
   run only inside `aio_wait`.
-- A chain of nested epoll sets is bounded at four (A11); Linux allows
-  five. The bound is lockdep's subclass count, which sizes its order graph
-  (`design.md`, "epoll").
+- A chain of nested epoll sets is bounded at five (A11), as Linux's
+  epoll_ctl(2) documents; Linux's forward walk alone would let a chain of
+  empty sets go deeper, and its reverse-path check also bounds the number
+  of paths from a file to its sets (1000 at the first level down to 10 at
+  the fifth), which this kernel does not count.
 - A signalfd's registration hears the signals of the process that made
   it: the hook is on that process's `signalfd_wqh`, while the signalfd's
   readiness is the current process's. Another process that inherits both

@@ -20,7 +20,7 @@
  * first 320 before callback classes existed, and 382 of 384 when the 38
  * completion classes arrived (2026-10-07). */
 #define LOCKDEP_MAX_CLASSES    512u
-#define LOCKDEP_SUBCLASSES     4u
+#define LOCKDEP_SUBCLASSES     5u   /* 0..4: a chain of EPOLL_MAX_NESTS (5) epoll sets wakes at subclasses 0..4 */
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)
 #define LOCKDEP_MAX_HELD       24u   /* per CPU: spinlocks, interrupt context included */

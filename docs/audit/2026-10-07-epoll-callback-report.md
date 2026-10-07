@@ -275,3 +275,81 @@ x86-64 runner; the litmus job's `epoll/watched.litmus` verdicts are
 
 Plan §8's epoll item is complete; inventory §7.7 and the history carry the
 unit; the epoll unit's risks list strikes nesting.
+
+## 7. Follow-up: `wake_one` and the nesting limit
+
+Two things this unit left wrong, fixed in the follow-up PR (branch
+`wake-one-nesting`).
+
+**`wake_one` walked the whole queue.** Since §2's fix for the review,
+`wake_one` kept walking after the thread it woke so that every callback
+entry on the list ran -- correct for a queue with callbacks, and for a
+mutex's queue, a semaphore's or the quiesce worker's, which never carry
+one, a contended unlock that became O(waiters) under the queue's spinlock
+with interrupts off. `struct waitqueue` now has two lists, `waiters` and
+`callbacks` (Linux keeps its non-exclusive entries at the head and its
+exclusive ones at the tail for the same reason): a wake runs the callbacks
+list whole, then stops at the first thread it transitions. Module ABI 7.
+`mutex-wake-bench` is the measurement: 1, 8, 32 and 256 waiters blocked on
+a mutex, the unlock call's duration and the time from the unlock to the first
+waiter's acquire, medians of ten. Three trees, through
+`tools/wake-one-probe.py`: before the unit (`95c635e2`), after it
+(`abf63098`), and the follow-up.
+
+Each cell is `unlock call / unlock to the first waiter's acquire`, in
+microseconds, for 1, 8, 32 and 256 waiters (medians of ten; QEMU TCG, four
+CPUs, the host otherwise idle):
+
+| Tree | x86-64 debug | x86-64 `LOCKDEP=0` | AArch64 debug |
+|---|---|---|---|
+| before the unit (`95c635e2`) | 61/169, 87/242, 47/139, **29**/138 | 26/80, 52/177, 41/171, **16**/146 | 39/123, 57/203, 35/124, **25**/170 |
+| after the unit (`abf63098`) | 54/152, 105/343, 59/170, **71**/165 | 27/94, 56/160, 59/199, **56**/131 | 53/156, 124/290, 55/155, **70**/169 |
+| the follow-up | 61/170, 45/152, 42/138, **40**/172 | 33/92, 71/215, 46/163, **16**/108 | 51/151, 70/244, 39/136, **27**/178 |
+
+At one, eight and thirty-two waiters the three trees are within TCG's
+noise of one another (an unlock call is 30 to 120 us on this host, and a
+run of ten moves by that much). At 256 waiters the walk shows: the unit's
+tree takes 2.5 to 3.5 times as long to unlock as the tree before it, on
+every column (71 us against 29, 56 against 16, 70 against 25), about 150
+to 200 ns a list entry under TCG; the follow-up is back at the earlier
+tree's figure (40, 16 and 27 us). The time to the first waiter's acquire
+is dominated by the wake and the switch and does not resolve the
+difference at any size. So the regression was real and is gone, and it
+needed 256 waiters to be seen: the 32-waiter bench the follow-up started
+with showed nothing on either tree, which is why the bench grew. (The two
+older trees boot with this branch's bench added; their runs fail the
+harness only on the module ABI marker, `v7` against their `v5`/`v6`.)
+
+**The nesting limit was four; Linux's is five.** epoll_ctl(2) documents
+`ELOOP` for "a nesting depth of epoll instances greater than 5"; in the
+source `EP_MAX_NESTS` is 4 and the reverse-path check counts a file's
+depth from 0, so a file sits in at most five sets (the forward walk alone
+would let a chain of empty sets go one deeper, an edge the man page does
+not promise). `EPOLL_MAX_NESTS` is 5 and lockdep has five subclasses: a
+chain of five sets wakes at subclasses 0..4. The alternative the review
+of the plan named -- keep four subclasses and cap the forwarded wake's
+subclass at three -- was rejected on inspection: the top two sets of a
+five-chain would take the `epoll` queue lock at the same subclass, one
+inside the other, and lockdep would report a recursion in every debug
+boot that exercises the depth, a false positive it cannot tell from the
+inversion the subclasses exist to find. The fifth subclass costs 288 KiB
+of order graph in debug builds (800 KiB, from 512). A11, `epoll-nest`
+(five accepted, the sixth refused), `LXEPOLLNEST` (a chain of six) and
+the design say five.
+
+**Validation.** The usual chain on both architectures, this branch at
+its head: `host-test` (after fixing `test_lockdep`'s node arithmetic,
+which had hard-coded four subclasses), `analyze`, the debug suite with
+one, two and four CPUs, `test-smp2`, `test-chaos`, and a release build
+and boot, all passing; the network harness is part of every debug boot.
+Boot times: x86-64 137/147/148 s (one/two/four CPUs), `test-smp2` 150 s,
+`test-chaos` 140 s, release 17 s; AArch64 128/145/139 s, 152 s, 153 s,
+20 s. One failure on the way: the first x86-64 `test-chaos` boot failed
+`smp-ticks` (`d >= 5` at `smptest.c:540`, a fixed-settle tick count)
+while the host was compiling and running fuzz targets for the next unit;
+on a quiet host the same build passed (`smp-ticks` in 41 ms). It is the
+loaded-host timing family `docs/testing/flakes.md` describes and not this
+branch's doing, so it is not counted as a sighting. The measurements
+above were taken with nothing else running, at the default QEMU priority.
+`tools/epoll-callback-probe.py --old no-loop-check` still fails at its
+anchor (the memoised loop check), unchanged by the follow-up.

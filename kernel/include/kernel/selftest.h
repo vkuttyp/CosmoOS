@@ -58,6 +58,7 @@ int sched_preempt_probe_sysctl(char *out, size_t n);
 bool selftest_sleep(const char **reason);
 bool selftest_wait_timeout(const char **reason);
 bool selftest_mutex(const char **reason);
+bool selftest_mutex_wake_bench(const char **reason);   /* kernel/scheduler/schedtest.c: a contended unlock against the number of waiters (reports only) */
 bool selftest_semaphore(const char **reason);
 bool selftest_completion(const char **reason);
 bool selftest_completion_race(const char **reason);   /* a completion freed by its waiter while complete() still runs */

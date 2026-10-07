@@ -19,12 +19,14 @@ struct kobject;
 #define EPOLL_WAIT_FOREVER UINT64_MAX
 
 /* How many sets a chain of nested sets may hold (a set in a set in a set
- * ...), counting both ends. A forwarded wake takes the outer set's two
- * spinlocks with a lockdep subclass equal to the depth below it, so the
- * bound is lockdep's LOCKDEP_SUBCLASSES (4); Linux allows one more
- * (EP_MAX_NESTS 4, five sets). Adding a set that would make a longer
+ * ...), counting both ends: five, Linux's rule (epoll_ctl(2): "a nesting
+ * depth of epoll instances greater than 5" is ELOOP; EP_MAX_NESTS is 4
+ * and the reverse-path check counts a file's depth from 0, so a file sits
+ * in at most five sets). A forwarded wake takes the outer set's two
+ * spinlocks with a lockdep subclass equal to the depth below it, 0..4, which
+ * is why lockdep has five subclasses. Adding a set that would make a longer
  * chain, or a loop, is -ELOOP (docs/kernel/io/design.md, "epoll"). */
-#define EPOLL_MAX_NESTS 4u
+#define EPOLL_MAX_NESTS 5u
 unsigned epoll_obj_max_nests(void);
 
 /* One ready member, kernel-side. `io` is the COSMO_IO_* bits that fired;

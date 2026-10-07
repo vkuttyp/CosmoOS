@@ -33,12 +33,16 @@ struct wait_entry;
 typedef void (*wait_callback_fn)(struct wait_entry *e, unsigned flags);
 #define WAIT_CB_FREED 1u
 
-/* One of two kinds, on a queue's list: a sleeping thread (waitqueue_prepare,
- * `thread` set, `fn` NULL) that a wake marks READY, or a callback
- * (waitqueue_add_callback, `fn` set) that a wake runs. A callback entry stays
- * on the queue until its owner removes it; it is what lets a set of objects
- * (epoll) be told of a member's event without a thread sleeping on each
- * member's queue. */
+/* One of two kinds, each on its own list of the queue: a sleeping thread
+ * (waitqueue_prepare, `thread` set, `fn` NULL) that a wake marks READY, on
+ * `waiters`; or a callback (waitqueue_add_callback, `fn` set) that a wake
+ * runs, on `callbacks`. A callback entry stays on the queue until its owner
+ * removes it; it is what lets a set of objects (epoll) be told of a member's
+ * event without a thread sleeping on each member's queue. The two lists keep
+ * a wake_one at one thread: it runs the callbacks list whole and stops at the
+ * first thread it wakes (a contended mutex unlock is not O(waiters) under its
+ * spinlock; the first version of the callback kind walked one list to its
+ * end). */
 struct wait_entry {
     struct list_node link;
     struct thread *thread;
@@ -47,10 +51,12 @@ struct wait_entry {
 
 struct waitqueue {
     spinlock_t lock;
-    struct list_node waiters;
+    struct list_node waiters;     /* sleeping threads */
+    struct list_node callbacks;   /* callback entries, run by every wake */
 };
 
-#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters) }
+#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters), \
+                               .callbacks = LIST_HEAD_INIT((name).callbacks) }
 
 void waitqueue_init(struct waitqueue *wq, const char *name);
 
@@ -92,13 +98,21 @@ void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e);
 void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e);
 
 /* Wake the first / every sleeping waiter and run every callback entry --
- * every one, on either kind of wake: a wake_one that has found its thread
- * walks on to the end for the callbacks and wakes no second thread. Return
- * the number of threads woken (callbacks are not counted). */
+ * every one, on either kind of wake, from the queue's own callbacks list
+ * before the threads are looked at. Return the number of threads woken
+ * (callbacks are not counted). */
 unsigned waitqueue_wake_one(struct waitqueue *wq);
 unsigned waitqueue_wake_all(struct waitqueue *wq);
 
+/* No sleeping thread and no callback entry on the queue (a snapshot under
+ * its lock): a wake may be skipped. A callback entry counts -- it is owed a
+ * wake as a thread is -- so the test is never a reason to pass an epoll
+ * item over. */
 bool waitqueue_empty(struct waitqueue *wq);
+/* How many threads sleep on the queue right now (callback entries are not
+ * counted): the self-tests' proof that their waiters are enrolled, not a
+ * synchronisation primitive. */
+unsigned waitqueue_waiting(struct waitqueue *wq);
 
 #define wait_event(wq, cond)                                                   \
     do {                                                                       \

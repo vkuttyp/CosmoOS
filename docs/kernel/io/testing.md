@@ -133,8 +133,8 @@ itself is `-EINVAL`, the outer into the inner `-ELOOP`; a thread writes
 the eventfd while the outer blocks (1 s bound) and the outer returns the
 inner's descriptor, the inner returns the eventfd's, the outer again (a
 level item re-queued while the inner has an event), and once the eventfd
-is drained neither reports. Then the bound: `EPOLL_MAX_NESTS` sets in a
-chain accepted, a fifth refused from below and from above, a loop at the
+is drained neither reports. Then the bound: `EPOLL_MAX_NESTS` (5) sets in a
+chain accepted, a sixth refused from below and from above, a loop at the
 bottom refused, and an event written at the bottom of the chain woken
 through to the top. The table is destroyed with every set and the
 eventfd registered; every object's count returns to the test's own.
