@@ -17,6 +17,7 @@ void waitqueue_init(struct waitqueue *wq, const char *name)
 {
     spinlock_init(&wq->lock, name);
     list_init(&wq->waiters);
+    list_init(&wq->callbacks);
 }
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
@@ -58,7 +59,7 @@ void waitqueue_add_callback(struct waitqueue *wq, struct wait_entry *e, wait_cal
     e->thread = NULL;
     e->fn = fn;
     arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
-    list_push_back(&wq->waiters, &e->link);
+    list_push_back(&wq->callbacks, &e->link);
     spin_unlock_irqrestore(&wq->lock, s);
 }
 
@@ -77,9 +78,7 @@ unsigned waitqueue_detach_callbacks(struct waitqueue *wq)
     unsigned n = 0;
     arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
     struct wait_entry *e, *tmp;
-    list_for_each_entry_safe(e, tmp, &wq->waiters, link) {
-        if (e->fn == NULL)
-            continue;
+    list_for_each_entry_safe(e, tmp, &wq->callbacks, link) {
         list_remove(&e->link);
         e->fn(e, WAIT_CB_FREED);
         n++;
@@ -89,29 +88,30 @@ unsigned waitqueue_detach_callbacks(struct waitqueue *wq)
 }
 
 /*
- * A waiter that was already woken stays linked until it runs and calls
- * waitqueue_finish. wake_one must not stop at such an entry: it counts
- * only waiters it actually transitioned, and keeps scanning past ones
- * that are already READY or RUNNING, so consecutive wake_one calls reach
- * consecutive blocked waiters. Callback entries are run, every one of
- * them, whichever kind of wake this is, and are not counted: they are
- * observers of the event, not the waiter a wake_one is for -- so a
- * wake_one that has found its thread walks on to the end for them,
- * waking no second thread (review of PR #325).
+ * Callback entries first, every one of them, whichever kind of wake this
+ * is, and not counted: they are observers of the event, not the waiter a
+ * wake_one is for. Then the threads: a waiter that was already woken stays
+ * linked until it runs and calls waitqueue_finish, so wake_one must not
+ * stop at such an entry -- it counts only waiters it actually transitioned
+ * and keeps scanning past ones already READY or RUNNING, so consecutive
+ * wake_one calls reach consecutive blocked waiters, and it stops at the
+ * first it transitions: a contended mutex unlock is one thread's work under
+ * the queue's lock, not the whole list's (the first version of the
+ * callback kind kept one list and walked it to the end for the callbacks;
+ * the benchmark is `mutex-wake-bench`).
  */
 static unsigned wake_locked(struct waitqueue *wq, bool all)
 {
     unsigned n = 0;
     struct wait_entry *e, *tmp;
+    list_for_each_entry_safe(e, tmp, &wq->callbacks, link)
+        e->fn(e, 0);
     list_for_each_entry_safe(e, tmp, &wq->waiters, link) {
-        if (e->fn != NULL) {
-            e->fn(e, 0);
+        if (!sched_wake(e->thread))
             continue;
-        }
-        if (n > 0 && !all)
-            continue;   /* wake_one has its thread: only callbacks from here */
-        if (sched_wake(e->thread))
-            n++;
+        n++;
+        if (!all)
+            break;
     }
     return n;
 }

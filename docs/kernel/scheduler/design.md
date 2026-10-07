@@ -464,7 +464,7 @@ and `sched_dump`'s per-CPU line carries the load.
 
 ```c
 struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn fn; };
-struct waitqueue { spinlock_t lock; struct list_node waiters; };
+struct waitqueue { spinlock_t lock; struct list_node waiters; struct list_node callbacks; };
 
 #define wait_event(wq, cond)                          \
     do {                                              \
@@ -490,11 +490,16 @@ sleeping thread; `wait_event(&t->sleep_wq, timer fired)`.
 
 **Callback entries (the epoll-callback unit).** An entry is one of two
 kinds: a sleeping thread (`waitqueue_prepare`; `thread` set, `fn` NULL),
-which a wake marks READY, or a callback (`waitqueue_add_callback`; `fn`
-set), which a wake *runs*, under the queue's spinlock, in the waker's
-context -- an interrupt, a timer, another CPU's thread. Every wake runs
-every callback entry, `wake_one` included (it runs past them to reach a
-thread, and counts only threads). The callback may take spinlocks ordered
+which a wake marks READY, on `waiters`, or a callback
+(`waitqueue_add_callback`; `fn` set), which a wake *runs*, under the
+queue's spinlock, in the waker's context -- an interrupt, a timer, another
+CPU's thread -- on `callbacks`, a list of its own. Every wake runs the
+callbacks list whole first, `wake_one` included, and counts only threads;
+`wake_one` then stops at the first thread it transitions, so a contended
+mutex unlock (which has no callbacks) is one thread's work under the
+spinlock. The first version kept one list and had `wake_one` walk it to
+the end for the callbacks, which made the unlock O(waiters)
+(`mutex-wake-bench`, the epoll-callback report's addendum). The callback may take spinlocks ordered
 after the queue's and must not sleep or touch the queue it is on. A
 callback entry stays on the queue until its owner removes it
 (`waitqueue_remove_callback`, under the lock: on return no callback of
