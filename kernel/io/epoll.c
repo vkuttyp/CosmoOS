@@ -119,7 +119,15 @@ struct epoll_obj {
     uint64_t next_id;         /* assigns each arm (add or MOD re-arm) a unique id */
     unsigned nests;           /* while this set's queue is being woken, under wait's lock: the lockdep
                                * subclass the next set up the chain must use (ep_poll_safewake) */
+    /* The loop check's memo (g_watch_lock): each set is visited once per
+     * check, so a layered graph of sets costs its size, not its paths
+     * (Linux's loop_check_gen). */
+    uint64_t visit_gen;       /* reaches: explored in this check */
+    uint64_t down_gen, up_gen;
+    unsigned down_depth, up_depth;
 };
+
+static uint64_t g_check_gen;  /* g_watch_lock: the current nesting check */
 
 static void epoll_release(struct kobject *obj);
 static unsigned epoll_ready(struct kobject *obj);
@@ -223,6 +231,15 @@ static void hook_wake(struct wait_entry *e, unsigned flags)
      * order check honest about `epoll-ready` and `epoll` nested in themselves. */
     unsigned sub = it->member_set ? epoll_of(it->obj)->nests : 0;
     arch_irq_state_t s = spin_lock_irqsave_nested(&ep->rlock, sub);
+    /* A fired one-shot hears nothing until MOD re-arms it (Linux's callback
+     * returns for an item whose events are cleared): no link, no wake, so
+     * the set does not read readable for an item a wait cannot report. MOD
+     * and rearm clear the flag under ep->lock and then poll the member
+     * themselves, so a wake skipped here is not an event lost. */
+    if (__atomic_load_n(&it->disabled, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&ep->rlock, s);
+        return;
+    }
     if (it->rstate == R_IDLE) {
         list_push_back(&ep->rdllist, &it->rdllink);
         it->rstate = R_READY;
@@ -327,59 +344,71 @@ static unsigned item_ready(const struct epoll_item *it)
 /* --- the loop check (nesting) --------------------------------------------- */
 
 /* g_watch_lock held. The longest chain of sets from `ep` downward, counting
- * `ep` (1 when it holds no set). Bounded by the limit itself: a chain longer
- * than the limit cannot exist, so the walk is at most EPOLL_MAX_NESTS deep. */
-static unsigned depth_below(struct epoll_obj *ep, unsigned limit)
+ * `ep` (1 when it holds no set), memoised per check: a set reached by many
+ * paths is computed once. A chain longer than EPOLL_MAX_NESTS cannot exist,
+ * so the recursion is at most that deep. */
+static unsigned depth_below(struct epoll_obj *ep)
 {
+    if (ep->down_gen == g_check_gen)
+        return ep->down_depth;
     unsigned best = 1;
     struct epoll_item *it;
-    if (limit == 0)
-        return 1;
     list_for_each_entry(it, &ep->subsets, set_link) {
-        unsigned d = 1 + depth_below(epoll_of(it->obj), limit - 1);
+        unsigned d = 1 + depth_below(epoll_of(it->obj));
         if (d > best)
             best = d;
     }
+    ep->down_gen = g_check_gen;
+    ep->down_depth = best;
     return best;
 }
 
 /* g_watch_lock held. The longest chain of sets from `ep` upward through the
- * sets it is a member of, counting `ep`. */
-static unsigned depth_above(struct epoll_obj *ep, unsigned limit)
+ * sets it is a member of, counting `ep`; memoised the same way. */
+static unsigned depth_above(struct epoll_obj *ep)
 {
+    if (ep->up_gen == g_check_gen)
+        return ep->up_depth;
     unsigned best = 1;
-    if (limit == 0)
-        return 1;
     for (struct epoll_item *it = ep->obj.watchers; it != NULL; it = it->obj_next) {
-        unsigned d = 1 + depth_above(it->ep, limit - 1);
+        unsigned d = 1 + depth_above(it->ep);
         if (d > best)
             best = d;
     }
+    ep->up_gen = g_check_gen;
+    ep->up_depth = best;
     return best;
 }
 
-/* g_watch_lock held. Whether `target` is `inner` or reachable below it. */
-static bool reaches(struct epoll_obj *inner, struct epoll_obj *target, unsigned limit)
+/* g_watch_lock held. Whether `target` is `inner` or reachable below it; a
+ * set explored in this check is not explored again. */
+static bool reaches(struct epoll_obj *inner, struct epoll_obj *target)
 {
     if (inner == target)
         return true;
-    if (limit == 0)
+    if (inner->visit_gen == g_check_gen)
         return false;
+    inner->visit_gen = g_check_gen;
     struct epoll_item *it;
     list_for_each_entry(it, &inner->subsets, set_link)
-        if (reaches(epoll_of(it->obj), target, limit - 1))
+        if (reaches(epoll_of(it->obj), target))
             return true;
     return false;
 }
 
 /* g_watch_lock held. Whether `inner` may become a member of `outer`: not when
  * `outer` is reachable from `inner` (a loop), and not when the chain through
- * the new edge would exceed EPOLL_MAX_NESTS sets. -ELOOP for both, as Linux. */
+ * the new edge would exceed EPOLL_MAX_NESTS sets. -ELOOP for both, as Linux.
+ * One check generation: every set is visited at most once by each walk, so
+ * the cost is the sets and edges reachable, however many paths join them
+ * (review of PR #325: a layered graph made the path count exponential, all
+ * under the global lock). */
 static int nesting_allowed(struct epoll_obj *outer, struct epoll_obj *inner)
 {
-    if (reaches(inner, outer, EPOLL_MAX_NESTS))
+    g_check_gen++;
+    if (reaches(inner, outer))
         return -ELOOP;
-    if (depth_above(outer, EPOLL_MAX_NESTS) + depth_below(inner, EPOLL_MAX_NESTS) > EPOLL_MAX_NESTS)
+    if (depth_above(outer) + depth_below(inner) > EPOLL_MAX_NESTS)
         return -ELOOP;
     return 0;
 }
@@ -549,7 +578,7 @@ int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events,
     it->events = events;
     it->data = data;
     it->oneshot = oneshot;
-    it->disabled = false;      /* MOD re-arms a fired one-shot */
+    __atomic_store_n(&it->disabled, false, __ATOMIC_RELEASE);   /* MOD re-arms a fired one-shot */
     it->edge = edge;
     it->id = ep->next_id++;    /* a fresh arm: a copy-failure re-arm of the previous arm must not match */
     hook_item(it);
@@ -598,7 +627,7 @@ void epoll_obj_rearm(struct kobject *epobj, int fd, uint64_t id)
      * event the door could not copy out goes back on the ready list, and a
      * fired one-shot's suppression is lifted, so it is not lost. */
     if (it != NULL && it->id == id) {
-        it->disabled = false;
+        __atomic_store_n(&it->disabled, false, __ATOMIC_RELEASE);
         ready_item(ep, it);
     }
     mutex_unlock(&ep->lock);
@@ -662,7 +691,7 @@ static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned 
                 out[n].edge = it->edge;
                 n++;
                 if (it->oneshot)
-                    it->disabled = true;
+                    __atomic_store_n(&it->disabled, true, __ATOMIC_RELEASE);   /* hook_wake reads it */
                 keep = !it->oneshot && !it->edge;   /* level: re-queued; edge and one-shot: wait for a wake / MOD */
             } else {
                 keep = false;   /* a drain's wake, or a one-shot still disabled: off the list */
@@ -683,7 +712,13 @@ static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned 
         }
         it->rewake = false;
     }
+    bool pending = !list_empty(&ep->rdllist);
     spin_unlock_irqrestore(&ep->rlock, s);
+    /* Items went back on the list: another waiter that found it empty while
+     * we held them is asleep with events pending, and an outer set that
+     * polled us then read not-ready -- wake, as Linux's ep_done_scan does. */
+    if (pending)
+        set_wake_nested(ep, 0);
     return n;
 }
 

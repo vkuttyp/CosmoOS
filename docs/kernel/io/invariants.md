@@ -132,6 +132,12 @@ no-loop-check` skips the check and `epoll-nest` fails at its first
 - A chain of nested epoll sets is bounded at four (A11); Linux allows
   five. The bound is lockdep's subclass count, which sizes its order graph
   (`design.md`, "epoll").
+- A signalfd's registration hears the signals of the process that made
+  it: the hook is on that process's `signalfd_wqh`, while the signalfd's
+  readiness is the current process's. Another process that inherits both
+  the set and the signalfd and waits on the set is not woken by its own
+  signals (Linux's epitem sits on the adding task's `sighand` queue the
+  same way). A signalfd in a set is a one-process arrangement.
 - A set's readiness as a member of a set, or to `poll()`, is its ready
   list's emptiness: a wake that turns out not to have made the member
   ready (a drain) reads as readable until the next walk drops it, so a

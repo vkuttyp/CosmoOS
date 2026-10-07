@@ -267,7 +267,14 @@ of a member that is ready now puts it straight on the list, and a member
 with no queue at all (a plain file: always ready, never changing) lives
 on the list. A wake that arrives while a walker holds the item on its
 transfer list is noted (`rewake`) and the item re-queued whatever the
-walker decided, so no event is lost to the walk. The set's own readiness,
+walker decided, so no event is lost to the walk; and when the walker puts
+items back it wakes the set's queue (Linux's `ep_done_scan`), so a second
+waiter that found the list empty while the walker held them does not
+sleep with events pending, and an outer set that polled the set then is
+told to look again. A fired one-shot's member wakes are ignored by the
+callback until MOD re-arms it (Linux's callback returns for an item whose
+events are cleared): the set is not made readable, nor its waiters woken,
+for an item a wait cannot report. The set's own readiness,
 for `poll()` on it and for a set that is a member of a set, is "the ready
 list has entries", a spinlock-guarded check: it can read readable where
 the walk would then find nothing (as Linux's epoll descriptor can), never
@@ -349,8 +356,11 @@ queue lock while it wakes, and the outer's callback reads it there
 squared, 512 KiB at four subclasses; Linux allows five sets). The loop
 check, under `g_watch_lock` and no set lock, walks the inner set's
 `subsets` downward for the outer (a loop) and the two chains above the
-outer and below the inner for the depth; a set added to itself is
-`-EINVAL`, a loop or a longer chain `-ELOOP`, as Linux. An inner set's
+outer and below the inner for the depth, each set visited once per check
+(a generation stamp per set, Linux's `loop_check_gen`), so a layered
+graph of sets costs its sets and edges and not its paths under the global
+lock; a set added to itself is `-EINVAL`, a loop or a longer chain
+`-ELOOP`, as Linux. An inner set's
 readiness as a member is its ready list's emptiness (above), so a level
 item for an inner set stays reportable while the inner has events and is
 dropped once the inner is drained.

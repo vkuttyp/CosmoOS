@@ -95,7 +95,9 @@ unsigned waitqueue_detach_callbacks(struct waitqueue *wq)
  * that are already READY or RUNNING, so consecutive wake_one calls reach
  * consecutive blocked waiters. Callback entries are run, every one of
  * them, whichever kind of wake this is, and are not counted: they are
- * observers of the event, not the waiter a wake_one is for.
+ * observers of the event, not the waiter a wake_one is for -- so a
+ * wake_one that has found its thread walks on to the end for them,
+ * waking no second thread (review of PR #325).
  */
 static unsigned wake_locked(struct waitqueue *wq, bool all)
 {
@@ -106,11 +108,10 @@ static unsigned wake_locked(struct waitqueue *wq, bool all)
             e->fn(e, 0);
             continue;
         }
-        if (!sched_wake(e->thread))
-            continue;
-        n++;
-        if (!all)
-            break;
+        if (n > 0 && !all)
+            continue;   /* wake_one has its thread: only callbacks from here */
+        if (sched_wake(e->thread))
+            n++;
     }
     return n;
 }

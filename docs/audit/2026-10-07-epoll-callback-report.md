@@ -243,6 +243,20 @@ above are the repeats' where one was needed:
   the writer) rather than the deterministic check after the loop the probe
   named; both are the protection, and the probe accepts either.
 
+Qodo's review of the PR found four things worth fixing and one worth
+recording, all in one follow-up commit: a second waiter could sleep with
+events pending (the walk re-queued items without waking the set's queue:
+it wakes now, Linux's `ep_done_scan`); a fired one-shot's member wakes
+re-queued the disabled item and made the set readable to `poll()` and to
+an outer set (the callback skips a disabled item, as Linux's returns for
+cleared events; `epoll-nest` checks the nested one-shot shape); the loop
+check walked every path of a layered graph of sets under the global lock
+(each set is visited once per check, a generation stamp as Linux's
+`loop_check_gen`); and `wake_one` stopped at its thread with callbacks
+behind it unrun (it walks on for them). The fifth, a signalfd inherited by
+another process not waking that process's wait, is Linux's behaviour too
+and is recorded as a gap in `invariants.md`.
+
 No x86-64 boot approached the 180 s budget (the longest, `test-chaos`,
 146.8 s). The PR's CI boot times are added here when its run completes.
 

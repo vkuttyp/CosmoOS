@@ -556,6 +556,22 @@ bool selftest_epoll_nest(const char **reason)
     CHECK(kobject_io_of(ev)->read(ev, &sink, 8) == 8);
     CHECK(epoll_obj_wait(inner, out, 4, 0) == 0);                 /* drained: the inner's level item is dropped */
     CHECK(epoll_obj_wait(outer, out, 4, 0) == 0);                 /* ... and so the outer's */
+    /* A fired one-shot in the inner set hears nothing until MOD re-arms it:
+     * its member's next wake must not make the inner set readable to the
+     * outer, nor wake the outer's waiters (review of PR #325). */
+    uint64_t one = 1;
+    CHECK(epoll_obj_mod(inner, he, COSMO_IO_READABLE, 0, 0x51, true, false) == 0);   /* one-shot */
+    CHECK(kobject_io_of(ev)->write(ev, &one, 8) == 8);
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 1 && out[0].fd == he);   /* reported once ... */
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 0);                       /* the inner re-queued nothing */
+    CHECK(kobject_io_of(ev)->write(ev, &one, 8) == 8);                  /* the member wakes again */
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 0);                       /* ... and the fired one-shot is silent */
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 0);                       /* so is the outer */
+    CHECK(epoll_obj_mod(inner, he, COSMO_IO_READABLE, 0, 0x51, false, false) == 0);   /* re-armed, level: the member is ready */
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 1 && out[0].fd == hi);
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 1 && out[0].fd == he);
+    CHECK(kobject_io_of(ev)->read(ev, &sink, 8) == 8);
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 0 && epoll_obj_wait(outer, out, 4, 0) == 0);
     /* The depth bound: a chain of EPOLL_MAX_NESTS sets, then one more. */
     unsigned maxn = epoll_obj_max_nests();
     static struct kobject *chain[8];

@@ -91,9 +91,10 @@ void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e);
 /* Dequeue and mark RUNNING. */
 void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e);
 
-/* Wake the first / every sleeping waiter and run every callback entry.
- * Return the number of threads woken (callbacks are not counted, and
- * wake_one runs past them to reach a thread). */
+/* Wake the first / every sleeping waiter and run every callback entry --
+ * every one, on either kind of wake: a wake_one that has found its thread
+ * walks on to the end for the callbacks and wakes no second thread. Return
+ * the number of threads woken (callbacks are not counted). */
 unsigned waitqueue_wake_one(struct waitqueue *wq);
 unsigned waitqueue_wake_all(struct waitqueue *wq);
 
