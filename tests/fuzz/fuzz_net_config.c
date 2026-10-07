@@ -68,14 +68,21 @@ static const uint8_t k_peer_mac[6] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 static const uint8_t k_guest_a_mac[6] = { 0x02, 0xa1, 0x00, 0x00, 0x00, 0x0f };
 static const uint8_t k_guest_b_mac[6] = { 0x02, 0xb1, 0x00, 0x00, 0x00, 0x0f };
 
-#define IP0      IPV4_ADDR(10, 0, 2, 15)
-#define PEER     IPV4_ADDR(10, 0, 2, 2)
-#define WORLD    IPV4_ADDR(8, 8, 8, 8)
-#define IP1      IPV4_ADDR(10, 75, 0, 1)
-#define GUEST_A  IPV4_ADDR(10, 75, 0, 15)
-#define IP2      IPV4_ADDR(10, 76, 0, 1)
-#define GUEST_B  IPV4_ADDR(10, 76, 0, 15)
-#define NOBODY   IPV4_ADDR(10, 77, 0, 15)   /* a guest no tap attached */
+/* IPV4_ADDR goes through htonl, which is no constant expression on glibc;
+ * these addresses initialise static tables. */
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define IP4C(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#else
+#define IP4C(a, b, c, d) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) | (uint32_t)(d))
+#endif
+#define IP0      IP4C(10, 0, 2, 15)
+#define PEER     IP4C(10, 0, 2, 2)
+#define WORLD    IP4C(8, 8, 8, 8)
+#define IP1      IP4C(10, 75, 0, 1)
+#define GUEST_A  IP4C(10, 75, 0, 15)
+#define IP2      IP4C(10, 76, 0, 1)
+#define GUEST_B  IP4C(10, 76, 0, 15)
+#define NOBODY   IP4C(10, 77, 0, 15)   /* a guest no tap attached */
 #define MASK24   htonl(0xffffff00u)
 
 static struct fz_netif g_f0, g_f1, g_f2;
@@ -287,7 +294,7 @@ enum { OP_FW_ADD, OP_FW_DEL, OP_POLICY, OP_FW_FLUSH, OP_PF_ADD, OP_PF_DEL, OP_PF
        OP_CLOCK, OP_SEND, OP_FRAME, OP_COUNT };
 static const unsigned k_op_args[OP_COUNT] = { 12, 12, 3, 0, 4, 2, 0, 1, 0, 1, 3, 6 };
 
-static const uint32_t k_ips[8] = { 0, PEER, IP0, IP1, GUEST_A, GUEST_B, WORLD, IPV4_ADDR(10, 75, 0, 0) };
+static const uint32_t k_ips[8] = { 0, PEER, IP0, IP1, GUEST_A, GUEST_B, WORLD, IP4C(10, 75, 0, 0) };
 static const uint16_t k_ports[8] = { 80, 22, 53, 8080, 8081, 5353, 7, 9 };
 
 static uint16_t port_of(uint8_t b)
