@@ -74,6 +74,9 @@ void fz_dump_timers(void);   /* every pending timer, to stderr */
 
 /* How many times the stack woke a socket or set an error on one. */
 unsigned fz_sock_wakes(void);
+/* Wake references held (sock_wake_ref less sock_wake_unref): zero whenever
+ * the stack has returned to the target. */
+unsigned fz_sock_wake_refs(void);
 
 /* Reseed the stack's random source (random_u64) so an input replays. */
 void fz_random_seed(uint64_t seed);

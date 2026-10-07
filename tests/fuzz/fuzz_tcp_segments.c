@@ -146,6 +146,7 @@ static bool seq_leq(uint32_t a, uint32_t b)
 static void check_invariants(void)
 {
     FUZZ_ASSERT(harness_locks_held() == 0);
+    FUZZ_ASSERT(fz_sock_wake_refs() == 0);   /* every wake reference put after its wake */
     FUZZ_ASSERT(g_bad_csum_frames == 0);
     FUZZ_ASSERT(g_bad_len_frames == 0);
     FUZZ_ASSERT(g_f0.oversize == 0 && g_f0.runts == 0);
