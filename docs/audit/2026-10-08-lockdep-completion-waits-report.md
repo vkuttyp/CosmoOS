@@ -22,7 +22,11 @@ second a named list. A housekeeping commit precedes both.
   node, so an interrupt or a timer callback that signals records nothing
   and is no gap. No history is kept, which is what crossrelease and DEPT
   kept and paid for in false positives.
-- **The tree reported nothing.** TBD_REPORT_SENTENCE
+- **The tree reported nothing.** Full debug suites at one, two and four
+  CPUs on both architectures, the chaos boots and the network harness
+  produced no `LOCKDEP_R_COMPLETION` report beyond the four the new test
+  expects; the graph's edges into and out of completion classes are listed
+  below and every one is a mutex the survey predicted.
 - **A shape the first design would have misreported**, found in the survey
   before the first boot: the RAM block device completes a bio synchronously
   inside `submit`, so `sync_io` under a VFS mutex completes its own
@@ -35,7 +39,9 @@ second a named list. A housekeeping commit precedes both.
   callback functions set up and never run, and the completion classes
   never signalled or never waited for. On this tree: one callback function
   of twenty (`delack_timer`, TCP's delayed acknowledgement, set up 242
-  times and never fired) and TBD_COVER_SENTENCE.
+  times and never fired) and four completion classes: one production class that is polled rather
+  than waited for (`xhci-first-scan`), and three test classes (one
+  completed by nobody by design, two whose test joins the threads instead).
 - **The class table went from 384 to 512.** The 38 completion classes took
   a full x86-64 debug boot to 382 of 384.
 
@@ -163,7 +169,28 @@ got for free (a lock held before the wait began was outside its history).
 
 ### 4. The graph on this tree
 
-TBD_GRAPH_SECTION
+A full x86-64 debug boot (four CPUs) records these edges touching the
+production completion classes (test classes omitted), read from the
+runner's graph dump:
+
+| From | To | Why |
+|---|---|---|
+| `vnode`#0/#1/#2, `pagecache`, `cosmofs`, `mounts`, `rename`, `mount-sync`, `file` | `blk-sync` | cosmofs and the VFS do synchronous block I/O under their mutexes |
+| `blk-sync` | `blkdevs` | a `blk-sync` was completed by a thread holding the block registry mutex: `blk_unregister` failing in-flight bios, or the timeout thread through a driver's `timeout`. A sync I/O made under `blkdevs` could never be rescued by removal; no caller makes one |
+| `mount-sync` | `thread-exit` | `vfs_sync` joins a thread under its mutex |
+| `netif-unregister` | `netif-barrier` | the unregister waits for the worker barriers under its mutex |
+| `nvme-admin` (mutex), `devices`, `modules` | `nvme-admin` | admin commands under the admin mutex, at bring-up under the device and module registries |
+| `xhci-cmd` (mutex), `usb-hcd`, `blkdevs`, `devices` | `xhci-cmd` | xHCI commands under the command mutex, at enumeration under the host-controller mutex, from USB storage's probe under the block registry |
+| `usb-hcd`, `blkdevs`, `devices`, `modules` | `usb-sync` | USB transfers from enumeration, storage probe and module init |
+| `ahci-hotplug`, `devices`, `modules` | `ahci-sync` | IDENTIFY at probe under the port's hotplug mutex and the registries |
+
+Every edge into a completion class comes from a mutex (fact 1); the one
+edge out of a completion class goes to a mutex (fact 3); no cycle closes.
+The boot's 430 self-tests, the user-mode suite and the network harness
+produced no `LOCKDEP_R_COMPLETION` report other than the four the test
+expects. The RAM block device's synchronous completions under the VFS
+mutexes, which the undeferred design would have turned into `blk-sync →
+vnode` and a report at the next sync read under `vnode`, left no edge.
 
 ### 5. Tests and controls
 
@@ -203,20 +230,29 @@ nothing in the checker changed.
 
 | Mode | Removes | Required failure | x86-64 | AArch64 |
 |---|---|---|---|---|
-| `no-wait` | the wait hook | case 1, `hits_signal_first == 1` | TBD | TBD |
-| `no-signal` | the signal hook | case 1, `hits_signal_first == 1` | TBD | TBD |
-| `no-signal-check` | the signal-side cycle check (edges still recorded) | case 2, `hits_wait_first == 1` | TBD | TBD |
-| `no-self` | the discard of a thread's own pending complete() at its own wait | the boot panics with `lockdep: a completion wait holds a lock its signaller needs` inside the test | TBD | TBD |
+| `no-wait` | the wait hook | case 1, `hits_signal_first == 1` | required failure | required failure |
+| `no-signal` | the signal hook | case 1, `hits_signal_first == 1` | required failure | required failure |
+| `no-signal-check` | the signal-side cycle check (edges still recorded) | case 2, `hits_wait_first == 1` | required failure | required failure |
+| `no-self` | the discard of a thread's own pending complete() at its own wait | the boot panics with `lockdep: a completion wait holds a lock its signaller needs` inside the test | panic: `complete() held 'lockdep-cm-l5'#0, and a wait for 'lockdep-cm-self' is recorded holding it`, chain `'lockdep-cm-l5'#0 -> 'lockdep-cm-self'#0`, 22 s in | the same, 27 s in |
+
+Eight of eight. The two modes that fail at the same check remove the two
+halves of one cycle (the wait's edge and the signal's edge), as the
+callback probe's `no-wait` and `no-class` do; `no-signal-check` keeps the
+signal's edge and so fails only where the signal is the side that must
+report.
 
 ### 6. Capacity
 
-The first boot of the change reached **382 of 384** classes: 38 completion
-classes on top of the 344 a boot of `main` creates (the callback-classes
-report measured 324 on 2026-10-05; three units since added the rest).
+The first boot of the change reached **382 of 384** classes, against the
+332 a four-CPU x86-64 debug boot of `main` creates at the branch point
+(the callback-classes report measured 324 on 2026-10-05): 38 completion
+classes, and the new test's mutexes and spinlocks for the rest.
 `LOCKDEP_MAX_CLASSES` is 512 now; the graph is 2048 nodes × 32 words
 (512 KiB, `LOCKDEP=1` only), the dump's snapshot 573,448 bytes, and the
-host `search-work` bounds follow the macros. A full x86-64 debug boot
-reaches TBD_PEAK classes; AArch64 TBD_PEAK_A64.
+host `search-work` bounds follow the macros. A full four-CPU debug boot
+reaches **408** classes on both architectures (353–354 at one CPU, 321 at
+two, where the per-CPU run-queue classes and some tests differ); `main`
+reaches 332.
 
 ## Part B: what the suite never drives
 
@@ -228,20 +264,125 @@ the graph dump.
 
 ### Timer callbacks
 
-TBD_TIMER_SECTION
+The source sets up 23 distinct timer callback functions. Two are
+AArch64's alone (`test_tick` in `kernel/arch/aarch64/timer.c`, and the EL2
+guest UART test's `wake_by_typing`); a full x86-64 debug boot sets up the
+other 21, and one of them never runs:
+
+| Callback | Set up | Where | Why it never runs | Matters? | A test that would cover it |
+|---|---|---|---|---|---|
+| `delack_timer` (`kernel-services/network/tcp.c`) | 242 times, one per TCP control block created in the boot (`tcp_pcb_new`) | armed for 40 ms on every second in-order data segment (`tcp.c`, the receive path), cancelled whenever an acknowledgement goes out first | every TCP exchange in the suite and the harness acknowledges within 40 ms, by the next data segment or by the send side's own output, so the delayed acknowledgement is always cancelled before it fires | a protocol path, not an error or teardown path: the callback is `timer_kick(pcb, WORK_DELACK)`, the same function `rexmit_timer` (which runs) calls, so its locks are in the graph under the retransmit callback's class and not under its own; a wait across `timer_cancel_sync(&pcb->delack)` (`tcp_pcb_free`) is checked against the retransmit class's edges only by coincidence of code sharing | cheap: a loopback receiver that reads one segment and sends nothing for more than 40 ms (the `net-lo-tcp` fixture), then checks the acknowledgement arrived; recorded in `docs/plan.md` §1 |
+
+The other twenty ran, grouped by subsystem: the scheduler's `sleep_fired`
+(`thread_sleep_ns` and its killable form share it); the futex, poll, epoll
+and aio timeouts (`timeout_fired`, three `alarm_fired`) and the timer
+object's `timer_obj_fired`; the network's `age_timer` (ARP) and TCP's
+`rexmit_timer`, `keep_timer` and `timewait_timer`; the e1000e watchdog;
+and the tests' `cb_a`, `cb_b`, `cb_c`, `cont_timer`, `cm_timer_cb`,
+`timer_probe_fn`, `rearm_cb`, `tagged_cb` and `storm_timer`. The paths one
+might have expected to be quiet -- the TIME-WAIT and keepalive timers, the
+poll family's deadlines -- all fired at least once in the suite. Error and
+teardown callbacks in this kernel are not timers: device removal and
+controller death run on threads (the block timeout thread, the USB
+worker) or in interrupt handlers, which the callback-class mechanism does
+not cover and which this listing therefore does not judge. The table has
+64 entries and was not full (`timer: 21 callback functions set up this
+boot, 1 never ran`); the AArch64 boot's listing is in the validation
+section.
 
 ### Completion classes
 
-TBD_COMPLETION_COVER_SECTION
+Forty-four completion classes exist in a full x86-64 debug boot (the
+eleven production names of the survey, nine of this unit's test, the rest
+other tests'); five are not both waited for and signalled:
+
+| Class | Listing | Judgement |
+|---|---|---|
+| `xhci-first-scan` | signalled, never waited for | polled with `completion_done` by the USB class drivers' module init under `g_controllers_lock`, bounded at 3 s; the worker that signals it takes no mutex, so the poll under the mutex is safe today and outside the graph; a `wait_for_completion_timeout` would put it in |
+| `ct-none` (`completion-timeout` test) | waited for, never signalled | by design: the test's completion nobody completes |
+| `chrblock-reader`, `chrblock-writer` (`vfs` tests) | signalled, never waited for | the test joins the threads instead of waiting on their completions; the completions are redundant with the join. Harmless |
+| `lockdep-cm-sync-submit` (this unit's test, first boot) | signalled, never waited for | the self-signal discard returned before marking the wait; the wait is marked now and the class no longer appears |
+
+The production classes the survey expected to be driven by interrupt
+handlers only (`nvme-admin`, `xhci-cmd`, `usb-sync`, `ahci-sync`) are
+listed as both waited for and signalled: the signal mark is made in any
+context, so an interrupt-only signaller is not mistaken for a missing one
+(the first boot of the branch had that mistake; the listing showed the
+four as "never signalled" and was wrong).
 
 ## Release builds
 
-TBD_RELEASE_SECTION
+Every hook is a `static inline` no-op without `CONFIG_LOCKDEP`, and the
+callback table exists only with `CONFIG_DEBUG`. Release kernels of `main`
+(`e3d9e6fe`) and of the branch (`e2eb847d`), both built in the same clone
+directory so that `__FILE__` strings and paths agree, have **identical
+defined-symbol tables** (name, size and type; `llvm-nm -S --defined-only`)
+on both architectures, and neither contains a `lockdep_completion_*`,
+`lockdep_dump_completion_coverage`, `timer_dump_callbacks` or
+`callback_cover_*` symbol. `struct thread` is 40 bytes larger in every
+build, which changes no symbol size.
+
+A first comparison, of the branch's release built in the working tree
+against `main`'s built in the clone, showed 8 differing lines on x86-64
+and 74 on AArch64, all in functions this change does not touch (`crc32c`,
+`lz4_decompress`, `sha512_block`, the PCI legacy accessors): the two trees
+sat at different paths, and the AArch64 immediates that encode
+`__FILE__`-derived lengths differ with the path. A control must differ in
+one thing; the same-path build above is that control.
 
 ## Validation
 
-TBD_VALIDATION_SECTION
+On `e2eb847d`, one chain, one QEMU at a time at its default priority
+(sampled: `pri 31 nice 0`), no `&` loops; the x86-64 four-CPU rows are
+the two timing boots:
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test` (lockdep host models at 512 classes, 2048 nodes) | PASS (62 s) | -- |
+| `make host-test-lockdep-tsan` | PASS | -- |
+| `make analyze` | clean | clean |
+| debug boot, 4 CPUs | PASS 139.3 s and 140.1 s, 430 self-tests, 408 classes | PASS 141.3 s, 430 self-tests, 408 classes |
+| `make test-smp2` | PASS 148.1 s | PASS 142.1 s |
+| debug boot, 1 CPU | PASS 131.9 s | PASS 131.2 s |
+| `make test-chaos` | PASS 139.5 s | PASS 143.6 s |
+| release build and boot | PASS 16.6 s | PASS 20.1 s |
+| `tools/lockdep-completion-probe.py`, four modes | 4 of 4 required failures | 4 of 4 |
+| `tools/neigh-down-race-probe.py --old`, four races (housekeeping) | 4 of 4 required failures | 4 of 4 |
+
+`lockdep-completion` passed in every debug boot (22–29 ms). The AArch64
+listing agrees with x86-64's: `delack_timer` the one callback of 22 set up
+(the AArch64 tick adds one) that never ran, and the same four completion
+classes.
+
+**Self-test time against `main`**, x86-64, four CPUs, alternated boots
+(`main`, branch, `main`, branch), `SELFTEST: timing total=`:
+
+| Run | `main` (332 classes) | branch (408 classes) |
+|---|---|---|
+| 1 | 113.1 s | 111.0 s |
+| 2 | 110.7 s | 111.9 s |
+
+The difference is inside `main`'s own spread (2.4 s). Both trees run with
+`LOCKDEP=1`, so the comparison is like with like; the absolute numbers are
+the debug-with-lockdep ones (`docs/development.md`, "Benchmark runs"). No
+x86-64 boot approached the 180 s budget (the longest, the two-CPU boot,
+148.1 s); the flakes record is unchanged.
 
 ## Plan §1
 
-TBD_PLAN_SECTION
+The item is marked complete, on these grounds:
+
+- **Completion waits are modelled**, soundly for every signaller context
+  the kernel has: thread signallers through held-at-signal edges, deferred
+  for the self-signalling shapes; interrupt and callback signallers by the
+  argument that they cannot be on a lock cycle through the wait. What the
+  model does not record is enumerated: the "lock, unlock, complete" shape
+  (no production instance), the queued-worker dependence (the network
+  worker's items take no mutex), and a self-signal through a poll (the
+  NVMe fallback, not reached under QEMU).
+- **Unexecuted callback paths are a listing**, printed after every debug
+  suite on both architectures, with one entry today, judged, and the test
+  that would remove it recorded in the plan.
+
+A new §1 item carries what remains: the delayed-acknowledgement test, the
+polled completions, and the two recorded shapes.
