@@ -250,6 +250,7 @@ void net_workers_barrier(void)
 {
     static struct worker_barrier barriers[CONFIG_MAX_CPUS];
     bool posted[CONFIG_MAX_CPUS] = { false };
+    _Static_assert(ARRAY_SIZE(barriers) == ARRAY_SIZE(g_cpu), "a barrier item per worker");
     mutex_lock(&g_barrier_lock);
     for (unsigned i = 0; i < g_ncpu; i++) {
         if (!g_cpu[i].ready)

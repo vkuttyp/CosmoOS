@@ -139,7 +139,21 @@ def main():
     print('probe: net-accept-race %s; net-census-wake-ref %s' % (
         'LEFT A SOCKET (the CI failure)' if accept_left else 'ok',
         'FAILED' if census_fail else 'ok' if census_ok else 'absent (an older tree)'))
-    return rc if args.tree == 'this' and not args.old and not args.adversary else 0
+    # Each mode's expected verdict, as the exit status:
+    #   --old                     net-census-wake-ref fails (the test is not vacuous)
+    #   --adversary, older tree   net-accept-race leaves a socket (the CI failure, reproduced)
+    #   --adversary, this tree    both tests pass (the fix holds against the adversary)
+    #   neither, this tree        the harness's own verdict
+    if args.old:
+        ok = census_fail
+    elif args.adversary and args.tree != 'this':
+        ok = accept_left
+    elif args.adversary:
+        ok = accept_ok and census_ok
+    else:
+        return rc
+    print('probe: %s' % ('the expected verdict' if ok else 'NOT the expected verdict'))
+    return 0 if ok else 1
 
 
 if __name__ == '__main__':

@@ -132,8 +132,12 @@ void nettest_census(struct nettest_census *out)
      * at an instant no wake reference is held: a barrier through every
      * worker ends each window a worker had open, and a reference a thread
      * holds across its own wake is waited out, to a deadline. Past it the
-     * count is taken anyway -- a socket a wake reference never lets go of
-     * is a leak, and the comparison then reports it. */
+     * count is taken anyway, and said to be -- a socket a wake reference
+     * never lets go of is a leak, and the comparison then reports it. The
+     * deadline bounds a thread's reference, not a worker: the barrier waits
+     * for every worker's step without one, as netif_unregister's does, and
+     * a worker that never finishes its step is a hang the runner's per-test
+     * watchdog (armed across this census) reports with a scheduler dump. */
     uint64_t deadline = clock_now_ns() + 2000ull * 1000 * 1000;
     while (socket_wake_refs() != 0) {
         net_workers_barrier();
@@ -141,6 +145,9 @@ void nettest_census(struct nettest_census *out)
             break;
         thread_sleep_ms(1);
     }
+    unsigned held = socket_wake_refs();
+    if (held != 0)
+        kwarn("selftest: census: %u wake reference(s) still held after 2 s; counting anyway", held);
     unsigned sockets = socket_count();
     out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
 }
