@@ -1397,9 +1397,10 @@ so no segment toward the guest ever waits on the guest's acknowledgement.
 A Nagle batch therefore exercises the host kernel's Nagle against the
 host kernel's own delayed acknowledgement, on the loopback leg between
 the harness and QEMU -- on a macOS host the Nagle batches read like the
-`NODELAY` ones (the report has the figures, and the CI runner's for
-Linux); the figures are a property of the host and are reported, not
-bounded. The `NODELAY`
+`NODELAY` ones, and on the Linux CI runner they read a 41 ms median in
+both directions (Linux's classic Nagle/delayed-ACK stall, the first
+rounds quick-ACKed at 1 ms) where the `NODELAY` ones read 0.5 ms; the
+figures are a property of the host and are reported, not bounded. The `NODELAY`
 batches are the latency of the path through QEMU and the guest, and
 those are bounded. The guest's own interaction with a Nagle peer is
 measured where the peer can be built: `net-tcp-nagle-peer`.

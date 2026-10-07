@@ -133,14 +133,40 @@ Milliseconds for the host side, microseconds for the guest's.
 
 The two trees read alike in every column, as §"What can measure it"
 predicts: nothing on this path waits for the guest's acknowledgement.
-The one Nagle-shaped reading is in the guest-to-host column, where the
-host's second write waits for the host kernel's own acknowledgement of
-its first on the loopback leg: with Nagle on, the median is 0.2-0.5 ms
-higher than with `TCP_NODELAY` and the tail longer (macOS acknowledges
-the loopback segment quickly; one round of fifty in one boot took 30.7 ms,
-the single stall in 1,200 Nagle rounds, and a host-side one). On Linux the
-same leg has the 40 ms stall once the connection leaves quick-ACK mode,
-and the CI runner's figures are the place to see it (§Validation, CI).
+The one Nagle-shaped reading on the macOS host is in the guest-to-host
+column, where the host's second write waits for the host kernel's own
+acknowledgement of its first on the loopback leg: with Nagle on, the
+median is 0.2-0.5 ms higher than with `TCP_NODELAY` and the tail longer
+(macOS acknowledges the loopback segment quickly; one round of fifty in
+one boot took 30.7 ms, the single stall in 1,200 Nagle rounds, and a
+host-side one).
+
+**The Linux host shows the stall in full.** The same branch on the CI
+runner (Debian trixie container, PR #323, run 37617295102; every x86-64
+debug boot alike):
+
+| Shape | Linux host (CI) |
+|---|---|
+| host -> guest, Nagle | min 1.0 ms, **p50 41.0 ms**, p90 41.1 ms, max 41.4 ms |
+| host -> guest, `TCP_NODELAY` | 0.3 / 0.4 / 0.5 / 1.5 ms |
+| guest -> host, host Nagle | min 712 us, **p50 41181 us**, p90 41380, max 42270 |
+| guest -> host, host `TCP_NODELAY` | 439 / 528 / 608 / 699 us |
+| the same four, AArch64 job | Nagle 41.0-41.2 ms medians both ways; `TCP_NODELAY` 0.8-1.0 ms host -> guest |
+| loopback Nagle peer, server reading at once (ack / exchange medians) | 324 / 701 us |
+| loopback Nagle peer, server busy 5 ms (ack / exchange medians) | 7640 / 7992 us |
+
+The 41 ms is Linux's: the first rounds of a connection are acknowledged
+at once (quick-ACK mode, 1 ms), then the connection is in pingpong mode
+and the harness's -- or QEMU's -- kernel socket withholds the
+acknowledgement of a lone small segment for its delayed-ACK timer
+(`TCP_DELACK_MIN`, 40 ms), and the Nagle sender on the other side of the
+loopback waits for it. It appears in both directions because both have a
+Linux sender with Nagle on talking to a Linux receiver over loopback, and
+it is identical on every boot of the branch because the guest is not on
+that path. The guest's own figures on the runner (the loopback peer: 0.3
+ms acknowledged by a reading server, 7.6 ms by a busy one, no 40 ms
+anywhere) are the measurement this unit is about, and they agree with
+the macOS ones.
 
 
 ## Linux, for comparison
@@ -204,9 +230,13 @@ markers. The `--old` tree is now the commit's whole `tcp.c` change
 reverse-applied with `git apply -R`, and the environment is set first.
 
 No x86-64 boot approached the 180 s budget locally (the longest, the
-two-CPU `test-smp2`, 144.9 s). The PR's CI boot times, and the Linux
-runner's Nagle-batch figures, are added to this section when its run
-completes.
+two-CPU `test-smp2`, 144.9 s). CI (PR #323, run 37617295102): the x86-64
+job's debug boots took 119.6-124.2 s against the 180 s budget (release
+15.5 s, the panic-path boot 103.6 s); the AArch64 job's 176.1-185.8 s
+against its 240 s (release 21.3 s), a few seconds above the previous
+unit's 166.7-178.9 s, which is what two hundred write-write-read rounds
+and the reverse exchange cost a boot on that runner. No timeout; the flakes record is unchanged. The Linux
+runner's Nagle-batch figures are in §"The measurements".
 
 
 ## Plan

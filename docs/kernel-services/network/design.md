@@ -226,10 +226,11 @@ acknowledgement is owed, the acknowledgement goes at once (N27). Linux's
 emptied, a small (PSH) segment was queued, *and* the connection is not in
 "pingpong" (interactive) mode, where it expects the reply to carry the
 acknowledgement -- which is exactly the mode a request-response server is
-in, so Linux itself is subject to the 40 ms stall in the write-write-read
-shape until the sender sets `TCP_NODELAY` (the harness's Nagle batches on
-a Linux host are where that shows, if it shows: the 2026-10-07 report
-records what the CI runner measured). Linux also enters a quick-ACK mode
+in, so Linux itself has the 40 ms stall in the write-write-read shape
+until the sender sets `TCP_NODELAY`: on the Linux CI runner the
+harness's Nagle batches -- the host kernel against its own loopback
+delayed ACK, both directions -- read a 41 ms median on every boot where
+the `TCP_NODELAY` batches read 0.5 ms (the 2026-10-07 report). Linux also enters a quick-ACK mode
 for a connection's first segments (`tcp_incr_quickack`); this stack has
 no such mode and does not need one, because the read already acknowledges.
 The cost is one pure acknowledgement per request in interactive traffic
