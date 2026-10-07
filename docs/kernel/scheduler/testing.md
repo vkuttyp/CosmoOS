@@ -124,6 +124,19 @@ wait queue, so this exercises `mutex_lock`'s `wait_event` loop under
 contention. `counter == 400` and `violated == false` prove mutual
 exclusion; the lock is free afterwards.
 
+### `mutex-wake-bench` (reports only)
+1, 8, 32 and 256 threads block on a mutex the test holds -- enrolled, by
+the mutex queue's own count (`waitqueue_waiting`), before the unlock is
+timed; the test unlocks and takes two medians of ten rounds: the unlock call's own duration (the
+wake runs under the wait queue's spinlock with interrupts off) and the
+time from the unlock to the first woken waiter's acquire. Printed as
+`selftest: mutex-wake-bench: waiters 1/8/32/256: ...`. Between the
+epoll-callback unit and its follow-up `wake_one` walked the whole list
+for callback entries and the unlock grew with the waiters; the callbacks
+list of their own gives `wake_one` back its one thread
+(`tools/wake-one-probe.py` boots the three trees; the epoll-callback
+report's §7 has the figures).
+
 ### `semaphore`
 Consumer thread does five `semaphore_down` on a semaphore initialised
 to 0; thread 0 verifies nothing was consumed after 5 ms, then does five

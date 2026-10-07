@@ -2462,6 +2462,15 @@ See the [history index](README.md).
   `--measure`). `init --block` reads a pipe of its own, closing the
   "known `--block` flake". Module ABI 6. Report:
   `docs/audit/2026-10-07-epoll-callback-report.md`.
+- **The epoll-callback follow-up: `wake_one` and the nesting limit.**
+  `wake_one` had walked its queue to the end for callback entries, making
+  a contended mutex unlock O(waiters) under the spinlock; callback entries
+  have a list of their own and `wake_one` stops at its one thread again
+  (`mutex-wake-bench`, `tools/wake-one-probe.py` on the three trees;
+  module ABI 7). The nesting limit is Linux's five sets, not four:
+  lockdep has a fifth subclass (800 KiB of order graph) rather than a
+  capped subclass, which would report a false recursion at the fifth
+  level. Report: the epoll-callback report's §7.
 - **Network packet-parser fuzzing (plan §12).** The protocol layers --
   `ether.c` through `tcp.c`, `nat.c`, `fw.c` -- and the tap services compile
   unchanged on the host over `tests/fuzz/shim_net.c` (the interface

@@ -436,8 +436,8 @@ and [Linux compatibility API](compat/linux/api.md).
   walks the ready list alone (A10: O(ready), not O(registered)); a set may
   be a member of a set, its wake forwarded with a lockdep subclass per
   chain depth, with Linux's loop detection (`-ELOOP`) and a chain bounded
-  at four sets (A11; the bound is lockdep's subclass count, Linux allows
-  five); the never-registered object's last close takes no lock (a
+  at five sets as epoll_ctl(2) documents (A11; lockdep gained a fifth
+  subclass for it in the follow-up PR); the never-registered object's last close takes no lock (a
   `watched` flag proved by a litmus test). `epoll-scale`,
   `epoll-wake-race`, `epoll-nest`, `epoll-close-bench`, `LXEPOLLNEST`,
   `epoll_musl`'s nested case, `tools/epoll-callback-probe.py`. See the

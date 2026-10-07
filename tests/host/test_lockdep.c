@@ -39,7 +39,8 @@ static void test_classes(void)
     EXPECT(rc == -1);
     EXPECT(g->nr_classes == LOCKDEP_MAX_CLASSES);
     /* Node arithmetic. */
-    EXPECT(lockdep_node(5, 3) == 23 && lockdep_node_class(23) == 5 && lockdep_node_subclass(23) == 3);
+    EXPECT(lockdep_node(5, 3) == 5 * LOCKDEP_SUBCLASSES + 3 && lockdep_node_class(5 * LOCKDEP_SUBCLASSES + 3) == 5 &&
+           lockdep_node_subclass(5 * LOCKDEP_SUBCLASSES + 3) == 3);
     EXPECT(lockdep_node(LOCKDEP_MAX_CLASSES - 1, LOCKDEP_SUBCLASSES - 1) == LOCKDEP_MAX_NODES - 1);
     free(g);
 }
@@ -261,7 +262,7 @@ static void test_irq_dependencies(void)
  * across every pair of a small graph, with disconnected subclass nodes. */
 static void test_irq_oracle(void)
 {
-    enum { N = 16 };
+    enum { N = 4 * LOCKDEP_SUBCLASSES };   /* four classes, every subclass node of each */
     struct lockdep_graph *g = calloc(1, sizeof(*g));
     struct lockdep_scratch *s = calloc(1, sizeof(*s));
     EXPECT(g != NULL && s != NULL);
@@ -271,8 +272,8 @@ static void test_irq_oracle(void)
         g->nr_edges = 0;
         for (unsigned c = 0; c < g->nr_classes; c++)
             g->classes[c].usage = 0;
-        g->classes[seed % 4].usage |= LOCKDEP_USED_IN_IRQ;
-        g->classes[(seed / 4) % 4].usage |= LOCKDEP_HELD_IRQS_ON;
+        g->classes[seed % g->nr_classes].usage |= LOCKDEP_USED_IN_IRQ;
+        g->classes[(seed / g->nr_classes) % g->nr_classes].usage |= LOCKDEP_HELD_IRQS_ON;
         bool reach[N][N] = { { false } };
         unsigned rng = seed;
         for (unsigned a = 0; a < N; a++) {
@@ -293,8 +294,8 @@ static void test_irq_oracle(void)
             for (unsigned b = 0; b < N; b++) {
                 bool pred = false, succ = false;
                 for (unsigned n = 0; n < N; n++) {
-                    pred |= reach[n][a] && (g->classes[n / 4].usage & LOCKDEP_USED_IN_IRQ);
-                    succ |= reach[b][n] && (g->classes[n / 4].usage & LOCKDEP_HELD_IRQS_ON);
+                    pred |= reach[n][a] && (g->classes[n / LOCKDEP_SUBCLASSES].usage & LOCKDEP_USED_IN_IRQ);
+                    succ |= reach[b][n] && (g->classes[n / LOCKDEP_SUBCLASSES].usage & LOCKDEP_HELD_IRQS_ON);
                 }
                 uint16_t safe, unsafe;
                 EXPECT(lockdep_core_irq_edge(g, s, (uint16_t)a, (uint16_t)b, &safe, &unsafe) == (pred && succ));
