@@ -485,6 +485,26 @@ by it today. If an item ever takes a mutex, the mechanism is the callback
 class applied to the worker: the worker holds a pseudo-class while it
 runs any item and the barrier wait acquires it.
 
+A second shape the model does not record follows from the classes being
+acquired and never held: **a signaller that is itself blocked in another
+wait** -- a completion, a `thread_join`, a `timer_cancel_sync` -- before
+its `complete()` contributes no edge for that wait. A waiter holds M and
+waits for C1; C1's signaller waits for C2 before completing C1; C2's
+signaller needs M: a deadlock the graph cannot close, because the wait
+for C2 records only what its waiter *holds* (mutexes), and a wait is not
+held. Closing it would mean a thread holding the class of the completion
+it waits for while it waits, which is what crossrelease did and where its
+nesting problems began (a wait inside a wait, orders between completion
+classes, every long-lived wait in the graph); the model stops at one
+level on purpose. The survey of 2026-10-07 named the signallers that wait
+before they complete: the xHCI port worker completes `xhci-first-scan`
+after a scan that waits for `xhci-cmd` and `usb-sync`; a USB removal
+completes `usb-sync` (through `ring_flush`) after `xhci_disable_device`'s
+waits for `xhci-cmd`; and threads that join children before exiting
+complete `thread-exit` after waits for other threads' `thread-exit`. None
+of their second-level signallers takes a mutex (the xHCI event handler
+and the exiting threads hold nothing), so no such chain exists today.
+
 ### Coverage: callback and completion classes never exercised
 
 A class the boot never exercises contributes no edges, and the graph is
