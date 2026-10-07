@@ -8881,10 +8881,23 @@ bool selftest_net_fin_acks_last_data(const char **reason)
     }
     CHECK(fin && sg.seq == iss + 61 && sg.ack == 7002);
 
-    /* (3) The world acknowledges the FIN: the connection is over (TIME_WAIT,
-     * then gone -- the leftover census at the end of the test sees it). */
+    /* (3) The world acknowledges the FIN: the connection is over. Seen
+     * through the port: with the listener closed, the connection is the
+     * one pcb on 2231, and tcp_port_in_use passes over a TIME_WAIT pcb (the
+     * port may be bound again) but not a CLOSING one -- which is where the
+     * old tree left it, for ever. Asked of the table, not of a pcb pointer
+     * the host no longer owns. */
     l4len = hin_mk_tcp(l4, w, u_ip, 41002, 2231, 7002, iss + 62, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    nt_ksock_put(ls);
+    struct netaddr any2231 = v4addr(0, 2231);
+    bool over = false;
+    for (unsigned k = 0; k < HIN_TRIES && !over; k++) {
+        over = !tcp_port_in_use(COSMO_AF_INET, 2231, &any2231);
+        if (!over)
+            thread_sleep_ms(10);
+    }
+    CHECK(over);
     kinfo("selftest: net-fin-acks-last-data: the world's FIN that acknowledged the last segment in flight drew the "
           "40 bytes held by its window and then the host's FIN; the connection ended\n");
     return true;

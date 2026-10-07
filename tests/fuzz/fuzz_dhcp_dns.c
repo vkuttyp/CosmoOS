@@ -10,8 +10,8 @@
  * transmits out the interface, a DNS relay as the datagram the proxy sends
  * through its (stubbed) socket.
  *
- * The input is a sequence of records: a kind byte, a little-endian 16-bit
- * length, the payload.
+ * The input is a sequence of records (up to 256): a kind byte, a
+ * little-endian 16-bit length, the payload.
  *   0  an Ethernet frame into the DHCP filter
  *   1  a DNS query from the guest (payload: the DNS message)
  *   2  a DNS answer from the upstream resolver; bit 4 of the kind byte
@@ -144,14 +144,23 @@ static void on_frame(struct fz_netif *f, const uint8_t *frame, uint32_t len)
     }
     const uint8_t *ip = frame + NP_ETH;
     unsigned ihl = (unsigned)(ip[0] & 0xf) * 4u;
+    if ((ip[0] >> 4) != 4 || ihl < NP_IPV4 || len < NP_ETH + ihl + NP_UDP + 240) {
+        g_bad_frames++;
+        return;
+    }
     const uint8_t *uh = ip + ihl;
     if (ip[9] != IPPROTO_UDP || np_get16(uh) != 67 || np_get16(uh + 2) != 68) {
         g_bad_frames++;
         return;
     }
     const uint8_t *dh = uh + NP_UDP;
-    uint32_t dhlen = np_get16(uh + 4) - NP_UDP;
-    if (dhlen < 240 || dh[0] != 2 || np_get32(dh + 4) != g_claimed_xid || np_get32(dh + 236) != 0x63825363u) {
+    uint16_t ulen = np_get16(uh + 4);
+    if (ulen < NP_UDP + 240 || NP_ETH + ihl + ulen > len) {
+        g_bad_frames++;
+        return;
+    }
+    uint32_t dhlen = ulen - NP_UDP;
+    if (dh[0] != 2 || np_get32(dh + 4) != g_claimed_xid || np_get32(dh + 236) != 0x63825363u) {
         g_bad_frames++;
         return;
     }
@@ -224,9 +233,14 @@ static void dhcp_record(const uint8_t *p, size_t n)
         n = sizeof(frame);
     memcpy(frame, p, n);
     /* The xid the oracle expects a reply to echo: the request's, when the
-     * frame is long enough to hold one. */
-    g_claimed_xid = n >= NP_ETH + NP_IPV4 + NP_UDP + 8 ? np_get32(frame + NP_ETH + (frame[NP_ETH] & 0xf) * 4u + NP_UDP + 4)
-                                                        : 0;
+     * frame holds a whole IPv4 header of its stated length, a UDP header and
+     * the BOOTP xid. */
+    g_claimed_xid = 0;
+    if (n >= NP_ETH + NP_IPV4) {
+        unsigned ihl = (frame[NP_ETH] & 0xf) * 4u;
+        if ((frame[NP_ETH] >> 4) == 4 && ihl >= NP_IPV4 && n >= NP_ETH + ihl + NP_UDP + 8)
+            g_claimed_xid = np_get32(frame + NP_ETH + ihl + NP_UDP + 4);
+    }
     unsigned tx = g_f1.transmits;
     g_claimed = true;   /* provisionally: the filter answers only what it claims, checked below */
     bool claimed = tapsvc_test_dhcp(g_svc, frame, (uint32_t)n);
@@ -269,6 +283,8 @@ static void dns_query(const uint8_t *p, size_t n)
     if (s1.dns_drop_full > s0.dns_drop_full) {
         FUZZ_ASSERT(g_nsent == sent0);
         FUZZ_ASSERT(s0.dns_pending == DNS_PENDING_MAX_EXPECTED);   /* dropped only when the table is full */
+        if (getenv("FZ_TRACE"))
+            fprintf(stderr, "fuzz_dhcp_dns: a query dropped with the table full (%u pending)\n", s0.dns_pending);
         return;
     }
     /* Relayed once, upstream, byte for byte but the id. */
@@ -334,7 +350,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     setup();
     size_t off = 0;
     unsigned records = 0;
-    while (off + 3 <= size && records++ < 64) {
+    while (off + 3 <= size && records++ < 256) {   /* the DNS table takes 128 queries; a seed fills it and one more */
         uint8_t kind = data[off];
         size_t len = data[off + 1] | ((size_t)data[off + 2] << 8);
         off += 3;

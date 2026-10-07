@@ -60,8 +60,9 @@ uint64_t fz_now(void);
 void fz_clock_advance(uint64_t ns);
 void fz_run_work(void);
 unsigned fz_timers_pending(void);
-/* Advance to each pending expiry in turn, at most `max_fires` times, never
- * past now + `max_ns`; the number of timers fired. */
+/* Fire the earliest pending timer, moving the clock to it, at most
+ * `max_fires` timers one at a time, never past now + `max_ns`; the number
+ * fired. (A pending timer started again is a panic, as in the kernel.) */
 unsigned fz_fire_until(uint64_t max_ns, unsigned max_fires);
 
 /* The allocator's live-object count (kmalloc, kzalloc and every slab cache):

@@ -211,7 +211,7 @@ void timer_setup(struct timer *t, timer_fn fn, void *arg)
 void timer_start(struct timer *t, uint64_t delay_ns)
 {
     if (t->state == TIMER_PENDING)
-        timer_unlink(t);   /* re-arm: the kernel moves a pending timer */
+        panic("fuzz timer: timer_start on a pending timer");   /* as kernel/timer/timer.c: cancel first */
     if (g_ntimers == FZ_TIMERS_MAX)
         panic("fuzz timer: too many pending timers");
     t->expires_ns = g_now + delay_ns;
@@ -312,6 +312,9 @@ void fz_clock_advance(uint64_t ns)
 
 unsigned fz_fire_until(uint64_t max_ns, unsigned max_fires)
 {
+    /* One timer per count: the earliest pending, the clock moved to it, its
+     * callback and the work it queued run -- another timer due at the same
+     * instant waits for the next count (fz_clock_advance drains). */
     uint64_t limit = g_now + max_ns;
     unsigned fired = 0;
     while (fired < max_fires) {
@@ -320,7 +323,9 @@ unsigned fz_fire_until(uint64_t max_ns, unsigned max_fires)
             break;
         if (t->expires_ns > g_now)
             g_now = t->expires_ns;
-        fire_due();
+        timer_unlink(t);
+        t->fn(t, t->arg);
+        fz_run_work();
         fired++;
     }
     return fired;
