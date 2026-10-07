@@ -250,8 +250,21 @@ fail_slot:
     return -ENOMEM;
 }
 
+#if CONFIG_DEBUG
+void (*tap_test_after_purge)(void *arg);
+void *tap_test_after_purge_arg;
+#endif
+
 /* Last close: stop the service first (its threads and DHCP filter must be
- * gone before the tap they point at), then the tap, then free the subnet. */
+ * gone before the tap they point at), then the tap, then the guest's NAT
+ * and firewall state, then the subnet. The tap before the purges: once
+ * tap_destroy returns no frame of the guest's is queued or in flight
+ * (netif_unregister's barrier), so nothing can make a translation or a flow
+ * for the address after the purge has cleared it. The other order left a
+ * window in which a frame the guest wrote before its last close, still on
+ * a worker's queue, was masqueraded after the purge, and the entry outlived
+ * the tap into the next one given the subnet (fuzz_net_config;
+ * net-tap-release-order). */
 static void tap_chr_release(struct vnode *vn, struct file *f)
 {
     (void)vn;
@@ -260,9 +273,13 @@ static void tap_chr_release(struct vnode *vn, struct file *f)
         return;
     uint32_t guest = (tap_netif(o->tap)->ip4.addr & tap_netif(o->tap)->ip4.mask) | htonl(15u);
     tapsvc_stop(o->svc);
+    tap_destroy(o->tap);
     nat_guest_purge(guest);    /* no stale rules/flows for a reused subnet */
     fw_guest_purge(guest);     /* detach: its firewall rules, policy and flows go with it */
-    tap_destroy(o->tap);
+#if CONFIG_DEBUG
+    if (tap_test_after_purge)
+        tap_test_after_purge(tap_test_after_purge_arg);   /* a frame arriving now must make nothing */
+#endif
     arch_irq_state_t s = spin_lock_irqsave(&g_tap_slot_lock);
     g_tap_slot[o->slot] = false;
     spin_unlock_irqrestore(&g_tap_slot_lock, s);

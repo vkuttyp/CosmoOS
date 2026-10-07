@@ -7425,6 +7425,114 @@ static uint16_t fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id)
     return 16;
 }
 
+/* --- a tap's release against a frame still in flight --------------------------------
+ *
+ * tap_chr_release purged the guest's NAT and firewall state and then
+ * destroyed the tap; a frame the guest wrote before its last close, still
+ * on a worker's queue, was masqueraded in between and its translation
+ * outlived the tap -- the next tap given the subnet inherited it
+ * (fuzz_net_config). The seam delivers such a frame through the tap's
+ * interface just after the purges and waits for the workers: nothing may
+ * name the guest when the close returns.
+ */
+#if CONFIG_DEBUG
+struct tro_ctx {
+    struct netif *nif;      /* held across the close */
+    uint8_t frame[128];
+    uint32_t flen;
+    int delivered;          /* netif_rx was offered the frame */
+};
+
+static void tro_after_purge(void *arg)
+{
+    struct tro_ctx *c = arg;
+    struct mbuf *m = m_getcl();
+    if (m == NULL)
+        return;
+    memcpy(m->data, c->frame, c->flen);
+    m->len = m->pkt.len = c->flen;
+    netif_rx(c->nif, m);    /* the tap's own path in (tap_inject) */
+    c->delivered++;
+    net_workers_barrier();  /* whatever the stack makes of it is made */
+}
+
+static void tro_disarm(void *arg)
+{
+    (void)arg;
+    tap_test_after_purge = NULL;
+    tap_test_after_purge_arg = NULL;
+}
+
+static unsigned tro_naming(uint32_t guest)
+{
+    static struct nat_flow nf[NAT_TABLE_SIZE];
+    static struct fw_flow_info ff[FW_FLOW_MAX];
+    unsigned n = 0;
+    unsigned nn = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
+    for (unsigned i = 0; i < nn; i++)
+        n += nf[i].orig_ip == guest;
+    unsigned nfl = fw_flow_list(ff, FW_FLOW_MAX, clock_now_ns());
+    for (unsigned i = 0; i < nfl; i++)
+        n += ff[i].guest_ip == guest || ff[i].a_ip == guest || ff[i].b_ip == guest;
+    return n;
+}
+
+#endif /* CONFIG_DEBUG */
+
+bool selftest_net_tap_release_order(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-tap-release-order: no test hooks in this build; skipping");
+    return true;
+#else
+    fw_flush();
+    nat_flush();
+    struct file *fa = NULL;
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), world = IPV4_ADDR(10, 0, 2, 2);
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x01, 0x0a };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    static struct tro_ctx c;
+    memset(&c, 0, sizeof(c));
+    static struct nt_netif_ref held;
+    c.nif = netif_find("tap0");
+    CHECK(c.nif != NULL && nt_netif_hold(&held, c.nif));
+    CHECK(c.nif->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
+    nettest_seed_arp(c.nif, ga, amac);
+
+    /* The control: the same frame before the close is masqueraded. */
+    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32];
+    uint16_t l4len = nettest_mk_udp(l4, ga, world, 7100, 53, pl, sizeof(pl));
+    c.flen = nettest_wrap(c.frame, tap0mac, amac, ga, world, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len));
+    net_workers_barrier();
+    unsigned before = tro_naming(ga);
+    CHECK(before > 0);      /* a translation (and a flow) for the guest: the frame is one that makes state */
+    nat_flush();
+    fw_flush();
+    CHECK(tro_naming(ga) == 0);
+
+    CHECK(selftest_defer(tro_disarm, &c));
+    tap_test_after_purge_arg = &c;
+    tap_test_after_purge = tro_after_purge;
+    nt_file_put(fa);        /* the last close: the release, and the seam inside it */
+    tro_disarm(NULL);
+    selftest_forget(&c);
+    CHECK(c.delivered == 1);
+    unsigned left = tro_naming(ga);
+    if (left != 0)
+        kerror("selftest: net-tap-release-order: %u NAT entr(ies)/flow(s) name the released guest", left);
+    CHECK(left == 0);
+    nat_flush();
+    fw_flush();
+    nt_netif_ref_put(&held);
+    kinfo("selftest: net-tap-release-order: a frame offered after the purges made nothing (the control made %u)",
+          before);
+    return true;
+#endif
+}
+
 bool selftest_net_firewall(const char **reason)
 {
     *reason = NULL;

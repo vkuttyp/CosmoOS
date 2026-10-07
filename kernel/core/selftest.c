@@ -731,6 +731,7 @@ static const struct selftest tests[] = {
     { "net-tapctl",      selftest_net_tapctl },
     { "net-multiguest",  selftest_net_multiguest },
     { "net-firewall",    selftest_net_firewall },
+    { "net-tap-release-order", selftest_net_tap_release_order },
     { "net-input",       selftest_net_input },
     { "net-hostinput",   selftest_net_hostinput },
     { "net-zero-window-probe", selftest_net_zero_window_probe },
