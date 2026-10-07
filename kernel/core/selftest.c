@@ -77,7 +77,7 @@ static const struct selftest_budget {
      * whenever a transaction writes another block -- by design, twice so
      * far (docs/audit/next-subsystem-snap-deadlist.md, -orphan.md). About
      * 13 s here and 20 s on CI. 40 s is twice CI's figure and still far
-     * under the 180 s boot timeout: a budget notices a test that stopped
+     * under the 240 s boot timeout: a budget notices a test that stopped
      * terminating, it does not ration one that got more thorough. Under
      * the old single 8 s arming this test fired the watchdog in every
      * debug boot and left it spent for every test after it

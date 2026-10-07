@@ -82,9 +82,14 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # over 257 CI boots (40 runs, 2026-10-06) it took a median of 154 s, p95 173 s,
 # and exceeded 180 s four times on slow runners -- twice on branches before
 # the one that prompted this -- with every self-test passed. 240 s matches
-# test-chaos. x86-64 stays at 180 s: p95 163 s, maximum 169 s, no timeout.
+# test-chaos. x86-64 followed on 2026-10-07: over 81 boots of main's last
+# twelve runs it took a median of 141 s and a p95 of 170 s, with a maximum
+# of 175 s passing, on runners of two speeds (about 125 s and about 165 s a
+# boot); on the slow kind the suite had grown to within 5 s of 180, and the
+# merge of PR #325 timed out its test-harness-retry boot at 184 s with every
+# self-test passed (run 37653536848). The same 240 s on both.
 # The shell, network and key harnesses derive their deadlines from it.
-BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),240,180)
+BOOT_TIMEOUT ?= 240
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
@@ -146,10 +151,10 @@ endif
 # into a sibling output tree. The harness requires the migrator to have
 # moved something. CI's ordinary AArch64 boots take up to 167 s; chaos
 # added 11 s of self-test work and exhausted the shell's 170 s deadline
-# under the default 180 s total. Allow 240 s for this heavier full boot;
+# under the then-default 180 s total. 240 s for this heavier full boot;
 # individual self-test watchdogs and shell signal-latency checks remain.
-# (AArch64's ordinary boots have had 240 s too since BOOT_TIMEOUT, above;
-# x86-64's chaos boot is the one this still lengthens.)
+# (Ordinary boots on both architectures have 240 s too since BOOT_TIMEOUT,
+# above, so this no longer lengthens anything; it stays explicit.)
 test-chaos:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
