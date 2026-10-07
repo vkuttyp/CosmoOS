@@ -107,6 +107,7 @@ static const char *const g_kind_names[LOCKDEP_R_COUNT] = {
     [LOCKDEP_R_EXIT_HELD] = "thread exit with a mutex held",
     [LOCKDEP_R_IRQ_STATE] = "mismatched irqsave acquisition and restoration",
     [LOCKDEP_R_CALLBACK] = "timer cancellation waits while holding a callback lock",
+    [LOCKDEP_R_COMPLETION] = "a completion wait holds a lock its signaller needs",
 };
 
 const char *lockdep_report_name(enum lockdep_report_kind kind)
@@ -115,6 +116,8 @@ const char *lockdep_report_name(enum lockdep_report_kind kind)
 }
 
 /* --- held stacks ---------------------------------------------------------- */
+
+static void completion_commit(struct thread *t);   /* completion classes, below */
 
 static struct lockdep_cpu *my_cpu(void)
 {
@@ -129,7 +132,8 @@ static struct thread *me(void)
 
 static const char *kind_name(unsigned kind)
 {
-    return kind == LOCKDEP_KIND_MUTEX ? "mutex" : kind == LOCKDEP_KIND_CALLBACK ? "callback" : "spin";
+    return kind == LOCKDEP_KIND_MUTEX ? "mutex" : kind == LOCKDEP_KIND_CALLBACK ? "callback" :
+           kind == LOCKDEP_KIND_COMPLETION ? "completion" : "spin";
 }
 
 static void print_held(const char *who, const struct lockdep_held *h, unsigned n)
@@ -444,24 +448,36 @@ bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip)
  * the stack. Edges record "attempted while held", which is the order
  * relation the checker wants whether or not the attempt has completed.
  */
+static bool acquire_check_node(const void *lock, uint16_t node, const char *name, unsigned kind, unsigned subclass,
+                               bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind);
+
+/* `wait_kind` is LOCKDEP_R_INVERSION for a lock acquisition, or the kind a
+ * synchronous wait reports as: LOCKDEP_R_CALLBACK for a timer callback,
+ * LOCKDEP_R_COMPLETION for a completion. */
 static bool acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
-                          unsigned subclass, bool irqs_on, uintptr_t ip, bool wait)
+                          unsigned subclass, bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind)
+{
+    int n = node_of(class_slot, name, kind, subclass, ip);
+    if (n < 0)
+        return false;
+    return acquire_check_node(lock, (uint16_t)n, name, kind, subclass, irqs_on, ip, wait_kind);
+}
+
+static bool acquire_check_node(const void *lock, uint16_t node, const char *name, unsigned kind, unsigned subclass,
+                               bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind)
 {
     struct percpu *pc = raw_this_cpu();   /* identity: irq_depth is the same wherever the thread runs */
     bool in_irq = pc->irq_depth != 0;
     struct lockdep_cpu *lc = my_cpu();
     struct thread *t = in_irq ? NULL : me();
-    /* A synchronous wait for a callback reports as a callback dependency,
-     * whichever check finds it. A lock taken inside a callback that
-     * closes the same cycle from the other side is an ordinary inversion
-     * whose chain names the callback class. */
-    enum lockdep_report_kind recursion = wait ? LOCKDEP_R_CALLBACK : LOCKDEP_R_RECURSION;
-    enum lockdep_report_kind inversion = wait ? LOCKDEP_R_CALLBACK : LOCKDEP_R_INVERSION;
+    /* A synchronous wait reports as a dependency of its kind, whichever
+     * check finds it. A lock taken inside a callback that closes the same
+     * cycle from the other side is an ordinary inversion whose chain
+     * names the callback class. */
+    bool wait = wait_kind != LOCKDEP_R_INVERSION;
+    enum lockdep_report_kind recursion = wait ? wait_kind : LOCKDEP_R_RECURSION;
+    enum lockdep_report_kind inversion = wait ? wait_kind : LOCKDEP_R_INVERSION;
 
-    int n = node_of(class_slot, name, kind, subclass, ip);
-    if (n < 0)
-        return false;
-    uint16_t node = (uint16_t)n;
     count_acquisition();
     if (kind == LOCKDEP_KIND_SPIN && in_irq && lc->callback_timer)
         timer_profile_note(lc->callback_timer, lc->callback_profile, lock, node);
@@ -555,10 +571,10 @@ void lockdep_acquire_check(const void *lock, uint16_t *class_slot, const char *n
         return;
     if (kind == LOCKDEP_KIND_MUTEX) {
         arch_irq_state_t s = arch_irq_save();
-        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, false);
+        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, LOCKDEP_R_INVERSION);
         arch_irq_restore(s);
     } else {
-        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, false);
+        (void)acquire_check(lock, class_slot, name, kind, subclass, irqs_on, ip, LOCKDEP_R_INVERSION);
     }
 }
 
@@ -680,6 +696,7 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
             return;
         if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
             report(LOCKDEP_R_UNHELD, NULL, 0, ip, "mutex_unlock of a mutex this thread does not hold", NULL, 0);
+        completion_commit(t);   /* a complete() made under this mutex was no self-signal: it is in the graph now */
         return;
     }
     struct lockdep_cpu *lc = my_cpu();
@@ -732,7 +749,7 @@ void lockdep_callback_enter(const void *fn, uint16_t *class_slot)
     bool irqs_on = arch_irq_enabled();
     /* Held while the callback runs, like a lock the callback holds: every
      * lock taken inside is recorded under it. */
-    (void)acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, irqs_on, ip, false);
+    (void)acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, irqs_on, ip, LOCKDEP_R_INVERSION);
     lockdep_acquired(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, false, irqs_on, ip);
 }
 
@@ -751,9 +768,202 @@ bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip)
      * held locks were held". Interrupts off for the CPU's held stack, as
      * for a mutex acquisition. */
     arch_irq_state_t s = arch_irq_save();
-    bool ok = acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, arch_irq_state_enabled(s), ip, true);
+    bool ok = acquire_check(fn, class_slot, name, LOCKDEP_KIND_CALLBACK, 0, arch_irq_state_enabled(s), ip,
+                            LOCKDEP_R_CALLBACK);
     arch_irq_restore(s);
     return ok;
+}
+
+/* --- completion classes ---------------------------------------------------- */
+
+/*
+ * One class per completion name (design.md, "Completion waits"), acquired
+ * and never held by both sides: a wait records held mutex -> completion,
+ * a complete() in thread context records completion -> each held mutex.
+ * Only mutexes matter: the waiter holds no spinlock (might_sleep ran) and
+ * no spinlock node reaches a mutex node, so an interrupt or a timer
+ * callback that signals cannot be on a cycle through the wait and records
+ * nothing. Both orders are checked persistently, which is what the
+ * crossrelease history did not give; nothing here is a history.
+ */
+
+/* The completion class (index + 1) of a completion whose own spinlock has
+ * class index `spin - 1`: filled at completion_init, read by every hook,
+ * so struct completion carries no field of its own. */
+static uint16_t g_completion_class[LOCKDEP_MAX_CLASSES];
+
+/* The node for (the spinlock's class slot, the name): one load and one
+ * table entry once init has run; a completion never initialised is
+ * classified by name every time. */
+static int completion_node(uint16_t *spin_slot, const char *name, uintptr_t ip)
+{
+    uint16_t spin = __atomic_load_n(spin_slot, __ATOMIC_ACQUIRE);
+    if (spin != 0) {
+        uint16_t c = __atomic_load_n(&g_completion_class[spin - 1u], __ATOMIC_ACQUIRE);
+        if (c != 0)
+            return (int)lockdep_node(c - 1u, 0);
+    }
+    uint16_t slot = 0;
+    int n = node_of(&slot, name, LOCKDEP_KIND_COMPLETION, 0, ip);
+    if (n >= 0 && spin != 0)
+        __atomic_store_n(&g_completion_class[spin - 1u], slot, __ATOMIC_RELEASE);
+    return n;
+}
+
+static void completion_cover(uint16_t node, unsigned bit)
+{
+    struct lock_class *c = &g_graph.classes[lockdep_node_class(node)];
+    if ((__atomic_load_n(&c->cover, __ATOMIC_RELAXED) & bit) == 0)
+        __atomic_fetch_or(&c->cover, bit, __ATOMIC_RELAXED);
+}
+
+void lockdep_completion_init(uint16_t *spin_slot, const char *name, uintptr_t ip)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
+    /* The completion's own spinlock, classified now as its first
+     * acquisition would classify it, so the table above can be keyed. */
+    if (node_of(spin_slot, name, LOCKDEP_KIND_SPIN, 0, ip) < 0)
+        return;
+    (void)completion_node(spin_slot, name, ip);
+}
+
+void lockdep_completion_wait(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
+    struct thread *t = me();
+    int n = completion_node(spin_slot, name, ip);
+    if (n < 0)
+        return;
+    completion_cover((uint16_t)n, LOCKDEP_COVER_WAITED);
+    if (t != NULL && t->completion_pending.c == c) {
+        /* This thread completed `c` itself and now waits for it: the
+         * completion ran inside the waiter's own call chain -- a device
+         * that completes in submit, a cancel after a timed-out wait --
+         * with the waiter's locks merely inherited. Not a dependency. */
+        t->completion_pending.c = NULL;
+        return;
+    }
+    if (t != NULL)
+        completion_commit(t);
+    /* Acquired, never held. Interrupts off for the CPU's held stack, as
+     * for a mutex acquisition; might_sleep has run, so it holds nothing. */
+    arch_irq_state_t s = arch_irq_save();
+    (void)acquire_check_node(c, (uint16_t)n, name, LOCKDEP_KIND_COMPLETION, 0, arch_irq_state_enabled(s), ip,
+                             LOCKDEP_R_COMPLETION);
+    arch_irq_restore(s);
+}
+
+void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)
+{
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
+    int n = completion_node(spin_slot, name, ip);
+    if (n < 0)
+        return;
+    uint16_t node = (uint16_t)n;
+    completion_cover(node, LOCKDEP_COVER_SIGNALLED);   /* in any context: the coverage listing counts interrupt signallers */
+    if (raw_this_cpu()->irq_depth != 0)
+        return;   /* an interrupt holds no mutex, and a spinlock reaches none: nothing a waiter could hold */
+    struct thread *t = me();
+    if (t == NULL || t->nr_held_mutex == 0)
+        return;
+    /* Not committed here: if this thread's next completion event is its
+     * own wait for `c`, this complete() ran inside that wait's call chain
+     * and the locks it holds are the waiter's, not prerequisites of the
+     * signal. Anything else commits it (completion_commit). */
+    completion_commit(t);
+    struct lockdep_completion_pending *p = &t->completion_pending;
+    p->c = c;
+    p->ip = ip;
+    p->node = node;
+    p->nr_held = (uint16_t)t->nr_held_mutex;
+    for (unsigned i = 0; i < t->nr_held_mutex; i++)
+        p->held[i] = t->held_mutex[i].node;
+}
+
+/*
+ * Commit the thread's pending complete(): completion -> each mutex it
+ * held at the call, and a report if one of them already reaches the
+ * completion (a wait of the class is recorded holding it). Called at the
+ * thread's next completion event, mutex release and exit, so the edges
+ * are in the graph before the thread can be party to the wait they would
+ * have caught, and with no history: only what was held at the call.
+ */
+static void completion_commit(struct thread *t)
+{
+    struct lockdep_completion_pending *p = &t->completion_pending;
+    if (p->c == NULL)
+        return;
+    uint16_t node = p->node;
+    uintptr_t ip = p->ip;
+    unsigned nr_held = p->nr_held;
+    uint16_t held[LOCKDEP_MAX_HELD_MUTEX];
+    for (unsigned i = 0; i < nr_held && i < LOCKDEP_MAX_HELD_MUTEX; i++)
+        held[i] = p->held[i];
+    p->c = NULL;
+    const char *name = g_graph.classes[lockdep_node_class(node)].name;   /* owned, immutable */
+    count_acquisition();
+    uint16_t path[8];
+    unsigned path_len = 0;
+    bool cycle = false, irq_conflict = false;
+    uint16_t safe = 0, unsafe = 0, against = 0;
+    arch_irq_state_t s = raw_lock();
+    for (unsigned i = 0; i < nr_held && !cycle && !irq_conflict; i++) {
+        uint16_t held_node = held[i];
+        if (lockdep_core_has_edge(&g_graph, node, held_node))
+            continue;
+        g_stats.searches++;   /* g_raw held */
+        if (lockdep_core_reaches(&g_graph, &g_scratch, held_node, node, path, 8, &path_len)) {   /* M reaches C: a waiter holding M */
+            cycle = true;
+            against = held_node;
+            break;
+        }
+        if (lockdep_core_irq_edge(&g_graph, &g_scratch, node, held_node, &safe, &unsafe)) {
+            irq_conflict = true;
+            against = held_node;
+            break;
+        }
+        lockdep_core_add_edge(&g_graph, node, held_node);   /* C -> M: to signal C, M was held */
+    }
+    raw_unlock(s);
+    if (irq_conflict) {
+        char change[160];
+        ksnprintf(change, sizeof(change), "new edge '%s' -> '%s'#%u", name,
+                  g_graph.classes[lockdep_node_class(against)].name, lockdep_node_subclass(against));
+        report_irq(name, 0, ip, safe, unsafe, change);
+    }
+    if (cycle) {
+        char detail[160];
+        const struct lock_class *ac = &g_graph.classes[lockdep_node_class(against)];
+        ksnprintf(detail, sizeof(detail),
+                  "complete() held '%s'#%u, and a wait for '%s' is recorded holding it (or a lock that reaches it)",
+                  ac->name, lockdep_node_subclass(against), name);
+        report(LOCKDEP_R_COMPLETION, name, 0, ip, detail, path, path_len);
+    }
+}
+
+void lockdep_dump_completion_coverage(void)
+{
+    arch_irq_state_t s = raw_lock();
+    unsigned n = g_graph.nr_classes;   /* every class below it is complete: both written under g_raw */
+    raw_unlock(s);
+    unsigned total = 0, silent = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const struct lock_class *c = &g_graph.classes[i];   /* classes never move or go away */
+        if (c->kind != LOCKDEP_KIND_COMPLETION)
+            continue;
+        total++;
+        unsigned cover = __atomic_load_n(&c->cover, __ATOMIC_RELAXED);
+        if (cover == (LOCKDEP_COVER_WAITED | LOCKDEP_COVER_SIGNALLED))
+            continue;
+        silent++;
+        kinfo("lockdep: completion '%s': %s", c->name,
+              cover == 0 ? "never waited for, never signalled" :
+              (cover & LOCKDEP_COVER_WAITED) ? "waited for, never signalled" : "signalled, never waited for");
+    }
+    kinfo("lockdep: %u completion classes, %u not both waited for and signalled this boot", total, silent);
 }
 
 /* --- the other checks ----------------------------------------------------- */
@@ -772,6 +982,7 @@ void lockdep_thread_exit(struct thread *t)
 {
     if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
         return;
+    completion_commit(t);
     unsigned saves = __atomic_load_n(&t->irq_saves.depth, __ATOMIC_RELAXED);
     if (saves != 0) {
         char detail[96];

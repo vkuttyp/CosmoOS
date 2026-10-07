@@ -54,6 +54,24 @@ with `LOCKDEP=0`.
 - Concurrency: any context. Takes the checker's raw (untracked) lock only
   to classify or to record new edges.
 
+### `void lockdep_completion_init(uint16_t *spin_slot, const char *name, uintptr_t ip)`, `void lockdep_completion_wait(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)`, `void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)`, `void lockdep_dump_completion_coverage(void)`
+- Called by `completion.c` (design.md, "Completion waits"). `spin_slot` is
+  the completion's own spinlock's cached class and `name` its name: init
+  classifies both and keys the completion class through the spinlock's,
+  so `struct completion` carries nothing extra. The wait records `held
+  mutex → completion` and reports a cycle. The signal, in thread context
+  with mutexes held, keeps `completion → held mutex` pending in the
+  thread (`thread.completion_pending`) and it is committed, with the
+  cycle check, by the thread's next completion event, mutex release
+  (`lockdep_release`) or exit (`lockdep_thread_exit`); the thread's own
+  wait for the same object discards it instead, as a completion made
+  inside the waiter's call chain. Otherwise the signal records nothing.
+  The dump prints the completion classes never waited for or never
+  signalled this boot (normal diagnostics; the self-test runner calls it).
+- Concurrency: any context for the signal (interrupt context returns at
+  once); the waits are thread context. The raw lock is taken to classify
+  and to record edges.
+
 ### `void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)`
 - Called once the lock is owned: pushes the held entry (trylock callers
   use only this half; a trylock cannot deadlock and records no order).

@@ -536,6 +536,7 @@ static const struct selftest tests[] = {
     { "lockdep-contention", selftest_lockdep_contention },
     { "lockdep-callback", selftest_lockdep_callback },
     { "lockdep-irq-pairing", selftest_lockdep_irq_pairing },
+    { "lockdep-completion", selftest_lockdep_completion },
     { "lockdep-bench", selftest_lockdep_bench },
     { "lockdep-first-bench", selftest_lockdep_first_bench },
     { "lockdep-mutex-bench", selftest_lockdep_mutex_bench },
@@ -1183,6 +1184,11 @@ int selftest_run_all(void)
 
     /* The lock order the whole run recorded, for docs/kernel/lockdep/testing.md. */
     lockdep_dump_graph();
+    /* What the run did not drive: callback functions set up and never run,
+     * completion classes never signalled or never waited for (lockdep
+     * design.md, "Coverage"); the paths the graph has no edges for. */
+    timer_dump_callbacks();
+    lockdep_dump_completion_coverage();
 
     kprintf("SELFTEST: timing total=%llu ms slowest=%s (%llu ms)\n", (unsigned long long)(total_ns / 1000000), slowest,
             (unsigned long long)(slowest_ns / 1000000));

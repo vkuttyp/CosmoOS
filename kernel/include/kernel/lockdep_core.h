@@ -14,10 +14,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Bounded pool, including one class per run queue (S24) and one per timer
- * callback function (design.md, "Callback classes"). A debug boot reached
- * 307 of the earlier 320 before callback classes existed. */
-#define LOCKDEP_MAX_CLASSES    384u
+/* Bounded pool, including one class per run queue (S24), one per timer
+ * callback function (design.md, "Callback classes") and one per completion
+ * name (design.md, "Completion waits"). A debug boot reached 307 of the
+ * first 320 before callback classes existed, and 382 of 384 when the 38
+ * completion classes arrived (2026-10-08). */
+#define LOCKDEP_MAX_CLASSES    512u
 #define LOCKDEP_SUBCLASSES     4u
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)
@@ -32,10 +34,18 @@
  * different classes. A callback class is not a lock: it stands for "a
  * callback of this function is executing", held on the CPU stack while
  * one runs and acquired (never held) by a synchronous wait for one
- * (design.md, "Callback classes"). */
-#define LOCKDEP_KIND_SPIN     0u
-#define LOCKDEP_KIND_MUTEX    1u
-#define LOCKDEP_KIND_CALLBACK 2u
+ * (design.md, "Callback classes"). A completion class is not a lock
+ * either, and is never held: a wait for it and a complete() of it both
+ * acquire it (design.md, "Completion waits"). */
+#define LOCKDEP_KIND_SPIN       0u
+#define LOCKDEP_KIND_MUTEX      1u
+#define LOCKDEP_KIND_CALLBACK   2u
+#define LOCKDEP_KIND_COMPLETION 3u
+
+/* Coverage bits of a completion class (design.md, "Coverage"): whether
+ * any wait and any complete() has named it during the boot. */
+#define LOCKDEP_COVER_WAITED    (1u << 0)
+#define LOCKDEP_COVER_SIGNALLED (1u << 1)
 
 /* Class usage bits. Both at once is a report. */
 #define LOCKDEP_USED_IN_IRQ   (1u << 0)   /* acquired with irq_depth > 0 */
@@ -61,10 +71,26 @@ struct lockdep_irq_saves {
     } e[LOCKDEP_MAX_IRQ_SAVES];
 };
 
+/* A thread's complete() not yet committed to the graph (design.md,
+ * "Completion waits"): the object, its class node, and the mutexes the
+ * thread held at the call. Committed -- completion -> each held mutex,
+ * with the cycle check -- at the thread's next completion event, mutex
+ * release or exit; discarded if that event is the thread's own wait for
+ * the same object, a completion signalled inside the waiter's own call
+ * chain, which inherited the waiter's locks and depends on none of them. */
+struct lockdep_completion_pending {
+    const void *c;
+    uintptr_t ip;
+    uint16_t node;
+    uint16_t nr_held;
+    uint16_t held[LOCKDEP_MAX_HELD_MUTEX];
+};
+
 struct lock_class {
     char name[LOCKDEP_CLASS_NAME_MAX];
     unsigned kind;
     unsigned usage;
+    unsigned cover;        /* LOCKDEP_COVER_*: completion classes only; diagnostics */
     uintptr_t irq_ip;      /* first acquisition in interrupt context */
     uintptr_t irqs_on_ip;  /* first acquisition with interrupts enabled */
 };
@@ -212,6 +238,7 @@ static inline int lockdep_core_class(struct lockdep_graph *g, const char *name, 
         g->classes[i].name[j] = name[j];
     g->classes[i].kind = kind;
     g->classes[i].usage = 0;
+    g->classes[i].cover = 0;
     g->classes[i].irq_ip = g->classes[i].irqs_on_ip = 0;
     return (int)i;
 }

@@ -341,8 +341,89 @@ static struct timer_queue *local_queue(void)
     return this_cpu()->timers;   /* checked: every caller arms or cancels with interrupts off */
 }
 
+#if CONFIG_DEBUG
+/*
+ * Which callback functions the boot set up, and which of them ran
+ * (docs/kernel/lockdep/design.md, "Coverage"): a callback that never
+ * runs contributes no edge to the lock graph, so the self-test runner
+ * prints the ones registered and never run. Lock-free: a slot is claimed
+ * with one CAS on its function; the counts are relaxed; a dump reads at
+ * the end of the run.
+ */
+#define TIMER_CALLBACK_TABLE 64u
+static struct timer_callback_cover {
+    uintptr_t fn;
+    uintptr_t first_ip;   /* the first timer_setup's caller */
+    unsigned setups;
+    unsigned ran;
+} g_callback_cover[TIMER_CALLBACK_TABLE];
+static unsigned g_callback_cover_lost;   /* functions past the table: counted, not listed */
+
+static void callback_cover_setup(timer_fn fn, uintptr_t ip)
+{
+    uintptr_t key = (uintptr_t)fn;
+    for (unsigned i = 0; i < TIMER_CALLBACK_TABLE; i++) {
+        struct timer_callback_cover *e = &g_callback_cover[i];
+        uintptr_t have = __atomic_load_n(&e->fn, __ATOMIC_ACQUIRE);
+        if (have == 0) {
+            uintptr_t expected = 0;
+            if (__atomic_compare_exchange_n(&e->fn, &expected, key, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&e->first_ip, ip, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&e->setups, 1u, __ATOMIC_RELAXED);
+                return;
+            }
+            have = expected;   /* another CPU claimed the slot, for this function or another */
+        }
+        if (have == key) {
+            __atomic_fetch_add(&e->setups, 1u, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+    __atomic_fetch_add(&g_callback_cover_lost, 1u, __ATOMIC_RELAXED);
+}
+
+static void callback_cover_ran(timer_fn fn)
+{
+    uintptr_t key = (uintptr_t)fn;
+    for (unsigned i = 0; i < TIMER_CALLBACK_TABLE; i++) {
+        uintptr_t have = __atomic_load_n(&g_callback_cover[i].fn, __ATOMIC_ACQUIRE);
+        if (have == 0)
+            return;   /* set up through timer_setup always precedes a run; past the table it was lost */
+        if (have == key) {
+            if (__atomic_load_n(&g_callback_cover[i].ran, __ATOMIC_RELAXED) == 0)
+                __atomic_store_n(&g_callback_cover[i].ran, 1u, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
+void timer_dump_callbacks(void)
+{
+    unsigned total = 0, never = 0;
+    for (unsigned i = 0; i < TIMER_CALLBACK_TABLE; i++) {
+        struct timer_callback_cover *e = &g_callback_cover[i];
+        uintptr_t fn = __atomic_load_n(&e->fn, __ATOMIC_ACQUIRE);
+        if (fn == 0)
+            break;
+        total++;
+        if (__atomic_load_n(&e->ran, __ATOMIC_RELAXED) != 0)
+            continue;
+        never++;
+        kinfo("timer: callback %p set up %u time(s) (first at %p) never ran", (void *)fn,
+              __atomic_load_n(&e->setups, __ATOMIC_RELAXED), (void *)__atomic_load_n(&e->first_ip, __ATOMIC_RELAXED));
+    }
+    unsigned lost = __atomic_load_n(&g_callback_cover_lost, __ATOMIC_RELAXED);
+    kinfo("timer: %u callback functions set up this boot, %u never ran%s", total, never,
+          lost ? " (table full: some functions uncounted)" : "");
+}
+#else
+static inline void callback_cover_setup(timer_fn fn, uintptr_t ip) { (void)fn; (void)ip; }
+static inline void callback_cover_ran(timer_fn fn) { (void)fn; }
+#endif
+
 void timer_setup(struct timer *t, timer_fn fn, void *arg)
 {
+    callback_cover_setup(fn, (uintptr_t)__builtin_return_address(0));
     list_init(&t->link);
     t->expires_ns = 0;
     t->fn = fn;
@@ -524,6 +605,7 @@ static void run_expired(struct timer_queue *q, uint64_t now)
          * timer is certainly alive; exit names only the function, since
          * the timer may be gone by then (above). */
         timer_fn fn = t->fn;
+        callback_cover_ran(fn);
         lockdep_callback_enter((const void *)fn, &t->lockdep_class);
         lockdep_timer_enter(t);
         fn(t, t->arg);

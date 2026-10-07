@@ -47,6 +47,7 @@ enum lockdep_report_kind {
     LOCKDEP_R_EXIT_HELD,
     LOCKDEP_R_IRQ_STATE,
     LOCKDEP_R_CALLBACK,
+    LOCKDEP_R_COMPLETION,
     LOCKDEP_R_COUNT,
 };
 
@@ -94,6 +95,27 @@ bool lockdep_timer_cancel_check(const void *timer, uintptr_t ip);
 void lockdep_callback_enter(const void *fn, uint16_t *class_slot);
 void lockdep_callback_exit(const void *fn);
 bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip);
+/*
+ * Completion classes (design.md, "Completion waits"): one class per
+ * completion name, keyed through the completion's own spinlock class
+ * (`spin_slot` is that lock's cached class; `name` its name), so struct
+ * completion carries nothing extra. Init classifies both. A wait records
+ * each held mutex -> completion and reports a cycle. A complete() in
+ * thread context with mutexes held keeps completion -> each held mutex
+ * pending in the thread and commits it, with the cycle check, at the
+ * thread's next completion event, mutex release or exit -- unless that
+ * event is the thread's own wait for the same object, which makes the
+ * complete() a self-signal inside the waiter's call chain (a device that
+ * completes in submit, a cancel after a timed-out wait) and discards it.
+ * In interrupt context, or holding no mutex, complete() records nothing.
+ * `c` is the object, for that comparison only.
+ */
+void lockdep_completion_init(uint16_t *spin_slot, const char *name, uintptr_t ip);
+void lockdep_completion_wait(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip);
+void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip);
+/* Print the completion classes never waited for or never signalled this
+ * boot (kinfo), one per line, and a total. Normal diagnostics only. */
+void lockdep_dump_completion_coverage(void);
 
 /* The debug half of might_sleep(): a report with the held stacks. */
 void lockdep_might_sleep(uintptr_t ip);
@@ -167,6 +189,13 @@ static inline void lockdep_callback_enter(const void *fn, uint16_t *class_slot) 
 static inline void lockdep_callback_exit(const void *fn) { (void)fn; }
 static inline bool lockdep_callback_wait(const void *fn, uint16_t *class_slot, uintptr_t ip)
 { (void)fn; (void)class_slot; (void)ip; return true; }
+static inline void lockdep_completion_init(uint16_t *spin_slot, const char *name, uintptr_t ip)
+{ (void)spin_slot; (void)name; (void)ip; }
+static inline void lockdep_completion_wait(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)
+{ (void)c; (void)spin_slot; (void)name; (void)ip; }
+static inline void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *name, uintptr_t ip)
+{ (void)c; (void)spin_slot; (void)name; (void)ip; }
+static inline void lockdep_dump_completion_coverage(void) {}
 static inline void lockdep_might_sleep(uintptr_t ip) { (void)ip; }
 static inline void lockdep_thread_exit(struct thread *t) { (void)t; }
 static inline void lockdep_dump_held(void) {}

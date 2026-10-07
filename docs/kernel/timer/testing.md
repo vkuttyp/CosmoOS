@@ -49,6 +49,19 @@ clang emitted `__udivti3` and the link failed. The fix (fixed-point
 multiplier, T2) is verified by the link succeeding and by the tick-rate
 check above, which would drift if the multiplier were wrong.
 
+## Callback coverage
+
+A debug build records every callback function `timer_setup` registers
+(a 64-entry lock-free table in `timer.c`, claimed by a CAS on the
+function) and marks it when `run_expired` runs it. After the self-test
+suite the runner prints `timer: callback <fn> set up N time(s) (first at
+<ip>) never ran` for each function never run, and a total
+(`timer_dump_callbacks`). The addresses resolve with `llvm-nm -n` on
+`out/<arch>-debug/kernel/kernel.elf`. The listing is the evidence for
+the lockdep plan item on unexecuted callback paths: a callback that never
+ran contributed no edge to the lock graph (`docs/kernel/lockdep/design.md`,
+"Coverage"); the completion-waits report judges each entry.
+
 ## Gaps and planned tests
 
 - No cross-CPU cancel (SMP PR).
