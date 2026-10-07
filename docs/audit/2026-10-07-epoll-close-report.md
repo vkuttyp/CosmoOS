@@ -150,8 +150,18 @@ held its creator reference across the close and asserted the writer's
 `-EPIPE` where only the count could yet show the removal; the check order
 is the one in §4 now, and the module ABI marker the runner requires
 moved to v5 with the structure. No x86-64 boot approached the 180 s
-budget locally (the longest, `test-chaos`, 146.0 s). The PR's CI boot
-times are added here when its run completes.
+budget locally (the longest, `test-chaos`, 146.0 s).
+
+CI (PR #324, run 37624264022, on the review follow-up `cf8808a2`): the
+x86-64 job's debug boots took 140.4-149.4 s against the 180 s budget
+(release 16.6 s, the panic-path boot 124.3 s); `epoll_musl` compiled
+there for the first time (`musl-gcc`, the x86-64 runner) and its serial
+log carries `epoll musl: auto-removal ok` beside `hello from musl`,
+`SELFTEST: epoll-close ... ok` and `LXEPOLLCLOSE`. The AArch64 job's
+171.1-186.1 s against its 240 s (release 21.3 s). No timeout; the flakes record is unchanged.
+Greptile's review found the lock-free look at the watchers list (§2,
+"Races closed", first row) and three smaller points, all in `cf8808a2`;
+its second pass added nothing.
 
 ## 6. Plan
 
