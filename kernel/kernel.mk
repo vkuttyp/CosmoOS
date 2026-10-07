@@ -83,6 +83,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/io/epoll.c \
 	kernel/io/poll.c \
 	kernel/io/polltest.c \
+	kernel/io/epolltest.c \
 	compat/linux/convert.c \
 	compat/linux/syscalls.c \
 	compat/linux/signal.c \

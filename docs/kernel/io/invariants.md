@@ -62,6 +62,26 @@ wake between the evaluation and the block returns from
 thread wakes a wait without timeout), `lxtest` (a clone's write wakes
 `poll(-1)`). Gap: the two-waiter and the storm cases are not tested.
 
+**A9. An epoll registration lives exactly as long as some descriptor to
+its member.** `kobject.handles` counts the handle-table slots holding an
+object across every process; when `handle_close` takes it to zero it calls
+`epoll_last_handle_closed`, which removes every registration on the
+object (the items leave their sets under each set's lock, the sets' queues
+are woken, the references are put) before the slot's own reference goes.
+`EPOLL_CTL_DEL` is never required; a `dup`'d or inherited descriptor
+keeps the registration; closing one of several does not remove it. An add
+whose object has no slot left is refused (`-EBADF`); a set released with
+entries unlinks them from their members first. Check: `epoll-close` (a
+pipe end, an eventfd and a TCP socket closed while registered: the writer
+gets `-EPIPE`, the peer sees the FIN, nothing is reported, the object's
+count returns to the test's own reference; a dup keeps the entry and the
+last close removes it; the add after the last close is refused; a close
+under a blocked `epoll_obj_wait` releases the member while the waiter
+still sleeps; the set closed first, then the member), `lxtest`
+(`LXEPOLLCLOSE`), `epoll_musl` (a static musl program relying on the
+removal); `tools/epoll-close-probe.py --old` restores v1 and the test
+fails at its baseline: the registration still holds the closed pipe end.
+
 ## Gaps (documented, not invariants)
 
 - No cancellation of a single parked entry; closing the ring is the only
@@ -71,3 +91,11 @@ thread wakes a wait without timeout), `lxtest` (a clone's write wakes
 - A ring polled by another ring becomes readable only when the owner
   collects completions into the inner ring's queue, since parked entries
   run only inside `aio_wait`.
+- An epoll cannot be a member of an epoll (`-EINVAL`): a member's events
+  wake the member's queue, not the set's, so an outer set would sleep
+  through the inner set's events (`design.md`, "epoll"). Linux allows it
+  with loop detection (`-ELOOP`) and a depth limit.
+- A handle riding in an unread unix message is not a descriptor for A9: an
+  object whose only remaining reference is such a handle loses its epoll
+  registrations when its last slot closes, where Linux keeps them until
+  the message is received and that descriptor is closed too.

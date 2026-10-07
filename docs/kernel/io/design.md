@@ -222,6 +222,91 @@ readable and writable; objects without `poll_wq` can only be re-checked
 by another entry's wake or the timeout. Linux `poll`/`ppoll` translate
 onto it; a native `poll` can be added the same way.
 
+## epoll (stage 3; the epoll, EPOLLET and epoll-close units)
+
+`kernel/io/epoll.c` is an interest set: a kobject holding items keyed by
+descriptor number, each a referenced member object with a wanted
+`COSMO_IO_*` mask, the personality's opaque tokens, and one-shot and
+edge state. `epoll_obj_wait` is `io_poll`'s multi-queue sleep over the
+set: it snapshots the members under `ep->lock`, pins each with a
+reference, arms its own wait entries on their queues and on the set's own
+queue, evaluates, and sleeps only when nothing is ready
+(`docs/audit/next-subsystem-epoll.md`, `next-subsystem-epollet.md`).
+
+**Lifetime: a registration lives exactly as long as some descriptor to
+its member.** Linux keys an epoll registration on the open file
+description, not the descriptor: it is removed when the *last* descriptor
+referring to that description is closed, in any process; a `dup`'d or
+inherited descriptor keeps it; closing one of several does not remove
+it. Here the open file description is the kobject in the handle slot (a
+`dup` installs the same object; a file's per-open state is its own
+kobject), so the rule maps onto a count: `struct kobject` carries
+`handles`, the number of handle-table slots holding it across every
+process (raised by `handle_install`/`_at`, lowered by `handle_close`), and
+when `handle_close` takes it to zero it calls `epoll_last_handle_closed`
+before its own put. Every item is linked on its member's `watchers` list
+(`kobject.watchers`, a singly linked list through the items), which is
+how that call finds the sets to remove it from: each item leaves its
+set's list under that set's `ep->lock`, the set's queue is woken, and the
+items' references are dropped outside the locks. The registration thus
+never outlives the object it holds, and the object's release -- a
+socket's FIN, a pipe end's end-of-file -- follows the last descriptor's
+close as it does on Linux, where before this unit the registration kept
+a closed socket alive and evaluated it forever (invariant A9).
+
+The one lock added is a global mutex, `g_watch_lock` (as Linux's
+`epmutex`), guarding every `watchers` list and the handle-count check an
+add makes. Order: `g_watch_lock` outside `ep->lock`, always -- the add,
+the DEL, the release and the last-close removal all take it first;
+`epoll_obj_wait` takes `ep->lock` alone and never the watch lock, so a
+waiter is never in the order. The removal takes it before deciding
+whether the object has watchers at all, even for the common object that
+was never registered: an add that has passed its handle-count check
+under the lock and not yet linked its item is invisible to an unlocked
+look at the list, and its registration would outlive the last descriptor
+(found in review). An uncontended mutex per last close is the cost. Three
+more races are closed by it:
+
+- *An add against the last close.* The door looked the descriptor up, so
+  the object had a slot then; another thread's close can empty it before
+  the add runs, and that close's removal finds no item. The add therefore
+  re-reads `handles` under the watch lock and refuses an object with none
+  (`-EBADF`): a registration nothing would ever remove is not made.
+- *A reappearing descriptor.* A handle riding in a unix message is
+  installed at the receiver, so the count can go 0 -> 1 between
+  `handle_close`'s decrement and the removal's lock; the removal re-reads
+  the count under the lock and keeps the registrations when a descriptor
+  is back. (A description whose *only* remaining reference rides in an
+  unread message still loses its registrations at that moment, where
+  Linux keeps them until the message is received and that descriptor
+  closed: recorded as a gap.)
+- *The set closed while it holds entries.* `epoll_release` takes the
+  watch lock to unlink its items from their members' lists before freeing
+  them, or a member's later last close would walk freed items.
+
+**`epoll_wait` running concurrently with the final close.** A sleeping
+waiter holds a snapshot reference to every member and has its own wait
+entry parked on the member's queue; the member cannot be freed under it
+(the existing rule). The removal wakes the set's queue, so the waiter
+finishes its entries, drops its pins and re-snapshots without the member;
+the member's release follows that drop -- promptly, not at the member's
+next event, which for a quiet connection would be never. A waiter that
+collected the member just before the close may still report it; the
+program's `close` has not returned at that point, which is a legal order
+on Linux too.
+
+**Nesting stays refused** (`-EINVAL` for an epoll as a member, as v1). The
+reason is the wait protocol, not the lifetime rule: a member's events
+wake the *member's* queue, and a waiter parks its own entries there; the
+set's own queue is woken only by `ctl`. An outer set sleeping on an inner
+set's queue would therefore sleep through every event of the inner set's
+members. Linux's `ep_poll_callback` forwards a member's wake to the set's
+queue through an item-owned wait entry, which is also what its loop
+detection (`-ELOOP`, depth 5) is built on; that is a redesign of the
+wait entry (a callback kind) and of the set's wake path, and the EPOLLET
+unit's wake-generation counter does not substitute for it. Until then a
+program that nests gets a loud `-EINVAL`, never a silent lost wake.
+
 ## What this gives the rest of the system
 
 - **Files, sockets, pipes, the console** work today through the two

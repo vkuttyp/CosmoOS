@@ -157,6 +157,15 @@ that until `vfs-put-race` reproduced it (`docs/kernel-services/vfs/design.md`,
 - Ownership: whoever creates an object holds the initial reference;
   installing it in a table takes another; lookup takes one for the
   caller; close drops the table's.
+- Descriptors: `kobject.handles` counts the slots holding the object
+  across every process (raised in `install_slot`, lowered in
+  `handle_close`); it is what "the last descriptor to this object"
+  means, since a `dup` or a spawn's handle map installs the same object.
+  The close that takes it to zero tells epoll (`epoll_last_handle_closed`,
+  `docs/kernel/io/design.md` "epoll") before dropping the slot's
+  reference, so an interest-set registration never outlives the last
+  descriptor to its member. A handle in flight in a unix message holds
+  a reference but is not a descriptor until it is installed.
 - Lifetime: `release` runs exactly once, from the last `kobject_put`,
   in the context of whoever dropped the last reference. Releases must
   be callable from any thread context; they may block (they run outside

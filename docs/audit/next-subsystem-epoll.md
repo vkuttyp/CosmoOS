@@ -204,19 +204,28 @@ None.
 
 ## Risks
 
-- **Close-while-registered is not auto-removed (v1).** Linux drops an fd from
+- ~~**Close-while-registered is not auto-removed (v1).** Linux drops an fd from
   the interest set when its last descriptor is closed; this kernel has no close
   hook for that. v1 keeps the member's reference, so a registered fd must be
   removed with `EPOLL_CTL_DEL` — a closed-but-still-registered entry keeps its
   object alive and keeps being evaluated. This is the one real deviation; it is
   documented, and auto-remove-on-close is a follow-up that needs a handle-table
-  notification epoll can subscribe to.
+  notification epoll can subscribe to.~~ **Closed by the epoll-close unit
+  (2026-10-07, `docs/audit/2026-10-07-epoll-close-report.md`)**: the
+  handle table counts an object's slots across every process and the
+  last close removes the object's registrations (`docs/kernel/io/design.md`,
+  "epoll"; invariant A9).
 - **Level-triggered only.** `EPOLLET` (edge-triggered) needs per-entry
   last-reported state and transition bookkeeping; it is a separate unit. Until
   then an `EPOLLET` bit is rejected (`-EINVAL`) rather than silently treated as
   level, so a program that depends on edge semantics fails loudly.
 - **Nested epoll is refused.** Adding an epoll fd to an epoll is `-EINVAL` in
-  v1; loop detection across nested epolls is deferred with it.
+  v1; loop detection across nested epolls is deferred with it. The epoll-close
+  unit kept it refused and recorded why: a member's events wake the member's
+  queue, not the set's, so an outer set would sleep through the inner set's
+  events; the fix is an item-owned forwarding wait entry (Linux's
+  `ep_poll_callback`), a redesign of the wait protocol
+  (`docs/kernel/io/design.md`, "epoll").
 - **The packed `epoll_event`.** The x86-64 packed layout (§4) is the easy thing
   to get wrong; the test reads back `data` to prove the array marshals
   byte-for-byte on both arches.

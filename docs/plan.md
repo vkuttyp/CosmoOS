@@ -415,10 +415,26 @@ and [Linux compatibility API](compat/linux/api.md).
   per-thread registration/abort semantics and a new socket-family protocol surface.
 - [ ] **Implementation — socket options.** Add backing behavior for supported
   options; preserve explicit errors for options whose semantics remain unimplemented.
-- [ ] **Implementation — epoll lifetime and nesting.** Add removal on final
-  descriptor close and nested sets with cycle detection. Edge-triggered operation
-  is already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
-  [EPOLLET](audit/next-subsystem-epollet.md).
+- [x] **Implementation — epoll lifetime; decision — nesting.** Removal on
+  the final descriptor close is built; nested sets with cycle detection
+  are refused by decision (below). Edge-triggered operation
+  was already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
+  [EPOLLET](audit/next-subsystem-epollet.md). *Removal completed
+  2026-10-07*: the handle table counts an object's slots across every
+  process and the close that empties the last one removes the object's
+  registrations from every set, keyed as Linux keys them (the open file
+  description: a `dup`'d or inherited descriptor keeps the registration,
+  the last close removes it), with the add-versus-close and
+  set-closed-first races closed under one global watch lock and a waiter
+  asleep on the member woken so its release follows the close (invariant
+  A9; `epoll-close`, `LXEPOLLCLOSE` in `lxtest`, the static musl program
+  `epoll_musl`, `tools/epoll-close-probe.py --old`). *Nesting stays
+  refused*, by decision: a member's events wake the member's queue and not
+  the set's, so an outer set would sleep through an inner set's events;
+  allowing it needs an item-owned forwarding wait entry (Linux's
+  `ep_poll_callback`) and the loop detection built on it -- a redesign of
+  the wait protocol, recorded in `docs/kernel/io/design.md` ("epoll").
+  See the [report](audit/2026-10-07-epoll-close-report.md).
 - [ ] **Implementation — mremap extensions.** Support relocation and separately
   define fixed, file-backed and sub-range cases beyond whole anonymous
   in-place resizing. See the [mremap report](audit/next-subsystem-mremap.md).

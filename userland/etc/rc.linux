@@ -21,6 +21,9 @@ echo "lxsig group: $?"
 echo "lxsig lastthread: $?"
 /boot/tests/linux/lxsig session
 echo "lxsig session: $?"
-ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
+# The musl programs, where the build had musl-gcc (both or neither): an
+# inner shell skips the section when the first is absent and fails it when
+# either program fails, the same shape rc.test uses to run this script.
+sh -c 'ls /boot/tests/linux/hello_musl > /tmp/.musl.probe 2>&1 || exit 0; /boot/tests/linux/hello_musl || exit 1; /boot/tests/linux/epoll_musl || exit 1' || exit 1
 rm /tmp/.musl.probe
 exit 0

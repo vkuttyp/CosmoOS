@@ -945,6 +945,42 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_write, efd, &one, 8) == 8, 0);
         CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
         CHECKV(sc1(LX_close, efd) == 0, 0);
+
+        /* Removal on the final close, without DEL (the epoll-close unit,
+         * docs/kernel/io/design.md "epoll"): what an event loop written for
+         * Linux relies on. A readable eventfd closed while registered is no
+         * longer reported; a dup keeps it registered until the last close;
+         * one end of a socket pair closed while registered really closes --
+         * the other end reads end-of-file where it read EAGAIN before, when
+         * the registration kept the closed end alive. */
+        long ce = sc2(LX_eventfd2, 1, 0);
+        CHECKV(ce >= 3, ce);
+        struct lx_epoll_event cee = { .events = LX_EPOLLIN, .data = 0xC10 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, ce, &cee) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1 && out[0].data == 0xC10, 0);
+        long cd = sc1(LX_dup, ce);
+        CHECKV(cd >= 3, cd);
+        CHECKV(sc1(LX_close, ce) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 1 && out[0].data == 0xC10, 0);   /* the dup keeps it */
+        CHECKV(sc1(LX_close, cd) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);                            /* the last close removes it */
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_DEL, ce, 0) == -2, 0);                     /* ENOENT: already gone */
+        int32_t csv[2] = { -1, -1 };
+        CHECKV(sc4(LX_socketpair, LX_AF_UNIX, LX_SOCK_STREAM | LX_SOCK_NONBLOCK, 0, csv) == 0, 0);
+        struct lx_epoll_event cse = { .events = LX_EPOLLIN, .data = 0xC11 };
+        CHECKV(sc4(LX_epoll_ctl, ep, LX_EPOLL_CTL_ADD, csv[0], &cse) == 0, 0);
+        CHECKV(sc3(LX_read, csv[1], buf, 4) == -11, 0);                                       /* EAGAIN: the peer is open */
+        CHECKV(sc1(LX_close, csv[0]) == 0, 0);
+        CHECKV(sc3(LX_read, csv[1], buf, 4) == 0, 0);                                         /* end of file: the peer is closed */
+        CHECKV(sc1(LX_close, csv[1]) == 0, 0);
+        CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
+        /* An epoll closed while it holds a member, then the member's last
+         * close: both plain closes. */
+        long ep3 = sc1(LX_epoll_create1, 0);
+        long ce3 = sc2(LX_eventfd2, 1, 0);
+        CHECKV(ep3 >= 3 && ce3 >= 3 && sc4(LX_epoll_ctl, ep3, LX_EPOLL_CTL_ADD, ce3, &cee) == 0, 0);
+        CHECKV(sc1(LX_close, ep3) == 0 && sc1(LX_close, ce3) == 0, 0);
+        lx_puts("LXEPOLLCLOSE: a registered fd's last close removes it (eventfd, dup, socketpair; the set closed first)\n");
         CHECKV(sc1(LX_close, ep) == 0, 0);
 #ifdef LX_epoll_create
         /* x86-64 legacy epoll_create + epoll_wait */

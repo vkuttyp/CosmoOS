@@ -77,6 +77,31 @@ HANGUP` even though only `READABLE` was asked for. About 50 ms. The Linux
 `poll`/`ppoll` checks in `lxtest` cover the translation
 (`docs/compat/linux/testing.md`).
 
+### `epoll-close` (`kernel/io/epolltest.c`, the epoll-close unit)
+
+Drives the kernel API with a handle table of its own (invariant A9). A
+pipe's read end installed, registered under its handle and closed
+without `EPOLL_CTL_DEL`: the end's count is back to the test's creator
+reference (the registration left with the descriptor), a zero-timeout
+wait reports nothing, and once the test drops that reference the writer's
+write returns `-EPIPE`. An eventfd made readable, registered and closed: not reported,
+released. A TCP client socket to a loopback server that accepts and
+holds, registered and closed: the server's connection reaches
+`CLOSE_WAIT` within two seconds (the FIN went), the socket is released,
+nothing is reported. Two slots for one eventfd, registered under the
+first: closing the first still reports the event, closing the second
+removes it. A slot closed and then an add under it: `-EBADF`. A waiter
+thread blocked in `epoll_obj_wait(FOREVER)` on a pipe end and an eventfd,
+neither ready: the pipe end's slot is closed under it, its count returns
+to the test's reference within a second while the waiter still sleeps
+(it was woken by the removal and re-slept on the eventfd alone), and a
+write to the eventfd ends the wait with that one event. A second set
+holding an eventfd, the set's slot closed first (its release unlinks the
+entry), then the eventfd's. Finally a registered eventfd in a table that
+is destroyed. About 0.3 s; ports 6098. `tools/epoll-close-probe.py --old`
+drops the call from `handle_close` and the test fails at its first
+check after the baseline close: the registration still holds the end.
+
 ### `realtime` (`kernel/io/polltest.c`)
 
 `clock_realtime_ns` is between 2020 and 2100 and advances across a 5 ms

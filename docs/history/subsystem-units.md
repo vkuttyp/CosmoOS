@@ -2422,3 +2422,20 @@ See the [history index](README.md).
   reading and a busy server; `tools/delack-nagle-probe.py --old` boots
   the rule as it was before b76e4536. No TCP rule changed. Report:
   `docs/audit/2026-10-07-delack-nagle-report.md`.
+- **epoll interest removal on the final close.** A descriptor closed
+  without `EPOLL_CTL_DEL` kept its object alive and evaluated (epoll v1's
+  one recorded deviation), so an event loop written for Linux never
+  really closed a TCP socket in a set: no FIN, the connection leaked. The
+  open file description is the kobject, so `struct kobject` now counts its
+  handle-table slots across every process and the close that empties the
+  last one removes the object's registrations from every set (items on
+  the object's `watchers` list under one global watch mutex, outside
+  `ep->lock`; A9). A `dup`'d or inherited descriptor keeps the
+  registration; an add racing the last close is refused; a set released
+  with entries unlinks them first; a waiter asleep on the member is woken
+  so the release -- the FIN -- follows the close. Nesting stays refused,
+  with the reason recorded (a member's events do not reach the set's
+  queue). `epoll-close` (eight cases, a loopback server for the FIN),
+  `LXEPOLLCLOSE` in `lxtest`, `epoll_musl` (static musl, x86-64 CI),
+  `tools/epoll-close-probe.py --old` failing at the baseline. Report:
+  `docs/audit/2026-10-07-epoll-close-report.md`.

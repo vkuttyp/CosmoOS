@@ -807,6 +807,7 @@ static const struct selftest tests[] = {
     { "unix-close-race", selftest_unix_close_race },
     { "unix-poll",       selftest_unix_poll },
     { "io-poll",         selftest_io_poll },
+    { "epoll-close",     selftest_epoll_close },
     { "realtime",        selftest_realtime },
     { "process-reject",  selftest_process_reject },
     { "process-spawn",   selftest_process_spawn },
