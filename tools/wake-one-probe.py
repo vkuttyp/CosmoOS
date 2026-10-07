@@ -83,7 +83,7 @@ def main():
         spec = importlib.util.spec_from_file_location('wake_one_boot', root / 'tests/boot/run_boot_test.py')
         harness = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(harness)
-        timeout = '240' if args.arch == 'aarch64' else '180'
+        timeout = '240'   # the whole-boot timeout, BOOT_TIMEOUT's value on both architectures (PR #327)
         log_path = out / 'boot.log'
         sys.argv = ['wake-one-probe', '--timeout', timeout, '--image', str(out / 'cosmoos.img'),
                     '--log', str(log_path), '--kernel', str(out / 'kernel/kernel.elf')]
