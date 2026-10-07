@@ -1493,10 +1493,11 @@ static int xhci_module_init(void)
     mutex_lock(&g_controllers_lock);
     struct xhci *x;
     list_for_each_entry(x, &g_controllers, link) {
-        uint64_t deadline = clock_deadline_ns(3000ull * 1000000ull);
-        while (!completion_done(&x->first_scan) && !clock_deadline_passed(deadline))
-            thread_sleep_ms(1);
-        if (!completion_done(&x->first_scan))
+        /* A wait, not a poll of completion_done: the wait is in the lock
+         * graph (g_controllers_lock -> xhci-first-scan), the poll was not
+         * (docs/kernel/lockdep/design.md, "Completion waits"). The same
+         * 3 s bound per controller. */
+        if (!wait_for_completion_timeout(&x->first_scan, 3000ull * 1000000ull))
             kwarn("xhci%u: the first port scan has not finished after 3 s; continuing", x->hcd.index);
     }
     mutex_unlock(&g_controllers_lock);
