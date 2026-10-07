@@ -996,6 +996,103 @@ bool selftest_mutex(const char **reason)
     return true;
 }
 
+/* --- mutex-wake-bench: a contended unlock against the number of waiters --------
+ *
+ * N threads block on a mutex the test holds; the test unlocks and measures
+ * two things, medians of the rounds: how long the unlock call itself takes
+ * (the wake runs under the wait queue's spinlock with interrupts off) and
+ * how long until the first woken waiter runs (unlock to the waiter's
+ * acquire). Between the epoll-callback unit and its wake_one follow-up,
+ * wake_one walked the whole list for callback entries, so the unlock grew
+ * with N; the callbacks list of their own gives wake_one back its one
+ * thread. Figures only, printed for the report; N = 1, 8 and 32.
+ */
+#define WAKE_BENCH_ROUNDS 10u
+#define WAKE_BENCH_MAX    32u
+
+struct wake_bench {
+    struct mutex m;
+    volatile unsigned blocked;    /* waiters that have reached mutex_lock (counted before they block) */
+    volatile uint64_t first_at;   /* the first woken waiter's acquire time; 0 until then */
+};
+
+static void wake_bench_waiter(void *arg)
+{
+    struct wake_bench *b = arg;
+    __atomic_fetch_add(&b->blocked, 1, __ATOMIC_ACQ_REL);
+    mutex_lock(&b->m);
+    uint64_t now = clock_now_ns();
+    uint64_t zero = 0;
+    __atomic_compare_exchange_n(&b->first_at, &zero, now, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    mutex_unlock(&b->m);
+    thread_exit(0);
+}
+
+static void sort_ns(uint64_t *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; i++) {
+        uint64_t x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = x;
+    }
+}
+
+static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unlock_ns, uint64_t *wake_ns)
+{
+    static struct wake_bench b;
+    static struct thread *th[WAKE_BENCH_MAX];
+    uint64_t unlock[WAKE_BENCH_ROUNDS], wake[WAKE_BENCH_ROUNDS];
+    mutex_init(&b.m, "wake-bench");
+    for (unsigned r = 0; r < WAKE_BENCH_ROUNDS; r++) {
+        b.blocked = 0;
+        b.first_at = 0;
+        mutex_lock(&b.m);
+        for (unsigned i = 0; i < nwaiters; i++) {
+            th[i] = thread_create(wake_bench_waiter, &b, "wake-bench-w", SCHED_PRIO_DEFAULT);
+            CHECK(th[i] != NULL);
+        }
+        /* Every waiter has reached mutex_lock; a settle lets the last of
+         * them block rather than spin on the way in. */
+        for (unsigned i = 0; i < 400 && __atomic_load_n(&b.blocked, __ATOMIC_ACQUIRE) < nwaiters; i++)
+            thread_sleep_ms(5);
+        CHECK(b.blocked == nwaiters);
+        thread_sleep_ms(10);
+        uint64_t t0 = clock_now_ns();
+        mutex_unlock(&b.m);
+        uint64_t t1 = clock_now_ns();
+        for (unsigned i = 0; i < nwaiters; i++)
+            thread_join(th[i]);
+        CHECK(b.first_at != 0 && b.first_at >= t0);
+        unlock[r] = t1 - t0;
+        wake[r] = b.first_at - t0;
+    }
+    sort_ns(unlock, WAKE_BENCH_ROUNDS);
+    sort_ns(wake, WAKE_BENCH_ROUNDS);
+    *unlock_ns = unlock[WAKE_BENCH_ROUNDS / 2];
+    *wake_ns = wake[WAKE_BENCH_ROUNDS / 2];
+    return true;
+}
+
+bool selftest_mutex_wake_bench(const char **reason)
+{
+    unsigned before = thread_count();
+    static const unsigned sizes[3] = { 1, 8, 32 };
+    uint64_t unlock_ns[3], wake_ns[3];
+    for (unsigned k = 0; k < 3; k++)
+        if (!wake_bench_one(reason, sizes[k], &unlock_ns[k], &wake_ns[k]))
+            return false;
+    kinfo("selftest: mutex-wake-bench: waiters 1/8/32: unlock call %llu/%llu/%llu ns, unlock to the first waiter's acquire "
+          "%llu/%llu/%llu ns (medians of %u)",
+          (unsigned long long)unlock_ns[0], (unsigned long long)unlock_ns[1], (unsigned long long)unlock_ns[2],
+          (unsigned long long)wake_ns[0], (unsigned long long)wake_ns[1], (unsigned long long)wake_ns[2], WAKE_BENCH_ROUNDS);
+    CHECK(threads_settle(before));
+    return true;
+}
+
 /* --- semaphore --- */
 
 struct sem_test {
