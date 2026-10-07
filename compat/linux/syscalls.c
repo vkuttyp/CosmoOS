@@ -948,16 +948,13 @@ static int64_t lx_epoll_ctl(struct syscall_args *a)
         kobject_put(ep);
         return rc;
     }
-    /* ADD: the member must be a valid fd and not an epoll (no nesting). */
+    /* ADD: the member must be a valid fd. A set may be a member of a set
+     * (the epoll-callback unit): the object refuses the set itself (-EINVAL)
+     * and a loop or a chain deeper than EPOLL_MAX_NESTS (-ELOOP), as Linux. */
     struct kobject *target = handle_lookup(&process_current()->handles, fd, 0);
     if (target == NULL) {
         kobject_put(ep);
         return -EBADF;
-    }
-    if (epoll_obj_from_kobject(target) != NULL) {
-        kobject_put(target);
-        kobject_put(ep);
-        return -EINVAL;   /* nesting an epoll in an epoll */
     }
     rc = epoll_obj_add(ep, fd, target, want, ev.events, ev.data, oneshot, edge);   /* takes target's ref on success */
     if (rc)

@@ -102,6 +102,67 @@ is destroyed. About 0.3 s; ports 6098. `tools/epoll-close-probe.py --old`
 drops the call from `handle_close` and the test fails at its first
 check after the baseline close: the registration still holds the end.
 
+### `epoll-scale` (`kernel/io/epolltest.c`, the epoll-callback unit)
+
+Sixteen handle tables of the test's own hold 1, 16, 256 and 1024
+eventfds registered in one set, the first of them readable. Two
+measurements per size, medians of twenty: a non-blocking wait that finds
+the one ready member, and a blocking wait woken by a thread that writes
+the member after the waiter is asleep (the time from the write to the
+return). The four pairs are printed
+(`selftest: epoll-scale: members 1/16/256/1024: ...`) and the 1024-member
+figures bounded against the 1-member ones (A10). Before the unit the
+figures grew with the count (the report's baseline).
+
+### `epoll-wake-race` (`kernel/io/epolltest.c`)
+
+A thread on another CPU (the next one up, where there is one) writes an
+eventfd in a loop while this thread, two thousand times, installs the
+eventfd, registers it, polls the set, removes it (every third round by
+DEL, otherwise by closing its last slot) and reinstalls it, so the
+callback runs against ADD, DEL and the last-close removal on the other
+CPU. Then the deterministic shape: registered, polled empty, DELed, the
+member written, the set polled -- nothing, because the entry left the
+queue with the item. The probe's `no-unhook` leaves it and that last
+check fails.
+
+### `epoll-nest` (`kernel/io/epolltest.c`)
+
+An inner set holding an eventfd, an outer set holding the inner: the set
+itself is `-EINVAL`, the outer into the inner `-ELOOP`; a thread writes
+the eventfd while the outer blocks (1 s bound) and the outer returns the
+inner's descriptor, the inner returns the eventfd's, the outer again (a
+level item re-queued while the inner has an event), and once the eventfd
+is drained neither reports. Then the bound: `EPOLL_MAX_NESTS` sets in a
+chain accepted, a fifth refused from below and from above, a loop at the
+bottom refused, and an event written at the bottom of the chain woken
+through to the top. The table is destroyed with every set and the
+eventfd registered; every object's count returns to the test's own.
+
+### The `watched` flag under the C11 model (`tests/litmus/epoll/watched.litmus`, `make litmus`)
+
+The close of a never-registered object decides without the epoll watch
+lock from a flag the add sets under it (`design.md`, "epoll"). The pairing
+is store-buffering: the add's store of the flag and read of the handle
+count, the close's write of the count and read of the flag, each split by
+a `seq_cst` fence. herd7 under RC11 must find the bad outcome (the add
+reads a handle, the close reads no flag) unreachable, each conjunct
+reachable on its own, and the outcome reachable with either fence removed
+(the two controls). The runner is `tests/litmus/run_litmus.py`, shared with
+the quiescence tests; CI runs it in its own container.
+
+### `epoll-close-bench` (`kernel/io/epolltest.c`, reports only)
+
+One thread per CPU (at most four), each with its own table and eventfd,
+three shapes (20 000 rounds each, 2 000 for the third, which runs tens of
+microseconds a round under TCG): the last close of a never-registered object
+(the `watched` flag spares it the watch lock; the previous unit took the
+lock on every last close); a close that is not the last (a slot elsewhere
+holds the object: no registration work on either tree); and install, ADD
+to a set of the worker's own, last close -- the removal path, which takes
+the lock and walks the watchers. Closes per second for each, printed; the
+report compares them with the baseline.
+
 ### `realtime` (`kernel/io/polltest.c`)
 
 `clock_realtime_ns` is between 2020 and 2100 and advances across a 5 ms

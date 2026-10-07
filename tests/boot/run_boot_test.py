@@ -266,7 +266,7 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] blk: nvme0n1: 16384 sectors of 512 bytes",
     r"^\[ INFO\] nvme0: .* 1 namespace\(s\) of \d+, \d+ I/O queue\(s\) of depth 32",
     r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
-    r"^\[ INFO\] hello: module init \(ABI v5, load 1\)",
+    r"^\[ INFO\] hello: module init \(ABI v6, load 1\)",
     r"^init: CosmoOS userland, pid \d+",
     r"^CosmoOS userland ready",
     r"^init: rc exited with status 0",

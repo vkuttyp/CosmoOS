@@ -69,7 +69,7 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 5. Version 2 (the lifetime pass): `struct
+`COSMO_MODULE_ABI_VERSION` is 6. Version 2 (the lifetime pass): `struct
 kobject` gained `owner`, which moves every field after the embedded
 kobject in `struct device`, `struct blkdev` and `struct netif`, and the
 release callbacks (`struct device.release`, `struct blkdev_ops.release`,
@@ -80,8 +80,11 @@ of every exported structure embedding one. Version 4 (the device-reset
 unit): `struct device_driver` gained `reset`. Version 5 (the epoll-close
 unit): `struct kobject` gained `handles` (the handle-table slots holding
 the object, across every process) and `watchers` (its epoll
-registrations), which moves every field after an embedded kobject. An
-older module is refused by `modelf_check_info`.
+registrations), which moves every field after an embedded kobject.
+Version 6 (the epoll-callback unit): `struct wait_entry` gained `fn` (a
+callback kind of entry, what the `wait_event` macro's stack entry is laid
+out as), `struct waitqueue` lost `wake_gen`, and `struct kobject` gained
+`watched`. An older module is refused by `modelf_check_info`.
 
 The exports include device, PCI, DMA, block, entropy and console-sink
 interfaces, the mbuf and network-interface surface a NIC driver needs,

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check the quiescence protocol's litmus tests against the RC11 model.
+"""Check the kernel's litmus tests against the RC11 model.
 
-docs/kernel/quiesce/testing.md, "Memory ordering". Every litmus file in
-tests/litmus/quiesce/ states one outcome the protocol must forbid (or, for
+docs/kernel/quiesce/testing.md, "Memory ordering", and docs/kernel/io/testing.md
+(epoll). Every litmus file in tests/litmus/quiesce/ and tests/litmus/epoll/
+states one outcome the protocol must forbid (or, for
 online-old, the outcome the old onlining order allowed). herd7 enumerates
 every execution the C11 model (rc11.cat: Lahav et al., PLDI 2017)
 permits, so a verdict here is exhaustive, not a sample.
@@ -33,47 +34,59 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DIR = os.path.join(HERE, 'quiesce')
 
-# file -> (expected verdict, the conjuncts that must each be reachable)
+# file (relative to this directory) -> (expected verdict, the conjuncts that
+# must each be reachable)
 VERDICTS = {
-    'gp.litmus': ('NoRace', []),
-    'unlink.litmus': ('Never', ['1:e=1', '1:r=0']),
-    'two-waiters.litmus': ('Never', ['0:t=0 /\\ 1:t=1 /\\ 2:e=2', '2:r=0']),
-    'online.litmus': ('Never', ['0:m=0', '1:r=0']),
-    'online-old.litmus': ('Sometimes', []),
-    'wake.litmus': ('Never', ['((0:a=0 /\\ 1:a=2) \\/ (1:a=0 /\\ 0:a=2)) /\\ 0:w=0',
+    # The epoll watched flag (docs/kernel/io/design.md, "epoll"): the add's
+    # store of the flag and read of the handle count against the close's
+    # decrement and read of the flag, each pair split by a seq_cst fence.
+    'epoll/watched.litmus': ('Never', ['0:r0=1', '1:r1=0']),
+    'quiesce/gp.litmus': ('NoRace', []),
+    'quiesce/unlink.litmus': ('Never', ['1:e=1', '1:r=0']),
+    'quiesce/two-waiters.litmus': ('Never', ['0:t=0 /\\ 1:t=1 /\\ 2:e=2', '2:r=0']),
+    'quiesce/online.litmus': ('Never', ['0:m=0', '1:r=0']),
+    'quiesce/online-old.litmus': ('Sometimes', []),
+    'quiesce/wake.litmus': ('Never', ['((0:a=0 /\\ 1:a=2) \\/ (1:a=0 /\\ 0:a=2)) /\\ 0:w=0',
                               '((0:a=0 /\\ 1:a=2) \\/ (1:a=0 /\\ 0:a=2)) /\\ 1:s=0']),
 }
 
 # (file, what the control removes, [(old, new), ...]); each must flip:
 # a Never file to Sometimes, a NoRace file to Race.
 CONTROLS = [
-    ('gp.litmus', 'Q2 relaxed',
+    ('epoll/watched.litmus', 'no fence in the add',
+     [('  atomic_store_explicit(watched, 1, memory_order_release);\n'
+       '  atomic_thread_fence(memory_order_seq_cst);\n',
+       '  atomic_store_explicit(watched, 1, memory_order_release);\n')]),
+    ('epoll/watched.litmus', 'no fence in the close',
+     [('  atomic_store_explicit(handles, 0, memory_order_release);\n'
+       '  atomic_thread_fence(memory_order_seq_cst);\n',
+       '  atomic_store_explicit(handles, 0, memory_order_release);\n')]),
+    ('quiesce/gp.litmus', 'Q2 relaxed',
      [('atomic_exchange_explicit(seen, e, memory_order_acq_rel)',
        'atomic_exchange_explicit(seen, e, memory_order_relaxed)')]),
-    ('gp.litmus', 'W2 relaxed',
+    ('quiesce/gp.litmus', 'W2 relaxed',
      [('atomic_load_explicit(seen, memory_order_acquire)',
        'atomic_load_explicit(seen, memory_order_relaxed)')]),
-    ('unlink.litmus', 'Q1 relaxed',
+    ('quiesce/unlink.litmus', 'Q1 relaxed',
      [('atomic_load_explicit(epoch, memory_order_acquire)',
        'atomic_load_explicit(epoch, memory_order_relaxed)')]),
-    ('unlink.litmus', 'W1 relaxed',
+    ('quiesce/unlink.litmus', 'W1 relaxed',
      [('atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst)',
        'atomic_fetch_add_explicit(epoch, 1, memory_order_relaxed)')]),
-    ('two-waiters.litmus', 'second waiter stores instead of RMW (no release sequence)',
+    ('quiesce/two-waiters.litmus', 'second waiter stores instead of RMW (no release sequence)',
      [('P1 (atomic_int* epoch) {\n  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);',
        'P1 (atomic_int* epoch) {\n  int t = atomic_load_explicit(epoch, memory_order_relaxed);\n'
        '  atomic_store_explicit(epoch, 2, memory_order_relaxed);')]),
-    ('online.litmus', 'no W1b fence (waiter)',
+    ('quiesce/online.litmus', 'no W1b fence (waiter)',
      [('  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);\n'
        '  atomic_thread_fence(memory_order_seq_cst);\n',
        '  int t = atomic_fetch_add_explicit(epoch, 1, memory_order_seq_cst);\n')]),
-    ('online.litmus', 'no Q0 fence (new CPU)',
+    ('quiesce/online.litmus', 'no Q0 fence (new CPU)',
      [('  atomic_store_explicit(online, 1, memory_order_release);\n'
        '  atomic_thread_fence(memory_order_seq_cst);\n',
        '  atomic_store_explicit(online, 1, memory_order_release);\n')]),
-    ('wake.litmus', 'waitqueue_empty without the lock',
+    ('quiesce/wake.litmus', 'waitqueue_empty without the lock',
      [('  int a = atomic_fetch_add_explicit(lk, 1, memory_order_acquire);\n'
        '  int w = atomic_load_explicit(wq, memory_order_relaxed);\n'
        '  int b = atomic_fetch_add_explicit(lk, 1, memory_order_release);\n',
@@ -132,19 +145,20 @@ def main():
         if not ok:
             failures += 1
 
-    on_disk = sorted(f for f in os.listdir(DIR) if f.endswith('.litmus'))
+    on_disk = sorted(os.path.join(d, f) for d in ('epoll', 'quiesce')
+                     for f in os.listdir(os.path.join(HERE, d)) if f.endswith('.litmus'))
     if on_disk != sorted(VERDICTS):
         print(f'FAIL the litmus files on disk {on_disk} differ from the table {sorted(VERDICTS)}')
         failures += 1
 
     for name, (want, witnesses) in sorted(VERDICTS.items()):
-        text = open(os.path.join(DIR, name)).read()
+        text = open(os.path.join(HERE, name)).read()
         check(f'verdict  {name}', verdict(herd7, text, want), want)
         for w in witnesses:
             check(f'witness  {name}: {w}', verdict(herd7, with_exists(text, w), 'Sometimes'), 'Sometimes')
 
     for name, what, edits in CONTROLS:
-        text = open(os.path.join(DIR, name)).read()
+        text = open(os.path.join(HERE, name)).read()
         for old, new in edits:
             if text.count(old) != 1:
                 print(f'FAIL control {name} ({what}): its anchor does not match the file exactly once')

@@ -31,6 +31,8 @@
 #include <arch/trap.h>
 #include <arch/user.h>
 #include <kernel/interrupt.h>
+#include <kernel/quiesce.h>
+#include <kernel/wait.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -101,6 +103,15 @@ static void process_release(struct kobject *obj)
     g_process_count--;
     spin_unlock_irqrestore(&g_process_table_lock, s);
 
+    /* The process's signalfd queue may carry epoll callback entries (a
+     * signalfd of this process in a set another process still holds):
+     * detach them under the queue's lock and let a grace period pass
+     * before the memory goes, since an unhook reads the queue pointer
+     * inside a read-side section (docs/kernel/io/design.md, "epoll";
+     * Linux's POLLFREE). The common exit detaches nothing and waits for
+     * nothing. */
+    if (waitqueue_detach_callbacks(&p->signalfd_wqh) != 0)
+        synchronize_quiesce();
     kdebug("process: pid %u '%s' released", p->pid, p->name);
     kmem_cache_free(g_process_cache, p);
 }

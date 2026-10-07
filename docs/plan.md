@@ -415,10 +415,10 @@ and [Linux compatibility API](compat/linux/api.md).
   per-thread registration/abort semantics and a new socket-family protocol surface.
 - [ ] **Implementation — socket options.** Add backing behavior for supported
   options; preserve explicit errors for options whose semantics remain unimplemented.
-- [x] **Implementation — epoll lifetime; decision — nesting.** Removal on
-  the final descriptor close is built; nested sets with cycle detection
-  are refused by decision (below). Edge-triggered operation
-  was already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
+- [x] **Implementation — epoll lifetime, readiness by callback, nesting.**
+  Removal on the final descriptor close is built; nested sets with loop
+  detection are built on readiness by callback (below). Edge-triggered
+  operation was already built. Sources: [epoll](audit/next-subsystem-epoll.md) and
   [EPOLLET](audit/next-subsystem-epollet.md). *Removal completed
   2026-10-07*: the handle table counts an object's slots across every
   process and the close that empties the last one removes the object's
@@ -428,13 +428,20 @@ and [Linux compatibility API](compat/linux/api.md).
   set-closed-first races closed under one global watch lock and a waiter
   asleep on the member woken so its release follows the close (invariant
   A9; `epoll-close`, `LXEPOLLCLOSE` in `lxtest`, the static musl program
-  `epoll_musl`, `tools/epoll-close-probe.py --old`). *Nesting stays
-  refused*, by decision: a member's events wake the member's queue and not
-  the set's, so an outer set would sleep through an inner set's events;
-  allowing it needs an item-owned forwarding wait entry (Linux's
-  `ep_poll_callback`) and the loop detection built on it -- a redesign of
-  the wait protocol, recorded in `docs/kernel/io/design.md` ("epoll").
-  See the [report](audit/2026-10-07-epoll-close-report.md).
+  `epoll_musl`, `tools/epoll-close-probe.py --old`); see the
+  [report](audit/2026-10-07-epoll-close-report.md). *Readiness by callback
+  and nesting completed 2026-10-07*: a wait entry gained a callback kind,
+  every item owns one on each of its member's queues, a wake links the
+  item onto the set's ready list and wakes the set's queue, and a wait
+  walks the ready list alone (A10: O(ready), not O(registered)); a set may
+  be a member of a set, its wake forwarded with a lockdep subclass per
+  chain depth, with Linux's loop detection (`-ELOOP`) and a chain bounded
+  at four sets (A11; the bound is lockdep's subclass count, Linux allows
+  five); the never-registered object's last close takes no lock (a
+  `watched` flag proved by a litmus test). `epoll-scale`,
+  `epoll-wake-race`, `epoll-nest`, `epoll-close-bench`, `LXEPOLLNEST`,
+  `epoll_musl`'s nested case, `tools/epoll-callback-probe.py`. See the
+  [callback report](audit/2026-10-07-epoll-callback-report.md).
 - [ ] **Implementation — mremap extensions.** Support relocation and separately
   define fixed, file-backed and sub-range cases beyond whole anonymous
   in-place resizing. See the [mremap report](audit/next-subsystem-mremap.md).

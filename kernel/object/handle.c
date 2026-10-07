@@ -161,11 +161,17 @@ int handle_close(struct handle_table *t, int h)
      * end here, as Linux drops an epitem at the file's final close
      * (docs/kernel/io/design.md, "epoll"). Outside the table lock -- the
      * removal takes mutexes -- and before the put, so a registration
-     * cannot outlive the object it holds a reference to. A table that is
-     * still ours to look up and install into would be a lookup racing a
-     * close of the same handle, which a program only does to itself. */
-    if (left == 0)
-        epoll_last_handle_closed(obj);
+     * cannot outlive the object it holds a reference to. The object that
+     * was never registered (`watched`, set under epoll's watch lock before
+     * an add checks this count) is spared the lock: the fence orders our
+     * decrement before the read of the flag as the add's orders its store
+     * before its read of the count, so one of the two sees the other
+     * (store-buffering: tests/litmus/epoll/watched.litmus). */
+    if (left == 0) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&obj->watched, __ATOMIC_ACQUIRE))
+            epoll_last_handle_closed(obj);
+    }
 
     /* The object's flush, before the put and outside the lock: a file
      * writes its dirty pages back and reports a write-back failure once,

@@ -10,8 +10,10 @@
  * reader registered and closed without EPOLL_CTL_DEL must leave the
  * writer with EPIPE (the reader really gone), a socket pair's end must
  * leave its peer at end-of-file, and a dup must keep the registration
- * until the last descriptor closes. Prints `epoll musl: auto-removal ok`
- * and exits 0, or names the first failed step and exits 1.
+ * until the last descriptor closes. Then a set in a set: the outer sees
+ * the inner's member become readable, and a loop is ELOOP. Prints
+ * `epoll musl: auto-removal ok` and exits 0, or names the first failed
+ * step and exits 1.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -89,6 +91,33 @@ int main(void)
     if (epoll_ctl(ep, EPOLL_CTL_DEL, d, NULL) != -1 || (errno != EBADF && errno != ENOENT))
         return fail("DEL of the closed fd (expected EBADF or ENOENT)");
     close(p[1]);
+
+    /* A set in a set (the epoll-callback unit): an outer set holding `ep`
+     * sees `ep`'s member become readable, and a loop is ELOOP. */
+    int outer = epoll_create1(0);
+    if (outer < 0)
+        return fail("epoll_create1 outer");
+    ev.data.u64 = 4;
+    if (epoll_ctl(outer, EPOLL_CTL_ADD, ep, &ev) != 0)
+        return fail("epoll_ctl ADD of a set into a set");
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, outer, &ev) != -1 || errno != ELOOP)
+        return fail("adding the outer into the inner (expected ELOOP)");
+    if (pipe(p) != 0)
+        return fail("pipe 3");
+    ev.data.u64 = 5;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) != 0)
+        return fail("epoll_ctl ADD pipe 3");
+    if (epoll_wait(outer, out, 4, 0) != 0)
+        return fail("outer before the write (expected nothing)");
+    if (write(p[1], "z", 1) != 1)
+        return fail("write 3");
+    if (epoll_wait(outer, out, 4, 1000) != 1 || out[0].data.u64 != 4)
+        return fail("outer after the write (expected the inner set, readable)");
+    if (epoll_wait(ep, out, 4, 0) != 1 || out[0].data.u64 != 5)
+        return fail("inner after the write (expected the pipe)");
+    close(p[0]);
+    close(p[1]);
+    close(outer);
     close(ep);
     printf("epoll musl: auto-removal ok\n");
     return 0;

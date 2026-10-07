@@ -5754,8 +5754,17 @@ int main(int argc, char **argv)
         return 7;
     }
     if (argc >= 2 && strcmp(argv[1], "--block") == 0) {
+        /* A killable wait that nothing but the kill can end: a read of a
+         * pipe this process alone holds. It used to read the console, and
+         * a key the HID harness typed at the machine during the 50 ms the
+         * kernel test gives it ended the read with status 5 instead of the
+         * kill -- a flake that moved with the self-test timeline
+         * (process-spawn, the epoll-callback unit). */
+        int h[2];
         char c;
-        read(0, &c, 1);
+        if (cosmo_pipe(h) != 0)
+            return 6;
+        read(h[0], &c, 1);
         return 5;
     }
     if (argc >= 2 && strcmp(argv[1], "--spin") == 0) {

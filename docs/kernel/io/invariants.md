@@ -82,6 +82,44 @@ still sleeps; the set closed first, then the member), `lxtest`
 removal); `tools/epoll-close-probe.py --old` restores v1 and the test
 fails at its baseline: the registration still holds the closed pipe end.
 
+**A10. A wait costs the ready members, and a member's callback never
+outlives its item.** Every epoll item owns a callback wait entry on each
+queue its member's requested directions wake, for the item's whole life;
+a wake links the item onto the set's ready list and wakes the set's own
+queue, and `epoll_obj_wait` sleeps on that queue alone and walks only the
+ready list -- O(ready), not O(registered). The entries leave their queues
+under those queues' locks before the item is freed (DEL, release, the
+last-close removal), so a callback in flight has finished and none can
+start; a queue not owned by the member (a process's signalfd queue)
+detaches every callback entry and waits a grace period before it is
+freed, and the unhook reads the queue pointer inside a read-side section.
+Check: `epoll-scale` (1, 16, 256 and 1024 members with one ready: the
+1024-member non-blocking wait within 8x the 1-member one plus 20 us, the
+woken blocking wait within 4x plus 200 us; the figures are printed),
+`epoll-wake-race` (a writer on another CPU against ADD, wait, DEL, the
+last close and re-install, two thousand rounds; then a write after DEL
+puts nothing in the set), `lxtest` (`LXEPOLLET`: the edge semantics the
+callback carries); `tools/epoll-callback-probe.py --old no-unhook`
+leaves the entry on the queue at DEL and `epoll-wake-race` fails at that
+last check. Gap: no test frees a process's signalfd queue under a
+registration held by another process.
+
+**A11. A set in a set forwards its events, and a chain of sets is bounded
+and acyclic.** An inner set's wake runs the outer set's callback (the
+outer's item hooks the inner's queue), taking the outer's ready-list and
+queue locks with a lockdep subclass equal to the depth below it; a set
+added to itself is `-EINVAL`, a set that reaches the outer or that would
+make a chain of more than `EPOLL_MAX_NESTS` (4) sets is `-ELOOP`, decided
+under the watch lock with no set lock held. A set's readiness as a member
+is "its ready list has entries". Check: `epoll-nest` (an eventfd written
+from a thread while the outer blocks: the outer returns the inner's
+descriptor, the inner the eventfd's, drained neither reports; a loop
+`-ELOOP`, four sets accepted, the fifth `-ELOOP`, an event at the bottom
+of the chain reaching the top), `lxtest` (`LXEPOLLNEST`), `epoll_musl`
+(a set in a set, `ELOOP`); `tools/epoll-callback-probe.py --old
+no-loop-check` skips the check and `epoll-nest` fails at its first
+`-ELOOP`. Lockdep, in every debug boot, checks the subclassed order.
+
 ## Gaps (documented, not invariants)
 
 - No cancellation of a single parked entry; closing the ring is the only
@@ -91,10 +129,20 @@ fails at its baseline: the registration still holds the closed pipe end.
 - A ring polled by another ring becomes readable only when the owner
   collects completions into the inner ring's queue, since parked entries
   run only inside `aio_wait`.
-- An epoll cannot be a member of an epoll (`-EINVAL`): a member's events
-  wake the member's queue, not the set's, so an outer set would sleep
-  through the inner set's events (`design.md`, "epoll"). Linux allows it
-  with loop detection (`-ELOOP`) and a depth limit.
+- A chain of nested epoll sets is bounded at four (A11); Linux allows
+  five. The bound is lockdep's subclass count, which sizes its order graph
+  (`design.md`, "epoll").
+- A signalfd's registration hears the signals of the process that made
+  it: the hook is on that process's `signalfd_wqh`, while the signalfd's
+  readiness is the current process's. Another process that inherits both
+  the set and the signalfd and waits on the set is not woken by its own
+  signals (Linux's epitem sits on the adding task's `sighand` queue the
+  same way). A signalfd in a set is a one-process arrangement.
+- A set's readiness as a member of a set, or to `poll()`, is its ready
+  list's emptiness: a wake that turns out not to have made the member
+  ready (a drain) reads as readable until the next walk drops it, so a
+  `poll()` on an epoll descriptor can return readable and the following
+  `epoll_wait` nothing. Linux's epoll descriptor has the same property.
 - A handle riding in an unread unix message is not a descriptor for A9: an
   object whose only remaining reference is such a handle loses its epoll
   registrations when its last slot closes, where Linux keeps them until

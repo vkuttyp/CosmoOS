@@ -61,7 +61,9 @@ process object; the log shows `rejected: bad ELF magic`.
 `/usr`; `/usr/bin` + `../../..` → `/`; `/a` + `./b//c/./d` → `/a/b/c/d`;
 `/a/b` + `/x/../y` → `/y`; `/` + `.` → `/`; a 4-byte output buffer →
 `-ENAMETOOLONG`. Then two kills of the archive's `init` created by the
-kernel: `init --block` (blocked in a console read) is killed with
+kernel: `init --block` (blocked in a read of a pipe of its own; until the
+epoll-callback unit a console read, which a key the HID harness typed in
+those 50 ms could end -- the "known `--block` flake") is killed with
 `SIGTERM` after 50 ms and must exit with 143 within 2 s; `init --spin`
 (a CPU-bound loop, killed with `SIGKILL`) must exit with 137, which
 proves the return-to-user delivery point. Both are checked not to have

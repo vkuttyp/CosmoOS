@@ -20,39 +20,69 @@
 #include <kernel/timer.h>
 
 struct thread;
+struct wait_entry;
 
+/* A callback entry's function: run by every wake of the queue it is on,
+ * under that queue's spinlock, in the waker's context -- which may be an
+ * interrupt. It may take spinlocks ordered after the queue's (an epoll set's
+ * ready-list lock and the set's own queue), never sleep, and never touch
+ * the queue it is on. `flags` is 0 for a wake, WAIT_CB_FREED when the
+ * queue's owner is about to free the queue: the entry has already been
+ * unlinked and the owner of the entry must forget the queue
+ * (docs/kernel/scheduler/design.md, "Wait queues"). */
+typedef void (*wait_callback_fn)(struct wait_entry *e, unsigned flags);
+#define WAIT_CB_FREED 1u
+
+/* One of two kinds, on a queue's list: a sleeping thread (waitqueue_prepare,
+ * `thread` set, `fn` NULL) that a wake marks READY, or a callback
+ * (waitqueue_add_callback, `fn` set) that a wake runs. A callback entry stays
+ * on the queue until its owner removes it; it is what lets a set of objects
+ * (epoll) be told of a member's event without a thread sleeping on each
+ * member's queue. */
 struct wait_entry {
     struct list_node link;
     struct thread *thread;
+    wait_callback_fn fn;
 };
 
 struct waitqueue {
     spinlock_t lock;
     struct list_node waiters;
-    uint64_t wake_gen;          /* bumped on every wake, even with no waiters: lets a
-                                 * poller (epoll EPOLLET) learn a wake happened while it
-                                 * was not blocked, without a per-waiter callback */
 };
 
-#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters), .wake_gen = 0 }
-
-/* The current wake generation: it advances by at least one on every
- * waitqueue_wake_one/all call. A reader that saw value G and later sees a
- * different value knows the queue was woken in between (an event may have
- * occurred). Monotonic within a boot; wrap is not a concern at 64 bits. */
-static inline uint64_t waitqueue_wake_gen(const struct waitqueue *wq)
-{
-    return __atomic_load_n(&wq->wake_gen, __ATOMIC_ACQUIRE);
-}
+#define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters) }
 
 void waitqueue_init(struct waitqueue *wq, const char *name);
 
-/* Initialise an entry (once, before the first prepare). */
+/* Initialise an entry (once, before the first prepare or add). */
 static inline void wait_entry_init(struct wait_entry *e)
 {
     list_init(&e->link);
     e->thread = NULL;
+    e->fn = NULL;
 }
+
+/* Put a callback entry on the queue; every later wake runs `fn` under the
+ * queue's lock. Thread context. */
+void waitqueue_add_callback(struct waitqueue *wq, struct wait_entry *e, wait_callback_fn fn);
+/* Take a callback entry off its queue. Under the queue's lock, so when this
+ * returns no wake is running the callback and none will: the entry (and
+ * what owns it) may be freed. A no-op for an entry the queue's owner has
+ * already detached (WAIT_CB_FREED). */
+void waitqueue_remove_callback(struct waitqueue *wq, struct wait_entry *e);
+/* The owner of a queue that is about to free it: every callback entry is
+ * unlinked and told WAIT_CB_FREED under the lock, so no entry outlives the
+ * queue (Linux's POLLFREE). Thread entries are untouched: a thread asleep
+ * on a dying queue is the owner's own bug. */
+unsigned waitqueue_detach_callbacks(struct waitqueue *wq);   /* returns how many were detached */
+
+/* The wake, split for a waker that must nest the queue's lock inside another
+ * queue's (an epoll set woken from inside a member set's wake) and record
+ * something under it: lock with a lockdep subclass, wake every waiter and
+ * run every callback, unlock. `waitqueue_wake_all` is the three in one. */
+arch_irq_state_t waitqueue_lock_nested(struct waitqueue *wq, unsigned subclass);
+unsigned waitqueue_wake_all_locked(struct waitqueue *wq);
+void waitqueue_unlock(struct waitqueue *wq, arch_irq_state_t s);
 
 /* Enqueue the current thread (if not already queued) and mark it
  * BLOCKED. Safe to call repeatedly with the same entry: a woken waiter
@@ -61,7 +91,10 @@ void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e);
 /* Dequeue and mark RUNNING. */
 void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e);
 
-/* Wake the first / every waiter. Return the number woken. */
+/* Wake the first / every sleeping waiter and run every callback entry --
+ * every one, on either kind of wake: a wake_one that has found its thread
+ * walks on to the end for the callbacks and wakes no second thread. Return
+ * the number of threads woken (callbacks are not counted). */
 unsigned waitqueue_wake_one(struct waitqueue *wq);
 unsigned waitqueue_wake_all(struct waitqueue *wq);
 
