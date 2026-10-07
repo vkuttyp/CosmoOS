@@ -449,6 +449,10 @@ bool selftest_epoll_wake_race(const char **reason)
     struct kobject *ep, *ev;
     CHECK(epoll_obj_create(&ep) == 0);
     CHECK(eventfd_obj_create(0, false, &ev) == 0);
+    /* Non-blocking: the drains below run against a writer on its own
+     * schedule, and on one CPU the count can be zero when they run -- a
+     * blocking read there waited forever (the first one-CPU boot). */
+    CHECK(kobject_set_nonblock(ev, 1) == 0);
     struct epoll_ready out[4];
     static struct race_writer w;
     memset(&w, 0, sizeof(w));
