@@ -1050,6 +1050,12 @@ static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unl
     uint64_t unlock[WAKE_BENCH_ROUNDS], wake[WAKE_BENCH_ROUNDS];
     mutex_init(&b.m, "wake-bench");
     for (unsigned r = 0; r < WAKE_BENCH_ROUNDS; r++) {
+        /* A round creates, settles and joins up to 256 threads: on a slow
+         * host the ten of a size add up, so the watchdog is kicked per
+         * round, not per size. The run stays under the harness's per-test
+         * budget by being quick (1.6 to 1.9 s for all four sizes on TCG),
+         * not by a budget of its own. */
+        sched_watchdog_kick();
         b.blocked = 0;
         b.first_at = 0;
         mutex_lock(&b.m);
@@ -1085,7 +1091,6 @@ bool selftest_mutex_wake_bench(const char **reason)
     static const unsigned sizes[4] = { 1, 8, 32, 256 };
     uint64_t unlock_ns[4], wake_ns[4];
     for (unsigned k = 0; k < 4; k++) {
-        sched_watchdog_kick();
         if (!wake_bench_one(reason, sizes[k], &unlock_ns[k], &wake_ns[k]))
             return false;
     }
