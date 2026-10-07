@@ -2099,6 +2099,218 @@ bool selftest_net_arp_per_interface(const char **reason)
     return true;
 }
 
+/* --- net-neigh-down-race ------------------------------------------------------ *
+ *
+ * The two windows the N25 follow-up closes. arp_input and nd_input_*
+ * used to test NETIF_UP before taking the table lock; arp_resolve and
+ * nd_resolve did not test it at all. So an input that read "up", then
+ * lost the CPU while netif_set_up(false) cleared the flag and flushed,
+ * learned a MAC on the down interface; and a resolve racing the down
+ * allocated a fresh incomplete entry, packet parked, after the flush.
+ * Both decide under the table lock now, which the flush also takes, and
+ * the flag is cleared before the flush: whichever critical section is
+ * second sees the other's effect. The test parks each caller exactly
+ * between its old decision point and the lock (debug hooks), takes the
+ * interface down, releases it, and looks for an entry on the down
+ * interface.
+ */
+static bool dual_nd_advert(struct netif *nif, const struct in6_addr *target, const uint8_t mac[ETH_ALEN]);
+
+#if CONFIG_DEBUG
+struct down_race {
+    struct netif *nif;
+    uint32_t ip4;
+    struct in6_addr ip6;
+    int rc;
+    volatile unsigned done;
+};
+
+static void down_race_arp_input(void *arg)
+{
+    struct down_race *r = arg;
+    struct mbuf *f = m_getcl();
+    if (f != NULL) {
+        static const uint8_t peer_mac[ETH_ALEN] = { 0x02, 0xdd, 0x00, 0x00, 0x00, 0x01 };
+        memset(f->data, 0, 28);
+        f->len = f->pkt.len = 28;
+        f->data[1] = 1;
+        f->data[2] = 0x08;
+        f->data[4] = 6;
+        f->data[5] = 4;
+        f->data[7] = 1;   /* a request addressed to us: the asker is learned */
+        memcpy(f->data + 8, peer_mac, ETH_ALEN);
+        memcpy(f->data + 14, &r->ip4, 4);
+        memcpy(f->data + 24, &r->nif->ip4.addr, 4);
+        arp_input(r->nif, f);
+    }
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+static void down_race_arp_resolve(void *arg)
+{
+    struct down_race *r = arg;
+    uint8_t mac[ETH_ALEN];
+    struct mbuf *m = dual_packet();
+    r->rc = m ? arp_resolve(r->nif, r->ip4, mac, m) : -ENOMEM;
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+static void down_race_nd_input(void *arg)
+{
+    struct down_race *r = arg;
+    struct mbuf *f = m_getcl();
+    if (f != NULL) {
+        struct {
+            uint8_t type, code;
+            uint16_t cksum;
+            uint32_t flags;
+            struct in6_addr target;
+            uint8_t opt_type, opt_len;
+            uint8_t opt_mac[ETH_ALEN];
+        } __packed ns;
+        memset(&ns, 0, sizeof(ns));
+        ns.type = ICMPV6_NS;
+        ns.target = r->nif->ip6_ll;   /* a solicitation for our address: the asker is learned */
+        ns.opt_type = 1;
+        ns.opt_len = 1;
+        memcpy(ns.opt_mac, "\x02\xdd\x00\x00\x00\x02", ETH_ALEN);
+        memcpy(f->data, &ns, sizeof(ns));
+        f->len = f->pkt.len = sizeof(ns);
+        struct ipv6_hdr ip6;
+        memset(&ip6, 0, sizeof(ip6));
+        ip6.src = r->ip6;
+        ip6.dst = r->nif->ip6_ll;
+        nd_input_ns(r->nif, f, &ip6);
+    }
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+static void down_race_nd_advert(void *arg)
+{
+    struct down_race *r = arg;
+    static const uint8_t peer_mac[ETH_ALEN] = { 0x02, 0xdd, 0x00, 0x00, 0x00, 0x03 };
+    dual_nd_advert(r->nif, &r->ip6, peer_mac);   /* an advertisement for the entry resolve made below */
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+static void down_race_nd_resolve(void *arg)
+{
+    struct down_race *r = arg;
+    uint8_t mac[ETH_ALEN];
+    struct mbuf *m = dual_packet();
+    r->rc = m ? nd_resolve(r->nif, &r->ip6, mac, m) : -ENOMEM;
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+}
+
+/* Run `fn` on a thread parked at the hook, take the interface down while
+ * it is parked, release it and join. False if it never parked. */
+static bool down_race_run(struct down_race *r, void (*fn)(void *), bool (*parked)(void), void (*release)(void))
+{
+    r->done = 0;
+    r->rc = 0;
+    struct thread *t = thread_create(fn, r, "neighrace", SCHED_PRIO_DEFAULT);
+    if (t == NULL)
+        return false;
+    uint64_t give_up = clock_now_ns() + 2ull * NS_PER_SEC;
+    while (!parked() && clock_now_ns() < give_up)
+        sched_yield();
+    bool was_parked = parked();
+    netif_set_up(r->nif, false);   /* the flag cleared, then the flush -- while the caller stands before the lock */
+    release();
+    thread_join(t);
+    return was_parked;
+}
+#endif
+
+bool selftest_net_neigh_down_race(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-neigh-down-race: needs the debug park hooks; skipping");
+    return true;
+#else
+    static struct dual_nif d;
+    dual_nif_init(&d, "ndown0", 0x2d, htonl(0x0a4d0001));   /* 10.77.0.1/24 */
+    CHECK(nt_netif_register(&d.nif) == 0);
+    struct down_race r = { .nif = &d.nif, .ip4 = htonl(0x0a4d0002) };
+    const struct in6_addr peer6 = { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4d, 2 } };
+    r.ip6 = peer6;
+    uint8_t mac[ETH_ALEN];
+    struct arp_stats a0, a1;
+
+    /* 1. ARP input racing the down: the request's asker must not be learned. */
+    arp_get_stats(&a0);
+    arp_test_hold_lock_entry(true);
+    bool parked = down_race_run(&r, down_race_arp_input, arp_test_lock_entry_parked, arp_test_release_lock_entry);
+    arp_test_hold_lock_entry(false);
+    CHECK(parked);
+    CHECK(!arp_lookup(&d.nif, r.ip4, mac));   /* the old order leaves the asker reachable on the down interface */
+    arp_get_stats(&a1);
+    CHECK(a1.entries == a0.entries);
+
+    /* 2. ARP resolve racing the down: no entry, the packet freed and counted. */
+    netif_set_up(&d.nif, true);
+    arp_get_stats(&a0);
+    arp_test_hold_lock_entry(true);
+    parked = down_race_run(&r, down_race_arp_resolve, arp_test_lock_entry_parked, arp_test_release_lock_entry);
+    arp_test_hold_lock_entry(false);
+    CHECK(parked);
+    CHECK(r.rc == -ENETUNREACH);   /* the old order: -EINPROGRESS, an incomplete entry with a parked packet on a down interface */
+    CHECK(!arp_lookup(&d.nif, r.ip4, mac));
+    arp_get_stats(&a1);
+    CHECK(a1.entries == a0.entries && a1.pending_dropped == a0.pending_dropped + 1);
+
+    /* 3. ND input racing the down: the solicitation's asker must not be learned. */
+    netif_set_up(&d.nif, true);
+    nd_test_hold_lock_entry(true);
+    parked = down_race_run(&r, down_race_nd_input, nd_test_lock_entry_parked, nd_test_release_lock_entry);
+    nd_test_hold_lock_entry(false);
+    CHECK(parked);
+    netif_set_up(&d.nif, true);
+    CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no entry: 0 would mean the asker was learned across the down */
+    netif_set_up(&d.nif, false);   /* drops the entry the probe above made */
+
+    /* 4. ND advertisement racing the down: an incomplete entry of ours
+     * exists (resolve made it), the advertisement that would complete it
+     * is parked before the lock, the down flushes the entry; the
+     * advertisement must complete nothing. (nd_input_na never allocates,
+     * so a flush leaves it nothing to complete under either order; the
+     * case pins the check's place under the lock.) */
+    netif_set_up(&d.nif, true);
+    uint8_t probe_mac[ETH_ALEN];
+    struct mbuf *probe = dual_packet();
+    CHECK(probe != NULL);
+    CHECK(nd_resolve(&d.nif, &peer6, probe_mac, probe) == -EINPROGRESS);
+    nd_test_hold_lock_entry(true);
+    parked = down_race_run(&r, down_race_nd_advert, nd_test_lock_entry_parked, nd_test_release_lock_entry);
+    nd_test_hold_lock_entry(false);
+    CHECK(parked);
+    netif_set_up(&d.nif, true);
+    CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no reachable entry: the advertisement completed nothing */
+    netif_set_up(&d.nif, false);
+
+    /* 5. ND resolve racing the down: refused, the packet counted dropped. */
+    struct ip_stats n0, n1;
+    ipv6_get_stats(&n0);
+    netif_set_up(&d.nif, true);
+    nd_test_hold_lock_entry(true);
+    parked = down_race_run(&r, down_race_nd_resolve, nd_test_lock_entry_parked, nd_test_release_lock_entry);
+    nd_test_hold_lock_entry(false);
+    CHECK(parked);
+    CHECK(r.rc == -ENETUNREACH);
+    ipv6_get_stats(&n1);
+    CHECK(n1.nd_pending_dropped == n0.nd_pending_dropped + 1);
+    netif_set_up(&d.nif, true);
+    CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* nothing left behind by the refused resolve */
+    netif_set_up(&d.nif, false);
+
+    nt_netif_unregister(&d.nif);
+    kobject_put(&d.nif.obj);
+    kinfo("selftest: net-neigh-down-race: input and resolve parked before the lock while the interface went down; no entry survived");
+    return true;
+#endif
+}
+
 /* A neighbour advertisement for `target` at `mac`, handed to nd_input_na as `nif`'s. */
 static bool dual_nd_advert(struct netif *nif, const struct in6_addr *target, const uint8_t mac[ETH_ALEN])
 {

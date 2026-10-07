@@ -453,10 +453,37 @@ finishes on the live interface under its read-side section (N-L1); the
 flush takes only the table locks, so it is safe from the contexts
 `netif_set_up` is called from. The routing lookup never chooses a down
 interface (`netif_connected`, `netif_default` skip `!NETIF_UP`), and
-`arp_input`/`nd_input_*` learn and answer nothing on an interface that
-is not up -- a frame queued before the down and input after the flush
-would otherwise carry a MAC across the down transition into the link's
-return (review of PR #319).
+`arp_input`/`nd_input_*` learn and answer nothing, `arp_resolve`/
+`nd_resolve` allocate nothing (`-ENETUNREACH`, the packet freed and
+counted with the flush's drops), on an interface that is not up -- a
+frame queued before the down and input after the flush would otherwise
+carry a MAC across the down transition into the link's return (review of
+PR #319), and a send racing the down would park a packet on a link that
+is not there.
+
+**The ordering** (closed 2026-10-07, the follow-up to PR #319). The flag
+is read *under the table lock*, which the flush also takes, and
+`netif_set_up(false)` clears it (a release store under `nif->lock`)
+before calling the flush. The two critical sections on a table lock are
+ordered; whichever is second sees the other's effect: a reader first is
+undone by the flush behind it, a reader second sees the cleared flag.
+Read before the lock -- the order until then -- the check could pass,
+the CPU go to the down, and the entry be made after the flush. Every
+writer of `nif->flags` (`netif_set_up`, `netif_set_forward`,
+`netif_set_masquerade`, `netif_unregister` step 1) holds `nif->lock` and
+publishes the whole word with a release store, so the lock-free acquire
+loads on the data paths see one word, never a torn read-modify-write;
+`netif_register`'s clear of `NETIF_GONE` is before the object is
+published and needs none. **Checked by** `net-neigh-down-race` (debug
+builds): `arp_test_hold_lock_entry`/`nd_test_hold_lock_entry` park the
+next `arp_input`, `arp_resolve`, `nd_input_ns` or `nd_resolve` between
+its decision to proceed and its taking of the lock; the test takes the
+interface down while each is parked, releases it, and finds no entry
+(and `-ENETUNREACH` with the packet counted dropped from the resolves).
+`tools/neigh-down-race-probe.py --old` moves the input checks back before
+the lock and removes the resolve checks: the test fails at
+`!arp_lookup(&d.nif, r.ip4, mac)`, the asker learned on the down
+interface.
 
 **Checked by** `net-arp-per-interface` and `net-nd-per-interface`: two
 fake interfaces, one neighbour address, two MACs; each resolution sends

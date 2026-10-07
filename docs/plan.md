@@ -312,6 +312,11 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   (`tools/arp-per-interface-probe.py --old`). `net-nicbench` fails again on
   an unresolved gateway. See the
   [report](audit/2026-10-07-neighbour-per-interface-report.md).
+  *Follow-up 2026-10-07:* the `NETIF_UP` checks moved under the table
+  locks in input and resolve (a resolve on a down interface is refused),
+  every flag writer a release store; `net-neigh-down-race` parks a caller
+  between its decision and the lock while the interface goes down
+  (report §8).
 - [ ] **Decision — UDP send when the transmit ring is full.** Today
   `vnet_transmit` and `e1000e_transmit` refuse a frame with `-ENOBUFS` when
   no descriptor is free, and `udp_sendto` hands that to the caller: a blocking

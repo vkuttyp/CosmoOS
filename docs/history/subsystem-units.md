@@ -2359,3 +2359,13 @@ See the [history index](README.md).
   `tools/arp-per-interface-probe.py --old`. `net-nicbench` fails again on an
   unresolved gateway; no test moves the table's clock any more. Report:
   `docs/audit/2026-10-07-neighbour-per-interface-report.md`.
+- **Down interfaces hold no neighbour entries, closed.** The input paths
+  read `NETIF_UP` before the table lock and the resolve paths not at all,
+  so a caller that lost the CPU to `netif_set_up(false)` between its
+  decision and the lock learned or allocated on the down interface. Both
+  tables read the flag under their lock; a resolve on a down interface is
+  refused with the packet counted dropped; every writer of the flag word
+  publishes with a release store. `net-neigh-down-race` parks each caller
+  at the window with debug hooks while the interface goes down;
+  `tools/neigh-down-race-probe.py --old` restores the old order and fails
+  it. Report: `docs/audit/2026-10-07-neighbour-per-interface-report.md`, §8.
