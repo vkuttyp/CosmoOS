@@ -8,7 +8,7 @@ QEMU TCG on an Apple M-series host, 2026-09-05).
 
 | Level | What | Command |
 |---|---|---|
-| Host fuzz | `fuzz_modelf`, `fuzz_elf`, `fuzz_pkg`, `fuzz_linux`, `fuzz_virtq`, `fuzz_cosmofs`: seeds plus `FUZZ_RUNS` mutations each, ASan + UBSan | `make fuzz` (CI: `FUZZ_RUNS=50000` on the x86-64 job) |
+| Host fuzz | `fuzz_modelf`, `fuzz_elf`, `fuzz_pkg`, `fuzz_linux`, `fuzz_virtq`, `fuzz_cosmofs`, `fuzz_lz4`, `fuzz_usb_desc`, `fuzz_fbvalid`, `fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns`: seeds (and a corpus) plus `FUZZ_RUNS` mutations each, ASan + UBSan | `make fuzz` (CI: `FUZZ_RUNS=50000` on the x86-64 job) |
 | Host unit | `test_modelf` `unaligned-tables` (the fuzz finding's regression) | `make host-test` |
 | Target, debug | `fault-kmalloc`, `fault-blk`, `cosmofs-replay`, `syscall-fuzz`; every test's duration and the timing summary | `make test`, `QEMU_SMP=1 make test`, `ARCH=aarch64 make test` |
 | Target, release | the four tests report "compiled out" and pass; no fault-injection hook, no `debug.faultinject` | `make BUILD=release test` |
@@ -30,6 +30,9 @@ plus a walk).
 | `fuzz_linux` | sockaddrs, a dirent batch, flag words | `compat/linux/convert.c` | converted records never exceed the caller's capacity |
 | `fuzz_virtq` | a well-behaved add/complete/pop program | `drivers/virtio/virtqueue.c` | only in-flight cookies are ever popped; `num_free ≤ size` |
 | `fuzz_cosmofs` | `cosmofs_format` of a 64-block device | `cosmofs_core.c`, `cosmofs.c`, `crc32c.c`, `slab.c`, `kmalloc.c` | mount either fails or every reachable directory and file walks and reads; unmount leaves no vnode |
+| `fuzz_net_frame` | 19 frames (ARP, ping, UDP, TCP in every phase, masqueraded guest traffic, a port forward, ND, IPv6 ping, fragmentation needed) and 8 corpus frames from a boot's capture | the receive path, `ether.c` to `tcp.c`, `nat.c`, `fw.c` over `shim_net.c` | every transmitted frame well formed and checksummed; tables bounded; nothing leaked after teardown |
+| `fuzz_tcp_segments` | 16 programs over one connection (data, gaps, both closes, resets, options, a closed window, retransmissions to the limit, keepalive) | `tcp.c` with `TCP_HOST_TEST` | state changes on RFC 793's machine; a bad checksum changes nothing; sequence variables ordered; nothing leaked |
+| `fuzz_dhcp_dns` | 7 records (the lease conversation, a NAK, a stranger, a query and its answer, SERVFAIL, expiry, resolver strings, a full table) | `tapsvc.c` with `TAPSVC_HOST_TEST` | a DHCP reply well formed and to a claimed request; a query relayed once with its id alone changed; an answer only from the upstream with a lent id |
 
 **Finding.** The first run of `fuzz_modelf` (iteration 2 of the
 mutations) produced a UBSan misaligned-load report: `e_shoff` was
@@ -40,6 +43,16 @@ relocations, `.cosmo.module`, `.ksymtab`); `test_modelf` gained
 `unaligned-tables`. On the target the same image would have been an
 unaligned read that x86 tolerates and AArch64 may not, from a signed
 module: a reject, not a trust boundary breach, but a real defect.
+
+**Finding (2026-10-07, `fuzz_tcp_segments`).** A peer's FIN that also
+acknowledged the last segment in flight, while the host had closed with
+data still held back by the peer's window, left the connection in CLOSING
+for ever: the FIN branch of `tcp_input` built a bare acknowledgement and
+did not run the output, and nothing else would. The pcb, its buffers and
+its table slot stayed, and the peer waited for a FIN that never came. The
+leak oracle (the allocator's live count after teardown) caught it; the fix
+runs the output from the FIN branch; `net-fin-acks-last-data` is the
+regression test (`docs/audit/2026-10-07-net-fuzz-report.md`).
 
 **Reproducing a crash.** The driver saves the input to
 `out/<arch>-<build>/fuzz/crash-<n>`; `out/…/fuzz/fuzz_modelf
