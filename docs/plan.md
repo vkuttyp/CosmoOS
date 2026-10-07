@@ -80,27 +80,27 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   never run and the completion classes never signalled or never waited
   for, and the [completion-waits report](audit/2026-10-07-lockdep-completion-waits-report.md)
   judges each entry. What remains is bounded and named in the next item.
-- [ ] **Validation — the paths the suite never drives.** The coverage
-  listing of 2026-10-07 names one timer callback function the whole debug
-  suite never runs, `delack_timer` (TCP's delayed acknowledgement, armed
-  on every second in-order segment and always cancelled by the
-  acknowledgement that goes out first), one production completion class
-  never waited for because its consumer polls (`xhci-first-scan`, under
-  `g_controllers_lock`), and one polled path inside an exercised class
-  (the NVMe admin fallback without a vector, whose `nvme-admin` class is
-  otherwise waited for and signalled). A delayed acknowledgement needs a receiver that gets
-  one segment and sends nothing for 40 ms: a loopback test of the shape
-  `net-lo-tcp` has would run it, and the callback's locks (`timer_kick`,
-  the same as `rexmit_timer`'s, which runs) would then be in the graph
-  under its own class. The NVMe fallback's self-signal through a poll is
-  the one completion shape the model takes for another thread's; a
-  handshake wait in the fallback would both make it visible and settle
-  the frame's lifetime by the primitive rather than by argument. Also
-  recorded: a completion signaller that takes and releases a mutex before
-  `complete()` records no edge for it (no production instance), and a
-  worker completing a barrier item depends on every item ahead of it (the
-  network worker's items take spinlocks only; the mechanism if that
-  changes is the callback class applied to the worker).
+- [x] **Validation — the paths the suite never drives.** The coverage
+  listing of 2026-10-07 named one timer callback function the debug suite
+  never ran (`delack_timer`) and two polled completion waits
+  (`xhci-first-scan`, the NVMe admin fallback). *Completed 2026-10-07
+  (the tidy-up):* `net-tcp-delack` drives the delayed acknowledgement --
+  and found it could not fire: the receive path's output after every
+  segment sent the owed acknowledgement at once and cancelled the timer it
+  had just armed; `ack_now` now separates "wanted now" from "owed", as the
+  design document always said, and the listing reports no callback never
+  run on either architecture. The xHCI module init waits
+  (`wait_for_completion_timeout`, 3 s) and the NVMe fallback waits (1 ms
+  rounds) and can be forced (`FI_NVME_ADMIN_POLL`, `nvme-admin-poll`), so
+  both are in the graph. Still recorded, not modelled: a completion
+  signaller that takes and releases a mutex before `complete()` (no
+  production instance); a worker completing a barrier item depends on
+  every item ahead of it (the network worker's items take spinlocks only;
+  the mechanism if that changes is the callback class applied to the
+  worker); and a signaller blocked in another wait before its `complete()`
+  contributes no edge for that wait (the model stops at one level on
+  purpose; no production chain closes through it today). See the
+  [tidy-up report](audit/2026-10-07-completion-waits-tidy-up-report.md).
 - [x] **Implementation/validation — raw IRQ pairing.** Track or validate
   ownership and pairing of raw `arch_irq_save`/`arch_irq_restore` operations
   beyond the checks already applied to tracked spinlock wrappers.
@@ -349,7 +349,7 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   every flag writer a release store; `net-neigh-down-race` parks a caller
   between its decision and the lock while the interface goes down
   (report §8).
-- [ ] **Implementation — netif flag reads once per packet.** Every writer
+- [x] **Implementation — netif flag reads once per packet.** Every writer
   of `nif->flags` publishes with a release store (the N25 follow-up), and
   the readers whose order against another structure matters (`NETIF_UP`
   under the neighbour tables' locks, `NETIF_GONE` in `netif_transmit` and
@@ -362,7 +362,12 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   packet -- forwarded by the first read, not masqueraded by the second.
   Read the flag word once per packet with a relaxed atomic load and pass
   the copy down the path; a toggle then takes effect between packets, not
-  inside one.
+  inside one. *Completed 2026-10-07 (N26):* `ipv4_input`, `ipv4_forward`
+  and `ipv4_output` each read the word once and hand it to `fw.c` and
+  `nat.c`; `net-netif-flags` parks a datagram between the anti-spoof check
+  and the masquerade decision while the flag flips (the old reads
+  masqueraded a source the masquerade's anti-spoof refuses) and runs a
+  stream under a toggling thread; `tools/netif-flags-probe.py --old`.
 - [ ] **Decision — UDP send when the transmit ring is full.** Today
   `vnet_transmit` and `e1000e_transmit` refuse a frame with `-ENOBUFS` when
   no descriptor is free, and `udp_sendto` hands that to the caller: a blocking

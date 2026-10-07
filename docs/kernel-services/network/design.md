@@ -207,7 +207,14 @@ retransmits from `snd_una` with a doubled RTO, giving up after 8
 attempts (the connection is closed with `-ETIMEDOUT`). When the peer
 advertises a zero window the retransmit timer doubles as the persist
 probe. Delayed ACK: a
-pure ACK is sent at once when two segments are pending or after 40 ms.
+pure ACK is sent at once when two segments are pending or after 40 ms
+(`ack_now` says one is wanted on this output -- every second segment, a
+gap behind, a window update, the handshake, the application's read while
+one is owed, the timer -- and `delack_pending` that one is owed with the
+timer armed; until 2026-10-07
+the output routine sent the owed one on any output, and the receive
+path's output after every segment cancelled the timer it had just armed,
+so the timer never fired: `net-tcp-delack`).
 TIME_WAIT lasts 2 s in this phase (a constant, `TCP_TIMEWAIT_NS`) and
 restarts only for a retransmitted FIN. An orphaned FIN_WAIT_2 ends
 after `TCP_FIN_WAIT2_NS`; an idle established connection is probed
