@@ -31,6 +31,8 @@ int harness_run(const struct host_test *tests, size_t count);
 /* Drop every spinlock the code under test still holds (shim_spinlock.c).
  * Called by panic() before unwinding into EXPECT_PANIC. */
 void harness_release_all_locks(void);
+/* How many it holds right now: a fuzz target's lock-balance oracle. */
+unsigned harness_locks_held(void);
 
 #define EXPECT(cond)                                                           \
     do {                                                                       \

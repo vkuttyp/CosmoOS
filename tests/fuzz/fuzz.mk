@@ -53,8 +53,22 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel/security/sha512.c \
 	kernel/core/crc32c.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
 
+# The network stack on the host (docs/verification/design.md, "The network
+# targets"): the protocol layers unchanged, over tests/fuzz/shim_net.c.
+FUZZ_NET_STACK := kernel-services/network/ether.c kernel-services/network/arp.c kernel-services/network/ipv4.c \
+	kernel-services/network/ipv6.c kernel-services/network/udp.c kernel-services/network/tcp.c \
+	kernel-services/network/nat.c kernel-services/network/fw.c kernel-services/network/mbuf.c \
+	kernel-services/network/cksum.c kernel-services/network/inet.c
+FUZZ_NET_FRAME_SRCS := tests/fuzz/fuzz_net_frame.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
+FUZZ_TCP_SEGMENTS_SRCS := tests/fuzz/fuzz_tcp_segments.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
+FUZZ_DHCP_DNS_SRCS := tests/fuzz/fuzz_dhcp_dns.c tests/fuzz/shim_net.c kernel-services/network/tapsvc.c \
+	$(FUZZ_NET_STACK) $(FUZZ_COMMON)
+# Checked-in corpora: frames from a boot's capture (tools/pcap-to-seeds.py).
+FUZZ_NET_FRAME_CORPUS := $(ROOT)/tests/fuzz/corpus/net_frame
+
 FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pkg $(FUZZ_OUT)/fuzz_linux \
-	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid
+	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid \
+	$(FUZZ_OUT)/fuzz_net_frame $(FUZZ_OUT)/fuzz_tcp_segments $(FUZZ_OUT)/fuzz_dhcp_dns
 
 $(FUZZ_OUT)/fuzz_fbvalid: $(addprefix $(ROOT)/,$(FUZZ_FBVALID_SRCS))
 	$(call log,FUZZCC,$@)
@@ -105,9 +119,28 @@ $(FUZZ_OUT)/fuzz_cosmofs: $(addprefix $(ROOT)/,$(FUZZ_COSMOFS_SRCS))
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/kernel-services/filesystem/cosmofs \
 		$(addprefix $(ROOT)/,$(FUZZ_COSMOFS_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
+FUZZ_NET_HDRS := $(ROOT)/tests/fuzz/shim_net.h $(ROOT)/tests/fuzz/netpkt.h
+
+$(FUZZ_OUT)/fuzz_net_frame: $(addprefix $(ROOT)/,$(FUZZ_NET_FRAME_SRCS)) $(FUZZ_NET_HDRS)
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(addprefix $(ROOT)/,$(FUZZ_NET_FRAME_SRCS)) $(FUZZ_LDFLAGS) -o $@
+
+$(FUZZ_OUT)/fuzz_tcp_segments: $(addprefix $(ROOT)/,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_NET_HDRS)
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTCP_HOST_TEST=1 $(addprefix $(ROOT)/,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_LDFLAGS) -o $@
+
+$(FUZZ_OUT)/fuzz_dhcp_dns: $(addprefix $(ROOT)/,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS)
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTAPSVC_HOST_TEST=1 $(addprefix $(ROOT)/,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_LDFLAGS) -o $@
+
 .PHONY: fuzz fuzz-build
 fuzz-build: $(FUZZ_TARGETS)
 
 fuzz: $(FUZZ_TARGETS)
-	$(Q)for t in $(FUZZ_TARGETS); do echo "== $$t"; ASAN_OPTIONS=$(FUZZ_ASAN_OPTIONS) $$t $(FUZZ_RUN_ARGS) || exit 1; done
+	$(Q)for t in $(FUZZ_TARGETS); do \
+		corpus=""; case $$t in */fuzz_net_frame) corpus="$(FUZZ_NET_FRAME_CORPUS)";; esac; \
+		echo "== $$t"; ASAN_OPTIONS=$(FUZZ_ASAN_OPTIONS) $$t $(FUZZ_RUN_ARGS) $$corpus || exit 1; done
 	@echo "fuzz: PASS"

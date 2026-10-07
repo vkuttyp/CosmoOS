@@ -352,8 +352,18 @@ static enum tcp_state state_of(const struct tcp_pcb *pcb)
     return __atomic_load_n(&pcb->state, __ATOMIC_ACQUIRE);
 }
 
+#ifdef TCP_HOST_TEST
+/* The host fuzz target's oracle (tests/fuzz/fuzz_tcp_segments.c): every
+ * state change passes here, before it is stored, and is checked against
+ * the documented state machine. Not compiled into the kernel. */
+void tcp_test_state_change(struct tcp_pcb *pcb, enum tcp_state from, enum tcp_state to);
+#endif
+
 static void set_state(struct tcp_pcb *pcb, enum tcp_state st)
 {
+#ifdef TCP_HOST_TEST
+    tcp_test_state_change(pcb, pcb->state, st);
+#endif
     __atomic_store_n(&pcb->state, st, __ATOMIC_RELEASE);
 }
 

@@ -388,6 +388,39 @@ static void dns_servfail(struct tapsvc *svc, uint8_t *buf, uint32_t n, const str
     ksock_sendto(svc->gsock, buf, n, to);
 }
 
+/* One query from the guest (`n` >= DNS_HDR bytes in `buf`, from `from`):
+ * lend an upstream id and forward it, or answer SERVFAIL. */
+static void dns_guest_one(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from)
+{
+    STAT(dns_query);
+    if (!svc->up_set) { dns_servfail(svc, buf, n, from); return; }
+    uint16_t gid = (uint16_t)(buf[0] << 8 | buf[1]);
+    uint16_t uid;
+    if (!dns_alloc(svc, gid, from, &uid)) { STAT(dns_drop_full); return; }
+    buf[0] = (uint8_t)(uid >> 8); buf[1] = (uint8_t)uid;
+    struct netaddr up;
+    memset(&up, 0, sizeof(up));
+    up.family = COSMO_AF_INET; up.port = svc->up_port; up.v4 = svc->up_ip;
+    ksock_sendto(svc->usock, buf, n, &up);
+}
+
+/* One answer from the upstream side: restore the guest's id, relay it back. */
+static void dns_up_one(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from)
+{
+    /* Only the configured upstream may answer: an unconnected socket
+     * accepts packets from anyone, and matching on the id alone would let
+     * a reachable attacker race a forged response into the guest. */
+    if (from->v4 != svc->up_ip || from->port != svc->up_port)
+        return;
+    uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
+    struct netaddr guest; uint16_t gid;
+    if (!dns_take(svc, uid, &guest, &gid))
+        return;                               /* no live entry: drop */
+    buf[0] = (uint8_t)(gid >> 8); buf[1] = (uint8_t)gid;
+    STAT(dns_answer);
+    ksock_sendto(svc->gsock, buf, n, &guest);
+}
+
 /* Guest side: read a query, lend an upstream id, forward it. */
 static void dns_guest_main(void *arg)
 {
@@ -397,16 +430,7 @@ static void dns_guest_main(void *arg)
         struct netaddr from;
         int64_t n = ksock_recvfrom(svc->gsock, buf, sizeof(buf), &from);
         if (n < DNS_HDR) { if (n <= 0) break; continue; }
-        STAT(dns_query);
-        if (!svc->up_set) { dns_servfail(svc, buf, (uint32_t)n, &from); continue; }
-        uint16_t gid = (uint16_t)(buf[0] << 8 | buf[1]);
-        uint16_t uid;
-        if (!dns_alloc(svc, gid, &from, &uid)) { STAT(dns_drop_full); continue; }
-        buf[0] = (uint8_t)(uid >> 8); buf[1] = (uint8_t)uid;
-        struct netaddr up;
-        memset(&up, 0, sizeof(up));
-        up.family = COSMO_AF_INET; up.port = svc->up_port; up.v4 = svc->up_ip;
-        ksock_sendto(svc->usock, buf, (size_t)n, &up);
+        dns_guest_one(svc, buf, (uint32_t)n, &from);
     }
     thread_exit(0);
 }
@@ -420,18 +444,7 @@ static void dns_up_main(void *arg)
         struct netaddr from;
         int64_t n = ksock_recvfrom(svc->usock, buf, sizeof(buf), &from);
         if (n < DNS_HDR) { if (n <= 0) break; continue; }
-        /* Only the configured upstream may answer: an unconnected socket
-         * accepts packets from anyone, and matching on the id alone would let
-         * a reachable attacker race a forged response into the guest. */
-        if (from.v4 != svc->up_ip || from.port != svc->up_port)
-            continue;
-        uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
-        struct netaddr guest; uint16_t gid;
-        if (!dns_take(svc, uid, &guest, &gid))
-            continue;                         /* no live entry: drop */
-        buf[0] = (uint8_t)(gid >> 8); buf[1] = (uint8_t)gid;
-        STAT(dns_answer);
-        ksock_sendto(svc->gsock, buf, (size_t)n, &guest);
+        dns_up_one(svc, buf, (uint32_t)n, &from);
     }
     thread_exit(0);
 }
@@ -556,6 +569,76 @@ void tapsvc_stop(struct tapsvc *svc)
     dns_stop(svc);
     kfree(svc);
 }
+
+#ifdef TAPSVC_HOST_TEST
+/*
+ * The host fuzz target (tests/fuzz/fuzz_dhcp_dns.c) drives the two parsers
+ * without a tap, sockets or threads: an instance over a bare interface, the
+ * DHCP filter fed a frame, the DNS proxy fed one datagram from either side.
+ * Not compiled into the kernel.
+ */
+struct tapsvc *tapsvc_test_new(struct netif *nif)
+{
+    struct tapsvc *svc = kmalloc(sizeof(*svc), KMEM_ZERO);
+    if (svc == NULL)
+        return NULL;
+    spinlock_init(&svc->lock, "tapsvc");
+    spinlock_init(&svc->dns_lock, "tapsvc-dns");
+    svc->nif = nif;
+    svc->gateway = nif->ip4.addr;
+    svc->mask = nif->ip4.mask;
+    svc->guest = (nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST);
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    int slot = -1;
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i] == NULL) { slot = (int)i; break; }
+    if (slot >= 0)
+        g_svcs[slot] = svc;
+    spin_unlock_irqrestore(&g_svcs_lock, s);
+    if (slot < 0) {
+        kfree(svc);
+        return NULL;
+    }
+    return svc;
+}
+
+void tapsvc_test_free(struct tapsvc *svc)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i] == svc) { g_svcs[i] = NULL; break; }
+    spin_unlock_irqrestore(&g_svcs_lock, s);
+    kfree(svc);
+}
+
+bool tapsvc_test_dhcp(struct tapsvc *svc, const void *frame, uint32_t len)
+{
+    return dhcp_filter(NULL, frame, len, svc);
+}
+
+void tapsvc_test_dns_query(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from)
+{
+    if (n >= DNS_HDR)
+        dns_guest_one(svc, buf, n, from);
+}
+
+void tapsvc_test_dns_answer(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from)
+{
+    if (n >= DNS_HDR)
+        dns_up_one(svc, buf, n, from);
+}
+
+bool tapsvc_test_parse_ip(const char *s, uint32_t *out)
+{
+    return dns_parse_ip(s, out);
+}
+
+void tapsvc_test_set_sockets(struct tapsvc *svc, struct socket *gsock, struct socket *usock)
+{
+    svc->gsock = gsock;
+    svc->usock = usock;
+}
+#endif /* TAPSVC_HOST_TEST */
 
 unsigned tapsvc_count(void)
 {

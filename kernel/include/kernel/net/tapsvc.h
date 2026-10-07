@@ -54,4 +54,19 @@ unsigned tapsvc_count(void);
 /* Test hook: point the DNS proxy at a chosen upstream (ip/port network+host). */
 void tapsvc_test_set_upstream(struct tapsvc *svc, uint32_t ip, uint16_t port);
 
+#ifdef TAPSVC_HOST_TEST
+/* The host fuzz target's doors (tests/fuzz/fuzz_dhcp_dns.c): an instance
+ * over a bare interface, no tap, sockets or threads. Not in the kernel. */
+struct netif;
+struct netaddr;
+struct socket;
+struct tapsvc *tapsvc_test_new(struct netif *nif);
+void tapsvc_test_free(struct tapsvc *svc);
+bool tapsvc_test_dhcp(struct tapsvc *svc, const void *frame, uint32_t len);   /* the DHCP filter: true = claimed */
+void tapsvc_test_dns_query(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from);
+void tapsvc_test_dns_answer(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *from);
+bool tapsvc_test_parse_ip(const char *s, uint32_t *out);
+void tapsvc_test_set_sockets(struct tapsvc *svc, struct socket *gsock, struct socket *usock);
+#endif
+
 #endif /* KERNEL_NET_TAPSVC_H */
