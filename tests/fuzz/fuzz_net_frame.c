@@ -140,12 +140,14 @@ static void hexdump(const char *what, const uint8_t *p, uint32_t n)
  * such a datagram INVALID and skips NAT; this stack masquerades it; the
  * report records the difference). The oracle holds a forwarded frame to the
  * IP header checksum alone; the stack's own frames must be well-formed
- * throughout. A delivery is remembered by its destination, protocol, total
- * length and destination port, none of which forwarding changes.
+ * throughout. A delivery is remembered by its destination, protocol, payload
+ * length and destination port, none of which forwarding changes (the IP
+ * total does: the forwarder writes a fresh 20-byte header, so a datagram
+ * that arrived with options leaves shorter by their length).
  */
 struct seen_ip {
     uint32_t dst;
-    uint16_t total, dport;
+    uint16_t payload, dport;
     uint8_t proto;
     bool valid;
 };
@@ -161,7 +163,8 @@ static bool ip_key(const uint8_t *frame, uint32_t len, struct seen_ip *k)
     if ((ip[0] >> 4) != 4 || ihl < NP_IPV4 || NP_ETH + ihl + 4 > len)
         return false;
     memcpy(&k->dst, ip + 16, 4);
-    k->total = np_get16(ip + 2);
+    uint16_t total = np_get16(ip + 2);
+    k->payload = total >= ihl ? (uint16_t)(total - ihl) : 0;
     k->proto = ip[9];
     k->dport = np_get16(ip + ihl + 2);
     k->valid = true;
@@ -174,7 +177,7 @@ static bool forwarded(const uint8_t *frame, uint32_t len)
     if (!ip_key(frame, len, &k))
         return false;
     for (unsigned i = 0; i < 16; i++)
-        if (g_in[i].valid && g_in[i].dst == k.dst && g_in[i].total == k.total && g_in[i].proto == k.proto &&
+        if (g_in[i].valid && g_in[i].dst == k.dst && g_in[i].payload == k.payload && g_in[i].proto == k.proto &&
             g_in[i].dport == k.dport)
             return true;
     return false;
