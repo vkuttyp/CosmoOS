@@ -296,7 +296,29 @@ waiter's acquire, medians of ten. Three trees, through
 `tools/wake-one-probe.py`: before the unit (`95c635e2`), after it
 (`abf63098`), and the follow-up.
 
-TBD-WAKE-TABLE
+Each cell is `unlock call / unlock to the first waiter's acquire`, in
+microseconds, for 1, 8, 32 and 256 waiters (medians of ten; QEMU TCG, four
+CPUs, the host otherwise idle):
+
+| Tree | x86-64 debug | x86-64 `LOCKDEP=0` | AArch64 debug |
+|---|---|---|---|
+| before the unit (`95c635e2`) | 61/169, 87/242, 47/139, **29**/138 | 26/80, 52/177, 41/171, **16**/146 | 39/123, 57/203, 35/124, **25**/170 |
+| after the unit (`abf63098`) | 54/152, 105/343, 59/170, **71**/165 | 27/94, 56/160, 59/199, **56**/131 | 53/156, 124/290, 55/155, **70**/169 |
+| the follow-up | 61/170, 45/152, 42/138, **40**/172 | 33/92, 71/215, 46/163, **16**/108 | 51/151, 70/244, 39/136, **27**/178 |
+
+At one, eight and thirty-two waiters the three trees are within TCG's
+noise of one another (an unlock call is 30 to 120 us on this host, and a
+run of ten moves by that much). At 256 waiters the walk shows: the unit's
+tree takes 2.5 to 3.5 times as long to unlock as the tree before it, on
+every column (71 us against 29, 56 against 16, 70 against 25), about 150
+to 200 ns a list entry under TCG; the follow-up is back at the earlier
+tree's figure (40, 16 and 27 us). The time to the first waiter's acquire
+is dominated by the wake and the switch and does not resolve the
+difference at any size. So the regression was real and is gone, and it
+needed 256 waiters to be seen: the 32-waiter bench the follow-up started
+with showed nothing on either tree, which is why the bench grew. (The two
+older trees boot with this branch's bench added; their runs fail the
+harness only on the module ABI marker, `v7` against their `v5`/`v6`.)
 
 **The nesting limit was four; Linux's is five.** epoll_ctl(2) documents
 `ELOOP` for "a nesting depth of epoll instances greater than 5"; in the
@@ -315,4 +337,19 @@ of order graph in debug builds (800 KiB, from 512). A11, `epoll-nest`
 (five accepted, the sixth refused), `LXEPOLLNEST` (a chain of six) and
 the design say five.
 
-TBD-FOLLOWUP-VALIDATION
+**Validation.** The usual chain on both architectures, this branch at
+its head: `host-test` (after fixing `test_lockdep`'s node arithmetic,
+which had hard-coded four subclasses), `analyze`, the debug suite with
+one, two and four CPUs, `test-smp2`, `test-chaos`, and a release build
+and boot, all passing; the network harness is part of every debug boot.
+Boot times: x86-64 137/147/148 s (one/two/four CPUs), `test-smp2` 150 s,
+`test-chaos` 140 s, release 17 s; AArch64 128/145/139 s, 152 s, 153 s,
+20 s. One failure on the way: the first x86-64 `test-chaos` boot failed
+`smp-ticks` (`d >= 5` at `smptest.c:540`, a fixed-settle tick count)
+while the host was compiling and running fuzz targets for the next unit;
+on a quiet host the same build passed (`smp-ticks` in 41 ms). It is the
+loaded-host timing family `docs/testing/flakes.md` describes and not this
+branch's doing, so it is not counted as a sighting. The measurements
+above were taken with nothing else running, at the default QEMU priority.
+`tools/epoll-callback-probe.py --old no-loop-check` still fails at its
+anchor (the memoised loop check), unchanged by the follow-up.
