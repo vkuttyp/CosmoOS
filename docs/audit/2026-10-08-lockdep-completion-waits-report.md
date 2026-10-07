@@ -365,8 +365,12 @@ classes.
 The difference is inside `main`'s own spread (2.4 s). Both trees run with
 `LOCKDEP=1`, so the comparison is like with like; the absolute numbers are
 the debug-with-lockdep ones (`docs/development.md`, "Benchmark runs"). No
-x86-64 boot approached the 180 s budget (the longest, the two-CPU boot,
-148.1 s); the flakes record is unchanged.
+x86-64 boot approached the 180 s budget locally (the longest, the two-CPU
+boot, 148.1 s). On CI (PR #321), the x86-64 job's debug boots took
+162.7–166.1 s in the first run and 143.6–144.4 s in the second, against
+the 180 s budget; the AArch64 job's 170.2–183.1 s against its 240 s. No
+timeout, so the flakes record is unchanged; the first run's 166 s is the
+closest an x86-64 boot of this branch came.
 
 ## Plan §1
 
