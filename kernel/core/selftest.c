@@ -596,6 +596,7 @@ static const struct selftest tests[] = {
     { "sched-migrate-refuses", selftest_sched_migrate_refuses },
     { "sched-migrate-stress", selftest_sched_migrate_stress },
     { "nvme",            selftest_nvme },
+    { "nvme-admin-poll", selftest_nvme_admin_poll },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },
     { "usb-storage-timeout", selftest_usb_storage_timeout },

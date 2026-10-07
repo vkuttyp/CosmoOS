@@ -31,6 +31,7 @@ enum fi_kind {
     FI_HV_SELFCHECK,  /* the hypervisor's boot self-check reports failure: the backend-disable path */
     FI_FILE_READPAGE, /* a page cache miss's readpage fails with -EIO: a mapped touch is SIGBUS */
     FI_NET_RX_DUP,    /* a received frame is delivered a second time (a link-layer retransmit, a switch flooding): the stack must stay idempotent -- TCP delivers the duplicated segment once, ARP keeps one entry */
+    FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path -- the issuing thread drives the admin queue itself and the interrupt handler leaves that queue alone -- so the path runs under lockdep on a machine that has a vector */
     FI_KIND_COUNT,
 };
 

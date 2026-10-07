@@ -14,6 +14,7 @@
 #include <kernel/completion.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/kmalloc.h>
@@ -102,6 +103,7 @@ struct nvme_ctrl {
     uint64_t cap;
     unsigned dstrd;
     unsigned index;                        /* nvme<index> */
+    bool admin_polled;                     /* an admin command is being driven by its issuer: the handler leaves the admin queue alone */
     struct nvme_queue admin;
     struct nvme_queue *ioq[NVME_MAX_IOQ];
     unsigned nr_ioq;
@@ -299,7 +301,15 @@ static void nvme_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
     (void)frame;
-    queue_process(arg);
+    struct nvme_queue *q = arg;
+    /* The admin queue is the issuing thread's to drive while admin_cmd is
+     * on its polled path (FI_NVME_ADMIN_POLL forced it on a machine that
+     * has a vector): the handler leaves the completion for that thread to
+     * find, so the path really runs. A straggler after the flag clears
+     * finds nothing to do. */
+    if (q->qid == 0 && __atomic_load_n(&q->ctrl->admin_polled, __ATOMIC_ACQUIRE))
+        return;
+    queue_process(q);
 }
 
 /* --- admin commands ------------------------------------------------------------ */
@@ -316,10 +326,17 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
     w.status = 0;
     mutex_lock(&c->admin_lock);
     struct nvme_queue *q = &c->admin;
+    /* Decided before the submit, so the handler knows to stand aside
+     * before the completion can arrive (the injection point is consulted
+     * in thread context; it is silent in an interrupt). */
+    bool polled = c->admin.vector < 0 || faultinject_should_fail(FI_NVME_ADMIN_POLL);
+    if (polled)
+        __atomic_store_n(&c->admin_polled, true, __ATOMIC_RELEASE);
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
     uint16_t cid = slot_get(q);
     if (cid == 0xffff) {
         spin_unlock_irqrestore(&q->lock, s);
+        __atomic_store_n(&c->admin_polled, false, __ATOMIC_RELEASE);
         mutex_unlock(&c->admin_lock);
         return -EBUSY;
     }
@@ -328,16 +345,20 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
     submit_locked(q, sqe);
     spin_unlock_irqrestore(&q->lock, s);
     bool completed;
-    if (c->admin.vector < 0) {
+    if (polled) {
         /* Fallback: no admin vector (bring-up requests it before the first
-         * command, so this is not reached there). This thread completes the
-         * command itself with queue_process, so no other CPU is inside
-         * complete() and the poll frees the frame safely. */
+         * command, so this is not reached there), or forced by the
+         * injection point for a self-test. This thread drives the queue
+         * itself, and waits on the completion rather than polling
+         * completion_done, so the wait is in the lock graph and its own
+         * complete() is recognised as the self-signal it is
+         * (docs/kernel/lockdep/design.md, "Completion waits"); the wait's
+         * handshake also settles the frame's lifetime by the primitive.
+         * One millisecond per round, the same bound as before. */
         completed = false;
         for (unsigned waited = 0; waited < NVME_ADMIN_TIMEOUT_MS && !completed; waited++) {
-            thread_sleep_ms(1);
             queue_process(q);
-            completed = completion_done(&w.done);
+            completed = wait_for_completion_timeout(&w.done, 1000000ull);
         }
     } else {
         /* The interrupt path signals from another CPU: wait_for_completion_timeout
@@ -370,6 +391,7 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
         if (result)
             *result = w.result;
     }
+    __atomic_store_n(&c->admin_polled, false, __ATOMIC_RELEASE);
     mutex_unlock(&c->admin_lock);
     return rc;
 }

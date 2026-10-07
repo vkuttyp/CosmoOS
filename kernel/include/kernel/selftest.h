@@ -437,6 +437,7 @@ bool selftest_device_reset(const char **reason);       /* in-place device reset 
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
+bool selftest_nvme_admin_poll(const char **reason);   /* the admin command's no-vector path, forced, under lockdep */
 bool selftest_usb_enum(const char **reason);     /* the device on the USB bus: descriptors, parent, endpoints */
 bool selftest_usb_storage(const char **reason);  /* sda through the block layer: round trips, segments, counters */
 bool selftest_usb_storage_timeout(const char **reason);   /* a CSW that never comes: the block layer's timeout, recovery */
