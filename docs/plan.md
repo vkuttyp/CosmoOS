@@ -328,6 +328,22 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   timestamps, ECN, fast recovery and Nagle behavior; three-duplicate-ACK fast
   retransmit already exists. Implement IP fragmentation and reassembly with
   resource bounds and hostile-input tests; IPv4 fragments are currently dropped.
+- [x] **Measurement — the delayed acknowledgement against a Nagle peer.**
+  The tidy-up's correction (b76e4536) made the delayed ACK fire for the
+  first time, and a peer with Nagle on that does write-write-read holds
+  its second write until the first is acknowledged: does the change cost
+  such a peer up to 40 ms a request? *Measured and closed 2026-10-07*: the
+  read-driven acknowledgement (N27) answers every shape in which the
+  application reads; `net-tcp-nagle-peer` builds the Nagle peer on
+  loopback (no peer in the suite has Nagle: this stack has none and QEMU's
+  user-mode backend disables it toward the guest) and bounds the medians
+  at half the timer against a reading and a busy server; the network
+  harness measures a write-write-read exchange both ways on every boot,
+  with and without `TCP_NODELAY`; `tools/delack-nagle-probe.py --old`
+  boots the rule as it was before. No rule was added: the standard
+  remedies (quick-ACK at connection start, ACK on PSH) address a stall
+  the unconditional read-driven acknowledgement does not have. See the
+  [report](audit/2026-10-07-delack-nagle-report.md).
 - [ ] **Implementation/validation — IPv6 beyond the local link.** Implement
   global routing (the route lookup returns none beyond loopback, link-local and
   multicast) and router discovery, then exercise neighbor discovery against a

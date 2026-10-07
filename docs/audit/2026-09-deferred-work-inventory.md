@@ -805,3 +805,11 @@ Report: [`2026-10-07-completion-waits-tidy-up-report.md`](2026-10-07-completion-
 | ~~`fw.c`, `ipv4.c`, `nat.c` read `nif->flags` once per check~~ | **FIXED (N26)**: one reading per interface per packet, passed down; `net-netif-flags`, `tools/netif-flags-probe.py --old`. |
 | ~~The class table's headroom was invisible until a boot overflowed it~~ | **BUILT**: the post-suite dump prints the peak against `LOCKDEP_MAX_CLASSES` and warns at 90%. |
 | A completion signaller blocked in another wait before its `complete()` | Recorded in the design document and the report: the classes are acquired and never held, so the chain through a second wait is not detected; no production instance closes it. |
+
+### 7.5 The delayed acknowledgement against a Nagle peer (2026-10-07)
+
+Report: [`2026-10-07-delack-nagle-report.md`](2026-10-07-delack-nagle-report.md).
+
+| Item | Outcome |
+|---|---|
+| ~~Does the delayed ACK that now fires (§7.4) cost a Nagle peer doing write-write-read up to 40 ms a request?~~ | **MEASURED, CLOSED**: no shape in which the application reads pays the timer -- the owed acknowledgement leaves with the read, unconditionally (N27), where Linux's `tcp_cleanup_rbuf` withholds it in pingpong mode and so has the stall itself. `net-tcp-nagle-peer` builds the Nagle peer on loopback (a reading server and a 5 ms-busy one; medians bounded at 20 ms); the harness runs a write-write-read exchange both ways on every boot (`NODELAY` median bounded at 25 ms); `tools/delack-nagle-probe.py --old` boots the pre-b76e4536 rule. QEMU's user-mode backend has no Nagle toward the guest (libslirp `tcp_output.c`), so the harness's Nagle batches measure the host kernel and are reported, not bounded. |

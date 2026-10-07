@@ -300,6 +300,24 @@ until this test `delack_timer` never ran in a boot (the completion-waits
 report's coverage listing); with it the timer callback runs under its own
 lockdep class.
 
+**`net-tcp-nagle-peer`**: a Nagle sender's write-write-read against the
+delayed acknowledgement (N27). No peer in the suite has Nagle -- this
+stack has none and QEMU's user-mode backend disables it on the
+connections it proxies -- so the test builds one on loopback: the client
+sends the first 16-byte half of a request, polls (with yields, not sleeps:
+a sleep is quantised to the 4 ms tick) until its send buffer is whole
+again, i.e. the half is acknowledged, then sends the second half and reads
+the 32-byte answer. Twenty rounds against a server that reads at once, and
+twenty against one that sleeps 5 ms before each read (a busy
+application), on ports 6096 and 6097. It prints both distributions and
+requires the medians of the time to the first half's acknowledgement and
+of the whole exchange to be under 20 ms in both modes: a receiver that
+acknowledged only from the timer would cost every round 40 ms, while the
+read-driven acknowledgement costs the busy server's own delay. The old
+rule (acknowledged on any output, before 2026-10-07) also passes it, with
+the acknowledgement at once: the test pins the property, and
+`tools/delack-nagle-probe.py` boots the comparison.
+
 ## Forwarding and NAT
 
 These create their own taps on private subnets (`10.9.x`, `10.77.x`) chosen
@@ -1203,8 +1221,8 @@ is `docs/testing/flakes.md`; one of this file's tests is on it,
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 
 `run_boot_test.py` creates a `NetTest` for normal runs (not
-`--expect-panic`, not `--expect-selftest no`). It picks three free
-host ports and exports `QEMU_NET_HOSTFWD=tcp:127.0.0.1:P1-:7,udp:127.0.0.1:P2-:7`
+`--expect-panic`, not `--expect-selftest no`). It picks four free
+host ports and exports `QEMU_NET_HOSTFWD=tcp:127.0.0.1:P1-:7,udp:127.0.0.1:P2-:7,tcp:127.0.0.1:P4-:8`
 and `QEMU_FWCFG_NETTEST=tcp=P3` for `scripts/qemu-run.sh`, which turns
 them into `-netdev user,id=n0,ipv4=on,ipv6=on,hostfwd=...` and
 `-fw_cfg name=opt/cosmo/nettest,string=tcp=P3`. P3 is **bound and
@@ -1213,15 +1231,18 @@ told about it — but nothing accepts on it yet. A thread polls the
 serial log for `NETTEST: ready`, and then, in order: accepts the
 guest's back-connection on P3 and answers its `cosmo hello\n` with
 `cosmo world\n` (the guest connects immediately after printing
-readiness and waits for that reply before serving anything); opens a TCP
+readiness and waits for that reply before serving anything), then serves
+the guest's write-write-read rounds on that connection (below); opens a TCP
 connection to P1, writes 256 KiB of seeded random bytes in chunks of 1
 to 9000 bytes while a reader collects the echo and compares it;
 sends 20 UDP datagrams to P2 and counts echoes (18 or more pass, QEMU's
-user-mode backend may lose one); opens a second TCP connection and
+user-mode backend may lose one); runs its own write-write-read rounds
+against P4; opens a second TCP connection and
 sends `QUIT`. When self-tests are enabled the run fails on any of:
 no ready line, TCP mismatch, fewer than 18 UDP echoes, the
-guest-initiated connection not received, QUIT not sent, or the
-`NETTEST: client ok` / `NETTEST: done .*quit=1` markers missing. The
+guest-initiated connection not received, a write-write-read batch not
+completed or the host-to-guest `TCP_NODELAY` median over 25 ms, QUIT not sent, or the
+`NETTEST: client ok` / `NETTEST: done .*quit=1` / `NETTEST: wwr guest-client ...` markers missing. The
 boot timeout is `BOOT_TIMEOUT`, 180 s on x86-64 and 240 s on AArch64 (the
 harness gets timeout minus 30 s).
 
@@ -1339,6 +1360,47 @@ count", holds the tally). `tests/boot/test_nettest_deadline.py`
 the guest exists, a late connection still accepted, the budget taken
 from the caller, and an expired deadline leaving nothing listening —
 which is why expiry was fatal rather than merely late.
+
+### The write-write-read exchange (2026-10-07)
+
+A request is two 16-byte halves written as two sends; the answer is the
+request, sent once both halves are in (`WWR_HALF`, `WWR_ROUNDS` = 50, the
+same two constants in `nettest.py` and `kernel-services/network/nettest.c`).
+It runs both ways. **Host to guest**: `_wwr_client` connects to the
+guest's port-8 service (`h_wwr_thread`) with the default socket -- Nagle
+on, as Linux and macOS clients are -- for 50 rounds, and on a second
+connection with `TCP_NODELAY` for 50 more, timing each round; the run
+prints
+
+```
+network harness: write-write-read host->guest, nagle: 50 rounds min 0.5 ms, p50 0.6 ms, p90 0.7 ms, max 1.0 ms; nodelay: 50 rounds min 0.4 ms, p50 0.4 ms, p90 0.5 ms, max 1.1 ms; guest->host rounds served 100 of 100
+```
+
+and fails when a batch did not complete or the `NODELAY` median exceeds
+25 ms. **Guest to host**: on the back-connection, once the hello is
+answered, the guest (`h_wwr_client`) runs 50 rounds against the host
+answering in two writes with its socket as accepted (Nagle on) and 50
+with `TCP_NODELAY` set (`_wwr_host_reply` switches between the batches),
+and prints `NETTEST: wwr guest-client host-nagle=on|off rounds=50 min= p50=
+p90= max= us`; the runner requires both lines and the host requires 100
+rounds served.
+
+What each shape measures is worth being exact about, because the
+exchange was added to answer a question about the *guest's* delayed
+acknowledgement (`docs/audit/2026-10-07-delack-nagle-report.md`). QEMU's
+user-mode backend terminates the guest's TCP in its own stack and writes
+onward to a host socket, and that stack never holds a small segment for
+an acknowledgement (libslirp `tcp_output.c`: `(1 || idle || TF_NODELAY)`),
+so no segment toward the guest ever waits on the guest's acknowledgement.
+A Nagle batch therefore exercises the host kernel's Nagle against the
+host kernel's own delayed acknowledgement, on the loopback leg between
+the harness and QEMU -- on a macOS host the Nagle batches read like the
+`NODELAY` ones (the report has the figures, and the CI runner's for
+Linux); the figures are a property of the host and are reported, not
+bounded. The `NODELAY`
+batches are the latency of the path through QEMU and the guest, and
+those are bounded. The guest's own interaction with a Nagle peer is
+measured where the peer can be built: `net-tcp-nagle-peer`.
 
 Release builds (`make BUILD=release test`) have no self-tests, so the
 harness is created but its results are not evaluated; the two boot

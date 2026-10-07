@@ -214,7 +214,32 @@ one is owed, the timer -- and `delack_pending` that one is owed with the
 timer armed; until 2026-10-07
 the output routine sent the owed one on any output, and the receive
 path's output after every segment cancelled the timer it had just armed,
-so the timer never fired: `net-tcp-delack`).
+so the timer never fired: `net-tcp-delack`). **Against a Nagle peer.** A
+peer with Nagle on (Linux and macOS by default) that writes a request in
+two small parts holds the second until the first is acknowledged, so a
+receiver that acknowledged an odd segment only from the timer would cost
+such a peer up to 40 ms per request (the classic Nagle/delayed-ACK
+interaction). The read-driven acknowledgement is what prevents it here,
+and it is *unconditional*: whenever the application takes data while an
+acknowledgement is owed, the acknowledgement goes at once (N27). Linux's
+`tcp_cleanup_rbuf` sends it on a read only when the receive queue was
+emptied, a small (PSH) segment was queued, *and* the connection is not in
+"pingpong" (interactive) mode, where it expects the reply to carry the
+acknowledgement -- which is exactly the mode a request-response server is
+in, so Linux itself is subject to the 40 ms stall in the write-write-read
+shape until the sender sets `TCP_NODELAY` (the harness's Nagle batches on
+a Linux host are where that shows, if it shows: the 2026-10-07 report
+records what the CI runner measured). Linux also enters a quick-ACK mode
+for a connection's first segments (`tcp_incr_quickack`); this stack has
+no such mode and does not need one, because the read already acknowledges.
+The cost is one pure acknowledgement per request in interactive traffic
+where Linux would have let the reply carry it; the gain is that a Nagle
+peer never waits on the timer while the application is reading. Measured
+in `net-tcp-nagle-peer` (the Nagle peer built on loopback, since no peer in
+the suite has Nagle: this stack has none and QEMU's user-mode backend
+disables it on the connections it proxies) and in the harness's
+write-write-read exchange both ways
+(`docs/audit/2026-10-07-delack-nagle-report.md`).
 TIME_WAIT lasts 2 s in this phase (a constant, `TCP_TIMEWAIT_NS`) and
 restarts only for a retransmitted FIN. An orphaned FIN_WAIT_2 ends
 after `TCP_FIN_WAIT2_NS`; an idle established connection is probed
@@ -299,20 +324,30 @@ means no parameters. Strings: `opt/cosmo/ipv4`, `opt/cosmo/nettest`
 
 ## The harness protocol (`tests/boot/run_boot_test.py`, `nettest.py`)
 
-QEMU is started with `-netdev user,id=n0,ipv4=on,ipv6=on,hostfwd=tcp:127.0.0.1:P1-:7,hostfwd=udp:127.0.0.1:P2-:7`,
+QEMU is started with `-netdev user,id=n0,ipv4=on,ipv6=on,hostfwd=tcp:127.0.0.1:P1-:7,hostfwd=udp:127.0.0.1:P2-:7,hostfwd=tcp:127.0.0.1:P4-:8`,
 `-device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05` and `-fw_cfg name=opt/cosmo/nettest,string=tcp=P3`
-where P1..P3 are free ports the harness picked; it listens on P3.
+where P1..P4 are free ports the harness picked; it listens on P3.
 (`ipv4=on` is spelled out because QEMU's user-mode backend treats
 `ipv6=on` alone as "IPv6 only"; the backend also drops frames shorter
 than 60 bytes, which is why `ether_output` pads.) The
 kernel self-test `net-harness` starts a TCP echo server and a UDP echo
-server on port 7, prints `NETTEST: ready`, connects to `10.0.2.2:P3`,
-sends `cosmo hello\n`, expects `cosmo world\n`, prints `NETTEST: client ok`,
+server on port 7 and a write-write-read service on port 8 (a request of
+two 16-byte halves, answered once both are in), prints `NETTEST: ready`,
+connects to `10.0.2.2:P3`,
+sends `cosmo hello\n`, expects `cosmo world\n`, runs the write-write-read
+exchange the other way on that connection (two batches of 50 rounds, the
+host answering in two writes with Nagle on and then with `TCP_NODELAY`;
+it prints the two distributions as `NETTEST: wwr guest-client ...`),
+prints `NETTEST: client ok`,
 then serves echo until a TCP connection delivers `QUIT` (60 s budget),
-prints `NETTEST: done tcp_conns=N udp_pkts=N quit=1` and returns. The
+prints `NETTEST: done tcp_conns=N udp_pkts=N wwr_conns=N quit=1` and returns. The
 harness tails the serial log during the run; on `ready` it echoes 256
 KiB through TCP in varying chunk sizes, exchanges 20 UDP datagrams (18
-must return), sends `QUIT`, and requires both markers plus its own
+must return), runs 50 write-write-read rounds against port 8 with its
+default socket and 50 more with `TCP_NODELAY` (the `NODELAY` median is
+bounded at 25 ms; the Nagle batches are measurements of the host kernel's
+own Nagle against its loopback delayed ACK, since QEMU's backend has none
+toward the guest), sends `QUIT`, and requires the markers plus its own
 verification. Without fw_cfg the self-test skips, so `make run` is
 unaffected. The harness deadline is the boot timeout (`BOOT_TIMEOUT`: 180 s on x86-64,
 240 s on AArch64) minus 30 s; release builds create the
