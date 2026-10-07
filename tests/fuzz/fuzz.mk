@@ -16,8 +16,10 @@ FUZZ_SEED     ?= 1
 FUZZ_ENGINE   ?= driver
 FUZZ_CORPUS   ?=
 
-FUZZ_CFLAGS := $(HOST_CFLAGS) -I$(ROOT)/tests/fuzz
-FUZZ_LDFLAGS := $(HOST_LDFLAGS)
+# FUZZ_EXTRA_CFLAGS / FUZZ_EXTRA_LDFLAGS: added to every target, for a
+# coverage build (tools/fuzz-coverage.py) into its own OUT.
+FUZZ_CFLAGS := $(HOST_CFLAGS) -I$(ROOT)/tests/fuzz $(FUZZ_EXTRA_CFLAGS)
+FUZZ_LDFLAGS := $(HOST_LDFLAGS) $(FUZZ_EXTRA_LDFLAGS)
 ifeq ($(FUZZ_ENGINE),libfuzzer)
 FUZZ_CFLAGS  += -fsanitize=fuzzer
 FUZZ_LDFLAGS += -fsanitize=fuzzer
