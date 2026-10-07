@@ -903,11 +903,10 @@ def main():
         print(nettest.timing(), flush=True)
         print(nettest.latency(), flush=True)
         failures.extend(nettest.failures())
-        for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1",
-                    r"^NETTEST: wwr guest-client host-nagle=on rounds=\d+ min=\d+ p50=\d+ p90=\d+ max=\d+ us",
-                    r"^NETTEST: wwr guest-client host-nagle=off rounds=\d+ min=\d+ p50=\d+ p90=\d+ max=\d+ us"):
+        for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1"):
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (network harness)")
+        failures.extend(nettest.guest_failures(lines))
 
     if keytest is not None and want_selftest:
         if key_thread is not None:

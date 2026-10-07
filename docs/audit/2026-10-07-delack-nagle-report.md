@@ -52,7 +52,7 @@ acknowledgement in question. That is `net-tcp-nagle-peer`.
 |---|---|
 | `net-tcp-nagle-peer` (kernel self-test, every debug boot) | `kernel-services/network/nettest.c`: `tcp_wwr_server_thread`, `nagle_peer_mode`, `selftest_net_tcp_nagle_peer`; registered in `kernel/core/selftest.c` |
 | The write-write-read service on port 8, and the reverse exchange on the back-connection | `kernel-services/network/nettest.c`: `h_wwr_thread`, `h_wwr_client`; `NETTEST: wwr guest-client ...` lines; `wwr_conns` in the done line |
-| The host side: port-8 forward, two batches of 50 rounds each way, the latency line, the bound | `tests/boot/nettest.py` (`WWR_HALF`, `WWR_ROUNDS`, `WWR_BUDGET_S`, `_wwr_client`, `_wwr_host_reply`, `latency`, `failures`); `tests/boot/run_boot_test.py` prints the line and requires the guest's two |
+| The host side: port-8 forward, two batches of 50 rounds each way, the latency line, the bounds | `tests/boot/nettest.py` (`WWR_HALF`, `WWR_ROUNDS`, `WWR_BUDGET_S`, `_wwr_client`, `_wwr_host_reply`, `latency`, `failures`, `guest_failures`); `tests/boot/run_boot_test.py` prints the line and judges the guest's two |
 | The comparison tool | `tools/delack-nagle-probe.py [--old]`: a clone of HEAD, with `--old` the rule before `b76e4536` (the pure-ACK branch fires on `delack_pending`, the read sets no `ack_now`), booted through the standard harness |
 | Invariant N27, the design paragraph, the test descriptions | `docs/kernel-services/network/invariants.md`, `design.md` ("TCP", "The harness protocol"), `testing.md` |
 | The harness's own unit test | `tests/boot/test_nettest_deadline.py` records the exchange as a passing run does |
@@ -67,7 +67,7 @@ request, sent once both halves are in. Fifty rounds a batch.
 | host -> guest, Nagle | harness, default socket | guest port 8 | the host kernel to withhold the ACK of the first half from the harness; the guest is not on that path |
 | host -> guest, `TCP_NODELAY` | harness | guest port 8 | nothing: the path's latency, bounded at a 25 ms median |
 | guest -> host, host Nagle | guest, on the back-connection | harness, answering in two writes | the host kernel to withhold the ACK of the host's first write from itself (loopback to QEMU) |
-| guest -> host, host `TCP_NODELAY` | guest | harness | nothing |
+| guest -> host, host `TCP_NODELAY` | guest | harness | nothing: the path's latency, bounded at a 25 ms median from the guest's line |
 | loopback Nagle peer, server reading at once | the test's client | `tcp_wwr_server_thread` | the guest to withhold the ACK of the first half past the read |
 | loopback Nagle peer, server busy 5 ms before each read | the test's client | the same, `param` = 5 | the same, with the read 5 ms late: the ACK must still leave with it, not 40 ms later |
 

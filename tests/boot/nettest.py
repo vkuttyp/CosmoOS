@@ -9,6 +9,7 @@ QUIT.
 
 import os
 import random
+import re
 import select
 import socket
 import sys
@@ -452,6 +453,34 @@ class NetTest:
         served = self.results.get("wwr_reverse_served")
         return ("network harness: write-write-read host->guest, " + "; ".join(parts) +
                 f"; guest->host rounds served {served if served is not None else '-'} of {2 * WWR_ROUNDS}")
+
+    @staticmethod
+    def guest_failures(lines):
+        """The guest's half of the exchange, judged from its serial lines.
+
+        The guest prints one distribution per batch (`NETTEST: wwr
+        guest-client host-nagle=on|off ...`, microseconds). Both lines are
+        required, and the `TCP_NODELAY` batch's median is bounded like the
+        host-driven one: it is the same path the other way, and a delayed
+        acknowledgement anywhere on it would cost every round 40 ms. The
+        Nagle batch is the host kernel's own behaviour and is reported only.
+        """
+        f = []
+        for mode in ("on", "off"):
+            pat = re.compile(r"^NETTEST: wwr guest-client host-nagle=%s rounds=(\d+) min=(\d+) p50=(\d+) p90=(\d+) max=(\d+) us"
+                             % mode)
+            hits = [pat.match(ln) for ln in lines]
+            hits = [m for m in hits if m]
+            if not hits:
+                f.append(f"missing marker /{pat.pattern}/ (network harness: the guest's write-write-read batch)")
+                continue
+            rounds, _mn, p50, _p90, _mx = (int(g) for g in hits[-1].groups())
+            if rounds != WWR_ROUNDS:
+                f.append(f"network harness: write-write-read guest->host (host-nagle={mode}) ran {rounds} of {WWR_ROUNDS} rounds")
+            if mode == "off" and p50 > WWR_BUDGET_S * 1e6:
+                f.append("network harness: write-write-read guest->host (host TCP_NODELAY) median %.1f ms over the %.0f ms budget"
+                         % (p50 / 1e3, WWR_BUDGET_S * 1e3))
+        return f
 
     def _probe_conn(self, c, ended, errno=None):
         """Record how one connection ended, and its state while it can be read.

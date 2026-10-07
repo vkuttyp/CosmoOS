@@ -1395,6 +1395,8 @@ static bool nagle_peer_mode(const char **reason, uint16_t port, unsigned busy_ms
             if (ok)
                 have += (size_t)n;
         }
+        /* The answer is the request: both halves, in order. */
+        ok = ok && memcmp(reply, half, sizeof(half)) == 0 && memcmp(reply + sizeof(half), half, sizeof(half)) == 0;
         uint64_t t1 = clock_now_ns();
         ack_us[r] = (acked - t0) / 1000;
         rtt_us[r] = (t1 - t0) / 1000;
@@ -1739,6 +1741,10 @@ static bool h_wwr_client(struct socket *c)
                 have += (size_t)n;
             }
             us[m][r] = (clock_now_ns() - t0) / 1000;
+            if (memcmp(reply, half, sizeof(half)) != 0 || memcmp(reply + sizeof(half), half, sizeof(half)) != 0) {
+                kprintf("NETTEST: wwr guest-client: the reply is not the request in mode %u round %u\n", m, r);
+                return false;
+            }
         }
         sort_u64(us[m], WWR_ROUNDS);
         kprintf("NETTEST: wwr guest-client host-nagle=%s rounds=%u min=%llu p50=%llu p90=%llu max=%llu us\n",

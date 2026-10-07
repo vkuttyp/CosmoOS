@@ -1241,7 +1241,7 @@ against P4; opens a second TCP connection and
 sends `QUIT`. When self-tests are enabled the run fails on any of:
 no ready line, TCP mismatch, fewer than 18 UDP echoes, the
 guest-initiated connection not received, a write-write-read batch not
-completed or the host-to-guest `TCP_NODELAY` median over 25 ms, QUIT not sent, or the
+completed or either `TCP_NODELAY` median over 25 ms, QUIT not sent, or the
 `NETTEST: client ok` / `NETTEST: done .*quit=1` / `NETTEST: wwr guest-client ...` markers missing. The
 boot timeout is `BOOT_TIMEOUT`, 180 s on x86-64 and 240 s on AArch64 (the
 harness gets timeout minus 30 s).
@@ -1382,8 +1382,10 @@ answered, the guest (`h_wwr_client`) runs 50 rounds against the host
 answering in two writes with its socket as accepted (Nagle on) and 50
 with `TCP_NODELAY` set (`_wwr_host_reply` switches between the batches),
 and prints `NETTEST: wwr guest-client host-nagle=on|off rounds=50 min= p50=
-p90= max= us`; the runner requires both lines and the host requires 100
-rounds served.
+p90= max= us`; the runner requires both lines (`NetTest.guest_failures`),
+bounds the `TCP_NODELAY` batch's median at the same 25 ms, and the host
+requires 100 rounds served. Both guest clients compare the answer with the
+request, as the host's does.
 
 What each shape measures is worth being exact about, because the
 exchange was added to answer a question about the *guest's* delayed

@@ -337,7 +337,8 @@ connects to `10.0.2.2:P3`,
 sends `cosmo hello\n`, expects `cosmo world\n`, runs the write-write-read
 exchange the other way on that connection (two batches of 50 rounds, the
 host answering in two writes with Nagle on and then with `TCP_NODELAY`;
-it prints the two distributions as `NETTEST: wwr guest-client ...`),
+it prints the two distributions as `NETTEST: wwr guest-client ...`, and
+the runner bounds the `NODELAY` median at 25 ms),
 prints `NETTEST: client ok`,
 then serves echo until a TCP connection delivers `QUIT` (60 s budget),
 prints `NETTEST: done tcp_conns=N udp_pkts=N wwr_conns=N quit=1` and returns. The
