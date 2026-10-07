@@ -5,6 +5,9 @@
       the FIN branch of tcp_input builds a bare acknowledgement instead of
       running the output (the tree before the net-fuzz unit's fix):
       `net-fin-acks-last-data` must FAIL at its stream check, nothing else
+  python3 tools/net-fuzz-probe.py --arch x86_64 --old pf-clear
+      nat_pf_clear removes the rules and keeps the DNAT translations they
+      made: `net-pf-clear` must FAIL
   python3 tools/net-fuzz-probe.py --arch x86_64
       the clone as committed: everything must PASS
 
@@ -37,6 +40,18 @@ MODES = {
         timer_cancel(&pcb->delack);
     } else if (pcb->state != TCP_CLOSED && pcb->state != TCP_TIME_WAIT) {''',
                    'net-fin-acks-last-data'),
+    # nat_pf_clear removes the rules and keeps their translations (fuzz_net_config)
+    'pf-clear': ('kernel-services/network/nat.c',
+                 '''    memset(g_pf, 0, sizeof(g_pf));
+    arch_irq_state_t ns = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && g_nat[i].kind == NAT_KIND_DNAT)
+            g_nat[i].in_use = false;
+    spin_unlock_irqrestore(&g_nat_lock, ns);
+    spin_unlock_irqrestore(&g_pf_lock, s);''',
+                 '''    memset(g_pf, 0, sizeof(g_pf));
+    spin_unlock_irqrestore(&g_pf_lock, s);''',
+                 'net-pf-clear'),
 }
 
 

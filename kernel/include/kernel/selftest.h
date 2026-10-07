@@ -430,6 +430,7 @@ bool selftest_net_nd_per_interface(const char **reason);
 bool selftest_net_neigh_down_race(const char **reason);
 bool selftest_net_accept_race(const char **reason);
 bool selftest_net_census_wake_ref(const char **reason);
+bool selftest_net_pf_clear(const char **reason);
 bool selftest_net_tcp_syncache(const char **reason);   /* milestone 8: SYN cache and cookies */
 bool selftest_net_tcp_rfc5961(const char **reason);    /* blind RST/SYN/ACK earn challenge ACKs */
 bool selftest_net_tcp_reorder(const char **reason);    /* out-of-order segments are reassembled */

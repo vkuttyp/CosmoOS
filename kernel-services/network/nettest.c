@@ -6824,6 +6824,76 @@ static int dnat_flow_est(uint32_t client, uint16_t port)
     return -1;
 }
 
+/* An IPv4 frame the stack has sent out `t`, after every worker has finished
+ * what it was given: NULL means none was, not "none yet". */
+static struct mbuf *nettest_sent_ip_now(struct tap *t)
+{
+    net_workers_barrier();
+    struct mbuf *m;
+    while ((m = tap_recv(t)) != NULL) {
+        uint8_t type[2];
+        if (m_copydata(m, 12, 2, type) && type[0] == 0x08 && type[1] == 0x00)
+            return m;
+        m_freem(m);
+    }
+    return NULL;
+}
+
+/*
+ * nat_pf_clear removed the rules and kept their translations: a client
+ * whose connection a forward had translated kept reaching the guest through
+ * a port the clear had closed (fuzz_net_config). It reaps them now, as
+ * nat_pf_del reaps one rule's.
+ */
+bool selftest_net_pf_clear(const char **reason)
+{
+    static const uint8_t g_mac[6]      = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x01 };
+    static const uint8_t u_mac[6]      = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x01 };
+    static const uint8_t guest_mac[6]  = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x0f };
+    static const uint8_t client_mac[6] = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
+    struct tap *g = nt_tap_create("pfcg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = nt_tap_create("pfcu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);
+    nettest_seed_arp(tap_netif(u), client, client_mac);
+    nat_flush();
+    nat_pf_clear();
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
+
+    uint8_t l4[64], frame[128];
+    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_SYN);
+    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    struct mbuf *r = nettest_sent_ip_now(g);
+    CHECK(r != NULL);   /* translated to the guest */
+    m_freem(r);
+    CHECK(dnat_flow_est(client, 23456) == 0);
+
+    nat_pf_clear();
+    struct nat_pf_rule pf[1];
+    CHECK(nat_pf_list(pf, 1) == 0);
+    CHECK(dnat_flow_est(client, 23456) == -1);   /* its translation went with it */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_sent_ip_now(g);
+    if (r != NULL)
+        m_freem(r);
+    CHECK(r == NULL);   /* the client reaches the guest no more */
+
+    nat_flush();
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
+    kinfo("selftest: net-pf-clear: a clear took the forward's live translation with it");
+    return true;
+}
+
 bool selftest_net_dnat(const char **reason)
 {
     static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x01 };
