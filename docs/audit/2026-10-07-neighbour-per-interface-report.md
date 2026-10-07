@@ -251,7 +251,27 @@ order (input checks before the park point, no resolve checks):
 
 | | x86-64 | AArch64 |
 | --- | --- | --- |
-| `--old` | TODO | TODO |
-| fixed | TODO | TODO |
+| `--old` | FAIL: `check failed: !arp_lookup(&d.nif, r.ip4, mac)` (line 2244): the asker learned on the down interface | FAIL, the same check |
+| fixed | PASS | PASS |
 
-Validation: TODO
+Four boots of about 90 s to the verdict. The old order fails at the first
+of the four races (ARP input); the other three (ARP resolve allocating
+after the flush, ND input, ND resolve) are the same window and the test
+does not reach them under the old order.
+
+**Validation**, on the committed tree, one QEMU at a time at its default
+priority (pri 31 nice 0), no `&` loops:
+
+| step | x86-64 | AArch64 |
+| --- | --- | --- |
+| `make host-test` | passed (62 s) | -- |
+| `make analyze` | clean | clean |
+| debug boot, 4 CPUs | PASS 138.8 s, 430 self-tests | PASS 131.5 s |
+| `make test-smp2` | PASS 137.8 s | PASS 141.0 s |
+| debug boot, 1 CPU | PASS 121.1 s | PASS 122.7 s |
+| `make test-chaos` | PASS 133.7 s | PASS 140.7 s |
+| release build and boot | PASS 16.6 s | PASS 20.0 s |
+
+The network harness passed in every debug boot; `net-neigh-down-race`
+passed in all eight (4 ms), every other network test and budget
+unchanged.
