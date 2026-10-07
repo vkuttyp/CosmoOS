@@ -135,11 +135,116 @@ few caller-named objects, the shape thread entries serve.
 
 ## 4. The measurements
 
-TBD-MEASUREMENTS
+All figures are from `tools/epoll-callback-probe.py --baseline` (the tree
+before the unit, `main` at `95c635e2`, with this branch's two benches added)
+and `--measure` (this branch), four CPUs under QEMU TCG on the macOS host at
+the default priority, debug builds with lockdep on and with `LOCKDEP=0`
+(lockdep costs about half of every debug figure). `epoll-scale` registers
+1, 16, 256 and 1024 eventfds with the first readable; medians of twenty.
+
+### A wait against the number of registered members
+
+Microseconds, 1/16/256/1024 members; the non-blocking wait that finds the
+one ready member, and the blocking wait woken by a writer (write to return).
+
+| Tree, arch, build | non-blocking | woken |
+|---|---|---|
+| before, x86-64, debug | 38/187/1314/4087 | 209/735/2933/1699 (a first run: 302/655/2490/13325) |
+| before, x86-64, LOCKDEP=0 | 6/27/434/947 | 80/179/1524/2336 |
+| this branch, x86-64, debug | 42/56/42/23 | 186/218/189/87 |
+| this branch, x86-64, LOCKDEP=0 | 10/12/16/10 | 86/122/159/84 |
+| before, AArch64, debug | 27/138/1069/2293 | 156/559/2046/10398 |
+| before, AArch64, LOCKDEP=0 | 10/48/590/1083 | 114/321/1904/2603 |
+| this branch, AArch64, debug | 45/60/40/25 | 303/372/266/158 |
+| this branch, AArch64, LOCKDEP=0 | 11/16/16/11 | 112/172/150/102 |
+
+Before, both figures grow with the count -- about a hundredfold from 1 to
+1024 members for the non-blocking wait (every item walked and polled) and
+ten- to sixtyfold for the woken one (every member pinned, an entry parked
+on each queue, then finished and unpinned after the wake; its 1024-member
+figure varies by a factor of eight between two runs, the snapshot's
+allocation and 2048 queue operations being at the mercy of the host). On
+this branch both are flat: the 1024-member wait is the cheapest of the
+four, since the one ready item is the whole walk. The cost of the flat
+line is paid at one member: a non-blocking wait with one member takes two
+spinlock pairs it did not before (the ready list is moved to the transfer
+list and the level item re-queued), 10 against 6 us with lockdep off on
+x86-64 and 42 against 38 us in debug, where lockdep weighs every
+acquisition. From sixteen members up the new wait is cheaper everywhere.
+`epoll-scale` bounds the 1024-member figures against the 1-member ones
+(eight times plus 20 us; four times plus 200 us) and fails on the baseline
+tree at its first bound, 4087 against 324 us.
+
+### The close path
+
+Closes per second, four CPUs each in a loop of 20 000 rounds (2 000 for
+the removal shape): the last close of an object never registered; a close
+that is not the last (a slot elsewhere); install, ADD to a set of the
+worker's own, last close (the removal).
+
+| Tree, arch, build | last close, never registered | a non-last close | the removal |
+|---|---|---|---|
+| before, x86-64, debug | 22 764 | 488 025 | 8 109 |
+| before, x86-64, LOCKDEP=0 | 123 073 | 3 009 709 | 40 427 |
+| this branch, x86-64, debug | 554 856 | 553 858 | 9 193 |
+| this branch, x86-64, LOCKDEP=0 | 2 306 512 | 2 259 893 | 29 746 |
+| before, AArch64, debug | 32 818 | 779 529 | 10 781 |
+| before, AArch64, LOCKDEP=0 | 63 762 | 2 175 568 | 25 339 |
+| this branch, AArch64, debug | 555 023 | 554 581 | 8 358 |
+| this branch, AArch64, LOCKDEP=0 | 2 046 768 | 2 081 057 | 24 219 |
+
+Before, the last close of a never-registered object took the global watch
+lock, and four CPUs closing at once contended a mutex: 23-33 thousand a
+second in debug, 64-123 thousand with lockdep off -- against a non-last
+close, which took no lock on either tree, at half a million to three
+million. On this branch the last close reads the `watched` flag and runs
+at the non-last close's speed: 17-24 times the baseline in debug, 19-32
+times with lockdep off. This is §2's "show the improvement". The removal
+path -- the one case that must take the lock and walk the watchers -- is
+within noise of the baseline in debug and 25 % slower with lockdep off on
+x86-64 (an ADD now hooks a callback entry on the member's queue and the
+removal unhooks it, two spinlock pairs more than a snapshot wait design
+needed), the same on AArch64.
+
 
 ## 5. Validation
 
-TBD-VALIDATION
+On the branch head, one chain, one QEMU at a time at the default
+priority (no zsh `&`), 439 self-tests in every debug boot:
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test` | PASS | PASS |
+| `make analyze` | clean | clean |
+| debug boot, 4 CPUs | PASS 137.0 s | PASS 145.4 s |
+| debug boot, 2 CPUs | PASS 143.6 s | PASS 147.1 s |
+| debug boot, 1 CPU | PASS 132.5 s | PASS 124.1 s |
+| `make test-smp2` | PASS 143.3 s | PASS 151.2 s |
+| `make test-chaos` | PASS 146.8 s | PASS 138.8 s |
+| release build and boot | PASS 16.6 s | PASS 20.3 s |
+| `tools/epoll-callback-probe.py` (fixed, both tests) | `ok=1` twice | `ok=1` twice |
+| `tools/epoll-callback-probe.py --old no-unhook` | `epoll-wake-race` fails at one of its two checks, as required | `epoll-wake-race` fails at one of its two checks, as required |
+| `tools/epoll-callback-probe.py --old no-loop-check` | `epoll-nest` fails at `add(inner, ho, outer, ...) == -ELOOP`, as required | the same |
+| `make litmus` | herd7 is not on the development host: CI's litmus job (§"CI") | |
+
+Three boots of the chain were repeated after a fix each, and the figures
+above are the repeats' where one was needed:
+
+- The first one-CPU boots of both architectures hung at the hang watchdog
+  inside `epoll-wake-race`: its drain of the eventfd after the writer
+  stopped was a blocking read, and on one CPU the count was zero there.
+  The eventfd is non-blocking for the test.
+- The first AArch64 measurement boot of this tree ran `epoll-close-bench`
+  past the 8 s per-test budget: the removal shape costs tens of
+  microseconds a round under TCG. Each shape has its own round count and
+  the watchdog is kicked between shapes.
+- The first x86-64 `--old no-unhook` boot made `epoll-wake-race` fail at
+  the race loop's own check (the leaked item's callback was reported under
+  the writer) rather than the deterministic check after the loop the probe
+  named; both are the protection, and the probe accepts either.
+
+No x86-64 boot approached the 180 s budget (the longest, `test-chaos`,
+146.8 s). The PR's CI boot times are added here when its run completes.
 
 ## 6. Plan
 
