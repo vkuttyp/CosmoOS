@@ -2,6 +2,7 @@
  * handle.c - Per-process handle table.
  */
 
+#include <kernel/epoll.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/object.h>
@@ -39,6 +40,9 @@ static int install_slot(struct handle_table *t, int h, struct kobject *obj, unsi
     t->entries[h].obj = obj;
     t->entries[h].rights = rights;
     t->count++;
+    /* One more descriptor to the object, in some process (the count is
+     * per object, across every table). */
+    __atomic_fetch_add(&obj->handles, 1u, __ATOMIC_ACQ_REL);
     return h;
 }
 
@@ -150,7 +154,18 @@ int handle_close(struct handle_table *t, int h)
     t->entries[h].obj = NULL;
     t->entries[h].rights = 0;
     t->count--;
+    uint32_t left = __atomic_sub_fetch(&obj->handles, 1u, __ATOMIC_ACQ_REL);
     spin_unlock_irqrestore(&t->lock, s);
+
+    /* The last descriptor to the object anywhere: its epoll registrations
+     * end here, as Linux drops an epitem at the file's final close
+     * (docs/kernel/io/design.md, "epoll"). Outside the table lock -- the
+     * removal takes mutexes -- and before the put, so a registration
+     * cannot outlive the object it holds a reference to. A table that is
+     * still ours to look up and install into would be a lookup racing a
+     * close of the same handle, which a program only does to itself. */
+    if (left == 0)
+        epoll_last_handle_closed(obj);
 
     /* The object's flush, before the put and outside the lock: a file
      * writes its dirty pages back and reports a write-back failure once,

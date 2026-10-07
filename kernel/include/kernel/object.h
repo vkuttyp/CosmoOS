@@ -34,14 +34,28 @@ struct kobject_type {
 #define KOBJECT_TYPE_IO 1u
 
 struct module;
+struct epoll_item;
 
 struct kobject {
     const struct kobject_type *type;
     uint32_t refcount;
+    /* How many handle-table slots, in every process, hold this object:
+     * raised by handle_install/_at, lowered by handle_close. Linux's open
+     * file description is the object, and an epoll registration lives
+     * exactly as long as some descriptor to it: when this reaches zero,
+     * handle_close tells epoll (epoll_last_handle_closed) and every
+     * interest-set entry holding the object is dropped
+     * (docs/kernel/io/design.md, "epoll"; invariant A9). Atomic. */
+    uint32_t handles;
     struct module *owner;   /* module whose code the release lives in, or NULL for the kernel */
+    /* The epoll entries registered on this object (kernel/io/epoll.c), a
+     * singly linked list through epoll_item.obj_next under epoll's own
+     * watch lock; NULL for the many objects never registered. */
+    struct epoll_item *watchers;
 };
 
-/* Reference 1 belongs to the caller. Records the owner of type->release. */
+/* Reference 1 belongs to the caller. Records the owner of type->release.
+ * No handle yet, no watchers. */
 void kobject_init(struct kobject *obj, const struct kobject_type *type);
 void kobject_get(struct kobject *obj);
 /* `n` references in one add, for a caller that has counted under a lock

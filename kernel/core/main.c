@@ -29,6 +29,7 @@
 #include <kernel/lockup.h>
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
+#include <kernel/epoll.h>
 #include <kernel/futex.h>
 #include <kernel/hv.h>
 #include <kernel/process.h>
@@ -158,6 +159,7 @@ void kernel_main(const struct cosmoboot_info *info)
     tty_init();
     process_init();
     futex_init();
+    epoll_init();
     module_init();
 
     /* Devices: the model, then the PCI bus (ECAM from ACPI, BARs, MSI

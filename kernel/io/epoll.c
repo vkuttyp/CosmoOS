@@ -21,8 +21,22 @@
  * supported. See docs/audit/next-subsystem-epoll.md.
  *
  * Lifetime: each registration holds a reference to its member object, dropped
- * on EPOLL_CTL_DEL and when the epoll is released. v1 has no auto-remove on a
- * member's close: a registered fd must be removed with EPOLL_CTL_DEL.
+ * on EPOLL_CTL_DEL, when the epoll is released, and when the member's last
+ * handle-table slot anywhere is closed (epoll_last_handle_closed, called by
+ * handle_close): Linux's open file description is the kobject here, and a
+ * registration lives exactly as long as some descriptor to it -- a dup'd or
+ * inherited descriptor keeps it, closing one of several does not remove it,
+ * the last close does, in whatever epoll and process it was made. Every item
+ * is also linked on its object's `watchers` list, which is how the last close
+ * finds the sets to remove it from. One global mutex (g_watch_lock) guards
+ * every watchers list and is taken outside ep->lock; epoll_obj_wait takes
+ * ep->lock alone, so a waiter is never in the order. A waiter asleep with the
+ * member pinned (its snapshot reference) is woken by the removal and drops the
+ * pin on its next pass; the member's release, and so a socket's FIN, follows
+ * that drop, never the waiter's next event. Nesting an epoll in an epoll stays
+ * refused: a member's events wake the member's queue, not the set's, so an
+ * outer set sleeping on an inner set's queue would sleep through them
+ * (docs/kernel/io/design.md, "epoll").
  */
 
 #include <kernel/compiler.h>
@@ -42,6 +56,8 @@
 
 #define EPOLL_WANT_ALL(want) ((want) | COSMO_IO_HANGUP | COSMO_IO_ERROR)
 
+struct epoll_obj;
+
 struct epoll_item {
     struct kobject *obj;      /* the member, referenced */
     int fd;                   /* the key */
@@ -57,6 +73,8 @@ struct epoll_item {
     uint64_t edge_gen;        /* edge: the member queue's wake generation last observed; a change
                                * means the member's source fired (an event), so re-arm */
     struct list_node link;
+    struct epoll_obj *ep;     /* the set this item is in, for the last-close removal */
+    struct epoll_item *obj_next;   /* the member object's watchers list (g_watch_lock) */
 };
 
 /* A member captured for one wait: its queue(s) and a held reference, so the
@@ -99,6 +117,39 @@ static struct epoll_obj *epoll_of(struct kobject *obj)
     return container_of(obj, struct epoll_obj, obj);
 }
 
+/* Every object's watchers list, and the handle-count check an add makes
+ * against a concurrent last close. Taken outside any ep->lock (add, del,
+ * release, the last-close removal); epoll_obj_wait never takes it. */
+static struct mutex g_watch_lock;
+
+void epoll_init(void)
+{
+    mutex_init(&g_watch_lock, "epoll-watch");
+}
+
+/* g_watch_lock held. The list head is also read without the lock, by
+ * epoll_last_handle_closed's first look, so it is stored atomically. */
+static void watch_link(struct epoll_item *it)
+{
+    it->obj_next = it->obj->watchers;
+    __atomic_store_n(&it->obj->watchers, it, __ATOMIC_RELEASE);
+}
+
+/* g_watch_lock held. The item is on its object's list exactly once. */
+static void watch_unlink(struct epoll_item *it)
+{
+    struct kobject *obj = it->obj;
+    if (obj->watchers == it) {
+        __atomic_store_n(&obj->watchers, it->obj_next, __ATOMIC_RELEASE);
+    } else {
+        struct epoll_item *prev = obj->watchers;
+        while (prev->obj_next != it)
+            prev = prev->obj_next;
+        prev->obj_next = it->obj_next;
+    }
+    it->obj_next = NULL;
+}
+
 struct kobject *epoll_obj_from_kobject(struct kobject *obj)
 {
     return (obj != NULL && obj->type == &epoll_type.base) ? obj : NULL;
@@ -121,12 +172,63 @@ static void epoll_release(struct kobject *obj)
 {
     struct epoll_obj *ep = epoll_of(obj);
     struct epoll_item *it, *tmp;
+    /* Nobody holds the set any more (this is its last reference), so its
+     * list is ours without ep->lock; the items must still leave their
+     * objects' watchers lists under the watch lock, or a member's later
+     * last close would walk into freed items. */
+    mutex_lock(&g_watch_lock);
+    list_for_each_entry(it, &ep->items, link)
+        watch_unlink(it);
+    mutex_unlock(&g_watch_lock);
     list_for_each_entry_safe(it, tmp, &ep->items, link) {
         list_remove(&it->link);
         kobject_put(it->obj);
         kfree(it);
     }
     kfree(ep);
+}
+
+void epoll_last_handle_closed(struct kobject *obj)
+{
+    /* Unlocked read first: the common object was never registered and
+     * must not pay for a mutex at every close. A registration made after
+     * this read happens under the lock, where the add re-checks the handle
+     * count and refuses an object with none (-EBADF), so nothing is missed. */
+    if (__atomic_load_n(&obj->watchers, __ATOMIC_ACQUIRE) == NULL)
+        return;
+    mutex_lock(&g_watch_lock);
+    /* A descriptor can have reappeared: a handle riding in a unix message
+     * is installed at the receiver (handle_install raises the count) and
+     * may have landed between our caller's decrement and this lock. Then
+     * the object has a descriptor again and its registrations stand. */
+    if (__atomic_load_n(&obj->handles, __ATOMIC_ACQUIRE) != 0) {
+        mutex_unlock(&g_watch_lock);
+        return;
+    }
+    struct epoll_item *gone = obj->watchers;
+    __atomic_store_n(&obj->watchers, NULL, __ATOMIC_RELEASE);
+    for (struct epoll_item *it = gone; it != NULL; it = it->obj_next) {
+        struct epoll_obj *ep = it->ep;   /* alive: its items leave this list in epoll_release */
+        mutex_lock(&ep->lock);
+        list_remove(&it->link);
+        ep->nr--;
+        /* A waiter asleep on this member holds its own pin (snapshot) and
+         * parks its own wait entry on the member's queue; wake it so it
+         * finishes and drops the pin now rather than on the member's next
+         * event -- the object's release (a socket's FIN) waits on that. */
+        waitqueue_wake_all(&ep->wait);
+        mutex_unlock(&ep->lock);
+    }
+    mutex_unlock(&g_watch_lock);
+    /* The registrations' references, outside both locks (a release may
+     * block; the rule is epoll_obj_del's). None is the object's last: our
+     * caller, handle_close, still holds the slot's and puts it after. */
+    while (gone != NULL) {
+        struct epoll_item *next = gone->obj_next;
+        kobject_put(gone->obj);
+        kfree(gone);
+        gone = next;
+    }
 }
 
 /* Lock held. */
@@ -247,13 +349,25 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     struct epoll_item *it = kzalloc(sizeof(*it));
     if (it == NULL)
         return -ENOMEM;
+    mutex_lock(&g_watch_lock);
+    /* The caller looked `fd` up, so the object had a handle then; its last
+     * close can have run since (another thread), and that removal found no
+     * item. Refuse rather than register what nothing would ever remove. */
+    if (__atomic_load_n(&target->handles, __ATOMIC_ACQUIRE) == 0) {
+        mutex_unlock(&g_watch_lock);
+        kfree(it);
+        return -EBADF;
+    }
     mutex_lock(&ep->lock);
     if (find_item(ep, fd) != NULL) {
         mutex_unlock(&ep->lock);
+        mutex_unlock(&g_watch_lock);
         kfree(it);
         return -EEXIST;
     }
     it->obj = target;          /* takes ownership of the caller's reference */
+    it->ep = ep;
+    watch_link(it);
     it->fd = fd;
     it->id = ep->next_id++;
     it->want = want;
@@ -270,6 +384,7 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
      * wakes the ring's queue after parking an entry). */
     waitqueue_wake_all(&ep->wait);
     mutex_unlock(&ep->lock);
+    mutex_unlock(&g_watch_lock);
     return 0;
 }
 
@@ -299,15 +414,19 @@ int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events,
 int epoll_obj_del(struct kobject *epobj, int fd)
 {
     struct epoll_obj *ep = epoll_of(epobj);
+    mutex_lock(&g_watch_lock);
     mutex_lock(&ep->lock);
     struct epoll_item *it = find_item(ep, fd);
     if (it == NULL) {
         mutex_unlock(&ep->lock);
+        mutex_unlock(&g_watch_lock);
         return -ENOENT;
     }
     list_remove(&it->link);
     ep->nr--;
+    watch_unlink(it);
     mutex_unlock(&ep->lock);
+    mutex_unlock(&g_watch_lock);
     /* Safe to free even with a waiter asleep: a waiter holds its own reference
      * to the member and parks its own wait entry on the member's queue, not
      * this item's -- the item carries no wait state. */
