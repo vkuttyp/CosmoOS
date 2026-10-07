@@ -10,8 +10,10 @@ sound, and this probe builds a temporary clone with one of them taken out:
                       callback entry off the member's queue (the item is
                       leaked rather than freed, so the next wake runs a
                       callback on a removed item instead of on freed memory).
-                      `epoll-wake-race` must FAIL at its check that a write
-                      of the member after the DEL puts nothing in the set.
+                      `epoll-wake-race` must FAIL at one of its two checks
+                      that catch it: the race loop's "the reported descriptor
+                      is the registered one", or the deterministic "a write
+                      of the member after the DEL puts nothing in the set".
   --old no-loop-check a set may be added to a set without the reachability
                       and depth check. `epoll-nest` must FAIL at its first
                       -ELOOP check (the loop outer -> inner -> outer).
@@ -52,20 +54,30 @@ def replace_once(source, before, after):
     return source.replace(before, after)
 
 
-# mode -> (the test whose verdict is read, the expression of the check that must fail)
+# mode -> (the test function, its name, the checks that may be the one to fail: (expression, a
+# comment on its line)). no-unhook has two: the race loop's "the reported descriptor is the
+# registered one" catches the leaked item's callback when the writer's wake lands first, and
+# the deterministic "nothing in the set hears it" when it does not; both are the protection.
 MODES = {
-    'no-unhook': ('epoll_wake_race', 'epoll-wake-race', 'epoll_obj_wait(ep, out, 4, 0) == 0',
-                  'nothing in the set hears it'),
-    'no-loop-check': ('epoll_nest', 'epoll-nest', 'add(inner, ho, outer, COSMO_IO_READABLE) == -ELOOP',
-                      'a loop: outer reaches inner'),
+    'no-unhook': ('epoll_wake_race', 'epoll-wake-race',
+                  [('got == 0 || (got == 1 && out[0].fd == h)', 'CHECK(got == 0 || (got == 1 && out[0].fd == h));'),
+                   ('epoll_obj_wait(ep, out, 4, 0) == 0', 'nothing in the set hears it')]),
+    'no-loop-check': ('epoll_nest', 'epoll-nest',
+                      [('add(inner, ho, outer, COSMO_IO_READABLE) == -ELOOP', 'a loop: outer reaches inner')]),
 }
 
 
-def failing_check(tests, expr, marker):
-    for i, l in enumerate(tests.splitlines()):
-        if 'CHECK(' + expr + ');' in l and marker in l:
-            return expr, i + 1
-    raise RuntimeError('the check is not in epolltest.c as expected: ' + expr)
+def failing_checks(tests, checks):
+    """A regex alternation of the checks' failure texts, each with its line number."""
+    alts = []
+    for expr, marker in checks:
+        for i, l in enumerate(tests.splitlines()):
+            if 'CHECK(' + expr + ');' in l and marker in l:
+                alts.append(re.escape(expr) + ' at line %u' % (i + 1))
+                break
+        else:
+            raise RuntimeError('the check is not in epolltest.c as expected: ' + expr)
+    return '(' + '|'.join(alts) + ')'
 
 
 def wrap_with_panic(tests, fn):
@@ -171,7 +183,7 @@ def main():
                                          [m for m, v in MODES.items() if v[1] == args.test])
     rc_all = 0
     for mode in modes:
-        fn, test_name, expr, marker = MODES[mode]
+        fn, test_name, checks = MODES[mode]
         tag = 'epoll-callback-' + args.arch + ('-' + mode if args.old else '-fixed-' + test_name)
         out = root / 'out' / tag
         shutil.rmtree(out, ignore_errors=True)
@@ -214,8 +226,7 @@ def main():
             harness = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(harness)
             if args.old:
-                e, line = failing_check(tests, expr, marker)
-                outcome = r'ok=0 reason=check failed: ' + re.escape(e) + ' at line %u' % line
+                outcome = r'ok=0 reason=check failed: ' + failing_checks(tests, checks)
             else:
                 outcome = r'ok=1 reason='
             harness.PANIC_REQUIRED_MARKERS = [r'^KERNEL PANIC: EPOLLCBPROBE: ' + outcome + '$']
