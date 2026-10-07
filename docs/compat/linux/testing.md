@@ -193,7 +193,7 @@ The harness requires in self-test builds (`LINUXTEST_MARKERS`):
 | `^lxinterp: ok$`, `^lxdyn: ok$` | the PIE pair |
 | `^lxsig <mode>: <status>$` (eight lines) | `lxsig` through `rc.linux` |
 | `^hello from musl on Linux x86_64 \(pid \d+\)$` (`MUSL_MARKER`) | `hello_musl`; required only when the environment has `HAVE_MUSL=1`, which `make test` sets from `tests/linux/linux.mk` |
-| `^epoll musl: auto-removal ok$` (`EPOLL_MUSL_MARKER`) | `epoll_musl` (`tests/linux/epoll_musl.c`, built and run as `hello_musl` is): an event loop's assumption through musl's wrappers -- a pipe's reader registered in an epoll set and closed without `EPOLL_CTL_DEL` leaves the writer with `EPIPE` (`SIGPIPE` ignored), a socket pair's registered end closed leaves its peer at end-of-file, a `dup` keeps the registration until the last close (the epoll-close unit, invariant A9) |
+| `^epoll musl: auto-removal ok$` (`EPOLL_MUSL_MARKER`) | `epoll_musl` (`tests/linux/epoll_musl.c`, built and run as `hello_musl` is): an event loop's assumption through musl's wrappers -- a pipe's reader registered in an epoll set and closed without `EPOLL_CTL_DEL` leaves the writer with `EPIPE` (`SIGPIPE` ignored), a socket pair's registered end closed leaves its peer at end-of-file, a `dup` keeps the registration until the last close (the epoll-close unit, invariant A9); then a set in a set: the outer sees the inner's member become readable and adding the outer to the inner is `ELOOP` (the epoll-callback unit) |
 
 Release builds run no `rc.test`, so the Linux programs run only in
 self-test builds (the release image still carries them).

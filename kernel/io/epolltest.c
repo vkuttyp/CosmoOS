@@ -22,6 +22,8 @@
 #include <kernel/socket.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/log.h>
+#include <kernel/percpu.h>
 #include <kernel/timer.h>
 #include <kernel/wait.h>
 #include <uapi/cosmo/syscall.h>
@@ -278,5 +280,396 @@ bool selftest_epoll_close(const char **reason)
     kobject_put(ep);
     thread_sleep_ms(50);
     CHECK(socket_count() == socks0);
+    return true;
+}
+
+/* --- epoll-scale: a wait costs the ready members ------------------------------
+ *
+ * N eventfds registered, one of them readable: the cost of a wait must not
+ * grow with N (A10). Before the epoll-callback unit every wait walked every
+ * item (and a blocking one pinned each member and parked an entry on each
+ * queue), so the figures grew with N; with readiness by callback a wait
+ * walks the ready list. Two shapes: a non-blocking wait that finds the one
+ * ready member, and a blocking wait woken by a thread writing it. Medians of
+ * 20; the figures are printed so a boot's numbers can be compared, and the
+ * 1024-member figures are bounded against the 1-member ones.
+ */
+#define SCALE_TABLES 16u   /* 16 x 64 slots: room for 1024 members */
+#define SCALE_ROUNDS 20u
+
+struct scale_writer {
+    struct kobject *ev;
+    volatile bool go, done;
+    uint64_t wrote_at;
+};
+
+static void scale_writer_thread(void *arg)
+{
+    struct scale_writer *w = arg;
+    uint64_t one = 1;
+    while (!__atomic_load_n(&w->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    thread_sleep_ms(2);   /* the waiter is asleep by now */
+    w->wrote_at = clock_now_ns();
+    kobject_io_of(w->ev)->write(w->ev, &one, 8);
+    __atomic_store_n(&w->done, true, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+static void sort_u64s(uint64_t *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; i++) {
+        uint64_t x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = x;
+    }
+}
+
+/* One size: register `n` eventfds, make the first readable, measure. Fills
+ * the two medians (ns). The tables and objects are the caller's. */
+static bool scale_one(const char **reason, struct handle_table *tabs, struct kobject **evs, unsigned n,
+                      uint64_t *poll_ns, uint64_t *wake_ns)
+{
+    struct kobject *ep;
+    CHECK(epoll_obj_create(&ep) == 0);
+    struct epoll_ready out[4];
+    for (unsigned i = 0; i < n; i++) {
+        int h = handle_install(&tabs[i / HANDLE_TABLE_SIZE], evs[i], HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+        CHECK(h >= 0);
+        CHECK(add(ep, (int)i, evs[i], COSMO_IO_READABLE) == 0);
+    }
+    uint64_t one = 1, sink;
+    uint64_t t[SCALE_ROUNDS];
+    /* A non-blocking wait with one member readable. */
+    CHECK(kobject_io_of(evs[0])->write(evs[0], &one, 8) == 8);
+    for (unsigned r = 0; r < SCALE_ROUNDS; r++) {
+        uint64_t t0 = clock_now_ns();
+        int64_t got = epoll_obj_wait(ep, out, 4, 0);
+        t[r] = clock_now_ns() - t0;
+        CHECK(got == 1 && out[0].fd == 0);
+    }
+    sort_u64s(t, SCALE_ROUNDS);
+    *poll_ns = t[SCALE_ROUNDS / 2];
+    CHECK(kobject_io_of(evs[0])->read(evs[0], &sink, 8) == 8);
+    CHECK(epoll_obj_wait(ep, out, 4, 0) == 0);
+    /* A blocking wait woken by a writer. */
+    static struct scale_writer w;
+    for (unsigned r = 0; r < SCALE_ROUNDS; r++) {
+        memset(&w, 0, sizeof(w));
+        w.ev = evs[0];
+        struct thread *th = thread_create(scale_writer_thread, &w, "epoll-scale-w", 32);
+        CHECK(th != NULL);
+        __atomic_store_n(&w.go, true, __ATOMIC_RELEASE);
+        int64_t got = epoll_obj_wait(ep, out, 4, EPOLL_WAIT_FOREVER);
+        uint64_t t1 = clock_now_ns();
+        thread_join(th);
+        CHECK(got == 1 && out[0].fd == 0 && w.done);
+        t[r] = t1 - w.wrote_at;
+        CHECK(kobject_io_of(evs[0])->read(evs[0], &sink, 8) == 8);
+    }
+    sort_u64s(t, SCALE_ROUNDS);
+    *wake_ns = t[SCALE_ROUNDS / 2];
+    for (unsigned i = 0; i < SCALE_TABLES; i++)
+        handle_table_destroy(&tabs[i]);   /* the last closes remove every registration */
+    CHECK(epoll_obj_wait(ep, out, 4, 0) == 0);
+    kobject_put(ep);
+    for (unsigned i = 0; i < SCALE_TABLES; i++)
+        handle_table_init(&tabs[i]);
+    return true;
+}
+
+bool selftest_epoll_scale(const char **reason)
+{
+    static struct handle_table tabs[SCALE_TABLES];
+    static struct kobject *evs[SCALE_TABLES * HANDLE_TABLE_SIZE];
+    static const unsigned sizes[4] = { 1, 16, 256, 1024 };
+    uint64_t poll_ns[4], wake_ns[4];
+    for (unsigned i = 0; i < SCALE_TABLES; i++)
+        handle_table_init(&tabs[i]);
+    for (unsigned i = 0; i < SCALE_TABLES * HANDLE_TABLE_SIZE; i++)
+        CHECK(eventfd_obj_create(0, false, &evs[i]) == 0);
+    bool ok = true;
+    for (unsigned k = 0; k < 4 && ok; k++)
+        ok = scale_one(reason, tabs, evs, sizes[k], &poll_ns[k], &wake_ns[k]);
+    for (unsigned i = 0; i < SCALE_TABLES * HANDLE_TABLE_SIZE; i++)
+        kobject_put(evs[i]);
+    if (!ok)
+        return false;
+    kinfo("selftest: epoll-scale: members 1/16/256/1024: non-blocking wait with one ready %llu/%llu/%llu/%llu ns, "
+          "blocking wait woken by a writer %llu/%llu/%llu/%llu ns (medians of %u)",
+          (unsigned long long)poll_ns[0], (unsigned long long)poll_ns[1], (unsigned long long)poll_ns[2],
+          (unsigned long long)poll_ns[3], (unsigned long long)wake_ns[0], (unsigned long long)wake_ns[1],
+          (unsigned long long)wake_ns[2], (unsigned long long)wake_ns[3], SCALE_ROUNDS);
+    /* Flat: the 1024-member figures within a small factor of the 1-member
+     * ones, with an allowance for the clock and the scheduler. The old walk
+     * cost hundreds of times more at 1024 (the report's baseline). */
+    CHECK(poll_ns[3] <= 8 * poll_ns[0] + 20000);
+    CHECK(wake_ns[3] <= 4 * wake_ns[0] + 200000);
+    return true;
+}
+
+/* --- epoll-wake-race: wakes against DEL and the last close ---------------------
+ *
+ * A thread on another CPU (where there is one) writes an eventfd in a loop
+ * while this thread registers it, waits, removes it, closes its last slot
+ * and installs it again: every wake runs the item's callback, and the
+ * removal takes it off the queue under the queue's lock before the item is
+ * freed, so a callback in flight has finished and none can start (A10).
+ * Then the deterministic shape: after a DEL a write of the member must
+ * produce nothing in the set -- with the callback left on the queue (the
+ * probe's `no-unhook`), the write would link the removed item and the wait
+ * would report it.
+ */
+struct race_writer {
+    struct kobject *ev;
+    volatile bool stop;
+    unsigned writes;
+};
+
+static void race_writer_thread(void *arg)
+{
+    struct race_writer *w = arg;
+    uint64_t one = 1;
+    while (!__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE)) {
+        kobject_io_of(w->ev)->write(w->ev, &one, 8);
+        w->writes++;
+        sched_yield();
+    }
+    thread_exit(0);
+}
+
+bool selftest_epoll_wake_race(const char **reason)
+{
+    static struct handle_table t;
+    handle_table_init(&t);
+    struct kobject *ep, *ev;
+    CHECK(epoll_obj_create(&ep) == 0);
+    CHECK(eventfd_obj_create(0, false, &ev) == 0);
+    struct epoll_ready out[4];
+    static struct race_writer w;
+    memset(&w, 0, sizeof(w));
+    w.ev = ev;
+    unsigned ncpu = cpu_count();
+    /* The other CPU where there is one: the race is between CPUs. On one
+     * CPU the writer yields into us and the shape is interleaving only. */
+    cpumask_t mask = ncpu > 1 ? ((cpumask_t)1 << ((raw_cpu_id() + 1) % ncpu)) : CPUMASK_ALL;
+    struct thread *th = thread_create_on(race_writer_thread, &w, "epoll-race-w", 32, mask);
+    CHECK(th != NULL);
+    uint64_t sink;
+    unsigned reported = 0;
+    for (unsigned i = 0; i < 2000; i++) {
+        int h = handle_install(&t, ev, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+        CHECK(h >= 0);
+        CHECK(add(ep, h, ev, COSMO_IO_READABLE) == 0);
+        int64_t got = epoll_obj_wait(ep, out, 4, 0);
+        CHECK(got == 0 || (got == 1 && out[0].fd == h));
+        reported += got == 1;
+        if (i % 3 == 0)
+            CHECK(epoll_obj_del(ep, h) == 0);   /* DEL under the writer */
+        CHECK(handle_close(&t, h) == 0);      /* the last slot: removal under the writer (when not DELed) */
+        if (i % 7 == 0)
+            (void)kobject_io_of(ev)->read(ev, &sink, 8);   /* let the count fall now and then */
+    }
+    __atomic_store_n(&w.stop, true, __ATOMIC_RELEASE);
+    thread_join(th);
+    CHECK(w.writes > 0);
+    /* The deterministic half. */
+    (void)kobject_io_of(ev)->read(ev, &sink, 8);
+    int h = handle_install(&t, ev, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    CHECK(h >= 0 && add(ep, h, ev, COSMO_IO_READABLE) == 0);
+    CHECK(epoll_obj_wait(ep, out, 4, 0) == 0);
+    CHECK(epoll_obj_del(ep, h) == 0);
+    uint64_t one = 1;
+    CHECK(kobject_io_of(ev)->write(ev, &one, 8) == 8);   /* a wake of the member after DEL */
+    CHECK(epoll_obj_wait(ep, out, 4, 0) == 0);           /* nothing in the set hears it */
+    CHECK(handle_close(&t, h) == 0);
+    kinfo("selftest: epoll-wake-race: %u writes from %s, %u of 2000 rounds reported the member",
+          w.writes, ncpu > 1 ? "another CPU" : "this CPU", reported);
+    CHECK(kobject_refcount(ev) == 1);
+    kobject_put(ev);
+    kobject_put(ep);
+    handle_table_destroy(&t);
+    return true;
+}
+
+/* --- epoll-nest: a set in a set ----------------------------------------------
+ *
+ * An inner set's wake reaches the outer set through the outer's callback on
+ * the inner's queue (what refused nesting before this unit). An eventfd in
+ * the inner, written from another thread while the outer blocks: the outer
+ * returns the inner's descriptor, the inner returns the eventfd's; drained,
+ * neither reports (the level items are re-queued and found not ready). The
+ * loop check: the set itself -EINVAL, a loop -ELOOP, a chain of
+ * EPOLL_MAX_NESTS sets accepted and one more refused.
+ */
+struct nest_writer {
+    struct kobject *ev;
+    volatile bool done;
+};
+
+static void nest_writer_thread(void *arg)
+{
+    struct nest_writer *w = arg;
+    uint64_t one = 1;
+    thread_sleep_ms(5);
+    kobject_io_of(w->ev)->write(w->ev, &one, 8);
+    __atomic_store_n(&w->done, true, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+bool selftest_epoll_nest(const char **reason)
+{
+    static struct handle_table t;
+    handle_table_init(&t);
+    struct kobject *outer, *inner, *ev;
+    CHECK(epoll_obj_create(&outer) == 0 && epoll_obj_create(&inner) == 0 && eventfd_obj_create(0, false, &ev) == 0);
+    int he = handle_install(&t, ev, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int hi = handle_install(&t, inner, HANDLE_RIGHT_READ);
+    int ho = handle_install(&t, outer, HANDLE_RIGHT_READ);
+    CHECK(he >= 0 && hi >= 0 && ho >= 0);
+    struct epoll_ready out[4];
+    CHECK(add(inner, he, ev, COSMO_IO_READABLE) == 0);
+    CHECK(add(outer, hi, inner, COSMO_IO_READABLE) == 0);        /* a set as a member */
+    CHECK(add(outer, ho, outer, COSMO_IO_READABLE) == -EINVAL);  /* itself */
+    CHECK(add(inner, ho, outer, COSMO_IO_READABLE) == -ELOOP);   /* a loop: outer reaches inner */
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 0);
+    /* The forwarded wake: the outer blocks, a thread writes the inner's member. */
+    static struct nest_writer w;
+    memset(&w, 0, sizeof(w));
+    w.ev = ev;
+    struct thread *th = thread_create(nest_writer_thread, &w, "epoll-nest-w", 32);
+    CHECK(th != NULL);
+    int64_t got = epoll_obj_wait(outer, out, 4, 1000ull * 1000000ull);
+    thread_join(th);
+    CHECK(got == 1 && out[0].fd == hi);                           /* the outer saw the inner's event */
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 1 && out[0].fd == he);
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 1 && out[0].fd == hi);   /* level: re-queued while the inner has it */
+    uint64_t sink;
+    CHECK(kobject_io_of(ev)->read(ev, &sink, 8) == 8);
+    CHECK(epoll_obj_wait(inner, out, 4, 0) == 0);                 /* drained: the inner's level item is dropped */
+    CHECK(epoll_obj_wait(outer, out, 4, 0) == 0);                 /* ... and so the outer's */
+    /* The depth bound: a chain of EPOLL_MAX_NESTS sets, then one more. */
+    unsigned maxn = epoll_obj_max_nests();
+    static struct kobject *chain[8];
+    static int hc[8];
+    CHECK(maxn <= 8);
+    for (unsigned i = 0; i < maxn; i++) {
+        CHECK(epoll_obj_create(&chain[i]) == 0);
+        hc[i] = handle_install(&t, chain[i], HANDLE_RIGHT_READ);
+        CHECK(hc[i] >= 0);
+    }
+    for (unsigned i = 1; i < maxn; i++)
+        CHECK(add(chain[i - 1], hc[i], chain[i], COSMO_IO_READABLE) == 0);   /* chain[0] holds chain[1] holds ... */
+    struct kobject *extra;
+    CHECK(epoll_obj_create(&extra) == 0);
+    int hx = handle_install(&t, extra, HANDLE_RIGHT_READ);
+    CHECK(hx >= 0);
+    CHECK(add(chain[maxn - 1], hx, extra, COSMO_IO_READABLE) == -ELOOP);   /* a chain of maxn + 1 */
+    CHECK(add(extra, hc[0], chain[0], COSMO_IO_READABLE) == -ELOOP);       /* from above, the same chain */
+    CHECK(add(chain[maxn - 1], hc[0], chain[0], COSMO_IO_READABLE) == -ELOOP);   /* a loop at the bottom */
+    /* An event at the bottom of the chain reaches the top. */
+    int hev = handle_install(&t, ev, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    CHECK(hev >= 0 && add(chain[maxn - 1], hev, ev, COSMO_IO_READABLE) == 0);
+    memset(&w, 0, sizeof(w));
+    w.ev = ev;
+    th = thread_create(nest_writer_thread, &w, "epoll-nest-w", 32);
+    CHECK(th != NULL);
+    got = epoll_obj_wait(chain[0], out, 4, 1000ull * 1000000ull);
+    thread_join(th);
+    CHECK(got == 1 && out[0].fd == hc[1]);
+    CHECK(kobject_io_of(ev)->read(ev, &sink, 8) == 8);
+    handle_table_destroy(&t);   /* every set and the eventfd: the last closes remove the registrations */
+    CHECK(kobject_refcount(ev) == 1 && kobject_refcount(inner) == 1 && kobject_refcount(outer) == 1);
+    kobject_put(ev);
+    kobject_put(inner);
+    kobject_put(outer);
+    kobject_put(extra);
+    for (unsigned i = 0; i < maxn; i++)
+        kobject_put(chain[i]);
+    return true;
+}
+
+/* --- epoll-close-bench: the close path's cost (reports only) -------------------
+ *
+ * One thread per CPU (at most four), each with its own table and eventfd,
+ * installing and closing in a loop: the never-registered object's close
+ * decides without the epoll watch lock (the `watched` flag), the registered
+ * one's takes it. Closes per second, both ways, for the report.
+ */
+struct close_worker {
+    struct handle_table t;
+    struct kobject *ev;
+    unsigned rounds;
+    volatile bool done;
+};
+
+static void close_worker_thread(void *arg)
+{
+    struct close_worker *w = arg;
+    for (unsigned i = 0; i < w->rounds; i++) {
+        int h = handle_install(&w->t, w->ev, HANDLE_RIGHT_READ);
+        if (h >= 0)
+            handle_close(&w->t, h);
+    }
+    __atomic_store_n(&w->done, true, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+static bool close_bench(const char **reason, struct close_worker *ws, unsigned n, bool registered, uint64_t *per_s)
+{
+    struct kobject *ep = NULL;
+    static struct handle_table keep;
+    if (registered) {
+        /* One registration of each object elsewhere, kept across the loop:
+         * every last close in the loop finds a watcher list to walk. */
+        handle_table_init(&keep);
+        CHECK(epoll_obj_create(&ep) == 0);
+        for (unsigned i = 0; i < n; i++) {
+            int h = handle_install(&keep, ws[i].ev, HANDLE_RIGHT_READ);
+            CHECK(h >= 0 && add(ep, h, ws[i].ev, COSMO_IO_READABLE) == 0);
+        }
+    }
+    struct thread *th[4];
+    uint64_t t0 = clock_now_ns();
+    for (unsigned i = 0; i < n; i++) {
+        ws[i].done = false;
+        th[i] = thread_create_on(close_worker_thread, &ws[i], "epoll-close-w", 32, (cpumask_t)1 << i);
+        CHECK(th[i] != NULL);
+    }
+    for (unsigned i = 0; i < n; i++)
+        thread_join(th[i]);
+    uint64_t ns = clock_now_ns() - t0;
+    *per_s = ns ? (uint64_t)n * ws[0].rounds * 1000000000ull / ns : 0;
+    if (registered) {
+        handle_table_destroy(&keep);
+        kobject_put(ep);
+    }
+    return true;
+}
+
+bool selftest_epoll_close_bench(const char **reason)
+{
+    static struct close_worker ws[4];
+    unsigned n = cpu_count() < 4 ? cpu_count() : 4;
+    for (unsigned i = 0; i < n; i++) {
+        handle_table_init(&ws[i].t);
+        CHECK(eventfd_obj_create(0, false, &ws[i].ev) == 0);
+        ws[i].rounds = 20000;
+    }
+    uint64_t plain = 0, watched = 0;
+    bool ok = close_bench(reason, ws, n, false, &plain) && close_bench(reason, ws, n, true, &watched);
+    for (unsigned i = 0; i < n; i++) {
+        handle_table_destroy(&ws[i].t);
+        kobject_put(ws[i].ev);
+    }
+    if (!ok)
+        return false;
+    kinfo("selftest: epoll-close-bench: %u CPUs x %u install+close rounds: never registered %llu closes/s, "
+          "registered elsewhere %llu closes/s",
+          n, ws[0].rounds, (unsigned long long)plain, (unsigned long long)watched);
     return true;
 }
