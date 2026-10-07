@@ -1047,6 +1047,14 @@ void lockdep_dump_graph(void)
     unsigned nr_edges = snapshot->nr_edges;
     unsigned nr_nodes = nr_classes * LOCKDEP_SUBCLASSES;
     kdebug("lockdep: %u classes, %u edges (a -> b: b was taken while a was held)", nr_classes, nr_edges);
+    /* The table's headroom. Classes are never freed, so the count at the
+     * end of the run is the boot's peak; a boot that reaches the table
+     * fails with LOCKDEP_R_OVERFLOW, so the warning comes first. */
+    kinfo("lockdep: class table peak %u of %u (%u%%)", nr_classes, LOCKDEP_MAX_CLASSES,
+          nr_classes * 100u / LOCKDEP_MAX_CLASSES);
+    if (nr_classes * 10u >= LOCKDEP_MAX_CLASSES * 9u)
+        kwarn("lockdep: class table at %u of %u: raise LOCKDEP_MAX_CLASSES (lockdep_core.h) before a boot overflows it",
+              nr_classes, LOCKDEP_MAX_CLASSES);
     for (unsigned a = 0; a < nr_nodes; a++) {
         for (unsigned w = 0; w < LOCKDEP_NODE_WORDS; w++) {
             uint64_t bits = snapshot->before[a][w];
