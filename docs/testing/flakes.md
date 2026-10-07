@@ -3360,3 +3360,41 @@ to 240 s on four such timeouts. The failed job re-run on another runner
 passed every step, its three debug boots in 115.3, 109.7 and 112.0 s --
 the guard boot 112.0 s against the 184 s that timed out. One sighting;
 a second is the case for giving x86-64 the margin #314 gave aarch64.
+
+## Under the chaos migrator: `net-accept-race` "left" a socket it had put, 2026-10-07
+
+**Run 37679564267, the CI run on main's #326 merge commit (3851a80),
+x86-64, "Boot test under a chaos migrator (debug)":** `boot-test: FAIL
+after 178.2s`, `SELFTEST: FAIL (1 of 440)`, and the one failure was
+
+```
+[ INFO] selftest: net-accept-race: 64 connections accepted against a dropping peer
+[ERROR] selftest: net-accept-race left the network changed: interfaces (3) [lo,eth0,eth1] -> (3) [lo,eth0,eth1], services 0 -> 0, sockets 0 -> 1
+SELFTEST: net-accept-race  ... FAIL: it left network state behind (83 ms)
+```
+
+Every check of the test passed; the runner's census (PR #257) failed it.
+The later steps of the job were skipped, and the aarch64 job passed. The
+summary of #326-#329 did not mention it.
+
+**Not #326's (wake_one) and not #328's.** #328 merged after this commit,
+and the window is older than both. TCP and UDP wake a socket after
+dropping their lock, holding a reference taken under it, and put it
+after the wake. A test that has put every socket of its can return
+while a network worker is between the two. The census then counts a
+socket the test no longer owns. The chaos migrator widens the window.
+`tools/census-wake-ref-probe.py --adversary` makes it certain, by having
+the worker that woke the test's listener sleep 30 ms before its put. That
+reproduces the line above exactly (`sockets 0 -> 1`, the only failure of
+439) on #326's first parent (e33dd5a2) and on main at 9917c700, x86-64.
+
+**Fixed by the census-wake-ref unit.** Wake references are counted
+(`sock_wake_ref`, `socket_wake_refs`) and the census counts sockets only
+at an instant none is held: a barrier through every network worker, then
+the counter to zero, to a 2 s deadline. `net-census-wake-ref` holds a
+worker past the test's last put with a CONFIG_DEBUG seam. Without the
+wait the census returns in 2 ms with the count one high (`--old`: `check
+failed: !early`). With it, the census waits and finds `sockets 0 -> 0`, and
+the adversary's `net-accept-race` passes. A test the census blames is
+still a leftover until shown otherwise; this one was a census that
+counted too early.

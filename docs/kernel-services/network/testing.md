@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: a registration without a release, and one whose name fills all 8 bytes with no terminator, are both refused with `-EINVAL`; registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
+| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: a registration without a release, and one whose name fills all 8 bytes with no terminator, are both refused with `-EINVAL`; registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns), `net-census-wake-ref` (the runner's census waits out a worker's wake reference; see "A worker's wake reference is not a leftover" below) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -1213,6 +1213,31 @@ next test starts from what is left, so a leftover is blamed once.
 **Checked by forcing.** `tools/net-leftover-probe.py --count-checks`
 counts each test's passing checks (50 tests counted), and `--force
 last|mid LOG` makes each counted test fail at that check, in one boot.
+
+**A worker's wake reference is not a leftover.** TCP and UDP wake a
+socket after dropping their own lock, holding a reference taken under it
+(`sock_wake_ref`, a tryget) until after the wake (`sock_wake_unref`). A
+test that has put every socket of its can return while a network worker
+is between the two, and the socket count is then one high for a socket
+the test does not own: `net-accept-race` failed so on main's CI (run
+37679564267, x86-64 under the chaos migrator, `sockets 0 -> 1`, every
+check passing). The census counts sockets only at an instant no wake
+reference is held (`socket_wake_refs`, counted before the tryget and
+uncounted after the put, so none exists uncounted): it runs a barrier
+through every worker (`net_workers_barrier`, the one `netif_unregister`
+uses), which ends any window a worker had open, and waits out a reference
+a thread holds across its own wake, to 2 s. The counter decides, not the
+barrier: one worker's put can leave another holding the socket after
+that worker passed its barrier. Past the deadline the count is taken
+anyway, so a wake reference that is never put is still reported.
+`net-census-wake-ref` holds a worker there with a CONFIG_DEBUG seam
+(`sock_test_wake_hold_arm`), puts every socket of its, and runs the
+census on a thread of its own. The census must not return while the
+worker holds the socket, and must then find nothing left. Without the
+wait the census returns at once with the count one high.
+`tools/census-wake-ref-probe.py --adversary` reproduces the CI failure on
+demand on any tree, by having the worker that woke `net-accept-race`'s
+listener sleep 30 ms before its put.
 A test that passes fewer checks on the forcing run than it was counted
 with never reaches its forcing point, and passes. As recorded:
 
