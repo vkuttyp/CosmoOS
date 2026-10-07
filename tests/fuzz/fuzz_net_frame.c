@@ -9,7 +9,11 @@
  * forward). Before each input: a UDP socket on :7, a UDP socket connected
  * to the peer, a TCP listener on :80, a connection the peer opened to it
  * and accepted (ESTABLISHED), and a connection this host is opening to
- * 10.0.2.3:9 (SYN_SENT, its SYN parked on an incomplete ARP entry).
+ * 10.0.2.3:9 (SYN_SENT, its SYN parked on an incomplete ARP entry). And
+ * the same over IPv6 on fz0's link-local address: the peer fe80::1 learnt
+ * from its neighbour solicitation, a UDP socket on :7, one connected to
+ * the peer's :53, a TCP listener on :80 and a connection from the peer,
+ * accepted.
  *
  * The input is a sequence of records: a control byte, a little-endian
  * 16-bit length, the frame. Control bits:
@@ -25,11 +29,28 @@
  *   6  the host closes the established connection (once)
  *   7  the host shuts its write side (once)
  *
+ * A record whose length has its top bit (0x8000) set is a host action, not
+ * a frame: the control byte names it (modulo the count), the low 15 bits
+ * are the length of its argument bytes. A UDP send (socket: unconnected
+ * v4, connected v4, unconnected v6, connected v6, or a fresh one --
+ * unbound v4 or v6 (an ephemeral port), bound to a port in use, bound to an
+ * address not this host's; destination: one of
+ * sixteen -- resolved, unresolved, routed, broadcast, multicast, own,
+ * loopback, unroutable -- port and length from the arguments), the
+ * transmit rings full or not (-ENOBUFS), a segment from the IPv6 peer
+ * at what the connection expects, the host's acts on the IPv6 connection,
+ * time passing, a neighbour advertisement or solicitation.
+ *
  * Oracles, checked after every frame and at the end of the input: every
  * spinlock released; every frame the stack transmitted carries correct
  * checksums, is at least 60 bytes and at most the MTU plus the Ethernet
  * header; the ARP and ND tables never exceed their sizes; the NAT and
- * firewall flow tables never exceed theirs. After teardown (sockets
+ * firewall flow tables never exceed theirs; every unicast IPv4 or IPv6
+ * frame sent goes to the MAC its interface's ARP or ND table holds for
+ * the next hop, reachable, on that interface (N25; neighbour discovery's
+ * own answers excepted: they go to the asker's option); a UDP send whose
+ * datagram the ring refused returns -ENOBUFS, and one that returns
+ * -ENOBUFS had its datagram refused. After teardown (sockets
  * closed, every timer run to quiescence): no mbuf alive, the allocator's
  * live count back to its baseline (no pcb, SYN-cache entry or buffer
  * leaked), the neighbour tables empty once each interface is flushed
@@ -84,9 +105,11 @@ static struct fz_netif g_f0, g_f1;
 static size_t g_baseline;
 static unsigned g_bad_csum_frames, g_bad_len_frames;
 
-static struct udp_pcb g_udp7, g_udpc;
-static struct tcp_pcb *g_listener, *g_conn, *g_half;
+static struct udp_pcb g_udp7, g_udpc, g_udp6, g_udpc6;
+static struct tcp_pcb *g_listener, *g_conn, *g_half, *g_listener6, *g_conn6;
 static bool g_conn_closed;
+static struct in6_addr g_ll0, g_ll1, g_peer6;   /* fz0's and fz1's link-local addresses; the IPv6 peer */
+static unsigned g_bad_neigh_frames;
 
 /*
  * Every TCP pcb a caller closes has an owner: the socket layer attaches
@@ -97,7 +120,7 @@ static bool g_conn_closed;
  * would be put once too often, so this target owns its pcbs the way the
  * socket layer does: a socket object per pcb, released with it.
  */
-static struct socket g_sock_listener, g_sock_conn, g_sock_half;
+static struct socket g_sock_listener, g_sock_conn, g_sock_half, g_sock_listener6, g_sock_conn6;
 static const struct kobject_type g_sock_type = { .name = "fz-socket" };
 
 static void own(struct socket *s, struct tcp_pcb *pcb)
@@ -183,8 +206,51 @@ static bool forwarded(const uint8_t *frame, uint32_t len)
     return false;
 }
 
+/*
+ * The frame went to the neighbour its interface knows (N25): a unicast
+ * IPv4 frame to the MAC ARP holds on that interface for the next hop (the
+ * destination on the link, the gateway off it), an IPv6 one to the MAC ND
+ * holds there for the destination (link-local only: no global routing).
+ * Neighbour discovery's NS and NA, and ARP itself, are addressed from the
+ * message they answer and are not held to it.
+ */
+static void check_neighbour(struct fz_netif *f, const uint8_t *frame, uint32_t len)
+{
+    if (len < NP_ETH || (frame[0] & 1))
+        return;   /* broadcast or multicast */
+    uint8_t mac[6];
+    const char *what = NULL;
+    uint16_t type = np_get16(frame + 12);
+    if (type == ETH_P_IPV6 && len >= NP_ETH + NP_IPV6) {
+        const uint8_t *ip = frame + NP_ETH;
+        if (ip[6] == IPPROTO_ICMPV6 && len > NP_ETH + NP_IPV6 &&
+            (ip[NP_IPV6] == ICMPV6_NS || ip[NP_IPV6] == ICMPV6_NA))
+            return;
+        struct in6_addr dst;
+        memcpy(dst.s6_addr, ip + 24, 16);
+        if (!nd_lookup(&f->nif, &dst, mac))
+            what = "an IPv6 frame to a neighbour its interface's ND table does not hold reachable";
+        else if (memcmp(mac, frame, 6) != 0)
+            what = "an IPv6 frame to a MAC other than its interface's ND entry";
+    } else if (type == ETH_P_IP && len >= NP_ETH + NP_IPV4) {
+        uint32_t dst;
+        memcpy(&dst, frame + NP_ETH + 16, 4);
+        uint32_t hop = ((dst ^ f->nif.ip4.addr) & f->nif.ip4.mask) == 0 ? dst : f->nif.ip4.gateway;
+        if (!arp_lookup(&f->nif, hop, mac))
+            what = "an IPv4 frame to a next hop its interface's ARP table does not hold reachable";
+        else if (memcmp(mac, frame, 6) != 0)
+            what = "an IPv4 frame to a MAC other than its interface's ARP entry";
+    }
+    if (what == NULL)
+        return;
+    hexdump(what, frame, len);
+    fprintf(stderr, "  out of %s\n", f->nif.name);
+    g_bad_neigh_frames++;
+}
+
 static void on_frame(struct fz_netif *f, const uint8_t *frame, uint32_t len)
 {
+    check_neighbour(f, frame, len);
     int rc = np_check_checksums(frame, len);
     if (rc == 0)
         return;
@@ -219,6 +285,7 @@ static void check_invariants(void)
     FUZZ_ASSERT(fz_sock_wake_refs() == 0);   /* every wake reference put after its wake */
     FUZZ_ASSERT(g_bad_csum_frames == 0);
     FUZZ_ASSERT(g_bad_len_frames == 0);
+    FUZZ_ASSERT(g_bad_neigh_frames == 0);
     FUZZ_ASSERT(g_f0.oversize == 0 && g_f1.oversize == 0);
     FUZZ_ASSERT(g_f0.runts == 0 && g_f1.runts == 0);
     check_tables();
@@ -292,10 +359,76 @@ static void establish(void)
     trace("accepted: refs %u listener refs %u\n", g_conn->refs, g_listener->refs);
 }
 
+static void link_local(const uint8_t mac[6], struct in6_addr *a)
+{
+    memset(a, 0, sizeof(*a));
+    a->s6_addr[0] = 0xfe;
+    a->s6_addr[1] = 0x80;
+    a->s6_addr[8] = mac[0] ^ 0x02;
+    a->s6_addr[9] = mac[1];
+    a->s6_addr[10] = mac[2];
+    a->s6_addr[11] = 0xff;
+    a->s6_addr[12] = 0xfe;
+    a->s6_addr[13] = mac[3];
+    a->s6_addr[14] = mac[4];
+    a->s6_addr[15] = mac[5];
+}
+
+/* The peer's solicitation for fz0's link-local address, carrying its own
+ * MAC: learnt, so the host's IPv6 replies to it go straight out. */
+static void peer_ns(void)
+{
+    struct in6_addr sn;
+    memset(&sn, 0, sizeof(sn));
+    sn.s6_addr[0] = 0xff;
+    sn.s6_addr[1] = 0x02;
+    sn.s6_addr[11] = 0x01;
+    sn.s6_addr[12] = 0xff;
+    memcpy(sn.s6_addr + 13, g_ll0.s6_addr + 13, 3);
+    uint8_t sn_mac[6] = { 0x33, 0x33, 0xff, sn.s6_addr[13], sn.s6_addr[14], sn.s6_addr[15] };
+    uint8_t f[128];
+    size_t n = np_frame_nd(f, sn_mac, k_peer_mac, &g_peer6, &sn, ICMPV6_NS, &g_ll0, k_peer_mac);
+    deliver(&g_f0, f, n);
+}
+
+/* The handshake from the IPv6 peer, then accept. */
+static void establish6(void)
+{
+    uint8_t f[128];
+    uint8_t mss[4] = { 2, 4, 0x05, 0xa0 };
+    size_t n = np_frame_tcp6(f, k_mac0, k_peer_mac, &g_peer6, &g_ll0, PEER_PORT, 80, OUR_ISN, 0, TH_SYN, 65535, mss,
+                             4, NULL, 0);
+    unsigned before = g_f0.transmits;
+    deliver(&g_f0, f, n);
+    if (g_f0.transmits != before + 1)
+        dump_stats("the IPv6 SYN drew no SYN-ACK");
+    FUZZ_ASSERT(g_f0.transmits == before + 1);
+    const uint8_t *sa = g_f0.last;
+    FUZZ_ASSERT(g_f0.last_len >= NP_ETH + NP_IPV6 + NP_TCP && np_get16(sa + 12) == ETH_P_IPV6);
+    FUZZ_ASSERT((sa[NP_ETH + NP_IPV6 + 13] & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK));
+    uint32_t their_seq = np_get32(sa + NP_ETH + NP_IPV6 + 4);
+    n = np_frame_tcp6(f, k_mac0, k_peer_mac, &g_peer6, &g_ll0, PEER_PORT, 80, OUR_ISN + 1, their_seq + 1, TH_ACK,
+                      65535, NULL, 0, NULL, 0);
+    deliver(&g_f0, f, n);
+    memset(&g_sock_conn6, 0, sizeof(g_sock_conn6));
+    kobject_init(&g_sock_conn6.obj, &g_sock_type);
+    g_sock_conn6.family = COSMO_AF_INET6;
+    g_conn6 = tcp_accept(g_listener6, &g_sock_conn6);
+    FUZZ_ASSERT(g_conn6 != NULL);
+    g_sock_conn6.tcp = g_conn6;
+    FUZZ_ASSERT(tcp_state_of(g_conn6) == TCP_ESTABLISHED);
+}
+
 static void setup(void)
 {
     fz_random_seed(0x5eed);
-    g_bad_csum_frames = g_bad_len_frames = 0;
+    g_bad_csum_frames = g_bad_len_frames = g_bad_neigh_frames = 0;
+    link_local(k_mac0, &g_ll0);
+    link_local(k_mac1, &g_ll1);
+    memset(&g_peer6, 0, sizeof(g_peer6));
+    g_peer6.s6_addr[0] = 0xfe;
+    g_peer6.s6_addr[1] = 0x80;
+    g_peer6.s6_addr[15] = 0x01;
     memset(g_in, 0, sizeof(g_in));
     fz_netif_register(&g_f0, "fz0", k_mac0, IP0, MASK24, PEER, 0);
     fz_netif_register(&g_f1, "fz1", k_mac1, IP1, MASK24, 0, NETIF_NODEFAULT | NETIF_FORWARD | NETIF_MASQUERADE);
@@ -340,6 +473,28 @@ static void setup(void)
     far.v4 = FAR;
     FUZZ_ASSERT(tcp_connect(g_half, &far) == 0);
     FUZZ_ASSERT(tcp_state_of(g_half) == TCP_SYN_SENT);
+
+    struct netaddr a6;
+    memset(&a6, 0, sizeof(a6));
+    a6.family = COSMO_AF_INET6;
+    a6.port = 7;
+    FUZZ_ASSERT(udp_pcb_init(&g_udp6, COSMO_AF_INET6) == 0);
+    FUZZ_ASSERT(udp_bind(&g_udp6, &a6) == 0);
+    a6.port = 5353;
+    FUZZ_ASSERT(udp_pcb_init(&g_udpc6, COSMO_AF_INET6) == 0);
+    FUZZ_ASSERT(udp_bind(&g_udpc6, &a6) == 0);
+    g_udpc6.remote.family = COSMO_AF_INET6;
+    g_udpc6.remote.port = 53;
+    g_udpc6.remote.v6 = g_peer6;
+    g_listener6 = tcp_pcb_new(COSMO_AF_INET6);
+    FUZZ_ASSERT(g_listener6 != NULL);
+    own(&g_sock_listener6, g_listener6);
+    g_sock_listener6.family = COSMO_AF_INET6;
+    a6.port = 80;
+    FUZZ_ASSERT(tcp_bind(g_listener6, &a6) == 0);
+    FUZZ_ASSERT(tcp_listen(g_listener6, 4) == 0);
+    peer_ns();
+    establish6();
 }
 
 static void teardown(void)
@@ -352,17 +507,23 @@ static void teardown(void)
     if (g_conn)
         tcp_close(g_conn);
     g_conn = NULL;
+    if (g_conn6)
+        tcp_close(g_conn6);
+    g_conn6 = NULL;
+    tcp_close(g_listener6);
+    g_listener6 = NULL;
+    g_f0.ring_full = g_f1.ring_full = false;
     tcp_close(g_half);
     g_half = NULL;
     tcp_close(g_listener);
     g_listener = NULL;
-    udp_unbind(&g_udp7);
-    udp_unbind(&g_udpc);
-    struct mbuf *m;
-    while ((m = udp_recv(&g_udp7)) != NULL)
-        m_freem(m);
-    while ((m = udp_recv(&g_udpc)) != NULL)
-        m_freem(m);
+    struct udp_pcb *udps[] = { &g_udp7, &g_udpc, &g_udp6, &g_udpc6 };
+    for (unsigned i = 0; i < 4; i++) {
+        udp_unbind(udps[i]);
+        struct mbuf *m;
+        while ((m = udp_recv(udps[i])) != NULL)
+            m_freem(m);
+    }
     /* Let every connection run down: FIN retransmissions give up, TIME_WAIT
      * expires, SYN-cache entries age out. The ARP sweep fires once a second
      * for ever, so "no timer pending" is never the stopping point: stop
@@ -429,7 +590,203 @@ static void host_acts(void)
         m_freem(m);
     while ((m = udp_recv(&g_udpc)) != NULL)
         m_freem(m);
+    while ((m = udp_recv(&g_udp6)) != NULL)
+        m_freem(m);
+    while ((m = udp_recv(&g_udpc6)) != NULL)
+        m_freem(m);
     fz_run_work();
+}
+
+/* --- host actions ------------------------------------------------------------ */
+
+enum { ACT_UDP_SEND, ACT_RING, ACT_V6_SEG, ACT_V6_HOST, ACT_CLOCK, ACT_ND, ACT_COUNT };
+#define ACT_RECORD 0x8000u
+
+static void dest_of(unsigned i, struct netaddr *a)
+{
+    memset(a, 0, sizeof(*a));
+    a->family = COSMO_AF_INET;
+    switch (i & 15) {
+    case 0: a->v4 = PEER; break;                           /* resolved */
+    case 1: a->v4 = FAR; break;                            /* on the link, unresolved (the half-open's entry) */
+    case 2: a->v4 = IPV4_ADDR(8, 8, 8, 8); break;          /* routed through the gateway */
+    case 3: a->v4 = GUEST; break;                          /* the guest's side, unresolved there */
+    case 4: a->v4 = IP0; break;                            /* this host */
+    case 5: a->v4 = IPV4_ADDR(10, 0, 2, 255); break;       /* the uplink's broadcast */
+    case 6: a->v4 = 0xffffffffu; break;                    /* the limited broadcast */
+    case 7: a->v4 = INADDR_LOOPBACK_N; break;
+    case 8: a->family = COSMO_AF_INET6; a->v6 = g_peer6; break;               /* resolved */
+    case 9: a->family = COSMO_AF_INET6; a->v6 = g_peer6; a->v6.s6_addr[15] = 0x99; break;   /* unresolved */
+    case 10: a->family = COSMO_AF_INET6; a->v6.s6_addr[0] = 0xff; a->v6.s6_addr[1] = 0x02; a->v6.s6_addr[15] = 1; break;
+    case 11: a->family = COSMO_AF_INET6; a->v6.s6_addr[0] = 0x20; a->v6.s6_addr[1] = 0x01; a->v6.s6_addr[15] = 1; break;
+    case 12: a->family = COSMO_AF_INET6; a->v6.s6_addr[15] = 1; break;      /* ::1 */
+    case 13: a->v4 = 0; break;                             /* unspecified: -EINVAL */
+    case 14: a->v4 = IPV4_ADDR(10, 75, 0, 99); break;      /* the guest subnet, nobody there */
+    default: a->family = COSMO_AF_INET6; a->v6 = g_ll1; break;              /* this host's other link-local */
+    }
+}
+
+/* Did the ring refuse a UDP datagram since `before` -- the datagram, not the
+ * ARP request or neighbour solicitation its resolution sent? */
+static bool refused_udp(const struct fz_netif *f, unsigned before)
+{
+    if (f->refused == before)
+        return false;
+    const uint8_t *r = f->last_refused;
+    uint32_t n = f->last_refused_len;
+    if (n >= NP_ETH + NP_IPV4 && np_get16(r + 12) == ETH_P_IP)
+        return r[NP_ETH + 9] == IPPROTO_UDP;
+    if (n >= NP_ETH + NP_IPV6 && np_get16(r + 12) == ETH_P_IPV6)
+        return r[NP_ETH + 6] == IPPROTO_UDP;
+    return false;
+}
+
+static void act_udp_send(const uint8_t *arg, size_t n)
+{
+    static const uint8_t payload[4096] = { 'u' };
+    uint8_t sel = n > 0 ? arg[0] : 0;
+    struct udp_pcb *pcbs[] = { &g_udp7, &g_udpc, &g_udp6, &g_udpc6 };
+    unsigned which = (sel >> 4) & 7;
+    static struct udp_pcb fresh;
+    struct udp_pcb *pcb = which < 4 ? pcbs[which] : &fresh;
+    if (which >= 4) {
+        FUZZ_ASSERT(udp_pcb_init(&fresh, which == 5 ? COSMO_AF_INET6 : COSMO_AF_INET) == 0);
+        struct netaddr local;
+        memset(&local, 0, sizeof(local));
+        local.family = fresh.local.family;
+        if (which == 6) {
+            local.port = 7;   /* g_udp7's */
+            FUZZ_ASSERT(udp_bind(&fresh, &local) == -EADDRINUSE);
+        } else if (which == 7) {
+            local.port = 7000;
+            local.v4 = IPV4_ADDR(192, 0, 2, 1);
+            FUZZ_ASSERT(udp_bind(&fresh, &local) == -EADDRNOTAVAIL);
+        }
+    }
+    struct netaddr to;
+    if (pcb == &g_udpc || pcb == &g_udpc6) {
+        to = pcb->remote;   /* a connected send: the socket layer passes the recorded peer */
+    } else {
+        dest_of(sel, &to);
+        to.port = n > 2 ? np_get16(arg + 1) : 9;
+    }
+    size_t len = n > 3 ? (size_t)arg[3] * 8u : 16u;
+    if (n > 4)
+        len += (size_t)(arg[4] & 15) * 256u;
+    if (len > sizeof(payload))
+        len = sizeof(payload);
+    unsigned r0 = g_f0.refused, r1 = g_f1.refused;
+    int rc = udp_sendto(pcb, payload, len, &to);
+    bool refused = refused_udp(&g_f0, r0) || refused_udp(&g_f1, r1);
+    trace("udp send sel %#x len %zu: %d%s\n", sel, len, rc, refused ? " (refused)" : "");
+    if (refused != (rc == -ENOBUFS)) {
+        fprintf(stderr, "fuzz_net_frame: a UDP send returned %d and its datagram was %srefused by the ring\n", rc,
+                refused ? "" : "not ");
+        FUZZ_ASSERT(refused == (rc == -ENOBUFS));
+    }
+    if (pcb == &fresh) {
+        struct mbuf *m;
+        udp_unbind(&fresh);
+        while ((m = udp_recv(&fresh)) != NULL)
+            m_freem(m);
+    }
+}
+
+/* A segment from the IPv6 peer, at the sequence numbers the connection expects. */
+static void act_v6_seg(const uint8_t *arg, size_t n)
+{
+    if (g_conn6 == NULL)
+        return;
+    uint8_t flags = n > 0 ? arg[0] : TH_ACK;
+    uint16_t win = n > 2 ? np_get16(arg + 1) : 65535;
+    const uint8_t *data = n > 3 ? arg + 3 : NULL;
+    size_t dlen = n > 3 ? n - 3 : 0;
+    if (dlen > 1200)
+        dlen = 1200;
+    uint8_t f[1400];
+    size_t len = np_frame_tcp6(f, k_mac0, k_peer_mac, &g_conn6->remote.v6, &g_conn6->local.v6, g_conn6->remote.port,
+                               g_conn6->local.port, g_conn6->rcv_nxt, g_conn6->snd_nxt, flags, win, NULL, 0, data,
+                               dlen);
+    deliver(&g_f0, f, len);
+}
+
+static void act_v6_host(const uint8_t *arg, size_t n)
+{
+    uint8_t b = n > 0 ? arg[0] : 3;
+    if (g_conn6) {
+        if (b & 1) {
+            static const uint8_t payload[200] = { '6' };
+            tcp_send(g_conn6, payload, (size_t)(n > 1 ? arg[1] : 100) % sizeof(payload) + 1);
+        }
+        if (b & 2) {
+            uint8_t buf[512];
+            bool eof = false;
+            while (tcp_recv(g_conn6, buf, sizeof(buf), &eof) > 0)
+                ;
+        }
+        if (b & 4)
+            tcp_shutdown_write(g_conn6);
+        if (b & 8) {
+            tcp_close(g_conn6);
+            g_conn6 = NULL;
+        }
+    }
+    struct mbuf *m;
+    while ((m = udp_recv(&g_udp6)) != NULL)
+        m_freem(m);
+    while ((m = udp_recv(&g_udpc6)) != NULL)
+        m_freem(m);
+    fz_run_work();
+}
+
+/* A neighbour advertisement or solicitation, made well-formed: the peer's
+ * address, the unresolved one the sends park on, or this host's own, from
+ * the peer's MAC or another, on either interface. */
+static void act_nd(const uint8_t *arg, size_t n)
+{
+    uint8_t b = n > 0 ? arg[0] : 0;
+    struct in6_addr target = g_peer6;
+    if (b & 1)
+        target.s6_addr[15] = 0x99;
+    uint8_t mac[6];
+    memcpy(mac, k_peer_mac, 6);
+    if (b & 2)
+        mac[5] ^= 0x5a;
+    struct fz_netif *f = (b & 4) ? &g_f1 : &g_f0;
+    const uint8_t *ours = (b & 4) ? k_mac1 : k_mac0;
+    const struct in6_addr *own = (b & 4) ? &g_ll1 : &g_ll0;
+    uint8_t fr[128];
+    size_t len;
+    if (b & 8)   /* a solicitation for our address from `target`, carrying `mac` */
+        len = np_frame_nd(fr, ours, mac, &target, own, ICMPV6_NS, own, mac);
+    else         /* an advertisement of `target` at `mac` */
+        len = np_frame_nd(fr, ours, mac, &target, own, ICMPV6_NA, &target, mac);
+    deliver(f, fr, len);
+}
+
+static void host_action(uint8_t op, const uint8_t *arg, size_t n)
+{
+    switch (op % ACT_COUNT) {
+    case ACT_UDP_SEND:
+        act_udp_send(arg, n);
+        break;
+    case ACT_RING:
+        g_f0.ring_full = n > 0 && (arg[0] & 1);
+        g_f1.ring_full = n > 0 && (arg[0] & 2);
+        break;
+    case ACT_V6_SEG:
+        act_v6_seg(arg, n);
+        break;
+    case ACT_V6_HOST:
+        act_v6_host(arg, n);
+        break;
+    case ACT_CLOCK:
+        fz_clock_advance(((uint64_t)(n > 0 ? arg[0] : 0) + 1) * 100ull * 1000000ull);
+        break;
+    default:
+        act_nd(arg, n);
+        break;
+    }
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -444,8 +801,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         uint8_t ctl = data[off];
         size_t len = data[off + 1] | ((size_t)data[off + 2] << 8);
         off += 3;
+        bool action = (len & ACT_RECORD) != 0;
+        len &= ~(size_t)ACT_RECORD;
         if (len > size - off)
             len = size - off;
+        if (action) {
+            host_action(ctl, data + off, len);
+            off += len;
+            frames++;
+            check_invariants();
+            continue;
+        }
         if (len > FZ_CAPTURE_MAX)
             len = FZ_CAPTURE_MAX;
         uint8_t frame[FZ_CAPTURE_MAX];
@@ -493,6 +859,25 @@ static size_t record(uint8_t *buf, size_t cap, uint8_t ctl, const uint8_t *frame
     buf[2] = (uint8_t)(n >> 8);
     memcpy(buf + 3, frame, n);
     return 3 + n;
+}
+
+/* A host-action record: `op`, then its arguments. */
+static size_t action(uint8_t *buf, size_t cap, uint8_t op, const uint8_t *arg, size_t n)
+{
+    if (3 + n > cap)
+        return 0;
+    buf[0] = op;
+    buf[1] = (uint8_t)n;
+    buf[2] = (uint8_t)((n >> 8) | (ACT_RECORD >> 8));
+    memcpy(buf + 3, arg, n);
+    return 3 + n;
+}
+
+/* `udp_sendto` from socket `sock` (0-3) to destination `dest` (0-15). */
+static size_t udp_action(uint8_t *buf, size_t cap, unsigned sock, unsigned dest, uint8_t len8)
+{
+    uint8_t a[5] = { (uint8_t)((sock << 4) | dest), 0, 9, len8, 0 };
+    return action(buf, cap, ACT_UDP_SEND, a, sizeof(a));
 }
 
 size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
@@ -598,6 +983,56 @@ size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
     case 18:  /* a SYN-ACK to the half-open connection: it completes */
         n = np_frame_tcp4(f, k_mac0, k_peer_mac, FAR, IP0, 9, 0, 300, 0, TH_SYN | TH_ACK, 65535, mss, 4, NULL, 0);
         return record(buf, cap, CTL_FIX | CTL_TO_HALF | CTL_HOST_ACTS, f, n);
+    case 19:  /* UDP to the resolved peer, then to the unresolved neighbour, then time for the ARP retries */
+        n = udp_action(buf, cap, 0, 0, 4);
+        n += udp_action(buf + n, cap - n, 0, 1, 4);
+        return n + action(buf + n, cap - n, ACT_CLOCK, (const uint8_t[]){ 30 }, 1);
+    case 20:  /* a connected send, a routed one, a broadcast, a guest-side one */
+        n = udp_action(buf, cap, 1, 0, 2);
+        n += udp_action(buf + n, cap - n, 0, 2, 2);
+        n += udp_action(buf + n, cap - n, 0, 5, 2);
+        return n + udp_action(buf + n, cap - n, 0, 3, 2);
+    case 21:  /* IPv6: to the peer, connected, multicast */
+        n = udp_action(buf, cap, 2, 8, 4);
+        n += udp_action(buf + n, cap - n, 3, 0, 4);
+        return n + udp_action(buf + n, cap - n, 2, 10, 4);
+    case 22:  /* IPv6 to an unresolved neighbour, then its advertisement completes it */
+        n = udp_action(buf, cap, 2, 9, 4);
+        return n + action(buf + n, cap - n, ACT_ND, (const uint8_t[]){ 1 }, 1);
+    case 23:  /* the ring full: a resolved send fails -ENOBUFS; then empty again */
+        n = action(buf, cap, ACT_RING, (const uint8_t[]){ 3 }, 1);
+        n += udp_action(buf + n, cap - n, 0, 0, 4);
+        n += udp_action(buf + n, cap - n, 2, 8, 4);
+        n += action(buf + n, cap - n, ACT_RING, (const uint8_t[]){ 0 }, 1);
+        return n + udp_action(buf + n, cap - n, 0, 0, 4);
+    case 24:  /* the IPv6 peer sends data, the host answers and closes */
+        n = action(buf, cap, ACT_V6_SEG, (const uint8_t[]){ TH_PSH | TH_ACK, 0xff, 0xff, 'h', 'i', '6' }, 6);
+        return n + action(buf + n, cap - n, ACT_V6_HOST, (const uint8_t[]){ 1 | 2 | 8, 40 }, 2);
+    case 25:  /* the IPv6 peer closes */
+        n = action(buf, cap, ACT_V6_SEG, (const uint8_t[]){ TH_FIN | TH_ACK, 0xff, 0xff }, 3);
+        return n + action(buf + n, cap - n, ACT_V6_HOST, (const uint8_t[]){ 2 | 8 }, 1);
+    case 27: { /* port unreachable quoting the connected socket's flow: its pending error (udp_error_notify) */
+        uint8_t inner[NP_IPV4 + 8];
+        np_ipv4(inner, IP0, PEER, IPPROTO_UDP, 8, 64);
+        np_put16(inner + NP_IPV4, 5353);
+        np_put16(inner + NP_IPV4 + 2, 53);
+        np_put16(inner + NP_IPV4 + 4, 8);
+        np_put16(inner + NP_IPV4 + 6, 0);
+        n = np_frame_icmp4(f, k_mac0, k_peer_mac, PEER, IP0, ICMP_DEST_UNREACH, ICMP_UNREACH_PORT, 0, 0, inner,
+                           sizeof(inner));
+        size_t a = udp_action(buf, cap, 1, 0, 2);
+        return a + record(buf + a, cap - a, CTL_FIX, f, n);
+    }
+    case 28:  /* fresh sockets: an ephemeral port each family, a port in use, an address not ours */
+        n = udp_action(buf, cap, 4, 0, 2);
+        n += udp_action(buf + n, cap - n, 5, 8, 2);
+        n += udp_action(buf + n, cap - n, 6, 0, 2);
+        return n + udp_action(buf + n, cap - n, 7, 0, 2);
+    case 26:  /* an oversized datagram, own and loopback destinations, an unroutable one */
+        n = udp_action(buf, cap, 0, 0, 255);
+        n += udp_action(buf + n, cap - n, 0, 4, 2);
+        n += udp_action(buf + n, cap - n, 0, 7, 2);
+        return n + udp_action(buf + n, cap - n, 2, 11, 2);
     default:
         return 0;
     }

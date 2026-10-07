@@ -436,6 +436,15 @@ static int fz_transmit(struct netif *nif, struct mbuf *m)
 {
     struct fz_netif *f = (struct fz_netif *)nif;
     uint32_t len = m->pkt.len;
+    if (f->ring_full) {
+        /* As virtio_net's transmit on a full ring: the packet is taken and freed. */
+        f->refused++;
+        f->last_refused_len = len < FZ_CAPTURE_MAX ? len : FZ_CAPTURE_MAX;
+        if (!m_copydata(m, 0, f->last_refused_len, f->last_refused))
+            panic("fuzz netif: a refused chain is shorter than its pkt.len");
+        m_freem(m);
+        return -ENOBUFS;
+    }
     f->transmits++;
     if (len > nif->mtu + ETH_HLEN)
         f->oversize++;

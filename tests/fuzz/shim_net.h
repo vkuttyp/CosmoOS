@@ -29,6 +29,10 @@ struct fz_netif {
     unsigned transmits;            /* frames the stack sent out of it */
     unsigned oversize;             /* frames longer than mtu + ETH_HLEN (an oracle) */
     unsigned runts;                /* frames shorter than 60 bytes */
+    bool ring_full;                /* the target's switch: transmit refuses, -ENOBUFS, as a full ring does */
+    unsigned refused;              /* frames refused so */
+    uint8_t last_refused[FZ_CAPTURE_MAX];   /* the most recent one, whole */
+    uint32_t last_refused_len;
     uint8_t last[FZ_CAPTURE_MAX];  /* the most recent frame, whole */
     uint32_t last_len;
     /* The target's per-frame observer (checksums, lengths), or NULL. */

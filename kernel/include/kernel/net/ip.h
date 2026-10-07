@@ -103,6 +103,8 @@ int icmp_send_echo(uint32_t dst, uint16_t id, uint16_t seq, const void *payload,
 /* Neighbour discovery: like ARP for IPv6. */
 void nd_init(void);
 int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[6], struct mbuf *m);
+/* arp_lookup's twin: is `ip` a reachable neighbour on `nif`, and its MAC. */
+bool nd_lookup(const struct netif *nif, const struct in6_addr *ip, uint8_t mac[6]);
 void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_age(uint64_t now_ns);

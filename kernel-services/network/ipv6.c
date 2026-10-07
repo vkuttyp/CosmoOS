@@ -214,6 +214,17 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALE
     return -EINPROGRESS;
 }
 
+bool nd_lookup(const struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALEN])
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
+    struct nd_entry *e = nd_find(nif, ip);
+    bool ok = e && e->state == ND_REACHABLE;
+    if (ok)
+        memcpy(mac, e->mac, ETH_ALEN);
+    spin_unlock_irqrestore(&g_nd_lock, s);
+    return ok;
+}
+
 void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
 {
     m = m_pullup(m, sizeof(struct nd_msg));
