@@ -154,11 +154,13 @@ the quiescence tests; CI runs it in its own container.
 ### `epoll-close-bench` (`kernel/io/epolltest.c`, reports only)
 
 One thread per CPU (at most four), each with its own table and eventfd,
-installing and closing 20 000 times: closes per second for an object
-never registered (the `watched` flag spares its last close the watch
-lock) and for one registered elsewhere (the lock is taken and the
-watchers list walked). The report compares the figures with the previous
-unit's, which took the lock on every last close.
+20 000 rounds, three shapes: the last close of a never-registered object
+(the `watched` flag spares it the watch lock; the previous unit took the
+lock on every last close); a close that is not the last (a slot elsewhere
+holds the object: no registration work on either tree); and install, ADD
+to a set of the worker's own, last close -- the removal path, which takes
+the lock and walks the watchers. Closes per second for each, printed; the
+report compares them with the baseline.
 
 ### `realtime` (`kernel/io/polltest.c`)
 
