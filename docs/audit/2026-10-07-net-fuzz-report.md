@@ -164,7 +164,38 @@ bit, so they land on the established connection at run time.
 
 ## 5. Runs and findings
 
-TBD-RUNS
+Every run under ASan and UBSan on the host (Apple M-series, one thread, the
+portable driver); the coverage build adds clang's source-based
+instrumentation and reports the lines of `kernel-services/network/*.c`
+executed by the seeds, the corpus and N mutations of one seed. The curve
+flattens by 100 000 mutations for every target: the mutator is exploring a
+fixed topology, and what it does not reach by then it does not reach.
+
+| Target | Inputs a second | Lines covered: seeds only, 20 000, 100 000, 300 000 mutations | Time, 300 000 |
+|---|---|---|---|
+| `fuzz_net_frame` | about 5 300 | 56.0 %, 62.3 %, 64.1 %, 64.7 % of the stack's 4 976 lines | 57 s |
+| `fuzz_tcp_segments` | about 7 500 | 35.4 %, 39.5 %, 39.6 %, 39.7 % | 40 s |
+| `fuzz_dhcp_dns` | about 100 000 | 9.6 %, 10.0 %, 10.0 %, 10.0 % (72.8 % of `tapsvc.c`, the file under test) | 3 s |
+
+By file at the plateau, `fuzz_net_frame`: `ether.c` 92 %, `cksum.c` 91 %,
+`arp.c` 77 %, `ipv4.c` 70 %, `tcp.c` 69 %, `ipv6.c` 69 %, `mbuf.c` 64 %,
+`nat.c` 60 %, `udp.c` 49 %, `fw.c` 46 %, `inet.c` 19 % (address
+formatting). `fuzz_tcp_segments` reaches 69 % of `tcp.c` by a different
+route (every state, the timers, the probe, keepalive, PMTU) and little
+else by design. What the frame target does not reach is the half of
+`fw.c` and `nat.c` that configuration drives (rule editing, listing, the
+port-forward table's commands), `udp.c`'s send side, and the IPv6 output
+path (no IPv6 socket). The per-input cost of the two stack targets is the
+handshake and teardown each input pays -- a listener, a real three-way
+handshake read off the fake interface, up to fifteen simulated minutes of
+timers -- which keeps every input independent and reproducible from its
+file alone.
+
+Longer runs: 50 000 mutations of each target with the driver's seeds 1
+and 2 and 30 000 with seeds 3, 4 and 5 for the frame target, all clean
+after the finding below was fixed; CI runs each with `FUZZ_RUNS=50000`
+(about 10 s for the frame target, 7 s for the segments, under a second
+for DHCP and DNS).
 
 **Finding: a FIN that acknowledges the last segment in flight strands a
 closed connection (fixed).** `fuzz_tcp_segments`, 16 inputs into a
@@ -239,4 +270,16 @@ replays clean with the fix, and so does the run that found it.
 
 ## 7. Validation
 
-TBD-VALIDATION
+The usual chain on both architectures, at the branch's head: `host-test`,
+`analyze`, `make fuzz` with 50 000 mutations of every target (the nine
+earlier ones and the three new), the debug suite with one, two and four
+CPUs, `test-smp2`, `test-chaos`, and a release build and boot, all passing;
+the network harness is part of every debug boot and the new
+`net-fin-acks-last-data` runs in each. Boot times: x86-64 134/136/145 s
+(one/two/four CPUs), `test-smp2` 144 s, `test-chaos` 148 s, release 17 s;
+AArch64 126/136/136 s, 136 s, 148 s, 20 s. `tools/net-fuzz-probe.py --old
+fin-output` on both architectures: the clone with the old FIN branch fails
+`net-fin-acks-last-data` at its stream check (`hin_recv_stream(u, 41002,
+iss + 1, 20, 60, ...)`, 2.5 s of retries) and nothing else of the 440
+tests. The host runs were on the Apple M-series development machine; the
+three new targets add about 18 s to CI's fuzz step.
