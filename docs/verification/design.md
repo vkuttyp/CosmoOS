@@ -283,9 +283,10 @@ and no longer lengthens the test, and it is back on the default
 (`docs/audit/2026-10-06-flake-triage-report.md`).
 
 `make test-chaos` gives the complete boot 240 s, including 230 s for the
-shell harness. Ordinary boots use `BOOT_TIMEOUT`: 180 s (shell 170 s) on
-x86-64, and 240 s on AArch64 since its CI boots were measured to exceed
-180 s on slow runners (the Makefile comment has the distribution). The corresponding
+shell harness. Ordinary boots use `BOOT_TIMEOUT`, 240 s on both
+architectures: AArch64 since its CI boots were measured to exceed 180 s on
+slow runners (2026-10-06), x86-64 since one did (2026-10-07; the Makefile
+comment has both distributions). When chaos got its 240 s the corresponding
 CI run's ordinary boots took 164–167 s; chaos added about 11 s of kernel
 self-tests and exhausted the shell deadline. Per-test watchdogs, the
 shell's 3 s signal-response check and the final boot timeout remain active.
