@@ -3401,3 +3401,40 @@ failed: !early`). With it, the census waits and finds `sockets 0 -> 0`, and
 the adversary's `net-accept-race` passes. A test the census blames is
 still a leftover until shown otherwise; this one was a census that
 counted too early.
+
+## `virtio-remove-inflight` held for 184 s, CPU 0 in virtio-blk's completion loop, 2026-10-08
+
+**Run 37698731544, PR #330's x86-64 job, "Boot test with the harness's
+first attempt broken (debug)":** `boot-test: FAIL after 244.0s -- timed
+out after 240s`. `virtio-remove-inflight` passed every check but took
+**183 946 ms** against its 8 s budget:
+
+```
+selftest: virtio-remove-inflight: held: 1227095 accepted, 2687 refused; 64 found in flight at the remove, ...
+[ WARN] timer: cpu 0: no tick for 22876 ms; interrupts came back at pc ... (last tick interrupted pc ..., thread 'netrx/0')
+[ WARN] hard lockup: cpu 0 no tick for 10000 ms; ... (seen from cpu 3)   -- three times
+```
+
+The rest of the boot never ran. The same job's other debug boots (main,
+smp2, guard, chaos) passed. In the three runs before it, the held pass
+accepted 69-2 406 requests in 148-409 ms in every x86-64 boot. The
+branch touches the network census and socket wake references, not
+`drivers/virtio`.
+
+**Mechanism, provisional (one sighting; the dumps' PCs could not be
+symbolised, since CI does not upload the x86-64 kernel ELF).** During
+the gaps, CPU 0's NMI samples sit in module text under an interrupted
+thread. CPU 1's stack is in the submitter's write path. `vblk_done`
+(`drivers/virtio/virtio_blk.c`) pops completions in a `for (;;)` until
+the used ring is empty, in interrupt context, with no budget. A
+submitter that keeps the device fed, against a device model that
+completes at once, can keep that ring from ever being seen empty: the
+handler then runs for as long as the submitter does. That fits 1.2
+million requests passing through a pass that normally sees about a
+hundred, and a CPU with no tick for 22 s. It is not shown: a slow runner
+gives the timing, and nothing here has reproduced it. The next step is
+the one this file keeps naming: build what names the cause. That is a
+per-call count of completions popped in `vblk_done`, printed when it
+exceeds the ring size, plus a deterministic run in which the submitter
+outpaces the handler. Then bound the loop (a budget, the remainder
+deferred), if that is what it is. The failed job was re-run.
