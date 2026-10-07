@@ -634,10 +634,14 @@ static void close_worker_thread(void *arg)
 
 enum { BENCH_LAST, BENCH_NOT_LAST, BENCH_REMOVAL };
 
-static bool close_bench(const char **reason, struct close_worker *ws, unsigned n, int shape, uint64_t *per_s)
+static bool close_bench(const char **reason, struct close_worker *ws, unsigned n, int shape, unsigned rounds,
+                        uint64_t *per_s)
 {
     static struct handle_table keep;
     struct kobject *eps[4] = { NULL, NULL, NULL, NULL };
+    sched_watchdog_kick();   /* three shapes back to back, the removal one slow under TCG */
+    for (unsigned i = 0; i < n; i++)
+        ws[i].rounds = rounds;
     if (shape == BENCH_NOT_LAST) {
         /* A slot elsewhere holds each object: the loop's closes are never
          * the last. */
@@ -660,7 +664,7 @@ static bool close_bench(const char **reason, struct close_worker *ws, unsigned n
     for (unsigned i = 0; i < n; i++)
         thread_join(th[i]);
     uint64_t ns = clock_now_ns() - t0;
-    *per_s = ns ? (uint64_t)n * ws[0].rounds * 1000000000ull / ns : 0;
+    *per_s = ns ? (uint64_t)n * rounds * 1000000000ull / ns : 0;
     for (unsigned i = 0; i < n; i++) {
         CHECK(ws[i].ok);
         if (eps[i] != NULL)
@@ -678,19 +682,22 @@ bool selftest_epoll_close_bench(const char **reason)
     for (unsigned i = 0; i < n; i++) {
         handle_table_init(&ws[i].t);
         CHECK(eventfd_obj_create(0, false, &ws[i].ev) == 0);
-        ws[i].rounds = 20000;
     }
+    /* The rates are the figures; the round counts keep each shape well
+     * inside the per-test budget (the removal is tens of microseconds a
+     * round under TCG, with the watch lock contended on the old tree). */
     uint64_t last = 0, not_last = 0, removal = 0;
-    bool ok = close_bench(reason, ws, n, BENCH_LAST, &last) && close_bench(reason, ws, n, BENCH_NOT_LAST, &not_last) &&
-              close_bench(reason, ws, n, BENCH_REMOVAL, &removal);
+    bool ok = close_bench(reason, ws, n, BENCH_LAST, 20000, &last) &&
+              close_bench(reason, ws, n, BENCH_NOT_LAST, 20000, &not_last) &&
+              close_bench(reason, ws, n, BENCH_REMOVAL, 2000, &removal);
     for (unsigned i = 0; i < n; i++) {
         handle_table_destroy(&ws[i].t);
         kobject_put(ws[i].ev);
     }
     if (!ok)
         return false;
-    kinfo("selftest: epoll-close-bench: %u CPUs x %u rounds: last close of a never-registered object %llu/s, "
-          "a close that is not the last %llu/s, install+add+last close (the removal) %llu/s",
-          n, ws[0].rounds, (unsigned long long)last, (unsigned long long)not_last, (unsigned long long)removal);
+    kinfo("selftest: epoll-close-bench: %u CPUs x 20000 rounds: last close of a never-registered object %llu/s, "
+          "a close that is not the last %llu/s; x 2000 rounds: install+add+last close (the removal) %llu/s",
+          n, (unsigned long long)last, (unsigned long long)not_last, (unsigned long long)removal);
     return true;
 }
