@@ -1220,21 +1220,35 @@ bool selftest_net_tcp_delack(const char **reason)
     CHECK(ksock_connect(c, &srv.addr) == 0);
     thread_sleep_ms(20);   /* the handshake's last segment is the worker's; let it leave before counting */
 
-    /* One segment out; nothing comes back until the receiver's timer
-     * acknowledges it. Count segments the host sent: the data segment and
-     * then the acknowledgement, and the time the second one took. */
+    /* The receiver acknowledges every second segment at once and arms the
+     * timer for the odd one; the handshake's last segment counts as one,
+     * so the first data segment is acknowledged immediately and the
+     * second is the one the timer acknowledges. Send one, wait for its
+     * acknowledgement, then send the second and time the acknowledgement
+     * that nothing but the timer can produce. Segments are counted
+     * host-wide: the data segment, then the acknowledgement. */
     struct tcp_stats t0, t1;
     tcp_get_stats(&t0);
+    CHECK(ksock_sendto(c, "a", 1, NULL) == 1);
+    bool first_acked = false;
+    for (unsigned i = 0; i < 200 && !first_acked; i++) {
+        tcp_get_stats(&t1);
+        first_acked = t1.segs_out >= t0.segs_out + 2;
+        if (!first_acked)
+            thread_sleep_ms(5);
+    }
+    CHECK(first_acked);
+    tcp_get_stats(&t0);
     uint64_t sent_at = clock_now_ns();
-    CHECK(ksock_sendto(c, "d", 1, NULL) == 1);
+    CHECK(ksock_sendto(c, "b", 1, NULL) == 1);
     uint64_t acked_at = 0;
-    for (unsigned i = 0; i < 200; i++) {
+    for (unsigned i = 0; i < 400; i++) {
         tcp_get_stats(&t1);
         if (t1.segs_out >= t0.segs_out + 2) {
             acked_at = clock_now_ns();
             break;
         }
-        thread_sleep_ms(5);
+        thread_sleep_ms(2);
     }
     CHECK(acked_at != 0);                                   /* the acknowledgement came within a second */
     uint64_t delay_ms = (acked_at - sent_at) / 1000000ull;
@@ -1244,11 +1258,11 @@ bool selftest_net_tcp_delack(const char **reason)
     srv.stop = true;
     for (unsigned i = 0; i < 300 && !srv.done; i++)
         thread_sleep_ms(10);
-    CHECK(srv.done && srv.result == 0 && srv.bytes_seen == 1);
+    CHECK(srv.done && srv.result == 0 && srv.bytes_seen == 2);
     nt_ksock_put(c);
     thread_sleep_ms(50);
     CHECK(socket_count() == socks0);
-    kinfo("selftest: net-tcp-delack: a silent receiver acknowledged one segment after %llu ms, from the delayed-ACK timer",
+    kinfo("selftest: net-tcp-delack: a silent receiver acknowledged the odd segment after %llu ms, from the delayed-ACK timer",
           (unsigned long long)delay_ms);
     return true;
 }
@@ -5555,6 +5569,198 @@ static uint16_t nettest_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id, uint16_t
     uint16_t len = (uint16_t)(sizeof(*ic) + pllen);
     ic->cksum = in_cksum(l4, len);   /* ICMPv4: no pseudo-header */
     return len;
+}
+
+
+/* --- net-netif-flags: one reading of the flag word per packet (N26) ------
+ *
+ * ipv4_input reads the ingress interface's nif->flags once, and
+ * ipv4_forward the egress's once, and every check of the packet -- the
+ * anti-spoof, the forwarding firewall's direction, whether to masquerade
+ * -- is made from those readings. Until 2026-10-07 each check read the
+ * word again, so a toggle of masquerade landing between two of them gave
+ * one packet half of each state: anti-spoofed as a plain forwarder (any
+ * source on the subnet passes), then masqueraded (a source the masquerade
+ * anti-spoof would have refused, translated). The park hook holds a packet
+ * exactly there while the test flips the flag; a stream under a toggling
+ * thread checks the same rule without the hook.
+ */
+#if CONFIG_DEBUG   /* the park hook exists in debug builds; the test skips without it */
+struct flags_toggler {
+    struct netif *nif;
+    volatile bool stop;
+    unsigned flips;
+};
+
+static void flags_toggler_thread(void *arg)
+{
+    struct flags_toggler *t = arg;
+    bool on = false;
+    while (!t->stop) {
+        on = !on;
+        netif_set_masquerade(t->nif, on);
+        t->flips++;
+        thread_sleep_ms(1);
+    }
+    netif_set_masquerade(t->nif, false);
+    thread_exit(0);
+}
+
+/* Inject a datagram from `src` on `g`, parked in ipv4_forward between the
+ * anti-spoof and the masquerade decision; flip masquerade to `masq` while
+ * it is parked; release it. True when it was parked. */
+static bool flags_inject_parked(struct tap *g, const uint8_t gmac[6], const uint8_t smac[6], uint32_t src,
+                                uint32_t dst, bool masq)
+{
+    uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, frame[128];
+    ipv4_test_hold_forward(true);
+    uint32_t len = nettest_build_udp(frame, gmac, smac, src, dst, 64, 4100, 5100, payload, sizeof(payload));
+    if (tap_inject(g, frame, len) != 0) {
+        ipv4_test_hold_forward(false);
+        return false;
+    }
+    bool parked = false;
+    for (unsigned i = 0; i < 1000 && !parked; i++) {
+        parked = ipv4_test_forward_parked();
+        if (!parked)
+            thread_sleep_ms(1);
+    }
+    netif_set_masquerade(tap_netif(g), masq);
+    ipv4_test_release_forward();
+    ipv4_test_hold_forward(false);
+    return parked;
+}
+
+/* The source address of the next IPv4 frame on `u`, or 0 for none. */
+static uint32_t flags_recv_src(struct tap *u)
+{
+    struct mbuf *out = nettest_recv_ip(u);
+    if (out == NULL)
+        return 0;
+    uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
+    uint32_t src = 0;
+    if (m_copydata(out, 0, sizeof(hdr), hdr))
+        src = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
+    m_freem(out);
+    return src;
+}
+#endif
+
+bool selftest_net_netif_flags(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-netif-flags: needs the debug park hook; skipping");
+    return true;
+#else
+    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x01 };
+    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x0f };
+    static const uint8_t other_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x14 };
+    static const uint8_t peer_mac[6]  = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 5, 1), guest = IPV4_ADDR(10, 77, 5, 15), other = IPV4_ADDR(10, 77, 5, 20);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 6, 1), peer = IPV4_ADDR(10, 77, 6, 99);
+
+    struct tap *g = nt_tap_create("flgg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = nt_tap_create("flgu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);   /* a plain forwarder to begin with: masquerade off */
+    nettest_seed_arp(tap_netif(u), peer, peer_mac);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);
+    nettest_seed_arp(tap_netif(g), other, other_mac);
+    nat_flush();
+    struct nat_stats n0, n1;
+    nat_get_stats(&n0);
+
+    /* 1. Masquerade turned on while a datagram from .20 -- on the subnet,
+     * so the plain forwarder's anti-spoof passed it -- is parked before
+     * the masquerade decision. One reading of the word: forwarded as the
+     * forwarder it entered under, its source intact, no flow made. Two
+     * readings: masqueraded, a source the masquerade's anti-spoof refuses
+     * translated and given a NAT flow. */
+    CHECK(flags_inject_parked(g, g_mac, other_mac, other, peer, true));
+    uint32_t src = flags_recv_src(u);
+    CHECK(src != 0);
+    CHECK(src == other);   /* two readings masquerade it: src == u_ip */
+    nat_get_stats(&n1);
+    CHECK(n1.out_new == n0.out_new);
+
+    /* 2. The mirror: masquerade turned off while the guest's (.15) datagram
+     * is parked. One reading: masqueraded, the state it entered under. */
+    CHECK(flags_inject_parked(g, g_mac, guest_mac, guest, peer, false));
+    src = flags_recv_src(u);
+    CHECK(src == u_ip);
+    nat_get_stats(&n1);
+    CHECK(n1.out_new == n0.out_new + 1);
+    netif_set_masquerade(tap_netif(g), false);
+
+    /* 3. A stream from .20 while another thread flips masquerade every
+     * millisecond, no hook. Each datagram is either forwarded with its own
+     * source (the forwarder's treatment) or refused by the masquerade's
+     * anti-spoof (the masquerader's); none is masqueraded, and no flow is
+     * made for .20. */
+    struct flags_toggler tg = { .nif = tap_netif(g) };
+    struct thread *th = thread_create(flags_toggler_thread, &tg, "flags-toggle", SCHED_PRIO_DEFAULT);
+    CHECK(th != NULL);
+    uint8_t payload[8] = { 9, 8, 7, 6, 5, 4, 3, 2 }, frame[128];
+    unsigned sent = 0, got = 0, masqueraded = 0, foreign = 0;
+    struct ip_stats i0, i1;
+    ipv4_get_stats(&i0);
+    for (unsigned i = 0; i < 300; i++) {
+        uint32_t len = nettest_build_udp(frame, g_mac, other_mac, other, peer, 64, (uint16_t)(4200 + (i & 63)), 5100,
+                                         payload, sizeof(payload));
+        if (tap_inject(g, frame, len) == 0)
+            sent++;
+        struct mbuf *m;
+        while ((m = tap_recv(u)) != NULL) {
+            uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
+            if (m_copydata(m, 0, sizeof(hdr), hdr) && hdr[12] == 0x08 && hdr[13] == 0x00) {
+                uint32_t s = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
+                got++;
+                if (s == u_ip)
+                    masqueraded++;
+                else if (s != other)
+                    foreign++;
+            }
+            m_freem(m);
+        }
+        if ((i & 7) == 7)
+            thread_sleep_ms(1);
+    }
+    tg.stop = true;
+    thread_join(th);
+    for (unsigned i = 0; i < 30; i++) {   /* what the worker forwarded after the last inject */
+        struct mbuf *m;
+        while ((m = tap_recv(u)) != NULL) {
+            uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
+            if (m_copydata(m, 0, sizeof(hdr), hdr) && hdr[12] == 0x08 && hdr[13] == 0x00) {
+                uint32_t s = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
+                got++;
+                if (s == u_ip)
+                    masqueraded++;
+                else if (s != other)
+                    foreign++;
+            }
+            m_freem(m);
+        }
+        thread_sleep_ms(10);
+    }
+    ipv4_get_stats(&i1);
+    nat_get_stats(&n1);
+    CHECK(sent == 300);
+    CHECK(masqueraded == 0);
+    CHECK(foreign == 0);
+    CHECK(got + (unsigned)(i1.fwd_spoofed - i0.fwd_spoofed) == sent);   /* every datagram: forwarded intact or refused */
+    CHECK(n1.out_new == n0.out_new + 1);                               /* still only the guest's flow */
+    CHECK(got >= 1 && i1.fwd_spoofed > i0.fwd_spoofed);                /* both treatments occurred */
+
+    kinfo("selftest: net-netif-flags: a toggle parked between two checks follows one reading of the word; "
+          "%u datagrams under %u flips: %u forwarded intact, %llu refused, none masqueraded",
+          sent, tg.flips, got, (unsigned long long)(i1.fwd_spoofed - i0.fwd_spoofed));
+    return true;
+#endif
 }
 
 bool selftest_net_nat(const char **reason)

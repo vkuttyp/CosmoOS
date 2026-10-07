@@ -85,7 +85,7 @@ void nat_guest_purge(uint32_t guest_ip);
  * on success (including "not masqueraded"), -ENOMEM/-ENOSPC when a needed
  * entry could not be made (the caller drops the packet).
  */
-int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
+int nat_out(struct netif *in, unsigned in_flags, struct netif *out, unsigned out_flags, struct mbuf *m,
             const struct ipv4_hdr *iph, unsigned ihl, uint32_t *new_src);
 
 /*

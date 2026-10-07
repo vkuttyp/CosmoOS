@@ -397,6 +397,7 @@ bool selftest_net_tcpverdict(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);
+bool selftest_net_netif_flags(const char **reason);   /* one reading of an interface's flag word per packet (N26) */
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_sockerr_udp(const char **reason);

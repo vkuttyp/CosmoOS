@@ -719,6 +719,7 @@ static const struct selftest tests[] = {
     { "net-route",       selftest_net_route },
     { "net-forward",     selftest_net_forward },
     { "net-nat",         selftest_net_nat },
+    { "net-netif-flags", selftest_net_netif_flags },
     { "tap",             selftest_tap },
     { "tap-filter",      selftest_tap_filter },
     { "tap-ready",       selftest_tap_ready },

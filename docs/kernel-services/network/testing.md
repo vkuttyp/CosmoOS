@@ -290,6 +290,16 @@ processes the client's final ACK, and the test thread (higher priority)
 can run ahead of the worker now that `quiesce_read_unlock` at the end of
 a transmit is a prompt preemption point.
 
+**`net-tcp-delack`**: the delayed acknowledgement. A loopback server
+accepts and then neither reads nor writes; the client sends one byte and
+counts the host's segments: the data segment, then the acknowledgement,
+which must arrive within a second and not before `TCP_DELACK_NS` (40 ms)
+less a 10 ms allowance, and not as a retransmission. Every other TCP
+exchange in the suite acknowledges by output before the timer fires, so
+until this test `delack_timer` never ran in a boot (the completion-waits
+report's coverage listing); with it the timer callback runs under its own
+lockdep class.
+
 ## Forwarding and NAT
 
 These create their own taps on private subnets (`10.9.x`, `10.77.x`) chosen
@@ -353,6 +363,20 @@ result, completed panic output and failure exit; a gate timeout cannot
 pass. Repeat old/fixed with `--arch aarch64`. Images and build/boot logs
 remain in fresh `out/nat-expiry-*/run-*` directories. The injected gate and
 early test placement are confined to the temporary clone.
+
+**`net-netif-flags`** (debug builds): the per-packet reading of an
+interface's flag word (N26). Two taps, the guest side forwarding, masquerade
+off. A datagram from a subnet address that is not the guest's is parked by
+`ipv4_test_hold_forward` between ipv4_forward's anti-spoof check and its
+masquerade decision while masquerade is turned on: it must leave the
+uplink with its own source and open no NAT flow (the old per-check reads
+masqueraded it: a source the masquerade's anti-spoof refuses, translated).
+The mirror: the guest's datagram parked while masquerade is turned off
+leaves masqueraded. Then 300 datagrams from the non-guest address while a
+thread flips masquerade every millisecond: each is forwarded intact or
+refused as spoofed (`fwd_spoofed`), none masqueraded, the flow count
+unchanged, both treatments seen. `tools/netif-flags-probe.py --old`
+restores the live reads and the test fails at `src == other`.
 
 **`net-dnat`**: two taps and a static port-forward rule (`tcp:8080 →
 10.77.5.15:80`). A client SYN to the host's uplink address port 8080 is read

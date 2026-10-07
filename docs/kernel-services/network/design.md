@@ -754,6 +754,23 @@ reproduction. The filtering firewall over this forwarding path is done ("A
 forwarding firewall", below); IPv6 NAT is a later unit; inbound
 port-forwarding (DNAT), once next, is done -- the next section.
 
+**One reading of the flag word per packet (N26, 2026-10-07).** The
+forwarding path makes several decisions from an interface's flags: the
+ingress's `NETIF_FORWARD` (forward at all), its `NETIF_MASQUERADE` (the
+anti-spoof's rule, whether to masquerade, the INPUT chain), the egress's
+`NETIF_FORWARD` (the firewall's direction, guest-to-guest or uplink) and
+`NETIF_LOOPBACK`. Each check used to read `nif->flags` again, and the
+writers (`netif_set_forward`, `netif_set_masquerade`) run at any time, so
+a toggle could land between two checks of one packet: anti-spoofed as a
+plain forwarder, then masqueraded. Now `ipv4_input` reads the ingress word
+once with a relaxed atomic load, `ipv4_forward` the egress's once after
+the route, `ipv4_output` the egress's once, and the readings travel down
+as `in_flags`/`out_flags` into `fw_forward_verdict`, `nat_out`,
+`fw_output_verdict` and `fw_host_flow_of`. A toggle takes effect between
+packets. The test `net-netif-flags` parks a datagram at the window with a
+debug hook (`ipv4_test_hold_forward`) and flips the flag; the probe
+`tools/netif-flags-probe.py --old` restores the live reads.
+
 ## Inbound port forwarding: DNAT (`nat.c`; audit unit "reaching the guest from outside")
 
 Masquerade let the guest reach out; DNAT lets the outside reach a service the

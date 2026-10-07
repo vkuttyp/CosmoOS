@@ -9,6 +9,8 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+
+#include <arch/cpu.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
@@ -186,6 +188,7 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
      * for the senders that leave it to the route (icmp_send_echo, an unbound
      * socket) as much as for those that name it. */
     uint32_t from = src != 0 ? src : ipv4_source_for(dst);
+    unsigned flags = __atomic_load_n(&nif->flags, __ATOMIC_RELAXED);   /* once per datagram (N26) */
 
     /* The firewall's OUTPUT chain: what the host itself may send. Here --
      * after the route, because the egress is the scope the rule may name,
@@ -195,7 +198,7 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
      * chains hide from it is told: -EPERM, which udp_sendto and
      * icmp_send_echo already return to their callers. Loopback is not
      * offered: the host talking to itself passes no chain. */
-    if (!(nif->flags & NETIF_LOOPBACK) && fw_output_verdict(nif, m, from, dst, proto) == FW_DROP) {
+    if (!(flags & NETIF_LOOPBACK) && fw_output_verdict(nif, flags, m, from, dst, proto) == FW_DROP) {
         STAT(tx_filtered);
         m_freem(m);
         netif_put(nif);
@@ -211,7 +214,7 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
      * stack accepted it, and whether the neighbour ever answers is a network
      * condition, not a refused send.) */
     struct fw_host_flow hf;
-    bool track = fw_host_flow_of(nif, m, from, dst, proto, &hf);
+    bool track = fw_host_flow_of(nif, flags, m, from, dst, proto, &hf);
     int rc = output_on(nif, m, from, dst, proto, ttl);
     if (track && rc == 0)
         fw_host_record(&hf);
@@ -517,7 +520,18 @@ int icmp_send_echo(uint32_t dst, uint16_t id, uint16_t seq, const void *payload,
  * time-exceeded at zero; a routeless or hairpin (back out the arrival
  * interface) packet is dropped, with an ICMP net-unreachable for no route.
  */
-static void ipv4_forward(struct netif *in, struct mbuf *m,
+#if CONFIG_DEBUG
+static void ipv4_test_park_forward(void);
+#else
+static inline void ipv4_test_park_forward(void) {}
+#endif
+
+/* `in_flags` is the ingress interface's flag word as ipv4_input read it,
+ * once, at the packet's entry (N26): every decision below about the
+ * ingress -- anti-spoof, whether to masquerade -- is made from that one
+ * reading, and the egress's word is read once here, so a toggle between
+ * two of a packet's checks cannot give it half of each state. */
+static void ipv4_forward(struct netif *in, unsigned in_flags, struct mbuf *m,
                          const struct ipv4_hdr *iph, unsigned ihl, uint16_t total)
 {
     STAT(fwd);
@@ -531,7 +545,7 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
      * configured subnet cannot be checked and is not gated. */
     if (in->ip4.addr && in->ip4.mask) {
         uint32_t net = in->ip4.addr & in->ip4.mask;
-        bool bad = (in->flags & NETIF_MASQUERADE)
+        bool bad = (in_flags & NETIF_MASQUERADE)
                        ? iph->src != (net | htonl(TAPSVC_GUEST_HOST))
                        : ((iph->src ^ in->ip4.addr) & in->ip4.mask) != 0;
         if (bad) {
@@ -549,6 +563,11 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
     uint32_t src = iph->src, dst = iph->dst;
     uint8_t proto = iph->proto;
 
+    /* Between the anti-spoof's reading and the masquerade decision: where
+     * the old per-check loads could see two states of one toggle. A test
+     * parks the packet here while it flips the flag (net-netif-flags). */
+    ipv4_test_park_forward();
+
     struct netif *out = ipv4_route(dst);
     if (out == NULL) {
         icmp_send_unreach(m, iph, ICMP_UNREACH_NET);
@@ -556,7 +575,8 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
         m_freem(m);
         return;
     }
-    if (out == in || (out->flags & NETIF_LOOPBACK)) {
+    unsigned out_flags = __atomic_load_n(&out->flags, __ATOMIC_RELAXED);   /* once, for the egress (N26) */
+    if (out == in || (out_flags & NETIF_LOOPBACK)) {
         /* Back out the arrival interface (a redirect we do not do), or a
          * martian destination routing to loopback: drop, do not reflect. */
         STAT(fwd_hairpin);
@@ -571,7 +591,7 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
      * rules see guest-visible addresses. A guest-to-guest reply is admitted
      * here by the filter's own flow state; a masqueraded reply never comes
      * this way (nat_in delivers it on the strength of its conntrack entry). */
-    if (fw_forward_verdict(in, out, m, iph, ihl) == FW_DROP) {
+    if (fw_forward_verdict(in, out, out_flags, m, iph, ihl) == FW_DROP) {
         STAT(fwd_filtered);
         netif_put(out);
         m_freem(m);
@@ -588,7 +608,7 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
      * with the private source exposed. Non-transport protocols that need no
      * masquerade (source already on the egress subnet) forward as-is. */
     uint32_t new_src = src;
-    if (in->flags & NETIF_MASQUERADE) {
+    if (in_flags & NETIF_MASQUERADE) {
         unsigned l4min = proto == IPPROTO_TCP ? 20u : 8u;
         bool natable = (proto == IPPROTO_UDP || proto == IPPROTO_TCP || proto == IPPROTO_ICMP) &&
                        m->pkt.len >= (uint32_t)ihl + l4min;
@@ -599,7 +619,7 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
                 return;
             }
             iph = (const struct ipv4_hdr *)m->data;
-            if (nat_out(in, out, m, iph, ihl, &new_src) != 0) {
+            if (nat_out(in, in_flags, out, out_flags, m, iph, ihl, &new_src) != 0) {
                 STAT(fwd_nat_drop);
                 netif_put(out);
                 m_freem(m);
@@ -628,6 +648,44 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
     output_on(out, m, new_src, dst, proto, ttl);
     netif_put(out);
 }
+
+#if CONFIG_DEBUG
+/*
+ * Park the next forwarded packet between the anti-spoof check and the
+ * masquerade decision (net-netif-flags): the window in which the old
+ * per-check reads of nif->flags could see a toggle land, so the test holds
+ * the packet there, flips the flag, and shows the packet follows one
+ * reading of the word (N26). Same shape as arp_test_hold_lock_entry.
+ */
+static unsigned g_test_hold_forward, g_test_forward_parked, g_test_forward_release;
+
+void ipv4_test_hold_forward(bool on)
+{
+    /* Arming resets the park state; disarming leaves it, because the
+     * parked worker may not have seen the release yet (it runs on another
+     * CPU and nobody joins it), and clearing the release under it would
+     * park it for good. The next arming resets both. */
+    if (on) {
+        __atomic_store_n(&g_test_forward_parked, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_test_forward_release, 0u, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&g_test_hold_forward, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool ipv4_test_forward_parked(void) { return __atomic_load_n(&g_test_forward_parked, __ATOMIC_ACQUIRE) != 0; }
+void ipv4_test_release_forward(void) { __atomic_store_n(&g_test_forward_release, 1u, __ATOMIC_RELEASE); }
+
+static void ipv4_test_park_forward(void)
+{
+    if (__atomic_load_n(&g_test_hold_forward, __ATOMIC_RELAXED) == 0)
+        return;   /* not armed, the common case */
+    unsigned one = 1u;
+    if (!__atomic_compare_exchange_n(&g_test_hold_forward, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&g_test_forward_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_forward_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+}
+#endif
 
 void ipv4_input(struct netif *nif, struct mbuf *m)
 {
@@ -667,8 +725,12 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * transport header. After this, m->pkt.len == total. */
     if (total < m->pkt.len)
         m_adj(m, -(int)(m->pkt.len - total));
+    /* The ingress interface's flag word, read once for this packet (N26):
+     * a runtime toggle of forwarding or masquerade takes effect between
+     * packets, never between two checks of one. */
+    unsigned flags = __atomic_load_n(&nif->flags, __ATOMIC_RELAXED);
     /* Martians: loopback or our own addresses arriving from a real link. */
-    if (!(nif->flags & NETIF_LOOPBACK) &&
+    if (!(flags & NETIF_LOOPBACK) &&
         ((ntohl(iph->src) >> 24) == 127 || netif_owns_ipv4(iph->src))) {
         STAT(rx_bad_header);
         m_freem(m);
@@ -678,8 +740,8 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
                  (nif->ip4.mask && nif->ip4.addr && (iph->dst | nif->ip4.mask) == INADDR_BROADCAST_N &&
                   ((iph->dst ^ nif->ip4.addr) & nif->ip4.mask) == 0);
     if (!bcast && !netif_owns_ipv4(iph->dst)) {
-        if (nif->flags & NETIF_FORWARD) {
-            ipv4_forward(nif, m, iph, ihl, total);
+        if (flags & NETIF_FORWARD) {
+            ipv4_forward(nif, flags, m, iph, ihl, total);
             return;
         }
         STAT(rx_not_for_us);
@@ -700,7 +762,7 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * topology, not a policy: no rule can reopen it. Loopback ingress is the
      * host talking to itself and is exempt; masqueraded replies and DNAT are
      * addressed to the uplink's own address and are on link. */
-    if (!bcast && !(nif->flags & NETIF_LOOPBACK) && iph->dst != nif->ip4.addr) {
+    if (!bcast && !(flags & NETIF_LOOPBACK) && iph->dst != nif->ip4.addr) {
         STAT(rx_offlink);
         m_freem(m);
         return;
@@ -718,7 +780,7 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * broadcast -- gets a verdict before any host service sees it: the
      * anti-spoof first (the source must be the tap's guest), then the
      * guest's TO_HOST rules and default. Loopback is not consulted. */
-    if ((nif->flags & NETIF_MASQUERADE) && fw_input_verdict(nif, m, iph, ihl) == FW_DROP) {
+    if ((flags & NETIF_MASQUERADE) && fw_input_verdict(nif, m, iph, ihl) == FW_DROP) {
         STAT(in_filtered);
         m_freem(m);
         return;
@@ -738,7 +800,7 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * (RFC 5927), and icmp_input under the flag runs that confirmation and
      * nothing else -- no echo reply, no hook, no rate-limit budget spent.
      * Anything else (an unknown protocol) is freed. */
-    if (!(nif->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) && fw_host_verdict(nif, m, iph, ihl) == FW_DROP) {
+    if (!(flags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) && fw_host_verdict(nif, m, iph, ihl) == FW_DROP) {
         if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP || iph->proto == IPPROTO_ICMP) {
             m->flags |= M_FW_QUIET;
             STAT(hin_quiet);

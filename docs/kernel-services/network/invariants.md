@@ -507,3 +507,33 @@ e->nif`, asserted by `net-arp-retry-unregister`; the test does not call
 retries -- the hazard of §3 below.) `tools/arp-per-interface-probe.py --old`
 restores the address-only keying in both tables and shows both tests
 failing at that check, on both architectures.
+
+**N26. An interface's flag word is read once per packet.** `ipv4_input`
+reads the ingress interface's `nif->flags` once, with a relaxed atomic
+load, after the header checks; `ipv4_forward` reads the egress's once,
+after the route; `ipv4_output` reads the egress's once, after the route.
+Every decision about that packet that depends on the word -- the martian
+and off-link checks, whether to forward, the anti-spoof's rule, the
+forwarding firewall's direction, whether to masquerade, which chain and
+scope the host's output takes -- is made from that reading, passed down as
+`*_flags` to `fw_forward_verdict`, `nat_out`, `fw_output_verdict` and
+`fw_host_flow_of`, which read `nif->flags` themselves no more. A runtime
+toggle (`netif_set_forward`, `netif_set_masquerade`) therefore takes
+effect between packets, never between two checks of one: before
+2026-10-07 each check read the word again, so a toggle of masquerade
+landing between the anti-spoof check (made as a plain forwarder: any
+source on the subnet passes) and the masquerade decision gave one packet
+half of each state -- a source the masquerade's anti-spoof refuses,
+translated and given a NAT flow. `NETIF_LOOPBACK` is set at registration
+and never toggled, so the two helper reads of it off the packet path
+(`ipv4_source_for`, the echo reply's route) are not covered by the rule.
+The writers are unchanged (N25: a release store under `nif->lock`).
+**Checked by** `net-netif-flags` (debug builds): `ipv4_test_hold_forward`
+parks a forwarded datagram between the anti-spoof check and the
+masquerade decision while the test flips masquerade -- on, for a datagram
+from a non-guest subnet address, which must leave intact with no flow;
+off, for the guest's, which must leave masqueraded -- and a 300-datagram
+stream under a thread flipping the flag every millisecond, every datagram
+of which is forwarded intact or refused as spoofed, none masqueraded.
+`tools/netif-flags-probe.py --old` restores the per-check reads and the
+test fails at `src == other`: the parked datagram was masqueraded.

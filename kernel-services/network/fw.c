@@ -506,11 +506,12 @@ static void flow_fill(struct fw_flow *slot, uint32_t initiator, uint8_t proto, u
     slot->expires_ns = now + flow_timeout(slot);
 }
 
-enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct mbuf *m,
+enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, unsigned out_flags, struct mbuf *m,
                                    const struct ipv4_hdr *iph, unsigned ihl)
 {
     (void)in;
-    uint8_t dir = (out->flags & NETIF_FORWARD) ? FW_DIR_TO_GUEST : FW_DIR_TO_UPLINK;
+    (void)out;   /* its flags come as the caller's one reading of the word (N26) */
+    uint8_t dir = (out_flags & NETIF_FORWARD) ? FW_DIR_TO_GUEST : FW_DIR_TO_UPLINK;
     struct l4_view v;
     l4_read(m, ihl, iph->proto, &v);
     uint64_t now = clock_now_ns();
@@ -634,13 +635,14 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
 /* --- the host chain ------------------------------------------------------- */
 
 /* The host is sending: the flow whose reply the chain must admit, if any. */
-bool fw_host_flow_of(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto,
-                     struct fw_host_flow *f)
+bool fw_host_flow_of(struct netif *out, unsigned out_flags, struct mbuf *m, uint32_t src, uint32_t dst,
+                     uint8_t proto, struct fw_host_flow *f)
 {
+    (void)out;   /* its flags come as the caller's one reading of the word (N26) */
     /* Only the world's links. A guest tap's egress carries the guest's own
      * traffic (whose state is NAT's or the FORWARD chain's), and nothing
      * delivered over loopback ever reaches a chain. */
-    if (out->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))
+    if (out_flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))
         return false;
     if (proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
         return false;                        /* see fw.h: TCP is deliberately not recorded */
@@ -780,9 +782,10 @@ enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
 
 /* --- the OUTPUT chain ----------------------------------------------------- */
 
-enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst,
+enum fw_verdict fw_output_verdict(struct netif *out, unsigned out_flags, struct mbuf *m, uint32_t src, uint32_t dst,
                                   uint8_t proto)
 {
+    (void)out;   /* its flags come as the caller's one reading of the word (N26) */
     /* The egress is the scope: a guest's tap, or the world. (Loopback never
      * reaches this function -- ipv4_output does not offer it.) */
     /* Nothing to decide: no OUTPUT rule and an ACCEPT default -- every
@@ -794,7 +797,7 @@ enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t sr
         STAT(out_accept_default);
         return FW_ACCEPT;
     }
-    uint8_t scope = (out->flags & NETIF_MASQUERADE) ? FW_SCOPE_GUEST : FW_SCOPE_WORLD;
+    uint8_t scope = (out_flags & NETIF_MASQUERADE) ? FW_SCOPE_GUEST : FW_SCOPE_WORLD;
     /* rule_matches reads the addresses and protocol through a header, which
      * on this path is not built yet, so the key is assembled here as
      * fw_host_record does; the transport sits at offset 0. */

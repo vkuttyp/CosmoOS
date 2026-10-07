@@ -308,9 +308,10 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
 
 /* --- outbound ------------------------------------------------------------- */
 
-int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
+int nat_out(struct netif *in, unsigned in_flags, struct netif *out, unsigned out_flags, struct mbuf *m,
             const struct ipv4_hdr *iph, unsigned ihl, uint32_t *new_src)
 {
+    (void)in;   /* its flags come as the caller's one reading of the word (N26) */
     *new_src = iph->src;
 
     /* DNAT reply (precedence over masquerade): a forwarded guest packet that
@@ -357,8 +358,8 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
     /* Masquerade only toward the uplink. A flow leaving another forwarding
      * tap is guest-to-guest (both taps forward); leave its source real so the
      * guests see each other's addresses. */
-    if (!(in->flags & NETIF_MASQUERADE) || on_egress || out->ip4.addr == 0 ||
-        (out->flags & NETIF_FORWARD))
+    if (!(in_flags & NETIF_MASQUERADE) || on_egress || out->ip4.addr == 0 ||
+        (out_flags & NETIF_FORWARD))   /* the caller's one reading of each word (N26) */
         return 0;
 
     uint8_t proto = iph->proto;
