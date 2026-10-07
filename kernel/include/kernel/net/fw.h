@@ -157,6 +157,11 @@ int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint
 /* The attached guests' addresses (the host object is not among them); the
  * count written. */
 unsigned fw_guest_list(uint32_t *out, unsigned max);
+#ifdef FW_HOST_TEST
+/* The configuration fuzz target's doors (fw.c). */
+extern void (*fw_test_rule_matched)(uint32_t owner_ip, const struct fw_rule *r);
+bool fw_test_out_fast(void);
+#endif
 
 /*
  * FORWARD: the verdict for a datagram being forwarded from `in` out `out`.

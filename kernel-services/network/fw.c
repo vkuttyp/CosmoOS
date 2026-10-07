@@ -96,6 +96,20 @@ static uint32_t g_out_fast = 1;
 static spinlock_t g_fw_lock = SPINLOCK_INIT("fw");
 static struct fw_stats g_stats;
 
+#ifdef FW_HOST_TEST
+/* The configuration fuzz target's view (tests/fuzz/fuzz_net_config.c):
+ * every rule that decides a verdict, with its owner, as it decides it --
+ * under g_fw_lock, so the hook must not call back into the firewall. */
+void (*fw_test_rule_matched)(uint32_t owner_ip, const struct fw_rule *r);
+#define TEST_MATCHED(owner, r) do { if (fw_test_rule_matched) fw_test_rule_matched((owner), (r)); } while (0)
+bool fw_test_out_fast(void)
+{
+    return __atomic_load_n(&g_out_fast, __ATOMIC_RELAXED) != 0;
+}
+#else
+#define TEST_MATCHED(owner, r) do { } while (0)
+#endif
+
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
 static inline unsigned dir_slot(uint8_t dir)
@@ -552,6 +566,7 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, unsigned
         verdict = (enum fw_verdict)g->policy[dir_slot(dir)];
         for (unsigned i = 0; i < g->nrules; i++)
             if (rule_matches(&g->rules[i], dir, iph, &v, FW_SCOPE_ANY)) {
+                TEST_MATCHED(g->ip, &g->rules[i]);
                 verdict = (enum fw_verdict)g->rules[i].verdict;
                 by_rule = true;
                 break;
@@ -617,6 +632,7 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
         verdict = (enum fw_verdict)g->policy[dir_slot(FW_DIR_TO_HOST)];
         for (unsigned i = 0; i < g->nrules; i++)
             if (rule_matches(&g->rules[i], FW_DIR_TO_HOST, iph, &v, FW_SCOPE_ANY)) {
+                TEST_MATCHED(g->ip, &g->rules[i]);
                 verdict = (enum fw_verdict)g->rules[i].verdict;
                 by_rule = true;
                 break;
@@ -766,6 +782,7 @@ enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
     bool by_rule = false;
     for (unsigned i = 0; i < g_host.nrules; i++)
         if (rule_matches(&g_host.rules[i], FW_DIR_FROM_UPLINK, iph, &v, FW_SCOPE_ANY)) {
+            TEST_MATCHED(FW_HOST_GUEST_IP, &g_host.rules[i]);
             verdict = (enum fw_verdict)g_host.rules[i].verdict;
             by_rule = true;
             break;
@@ -814,6 +831,7 @@ enum fw_verdict fw_output_verdict(struct netif *out, unsigned out_flags, struct 
     bool by_rule = false;
     for (unsigned i = 0; i < g_host.nrules; i++)
         if (rule_matches(&g_host.rules[i], FW_DIR_OUTPUT, &key, &v, scope)) {
+            TEST_MATCHED(FW_HOST_GUEST_IP, &g_host.rules[i]);
             verdict = (enum fw_verdict)g_host.rules[i].verdict;
             by_rule = true;
             break;

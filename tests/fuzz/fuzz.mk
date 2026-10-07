@@ -63,6 +63,7 @@ FUZZ_NET_STACK := kernel-services/network/ether.c kernel-services/network/arp.c 
 	kernel-services/network/cksum.c kernel-services/network/inet.c
 FUZZ_NET_FRAME_SRCS := tests/fuzz/fuzz_net_frame.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
 FUZZ_TCP_SEGMENTS_SRCS := tests/fuzz/fuzz_tcp_segments.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
+FUZZ_NET_CONFIG_SRCS := tests/fuzz/fuzz_net_config.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
 FUZZ_DHCP_DNS_SRCS := tests/fuzz/fuzz_dhcp_dns.c tests/fuzz/shim_net.c kernel-services/network/tapsvc.c \
 	$(FUZZ_NET_STACK) $(FUZZ_COMMON)
 # Checked-in corpora: frames from a boot's capture (tools/pcap-to-seeds.py).
@@ -70,7 +71,7 @@ FUZZ_NET_FRAME_CORPUS := $(ROOT)/tests/fuzz/corpus/net_frame
 
 FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pkg $(FUZZ_OUT)/fuzz_linux \
 	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid \
-	$(FUZZ_OUT)/fuzz_net_frame $(FUZZ_OUT)/fuzz_tcp_segments $(FUZZ_OUT)/fuzz_dhcp_dns
+	$(FUZZ_OUT)/fuzz_net_frame $(FUZZ_OUT)/fuzz_tcp_segments $(FUZZ_OUT)/fuzz_dhcp_dns $(FUZZ_OUT)/fuzz_net_config
 
 $(FUZZ_OUT)/fuzz_fbvalid: $(addprefix $(ROOT)/,$(FUZZ_FBVALID_SRCS))
 	$(call log,FUZZCC,$@)
@@ -132,6 +133,11 @@ $(FUZZ_OUT)/fuzz_tcp_segments: $(addprefix $(ROOT)/,$(FUZZ_TCP_SEGMENTS_SRCS)) $
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTCP_HOST_TEST=1 $(addprefix $(ROOT)/,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_LDFLAGS) -o $@
+
+$(FUZZ_OUT)/fuzz_net_config: $(addprefix $(ROOT)/,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_NET_HDRS)
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DFW_HOST_TEST=1 $(addprefix $(ROOT)/,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
 $(FUZZ_OUT)/fuzz_dhcp_dns: $(addprefix $(ROOT)/,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS)
 	$(call log,FUZZCC,$@)
