@@ -18,6 +18,15 @@ struct kobject;
 
 #define EPOLL_WAIT_FOREVER UINT64_MAX
 
+/* How many sets a chain of nested sets may hold (a set in a set in a set
+ * ...), counting both ends. A forwarded wake takes the outer set's two
+ * spinlocks with a lockdep subclass equal to the depth below it, so the
+ * bound is lockdep's LOCKDEP_SUBCLASSES (4); Linux allows one more
+ * (EP_MAX_NESTS 4, five sets). Adding a set that would make a longer
+ * chain, or a loop, is -ELOOP (docs/kernel/io/design.md, "epoll"). */
+#define EPOLL_MAX_NESTS 4u
+unsigned epoll_obj_max_nests(void);
+
 /* One ready member, kernel-side. `io` is the COSMO_IO_* bits that fired;
  * `events` and `data` are the opaque personality tokens the registration
  * carried (the door interprets them); `fd` and `oneshot` let the door re-arm a
@@ -45,7 +54,7 @@ int epoll_obj_create(struct kobject **out);
 void epoll_last_handle_closed(struct kobject *obj);
 
 /* `obj` iff it is an epoll object, else NULL -- a door confirms an fd is an
- * epoll before a ctl/wait, and rejects nesting an epoll in an epoll. */
+ * epoll before a ctl/wait. */
 struct kobject *epoll_obj_from_kobject(struct kobject *obj);
 
 /* Register `target` (a referenced object; the add takes ownership of that
@@ -54,7 +63,9 @@ struct kobject *epoll_obj_from_kobject(struct kobject *obj);
  * opaque `data` (both echoed to the waiter), and a one-shot flag. -EEXIST if
  * `fd` is already registered; -EBADF if `target` has no handle left anywhere
  * (its last descriptor closed between the caller's lookup and this add: the
- * registration would never be removed). */
+ * registration would never be removed); -EINVAL for the set itself; -ELOOP
+ * for a set that reaches `ep` or would make a chain longer than
+ * EPOLL_MAX_NESTS. */
 int epoll_obj_add(struct kobject *ep, int fd, struct kobject *target,
                   unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge);
 /* Update the registration keyed by `fd` and re-arm a one-shot (and an edge).

@@ -15,6 +15,7 @@ void kobject_init(struct kobject *obj, const struct kobject_type *type)
     obj->type = type;
     obj->refcount = 1;
     obj->handles = 0;
+    obj->watched = 0;
     obj->watchers = NULL;
     /* The owner's live-object count is taken inside module_owner_of's
      * read section, so the module cannot be freed between the lookup and

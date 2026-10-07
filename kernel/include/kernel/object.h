@@ -47,6 +47,13 @@ struct kobject {
      * interest-set entry holding the object is dropped
      * (docs/kernel/io/design.md, "epoll"; invariant A9). Atomic. */
     uint32_t handles;
+    /* Set, and never cleared, when an epoll registration of this object is
+     * made: handle_close consults it after the last slot empties and spares
+     * the never-registered object the epoll watch lock. Written under that
+     * lock before the add's handle-count check, with a seq_cst fence; read
+     * after the decrement with a seq_cst fence (store-buffering, proved in
+     * tests/litmus/epoll/watched.litmus). */
+    uint8_t watched;
     struct module *owner;   /* module whose code the release lives in, or NULL for the kernel */
     /* The epoll entries registered on this object (kernel/io/epoll.c), a
      * singly linked list through epoll_item.obj_next, read and written
@@ -56,7 +63,7 @@ struct kobject {
 };
 
 /* Reference 1 belongs to the caller. Records the owner of type->release.
- * No handle yet, no watchers. */
+ * No handle yet, no watchers, never watched. */
 void kobject_init(struct kobject *obj, const struct kobject_type *type);
 void kobject_get(struct kobject *obj);
 /* `n` references in one add, for a caller that has counted under a lock

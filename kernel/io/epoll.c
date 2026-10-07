@@ -3,40 +3,50 @@
  *
  * The object is a kobject holding a list of (fd, object) registrations. Each
  * carries a wanted COSMO_IO_* mask, opaque personality tokens (events, data),
- * and a one-shot flag. epoll_obj_wait is the aio ring's multi-wait
- * (kernel/io/aio.c) in the shape poll.c uses: it takes a *snapshot* of the
- * members under the lock -- pinning each with a reference and recording its
- * poll_wq -- then arms its *own* per-call wait entries on those queues and the
- * set's own queue, evaluates readiness, and sleeps only if none is ready and
- * the deadline has not passed. A finite timeout wakes the waiting thread
- * directly. A ctl that adds or re-arms a member wakes the set's queue so a
- * concurrent waiter re-evaluates.
+ * and one-shot and edge flags. Readiness reaches the set by callback, as
+ * Linux's does: every item owns a callback wait entry on each queue its
+ * member's requested directions wake (one, or two for an O_RDWR FIFO),
+ * registered for the item's whole life. A member's wake runs the callback
+ * under the member queue's lock; it links the item onto the set's ready list
+ * (under the set's ready-list spinlock) and wakes the set's own queue. A
+ * waiter therefore sleeps on the set's queue alone and walks only the ready
+ * list: the cost of a wait is the number of ready members, not the number
+ * registered, and a set can be a member of another set because its wake
+ * reaches the outer set's queue (docs/kernel/io/design.md, "epoll").
  *
- * The snapshot-and-pin is what makes concurrent ctl safe: a waiter's wait
- * entries are its own (so two waiters do not share one), it finishes on the
- * queues it armed (so a MOD that changes a member's queue cannot strand it),
- * and it holds a reference to each member across the sleep (so a DEL or close
- * cannot free a member whose queue the waiter is parked on). Level- and
- * edge-triggered (EPOLLET, docs/audit/next-subsystem-epollet.md); one-shot
- * supported. See docs/audit/next-subsystem-epoll.md.
+ * Level- and edge-triggered: a level item that was reported goes back on the
+ * ready list, so the next wait re-evaluates it (Linux re-queues level items);
+ * an edge item comes back only through its callback, i.e. a new wake of its
+ * member -- that wake is the edge, whether or not readiness dipped between two
+ * looks. A one-shot item is disabled on report until MOD re-arms it. An item
+ * found not ready when the ready list is walked is dropped from it (a drain's
+ * wake put it there); its next wake brings it back.
  *
  * Lifetime: each registration holds a reference to its member object, dropped
- * on EPOLL_CTL_DEL, when the epoll is released, and when the member's last
- * handle-table slot anywhere is closed (epoll_last_handle_closed, called by
- * handle_close): Linux's open file description is the kobject here, and a
- * registration lives exactly as long as some descriptor to it -- a dup'd or
- * inherited descriptor keeps it, closing one of several does not remove it,
- * the last close does, in whatever epoll and process it was made. Every item
- * is also linked on its object's `watchers` list, which is how the last close
- * finds the sets to remove it from. One global mutex (g_watch_lock) guards
- * every watchers list and is taken outside ep->lock; epoll_obj_wait takes
- * ep->lock alone, so a waiter is never in the order. A waiter asleep with the
- * member pinned (its snapshot reference) is woken by the removal and drops the
- * pin on its next pass; the member's release, and so a socket's FIN, follows
- * that drop, never the waiter's next event. Nesting an epoll in an epoll stays
- * refused: a member's events wake the member's queue, not the set's, so an
- * outer set sleeping on an inner set's queue would sleep through them
- * (docs/kernel/io/design.md, "epoll").
+ * on EPOLL_CTL_DEL, when the set is released, and when the member's last
+ * handle-table slot anywhere is closed (epoll_last_handle_closed, from
+ * handle_close): a registration lives exactly as long as some descriptor to
+ * its member (A9). Before the item is freed its callback entries leave their
+ * queues under those queues' locks, so a callback in flight on another CPU
+ * has finished and none can start: the entries are the item's and the queues
+ * are the member's, which the item's reference keeps alive. A queue whose
+ * owner is not the member (a signalfd polls its process's queue) detaches
+ * every callback entry before it dies (waitqueue_detach_callbacks) and frees
+ * after a grace period; the unhook reads the queue pointer inside a read-side
+ * section. Every item is also on its object's `watchers` list, which is how
+ * the last close finds the sets to remove it from; one global mutex
+ * (g_watch_lock) guards those lists and the subset lists the loop check
+ * walks, and is taken outside ep->lock.
+ *
+ * Locks, inner to outer: a member queue's spinlock -> ep->rlock (ready list)
+ * -> ep->wait's spinlock. A set woken from inside another set's wake takes
+ * its two spinlocks with a lockdep subclass equal to the chain depth below
+ * it (Linux's ep_poll_safewake): the inner set records the depth in `nests`
+ * under its queue's lock while it wakes, and the forwarding callback reads
+ * it there. EPOLL_MAX_NESTS bounds the chain so the subclass stays within
+ * lockdep's four. ep->lock (mutex) serialises ctl against the walk of the
+ * ready list and is never held when a spinlock above is taken by a waker;
+ * the loop check holds g_watch_lock and no ep->lock.
  */
 
 #include <kernel/compiler.h>
@@ -46,8 +56,11 @@
 #include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/object.h>
+#include <kernel/panic.h>
 #include <kernel/process.h>
+#include <kernel/quiesce.h>
 #include <kernel/sched.h>
+#include <kernel/spinlock.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/wait.h>
@@ -57,6 +70,18 @@
 #define EPOLL_WANT_ALL(want) ((want) | COSMO_IO_HANGUP | COSMO_IO_ERROR)
 
 struct epoll_obj;
+struct epoll_item;
+
+/* One callback entry on one member queue. */
+struct epoll_hook {
+    struct wait_entry we;
+    struct waitqueue *wq;     /* the queue the entry is on; NULL when unhooked, or when the queue's
+                               * owner detached it (WAIT_CB_FREED). Written under the queue's lock,
+                               * read by the unhook inside a read-side section. */
+    struct epoll_item *it;
+};
+
+enum { R_IDLE = 0, R_READY, R_TX };   /* off the ready list; on it; on a walker's transfer list */
 
 struct epoll_item {
     struct kobject *obj;      /* the member, referenced */
@@ -68,38 +93,32 @@ struct epoll_item {
     uint64_t data;            /* opaque data token, echoed to the waiter */
     bool oneshot;             /* disable after one report, until MOD re-arms */
     bool disabled;            /* a fired one-shot, until MOD or rearm */
-    bool edge;                /* EPOLLET: report only on a transition into readiness */
-    bool armed;               /* edge: eligible to report an edge now (distinct from !disabled) */
-    uint64_t edge_gen;        /* edge: the member queue's wake generation last observed; a change
-                               * means the member's source fired (an event), so re-arm */
-    struct list_node link;
-    struct epoll_obj *ep;     /* the set this item is in, for the last-close removal */
+    bool edge;                /* EPOLLET: report a wake once; a level item is re-queued after a report */
+    bool member_set;          /* the member is an epoll set: its wakes forward with their depth */
+    struct list_node link;    /* ep->items (ep->lock) */
+    struct list_node set_link;   /* ep->subsets, when member_set (g_watch_lock) */
+    struct epoll_obj *ep;     /* the set this item is in */
     struct epoll_item *obj_next;   /* the member object's watchers list (g_watch_lock) */
-};
-
-/* A member captured for one wait: its queue(s) and a held reference, so the
- * sleep is immune to a concurrent DEL/MOD of the live list. A member's read and
- * write readiness can live on different queues (an O_RDWR FIFO), so up to two. */
-struct epoll_snap {
-    struct kobject *obj;      /* referenced for the duration of the wait */
-    struct waitqueue *wq[2];  /* the requested directions' wake queues, de-duplicated */
-    unsigned nwq;
-    unsigned want;
-    bool edge;                /* captured so the sleep decision gates like collect */
-    bool armed;               /* a disarmed edge member is not "ready" for the sleep check */
-    uint64_t edge_gen;        /* the member's wake generation collect last acted on: a change
-                               * seen after the wait entries are armed is a fresh edge, so do not sleep */
-    struct wait_entry we[2];
-    bool prepared[2];
+    struct epoll_hook hook[2];     /* the member queues' callback entries (ep->lock; each entry under its queue's lock) */
+    unsigned nhooks;
+    struct list_node rdllink; /* ep->rdllist (ep->rlock) */
+    uint8_t rstate;           /* R_* (ep->rlock) */
+    bool rewake;              /* a wake arrived while on a walker's transfer list (ep->rlock) */
+    bool requeue;             /* the walker's own verdict for an item it holds (the walker only) */
 };
 
 struct epoll_obj {
     struct kobject obj;
-    struct mutex lock;        /* the item list */
-    struct waitqueue wait;    /* the set's own queue: ctl wakes it, wait sleeps on it */
+    struct mutex lock;        /* the item list, the ready-list walk, the hooks */
+    struct waitqueue wait;    /* the set's own queue: callbacks and ctl wake it, wait sleeps on it */
+    spinlock_t rlock;         /* the ready list and every item's rstate */
     struct list_node items;
+    struct list_node rdllist;
+    struct list_node subsets; /* the items whose member is a set (g_watch_lock): the loop check's edges */
     unsigned nr;
     uint64_t next_id;         /* assigns each arm (add or MOD re-arm) a unique id */
+    unsigned nests;           /* while this set's queue is being woken, under wait's lock: the lockdep
+                               * subclass the next set up the chain must use (ep_poll_safewake) */
 };
 
 static void epoll_release(struct kobject *obj);
@@ -117,9 +136,10 @@ static struct epoll_obj *epoll_of(struct kobject *obj)
     return container_of(obj, struct epoll_obj, obj);
 }
 
-/* Every object's watchers list, and the handle-count check an add makes
- * against a concurrent last close. Taken outside any ep->lock (add, del,
- * release, the last-close removal); epoll_obj_wait never takes it. */
+/* Every object's watchers list, every set's subsets list, and the
+ * handle-count check an add makes against a concurrent last close. Taken
+ * outside any ep->lock (add, del, release, the last-close removal, the loop
+ * check); epoll_obj_wait never takes it. */
 static struct mutex g_watch_lock;
 
 void epoll_init(void)
@@ -162,96 +182,61 @@ int epoll_obj_create(struct kobject **out)
     kobject_init(&ep->obj, &epoll_type.base);
     mutex_init(&ep->lock, "epoll");
     waitqueue_init(&ep->wait, "epoll");
+    spinlock_init(&ep->rlock, "epoll-ready");
     list_init(&ep->items);
+    list_init(&ep->rdllist);
+    list_init(&ep->subsets);
     *out = &ep->obj;
     return 0;
 }
 
-static void epoll_release(struct kobject *obj)
+/* --- the callback ----------------------------------------------------------- */
+
+/* Wake the set's queue from inside another queue's wake, at chain depth
+ * `sub`, recording `sub + 1` for a set above us while our callbacks run. */
+static void set_wake_nested(struct epoll_obj *ep, unsigned sub)
 {
-    struct epoll_obj *ep = epoll_of(obj);
-    struct epoll_item *it, *tmp;
-    /* Nobody holds the set any more (this is its last reference), so its
-     * list is ours without ep->lock; the items must still leave their
-     * objects' watchers lists under the watch lock, or a member's later
-     * last close would walk into freed items. */
-    mutex_lock(&g_watch_lock);
-    list_for_each_entry(it, &ep->items, link)
-        watch_unlink(it);
-    mutex_unlock(&g_watch_lock);
-    list_for_each_entry_safe(it, tmp, &ep->items, link) {
-        list_remove(&it->link);
-        kobject_put(it->obj);
-        kfree(it);
-    }
-    kfree(ep);
+    arch_irq_state_t s = waitqueue_lock_nested(&ep->wait, sub);
+    ep->nests = sub + 1;
+    waitqueue_wake_all_locked(&ep->wait);
+    ep->nests = 0;
+    waitqueue_unlock(&ep->wait, s);
 }
 
-void epoll_last_handle_closed(struct kobject *obj)
+/* The member's queue was woken: the member's readiness may have changed.
+ * Under the member queue's lock, in the waker's context (an interrupt, a
+ * timer, another CPU's thread). Links the item onto the ready list unless it
+ * is there, notes the wake if a walker has it, and wakes the set's waiters. */
+static void hook_wake(struct wait_entry *e, unsigned flags)
 {
-    /* The lock first, even for the common object that was never
-     * registered: an add that passed its handle-count check under this
-     * lock and has not yet linked its item would be invisible to an
-     * unlocked look at `watchers`, and its registration would outlive the
-     * last descriptor (review of PR #324). The decision is made under the
-     * lock the add publishes under; the uncontended mutex is the cost. */
-    mutex_lock(&g_watch_lock);
-    /* A descriptor can have reappeared: a handle riding in a unix message
-     * is installed at the receiver (handle_install raises the count) and
-     * may have landed between our caller's decrement and this lock. Then
-     * the object has a descriptor again and its registrations stand. */
-    if (__atomic_load_n(&obj->handles, __ATOMIC_ACQUIRE) != 0) {
-        mutex_unlock(&g_watch_lock);
+    struct epoll_hook *h = container_of(e, struct epoll_hook, we);
+    if (flags & WAIT_CB_FREED) {
+        /* The queue's owner is freeing it and has unlinked us: never touch
+         * that queue again (hook_unhook reads this). */
+        __atomic_store_n(&h->wq, NULL, __ATOMIC_RELEASE);
         return;
     }
-    struct epoll_item *gone = obj->watchers;
-    obj->watchers = NULL;
-    for (struct epoll_item *it = gone; it != NULL; it = it->obj_next) {
-        struct epoll_obj *ep = it->ep;   /* alive: its items leave this list in epoll_release */
-        mutex_lock(&ep->lock);
-        list_remove(&it->link);
-        ep->nr--;
-        /* A waiter asleep on this member holds its own pin (snapshot) and
-         * parks its own wait entry on the member's queue; wake it so it
-         * finishes and drops the pin now rather than on the member's next
-         * event -- the object's release (a socket's FIN) waits on that. */
-        waitqueue_wake_all(&ep->wait);
-        mutex_unlock(&ep->lock);
+    struct epoll_item *it = h->it;
+    struct epoll_obj *ep = it->ep;
+    /* A wake that came up from a member set carries the chain depth below
+     * it; a plain member's wake is depth 0. The subclass keeps lockdep's
+     * order check honest about `epoll-ready` and `epoll` nested in themselves. */
+    unsigned sub = it->member_set ? epoll_of(it->obj)->nests : 0;
+    arch_irq_state_t s = spin_lock_irqsave_nested(&ep->rlock, sub);
+    if (it->rstate == R_IDLE) {
+        list_push_back(&ep->rdllist, &it->rdllink);
+        it->rstate = R_READY;
+    } else if (it->rstate == R_TX) {
+        it->rewake = true;   /* the walker re-queues it: this wake is not lost */
     }
-    mutex_unlock(&g_watch_lock);
-    /* The registrations' references, outside both locks (a release may
-     * block; the rule is epoll_obj_del's). None is the object's last: our
-     * caller, handle_close, still holds the slot's and puts it after. */
-    while (gone != NULL) {
-        struct epoll_item *next = gone->obj_next;
-        kobject_put(gone->obj);
-        kfree(gone);
-        gone = next;
-    }
+    spin_unlock_irqrestore(&ep->rlock, s);
+    set_wake_nested(ep, sub);
 }
 
-/* Lock held. */
-static struct epoll_item *find_item(struct epoll_obj *ep, int fd)
-{
-    struct epoll_item *it;
-    list_for_each_entry(it, &ep->items, link)
-        if (it->fd == fd)
-            return it;
-    return NULL;
-}
-
-/* The readiness a member would report now (0 if disabled). Lock held. */
-static unsigned item_ready(const struct epoll_item *it)
-{
-    if (it->disabled)
-        return 0;
-    return kobject_ready(it->obj) & EPOLL_WANT_ALL(it->want);
-}
-
-/* Resolve the wake queue(s) the member's requested directions sleep on. A
+/* Resolve the wake queue(s) the member's requested directions wake. A
  * member's read and write readiness can live on different queues (an O_RDWR
- * FIFO wakes rd_wq on a read and wr_wq on a write), so fill up to two, one per
- * requested direction, de-duplicated. Returns the count. Lock held. */
+ * FIFO wakes rd_wq on a read and wr_wq on a write), so up to two, one per
+ * requested direction, de-duplicated. */
 static unsigned member_wqs(struct kobject *obj, unsigned want, struct waitqueue *out[2])
 {
     unsigned n = 0;
@@ -273,82 +258,226 @@ static unsigned member_wqs(struct kobject *obj, unsigned want, struct waitqueue 
     return n;
 }
 
-/* The combined wake generation across `n` queues: any one advancing advances
- * the sum (both are monotonic), so a change means a watched direction fired. */
-static uint64_t wqs_gen(struct waitqueue *const *wq, unsigned n)
-{
-    uint64_t g = 0;
-    for (unsigned i = 0; i < n; i++)
-        g += waitqueue_wake_gen(wq[i]);
-    return g;
-}
-
-/* The member's combined wake generation over its requested directions. A member
- * with no poll queue (always ready, never changes) has no event to track, so
- * its stored value is returned, which never looks changed. Lock held. */
-static uint64_t item_wq_gen(const struct epoll_item *it)
+/* ep->lock held. Put the item's callback entries on its member's queues. */
+static void hook_item(struct epoll_item *it)
 {
     struct waitqueue *wqs[2];
-    unsigned n = member_wqs(it->obj, it->want, wqs);
-    return n ? wqs_gen(wqs, n) : it->edge_gen;
+    it->nhooks = member_wqs(it->obj, it->want, wqs);
+    for (unsigned i = 0; i < it->nhooks; i++) {
+        it->hook[i].it = it;
+        it->hook[i].wq = wqs[i];
+        wait_entry_init(&it->hook[i].we);
+        waitqueue_add_callback(wqs[i], &it->hook[i].we, hook_wake);
+    }
 }
 
-/* Lock held. Fill up to `max` ready members, newest fairness: each reported
- * entry is moved to the tail so a persistently-ready fd cannot hide another
- * when more are ready than fit. Disables one-shots as they are reported (the
- * caller re-arms any it cannot deliver). The walk is bounded by the item count
- * captured up front, so moving entries to the tail cannot loop. */
-static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned max)
+/* ep->lock held. Take the item's callback entries off their queues: when this
+ * returns no callback of the item is running or can start (the removal is
+ * under each queue's lock). A queue whose owner detached us (WAIT_CB_FREED,
+ * NULL here) is not touched; the pointer is read inside a read-side section
+ * because that owner frees the queue after a grace period. */
+static void unhook_item(struct epoll_item *it)
 {
-    unsigned n = 0, budget = ep->nr;
-    struct list_node *cur = ep->items.next;
-    while (cur != &ep->items && n < max && budget-- > 0) {
-        struct list_node *next = cur->next;
-        struct epoll_item *it = container_of(cur, struct epoll_item, link);
-        unsigned io = item_ready(it);
-        /* An edge member re-arms when its poll queue has been woken since we
-         * last looked -- its source fired (an event), whether or not a wait was
-         * blocked for it, whether or not its readiness ever dipped to 0 between
-         * our looks. This is the edge: a drain-then-refill, or a new event on a
-         * still-ready member, both advance the generation. */
-        if (it->edge) {
-            uint64_t gen = item_wq_gen(it);
-            if (gen != it->edge_gen) {
-                it->armed = true;
-                it->edge_gen = gen;
-            }
-        }
-        /* An edge member reports only on a transition -- only while armed. A
-         * level member reports whenever ready, as before. */
-        if (io != 0 && !(it->edge && !it->armed)) {
-            out[n].fd = it->fd;
-            out[n].id = it->id;
-            out[n].io = io;
-            out[n].events = it->events;
-            out[n].data = it->data;
-            out[n].oneshot = it->oneshot;
-            out[n].edge = it->edge;
-            n++;
-            if (it->oneshot)
-                it->disabled = true;
-            if (it->edge)
-                it->armed = false;         /* disarm until a later wake re-arms it */
-            list_remove(&it->link);        /* round-robin: reported goes to the tail */
-            list_push_back(&ep->items, &it->link);
-        }
-        cur = next;
+    for (unsigned i = 0; i < it->nhooks; i++) {
+        quiesce_read_lock();
+        struct waitqueue *wq = __atomic_load_n(&it->hook[i].wq, __ATOMIC_ACQUIRE);
+        if (wq != NULL)
+            waitqueue_remove_callback(wq, &it->hook[i].we);
+        quiesce_read_unlock();
+        it->hook[i].wq = NULL;
     }
-    return n;
+    it->nhooks = 0;
+}
+
+/* Take the item off the ready list, whatever state it is in. ep->lock held
+ * (so no walker holds it on a transfer list). */
+static void unready_item(struct epoll_obj *ep, struct epoll_item *it)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&ep->rlock);
+    if (it->rstate != R_IDLE)
+        list_remove(&it->rdllink);
+    it->rstate = R_IDLE;
+    it->rewake = false;
+    spin_unlock_irqrestore(&ep->rlock, s);
+}
+
+/* Put the item on the ready list (unless it is there) and wake the set: an
+ * ADD or MOD of a member that is ready now, or a re-arm. ep->lock held. */
+static void ready_item(struct epoll_obj *ep, struct epoll_item *it)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&ep->rlock);
+    if (it->rstate == R_IDLE) {
+        list_push_back(&ep->rdllist, &it->rdllink);
+        it->rstate = R_READY;
+    }
+    spin_unlock_irqrestore(&ep->rlock, s);
+    /* Depth 0, and `nests` recorded for a set above us, as a callback's wake
+     * does: an outer set's forwarding callback runs inside this wake. */
+    set_wake_nested(ep, 0);
+}
+
+/* The readiness a member would report now (0 if disabled). */
+static unsigned item_ready(const struct epoll_item *it)
+{
+    if (it->disabled)
+        return 0;
+    return kobject_ready(it->obj) & EPOLL_WANT_ALL(it->want);
+}
+
+/* --- the loop check (nesting) --------------------------------------------- */
+
+/* g_watch_lock held. The longest chain of sets from `ep` downward, counting
+ * `ep` (1 when it holds no set). Bounded by the limit itself: a chain longer
+ * than the limit cannot exist, so the walk is at most EPOLL_MAX_NESTS deep. */
+static unsigned depth_below(struct epoll_obj *ep, unsigned limit)
+{
+    unsigned best = 1;
+    struct epoll_item *it;
+    if (limit == 0)
+        return 1;
+    list_for_each_entry(it, &ep->subsets, set_link) {
+        unsigned d = 1 + depth_below(epoll_of(it->obj), limit - 1);
+        if (d > best)
+            best = d;
+    }
+    return best;
+}
+
+/* g_watch_lock held. The longest chain of sets from `ep` upward through the
+ * sets it is a member of, counting `ep`. */
+static unsigned depth_above(struct epoll_obj *ep, unsigned limit)
+{
+    unsigned best = 1;
+    if (limit == 0)
+        return 1;
+    for (struct epoll_item *it = ep->obj.watchers; it != NULL; it = it->obj_next) {
+        unsigned d = 1 + depth_above(it->ep, limit - 1);
+        if (d > best)
+            best = d;
+    }
+    return best;
+}
+
+/* g_watch_lock held. Whether `target` is `inner` or reachable below it. */
+static bool reaches(struct epoll_obj *inner, struct epoll_obj *target, unsigned limit)
+{
+    if (inner == target)
+        return true;
+    if (limit == 0)
+        return false;
+    struct epoll_item *it;
+    list_for_each_entry(it, &inner->subsets, set_link)
+        if (reaches(epoll_of(it->obj), target, limit - 1))
+            return true;
+    return false;
+}
+
+/* g_watch_lock held. Whether `inner` may become a member of `outer`: not when
+ * `outer` is reachable from `inner` (a loop), and not when the chain through
+ * the new edge would exceed EPOLL_MAX_NESTS sets. -ELOOP for both, as Linux. */
+static int nesting_allowed(struct epoll_obj *outer, struct epoll_obj *inner)
+{
+    if (reaches(inner, outer, EPOLL_MAX_NESTS))
+        return -ELOOP;
+    if (depth_above(outer, EPOLL_MAX_NESTS) + depth_below(inner, EPOLL_MAX_NESTS) > EPOLL_MAX_NESTS)
+        return -ELOOP;
+    return 0;
+}
+
+/* --- the object ------------------------------------------------------------- */
+
+static void epoll_release(struct kobject *obj)
+{
+    struct epoll_obj *ep = epoll_of(obj);
+    struct epoll_item *it, *tmp;
+    /* Nobody holds the set any more (this is its last reference), so its
+     * lists are ours without ep->lock; the items must still leave their
+     * objects' watchers lists and our subsets list under the watch lock, or
+     * a member's later last close, or a loop check, would walk freed items. */
+    mutex_lock(&g_watch_lock);
+    list_for_each_entry(it, &ep->items, link) {
+        watch_unlink(it);
+        if (it->member_set)
+            list_remove(&it->set_link);
+    }
+    mutex_unlock(&g_watch_lock);
+    list_for_each_entry_safe(it, tmp, &ep->items, link) {
+        list_remove(&it->link);
+        unhook_item(it);          /* before the put: the queues are the member's */
+        kobject_put(it->obj);
+        kfree(it);
+    }
+    kfree(ep);
+}
+
+void epoll_last_handle_closed(struct kobject *obj)
+{
+    /* The lock first: an add that passed its handle-count check under this
+     * lock and has not yet linked its item would be invisible to an unlocked
+     * look at `watchers` (review of PR #324). handle_close spares the common
+     * object this call altogether (kobject.watched, set under this lock
+     * before the add's check; the pairing is the store-buffering litmus
+     * tests/litmus/epoll/watched.litmus). */
+    mutex_lock(&g_watch_lock);
+    /* A descriptor can have reappeared: a handle riding in a unix message
+     * is installed at the receiver (handle_install raises the count) and
+     * may have landed between our caller's decrement and this lock. Then
+     * the object has a descriptor again and its registrations stand. */
+    if (__atomic_load_n(&obj->handles, __ATOMIC_ACQUIRE) != 0) {
+        mutex_unlock(&g_watch_lock);
+        return;
+    }
+    struct epoll_item *gone = obj->watchers;
+    obj->watchers = NULL;
+    for (struct epoll_item *it = gone; it != NULL; it = it->obj_next) {
+        struct epoll_obj *ep = it->ep;   /* alive: its items leave this list in epoll_release */
+        if (it->member_set)
+            list_remove(&it->set_link);
+        mutex_lock(&ep->lock);
+        list_remove(&it->link);
+        ep->nr--;
+        unhook_item(it);
+        unready_item(ep, it);
+        mutex_unlock(&ep->lock);
+    }
+    mutex_unlock(&g_watch_lock);
+    /* The registrations' references, outside both locks (a release may
+     * block; the rule is epoll_obj_del's). None is the object's last: our
+     * caller, handle_close, still holds the slot's and puts it after. */
+    while (gone != NULL) {
+        struct epoll_item *next = gone->obj_next;
+        kobject_put(gone->obj);
+        kfree(gone);
+        gone = next;
+    }
+}
+
+/* ep->lock held. */
+static struct epoll_item *find_item(struct epoll_obj *ep, int fd)
+{
+    struct epoll_item *it;
+    list_for_each_entry(it, &ep->items, link)
+        if (it->fd == fd)
+            return it;
+    return NULL;
 }
 
 int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
                   unsigned want, uint32_t events, uint64_t data, bool oneshot, bool edge)
 {
     struct epoll_obj *ep = epoll_of(epobj);
+    if (target == epobj)
+        return -EINVAL;   /* a set in itself: Linux says EINVAL, not ELOOP */
     struct epoll_item *it = kzalloc(sizeof(*it));
     if (it == NULL)
         return -ENOMEM;
     mutex_lock(&g_watch_lock);
+    /* Published before the check below, so a last close that misses this
+     * add's item (it decremented after our check) sees the flag and takes
+     * the lock -- where it finds the item. Store-buffering: the fence pairs
+     * with handle_close's (tests/litmus/epoll/watched.litmus). */
+    __atomic_store_n(&target->watched, 1u, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     /* The caller looked `fd` up, so the object had a handle then; its last
      * close can have run since (another thread), and that removal found no
      * item. Refuse rather than register what nothing would ever remove. */
@@ -356,6 +485,15 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
         mutex_unlock(&g_watch_lock);
         kfree(it);
         return -EBADF;
+    }
+    bool member_set = epoll_obj_from_kobject(target) != NULL;
+    if (member_set) {
+        int rc = nesting_allowed(ep, epoll_of(target));
+        if (rc) {
+            mutex_unlock(&g_watch_lock);
+            kfree(it);
+            return rc;
+        }
     }
     mutex_lock(&ep->lock);
     if (find_item(ep, fd) != NULL) {
@@ -366,7 +504,10 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     }
     it->obj = target;          /* takes ownership of the caller's reference */
     it->ep = ep;
+    it->member_set = member_set;
     watch_link(it);
+    if (member_set)
+        list_push_back(&ep->subsets, &it->set_link);
     it->fd = fd;
     it->id = ep->next_id++;
     it->want = want;
@@ -375,13 +516,17 @@ int epoll_obj_add(struct kobject *epobj, int fd, struct kobject *target,
     it->oneshot = oneshot;
     it->disabled = false;
     it->edge = edge;
-    it->armed = true;          /* a fresh arm is eligible to report an edge */
-    it->edge_gen = edge ? item_wq_gen(it) : 0;   /* only a later wake re-arms past this */
+    list_init(&it->rdllink);
+    it->rstate = R_IDLE;
     list_push_back(&ep->items, &it->link);
     ep->nr++;
-    /* A concurrent epoll_wait must re-evaluate the new member (as aio_submit
-     * wakes the ring's queue after parking an entry). */
-    waitqueue_wake_all(&ep->wait);
+    /* Hooked first, then polled: a wake between the poll and the hook would
+     * otherwise be missed. A member ready now goes straight on the list (a
+     * waiter asleep must see it, as it would a new event); one with no queue
+     * at all (a plain file: always ready, never changing) lives on the list. */
+    hook_item(it);
+    if (item_ready(it) || it->nhooks == 0)
+        ready_item(ep, it);
     mutex_unlock(&ep->lock);
     mutex_unlock(&g_watch_lock);
     return 0;
@@ -396,16 +541,23 @@ int epoll_obj_mod(struct kobject *epobj, int fd, unsigned want, uint32_t events,
         mutex_unlock(&ep->lock);
         return -ENOENT;
     }
+    /* The requested directions may have changed, and with them the queues
+     * the item must hear: re-hook, under the set lock so no walker has the
+     * item. The ready state is kept -- a wake that arrived is still an event. */
+    unhook_item(it);
     it->want = want;
     it->events = events;
     it->data = data;
     it->oneshot = oneshot;
     it->disabled = false;      /* MOD re-arms a fired one-shot */
     it->edge = edge;
-    it->armed = true;          /* ... and re-arms the edge */
-    it->edge_gen = edge ? item_wq_gen(it) : 0;   /* a fresh arm: only a later wake re-arms past this */
     it->id = ep->next_id++;    /* a fresh arm: a copy-failure re-arm of the previous arm must not match */
-    waitqueue_wake_all(&ep->wait);   /* a widened mask or re-arm can make it reportable */
+    hook_item(it);
+    /* A widened mask or a re-arm can make it reportable now: like ADD, a
+     * fresh arm reports a member that is ready (the edge model's "a fresh arm
+     * is eligible to report"). */
+    if (item_ready(it) || it->nhooks == 0)
+        ready_item(ep, it);
     mutex_unlock(&ep->lock);
     return 0;
 }
@@ -424,11 +576,12 @@ int epoll_obj_del(struct kobject *epobj, int fd)
     list_remove(&it->link);
     ep->nr--;
     watch_unlink(it);
+    if (it->member_set)
+        list_remove(&it->set_link);
+    unhook_item(it);          /* no callback runs on this item after this */
+    unready_item(ep, it);
     mutex_unlock(&ep->lock);
     mutex_unlock(&g_watch_lock);
-    /* Safe to free even with a waiter asleep: a waiter holds its own reference
-     * to the member and parks its own wait entry on the member's queue, not
-     * this item's -- the item carries no wait state. */
     kobject_put(it->obj);
     kfree(it);
     return 0;
@@ -441,22 +594,12 @@ void epoll_obj_rearm(struct kobject *epobj, int fd, uint64_t id)
     struct epoll_item *it = find_item(ep, fd);
     /* Only the exact registration that produced the undelivered event: if the
      * fd was removed, or removed and re-added, the id no longer matches and
-     * this is a no-op -- never re-enabling a different registration. Restore
-     * whichever suppression the report set: a fired one-shot's `disabled`, or a
-     * reported edge's `armed`, so an event the door could not copy out is not
-     * lost. */
+     * this is a no-op -- never re-enabling a different registration. The
+     * event the door could not copy out goes back on the ready list, and a
+     * fired one-shot's suppression is lifted, so it is not lost. */
     if (it != NULL && it->id == id) {
-        bool changed = false;
-        if (it->disabled) {
-            it->disabled = false;
-            changed = true;
-        }
-        if (it->edge && !it->armed) {
-            it->armed = true;
-            changed = true;
-        }
-        if (changed)
-            waitqueue_wake_all(&ep->wait);   /* a waiter that slept while it was suppressed must re-evaluate */
+        it->disabled = false;
+        ready_item(ep, it);
     }
     mutex_unlock(&ep->lock);
 }
@@ -474,53 +617,83 @@ static void alarm_fired(struct timer *t, void *arg)
     sched_wake(al->thread);
 }
 
-/* Lock held. Capture every enabled member into `snap` (up to `cap`), pinning
- * each with a reference; returns the count. */
-static unsigned snapshot(struct epoll_obj *ep, struct epoll_snap *snap, unsigned cap)
+/* ep->lock held. Walk the ready list: move it to a transfer list under rlock
+ * (so callbacks keep linking new arrivals onto the real list, and note a
+ * wake of an item we hold), evaluate each item without any spinlock, report
+ * the ready ones up to `max`, and put back what belongs on the list: a
+ * reported level item (Linux re-queues level items, so the next wait
+ * re-evaluates it; the tail, so a persistently ready member cannot hide
+ * another when more are ready than fit), every unexamined item (the list
+ * was longer than `max`), and any item whose member woke while we held it.
+ * A disabled one-shot, a reported edge item, and an item found not ready
+ * are dropped; a new wake brings each back. */
+static unsigned collect(struct epoll_obj *ep, struct epoll_ready *out, unsigned max)
 {
-    unsigned n = 0;
-    struct epoll_item *it;
-    list_for_each_entry(it, &ep->items, link) {
-        if (n >= cap)
-            break;
-        if (it->disabled)
-            continue;
-        kobject_get(it->obj);
-        snap[n].obj = it->obj;
-        snap[n].nwq = member_wqs(it->obj, it->want, snap[n].wq);
-        snap[n].want = it->want;
-        snap[n].edge = it->edge;
-        snap[n].armed = it->armed;
-        snap[n].edge_gen = it->edge_gen;
-        for (unsigned j = 0; j < 2; j++) {
-            snap[n].prepared[j] = false;
-            wait_entry_init(&snap[n].we[j]);
-        }
-        n++;
+    struct list_node tx;
+    list_init(&tx);
+    arch_irq_state_t s = spin_lock_irqsave(&ep->rlock);
+    while (!list_empty(&ep->rdllist)) {
+        struct epoll_item *it = container_of(ep->rdllist.next, struct epoll_item, rdllink);
+        list_remove(&it->rdllink);
+        list_push_back(&tx, &it->rdllink);
+        it->rstate = R_TX;
+        it->rewake = false;
     }
+    spin_unlock_irqrestore(&ep->rlock, s);
+
+    unsigned n = 0;
+    struct list_node requeue;
+    list_init(&requeue);
+    while (!list_empty(&tx)) {
+        struct epoll_item *it = container_of(tx.next, struct epoll_item, rdllink);
+        list_remove(&it->rdllink);
+        bool keep;
+        if (n >= max) {
+            keep = true;   /* unexamined: stays ready */
+        } else {
+            unsigned io = item_ready(it);
+            if (io != 0) {
+                out[n].fd = it->fd;
+                out[n].id = it->id;
+                out[n].io = io;
+                out[n].events = it->events;
+                out[n].data = it->data;
+                out[n].oneshot = it->oneshot;
+                out[n].edge = it->edge;
+                n++;
+                if (it->oneshot)
+                    it->disabled = true;
+                keep = !it->oneshot && !it->edge;   /* level: re-queued; edge and one-shot: wait for a wake / MOD */
+            } else {
+                keep = false;   /* a drain's wake, or a one-shot still disabled: off the list */
+            }
+        }
+        list_push_back(&requeue, &it->rdllink);
+        it->requeue = keep;   /* ours alone; `rewake` is the callback's, resolved with it under rlock */
+    }
+    s = spin_lock_irqsave(&ep->rlock);
+    while (!list_empty(&requeue)) {
+        struct epoll_item *it = container_of(requeue.next, struct epoll_item, rdllink);
+        list_remove(&it->rdllink);
+        if (it->requeue || it->rewake) {   /* kept, or a wake arrived while it was ours */
+            list_push_back(&ep->rdllist, &it->rdllink);
+            it->rstate = R_READY;
+        } else {
+            it->rstate = R_IDLE;
+        }
+        it->rewake = false;
+    }
+    spin_unlock_irqrestore(&ep->rlock, s);
     return n;
 }
 
-/* Whether the wait should stay awake rather than sleep. Called after the member
- * wait entries are armed, so it closes the window between collect and arming:
- *  - a disarmed edge member does not count as ready for its readiness (collect
- *    would not report it) -- but if its queue was woken since collect acted on
- *    it (its generation advanced), an event fired in that window and the next
- *    collect would re-arm it, so do not sleep;
- *  - any other member counts as ready when its readiness bits are set.
- * A member's queue firing after this check wakes the armed entry instead. */
-static bool snap_any_ready(struct epoll_snap *snap, unsigned n)
+/* Whether the ready list is empty. */
+static bool nothing_ready(struct epoll_obj *ep)
 {
-    for (unsigned i = 0; i < n; i++) {
-        if (snap[i].edge && !snap[i].armed) {
-            if (snap[i].nwq && wqs_gen(snap[i].wq, snap[i].nwq) != snap[i].edge_gen)
-                return true;   /* a fresh edge raced in; re-collect rather than sleep */
-            continue;
-        }
-        if (kobject_ready(snap[i].obj) & EPOLL_WANT_ALL(snap[i].want))
-            return true;
-    }
-    return false;
+    arch_irq_state_t s = spin_lock_irqsave(&ep->rlock);
+    bool empty = list_empty(&ep->rdllist);
+    spin_unlock_irqrestore(&ep->rlock, s);
+    return empty;
 }
 
 int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned max, uint64_t timeout_ns)
@@ -537,82 +710,56 @@ int64_t epoll_obj_wait(struct kobject *epobj, struct epoll_ready *out, unsigned 
         armed = true;
     }
     struct wait_entry ep_we;
+    wait_entry_init(&ep_we);
     int rc = 0;
     unsigned n = 0;
 
     for (;;) {
         mutex_lock(&ep->lock);
-        /* collect re-arms each edge member from its own poll queue's wake
-         * generation, so no wake bookkeeping is needed here: a member's event
-         * (even one that raced the deadline, or arrived while not blocked) is
-         * seen on the next collect, and a bare timeout -- not an event -- does
-         * not re-arm anything. */
         n = collect(ep, out, max);
+        mutex_unlock(&ep->lock);
         if (n > 0 || __atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) || process_kill_pending()) {
             if (n == 0 && process_kill_pending())
                 rc = -EINTR;
-            mutex_unlock(&ep->lock);
             break;
         }
-        /* Snapshot the members and pin them, and arm every wake source -- all
-         * under the lock, so a concurrent ctl's wake of ep->wait cannot be lost
-         * (as aio_wait arms the ring's queue under its lock). */
-        unsigned cap = ep->nr;
-        struct epoll_snap *snap = cap ? kmalloc(cap * sizeof(*snap), 0) : NULL;
-        if (cap && snap == NULL) {
-            mutex_unlock(&ep->lock);
-            rc = -ENOMEM;
-            break;
-        }
-        unsigned sn = snapshot(ep, snap, cap);
-        wait_entry_init(&ep_we);
+        /* Arm the one wake source, then decide: a callback that links an item
+         * after this check wakes the entry (the thread is BLOCKED on the
+         * queue before the list is read), so no event is lost; one that
+         * linked before it is on the list and we do not sleep. */
         waitqueue_prepare(&ep->wait, &ep_we);
-        for (unsigned i = 0; i < sn; i++) {
-            for (unsigned j = 0; j < snap[i].nwq; j++) {
-                waitqueue_prepare(snap[i].wq[j], &snap[i].we[j]);
-                snap[i].prepared[j] = true;
-            }
-        }
-        bool sleep = !snap_any_ready(snap, sn) && !__atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) &&
+        bool sleep = nothing_ready(ep) && !__atomic_load_n(&alarm.fired, __ATOMIC_ACQUIRE) &&
                      !process_kill_pending();
-        mutex_unlock(&ep->lock);
         if (sleep)
             sched_block_current();
-        /* Finish without the lock: each pinned member (and so its queue) is
-         * kept alive by the reference the snapshot holds, even if a concurrent
-         * DEL removed and freed its item. */
         waitqueue_finish(&ep->wait, &ep_we);
-        for (unsigned i = 0; i < sn; i++) {
-            for (unsigned j = 0; j < 2; j++)
-                if (snap[i].prepared[j])
-                    waitqueue_finish(snap[i].wq[j], &snap[i].we[j]);
-            kobject_put(snap[i].obj);
-        }
-        kfree(snap);
     }
     if (armed)
         timer_cancel_sync(&timer);
     return rc ? rc : (int64_t)n;
 }
 
+/* The set's own readiness, for poll() on it and for a set that is a member
+ * of another: readable while its ready list has entries. An entry may turn
+ * out not ready when walked (a drain's wake), so this can read readable
+ * where a wait would then report nothing, as Linux's epoll fd can; what it
+ * never does is read unreadable with an event pending, or take a lock an
+ * outer walk holds -- it is a spinlock-guarded emptiness check, so a set
+ * nested in a set needs no mutex recursion to be polled. */
 static unsigned epoll_ready(struct kobject *obj)
 {
-    struct epoll_obj *ep = epoll_of(obj);
-    mutex_lock(&ep->lock);
-    struct epoll_item *it;
-    unsigned r = 0;
-    list_for_each_entry(it, &ep->items, link) {
-        if (item_ready(it)) {
-            r = COSMO_IO_READABLE;
-            break;
-        }
-    }
-    mutex_unlock(&ep->lock);
-    return r;
+    return nothing_ready(epoll_of(obj)) ? 0 : COSMO_IO_READABLE;
 }
 
 static struct waitqueue *epoll_poll_wq(struct kobject *obj, unsigned events)
 {
     (void)events;
     return &epoll_of(obj)->wait;
+}
+
+/* --- for the tests ----------------------------------------------------------- */
+
+unsigned epoll_obj_max_nests(void)
+{
+    return EPOLL_MAX_NESTS;
 }
