@@ -17,7 +17,6 @@ void waitqueue_init(struct waitqueue *wq, const char *name)
 {
     spinlock_init(&wq->lock, name);
     list_init(&wq->waiters);
-    wq->wake_gen = 0;
 }
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
@@ -53,29 +52,73 @@ void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e)
     sched_set_running_current();
 }
 
+void waitqueue_add_callback(struct waitqueue *wq, struct wait_entry *e, wait_callback_fn fn)
+{
+    KASSERT(fn != NULL && list_empty(&e->link));
+    e->thread = NULL;
+    e->fn = fn;
+    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
+    list_push_back(&wq->waiters, &e->link);
+    spin_unlock_irqrestore(&wq->lock, s);
+}
+
+void waitqueue_remove_callback(struct waitqueue *wq, struct wait_entry *e)
+{
+    /* The lock is what makes the return a promise: a wake running this
+     * entry's callback holds it, so it has finished when we have it. */
+    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
+    if (!list_empty(&e->link))
+        list_remove(&e->link);
+    spin_unlock_irqrestore(&wq->lock, s);
+}
+
+unsigned waitqueue_detach_callbacks(struct waitqueue *wq)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
+    struct wait_entry *e, *tmp;
+    list_for_each_entry_safe(e, tmp, &wq->waiters, link) {
+        if (e->fn == NULL)
+            continue;
+        list_remove(&e->link);
+        e->fn(e, WAIT_CB_FREED);
+        n++;
+    }
+    spin_unlock_irqrestore(&wq->lock, s);
+    return n;
+}
+
 /*
  * A waiter that was already woken stays linked until it runs and calls
  * waitqueue_finish. wake_one must not stop at such an entry: it counts
  * only waiters it actually transitioned, and keeps scanning past ones
  * that are already READY or RUNNING, so consecutive wake_one calls reach
- * consecutive blocked waiters.
+ * consecutive blocked waiters. Callback entries are run, every one of
+ * them, whichever kind of wake this is, and are not counted: they are
+ * observers of the event, not the waiter a wake_one is for.
  */
-static unsigned wake(struct waitqueue *wq, bool all)
+static unsigned wake_locked(struct waitqueue *wq, bool all)
 {
     unsigned n = 0;
-    /* Advance the generation on every wake, even one that transitions no
-     * waiter: a poller not currently blocked (epoll EPOLLET) learns from the
-     * change that an event occurred while it was away. */
-    __atomic_fetch_add(&wq->wake_gen, 1, __ATOMIC_RELEASE);
-    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
     struct wait_entry *e, *tmp;
     list_for_each_entry_safe(e, tmp, &wq->waiters, link) {
+        if (e->fn != NULL) {
+            e->fn(e, 0);
+            continue;
+        }
         if (!sched_wake(e->thread))
             continue;
         n++;
         if (!all)
             break;
     }
+    return n;
+}
+
+static unsigned wake(struct waitqueue *wq, bool all)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
+    unsigned n = wake_locked(wq, all);
     spin_unlock_irqrestore(&wq->lock, s);
     return n;
 }
@@ -88,6 +131,21 @@ unsigned waitqueue_wake_one(struct waitqueue *wq)
 unsigned waitqueue_wake_all(struct waitqueue *wq)
 {
     return wake(wq, true);
+}
+
+arch_irq_state_t waitqueue_lock_nested(struct waitqueue *wq, unsigned subclass)
+{
+    return spin_lock_irqsave_nested(&wq->lock, subclass);
+}
+
+unsigned waitqueue_wake_all_locked(struct waitqueue *wq)
+{
+    return wake_locked(wq, true);
+}
+
+void waitqueue_unlock(struct waitqueue *wq, arch_irq_state_t s)
+{
+    spin_unlock_irqrestore(&wq->lock, s);
 }
 
 bool waitqueue_empty(struct waitqueue *wq)

@@ -463,7 +463,7 @@ and `sched_dump`'s per-CPU line carries the load.
 ## 4. Wait queues
 
 ```c
-struct wait_entry { struct list_node link; struct thread *thread; };
+struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn fn; };
 struct waitqueue { spinlock_t lock; struct list_node waiters; };
 
 #define wait_event(wq, cond)                          \
@@ -487,6 +487,30 @@ READY current thread as a yield, returning immediately. Wakers call
 
 `thread_sleep_ns(ns)`: a stack `struct timer` whose callback wakes the
 sleeping thread; `wait_event(&t->sleep_wq, timer fired)`.
+
+**Callback entries (the epoll-callback unit).** An entry is one of two
+kinds: a sleeping thread (`waitqueue_prepare`; `thread` set, `fn` NULL),
+which a wake marks READY, or a callback (`waitqueue_add_callback`; `fn`
+set), which a wake *runs*, under the queue's spinlock, in the waker's
+context -- an interrupt, a timer, another CPU's thread. Every wake runs
+every callback entry, `wake_one` included (it runs past them to reach a
+thread, and counts only threads). The callback may take spinlocks ordered
+after the queue's and must not sleep or touch the queue it is on. A
+callback entry stays on the queue until its owner removes it
+(`waitqueue_remove_callback`, under the lock: on return no callback of
+the entry is running or can start), and the owner of a queue that is
+about to free it detaches every callback entry first
+(`waitqueue_detach_callbacks`: unlinked and told `WAIT_CB_FREED` under
+the lock, Linux's POLLFREE) and lets a grace period pass before the
+memory goes, so an entry's owner that reads the queue pointer inside a
+read-side section never follows it into freed memory. For a waker that
+must nest a queue's lock inside another queue's (a set woken from inside
+a member set's wake), the wake is split: `waitqueue_lock_nested(wq,
+subclass)`, `waitqueue_wake_all_locked`, `waitqueue_unlock`. This is
+what lets epoll be told of a member's event without a thread asleep on
+each member's queue (`docs/kernel/io/design.md`, "epoll"). The former
+`wake_gen` counter, which served the same purpose for edge-triggered
+epoll by polling, is gone.
 
 ## 5. Mutex, semaphore, completion
 
