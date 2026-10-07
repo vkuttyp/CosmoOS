@@ -290,8 +290,8 @@ with interrupts off. `struct waitqueue` now has two lists, `waiters` and
 `callbacks` (Linux keeps its non-exclusive entries at the head and its
 exclusive ones at the tail for the same reason): a wake runs the callbacks
 list whole, then stops at the first thread it transitions. Module ABI 7.
-`mutex-wake-bench` is the measurement: 1, 8 and 32 waiters blocked on a
-mutex, the unlock call's duration and the time from the unlock to the first
+`mutex-wake-bench` is the measurement: 1, 8, 32 and 256 waiters blocked on
+a mutex, the unlock call's duration and the time from the unlock to the first
 waiter's acquire, medians of ten. Three trees, through
 `tools/wake-one-probe.py`: before the unit (`95c635e2`), after it
 (`abf63098`), and the follow-up.

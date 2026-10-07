@@ -1005,10 +1005,12 @@ bool selftest_mutex(const char **reason)
  * acquire). Between the epoll-callback unit and its wake_one follow-up,
  * wake_one walked the whole list for callback entries, so the unlock grew
  * with N; the callbacks list of their own gives wake_one back its one
- * thread. Figures only, printed for the report; N = 1, 8 and 32.
+ * thread. Figures only, printed for the report; N = 1, 8, 32 and 256 (the
+ * walk of a 32-entry list is below what a 50 us unlock under TCG can show;
+ * 256 entries are a few microseconds).
  */
 #define WAKE_BENCH_ROUNDS 10u
-#define WAKE_BENCH_MAX    32u
+#define WAKE_BENCH_MAX    256u
 
 struct wake_bench {
     struct mutex m;
@@ -1080,15 +1082,18 @@ static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unl
 bool selftest_mutex_wake_bench(const char **reason)
 {
     unsigned before = thread_count();
-    static const unsigned sizes[3] = { 1, 8, 32 };
-    uint64_t unlock_ns[3], wake_ns[3];
-    for (unsigned k = 0; k < 3; k++)
+    static const unsigned sizes[4] = { 1, 8, 32, 256 };
+    uint64_t unlock_ns[4], wake_ns[4];
+    for (unsigned k = 0; k < 4; k++) {
+        sched_watchdog_kick();
         if (!wake_bench_one(reason, sizes[k], &unlock_ns[k], &wake_ns[k]))
             return false;
-    kinfo("selftest: mutex-wake-bench: waiters 1/8/32: unlock call %llu/%llu/%llu ns, unlock to the first waiter's acquire "
-          "%llu/%llu/%llu ns (medians of %u)",
+    }
+    kinfo("selftest: mutex-wake-bench: waiters 1/8/32/256: unlock call %llu/%llu/%llu/%llu ns, unlock to the first waiter's "
+          "acquire %llu/%llu/%llu/%llu ns (medians of %u)",
           (unsigned long long)unlock_ns[0], (unsigned long long)unlock_ns[1], (unsigned long long)unlock_ns[2],
-          (unsigned long long)wake_ns[0], (unsigned long long)wake_ns[1], (unsigned long long)wake_ns[2], WAKE_BENCH_ROUNDS);
+          (unsigned long long)unlock_ns[3], (unsigned long long)wake_ns[0], (unsigned long long)wake_ns[1],
+          (unsigned long long)wake_ns[2], (unsigned long long)wake_ns[3], WAKE_BENCH_ROUNDS);
     CHECK(threads_settle(before));
     return true;
 }

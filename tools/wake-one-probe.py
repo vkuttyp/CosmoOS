@@ -7,8 +7,8 @@ mutex unlock, which uses wake_one on a queue that never holds a callback,
 became O(waiters) under the queue's spinlock with interrupts off. The
 follow-up puts callback entries on a list of their own, so wake_one stops at
 its one thread again. `mutex-wake-bench` (kernel/scheduler/schedtest.c) is
-the measurement: 1, 8 and 32 waiters blocked on a mutex, the unlock call's
-duration and the unlock-to-first-acquire latency, medians of ten.
+the measurement: 1, 8, 32 and 256 waiters blocked on a mutex, the unlock
+call's duration and the unlock-to-first-acquire latency, medians of ten.
 
   python3 tools/wake-one-probe.py --arch x86_64 --tree before   # main at 95c635e2, wake_one stopped at its thread
   python3 tools/wake-one-probe.py --arch x86_64 --tree after    # main at abf63098 (PR #325): wake_one walks the whole list
