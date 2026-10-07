@@ -92,8 +92,9 @@ own `complete()` under the admin mutex is discarded by the thread's wait
 for the same object (the self-signal rule), which is what the test's
 "no report" line says, and the xHCI worker holds no mutex when it
 signals. `nvme-admin-poll` runs Identify Controller through the polled
-path in 1.6 ms (one round of the 1 ms wait, the handler standing aside:
-the test requires at least 0.9 ms) on both architectures.
+path in 1.6 ms on both architectures; the evidence that the path was
+taken is the injection point's hit, not the time (a controller that
+answers before the first `queue_process` makes the wait return at once).
 
 ## Coverage after the unit
 
@@ -154,7 +155,10 @@ stall sank to 2):
 The `main` figures are the previous unit's validation and this chain's
 `main` boots; the branch's are this chain's and the default-priority
 rerun. No x86-64 boot approached the 180 s budget locally (the longest,
-the two-CPU boot, 147.1 s). CI boot times are in the pull request (PR #322) and below once it has run.
+the two-CPU boot, 147.1 s). CI (PR #322, run 37595714297): the x86-64 job's debug boots took
+140.7–147.3 s against the 180 s budget (release 16.5 s); the AArch64
+job's 166.7–178.9 s against its 240 s. No timeout; the flakes record is
+unchanged.
 
 ## Plan
 
