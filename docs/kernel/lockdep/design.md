@@ -4,7 +4,7 @@
 
 ```c
 #define LOCKDEP_MAX_CLASSES   512       /* includes runqueue, callback and completion classes */
-#define LOCKDEP_SUBCLASSES    4         /* nesting levels per class */
+#define LOCKDEP_SUBCLASSES    5         /* nesting levels per class: a chain of five epoll sets */
 #define LOCKDEP_MAX_NODES     (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_MAX_HELD      24        /* per CPU: spinlocks, interrupt context included */
 #define LOCKDEP_MAX_HELD_MUTEX 8        /* per thread */
@@ -42,7 +42,9 @@ raw lock. The field exists in every build so the module ABI has one layout:
 The graph and the class table are one `struct lockdep_state` behind pure
 inline functions in `lockdep_core.h` (class lookup, edge add, reachability),
 so the host test drives them under the sanitizers. The bitmap is 2048 nodes
-(512 classes × 4 subclasses) × 256 bytes = 512 KiB when `LOCKDEP=1`.
+(512 classes × 5 subclasses) × 320 bytes = 800 KiB when `LOCKDEP=1` (four
+subclasses and 512 KiB until the wake_one follow-up to the epoll-callback
+unit, which needed a fifth for Linux's nesting depth of five sets).
 
 ## Classes and nodes
 

@@ -352,8 +352,15 @@ outer's two locks with a lockdep subclass equal to the depth of the chain
 below it: the inner set records `nests` (its own depth plus one) under its
 queue lock while it wakes, and the outer's callback reads it there
 (Linux's `ep_poll_safewake`). The chain is bounded at `EPOLL_MAX_NESTS` =
-4 sets, the subclasses lockdep has (its order graph is a bitmap of nodes
-squared, 512 KiB at four subclasses; Linux allows five sets). The loop
+5 sets, Linux's rule (epoll_ctl(2): a nesting depth greater than 5 is
+`ELOOP`); lockdep has five subclasses for it (0..4; its order graph is a
+bitmap of nodes squared, 800 KiB at five -- the first version bounded the
+chain at four to stay within four subclasses and 512 KiB). A capped
+subclass was considered instead and rejected: the top two sets of a
+five-chain would share a subclass, and the forwarded wake's nested
+acquisition of the `epoll` queue lock would be reported as a recursion in
+every debug boot that exercises the depth -- a false positive lockdep
+cannot tell from the inversion the subclasses exist to find. The loop
 check, under `g_watch_lock` and no set lock, walks the inner set's
 `subsets` downward for the outer (a loop) and the two chains above the
 outer and below the inner for the depth, each set visited once per check

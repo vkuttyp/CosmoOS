@@ -43,8 +43,8 @@
  * its two spinlocks with a lockdep subclass equal to the chain depth below
  * it (Linux's ep_poll_safewake): the inner set records the depth in `nests`
  * under its queue's lock while it wakes, and the forwarding callback reads
- * it there. EPOLL_MAX_NESTS bounds the chain so the subclass stays within
- * lockdep's four. ep->lock (mutex) serialises ctl against the walk of the
+ * it there. EPOLL_MAX_NESTS (5, Linux's limit) bounds the chain so the
+ * subclass stays within lockdep's five. ep->lock (mutex) serialises ctl against the walk of the
  * ready list and is never held when a spinlock above is taken by a waker;
  * the loop check holds g_watch_lock and no ep->lock.
  */

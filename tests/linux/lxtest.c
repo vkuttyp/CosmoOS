@@ -984,8 +984,8 @@ int main(int argc, char **argv)
 
         /* A set in a set (the epoll-callback unit): the inner's event reaches
          * the outer, drained neither reports; a loop is ELOOP, the set itself
-         * EINVAL (checked above), a chain of five sets ELOOP (the bound is
-         * four). */
+         * EINVAL (checked above), a chain of six sets ELOOP (the bound is
+         * five, Linux's). */
         long nin = sc1(LX_epoll_create1, 0), nev = sc2(LX_eventfd2, 0, 0);
         CHECKV(nin >= 3 && nev >= 3, nin);
         struct lx_epoll_event nee = { .events = LX_EPOLLIN, .data = 0xC20 };
@@ -1000,18 +1000,18 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_read, nev, &sink, 8) == 8, 0);
         CHECKV(sc6(LX_epoll_pwait, nin, out, 4, 0, 0, 0) == 0, 0);
         CHECKV(sc6(LX_epoll_pwait, ep, out, 4, 0, 0, 0) == 0, 0);
-        long chain[5];
-        for (int i = 0; i < 5; i++) {
+        long chain[6];
+        for (int i = 0; i < 6; i++) {
             chain[i] = sc1(LX_epoll_create1, 0);
             CHECKV(chain[i] >= 3, chain[i]);
         }
-        for (int i = 1; i < 4; i++)
-            CHECKV(sc4(LX_epoll_ctl, chain[i - 1], LX_EPOLL_CTL_ADD, chain[i], &nie) == 0, i);   /* four sets */
-        CHECKV(sc4(LX_epoll_ctl, chain[3], LX_EPOLL_CTL_ADD, chain[4], &nie) == -40, 0);        /* the fifth: ELOOP */
-        for (int i = 0; i < 5; i++)
+        for (int i = 1; i < 5; i++)
+            CHECKV(sc4(LX_epoll_ctl, chain[i - 1], LX_EPOLL_CTL_ADD, chain[i], &nie) == 0, i);   /* five sets */
+        CHECKV(sc4(LX_epoll_ctl, chain[4], LX_EPOLL_CTL_ADD, chain[5], &nie) == -40, 0);        /* the sixth: ELOOP */
+        for (int i = 0; i < 6; i++)
             CHECKV(sc1(LX_close, chain[i]) == 0, i);
         CHECKV(sc1(LX_close, nev) == 0 && sc1(LX_close, nin) == 0, 0);
-        lx_puts("LXEPOLLNEST: a set in a set forwards its member's event; a loop and a fifth level are ELOOP\n");
+        lx_puts("LXEPOLLNEST: a set in a set forwards its member's event; a loop and a sixth level are ELOOP\n");
         CHECKV(sc1(LX_close, ep) == 0, 0);
 #ifdef LX_epoll_create
         /* x86-64 legacy epoll_create + epoll_wait */

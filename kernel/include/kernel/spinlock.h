@@ -46,7 +46,7 @@ void spin_lock(spinlock_t *lock);
 void spin_unlock(spinlock_t *lock);
 
 /* As spin_lock, annotated for legitimate nesting inside another lock of
- * the same class (subclass 1..3; docs/kernel/lockdep/invariants.md lists
+ * the same class (subclass 1..4; docs/kernel/lockdep/invariants.md lists
  * every use). */
 void spin_lock_nested(spinlock_t *lock, unsigned subclass);
 /* lockdep's order check for acquiring `lock` here, without acquiring it:
