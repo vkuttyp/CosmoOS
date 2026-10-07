@@ -20,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nettest import (NetTest, BACK_PREVIEW, BACK_BACKLOG,  # noqa: E402
-                     BACK_GRACE_S)
+                     BACK_GRACE_S, WWR_ROUNDS)
 
 FAILURES = []
 CHECKS = 0
@@ -434,6 +434,10 @@ def test_arrivals_without_the_request_still_fail():
         nt.results["tcp_echo"] = True
         nt.results["udp_ok"] = True
         nt.results["quit_sent"] = True
+        # The write-write-read exchanges as a passing run records them.
+        nt.results["wwr_h2g_nagle"] = [0.001] * WWR_ROUNDS
+        nt.results["wwr_h2g_nodelay"] = [0.001] * WWR_ROUNDS
+        nt.results["wwr_reverse_served"] = 2 * WWR_ROUNDS
         msgs = nt.failures()
         check(len(msgs) == 1, f"and it is reported once (got {len(msgs)})")
         check("connection(s)" in msgs[0],

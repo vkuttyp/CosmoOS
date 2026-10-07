@@ -1667,7 +1667,87 @@ bool selftest_net_lo_tcp_loss(const char **reason)
 /* --- harness-driven echo over the real interface --------------------------------------- */
 
 static volatile bool g_h_quit, g_h_stop;
-static volatile int g_h_tcp_conns, g_h_udp_pkts;
+static volatile int g_h_tcp_conns, g_h_udp_pkts, g_h_wwr_conns;
+
+/*
+ * The write-write-read exchange (docs/kernel-services/network/testing.md,
+ * "The host harness"): a request of two WWR_HALF-byte halves, written as two
+ * sends, answered with the request once both halves are in. The host drives
+ * it against the service on port 8 with its default socket (Nagle on) and
+ * again with TCP_NODELAY; the guest drives it the other way on the
+ * back-connection, where the host answers in two writes, with and without
+ * Nagle. Both sides count WWR_ROUNDS rounds per mode; tests/boot/nettest.py
+ * carries the same two constants.
+ */
+#define WWR_HALF   16u
+#define WWR_ROUNDS 50u
+
+static void h_wwr_thread(void *arg)
+{
+    struct socket *ls = arg;
+    for (;;) {
+        struct socket *c;
+        if (ksock_accept(ls, &c, NULL) != 0)
+            break;
+        g_h_wwr_conns++;
+        uint8_t req[2 * WWR_HALF];
+        for (;;) {
+            size_t have = 0;
+            bool eof = false;
+            while (have < sizeof(req)) {
+                int64_t n = ksock_recvfrom(c, req + have, sizeof(req) - have, NULL);
+                if (n <= 0) {
+                    eof = true;
+                    break;
+                }
+                have += (size_t)n;
+            }
+            if (eof || ksock_sendto(c, req, sizeof(req), NULL) != (int64_t)sizeof(req))
+                break;
+        }
+        ksock_put(c);
+    }
+    ksock_put(ls);   /* its own reference: the harness took one for it */
+    thread_exit(0);
+}
+
+/* The guest's side of the reverse exchange, on the back-connection after the
+ * hello: WWR_ROUNDS rounds with the host's Nagle on, then WWR_ROUNDS with it
+ * off (the host switches after the first batch). Prints one line per mode;
+ * false if a round did not complete. */
+static bool h_wwr_client(struct socket *c)
+{
+    static uint64_t us[2][WWR_ROUNDS];
+    uint8_t half[WWR_HALF], reply[2 * WWR_HALF];
+    memset(half, 'w', sizeof(half));
+    for (unsigned m = 0; m < 2; m++) {
+        for (unsigned r = 0; r < WWR_ROUNDS; r++) {
+            uint64_t t0 = clock_now_ns();
+            if (ksock_sendto(c, half, sizeof(half), NULL) != (int64_t)sizeof(half) ||
+                ksock_sendto(c, half, sizeof(half), NULL) != (int64_t)sizeof(half)) {
+                kprintf("NETTEST: wwr guest-client: send failed in mode %u round %u\n", m, r);
+                return false;
+            }
+            size_t have = 0;
+            while (have < sizeof(reply)) {
+                int64_t n = ksock_recvfrom(c, reply + have, sizeof(reply) - have, NULL);
+                if (n <= 0) {
+                    kprintf("NETTEST: wwr guest-client: recv %lld in mode %u round %u after %zu bytes\n",
+                            (long long)n, m, r, have);
+                    return false;
+                }
+                have += (size_t)n;
+            }
+            us[m][r] = (clock_now_ns() - t0) / 1000;
+        }
+        sort_u64(us[m], WWR_ROUNDS);
+        kprintf("NETTEST: wwr guest-client host-nagle=%s rounds=%u min=%llu p50=%llu p90=%llu max=%llu us\n",
+                m == 0 ? "on" : "off", WWR_ROUNDS,
+                (unsigned long long)us[m][0], (unsigned long long)us[m][WWR_ROUNDS / 2],
+                (unsigned long long)us[m][WWR_ROUNDS * 9 / 10], (unsigned long long)us[m][WWR_ROUNDS - 1]);
+    }
+    return true;
+}
 
 static void h_tcp_echo_thread(void *arg)
 {
@@ -1769,13 +1849,20 @@ bool selftest_net_harness(const char **reason)
     CHECK(ksock_bind(tls, &any7) == 0 && ksock_listen(tls, 4) == 0);
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &us) == 0);
     CHECK(ksock_bind(us, &any7) == 0);
+    /* The write-write-read service on port 8 (h_wwr_thread). */
+    struct socket *wls;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &wls) == 0);
+    struct netaddr any8 = v4addr(0, 8);
+    CHECK(ksock_bind(wls, &any8) == 0 && ksock_listen(wls, 4) == 0);
     g_h_quit = g_h_stop = false;
-    g_h_tcp_conns = g_h_udp_pkts = 0;
+    g_h_tcp_conns = g_h_udp_pkts = g_h_wwr_conns = 0;
     ksock_get(tls);
     ksock_get(us);
+    ksock_get(wls);
     CHECK(thread_create(h_tcp_echo_thread, tls, "nettest-tcp", 32) != NULL);
     CHECK(thread_create(h_udp_echo_thread, us, "nettest-udp", 32) != NULL);
-    kprintf("NETTEST: ready tcp=7 udp=7\n");
+    CHECK(thread_create(h_wwr_thread, wls, "nettest-wwr", 32) != NULL);
+    kprintf("NETTEST: ready tcp=7 udp=7 wwr=8\n");
 
     /*
      * Connect back to the harness through the gateway (QEMU forwards
@@ -1804,7 +1891,7 @@ bool selftest_net_harness(const char **reason)
      *
      * A retry that hid the flake would be worse than the flake.
      */
-    bool client_ok = false;
+    bool client_ok = false, wwr_ok = false;
     unsigned attempt = 0;
     struct socket *c = NULL;
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
@@ -1868,6 +1955,9 @@ bool selftest_net_harness(const char **reason)
         }
         space2 = tcp_send_space(c->tcp);
     }
+    /* The reverse write-write-read exchange rides on this connection once
+     * the hello has been answered: the host serves it before closing. */
+    wwr_ok = client_ok && h_wwr_client(c);
     tcp_get_stats(&t1);
     enum tcp_state st = tcp_state_of(c->tcp);
     /* The socket's own verdict, which no caller could ask for until this
@@ -1930,13 +2020,17 @@ bool selftest_net_harness(const char **reason)
     }
     g_h_stop = true;
     ksock_shutdown(tls, COSMO_SHUT_RD);   /* accept returns */
+    ksock_shutdown(wls, COSMO_SHUT_RD);
     struct netaddr self = v4addr(INADDR_LOOPBACK_N, 7);
     ksock_sendto(us, "x", 1, &self);       /* the UDP thread wakes and exits */
     thread_sleep_ms(50);
-    kprintf("NETTEST: done tcp_conns=%d udp_pkts=%d quit=%d\n", g_h_tcp_conns, g_h_udp_pkts, g_h_quit ? 1 : 0);
+    kprintf("NETTEST: done tcp_conns=%d udp_pkts=%d wwr_conns=%d quit=%d\n", g_h_tcp_conns, g_h_udp_pkts,
+            g_h_wwr_conns, g_h_quit ? 1 : 0);
     nt_ksock_put(tls);
     nt_ksock_put(us);
+    nt_ksock_put(wls);
     CHECK(client_ok);
+    CHECK(wwr_ok);
     CHECK(g_h_quit);
     return true;
 }

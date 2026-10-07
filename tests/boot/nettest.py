@@ -64,6 +64,34 @@ BACK_BACKLOG = 8
 # (docs/audit/next-subsystem-nettest-deadline.md).
 BACK_GRACE_S = BACK_RECV_S
 
+# The write-write-read exchange, both ways (docs/kernel-services/network/testing.md,
+# "The host harness"; docs/audit/2026-10-07-delack-nagle-report.md). A request
+# is two WWR_HALF-byte halves written as two sends; the answer is the request,
+# sent once both halves are in. Host to guest: this module connects to the
+# guest's service on port 8 and runs WWR_ROUNDS rounds with the default socket
+# (Nagle on) and WWR_ROUNDS more on a second connection with TCP_NODELAY.
+# Guest to host: on the back-connection, after the hello, the guest runs the
+# same two batches and the host answers in two writes, Nagle on for the first
+# batch and TCP_NODELAY for the second. The guest's kernel carries the same
+# two constants (kernel-services/network/nettest.c, WWR_HALF/WWR_ROUNDS).
+#
+# What the figures mean: QEMU's user-mode backend terminates the guest's TCP
+# in its own stack, and that stack never holds a small segment for an
+# acknowledgement (libslirp tcp_output.c: `(1 || idle || TF_NODELAY)`), so a
+# Nagle shape here exercises the HOST kernel's Nagle against the host
+# kernel's own delayed acknowledgement on the loopback leg to QEMU -- Linux
+# shows its 40 ms there -- and never the guest's. The TCP_NODELAY shapes are
+# the path's latency through QEMU and the guest; those are bounded. The
+# guest-side interaction is measured where the peer can be built:
+# `net-tcp-nagle-peer`.
+WWR_HALF = 16
+WWR_ROUNDS = 50
+# The bound on the TCP_NODELAY shapes' median round trip. A delayed
+# acknowledgement in the guest's path would cost 40 ms on every round; a
+# median of fifty rounds through QEMU runs a few milliseconds on a loaded CI
+# runner.
+WWR_BUDGET_S = 0.025
+
 # How long the liveness probe gets. Generous: a slow answer is a reading,
 # not a failure, and the exchange has already failed by the time this runs
 # (docs/audit/next-subsystem-nettest-probe.md).
@@ -136,6 +164,7 @@ class NetTest:
         self.tcp_port = free_port()
         self.udp_port = free_port()
         self.back_port = free_port()
+        self.wwr_port = free_port()
         self.results = {}
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -152,7 +181,8 @@ class NetTest:
 
     def env(self):
         return {
-            "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{self.tcp_port}-:7,udp:127.0.0.1:{self.udp_port}-:7",
+            "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{self.tcp_port}-:7,udp:127.0.0.1:{self.udp_port}-:7,"
+                                f"tcp:127.0.0.1:{self.wwr_port}-:8",
             "QEMU_FWCFG_NETTEST": f"tcp={self.back_port}",
         }
 
@@ -305,6 +335,10 @@ class NetTest:
                 sock.setblocking(True)
                 sock.settimeout(BACK_RECV_S)
                 sock.sendall(BACK_REPLY)
+                # The reverse write-write-read exchange rides on this
+                # connection: the guest starts it as soon as it has the
+                # reply, and the host closes only after serving it.
+                self._wwr_host_reply(sock)
                 time.sleep(0.2)
             elif self.back_conns:
                 # Nothing delivered the request. Report the first
@@ -340,6 +374,84 @@ class NetTest:
             except OSError:
                 pass
             self.results["back_closed_s"] = time.monotonic() - self.t0
+
+    @staticmethod
+    def _recv_exactly(sock, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise EOFError(f"peer closed after {len(buf)} of {n} bytes")
+            buf += chunk
+        return buf
+
+    def _wwr_host_reply(self, sock):
+        """Answer the guest's write-write-read rounds on the back-connection.
+
+        Two batches of WWR_ROUNDS: the reply goes out as two writes, the
+        first batch on the socket as accepted (Nagle on), the second with
+        TCP_NODELAY. The guest times each round and prints the two
+        distributions (`NETTEST: wwr guest-client ...`); this side only
+        counts what it served, so a short exchange names the round.
+        """
+        served = 0
+        try:
+            for batch in range(2):
+                if batch == 1:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                for _ in range(WWR_ROUNDS):
+                    req = self._recv_exactly(sock, 2 * WWR_HALF)
+                    sock.sendall(req[:WWR_HALF])
+                    sock.sendall(req[WWR_HALF:])
+                    served += 1
+        except Exception as e:  # noqa: BLE001
+            self.results["wwr_reverse_error"] = repr(e)
+        self.results["wwr_reverse_served"] = served
+
+    def _wwr_client(self):
+        """Host-driven write-write-read against the guest's port-8 service.
+
+        One connection per mode: the default socket (Nagle on) and one with
+        TCP_NODELAY. Each runs WWR_ROUNDS rounds -- two sends of WWR_HALF
+        bytes, then the 2*WWR_HALF-byte answer -- and keeps every round's
+        time; the distributions are printed by latency() and the NODELAY
+        median is bounded by failures().
+        """
+        half = bytes([0x77]) * WWR_HALF
+        for mode in ("nagle", "nodelay"):
+            rounds = []
+            try:
+                s = socket.create_connection(("127.0.0.1", self.wwr_port), timeout=20)
+                s.settimeout(20)
+                if mode == "nodelay":
+                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                for _ in range(WWR_ROUNDS):
+                    t0 = time.monotonic()
+                    s.sendall(half)
+                    s.sendall(half)
+                    reply = self._recv_exactly(s, 2 * WWR_HALF)
+                    if reply != half + half:
+                        raise ValueError(f"reply {reply!r}")
+                    rounds.append(time.monotonic() - t0)
+                s.close()
+            except Exception as e:  # noqa: BLE001
+                self.results[f"wwr_h2g_{mode}_error"] = repr(e)
+            self.results[f"wwr_h2g_{mode}"] = sorted(rounds)
+
+    def latency(self):
+        """One line with the host-driven write-write-read distributions."""
+        parts = []
+        for mode in ("nagle", "nodelay"):
+            r = self.results.get(f"wwr_h2g_{mode}")
+            if not r:
+                parts.append(f"{mode}: no rounds ({self.results.get(f'wwr_h2g_{mode}_error', 'not run')})")
+                continue
+            n = len(r)
+            parts.append("%s: %d rounds min %.1f ms, p50 %.1f ms, p90 %.1f ms, max %.1f ms"
+                         % (mode, n, r[0] * 1e3, r[n // 2] * 1e3, r[n * 9 // 10] * 1e3, r[-1] * 1e3))
+        served = self.results.get("wwr_reverse_served")
+        return ("network harness: write-write-read host->guest, " + "; ".join(parts) +
+                f"; guest->host rounds served {served if served is not None else '-'} of {2 * WWR_ROUNDS}")
 
     def _probe_conn(self, c, ended, errno=None):
         """Record how one connection ended, and its state while it can be read.
@@ -457,6 +569,7 @@ class NetTest:
         time.sleep(0.3)
         self._tcp_echo()
         self._udp_echo()
+        self._wwr_client()
         self._quit()
 
     def _tcp_echo(self):
@@ -565,4 +678,16 @@ class NetTest:
             )
         if not r.get("quit_sent"):
             f.append("network harness: could not send QUIT")
+        for mode in ("nagle", "nodelay"):
+            rounds = r.get(f"wwr_h2g_{mode}") or []
+            if len(rounds) != WWR_ROUNDS:
+                f.append(f"network harness: write-write-read host->guest ({mode}) completed "
+                         f"{len(rounds)} of {WWR_ROUNDS} rounds ({r.get(f'wwr_h2g_{mode}_error', '')})")
+        nodelay = r.get("wwr_h2g_nodelay") or []
+        if len(nodelay) == WWR_ROUNDS and nodelay[WWR_ROUNDS // 2] > WWR_BUDGET_S:
+            f.append("network harness: write-write-read host->guest (nodelay) median %.1f ms over the %.0f ms budget"
+                     % (nodelay[WWR_ROUNDS // 2] * 1e3, WWR_BUDGET_S * 1e3))
+        if r.get("wwr_reverse_served") != 2 * WWR_ROUNDS:
+            f.append(f"network harness: write-write-read guest->host served {r.get('wwr_reverse_served')} "
+                     f"of {2 * WWR_ROUNDS} rounds ({r.get('wwr_reverse_error', '')})")
         return f

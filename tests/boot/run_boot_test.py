@@ -901,8 +901,11 @@ def main():
         if net_thread is not None:
             net_thread.join(5)
         print(nettest.timing(), flush=True)
+        print(nettest.latency(), flush=True)
         failures.extend(nettest.failures())
-        for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1"):
+        for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1",
+                    r"^NETTEST: wwr guest-client host-nagle=on rounds=\d+ min=\d+ p50=\d+ p90=\d+ max=\d+ us",
+                    r"^NETTEST: wwr guest-client host-nagle=off rounds=\d+ min=\d+ p50=\d+ p90=\d+ max=\d+ us"):
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (network harness)")
 
