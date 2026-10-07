@@ -219,13 +219,15 @@ None.
   last-reported state and transition bookkeeping; it is a separate unit. Until
   then an `EPOLLET` bit is rejected (`-EINVAL`) rather than silently treated as
   level, so a program that depends on edge semantics fails loudly.
-- **Nested epoll is refused.** Adding an epoll fd to an epoll is `-EINVAL` in
+- ~~**Nested epoll is refused.** Adding an epoll fd to an epoll is `-EINVAL` in
   v1; loop detection across nested epolls is deferred with it. The epoll-close
   unit kept it refused and recorded why: a member's events wake the member's
   queue, not the set's, so an outer set would sleep through the inner set's
   events; the fix is an item-owned forwarding wait entry (Linux's
   `ep_poll_callback`), a redesign of the wait protocol
-  (`docs/kernel/io/design.md`, "epoll").
+  (`docs/kernel/io/design.md`, "epoll").~~ **Built by the epoll-callback
+  unit** (`docs/audit/2026-10-07-epoll-callback-report.md`): readiness by
+  callback, nesting with `-ELOOP` and a depth of four sets.
 - **The packed `epoll_event`.** The x86-64 packed layout (§4) is the easy thing
   to get wrong; the test reads back `data` to prove the array marshals
   byte-for-byte on both arches.

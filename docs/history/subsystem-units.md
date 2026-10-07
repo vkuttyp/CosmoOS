@@ -2439,3 +2439,26 @@ See the [history index](README.md).
   `LXEPOLLCLOSE` in `lxtest`, `epoll_musl` (static musl, x86-64 CI),
   `tools/epoll-close-probe.py --old` failing at the baseline. Report:
   `docs/audit/2026-10-07-epoll-close-report.md`.
+- **epoll readiness by callback, and nesting.** Every `epoll_wait`
+  snapshotted every member, pinned each and parked a wait entry of its
+  own on each member's queue -- O(registered) per call, and the reason a
+  set could not be a member of a set. `struct wait_entry` gained a
+  callback kind (run by the wake under the queue's lock; removable under
+  it; detached with `WAIT_CB_FREED` by a dying queue's owner, which then
+  waits a grace period -- Linux's POLLFREE); every item owns one on each
+  queue its member's directions wake, a wake links the item onto the
+  set's ready list under a new ready-list spinlock and wakes the set's
+  queue, and a wait sleeps on that queue alone and walks the ready list
+  (A10). Level items are re-queued after a report, edge and one-shot items
+  come back only by a wake or a MOD; the wake generation counter went. A
+  set may be a member of a set: its wake forwards with a lockdep subclass
+  per chain depth (`nests`), self is `-EINVAL`, a loop or a chain of more
+  than four sets `-ELOOP` (A11; four is lockdep's subclass count). The
+  never-registered object's last close takes no lock: a `watched` flag,
+  a store-buffering pair proved by `tests/litmus/epoll/watched.litmus`.
+  `epoll-scale` (1 to 1024 members, flat), `epoll-wake-race`, `epoll-nest`,
+  `epoll-close-bench`, `LXEPOLLNEST`, `epoll_musl`'s nested case,
+  `tools/epoll-callback-probe.py` (two `--old` modes, `--baseline`,
+  `--measure`). `init --block` reads a pipe of its own, closing the
+  "known `--block` flake". Module ABI 6. Report:
+  `docs/audit/2026-10-07-epoll-callback-report.md`.
