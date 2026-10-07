@@ -742,6 +742,7 @@ static const struct selftest tests[] = {
     { "tcp-pcb-timer-free", selftest_tcp_pcb_timer_free },
     { "net-lo-tcp",      selftest_net_lo_tcp },
     { "net-tcp-delack",  selftest_net_tcp_delack },
+    { "net-tcp-nagle-peer", selftest_net_tcp_nagle_peer },
     { "net-rx-dup",      selftest_net_rx_dup },
     { "net-accept-order", selftest_net_accept_order },
     { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },

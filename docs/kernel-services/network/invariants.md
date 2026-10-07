@@ -537,3 +537,27 @@ stream under a thread flipping the flag every millisecond, every datagram
 of which is forwarded intact or refused as spoofed, none masqueraded.
 `tools/netif-flags-probe.py --old` restores the per-check reads and the
 test fails at `src == other`: the parked datagram was masqueraded.
+
+**N27. An owed acknowledgement leaves with the application's read.**
+When `tcp_recv` takes data from the receive buffer while `delack_pending`
+is set (an odd in-order segment arrived and the 40 ms timer holds its
+acknowledgement), it sets `ack_now` and runs the output, so the
+acknowledgement goes at once -- not after the timer, and whatever the
+connection's traffic pattern (Linux's `tcp_cleanup_rbuf` withholds it in
+"pingpong" mode; this stack never does). It is what keeps a Nagle peer
+moving: such a peer holds its second small write until the first is
+acknowledged, so a receiver acknowledging only from the timer would cost
+it `TCP_DELACK_NS` per request, and a one-CPU loopback stream whose
+window ends on an odd segment the same per round (the first version of
+the 2026-10-07 correction, without this rule, sank `net-bench` from 21 to
+2 MiB/s). A receiver that does not read still leaves the acknowledgement
+to the timer (that is `net-tcp-delack`'s silent server). **Checked by**
+`net-tcp-nagle-peer`: a loopback client that sends the first half of a
+request, waits until its send buffer is acknowledged and only then sends
+the second (a Nagle sender by construction), against a server that reads
+at once and against one that stays away from the socket for 5 ms before
+each read; the median time to the first half's acknowledgement and the
+median exchange are both under 20 ms in both modes (a timer-only
+receiver costs 40 ms every round). `tools/delack-nagle-probe.py --old`
+builds the rule as it was before b76e4536 (acknowledged on any output,
+so never owed) for the comparison the report records.

@@ -19,6 +19,7 @@ Remaining work is grouped in [`docs/plan.md`](../plan.md).
 | [`2026-10-03-lockdep-context-plan.md`](2026-10-03-lockdep-context-plan.md) | Lockdep context validation — continuation after PR #302 |
 | [`2026-10-03-lockdep-report.md`](2026-10-03-lockdep-report.md) | Lockdep hardening report — 2026-10-03 |
 | [`2026-10-04-spin-contention-report.md`](2026-10-04-spin-contention-report.md) | Observed spin contention — 2026-10-04 |
+| [`2026-10-07-delack-nagle-report.md`](2026-10-07-delack-nagle-report.md) | The delayed acknowledgement against a Nagle peer — 2026-10-07 |
 
 ## Section 68 reports
 

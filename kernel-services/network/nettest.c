@@ -715,6 +715,7 @@ struct tcp_server {
     int result;
     volatile bool done;
     bool echo;               /* echo mode for the harness */
+    unsigned param;          /* a per-thread parameter (net-tcp-nagle-peer: the reader's delay in ms) */
     volatile bool stop;
     /* For its release (the net-leftover unit): the thread, and the
      * sockets it is blocked on, published under `lock` so the release can
@@ -1267,6 +1268,181 @@ bool selftest_net_tcp_delack(const char **reason)
     return true;
 }
 
+/* --- net-tcp-nagle-peer: a Nagle sender's write-write-read -------------------
+ *
+ * A peer with Nagle on (Linux and macOS by default) that writes a small
+ * request in two parts holds the second part until the first is
+ * acknowledged, so a receiver that only acknowledges from the delayed-ACK
+ * timer costs it TCP_DELACK_NS per request. This stack has no Nagle of its
+ * own and QEMU's user-mode backend disables it on the connections it
+ * proxies (libslirp tcp_output.c: `(1 || idle || TF_NODELAY)`), so no peer
+ * in the suite can show the interaction; this test builds the peer. The
+ * client is a Nagle sender by construction: it sends the first half, waits
+ * until the send buffer is acknowledged (TCP_SNDBUF free again), and only
+ * then sends the second. The server reads both halves and replies, either
+ * as soon as the data arrives or after `param` ms away from the socket -- a
+ * busy application. The owed acknowledgement must leave with the read
+ * (tcp_recv, as Linux's tcp_cleanup_rbuf), so in both modes the first
+ * half is acknowledged before the timer could, and the exchange costs the
+ * server's delay and not TCP_DELACK_NS on top of it
+ * (docs/kernel-services/network/design.md, "TCP", N27).
+ */
+#define NAGLE_HALF   16u
+#define NAGLE_ROUNDS 20u
+
+static void tcp_wwr_server_thread(void *arg)
+{
+    struct tcp_server *srv = arg;
+    struct socket *ls, *c;
+    srv->result = ksock_create(srv->addr.family, COSMO_SOCK_STREAM, 0, &ls);
+    if (srv->result)
+        goto done;
+    tcp_server_publish(srv, &srv->ls, ls);
+    srv->result = ksock_bind(ls, &srv->addr);
+    if (srv->result == 0)
+        srv->result = ksock_listen(ls, 1);
+    if (srv->result == 0)
+        srv->result = ksock_accept(ls, &c, NULL);
+    if (srv->result) {
+        tcp_server_publish(srv, &srv->ls, NULL);
+        ksock_put(ls);
+        goto done;
+    }
+    tcp_server_publish(srv, &srv->c, c);
+    uint8_t req[2 * NAGLE_HALF];
+    while (!srv->stop) {
+        /* A busy application: away from the socket while the request's
+         * first half arrives, so nothing but the read can acknowledge it. */
+        if (srv->param)
+            thread_sleep_ms(srv->param);
+        size_t have = 0;
+        while (have < sizeof(req)) {
+            int64_t n = ksock_recvfrom(c, req + have, sizeof(req) - have, NULL);
+            if (n <= 0)
+                goto closed;
+            have += (size_t)n;
+        }
+        srv->bytes_seen += (uint32_t)have;
+        if (ksock_sendto(c, req, sizeof(req), NULL) != (int64_t)sizeof(req))
+            break;
+    }
+closed:
+    tcp_server_publish(srv, &srv->c, NULL);
+    tcp_server_publish(srv, &srv->ls, NULL);
+    ksock_put(c);
+    ksock_put(ls);
+done:
+    srv->done = true;
+    thread_exit(0);
+}
+
+static void sort_u64(uint64_t *v, unsigned n)
+{
+    for (unsigned i = 1; i < n; i++) {
+        uint64_t x = v[i];
+        unsigned j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = x;
+    }
+}
+
+/* One mode: `busy_ms` is how long the server stays away from the socket
+ * before reading each request. Fills the sorted per-round acknowledgement
+ * and exchange times (us). */
+static bool nagle_peer_mode(const char **reason, uint16_t port, unsigned busy_ms,
+                            uint64_t ack_us[NAGLE_ROUNDS], uint64_t rtt_us[NAGLE_ROUNDS])
+{
+    static struct tcp_server srv[2];   /* a thread may outlive this frame; one per mode */
+    struct tcp_server *s = &srv[busy_ms ? 1 : 0];
+    memset(s, 0, sizeof(*s));
+    s->addr = v4addr(INADDR_LOOPBACK_N, port);
+    s->param = busy_ms;
+    CHECK(tcp_server_start(s, tcp_wwr_server_thread, "tcp-wwr", 32));
+    thread_sleep_ms(20);   /* let it listen */
+
+    struct socket *c;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &s->addr) == 0);
+    thread_sleep_ms(20);   /* the handshake's last segment is the worker's */
+
+    uint8_t half[NAGLE_HALF], reply[2 * NAGLE_HALF];
+    memset(half, 'n', sizeof(half));
+    bool ok = true;
+    for (unsigned r = 0; r < NAGLE_ROUNDS && ok; r++) {
+        uint64_t t0 = clock_now_ns();
+        ok = ksock_sendto(c, half, sizeof(half), NULL) == (int64_t)sizeof(half);
+        /* Nagle: the second small write waits for the first's acknowledgement
+         * (the send buffer whole again). Polled with yields, not sleeps: a
+         * sleep is quantised to the 4 ms tick (CONFIG_HZ) and would be most
+         * of the reading. Bounded at a second. */
+        uint64_t acked = 0;
+        while (ok && clock_now_ns() - t0 < 1000000000ull) {
+            if (tcp_send_space(c->tcp) == TCP_SNDBUF) {
+                acked = clock_now_ns();
+                break;
+            }
+            sched_yield();
+        }
+        ok = ok && acked != 0;
+        ok = ok && ksock_sendto(c, half, sizeof(half), NULL) == (int64_t)sizeof(half);
+        size_t have = 0;
+        while (ok && have < sizeof(reply)) {
+            int64_t n = ksock_recvfrom(c, reply + have, sizeof(reply) - have, NULL);
+            ok = n > 0;
+            if (ok)
+                have += (size_t)n;
+        }
+        /* The answer is the request: both halves, in order. */
+        ok = ok && memcmp(reply, half, sizeof(half)) == 0 && memcmp(reply + sizeof(half), half, sizeof(half)) == 0;
+        uint64_t t1 = clock_now_ns();
+        ack_us[r] = (acked - t0) / 1000;
+        rtt_us[r] = (t1 - t0) / 1000;
+    }
+    s->stop = true;
+    ksock_shutdown(c, COSMO_SHUT_WR);   /* the server's read returns 0 */
+    for (unsigned i = 0; i < 300 && !s->done; i++)
+        thread_sleep_ms(10);
+    nt_ksock_put(c);
+    CHECK(ok);
+    CHECK(s->done && s->result == 0 && s->bytes_seen == NAGLE_ROUNDS * 2 * NAGLE_HALF);
+    sort_u64(ack_us, NAGLE_ROUNDS);
+    sort_u64(rtt_us, NAGLE_ROUNDS);
+    return true;
+}
+
+bool selftest_net_tcp_nagle_peer(const char **reason)
+{
+    unsigned socks0 = socket_count();
+    static const unsigned busy[2] = { 0, 5 };
+    uint64_t ack[2][NAGLE_ROUNDS], rtt[2][NAGLE_ROUNDS];
+    for (unsigned m = 0; m < 2; m++) {
+        if (!nagle_peer_mode(reason, (uint16_t)(6096 + m), busy[m], ack[m], rtt[m]))
+            return false;
+        kinfo("selftest: net-tcp-nagle-peer: server %s: first half acknowledged after %llu/%llu/%llu us, "
+              "exchange %llu/%llu/%llu us (min/median/max of %u)",
+              busy[m] ? "busy 5 ms before each read" : "reading at once",
+              (unsigned long long)ack[m][0], (unsigned long long)ack[m][NAGLE_ROUNDS / 2],
+              (unsigned long long)ack[m][NAGLE_ROUNDS - 1],
+              (unsigned long long)rtt[m][0], (unsigned long long)rtt[m][NAGLE_ROUNDS / 2],
+              (unsigned long long)rtt[m][NAGLE_ROUNDS - 1], NAGLE_ROUNDS);
+    }
+    /* The medians: a receiver acknowledging only from the timer costs every
+     * round TCP_DELACK_NS (40 ms); the read-driven acknowledgement costs the
+     * busy server's own delay and nothing more. A single slow round under
+     * load does not move a median of twenty. */
+    uint64_t bound_us = TCP_DELACK_NS / 1000 / 2;   /* 20 ms: half the timer */
+    CHECK(ack[0][NAGLE_ROUNDS / 2] < bound_us);     /* a reading server: acknowledged at once */
+    CHECK(rtt[0][NAGLE_ROUNDS / 2] < bound_us);
+    CHECK(ack[1][NAGLE_ROUNDS / 2] < bound_us);     /* a busy server: acknowledged by its read, before the timer */
+    CHECK(rtt[1][NAGLE_ROUNDS / 2] < bound_us);
+    thread_sleep_ms(50);
+    CHECK(socket_count() == socks0);
+    return true;
+}
+
 /* --- a duplicated received frame (FI_NET_RX_DUP) ----------------------------
  *
  * A frame delivered twice -- a link-layer retransmit, a switch flooding --
@@ -1493,7 +1669,91 @@ bool selftest_net_lo_tcp_loss(const char **reason)
 /* --- harness-driven echo over the real interface --------------------------------------- */
 
 static volatile bool g_h_quit, g_h_stop;
-static volatile int g_h_tcp_conns, g_h_udp_pkts;
+static volatile int g_h_tcp_conns, g_h_udp_pkts, g_h_wwr_conns;
+
+/*
+ * The write-write-read exchange (docs/kernel-services/network/testing.md,
+ * "The host harness"): a request of two WWR_HALF-byte halves, written as two
+ * sends, answered with the request once both halves are in. The host drives
+ * it against the service on port 8 with its default socket (Nagle on) and
+ * again with TCP_NODELAY; the guest drives it the other way on the
+ * back-connection, where the host answers in two writes, with and without
+ * Nagle. Both sides count WWR_ROUNDS rounds per mode; tests/boot/nettest.py
+ * carries the same two constants.
+ */
+#define WWR_HALF   16u
+#define WWR_ROUNDS 50u
+
+static void h_wwr_thread(void *arg)
+{
+    struct socket *ls = arg;
+    for (;;) {
+        struct socket *c;
+        if (ksock_accept(ls, &c, NULL) != 0)
+            break;
+        g_h_wwr_conns++;
+        uint8_t req[2 * WWR_HALF];
+        for (;;) {
+            size_t have = 0;
+            bool eof = false;
+            while (have < sizeof(req)) {
+                int64_t n = ksock_recvfrom(c, req + have, sizeof(req) - have, NULL);
+                if (n <= 0) {
+                    eof = true;
+                    break;
+                }
+                have += (size_t)n;
+            }
+            if (eof || ksock_sendto(c, req, sizeof(req), NULL) != (int64_t)sizeof(req))
+                break;
+        }
+        ksock_put(c);
+    }
+    ksock_put(ls);   /* its own reference: the harness took one for it */
+    thread_exit(0);
+}
+
+/* The guest's side of the reverse exchange, on the back-connection after the
+ * hello: WWR_ROUNDS rounds with the host's Nagle on, then WWR_ROUNDS with it
+ * off (the host switches after the first batch). Prints one line per mode;
+ * false if a round did not complete. */
+static bool h_wwr_client(struct socket *c)
+{
+    static uint64_t us[2][WWR_ROUNDS];
+    uint8_t half[WWR_HALF], reply[2 * WWR_HALF];
+    memset(half, 'w', sizeof(half));
+    for (unsigned m = 0; m < 2; m++) {
+        for (unsigned r = 0; r < WWR_ROUNDS; r++) {
+            uint64_t t0 = clock_now_ns();
+            if (ksock_sendto(c, half, sizeof(half), NULL) != (int64_t)sizeof(half) ||
+                ksock_sendto(c, half, sizeof(half), NULL) != (int64_t)sizeof(half)) {
+                kprintf("NETTEST: wwr guest-client: send failed in mode %u round %u\n", m, r);
+                return false;
+            }
+            size_t have = 0;
+            while (have < sizeof(reply)) {
+                int64_t n = ksock_recvfrom(c, reply + have, sizeof(reply) - have, NULL);
+                if (n <= 0) {
+                    kprintf("NETTEST: wwr guest-client: recv %lld in mode %u round %u after %zu bytes\n",
+                            (long long)n, m, r, have);
+                    return false;
+                }
+                have += (size_t)n;
+            }
+            us[m][r] = (clock_now_ns() - t0) / 1000;
+            if (memcmp(reply, half, sizeof(half)) != 0 || memcmp(reply + sizeof(half), half, sizeof(half)) != 0) {
+                kprintf("NETTEST: wwr guest-client: the reply is not the request in mode %u round %u\n", m, r);
+                return false;
+            }
+        }
+        sort_u64(us[m], WWR_ROUNDS);
+        kprintf("NETTEST: wwr guest-client host-nagle=%s rounds=%u min=%llu p50=%llu p90=%llu max=%llu us\n",
+                m == 0 ? "on" : "off", WWR_ROUNDS,
+                (unsigned long long)us[m][0], (unsigned long long)us[m][WWR_ROUNDS / 2],
+                (unsigned long long)us[m][WWR_ROUNDS * 9 / 10], (unsigned long long)us[m][WWR_ROUNDS - 1]);
+    }
+    return true;
+}
 
 static void h_tcp_echo_thread(void *arg)
 {
@@ -1595,13 +1855,20 @@ bool selftest_net_harness(const char **reason)
     CHECK(ksock_bind(tls, &any7) == 0 && ksock_listen(tls, 4) == 0);
     CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &us) == 0);
     CHECK(ksock_bind(us, &any7) == 0);
+    /* The write-write-read service on port 8 (h_wwr_thread). */
+    struct socket *wls;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &wls) == 0);
+    struct netaddr any8 = v4addr(0, 8);
+    CHECK(ksock_bind(wls, &any8) == 0 && ksock_listen(wls, 4) == 0);
     g_h_quit = g_h_stop = false;
-    g_h_tcp_conns = g_h_udp_pkts = 0;
+    g_h_tcp_conns = g_h_udp_pkts = g_h_wwr_conns = 0;
     ksock_get(tls);
     ksock_get(us);
+    ksock_get(wls);
     CHECK(thread_create(h_tcp_echo_thread, tls, "nettest-tcp", 32) != NULL);
     CHECK(thread_create(h_udp_echo_thread, us, "nettest-udp", 32) != NULL);
-    kprintf("NETTEST: ready tcp=7 udp=7\n");
+    CHECK(thread_create(h_wwr_thread, wls, "nettest-wwr", 32) != NULL);
+    kprintf("NETTEST: ready tcp=7 udp=7 wwr=8\n");
 
     /*
      * Connect back to the harness through the gateway (QEMU forwards
@@ -1630,7 +1897,7 @@ bool selftest_net_harness(const char **reason)
      *
      * A retry that hid the flake would be worse than the flake.
      */
-    bool client_ok = false;
+    bool client_ok = false, wwr_ok = false;
     unsigned attempt = 0;
     struct socket *c = NULL;
     struct netaddr host = v4addr(nif->ip4.gateway, (uint16_t)hostport);
@@ -1694,6 +1961,9 @@ bool selftest_net_harness(const char **reason)
         }
         space2 = tcp_send_space(c->tcp);
     }
+    /* The reverse write-write-read exchange rides on this connection once
+     * the hello has been answered: the host serves it before closing. */
+    wwr_ok = client_ok && h_wwr_client(c);
     tcp_get_stats(&t1);
     enum tcp_state st = tcp_state_of(c->tcp);
     /* The socket's own verdict, which no caller could ask for until this
@@ -1756,13 +2026,17 @@ bool selftest_net_harness(const char **reason)
     }
     g_h_stop = true;
     ksock_shutdown(tls, COSMO_SHUT_RD);   /* accept returns */
+    ksock_shutdown(wls, COSMO_SHUT_RD);
     struct netaddr self = v4addr(INADDR_LOOPBACK_N, 7);
     ksock_sendto(us, "x", 1, &self);       /* the UDP thread wakes and exits */
     thread_sleep_ms(50);
-    kprintf("NETTEST: done tcp_conns=%d udp_pkts=%d quit=%d\n", g_h_tcp_conns, g_h_udp_pkts, g_h_quit ? 1 : 0);
+    kprintf("NETTEST: done tcp_conns=%d udp_pkts=%d wwr_conns=%d quit=%d\n", g_h_tcp_conns, g_h_udp_pkts,
+            g_h_wwr_conns, g_h_quit ? 1 : 0);
     nt_ksock_put(tls);
     nt_ksock_put(us);
+    nt_ksock_put(wls);
     CHECK(client_ok);
+    CHECK(wwr_ok);
     CHECK(g_h_quit);
     return true;
 }

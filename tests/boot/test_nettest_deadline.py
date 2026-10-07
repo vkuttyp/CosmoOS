@@ -20,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nettest import (NetTest, BACK_PREVIEW, BACK_BACKLOG,  # noqa: E402
-                     BACK_GRACE_S)
+                     BACK_GRACE_S, WWR_ROUNDS)
 
 FAILURES = []
 CHECKS = 0
@@ -413,6 +413,21 @@ def test_the_preview_is_bounded():
             pass
 
 
+def test_guest_lines_are_judged():
+    """The guest's write-write-read lines: both required, the TCP_NODELAY
+    median bounded, the Nagle batch reported only (review of PR #323)."""
+    on = "NETTEST: wwr guest-client host-nagle=on rounds=50 min=500 p50=40000 p90=41000 max=42000 us"
+    off = "NETTEST: wwr guest-client host-nagle=off rounds=50 min=400 p50=600 p90=700 max=900 us"
+    check(NetTest.guest_failures([on, off]) == [], "a slow Nagle batch beside a fast NODELAY one passes")
+    msgs = NetTest.guest_failures([on, off.replace("p50=600", "p50=40000")])
+    check(len(msgs) == 1 and "TCP_NODELAY" in msgs[0] and "40.0 ms" in msgs[0],
+          f"a 40 ms NODELAY median is a failure that names the figure (got {msgs})")
+    msgs = NetTest.guest_failures([off])
+    check(len(msgs) == 1 and "host-nagle=on" in msgs[0], f"a missing batch is named (got {msgs})")
+    msgs = NetTest.guest_failures([on, off.replace("rounds=50", "rounds=49")])
+    check(len(msgs) == 1 and "49 of 50" in msgs[0], f"a short batch is named (got {msgs})")
+
+
 def test_arrivals_without_the_request_still_fail():
     """Design point 6: a deeper backlog must not turn a fault into a pass.
 
@@ -434,6 +449,10 @@ def test_arrivals_without_the_request_still_fail():
         nt.results["tcp_echo"] = True
         nt.results["udp_ok"] = True
         nt.results["quit_sent"] = True
+        # The write-write-read exchanges as a passing run records them.
+        nt.results["wwr_h2g_nagle"] = [0.001] * WWR_ROUNDS
+        nt.results["wwr_h2g_nodelay"] = [0.001] * WWR_ROUNDS
+        nt.results["wwr_reverse_served"] = 2 * WWR_ROUNDS
         msgs = nt.failures()
         check(len(msgs) == 1, f"and it is reported once (got {len(msgs)})")
         check("connection(s)" in msgs[0],
@@ -800,6 +819,7 @@ def main():
                test_the_request_may_arrive_on_the_second_connection,
                test_each_connection_gets_its_own_receive_budget,
                test_the_preview_is_bounded,
+               test_guest_lines_are_judged,
                test_arrivals_without_the_request_still_fail,
                test_the_backlog_is_deeper_than_one,
                test_foreign_connections_are_closed_not_leaked,

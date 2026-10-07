@@ -2406,3 +2406,19 @@ See the [history index](README.md).
   lockdep class-table peak printed against its capacity, warning at 90%.
   The coverage listing reports no timer callback never run. Report:
   `docs/audit/2026-10-07-completion-waits-tidy-up-report.md`.
+- **The delayed acknowledgement against a Nagle peer.** The tidy-up made
+  the delayed ACK fire for the first time; a peer with Nagle on that writes
+  a request in two parts holds the second until the first is acknowledged,
+  so the question was whether the change costs such a peer 40 ms a
+  request. Measured: it does not, in any shape where the application
+  reads, because the owed acknowledgement leaves with the read (N27),
+  unconditionally -- where Linux withholds it in pingpong mode and has the
+  stall itself. The harness gained a write-write-read exchange both ways
+  (a port-8 service in the guest, the reverse on the back-connection, with
+  and without `TCP_NODELAY`; the `NODELAY` median bounded), and the finding
+  that QEMU's user-mode backend disables Nagle toward the guest, so those
+  batches measure the host kernel; `net-tcp-nagle-peer` builds the Nagle
+  peer on loopback and bounds the medians at half the timer against a
+  reading and a busy server; `tools/delack-nagle-probe.py --old` boots
+  the rule as it was before b76e4536. No TCP rule changed. Report:
+  `docs/audit/2026-10-07-delack-nagle-report.md`.
