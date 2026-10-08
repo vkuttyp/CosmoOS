@@ -327,6 +327,31 @@ before the reset is read back afterwards through the **same** `blkdev` — which
 a remove+reprobe could not do, the old disk being gone — proving the reset
 re-initializes the device while keeping it registered.
 
+### `vnet-remove-pending`, `vnet-remove-late`
+
+Debug self-tests on every CPU count, using a private device peer in
+`drivers/virtio/virtio_net_test.inc`, reached through the existing
+`module_symbol_lookup` API. Real split queues, DMA mappings, irq_poll
+and `vnet_remove` are exercised; the production network device remains
+available to the network harness.
+
+Before parking completions, each test fills TX twice and completes it in
+reverse order. One round exhausts ownership records, the next exhausts
+descriptors with a record still available; a rejected submission must
+return its mapping and record. All records and descriptors must be
+reusable, and the balanced warm-up ledger is cleared before removal.
+
+Both tests hold one RX completion and one two-segment TX completion,
+leaving 31 more RX buffers without used entries. The pending case holds
+delivery until teardown; the late case attempts delivery at the reset
+write before acknowledgement. A separate ledger requires every map to
+be unmapped and every buffer returned exactly once, `rx_posted == 0`,
+no submission after reset and zero RX accepted by the GONE interface.
+The old body fails on missing unmaps and reset-time RX reposting,
+respectively. `tools/vnet-remove-probe.py --old --arch=<arch>` replays
+those checks in an isolated worktree. This peer does not prove waiting
+for a callback held on another CPU or inject an actual PCI vector.
+
 ## Gaps
 
 - No host unit test for the virtqueue ring logic (`virtq_add`/`virtq_pop`
@@ -336,7 +361,7 @@ re-initializes the device while keeping it registered.
   observation of it is not.** `virtq_free` precedes the slot walk in
   release as in debug, but the stamps a test orders itself against are
   `CONFIG_DEBUG`, so a release boot exercises the order without
-  observing it. Accepted: the observation needs a seam, and a seam in a
+observing it. Accepted: the observation needs a seam, and a seam in a
   release build is a seam in the shipped driver. The debug run is the
   proof and the harness now insists it actually ran.
 - No test unloads a driver *module* with requests in flight — a
@@ -353,5 +378,5 @@ re-initializes the device while keeping it registered.
   a hotplug interrupt this kernel does not have). No legacy
   configuration access under test (q35 always has an MCFG), no test of
   a probe failure inside a real driver.
-- `virtio_net` is not driven; the transport handles the device but no
-  driver binds it.
+- Virtio-net module unload and probe-failure injection remain untested;
+  device-buffer removal is covered by the two synthetic peer tests above.

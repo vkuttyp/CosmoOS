@@ -580,6 +580,8 @@ static const struct selftest tests[] = {
     { "blk-submit-unregister", selftest_blk_submit_unregister },
     { "blk-unregister-drain", selftest_blk_unregister_drain },
     { "virtio-remove-inflight", selftest_virtio_remove_inflight },
+    { "vnet-remove-pending", selftest_vnet_remove_pending },
+    { "vnet-remove-late", selftest_vnet_remove_late },
     { "blk-irq-budget", selftest_blk_irq_budget },
     { "irqpoll-boost", selftest_irqpoll_boost },
     { "device-reset", selftest_device_reset },

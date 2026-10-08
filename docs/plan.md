@@ -600,7 +600,20 @@ Sources: inventory §§2.10, 2.11 and 3,
 
 ## 13. Devices, architecture and portability
 
-Sources: inventory §§1.4, 2.11 and 3 and [device design](kernel/device/design.md).
+Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device/design.md).
+
+- [x] **Device lifecycle — Unit 1 implementation: virtio-net removal.**
+  [PR #336](https://github.com/vkuttyp/CosmoOS/pull/336).
+  Held RX/TX completions prove missing unmaps, lost outstanding buffers and
+  reset-time RX refill. Private ownership tables and stopping polls before
+  reset reclaim every buffer with zero posted RX. Two self-tests and old
+  probes pass on both architectures; the full local matrix passes. See the
+  [report](audit/2026-10-08-vnet-remove-report.md) for the audit and CI checks.
+- [ ] **Device lifecycle — fault/interleaving sweep.** Prove the source-audit
+  concerns in inventory §8: failed DMA-stop acknowledgements, late submission
+  publication, callback retirement and RX before interface registration.
+  Existing debug bind/unbind helpers can drive the tests. Each defect needs
+  its own deterministic test and old-behavior probe.
 
 - [ ] **Implementation/validation — non-coherent DMA.** Audit device-written
   rings/buffers and submission synchronization in VirtIO, e1000e, AHCI and xHCI.

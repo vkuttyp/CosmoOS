@@ -14,6 +14,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/pmm.h>
 #include <kernel/log.h>
+#include <kernel/module.h>
 #include <kernel/page.h>
 #include <kernel/quiesce.h>
 #include <kernel/random.h>
@@ -46,6 +47,23 @@
     } while (0)
 
 #define VIRTIO_VENDOR 0x1af4
+
+static bool vnet_remove_case(unsigned mode, const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_SELFTEST
+    bool (*run)(unsigned, const char **) = (bool (*)(unsigned, const char **))
+        module_symbol_lookup("vnet_test_remove", NULL);
+    CHECK(run != NULL);
+    return run(mode, reason);
+#else
+    (void)mode;
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_vnet_remove_pending(const char **reason) { return vnet_remove_case(0, reason); }
+bool selftest_vnet_remove_late(const char **reason) { return vnet_remove_case(1, reason); }
 
 /* --- device model with a synthetic bus ------------------------------ */
 

@@ -2597,3 +2597,32 @@ See the [history index](README.md).
   - Found and recorded, not fixed: virtio-net's remove drains before its
     poll stops.
   - Report: `docs/audit/2026-10-08-irqpoll-lockdep-report.md`.
+- **Device lifecycle Unit 1: virtio-net removal (PR #336).**
+  - Two deterministic debug tests prove main's missing DMA unmaps and
+    reset-time RX refill on x86-64 and AArch64: held completions left
+    34 maps with zero unmaps, 31 outstanding buffers unreclaimed and
+    `rx_posted == 32`; a reset-time callback posted another RX buffer.
+    GONE already rejected the late frame; no protocol delivery was proved.
+  - Private RX/TX ownership tables survive queue-cookie destruction.
+    Removal excludes senders, stops both polls before reset, synchronizes
+    vectors/frees queues, then unmaps and returns every remaining buffer.
+    Partial probe rollback uses the same cleanup. Invariant V11 records
+    the teardown contract; shared module/syscall interfaces are unchanged.
+    Qodo review revision `71322638` replaces TX scans with a private
+    free list and record cookies. Exhaustion, failed-publication rollback,
+    reverse completion and reuse are checked before both removal cases.
+  - `vnet-remove-pending`, `vnet-remove-late` and
+    `tools/vnet-remove-probe.py --old` (strictly only the two target
+    failures). The ledger is private to the synthetic device and absent
+    from release; unarmed hooks use a plain load without a lock or RMW.
+  - Full local matrix passes on both architectures, including CPUs 1/2/4,
+    SMP2, chaos, retry, host tests/fuzz/analysis/reproducibility, expected
+    crash and release boots. Release kernel/module symbol checks pass.
+    Fresh analysis retains 27 x86-64 / 28 AArch64 existing diagnostics
+    outside the changed driver/fixture; target success is not warning-free.
+    The full matrix was repeated after `71322638`; branch CI run
+    `37835499625` passed both architectures and memory-order litmus.
+  - Source audit of the other eight drivers' remove/reset/rollback paths
+    is in the report. Unproven stop failures, late publication, callback
+    retirement and pre-registration RX cases are in inventory §8.
+  - Report: `docs/audit/2026-10-08-vnet-remove-report.md`.

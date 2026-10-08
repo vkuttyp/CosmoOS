@@ -68,3 +68,17 @@ of each `virtio_device_init` call. Gap: none.
 **V10. The VirtIO stack knows nothing about the hypervisor** (invariant
 9 of the constitution): it programs a PCI device and rings; no
 hypercall, no CPUID probing. Check: review. Gap: none.
+
+**V11. Teardown excludes submitters and stops completion delivery before
+draining driver-owned buffers.** A reposting poll is disabled before reset;
+reset stops device DMA; queue teardown synchronizes the interrupt and
+disables its deferred poll before outstanding records are reclaimed.
+Every accepted buffer has a driver-owned record independent of used-ring
+entries, every mapping is unmapped exactly once before its buffer is freed,
+and posted receive accounting ends at zero. Probe failure and queue rebuilding obey
+the same rule for partially initialized resources. `virtq_free` frees ring
+bookkeeping and never owns the cookies' storage. Live timeout recovery
+retains queue/record storage, stops device DMA, and serializes completion
+and recovery claims under the same lock; it must exclude new submission
+publication during its drain. Unit 1's reproduction and
+validation are recorded in `docs/audit/2026-10-08-vnet-remove-report.md`.
