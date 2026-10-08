@@ -198,9 +198,11 @@ static void worker_main(void *arg)
         s = spin_lock_irqsave(&ip->lock);
         (void)finish_locked(ip, n, cpu);   /* back on this worker's own list if there is more */
         spin_unlock_irqrestore(&ip->lock, s);
-        /* A batch at a time: whatever else is runnable here goes between
-         * two, so a device that never runs dry costs this CPU a share of
-         * its time rather than all of it. */
+        /* A batch at a time, with the tick, interrupts and anything else at
+         * this priority between two. A device that never runs dry keeps this
+         * CPU's threads waiting as long as it lasts -- as the unbounded
+         * handler did, but with the CPU still taking its tick and its
+         * interrupts, and the soft-lockup detector still watching it. */
         sched_yield();
     }
 }
@@ -215,7 +217,12 @@ void irq_poll_start_workers(void)
         list_init(&w->list);
         waitqueue_init(&w->wq, "irqpoll");
         ksnprintf(w->name, sizeof(w->name), "irqpoll/%u", c);
-        w->thread = thread_create_on(worker_main, w, w->name, SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        /* The highest priority: what the worker runs is what the handler
+         * ran before the budget, above every thread. At the default it
+         * waited behind any busier thread on its CPU -- quiesce, the
+         * reaper, a pinned self-test spinner -- and the queue's completions
+         * with it, for as long as that thread ran (review, PR #334). */
+        w->thread = thread_create_on(worker_main, w, w->name, SCHED_PRIO_HIGHEST, CPUMASK_OF(c));
         if (w->thread == NULL) {
             kwarn("irqpoll: no worker for cpu %u; its deferrals go to another CPU's", c);
             continue;

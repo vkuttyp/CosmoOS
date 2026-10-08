@@ -12,17 +12,18 @@
  *   - The handler calls irq_poll_sched(). The driver's `poll` runs there,
  *     consuming at most IRQ_POLL_BUDGET completions.
  *   - If it used the whole budget, the rest is deferred to this CPU's
- *     "irqpoll/N" worker, a kernel thread that calls `poll` again, a
- *     budget at a time, yielding between batches, until a call returns
- *     less than the budget.
+ *     "irqpoll/N" worker, a kernel thread at the highest priority that
+ *     calls `poll` again, a budget at a time, yielding between batches,
+ *     until a call returns less than the budget.
  *   - One consumer at a time: a handler that finds `poll` running (on
  *     another CPU, or in the worker) or queued only notes that there is
  *     more, and the running one takes it before going idle. Completions
  *     are therefore consumed in the device's order, as before.
  *
- * The deferred remainder always runs: the worker is pinned to an online
- * CPU, runnable from the moment it is queued, at the default priority, and
- * it re-queues itself while `poll` keeps using its budget. Until the
+ * The deferred remainder always runs, and promptly: the worker is pinned
+ * to an online CPU, runnable from the moment it is queued, at the highest
+ * priority (no thread can hold it off, as none could hold off the
+ * handler), and it re-queues itself while `poll` keeps using its budget. Until the
  * workers are started (boot, before drivers load) a deferral is not
  * possible and the handler polls to the end, as before.
  *
