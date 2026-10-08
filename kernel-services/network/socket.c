@@ -17,7 +17,17 @@
 #include <uapi/cosmo/syscall.h>
 
 static uint32_t g_count;
-static uint32_t g_wake_refs;   /* sock_wake_ref references held */
+#if CONFIG_SELFTEST
+/* sock_wake_ref references held. Only the self-test census reads it
+ * (socket_wake_refs), so only a self-test build counts: elsewhere a wake
+ * costs its tryget and put and nothing machine-wide. */
+static uint32_t g_wake_refs;
+static inline void wake_refs_count(void) { __atomic_fetch_add(&g_wake_refs, 1, __ATOMIC_RELAXED); }
+static inline void wake_refs_uncount(void) { __atomic_fetch_sub(&g_wake_refs, 1, __ATOMIC_RELEASE); }
+#else
+static inline void wake_refs_count(void) {}
+static inline void wake_refs_uncount(void) {}
+#endif
 
 static void socket_release(struct kobject *obj)
 {
@@ -581,10 +591,10 @@ struct socket *sock_wake_ref(struct socket *s)
 {
     if (s == NULL)
         return NULL;
-    __atomic_fetch_add(&g_wake_refs, 1, __ATOMIC_RELAXED);
+    wake_refs_count();
     if (kobject_tryget(&s->obj))
         return s;
-    __atomic_fetch_sub(&g_wake_refs, 1, __ATOMIC_RELEASE);
+    wake_refs_uncount();
     return NULL;
 }
 
@@ -599,6 +609,13 @@ static struct {
 
 static void wake_hold(struct socket *s)
 {
+    /* Unarmed, the common case: one load, no lock on the wake path. The
+     * arming's store is ordered before the wake it waits for by whatever
+     * the test does to cause that wake (a send, through the pcb lock), so a
+     * wake the test means to hold reads the target; a wake racing the arm
+     * may miss it, and the next one is held instead. */
+    if (__atomic_load_n(&g_wake_hold.target, __ATOMIC_ACQUIRE) != s)
+        return;
     arch_irq_state_t st = spin_lock_irqsave(&g_wake_hold.lock);
     bool mine = g_wake_hold.target == s && !g_wake_hold.held;
     if (mine)
@@ -624,7 +641,7 @@ void sock_test_wake_hold_arm(struct socket *s)
         g_wake_hold.wq_ready = true;
     }
     g_wake_hold.held = g_wake_hold.released = g_wake_hold.resumed = g_wake_hold.timed_out = false;
-    g_wake_hold.target = s;
+    __atomic_store_n(&g_wake_hold.target, s, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_wake_hold.lock, st);
 }
 
@@ -637,7 +654,7 @@ bool sock_test_wake_hold_release(void)
 {
     arch_irq_state_t st = spin_lock_irqsave(&g_wake_hold.lock);
     bool held = g_wake_hold.held;
-    g_wake_hold.target = NULL;   /* nothing new is held from here */
+    __atomic_store_n(&g_wake_hold.target, NULL, __ATOMIC_RELEASE);   /* nothing new is held from here */
     __atomic_store_n(&g_wake_hold.released, true, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_wake_hold.lock, st);
     if (!held)
@@ -657,10 +674,14 @@ void sock_wake_unref(struct socket *s)
 {
     wake_hold(s);
     ksock_put(s);
-    __atomic_fetch_sub(&g_wake_refs, 1, __ATOMIC_RELEASE);
+    wake_refs_uncount();
 }
 
 unsigned socket_wake_refs(void)
 {
+#if CONFIG_SELFTEST
     return __atomic_load_n(&g_wake_refs, __ATOMIC_ACQUIRE);
+#else
+    return 0;   /* not counted: no census runs */
+#endif
 }
