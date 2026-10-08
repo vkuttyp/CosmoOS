@@ -82,6 +82,13 @@ struct socket *socket_from_kobject(struct kobject *obj);
 
 /* Protocol side: wake every waiter on the socket (any context). */
 void sock_wake(struct socket *s);
+/* Protocol side: a reference held across a wake made after the protocol's
+ * own lock is dropped. A tryget, because a socket's release detaches it
+ * from its pcb only after its count reached zero: NULL for a NULL or dying
+ * socket. Counted while held, so the self-test census can tell a socket a
+ * test left behind from one a worker is still waking (socket_wake_refs). */
+struct socket *sock_wake_ref(struct socket *s);
+void sock_wake_unref(struct socket *s);
 void sock_set_error(struct socket *s, int err);   /* and wake */
 /* The pending asynchronous error, read once: returns it and clears it, as
  * SO_ERROR does, so two readers cannot both be told the same verdict. A
@@ -105,5 +112,23 @@ int ksock_error_peek(struct socket *s, uint64_t *token);
 void ksock_error_delivered(struct socket *s, uint64_t token);
 
 unsigned socket_count(void);
+/* Wake references held right now (sock_wake_ref). Read with acquire: at a
+ * zero, every socket a wake reference was the last holder of has been
+ * released and uncounted. */
+unsigned socket_wake_refs(void);
+
+/*
+ * The held-wake seam (`net-census-wake-ref`). CONFIG_DEBUG only; every
+ * entry point is a no-op, and _wait false, otherwise.
+ *
+ * Armed for a socket, the next sock_wake_unref of it -- on whichever
+ * thread made the wake -- stops after the wake and before its put, holding
+ * the reference, until _release. The hold is bounded (10 s) and a timeout
+ * is recorded, never hidden: _release returns false if the held side gave
+ * up waiting. _wait blocks until a wake is held, to `ns`.
+ */
+void sock_test_wake_hold_arm(struct socket *s);
+bool sock_test_wake_hold_wait(uint64_t ns);
+bool sock_test_wake_hold_release(void);   /* and disarm; waits for the held side to resume */
 
 #endif /* KERNEL_SOCKET_H */

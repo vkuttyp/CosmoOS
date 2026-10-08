@@ -216,6 +216,7 @@ static void check_tables(void)
 static void check_invariants(void)
 {
     FUZZ_ASSERT(harness_locks_held() == 0);
+    FUZZ_ASSERT(fz_sock_wake_refs() == 0);   /* every wake reference put after its wake */
     FUZZ_ASSERT(g_bad_csum_frames == 0);
     FUZZ_ASSERT(g_bad_len_frames == 0);
     FUZZ_ASSERT(g_f0.oversize == 0 && g_f1.oversize == 0);

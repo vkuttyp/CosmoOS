@@ -173,6 +173,12 @@ struct net_work {
 };
 void net_work_init(struct net_work *w, net_work_fn fn, void *arg);
 bool net_work_queue(struct net_work *w);      /* any context; true if newly queued, false while already queued */
+/* Thread context, not on a worker: returns once every running worker has
+ * finished what it had started -- a packet it had dequeued, a work item it
+ * was running -- and everything queued to it before the call. A reference
+ * a worker took while it ran (TCP's and UDP's wake references on a socket)
+ * has been put. */
+void net_workers_barrier(void);
 
 /* Test hook for the loopback path: called for every packet before it
  * is queued; return false to drop it. */

@@ -758,6 +758,7 @@ static const struct selftest tests[] = {
     { "net-nd-per-interface", selftest_net_nd_per_interface },
     { "net-neigh-down-race", selftest_net_neigh_down_race },
     { "net-accept-race", selftest_net_accept_race },
+    { "net-census-wake-ref", selftest_net_census_wake_ref },
     { "net-tcp-syncache", selftest_net_tcp_syncache },
     { "net-tcp-rfc5961", selftest_net_tcp_rfc5961 },
     { "net-tcp-reorder", selftest_net_tcp_reorder },

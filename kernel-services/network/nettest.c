@@ -124,6 +124,30 @@ void nettest_census(struct nettest_census *out)
      * abandoned count both change only on this thread: they are read as
      * one state without any retry. */
     nt_reap_abandoned();
+    /* A worker's wake reference (sock_wake_ref) is a socket's last for as
+     * long as the worker takes between sock_wake and its put: a test that
+     * has put every socket of its can return inside that window, and the
+     * count then holds one it does not own (`net-accept-race` under the
+     * chaos migrator, CI run 37679564267: "sockets 0 -> 1"). Counted only
+     * at an instant no wake reference is held: a barrier through every
+     * worker ends each window a worker had open, and a reference a thread
+     * holds across its own wake is waited out, to a deadline. Past it the
+     * count is taken anyway, and said to be -- a socket a wake reference
+     * never lets go of is a leak, and the comparison then reports it. The
+     * deadline bounds a thread's reference, not a worker: the barrier waits
+     * for every worker's step without one, as netif_unregister's does, and
+     * a worker that never finishes its step is a hang the runner's per-test
+     * watchdog (armed across this census) reports with a scheduler dump. */
+    uint64_t deadline = clock_now_ns() + 2000ull * 1000 * 1000;
+    while (socket_wake_refs() != 0) {
+        net_workers_barrier();
+        if (socket_wake_refs() == 0 || clock_now_ns() >= deadline)
+            break;
+        thread_sleep_ms(1);
+    }
+    unsigned held = socket_wake_refs();
+    if (held != 0)
+        kwarn("selftest: census: %u wake reference(s) still held after 2 s; counting anyway", held);
     unsigned sockets = socket_count();
     out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
 }
@@ -3017,6 +3041,97 @@ bool selftest_net_accept_race(const char **reason)
     nt_ksock_put(ls);
     kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
     return true;
+}
+
+/* --- the census against a worker's wake reference ----------------------------------
+ *
+ * net-accept-race failed on CI (run 37679564267, x86-64, chaos migrator)
+ * with every check passing: "left the network changed: ... sockets 0 ->
+ * 1". A worker that wakes a socket holds a reference from under the pcb
+ * lock until after the wake; a test that puts every socket of its while
+ * one is held returns with the count one high, and the census blamed it.
+ * The seam holds a worker there: the census must not return until it
+ * lets go, and must then find nothing left. The census runs on a thread
+ * of its own so the test can see whether it returned while the worker
+ * held on -- without the fix it does, at once, with the count one high.
+ */
+#if CONFIG_DEBUG
+struct census_job {
+    struct nettest_census out;
+    struct completion done;
+};
+
+static void census_job_main(void *arg)
+{
+    struct census_job *j = arg;
+    nettest_census(&j->out);
+    complete(&j->done);
+}
+
+static char g_wake_hold_marker;   /* the seam's release, by address */
+
+static void wake_hold_release_rel(void *arg)
+{
+    (void)arg;
+    (void)sock_test_wake_hold_release();
+}
+
+#endif /* CONFIG_DEBUG */
+
+bool selftest_net_census_wake_ref(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-census-wake-ref: no test hooks in this build; skipping");
+    return true;
+#else
+    static struct nettest_census before;
+    nettest_census(&before);
+    struct socket *ls, *c, *s;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0), srv, peer;
+    CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 1) == 0);
+    CHECK(ksock_getsockname(ls, &srv) == 0);
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv) == 0);
+    CHECK(nt_ksock_accept(ls, &s, &peer) == 0);
+
+    /* Registered after the sockets, so run before them (LIFO): a failed
+     * check never leaves a worker held while they are put. */
+    CHECK(selftest_defer(wake_hold_release_rel, &g_wake_hold_marker));
+    sock_test_wake_hold_arm(s);
+    CHECK(ksock_sendto(c, "x", 1, NULL) == 1);   /* its input wakes s */
+    CHECK(sock_test_wake_hold_wait(5ull * 1000 * 1000 * 1000));
+    unsigned refs = socket_wake_refs();
+    CHECK(refs >= 1);
+
+    /* Every reference of the test's: s lives on in the worker's hand only. */
+    nt_ksock_put(s);
+    nt_ksock_put(c);
+    nt_ksock_put(ls);
+
+    /* No check from here to the release: the census thread may be waiting
+     * on the held worker, and a return would put nothing that frees it. */
+    static struct census_job job;
+    memset(&job, 0, sizeof(job));
+    completion_init(&job.done, "census-job");
+    struct thread *t = thread_create(census_job_main, &job, "censusjob", SCHED_PRIO_DEFAULT);
+    /* Long enough for a census that does not wait to have returned. */
+    bool early = t != NULL && wait_for_completion_timeout(&job.done, 200ull * 1000 * 1000);
+    bool hold_ok = sock_test_wake_hold_release();
+    selftest_forget(&g_wake_hold_marker);
+    if (t != NULL) {
+        wait_for_completion(&job.done);
+        thread_join(t);
+    }
+    CHECK(t != NULL);
+    CHECK(hold_ok);    /* the worker was still held when it was let go */
+    CHECK(!early);     /* the census waited for the worker's put */
+    CHECK(nettest_census_equal(&before, &job.out));
+    kinfo("selftest: net-census-wake-ref: a worker held %u wake reference(s) past the test's last put; "
+          "the census waited for it and found sockets %u -> %u", refs, before.sockets, job.out.sockets);
+    return true;
+#endif
 }
 
 /* --- milestone 8: hardening -------------------------------------------------------- */

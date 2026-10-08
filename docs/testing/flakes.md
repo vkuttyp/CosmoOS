@@ -219,7 +219,7 @@ the same commit passed on a re-run with nothing changed:
 | where | what it looked like | why it is not a bound |
 | --- | --- | --- |
 | x86-64, the default boot | all 319 self-tests passed and `USERTEST: PASS`; the shell script ran its whole command list to `exit 0`; then `SHTEST: PASS` **and every Linux-ABI marker** -- the musl hello, `LINUXTEST: PASS`, `lxinterp`, `lxdyn`, `lxsig term` -- were all missing together | not a bound a loaded host trips. **What the cause was is not established**: those markers are the tail of the run -- the Linux ones come from `rc.test` and `SHTEST: PASS` is printed last -- so an absent boot archive, a Linux-test build that did not arrive, a hang and a premature shutdown all suppress exactly the same suffix. The observation is recorded; the diagnosis is not |
-| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one |
+| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one. Seen again 2026-10-08 on PR #331's two-CPU boot (run 37702907701, every self-test passing): the boot's own check logged `hv: backend el2 disabled: nested paging does not confine a guest with paging off (QEMU/TCG before 9.2 has this bug)`, so that runner's QEMU was the older one; the re-run passed |
 
 Neither is on the list above and neither should be: they are not bounds a
 loaded host can trip, so a re-run distinguishes them from a regression
@@ -3360,3 +3360,82 @@ to 240 s on four such timeouts. The failed job re-run on another runner
 passed every step, its three debug boots in 115.3, 109.7 and 112.0 s --
 the guard boot 112.0 s against the 184 s that timed out. One sighting;
 a second is the case for giving x86-64 the margin #314 gave aarch64.
+
+## Under the chaos migrator: `net-accept-race` "left" a socket it had put, 2026-10-07
+
+**Run 37679564267, the CI run on main's #326 merge commit (3851a80),
+x86-64, "Boot test under a chaos migrator (debug)":** `boot-test: FAIL
+after 178.2s`, `SELFTEST: FAIL (1 of 440)`, and the one failure was
+
+```
+[ INFO] selftest: net-accept-race: 64 connections accepted against a dropping peer
+[ERROR] selftest: net-accept-race left the network changed: interfaces (3) [lo,eth0,eth1] -> (3) [lo,eth0,eth1], services 0 -> 0, sockets 0 -> 1
+SELFTEST: net-accept-race  ... FAIL: it left network state behind (83 ms)
+```
+
+Every check of the test passed; the runner's census (PR #257) failed it.
+The later steps of the job were skipped, and the aarch64 job passed. The
+summary of #326-#329 did not mention it. The runs on the #328 and #329
+merge commits (37685081048, 37685205067) passed on both architectures, the
+chaos boots included, and none of their 30 debug boots had net-bench's
+slow mode (`net-bench` 1.9-4.2 s against its 8 s budget).
+
+**Not #326's (wake_one) and not #328's.** #328 merged after this commit,
+and the window is older than both. TCP and UDP wake a socket after
+dropping their lock, holding a reference taken under it, and put it
+after the wake. A test that has put every socket of its can return
+while a network worker is between the two. The census then counts a
+socket the test no longer owns. The chaos migrator widens the window.
+`tools/census-wake-ref-probe.py --adversary` makes it certain, by having
+the worker that woke the test's listener sleep 30 ms before its put. That
+reproduces the line above exactly (`sockets 0 -> 1`, the only failure of
+439) on #326's first parent (e33dd5a2) and on main at 9917c700, x86-64.
+
+**Fixed by the census-wake-ref unit.** Wake references are counted
+(`sock_wake_ref`, `socket_wake_refs`) and the census counts sockets only
+at an instant none is held: a barrier through every network worker, then
+the counter to zero, to a 2 s deadline. `net-census-wake-ref` holds a
+worker past the test's last put with a CONFIG_DEBUG seam. Without the
+wait the census returns in 2 ms with the count one high (`--old`: `check
+failed: !early`). With it, the census waits and finds `sockets 0 -> 0`, and
+the adversary's `net-accept-race` passes. A test the census blames is
+still a leftover until shown otherwise; this one was a census that
+counted too early.
+
+## `virtio-remove-inflight` held for 184 s, CPU 0 in virtio-blk's completion loop, 2026-10-08
+
+**Run 37698731544, PR #330's x86-64 job, "Boot test with the harness's
+first attempt broken (debug)":** `boot-test: FAIL after 244.0s -- timed
+out after 240s`. `virtio-remove-inflight` passed every check but took
+**183 946 ms** against its 8 s budget:
+
+```
+selftest: virtio-remove-inflight: held: 1227095 accepted, 2687 refused; 64 found in flight at the remove, ...
+[ WARN] timer: cpu 0: no tick for 22876 ms; interrupts came back at pc ... (last tick interrupted pc ..., thread 'netrx/0')
+[ WARN] hard lockup: cpu 0 no tick for 10000 ms; ... (seen from cpu 3)   -- three times
+```
+
+The rest of the boot never ran. The same job's other debug boots (main,
+smp2, guard, chaos) passed. In the three runs before it, the held pass
+accepted 69-2 406 requests in 148-409 ms in every x86-64 boot. The
+branch touches the network census and socket wake references, not
+`drivers/virtio`.
+
+**Mechanism, provisional (one sighting; the dumps' PCs could not be
+symbolised, since CI does not upload the x86-64 kernel ELF).** During
+the gaps, CPU 0's NMI samples sit in module text under an interrupted
+thread. CPU 1's stack is in the submitter's write path. `vblk_done`
+(`drivers/virtio/virtio_blk.c`) pops completions in a `for (;;)` until
+the used ring is empty, in interrupt context, with no budget. A
+submitter that keeps the device fed, against a device model that
+completes at once, can keep that ring from ever being seen empty: the
+handler then runs for as long as the submitter does. That fits 1.2
+million requests passing through a pass that normally sees about a
+hundred, and a CPU with no tick for 22 s. It is not shown: a slow runner
+gives the timing, and nothing here has reproduced it. The next step is
+the one this file keeps naming: build what names the cause. That is a
+per-call count of completions popped in `vblk_done`, printed when it
+exceeds the ring size, plus a deterministic run in which the submitter
+outpaces the handler. Then bound the loop (a budget, the remainder
+deferred), if that is what it is. The branch's next run, on a
+documentation commit, passed every boot (run 37702904070).

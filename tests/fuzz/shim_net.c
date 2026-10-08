@@ -386,6 +386,31 @@ unsigned fz_sock_wakes(void)
     return g_sock_wakes;
 }
 
+/* socket.c's wake references, counted the same way: a target can assert
+ * every one taken was put. */
+static unsigned g_sock_wake_refs;
+
+struct socket *sock_wake_ref(struct socket *s)
+{
+    if (s == NULL || !kobject_tryget(&s->obj))
+        return NULL;
+    g_sock_wake_refs++;
+    return s;
+}
+
+void sock_wake_unref(struct socket *s)
+{
+    if (g_sock_wake_refs == 0)
+        panic("fuzz: sock_wake_unref without a reference");
+    g_sock_wake_refs--;
+    kobject_put(&s->obj);
+}
+
+unsigned fz_sock_wake_refs(void)
+{
+    return g_sock_wake_refs;
+}
+
 /* arp.c's age sweep calls into the tap services; the DHCP/DNS target links
  * the real one, every other target this empty one. */
 __attribute__((weak)) void tapsvc_dns_age(uint64_t now_ns)

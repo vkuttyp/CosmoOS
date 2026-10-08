@@ -64,10 +64,12 @@ struct net_cpu {
 };
 static struct net_cpu g_cpu[CONFIG_MAX_CPUS];
 static unsigned g_ncpu = 1;            /* CPUs with a queue (workers may still be starting) */
-/* netif_unregister runs one at a time (it sleeps): the barrier items it
- * posts to every worker are static, so tearing an interface down never
- * depends on an allocation succeeding. */
+/* netif_unregister runs one at a time (it sleeps). */
 static struct mutex g_unregister_lock;
+/* net_workers_barrier runs one at a time: the barrier items it posts to
+ * every worker are static, so tearing an interface down never depends on
+ * an allocation succeeding. Taken inside g_unregister_lock. */
+static struct mutex g_barrier_lock;
 static bool g_steer = true;
 static void netif_dump_cpus(void);
 static netif_rx_hook_fn g_rx_hook;
@@ -243,9 +245,28 @@ unsigned netif_rxq_count(const struct netif *nif)
 
 static bool net_work_queue_on(struct net_work *w, struct net_cpu *c);
 
-void netif_unregister(struct netif *nif)
+/* A worker whose thread is not running yet has dequeued nothing. */
+void net_workers_barrier(void)
 {
     static struct worker_barrier barriers[CONFIG_MAX_CPUS];
+    bool posted[CONFIG_MAX_CPUS] = { false };
+    _Static_assert(ARRAY_SIZE(barriers) == ARRAY_SIZE(g_cpu), "a barrier item per worker");
+    mutex_lock(&g_barrier_lock);
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        if (!g_cpu[i].ready)
+            continue;
+        net_work_init(&barriers[i].work, barrier_fn, &barriers[i]);
+        completion_init(&barriers[i].done, "netif-barrier");
+        posted[i] = net_work_queue_on(&barriers[i].work, &g_cpu[i]);
+    }
+    for (unsigned i = 0; i < g_ncpu; i++)
+        if (posted[i])
+            wait_for_completion(&barriers[i].done);
+    mutex_unlock(&g_barrier_lock);
+}
+
+void netif_unregister(struct netif *nif)
+{
     mutex_lock(&g_unregister_lock);
     /* 1. Down and gone: netif_transmit and netif_rx refuse from here. */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
@@ -264,21 +285,9 @@ void netif_unregister(struct netif *nif)
     synchronize_quiesce();
 
     /* 4. Nothing of its left in any receive queue, and every worker has
-     * finished any input_one it had started: a barrier through each
-     * (static items under g_unregister_lock; a worker whose thread is not
-     * running yet has dequeued nothing). */
+     * finished any input_one it had started: a barrier through each. */
     unsigned dropped = rxq_purge(nif);
-    bool posted[CONFIG_MAX_CPUS] = { false };
-    for (unsigned i = 0; i < g_ncpu; i++) {
-        if (!g_cpu[i].ready)
-            continue;
-        net_work_init(&barriers[i].work, barrier_fn, &barriers[i]);
-        completion_init(&barriers[i].done, "netif-barrier");
-        posted[i] = net_work_queue_on(&barriers[i].work, &g_cpu[i]);
-    }
-    for (unsigned i = 0; i < g_ncpu; i++)
-        if (posted[i])
-            wait_for_completion(&barriers[i].done);
+    net_workers_barrier();
 
     /* 5. Tables that name the interface. */
     arp_flush(nif);
@@ -898,6 +907,7 @@ void net_init(void)
 {
     cpu_init(&g_cpu[0], 0);
     mutex_init(&g_unregister_lock, "netif-unregister");
+    mutex_init(&g_barrier_lock, "net-barrier");
     mbuf_init();
     arp_init();
     nd_init();

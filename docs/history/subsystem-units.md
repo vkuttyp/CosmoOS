@@ -2494,3 +2494,15 @@ See the [history index](README.md).
   Not host-fuzzable and recorded: the NIC receive descriptors, the tap
   device file, `netif.c`'s worker. Report:
   `docs/audit/2026-10-07-net-fuzz-report.md`.
+- **The census waits out wake references.** main's CI went red on the
+  #326 merge: `net-accept-race` under the chaos migrator, every check
+  passing, "left the network changed: ... sockets 0 -> 1". A worker's
+  wake reference outlived the test's last put, and the runner's census
+  counted it. TCP's and UDP's wake references are now counted
+  (`sock_wake_ref`, `socket_wake_refs`). The census counts sockets only at
+  an instant none is held, after a barrier through every worker
+  (`net_workers_barrier`, factored out of `netif_unregister`). New:
+  `net-census-wake-ref` (a CONFIG_DEBUG seam holds a worker past the
+  test's last put) and `tools/census-wake-ref-probe.py`, whose
+  `--adversary` reproduces the CI line on any tree, including #326's
+  first parent. Record: `docs/testing/flakes.md`.
