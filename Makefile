@@ -30,7 +30,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -209,12 +209,16 @@ endif
 litmus:
 	$(Q)$(PYTHON) $(ROOT)/tests/litmus/run_litmus.py
 
-analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
-	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)
+ANALYSIS_REPORTS ?= $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE)
+
+analysis-gate:
 	$(Q)$(PYTHON) $(ROOT)/scripts/check-analysis.py --root $(ROOT) --out $(OUT) \
 		--arch $(ARCH) --baseline $(ROOT)/tools/analysis/$(ARCH).json \
-		--inventory $(OUT)/analysis-inventory.json \
-		$(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE)
+		--inventory $(OUT)/analysis-inventory.json $(ANALYSIS_REPORTS)
+
+analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
+	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)
+	$(Q)$(MAKE) --no-print-directory analysis-gate
 
 reproducible:
 	$(Q)$(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)
