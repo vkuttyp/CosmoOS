@@ -137,6 +137,53 @@ The semantics are unchanged: disable unqueues a deferral and waits for
 current at the call (`runs` changes or `running` clears). The design doc
 gave no reason to keep the busy-wait.
 
+## 2a. A livelock the validation found: the worker's priority, bounded
+
+The first validation matrix failed two x86-64 boots in the same place:
+`virtio-remove-inflight` took 36 s at `QEMU_SMP=2`, and under the chaos
+migrator its boot timed out at 240 s, with the test 211 s in. The
+watchdog's dump named it. `irqpoll/0`, at the highest priority, had run
+8 s with 3 switches. `kmain`, the test thread, was "READY on cpu 0 for
+8129 ms behind 'irqpoll/0'". The test's submitter (`vrm`, CPU 1) kept the
+queue refilled, so the worker's poll always used its whole budget, and its
+`sched_yield` gave way to nothing. The thread that would have stopped the
+submitter could not run. (The worker's frames in that dump were the first
+module frames the new symboliser resolved in anger: `vblk_done
+[virtio_blk]`, `virtq_poll [virtio]`, `run_poll`.)
+
+This is #334's stated cost ("a device that never runs dry keeps that
+CPU's threads waiting as long as it lasts"), and here it is a livelock.
+The CI run of #334 did not hit it: `virtio-remove-inflight` was not among
+any boot's slowest tests. Whether this unit's per-batch cost (the lockdep
+class and the preemption bracket) made it likelier was not measured. The
+mechanism needs neither.
+
+**The bound.** A backlog keeps its worker at the highest priority for
+`IRQ_POLL_HOLD_NS` (10 ms, one slice), measured from the wake that began
+it. Past that, the worker drops to `SCHED_PRIO_DEFAULT` with
+`sched_reprioritize` and time-slices with the CPU's other threads until
+its list is empty. It then returns to the highest priority before it
+sleeps. The worker holds no mutex, so priority inheritance never touches
+it. The remainder still always runs, because the worker never leaves its
+run queue. This is the ksoftirqd shape: prompt first, then fair.
+
+**The test.** `blk-irq-budget` now runs a default-priority bystander pinned
+to every CPU, spinning, each recording its longest wait to run while the
+storm is on. The bound is 250 ms, the same load-sensitive class as the
+tick gap.
+
+| `QEMU_SMP=2`, x86-64 | before the bound | after |
+|---|---|---|
+| bystander's longest wait (CPU 0) | 998 ms (the whole storm): FAIL | 14 ms |
+| longest tick gap | 5 ms | 5 ms |
+| `virtio-remove-inflight` | 36,322 ms (matrix) | 152 ms |
+| completions in the 1 s storm | 11,841 | 2,720 |
+
+The storm's completions fall because the worker now shares its CPU with
+the bystander. That is the point of the bound, and the test's own
+non-vacuity checks (eight rounds, next completion ready 90% of the time)
+still pass.
+
 ## 3. Module symbolisation (irq-budget report §10)
 
 **The loader** prints one stable line per module after `module: loaded`:

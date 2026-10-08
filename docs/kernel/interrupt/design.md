@@ -119,9 +119,7 @@ on two CPUs and the boot's whole budget under chaos
 holds it with a default-priority bystander pinned to every CPU: it must
 run within 250 ms throughout the storm (998 ms before the bound, 14 ms
 after). Past the slice the remainder still always runs, because the
-worker never leaves its run queue, as Linux's ksoftirqd does. A storm
-longer than 10 s is still a soft lockup (the worker never blocks), which
-the detector reports. Before
+worker never leaves its run queue, as Linux's ksoftirqd does. Before
 the workers start (boot, before any driver loads) a handler cannot
 defer and polls to the end, as before.
 
