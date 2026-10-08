@@ -1196,64 +1196,75 @@ static bool rot_copy(struct blkdev *bd, uint64_t blk, uint8_t fill)
 bool selftest_cosmofs_mirror(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
-    struct blkdev *bd[2] = { ramblk_create(512), ramblk_create(512) };
-    CHECK(bd[0] != NULL && bd[1] != NULL);
-    CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct file *f = NULL;
+    struct spool *sp = NULL;
+    uint8_t *sblk = NULL;
+#define MIRROR_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    bd[0] = ramblk_create(512);
+    bd[1] = ramblk_create(512);
+    MIRROR_CHECK(bd[0] != NULL && bd[1] != NULL);
+    MIRROR_CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
     int mk = vfs_mkdir(NULL, ENG, 0755);
-    CHECK(mk == 0 || mk == -EEXIST);
-    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    MIRROR_CHECK(mk == 0 || mk == -EEXIST);
+    MIRROR_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
 
     struct cosmofs_stats st;
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.members == 1 && st.devices == 2 && st.degraded == 0);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(st.members == 1 && st.devices == 2 && st.degraded == 0);
     /* One member's worth of space: a mirror costs capacity, not blocks. */
-    CHECK(st.total_blocks == 512);
+    MIRROR_CHECK(st.total_blocks == 512);
 
     static char data[4096];
     memset(data, 'm', sizeof(data));
-    CHECK(write_file(ENG "/mirrored", data, sizeof(data)));
-    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
-    CHECK(write_file(ENG "/dir/inner", "inner", 5));
-    CHECK(vfs_sync() == 0);
+    MIRROR_CHECK(write_file(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    MIRROR_CHECK(write_file(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(vfs_sync() == 0);
 
     /* Where the file's one data block lives. */
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    MIRROR_CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
     uint64_t ino = f->vn->ino;
     file_put(f);
+    f = NULL;
     uint64_t pblk = 0;
-    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &pblk) == 0);
-    CHECK(CFS_DVA_VDEV(pblk) == 0);
+    MIRROR_CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &pblk) == 0);
+    MIRROR_CHECK(CFS_DVA_VDEV(pblk) == 0);
 
     /* Rot the second copy of that data block; the read comes from copy 0
      * and notices nothing. Then rot the first: the read has to fall back
      * to the second, which by then holds what copy 0 had. */
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0xA5));
-    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0xA5));
+    MIRROR_CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
     uint64_t repairs0 = st.repairs;
 
     /* A scrub reads everything and puts the rotted copy right. */
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
-    CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
-    CHECK(sc.repaired >= 1);
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
+    MIRROR_CHECK(sc.repaired >= 1);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
 
     /* A second scrub finds nothing to do: the first one fixed it. */
     struct cosmofs_scrub_stats sc2;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
-    CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
+    MIRROR_CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
 
     /* Rot the second copy of a *metadata* block that no read will
      * choose -- the inode map's root, which is reached through copy 0
      * every time. Only a scrub that looks at every copy can see it. */
-    uint8_t *sblk = kmalloc(CFS_BLOCK, 0);
-    CHECK(sblk != NULL);
-    struct spool *sp;
-    CHECK(pool_open(bd[0], &sp) == 0);
-    CHECK(pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, sblk) == 0);
+    sblk = kmalloc(CFS_BLOCK, 0);
+    MIRROR_CHECK(sblk != NULL);
+    MIRROR_CHECK(pool_open(bd[0], &sp) == 0);
+    MIRROR_CHECK(pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, sblk) == 0);
     uint64_t imap_root = 0, sgen = 0;
     for (unsigned slot = 0; slot < 2; slot++) {
         if (pool_read(sp, slot, sblk) != 0)
@@ -1265,50 +1276,70 @@ bool selftest_cosmofs_mirror(const char **reason)
         }
     }
     pool_close(sp);
+    sp = NULL;
     kfree(sblk);
-    CHECK(imap_root != 0);
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
-    CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
+    sblk = NULL;
+    MIRROR_CHECK(imap_root != 0);
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
 
     /* Now rot copy 0 of the same block: the read falls back to copy 1
      * and repairs copy 0. */
-    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
-    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    MIRROR_CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
+    MIRROR_CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
     /* Both copies gone: that file is unreadable, and the rest of the
      * filesystem is not. */
-    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x11));
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0x22));
-    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    MIRROR_CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x11));
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0x22));
+    MIRROR_CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
     static char got[4096];
-    CHECK(file_read(f, got, sizeof(got)) == -EIO);
+    MIRROR_CHECK(file_read(f, got, sizeof(got)) == -EIO);
     file_put(f);
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
+    f = NULL;
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
 
-    CHECK(vfs_umount(ENG) == 0);
+    MIRROR_CHECK(vfs_umount(ENG) == 0);
 
     /* A device that was detached while the pool went on being written
      * carries older contents that pass every checksum on it. It is
      * recognised by the generation and left out of the mirror: the pool
      * comes up degraded rather than quietly serving old blocks. */
-    CHECK(age_device(bd[1], 1));
-    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    MIRROR_CHECK(age_device(bd[1], 1));
+    MIRROR_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.devices == 1 && st.degraded == 1);
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    CHECK(vfs_umount(ENG) == 0);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(st.devices == 1 && st.degraded == 1);
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(vfs_umount(ENG) == 0);
 
-    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    MIRROR_CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd[0]);
+    bd[0] = NULL;
     ramblk_destroy(bd[1]);
+    bd[1] = NULL;
     kinfo("selftest: cosmofs-mirror: two copies, %llu blocks scrubbed", (unsigned long long)sc.blocks_read);
     return true;
+
+cleanup:
+    if (f)
+        file_put(f);
+    if (sp)
+        pool_close(sp);
+    kfree(sblk);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    if (bd[0])
+        ramblk_destroy(bd[0]);
+    if (bd[1])
+        ramblk_destroy(bd[1]);
+    return false;
+#undef MIRROR_CHECK
 }
 
 /*
