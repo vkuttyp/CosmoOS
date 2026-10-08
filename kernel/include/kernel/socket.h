@@ -114,7 +114,8 @@ void ksock_error_delivered(struct socket *s, uint64_t token);
 unsigned socket_count(void);
 /* Wake references held right now (sock_wake_ref). Read with acquire: at a
  * zero, every socket a wake reference was the last holder of has been
- * released and uncounted. */
+ * released and uncounted. Counted only when CONFIG_SELFTEST (the census is
+ * its one reader); always 0 otherwise. */
 unsigned socket_wake_refs(void);
 
 /*

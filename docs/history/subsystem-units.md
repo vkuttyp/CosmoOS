@@ -2523,3 +2523,12 @@ See the [history index](README.md).
   (`ipv6.c` 84 %, `udp.c` 79 %, `nat.c` 80 %, `fw.c` 92 %);
   `tools/fuzz-coverage.py`. Report:
   `docs/audit/2026-10-08-net-fuzz-oracles-report.md`.
+- **Wake references counted only where the census reads them.** PR #330's
+  `g_wake_refs` was a machine-wide atomic touched twice per TCP/UDP socket
+  wake in every build, read only by the self-test census. It now exists
+  under `CONFIG_SELFTEST`; elsewhere `socket_wake_refs()` is 0 and
+  `sock_wake_ref`/`sock_wake_unref` compile to the tryget and the put (a
+  release build has no `g_wake_refs` symbol on either architecture). The
+  ordering is unchanged where it counts. The debug seam's `wake_hold` reads
+  its armed target first and takes no lock when unarmed. New:
+  `tools/bench-ab.py`, two revisions' boot benchmarks booted alternately.
