@@ -887,5 +887,5 @@ on 2026-10-09. Results are recorded in that report as the probes run.
 
 | Finding | Evidence and work remaining |
 |---|---|
-| `cosmofstest.c:engine_mount` leaks a registered RAM device on setup failure | `ramblk_create` registers and returns a creator-owned device; subsequent CHECK returns bypass `ramblk_destroy`, and the caller's output pointer is not assigned until setup succeeds. Inject format/directory/mount failure and check device/heap counts. |
-| `devtest.c:selftest_nvme` leaks a worker buffer when thread creation fails | The buffer allocation precedes `thread_create_on`; cleanup skips `threads[c] == NULL`, retaining the buffer. Thread creation does not consume the entry argument on failure. Inject thread creation failure after a successful buffer allocation and check heap ownership. |
+| `cosmofstest.c:engine_mount` leaks a registered RAM device on setup failure | **Proven and fixed in `abc8bc63`.** On both architectures, `tools/cleanup-path-probe.py --old` failed at format, mkdir and mount injection with `released=0`; fixed mode reported `released=1` at all stages. The test checks `gone` and the creator-reference retirement while holding its own inspection reference. |
+| `devtest.c:selftest_nvme` leaks a worker buffer when thread creation fails | **Proven and fixed in `80fb43db`.** On both architectures, `--old` reported `allocated=1 hits=1 started=0 released=0`; fixed mode reported `released=1`. `thread_create_on` does not consume the entry argument on failure. |

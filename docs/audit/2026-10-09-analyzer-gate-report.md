@@ -85,14 +85,12 @@ correctness defects outside the targets. Source inspection identified:
    uninitialized thread-pointer comparison.
 
 The user explicitly added both defects to PR A on 2026-10-09, requiring
-deterministic proofs and separate fixes. Tests will inject a format I/O
-failure and directory/mount allocation failures after RAM-device creation,
-then check that only the test reference remains and the registry no longer
-contains the device. The NVMe test injects failure into thread allocation
-after buffer allocation and checks that the cleanup released that buffer.
-These seams and ownership observations are self-test/debug only. Each
-probe restores the original cleanup while retaining the injection and
-assertions; unrelated boot failures are rejected as evidence.
+deterministic proofs and separate fixes. The tests inject format I/O and
+directory/mount allocation failures after RAM-device creation, then check
+that only the test reference remains and the registry no longer contains
+the device. The NVMe test injects thread allocation failure after its worker
+buffer allocation and checks that the exact buffer is released. These seams
+and ownership observations are self-test/debug only.
 
 Before either repair, the registered tests failed deterministically on both
 architectures. `out/cleanup-proof-old-x86/boot-test.log` (2026-10-09,
@@ -102,6 +100,16 @@ in `out/cleanup-proof-old-arm/boot-test.log`. Both boots ran 451 self-tests;
 the only failures were these two, and `net-harness` passed with 100/100
 guest-to-host rounds. The full harness therefore returned the expected
 failure due to these assertions, not an unrelated boot failure.
+
+The checked-in `tools/cleanup-path-probe.py --old` restored both old cleanup
+paths in throwaway worktrees and passed its exact-failure oracle on x86-64
+and AArch64. `--old` required precisely these two failing self-tests, the
+cosmofs failures at all three setup stages, the NVMe `released=0` observation,
+and a passing network harness. Fixed-mode probe boots on both architectures
+reported NVMe `released=1`, cosmofs `released=1` at stages 1, 2 and 3,
+`SELFTEST: PASS (451 tests)`, and a passing network harness. The fixes are
+separate commits `abc8bc63` (RAM fixture cleanup) and `80fb43db` (NVMe worker
+buffer cleanup); their commit bodies give the ownership reason in one line.
 
 ## Complete unchanged-main diagnostic inventory
 
