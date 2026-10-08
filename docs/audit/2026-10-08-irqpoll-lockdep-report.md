@@ -33,10 +33,14 @@ classes", irq_poll):
   and unqueues). Any other spinlock is `might_sleep`'s report. The report
   name is now "a callback wait (timer_cancel_sync, irq_poll) holds a lock
   the callback takes".
-- The worker runs `poll` with preemption off. The class sits on the CPU's
-  held stack (L11), which belongs to this thread only while no other thread
-  runs on the CPU. `poll` never sleeps, since it also runs in interrupt
-  context.
+- In the worker (thread context, interrupts on), the class goes on the
+  thread's held stack, not the CPU's, so an interrupt taken during the
+  worker's poll does not see it. That was Qodo's second finding on PR
+  #335: on the CPU's stack, vdb's handler running `vblk_done` while vda's
+  worker was inside `vblk_done` was a fatal recursion report. Case 5 of
+  the self-test and probe mode `cpu-stack` hold it. The worker still runs
+  `poll` with preemption off, so a sleep inside `poll` is reported as it
+  would be in the handler.
 
 **What it adds over `might_sleep`, honestly.** Because the waits sleep, a
 waiter can hold no spinlock (release builds panic in `might_sleep`), and
@@ -127,9 +131,13 @@ They now sleep on the irq_poll's `idle_wq`:
 - The waiter raises `waiters` under the irq_poll's lock before it first
   reads its condition.
 - Every finish (handler or worker), and the worker dropping a disabled
-  deferral, reads `waiters` under the same lock and wakes the queue after
-  releasing the lock. So a finish after the raise wakes the waiter, and a
-  finish before it is seen by the condition.
+  deferral, reads `waiters` under the same lock and wakes the queue
+  **while still holding it**. So a finish after the raise wakes the waiter,
+  and a finish before it is seen by the condition. The first version woke
+  after releasing the lock. Qodo's first finding on PR #335 was that a
+  waiter could then see the poll idle, return, and let `virtq_free` free
+  the irq_poll while the waker was still inside its queue. The condition
+  takes the lock, so it cannot be true before the wake is done.
 - The hot path pays one load of `waiters` under a lock it already holds.
 
 The semantics are unchanged: disable unqueues a deferral and waits for
@@ -183,6 +191,29 @@ The storm's completions fall because the worker now shares its CPU with
 the bystander. That is the point of the bound, and the test's own
 non-vacuity checks (eight rounds, next completion ready 90% of the time)
 still pass.
+
+**Bounding the lowered phase too** (Qodo's sixth finding on PR #335). A
+worker lowered to the default priority could itself be held off without
+bound by a busier thread above the default on its CPU, and a lowered
+worker cannot run to raise itself. A per-worker timer (`boost`) now raises
+it again `IRQ_POLL_HOLD_NS` after the drop, and the cycle repeats until
+the backlog ends: half of a long backlog runs at the highest priority, half
+is shared. The new self-test `irqpoll-boost` pins a spinner at
+`SCHED_PRIO_DEFAULT - 4` to the worker's CPU for 300 ms while a poll keeps
+a backlog. The poll's longest gap between calls is 24 ms. With the timer
+removed it is 290 ms and the test fails. Two versions of the test were
+vacuous before that result:
+- the first created the spinner before scheduling the backlog, and the
+  spinner ran its whole 300 ms first;
+- the second disabled the irq_poll before the call that would measure the
+  stall.
+
+Both passed with the timer removed.
+
+**The bystander's window** (findings 3 and 4). Each gap is now clipped to
+a recorded window. The bystander runs at least once after the window
+closes, so a bystander starved for the whole storm counts to its end. A
+bystander that cannot be created fails the test.
 
 ## 3. Module symbolisation (irq-budget report §10)
 

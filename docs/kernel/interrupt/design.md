@@ -109,8 +109,14 @@ thread on its CPU (quiesce, the reaper, a pinned spinner) stalled the
 queue's completions for as long as it ran (review, PR #334). **But for
 one slice only.** A backlog that keeps the worker busy for longer than
 `IRQ_POLL_HOLD_NS` (10 ms) continues at the default priority,
-time-sliced with the CPU's other threads, until it ends; the worker
-returns to the highest priority before it next sleeps. Without that
+time-sliced with the CPU's other threads. A per-worker timer raises it
+again after another `IRQ_POLL_HOLD_NS`, and the cycle repeats until the
+backlog ends; the worker returns to the highest priority before it next
+sleeps. The raise is the timer's job because a lowered worker held off by
+a busier thread above the default (quiesce, the reaper) cannot run to
+raise itself (review, PR #335; `irqpoll-boost`: a spinner at the default
+less 4 on the worker's CPU, and the poll's longest gap is 24 ms, against
+290 ms without the timer). Without that
 bound, a device that never ran dry kept that CPU's threads off it for as
 long as it lasted. In `virtio-remove-inflight`'s held pass that
 included the test thread that was to stop the submitter: a livelock, 36 s
@@ -119,7 +125,7 @@ on two CPUs and the boot's whole budget under chaos
 holds it with a default-priority bystander pinned to every CPU: it must
 run within 250 ms throughout the storm (998 ms before the bound, 14 ms
 after). Past the slice the remainder still always runs, because the
-worker never leaves its run queue, as Linux's ksoftirqd does. Before
+worker never leaves its run queue. Before
 the workers start (boot, before any driver loads) a handler cannot
 defer and polls to the end, as before.
 
@@ -139,8 +145,12 @@ or the worker dropping a disabled deferral, wakes the queue when a waiter
 has registered under the irq_poll's lock. Both are lockdep callback waits
 on the poll's class, and both call `might_sleep` (lockdep design.md,
 "Callback classes"). Until 2026-10-08 they spun on `sched_yield`, which
-lockdep could not see. The worker runs `poll` with preemption off. It
-never sleeps, since it runs in interrupt context too.
+lockdep could not see. The idle queue is woken *under* the irq_poll's
+lock, which the waiter's condition also takes. A waiter therefore cannot
+see the poll idle, return, and let its caller free the irq_poll while a
+waker is still inside the queue (review, PR #335). The worker runs `poll`
+with preemption off. It never sleeps, since it runs in interrupt context
+too.
 
 Where it applies (the audit, docs/audit/2026-10-08-irq-budget-report.md):
 virtio queues (block, network transmit and receive, entropy), NVMe

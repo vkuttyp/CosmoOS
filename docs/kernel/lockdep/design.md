@@ -340,10 +340,20 @@ callback with a synchronous wait for it, and uses the same classes:
   skipped (a disable still disables and unqueues), as `timer_cancel_sync`
   skips its wait. Any other spinlock held is a `LOCKDEP_R_SLEEP` from
   `might_sleep`.
-- The worker calls `poll` with preemption off and interrupts on. The
-  class sits on the CPU's held stack (L11), which is this thread's only
-  while no other thread runs on the CPU. `poll` never sleeps, since it
-  also runs in interrupt context, so this costs nothing it could use.
+- The worker calls `poll` with interrupts on. There the class goes on
+  the **thread's** held stack (`lockdep_acquired`, `lockdep_release`: a
+  callback class entered with `irq_depth == 0`), as a mutex does. On the
+  CPU's stack, an interrupt taken during the worker's poll would see it.
+  A handler running a poll of the same function on another irq_poll (vda's
+  worker, vdb's interrupt; NVMe queues share `nvme_poll`) was then a fatal
+  recursion report, and other polls' locks were recorded as taken under
+  the class (review, PR #335). Interrupt context reads no thread's stack,
+  which is the separation Linux's lockdep gets from `irq_context`. A
+  timer's callback, entered with `irq_depth != 0`, stays on the CPU's
+  stack. `lockdep_completion_signal` counts only the mutexes on that
+  stack, so a worker that completes something records no edge to its
+  class. The worker also keeps preemption off across the call, so a
+  sleep inside `poll` is reported there as it would be in the handler.
 
 What the class adds over `might_sleep` is narrower than for timers.
 Because the waits sleep, a waiter can hold no spinlock (`might_sleep`
