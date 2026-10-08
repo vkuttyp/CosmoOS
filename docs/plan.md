@@ -176,6 +176,17 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
   Continue with host-loopback capture or slirp source investigation; do not
   relabel the existing diagnosis as a kernel send-path defect. See the
   [network retry report](audit/next-subsystem-nettest-retry.md).
+- [x] **Validation/fix — a completion handler refilled while it runs.**
+  CI's 184 s `virtio-remove-inflight` hold, with one CPU 22 s without a
+  tick in `vblk_done` (PR #330, run 37698731544). *Completed 2026-10-08*
+  ([irq-budget report](audit/2026-10-08-irq-budget-report.md)).
+  - `bio_complete` resubmits from the pending queue, so the handler fed
+    its own device. `blk-irq-budget` reproduces it on both
+    architectures; a 12 s storm gives the CI hard-lockup line.
+  - Every completion handler a device or a submitter could keep running
+    now takes a 32-completion budget per call, the rest on a per-CPU
+    `irqpoll/N` worker (`kernel/core/irqpoll.c`): virtio, NVMe, xHCI.
+  - CI uploads debug kernel and module ELFs on failure.
 - [ ] **Validation — AArch64 virtio-console output loss.** Explain the
   historical missing final console line while the serial log was complete.
   This remains an unexplained observation, not a demonstrated root cause.

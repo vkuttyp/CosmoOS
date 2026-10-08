@@ -2532,3 +2532,24 @@ See the [history index](README.md).
   ordering is unchanged where it counts. The debug seam's `wake_hold` reads
   its armed target first and takes no lock when unarmed. New:
   `tools/bench-ab.py`, two revisions' boot benchmarks booted alternately.
+- **Bounded completion handling in interrupt context.** The 184 s
+  `virtio-remove-inflight` hold (PR #330's CI) is reproduced and fixed.
+  `bio_complete` resubmits from the block layer's pending queue, so
+  `vblk_done` refilled its own device, and against a device that
+  completes at once it never saw the ring empty.
+  - `blk-irq-budget` reproduces it: one handler call popped 15,754
+    completions and its CPU went 1,002 ms without a tick (both
+    architectures and one CPU). A 12 s storm gives CI's
+    `hard lockup: cpu 0 no tick for 10000 ms`.
+  - New `kernel/core/irqpoll.c`: a 32-completion budget per handler
+    call, the remainder on a per-CPU `irqpoll/N` worker, one consumer at
+    a time. `irq_poll_disable` and `irq_poll_synchronize` are the
+    deferred halves of `synchronize_irq`.
+  - Used by the virtqueue core (callbacks take a budget; `virtq_free`
+    disables), NVMe queues and the xHCI event ring. The audit found
+    AHCI and e1000e already bounded.
+  - Also new: the per-call pop count in virtio-blk (module ABI 8), a
+    per-CPU maximum tick gap in self-test builds,
+    `tools/irq-budget-probe.py`, and CI uploading debug kernel and module
+    ELFs on failure.
+  - Report: `docs/audit/2026-10-08-irq-budget-report.md`.

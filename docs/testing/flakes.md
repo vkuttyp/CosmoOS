@@ -42,6 +42,7 @@ is deliberate: the list going silently empty is the failure it guards.
 | `sleep` | `kernel/scheduler/schedtest.c`, `selftest_sleep` | a 20 ms sleep returns within 20 ms + 3 ticks + 100 ms | the sleep is woken by the first tick past its deadline, not by a coarser mechanism (a sleep serviced every 100 ms would fail it) | "promptly" is the property; the wake is a timer callback on this CPU and there is no wake-reason to count that a coarse mechanism would not also produce |
 | `net-icmp-limit` | `kernel-services/network/nettest.c`, `selftest_net_icmp_limit` | the 300-echo flood is decided within the one-second limiter window the test saw begin | at most `ICMP_RATE_PER_SEC` replies to a burst, exactly one window's worth | the window's phase is now observed (an echo refused, then one replied), but that the flood's ~20 ms fits in the window's remaining second is time; a host holding the vCPU for most of a second inside the flood fails it. A 50× margin, the largest here |
 | `el2-guest-timer-ontime` | `kernel-services/virtualization/hvtest.c`, `selftest_el2_guest_timer_ontime` (runs under `make test-gic`) | the guest's timer is late by less than four times the ~15 ms it asked for | the WFI park wakes on the guest's deadline in 1 ms slices, not by sleeping the whole interval or in coarse slices | a wake-reason counter would say "the deadline passed", which a coarse park also satisfies; only the lateness distinguishes them, and lateness is time |
+| `blk-irq-budget` | `kernel/device/devtest.c`, `selftest_blk_irq_budget` | no online CPU goes more than 250 ms without a tick during the 1 s completion storm | a completion handler refilled while it runs gives its CPU back within a budget of completions | the deterministic half is asserted separately (no handler call consumes more than the ring holds; the budget is 32). The gap is the time-visible consequence the 184 s sighting was, and a host holding a vCPU for a quarter second anywhere in the storm fails it. The unbounded handler measured 1,002 ms |
 
 **Observed three times, not yet on the list: the TLB shootdown deadline.**
 `kernel/arch/x86_64/mmu.c:324` gives every other CPU one second to
@@ -2773,6 +2774,14 @@ rerun passed. It is the host-time family of the old `schedtest.c` lag
 bound (widened in PR #63): the host did not schedule the machine's vCPU
 for part of the window. Recorded, not attributed.
 
+**Second sighting, 2026-10-08:** `... by more than half the window (61
+ms)`. It came on local x86-64 debug, LOCKDEP=0, on the `before` side
+(main, d9889d5e) of `tools/bench-ab.py`'s third boot pair. Nothing else
+ran on the host: the boots are sequential. The other seven boots of the
+comparison passed it. Two sightings in nine days, both one boot each,
+neither reproduced. The bound is the half-window lag; the host-time
+explanation above still fits and is still not shown.
+
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
 **Budget corrected 2026-10-04, PR #307:** the combined two-interface
@@ -3440,6 +3449,47 @@ outpaces the handler. Then bound the loop (a budget, the remainder
 deferred), if that is what it is. The branch's next run, on a
 documentation commit, passed every boot (run 37702904070).
 
+**Reproduced and bounded, 2026-10-08
+(`docs/audit/2026-10-08-irq-budget-report.md`).** The mechanism is shown,
+and is narrower than "a submitter on another CPU". `bio_complete` ends
+with `drain_pending`, which hands the block layer's next waiting bio to
+the driver, so `vblk_done` refills the device itself. All it needs to
+run without end is a pending queue that stays non-empty and a device
+whose next completion is ready when the handler asks. In CI,
+`virtio-remove-inflight`'s submitter kept the queue full.
+
+- **The instrument.** The flakes entry above named it: completions
+  popped per `vblk_done` call, the maximum, and a debug warning above
+  the ring size.
+- **The reproduction.** `blk-irq-budget`: each bio's completion
+  resubmits it through the pending queue, then waits up to 1 ms for the
+  device's next completion. On the commit before the fix (x86-64, four
+  CPUs), one call popped **15,754** completions against a ring of 256,
+  and CPU 0 logged `no tick for 1002 ms`. That is the whole 1 s storm in
+  one interrupt-context call.
+- **AArch64 and one CPU.** AArch64 behaves the same: one call popped
+  16,936 and CPU 0 went 1,002 ms without a tick. On one x86-64 CPU it
+  was 15,202 and 1,002 ms: the handler needs no other CPU, since it is
+  its own submitter.
+- **The 12 s storm.** `--storm-ms 12000` gives the CI signature on both
+  architectures: `hard lockup: cpu 0 no tick for 10000 ms ... (seen
+  from cpu 3)`, the per-test watchdog's `no progress for 12001 ms`, and
+  one handler call that popped 189,841 completions (x86-64) or 245,082
+  (AArch64). The probe's kernel ELF symbolises what CI could not. CPU
+  0's NMI sample is in module text, called from `drain_pending` →
+  `to_driver`, inside `isr_common`, which had interrupted the test
+  thread's own `driver_submit`. The handler is resubmitting.
+- **The fix.** Every completion handler a device or a submitter could
+  keep running (virtio-blk, virtio-net transmit, NVMe, the xHCI event
+  ring) now consumes at most 32 completions per call and hands the rest
+  to its CPU's `irqpoll/N` worker (`kernel/core/irqpoll.c`). With it, one
+  call pops at most 32. Across the validation boots (both
+  architectures; 1, 2 and 4 CPUs; chaos), the longest tick gap during
+  the storm was 4–15 ms, against a tick period of 4 ms. `tools/irq-budget-probe.py --old` restores the unbounded
+  loop and the test fails again.
+- **Symbolisation.** CI now uploads every debug build's kernel and
+  module ELFs when a job fails, so the next sighting's PCs can be read.
+
 ## A slow x86-64 guard boot: `net-bench`'s slow mode and `lockdep-graph-bench` over budget, 2026-10-08
 
 **Run 37746634319, PR #332's x86-64 job, "Boot test on a
@@ -3481,4 +3531,34 @@ benchmark grew with the lock-class table (384 -> 512, PR #321) because
 its sizes include `LOCKDEP_MAX_CLASSES`. It has its own budget now, 20 s,
 like `cosmofs-replay` and `process-user`: it asserts no duration, and the
 budget is there to notice a hang.
+
+## `net-tcpverdict`: the delayed ACK met the rule first, 2026-10-08
+
+`SELFTEST: net-tcpverdict ... FAIL: check failed: ksock_sendto(cn2.s,
+"abc", 3, NULL) == 3 at line 10468`. Local AArch64 harness-retry boot of
+the irq-budget branch, one boot. The same boot passed in the branch's
+first validation pass.
+
+**Mechanism.**
+- Two bytes from the peer arrive and stay unread. This stack
+  acknowledges them with the delayed-ACK timer, `TCP_DELACK_NS` (40 ms)
+  later. The timer has been live only since #322 (2026-10-07), after
+  this test was written.
+- The test then adds an OUTPUT DROP rule, calls `hin_drain` (a 20 ms
+  sleep), and requires its own send to return 3. Only the *next* call is
+  told `-EPERM`.
+- That leaves about 10 ms between the test's last 10 ms poll for the
+  bytes and the timer. When the timer fires after the rule, the refused
+  ACK records the verdict, and the send of `"abc"` is told first.
+
+**Shown:** with a 50 ms sleep injected after the rule (the timer's whole
+window, on purpose), the test as on main fails with the same line,
+`ksock_sendto(cn2.s, "abc", 3, NULL) == 3`, on AArch64. The fixed test
+passes with the same injection. The adversary is the mechanism's own
+interval: the delayed ACK's 40 ms allowed to pass after the rule.
+
+**Fixed:** the test receives the guest's ACK of the two bytes (`ack ==
+5003`) before adding the rule. It waits for the event rather than
+racing the timer. Not related to the irq-budget change: the path is the
+test's own tap interface and a TCP timer, with no device interrupt.
 

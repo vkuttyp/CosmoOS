@@ -240,7 +240,10 @@ the mirror and never brought back), hot spares, deduplication.
 ### 2.5 Networking (constitution §35; Prompt #2 §20-22)
 
 Zero-copy paths, device multi-queue, TSO/LRO, jumbo frames, NAPI-style
-polling, interrupt moderation, busy polling; TCP window scaling, SACK,
+polling (the budget-and-defer half is built for completion handlers:
+`kernel/core/irqpoll.c`, 2026-10-08, irq-budget report; received frames
+still go through the per-CPU network workers, and nothing polls with
+interrupts off), interrupt moderation, busy polling; TCP window scaling, SACK,
 timestamps, ECN, fast recovery, Nagle; IP fragmentation and reassembly;
 IPv6 routing beyond loopback and ND against a real peer.
 
