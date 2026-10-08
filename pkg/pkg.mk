@@ -25,7 +25,7 @@ $(PKG_ELF): $(PKG_OBJS) $(LIBC_CRT0) $(LIBC_A) $(USER_LD)
 	$(Q)$(LD) $(USER_LDFLAGS) -T $(USER_LD) -o $@ $(LIBC_CRT0) $(PKG_OBJS) $(LIBC_A)
 
 PKG_ANALYZE := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.analyzed,$(filter pkg/%,$(PKG_SRCS))))
-$(OUT)/pkgprog/%.analyzed: $(ROOT)/%.c
+$(OUT)/pkgprog/%.analyzed: $(ROOT)/%.c analyze-force
 	$(call log,ANALYZE,$<)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(USER_CFLAGS) -I$(ROOT)/pkg --analyze -Xanalyzer -analyzer-output=plist-multi-file $< -o $@.tmp
