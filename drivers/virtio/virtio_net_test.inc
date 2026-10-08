@@ -166,7 +166,6 @@ bool vnet_test_remove(unsigned mode, const char **reason)
 out:
     if (registered && !removed) {
         vnet_remove(dev);
-        removed = true;
     }
     if (!registered && dev) {
         if (v && v->rx)
