@@ -1852,6 +1852,9 @@ bool selftest_virtio_remove_inflight(const char **reason)
 #ifndef BIRQ_STORM_MS            /* overridable: tools/irq-budget-probe.py --storm-ms */
 #define BIRQ_STORM_MS 1000u
 #endif
+/* LOAD-SENSITIVE (docs/testing/flakes.md, "The list"): a time bound. The
+ * unbounded handler measured 1,002 ms, the whole storm; a budget of 32 keeps
+ * one call to milliseconds, so 250 ms is a host stall, not a handler. */
 #define BIRQ_GAP_MS   250u       /* the longest a CPU may go without a tick meanwhile */
 #define BIRQ_NEXT_NS  (1000ull * 1000)   /* how long `done` waits for the device's next completion */
 #define BIRQ_MAX_BIOS 64u
