@@ -28,6 +28,12 @@ CASES = {
     "vfs-result": ("kernel-services/vfs/vfstest.c", "selftest_fsctl_result_per_open", "unix.Malloc", 2),
     "nvme-threads": ("kernel/device/devtest.c", "selftest_nvme", "core.UndefinedBinaryOperatorResult", 1,
                      "nvme_run_workers"),
+    "guestmem-copy": ("kernel-services/virtualization/guestmem.c", "copy",
+                       ("core.UndefinedBinaryOperatorResult", "unix.cstring.NullArg"), 2),
+    "epoll-wqs": ("kernel/io/epoll.c", "hook_item", "core.uninitialized.Assign", 1),
+    "hv-uart-sibling": ("kernel-services/virtualization/hvtest.c", "selftest_el2_guest_uart_race",
+                         "core.UndefinedBinaryOperatorResult", {"x86_64": 0, "aarch64": 1}),
+    "kill-current": ("kernel/syscall/native.c", "kill_one", "core.NullDereference", 1),
 }
 
 
@@ -61,9 +67,16 @@ def main():
                 return 1
             findings = plistlib.loads(report.read_bytes())["diagnostics"]
             expected_function = function if args.old else fixed_function
-            matches = [d for d in findings if d.get("issue_context") == expected_function
-                       and d["check_name"].startswith(checker)]
-            expected = old_count if args.old else 0
+            if isinstance(checker, tuple):
+                matches = [d for d in findings if d.get("issue_context") == expected_function
+                           and d["check_name"] in checker]
+            else:
+                matches = [d for d in findings if d.get("issue_context") == expected_function
+                           and d["check_name"].startswith(checker)]
+            if isinstance(old_count, dict):
+                expected = old_count[args.arch] if args.old else 0
+            else:
+                expected = old_count if args.old else 0
             for finding in matches:
                 print(f"{source}: {expected_function}: {finding['description']} [{finding['check_name']}]")
             ok = len(matches) == expected

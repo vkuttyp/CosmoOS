@@ -29,6 +29,9 @@ by*: `hv-npt` (translation of every page equals `page_to_phys` of the
 recorded page; unbacked ranges are `-EFAULT`; fresh memory reads zero;
 cross-page round trip), host test (`npt_query` on mapped/unmapped
 pages, rollback of a failing map, destroy returns every table page).
+Every nonempty copy has exactly one non-null host buffer, and a failed
+per-page lookup exits with `-EFAULT` while still holding the VM lock;
+`hv-npt` exercises valid cross-page read/write and unmapped-range errors.
 
 ### V3. Every port and every MSR is intercepted
 

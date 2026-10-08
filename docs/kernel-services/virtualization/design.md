@@ -935,7 +935,9 @@ with `PMM_ZERO`, records them, and maps each with `arch_hv_vm_map`. A
 failure midway unmaps and frees what was done and leaves the VM as it was.
 `vm_mem_read/write(vm, gpa, kbuf, len)` copy through the direct map page
 by page after locating the region; a range that crosses out of every
-region returns `-EFAULT` before any byte is copied. Regions live until
+region returns `-EFAULT` before any byte is copied. A nonempty copy
+requires exactly one host buffer direction; a missing or ambiguous
+buffer returns `-EFAULT`. Regions live until
 the VM is released; `vm_release` unmaps everything, destroys the arch
 context, and returns the pages (`pmm_free_page` each).
 
