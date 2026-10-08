@@ -40,6 +40,8 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--files', default='kernel-services/network/', help='report files whose path contains this')
     args = ap.parse_args()
+    if args.runs < 0:
+        ap.error('--runs must be 0 or more')
     root = Path(__file__).resolve().parents[1]
     out = root / 'out' / 'fuzz-coverage'
     prof = out / 'profiles'

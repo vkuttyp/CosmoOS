@@ -6839,6 +6839,19 @@ static struct mbuf *nettest_sent_ip_now(struct tap *t)
     return NULL;
 }
 
+/* The NAT and firewall state a test changed, cleared however it returns:
+ * a forward or a translation left behind would decide the next test's
+ * frames. */
+static char g_nat_state_marker;
+
+static void nt_rel_nat_state(void *arg)
+{
+    (void)arg;
+    nat_pf_clear();
+    nat_flush();
+    fw_flush();
+}
+
 /*
  * nat_pf_clear removed the rules and kept their translations: a client
  * whose connection a forward had translated kept reaching the guest through
@@ -6864,6 +6877,7 @@ bool selftest_net_pf_clear(const char **reason)
     nettest_seed_arp(tap_netif(u), client, client_mac);
     nat_flush();
     nat_pf_clear();
+    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
     CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
 
     uint8_t l4[64], frame[128];
@@ -6887,7 +6901,8 @@ bool selftest_net_pf_clear(const char **reason)
         m_freem(r);
     CHECK(r == NULL);   /* the client reaches the guest no more */
 
-    nat_flush();
+    if (!selftest_release(&g_nat_state_marker))
+        nt_rel_nat_state(NULL);
     nt_tap_destroy(u);
     nt_tap_destroy(g);
     kinfo("selftest: net-pf-clear: a clear took the forward's live translation with it");
@@ -7488,6 +7503,7 @@ bool selftest_net_tap_release_order(const char **reason)
 #else
     fw_flush();
     nat_flush();
+    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
     struct file *fa = NULL;
     CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), world = IPV4_ADDR(10, 0, 2, 2);
@@ -7524,8 +7540,8 @@ bool selftest_net_tap_release_order(const char **reason)
     if (left != 0)
         kerror("selftest: net-tap-release-order: %u NAT entr(ies)/flow(s) name the released guest", left);
     CHECK(left == 0);
-    nat_flush();
-    fw_flush();
+    if (!selftest_release(&g_nat_state_marker))
+        nt_rel_nat_state(NULL);
     nt_netif_ref_put(&held);
     kinfo("selftest: net-tap-release-order: a frame offered after the purges made nothing (the control made %u)",
           before);
