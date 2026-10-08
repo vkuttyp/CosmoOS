@@ -60,6 +60,17 @@ def main():
             wanted = ('mapped buffers not unmapped', 'receive buffers reposted after reset')
             ok = all(re.search(r'^SELFTEST: ' + name + r'\s+\.\.\. FAIL: vnet-remove: ' + why,
                                log, re.M) for name, why in zip(tests, wanted)) and rc != 0
+            failures = re.findall(r'^SELFTEST: (\S+)\s+\.\.\. FAIL', log, re.M)
+            ok = ok and len(failures) == 2 and set(failures) == set(tests)
+            ok = ok and re.search(r'^SELFTEST: FAIL \(2 of \d+\)', log, re.M) is not None
+            ok = ok and re.search(r'^SELFTEST: net-harness\s+\.\.\. ok', log, re.M) is not None
+            ok = ok and 'shutdown: exit status 1' in log
+            # Only the expected self-test verdict may fail the full harness.
+            result = (work / 'boot.result').read_text(errors='replace')
+            reasons = re.findall(r'^  - (.+)$', result, re.M)
+            ok = ok and len(reasons) == 3 and reasons[0] == 'kernel reported failure via debug-exit'
+            ok = ok and reasons[1].startswith('forbidden marker /SELFTEST: FAIL/: SELFTEST: FAIL (2 of ')
+            ok = ok and reasons[2] == "no 'SELFTEST: PASS' line"
         else:
             ok = rc == 0 and all(re.search(r'^SELFTEST: ' + name + r'\s+\.\.\. ok', log, re.M)
                                  for name in tests)
