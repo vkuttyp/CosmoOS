@@ -219,7 +219,7 @@ the same commit passed on a re-run with nothing changed:
 | where | what it looked like | why it is not a bound |
 | --- | --- | --- |
 | x86-64, the default boot | all 319 self-tests passed and `USERTEST: PASS`; the shell script ran its whole command list to `exit 0`; then `SHTEST: PASS` **and every Linux-ABI marker** -- the musl hello, `LINUXTEST: PASS`, `lxinterp`, `lxdyn`, `lxsig term` -- were all missing together | not a bound a loaded host trips. **What the cause was is not established**: those markers are the tail of the run -- the Linux ones come from `rc.test` and `SHTEST: PASS` is printed last -- so an absent boot archive, a Linux-test build that did not arrive, a hang and a premature shutdown all suppress exactly the same suffix. The observation is recorded; the diagnosis is not |
-| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one |
+| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one. Seen again 2026-10-08 on PR #331's two-CPU boot (run 37702907701, every self-test passing): the boot's own check logged `hv: backend el2 disabled: nested paging does not confine a guest with paging off (QEMU/TCG before 9.2 has this bug)`, so that runner's QEMU was the older one; the re-run passed |
 
 Neither is on the list above and neither should be: they are not bounds a
 loaded host can trip, so a re-run distinguishes them from a regression
@@ -3437,4 +3437,5 @@ the one this file keeps naming: build what names the cause. That is a
 per-call count of completions popped in `vblk_done`, printed when it
 exceeds the ring size, plus a deterministic run in which the submitter
 outpaces the handler. Then bound the loop (a budget, the remainder
-deferred), if that is what it is. The failed job was re-run.
+deferred), if that is what it is. The branch's next run, on a
+documentation commit, passed every boot (run 37702904070).
