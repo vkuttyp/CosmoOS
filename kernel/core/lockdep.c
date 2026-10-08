@@ -106,7 +106,7 @@ static const char *const g_kind_names[LOCKDEP_R_COUNT] = {
     [LOCKDEP_R_UNHELD] = "release of a lock that is not held",
     [LOCKDEP_R_EXIT_HELD] = "thread exit with a mutex held",
     [LOCKDEP_R_IRQ_STATE] = "mismatched irqsave acquisition and restoration",
-    [LOCKDEP_R_CALLBACK] = "timer cancellation waits while holding a callback lock",
+    [LOCKDEP_R_CALLBACK] = "a callback wait (timer_cancel_sync, irq_poll) holds a lock the callback takes",
     [LOCKDEP_R_COMPLETION] = "a completion wait holds a lock its signaller needs",
 };
 
@@ -452,7 +452,7 @@ static bool acquire_check_node(const void *lock, uint16_t node, const char *name
                                bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind);
 
 /* `wait_kind` is LOCKDEP_R_INVERSION for a lock acquisition, or the kind a
- * synchronous wait reports as: LOCKDEP_R_CALLBACK for a timer callback,
+ * synchronous wait reports as: LOCKDEP_R_CALLBACK for a timer callback or an irq_poll,
  * LOCKDEP_R_COMPLETION for a completion. */
 static bool acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
                           unsigned subclass, bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind)

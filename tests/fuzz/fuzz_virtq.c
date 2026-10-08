@@ -77,6 +77,7 @@ void irq_poll_sched(struct irq_poll *ip)
         ;
 }
 void irq_poll_disable(struct irq_poll *ip) { (void)ip; }
+void irq_poll_set_class(struct irq_poll *ip, const void *fn) { (void)ip; (void)fn; }
 
 static unsigned g_max_size = 16;
 

@@ -31,6 +31,13 @@
  * running or queued, and none will start until irq_poll_enable(). A
  * driver calls it after its interrupt is released and before it frees
  * what `poll` reads -- the deferred half of synchronize_irq.
+ *
+ * Lockdep: every call of `poll`, in the handler and in the worker, runs
+ * inside a callback class named by the poll's function (lockdep
+ * design.md, "Callback classes"), and irq_poll_disable and
+ * irq_poll_synchronize acquire that class without holding it, as
+ * timer_cancel_sync does. A wait holding a lock that any observed poll of
+ * the function takes, or reaches, is reported in either order.
  */
 #ifndef KERNEL_IRQPOLL_H
 #define KERNEL_IRQPOLL_H
@@ -40,6 +47,7 @@
 
 #include <kernel/list.h>
 #include <kernel/spinlock.h>
+#include <kernel/wait.h>
 
 #ifndef IRQ_POLL_BUDGET   /* overridable for a probe: tools/irq-budget-probe.py --old */
 #define IRQ_POLL_BUDGET 32u
@@ -48,14 +56,19 @@
 struct irq_poll;
 /* Consume at most `budget` completions; return how many were consumed.
  * Fewer than `budget` means the device had nothing more when it looked.
- * Called with interrupts off from irq_poll_sched, with them on from the
- * worker, never on two CPUs at once for one irq_poll. */
+ * Called with interrupts off from irq_poll_sched, with them on (and
+ * preemption off) from the worker, never on two CPUs at once for one
+ * irq_poll. It never sleeps: it runs in interrupt context. */
 typedef unsigned (*irq_poll_fn)(struct irq_poll *ip, unsigned budget);
 
 struct irq_poll {
     irq_poll_fn poll;
     const char *name;
+    const void *class_fn;   /* the function lockdep names the poll's class by */
+    uint16_t lockdep_class; /* that class, cached (0 = not yet) */
     spinlock_t lock;
+    struct waitqueue idle_wq;   /* irq_poll_disable / irq_poll_synchronize sleep here */
+    unsigned waiters;   /* how many of them: a finish wakes only when one waits */
     bool running;       /* `poll` is executing (handler or worker) */
     bool scheduled;     /* handed to a worker, not yet started there */
     bool queued;        /* on the worker's list (that worker's lock) */
@@ -70,9 +83,15 @@ struct irq_poll {
 };
 
 void irq_poll_init(struct irq_poll *ip, irq_poll_fn poll, const char *name);
+/* Name the lockdep class by `fn` instead of `poll`: for a shared `poll`
+ * that dispatches to a per-user function (the virtqueue core's, which
+ * calls the driver's callback), so that one driver's teardown is checked
+ * against what its own callback takes, not every driver's. Before the
+ * first irq_poll_sched. */
+void irq_poll_set_class(struct irq_poll *ip, const void *fn);
 /* From the interrupt handler (interrupts off). */
 void irq_poll_sched(struct irq_poll *ip);
-/* Thread context. Sleeps (yields) until no `poll` runs or is queued. */
+/* Thread context. Sleeps until no `poll` runs or is queued. */
 void irq_poll_disable(struct irq_poll *ip);
 void irq_poll_enable(struct irq_poll *ip);
 /* Thread context: wait until a call of `poll` running now has returned

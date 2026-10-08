@@ -5,10 +5,12 @@
  * "Bounded completion handling").
  *
  * Locks: an irq_poll's own lock, then a worker's list lock, in that order
- * and never the other way round. Neither is held across `poll`.
+ * and never the other way round. Neither is held across `poll`, and
+ * neither across a wake of the idle queue.
  */
 
 #include <kernel/irqpoll.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
 #include <kernel/percpu.h>
@@ -32,7 +34,11 @@ void irq_poll_init(struct irq_poll *ip, irq_poll_fn poll, const char *name)
 {
     ip->poll = poll;
     ip->name = name;
+    ip->class_fn = (const void *)poll;
+    ip->lockdep_class = 0;
     spinlock_init(&ip->lock, "irq-poll");
+    waitqueue_init(&ip->idle_wq, "irq-poll-idle");
+    ip->waiters = 0;
     ip->running = ip->scheduled = ip->queued = ip->again = ip->disabled = false;
     ip->cpu = 0;
     list_init(&ip->link);
@@ -40,11 +46,31 @@ void irq_poll_init(struct irq_poll *ip, irq_poll_fn poll, const char *name)
     ip->max_one = 0;
 }
 
+void irq_poll_set_class(struct irq_poll *ip, const void *fn)
+{
+    ip->class_fn = fn;
+    ip->lockdep_class = 0;
+}
+
 static void note_one(struct irq_poll *ip, unsigned n)
 {
     uint32_t max = __atomic_load_n(&ip->max_one, __ATOMIC_RELAXED);
     while (n > max && !__atomic_compare_exchange_n(&ip->max_one, &max, n, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
         ;
+}
+
+/* One call of `poll`, inside its callback class (lockdep design.md,
+ * "Callback classes"): every lock it takes is recorded as taken under the
+ * class, wherever it runs, so a teardown's wait is checked against it.
+ * Exit names only the function, as a timer's does. */
+static unsigned run_poll(struct irq_poll *ip)
+{
+    const void *fn = ip->class_fn;
+    lockdep_callback_enter(fn, &ip->lockdep_class);
+    unsigned n = ip->poll(ip, IRQ_POLL_BUDGET);
+    lockdep_callback_exit(fn);
+    note_one(ip, n);
+    return n;
 }
 
 /* A worker that can take a deferral: this CPU's, else any started one. */
@@ -104,14 +130,16 @@ void irq_poll_sched(struct irq_poll *ip)
     spin_unlock_irqrestore(&ip->lock, s);
     unsigned cpu = raw_cpu_id();   /* interrupts are off: this is the CPU the worker should be */
     for (;;) {
-        unsigned n = ip->poll(ip, IRQ_POLL_BUDGET);
-        note_one(ip, n);
+        unsigned n = run_poll(ip);
         s = spin_lock_irqsave(&ip->lock);
         bool early = n >= IRQ_POLL_BUDGET && worker_for(cpu) == NULL && !ip->disabled;
         struct irq_poll_worker *w = early ? NULL : finish_locked(ip, n, cpu);
+        bool idle_wake = !early && ip->waiters != 0;
         spin_unlock_irqrestore(&ip->lock, s);
         if (w != NULL)
             waitqueue_wake_one(&w->wq);
+        if (idle_wake)
+            waitqueue_wake_all(&ip->idle_wq);
         if (!early)
             return;
         /* Boot, before the workers: nowhere to defer to, so on, as the
@@ -119,8 +147,51 @@ void irq_poll_sched(struct irq_poll *ip)
     }
 }
 
+/* The wait's lockdep half, then might_sleep: a lock that the poll takes
+ * held across the wait is the deadlock itself and is reported as one
+ * (LOCKDEP_R_CALLBACK, naming the lock and the class), which the plain
+ * sleep check behind it would only call a sleep in atomic context. False
+ * after a report: the caller must not wait. */
+static bool may_wait(struct irq_poll *ip, uintptr_t ip_caller)
+{
+    if (!lockdep_callback_wait(ip->class_fn, &ip->lockdep_class, ip_caller))
+        return false;
+    might_sleep();
+    return true;
+}
+
+static bool idle_now(struct irq_poll *ip)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&ip->lock);
+    bool idle = !ip->running && !ip->scheduled;
+    spin_unlock_irqrestore(&ip->lock, s);
+    return idle;
+}
+
+static bool run_done(struct irq_poll *ip, uint64_t gen)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&ip->lock);
+    bool done = !ip->running || ip->runs != gen;
+    spin_unlock_irqrestore(&ip->lock, s);
+    return done;
+}
+
+/* `waiters` is raised under the lock before the condition is first read
+ * and every finish reads it under the same lock, so a finish after the
+ * raise wakes, and one before it is seen by the condition. */
+static void waiters_add(struct irq_poll *ip, int d)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&ip->lock);
+    ip->waiters += (unsigned)d;
+    spin_unlock_irqrestore(&ip->lock, s);
+}
+
 void irq_poll_disable(struct irq_poll *ip)
 {
+    /* Whether or not a poll runs now, this call may wait for one: checked
+     * against every poll of the function observed. After a report the
+     * irq_poll is still disabled and unqueued; only the wait is skipped. */
+    bool wait = may_wait(ip, (uintptr_t)__builtin_return_address(0));
     arch_irq_state_t s = spin_lock_irqsave(&ip->lock);
     ip->disabled = true;
     if (ip->scheduled) {
@@ -134,29 +205,30 @@ void irq_poll_disable(struct irq_poll *ip)
         }
         spin_unlock(&w->lock);
     }
+    bool busy = ip->running || ip->scheduled;
+    if (busy && wait)
+        ip->waiters++;
     spin_unlock_irqrestore(&ip->lock, s);
-    for (;;) {
-        s = spin_lock_irqsave(&ip->lock);
-        bool busy = ip->running || ip->scheduled;
-        spin_unlock_irqrestore(&ip->lock, s);
-        if (!busy)
-            return;
-        sched_yield();
-    }
+    if (!busy || !wait)
+        return;
+    wait_event(&ip->idle_wq, idle_now(ip));
+    waiters_add(ip, -1);
 }
 
 void irq_poll_synchronize(struct irq_poll *ip)
 {
+    if (!may_wait(ip, (uintptr_t)__builtin_return_address(0)))
+        return;
     arch_irq_state_t s = spin_lock_irqsave(&ip->lock);
     bool busy = ip->running;
     uint64_t gen = ip->runs;
+    if (busy)
+        ip->waiters++;
     spin_unlock_irqrestore(&ip->lock, s);
-    while (busy) {
-        sched_yield();
-        s = spin_lock_irqsave(&ip->lock);
-        busy = ip->running && ip->runs == gen;
-        spin_unlock_irqrestore(&ip->lock, s);
-    }
+    if (!busy)
+        return;
+    wait_event(&ip->idle_wq, run_done(ip, gen));
+    waiters_add(ip, -1);
 }
 
 void irq_poll_enable(struct irq_poll *ip)
@@ -187,17 +259,28 @@ static void worker_main(void *arg)
         s = spin_lock_irqsave(&ip->lock);
         ip->scheduled = false;
         if (ip->disabled) {
+            bool idle_wake = ip->waiters != 0;
             spin_unlock_irqrestore(&ip->lock, s);
-            continue;   /* irq_poll_disable is waiting for exactly this */
+            if (idle_wake)
+                waitqueue_wake_all(&ip->idle_wq);   /* irq_poll_disable is waiting for exactly this */
+            continue;
         }
         ip->running = true;
         ip->again = false;
         spin_unlock_irqrestore(&ip->lock, s);
-        unsigned n = ip->poll(ip, IRQ_POLL_BUDGET);
-        note_one(ip, n);
+        /* Preemption off across the call: `poll` never sleeps (it runs in
+         * interrupt context too), and its callback class sits on this
+         * CPU's held stack, which is this thread's only while no other
+         * thread runs here. Interrupts stay on. */
+        preempt_disable();
+        unsigned n = run_poll(ip);
+        preempt_enable();
         s = spin_lock_irqsave(&ip->lock);
         (void)finish_locked(ip, n, cpu);   /* back on this worker's own list if there is more */
+        bool idle_wake = ip->waiters != 0;
         spin_unlock_irqrestore(&ip->lock, s);
+        if (idle_wake)
+            waitqueue_wake_all(&ip->idle_wq);
         /* A batch at a time, with the tick, interrupts and anything else at
          * this priority between two. A device that never runs dry keeps this
          * CPU's threads waiting as long as it lasts -- as the unbounded
@@ -232,6 +315,7 @@ void irq_poll_start_workers(void)
 }
 
 EXPORT_SYMBOL(irq_poll_init);
+EXPORT_SYMBOL(irq_poll_set_class);
 EXPORT_SYMBOL(irq_poll_sched);
 EXPORT_SYMBOL(irq_poll_disable);
 EXPORT_SYMBOL(irq_poll_enable);

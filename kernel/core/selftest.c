@@ -548,6 +548,7 @@ static const struct selftest tests[] = {
     { "lockdep-mutex",   selftest_lockdep_mutex },
     { "lockdep-contention", selftest_lockdep_contention },
     { "lockdep-callback", selftest_lockdep_callback },
+    { "lockdep-irqpoll", selftest_lockdep_irqpoll },
     { "lockdep-irq-pairing", selftest_lockdep_irq_pairing },
     { "lockdep-completion", selftest_lockdep_completion },
     { "lockdep-bench", selftest_lockdep_bench },
