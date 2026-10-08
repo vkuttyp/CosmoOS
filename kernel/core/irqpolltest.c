@@ -73,16 +73,22 @@ static bool selftest_irqpoll_boost_pinned(const char **reason)
     g_bt.last = g_bt.max_gap = 0;
     g_bt.calls = g_bt.spinning = 0;
     g_bt.until = clock_now_ns() + (uint64_t)BOOST_SPIN_MS * 1000000ull;
-    /* Above the default: neither this thread nor a lowered worker preempts it. */
-    struct thread *spinner = thread_create_on(boost_spinner, NULL, "boost-spin", SCHED_PRIO_DEFAULT - 4,
-                                              CPUMASK_OF(cpu));
-    CHECK(spinner != NULL);
     /* What a handler does, on this CPU: the first call uses its budget, so
-     * the rest goes to this CPU's worker. The spinner cannot run before the
-     * schedule: interrupts are off across it. */
+     * the rest goes to this CPU's worker -- which preempts this thread at
+     * once, keeps the CPU for its hold, then time-slices with it. */
     arch_irq_state_t s = arch_irq_save();
     irq_poll_sched(&g_bt.ip);
     arch_irq_restore(s);
+    /* Then the spinner, above the default: neither this thread nor a
+     * lowered worker preempts it. Created first, it ran its whole time
+     * before the schedule, and the worker had no backlog to show. */
+    struct thread *spinner = thread_create_on(boost_spinner, NULL, "boost-spin", SCHED_PRIO_DEFAULT - 4,
+                                              CPUMASK_OF(cpu));
+    if (spinner == NULL) {
+        g_bt.until = 0;   /* the backlog ends at the next call */
+        irq_poll_disable(&g_bt.ip);
+        CHECK(spinner != NULL);
+    }
     (void)thread_join(spinner);   /* this thread runs again once the spinner is done */
     irq_poll_disable(&g_bt.ip);
     uint64_t gap_ms = g_bt.max_gap / 1000000ull;
@@ -90,7 +96,7 @@ static bool selftest_irqpoll_boost_pinned(const char **reason)
           "longest gap %llu ms (bound %u)",
           cpu, BOOST_SPIN_MS, g_bt.calls, (unsigned long long)gap_ms, BOOST_GAP_MS);
     CHECK(g_bt.spinning == 1);
-    CHECK(g_bt.calls > 10);   /* not vacuous: the worker ran the backlog */
+    CHECK(g_bt.calls > 10);   /* not vacuous: the worker ran the backlog, beside the spinner */
     CHECK(gap_ms <= BOOST_GAP_MS);
     return true;
 }
