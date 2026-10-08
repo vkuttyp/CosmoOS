@@ -1745,7 +1745,7 @@ static bool sched_balance_affinity_pinned(const char **reason)
     }
     unsigned before = thread_count();
     static struct bal_worker w[2];
-    struct thread *t[2];
+    struct thread *t[2] = { NULL, NULL };
     bool ok = true;
     for (unsigned i = 0; i < 2 && ok; i++) {
         memset(&w[i], 0, sizeof(w[i]));

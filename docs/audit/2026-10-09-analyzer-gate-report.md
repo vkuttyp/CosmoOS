@@ -39,5 +39,15 @@ false success with the new gate's rejection on each architecture.
 
 ## Investigation and validation
 
+`sched_balance_affinity_pinned`: proven uninitialized cleanup read. If
+the first `thread_create_on` returns NULL, the creation loop ends before
+assigning `t[1]`; the cleanup loop still reads both slots. The analyzer
+reports `core.UndefinedBinaryOperatorResult` on that exact path for both
+architectures. `analyzer-fix-probe.py --old --case smp-affinity` reproduces
+one diagnostic on each architecture (logs `out/analyzer-smp-old-<arch>.log`).
+Initialize the ownership array before creation so cleanup reads only NULL
+or a created thread. This is a static path proof; it is not a claim of a
+runtime allocation-failure boot.
+
 Results will be recorded as the checks run; completion requires the full
 AGENTS.md matrix on both architectures and branch and merge CI.

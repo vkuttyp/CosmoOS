@@ -560,6 +560,12 @@ interrupt-safe functions (`sched_wake`, `waitqueue_wake_*`,
 
 ## 7. Failure modes
 
+Self-tests that create several workers initialize every ownership slot to
+NULL before the first creation. A failed creation can then stop and join
+only workers actually created, including when the first allocation fails.
+`sched_balance_affinity_pinned` follows this rule; its analyzer regression
+probe restores the original uninitialized array on both target architectures.
+
 | Condition | Behaviour |
 |---|---|
 | out of memory in thread_create | NULL |
