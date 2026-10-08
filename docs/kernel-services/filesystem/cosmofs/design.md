@@ -1332,3 +1332,13 @@ room for more.
   alive): the deadlists know, but nothing reports it.
 - Snapshots of a mount that is read-only, and nested `.snapshots`
   inside a snapshot: both refused.
+
+## Self-test fixture failure ownership
+
+`cosmofstest.c:engine_mount` owns the registered RAM device until setup
+succeeds and publishes it through the output pointer. Format, directory
+creation and mount failures must destroy that device; directory cleanup
+removes only a directory this attempt created. The debug fixture test
+keeps an independent reference to inspect registry and creator-reference
+retirement after each injected failure. Assertions keep their original
+conditions and failure reasons.

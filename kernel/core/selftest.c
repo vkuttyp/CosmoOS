@@ -614,6 +614,7 @@ static const struct selftest tests[] = {
     { "sched-migrate-refuses", selftest_sched_migrate_refuses },
     { "sched-migrate-stress", selftest_sched_migrate_stress },
     { "nvme",            selftest_nvme },
+    { "nvme-worker-cleanup", selftest_nvme_worker_cleanup },
     { "nvme-admin-poll", selftest_nvme_admin_poll },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },
@@ -666,6 +667,7 @@ static const struct selftest tests[] = {
      * second finds it re-armed. Adjacent, in this order. */
     { "watchdog-spend",  selftest_watchdog_spend },
     { "watchdog-rearm",  selftest_watchdog_rearm },
+    { "cosmofs-fixture-cleanup", selftest_cosmofs_fixture_cleanup },
     { "cosmofs-holes",   selftest_cosmofs_holes },
     { "cosmofs-csum",    selftest_cosmofs_csum },
     { "cosmofs-metadata-csum-id", selftest_cosmofs_metadata_csum_id },

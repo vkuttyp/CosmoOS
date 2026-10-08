@@ -882,9 +882,8 @@ Prove each concern with a deterministic interleaving or fault before fixing.
 
 See [the analyzer report](2026-10-09-analyzer-gate-report.md). These two
 source-established self-test cleanup defects were discovered outside the
-current diagnostic list. The user's scope stop rule requires a decision
-before their proof and repair; no injected runtime reproduction or fix
-has been made.
+current diagnostic list. The user authorized deterministic proofs and separate repairs in PR A
+on 2026-10-09. Results are recorded in that report as the probes run.
 
 | Finding | Evidence and work remaining |
 |---|---|

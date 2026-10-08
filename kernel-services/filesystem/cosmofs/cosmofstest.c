@@ -10,6 +10,8 @@
 #include <uapi/cosmo/fsctl.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
+#include <kernel/thread.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
@@ -343,15 +345,53 @@ static bool write_wide_file(const char *path, unsigned pages)
 
 #define ENG "/mnt/eng"
 
+/* Only the serial self-test runner arms these operation-boundary seams. */
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+static unsigned engine_fail_stage;
+static struct blkdev *engine_observed;
+static uint64_t engine_fail_hits;
+
+static void engine_fail_begin(unsigned stage, struct blkdev *bd)
+{
+    if (engine_fail_stage != stage)
+        return;
+    engine_observed = bd;
+    blkdev_get(bd);   /* inspection reference, independent of fixture ownership */
+    faultinject_set(stage == 1 ? FI_BLK_SUBMIT : FI_KMALLOC, 1, 1, thread_current());
+}
+
+static void engine_fail_end(unsigned stage)
+{
+    if (engine_fail_stage != stage)
+        return;
+    enum fi_kind kind = stage == 1 ? FI_BLK_SUBMIT : FI_KMALLOC;
+    struct fi_stats st;
+    faultinject_stats(kind, &st);
+    engine_fail_hits = st.hits;
+    faultinject_clear(kind);
+}
+#else
+static inline void engine_fail_begin(unsigned stage, struct blkdev *bd) { (void)stage; (void)bd; }
+static inline void engine_fail_end(unsigned stage) { (void)stage; }
+#endif
+
 static bool engine_mount(struct blkdev **bdp, uint64_t nblocks, const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);   /* a failed earlier test may have left one behind */
     struct blkdev *bd = ramblk_create(nblocks);
     CHECK(bd != NULL);
-    CHECK(cosmofs_format(bd) == 0);
+    engine_fail_begin(1, bd);
+    int fmt = cosmofs_format(bd);
+    engine_fail_end(1);
+    CHECK(fmt == 0);
+    engine_fail_begin(2, bd);
     int mk = vfs_mkdir(NULL, ENG, 0755);
+    engine_fail_end(2);
     CHECK(mk == 0 || mk == -EEXIST);
-    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    engine_fail_begin(3, bd);
+    int mrc = vfs_mount(ENG, "cosmofs", bd, 0);
+    engine_fail_end(3);
+    CHECK(mrc == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
     *bdp = bd;
     return true;
@@ -362,6 +402,46 @@ static bool engine_unmount(struct blkdev *bd, const char **reason)
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
+    return true;
+}
+
+bool selftest_cosmofs_fixture_cleanup(const char **reason)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    bool ok = true;
+    for (unsigned stage = 1; stage <= 3; stage++) {
+        (void)vfs_rmdir(NULL, ENG);
+        engine_fail_stage = stage;
+        engine_observed = NULL;
+        engine_fail_hits = 0;
+        struct blkdev *published = NULL;
+        const char *why = NULL;
+        bool mounted = engine_mount(&published, 64, &why);
+        engine_fail_stage = 0;
+        struct blkdev *bd = engine_observed;
+        bool released = bd && bd->gone && __atomic_load_n(&bd->obj.refcount, __ATOMIC_RELAXED) == 1;
+        bool injected = !mounted && published == NULL && why != NULL && engine_fail_hits == 1;
+        kinfo("selftest: cosmofs-fixture-cleanup: stage=%u hits=%llu released=%u", stage,
+              (unsigned long long)engine_fail_hits, released);
+        /* Reclaim old-behavior leaks after observing them, so later tests remain independent. */
+        if (mounted)
+            (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+        if (bd) {
+            if (!bd->gone)
+                ramblk_destroy(bd);
+            blkdev_put(bd);
+        }
+        engine_observed = NULL;
+        (void)vfs_rmdir(NULL, ENG);
+        ok = ok && injected && released;
+    }
+    if (!ok) {
+        *reason = "fixture cleanup: registered RAM device retained after setup failure";
+        return false;
+    }
+#else
+    (void)reason;
+#endif
     return true;
 }
 

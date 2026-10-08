@@ -65,7 +65,7 @@ fixed target analyses report zero diagnostics for `vfstest.c`.
 Results will be recorded as the checks run; completion requires the full
 AGENTS.md matrix on both architectures and branch and merge CI.
 
-## Findings outside the reported diagnostics: scope decision required
+## Additional cleanup defects authorized for PR A
 
 The user's stop rule requires recording and asking before addressing
 correctness defects outside the targets. Source inspection identified:
@@ -84,12 +84,24 @@ correctness defects outside the targets. Source inspection identified:
    argument on failure. This is separate from the analyzer's reported
    uninitialized thread-pointer comparison.
 
-These are source-established error-path defects; deterministic injected
-runtime reproductions have not been run. Neither was fixed. A decision
-is requested on whether to include their proofs and separate repairs in
-PR A or retain them as deferred work. No PR has been opened or merged,
-the architecture baselines are not yet checked in, and the full validation
-matrix has not run. PR B has not started.
+The user explicitly added both defects to PR A on 2026-10-09, requiring
+deterministic proofs and separate fixes. Tests will inject a format I/O
+failure and directory/mount allocation failures after RAM-device creation,
+then check that only the test reference remains and the registry no longer
+contains the device. The NVMe test injects failure into thread allocation
+after buffer allocation and checks that the cleanup released that buffer.
+These seams and ownership observations are self-test/debug only. Each
+probe restores the original cleanup while retaining the injection and
+assertions; unrelated boot failures are rejected as evidence.
+
+Before either repair, the registered tests failed deterministically on both
+architectures. `out/cleanup-proof-old-x86/boot-test.log` (2026-10-09,
+QEMU_SMP=1) reported NVMe `allocated=1 hits=1 started=0 released=0` and
+cosmofs `released=0` at all three injected stages. The same assertions failed
+in `out/cleanup-proof-old-arm/boot-test.log`. Both boots ran 451 self-tests;
+the only failures were these two, and `net-harness` passed with 100/100
+guest-to-host rounds. The full harness therefore returned the expected
+failure due to these assertions, not an unrelated boot failure.
 
 ## Complete unchanged-main diagnostic inventory
 

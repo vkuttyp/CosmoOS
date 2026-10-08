@@ -319,6 +319,7 @@ bool selftest_pool(const char **reason);
 bool selftest_cosmofs_format(const char **reason);
 bool selftest_cosmofs_ops(const char **reason);
 bool selftest_cosmofs_crash(const char **reason);
+bool selftest_cosmofs_fixture_cleanup(const char **reason);
 bool selftest_cosmofs_holes(const char **reason);      /* milestone 7 (RAM devices): sparse files */
 bool selftest_cosmofs_csum(const char **reason);       /* data and directory checksums */
 bool selftest_cosmofs_metadata_csum_id(const char **reason);  /* the metadata header's checksum algorithm id */
@@ -454,6 +455,7 @@ bool selftest_blk_irq_budget(const char **reason);   /* a completion handler ref
 bool selftest_device_reset(const char **reason);       /* in-place device reset */
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
+bool selftest_nvme_worker_cleanup(const char **reason);
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
 bool selftest_nvme_admin_poll(const char **reason);   /* the admin command's no-vector path, forced, under lockdep */
 bool selftest_usb_enum(const char **reason);     /* the device on the USB bus: descriptors, parent, endpoints */

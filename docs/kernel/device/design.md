@@ -488,3 +488,12 @@ test (`test_virtq.c`) with a fake transport. Details in `testing.md`.
 - virtio-net in the networking phase, NVMe and AHCI as PCI drivers, USB.
 - Hot-plug: `device_unregister` plus a `release` that frees.
 - Legacy INTx once an AML interpreter or a static routing table exists.
+
+### NVMe self-test worker ownership
+
+The queue-locality test owns each worker buffer from allocation until its
+thread is joined, or until thread creation fails. A failed creation never
+transfers the entry argument to a worker. Cleanup must release buffers for
+failed starts as well as joined threads. A debug self-test arms FI_KMALLOC
+after the buffer allocation, checks one failed thread allocation, and
+observes the exact buffer release rather than unrelated heap traffic.
