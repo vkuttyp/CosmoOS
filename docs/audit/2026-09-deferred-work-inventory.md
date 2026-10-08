@@ -877,3 +877,16 @@ Prove each concern with a deterministic interleaving or fault before fixing.
 | virtio-net probe failure injection and active worker wait | The synthetic peer proves held completions at reset and tracks every outstanding RX/map/chain segment. Add actual probe-allocation/registration faults and a callback held on another CPU to prove waiting, beyond deterministic reset-time delivery. |
 | virtio-net receive before interface registration | `vnet_probe` sets DRIVER_OK/posts RX before filling the interface operations/name/MTU and calling `netif_register`. `rx_common` admits any non-GONE interface; the failed-registration path has no RX-worker purge/barrier. Inject a frame before registration plus registration failure and establish whether an escaped `rcvif` outlives the private object. This ordering is unchanged in Unit 1; no such interleaving was reproduced. |
 | ~~virtio-net TX ownership lookup cost~~ | **ADDRESSED during PR #336 review:** a private free list supplies ownership records; the queue cookie points directly to the record. Submission, completion and failed-publication rollback take constant time without a transport API or mbuf layout change. The synthetic peer checks exhaustion, reverse-order completion and reuse. No throughput improvement is claimed without matched-LOCKDEP benchmarks. |
+
+## 9. Analyzer investigation follow-ups (2026-10-09)
+
+See [the analyzer report](2026-10-09-analyzer-gate-report.md). These two
+source-established self-test cleanup defects were discovered outside the
+current diagnostic list. The user's scope stop rule requires a decision
+before their proof and repair; no injected runtime reproduction or fix
+has been made.
+
+| Finding | Evidence and work remaining |
+|---|---|
+| `cosmofstest.c:engine_mount` leaks a registered RAM device on setup failure | `ramblk_create` registers and returns a creator-owned device; subsequent CHECK returns bypass `ramblk_destroy`, and the caller's output pointer is not assigned until setup succeeds. Inject format/directory/mount failure and check device/heap counts. |
+| `devtest.c:selftest_nvme` leaks a worker buffer when thread creation fails | The buffer allocation precedes `thread_create_on`; cleanup skips `threads[c] == NULL`, retaining the buffer. Thread creation does not consume the entry argument on failure. Inject thread creation failure after a successful buffer allocation and check heap ownership. |
