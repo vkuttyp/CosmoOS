@@ -3439,3 +3439,35 @@ exceeds the ring size, plus a deterministic run in which the submitter
 outpaces the handler. Then bound the loop (a budget, the remainder
 deferred), if that is what it is. The branch's next run, on a
 documentation commit, passed every boot (run 37702904070).
+
+## A slow x86-64 guard boot: `net-bench`'s slow mode and `lockdep-graph-bench` over budget, 2026-10-08
+
+**Run 37746634319, PR #332's x86-64 job, "Boot test on a
+protection-capable CPU (debug)":** `boot-test: FAIL after 218.4s` on a
+commit that changes only `tools/bench-ab.py`, a host-side script the
+kernel never sees. The previous commit's run had passed every boot
+(run 37742504899). Three failures in one boot:
+
+- `[WATCHDOG] no progress for 8003 ms`, inside `lockdep-graph-bench`'s
+  densest case (2,560 nodes, insert). `kmain` was running on CPU 0,
+  ticking ("last tick 22 ms ago"), and the other CPUs were idle: a
+  computing thread, not a hang.
+- `lockdep-graph-bench took 13839 ms (budget 8000 ms)`.
+- `net-bench took 11790 ms (budget 8000 ms)`, in the slow mode the
+  `net-bench` row above describes. Steer 0 ran `tcp 1 flow 1 MiB/s, 2
+  flows 1 MiB/s total, udp 14035 sends/s (8059 of 10000 delivered)`;
+  steer 1 was normal (19 and 11 MiB/s).
+
+The whole boot was slow. Self-tests summed to 179.5 s, against 144.9 s
+for the same job's first boot and 137.8–148.5 s for every boot of the
+previous run. `cosmofs-replay` took 34.0 s against about 23 s. A slow
+stretch on the runner, then. The guard CPU model is not the cause: the
+previous run's guard boot was normal (`lockdep-graph-bench` 7,553 ms).
+
+**What it shows beyond the runner:** `lockdep-graph-bench` takes
+**7.35–7.55 s in every normal CI boot** of the previous run, 92–94 % of
+the generic 8 s budget, and reports progress only between phases.
+Neither ceiling allows a slow stretch. It is a benchmark that asserts
+no duration, as `net-nicbench` was before it got a budget of its own.
+Not changed here; named as a follow-up. The failed job was re-run.
+
