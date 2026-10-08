@@ -28,8 +28,8 @@ PKG_ANALYZE := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.analyzed,$(filter pk
 $(OUT)/pkgprog/%.analyzed: $(ROOT)/%.c
 	$(call log,ANALYZE,$<)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) $(USER_CFLAGS) -I$(ROOT)/pkg --analyze -Xanalyzer -analyzer-output=text $< -o /dev/null
-	$(Q)touch $@
+	$(Q)$(CC) $(USER_CFLAGS) -I$(ROOT)/pkg --analyze -Xanalyzer -analyzer-output=plist-multi-file $< -o $@.tmp
+	$(Q)mv $@.tmp $@
 
 # --- ports -> repository ---------------------------------------------------------
 
