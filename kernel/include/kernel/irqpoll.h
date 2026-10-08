@@ -23,7 +23,10 @@
  * The deferred remainder always runs, and promptly: the worker is pinned
  * to an online CPU, runnable from the moment it is queued, at the highest
  * priority (no thread can hold it off, as none could hold off the
- * handler), and it re-queues itself while `poll` keeps using its budget. Until the
+ * handler), and it re-queues itself while `poll` keeps using its budget.
+ * A backlog that outlasts IRQ_POLL_HOLD_NS continues at the default
+ * priority, time-sliced with the CPU's other threads, until it ends: a
+ * device refilled without pause cannot keep them off the CPU. Until the
  * workers are started (boot, before drivers load) a deferral is not
  * possible and the handler polls to the end, as before.
  *
@@ -52,6 +55,9 @@
 #ifndef IRQ_POLL_BUDGET   /* overridable for a probe: tools/irq-budget-probe.py --old */
 #define IRQ_POLL_BUDGET 32u
 #endif
+/* How long one backlog keeps its worker at the highest priority before it
+ * time-slices with its CPU's other threads at the default: one slice. */
+#define IRQ_POLL_HOLD_NS (10ull * 1000 * 1000)
 
 struct irq_poll;
 /* Consume at most `budget` completions; return how many were consumed.

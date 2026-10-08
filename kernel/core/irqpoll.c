@@ -17,6 +17,7 @@
 #include <kernel/printf.h>
 #include <kernel/sched.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/wait.h>
 
 struct irq_poll_worker {
@@ -25,6 +26,8 @@ struct irq_poll_worker {
     struct waitqueue wq;
     struct thread *thread;
     bool ready;               /* published with release once the thread exists */
+    bool lowered;             /* the worker's own: at SCHED_PRIO_DEFAULT for the rest of a backlog */
+    uint64_t busy_since;      /* the worker's own: when its current backlog began (0 = idle) */
     char name[16];
 };
 
@@ -243,8 +246,22 @@ static void worker_main(void *arg)
 {
     struct irq_poll_worker *w = arg;
     unsigned cpu = (unsigned)(w - g_workers);
+    struct thread *self = thread_current();
     for (;;) {
+        /* Idle again: the next deferral starts at the highest priority. */
+        arch_irq_state_t ls = spin_lock_irqsave(&w->lock);
+        bool idle = list_empty(&w->list);
+        spin_unlock_irqrestore(&w->lock, ls);
+        if (idle) {
+            if (w->lowered) {
+                sched_reprioritize(self, SCHED_PRIO_HIGHEST);
+                w->lowered = false;
+            }
+            w->busy_since = 0;
+        }
         wait_event(&w->wq, !list_empty(&w->list));
+        if (w->busy_since == 0)
+            w->busy_since = clock_now_ns();
         arch_irq_state_t s = spin_lock_irqsave(&w->lock);
         struct list_node *node = list_empty(&w->list) ? NULL : list_pop_front(&w->list);
         struct irq_poll *ip = NULL;
@@ -282,10 +299,19 @@ static void worker_main(void *arg)
         if (idle_wake)
             waitqueue_wake_all(&ip->idle_wq);
         /* A batch at a time, with the tick, interrupts and anything else at
-         * this priority between two. A device that never runs dry keeps this
-         * CPU's threads waiting as long as it lasts -- as the unbounded
-         * handler did, but with the CPU still taking its tick and its
-         * interrupts, and the soft-lockup detector still watching it. */
+         * this priority between two. At the highest priority for
+         * IRQ_POLL_HOLD_NS of one backlog, then at the default until the
+         * backlog ends: a device that never runs dry would otherwise keep
+         * this CPU's threads off it for as long as it lasts -- among them,
+         * in virtio-remove-inflight, the test thread that was to stop the
+         * submitter refilling it (a livelock: 36 s on two CPUs, the boot's
+         * whole budget under chaos). Past the hold it time-slices with
+         * the CPU's other threads, as ksoftirqd does in Linux; the
+         * remainder still always runs (it is never off a run queue). */
+        if (!w->lowered && clock_now_ns() - w->busy_since > IRQ_POLL_HOLD_NS) {
+            sched_reprioritize(self, SCHED_PRIO_DEFAULT);
+            w->lowered = true;
+        }
         sched_yield();
     }
 }
