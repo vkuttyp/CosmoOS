@@ -2760,7 +2760,6 @@ static int load_root(struct cfs *fs, struct vnode **root)
         if (!fs->have_key)
             kwarn("cosmofs: encrypted and locked; metadata only until a key arrives");
     }
-    rc = 0;
     /* From the blocks that exist, not the linear span: that is rounded
      * up to whole bitmap chunks per member and is mostly padding on a
      * small device. */
