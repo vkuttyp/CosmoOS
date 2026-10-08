@@ -147,6 +147,22 @@ jobs:
           path: out/**/boot-test*.log
           if-no-files-found: ignore
 
+      # A failed boot's serial log names program counters; reading them
+      # needs the kernel and module ELFs that boot ran, which the step
+      # below uploads only on success. The x86-64 sighting of 2026-10-08
+      # (docs/testing/flakes.md, "held for 184 s") could not be
+      # symbolised for want of these. Every debug build the boots use:
+      # the plain one, the chaos migrator's and the harness-break one.
+      - name: Upload debug kernel and modules (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: debug-elfs-${{ matrix.arch }}
+          path: |
+            out/${{ matrix.arch }}-debug*/kernel/kernel.elf
+            out/${{ matrix.arch }}-debug*/modules/*.ko
+          if-no-files-found: ignore
+
       - name: Upload binaries
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
