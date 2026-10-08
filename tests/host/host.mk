@@ -197,6 +197,8 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_usertest_sections.py
 	@echo "== $(ROOT)/tests/boot/test_selftest_budgets.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_selftest_budgets.py
+	@echo "== $(ROOT)/tests/boot/test_module_symbols.py"
+	$(Q)COSMO_CC=$(CC) COSMO_SYMBOLIZER=$(LLVM_PREFIX)llvm-symbolizer $(PYTHON) $(ROOT)/tests/boot/test_module_symbols.py
 
 # Keep TSan in a distinct binary: it cannot be combined with ASan.
 $(HOST_OUT)/test_lockdep_threads: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h

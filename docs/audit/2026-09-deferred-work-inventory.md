@@ -74,6 +74,8 @@ paragraph (same pull request), and the README now points here.
 | `net-bench` took 71 s once in a hundred boots (x86-64, throughput normal, time lost between rounds; a retransmit backoff after a receive-queue drop is the likeliest mechanism) | README.md:1804; `docs/testing/flakes.md` history |
 | the userland test programs' own timing assumptions (`thrtest`, `cwdtest`) | `docs/audit/next-subsystem-suite-waits.md`, deferrals |
 | ~~no named pipes and no unix sockets ("both things this kernel does not have")~~ **BOTH BUILT**: the unix socket by the unix-sockets unit (`docs/audit/next-subsystem-unix-sockets.md`, `mknod` and the `VNODE_SOCK` node), the named pipe by the named-pipes unit (`docs/audit/next-subsystem-named-pipes.md`: `VNODE_FIFO` through the same `mknod`, the pipe's ring split from its ends, POSIX's open rules, files that can say whether they would block) | README.md:650 |
+| **virtio-net's remove drains its queues while `vnet_rx_done` may still run** (found by reading, 2026-10-08, not yet reproduced). `vnet_remove` resets the device and pops both queues *before* `virtq_free` releases the interrupt and disables the irq_poll. A handler or irqpoll worker pass in that window still runs `vnet_rx_done`: it decrements `rx_posted` unlocked, hands a frame to an unregistered interface, and re-posts receive buffers to the reset device, which the free never returns. The drain frees without `dma_unmap`. virtio-blk was reordered against the same shape in #334. A test needs a parked receive completion across the remove | `docs/audit/2026-10-08-irqpoll-lockdep-report.md` §6 |
+| fault-injection points (`FI_BLK_COMPLETE`, `FI_NET_RX_DUP`, `FI_KMALLOC`) skip interrupt context, so since #334 they can fire in a poll the irqpoll worker runs and never in the same poll run by the handler: which half of a completion stream they see depends on the budget | same, §6 |
 
 ### 1.4 Explicitly not done, by decision or measurement
 
@@ -299,7 +301,9 @@ registers, and CPUID leaves the filter in `vcpu.c` passes through
 Kernel debugger, GDB remote debugging, crash dumps, structured tracing
 with per-CPU buffers, performance counters, `ktrace`/`kstat`/
 `cosmo-top`/`cosmo-prof`, eBPF-like tracing: none started. Panic
-symbolisation is still address-only. The many `*_stats` structures have
+symbolisation is still address-only in the kernel. The boot harness
+resolves kernel and module frames on a failed run; module text from the
+loader's `module: base` line (2026-10-08, irqpoll-lockdep report). The many `*_stats` structures have
 no transport beyond `sysctl` and the self-tests that print them.
 
 ### 2.9 Security (constitution §44; Prompt #2 §54)
