@@ -10,6 +10,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BASELINE = "55b1825ebc28c7f5cdb948477019808dc8ed5517"
 
 
 def main():
@@ -24,8 +25,24 @@ def main():
     make = "gmake" if sys.platform == "darwin" else "make"
     with tempfile.TemporaryDirectory(prefix="tree-", dir=out_dir) as temp:
         tree = Path(temp) / "tree"
-        subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), args.tree], check=True)
+        revision = BASELINE if args.old else args.tree
+        subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), revision], check=True)
         try:
+            if args.old:
+                main_c = tree / "kernel/core/main.c"
+                main_c.write_text(main_c.read_text() +
+                                  "\nint analyze_gate_probe(void) { int *p = 0; return *p; }\n")
+                output = tree / "out/analyze-gate-probe-old"
+                target_report = output / "kernel/core/main.analyzed"
+                run = subprocess.run([
+                    make, "-C", str(tree), "ARCH=" + args.arch,
+                    "OUT=" + str(output), str(target_report),
+                ], text=True, capture_output=True)
+                observed = "Dereference of null pointer" in run.stdout + run.stderr
+                ok = run.returncode == 0 and observed and target_report.exists()
+                print((run.stdout + run.stderr).strip())
+                print(f"PROBE: {'PASS' if ok else 'FAIL'}: old {args.arch} analyzer emitted the diagnostic but returned success")
+                return 0 if ok else 1
             report = tree / "out/analyze-gate-probe" / "diagnostic.analyzed"
             report.parent.mkdir(parents=True, exist_ok=True)
             source = report.with_suffix(".c")
@@ -42,12 +59,6 @@ def main():
             if len(findings) != 1 or findings[0]["check_name"] != "core.NullDereference":
                 print("PROBE: FAIL: expected one core.NullDereference diagnostic")
                 return 1
-            if args.old:
-                # Before the gate, analyzer reports were emitted as text and
-                # discarded; no diagnostic comparison ran. Confirm the
-                # synthetic report contains the deliberate finding.
-                print(f"PROBE: OLD BEHAVIOR: {args.arch} clang reports the diagnostic; the prior target discarded it")
-                return 0
             cmd = [make, "-C", str(tree), "ARCH=" + args.arch,
                    "OUT=" + str(report.parent), "analysis-gate",
                    "ANALYSIS_REPORTS=" + str(report)]
