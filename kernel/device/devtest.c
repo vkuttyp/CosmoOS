@@ -513,7 +513,7 @@ static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started
 {
     bool ok = true;
     struct nvme_worker workers[CONFIG_MAX_CPUS];
-    struct thread *threads[CONFIG_MAX_CPUS];
+    struct thread *threads[CONFIG_MAX_CPUS] = {NULL};
     unsigned started = 0;
     for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
         if (!cpu_online(c))
