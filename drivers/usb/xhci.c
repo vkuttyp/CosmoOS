@@ -18,6 +18,7 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
+#include <kernel/irqpoll.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -88,6 +89,7 @@ struct xhci_erst_entry {
 
 struct xhci {
     struct pci_device *pdev;
+    struct irq_poll poll;          /* the event ring: the handler's budget, the rest on the irqpoll worker */
     vaddr_t bar, op, rt, db;
     unsigned csz;                  /* context size: 32 or 64 */
     unsigned max_slots, nr_ports, hw_page;
@@ -663,6 +665,7 @@ static int xhci_gone(struct xhci *x)
 {
     if (x->vector >= 0)
         synchronize_irq((unsigned)x->vector);
+    irq_poll_synchronize(&x->poll);   /* the events may be the irqpoll worker's: its pass too */
     return -ENOENT;
 }
 
@@ -992,9 +995,26 @@ static void xhci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
         kerror("xhci%u: host %s error (USBSTS 0x%08x); the controller is dead", x->hcd.index,
                (sts & USBSTS_HSE) ? "system" : "controller", sts);
     }
+    irq_poll_sched(&x->poll);   /* the events: a budget here, the rest on this CPU's irqpoll worker */
+}
 
+/*
+ * At most `budget` events; how many. A completion callback below may
+ * submit the next transfer, and a device model that finishes transfers on
+ * the doorbell write posts its events while this runs -- a chain, for a
+ * storage driver whose every completion starts the next exchange -- so
+ * draining until caught up was not bounded. Stopped at the budget, the
+ * ring's EHB stays set (ERDP is written below without clearing it): the
+ * controller raises nothing more until the irqpoll worker, which takes
+ * the rest, catches up and clears it.
+ */
+static unsigned xhci_events(struct irq_poll *ip, unsigned budget)
+{
+    struct xhci *x = container_of(ip, struct xhci, poll);
+    vaddr_t ir = x->rt + XHCI_IR0;
     bool wake_ports = false;
-    for (;;) {
+    unsigned n = 0;
+    for (; n < budget; n++) {
         arch_irq_state_t s = spin_lock_irqsave(&x->lock);
         volatile struct xhci_trb *ev = &x->evt[x->evt_deq];
         uint32_t control = ev->control;
@@ -1067,10 +1087,11 @@ static void xhci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
         }
         spin_unlock_irqrestore(&x->lock, s);
         if (done != NULL)
-            usb_request_complete(done, status, done->actual);   /* interrupt context; may submit */
+            usb_request_complete(done, status, done->actual);   /* interrupt or irqpoll worker; may submit */
     }
     if (wake_ports)
         waitqueue_wake_all(&x->wq);
+    return n;
 }
 
 /* --- root-hub ports and the worker ------------------------------------------------ */
@@ -1371,6 +1392,7 @@ static int xhci_probe(struct pci_device *pdev, const struct pci_id *id)
     wr32(ir + XHCI_IMOD, 0);   /* no moderation: latency is what the benchmark measures first */
     wr32(ir + XHCI_IMAN, IMAN_IE | IMAN_IP);
 
+    irq_poll_init(&x->poll, xhci_events, "xhci");
     int granted = pci_msix_enable(pdev, 1);
     if (granted >= 1) {
         x->vector = pci_msix_request(pdev, 0, xhci_irq, x, "xhci", IRQ_CPU_ANY);
@@ -1424,6 +1446,7 @@ fail_irq:
     else
         pci_msi_disable(pdev);
     synchronize_irq((unsigned)x->vector);
+    irq_poll_disable(&x->poll);
 fail_tables:
     xhci_free_tables(x);
 fail_unmap:
@@ -1459,6 +1482,7 @@ static void xhci_remove(struct pci_device *pdev)
         pci_msi_disable(pdev);
     if (vector >= 0)
         synchronize_irq((unsigned)vector);
+    irq_poll_disable(&x->poll);   /* and the events it deferred, before the rings go */
     xhci_free_tables(x);
     device_unmap_mmio(x->bar);
     pdev->dev.drvdata = NULL;
