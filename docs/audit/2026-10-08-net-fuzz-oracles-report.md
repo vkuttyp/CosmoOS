@@ -60,6 +60,13 @@ The target keeps a model of what it configured. After every record:
 - every DNAT translation belongs to a forward the model holds;
 - nothing is a released guest's.
 
+Every verdict is accounted for. The hook tallies the rules that decide,
+by chain and verdict, and the firewall's per-chain by-rule counters must
+agree with the tally after every record. Where a frame's template names
+the chain and owner, a default decision must be the model's default. A
+host send returns `-EPERM` exactly when the OUTPUT chain dropped it. (All
+three were added in review.)
+
 As a frame is decided, every rule that decides it must be installed, for
 that owner, at that moment. This uses fw.c's `FW_HOST_TEST` hook, which
 reports each deciding rule, so a removed rule never matches again. A
@@ -87,6 +94,9 @@ clone, at 20 000 mutations or on the seeds:
 | deciding rule installed | the forward chain reads one past the list's end | iteration 1 |
 | DNAT has a forward | `nat_pf_del` does not reap | iteration 1 |
 | idempotent kill | the guard taken out | seed 16: ASan heap-use-after-free |
+| verdict tally | the OUTPUT chain turns a rule's DROP into ACCEPT | at once |
+| send result | the send path returns 0 for a dropped datagram | at once |
+| fast path, policy | `fw_policy_set` without `out_fast_update` | at once |
 
 ## 2. Findings
 
