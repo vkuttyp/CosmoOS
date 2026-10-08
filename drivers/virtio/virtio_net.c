@@ -53,6 +53,10 @@ struct vnet {
     struct netif nif;
     spinlock_t lock;
     unsigned rx_posted;
+    bool stopping;
+    /* Queue cookies disappear in virtq_free. Keep buffer ownership here
+     * until a completion or the stopped-device cleanup claims it. */
+    struct mbuf *rx_buf[VNET_RX_BUFS], *tx_buf[VIRTQ_MAX_SIZE];
     bool tx_csum, rx_csum;
     uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
 };
@@ -155,9 +159,26 @@ static void vnet_unmap(struct vnet *v, dma_addr_t dma, unsigned len, enum dma_di
     dma_unmap(&v->vdev->dev, dma, len, dir);
 }
 
+static unsigned vnet_buffer_slot(struct mbuf **buffers, unsigned count, struct mbuf *m)
+{
+    for (unsigned i = 0; i < count; i++)
+        if (buffers[i] == m)
+            return i;
+    return count;
+}
+
+/* Caller holds v->lock. A cookie has exactly one owner until claimed. */
+static void vnet_buffer_take(struct mbuf **buffers, unsigned count, struct mbuf *m)
+{
+    unsigned slot = vnet_buffer_slot(buffers, count, m);
+    KASSERT(slot < count);
+    buffers[slot] = NULL;
+}
+
 static void vnet_post_rx(struct vnet *v)
 {
-    while (v->rx_posted < VNET_RX_BUFS && virtq_free_count(v->rx) > 0) {
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    while (!v->stopping && v->rx_posted < VNET_RX_BUFS && virtq_free_count(v->rx) > 0) {
         struct mbuf *m = m_getcl();
         if (m == NULL)
             break;
@@ -169,15 +190,21 @@ static void vnet_post_rx(struct vnet *v)
         }
         m->pkt.dma = dma;
         vnet_note_map(v, m, MCLBYTES, DMA_FROM_DEVICE);
+        unsigned slot = vnet_buffer_slot(v->rx_buf, ARRAY_SIZE(v->rx_buf), NULL);
+        KASSERT(slot < ARRAY_SIZE(v->rx_buf));
+        v->rx_buf[slot] = m;
         struct virtq_sg sg = { .addr = dma, .len = MCLBYTES };
         if (virtq_add(v->rx, &sg, 0, 1, m) != 0) {
+            v->rx_buf[slot] = NULL;
             vnet_unmap(v, dma, MCLBYTES, DMA_FROM_DEVICE);
             vnet_free_mbuf(v, m);
             break;
         }
         v->rx_posted++;
     }
-    virtq_kick(v->rx);
+    if (!v->stopping)
+        virtq_kick(v->rx);
+    spin_unlock_irqrestore(&v->lock, s);
 }
 
 /* Bounded twice: by the budget, and by the buffers posted, which are
@@ -191,7 +218,11 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
     struct mbuf *m;
     unsigned n = 0;
     for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
+        arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+        vnet_buffer_take(v->rx_buf, ARRAY_SIZE(v->rx_buf), m);
+        KASSERT(v->rx_posted > 0);
         v->rx_posted--;
+        spin_unlock_irqrestore(&v->lock, s);
         vnet_unmap(v, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
         m->pkt.dma = 0;
         if (len < VNET_HDR_LEN + 14 || len > MCLBYTES) {
@@ -249,6 +280,9 @@ static unsigned vnet_tx_done(struct virtqueue *vq, unsigned budget)
     struct mbuf *m;
     unsigned n = 0;
     for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
+        arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+        vnet_buffer_take(v->tx_buf, ARRAY_SIZE(v->tx_buf), m);
+        spin_unlock_irqrestore(&v->lock, s);
         tx_unmap(v, m);
         vnet_free_mbuf(v, m);
     }
@@ -300,15 +334,66 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
         sg[n].len = b->len;
         n++;
     }
-    int rc = virtq_add(v->tx, sg, n, 0, m);
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    unsigned slot = vnet_buffer_slot(v->tx_buf, ARRAY_SIZE(v->tx_buf), NULL);
+    int rc = -ENOBUFS;
+    if (!v->stopping && slot < ARRAY_SIZE(v->tx_buf)) {
+        v->tx_buf[slot] = m;
+        rc = virtq_add(v->tx, sg, n, 0, m);
+        if (rc)
+            v->tx_buf[slot] = NULL;
+        else
+            virtq_kick(v->tx);
+    }
+    spin_unlock_irqrestore(&v->lock, s);
     if (rc) {
         v->tx_drops++;
         tx_unmap(v, m);
         vnet_free_mbuf(v, m);
         return -ENOBUFS;
     }
-    virtq_kick(v->tx);
     return 0;
+}
+
+/* No submitters may remain: remove unregisters the interface first;
+ * probe failure has never published it. Poll disable waits for callbacks
+ * and prevents RX refill at the reset acknowledgement. virtq_free then
+ * synchronizes the transport vectors before private buffer reclamation. */
+static void vnet_cleanup(struct vnet *v)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    v->stopping = true;
+    spin_unlock_irqrestore(&v->lock, s);
+    if (v->rx)
+        irq_poll_disable(&v->rx->poll);
+    if (v->tx)
+        irq_poll_disable(&v->tx->poll);
+    virtio_device_reset(v->vdev);
+    if (v->rx)
+        virtq_free(v->rx);
+    if (v->tx)
+        virtq_free(v->tx);
+    v->rx = v->tx = NULL;
+    for (unsigned i = 0; i < ARRAY_SIZE(v->rx_buf); i++) {
+        struct mbuf *m = v->rx_buf[i];
+        if (m == NULL)
+            continue;
+        v->rx_buf[i] = NULL;
+        vnet_unmap(v, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
+        m->pkt.dma = 0;
+        KASSERT(v->rx_posted > 0);
+        v->rx_posted--;
+        vnet_free_mbuf(v, m);
+    }
+    KASSERT(v->rx_posted == 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(v->tx_buf); i++) {
+        struct mbuf *m = v->tx_buf[i];
+        if (m == NULL)
+            continue;
+        v->tx_buf[i] = NULL;
+        tx_unmap(v, m);
+        vnet_free_mbuf(v, m);
+    }
 }
 
 static void vnet_release(struct netif *nif);
@@ -371,11 +456,7 @@ static int vnet_probe(struct virtio_device *vdev)
     return 0;
 
 fail:
-    virtio_device_reset(vdev);
-    if (v->rx)
-        virtq_free(v->rx);
-    if (v->tx)
-        virtq_free(v->tx);
+    vnet_cleanup(v);
     kfree(v);
     vdev->priv = NULL;
     return rc;
@@ -391,18 +472,8 @@ static void vnet_release(struct netif *nif)
 static void vnet_remove(struct virtio_device *vdev)
 {
     struct vnet *v = vdev->priv;
-    netif_unregister(&v->nif);   /* no transmit or receive touches the queues after this */
-    virtio_device_reset(vdev);
-    /* Everything the device held is dropped; free the posted buffers. */
-    struct mbuf *m;
-    uint32_t len;
-    while ((m = virtq_pop(v->rx, &len)) != NULL)
-        vnet_free_mbuf(v, m);
-    while ((m = virtq_pop(v->tx, &len)) != NULL)
-        vnet_free_mbuf(v, m);
-    virtq_free(v->rx);
-    virtq_free(v->tx);
-    v->rx = v->tx = NULL;
+    netif_unregister(&v->nif);   /* reject and drain stack submitters; callbacks still exist */
+    vnet_cleanup(v);
     vdev->priv = NULL;
     netif_put(&v->nif);          /* the creator's reference; vnet_release frees v when holders are gone */
 }
