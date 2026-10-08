@@ -15,6 +15,7 @@
 
 #include <kernel/device.h>
 #include <kernel/dma.h>
+#include <kernel/irqpoll.h>
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
 
@@ -114,6 +115,9 @@ struct virtq_used {
 } __packed;
 #define VIRTQ_USED_F_NO_NOTIFY 1u
 
+struct virtqueue;
+typedef unsigned (*virtq_callback_fn)(struct virtqueue *vq, unsigned budget);
+
 struct virtqueue {
     struct virtio_device *vdev;
     unsigned index;
@@ -136,7 +140,12 @@ struct virtqueue {
     uint16_t num_free;
     uint16_t last_used;                         /* next used->ring slot to consume */
     void **cookies;                             /* per head descriptor */
-    void (*callback)(struct virtqueue *vq);     /* interrupt context; NULL = polled */
+    /* Consume at most `budget` completions, return how many: called from
+     * the queue's interrupt and, for what one call leaves, from this CPU's
+     * irqpoll worker -- never on two CPUs at once (kernel/include/kernel/
+     * irqpoll.h). NULL = polled. */
+    virtq_callback_fn callback;
+    struct irq_poll poll;
     spinlock_t lock;
     int vector;                                 /* MSI-X vector or -1 */
     unsigned msix_index;                        /* transport use */
@@ -181,12 +190,15 @@ uint64_t virtio_read_config64(struct virtio_device *vdev, unsigned off);
 
 /* Allocate and enable queue `index` with at most `max` entries (0 = the
  * device's maximum, capped at VIRTQ_MAX_SIZE). Sleeps. */
-int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback,
                 struct virtqueue **out);
 /* The same with the queue's interrupt routed to `cpu` (virtq_alloc: CPU 0);
  * a multi-queue driver binds each queue to the CPU that consumes it. */
-int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback,
                    unsigned cpu, struct virtqueue **out);
+/* Release the queue: its interrupt (masked and synchronized by the
+ * transport), then its deferred completion work (irq_poll_disable), then
+ * the memory. On return no callback is running or will run. Sleeps. */
 void virtq_free(struct virtqueue *vq);
 
 /* Add a chain: `out` device-readable segments then `in` device-writable

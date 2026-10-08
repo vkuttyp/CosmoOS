@@ -274,15 +274,17 @@ static void vblk_note_pops(struct vblk *vb, struct virtqueue *vq, unsigned poppe
     }
 }
 
-static void vblk_done(struct virtqueue *vq)
+/* At most `budget` completions, in the device's order (virtq_callback_fn):
+ * the rest is the irqpoll worker's, never a second consumer's. */
+static unsigned vblk_done(struct virtqueue *vq, unsigned budget)
 {
     struct vblk *vb = vq->vdev->priv;
     uint32_t len;
     struct bio *bio;
     if (vb == NULL)
-        return;
+        return 0;
     unsigned popped = 0;
-    for (;; popped++) {
+    for (; popped < budget; popped++) {
 #if CONFIG_DEBUG
         /*
          * Held: the finished requests stay in flight for the remove to
@@ -330,6 +332,7 @@ static void vblk_done(struct virtqueue *vq)
         bio_complete(bio, status);
     }
     vblk_note_pops(vb, vq, popped);
+    return popped;
 }
 
 /* The device stopped answering: reset it (it drops every request) and

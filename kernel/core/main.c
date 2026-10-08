@@ -19,6 +19,7 @@
 #include <kernel/iommu.h>
 #include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
+#include <kernel/irqpoll.h>
 #include <kernel/ipi.h>
 #include <kernel/irq.h>
 #include <kernel/kernel.h>
@@ -202,6 +203,7 @@ void kernel_main(const struct cosmoboot_info *info)
     smp_init();
     clock_measure_offsets();   /* every AP is up: the counters can be compared */
     net_start_workers();   /* one receive queue and worker per online CPU (network unit 11) */
+    irq_poll_start_workers();   /* "irqpoll/N": where a completion handler's remainder goes (kernel/include/kernel/irqpoll.h) */
     lockup_init();         /* every CPU is up and ticking: the lockup detectors may watch (kernel/core/lockup.c) */
 
     /* Boot-time kernel modules from the archive, before the self-tests

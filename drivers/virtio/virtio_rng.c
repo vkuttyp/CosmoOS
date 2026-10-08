@@ -37,11 +37,12 @@ static void vrng_post(struct vrng *r)
     }
 }
 
-static void vrng_done(struct virtqueue *vq)
+static unsigned vrng_done(struct virtqueue *vq, unsigned budget)
 {
     struct vrng *r = vq->vdev->priv;
     uint32_t len;
-    while (virtq_pop(vq, &len) != NULL) {
+    unsigned n = 0;
+    for (; n < budget && virtq_pop(vq, &len) != NULL; n++) {
         r->posted = false;
         if (len > VRNG_BUF)
             len = VRNG_BUF;
@@ -52,6 +53,7 @@ static void vrng_done(struct virtqueue *vq)
         if (r->collected < VRNG_BUDGET)
             vrng_post(r);
     }
+    return n;
 }
 
 static int vrng_probe(struct virtio_device *vdev)

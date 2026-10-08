@@ -52,13 +52,19 @@ static void vq_release(struct virtqueue *vq)
     kfree(vq);
 }
 
-int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+static unsigned virtq_poll(struct irq_poll *ip, unsigned budget)
+{
+    struct virtqueue *vq = container_of(ip, struct virtqueue, poll);
+    return vq->callback(vq, budget);
+}
+
+int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback,
                 struct virtqueue **out)
 {
     return virtq_alloc_on(vdev, index, max, callback, 0, out);
 }
 
-int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback,
                    unsigned cpu, struct virtqueue **out)
 {
     if (index >= VIRTIO_MAX_QUEUES || vdev->vq[index] != NULL)
@@ -107,6 +113,7 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, voi
     vq->avail_dma = vq->ring_dma + avail_off;
     vq->used_dma = vq->ring_dma + used_off;
     vq->callback = callback;
+    irq_poll_init(&vq->poll, virtq_poll, "virtq");
     vq->vector = -1;
     vq->cpu = cpu;
     spinlock_init(&vq->lock, "virtq");
@@ -137,7 +144,8 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, voi
 void virtq_free(struct virtqueue *vq)
 {
     struct virtio_device *vdev = vq->vdev;
-    vdev->tr->teardown_queue(vdev, vq);
+    vdev->tr->teardown_queue(vdev, vq);   /* the interrupt: masked, released, synchronize_irq'd */
+    irq_poll_disable(&vq->poll);          /* and what it deferred: nothing runs or is queued after this */
     vdev->vq[vq->index] = NULL;
     dma_free(&vdev->dev, vq->ring_bytes, vq->ring_mem, vq->ring_dma);
     vq_release(vq);
@@ -215,8 +223,11 @@ static void reclaim_chain(struct virtqueue *vq, uint16_t head)
 void *virtq_pop(struct virtqueue *vq, uint32_t *len)
 {
     arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
-    for (;;) {
-        if (vq->last_used == read_le16(&vq->used->idx)) {
+    for (unsigned skipped = 0;; skipped++) {
+        /* A device that keeps posting bad entries is skipped a ring's
+         * worth per call, not for as long as it posts them: NULL here
+         * reads as "nothing yet", and the next interrupt goes on. */
+        if (vq->last_used == read_le16(&vq->used->idx) || skipped >= vq->size) {
             spin_unlock_irqrestore(&vq->lock, s);
             return NULL;
         }
@@ -288,7 +299,7 @@ void virtq_interrupt(struct virtqueue *vq)
 {
     vq->interrupts++;
     if (vq->callback)
-        vq->callback(vq);
+        irq_poll_sched(&vq->poll);   /* a budget here, the rest on this CPU's irqpoll worker */
 }
 
 EXPORT_SYMBOL(virtq_alloc);
