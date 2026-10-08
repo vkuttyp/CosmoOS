@@ -33,7 +33,7 @@ Read the governing [prompts](prompts/) before acting. Follow the
 
 ## Validation matrix
 
-The [device-lifecycle task](prompts/promt-oct-8.md#validation-matrix-both-architectures-unless-stated)
+The [device-lifecycle matrix](docs/audit/2026-10-08-vnet-remove-report.md#validation)
 requires, on x86-64 and AArch64 (`ARCH=aarch64`):
 
 - `make host-test`, `make fuzz`, `make analyze`.

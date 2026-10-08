@@ -75,7 +75,10 @@ reset stops device DMA; queue teardown synchronizes the interrupt and
 disables its deferred poll before outstanding records are reclaimed.
 Every accepted buffer has a driver-owned record independent of used-ring
 entries, every mapping is unmapped exactly once before its buffer is freed,
-and posted receive accounting ends at zero. Probe failure and reset obey
+and posted receive accounting ends at zero. Probe failure and queue rebuilding obey
 the same rule for partially initialized resources. `virtq_free` frees ring
-bookkeeping and never owns the cookies' storage. Unit 1's reproduction and
+bookkeeping and never owns the cookies' storage. Live timeout recovery
+retains queue/record storage, stops device DMA, and serializes completion
+and recovery claims under the same lock; it must exclude new submission
+publication during its drain. Unit 1's reproduction and
 validation are recorded in `docs/audit/2026-10-08-vnet-remove-report.md`.

@@ -202,6 +202,15 @@ configuration space) and marks it up; remove takes it down,
 unregisters, resets the device and frees every posted mbuf. Design of
 the stack side: `docs/kernel-services/network/design.md`.
 
+The private RX table has 32 entries and the TX table has `VIRTQ_MAX_SIZE`
+entries (256): each submitted chain needs at least one descriptor, so
+this bounds every possible outstanding cookie. Submission publishes the
+table entry before `virtq_add`; completion pops the cookie, then claims
+its table entry under the driver's lock. Cleanup stops polls before reset,
+frees the queues, and reclaims entries whether or not the device put them
+in the used ring. RX mappings use `MCLBYTES`; TX mappings use each
+segment's length. Interface unregister alone does not stop these callbacks.
+
 ## Ownership and lifetime
 
 ### Removal, reset and partial probe cleanup
@@ -222,6 +231,12 @@ must reach zero after cleanup. Partial probe failures follow the same
 order for every queue and buffer that was successfully initialized. See
 invariant V11 and the device-lifecycle Unit 1 report.
 
+Live timeout recovery that retains its queues and record tables may
+claim records under the completion lock after stopping DMA and excluding
+new publication. Queue/table reclamation still requires interrupt and
+poll synchronization. The audit distinguishes that locked claim from
+the teardown walk that frees ownership storage.
+
 The transport owns `struct vpci` (with the embedded `virtio_device`) from
 PCI probe to PCI remove. A device driver owns its `priv`, its queues
 (freed in `remove`) and its DMA pools. Virtqueue ring memory is one
@@ -237,6 +252,13 @@ virtio_blk's slot lock is a leaf. The console sink holds its own lock
 while polling with interrupts disabled, which is why the spin is
 bounded. Probe/remove run under the device model lock and inside a
 module `init`/`shutdown`, so they must not load or unload modules.
+
+Virtio-net's lock protects buffer tables, RX posted count and the stopping
+flag. Posting nests driver → queue/transport locks. Completion releases
+the queue lock in `virtq_pop` before taking the driver lock; cleanup
+releases the driver lock before waiting in `irq_poll_disable`. After
+poll/vector synchronization and submitter exclusion, cleanup is the only
+remaining owner and may drain the tables without the lock.
 
 ## Memory
 

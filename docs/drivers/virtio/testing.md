@@ -12,6 +12,7 @@
 | Entropy feed and budget | `random` self-test: `random_source_bytes() > 0` (4104 bytes reach the pool on a normal boot: 64 × 65 completions) |
 | Console sink registration | `virtio-console` self-test and the boot marker `virtio-console: virtioN: registered as a console sink` |
 | Network device: receive posting, transmit chains, header handling | Phase 8 `net-arp` (ARP through `eth0`) and `net-harness` (TCP and UDP echo with the host over QEMU user-mode networking); boot marker `virtio-net: virtioN is eth0` |
+| Network removal: completed and outstanding buffer ownership, map balance, RX accounting, reset-time callbacks | `vnet-remove-pending`, `vnet-remove-late`: debug synthetic transport over real queues, DMA and irq_poll; `tools/vnet-remove-probe.py --old --arch=<arch>` restores main's removal body in a throwaway worktree |
 | Module dependency handling | boot: the four drivers declare `deps = "virtio"` and load after it |
 | Split-ring logic against a hostile device | `tests/host/test_virtq.c` (`make host-test`, ASan/UBSan): the real `virtqueue.c` over a fake transport; the test acts as the peer and writes descriptor links that self-loop, form a two-element loop, point out of range or at a free descriptor; used elements with an id out of range, never posted, not a head, completed twice; lengths beyond the buffers; empty, oversized, full-table (boundary descriptor) and normal multi-descriptor chains; 500 rounds of out-of-order completions |
 
@@ -52,6 +53,8 @@ To try a different device set, append to `QEMU_EXTRA`, for example
   `virtio-remove-inflight` removes a live device with its slot table
   full and re-probes it (`docs/kernel/device/testing.md`); what remains
   is the same for the *module* rather than the device.
-- `virtio_net` has no driver; indirect descriptors and event index are
-  never negotiated and so never tested.
+- Network removal tests cover held RX/TX completions and a two-segment TX
+  chain, including RX buffers with no used entry. They do not inject
+  probe failure, park an active worker on another CPU, or unload the module.
+- Indirect descriptors and event index are never negotiated and so never tested.
 - MSI affinity: every vector targets CPU 0.
