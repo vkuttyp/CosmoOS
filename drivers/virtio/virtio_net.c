@@ -18,6 +18,7 @@
 #include <kernel/log.h>
 #include <kernel/mbuf.h>
 #include <kernel/module.h>
+#include <kernel/panic.h>
 #include <kernel/net/cksum.h>
 #include <kernel/netif.h>
 #include <kernel/spinlock.h>
@@ -56,6 +57,104 @@ struct vnet {
     uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
 };
 
+/* A seam armed only for the synthetic transport in the removal tests.
+ * No lock or atomic RMW is paid by an unarmed callback. */
+#if CONFIG_DEBUG && CONFIG_SELFTEST
+struct vnet_test_record {
+    struct mbuf *m;
+    dma_addr_t dma;
+    unsigned len;
+    enum dma_dir dir;
+    bool mapped;
+};
+struct vnet_test_state {
+    struct vnet *v;
+    spinlock_t irq_lock;
+    bool hold, reset, late;
+    unsigned records, maps, unmaps, freed, parked[2], callbacks_after_reset, posts_after_reset;
+    struct vnet_test_record record[128];
+};
+static struct vnet_test_state *g_vnet_test;
+
+static struct vnet_test_state *vnet_test_of(struct vnet *v)
+{
+    struct vnet_test_state *t = __atomic_load_n(&g_vnet_test, __ATOMIC_ACQUIRE);
+    return t != NULL && t->v == v ? t : NULL;
+}
+
+static void vnet_note_map(struct vnet *v, struct mbuf *m, unsigned len, enum dma_dir dir)
+{
+    struct vnet_test_state *t = vnet_test_of(v);
+    if (t == NULL)
+        return;
+    KASSERT(t->records < ARRAY_SIZE(t->record));
+    t->record[t->records++] = (struct vnet_test_record){ m, m->pkt.dma, len, dir, true };
+    t->maps++;
+}
+
+static void vnet_note_unmap(struct vnet *v, dma_addr_t dma)
+{
+    struct vnet_test_state *t = vnet_test_of(v);
+    if (t == NULL)
+        return;
+    for (unsigned i = 0; i < t->records; i++) {
+        if (t->record[i].mapped && t->record[i].dma == dma) {
+            t->record[i].mapped = false;
+            t->unmaps++;
+            return;
+        }
+    }
+    panic("vnet test: mapping unmapped twice");
+}
+
+static void vnet_note_free(struct vnet *v, struct mbuf *m)
+{
+    struct vnet_test_state *t = vnet_test_of(v);
+    if (t == NULL)
+        return;
+    for (struct mbuf *b = m; b; b = b->next) {
+        for (unsigned i = 0; i < t->records; i++) {
+            if (t->record[i].m == b) {
+                t->record[i].m = NULL;
+                t->freed++;
+                break;
+            }
+        }
+    }
+}
+
+static bool vnet_test_park(struct vnet *v, unsigned queue)
+{
+    struct vnet_test_state *t = vnet_test_of(v);
+    if (t == NULL)
+        return false;
+    if (t->reset)
+        t->callbacks_after_reset++;
+    if (!t->hold)
+        return false;
+    t->parked[queue]++;
+    return true;
+}
+#else
+static inline void vnet_note_map(struct vnet *v, struct mbuf *m, unsigned len, enum dma_dir dir)
+{ (void)v; (void)m; (void)len; (void)dir; }
+static inline void vnet_note_unmap(struct vnet *v, dma_addr_t dma) { (void)v; (void)dma; }
+static inline void vnet_note_free(struct vnet *v, struct mbuf *m) { (void)v; (void)m; }
+static inline bool vnet_test_park(struct vnet *v, unsigned queue) { (void)v; (void)queue; return false; }
+#endif
+
+static void vnet_free_mbuf(struct vnet *v, struct mbuf *m)
+{
+    vnet_note_free(v, m);
+    m_freem(m);
+}
+
+static void vnet_unmap(struct vnet *v, dma_addr_t dma, unsigned len, enum dma_dir dir)
+{
+    vnet_note_unmap(v, dma);
+    dma_unmap(&v->vdev->dev, dma, len, dir);
+}
+
 static void vnet_post_rx(struct vnet *v)
 {
     while (v->rx_posted < VNET_RX_BUFS && virtq_free_count(v->rx) > 0) {
@@ -65,14 +164,15 @@ static void vnet_post_rx(struct vnet *v)
         m->data = m->buf;   /* header + frame fill the whole cluster */
         dma_addr_t dma = dma_map(&v->vdev->dev, m->data, MCLBYTES, DMA_FROM_DEVICE);
         if (dma == 0) {
-            m_freem(m);
+            vnet_free_mbuf(v, m);
             break;
         }
         m->pkt.dma = dma;
+        vnet_note_map(v, m, MCLBYTES, DMA_FROM_DEVICE);
         struct virtq_sg sg = { .addr = dma, .len = MCLBYTES };
         if (virtq_add(v->rx, &sg, 0, 1, m) != 0) {
-            dma_unmap(&v->vdev->dev, dma, MCLBYTES, DMA_FROM_DEVICE);
-            m_freem(m);
+            vnet_unmap(v, dma, MCLBYTES, DMA_FROM_DEVICE);
+            vnet_free_mbuf(v, m);
             break;
         }
         v->rx_posted++;
@@ -85,16 +185,18 @@ static void vnet_post_rx(struct vnet *v)
 static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
 {
     struct vnet *v = vq->vdev->priv;
+    if (vnet_test_park(v, 0))
+        return 0;
     uint32_t len;
     struct mbuf *m;
     unsigned n = 0;
     for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
         v->rx_posted--;
-        dma_unmap(&v->vdev->dev, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
+        vnet_unmap(v, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
         m->pkt.dma = 0;
         if (len < VNET_HDR_LEN + 14 || len > MCLBYTES) {
             v->rx_drops++;
-            m_freem(m);
+            vnet_free_mbuf(v, m);
             continue;
         }
         struct vnet_hdr hdr;
@@ -111,13 +213,14 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
                 v->rx_csum_finished++;
             } else {
                 v->rx_drops++;
-                m_freem(m);
+                vnet_free_mbuf(v, m);
                 continue;
             }
         } else if (v->rx_csum && (hdr.flags & VNET_HDR_F_DATA_VALID)) {
             m->flags |= M_CSUM_OK;
             v->rx_csum_valid++;
         }
+        vnet_note_free(v, m);   /* the stack takes ownership, including GONE drops */
         netif_rx(&v->nif, m);
     }
     vnet_post_rx(v);
@@ -129,7 +232,7 @@ static void tx_unmap(struct vnet *v, struct mbuf *m)
 {
     for (struct mbuf *b = m; b; b = b->next) {
         if (b->pkt.dma) {
-            dma_unmap(&v->vdev->dev, b->pkt.dma, b->len, DMA_TO_DEVICE);
+            vnet_unmap(v, b->pkt.dma, b->len, DMA_TO_DEVICE);
             b->pkt.dma = 0;
         }
     }
@@ -140,12 +243,14 @@ static void tx_unmap(struct vnet *v, struct mbuf *m)
 static unsigned vnet_tx_done(struct virtqueue *vq, unsigned budget)
 {
     struct vnet *v = vq->vdev->priv;
+    if (vnet_test_park(v, 1))
+        return 0;
     uint32_t len;
     struct mbuf *m;
     unsigned n = 0;
     for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
         tx_unmap(v, m);
-        m_freem(m);
+        vnet_free_mbuf(v, m);
     }
     return n;
 }
@@ -158,7 +263,7 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
         nbufs++;
     if (nbufs > VNET_MAX_SEGS) {
         struct mbuf *lin = m_copypacket(m);
-        m_freem(m);
+        vnet_free_mbuf(v, m);
         if (lin == NULL)
             return -ENOMEM;
         m = lin;
@@ -186,10 +291,11 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
         dma_addr_t dma = n < ARRAY_SIZE(sg) ? dma_map(&v->vdev->dev, b->data, b->len, DMA_TO_DEVICE) : 0;
         if (dma == 0) {
             tx_unmap(v, m);
-            m_freem(m);
+            vnet_free_mbuf(v, m);
             return -EINVAL;
         }
         b->pkt.dma = dma;
+        vnet_note_map(v, b, b->len, DMA_TO_DEVICE);
         sg[n].addr = dma;
         sg[n].len = b->len;
         n++;
@@ -198,7 +304,7 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
     if (rc) {
         v->tx_drops++;
         tx_unmap(v, m);
-        m_freem(m);
+        vnet_free_mbuf(v, m);
         return -ENOBUFS;
     }
     virtq_kick(v->tx);
@@ -291,15 +397,19 @@ static void vnet_remove(struct virtio_device *vdev)
     struct mbuf *m;
     uint32_t len;
     while ((m = virtq_pop(v->rx, &len)) != NULL)
-        m_freem(m);
+        vnet_free_mbuf(v, m);
     while ((m = virtq_pop(v->tx, &len)) != NULL)
-        m_freem(m);
+        vnet_free_mbuf(v, m);
     virtq_free(v->rx);
     virtq_free(v->tx);
     v->rx = v->tx = NULL;
     vdev->priv = NULL;
     netif_put(&v->nif);          /* the creator's reference; vnet_release frees v when holders are gone */
 }
+
+#if CONFIG_DEBUG && CONFIG_SELFTEST
+#include "virtio_net_test.inc"
+#endif
 
 static const uint32_t vnet_ids[] = { VIRTIO_ID_NET, 0 };
 

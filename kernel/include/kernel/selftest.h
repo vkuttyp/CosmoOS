@@ -160,6 +160,8 @@ bool selftest_epoll_wake_race(const char **reason);   /* kernel/io/epolltest.c: 
 bool selftest_epoll_nest(const char **reason);    /* kernel/io/epolltest.c: a set in a set: forwarded wakes, -ELOOP, the depth bound, level re-queue */
 bool selftest_epoll_close_bench(const char **reason);   /* kernel/io/epolltest.c: closes per second across CPUs, never-registered and registered objects */
 bool selftest_iommu(const char **reason);      /* kernel/iommu/iommutest.c: domains, IOVA, the DMA API (unit 12) */
+bool selftest_vnet_remove_pending(const char **reason);
+bool selftest_vnet_remove_late(const char **reason);
 
 /* Phase 4: kernel/process/proctest.c */
 bool selftest_objects(const char **reason);

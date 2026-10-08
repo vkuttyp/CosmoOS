@@ -204,6 +204,24 @@ the stack side: `docs/kernel-services/network/design.md`.
 
 ## Ownership and lifetime
 
+### Removal, reset and partial probe cleanup
+
+A driver must exclude and drain submitters before reclaiming its queues.
+If a completion can repost buffers, stop that poll before resetting the
+device: a reset must not race a new receive submission. Reset stops DMA;
+`virtq_free` then releases/synchronizes the interrupt and disables deferred
+poll delivery. Only after both consumers have stopped may the driver drain
+its outstanding buffer records, unmap each mapped segment, and free each
+buffer. Queue memory and cookie arrays are transport bookkeeping, not a
+buffer ownership ledger: reset need not publish a used entry for every
+available descriptor, and `virtq_free` never frees cookies.
+
+The driver must retain an independent record of every accepted buffer
+until completion or teardown claims it exactly once. Receive accounting
+must reach zero after cleanup. Partial probe failures follow the same
+order for every queue and buffer that was successfully initialized. See
+invariant V11 and the device-lifecycle Unit 1 report.
+
 The transport owns `struct vpci` (with the embedded `virtio_device`) from
 PCI probe to PCI remove. A device driver owns its `priv`, its queues
 (freed in `remove`) and its DMA pools. Virtqueue ring memory is one
