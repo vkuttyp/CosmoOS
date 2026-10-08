@@ -26,6 +26,8 @@ CASES = {
     "cosmofs-compress": ("kernel-services/filesystem/cosmofs/cosmofstest.c", "selftest_cosmofs_compress", "unix.Malloc", 3),
     "fsctl-check": ("kernel-services/filesystem/cosmofs/cosmofstest.c", "selftest_fsctl_check", "unix.Malloc", 1),
     "vfs-result": ("kernel-services/vfs/vfstest.c", "selftest_fsctl_result_per_open", "unix.Malloc", 2),
+    "nvme-threads": ("kernel/device/devtest.c", "selftest_nvme", "core.UndefinedBinaryOperatorResult", 1,
+                     "nvme_run_workers"),
 }
 
 
@@ -36,7 +38,9 @@ def main():
     parser.add_argument("--old", action="store_true")
     parser.add_argument("--tree", default="HEAD")
     args = parser.parse_args()
-    source, function, checker, old_count = CASES[args.case]
+    case = CASES[args.case]
+    source, function, checker, old_count = case[:4]
+    fixed_function = case[4] if len(case) > 4 else function
     work = ROOT / "out/analyzer-fix-probe" / (args.arch + ("-old" if args.old else "-fixed")) / args.case
     work.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="tree-", dir=work) as directory:
@@ -56,11 +60,12 @@ def main():
                 print("PROBE: FAIL: analyzer command failed; see " + str(work / "build.log"))
                 return 1
             findings = plistlib.loads(report.read_bytes())["diagnostics"]
-            matches = [d for d in findings if d.get("issue_context") == function
+            expected_function = function if args.old else fixed_function
+            matches = [d for d in findings if d.get("issue_context") == expected_function
                        and d["check_name"].startswith(checker)]
             expected = old_count if args.old else 0
             for finding in matches:
-                print(f"{source}: {function}: {finding['description']} [{finding['check_name']}]")
+                print(f"{source}: {expected_function}: {finding['description']} [{finding['check_name']}]")
             ok = len(matches) == expected
             print(f"PROBE: {'PASS' if ok else 'FAIL'}: {args.arch} {args.case}: "
                   f"{len(matches)} diagnostics, expected {expected} ({work})")
