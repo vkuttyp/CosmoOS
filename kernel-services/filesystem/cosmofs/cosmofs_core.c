@@ -1207,7 +1207,6 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *h
      * reason, and the commit's dirty loop writes it.
      */
     unsigned at = 0;                         /* entries of pending_free written so far */
-    unsigned x = need;                       /* leftovers recorded, once the last block is written */
     for (unsigned i = 0; i < need; i++) {
         struct cfs_buf *b = buf_alloc(fs, blk[i]);
         if (b == NULL)
@@ -1242,6 +1241,7 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *h
         /* The reserved blocks nobody needed say so here, in the last
          * block, whose capacity `need` was chosen to leave room in. */
         if (i + 1 == need) {
+            unsigned x;
             for (x = need; x < n && k < CFS_FREELOG_PER_BLOCK; x++)
                 d->blk[k++] = blk[x];
             if (x < n) {
