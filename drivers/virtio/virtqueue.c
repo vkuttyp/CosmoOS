@@ -123,6 +123,8 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
     vq->used_dma = vq->ring_dma + used_off;
     vq->callback = callback;
     irq_poll_init(&vq->poll, virtq_poll, "virtq");
+    if (callback != NULL)   /* lockdep's class: the driver's callback, which is what runs; virtq_poll is everyone's */
+        irq_poll_set_class(&vq->poll, (const void *)callback);
     vq->vector = -1;
     vq->cpu = cpu;
     spinlock_init(&vq->lock, "virtq");

@@ -106,7 +106,7 @@ static const char *const g_kind_names[LOCKDEP_R_COUNT] = {
     [LOCKDEP_R_UNHELD] = "release of a lock that is not held",
     [LOCKDEP_R_EXIT_HELD] = "thread exit with a mutex held",
     [LOCKDEP_R_IRQ_STATE] = "mismatched irqsave acquisition and restoration",
-    [LOCKDEP_R_CALLBACK] = "timer cancellation waits while holding a callback lock",
+    [LOCKDEP_R_CALLBACK] = "a callback wait (timer_cancel_sync, irq_poll) holds a lock the callback takes",
     [LOCKDEP_R_COMPLETION] = "a completion wait holds a lock its signaller needs",
 };
 
@@ -225,7 +225,13 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
                (void *)ip);
         return;
     }
-    __atomic_store_n(&g_off, true, __ATOMIC_RELEASE);
+    /* The first unexpected report turns the checker off and panics. One that
+     * finds it off already is a cascade of the first on another CPU -- an
+     * acquisition whose push the first one's g_off skipped, then reported
+     * missing at its irqsave or release -- and would interleave nonsense
+     * with the real report on the console: dropped. */
+    if (__atomic_exchange_n(&g_off, true, __ATOMIC_ACQ_REL))
+        return;
     /* A failure can originate while console.lock is held by this CPU.
      * Enter the existing fatal-output mode before the first print, and
      * freeze CPU identity/held stacks before dumping them. panic() will
@@ -452,7 +458,7 @@ static bool acquire_check_node(const void *lock, uint16_t node, const char *name
                                bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind);
 
 /* `wait_kind` is LOCKDEP_R_INVERSION for a lock acquisition, or the kind a
- * synchronous wait reports as: LOCKDEP_R_CALLBACK for a timer callback,
+ * synchronous wait reports as: LOCKDEP_R_CALLBACK for a timer callback or an irq_poll,
  * LOCKDEP_R_COMPLETION for a completion. */
 static bool acquire_check(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
                           unsigned subclass, bool irqs_on, uintptr_t ip, enum lockdep_report_kind wait_kind)
@@ -599,7 +605,13 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
                                                  (irqs_on ? LOCKDEP_HF_IRQS_ON : 0u)),
                               .ip = ip,
                               .lock = lock };
-    if (kind == LOCKDEP_KIND_MUTEX) {
+    /* A callback class entered in thread context (an irqpoll worker's
+     * poll, interrupts on) is the thread's, like a mutex: an interrupt
+     * taken meanwhile runs in its own context and must not find it on the
+     * CPU's stack, where it would see a nested poll of the same function as
+     * recursion and record its locks as taken under the class (review,
+     * PR #335). In interrupt context it is the CPU's, as a timer's is. */
+    if (kind == LOCKDEP_KIND_MUTEX || (kind == LOCKDEP_KIND_CALLBACK && !in_irq && me() != NULL)) {
         struct thread *t = in_irq ? NULL : me();
         if (t == NULL)
             return;   /* mutexes before threads exist are not tracked */
@@ -642,6 +654,8 @@ static bool remove_entry(struct lockdep_held *held, unsigned *n, uint64_t *seq, 
 
 void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
 {
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;   /* the push it would mark was skipped too */
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         if (lc->held[i].lock == lock) {
@@ -661,6 +675,8 @@ void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
 
 void lockdep_irqrestore_check(const void *lock, bool irq_will_enable, uintptr_t ip)
 {
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         struct lockdep_held *h = &lc->held[i];
@@ -697,6 +713,12 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
         if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
             report(LOCKDEP_R_UNHELD, NULL, 0, ip, "mutex_unlock of a mutex this thread does not hold", NULL, 0);
         completion_commit(t);   /* a complete() made under this mutex was no self-signal: it is in the graph now */
+        return;
+    }
+    if (kind == LOCKDEP_KIND_CALLBACK && raw_this_cpu()->irq_depth == 0 && me() != NULL) {
+        struct thread *t = me();   /* entered in thread context: on the thread's stack (lockdep_acquired) */
+        if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
+            report(LOCKDEP_R_UNHELD, NULL, 0, ip, "callback exit of a class this thread did not enter", NULL, 0);
         return;
     }
     struct lockdep_cpu *lc = my_cpu();
@@ -874,7 +896,15 @@ void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *n
     if (raw_this_cpu()->irq_depth != 0)
         return;   /* an interrupt holds no mutex, and a spinlock reaches none: nothing a waiter could hold */
     struct thread *t = me();
-    if (t == NULL || t->nr_held_mutex == 0)
+    if (t == NULL)
+        return;
+    /* Mutexes only: a callback class the thread is inside (an irqpoll
+     * worker's poll) shares the stack and is no lock a waiter could hold. */
+    unsigned nr_mutex = 0;
+    for (unsigned i = 0; i < t->nr_held_mutex; i++)
+        if (g_graph.classes[lockdep_node_class(t->held_mutex[i].node)].kind == LOCKDEP_KIND_MUTEX)
+            nr_mutex++;
+    if (nr_mutex == 0)
         return;
     /* Not committed here: if this thread's next completion event is its
      * own wait for `c`, this complete() ran inside that wait's call chain
@@ -885,9 +915,10 @@ void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *n
     p->c = c;
     p->ip = ip;
     p->node = node;
-    p->nr_held = (uint16_t)t->nr_held_mutex;
+    p->nr_held = 0;
     for (unsigned i = 0; i < t->nr_held_mutex; i++)
-        p->held[i] = t->held_mutex[i].node;
+        if (g_graph.classes[lockdep_node_class(t->held_mutex[i].node)].kind == LOCKDEP_KIND_MUTEX)
+            p->held[p->nr_held++] = t->held_mutex[i].node;
 }
 
 /*

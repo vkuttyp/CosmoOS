@@ -446,6 +446,12 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
     kinfo("module: loaded %s %s (text %zu KiB, rodata %zu KiB, data %zu KiB, %zu exports%s)", m->name,
           m->version, m->text_size >> 10, m->rodata_size >> 10, m->data_size >> 10, m->nr_exports,
           (m->flags & MODULE_FLAG_UNSIGNED) ? ", UNSIGNED" : "");
+    /* Where it landed, one parseable line: the boot harness's symboliser
+     * resolves a PC in [text, text + size) against the module's .ko
+     * (tests/boot/run_boot_test.py; docs/kernel/module/design.md). */
+    kinfo("module: base %s text 0x%llx size 0x%zx rodata 0x%llx data 0x%llx", m->name,
+          (unsigned long long)m->text, m->text_size, (unsigned long long)m->rodata,
+          (unsigned long long)m->data);
     kfree(l);
     if (out)
         *out = m;

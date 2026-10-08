@@ -2553,3 +2553,47 @@ See the [history index](README.md).
     `tools/irq-budget-probe.py`, and CI uploading debug kernel and module
     ELFs on failure.
   - Report: `docs/audit/2026-10-08-irq-budget-report.md`.
+- **irq_poll under lockdep; module symbols; the rule-removal rule.**
+  A follow-up to #334.
+  - Every call of a driver's `poll` (handler and `irqpoll/N` worker) runs
+    inside a lockdep callback class named by its function; a virtqueue
+    names it by the driver's callback (`irq_poll_set_class`).
+    `irq_poll_disable` and `irq_poll_synchronize` acquire the class unheld
+    and then `might_sleep`. They sleep on the irq_poll's idle queue instead
+    of yielding. The worker runs `poll` with preemption off. No report on
+    the current tree; an audit found every lock under the six polls taken
+    with irqsave.
+  - A backlog keeps the worker at the highest priority for one 10 ms slice
+    (`IRQ_POLL_HOLD_NS`), then time-slices at the default until it ends.
+    Unbounded, a refilled queue livelocked `virtio-remove-inflight` (the
+    test thread READY behind `irqpoll/0`; 36 s on two CPUs, 240 s timeout
+    under chaos). `blk-irq-budget` now requires a default-priority
+    bystander on every CPU to run within 250 ms during the storm (998 ms
+    before, 14 ms after).
+    A lowered worker is raised again by a timer after another slice, so a
+    busier thread above the default cannot hold it off either
+    (`irqpoll-boost`: 24 ms gap, 290 ms without the timer).
+  - Review (Qodo): the idle queue is woken under the irq_poll's lock (a
+    waiter could return and free it mid-wake); a callback class entered in
+    thread context lives on the thread's held stack, so an interrupt nested
+    over the worker's poll is no false recursion (case 5, probe mode
+    `cpu-stack`).
+  - `lockdep-irqpoll` self-test and `tools/lockdep-irqpoll-probe.py`
+    (`no-wait`, `no-class`, `no-worker-class`, both architectures).
+  - Lockdep: a report made after the checker is already off (another CPU's
+    cascade of the first) is dropped, and the irqsave/irqrestore hooks
+    return while off. AArch64 had printed two bogus reports interleaved
+    with the real one.
+  - The loader prints `module: base <name> text ... size ...`. The boot
+    harness lays out each `.ko`'s text group as the loader does and
+    resolves module frames to function and line (`vblk_done [virtio_blk]`),
+    shown on the stalled CPU of a forced storm on both architectures.
+    `tests/boot/test_module_symbols.py`.
+  - Network invariant N28: removing a rule ends the state that copies it
+    (a DNAT translation, reaped with its forward), not the state that only
+    records admitted traffic (a firewall flow). `fuzz_net_config` holds
+    flows and masquerade entries unchanged across rule, policy and forward
+    operations.
+  - Found and recorded, not fixed: virtio-net's remove drains before its
+    poll stops.
+  - Report: `docs/audit/2026-10-08-irqpoll-lockdep-report.md`.

@@ -22,12 +22,15 @@ still fails: the note is a label, not a retry.
 """
 
 import argparse
+import atexit
 import os
 import sys
 import threading
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 EXIT_SUCCESS_VALUE = 0x10
@@ -588,38 +591,204 @@ ADDR_PATTERNS = [
 ]
 
 
-def symbolize(lines, kernel, tool):
+def run_symbolizer(tool, obj, addrs):
+    """[(function, location)] for `addrs` in `obj`, or None."""
+    try:
+        out = subprocess.run([tool, "--obj=" + obj, "--no-inlines", "--functions=short"],
+                             input="\n".join(addrs) + "\n", capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    # One record per address: FUNCTION, FILE:LINE:COL, blank.
+    result = []
+    for rec in out.stdout.split("\n\n")[:len(addrs)]:
+        parts = rec.strip().split("\n")
+        func = parts[0] if parts and parts[0] else "??"
+        loc = parts[1] if len(parts) > 1 else "??"
+        loc = re.sub(r":\d+$", "", loc)          # drop the column
+        result.append((func, repo_relative(loc)))
+    return result
+
+
+# The loader's line for each module it loads (kernel/module/module.c):
+# where the text group landed, and its size.
+MODULE_BASE = re.compile(r"module: base (\S+) text (0x[0-9a-fA-F]+) size (0x[0-9a-fA-F]+)")
+
+SHF_ALLOC, SHF_EXECINSTR, SHT_SYMTAB, STT_FUNC = 0x2, 0x4, 2, 2
+
+
+def ko_text(path):
+    """The text group of a module, laid out as the loader lays it
+    (kernel/module/modelf.c): every allocatable executable section, in
+    section order, each at its alignment. Returns ([(index, offset, size,
+    name)],
+    [(section index, value, size, name)] for the function symbols), or
+    None if the file is not an ELF64 relocatable object or is damaged: a
+    truncated artifact must not turn a boot's failure report into a
+    traceback (review, PR #335). Parsed once per path."""
+    if path in _LAYOUTS:
+        return _LAYOUTS[path]
+    try:
+        layout = _ko_text(path)
+    except (struct.error, IndexError, ValueError):
+        layout = None
+    _LAYOUTS[path] = layout
+    return layout
+
+
+_LAYOUTS = {}
+
+
+def _ko_text(path):
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or struct.unpack_from("<H", data, 16)[0] != 1:
+        return None
+    shoff = struct.unpack_from("<Q", data, 0x28)[0]
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    shdrs = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    shstr = shdrs[struct.unpack_from("<H", data, 0x3E)[0]][4]
+    texts, size = [], 0
+    for i, (name, typ, flags, _a, _o, sz, _l, _i, align, _e) in enumerate(shdrs):
+        if typ == 0 or not flags & SHF_ALLOC or not flags & SHF_EXECINSTR:
+            continue
+        align = align or 1
+        off = (size + align - 1) & ~(align - 1)
+        end = data.index(b"\0", shstr + name)
+        texts.append((i, off, sz, data[shstr + name:end].decode(errors="replace")))
+        size = off + sz
+    funcs = []
+    for (_n, typ, _f, _a, off, sz, link, _i, _al, ent) in shdrs:
+        if typ != SHT_SYMTAB or not ent:
+            continue
+        stroff = shdrs[link][4]
+        for k in range(sz // ent):
+            name, info, _o, shndx, value, ssize = struct.unpack_from("<IBBHQQ", data, off + k * ent)
+            if info & 0xF == STT_FUNC:
+                end = data.index(b"\0", stroff + name)
+                funcs.append((shndx, value, ssize, data[stroff + name:end].decode(errors="replace")))
+    return texts, funcs
+
+
+_PLACED = {}
+
+
+def placed_object(obj, texts, tool):
+    """`obj` linked into an executable whose text is laid out as the
+    loader lays it -- each text section at its offset in the group, by a
+    linker script -- with the object's relocations (DWARF's included)
+    applied by the linker, so llvm-symbolizer reads it as it reads the
+    kernel ELF. A relocatable object's own DWARF is resolved by some
+    llvm-symbolizers and not others (Debian trixie's gave `??` for every
+    line). Made once per object by the ld.lld beside `tool`; None if it
+    cannot be made."""
+    if obj in _PLACED:
+        return _PLACED[obj]
+    ld = os.path.join(os.path.dirname(tool), os.path.basename(tool).replace("llvm-symbolizer", "ld.lld"))
+    fd, script = tempfile.mkstemp(suffix=".ld")
+    os.close(fd)
+    fd, placed = tempfile.mkstemp(suffix=".elf")
+    os.close(fd)
+    for p in (script, placed):
+        atexit.register(lambda p=p: os.path.exists(p) and os.unlink(p))
+    body = "".join("    . = 0x%x;\n    KEEP(*(%s))\n" % (o, n) for _i, o, _s, n in texts)
+    with open(script, "w") as f:
+        f.write("SECTIONS {\n  .modtext 0 : {\n%s  }\n}\n" % body)
+    try:
+        r = subprocess.run([ld, "-o", placed, "-T", script, "--image-base=0", "-e", "0", "--no-check-sections",
+                            "--unresolved-symbols=ignore-all", "--noinhibit-exec", obj],
+                           capture_output=True, timeout=60)
+        ok = r.returncode == 0 and os.path.getsize(placed) > 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _PLACED[obj] = placed if ok else None
+    return _PLACED[obj]
+
+
+def module_object(modules, name):
+    """The module's ELF: the unsigned one (the signed .ko has the
+    signature appended), else the .ko."""
+    for cand in (name + ".ko.unsigned", name + ".ko"):
+        p = os.path.join(modules, cand)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def module_hit(addr, bases, modules):
+    """For an address in a loaded module's text: (function, object, offset
+    in the text group, layout), with object None when the line cannot be
+    looked up (the function then says why); None if it is in no module.
+    The latest load of a range wins: a module unloaded and loaded again
+    prints a new base."""
+    a = int(addr, 16)
+    for name, base, size in reversed(bases):
+        if not base <= a < base + size:
+            continue
+        obj = module_object(modules, name) if modules else None
+        layout = ko_text(obj) if obj else None
+        if layout is None:
+            return ("?? [%s+0x%x] (no readable %s.ko)" % (name, a - base, name), None, 0, None)
+        texts, funcs = layout
+        off = a - base
+        hit = next(((i, off - o) for i, o, sz, _n in texts if o <= off < o + sz), None)
+        if hit is None:
+            return ("?? [%s+0x%x] (past its sections)" % (name, off), None, 0, None)
+        index, rel = hit
+        func = next((f"{n} [{name}]" for (sh, v, sz, n) in funcs if sh == index and v <= rel < v + max(sz, 1)),
+                    "?? [%s+0x%x]" % (name, off))
+        return (func, obj, off, texts)
+    return None
+
+
+def symbolize(lines, kernel, tool, modules=None):
     """Return [(address, function, location)] for the report addresses in
     `lines`, in first-seen order, or [] when there is nothing to resolve or
-    no way to resolve it (no --kernel, no symbolizer: never a failure)."""
+    no way to resolve it (no --kernel, no symbolizer: never a failure).
+    Addresses in a module's text (its `module: base` line) resolve against
+    the module's own object in `modules`."""
     if not kernel or not os.path.exists(kernel):
         return []
-    addrs = []
+    addrs, bases = [], []
     for ln in lines:
+        mb = MODULE_BASE.search(ln)
+        if mb:
+            bases.append((mb.group(1), int(mb.group(2), 16), int(mb.group(3), 16)))
+            continue
         for pat in ADDR_PATTERNS:
             m = pat.search(ln)
             if m and m.group(1) not in addrs:
                 addrs.append(m.group(1))
     if not addrs:
         return []
-    try:
-        out = subprocess.run([tool, "--obj=" + kernel, "--no-inlines", "--functions=short"],
-                             input="\n".join(addrs) + "\n", capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if out.returncode != 0:
-        return []
-    # One record per address: FUNCTION, FILE:LINE:COL, blank.
-    records = [r for r in out.stdout.split("\n\n")]
-    table = []
-    for addr, rec in zip(addrs, records):
-        parts = rec.strip().split("\n")
-        func = parts[0] if parts and parts[0] else "??"
-        loc = parts[1] if len(parts) > 1 else "??"
-        loc = re.sub(r":\d+$", "", loc)          # drop the column
-        loc = repo_relative(loc)
-        table.append((addr, func, loc))
-    return table
+    resolved, by_obj = {}, {}
+    for addr in addrs:
+        hit = module_hit(addr, bases, modules)
+        if hit is None:
+            continue
+        func, obj, off, texts = hit
+        resolved[addr] = (func, "??")
+        if obj is not None:
+            by_obj.setdefault(obj, (texts, []))[1].append((addr, off))
+    # The lines: one llvm-symbolizer run per module, over the object linked
+    # at the loader's layout, where an address is its offset in the group.
+    for obj, (texts, hits) in by_obj.items():
+        placed = placed_object(obj, texts, tool)
+        r = run_symbolizer(tool, placed, ["0x%x" % off for _a, off in hits]) if placed else None
+        for (addr, _off), (_f, loc) in zip(hits, r or []):
+            resolved[addr] = (resolved[addr][0], loc)
+    rest = [a for a in addrs if a not in resolved]
+    if rest:
+        r = run_symbolizer(tool, kernel, rest)
+        if r is None:
+            if not resolved:
+                return []
+            r = [("??", "??")] * len(rest)
+        resolved.update(zip(rest, r))
+    return [(addr,) + resolved[addr] for addr in addrs]
 
 
 REPO_TOP_DIRS = ("kernel/", "kernel-services/", "drivers/", "compat/", "boot/", "libc/", "userland/", "pkg/", "tests/", "tools/")
@@ -638,7 +807,7 @@ def repo_relative(loc):
 def print_symbols(table):
     if not table:
         return
-    print("---- symbols (llvm-symbolizer over the kernel ELF) ----")
+    print("---- symbols (llvm-symbolizer over the kernel ELF and the modules' objects) ----")
     for addr, func, loc in table:
         print(f"  {addr}  {func:<40} {loc}")
 
@@ -667,6 +836,9 @@ def main():
                          "report in the harness's own report (docs/kernel/diagnostics/design.md)")
     ap.add_argument("--symbolizer", default="llvm-symbolizer",
                     help="the llvm-symbolizer to use with --kernel")
+    ap.add_argument("--modules", default=None,
+                    help="the directory of the built modules (.ko), for addresses in module text "
+                         "(default: modules/ beside the kernel's build directory)")
     args = ap.parse_args()
 
     if args.expect_panic == "wxn":
@@ -982,7 +1154,9 @@ def main():
     # kernel ELF with llvm-symbolizer. Shown when the run failed or when a
     # panic was expected: the log stays the run's evidence, this table is
     # the harness's addition (docs/kernel/diagnostics/design.md, "Lockups").
-    table = symbolize(lines, args.kernel, args.symbolizer) if (failures or args.expect_panic) else []
+    modules = args.modules or (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(args.kernel))), "modules")
+                               if args.kernel else None)
+    table = symbolize(lines, args.kernel, args.symbolizer, modules) if (failures or args.expect_panic) else []
 
     if failures:
         print(f"boot-test: FAIL after {elapsed:.1f}s")

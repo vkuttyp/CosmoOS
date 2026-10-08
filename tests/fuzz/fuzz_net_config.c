@@ -38,7 +38,11 @@
  *
  * A stateful flow that a rule accepted outlives the rule, as conntrack's
  * do: a frame it passes is passed by the flow, not by the removed rule, and
- * is not held to it.
+ * is not held to it. A translation does not outlive its forward. That is
+ * network invariant N28 (state that copies a rule ends with it, state that
+ * records admitted traffic does not), and both halves are oracles: the
+ * DNAT check above, and a rule, policy or forward change that leaves the
+ * flows (and, for a forward, the masquerade entries) exactly as they were.
  */
 
 #include <kernel/net/cksum.h>
@@ -400,14 +404,76 @@ static void model_reset(int o)
     g_own[o] = g_reset[o];
 }
 
+/* N28's other half: what a configuration change must leave alone, read
+ * before and after it at one clock. Field by field: the listings copy
+ * structs, padding and all. */
+struct kept_state {
+    struct fw_flow_info ff[FW_FLOW_MAX];
+    unsigned nff;
+    struct nat_flow masq[NAT_TABLE_SIZE];
+    unsigned nmasq;
+};
+static struct kept_state g_kept_before, g_kept_after;
+
+static void kept_read(struct kept_state *k)
+{
+    k->nff = fw_flow_list(k->ff, FW_FLOW_MAX, fz_now());
+    static struct nat_flow nf[NAT_TABLE_SIZE];
+    unsigned nn = nat_flow_list(nf, NAT_TABLE_SIZE, fz_now());
+    k->nmasq = 0;
+    for (unsigned i = 0; i < nn; i++)
+        if (nf[i].kind != NAT_KIND_DNAT)
+            k->masq[k->nmasq++] = nf[i];
+}
+
+static bool same_fw_flow(const struct fw_flow_info *x, const struct fw_flow_info *y)
+{
+    return x->guest_ip == y->guest_ip && x->a_ip == y->a_ip && x->b_ip == y->b_ip && x->a_port == y->a_port &&
+           x->b_port == y->b_port && x->proto == y->proto && x->est == y->est && x->expires_ns == y->expires_ns;
+}
+
+static bool same_nat_flow(const struct nat_flow *x, const struct nat_flow *y)
+{
+    return x->kind == y->kind && x->proto == y->proto && x->est == y->est && x->orig_port == y->orig_port &&
+           x->nat_port == y->nat_port && x->peer_port == y->peer_port && x->orig_ip == y->orig_ip &&
+           x->nat_ip == y->nat_ip && x->peer_ip == y->peer_ip && x->expires_ns == y->expires_ns;
+}
+
+/* `masq` too for a forward change; a firewall change may not touch NAT
+ * either, but nothing in it could, so the firewall's flows suffice. */
+static void kept_check(const char *op, bool masq)
+{
+    kept_read(&g_kept_after);
+    const struct kept_state *b = &g_kept_before, *a = &g_kept_after;
+    bool same = a->nff == b->nff;
+    for (unsigned i = 0; same && i < a->nff; i++)
+        same = same_fw_flow(&a->ff[i], &b->ff[i]);
+    if (!same) {
+        fprintf(stderr, "fuzz_net_config: %s changed the firewall's flows (%u -> %u): N28\n", op, b->nff, a->nff);
+        FUZZ_ASSERT(same);
+    }
+    if (!masq)
+        return;
+    same = a->nmasq == b->nmasq;
+    for (unsigned i = 0; same && i < a->nmasq; i++)
+        same = same_nat_flow(&a->masq[i], &b->masq[i]);
+    if (!same) {
+        fprintf(stderr, "fuzz_net_config: %s changed the masquerade entries (%u -> %u): N28\n", op, b->nmasq,
+                a->nmasq);
+        FUZZ_ASSERT(same);
+    }
+}
+
 static void op_fw_add(const uint8_t *a)
 {
     struct fw_rule r;
     rule_of(a, &r);
     int o = a[9] % OWN_COUNT;
     unsigned at = a[10] % (FW_RULES_PER_GUEST + 2);
+    kept_read(&g_kept_before);
     int rc = fw_rule_add(k_owner_ip[o], at, &r);
     trace("fw add owner %d at %u: %d\n", o, at, rc);
+    kept_check("a rule add", false);
     struct owner_model *m = &g_own[o];
     bool dup = false;
     for (unsigned i = 0; m->attached && i < m->n && !dup; i++)
@@ -445,8 +511,10 @@ static void op_fw_del(const uint8_t *a)
         r = m->rules[a[11] % m->n];   /* one installed */
     else
         rule_of(a, &r);
+    kept_read(&g_kept_before);
     int rc = fw_rule_del(k_owner_ip[o], &r);
     trace("fw del owner %d: %d\n", o, rc);
+    kept_check("a rule delete", false);
     int at = -1;
     for (unsigned i = 0; m->attached && i < m->n && at < 0; i++)
         if (same_rule(&m->rules[i], &r))
@@ -462,8 +530,10 @@ static void op_policy(const uint8_t *a)
 {
     int o = a[0] % OWN_COUNT;
     uint8_t dir = a[1] % 7, verdict = a[2] % 3;
+    kept_read(&g_kept_before);
     int rc = fw_policy_set(k_owner_ip[o], dir, verdict);
     trace("policy owner %d dir %u verdict %u: %d\n", o, dir, verdict, rc);
+    kept_check("a policy change", false);
     bool host = o == OWN_HOST;
     bool valid = verdict <= FW_ACCEPT &&
                  (host ? (dir == FW_DIR_FROM_UPLINK || dir == FW_DIR_OUTPUT)
@@ -536,8 +606,10 @@ static void op_pf_del(const uint8_t *a)
         proto = a[0] & 1 ? IPPROTO_UDP : IPPROTO_TCP;
         hport = port_of(a[1]);
     }
+    kept_read(&g_kept_before);
     bool found = nat_pf_del(proto, hport);
     trace("pf del %u %u: %d\n", proto, hport, found);
+    kept_check("a forward delete", true);
     for (unsigned i = 0; i < g_npf; i++)
         if (g_pf[i].proto == proto && g_pf[i].host_port == hport) {
             FUZZ_ASSERT(found);
@@ -549,7 +621,9 @@ static void op_pf_del(const uint8_t *a)
 
 static void op_pf_clear(void)
 {
+    kept_read(&g_kept_before);
     nat_pf_clear();
+    kept_check("a forward clear", true);
     g_npf = 0;
 }
 

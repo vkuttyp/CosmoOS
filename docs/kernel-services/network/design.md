@@ -953,7 +953,12 @@ machine; and `(proto, host_port)` is a **unique key** (a duplicate `ADD` is
 traffic). `nat_pf_del` removes the rule holding a `(proto, host_port)` —
 whatever its origin, since the privileged operator owns the one table — and
 **reaps the DNAT conntrack entries it created**, so a removed forward stops an
-in-flight flow at once, not after it idles out. `nat_pf_list` snapshots the
+in-flight flow at once, not after it idles out (`nat_pf_clear` does the same
+for every forward). A firewall rule's removal does not end the flows it
+admitted. The rule that separates the two cases is **N28**: a translation
+copies its forward (the target it rewrites to), so it ends with the
+forward, while a flow records only the endpoints of admitted traffic and
+outlives the rule. `nat_pf_list` snapshots the
 rules for the `read`.
 
 The writable surface is contained by the same reasoning the arc used for the

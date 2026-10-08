@@ -187,6 +187,9 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
     now takes a 32-completion budget per call, the rest on a per-CPU
     `irqpoll/N` worker (`kernel/core/irqpoll.c`): virtio, NVMe, xHCI.
   - CI uploads debug kernel and module ELFs on failure.
+  - *Follow-up, 2026-10-08* ([irqpoll-lockdep report](audit/2026-10-08-irqpoll-lockdep-report.md)):
+    irq_poll's waits are lockdep callback waits and sleep on a waitqueue
+    instead of yielding; module frames resolve by name in the harness.
 - [ ] **Validation — AArch64 virtio-console output loss.** Explain the
   historical missing final console line while the serial log was complete.
   This remains an unexplained observation, not a demonstrated root cause.
@@ -527,6 +530,9 @@ Sources: inventory §2.8 and [diagnostics design](kernel/diagnostics/design.md).
   workflow appropriate to supported architectures and execution contexts.
 - [ ] **Implementation — crash dumps and symbols.** Preserve useful crash state
   and improve kernel-side symbolization; host postprocessing is a separate capability.
+  *Host side, 2026-10-08:* the boot harness resolves module text too, from the
+  loader's `module: base` line and the `.ko` files ([irqpoll-lockdep report](audit/2026-10-08-irqpoll-lockdep-report.md) §3).
+  Kernel-side symbolization and crash-state preservation remain.
 - [ ] **Implementation — tracing and counters.** Build structured per-CPU tracing
   and performance-counter support with bounded overhead and safe diagnostic readers.
 - [ ] **Implementation — operator tools.** Provide transports and interfaces for
@@ -680,7 +686,9 @@ their deferred status here; this section does not schedule them for implementati
    ([callback-classes report](audit/2026-10-05-lockdep-callback-classes-report.md)); raw IRQ pairing done
    2026-10-06 ([raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md));
    completion waits and the coverage listing done 2026-10-07
-   ([completion-waits report](audit/2026-10-07-lockdep-completion-waits-report.md)).
+   ([completion-waits report](audit/2026-10-07-lockdep-completion-waits-report.md));
+   irq_poll's teardown waits done 2026-10-08
+   ([irqpoll-lockdep report](audit/2026-10-08-irqpoll-lockdep-report.md)).
 4. Select later features from the sections above by demonstrated correctness
    impact, user need and available validation; keep conditional deferrals explicit.
    §4's bounded preempt-at-restore recursion done 2026-10-06
