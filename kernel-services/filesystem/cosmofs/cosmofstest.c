@@ -878,64 +878,90 @@ static uint32_t block_crc_test(const uint8_t *block)
 
 bool selftest_cosmofs_badmap(const char **reason)
 {
-    struct blkdev *bd;
+    struct blkdev *bd = NULL;
+    struct file *f = NULL;
+    struct spool *p = NULL;
+    uint8_t *page = NULL, *blk = NULL;
     if (!engine_mount(&bd, 512, reason))
         return false;
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
-    uint8_t *page = kmalloc(4096, 0);
-    CHECK(page != NULL);
+#define BADMAP_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    BADMAP_CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    page = kmalloc(4096, 0);
+    BADMAP_CHECK(page != NULL);
     memset(page, 0x11, 4096);
-    CHECK(file_pwrite(f, page, 4096, 0) == 4096);            /* run at lblk 0 */
+    BADMAP_CHECK(file_pwrite(f, page, 4096, 0) == 4096);    /* run at lblk 0 */
     memset(page, 0x22, 4096);
-    CHECK(file_pwrite(f, page, 4096, 5 * 4096) == 4096);     /* run at lblk 5, a hole between */
-    CHECK(file_sync(f) == 0);
+    BADMAP_CHECK(file_pwrite(f, page, 4096, 5 * 4096) == 4096); /* run at lblk 5, a hole between */
+    BADMAP_CHECK(file_sync(f) == 0);
     uint64_t ino = f->vn->ino;
     file_put(f);
+    f = NULL;
     cosmofs_test_discard_on_unmount(mount_of(ENG), true);   /* keep the slots as they are */
-    CHECK(vfs_umount(ENG) == 0);
+    BADMAP_CHECK(vfs_umount(ENG) == 0);
 
     /* Walk superblock -> IMAP1 -> IMAP0 -> INODES through the pool, swap
      * the two direct runs of the inode, re-seal the block. */
-    struct spool *p;
-    CHECK(pool_open(bd, &p) == 0);
-    uint8_t *blk = kmalloc(4096, 0);
-    CHECK(blk != NULL);
+    BADMAP_CHECK(pool_open(bd, &p) == 0);
+    blk = kmalloc(4096, 0);
+    BADMAP_CHECK(blk != NULL);
     uint64_t imap = 0, gen = 0;
     for (unsigned slot = 0; slot < 2; slot++) {
-        CHECK(pool_read(p, slot, blk) == 0);
+        BADMAP_CHECK(pool_read(p, slot, blk) == 0);
         const struct cfs_super *sb = (const struct cfs_super *)blk;
         if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > gen) {
             gen = sb->generation;
             imap = sb->imap_root;
         }
     }
-    CHECK(imap >= 2);
-    CHECK(pool_read(p, imap, blk) == 0);
+    BADMAP_CHECK(imap >= 2);
+    BADMAP_CHECK(pool_read(p, imap, blk) == 0);
     uint64_t l0 = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l1_index(ino)];
-    CHECK(pool_read(p, l0, blk) == 0);
+    BADMAP_CHECK(pool_read(p, l0, blk) == 0);
     uint64_t ib = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l0_index(ino)];
-    CHECK(pool_read(p, ib, blk) == 0);
+    BADMAP_CHECK(pool_read(p, ib, blk) == 0);
     struct cfs_inode *in = (struct cfs_inode *)(blk + CFS_MHDR_SIZE + cfs_inode_slot(ino) * CFS_INODE_SIZE);
-    CHECK(in->ino == ino && in->direct[0].count == 1 && in->direct[1].count == 1 && in->direct[1].lblk == 5);
+    BADMAP_CHECK(in->ino == ino && in->direct[0].count == 1 && in->direct[1].count == 1 && in->direct[1].lblk == 5);
     struct cfs_extent tmp = in->direct[0];
     in->direct[0] = in->direct[1];
     in->direct[1] = tmp;   /* unsorted: lblk 5 before lblk 0 */
     struct cfs_mhdr *h = (struct cfs_mhdr *)blk;
     h->crc = 0;
     h->crc = block_crc_test(blk);
-    CHECK(pool_write(p, ib, blk) == 0 && pool_flush(p) == 0);
+    BADMAP_CHECK(pool_write(p, ib, blk) == 0 && pool_flush(p) == 0);
     kfree(blk);
+    blk = NULL;
     pool_close(p);
+    p = NULL;
 
-    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
-    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDONLY, 0, &f) == 0);
-    CHECK(file_pread(f, page, 4096, 0) == -EIO);   /* not a hole of zeros */
-    CHECK(file_pread(f, page, 4096, 5 * 4096) == -EIO);
+    BADMAP_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    BADMAP_CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDONLY, 0, &f) == 0);
+    BADMAP_CHECK(file_pread(f, page, 4096, 0) == -EIO);   /* not a hole of zeros */
+    BADMAP_CHECK(file_pread(f, page, 4096, 5 * 4096) == -EIO);
     file_put(f);
+    f = NULL;
     kfree(page);
+    page = NULL;
     kinfo("selftest: cosmofs-badmap: an inode with unsorted direct runs is refused, not read as holes");
     return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    if (p)
+        pool_close(p);
+    kfree(blk);
+    kfree(page);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef BADMAP_CHECK
 }
 
 /* Snapshots: what the tree was, kept, while the live tree moves on
