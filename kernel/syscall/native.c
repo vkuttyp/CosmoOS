@@ -1525,11 +1525,13 @@ static int64_t sys_wait(struct syscall_args *a)
 static int kill_one(struct process *target, int sig)
 {
     struct process *cur = process_current();
+    if (cur == NULL)
+        return -ESRCH;
     /* A process outside domain 0 cannot reach another domain, and is
      * told the target does not exist rather than that it may not touch
      * it: -EPERM would confirm the pid is in use, which is the one
      * thing the domain is meant not to tell it. */
-    if (cur && cur->domain != 0 && target->domain != cur->domain)
+    if (cur->domain != 0 && target->domain != cur->domain)
         return -ESRCH;
     if (!cred_may_signal(&cur->cred, &target->cred))
         return -EPERM;
