@@ -151,6 +151,7 @@ struct virtqueue {
     unsigned msix_index;                        /* transport use */
     unsigned cpu;                               /* the CPU the vector is routed to (virtq_alloc_on) */
     uint64_t kicks, interrupts, bad_used;      /* bad_used: invalid device completions */
+    bool skip_capped;                           /* virtq_pop stopped at its bad-entry cap with entries left (lock) */
 };
 
 /* --- device drivers ------------------------------------------------- */

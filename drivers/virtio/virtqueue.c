@@ -55,7 +55,16 @@ static void vq_release(struct virtqueue *vq)
 static unsigned virtq_poll(struct irq_poll *ip, unsigned budget)
 {
     struct virtqueue *vq = container_of(ip, struct virtqueue, poll);
-    return vq->callback(vq, budget);
+    unsigned n = vq->callback(vq, budget);
+    /* A NULL from virtq_pop at its bad-entry cap reads to the callback as
+     * "empty" while entries remain; reported as a spent budget instead, so
+     * the rest is the worker's rather than the next interrupt's, which may
+     * never come (review, PR #334). */
+    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
+    bool capped = vq->skip_capped;
+    vq->skip_capped = false;
+    spin_unlock_irqrestore(&vq->lock, s);
+    return capped ? budget : n;
 }
 
 int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback,
@@ -228,6 +237,8 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
          * worth per call, not for as long as it posts them: NULL here
          * reads as "nothing yet", and the next interrupt goes on. */
         if (vq->last_used == read_le16(&vq->used->idx) || skipped >= vq->size) {
+            if (skipped >= vq->size && vq->last_used != read_le16(&vq->used->idx))
+                vq->skip_capped = true;   /* not empty: virtq_poll defers the rest */
             spin_unlock_irqrestore(&vq->lock, s);
             return NULL;
         }
