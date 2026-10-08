@@ -335,6 +335,12 @@ Debug self-tests on every CPU count, using a private device peer in
 and `vnet_remove` are exercised; the production network device remains
 available to the network harness.
 
+Before parking completions, each test fills TX twice and completes it in
+reverse order. One round exhausts ownership records, the next exhausts
+descriptors with a record still available; a rejected submission must
+return its mapping and record. All records and descriptors must be
+reusable, and the balanced warm-up ledger is cleared before removal.
+
 Both tests hold one RX completion and one two-segment TX completion,
 leaving 31 more RX buffers without used entries. The pending case holds
 delivery until teardown; the late case attempts delivery at the reset

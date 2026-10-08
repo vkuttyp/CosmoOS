@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Reproduce virtio-net removal defects in a throwaway worktree.
 
---old restores main 561b913b's remove body, preserving the debug ledger.
+--old restores main 561b913b's remove body, preserving the debug ledger
+and adapting only the TX cookie representation to the private record.
 The probe requires the exact tests' failures; an unrelated failed boot is
 never evidence. Without --old it requires both tests and the full boot to
 pass. Logs and build output stay under out/vnet-remove-probe/.
@@ -37,6 +38,13 @@ def main():
             pat = r'static void vnet_remove\(struct virtio_device \*vdev\)\n\{.*?\n\}'
             old = re.search(pat, original, re.S).group()
             old = old.replace('m_freem(m);', 'vnet_free_mbuf(v, m);')
+            # Ownership/order stay old: discard only used TX entries,
+            # without unmapping. Translate the new private cookie to mbuf.
+            old = old.replace('while ((m = virtq_pop(v->tx, &len)) != NULL)',
+                'struct vnet_tx *tx;\n    while ((tx = virtq_pop(v->tx, &len)) != NULL)')
+            old = old.replace('while ((tx = virtq_pop(v->tx, &len)) != NULL)\n        vnet_free_mbuf(v, m);',
+                'while ((tx = virtq_pop(v->tx, &len)) != NULL)\n        vnet_free_mbuf(v, tx->m);')
+            assert 'vnet_free_mbuf(v, tx->m);' in old, 'old TX cookie anchor changed'
             text, count = re.subn(pat, lambda m: old, text, count=1, flags=re.S)
             assert count == 1, 'remove anchor changed'
             path.write_text(text)

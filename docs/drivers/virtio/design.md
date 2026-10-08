@@ -204,9 +204,12 @@ the stack side: `docs/kernel-services/network/design.md`.
 
 The private RX table has 32 entries and the TX table has `VIRTQ_MAX_SIZE`
 entries (256): each submitted chain needs at least one descriptor, so
-this bounds every possible outstanding cookie. Submission publishes the
-table entry before `virtq_add`; completion pops the cookie, then claims
-its table entry under the driver's lock. Cleanup stops polls before reset,
+this bounds every possible outstanding cookie. TX records form a private
+free list, initialized to the negotiated queue size. Submission takes one
+record, stores the mbuf, and passes the record as the `virtq_add` cookie;
+completion gets that same record and returns it to the free list under the
+driver's lock. Both operations take constant time, including rollback when
+the descriptor ring is full. RX retains its bounded mbuf lookup. Cleanup stops polls before reset,
 frees the queues, and reclaims entries whether or not the device put them
 in the used ring. RX mappings use `MCLBYTES`; TX mappings use each
 segment's length. Interface unregister alone does not stop these callbacks.

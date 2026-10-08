@@ -78,6 +78,60 @@ static void vnet_peer_finish(struct virtqueue *vq, unsigned avail, uint32_t len)
     vq->used->idx = (uint16_t)(idx + 1);
 }
 
+static int vnet_peer_send(struct vnet *v, bool chain)
+{
+    struct mbuf *m = m_getcl(), *tail = chain ? m_getcl() : NULL;
+    if (m == NULL || (chain && tail == NULL)) {
+        m_freem(m);
+        m_freem(tail);
+        return -ENOMEM;
+    }
+    memset(m->data, 0, 64);
+    m->len = 64;
+    m->pkt.len = chain ? 128 : 64;
+    if (tail) {
+        memset(tail->data, 0, 64);
+        tail->len = 64;
+        m->next = tail;
+    }
+    return vnet_transmit(&v->nif, m);
+}
+
+/* Fill, reject, complete in reverse order, then reuse the pool. Round 0
+ * exhausts records; round 1 exhausts descriptors with one record still
+ * free, checking virtq_add failure rollback as well as completion return. */
+static bool vnet_peer_tx_reuse(struct vnet *v, struct vnet_test_state *t)
+{
+    t->hold = false;
+    for (unsigned round = 0; round < 2; round++) {
+        unsigned first = v->tx->avail->idx;
+        unsigned count = v->tx->size - round;
+        for (unsigned i = 0; i < count; i++)
+            if (vnet_peer_send(v, round == 1 && i == 0))
+                return false;
+        if (virtq_free_count(v->tx) != 0 || vnet_peer_send(v, false) != -ENOBUFS)
+            return false;
+        for (unsigned i = count; i > 0; i--) {
+            vnet_peer_finish(v->tx, first + i - 1, 0);
+            vnet_peer_irq(v->tx);
+        }
+        unsigned free = 0;
+        for (struct vnet_tx *tx = v->tx_free; tx; tx = tx->next) {
+            if (tx->m || ++free > v->tx->size)
+                return false;
+        }
+        if (free != v->tx->size || virtq_free_count(v->tx) != v->tx->size ||
+            t->maps != t->unmaps || t->records != t->freed)
+            return false;
+    }
+    /* All warm-up ownership has returned. Keep removal counters directly
+     * comparable with the original main proof (32 RX + two TX segments). */
+    memset(t->record, 0, sizeof(t->record));
+    t->records = t->maps = t->unmaps = t->freed = 0;
+    t->hold = true;
+    return true;
+}
+
 /* Called through module_symbol_lookup by devtest.c; no production ABI or
  * shared structure changes. The module stays loaded throughout the call. */
 bool vnet_test_remove(unsigned mode, const char **reason);
@@ -115,6 +169,11 @@ bool vnet_test_remove(unsigned mode, const char **reason)
     }
     registered = true;
     netif_get(&v->nif);   /* inspect accounting after remove drops its creator reference */
+    vnet_tx_init(v);
+    if (!vnet_peer_tx_reuse(v, t)) {
+        *reason = "vnet-remove: TX exhaustion/rollback/reuse failed";
+        goto out;
+    }
     vnet_post_rx(v);
     /* Two TX buffers in one chain check that every segment is unmapped. */
     struct mbuf *m = m_getcl(), *tail = m_getcl();
@@ -129,13 +188,14 @@ bool vnet_test_remove(unsigned mode, const char **reason)
     m->len = tail->len = 64;
     m->pkt.len = 128;
     m->next = tail;
+    unsigned tx_avail = v->tx->avail->idx;
     if (vnet_transmit(&v->nif, m)) {
         *reason = "vnet-remove: TX submission failed";
         goto out;
     }
     /* One completed RX, 31 still device-owned RX, a completed TX chain. */
     vnet_peer_finish(v->rx, 0, VNET_HDR_LEN + 14);
-    vnet_peer_finish(v->tx, 0, 0);
+    vnet_peer_finish(v->tx, tx_avail, 0);
     vnet_peer_irq(v->rx);
     vnet_peer_irq(v->tx);
     if (t->parked[0] == 0 || t->parked[1] == 0 || v->rx_posted != VNET_RX_BUFS) {

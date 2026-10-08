@@ -47,6 +47,11 @@ _Static_assert(sizeof(struct vnet_hdr) == VNET_HDR_LEN, "virtio_net_hdr is 12 by
 #define VNET_RX_BUFS        32u
 #define VNET_MAX_SEGS       4u
 
+struct vnet_tx {
+    struct mbuf *m;
+    struct vnet_tx *next;
+};
+
 struct vnet {
     struct virtio_device *vdev;
     struct virtqueue *rx, *tx;
@@ -56,7 +61,8 @@ struct vnet {
     bool stopping;
     /* Queue cookies disappear in virtq_free. Keep buffer ownership here
      * until a completion or the stopped-device cleanup claims it. */
-    struct mbuf *rx_buf[VNET_RX_BUFS], *tx_buf[VIRTQ_MAX_SIZE];
+    struct mbuf *rx_buf[VNET_RX_BUFS];
+    struct vnet_tx tx_buf[VIRTQ_MAX_SIZE], *tx_free;
 #if CONFIG_DEBUG && CONFIG_SELFTEST
     struct vnet_test_state *test;   /* immutable while this device's callbacks exist */
 #endif
@@ -79,7 +85,7 @@ struct vnet_test_state {
     spinlock_t irq_lock;
     bool hold, reset, late;
     unsigned records, maps, unmaps, freed, parked[2], callbacks_after_reset, posts_after_reset;
-    struct vnet_test_record record[128];
+    struct vnet_test_record record[256];
 };
 static struct vnet_test_state *vnet_test_of(struct vnet *v)
 {
@@ -173,6 +179,25 @@ static void vnet_buffer_take(struct mbuf **buffers, unsigned count, struct mbuf 
     unsigned slot = vnet_buffer_slot(buffers, count, m);
     KASSERT(slot < count);
     buffers[slot] = NULL;
+}
+
+/* Initialize before publication. Queue cookies point directly at these
+ * private records; no descriptor API or mbuf layout change is needed. */
+static void vnet_tx_init(struct vnet *v)
+{
+    for (unsigned i = 0; i < v->tx->size; i++) {
+        v->tx_buf[i].next = v->tx_free;
+        v->tx_free = &v->tx_buf[i];
+    }
+}
+
+/* Caller holds v->lock. Clear ownership before making the record reusable. */
+static void vnet_tx_put(struct vnet *v, struct vnet_tx *tx)
+{
+    KASSERT(tx->m != NULL);
+    tx->m = NULL;
+    tx->next = v->tx_free;
+    v->tx_free = tx;
 }
 
 static void vnet_post_rx(struct vnet *v)
@@ -277,11 +302,12 @@ static unsigned vnet_tx_done(struct virtqueue *vq, unsigned budget)
     if (vnet_test_park(v, 1))
         return 0;
     uint32_t len;
-    struct mbuf *m;
+    struct vnet_tx *tx;
     unsigned n = 0;
-    for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
+    for (; n < budget && (tx = virtq_pop(vq, &len)) != NULL; n++) {
         arch_irq_state_t s = spin_lock_irqsave(&v->lock);
-        vnet_buffer_take(v->tx_buf, ARRAY_SIZE(v->tx_buf), m);
+        struct mbuf *m = tx->m;
+        vnet_tx_put(v, tx);
         spin_unlock_irqrestore(&v->lock, s);
         tx_unmap(v, m);
         vnet_free_mbuf(v, m);
@@ -335,13 +361,15 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
         n++;
     }
     arch_irq_state_t s = spin_lock_irqsave(&v->lock);
-    unsigned slot = vnet_buffer_slot(v->tx_buf, ARRAY_SIZE(v->tx_buf), NULL);
     int rc = -ENOBUFS;
-    if (!v->stopping && slot < ARRAY_SIZE(v->tx_buf)) {
-        v->tx_buf[slot] = m;
-        rc = virtq_add(v->tx, sg, n, 0, m);
+    struct vnet_tx *tx = v->tx_free;
+    if (!v->stopping && tx != NULL) {
+        v->tx_free = tx->next;
+        KASSERT(tx->m == NULL);
+        tx->m = m;
+        rc = virtq_add(v->tx, sg, n, 0, tx);
         if (rc)
-            v->tx_buf[slot] = NULL;
+            vnet_tx_put(v, tx);
         else
             virtq_kick(v->tx);
     }
@@ -374,6 +402,9 @@ static void vnet_cleanup(struct vnet *v)
     if (v->tx)
         virtq_free(v->tx);
     v->rx = v->tx = NULL;
+    /* irq_poll_disable joins running callbacks and prevents new ones;
+     * virtq_free has also synchronized the vectors. Submitters were
+     * excluded before entry, so these ownership records are now private. */
     for (unsigned i = 0; i < ARRAY_SIZE(v->rx_buf); i++) {
         struct mbuf *m = v->rx_buf[i];
         if (m == NULL)
@@ -387,10 +418,10 @@ static void vnet_cleanup(struct vnet *v)
     }
     KASSERT(v->rx_posted == 0);
     for (unsigned i = 0; i < ARRAY_SIZE(v->tx_buf); i++) {
-        struct mbuf *m = v->tx_buf[i];
+        struct mbuf *m = v->tx_buf[i].m;
         if (m == NULL)
             continue;
-        v->tx_buf[i] = NULL;
+        v->tx_buf[i].m = NULL;
         tx_unmap(v, m);
         vnet_free_mbuf(v, m);
     }
@@ -438,6 +469,7 @@ static int vnet_probe(struct virtio_device *vdev)
     rc = virtq_alloc(vdev, 1, 0, vnet_tx_done, &v->tx);
     if (rc)
         goto fail;
+    vnet_tx_init(v);
     virtio_device_ready(vdev);
     vnet_post_rx(v);
 

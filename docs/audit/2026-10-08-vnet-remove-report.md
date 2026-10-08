@@ -118,11 +118,30 @@ source order is insufficient to claim a use-after-free.
 
 PR review identified a stale network lifetime coverage note, now updated
 to name both synthetic removal checks while retaining the module-unload
-and active-worker gaps. It also flagged the cost of scanning up to 256 TX
-ownership slots under the IRQ-safe driver lock. No performance regression
-was measured. The bounded private table keeps this fix within the current
-transport API and mbuf layout; a matched-LOCKDEP performance comparison
-is recorded in deferred inventory §8 before any lookup redesign.
+and active-worker gaps. Qodo also flagged the cost of scanning up to 256 TX
+ownership slots under the IRQ-safe driver lock. The review revision uses
+a private free list and passes each ownership record as the queue cookie.
+Submission, completion and failed-publication rollback are constant-time;
+only teardown walks the whole TX table. No transport API or mbuf layout
+changes. This removes the scans by construction; no measured throughput
+improvement is claimed.
+
+Both removal cases first fill the synthetic TX queue twice. The first
+round exhausts ownership records; the second uses a two-segment chain to
+exhaust descriptors while one record remains free, exercising failed
+`virtq_add` rollback. Reverse-order completions return all records and
+mappings for reuse. Balanced warm-up ledger entries are cleared before
+the original removal checks, preserving their 34-buffer baseline. The
+old-behavior probe translates the private TX cookie to its mbuf while
+retaining main's missing unmap and callback/drain ordering.
+
+Additional CosmoReview findings were checked against source:
+
+| Finding | Disposition and evidence |
+|---|---|
+| Callback still running after poll disable; unlocked final table walk | Not reproduced: `kernel/core/irqpoll.c:irq_poll_disable` marks disabled and waits on `idle_now` until neither running nor scheduled. Cleanup holds no driver lock during that wait. Both polls and transport vectors are synchronized before the walk; submitters were drained by unregister. A source comment now states this exclusivity. The existing active-worker test gap remains recorded. |
+| DMA-address aliases cause a false double-unmap panic | The device-private ledger appends one record per successful map; unmap searches for a still-mapped matching address. Equal addresses therefore consume separate records, and previously unmapped records are skipped. Real devices have a NULL ledger. No failing alias case was established. |
+| `m_getcl` may sleep under the driver spinlock | The actual path uses `kmem_cache_alloc` → `slab_grow` → `pmm_alloc_pages`, with IRQ-safe slab/zone locks and allocation failure returning NULL. It contains no sleeping allocation/reclaim path. The generic assumption about `kmalloc` does not apply here. |
 
 ## Validation
 
