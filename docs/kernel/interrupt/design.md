@@ -106,11 +106,22 @@ on a started worker's list and wakes it; the worker is runnable from then
 until the list is empty, at the highest priority, so no thread holds it
 off -- as none held off the handler. At the default priority a busier
 thread on its CPU (quiesce, the reaper, a pinned spinner) stalled the
-queue's completions for as long as it ran (review, PR #334). The cost:
-a device that never runs dry keeps that CPU's threads waiting for as
-long as it lasts, as the unbounded handler did, but the CPU keeps its
-tick and its interrupts, and the soft-lockup detector reports it past
-10 s. Before
+queue's completions for as long as it ran (review, PR #334). **But for
+one slice only.** A backlog that keeps the worker busy for longer than
+`IRQ_POLL_HOLD_NS` (10 ms) continues at the default priority,
+time-sliced with the CPU's other threads, until it ends; the worker
+returns to the highest priority before it next sleeps. Without that
+bound, a device that never ran dry kept that CPU's threads off it for as
+long as it lasted. In `virtio-remove-inflight`'s held pass that
+included the test thread that was to stop the submitter: a livelock, 36 s
+on two CPUs and the boot's whole budget under chaos
+(docs/audit/2026-10-08-irqpoll-lockdep-report.md §2a). `blk-irq-budget`
+holds it with a default-priority bystander pinned to every CPU: it must
+run within 250 ms throughout the storm (998 ms before the bound, 14 ms
+after). Past the slice the remainder still always runs, because the
+worker never leaves its run queue, as Linux's ksoftirqd does. A storm
+longer than 10 s is still a soft lockup (the worker never blocks), which
+the detector reports. Before
 the workers start (boot, before any driver loads) a handler cannot
 defer and polls to the end, as before.
 

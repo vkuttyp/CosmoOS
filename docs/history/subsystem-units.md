@@ -2553,3 +2553,32 @@ See the [history index](README.md).
     `tools/irq-budget-probe.py`, and CI uploading debug kernel and module
     ELFs on failure.
   - Report: `docs/audit/2026-10-08-irq-budget-report.md`.
+- **irq_poll under lockdep; module symbols; the rule-removal rule.**
+  A follow-up to #334.
+  - Every call of a driver's `poll` (handler and `irqpoll/N` worker) runs
+    inside a lockdep callback class named by its function; a virtqueue
+    names it by the driver's callback (`irq_poll_set_class`).
+    `irq_poll_disable` and `irq_poll_synchronize` acquire the class unheld
+    and then `might_sleep`. They sleep on the irq_poll's idle queue instead
+    of yielding. The worker runs `poll` with preemption off. No report on
+    the current tree; an audit found every lock under the six polls taken
+    with irqsave.
+  - `lockdep-irqpoll` self-test and `tools/lockdep-irqpoll-probe.py`
+    (`no-wait`, `no-class`, `no-worker-class`, both architectures).
+  - Lockdep: a report made after the checker is already off (another CPU's
+    cascade of the first) is dropped, and the irqsave/irqrestore hooks
+    return while off. AArch64 had printed two bogus reports interleaved
+    with the real one.
+  - The loader prints `module: base <name> text ... size ...`. The boot
+    harness lays out each `.ko`'s text group as the loader does and
+    resolves module frames to function and line (`vblk_done [virtio_blk]`),
+    shown on the stalled CPU of a forced storm on both architectures.
+    `tests/boot/test_module_symbols.py`.
+  - Network invariant N28: removing a rule ends the state that copies it
+    (a DNAT translation, reaped with its forward), not the state that only
+    records admitted traffic (a firewall flow). `fuzz_net_config` holds
+    flows and masquerade entries unchanged across rule, policy and forward
+    operations.
+  - Found and recorded, not fixed: virtio-net's remove drains before its
+    poll stops.
+  - Report: `docs/audit/2026-10-08-irqpoll-lockdep-report.md`.
