@@ -119,8 +119,8 @@ rerun printed only the real report. This has been latent since the raw
 interrupt-pairing unit: any fatal report on a busy SMP boot could garble
 the console this way.
 
-**Class table.** The peak is 440 of 512 (85%) on the x86-64 four-CPU debug
-boot. The completion-waits tidy-up recorded 408 on 2026-10-07, before #330 to #334 and this unit. That is still below the 90% warning, but
+**Class table.** The peak was 440 of 512 (85%) on the x86-64 four-CPU debug
+boot before the review round, and 444 after it (§7). The completion-waits tidy-up recorded 408 on 2026-10-07, before #330 to #334 and this unit. That is still below the 90% warning, but
 the margin is about 20 classes. The figure for each validation boot is in §7.
 
 ## 2. The waits sleep
@@ -351,24 +351,32 @@ the inventory (§1.3):
 
 ## 7. Validation
 
-Run sequentially on `d368d399` (the tree with §2a's bound), with QEMU at
-nice 0 (`ps` sampled). Every boot passed, and every debug boot printed only
-the self-tests' expected lockdep reports.
+Run sequentially on `60b7f812` (after the review round), with QEMU at
+nice 0 (`ps` sampled). Every boot passed, and every debug boot printed
+only the self-tests' expected lockdep reports. "bystander" is
+`blk-irq-budget`'s longest wait of a default-priority thread (bound
+250 ms); "boost" is `irqpoll-boost`'s longest gap (bound 100 ms).
 
 | | x86-64 | AArch64 |
 |---|---|---|
 | `make analyze` | clean | clean |
-| debug, `QEMU_SMP=1` | PASS 136.6 s; peak 385 of 512; bystander 17 ms | PASS 143.5 s; 386; 14 ms |
-| debug, `QEMU_SMP=2` | PASS 148.2 s; 421; 15 ms; `virtio-remove-inflight` 152 ms | PASS 153.6 s; 421; 18 ms; 180 ms |
-| debug, `QEMU_SMP=4` | PASS 148.7 s; 440; 17 ms; 209 ms | PASS 143.8 s; 440; 95 ms; 228 ms |
-| `make test-smp2` | PASS 139.5 s | PASS 149.3 s |
-| `make test-chaos` | PASS 146.1 s | PASS 142.5 s |
-| `make test-harness-retry` | PASS 141.8 s | PASS 140.9 s |
+| debug, `QEMU_SMP=1` | PASS 140.5 s; peak 389 of 512; bystander 19 ms; boost 14 ms | PASS 131.1 s; 390; 16 ms; 14 ms |
+| debug, `QEMU_SMP=2` | PASS 158.7 s; 425; 16 ms; 14 ms; `virtio-remove-inflight` 153 ms | PASS 140.8 s; 425; 18 ms; 14 ms; 158 ms |
+| debug, `QEMU_SMP=4` | PASS 150.8 s; 444; 29 ms; 13 ms; 181 ms | PASS 140.4 s; 444; 19 ms; 17 ms; 195 ms |
+| `make test-smp2` | PASS 145.6 s | PASS 152.5 s |
+| `make test-chaos` | PASS 139.9 s | PASS 153.9 s |
+| `make test-harness-retry` | PASS 140.5 s | PASS 154.4 s |
 | release build and boot | PASS 17.0 s; no `lockdep` symbol in the kernel ELF | PASS 20.4 s; none |
 | network harness (in every debug boot) | passed | passed |
+| `tools/lockdep-irqpoll-probe.py`, four modes | PASS ×4 | PASS ×4 |
 
-Host: `make host-test` (with `test_module_symbols`) and `make fuzz` (all
-13 targets) pass. The probes in §1 pass on both architectures.
+Host and CI: `make host-test` (with `test_module_symbols`, ten checks) and
+`make fuzz` pass locally and in both CI jobs. PR #335's CI is green on
+both architectures.
+
+The class table peaks at 444 of 512 (87%) with four CPUs. The new classes
+are the self-tests' and one boost-timer callback, so the 90% warning is
+about 17 classes away.
 
 The first run of this matrix, before §2a, failed `QEMU_SMP=2` (36 s
 `virtio-remove-inflight`, with a soft lockup on `irqpoll/0` and the hang
