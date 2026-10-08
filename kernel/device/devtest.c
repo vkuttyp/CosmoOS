@@ -1876,10 +1876,10 @@ static void birq_done(struct bio *bio)
     __atomic_fetch_add(&b->completions, 1u, __ATOMIC_RELAXED);
     if (bio->status != 0)
         __atomic_fetch_add(&b->errors, 1u, __ATOMIC_RELAXED);
-    else if (clock_now_ns() < b->deadline) {
+    else if (!clock_deadline_passed(b->deadline)) {   /* set on the test's CPU, read on the handler's */
         blk_test_resubmit_from_done(bio);
         __atomic_fetch_add(&b->resubmits, 1u, __ATOMIC_RELAXED);
-        uint64_t until = clock_now_ns() + BIRQ_NEXT_NS;
+        uint64_t until = clock_now_ns() + BIRQ_NEXT_NS;   /* begun and ended on this CPU, in this call: the raw clock */
         while (b->h->unconsumed(b->bd) == 0 && clock_now_ns() < until)
             arch_cpu_relax();
         if (b->h->unconsumed(b->bd) != 0)
@@ -1939,7 +1939,7 @@ bool selftest_blk_irq_budget(const char **reason)
     h->pops_reset(bd);
     timer_test_tick_gap_reset();
     uint64_t t0 = clock_now_ns();
-    b->deadline = t0 + (uint64_t)BIRQ_STORM_MS * 1000000ull;
+    b->deadline = clock_deadline_ns((uint64_t)BIRQ_STORM_MS * 1000000ull);
     unsigned refused = 0;
     for (unsigned i = 0; i < b->n; i++) {
         if (blk_submit(&b->bios[i]) != 0) {

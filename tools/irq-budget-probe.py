@@ -57,6 +57,10 @@ def main():
     ap.add_argument('--storm-ms', type=int, default=0, help='the storm\'s length (default the test\'s 1000)')
     ap.add_argument('--smp', type=int, default=4)
     args = ap.parse_args()
+    if not 0 <= args.storm_ms <= 600000:
+        ap.error('--storm-ms must be 0 (the test\'s own) to 600000')
+    if not 1 <= args.smp <= 8:
+        ap.error('--smp must be 1 to 8')
     if args.old and args.tree != 'this':
         ap.error('--old applies to --tree this')
     root = Path(__file__).resolve().parents[1]
