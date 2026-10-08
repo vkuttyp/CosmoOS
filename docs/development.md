@@ -388,6 +388,16 @@ A panic prints `KERNEL PANIC: <reason>`, the CPU, a register dump when a
 trap frame is available, and a frame-pointer stack trace. Resolve the
 addresses against `out/<arch>-<build>/kernel/kernel.map`, or with
 `llvm-symbolizer --obj=out/<arch>-<build>/kernel/kernel.elf <addr>`.
+A failing `make test` does this itself: its `---- symbols` table resolves
+every stack-trace and `pc` address in the log. An address in a module's
+text (marked `(outside kernel text)` in a trace) resolves against the
+module's own object in `out/<arch>-<build>/modules/`, through the
+`module: base <name> text <addr> size <n> ...` line the loader prints for
+each module it loads. It is shown as `vblk_done [virtio_blk]` with its
+source line. To resolve one by hand, subtract the base and give the
+offset to `llvm-symbolizer --obj=out/<arch>-<build>/modules/<name>.ko.unsigned`.
+That is exact for a module with one text section; for more than one, see
+`placed_object` in `tests/boot/run_boot_test.py`.
 
 A self-test that stops making progress for its budget (8 s unless the
 boot's `SELFTEST: budgets` line says otherwise) triggers the scheduler

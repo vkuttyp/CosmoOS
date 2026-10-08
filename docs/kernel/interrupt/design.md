@@ -125,7 +125,13 @@ walking its slots, also stops the deferred work there
 checked before every pop, in the handler and in the worker alike). A
 path that only needs "whatever the handler was doing is done", like
 xHCI's cancel, calls `irq_poll_synchronize`, which waits for a `poll`
-running now to return.
+running now to return. Both sleep on the irq_poll's idle queue. A finish,
+or the worker dropping a disabled deferral, wakes the queue when a waiter
+has registered under the irq_poll's lock. Both are lockdep callback waits
+on the poll's class, and both call `might_sleep` (lockdep design.md,
+"Callback classes"). Until 2026-10-08 they spun on `sched_yield`, which
+lockdep could not see. The worker runs `poll` with preemption off. It
+never sleeps, since it runs in interrupt context too.
 
 Where it applies (the audit, docs/audit/2026-10-08-irq-budget-report.md):
 virtio queues (block, network transmit and receive, entropy), NVMe

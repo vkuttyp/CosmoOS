@@ -322,6 +322,48 @@ callback classes and 38 completion classes), and a cached class reuses the
 graph's copy of its name, so a callback that runs every tick formats
 nothing.
 
+**irq_poll** (`kernel/core/irqpoll.c`, 2026-10-08) is the same shape, a
+callback with a synchronous wait for it, and uses the same classes:
+
+- Every call of a driver's `poll`, in the interrupt handler and in the
+  `irqpoll/N` worker alike, runs between `lockdep_callback_enter` and
+  `lockdep_callback_exit`. The class is named by the poll's function,
+  cached in `struct irq_poll`'s `lockdep_class`. A virtqueue names it by
+  the driver's callback through `irq_poll_set_class`, because the
+  virtqueue core's `virtq_poll` dispatches every driver's and would merge
+  them into one class.
+- `irq_poll_disable` and `irq_poll_synchronize` call
+  `lockdep_callback_wait` on every call, then `might_sleep`, because both
+  sleep (on the irq_poll's idle queue). The order matters. A held lock
+  that a poll takes is the deadlock itself and is reported as
+  `LOCKDEP_R_CALLBACK`, naming the lock and the class. The wait is then
+  skipped (a disable still disables and unqueues), as `timer_cancel_sync`
+  skips its wait. Any other spinlock held is a `LOCKDEP_R_SLEEP` from
+  `might_sleep`.
+- The worker calls `poll` with preemption off and interrupts on. The
+  class sits on the CPU's held stack (L11), which is this thread's only
+  while no other thread runs on the CPU. `poll` never sleeps, since it
+  also runs in interrupt context, so this costs nothing it could use.
+
+What the class adds over `might_sleep` is narrower than for timers.
+Because the waits sleep, a waiter can hold no spinlock (`might_sleep`
+panics in release builds), and a poll can take no mutex. A mutex-holding
+waiter therefore cannot close a cycle through a poll's class. The class
+names the deadlock where `might_sleep` would only say "sleep in atomic
+context". It catches the wait-first order through the edge it records
+before `might_sleep` reports. And it covers any non-spinlock class a
+future poll might reach (another callback's class through a nested
+wait), plus a poll that waits for its own irq_poll (recursion). A full
+debug boot finds no report on the current tree.
+
+**IRQ usage.** A poll's locks are taken in interrupt context (the
+handler) and in a thread with interrupts on (the worker). Every lock
+reached from the six converted polls is taken with `spin_lock_irqsave`
+(the 2026-10-08 audit, `docs/audit/2026-10-08-irqpoll-lockdep-report.md`).
+A plain `spin_lock` there would be held with interrupts on in the worker,
+and the usage check (`check_usage`) reports it the first time the worker
+runs that poll.
+
 **What is not covered.** `synchronize_irq` and `interrupt_unregister_sync`
 wait through `synchronize_quiesce`, which calls `might_sleep`: the waiter
 can hold no spinlock, and an interrupt handler can take no mutex, so no

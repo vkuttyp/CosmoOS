@@ -223,7 +223,13 @@ fails without side effects on the module list:
    so it must not call `module_load`/`module_unload`.
 9. **Register**: state `LIVE`, appended to `g_modules`, each dependency's
    `refs` incremented, `module: loaded <name> <version> (text N KiB,
-   rodata N KiB, data N KiB)` logged.
+   rodata N KiB, data N KiB)` logged, then `module: base <name> text
+   <addr> size <n> rodata <addr> data <addr>`. The second line is stable
+   and parseable. The boot harness's symboliser uses it to resolve a PC
+   in `[text, text + size)` against the module's `.ko`, by laying out the
+   text group as `modelf_parse` does (each allocatable executable section
+   in section order, at its alignment). A module unloaded and loaded again
+   prints a new line, and the latest one covering a PC wins.
 
 `module_unload(name)`: `-ENOENT` if absent, `-EBUSY` if `refs != 0`,
 otherwise state `GOING`, `shutdown()`, unlink, decrement dependency
