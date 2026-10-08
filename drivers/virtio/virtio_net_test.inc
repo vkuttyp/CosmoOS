@@ -107,7 +107,7 @@ bool vnet_test_remove(unsigned mode, const char **reason)
     v->nif.ops = &vnet_ops;
     v->nif.priv = v;
     v->nif.flags = NETIF_NODEFAULT | NETIF_NOARP;
-    __atomic_store_n(&g_vnet_test, t, __ATOMIC_RELEASE);
+    v->test = t;
     if (virtq_alloc(dev, 0, 64, vnet_rx_done, &v->rx) ||
         virtq_alloc(dev, 1, 64, vnet_tx_done, &v->tx) || netif_register(&v->nif)) {
         *reason = "vnet-remove: fixture queue/interface initialization failed";
@@ -173,7 +173,8 @@ out:
         if (v && v->tx)
             virtq_free(v->tx);
     }
-    __atomic_store_n(&g_vnet_test, NULL, __ATOMIC_RELEASE);
+    if (v)
+        v->test = NULL;   /* callbacks stopped; the retained interface reference is still ours */
     /* Old-behavior runs must leave no leaked fixture for later tests. The
      * ledger retains missing maps even when remove freed their buffers. */
     if (t && dev) {

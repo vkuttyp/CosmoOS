@@ -57,6 +57,9 @@ struct vnet {
     /* Queue cookies disappear in virtq_free. Keep buffer ownership here
      * until a completion or the stopped-device cleanup claims it. */
     struct mbuf *rx_buf[VNET_RX_BUFS], *tx_buf[VIRTQ_MAX_SIZE];
+#if CONFIG_DEBUG && CONFIG_SELFTEST
+    struct vnet_test_state *test;   /* immutable while this device's callbacks exist */
+#endif
     bool tx_csum, rx_csum;
     uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
 };
@@ -78,12 +81,9 @@ struct vnet_test_state {
     unsigned records, maps, unmaps, freed, parked[2], callbacks_after_reset, posts_after_reset;
     struct vnet_test_record record[128];
 };
-static struct vnet_test_state *g_vnet_test;
-
 static struct vnet_test_state *vnet_test_of(struct vnet *v)
 {
-    struct vnet_test_state *t = __atomic_load_n(&g_vnet_test, __ATOMIC_ACQUIRE);
-    return t != NULL && t->v == v ? t : NULL;
+    return v->test;
 }
 
 static void vnet_note_map(struct vnet *v, struct mbuf *m, unsigned len, enum dma_dir dir)
