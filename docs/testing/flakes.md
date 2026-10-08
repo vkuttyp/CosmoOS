@@ -3469,5 +3469,16 @@ previous run's guard boot was normal (`lockdep-graph-bench` 7,553 ms).
 the generic 8 s budget, and reports progress only between phases.
 Neither ceiling allows a slow stretch. It is a benchmark that asserts
 no duration, as `net-nicbench` was before it got a budget of its own.
-Not changed here; named as a follow-up. The failed job was re-run.
+Not changed here; named as a follow-up. The branch's next run (37747800146,
+on a documentation commit) passed every boot on both architectures.
+
+**main went red on it two hours later.** Run 37752084144 was the #332
+merge. Its AArch64 chaos boot failed with `lockdep-graph-bench took 8153
+ms (budget 8000 ms)` and the watchdog's `no progress for 8001 ms`. The
+same job's four other debug boots took 6,253-6,334 ms. The chaos migrator
+added 29 % to a compute-bound benchmark that had 21 % headroom. The
+benchmark grew with the lock-class table (384 -> 512, PR #321) because
+its sizes include `LOCKDEP_MAX_CLASSES`. It has its own budget now, 20 s,
+like `cosmofs-replay` and `process-user`: it asserts no duration, and the
+budget is there to notice a hang.
 

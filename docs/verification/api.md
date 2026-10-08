@@ -133,7 +133,8 @@ the run ends with `SELFTEST: timing total=N ms slowest=name (M ms)`. The
 harness prints the five slowest tests and the total, and fails a test whose
 duration exceeds its budget. The budgets are the kernel's: before the first
 test it prints `SELFTEST: budgets default=8000 process-user=20000
-cosmofs-replay=40000` (the two whole suites behind one line), and a run with
+cosmofs-replay=40000 lockdep-graph-bench=20000` (the two whole suites
+behind one line, and a benchmark sized by the lock-class table), and a run with
 tests and no such line fails. The runner arms the hang watchdog before each
 test at that test's budget (`docs/verification/design.md` §6).
 

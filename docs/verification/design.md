@@ -235,7 +235,8 @@ that only just finishes is noticed before it becomes a timeout.
 **The budgets are the kernel's, and each is also the watchdog's period.**
 `selftest.c`'s `budgets` table names the tests that are not held to the
 default of 8000 ms. Before the first test the runner prints
-`SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000`,
+`SELFTEST: budgets default=8000 process-user=20000 cosmofs-replay=40000
+lockdep-graph-bench=20000`,
 and the harness judges durations by that line alone: a run that ran tests
 and printed no such line fails. A budget naming no test panics the run, so
 a typo cannot quietly mean the default. Before each test the runner arms
@@ -270,7 +271,11 @@ there to catch a hang, not to cap a suite.
 Such a test gets a budget sized for what it is, in the kernel's
 `budgets` table, beside the default rather than instead of it:
 `process-user` has 20 s and `cosmofs-replay` 40 s. It keeps a budget, because a
-suite that hangs must still be caught. The list is deliberately short
+suite that hangs must still be caught. `lockdep-graph-bench` has 20 s
+from 2026-10-08. It is a benchmark that asserts no duration, sized by the
+lock-class table. It stood at 79-94 % of the default on every CI boot
+and went over under the chaos migrator and on a slow runner
+(`docs/testing/flakes.md`). The list is deliberately short
 and each entry is an admission that the line reports too little.
 
 `net-nicbench` had a 20 s entry from 2026-10-04 to 2026-10-06. Its UDP

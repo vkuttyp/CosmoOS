@@ -83,6 +83,18 @@ static const struct selftest_budget {
      * debug boot and left it spent for every test after it
      * (docs/audit/next-subsystem-watchdog-spent.md). */
     { "cosmofs-replay", 40000 },
+    /* A benchmark: it reports the lock graph's costs and asserts only that
+     * the graph operations are right, never how long they took. Its sizes
+     * include LOCKDEP_MAX_CLASSES and LOCKDEP_MAX_NODES, so it grew with
+     * the class table (384 -> 512). On CI it took 7.35-7.55 s on every
+     * x86-64 boot and 6.25-6.33 s on AArch64: 79-94 % of the default. It
+     * went over under the chaos migrator (AArch64, 8,153 ms, main run
+     * 37752084144) and on a slow x86-64 runner (13,839 ms, PR #332), and
+     * reports progress only between phases, so the watchdog fired too
+     * (docs/testing/flakes.md). 20 s is over twice CI's slowest normal
+     * figure, as for cosmofs-replay: the budget notices a test that
+     * stopped terminating, it does not ration a benchmark. */
+    { "lockdep-graph-bench", 20000 },
 };
 
 /* --- formatter --- */
