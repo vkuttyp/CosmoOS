@@ -46,22 +46,29 @@ out-of-range requests return zeros. Any context.
 
 ## Virtqueues
 
-### `int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *), unsigned cpu, struct virtqueue **out)` *(exported, network unit 11)*
+### `int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback, unsigned cpu, struct virtqueue **out)` *(exported, network unit 11)*
 `virtq_alloc` with the queue's MSI-X vector routed to `cpu`
 (`vq->cpu`, passed by the PCI transport to `pci_msix_request`); a
 multi-queue driver binds each queue to the CPU that consumes it.
 `virtq_alloc` is the CPU 0 form.
 
-### `int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *), struct virtqueue **out)` *(exported)*
+### `int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback, struct virtqueue **out)` *(exported)*
 Purpose: allocate, program and enable queue `index`. Inputs: `max` caps
 the size (0 = device maximum), at most `VIRTQ_MAX_SIZE` (256), power of
-two; `callback` runs in interrupt context on the queue's MSI-X vector,
-or NULL for a polled queue with no vector. Outputs: 0 and the queue in
+two; `callback` is `unsigned (*)(struct virtqueue *vq, unsigned budget)`:
+it consumes at most `budget` completions and returns how many. It runs
+from the queue's MSI-X vector in interrupt context and, for what one call
+left, on that CPU's `irqpoll/N` worker -- never on two CPUs at once, so
+completions are consumed in the device's order
+(docs/kernel/interrupt/design.md, "Bounded completion handling"). It
+must not sleep either way. NULL for a polled queue with no vector. Outputs: 0 and the queue in
 `vdev->vq[index]`; `-EINVAL` (bad index, already allocated, non power of
 two), `-ENOENT` (the device has no such queue), `-ENOMEM`, `-ENOSPC` (no
 MSI-X entry left), `-EIO` (device refused the vector). Sleeps (DMA
 allocation). Ownership: the driver, until `virtq_free` *(exported)*,
-which disables the queue, releases the vector and the ring memory.
+which disables the queue, releases the vector, then the deferred
+completion work (`irq_poll_disable`: no callback runs after it returns),
+and the ring memory.
 
 ### `int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)` *(exported)*
 Purpose: queue one chain: `out` device-readable segments followed by
