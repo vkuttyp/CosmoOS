@@ -116,6 +116,14 @@ No additional defect was reproduced or fixed. The concerns above are
 deferred to device-lifecycle fault/interleaving coverage; an atypical
 source order is insufficient to claim a use-after-free.
 
+PR review identified a stale network lifetime coverage note, now updated
+to name both synthetic removal checks while retaining the module-unload
+and active-worker gaps. It also flagged the cost of scanning up to 256 TX
+ownership slots under the IRQ-safe driver lock. No performance regression
+was measured. The bounded private table keeps this fix within the current
+transport API and mbuf layout; a matched-LOCKDEP performance comparison
+is recorded in deferred inventory §8 before any lookup redesign.
+
 ## Validation
 
 Review found a race in the first debug ledger implementation: a real

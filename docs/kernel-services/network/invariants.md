@@ -185,7 +185,10 @@ and the last reference.** `netif_register` refuses an interface without
 referenced pointers that their callers put; `netif_unregister` leaves no
 transmit, receive, queued packet, ARP or ND entry naming the interface
 (`docs/kernel/quiesce/invariants.md` Q9–Q12). Check: `net-netif-lifetime`.
-Gap: the virtio-net remove path is exercised only by unloading the module.
+Checks: `vnet-remove-pending` and `vnet-remove-late` exercise the
+real virtio-net remove path with synthetic queues and account for every
+outstanding buffer and DMA mapping. Gap: module unloading and a callback
+held on another CPU are not covered by these checks.
 
 **N-L2. A TCP child never exists without an owner between accept and
 attach.** `tcp_accept(pcb, owner)` attaches under the listener's and the
