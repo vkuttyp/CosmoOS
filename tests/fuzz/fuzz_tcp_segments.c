@@ -23,6 +23,7 @@
  *   8  a raw TCP segment: length(2) and the bytes, addressed to the
  *      connection, checksum fixed, everything else as given
  *   9  the next pending timer fires, whatever the time
+ *  10  the owner lets go without closing (an ownerless pcb)
  *
  * Oracles: every state change passes through tcp_test_state_change
  * (tcp.c under TCP_HOST_TEST) and must be an arc of the documented machine
@@ -422,6 +423,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         case 9:
             fz_fire_until(600ull * 1000000000ull, 1);
             break;
+        case 10:
+            /* The owner lets go without closing: the pcb is ownerless, as
+             * one tcp_accept(listener, NULL) makes is -- the network's end
+             * then kills it, and the close that follows must not put the
+             * state machine's reference a second time. */
+            if (!g_closed) {
+                arch_irq_state_t s = spin_lock_irqsave(&g_conn->lock);
+                g_conn->sock = NULL;
+                spin_unlock_irqrestore(&g_conn->lock, s);
+            }
+            break;
         default:
             break;   /* an unknown opcode is a no-op: the mutator keeps the rest of the program */
         }
@@ -566,6 +578,10 @@ size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
             emit8(&g, raw[k]);
         break;
     }
+    case 16:  /* an ownerless pcb the peer resets, closed after (a double put before the kill was idempotent) */
+        emit8(&g, 10);
+        seg(&g, 0, TH_RST, 0, 0, 0, NULL, 0, 0);
+        break;
     case 15:  /* the host shuts its write side, the peer keeps sending */
         emit8(&g, 4);
         seg(&g, 0, TH_ACK, 0, 1, 65535, NULL, 0, 100);

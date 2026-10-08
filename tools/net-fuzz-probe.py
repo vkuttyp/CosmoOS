@@ -5,6 +5,12 @@
       the FIN branch of tcp_input builds a bare acknowledgement instead of
       running the output (the tree before the net-fuzz unit's fix):
       `net-fin-acks-last-data` must FAIL at its stream check, nothing else
+  python3 tools/net-fuzz-probe.py --arch x86_64 --old pf-clear
+      nat_pf_clear removes the rules and keeps the DNAT translations they
+      made: `net-pf-clear` must FAIL
+  python3 tools/net-fuzz-probe.py --arch x86_64 --old tap-release-order
+      a tap's release purges its guest's NAT and firewall state before the
+      tap is destroyed: `net-tap-release-order` must FAIL
   python3 tools/net-fuzz-probe.py --arch x86_64
       the clone as committed: everything must PASS
 
@@ -37,6 +43,37 @@ MODES = {
         timer_cancel(&pcb->delack);
     } else if (pcb->state != TCP_CLOSED && pcb->state != TCP_TIME_WAIT) {''',
                    'net-fin-acks-last-data'),
+    # nat_pf_clear removes the rules and keeps their translations (fuzz_net_config)
+    'pf-clear': ('kernel-services/network/nat.c',
+                 '''    memset(g_pf, 0, sizeof(g_pf));
+    arch_irq_state_t ns = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && g_nat[i].kind == NAT_KIND_DNAT)
+            g_nat[i].in_use = false;
+    spin_unlock_irqrestore(&g_nat_lock, ns);
+    spin_unlock_irqrestore(&g_pf_lock, s);''',
+                 '''    memset(g_pf, 0, sizeof(g_pf));
+    spin_unlock_irqrestore(&g_pf_lock, s);''',
+                 'net-pf-clear'),
+    # a tap's release purges the guest's NAT and firewall state before the tap is gone (fuzz_net_config)
+    'tap-release-order': ('kernel-services/network/tap.c',
+                          '''    tapsvc_stop(o->svc);
+    tap_destroy(o->tap);
+    nat_guest_purge(guest);    /* no stale rules/flows for a reused subnet */
+    fw_guest_purge(guest);     /* detach: its firewall rules, policy and flows go with it */
+#if CONFIG_DEBUG
+    if (tap_test_after_purge)
+        tap_test_after_purge(tap_test_after_purge_arg);   /* a frame arriving now must make nothing */
+#endif''',
+                          '''    tapsvc_stop(o->svc);
+    nat_guest_purge(guest);    /* no stale rules/flows for a reused subnet */
+    fw_guest_purge(guest);     /* detach: its firewall rules, policy and flows go with it */
+#if CONFIG_DEBUG
+    if (tap_test_after_purge)
+        tap_test_after_purge(tap_test_after_purge_arg);   /* a frame arriving now must make nothing */
+#endif
+    tap_destroy(o->tap);''',
+                          'net-tap-release-order'),
 }
 
 

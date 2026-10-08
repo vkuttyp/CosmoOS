@@ -581,6 +581,14 @@ static void conn_reset_locked(struct tcp_pcb *pcb)
  */
 static bool pcb_kill_locked(struct tcp_pcb *pcb)
 {
+    /* Once: a second kill would hand its caller the state machine's
+     * reference again, and that caller would put it twice -- tcp_close on
+     * an ownerless pcb the network had already ended did (the net-fuzz
+     * report). No socket-layer path reaches that, but a pcb nobody owns
+     * is a state the fuzz targets can make. */
+    if (pcb->killed)
+        return false;
+    pcb->killed = true;
     timer_cancel_sync(&pcb->rexmit);
     timer_cancel_sync(&pcb->delack);
     timer_cancel_sync(&pcb->timewait);

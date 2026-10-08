@@ -712,10 +712,19 @@ bool nat_in(struct netif *nif, struct mbuf *m,
 
 /* --- port-forward configuration ------------------------------------------ */
 
+/* Every rule, and every DNAT entry the rules created: as nat_pf_del does for
+ * one, under g_pf_lock -> g_nat_lock, so a cleared forward translates nothing
+ * more (fuzz_net_config: a client's translation kept reaching the guest
+ * through a port the clear had closed). */
 void nat_pf_clear(void)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
     memset(g_pf, 0, sizeof(g_pf));
+    arch_irq_state_t ns = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && g_nat[i].kind == NAT_KIND_DNAT)
+            g_nat[i].in_use = false;
+    spin_unlock_irqrestore(&g_nat_lock, ns);
     spin_unlock_irqrestore(&g_pf_lock, s);
 }
 

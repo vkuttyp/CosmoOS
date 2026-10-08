@@ -210,6 +210,31 @@ static inline size_t np_frame_nd(uint8_t *f, const uint8_t dmac[6], const uint8_
     return o + NP_IPV6 + 32;
 }
 
+/* A whole IPv6/UDP frame; returns its length. */
+static inline size_t np_frame_udp6(uint8_t *f, const uint8_t dmac[6], const uint8_t smac[6], const struct in6_addr *src,
+                                   const struct in6_addr *dst, uint16_t sport, uint16_t dport, const void *payload,
+                                   size_t n)
+{
+    size_t o = np_eth(f, dmac, smac, ETH_P_IPV6);
+    size_t ul = np_udp(f + o + NP_IPV6, sport, dport, payload, n);
+    np_ipv6(f + o, src, dst, IPPROTO_UDP, (uint16_t)ul, 64);
+    np_l4_cksum6(f + o + NP_IPV6, (uint32_t)ul, src, dst, IPPROTO_UDP, 6);
+    return o + NP_IPV6 + ul;
+}
+
+/* A whole IPv6/TCP frame; returns its length. */
+static inline size_t np_frame_tcp6(uint8_t *f, const uint8_t dmac[6], const uint8_t smac[6], const struct in6_addr *src,
+                                   const struct in6_addr *dst, uint16_t sport, uint16_t dport, uint32_t seq,
+                                   uint32_t ack, uint8_t flags, uint16_t win, const void *opts, size_t optlen,
+                                   const void *payload, size_t n)
+{
+    size_t o = np_eth(f, dmac, smac, ETH_P_IPV6);
+    size_t tl = np_tcp(f + o + NP_IPV6, sport, dport, seq, ack, flags, win, opts, optlen, payload, n);
+    np_ipv6(f + o, src, dst, IPPROTO_TCP, (uint16_t)tl, 64);
+    np_l4_cksum6(f + o + NP_IPV6, (uint32_t)tl, src, dst, IPPROTO_TCP, 16);
+    return o + NP_IPV6 + tl;
+}
+
 /* An ICMPv6 echo request with `n` payload bytes. */
 static inline size_t np_frame_echo6(uint8_t *f, const uint8_t dmac[6], const uint8_t smac[6], const struct in6_addr *src,
                                     const struct in6_addr *dst, const void *payload, size_t n)
@@ -294,7 +319,8 @@ static inline void np_fix_checksums(uint8_t *f, size_t len)
  * The output oracle: does a frame the stack transmitted carry correct
  * checksums? 0 when it does (or is not a checksummed kind); otherwise a
  * small code naming the first wrong one: 1 the IPv4 header, 2 the IPv4
- * transport, 3 the IPv6 transport, 4 a malformed length.
+ * transport, 3 the IPv6 transport (a zero UDP checksum included), 4 a
+ * malformed length.
  */
 static inline int np_check_checksums(const uint8_t *f, size_t len)
 {
@@ -363,6 +389,8 @@ static inline int np_check_checksums(const uint8_t *f, size_t len)
             uint32_t min = nh == IPPROTO_UDP ? NP_UDP : nh == IPPROTO_TCP ? NP_TCP : 8u;
             if (plen < min)
                 return 4;
+            if (nh == IPPROTO_UDP && l4[6] == 0 && l4[7] == 0)
+                return 3;   /* UDP over IPv6 may not leave it out (RFC 8200 8.1) */
             if (cksum_fold(cksum_partial(l4, plen, cksum_pseudo6(&src, &dst, nh, plen))) != 0)
                 return 3;
         }

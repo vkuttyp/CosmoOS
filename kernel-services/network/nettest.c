@@ -6824,6 +6824,91 @@ static int dnat_flow_est(uint32_t client, uint16_t port)
     return -1;
 }
 
+/* An IPv4 frame the stack has sent out `t`, after every worker has finished
+ * what it was given: NULL means none was, not "none yet". */
+static struct mbuf *nettest_sent_ip_now(struct tap *t)
+{
+    net_workers_barrier();
+    struct mbuf *m;
+    while ((m = tap_recv(t)) != NULL) {
+        uint8_t type[2];
+        if (m_copydata(m, 12, 2, type) && type[0] == 0x08 && type[1] == 0x00)
+            return m;
+        m_freem(m);
+    }
+    return NULL;
+}
+
+/* The NAT and firewall state a test changed, cleared however it returns:
+ * a forward or a translation left behind would decide the next test's
+ * frames. */
+static char g_nat_state_marker;
+
+static void nt_rel_nat_state(void *arg)
+{
+    (void)arg;
+    nat_pf_clear();
+    nat_flush();
+    fw_flush();
+}
+
+/*
+ * nat_pf_clear removed the rules and kept their translations: a client
+ * whose connection a forward had translated kept reaching the guest through
+ * a port the clear had closed (fuzz_net_config). It reaps them now, as
+ * nat_pf_del reaps one rule's.
+ */
+bool selftest_net_pf_clear(const char **reason)
+{
+    static const uint8_t g_mac[6]      = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x01 };
+    static const uint8_t u_mac[6]      = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x01 };
+    static const uint8_t guest_mac[6]  = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x0f };
+    static const uint8_t client_mac[6] = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
+    struct tap *g = nt_tap_create("pfcg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = nt_tap_create("pfcu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);
+    nettest_seed_arp(tap_netif(u), client, client_mac);
+    nat_flush();
+    nat_pf_clear();
+    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
+
+    uint8_t l4[64], frame[128];
+    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_SYN);
+    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    struct mbuf *r = nettest_sent_ip_now(g);
+    CHECK(r != NULL);   /* translated to the guest */
+    m_freem(r);
+    CHECK(dnat_flow_est(client, 23456) == 0);
+
+    nat_pf_clear();
+    struct nat_pf_rule pf[1];
+    CHECK(nat_pf_list(pf, 1) == 0);
+    CHECK(dnat_flow_est(client, 23456) == -1);   /* its translation went with it */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_ACK);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_sent_ip_now(g);
+    if (r != NULL)
+        m_freem(r);
+    CHECK(r == NULL);   /* the client reaches the guest no more */
+
+    if (!selftest_release(&g_nat_state_marker))
+        nt_rel_nat_state(NULL);
+    nt_tap_destroy(u);
+    nt_tap_destroy(g);
+    kinfo("selftest: net-pf-clear: a clear took the forward's live translation with it");
+    return true;
+}
+
 bool selftest_net_dnat(const char **reason)
 {
     static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x01 };
@@ -7353,6 +7438,115 @@ static uint16_t fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id)
     l4[5] = (uint8_t)id;
     l4[7] = 1;                              /* sequence */
     return 16;
+}
+
+/* --- a tap's release against a frame still in flight --------------------------------
+ *
+ * tap_chr_release purged the guest's NAT and firewall state and then
+ * destroyed the tap; a frame the guest wrote before its last close, still
+ * on a worker's queue, was masqueraded in between and its translation
+ * outlived the tap -- the next tap given the subnet inherited it
+ * (fuzz_net_config). The seam delivers such a frame through the tap's
+ * interface just after the purges and waits for the workers: nothing may
+ * name the guest when the close returns.
+ */
+#if CONFIG_DEBUG
+struct tro_ctx {
+    struct netif *nif;      /* held across the close */
+    uint8_t frame[128];
+    uint32_t flen;
+    int delivered;          /* netif_rx was offered the frame */
+};
+
+static void tro_after_purge(void *arg)
+{
+    struct tro_ctx *c = arg;
+    struct mbuf *m = m_getcl();
+    if (m == NULL)
+        return;
+    memcpy(m->data, c->frame, c->flen);
+    m->len = m->pkt.len = c->flen;
+    netif_rx(c->nif, m);    /* the tap's own path in (tap_inject) */
+    c->delivered++;
+    net_workers_barrier();  /* whatever the stack makes of it is made */
+}
+
+static void tro_disarm(void *arg)
+{
+    (void)arg;
+    tap_test_after_purge = NULL;
+    tap_test_after_purge_arg = NULL;
+}
+
+static unsigned tro_naming(uint32_t guest)
+{
+    static struct nat_flow nf[NAT_TABLE_SIZE];
+    static struct fw_flow_info ff[FW_FLOW_MAX];
+    unsigned n = 0;
+    unsigned nn = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
+    for (unsigned i = 0; i < nn; i++)
+        n += nf[i].orig_ip == guest;
+    unsigned nfl = fw_flow_list(ff, FW_FLOW_MAX, clock_now_ns());
+    for (unsigned i = 0; i < nfl; i++)
+        n += ff[i].guest_ip == guest || ff[i].a_ip == guest || ff[i].b_ip == guest;
+    return n;
+}
+
+#endif /* CONFIG_DEBUG */
+
+bool selftest_net_tap_release_order(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: net-tap-release-order: no test hooks in this build; skipping");
+    return true;
+#else
+    fw_flush();
+    nat_flush();
+    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
+    struct file *fa = NULL;
+    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), world = IPV4_ADDR(10, 0, 2, 2);
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x01, 0x0a };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    static struct tro_ctx c;
+    memset(&c, 0, sizeof(c));
+    static struct nt_netif_ref held;
+    c.nif = netif_find("tap0");
+    CHECK(c.nif != NULL && nt_netif_hold(&held, c.nif));
+    CHECK(c.nif->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
+    nettest_seed_arp(c.nif, ga, amac);
+
+    /* The control: the same frame before the close is masqueraded. */
+    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32];
+    uint16_t l4len = nettest_mk_udp(l4, ga, world, 7100, 53, pl, sizeof(pl));
+    c.flen = nettest_wrap(c.frame, tap0mac, amac, ga, world, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len));
+    net_workers_barrier();
+    unsigned before = tro_naming(ga);
+    CHECK(before > 0);      /* a translation (and a flow) for the guest: the frame is one that makes state */
+    nat_flush();
+    fw_flush();
+    CHECK(tro_naming(ga) == 0);
+
+    CHECK(selftest_defer(tro_disarm, &c));
+    tap_test_after_purge_arg = &c;
+    tap_test_after_purge = tro_after_purge;
+    nt_file_put(fa);        /* the last close: the release, and the seam inside it */
+    tro_disarm(NULL);
+    selftest_forget(&c);
+    CHECK(c.delivered == 1);
+    unsigned left = tro_naming(ga);
+    if (left != 0)
+        kerror("selftest: net-tap-release-order: %u NAT entr(ies)/flow(s) name the released guest", left);
+    CHECK(left == 0);
+    if (!selftest_release(&g_nat_state_marker))
+        nt_rel_nat_state(NULL);
+    nt_netif_ref_put(&held);
+    kinfo("selftest: net-tap-release-order: a frame offered after the purges made nothing (the control made %u)",
+          before);
+    return true;
+#endif
 }
 
 bool selftest_net_firewall(const char **reason)
