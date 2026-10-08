@@ -3107,15 +3107,27 @@ bool selftest_fsctl_check(const char **reason)
 {
     struct cosmofs_check_report direct;
     struct blkdev *bd = NULL;
-    CHECK(check_fixture(&bd, reason));
-    uint64_t id = mount_of(ENG)->id;
-    CHECK(id != 0);
-
     struct file *f = NULL;
-    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+    struct vnode *rv = NULL;
+    uint8_t *buf = NULL;
+    if (!check_fixture(&bd, reason)) {
+        check_teardown(bd);
+        return false;
+    }
+#define FSCTL_CHECK(cond)                                                     \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    uint64_t id = mount_of(ENG)->id;
+    FSCTL_CHECK(id != 0);
+
+    FSCTL_CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
     size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check);
-    uint8_t *buf = kmalloc(cap, KMEM_ZERO);
-    CHECK(buf != NULL);
+    buf = kmalloc(cap, KMEM_ZERO);
+    FSCTL_CHECK(buf != NULL);
     struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
     struct cosmo_fsctl_check *c = (struct cosmo_fsctl_check *)(buf + sizeof(*h));
 
@@ -3123,71 +3135,71 @@ bool selftest_fsctl_check(const char **reason)
                                .flags = 0, .mount_id = id };
 
     /* Clean, through the device, and the same numbers the pass reports. */
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK(h->kind == COSMO_FSCTL_CHECK && h->count == 1);
-    CHECK(h->bytes == sizeof(struct cosmo_fsctl_check));
-    CHECK(c->nclasses == COSMO_FSCTL_CLASSES);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
-    CHECK((c->flags & COSMO_FSCTL_R_PARTIAL) == 0);
-    CHECK(cosmofs_check(mount_of(ENG), &direct, 0) == 0);
-    CHECK(c->blocks_seen == direct.blocks_seen);
-    CHECK(c->counted_free == direct.counted_free);
-    CHECK(c->inodes_seen == direct.inodes_seen);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK(h->kind == COSMO_FSCTL_CHECK && h->count == 1);
+    FSCTL_CHECK(h->bytes == sizeof(struct cosmo_fsctl_check));
+    FSCTL_CHECK(c->nclasses == COSMO_FSCTL_CLASSES);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_PARTIAL) == 0);
+    FSCTL_CHECK(cosmofs_check(mount_of(ENG), &direct, 0) == 0);
+    FSCTL_CHECK(c->blocks_seen == direct.blocks_seen);
+    FSCTL_CHECK(c->counted_free == direct.counted_free);
+    FSCTL_CHECK(c->inodes_seen == direct.inodes_seen);
     uint64_t free_before = c->counted_free;
 
     /* A leak, found by number through the device. */
     uint64_t leaked = 0;
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) == 0);
-    CHECK(c->class[0].count == 1);                  /* index 0 is alloc_not_seen, and that is ABI */
-    CHECK(c->class[0].named == 1 && c->class[0].name[0] == leaked);
-    CHECK(c->counted_free == free_before - 1);
+    FSCTL_CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) == 0);
+    FSCTL_CHECK(c->class[0].count == 1);                  /* index 0 is alloc_not_seen, and that is ABI */
+    FSCTL_CHECK(c->class[0].named == 1 && c->class[0].name[0] == leaked);
+    FSCTL_CHECK(c->counted_free == free_before - 1);
     /* A finding is not an error: the write succeeded and said so. */
 
     /* And repaired through the device, which is the half that mutates. */
     cmd.flags = COSMO_FSCTL_F_REPAIR;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK(c->class[0].repaired == 1);
-    CHECK((c->flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK(c->class[0].repaired == 1);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
     cmd.flags = 0;
-    CHECK(vfs_sync() == 0);
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
-    CHECK(c->counted_free == free_before);
+    FSCTL_CHECK(vfs_sync() == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    FSCTL_CHECK(c->counted_free == free_before);
 
     /* A scrub through the same channel, against the same name. */
     struct cosmo_fsctl scmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_SCRUB,
                                 .flags = 0, .mount_id = id };
     size_t scap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub);
-    CHECK(file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd));
-    CHECK(file_read(f, buf, scap) == (int64_t)scap);
+    FSCTL_CHECK(file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd));
+    FSCTL_CHECK(file_read(f, buf, scap) == (int64_t)scap);
     struct cosmo_fsctl_scrub *sc = (struct cosmo_fsctl_scrub *)(buf + sizeof(*h));
-    CHECK(h->kind == COSMO_FSCTL_SCRUB);
-    CHECK(sc->blocks_read > 0 && sc->unrecoverable == 0);
+    FSCTL_CHECK(h->kind == COSMO_FSCTL_SCRUB);
+    FSCTL_CHECK(sc->blocks_read > 0 && sc->unrecoverable == 0);
 
     /* The refusals. A ramfs has neither pass; a name nothing holds is
      * not a mount this namespace has. Both answer before any lock. */
     struct mount *rootm = NULL;
-    struct vnode *rv = NULL;
-    CHECK(vfs_lookup(NULL, "/tmp", &rv) == 0);
+    FSCTL_CHECK(vfs_lookup(NULL, "/tmp", &rv) == 0);
     rootm = rv->mnt;
     vnode_put(rv);
+    rv = NULL;
     cmd.mount_id = rootm->id;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EOPNOTSUPP);
-    CHECK(file_read(f, buf, cap) == 0);             /* a failed command leaves no result */
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EOPNOTSUPP);
+    FSCTL_CHECK(file_read(f, buf, cap) == 0);             /* a failed command leaves no result */
 
     cmd.mount_id = ~0ull;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -ENOENT);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -ENOENT);
     cmd.mount_id = id;
     cmd.version = COSMO_FSCTL_VERSION + 1;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
     cmd.version = COSMO_FSCTL_VERSION;
-    CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
 
     /*
      * Every bit of `flags` must mean something to the op it is sent
@@ -3196,21 +3208,34 @@ bool selftest_fsctl_check(const char **reason)
      * writer turns out to have been setting it.
      */
     cmd.flags = 1u << 31;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
     scmd.flags = COSMO_FSCTL_F_REPAIR;          /* CHECK-only, on a SCRUB */
-    CHECK(file_write(f, &scmd, sizeof(scmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &scmd, sizeof(scmd)) == -EINVAL);
     struct cosmo_fsctl lcmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_LIST,
                                 .flags = COSMO_FSCTL_F_REPAIR };
-    CHECK(file_write(f, &lcmd, sizeof(lcmd)) == -EINVAL);   /* LIST takes none */
+    FSCTL_CHECK(file_write(f, &lcmd, sizeof(lcmd)) == -EINVAL);   /* LIST takes none */
     cmd.flags = 0;
     scmd.flags = 0;
 
     kfree(buf);
+    buf = NULL;
     file_put(f);
+    f = NULL;
     check_teardown(bd);
+    bd = NULL;
     kinfo("selftest: fsctl-check: a leak found and repaired through /dev/fsctl against mount %llu",
           (unsigned long long)id);
     return true;
+
+cleanup:
+    if (rv)
+        vnode_put(rv);
+    if (f)
+        file_put(f);
+    kfree(buf);
+    check_teardown(bd);
+    return false;
+#undef FSCTL_CHECK
 }
 
 bool selftest_cosmofs_check_partial(const char **reason)
