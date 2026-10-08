@@ -315,6 +315,26 @@ the inventory (§1.3):
 
 ## 7. Validation
 
-Filled in from the run of HEAD; QEMU at nice 0 throughout.
+Run sequentially on `d368d399` (the tree with §2a's bound), with QEMU at
+nice 0 (`ps` sampled). Every boot passed, and every debug boot printed only
+the self-tests' expected lockdep reports.
 
-(see the PR description for the final table)
+| | x86-64 | AArch64 |
+|---|---|---|
+| `make analyze` | clean | clean |
+| debug, `QEMU_SMP=1` | PASS 136.6 s; peak 385 of 512; bystander 17 ms | PASS 143.5 s; 386; 14 ms |
+| debug, `QEMU_SMP=2` | PASS 148.2 s; 421; 15 ms; `virtio-remove-inflight` 152 ms | PASS 153.6 s; 421; 18 ms; 180 ms |
+| debug, `QEMU_SMP=4` | PASS 148.7 s; 440; 17 ms; 209 ms | PASS 143.8 s; 440; 95 ms; 228 ms |
+| `make test-smp2` | PASS 139.5 s | PASS 149.3 s |
+| `make test-chaos` | PASS 146.1 s | PASS 142.5 s |
+| `make test-harness-retry` | PASS 141.8 s | PASS 140.9 s |
+| release build and boot | PASS 17.0 s; no `lockdep` symbol in the kernel ELF | PASS 20.4 s; none |
+| network harness (in every debug boot) | passed | passed |
+
+Host: `make host-test` (with `test_module_symbols`) and `make fuzz` (all
+13 targets) pass. The probes in §1 pass on both architectures.
+
+The first run of this matrix, before §2a, failed `QEMU_SMP=2` (36 s
+`virtio-remove-inflight`, with a soft lockup on `irqpoll/0` and the hang
+watchdog) and `test-chaos` (240 s timeout) on x86-64. The AArch64 half was
+stopped there.
