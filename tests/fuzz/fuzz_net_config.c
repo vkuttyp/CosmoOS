@@ -150,9 +150,27 @@ static void dump_rule(const char *what, const struct fw_rule *r)
             r->scope);
 }
 
+/* Rule decisions per chain and verdict, since the last record began: the
+ * verdict oracle (check_verdicts) holds the firewall's counters to them. */
+enum { CH_FORWARD, CH_INPUT, CH_HOST, CH_OUTPUT, CH_COUNT };
+static unsigned g_tally[CH_COUNT][2];
+
+static int chain_of(uint8_t direction)
+{
+    switch (direction) {
+    case FW_DIR_TO_HOST: return CH_INPUT;
+    case FW_DIR_FROM_UPLINK: return CH_HOST;
+    case FW_DIR_OUTPUT: return CH_OUTPUT;
+    default: return CH_FORWARD;
+    }
+}
+
 /* As a frame is decided: the rule that decided it is installed, for that owner, now. */
 static void on_rule_matched(uint32_t owner_ip, const struct fw_rule *r)
 {
+    g_tally[chain_of(r->direction)][r->verdict == FW_ACCEPT]++;
+    trace("  rule decided: owner %08x dir %u proto %u verdict %u\n", ntohl(owner_ip), r->direction, r->proto,
+          r->verdict);
     int o = owner_of(owner_ip);
     bool ok = o >= 0 && g_own[o].attached;
     bool found = false;
@@ -284,6 +302,66 @@ static void check_released(uint32_t guest)
             fprintf(stderr, "fuzz_net_config: a firewall flow names guest %08x after its release\n", ntohl(guest));
             FUZZ_ASSERT(false);
         }
+}
+
+/*
+ * The verdict oracle. Every rule that decides a frame is reported by the
+ * hook, and every verdict is counted by the firewall, once, as by-rule or
+ * by-default; the two must agree. A rule's DROP is counted as a rule drop
+ * in its chain. A rule's ACCEPT is counted as a rule accept, except in the
+ * forward chain, where an accepted guest-to-guest flow with no room in the
+ * flow table is refused and counted as flow_drop_share or flow_drop_table
+ * instead. A stale fast path, a rule skipped, or a verdict inverted shows
+ * up as a count with no decision behind it, or a decision with no count.
+ */
+static void check_verdicts(const struct fw_stats *a, const struct fw_stats *b)
+{
+    unsigned fwd_acc = (unsigned)(b->accept_rule - a->accept_rule);
+    unsigned fwd_refused = (unsigned)((b->flow_drop_share - a->flow_drop_share) + (b->flow_drop_table - a->flow_drop_table));
+    bool ok = g_tally[CH_FORWARD][0] == b->drop_rule - a->drop_rule &&
+              g_tally[CH_FORWARD][1] >= fwd_acc && g_tally[CH_FORWARD][1] <= fwd_acc + fwd_refused &&
+              g_tally[CH_INPUT][0] == b->in_drop_rule - a->in_drop_rule &&
+              g_tally[CH_INPUT][1] == b->in_accept_rule - a->in_accept_rule &&
+              g_tally[CH_HOST][0] == b->hin_drop_rule - a->hin_drop_rule &&
+              g_tally[CH_HOST][1] == b->hin_accept_rule - a->hin_accept_rule &&
+              g_tally[CH_OUTPUT][0] == b->out_drop_rule - a->out_drop_rule &&
+              g_tally[CH_OUTPUT][1] == b->out_accept_rule - a->out_accept_rule;
+    if (ok)
+        return;
+    fprintf(stderr, "fuzz_net_config: rule decisions (drop/accept) forward %u/%u input %u/%u host %u/%u output %u/%u; "
+                    "counted forward %llu/%llu (+%u refused) input %llu/%llu host %llu/%llu output %llu/%llu\n",
+            g_tally[CH_FORWARD][0], g_tally[CH_FORWARD][1], g_tally[CH_INPUT][0], g_tally[CH_INPUT][1],
+            g_tally[CH_HOST][0], g_tally[CH_HOST][1], g_tally[CH_OUTPUT][0], g_tally[CH_OUTPUT][1],
+            (unsigned long long)(b->drop_rule - a->drop_rule), (unsigned long long)fwd_acc, fwd_refused,
+            (unsigned long long)(b->in_drop_rule - a->in_drop_rule), (unsigned long long)(b->in_accept_rule - a->in_accept_rule),
+            (unsigned long long)(b->hin_drop_rule - a->hin_drop_rule), (unsigned long long)(b->hin_accept_rule - a->hin_accept_rule),
+            (unsigned long long)(b->out_drop_rule - a->out_drop_rule), (unsigned long long)(b->out_accept_rule - a->out_accept_rule));
+    FUZZ_ASSERT(ok);
+}
+
+/* The default a chain applies for `o` in `slot` (fw_policy_get's order): the
+ * model's policy for an attached owner, the built-in one otherwise. */
+static uint8_t default_of(int o, unsigned slot)
+{
+    if (o >= 0 && g_own[o].attached)
+        return g_own[o].policy[slot];
+    static const uint8_t builtin[5] = { FW_ACCEPT, FW_DROP, FW_DROP, FW_ACCEPT, FW_ACCEPT };
+    return builtin[slot];
+}
+
+/* A chain decided by its default (one count moved, no rule decided in it):
+ * the verdict is the owner's default. */
+static void check_default(const char *chain, uint64_t acc_before, uint64_t acc_after, uint64_t drop_before,
+                          uint64_t drop_after, uint8_t want)
+{
+    uint64_t acc = acc_after - acc_before, drop = drop_after - drop_before;
+    if (acc + drop != 1)
+        return;   /* the chain did not run, or ran for more than this frame */
+    uint8_t got = acc ? FW_ACCEPT : FW_DROP;
+    if (got != want)
+        fprintf(stderr, "fuzz_net_config: the %s chain's default gave %s; the model's is %s\n", chain,
+                got ? "ACCEPT" : "DROP", want ? "ACCEPT" : "DROP");
+    FUZZ_ASSERT(got == want);
 }
 
 /* --- the operations -------------------------------------------------------------- */
@@ -517,8 +595,20 @@ static void op_send(const uint8_t *a)
     to.family = COSMO_AF_INET;
     to.v4 = k_ips[(a[0] & 7) ? (a[0] & 7) : 1];
     to.port = port_of(a[1]);
+    struct fw_stats s0, s1;
+    fw_get_stats(&s0);
+    unsigned rd0 = g_tally[CH_OUTPUT][0], ra0 = g_tally[CH_OUTPUT][1];
     int rc = udp_sendto(&g_udp7, payload, (size_t)(a[2] % 32) + 1, &to);
+    fw_get_stats(&s1);
     trace("send to %08x:%u: %d\n", ntohl(to.v4), to.port, rc);
+    /* The OUTPUT chain's verdict is what the send returns: -EPERM for a drop. */
+    uint64_t dropped = (s1.out_drop_rule - s0.out_drop_rule) + (s1.out_drop_default - s0.out_drop_default);
+    uint64_t passed = (s1.out_accept_rule - s0.out_accept_rule) + (s1.out_accept_default - s0.out_accept_default);
+    if (dropped + passed == 1)
+        FUZZ_ASSERT((rc == -EPERM) == (dropped == 1));
+    if (g_tally[CH_OUTPUT][0] == rd0 && g_tally[CH_OUTPUT][1] == ra0)
+        check_default("OUTPUT", s0.out_accept_default, s1.out_accept_default, s0.out_drop_default, s1.out_drop_default,
+                      default_of(OWN_HOST, 4));
 }
 
 /* A well-formed frame from a template, so the rules and translations meet
@@ -592,7 +682,28 @@ static void op_frame(const uint8_t *a)
           on->nif.name);
     if (!(on->nif.flags & NETIF_UP))
         return;   /* netif_rx refuses a down interface's frames */
+    struct fw_stats s0, s1;
+    fw_get_stats(&s0);
+    unsigned tally0[CH_COUNT][2];
+    memcpy(tally0, g_tally, sizeof(tally0));
     fz_deliver(on, f, (uint32_t)n);
+    fw_get_stats(&s1);
+    /* Where the template names the chain and the owner, a default decision
+     * is that owner's default. (A reply takes whatever path its translation
+     * gives it, and is held only to the tally.) */
+    int owner = owner_of(src);
+    unsigned kind = a[0] % 7;
+    if ((kind == 0 || kind == 1) && memcmp(tally0[CH_HOST], g_tally[CH_HOST], sizeof(tally0[CH_HOST])) == 0)
+        check_default("host", s0.hin_accept_default, s1.hin_accept_default, s0.hin_drop_default, s1.hin_drop_default,
+                      default_of(OWN_HOST, 3));
+    if (kind == 3 && memcmp(tally0[CH_INPUT], g_tally[CH_INPUT], sizeof(tally0[CH_INPUT])) == 0)
+        check_default("input", s0.in_accept_default, s1.in_accept_default, s0.in_drop_default, s1.in_drop_default,
+                      default_of(owner, 2));
+    if ((kind == 2 || kind == 4) && memcmp(tally0[CH_FORWARD], g_tally[CH_FORWARD], sizeof(tally0[CH_FORWARD])) == 0)
+        check_default("forward", s0.accept_default, s1.accept_default, s0.drop_default, s1.drop_default,
+                      default_of(owner, kind == 4 && g_own[owner_of(dst)].attached ? 1 : 0));
+    /* (To the other guest is TO_GUEST only while its tap is up: with it
+     * released the address routes out the uplink, TO_UPLINK.) */
     struct mbuf *m;
     while ((m = udp_recv(&g_udp7)) != NULL)
         m_freem(m);
@@ -688,6 +799,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         for (size_t i = 0; i < n && off < size; i++)
             a[i] = data[off++];
         ops++;
+        struct fw_stats before;
+        fw_get_stats(&before);
+        memset(g_tally, 0, sizeof(g_tally));
         switch (op) {
         case OP_FW_ADD: op_fw_add(a); break;
         case OP_FW_DEL: op_fw_del(a); break;
@@ -702,6 +816,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         case OP_SEND: op_send(a); break;
         default: op_frame(a); break;
         }
+        struct fw_stats after;
+        fw_get_stats(&after);
+        check_verdicts(&before, &after);
         check_model();
     }
     teardown();
