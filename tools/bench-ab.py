@@ -65,12 +65,13 @@ def build(root, rev, patch, out, arch, lockdep):
     make = ['gmake', '-j8', 'ARCH=' + arch, 'BUILD=debug', 'HAVE_MUSL=0', 'LOCKDEP=%d' % lockdep, 'OUT=' + str(out)]
     with (out / 'build.log').open('w') as log:
         subprocess.run(make + ['image'], cwd=tmp, stdout=log, stderr=subprocess.STDOUT, check=True)
-    shutil.rmtree(tmp, ignore_errors=True)
-    return sha
+    return sha, Path(tmp)
 
 
-def boot(root, out, log_path, timeout):
-    spec = importlib.util.spec_from_file_location('bench_ab_boot', root / 'tests/boot/run_boot_test.py')
+def boot(clone, out, log_path, timeout):
+    # The side's own harness: its markers are that tree's (a module ABI
+    # bump on one side fails the other's boots by a marker otherwise).
+    spec = importlib.util.spec_from_file_location('bench_ab_boot', clone / 'tests/boot/run_boot_test.py')
     harness = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(harness)
     sys.argv = ['bench-ab', '--timeout', str(timeout), '--image', str(out / 'cosmoos.img'), '--log', str(log_path),
@@ -108,16 +109,25 @@ def main():
     shutil.rmtree(base, ignore_errors=True)
     os.environ.update(COSMO_ARCH=args.arch, QEMU_ARCH=args.arch)
     sides = {}
-    for name, rev, patch in (('before', args.before, args.patch_before), ('after', args.after, args.patch_after)):
-        out = base / name
-        sha = build(root, rev, patch, out, args.arch, args.lockdep)
-        sides[name] = {'out': out, 'sha': sha + (' +patch' if patch else ''), 'runs': [], 'verdicts': []}
-        print('bench-ab: built %s = %s' % (name, sides[name]['sha']), flush=True)
+    try:
+        for name, rev, patch in (('before', args.before, args.patch_before), ('after', args.after, args.patch_after)):
+            out = base / name
+            sha, clone = build(root, rev, patch, out, args.arch, args.lockdep)
+            sides[name] = {'out': out, 'clone': clone, 'sha': sha + (' +patch' if patch else ''), 'runs': [],
+                           'verdicts': []}
+            print('bench-ab: built %s = %s' % (name, sides[name]['sha']), flush=True)
+        return run(args, groups, sides)
+    finally:
+        for s in sides.values():
+            shutil.rmtree(s['clone'], ignore_errors=True)
+
+
+def run(args, groups, sides):
     for i in range(args.pairs):
         for name in ('after', 'before'):
             s = sides[name]
             log_path = s['out'] / ('boot-%d.log' % i)
-            rc = boot(root, s['out'], log_path, args.timeout)
+            rc = boot(s['clone'], s['out'], log_path, args.timeout)
             try:
                 text = log_path.read_text(errors='replace')
             except OSError:
