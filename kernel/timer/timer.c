@@ -631,14 +631,16 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     clock_tick_advance(pc->cpu_id);
 
     uint64_t now = clock_now_ns();
+    uint64_t prev = pc->last_tick_ns;   /* the gap's start, for the detector and the self-tests' maximum */
+    (void)prev;
 #if CONFIG_DEBUG
     /* The tick-gap detector: a second without a tick on this CPU is an
      * interrupts-off window neither lockup detector sees (their bar is
      * ten). Named with where the CPU was when interrupts came back. */
-    if (pc->last_tick_ns != 0 && clock_delta_ns(now, pc->last_tick_ns) > NS_PER_SEC &&
+    if (prev != 0 && clock_delta_ns(now, prev) > NS_PER_SEC &&
         __atomic_load_n(&g_test_cpu_offset_ns[pc->cpu_id], __ATOMIC_ACQUIRE) == 0)   /* a test's injected skew reads as a gap */
         kwarn("timer: cpu %u: no tick for %llu ms; interrupts came back at pc %p (last tick interrupted pc %p, thread '%s')",
-              pc->cpu_id, (unsigned long long)(clock_delta_ns(now, pc->last_tick_ns) / 1000000),
+              pc->cpu_id, (unsigned long long)(clock_delta_ns(now, prev) / 1000000),
               (void *)arch_trap_frame_pc(frame), (void *)pc->last_tick_pc,
               pc->current ? pc->current->name : "-");
 #endif
@@ -654,9 +656,48 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
      * would hide a backwards counter on a single CPU, which is a bug in
      * the time source rather than the skew this tree tolerates. */
     pc->tick_cost_ns += clock_now_ns() - now;
+    /* The same interval the detector above judges, kept as a maximum for
+     * a test to bound (timer_test_tick_gap_max_ns). */
+    if (prev != 0 && __atomic_load_n(&g_test_cpu_offset_ns[pc->cpu_id], __ATOMIC_ACQUIRE) == 0) {
+        uint64_t gap = clock_delta_ns(now, prev);
+        if (gap > __atomic_load_n(&pc->tick_gap_max_ns, __ATOMIC_RELAXED))
+            __atomic_store_n(&pc->tick_gap_max_ns, gap, __ATOMIC_RELAXED);
+    }
 #endif
     if (g_tick_hook)
         g_tick_hook(now, frame);
+}
+
+void timer_test_tick_gap_reset(void)
+{
+#if CONFIG_SELFTEST
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        struct percpu *pc = percpu_get(c);
+        if (pc != NULL)
+            __atomic_store_n(&pc->tick_gap_max_ns, 0ull, __ATOMIC_RELAXED);
+    }
+#endif
+}
+
+uint64_t timer_test_tick_gap_max_ns(unsigned *cpu)
+{
+    uint64_t max = 0;
+    unsigned at = 0;
+#if CONFIG_SELFTEST
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        struct percpu *pc = percpu_get(c);
+        if (pc == NULL || !cpu_online(c))
+            continue;
+        uint64_t gap = __atomic_load_n(&pc->tick_gap_max_ns, __ATOMIC_RELAXED);
+        if (gap > max) {
+            max = gap;
+            at = c;
+        }
+    }
+#endif
+    if (cpu)
+        *cpu = at;
+    return max;
 }
 
 uint64_t timer_tick_cost_ns(void)

@@ -177,6 +177,12 @@ bool blk_test_drain_ordered(void);
  * its end with it and a completion callback stamps itself, so "after"
  * is an order and not two clocks (docs/audit/next-subsystem-virtio-remove-inflight.md). */
 uint64_t blk_test_tick(void);
+/* From a bio's `done` only: put the bio back at the tail of its device's
+ * pending queue, so the bio_complete running that `done` hands it to the
+ * driver again (drain_pending) -- the layer's own resubmission from a
+ * completion, which a waiting submitter drives in normal use, driven by a
+ * test instead (`blk-irq-budget`). */
+void blk_test_resubmit_from_done(struct bio *bio);
 
 /*
  * A driver's own seams, published to the block layer at its module init
