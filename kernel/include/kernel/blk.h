@@ -202,6 +202,12 @@ struct blk_test_driver_hooks {
     void (*stamps_reset)(void);
     uint64_t (*before_irq_seq)(void);
     uint64_t (*walk_seq)(void);
+    /* The most completions one call of the driver's completion handler
+     * consumed since the last reset (docs/testing/flakes.md, "held for
+     * 184 s"); and the calls that consumed more than the ring holds. */
+    void (*pops_reset)(struct blkdev *bd);
+    unsigned (*pops_max)(struct blkdev *bd);
+    uint64_t (*pops_over_ring)(struct blkdev *bd);
 };
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
 const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);
