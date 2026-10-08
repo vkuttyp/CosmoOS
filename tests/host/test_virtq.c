@@ -71,6 +71,21 @@ void dma_sync_for_device(struct device *dev, dma_addr_t dma, size_t len, enum dm
     (void)dev; (void)dma; (void)len; (void)dir;
 }
 
+/* The queue's deferred completion work is the kernel's (kernel/core/
+ * irqpoll.c). Every queue here is polled (a NULL callback), so nothing is
+ * ever scheduled; a scheduled poll would run to the end, synchronously. */
+void irq_poll_init(struct irq_poll *ip, irq_poll_fn poll, const char *name)
+{
+    ip->poll = poll;
+    ip->name = name;
+}
+void irq_poll_sched(struct irq_poll *ip)
+{
+    while (ip->poll(ip, IRQ_POLL_BUDGET) >= IRQ_POLL_BUDGET)
+        ;
+}
+void irq_poll_disable(struct irq_poll *ip) { (void)ip; }
+
 /* --- the fake transport --- */
 
 static unsigned g_notifies;
