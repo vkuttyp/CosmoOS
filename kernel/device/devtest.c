@@ -1858,6 +1858,13 @@ bool selftest_virtio_remove_inflight(const char **reason)
 #define BIRQ_GAP_MS   250u       /* the longest a CPU may go without a tick meanwhile */
 #define BIRQ_NEXT_NS  (1000ull * 1000)   /* how long `done` waits for the device's next completion */
 #define BIRQ_MAX_BIOS 64u
+/* LOAD-SENSITIVE, as BIRQ_GAP_MS: the longest a default-priority thread
+ * on any CPU may go without running during the storm. The irqpoll worker
+ * holds its CPU at the highest priority for one slice (IRQ_POLL_HOLD_NS),
+ * then time-slices; a worker that kept the CPU for the whole storm starved
+ * that CPU's threads for all of it -- the test thread among them, in
+ * virtio-remove-inflight, which was the one that would have ended it. */
+#define BIRQ_STARVE_MS 250u
 
 #if CONFIG_DEBUG
 static struct birq {
@@ -1868,7 +1875,30 @@ static struct birq {
     volatile unsigned completions, resubmits, found_next, missed_next, errors, finished;
     struct completion all_done;
     struct bio bios[BIRQ_MAX_BIOS];   /* static: a storm that never ends must not complete into a freed frame */
+    volatile unsigned measuring, stop;
+    struct birq_bystander {
+        volatile unsigned started;
+        uint64_t last_ns;
+        volatile uint64_t max_gap_ns;
+    } by[CONFIG_MAX_CPUS];
 } g_birq;
+
+/* One per CPU, pinned, at the default priority: how long it went without
+ * running while the storm was on. Spinning, so it is always ready -- a gap
+ * is time the CPU gave to something else. */
+static void birq_bystander_main(void *arg)
+{
+    struct birq_bystander *by = arg;
+    by->last_ns = clock_now_ns();
+    __atomic_store_n(&by->started, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_birq.stop, __ATOMIC_ACQUIRE)) {
+        uint64_t now = clock_now_ns();
+        if (__atomic_load_n(&g_birq.measuring, __ATOMIC_ACQUIRE) && now - by->last_ns > by->max_gap_ns)
+            __atomic_store_n(&by->max_gap_ns, now - by->last_ns, __ATOMIC_RELAXED);
+        by->last_ns = now;
+        arch_cpu_relax();
+    }
+}
 
 static void birq_done(struct bio *bio)
 {
@@ -1936,6 +1966,14 @@ bool selftest_blk_irq_budget(const char **reason)
         bio->arg = b;
         list_init(&bio->link);
     }
+    struct thread *bys[CONFIG_MAX_CPUS] = { 0 };
+    for (unsigned c = 0; c < cpu_count() && c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c))
+            bys[c] = thread_create_on(birq_bystander_main, &b->by[c], "birq-by", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        while (bys[c] != NULL && !__atomic_load_n(&b->by[c].started, __ATOMIC_ACQUIRE))
+            thread_sleep_ms(1);
+    __atomic_store_n(&b->measuring, 1u, __ATOMIC_RELEASE);
     h->pops_reset(bd);
     timer_test_tick_gap_reset();
     uint64_t t0 = clock_now_ns();
@@ -1950,6 +1988,20 @@ bool selftest_blk_irq_budget(const char **reason)
     }
     bool ended = wait_for_completion_timeout(&b->all_done, ((uint64_t)BIRQ_STORM_MS + 30000ull) * 1000000ull);
     uint64_t took_ms = clock_since_ns(t0) / 1000000ull;
+    __atomic_store_n(&b->measuring, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&b->stop, 1u, __ATOMIC_RELEASE);
+    uint64_t starve_ms = 0;
+    unsigned starve_cpu = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++) {
+        if (bys[c] == NULL)
+            continue;
+        (void)thread_join(bys[c]);
+        uint64_t g = __atomic_load_n(&b->by[c].max_gap_ns, __ATOMIC_RELAXED) / 1000000ull;
+        if (g > starve_ms) {
+            starve_ms = g;
+            starve_cpu = c;
+        }
+    }
     unsigned gap_cpu = 0;
     uint64_t gap_ms = timer_test_tick_gap_max_ns(&gap_cpu) / 1000000ull;
     unsigned pops = h->pops_max(bd);
@@ -1962,6 +2014,8 @@ bool selftest_blk_irq_budget(const char **reason)
     kinfo("selftest: blk-irq-budget: most popped in one handler call %u (calls over the ring %llu); "
           "longest tick gap %llu ms on cpu %u (bound %u)",
           pops, (unsigned long long)over, (unsigned long long)gap_ms, gap_cpu, BIRQ_GAP_MS);
+    kinfo("selftest: blk-irq-budget: a default-priority thread waited at most %llu ms to run, on cpu %u (bound %u)",
+          (unsigned long long)starve_ms, starve_cpu, BIRQ_STARVE_MS);
     if (!ended) {
         /* The bios are still the device's: static storage, the disk's
          * reference kept, and the buffer left allocated. */
@@ -1990,6 +2044,10 @@ bool selftest_blk_irq_budget(const char **reason)
     }
     if (gap_ms > BIRQ_GAP_MS) {
         *reason = "check failed: a CPU went longer than the bound without a tick";
+        return false;
+    }
+    if (starve_ms > BIRQ_STARVE_MS) {
+        *reason = "check failed: a default-priority thread went longer than the bound without running";
         return false;
     }
     return true;
