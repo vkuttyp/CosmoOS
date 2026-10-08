@@ -22,6 +22,7 @@ still fails: the note is a label, not a retry.
 """
 
 import argparse
+import atexit
 import os
 import sys
 import threading
@@ -29,6 +30,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 EXIT_SUCCESS_VALUE = 0x10
@@ -619,7 +621,8 @@ SHF_ALLOC, SHF_EXECINSTR, SHT_SYMTAB, STT_FUNC = 0x2, 0x4, 2, 2
 def ko_text(path):
     """The text group of a module, laid out as the loader lays it
     (kernel/module/modelf.c): every allocatable executable section, in
-    section order, each at its alignment. Returns ([(index, offset, size)],
+    section order, each at its alignment. Returns ([(index, offset, size,
+    name)],
     [(section index, value, size, name)] for the function symbols), or
     None if the file is not an ELF64 relocatable object."""
     try:
@@ -631,13 +634,15 @@ def ko_text(path):
     shoff = struct.unpack_from("<Q", data, 0x28)[0]
     shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
     shdrs = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    shstr = shdrs[struct.unpack_from("<H", data, 0x3E)[0]][4]
     texts, size = [], 0
-    for i, (_n, typ, flags, _a, _o, sz, _l, _i, align, _e) in enumerate(shdrs):
+    for i, (name, typ, flags, _a, _o, sz, _l, _i, align, _e) in enumerate(shdrs):
         if typ == 0 or not flags & SHF_ALLOC or not flags & SHF_EXECINSTR:
             continue
         align = align or 1
         off = (size + align - 1) & ~(align - 1)
-        texts.append((i, off, sz))
+        end = data.index(b"\0", shstr + name)
+        texts.append((i, off, sz, data[shstr + name:end].decode(errors="replace")))
         size = off + sz
     funcs = []
     for (_n, typ, _f, _a, off, sz, link, _i, _al, ent) in shdrs:
@@ -650,6 +655,39 @@ def ko_text(path):
                 end = data.index(b"\0", stroff + name)
                 funcs.append((shndx, value, ssize, data[stroff + name:end].decode(errors="replace")))
     return texts, funcs
+
+
+_PLACED = {}
+
+
+def placed_object(obj, texts, tool):
+    """`obj` with every text section's address set to its offset in the
+    loader's text group (a copy, made once, by the llvm-objcopy beside
+    `tool`), or `obj` itself when it has one text section; None if the
+    copy cannot be made."""
+    if len(texts) == 1:
+        return obj
+    if obj in _PLACED:
+        return _PLACED[obj]
+    names = [n for _i, _o, _s, n in texts]
+    placed = None
+    if len(set(names)) == len(names):
+        objcopy = os.path.join(os.path.dirname(tool), os.path.basename(tool).replace("llvm-symbolizer", "llvm-objcopy"))
+        fd, placed = tempfile.mkstemp(suffix=".o")
+        os.close(fd)
+        atexit.register(lambda p=placed: os.path.exists(p) and os.unlink(p))
+        args = [objcopy]
+        for _i, o, _s, n in texts:
+            args += ["--change-section-address", "%s=0x%x" % (n, o)]
+        try:
+            ok = subprocess.run(args + [obj, placed], capture_output=True, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            os.unlink(placed)
+            placed = None
+    _PLACED[obj] = placed
+    return placed
 
 
 def module_object(modules, name):
@@ -676,20 +714,18 @@ def symbolize_module(addr, bases, modules, tool):
             return ("?? [%s+0x%x]" % (name, a - base), "(no %s.ko to resolve it)" % name)
         texts, funcs = layout
         off = a - base
-        hit = next(((i, off - o) for i, o, sz in texts if o <= off < o + sz), None)
+        hit = next(((i, off - o) for i, o, sz, _n in texts if o <= off < o + sz), None)
         if hit is None:
             return ("?? [%s+0x%x]" % (name, off), "(past the module's sections)")
         index, rel = hit
         func = next((f"{n} [{name}]" for (sh, v, sz, n) in funcs if sh == index and v <= rel < v + max(sz, 1)),
                     "?? [%s+0x%x]" % (name, off))
-        loc = "??"
-        if len(texts) == 1:
-            # One text section: its section-relative address is unambiguous
-            # to llvm-symbolizer, which reads the object's (relocated) DWARF.
-            r = run_symbolizer(tool, obj, ["0x%x" % rel])
-            if r:
-                loc = r[0][1]
-        return (func, loc)
+        # llvm-symbolizer reads the object's (relocated) DWARF by section
+        # address: each text section at its offset in the group, which a
+        # single one at 0 already is, and a copy gets for several.
+        placed = placed_object(obj, texts, tool)
+        r = run_symbolizer(tool, placed, ["0x%x" % off]) if placed else None
+        return (func, r[0][1] if r else "??")
     return None
 
 
