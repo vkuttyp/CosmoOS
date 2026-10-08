@@ -302,9 +302,10 @@ static void worker_main(void *arg)
         ip->again = false;
         spin_unlock_irqrestore(&ip->lock, s);
         /* Preemption off across the call: `poll` never sleeps (it runs in
-         * interrupt context too), and its callback class sits on this
-         * CPU's held stack, which is this thread's only while no other
-         * thread runs here. Interrupts stay on. */
+         * interrupt context too), and a sleep inside it is then reported
+         * here as it would be in the handler. Interrupts stay on; the
+         * call's callback class is this thread's (lockdep_acquired), so an
+         * interrupt taken meanwhile does not see it. */
         preempt_disable();
         unsigned n = run_poll(ip);
         preempt_enable();
