@@ -1399,12 +1399,23 @@ static bool read_matches_prefix(const char *path, const void *data, size_t len);
 
 bool selftest_cosmofs_compress(const char **reason)
 {
-    struct blkdev *bd;
+    struct blkdev *bd = NULL;
+    uint8_t *dense = NULL, *sparse_data = NULL, *back = NULL;
+    struct file *f = NULL;
     if (!engine_mount(&bd, 1024, reason))
         return false;
+#define COMPRESS_CHECK(cond)                                                  \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
     const size_t len = 32 * 4096;   /* four records */
-    uint8_t *dense = kmalloc(len, 0), *sparse_data = kmalloc(len, 0), *back = kmalloc(len, 0);
-    CHECK(dense != NULL && sparse_data != NULL && back != NULL);
+    dense = kmalloc(len, 0);
+    sparse_data = kmalloc(len, 0);
+    back = kmalloc(len, 0);
+    COMPRESS_CHECK(dense != NULL && sparse_data != NULL && back != NULL);
     /* Repetitive: what compression is for. */
     for (size_t i = 0; i < len; i++)
         sparse_data[i] = (uint8_t)(i % 61);
@@ -1416,13 +1427,13 @@ bool selftest_cosmofs_compress(const char **reason)
     }
 
     struct cosmofs_stats st0, st1, st2;
-    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
-    CHECK(write_file(ENG "/small", sparse_data, len));
-    CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
-    CHECK(write_file(ENG "/big", dense, len));
-    CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    COMPRESS_CHECK(write_file(ENG "/small", sparse_data, len));
+    COMPRESS_CHECK(vfs_sync() == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    COMPRESS_CHECK(write_file(ENG "/big", dense, len));
+    COMPRESS_CHECK(vfs_sync() == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
 
     uint64_t compressible = st0.free_blocks - st1.free_blocks;
     uint64_t incompressible = st1.free_blocks - st2.free_blocks;
@@ -1430,31 +1441,32 @@ bool selftest_cosmofs_compress(const char **reason)
      * other one cannot be, and is stored as it is. */
     kinfo("cosmofs-compress: %llu blocks compressible, %llu not", (unsigned long long)compressible,
           (unsigned long long)incompressible);
-    CHECK(compressible < 16 && incompressible >= 32);
-    CHECK(compressible * 3 < incompressible);
+    COMPRESS_CHECK(compressible < 16 && incompressible >= 32);
+    COMPRESS_CHECK(compressible * 3 < incompressible);
 
     /* Both read back exactly, through the records and around them. */
-    CHECK(read_matches(ENG "/small", sparse_data, len));
-    CHECK(read_matches(ENG "/big", dense, len));
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
+    COMPRESS_CHECK(read_matches(ENG "/big", dense, len));
 
     /* A page written inside a compressed record: the record is read,
      * rebuilt around the new page, and written again. */
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
     memset(sparse_data + 3 * 4096, 0x5a, 4096);
-    CHECK(file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096);
-    CHECK(file_sync(f) == 0);
+    COMPRESS_CHECK(file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096);
+    COMPRESS_CHECK(file_sync(f) == 0);
     file_put(f);
-    CHECK(read_matches(ENG "/small", sparse_data, len));
+    f = NULL;
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
 
     /* A partial page inside a record, which reads the record to fill in
      * what the write does not cover. */
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
     memset(sparse_data + 9 * 4096 + 100, 0x33, 500);
-    CHECK(file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, 9 * 4096 + 100) == 500);
-    CHECK(file_sync(f) == 0);
+    COMPRESS_CHECK(file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, 9 * 4096 + 100) == 500);
+    COMPRESS_CHECK(file_sync(f) == 0);
     file_put(f);
-    CHECK(read_matches(ENG "/small", sparse_data, len));
+    f = NULL;
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
 
     /* Truncating into the middle of a record: what survives is rewritten
      * as ordinary blocks, and what is past the end must read as zeros
@@ -1462,27 +1474,43 @@ bool selftest_cosmofs_compress(const char **reason)
     int trc = vfs_truncate(NULL, ENG "/small", 10 * 4096 + 7);
     if (trc)
         kerror("compress: truncate returned %d", trc);
-    CHECK(trc == 0);
-    CHECK(read_matches_prefix(ENG "/small", sparse_data, 10 * 4096 + 7));
-    CHECK(vfs_truncate(NULL, ENG "/small", len) == 0);
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDONLY, 0, &f) == 0);
-    CHECK(file_read(f, back, len) == (int64_t)len);
+    COMPRESS_CHECK(trc == 0);
+    COMPRESS_CHECK(read_matches_prefix(ENG "/small", sparse_data, 10 * 4096 + 7));
+    COMPRESS_CHECK(vfs_truncate(NULL, ENG "/small", len) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDONLY, 0, &f) == 0);
+    COMPRESS_CHECK(file_read(f, back, len) == (int64_t)len);
     file_put(f);
-    CHECK(memcmp(back, sparse_data, 10 * 4096 + 7) == 0);
+    f = NULL;
+    COMPRESS_CHECK(memcmp(back, sparse_data, 10 * 4096 + 7) == 0);
     for (size_t i = 10 * 4096 + 7; i < len; i++)
-        CHECK(back[i] == 0);
+        COMPRESS_CHECK(back[i] == 0);
 
     /* A scrub reads every record through the checksums of its physical
      * blocks. */
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    COMPRESS_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
     kfree(dense);
+    dense = NULL;
     kfree(sparse_data);
+    sparse_data = NULL;
     kfree(back);
+    back = NULL;
     kinfo("selftest: cosmofs-compress: %llu blocks for 32 compressible, %llu for 32 that are not",
           (unsigned long long)compressible, (unsigned long long)incompressible);
     return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    kfree(back);
+    kfree(sparse_data);
+    kfree(dense);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef COMPRESS_CHECK
 }
 
 /*
