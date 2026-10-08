@@ -198,11 +198,13 @@ still pass.
 - It lays out the text group as `modelf_parse` does (each allocatable
   executable section in section order, at its alignment). The function
   name comes from the object's symbol table. The line comes from
-  `llvm-symbolizer` over the object.
-- A module with several text sections gets a temporary copy whose sections
-  are placed at their group offsets (`llvm-objcopy
-  --change-section-address`). `virtio.ko` has `.text` and
-  `.text.unlikely.`.
+  `llvm-symbolizer` over a temporary executable: `ld.lld` links the object
+  with a script that puts each text section at its offset in the group
+  (`virtio.ko` has `.text` and `.text.unlikely.`), so the linker applies
+  the DWARF relocations. The first version gave `llvm-symbolizer` the
+  relocatable object itself. That resolved lines with the local LLVM, but
+  Debian trixie's (CI) returned `??` for every line, and PR #335's first
+  CI run failed the host test on exactly that.
 - The latest load covering an address wins.
 - Host test: `tests/boot/test_module_symbols.py` (9 checks, in
   `host-test`).

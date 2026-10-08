@@ -661,33 +661,35 @@ _PLACED = {}
 
 
 def placed_object(obj, texts, tool):
-    """`obj` with every text section's address set to its offset in the
-    loader's text group (a copy, made once, by the llvm-objcopy beside
-    `tool`), or `obj` itself when it has one text section; None if the
-    copy cannot be made."""
-    if len(texts) == 1:
-        return obj
+    """`obj` linked into an executable whose text is laid out as the
+    loader lays it -- each text section at its offset in the group, by a
+    linker script -- with the object's relocations (DWARF's included)
+    applied by the linker, so llvm-symbolizer reads it as it reads the
+    kernel ELF. A relocatable object's own DWARF is resolved by some
+    llvm-symbolizers and not others (Debian trixie's gave `??` for every
+    line). Made once per object by the ld.lld beside `tool`; None if it
+    cannot be made."""
     if obj in _PLACED:
         return _PLACED[obj]
-    names = [n for _i, _o, _s, n in texts]
-    placed = None
-    if len(set(names)) == len(names):
-        objcopy = os.path.join(os.path.dirname(tool), os.path.basename(tool).replace("llvm-symbolizer", "llvm-objcopy"))
-        fd, placed = tempfile.mkstemp(suffix=".o")
-        os.close(fd)
-        atexit.register(lambda p=placed: os.path.exists(p) and os.unlink(p))
-        args = [objcopy]
-        for _i, o, _s, n in texts:
-            args += ["--change-section-address", "%s=0x%x" % (n, o)]
-        try:
-            ok = subprocess.run(args + [obj, placed], capture_output=True, timeout=60).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-        if not ok:
-            os.unlink(placed)
-            placed = None
-    _PLACED[obj] = placed
-    return placed
+    ld = os.path.join(os.path.dirname(tool), os.path.basename(tool).replace("llvm-symbolizer", "ld.lld"))
+    fd, script = tempfile.mkstemp(suffix=".ld")
+    os.close(fd)
+    fd, placed = tempfile.mkstemp(suffix=".elf")
+    os.close(fd)
+    for p in (script, placed):
+        atexit.register(lambda p=p: os.path.exists(p) and os.unlink(p))
+    body = "".join("    . = 0x%x;\n    KEEP(*(%s))\n" % (o, n) for _i, o, _s, n in texts)
+    with open(script, "w") as f:
+        f.write("SECTIONS {\n  .modtext 0 : {\n%s  }\n}\n" % body)
+    try:
+        r = subprocess.run([ld, "-o", placed, "-T", script, "--image-base=0", "-e", "0", "--no-check-sections",
+                            "--unresolved-symbols=ignore-all", "--noinhibit-exec", obj],
+                           capture_output=True, timeout=60)
+        ok = r.returncode == 0 and os.path.getsize(placed) > 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _PLACED[obj] = placed if ok else None
+    return _PLACED[obj]
 
 
 def module_object(modules, name):
@@ -720,9 +722,8 @@ def symbolize_module(addr, bases, modules, tool):
         index, rel = hit
         func = next((f"{n} [{name}]" for (sh, v, sz, n) in funcs if sh == index and v <= rel < v + max(sz, 1)),
                     "?? [%s+0x%x]" % (name, off))
-        # llvm-symbolizer reads the object's (relocated) DWARF by section
-        # address: each text section at its offset in the group, which a
-        # single one at 0 already is, and a copy gets for several.
+        # The line: llvm-symbolizer over the object linked at the loader's
+        # layout, where the address is the offset in the text group.
         placed = placed_object(obj, texts, tool)
         r = run_symbolizer(tool, placed, ["0x%x" % off]) if placed else None
         return (func, r[0][1] if r else "??")
