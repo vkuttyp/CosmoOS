@@ -91,7 +91,7 @@ handling".
   `poll(ip, budget)` there, with interrupts off. `poll` consumes at most
   `IRQ_POLL_BUDGET` (32) completions and returns how many.
 - If it used the whole budget, the irq_poll is queued on this CPU's
-  `irqpoll/N` worker (pinned, default priority). The worker calls `poll`
+  `irqpoll/N` worker (pinned, highest priority). The worker calls `poll`
   a budget at a time and yields between batches, re-queueing itself
   while `poll` keeps using its budget.
 - One consumer at a time. State is under the irq_poll's own lock:
@@ -130,8 +130,13 @@ worker catches up.
 **The deferred remainder runs.**
 - A deferral puts the irq_poll on a started worker's list, under that
   list's lock, and wakes the worker.
-- The worker is a pinned kernel thread at the default priority, runnable
-  until its list is empty, and the scheduler's time slicing runs it.
+- The worker is a pinned kernel thread at the highest priority, runnable
+  until its list is empty, so no thread holds it off, as none held off
+  the handler. The first version ran it at the default priority. Qodo's
+  review of #334 pointed out that quiesce (DEFAULT-4), the reaper
+  (DEFAULT-8) or a pinned self-test spinner (up to DEFAULT-16) would then
+  stall a deferred queue's completions while it ran. Before the budget,
+  interrupts consumed them regardless.
 - It cannot be lost: a handler that defers sets `scheduled` under the
   irq_poll's lock. Only two things clear it: the worker, just before
   calling `poll`, and `irq_poll_disable`, which is the teardown asking
@@ -182,8 +187,9 @@ worker.
 
 - `blk-irq-budget` passes on the fixed tree with one call popping at
   most 32, in every boot of the validation matrix. The longest tick gap
-  during the storm was 4–15 ms, against a 4 ms tick period and the
-  250 ms bound. One call's 32 completions take well under one tick. The bound is listed in `docs/testing/flakes.md`,
+  during the storm was 4–7 ms on the final tree, against a 4 ms tick
+  period and the 250 ms bound (4–15 ms with the first version's
+  default-priority worker). One call's 32 completions take well under one tick. The bound is listed in `docs/testing/flakes.md`,
   "The list", as load-sensitive. The deterministic claim is asserted
   beside it: no call pops more than the ring holds.
 - `tools/irq-budget-probe.py`:
@@ -193,8 +199,8 @@ worker.
   - `--storm-ms` lengthens the storm;
   - the expected verdict is the exit status.
   - `--tree before` and `--old` fail the test on both architectures
-    (§2's table, and `--old`: 15,645 popped on x86-64, 16,267 on
-    AArch64, 1,002 ms each).
+    (§2's table, and `--old` on the final tree: 13,032 popped in one
+    call on x86-64 and 10,203 on AArch64).
 - The existing device, removal, timeout and benchmark tests all pass in
   the validation matrix (§8): `virtio-remove-inflight` with its held and
   held-inside passes, the virtio-blk reset and timeout tests, NVMe,
@@ -247,17 +253,19 @@ rebase touched these paths.
 - **The storm is where the budget costs throughput, by design.** In
   `blk-irq-budget`'s 1 s storm (LOCKDEP=1), the unbounded handler
   completed 15,688–15,790 requests on x86-64 (four CPUs; 18,631 on one)
-  and 16,312–16,980 on AArch64. With the budget the validation boots
-  completed 9,486–15,387 on x86-64 and 11,466–16,717 on AArch64,
-  depending on CPU count and the chaos migrator. That is up to about a
-  third fewer.
+  and 16,312–16,980 on AArch64. With the budget, the final tree's
+  validation boots completed 12,078–14,357 on x86-64 and 11,515–16,789
+  on AArch64, depending on CPU count and the chaos migrator: up to about
+  a quarter fewer. With the first version's default-priority worker it
+  was 9,486–15,387 and 11,466–16,717.
 - The unbounded loop had its CPU to itself, with interrupts off, for as
-  long as the refilling lasted. The worker hands the CPU back every 32
-  completions, takes two locks per batch, and yields to whatever else
-  is runnable, which during the boot is the rest of the self-test
-  machinery. Trading a storm's peak rate for a CPU that keeps its tick
-  is the change's purpose. A device that never runs dry now costs its
-  CPU a share of its time rather than all of it.
+  long as the refilling lasted. The worker gives the CPU back to its
+  tick and its interrupts every 32 completions and takes two locks per
+  batch. At the highest priority it still keeps that CPU's threads
+  waiting while a storm lasts, as the handler did. The soft-lockup
+  detector reports that past 10 s, where the hard-lockup detector
+  reported the old handler. Trading a storm's peak rate for a CPU that
+  keeps its tick is the change's purpose.
 
 A lock-free fast path (an atomic state word claimed by compare-and-swap)
 would remove the lockdep cost on debug boots. It was not done: a

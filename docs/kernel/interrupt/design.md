@@ -90,7 +90,7 @@ with one design for every handler it applies to:
   the driver's `poll(budget)`: at most `IRQ_POLL_BUDGET` (32)
   completions, returning how many it consumed.
 - **The remainder on a worker.** A call that used its whole budget hands
-  the rest to this CPU's `irqpoll/N` thread (pinned, default priority),
+  the rest to this CPU's `irqpoll/N` thread (pinned, highest priority),
   which calls `poll` a budget at a time and yields between batches,
   until a call returns less than the budget.
 - **One consumer at a time.** A handler that finds `poll` running (on
@@ -101,9 +101,16 @@ with one design for every handler it applies to:
   lock, whether a popped bio is still its to complete; the timeout and
   removal walks clear the same slot table).
 
-**The remainder always runs.** A deferral queues the irq_poll on a
-started worker's list and wakes it; the worker is runnable from then
-until the list is empty, and the scheduler's time slicing runs it. Before
+**The remainder always runs, promptly.** A deferral queues the irq_poll
+on a started worker's list and wakes it; the worker is runnable from then
+until the list is empty, at the highest priority, so no thread holds it
+off -- as none held off the handler. At the default priority a busier
+thread on its CPU (quiesce, the reaper, a pinned spinner) stalled the
+queue's completions for as long as it ran (review, PR #334). The cost:
+a device that never runs dry keeps that CPU's threads waiting for as
+long as it lasts, as the unbounded handler did, but the CPU keeps its
+tick and its interrupts, and the soft-lockup detector reports it past
+10 s. Before
 the workers start (boot, before any driver loads) a handler cannot
 defer and polls to the end, as before.
 

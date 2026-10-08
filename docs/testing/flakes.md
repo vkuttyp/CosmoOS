@@ -3485,7 +3485,7 @@ whose next completion is ready when the handler asks. In CI,
   to its CPU's `irqpoll/N` worker (`kernel/core/irqpoll.c`). With it, one
   call pops at most 32. Across the validation boots (both
   architectures; 1, 2 and 4 CPUs; chaos), the longest tick gap during
-  the storm was 4–15 ms, against a tick period of 4 ms. `tools/irq-budget-probe.py --old` restores the unbounded
+  the storm was 4–7 ms, against a tick period of 4 ms. `tools/irq-budget-probe.py --old` restores the unbounded
   loop and the test fails again.
 - **Symbolisation.** CI now uploads every debug build's kernel and
   module ELFs when a job fails, so the next sighting's PCs can be read.
