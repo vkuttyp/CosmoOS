@@ -225,7 +225,13 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
                (void *)ip);
         return;
     }
-    __atomic_store_n(&g_off, true, __ATOMIC_RELEASE);
+    /* The first unexpected report turns the checker off and panics. One that
+     * finds it off already is a cascade of the first on another CPU -- an
+     * acquisition whose push the first one's g_off skipped, then reported
+     * missing at its irqsave or release -- and would interleave nonsense
+     * with the real report on the console: dropped. */
+    if (__atomic_exchange_n(&g_off, true, __ATOMIC_ACQ_REL))
+        return;
     /* A failure can originate while console.lock is held by this CPU.
      * Enter the existing fatal-output mode before the first print, and
      * freeze CPU identity/held stacks before dumping them. panic() will
@@ -642,6 +648,8 @@ static bool remove_entry(struct lockdep_held *held, unsigned *n, uint64_t *seq, 
 
 void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
 {
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;   /* the push it would mark was skipped too */
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         if (lc->held[i].lock == lock) {
@@ -661,6 +669,8 @@ void lockdep_irqsave_acquired(const void *lock, bool irq_was_enabled)
 
 void lockdep_irqrestore_check(const void *lock, bool irq_will_enable, uintptr_t ip)
 {
+    if (__atomic_load_n(&g_off, __ATOMIC_ACQUIRE))
+        return;
     struct lockdep_cpu *lc = my_cpu();
     for (unsigned i = lc->nr_held; i-- > 0;) {
         struct lockdep_held *h = &lc->held[i];
