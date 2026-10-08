@@ -2146,8 +2146,24 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
      * a VFS symbol in this file that the fuzz harness has to link.
      */
     struct cfs_inode in;
-    if (ino != 0 && cfs_inode_read(fs, ino, &in) != 0)
+    if (ino == 0) {
+        /* Only these whole-filesystem faults are valid without a target
+         * inode. Every inode-targeted case must not inspect an absent slot. */
+        switch (kind) {
+        case COSMOFS_CORRUPT_LEAK:
+        case COSMOFS_CORRUPT_ORPHAN:
+        case COSMOFS_CORRUPT_DANGLING:
+        case COSMOFS_CORRUPT_DIRENT:
+        case COSMOFS_CORRUPT_COUNTER:
+        case COSMOFS_CORRUPT_SNAP_MEMBERS:
+            memset(&in, 0, sizeof(in));
+            break;
+        default:
+            return -EINVAL;
+        }
+    } else if (cfs_inode_read(fs, ino, &in) != 0) {
         return -ENOENT;
+    }
 
     mutex_lock(&fs->lock);
     int rc = 0;

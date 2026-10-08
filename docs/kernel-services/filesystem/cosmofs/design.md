@@ -1042,6 +1042,13 @@ The other four `chain_cycle` sites (the deadlist, the imap and the
 directory-depth walkers) use different guards and stay untested; one
 test does not cover five walkers.
 
+The corruption hook accepts inode number zero only for whole-filesystem
+faults (`LEAK`, `ORPHAN`, `DANGLING`, `DIRENT`, `COUNTER` and
+`SNAP_MEMBERS`). Every inode-targeted case requires a readable nonzero
+inode before it examines or changes the inode record. This keeps invalid
+test input from reading an uninitialized record or writing a corruption
+that no checker can observe.
+
 **Thirteen classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired
 with `COSMOFS_CHECK_REPAIR`. The three added with the extent and name
