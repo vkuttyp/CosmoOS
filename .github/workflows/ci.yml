@@ -125,7 +125,7 @@ jobs:
         if: matrix.arch == 'x86_64'
         run: make ARCH=${{ matrix.arch }} fuzz FUZZ_RUNS=50000
 
-      - name: Static analysis
+      - name: Static analysis against reviewed architecture baseline
         run: make ARCH=${{ matrix.arch }} analyze
 
       - name: Reproducible build check

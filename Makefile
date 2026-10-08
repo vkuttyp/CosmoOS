@@ -211,7 +211,10 @@ litmus:
 
 analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
 	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)
-	@echo "static analysis: clean"
+	$(Q)$(PYTHON) $(ROOT)/scripts/check-analysis.py --root $(ROOT) --out $(OUT) \
+		--arch $(ARCH) --baseline $(ROOT)/tools/analysis/$(ARCH).json \
+		--inventory $(OUT)/analysis-inventory.json \
+		$(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE)
 
 reproducible:
 	$(Q)$(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)

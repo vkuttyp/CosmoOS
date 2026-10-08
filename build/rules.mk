@@ -3,7 +3,12 @@
 # Component makefiles call:
 #   $(eval $(call compile_rules,<objs>,<cflags-variable-name>))
 # which defines pattern rules for those objects with the given flags, plus
-# a matching static-analysis stamp rule.
+# a matching structured static-analysis report rule.
+
+# Analyze every source on every invocation: timestamps alone do not track
+# compiler/flag changes, and an incremental stdout-only gate loses reports.
+.PHONY: analyze-force
+analyze-force:
 
 # $(1) = list of object paths under $(OUT)
 # $(2) = name of the CFLAGS variable to use
@@ -13,11 +18,11 @@ $(1): $(OUT)/%.o: $(ROOT)/%.c
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)$$(CC) $$($(2)) $$(EXTRA_CFLAGS) -MMD -MP -c $$< -o $$@
 
-$(patsubst %.o,%.analyzed,$(1)): $(OUT)/%.analyzed: $(ROOT)/%.c
+$(patsubst %.o,%.analyzed,$(1)): $(OUT)/%.analyzed: $(ROOT)/%.c analyze-force
 	$$(call log,ANALYZE,$$<)
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)$$(CC) $$($(2)) $$(EXTRA_CFLAGS) --analyze -Xanalyzer -analyzer-output=text $$< -o /dev/null
-	$$(Q)touch $$@
+	$$(Q)$$(CC) $$($(2)) $$(EXTRA_CFLAGS) --analyze -Xanalyzer -analyzer-output=plist-multi-file $$< -o $$@.tmp
+	$$(Q)mv $$@.tmp $$@
 endef
 
 # Same for assembly. Assembly sources are preprocessed (.S).
