@@ -229,9 +229,10 @@ Before the multi-section placement, the `virtio` frames carried names but
 (`lockup-sample-irqoff` records this). The `--old` 12 s storm also split
 into 7.5 s and 4.5 s tick gaps, below the 10 s hard-lockup line. The stall
 shown there is instead the budgeted tree's worker under a 14 s storm
-(`--storm-ms 14000`). `irqpoll/0` passes the soft-lockup line, which the
-design accepts ("the soft-lockup detector reports it past 10 s"). Its
-sample, from the harness's table:
+(`--storm-ms 14000`), at commit `ba2f8c9b`, before §2a's hold bound.
+`irqpoll/0` ran past the soft-lockup line, which #334's design accepted
+("the soft-lockup detector reports it past 10 s"). Its sample, from the
+harness's table:
 
     soft lockup: cpu 0 running 'irqpoll/0' for 10000 ms
       #1 0xffffffff8040b658  vpci_notify [virtio]      drivers/virtio/virtio_pci.c:227
@@ -242,8 +243,8 @@ sample, from the harness's table:
       #6 0xffffffff8040a7a8  virtq_poll [virtio]       drivers/virtio/virtqueue.c:58
       #7 0xffffffff800068ac  run_poll                  kernel/core/irqpoll.c:70
 
-The same 14 s storm on x86-64 gives the same frames (`irqpoll/0` past
-10 s). A return address on a call's last instruction maps to line 0 here
+The same 14 s storm on x86-64 gave the same frames (`irqpoll/0` past
+10 s, same commit). A return address on a call's last instruction maps to line 0 here
 (`virtio_blk.c:0`), as it does for kernel frames. The harness does not
 subtract one from return addresses, for either.
 

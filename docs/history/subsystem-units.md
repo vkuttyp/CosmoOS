@@ -2563,6 +2563,13 @@ See the [history index](README.md).
     of yielding. The worker runs `poll` with preemption off. No report on
     the current tree; an audit found every lock under the six polls taken
     with irqsave.
+  - A backlog keeps the worker at the highest priority for one 10 ms slice
+    (`IRQ_POLL_HOLD_NS`), then time-slices at the default until it ends.
+    Unbounded, a refilled queue livelocked `virtio-remove-inflight` (the
+    test thread READY behind `irqpoll/0`; 36 s on two CPUs, 240 s timeout
+    under chaos). `blk-irq-budget` now requires a default-priority
+    bystander on every CPU to run within 250 ms during the storm (998 ms
+    before, 14 ms after).
   - `lockdep-irqpoll` self-test and `tools/lockdep-irqpoll-probe.py`
     (`no-wait`, `no-class`, `no-worker-class`, both architectures).
   - Lockdep: a report made after the checker is already off (another CPU's
