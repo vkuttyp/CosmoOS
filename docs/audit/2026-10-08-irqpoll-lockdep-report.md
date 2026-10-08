@@ -322,7 +322,10 @@ oracle, not a behaviour change.
 
 ## 5. Tests and tools added
 
-- `lockdep-irqpoll` (self-test), `tools/lockdep-irqpoll-probe.py`.
+- `lockdep-irqpoll` (self-test, five cases), `tools/lockdep-irqpoll-probe.py`
+  (four modes).
+- `irqpoll-boost` (self-test, `kernel/core/irqpolltest.c`).
+- `blk-irq-budget`: the per-CPU bystander bound.
 - `tests/boot/test_module_symbols.py` (host-test).
 - `fuzz_net_config`: the N28 kept-state oracle.
 

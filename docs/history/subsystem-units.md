@@ -2570,6 +2570,14 @@ See the [history index](README.md).
     under chaos). `blk-irq-budget` now requires a default-priority
     bystander on every CPU to run within 250 ms during the storm (998 ms
     before, 14 ms after).
+    A lowered worker is raised again by a timer after another slice, so a
+    busier thread above the default cannot hold it off either
+    (`irqpoll-boost`: 24 ms gap, 290 ms without the timer).
+  - Review (Qodo): the idle queue is woken under the irq_poll's lock (a
+    waiter could return and free it mid-wake); a callback class entered in
+    thread context lives on the thread's held stack, so an interrupt nested
+    over the worker's poll is no false recursion (case 5, probe mode
+    `cpu-stack`).
   - `lockdep-irqpoll` self-test and `tools/lockdep-irqpoll-probe.py`
     (`no-wait`, `no-class`, `no-worker-class`, both architectures).
   - Lockdep: a report made after the checker is already off (another CPU's
