@@ -529,6 +529,8 @@ static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started
         nvme_worker_fail_end();
         if (threads[c])
             started++;
+        else
+            nvme_worker_free(workers[c].buf);
     }
     for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
         if (!cpu_online(c) || threads[c] == NULL)
