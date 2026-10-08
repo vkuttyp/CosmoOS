@@ -2296,7 +2296,7 @@ bool selftest_el2_guest_uart_race(const char **reason)
 
     /* Phase one: one vCPU, the hypervisor's own ordering under test. */
     unsigned c1 = 0, i1 = 0, s1 = 0;
-    struct sibling sib;
+    struct sibling sib = {0};
     CHECK(uart_race_phase(reason, vm, v0, NULL, 200, &c1, &i1, &s1, &sib));
     CHECK(s1 == 0);
     CHECK(c1 == 200);
