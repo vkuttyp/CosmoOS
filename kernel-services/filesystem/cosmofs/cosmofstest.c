@@ -380,21 +380,39 @@ static bool engine_mount(struct blkdev **bdp, uint64_t nblocks, const char **rea
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);   /* a failed earlier test may have left one behind */
     struct blkdev *bd = ramblk_create(nblocks);
     CHECK(bd != NULL);
+    bool created_dir = false;
+#define ENGINE_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
     engine_fail_begin(1, bd);
     int fmt = cosmofs_format(bd);
     engine_fail_end(1);
-    CHECK(fmt == 0);
+    ENGINE_CHECK(fmt == 0);
     engine_fail_begin(2, bd);
     int mk = vfs_mkdir(NULL, ENG, 0755);
     engine_fail_end(2);
-    CHECK(mk == 0 || mk == -EEXIST);
+    if (mk == 0)
+        created_dir = true;
+    ENGINE_CHECK(mk == 0 || mk == -EEXIST);
     engine_fail_begin(3, bd);
     int mrc = vfs_mount(ENG, "cosmofs", bd, 0);
     engine_fail_end(3);
-    CHECK(mrc == 0);
+    ENGINE_CHECK(mrc == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
     *bdp = bd;
+#undef ENGINE_CHECK
     return true;
+
+fail:
+#undef ENGINE_CHECK
+    if (created_dir)
+        (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
 }
 
 static bool engine_unmount(struct blkdev *bd, const char **reason)
