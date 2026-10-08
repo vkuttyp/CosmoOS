@@ -49,5 +49,12 @@ Initialize the ownership array before creation so cleanup reads only NULL
 or a created thread. This is a static path proof; it is not a claim of a
 runtime allocation-failure boot.
 
+`selftest_fsctl_result_per_open`: two real leaks when one of the two
+buffer allocations fails, plus early assertion exits while buffers and
+file references are owned. Both old-source architecture probes report
+exactly two `unix.Malloc` diagnostics. Route every check through common
+cleanup with ownership initialized before the first acquisition. Both
+fixed target analyses report zero diagnostics for `vfstest.c`.
+
 Results will be recorded as the checks run; completion requires the full
 AGENTS.md matrix on both architectures and branch and merge CI.

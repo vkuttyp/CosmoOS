@@ -2,6 +2,12 @@
 
 ## Data structures
 
+The fsctl result-per-open self-test owns its two file references and two
+result buffers until one common cleanup path, including when allocation
+or an assertion fails. A reported test failure does not transfer ownership
+to the self-test runner. The analyzer probe exercises the original early
+returns and verifies both result buffers are accounted for after the repair.
+
 ### VFS core (`kernel/include/kernel/vfs.h`)
 
 ```c
