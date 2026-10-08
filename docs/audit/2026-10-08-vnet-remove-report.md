@@ -122,7 +122,7 @@ and active-worker gaps. Qodo also flagged the cost of scanning up to 256 TX
 ownership slots under the IRQ-safe driver lock. The review revision uses
 a private free list and passes each ownership record as the queue cookie.
 Submission, completion and failed-publication rollback are constant-time;
-only teardown walks the whole TX table. No transport API or mbuf layout
+full TX table walks occur only at initialization and teardown. No transport API or mbuf layout
 changes. This removes the scans by construction; no measured throughput
 improvement is claimed.
 
@@ -141,7 +141,7 @@ Additional CosmoReview findings were checked against source:
 |---|---|
 | Callback still running after poll disable; unlocked final table walk | Not reproduced: `kernel/core/irqpoll.c:irq_poll_disable` marks disabled and waits on `idle_now` until neither running nor scheduled. Cleanup holds no driver lock during that wait. Both polls and transport vectors are synchronized before the walk; submitters were drained by unregister. A source comment now states this exclusivity. The existing active-worker test gap remains recorded. |
 | DMA-address aliases cause a false double-unmap panic | The device-private ledger appends one record per successful map; unmap searches for a still-mapped matching address. Equal addresses therefore consume separate records, and previously unmapped records are skipped. Real devices have a NULL ledger. No failing alias case was established. |
-| `m_getcl` may sleep under the driver spinlock | The actual path uses `kmem_cache_alloc` → `slab_grow` → `pmm_alloc_pages`, with IRQ-safe slab/zone locks and allocation failure returning NULL. It contains no sleeping allocation/reclaim path. The generic assumption about `kmalloc` does not apply here. |
+| `m_getcl` may sleep under the driver spinlock | `kernel/include/kernel/kmalloc.h` explicitly declares allocation non-blocking and interrupt-safe. The actual path uses `kmem_cache_alloc` → `slab_grow` → `pmm_alloc_pages`, with IRQ-safe slab/zone locks and allocation failure returning NULL. It contains no sleeping allocation/reclaim path. The generic assumption about `kmalloc` does not apply here. |
 
 ## Validation
 
@@ -153,13 +153,18 @@ before the synthetic queues exist and cleared only after their callbacks
 stop. Real devices keep it NULL and never read fixture memory. The unarmed
 hook uses a plain load, no lock or atomic RMW. Debug boots/probes affected
 by this instrumentation change were repeated on the final implementation.
-The table below uses `47ea8581`'s code. AArch64's one/two-CPU and specialized
-boots ran after that correction in the first matrix; all affected x86-64
-boots, both probes and both four-CPU boots were repeated in the final matrix.
+The first full matrix used `47ea8581`'s code. After Qodo's TX lookup
+revision `71322638`, the entire matrix and both old-behavior probes were
+repeated again. The table below reports that review revision. CI run
+[37835499625](https://github.com/vkuttyp/CosmoOS/actions/runs/37835499625)
+passed both architectures and the memory-order litmus job for `71322638`.
+Qodo's summary for that commit lists no findings.
 
 Host: macOS ARM64; Apple clang 21; QEMU 11.1.1; GNU make. QEMU runs
 sequentially at default priority: sampled x86-64 PID 91630 and AArch64
-PID 95489 each showed priority 31, nice 0. No zsh background boot loop.
+PID 95489 each showed priority 31, nice 0. The review reruns sampled
+x86-64 PID 23935 and AArch64 PID 43293 with the same priority/nice values.
+No zsh background boot loop.
 The remote main SHA was rechecked via GitHub and remains `561b913b`.
 
 The first sandboxed host-test attempt failed at `NetTest.free_port`
@@ -168,7 +173,8 @@ bind. The permitted rerun completed successfully. This attributed
 environment failure is excluded from the matrix; no assertion/budget
 was changed. Sequential matrix commands, return codes, durations and
 logs are recorded in `out/vnet-validation/results.json` and
-`out/vnet-final-validation/results.json`.
+`out/vnet-final-validation/results.json`. Review reruns are recorded in
+`out/vnet-qodo-validation/results.json`.
 
 The full x86-64 analyzer emitted 28 diagnostics, including an unused
 assignment in the new fixture. That assignment was removed in
@@ -178,30 +184,31 @@ test/network/NVMe diagnostics recorded by the October 3 lockdep report,
 not a warning-free source audit. The target returns success despite
 diagnostics. Full initial log: `out/vnet-analyze-x86.log`. Fresh final runs
 confirmed 27 x86-64 and 28 AArch64 diagnostics, all outside the changed
-driver/fixture; logs: `out/vnet-final-validation/{x86_64,aarch64}-analyze.log`.
+driver/fixture. The fresh review reruns retained those same counts; logs:
+`out/vnet-qodo-validation/{x86_64,aarch64}-analyze.log`.
 
 All entries below passed (command wall time in seconds, including builds).
 Use `gmake` on this host, `ARCH=aarch64` for AArch64. Debug OUT directories
 are `out/vnet-fixed-x86` / `out/vnet-fixed-arm`; release directories are
-`out/vnet-release-<arch>`. Final logs are in `out/vnet-final-validation/`,
-except AArch64 CPU 1/2, SMP2, chaos, retry, crash and release logs in
-`out/vnet-validation/`.
+`out/vnet-release-<arch>`. Review-validation logs are in `out/vnet-qodo-validation/` on both
+architectures; CPU-count serial logs are `boot-qodo-final-<cpus>.log`
+inside the debug OUT directories.
 
 | Matrix item | x86-64 | AArch64 |
 |---|---|---|
-| `host-test` (ASan/UBSan and harness tests) | PASS, 60.9 | PASS, 60.8 |
-| `fuzz` (default 20,000 mutations per target, seed 1) | PASS, 17.5 | PASS, 14.9 |
-| Fresh `analyze` and vector-register check | exit 0, 54.1; 27 existing warnings | exit 0, 51.5; 28 existing warnings |
-| `reproducible` | yes, 14.1 | yes, 16.1 |
-| `vnet-remove-probe.py --old --arch=<arch>` | PASS, 163.5; exact two target failures | PASS, 163.5; exact two target failures |
-| Debug `test QEMU_SMP=1` | PASS, 137.8 | PASS, 130.8 |
-| Debug `test QEMU_SMP=2` | PASS, 159.1 | PASS, 147.9 |
-| Debug `test QEMU_SMP=4` | PASS, 152.7 | PASS, 153.3 |
-| `test-smp2` | PASS, 155.9 | PASS, 149.7 |
-| `test-chaos` | PASS, 146.4 | PASS, 161.9 |
-| `test-harness-retry` | PASS, 144.7; attempt 2 | PASS, 150.5; attempt 2 |
-| `test-crash` | PASS, 133.1; expected page-fault panic | PASS, 132.6; expected page-fault panic |
-| `BUILD=release test` (build and boot) | PASS, 17.9 | PASS, 28.0 |
+| `host-test` (ASan/UBSan and harness tests) | PASS, 60.5 | PASS, 60.7 |
+| `fuzz` (default 20,000 mutations per target, seed 1) | PASS, 14.4 | PASS, 14.7 |
+| Fresh `analyze` and vector-register check | exit 0, 53.1; 27 existing warnings | exit 0, 52.0; 28 existing warnings |
+| `reproducible` | PASS, 14.2 | PASS, 15.4 |
+| `vnet-remove-probe.py --old --arch=<arch>` | PASS, 157.9; exact two target failures | PASS, 155.0; exact two target failures |
+| Debug `test QEMU_SMP=1` | PASS, 144.5 | PASS, 142.2 |
+| Debug `test QEMU_SMP=2` | PASS, 154.9 | PASS, 139.5 |
+| Debug `test QEMU_SMP=4` | PASS, 146.0 | PASS, 154.9 |
+| `test-smp2` | PASS, 145.5 | PASS, 151.5 |
+| `test-chaos` | PASS, 146.1 | PASS, 144.7 |
+| `test-harness-retry` | PASS, 153.7; attempt 2 | PASS, 156.2; attempt 2 |
+| `test-crash` | PASS, 124.4; expected page-fault panic | PASS, 122.8; expected page-fault panic |
+| `BUILD=release test` (build and boot) | PASS, 17.2 | PASS, 20.8 |
 | `llvm-nm` release kernel and virtio-net module | test entries/ledger/peer absent | test entries/ledger/peer absent |
 
 Every normal debug boot reports `SELFTEST: PASS (449 tests)` and completes
@@ -211,7 +218,7 @@ the host back-connection, so its net-harness entry logs a skip; it passes
 the self-test suite before the expected panic. No budget was widened and
 no assertion weakened. The final removal cases record 34 maps/unmaps,
 34 buffers returned, zero posted RX and zero reset-time callbacks/posts.
-Release symbol logs: `out/vnet-final-validation/<arch>-release-{kernel,module}-symbols.log`.
+Release symbol logs: `out/vnet-qodo-validation/<arch>-release-{kernel,module}-symbols.log`.
 
 ## Recommendation for Unit 2
 

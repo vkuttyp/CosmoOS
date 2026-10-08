@@ -2608,6 +2608,9 @@ See the [history index](README.md).
     vectors/frees queues, then unmaps and returns every remaining buffer.
     Partial probe rollback uses the same cleanup. Invariant V11 records
     the teardown contract; shared module/syscall interfaces are unchanged.
+    Qodo review revision `71322638` replaces TX scans with a private
+    free list and record cookies. Exhaustion, failed-publication rollback,
+    reverse completion and reuse are checked before both removal cases.
   - `vnet-remove-pending`, `vnet-remove-late` and
     `tools/vnet-remove-probe.py --old` (strictly only the two target
     failures). The ledger is private to the synthetic device and absent
@@ -2617,6 +2620,8 @@ See the [history index](README.md).
     crash and release boots. Release kernel/module symbol checks pass.
     Fresh analysis retains 27 x86-64 / 28 AArch64 existing diagnostics
     outside the changed driver/fixture; target success is not warning-free.
+    The full matrix was repeated after `71322638`; branch CI run
+    `37835499625` passed both architectures and memory-order litmus.
   - Source audit of the other eight drivers' remove/reset/rollback paths
     is in the report. Unproven stop failures, late publication, callback
     retirement and pre-registration RX cases are in inventory §8.
