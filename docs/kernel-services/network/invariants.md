@@ -561,3 +561,40 @@ median exchange are both under 20 ms in both modes (a timer-only
 receiver costs 40 ms every round). `tools/delack-nagle-probe.py --old`
 builds the rule as it was before b76e4536 (acknowledged on any output,
 so never owed) for the comparison the report records.
+
+**N28. Removing a rule ends the state that copies the rule, and only
+that.** Two kinds of state outlive the packet that created them. A
+*translation* (a DNAT conntrack entry) holds a copy of the port forward
+that made it: the guest address and port it rewrites to. A *flow* (a
+firewall flow in the FORWARD chain's table, the host's own flow state)
+holds only the two endpoints of traffic that some rule admitted; it names
+no rule. So `nat_pf_del` and `nat_pf_clear` reap the translations of the
+forwards they remove, under `g_pf_lock` and before it is released, while
+`fw_rule_del`, `fw_rule_add` (a new DROP) and `fw_policy_set` leave every
+flow as it is, and an accepted connection runs until it closes or ages
+out (as Linux's conntrack keeps both).
+
+The reason is that a kept copy goes on *acting as the rule*. A forward
+removed and then added again for the same host port with another target
+would leave the old translation steering a client's connection to the old
+guest, which no listed rule says. And while no forward is listed, the
+host port would keep reaching a guest that the operator closed. A kept
+flow acts as nothing the operator configured: it only matches the replies
+and continuations of a connection that was admitted when it began, and it
+ends with the connection (its ageing in `fw_age`, or a purge when either
+endpoint's tap is released, which removes the *endpoint*, not a rule).
+Linux keeps DNAT conntrack entries after the rule goes, until they expire
+or `conntrack -F`. This stack does not, because here the translation and
+the forward are one configuration object, the operator's port. An operator
+who wants a firewall-admitted connection cut closes it, or flushes
+(`fw_flush`).
+
+**Checked by** `fuzz_net_config`. After every record, every DNAT entry
+matches a forward in the model by protocol, host port, guest address and
+guest port, so a translation that outlives its forward or carries an old
+target fails. A rule delete, a policy change or a forward delete or clear
+leaves the firewall's flows exactly as they were: the same list, in the
+same order, read before and after the operation at the same clock. A
+forward delete or clear also leaves every masquerade entry exactly as it
+was. `net-pf-clear` and `net-dnat` (a reaped translation reaches the
+guest no more) cover the same rule in the boot.
