@@ -470,7 +470,10 @@ static void vblk_remove(struct virtio_device *vdev)
      * exactly this (`kernel/include/kernel/interrupt.h`): a handler is a
      * quiesce read-side section, so a grace period after unregistration
      * proves no CPU is still inside it, and the mask is what stops one
-     * that has not started yet.
+     * that has not started yet. What a handler left to its irqpoll worker
+     * is the other half: `virtq_free` disables the queue's irq_poll after
+     * the transport's teardown, so no `vblk_done` runs in the worker
+     * either once it returns (kernel/include/kernel/irqpoll.h).
      *
      * Until that has happened a completion walk can be running on
      * another CPU, and the walk below reads and clears the very table
