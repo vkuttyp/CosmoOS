@@ -64,8 +64,9 @@ modelling interfaces as children (`docs/drivers/usb/invariants.md`, U7).
 **`struct usb_request`** — a transfer: device, endpoint address, buffer
 (direct-map, DMA-able), length, and on completion `actual` and
 `status`. Asynchronous: `usb_submit` hands it to the HCD, which owns it
-until `done(r)` runs — in interrupt context, and so not allowed to
-block, the same rule as a bio's `done`. `usb_control_msg` and
+until `done(r)` runs — in interrupt context or, for events beyond the
+handler's budget, on the CPU's `irqpoll/N` worker; either way not
+allowed to block, the same rule as a bio's `done`. `usb_control_msg` and
 `usb_bulk_msg` are the synchronous shapes over it: a completion on the
 caller's stack and a bounded wait (`wait_for_completion_timeout`, which
 does the handshake -- S30). On timeout the request is cancelled, which
@@ -223,7 +224,8 @@ drains the event ring until the next TRB's cycle bit is not the
 consumer's, and writes `ERDP` with `EHB`. Per event: a Command
 Completion wakes the waiter with the code and slot; a Transfer Event
 finds the request through the ring and completes it as above, calling
-`done` in interrupt context; a Port Status Change sets a flag and wakes
+`done` in interrupt context (past IRQ_POLL_BUDGET events, on the
+irqpoll worker, with EHB left set until it catches up); a Port Status Change sets a flag and wakes
 the port worker; a Host Controller Event marks the controller dead.
 
 **The port worker** (`xhci/<n>`, one thread per controller) scans every

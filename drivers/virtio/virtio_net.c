@@ -80,12 +80,15 @@ static void vnet_post_rx(struct vnet *v)
     virtq_kick(v->rx);
 }
 
-static void vnet_rx_done(struct virtqueue *vq)
+/* Bounded twice: by the budget, and by the buffers posted, which are
+ * reposted only after the loop (VNET_RX_BUFS). */
+static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
 {
     struct vnet *v = vq->vdev->priv;
     uint32_t len;
     struct mbuf *m;
-    while ((m = virtq_pop(vq, &len)) != NULL) {
+    unsigned n = 0;
+    for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
         v->rx_posted--;
         dma_unmap(&v->vdev->dev, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
         m->pkt.dma = 0;
@@ -118,6 +121,7 @@ static void vnet_rx_done(struct virtqueue *vq)
         netif_rx(&v->nif, m);
     }
     vnet_post_rx(v);
+    return n;
 }
 
 /* Every buffer of a transmitted chain carries its own mapping in pkt.dma. */
@@ -131,15 +135,19 @@ static void tx_unmap(struct vnet *v, struct mbuf *m)
     }
 }
 
-static void vnet_tx_done(struct virtqueue *vq)
+/* Bounded by the budget: transmits from other CPUs refill this ring
+ * while it is drained. */
+static unsigned vnet_tx_done(struct virtqueue *vq, unsigned budget)
 {
     struct vnet *v = vq->vdev->priv;
     uint32_t len;
     struct mbuf *m;
-    while ((m = virtq_pop(vq, &len)) != NULL) {
+    unsigned n = 0;
+    for (; n < budget && (m = virtq_pop(vq, &len)) != NULL; n++) {
         tx_unmap(v, m);
         m_freem(m);
     }
+    return n;
 }
 
 static int vnet_transmit(struct netif *nif, struct mbuf *m)

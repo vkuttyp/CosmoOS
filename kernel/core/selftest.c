@@ -579,6 +579,7 @@ static const struct selftest tests[] = {
     { "blk-submit-unregister", selftest_blk_submit_unregister },
     { "blk-unregister-drain", selftest_blk_unregister_drain },
     { "virtio-remove-inflight", selftest_virtio_remove_inflight },
+    { "blk-irq-budget", selftest_blk_irq_budget },
     { "device-reset", selftest_device_reset },
     { "blk-lifetime",    selftest_blk_lifetime },
     { "fault-kmalloc",   selftest_fault_kmalloc },

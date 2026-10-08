@@ -446,6 +446,7 @@ bool selftest_net_nicbench(const char **reason);       /* traffic that leaves th
 bool selftest_blk_submit_unregister(const char **reason);
 bool selftest_blk_unregister_drain(const char **reason);
 bool selftest_virtio_remove_inflight(const char **reason);
+bool selftest_blk_irq_budget(const char **reason);   /* a completion handler refilled while it runs keeps its CPU's tick */
 bool selftest_device_reset(const char **reason);       /* in-place device reset */
 bool selftest_blk_lifetime(const char **reason);
 struct bio;

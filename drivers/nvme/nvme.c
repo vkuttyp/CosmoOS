@@ -17,6 +17,7 @@
 #include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
+#include <kernel/irqpoll.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -86,6 +87,7 @@ struct nvme_queue {
     int vector;
     unsigned cpu;
     uint64_t completions;
+    struct irq_poll poll;                  /* the handler's budget, the rest on the irqpoll worker */
 };
 
 struct nvme_ns {
@@ -147,6 +149,8 @@ static int wait_ready(struct nvme_ctrl *c, bool ready)
 
 /* --- queues ------------------------------------------------------------------ */
 
+static unsigned nvme_poll(struct irq_poll *ip, unsigned budget);
+
 static int queue_alloc(struct nvme_ctrl *c, struct nvme_queue *q, uint16_t qid, uint16_t depth)
 {
     memset(q, 0, sizeof(*q));
@@ -156,6 +160,7 @@ static int queue_alloc(struct nvme_ctrl *c, struct nvme_queue *q, uint16_t qid, 
     q->phase = 1;
     q->vector = -1;
     spinlock_init(&q->lock, "nvme-queue");
+    irq_poll_init(&q->poll, nvme_poll, "nvme-queue");
     q->sq = dma_alloc(&c->pdev->dev, (size_t)depth * sizeof(struct nvme_sqe), &q->sq_dma, DMA_ZERO);
     q->cq = dma_alloc(&c->pdev->dev, (size_t)depth * sizeof(struct nvme_cqe), &q->cq_dma, DMA_ZERO);
     q->cmds = kzalloc((size_t)depth * sizeof(*q->cmds));
@@ -176,6 +181,10 @@ static int queue_alloc(struct nvme_ctrl *c, struct nvme_queue *q, uint16_t qid, 
 
 static void queue_free(struct nvme_ctrl *c, struct nvme_queue *q)
 {
+    /* The vector is released already; what it deferred goes now, before
+     * the rings it reads. */
+    if (q->poll.poll != NULL)
+        irq_poll_disable(&q->poll);
     if (q->sq)
         dma_free(&c->pdev->dev, (size_t)q->depth * sizeof(struct nvme_sqe), q->sq, q->sq_dma);
     if (q->cq)
@@ -241,17 +250,19 @@ static int status_to_errno(uint16_t status)
     return -EIO;
 }
 
-/* Reap completions. Interrupt or thread context. */
-static void queue_process(struct nvme_queue *q)
+/* Reap at most `budget` completions; return how many. Interrupt, the
+ * irqpoll worker, or the polled admin path's thread -- one at a time. */
+static unsigned queue_process(struct nvme_queue *q, unsigned budget)
 {
     struct nvme_ctrl *c = q->ctrl;
-    for (;;) {
+    unsigned n = 0;
+    for (; n < budget; n++) {
         arch_irq_state_t s = spin_lock_irqsave(&q->lock);
         dma_sync_for_cpu(&c->pdev->dev, q->cq_dma, (size_t)q->depth * sizeof(struct nvme_cqe), DMA_FROM_DEVICE);
         struct nvme_cqe cqe = q->cq[q->cq_head];
         if (NVME_CQE_PHASE(cqe.dw3) != q->phase) {
             spin_unlock_irqrestore(&q->lock, s);
-            return;
+            break;
         }
         q->cq_head = (uint16_t)(q->cq_head + 1);
         if (q->cq_head == q->depth) {
@@ -295,6 +306,20 @@ static void queue_process(struct nvme_queue *q)
         else if (!orphan)
             kwarn("nvme%u: completion for an unknown command %u on queue %u", c->index, cid, q->qid);
     }
+    return n;
+}
+
+static unsigned nvme_poll(struct irq_poll *ip, unsigned budget)
+{
+    struct nvme_queue *q = container_of(ip, struct nvme_queue, poll);
+    /* The admin queue is the issuing thread's to drive while admin_cmd is
+     * on its polled path (FI_NVME_ADMIN_POLL forced it on a machine that
+     * has a vector): the handler -- and the worker, for what it deferred --
+     * leaves the completion for that thread to find, so the path really
+     * runs. A straggler after the flag clears finds nothing to do. */
+    if (q->qid == 0 && __atomic_load_n(&q->ctrl->admin_polled, __ATOMIC_ACQUIRE))
+        return 0;
+    return queue_process(q, budget);
 }
 
 static void nvme_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
@@ -302,14 +327,7 @@ static void nvme_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
     (void)vector;
     (void)frame;
     struct nvme_queue *q = arg;
-    /* The admin queue is the issuing thread's to drive while admin_cmd is
-     * on its polled path (FI_NVME_ADMIN_POLL forced it on a machine that
-     * has a vector): the handler leaves the completion for that thread to
-     * find, so the path really runs. A straggler after the flag clears
-     * finds nothing to do. */
-    if (q->qid == 0 && __atomic_load_n(&q->ctrl->admin_polled, __ATOMIC_ACQUIRE))
-        return;
-    queue_process(q);
+    irq_poll_sched(&q->poll);
 }
 
 /* --- admin commands ------------------------------------------------------------ */
@@ -357,7 +375,7 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
          * One millisecond per round, the same bound as before. */
         completed = false;
         for (unsigned waited = 0; waited < NVME_ADMIN_TIMEOUT_MS && !completed; waited++) {
-            queue_process(q);
+            (void)queue_process(q, IRQ_POLL_BUDGET);
             completed = wait_for_completion_timeout(&w.done, 1000000ull);
         }
     } else {

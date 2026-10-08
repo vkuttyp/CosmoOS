@@ -177,6 +177,12 @@ bool blk_test_drain_ordered(void);
  * its end with it and a completion callback stamps itself, so "after"
  * is an order and not two clocks (docs/audit/next-subsystem-virtio-remove-inflight.md). */
 uint64_t blk_test_tick(void);
+/* From a bio's `done` only: put the bio back at the tail of its device's
+ * pending queue, so the bio_complete running that `done` hands it to the
+ * driver again (drain_pending) -- the layer's own resubmission from a
+ * completion, which a waiting submitter drives in normal use, driven by a
+ * test instead (`blk-irq-budget`). */
+void blk_test_resubmit_from_done(struct bio *bio);
 
 /*
  * A driver's own seams, published to the block layer at its module init
@@ -202,6 +208,12 @@ struct blk_test_driver_hooks {
     void (*stamps_reset)(void);
     uint64_t (*before_irq_seq)(void);
     uint64_t (*walk_seq)(void);
+    /* The most completions one call of the driver's completion handler
+     * consumed since the last reset (docs/testing/flakes.md, "held for
+     * 184 s"); and the calls that consumed more than the ring holds. */
+    void (*pops_reset)(struct blkdev *bd);
+    unsigned (*pops_max)(struct blkdev *bd);
+    uint64_t (*pops_over_ring)(struct blkdev *bd);
 };
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
 const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);

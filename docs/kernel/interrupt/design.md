@@ -67,9 +67,71 @@ Handlers run:
 Therefore handlers must not sleep, must not allocate (there is no
 allocator, and when there is one its interrupt-safe variant will be a
 distinct API), must not take a lock that can sleep, and must be short.
-Anything longer is deferred; the deferred-work mechanism arrives with the
-scheduler in Phase 3 and will be the recommended pattern from constitution
-section 53 (minimal handler → queue work → worker thread).
+Anything longer is deferred (constitution section 53: minimal handler →
+queue work → worker thread). For completion handlers that is the
+irq_poll below.
+
+## Bounded completion handling
+
+A completion handler consumes what its device has finished until it
+finds nothing more. That is not a bound when something refills the device
+while the handler runs: a submitter on another CPU, or the handler
+itself, since `bio_complete` hands the block layer's next waiting bio to
+the driver and a USB callback submits the next transfer. Against a device
+that completes at once, the handler then runs, interrupts off, for as
+long as the refilling lasts. CI saw one CPU take no tick for 22 s inside
+`vblk_done` (docs/testing/flakes.md, "held for 184 s"); `blk-irq-budget`
+reproduces it at will.
+
+`kernel/core/irqpoll.c` (`kernel/include/kernel/irqpoll.h`) bounds it,
+with one design for every handler it applies to:
+
+- **A budget per call.** The handler calls `irq_poll_sched`, which runs
+  the driver's `poll(budget)`: at most `IRQ_POLL_BUDGET` (32)
+  completions, returning how many it consumed.
+- **The remainder on a worker.** A call that used its whole budget hands
+  the rest to this CPU's `irqpoll/N` thread (pinned, highest priority),
+  which calls `poll` a budget at a time and yields between batches,
+  until a call returns less than the budget.
+- **One consumer at a time.** A handler that finds `poll` running (on
+  another CPU or in the worker) or queued only records `again`; whoever
+  is consuming takes it before going idle. Completions are consumed in
+  the device's order, as before, and ownership rules inside `poll` are
+  the driver's own, unchanged (virtio-blk decides by pointer, under its
+  lock, whether a popped bio is still its to complete; the timeout and
+  removal walks clear the same slot table).
+
+**The remainder always runs, promptly.** A deferral queues the irq_poll
+on a started worker's list and wakes it; the worker is runnable from then
+until the list is empty, at the highest priority, so no thread holds it
+off -- as none held off the handler. At the default priority a busier
+thread on its CPU (quiesce, the reaper, a pinned spinner) stalled the
+queue's completions for as long as it ran (review, PR #334). The cost:
+a device that never runs dry keeps that CPU's threads waiting for as
+long as it lasts, as the unbounded handler did, but the CPU keeps its
+tick and its interrupts, and the soft-lockup detector reports it past
+10 s. Before
+the workers start (boot, before any driver loads) a handler cannot
+defer and polls to the end, as before.
+
+**Teardown.** `irq_poll_disable` unqueues a deferral and waits for a
+running `poll` to return; after it, none runs or starts until
+`irq_poll_enable`. It is the deferred half of `synchronize_irq`, called
+after the interrupt is released and before what `poll` reads is freed:
+`virtq_free` calls it after the transport's teardown, so every virtio
+driver's remove and reset path, which already freed the queue before
+walking its slots, also stops the deferred work there
+(`virtio-remove-inflight`'s held passes keep their meaning: the hold is
+checked before every pop, in the handler and in the worker alike). A
+path that only needs "whatever the handler was doing is done", like
+xHCI's cancel, calls `irq_poll_synchronize`, which waits for a `poll`
+running now to return.
+
+Where it applies (the audit, docs/audit/2026-10-08-irq-budget-report.md):
+virtio queues (block, network transmit and receive, entropy), NVMe
+queues and the xHCI event ring. AHCI completes one snapshot of finished
+slots per interrupt (at most 32) and e1000e is bounded by its ring under
+the lock its transmit also takes; neither is changed.
 
 ## SMP publication and lifetime
 

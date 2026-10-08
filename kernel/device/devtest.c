@@ -1836,6 +1836,166 @@ bool selftest_virtio_remove_inflight(const char **reason)
     return r;
 }
 
+/*
+ * blk-irq-budget (docs/testing/flakes.md, "`virtio-remove-inflight` held
+ * for 184 s"): a completion handler that runs for as long as its device
+ * is refilled. Each bio's `done` puts it back in the block layer's pending
+ * queue, so the bio_complete that ran it hands it straight back to the
+ * driver -- the resubmission from a completion that a waiting submitter
+ * drives in normal use -- and then waits, to a bound, for the device to
+ * have finished some other request, so the handler asking for its next
+ * completion always finds one. The handler is its own submitter: one CPU
+ * is enough. A handler that consumes until it finds the ring empty runs
+ * until the storm stops, and its CPU takes no tick for as long; bounded
+ * per call, the tick never stops longer than BIRQ_GAP_MS.
+ */
+#ifndef BIRQ_STORM_MS            /* overridable: tools/irq-budget-probe.py --storm-ms */
+#define BIRQ_STORM_MS 1000u
+#endif
+/* LOAD-SENSITIVE (docs/testing/flakes.md, "The list"): a time bound. The
+ * unbounded handler measured 1,002 ms, the whole storm; a budget of 32 keeps
+ * one call to milliseconds, so 250 ms is a host stall, not a handler. */
+#define BIRQ_GAP_MS   250u       /* the longest a CPU may go without a tick meanwhile */
+#define BIRQ_NEXT_NS  (1000ull * 1000)   /* how long `done` waits for the device's next completion */
+#define BIRQ_MAX_BIOS 64u
+
+#if CONFIG_DEBUG
+static struct birq {
+    struct blkdev *bd;
+    const struct blk_test_driver_hooks *h;
+    uint64_t deadline;
+    unsigned n;
+    volatile unsigned completions, resubmits, found_next, missed_next, errors, finished;
+    struct completion all_done;
+    struct bio bios[BIRQ_MAX_BIOS];   /* static: a storm that never ends must not complete into a freed frame */
+} g_birq;
+
+static void birq_done(struct bio *bio)
+{
+    struct birq *b = bio->arg;
+    __atomic_fetch_add(&b->completions, 1u, __ATOMIC_RELAXED);
+    if (bio->status != 0)
+        __atomic_fetch_add(&b->errors, 1u, __ATOMIC_RELAXED);
+    else if (!clock_deadline_passed(b->deadline)) {   /* set on the test's CPU, read on the handler's */
+        blk_test_resubmit_from_done(bio);
+        __atomic_fetch_add(&b->resubmits, 1u, __ATOMIC_RELAXED);
+        uint64_t until = clock_now_ns() + BIRQ_NEXT_NS;   /* begun and ended on this CPU, in this call: the raw clock */
+        while (b->h->unconsumed(b->bd) == 0 && clock_now_ns() < until)
+            arch_cpu_relax();
+        if (b->h->unconsumed(b->bd) != 0)
+            __atomic_fetch_add(&b->found_next, 1u, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&b->missed_next, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    if (__atomic_add_fetch(&b->finished, 1u, __ATOMIC_ACQ_REL) == b->n)
+        complete(&b->all_done);
+}
+#endif
+
+bool selftest_blk_irq_budget(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: blk-irq-budget: no test hooks in this build; skipping");
+    return true;
+#else
+    const struct blk_test_driver_hooks *h = blk_test_driver_hooks("virtio_blk");
+    if (h == NULL || h->unconsumed == NULL || h->pops_max == NULL) {
+        kinfo("selftest: blk-irq-budget: virtio_blk published no test seams; skipping");
+        return true;
+    }
+    struct blkdev *bd = blk_find("vda");
+    if (bd == NULL) {
+        kinfo("selftest: blk-irq-budget: no vda; skipping");
+        return true;
+    }
+    uint8_t *buf = kmalloc(4096, 0);
+    if (buf == NULL) {
+        blkdev_put(bd);
+        *reason = "check failed: the test's own buffer";
+        return false;
+    }
+    struct birq *b = &g_birq;
+    memset(b, 0, sizeof(*b));
+    b->bd = bd;
+    b->h = h;
+    b->n = h->nr_slots(bd);
+    if (b->n > BIRQ_MAX_BIOS)
+        b->n = BIRQ_MAX_BIOS;
+    completion_init(&b->all_done, "blk-irq-budget");
+    uint32_t per = 4096 / bd->sector_size;
+    for (unsigned i = 0; i < b->n; i++) {
+        struct bio *bio = &b->bios[i];
+        bio->dev = bd;
+        bio->dir = BIO_READ;
+        bio->sector = ((uint64_t)i * per) % (bd->capacity - per);
+        bio->nsectors = per;
+        bio->buf = buf;   /* every read lands in one buffer: only the completions matter */
+        bio->done = birq_done;
+        bio->arg = b;
+        list_init(&bio->link);
+    }
+    h->pops_reset(bd);
+    timer_test_tick_gap_reset();
+    uint64_t t0 = clock_now_ns();
+    b->deadline = clock_deadline_ns((uint64_t)BIRQ_STORM_MS * 1000000ull);
+    unsigned refused = 0;
+    for (unsigned i = 0; i < b->n; i++) {
+        if (blk_submit(&b->bios[i]) != 0) {
+            refused++;
+            if (__atomic_add_fetch(&b->finished, 1u, __ATOMIC_ACQ_REL) == b->n)
+                complete(&b->all_done);
+        }
+    }
+    bool ended = wait_for_completion_timeout(&b->all_done, ((uint64_t)BIRQ_STORM_MS + 30000ull) * 1000000ull);
+    uint64_t took_ms = clock_since_ns(t0) / 1000000ull;
+    unsigned gap_cpu = 0;
+    uint64_t gap_ms = timer_test_tick_gap_max_ns(&gap_cpu) / 1000000ull;
+    unsigned pops = h->pops_max(bd);
+    uint64_t over = h->pops_over_ring(bd);
+    /* Two lines: the log's line limit cut one off before its verdict. */
+    kinfo("selftest: blk-irq-budget: %u bios on %s, storm %u ms, took %llu ms: %u completions, %u resubmitted, "
+          "next completion ready %u times and not %u",
+          b->n, bd->name, BIRQ_STORM_MS, (unsigned long long)took_ms, b->completions, b->resubmits, b->found_next,
+          b->missed_next);
+    kinfo("selftest: blk-irq-budget: most popped in one handler call %u (calls over the ring %llu); "
+          "longest tick gap %llu ms on cpu %u (bound %u)",
+          pops, (unsigned long long)over, (unsigned long long)gap_ms, gap_cpu, BIRQ_GAP_MS);
+    if (!ended) {
+        /* The bios are still the device's: static storage, the disk's
+         * reference kept, and the buffer left allocated. */
+        *reason = "check failed: the storm did not end within 30 s of its deadline";
+        return false;
+    }
+    kfree(buf);
+    blkdev_put(bd);
+    if (refused != 0 || b->errors != 0) {
+        *reason = "check failed: a bio was refused or failed";
+        return false;
+    }
+    /* Not vacuous: the storm ran, and the adversary held -- the handler
+     * found its next completion waiting nearly every time. */
+    if (b->resubmits < 8 * b->n) {
+        *reason = "check failed: the storm resubmitted fewer than eight rounds";
+        return false;
+    }
+    if (b->found_next * 10ull < (b->found_next + b->missed_next) * 9ull) {
+        *reason = "check failed: the device had the next completion ready under 90% of the time";
+        return false;
+    }
+    if (over != 0) {
+        *reason = "check failed: one handler call consumed more completions than the ring holds";
+        return false;
+    }
+    if (gap_ms > BIRQ_GAP_MS) {
+        *reason = "check failed: a CPU went longer than the bound without a tick";
+        return false;
+    }
+    return true;
+#endif
+}
+
 static int reset_fake_probe(struct device *dev) { (void)dev; return 0; }
 
 #if CONFIG_DEBUG

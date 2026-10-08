@@ -251,7 +251,7 @@ struct virtqueue {
     dma_addr_t desc_dma, avail_dma, used_dma;
     uint16_t free_head, num_free, last_used, avail_idx;
     void **cookies;                          /* per descriptor head */
-    void (*callback)(struct virtqueue *);    /* interrupt context */
+    virtq_callback_fn callback;              /* (vq, budget): interrupt context or the irqpoll worker */
     spinlock_t lock;
     int vector;                              /* MSI-X vector or -1 */
 };

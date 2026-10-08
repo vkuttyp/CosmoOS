@@ -56,6 +56,7 @@ struct percpu {
     uintptr_t last_tick_pc;     /* the PC this CPU's last tick interrupted ... */
     uint64_t last_tick_ns;      /* ... and when; two stores per tick */
     uint64_t tick_cost_ns;      /* CONFIG_SELFTEST: tick entry to the scheduler hook, accumulated */
+    uint64_t tick_gap_max_ns;   /* CONFIG_SELFTEST: the longest time between two ticks since the last reset */
     struct cpu_sample sample;   /* this CPU's answer to the last request for its frame */
     uint64_t stall_ns;          /* soft: time this CPU has run one thread while others waited */
     uint64_t last_switches;

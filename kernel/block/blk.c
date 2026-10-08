@@ -354,6 +354,16 @@ uint64_t blk_test_tick(void)
     return __atomic_add_fetch(&g_test_seq, 1u, __ATOMIC_SEQ_CST);
 }
 
+void blk_test_resubmit_from_done(struct bio *bio)
+{
+    struct blkdev *bd = bio->dev;
+    list_init(&bio->inflight_link);
+    arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+    list_push_back(&bd->pending, &bio->link);
+    bd->requeued++;
+    spin_unlock_irqrestore(&bd->qlock, s);
+}
+
 static const struct blk_test_driver_hooks *g_test_driver_hooks;
 
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h)

@@ -23,7 +23,8 @@ struct virtqueue {
     void *ring_mem; dma_addr_t ring_dma; size_t ring_bytes;      /* one dma_alloc */
     uint16_t free_head, num_free, last_used;
     void **cookies;                          /* per head descriptor */
-    void (*callback)(struct virtqueue *);    /* NULL: polled queue, no vector */
+    virtq_callback_fn callback;              /* (vq, budget) -> consumed; NULL: polled queue, no vector */
+    struct irq_poll poll;                    /* the budget per interrupt, the rest on irqpoll/N */
     spinlock_t lock; int vector; unsigned msix_index;
     uint64_t kicks, interrupts;
 };

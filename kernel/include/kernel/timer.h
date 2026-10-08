@@ -282,6 +282,13 @@ void timer_set_tick_hook(timer_tick_hook_fn hook);
  * hook call, accumulated (lockup-tick-bench); 0 in a release build. */
 uint64_t timer_tick_cost_ns(void);
 
+/* CONFIG_SELFTEST: the longest interval between two ticks on any online
+ * CPU since timer_test_tick_gap_reset, and which CPU (`cpu` may be NULL):
+ * how long some CPU ran with interrupts off. A gap a test's injected clock
+ * skew makes is not counted. 0 in a build without self-tests. */
+void timer_test_tick_gap_reset(void);
+uint64_t timer_test_tick_gap_max_ns(unsigned *cpu);
+
 void ndelay(uint64_t ns);
 void udelay(uint64_t us);
 

@@ -79,6 +79,12 @@ struct vblk {
     spinlock_t lock;
     bool flush;
     bool dead;                  /* a request timed out: the device was reset and every request fails */
+    /* Completions popped per vblk_done call: the most in one call, and how
+     * many calls popped more than the ring holds -- a call that outlives
+     * the ring is being refilled while it runs (docs/testing/flakes.md,
+     * "virtio-remove-inflight held for 184 s"). */
+    uint32_t pops_max;
+    uint64_t pops_over_ring;
 };
 
 #if CONFIG_DEBUG
@@ -120,6 +126,20 @@ static unsigned vblk_test_releases(void) { return __atomic_load_n(&g_test_releas
 static unsigned vblk_test_nr_slots(struct blkdev *bd) { return ((struct vblk *)bd->priv)->nr_slots; }
 static uint64_t vblk_test_before_irq_seq(void) { return __atomic_load_n(&g_test_before_irq_seq, __ATOMIC_ACQUIRE); }
 static uint64_t vblk_test_walk_seq(void) { return __atomic_load_n(&g_test_walk_seq, __ATOMIC_ACQUIRE); }
+static void vblk_test_pops_reset(struct blkdev *bd)
+{
+    struct vblk *vb = bd->priv;
+    __atomic_store_n(&vb->pops_max, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&vb->pops_over_ring, 0ull, __ATOMIC_RELAXED);
+}
+static unsigned vblk_test_pops_max(struct blkdev *bd)
+{
+    return __atomic_load_n(&((struct vblk *)bd->priv)->pops_max, __ATOMIC_RELAXED);
+}
+static uint64_t vblk_test_pops_over_ring(struct blkdev *bd)
+{
+    return __atomic_load_n(&((struct vblk *)bd->priv)->pops_over_ring, __ATOMIC_RELAXED);
+}
 static void vblk_test_stamps_reset(void)
 {
     __atomic_store_n(&g_test_before_irq_seq, 0ull, __ATOMIC_RELEASE);
@@ -139,6 +159,9 @@ static const struct blk_test_driver_hooks vblk_test_hooks = {
     .stamps_reset = vblk_test_stamps_reset,
     .before_irq_seq = vblk_test_before_irq_seq,
     .walk_seq = vblk_test_walk_seq,
+    .pops_reset = vblk_test_pops_reset,
+    .pops_max = vblk_test_pops_max,
+    .pops_over_ring = vblk_test_pops_over_ring,
 };
 #endif
 
@@ -236,14 +259,32 @@ static int vblk_submit(struct blkdev *bd, struct bio *bio)
     return 0;
 }
 
-static void vblk_done(struct virtqueue *vq)
+static void vblk_note_pops(struct vblk *vb, struct virtqueue *vq, unsigned popped)
+{
+    uint32_t max = __atomic_load_n(&vb->pops_max, __ATOMIC_RELAXED);
+    while (popped > max && !__atomic_compare_exchange_n(&vb->pops_max, &max, popped, true, __ATOMIC_RELAXED,
+                                                        __ATOMIC_RELAXED))
+        ;
+    if (popped > vq->size) {
+        __atomic_fetch_add(&vb->pops_over_ring, 1, __ATOMIC_RELAXED);
+#if CONFIG_DEBUG
+        kwarn("virtio-blk: %s: one completion call popped %u, more than the ring's %u", vb->bd.name, popped,
+              vq->size);
+#endif
+    }
+}
+
+/* At most `budget` completions, in the device's order (virtq_callback_fn):
+ * the rest is the irqpoll worker's, never a second consumer's. */
+static unsigned vblk_done(struct virtqueue *vq, unsigned budget)
 {
     struct vblk *vb = vq->vdev->priv;
     uint32_t len;
     struct bio *bio;
     if (vb == NULL)
-        return;
-    for (;;) {
+        return 0;
+    unsigned popped = 0;
+    for (; popped < budget; popped++) {
 #if CONFIG_DEBUG
         /*
          * Held: the finished requests stay in flight for the remove to
@@ -257,10 +298,10 @@ static void vblk_done(struct virtqueue *vq)
          * moment on purpose.
          */
         if (__atomic_load_n(&g_test_hold_bd, __ATOMIC_ACQUIRE) == &vb->bd)
-            return;
+            break;
 #endif
         if ((bio = virtq_pop(vq, &len)) == NULL)
-            return;
+            break;
         /* Ownership is decided under the lock, by pointer, before the bio
          * is touched: the timeout path may have completed it already (and
          * a synchronous caller freed its stack frame), so neither its
@@ -290,6 +331,8 @@ static void vblk_done(struct virtqueue *vq)
         }
         bio_complete(bio, status);
     }
+    vblk_note_pops(vb, vq, popped);
+    return popped;
 }
 
 /* The device stopped answering: reset it (it drops every request) and
@@ -427,7 +470,10 @@ static void vblk_remove(struct virtio_device *vdev)
      * exactly this (`kernel/include/kernel/interrupt.h`): a handler is a
      * quiesce read-side section, so a grace period after unregistration
      * proves no CPU is still inside it, and the mask is what stops one
-     * that has not started yet.
+     * that has not started yet. What a handler left to its irqpoll worker
+     * is the other half: `virtq_free` disables the queue's irq_poll after
+     * the transport's teardown, so no `vblk_done` runs in the worker
+     * either once it returns (kernel/include/kernel/irqpoll.h).
      *
      * Until that has happened a completion walk can be running on
      * another CPU, and the walk below reads and clears the very table

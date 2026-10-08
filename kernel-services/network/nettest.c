@@ -10455,6 +10455,17 @@ bool selftest_net_tcpverdict(const char **reason)
     for (unsigned i = 0; i < 40 && tcp_recv_avail(cn2.s->tcp) < 2; i++)
         thread_sleep_ms(10);
     CHECK(tcp_recv_avail(cn2.s->tcp) == 2);
+    /* Their acknowledgement on the wire before the rule. Unread, the two
+     * bytes are acknowledged by the delayed-ACK timer, TCP_DELACK_NS after
+     * they arrived; a rule added first refuses that ACK, and its verdict is
+     * then the one the send below is told of (-EPERM where 3 is checked).
+     * The window was the rule plus hin_drain's 20 ms sleep against the
+     * timer's 40 ms, about 10 ms of slack (docs/testing/flakes.md,
+     * "net-tcpverdict"). Waited for, not timed. */
+    bool hi_acked = false;
+    for (unsigned i = 0; i < 4 && !hi_acked; i++)
+        hi_acked = hin_recv(u, IPPROTO_TCP, 9302, &sg, HIN_TRIES) && (sg.flags & TH_ACK) && sg.ack == 5003;
+    CHECK(hi_acked);
 
     /* (4) A rule added mid-connection records the verdict and leaves the
      * connection standing. The send that meets the rule still returns its
