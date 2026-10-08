@@ -37,7 +37,7 @@ MODES = ('no-wait', 'no-class', 'no-worker-class')
 
 EDITS = {
     'no-wait': [('    if (!lockdep_callback_wait(ip->class_fn, &ip->lockdep_class, ip_caller))\n        return false;\n',
-                 '    (void)ip_caller;   /* PROBE */\n')],
+                 '    (void)ip; (void)ip_caller;   /* PROBE */\n')],
     'no-class': [('    lockdep_callback_enter(fn, &ip->lockdep_class);\n', '    (void)fn;   /* PROBE */\n'),
                  ('    lockdep_callback_exit(fn);\n', '    /* PROBE */\n')],
     'no-worker-class': [('        unsigned n = run_poll(ip);\n        preempt_enable();\n',

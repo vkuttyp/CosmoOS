@@ -26,6 +26,7 @@ import os
 import sys
 import threading
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -588,38 +589,144 @@ ADDR_PATTERNS = [
 ]
 
 
-def symbolize(lines, kernel, tool):
+def run_symbolizer(tool, obj, addrs):
+    """[(function, location)] for `addrs` in `obj`, or None."""
+    try:
+        out = subprocess.run([tool, "--obj=" + obj, "--no-inlines", "--functions=short"],
+                             input="\n".join(addrs) + "\n", capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    # One record per address: FUNCTION, FILE:LINE:COL, blank.
+    result = []
+    for rec in out.stdout.split("\n\n")[:len(addrs)]:
+        parts = rec.strip().split("\n")
+        func = parts[0] if parts and parts[0] else "??"
+        loc = parts[1] if len(parts) > 1 else "??"
+        loc = re.sub(r":\d+$", "", loc)          # drop the column
+        result.append((func, repo_relative(loc)))
+    return result
+
+
+# The loader's line for each module it loads (kernel/module/module.c):
+# where the text group landed, and its size.
+MODULE_BASE = re.compile(r"module: base (\S+) text (0x[0-9a-fA-F]+) size (0x[0-9a-fA-F]+)")
+
+SHF_ALLOC, SHF_EXECINSTR, SHT_SYMTAB, STT_FUNC = 0x2, 0x4, 2, 2
+
+
+def ko_text(path):
+    """The text group of a module, laid out as the loader lays it
+    (kernel/module/modelf.c): every allocatable executable section, in
+    section order, each at its alignment. Returns ([(index, offset, size)],
+    [(section index, value, size, name)] for the function symbols), or
+    None if the file is not an ELF64 relocatable object."""
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    if data[:4] != b"\x7fELF" or data[4] != 2 or struct.unpack_from("<H", data, 16)[0] != 1:
+        return None
+    shoff = struct.unpack_from("<Q", data, 0x28)[0]
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    shdrs = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    texts, size = [], 0
+    for i, (_n, typ, flags, _a, _o, sz, _l, _i, align, _e) in enumerate(shdrs):
+        if typ == 0 or not flags & SHF_ALLOC or not flags & SHF_EXECINSTR:
+            continue
+        align = align or 1
+        off = (size + align - 1) & ~(align - 1)
+        texts.append((i, off, sz))
+        size = off + sz
+    funcs = []
+    for (_n, typ, _f, _a, off, sz, link, _i, _al, ent) in shdrs:
+        if typ != SHT_SYMTAB or not ent:
+            continue
+        stroff = shdrs[link][4]
+        for k in range(sz // ent):
+            name, info, _o, shndx, value, ssize = struct.unpack_from("<IBBHQQ", data, off + k * ent)
+            if info & 0xF == STT_FUNC:
+                end = data.index(b"\0", stroff + name)
+                funcs.append((shndx, value, ssize, data[stroff + name:end].decode(errors="replace")))
+    return texts, funcs
+
+
+def module_object(modules, name):
+    """The module's ELF: the unsigned one (the signed .ko has the
+    signature appended), else the .ko."""
+    for cand in (name + ".ko.unsigned", name + ".ko"):
+        p = os.path.join(modules, cand)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def symbolize_module(addr, bases, modules, tool):
+    """(function, location) for an address in a loaded module's text, or
+    None if it is in none. The latest load of a range wins: a module
+    unloaded and loaded again prints a new base."""
+    a = int(addr, 16)
+    for name, base, size in reversed(bases):
+        if not base <= a < base + size:
+            continue
+        obj = module_object(modules, name) if modules else None
+        layout = ko_text(obj) if obj else None
+        if layout is None:
+            return ("?? [%s+0x%x]" % (name, a - base), "(no %s.ko to resolve it)" % name)
+        texts, funcs = layout
+        off = a - base
+        hit = next(((i, off - o) for i, o, sz in texts if o <= off < o + sz), None)
+        if hit is None:
+            return ("?? [%s+0x%x]" % (name, off), "(past the module's sections)")
+        index, rel = hit
+        func = next((f"{n} [{name}]" for (sh, v, sz, n) in funcs if sh == index and v <= rel < v + max(sz, 1)),
+                    "?? [%s+0x%x]" % (name, off))
+        loc = "??"
+        if len(texts) == 1:
+            # One text section: its section-relative address is unambiguous
+            # to llvm-symbolizer, which reads the object's (relocated) DWARF.
+            r = run_symbolizer(tool, obj, ["0x%x" % rel])
+            if r:
+                loc = r[0][1]
+        return (func, loc)
+    return None
+
+
+def symbolize(lines, kernel, tool, modules=None):
     """Return [(address, function, location)] for the report addresses in
     `lines`, in first-seen order, or [] when there is nothing to resolve or
-    no way to resolve it (no --kernel, no symbolizer: never a failure)."""
+    no way to resolve it (no --kernel, no symbolizer: never a failure).
+    Addresses in a module's text (its `module: base` line) resolve against
+    the module's own object in `modules`."""
     if not kernel or not os.path.exists(kernel):
         return []
-    addrs = []
+    addrs, bases = [], []
     for ln in lines:
+        mb = MODULE_BASE.search(ln)
+        if mb:
+            bases.append((mb.group(1), int(mb.group(2), 16), int(mb.group(3), 16)))
+            continue
         for pat in ADDR_PATTERNS:
             m = pat.search(ln)
             if m and m.group(1) not in addrs:
                 addrs.append(m.group(1))
     if not addrs:
         return []
-    try:
-        out = subprocess.run([tool, "--obj=" + kernel, "--no-inlines", "--functions=short"],
-                             input="\n".join(addrs) + "\n", capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if out.returncode != 0:
-        return []
-    # One record per address: FUNCTION, FILE:LINE:COL, blank.
-    records = [r for r in out.stdout.split("\n\n")]
-    table = []
-    for addr, rec in zip(addrs, records):
-        parts = rec.strip().split("\n")
-        func = parts[0] if parts and parts[0] else "??"
-        loc = parts[1] if len(parts) > 1 else "??"
-        loc = re.sub(r":\d+$", "", loc)          # drop the column
-        loc = repo_relative(loc)
-        table.append((addr, func, loc))
-    return table
+    resolved = {}
+    for addr in addrs:
+        r = symbolize_module(addr, bases, modules, tool)
+        if r is not None:
+            resolved[addr] = r
+    rest = [a for a in addrs if a not in resolved]
+    if rest:
+        r = run_symbolizer(tool, kernel, rest)
+        if r is None:
+            if not resolved:
+                return []
+            r = [("??", "??")] * len(rest)
+        resolved.update(zip(rest, r))
+    return [(addr,) + resolved[addr] for addr in addrs]
 
 
 REPO_TOP_DIRS = ("kernel/", "kernel-services/", "drivers/", "compat/", "boot/", "libc/", "userland/", "pkg/", "tests/", "tools/")
@@ -638,7 +745,7 @@ def repo_relative(loc):
 def print_symbols(table):
     if not table:
         return
-    print("---- symbols (llvm-symbolizer over the kernel ELF) ----")
+    print("---- symbols (llvm-symbolizer over the kernel ELF and the modules' objects) ----")
     for addr, func, loc in table:
         print(f"  {addr}  {func:<40} {loc}")
 
@@ -667,6 +774,9 @@ def main():
                          "report in the harness's own report (docs/kernel/diagnostics/design.md)")
     ap.add_argument("--symbolizer", default="llvm-symbolizer",
                     help="the llvm-symbolizer to use with --kernel")
+    ap.add_argument("--modules", default=None,
+                    help="the directory of the built modules (.ko), for addresses in module text "
+                         "(default: modules/ beside the kernel's build directory)")
     args = ap.parse_args()
 
     if args.expect_panic == "wxn":
@@ -982,7 +1092,9 @@ def main():
     # kernel ELF with llvm-symbolizer. Shown when the run failed or when a
     # panic was expected: the log stays the run's evidence, this table is
     # the harness's addition (docs/kernel/diagnostics/design.md, "Lockups").
-    table = symbolize(lines, args.kernel, args.symbolizer) if (failures or args.expect_panic) else []
+    modules = args.modules or (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(args.kernel))), "modules")
+                               if args.kernel else None)
+    table = symbolize(lines, args.kernel, args.symbolizer, modules) if (failures or args.expect_panic) else []
 
     if failures:
         print(f"boot-test: FAIL after {elapsed:.1f}s")
