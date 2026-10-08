@@ -603,6 +603,7 @@ Sources: inventory §§2.10, 2.11 and 3,
 Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device/design.md).
 
 - [x] **Device lifecycle — Unit 1 implementation: virtio-net removal.**
+  [PR #336](https://github.com/vkuttyp/CosmoOS/pull/336).
   Held RX/TX completions prove missing unmaps, lost outstanding buffers and
   reset-time RX refill. Private ownership tables and stopping polls before
   reset reclaim every buffer with zero posted RX. Two self-tests and old

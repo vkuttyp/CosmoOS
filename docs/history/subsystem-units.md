@@ -2597,7 +2597,7 @@ See the [history index](README.md).
   - Found and recorded, not fixed: virtio-net's remove drains before its
     poll stops.
   - Report: `docs/audit/2026-10-08-irqpoll-lockdep-report.md`.
-- **Device lifecycle Unit 1: virtio-net removal.**
+- **Device lifecycle Unit 1: virtio-net removal (PR #336).**
   - Two deterministic debug tests prove main's missing DMA unmaps and
     reset-time RX refill on x86-64 and AArch64: held completions left
     34 maps with zero unmaps, 31 outstanding buffers unreclaimed and

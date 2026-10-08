@@ -8,6 +8,10 @@ Work started 2026-10-08 on main `561b913b` (PR #335). Branch:
 drivers' remove/reset paths, and record unproven concerns. No independent
 bind/unbind API or module ABI change is proposed.
 
+PR: [#336](https://github.com/vkuttyp/CosmoOS/pull/336).
+Branch CI results: [PR checks](https://github.com/vkuttyp/CosmoOS/pull/336/checks).
+Merge-commit CI is the required follow-up when the PR is merged.
+
 ## Initial source findings
 
 `vnet_remove` unregisters the interface, resets, pops used RX/TX entries,
