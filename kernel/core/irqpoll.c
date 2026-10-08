@@ -4,9 +4,12 @@
  * (kernel/include/kernel/irqpoll.h; docs/kernel/interrupt/design.md,
  * "Bounded completion handling").
  *
- * Locks: an irq_poll's own lock, then a worker's list lock, in that order
- * and never the other way round. Neither is held across `poll`, and
- * neither across a wake of the idle queue.
+ * Locks: an irq_poll's own lock, then a worker's list lock or the
+ * irq_poll's idle queue, never the other way round. Neither is held across
+ * `poll`. The idle queue is woken under the irq_poll's lock: a waiter
+ * reads its condition under that lock too, so it cannot see the poll idle,
+ * return and let its caller free the irq_poll while a waker is still
+ * inside the queue (review, PR #335).
  */
 
 #include <kernel/irqpoll.h>
@@ -26,8 +29,10 @@ struct irq_poll_worker {
     struct waitqueue wq;
     struct thread *thread;
     bool ready;               /* published with release once the thread exists */
-    bool lowered;             /* the worker's own: at SCHED_PRIO_DEFAULT for the rest of a backlog */
-    uint64_t busy_since;      /* the worker's own: when its current backlog began (0 = idle) */
+    bool lowered;             /* the worker's own: at SCHED_PRIO_DEFAULT, until `boost` or idle */
+    bool boosted;             /* set by `boost` when it raised the worker again */
+    uint64_t busy_since;      /* the worker's own: when its current hold began (0 = idle) */
+    struct timer boost;       /* raises a lowered worker after IRQ_POLL_HOLD_NS */
     char name[16];
 };
 
@@ -137,12 +142,11 @@ void irq_poll_sched(struct irq_poll *ip)
         s = spin_lock_irqsave(&ip->lock);
         bool early = n >= IRQ_POLL_BUDGET && worker_for(cpu) == NULL && !ip->disabled;
         struct irq_poll_worker *w = early ? NULL : finish_locked(ip, n, cpu);
-        bool idle_wake = !early && ip->waiters != 0;
+        if (!early && ip->waiters != 0)
+            waitqueue_wake_all(&ip->idle_wq);
         spin_unlock_irqrestore(&ip->lock, s);
         if (w != NULL)
             waitqueue_wake_one(&w->wq);
-        if (idle_wake)
-            waitqueue_wake_all(&ip->idle_wq);
         if (!early)
             return;
         /* Boot, before the workers: nowhere to defer to, so on, as the
@@ -242,6 +246,17 @@ void irq_poll_enable(struct irq_poll *ip)
     spin_unlock_irqrestore(&ip->lock, s);
 }
 
+/* A lowered worker is raised again after one hold: it cannot rely on
+ * running to raise itself, since a busier thread above the default
+ * priority may be what keeps it off the CPU (review, PR #335). */
+static void boost_fn(struct timer *t, void *arg)
+{
+    (void)t;
+    struct irq_poll_worker *w = arg;
+    __atomic_store_n(&w->boosted, true, __ATOMIC_RELEASE);
+    sched_reprioritize(w->thread, SCHED_PRIO_HIGHEST);
+}
+
 static void worker_main(void *arg)
 {
     struct irq_poll_worker *w = arg;
@@ -254,9 +269,11 @@ static void worker_main(void *arg)
         spin_unlock_irqrestore(&w->lock, ls);
         if (idle) {
             if (w->lowered) {
+                (void)timer_cancel_sync(&w->boost);
                 sched_reprioritize(self, SCHED_PRIO_HIGHEST);
                 w->lowered = false;
             }
+            __atomic_store_n(&w->boosted, false, __ATOMIC_RELAXED);
             w->busy_since = 0;
         }
         wait_event(&w->wq, !list_empty(&w->list));
@@ -276,10 +293,9 @@ static void worker_main(void *arg)
         s = spin_lock_irqsave(&ip->lock);
         ip->scheduled = false;
         if (ip->disabled) {
-            bool idle_wake = ip->waiters != 0;
-            spin_unlock_irqrestore(&ip->lock, s);
-            if (idle_wake)
+            if (ip->waiters != 0)
                 waitqueue_wake_all(&ip->idle_wq);   /* irq_poll_disable is waiting for exactly this */
+            spin_unlock_irqrestore(&ip->lock, s);
             continue;
         }
         ip->running = true;
@@ -294,10 +310,9 @@ static void worker_main(void *arg)
         preempt_enable();
         s = spin_lock_irqsave(&ip->lock);
         (void)finish_locked(ip, n, cpu);   /* back on this worker's own list if there is more */
-        bool idle_wake = ip->waiters != 0;
-        spin_unlock_irqrestore(&ip->lock, s);
-        if (idle_wake)
+        if (ip->waiters != 0)
             waitqueue_wake_all(&ip->idle_wq);
+        spin_unlock_irqrestore(&ip->lock, s);
         /* A batch at a time, with the tick, interrupts and anything else at
          * this priority between two. At the highest priority for
          * IRQ_POLL_HOLD_NS of one backlog, then at the default until the
@@ -306,11 +321,19 @@ static void worker_main(void *arg)
          * in virtio-remove-inflight, the test thread that was to stop the
          * submitter refilling it (a livelock: 36 s on two CPUs, the boot's
          * whole budget under chaos). Past the hold it time-slices with
-         * the CPU's other threads, as ksoftirqd does in Linux; the
-         * remainder still always runs (it is never off a run queue). */
+         * the CPU's other threads, as ksoftirqd does in Linux. Lowered,
+         * it is raised again by `boost` after another IRQ_POLL_HOLD_NS, so
+         * no thread at any priority holds the remainder off for longer than
+         * that either: half of a long backlog at the highest priority, half
+         * shared. */
+        if (__atomic_exchange_n(&w->boosted, false, __ATOMIC_ACQ_REL)) {
+            w->lowered = false;
+            w->busy_since = clock_now_ns();
+        }
         if (!w->lowered && clock_now_ns() - w->busy_since > IRQ_POLL_HOLD_NS) {
             sched_reprioritize(self, SCHED_PRIO_DEFAULT);
             w->lowered = true;
+            timer_start(&w->boost, IRQ_POLL_HOLD_NS);
         }
         sched_yield();
     }
@@ -325,6 +348,7 @@ void irq_poll_start_workers(void)
         spinlock_init(&w->lock, "irq-poll-cpu");
         list_init(&w->list);
         waitqueue_init(&w->wq, "irqpoll");
+        timer_setup(&w->boost, boost_fn, w);
         ksnprintf(w->name, sizeof(w->name), "irqpoll/%u", c);
         /* The highest priority: what the worker runs is what the handler
          * ran before the budget, above every thread. At the default it

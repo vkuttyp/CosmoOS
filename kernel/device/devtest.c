@@ -1875,7 +1875,8 @@ static struct birq {
     volatile unsigned completions, resubmits, found_next, missed_next, errors, finished;
     struct completion all_done;
     struct bio bios[BIRQ_MAX_BIOS];   /* static: a storm that never ends must not complete into a freed frame */
-    volatile unsigned measuring, stop;
+    volatile uint64_t win_start, win_end;   /* the storm's window; win_end UINT64_MAX until it ends */
+    volatile unsigned stop;
     struct birq_bystander {
         volatile unsigned started;
         uint64_t last_ns;
@@ -1885,17 +1886,26 @@ static struct birq {
 
 /* One per CPU, pinned, at the default priority: how long it went without
  * running while the storm was on. Spinning, so it is always ready -- a gap
- * is time the CPU gave to something else. */
+ * is time the CPU gave to something else. Each gap is clipped to the
+ * window, and the bystander runs at least once after the window closes
+ * (it must see `stop`), so a gap that spans the window's end -- a
+ * bystander starved for the whole storm -- is counted to that end
+ * (review, PR #335). */
 static void birq_bystander_main(void *arg)
 {
     struct birq_bystander *by = arg;
     by->last_ns = clock_now_ns();
     __atomic_store_n(&by->started, 1u, __ATOMIC_RELEASE);
-    while (!__atomic_load_n(&g_birq.stop, __ATOMIC_ACQUIRE)) {
+    for (;;) {
+        bool stop = __atomic_load_n(&g_birq.stop, __ATOMIC_ACQUIRE);
         uint64_t now = clock_now_ns();
-        if (__atomic_load_n(&g_birq.measuring, __ATOMIC_ACQUIRE) && now - by->last_ns > by->max_gap_ns)
-            __atomic_store_n(&by->max_gap_ns, now - by->last_ns, __ATOMIC_RELAXED);
+        uint64_t from = by->last_ns > g_birq.win_start ? by->last_ns : g_birq.win_start;
+        uint64_t to = now < g_birq.win_end ? now : g_birq.win_end;
+        if (g_birq.win_start != 0 && to > from && to - from > by->max_gap_ns)
+            __atomic_store_n(&by->max_gap_ns, to - from, __ATOMIC_RELAXED);
         by->last_ns = now;
+        if (stop)
+            return;
         arch_cpu_relax();
     }
 }
@@ -1966,14 +1976,30 @@ bool selftest_blk_irq_budget(const char **reason)
         bio->arg = b;
         list_init(&bio->link);
     }
+    b->win_end = UINT64_MAX;
     struct thread *bys[CONFIG_MAX_CPUS] = { 0 };
-    for (unsigned c = 0; c < cpu_count() && c < CONFIG_MAX_CPUS; c++)
-        if (cpu_online(c))
-            bys[c] = thread_create_on(birq_bystander_main, &b->by[c], "birq-by", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+    bool all_bystanders = true;
+    for (unsigned c = 0; c < cpu_count() && c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c))
+            continue;
+        bys[c] = thread_create_on(birq_bystander_main, &b->by[c], "birq-by", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        all_bystanders &= bys[c] != NULL;
+    }
     for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
         while (bys[c] != NULL && !__atomic_load_n(&b->by[c].started, __ATOMIC_ACQUIRE))
             thread_sleep_ms(1);
-    __atomic_store_n(&b->measuring, 1u, __ATOMIC_RELEASE);
+    if (!all_bystanders) {
+        /* A CPU with no observer would pass the bound by not being measured. */
+        __atomic_store_n(&b->stop, 1u, __ATOMIC_RELEASE);
+        for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+            if (bys[c] != NULL)
+                (void)thread_join(bys[c]);
+        kfree(buf);
+        blkdev_put(bd);
+        *reason = "check failed: a bystander thread could not be created";
+        return false;
+    }
+    __atomic_store_n(&b->win_start, clock_now_ns(), __ATOMIC_RELEASE);
     h->pops_reset(bd);
     timer_test_tick_gap_reset();
     uint64_t t0 = clock_now_ns();
@@ -1988,7 +2014,7 @@ bool selftest_blk_irq_budget(const char **reason)
     }
     bool ended = wait_for_completion_timeout(&b->all_done, ((uint64_t)BIRQ_STORM_MS + 30000ull) * 1000000ull);
     uint64_t took_ms = clock_since_ns(t0) / 1000000ull;
-    __atomic_store_n(&b->measuring, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&b->win_end, clock_now_ns(), __ATOMIC_RELEASE);
     __atomic_store_n(&b->stop, 1u, __ATOMIC_RELEASE);
     uint64_t starve_ms = 0;
     unsigned starve_cpu = 0;

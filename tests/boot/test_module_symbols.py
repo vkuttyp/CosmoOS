@@ -84,6 +84,18 @@ try:
           f"a second text section's address resolves by the loader's layout (got {table.get(at('cold_one'))})")
     check(not table.get("0x%x" % (base + 0x1000 + 8), ("",))[0].endswith("[testmod]"),
           "past the text range is not the module's")
+    # A damaged artifact is unresolved, not a traceback in a failure report.
+    data = open(obj, "rb").read()
+    open(os.path.join(mods, "badmod.ko.unsigned"), "wb").write(data[:200])
+    bad = 0xffffffff88100000
+    try:
+        t2 = symbolize(["[ INFO] module: base badmod text 0x%x size 0x1000 rodata 0x0 data 0x0" % bad,
+                        "  #0  0x%x" % (bad + 0x10)], kernel, tool, mods)
+        got = t2[0][1] if t2 else ""
+    except Exception as e:   # noqa: BLE001 -- the check is that nothing escapes
+        got = "raised " + repr(e)
+    check(got.startswith("?? [badmod+0x10]"), f"a truncated .ko is reported unresolved (got {got})")
+
     if shutil.which(tool) or os.path.exists(tool):
         check(table[at("hot_two")][1].endswith("mod.c:4"), f"its line, from the object's DWARF (got {table[at('hot_two')][1]})")
         check(table[at("cold_one")][1].endswith("mod.c:5"),

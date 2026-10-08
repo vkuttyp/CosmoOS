@@ -11,6 +11,10 @@ the working tree), boots it, and requires `lockdep-irqpoll` to fail:
                    removed), in the handler or the worker.
   no-worker-class  the worker calls `poll` outside the class; the handler's
                    call keeps it, so only the worker case can fail.
+  cpu-stack        a class entered in thread context goes on the CPU's held
+                   stack, as before review of PR #335: the interrupt nested
+                   over the worker's poll (case 5) finds it there, and its
+                   own poll of the same function is reported as recursion.
 
 Without the class check the wait holding a lock its poll takes is no longer
 named as the deadlock it is: the only check left is might_sleep behind it,
@@ -19,7 +23,8 @@ so the test, which expects a callback report there, dies on an unexpected
 fatal unless the test expected that very kind. The probe requires that
 report, inside lockdep-irqpoll, and no `ok` line for the test; for
 no-worker-class it also requires the handler case to have passed (the
-report comes from the worker case's wait).
+report comes from the worker case's wait). cpu-stack requires a recursion
+report instead, made in the interrupt (irq_depth 1).
 
     tools/lockdep-irqpoll-probe.py --arch x86_64 --mode no-wait
 
@@ -33,9 +38,16 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODES = ('no-wait', 'no-class', 'no-worker-class')
+MODES = ('no-wait', 'no-class', 'no-worker-class', 'cpu-stack')
 
+# (file under kernel/core, before, after); irqpoll.c when the file is left out.
 EDITS = {
+    'cpu-stack': [('lockdep.c',
+                   '    if (kind == LOCKDEP_KIND_MUTEX || (kind == LOCKDEP_KIND_CALLBACK && !in_irq && me() != NULL)) {\n',
+                   '    if (kind == LOCKDEP_KIND_MUTEX) {   /* PROBE */\n'),
+                  ('lockdep.c',
+                   '    if (kind == LOCKDEP_KIND_CALLBACK && raw_this_cpu()->irq_depth == 0 && me() != NULL) {\n',
+                   '    if (false) {   /* PROBE */\n')],
     'no-wait': [('    if (!lockdep_callback_wait(ip->class_fn, &ip->lockdep_class, ip_caller))\n        return false;\n',
                  '    (void)ip; (void)ip_caller;   /* PROBE */\n')],
     'no-class': [('    lockdep_callback_enter(fn, &ip->lockdep_class);\n', '    (void)fn;   /* PROBE */\n'),
@@ -47,13 +59,16 @@ EDITS = {
 
 
 def mutate(tree, mode):
-    p = os.path.join(tree, 'kernel/core/irqpoll.c')
-    s = open(p).read()
-    for old, new in EDITS[mode]:
-        assert s.count(old) == 1, f'anchor: {old!r}'
-        s = s.replace(old, new)
-    open(p, 'w').write(s)
-    assert open(p).read().count('/* PROBE */') == len(EDITS[mode]), 'mutation did not apply'
+    edits = [e if len(e) == 3 else ('irqpoll.c',) + e for e in EDITS[mode]]
+    for name in sorted({e[0] for e in edits}):
+        p = os.path.join(tree, 'kernel/core', name)
+        s = open(p).read()
+        mine = [e for e in edits if e[0] == name]
+        for _f, old, new in mine:
+            assert s.count(old) == 1, f'anchor: {old!r}'
+            s = s.replace(old, new)
+        open(p, 'w').write(s)
+        assert open(p).read().count('/* PROBE */') == len(mine), 'mutation did not apply'
 
 
 def judge(serial, mode):
@@ -65,10 +80,17 @@ def judge(serial, mode):
     if any(l.startswith('SELFTEST: lockdep-irqpoll ') for l in after):
         return False, 'lockdep-irqpoll printed a result line: ' + next(
             l for l in after if l.startswith('SELFTEST: lockdep-irqpoll '))
-    rep = next((i for i, l in enumerate(after) if l.strip() == 'lockdep: sleeping call in atomic context'), None)
+    want = ('lockdep: recursive acquisition of one lock class' if mode == 'cpu-stack'
+            else 'lockdep: sleeping call in atomic context')
+    rep = next((i for i, l in enumerate(after) if l.strip() == want), None)
     if rep is None:
-        return False, 'no "sleeping call in atomic context" report after lockdep-callback'
-    print('evidence:', after[rep].strip(), '|', after[rep + 1].strip() if rep + 1 < len(after) else '')
+        return False, f'no "{want}" report after lockdep-callback'
+    detail = after[rep + 1].strip() if rep + 1 < len(after) else ''
+    print('evidence:', after[rep].strip(), '|', detail)
+    if mode == 'cpu-stack':
+        if 'irq_depth 1' not in detail:
+            return False, 'the recursion was not reported from the interrupt'
+        return True, 'lockdep-irqpoll died on a recursion report from the nested interrupt'
     if mode == 'no-worker-class':
         # The handler case passed first: its two expected callback reports precede the failure.
         hits = sum(1 for l in after[:rep] if 'expected report: a callback wait' in l)

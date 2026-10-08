@@ -605,7 +605,13 @@ void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, 
                                                  (irqs_on ? LOCKDEP_HF_IRQS_ON : 0u)),
                               .ip = ip,
                               .lock = lock };
-    if (kind == LOCKDEP_KIND_MUTEX) {
+    /* A callback class entered in thread context (an irqpoll worker's
+     * poll, interrupts on) is the thread's, like a mutex: an interrupt
+     * taken meanwhile runs in its own context and must not find it on the
+     * CPU's stack, where it would see a nested poll of the same function as
+     * recursion and record its locks as taken under the class (review,
+     * PR #335). In interrupt context it is the CPU's, as a timer's is. */
+    if (kind == LOCKDEP_KIND_MUTEX || (kind == LOCKDEP_KIND_CALLBACK && !in_irq && me() != NULL)) {
         struct thread *t = in_irq ? NULL : me();
         if (t == NULL)
             return;   /* mutexes before threads exist are not tracked */
@@ -707,6 +713,12 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
         if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
             report(LOCKDEP_R_UNHELD, NULL, 0, ip, "mutex_unlock of a mutex this thread does not hold", NULL, 0);
         completion_commit(t);   /* a complete() made under this mutex was no self-signal: it is in the graph now */
+        return;
+    }
+    if (kind == LOCKDEP_KIND_CALLBACK && raw_this_cpu()->irq_depth == 0 && me() != NULL) {
+        struct thread *t = me();   /* entered in thread context: on the thread's stack (lockdep_acquired) */
+        if (!remove_entry(t->held_mutex, &t->nr_held_mutex, &t->held_mutex_seq, lock))
+            report(LOCKDEP_R_UNHELD, NULL, 0, ip, "callback exit of a class this thread did not enter", NULL, 0);
         return;
     }
     struct lockdep_cpu *lc = my_cpu();
@@ -884,7 +896,15 @@ void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *n
     if (raw_this_cpu()->irq_depth != 0)
         return;   /* an interrupt holds no mutex, and a spinlock reaches none: nothing a waiter could hold */
     struct thread *t = me();
-    if (t == NULL || t->nr_held_mutex == 0)
+    if (t == NULL)
+        return;
+    /* Mutexes only: a callback class the thread is inside (an irqpoll
+     * worker's poll) shares the stack and is no lock a waiter could hold. */
+    unsigned nr_mutex = 0;
+    for (unsigned i = 0; i < t->nr_held_mutex; i++)
+        if (g_graph.classes[lockdep_node_class(t->held_mutex[i].node)].kind == LOCKDEP_KIND_MUTEX)
+            nr_mutex++;
+    if (nr_mutex == 0)
         return;
     /* Not committed here: if this thread's next completion event is its
      * own wait for `c`, this complete() ran inside that wait's call chain
@@ -895,9 +915,10 @@ void lockdep_completion_signal(const void *c, uint16_t *spin_slot, const char *n
     p->c = c;
     p->ip = ip;
     p->node = node;
-    p->nr_held = (uint16_t)t->nr_held_mutex;
+    p->nr_held = 0;
     for (unsigned i = 0; i < t->nr_held_mutex; i++)
-        p->held[i] = t->held_mutex[i].node;
+        if (g_graph.classes[lockdep_node_class(t->held_mutex[i].node)].kind == LOCKDEP_KIND_MUTEX)
+            p->held[p->nr_held++] = t->held_mutex[i].node;
 }
 
 /*

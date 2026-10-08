@@ -771,6 +771,42 @@ static unsigned ipt_poll_w(struct irq_poll *ip, unsigned budget)
     return 0;
 }
 
+/* Case 5: an interrupt on the worker's CPU while the worker is inside a
+ * poll, whose handler runs another irq_poll of the same function. The
+ * worker's class is its thread's, so the handler's is no recursion. */
+static spinlock_t g_ipt_n = SPINLOCK_INIT("lockdep-ipt-n");
+static struct irq_poll g_ipt_pn, g_ipt_pn2;
+static int g_ipt_vec = -1;
+static unsigned g_ipt_n_calls, g_ipt_n_ipi_sent, g_ipt_n_handled, g_ipt_n_nested;
+
+static void ipt_n_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    (void)arg;
+    irq_poll_sched(&g_ipt_pn2);
+    __atomic_store_n(&g_ipt_n_handled, 1u, __ATOMIC_RELEASE);
+}
+
+static unsigned ipt_poll_n(struct irq_poll *ip, unsigned budget)
+{
+    if (ip == &g_ipt_pn2) {   /* the nested one, in the handler */
+        (void)ipt_take(&g_ipt_n);
+        __atomic_store_n(&g_ipt_n_nested, 1u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    if (__atomic_fetch_add(&g_ipt_n_calls, 1u, __ATOMIC_RELAXED) == 0)
+        return budget;   /* the "handler": defer to the worker */
+    if (arch_irq_enabled()) {   /* the worker, inside its class: the interrupt arrives here */
+        __atomic_store_n(&g_ipt_n_ipi_sent, 1u, __ATOMIC_RELEASE);
+        arch_ipi_send(raw_cpu_id(), (unsigned)g_ipt_vec);
+        uint64_t end = clock_now_ns() + 1000000000ULL;
+        while (__atomic_load_n(&g_ipt_n_handled, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
+            arch_cpu_relax();
+    }
+    return 0;
+}
+
 /* What a handler does: interrupts off, then the schedule. */
 static void ipt_sched(struct irq_poll *ip)
 {
@@ -856,8 +892,34 @@ static bool selftest_lockdep_irqpoll_pinned(const char **reason)
     CHECK(lockdep_expected_hits() == 1);
     irq_poll_disable(&g_ipt_pc);
 
+    /* 5. An interrupt nested over the worker's poll runs a poll of the
+     * same function on another irq_poll: silent (no recursion, no edges
+     * from the worker's class into the handler's locks). */
+    g_ipt_vec = arch_vector_alloc();
+    CHECK(g_ipt_vec >= 0);
+    if (interrupt_register((unsigned)g_ipt_vec, ipt_n_handler, NULL, "selftest-lockdep-irqpoll") != 0) {
+        arch_vector_free((unsigned)g_ipt_vec);
+        CHECK(false);
+    }
+    arch_ipi_bind((unsigned)g_ipt_vec);
+    irq_poll_init(&g_ipt_pn, ipt_poll_n, "lockdep-ipt-n");
+    irq_poll_init(&g_ipt_pn2, ipt_poll_n, "lockdep-ipt-n2");
+    ipt_sched(&g_ipt_pn);
+    end = clock_now_ns() + 2000000000ULL;
+    while (__atomic_load_n(&g_ipt_n_handled, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
+        thread_sleep_ms(1);
+    irq_poll_disable(&g_ipt_pn);
+    irq_poll_disable(&g_ipt_pn2);
+    int urc = interrupt_unregister_sync((unsigned)g_ipt_vec, ipt_n_handler);
+    arch_vector_free((unsigned)g_ipt_vec);
+    CHECK(urc == 0);
+    CHECK(__atomic_load_n(&g_ipt_n_ipi_sent, __ATOMIC_ACQUIRE) == 1);   /* from the worker, with interrupts on */
+    CHECK(__atomic_load_n(&g_ipt_n_handled, __ATOMIC_ACQUIRE) == 1);
+    CHECK(__atomic_load_n(&g_ipt_n_nested, __ATOMIC_ACQUIRE) == 1);
+
     kinfo("selftest: lockdep-irqpoll: a wait holding a lock its poll takes is reported, from the handler's "
-          "and the worker's poll and in either order; released, silent");
+          "and the worker's poll and in either order; released, silent; a poll of the same function in an "
+          "interrupt over the worker's, silent");
     return true;
 }
 

@@ -624,12 +624,28 @@ def ko_text(path):
     section order, each at its alignment. Returns ([(index, offset, size,
     name)],
     [(section index, value, size, name)] for the function symbols), or
-    None if the file is not an ELF64 relocatable object."""
+    None if the file is not an ELF64 relocatable object or is damaged: a
+    truncated artifact must not turn a boot's failure report into a
+    traceback (review, PR #335). Parsed once per path."""
+    if path in _LAYOUTS:
+        return _LAYOUTS[path]
+    try:
+        layout = _ko_text(path)
+    except (struct.error, IndexError, ValueError):
+        layout = None
+    _LAYOUTS[path] = layout
+    return layout
+
+
+_LAYOUTS = {}
+
+
+def _ko_text(path):
     try:
         data = open(path, "rb").read()
     except OSError:
         return None
-    if data[:4] != b"\x7fELF" or data[4] != 2 or struct.unpack_from("<H", data, 16)[0] != 1:
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or struct.unpack_from("<H", data, 16)[0] != 1:
         return None
     shoff = struct.unpack_from("<Q", data, 0x28)[0]
     shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
@@ -702,10 +718,12 @@ def module_object(modules, name):
     return None
 
 
-def symbolize_module(addr, bases, modules, tool):
-    """(function, location) for an address in a loaded module's text, or
-    None if it is in none. The latest load of a range wins: a module
-    unloaded and loaded again prints a new base."""
+def module_hit(addr, bases, modules):
+    """For an address in a loaded module's text: (function, object, offset
+    in the text group, layout), with object None when the line cannot be
+    looked up (the function then says why); None if it is in no module.
+    The latest load of a range wins: a module unloaded and loaded again
+    prints a new base."""
     a = int(addr, 16)
     for name, base, size in reversed(bases):
         if not base <= a < base + size:
@@ -713,20 +731,16 @@ def symbolize_module(addr, bases, modules, tool):
         obj = module_object(modules, name) if modules else None
         layout = ko_text(obj) if obj else None
         if layout is None:
-            return ("?? [%s+0x%x]" % (name, a - base), "(no %s.ko to resolve it)" % name)
+            return ("?? [%s+0x%x] (no readable %s.ko)" % (name, a - base, name), None, 0, None)
         texts, funcs = layout
         off = a - base
         hit = next(((i, off - o) for i, o, sz, _n in texts if o <= off < o + sz), None)
         if hit is None:
-            return ("?? [%s+0x%x]" % (name, off), "(past the module's sections)")
+            return ("?? [%s+0x%x] (past its sections)" % (name, off), None, 0, None)
         index, rel = hit
         func = next((f"{n} [{name}]" for (sh, v, sz, n) in funcs if sh == index and v <= rel < v + max(sz, 1)),
                     "?? [%s+0x%x]" % (name, off))
-        # The line: llvm-symbolizer over the object linked at the loader's
-        # layout, where the address is the offset in the text group.
-        placed = placed_object(obj, texts, tool)
-        r = run_symbolizer(tool, placed, ["0x%x" % off]) if placed else None
-        return (func, r[0][1] if r else "??")
+        return (func, obj, off, texts)
     return None
 
 
@@ -750,11 +764,22 @@ def symbolize(lines, kernel, tool, modules=None):
                 addrs.append(m.group(1))
     if not addrs:
         return []
-    resolved = {}
+    resolved, by_obj = {}, {}
     for addr in addrs:
-        r = symbolize_module(addr, bases, modules, tool)
-        if r is not None:
-            resolved[addr] = r
+        hit = module_hit(addr, bases, modules)
+        if hit is None:
+            continue
+        func, obj, off, texts = hit
+        resolved[addr] = (func, "??")
+        if obj is not None:
+            by_obj.setdefault(obj, (texts, []))[1].append((addr, off))
+    # The lines: one llvm-symbolizer run per module, over the object linked
+    # at the loader's layout, where an address is its offset in the group.
+    for obj, (texts, hits) in by_obj.items():
+        placed = placed_object(obj, texts, tool)
+        r = run_symbolizer(tool, placed, ["0x%x" % off for _a, off in hits]) if placed else None
+        for (addr, _off), (_f, loc) in zip(hits, r or []):
+            resolved[addr] = (resolved[addr][0], loc)
     rest = [a for a in addrs if a not in resolved]
     if rest:
         r = run_symbolizer(tool, kernel, rest)
