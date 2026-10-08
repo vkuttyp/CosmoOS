@@ -103,6 +103,7 @@ bool selftest_lockdep_sleep(const char **reason);
 bool selftest_lockdep_mutex(const char **reason);
 bool selftest_lockdep_callback(const char **reason);   /* a timer wait checked against every observed callback of its function */
 bool selftest_lockdep_irqpoll(const char **reason);   /* an irq_poll wait checked against every observed poll of its function */
+bool selftest_irqpoll_boost(const char **reason);   /* a lowered irqpoll worker is raised again past a busier thread */
 bool selftest_lockdep_irq_pairing(const char **reason);   /* raw arch_irq_save/restore pairing violations are reported */
 bool selftest_lockdep_completion(const char **reason);   /* a completion wait holding a lock its signaller needs is reported */
 bool selftest_lockdep_contention(const char **reason);

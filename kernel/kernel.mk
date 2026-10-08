@@ -27,6 +27,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/shutdown.c \
 	kernel/core/selftest.c \
 	kernel/core/irqpoll.c \
+	kernel/core/irqpolltest.c \
 	kernel/core/spinlock.c \
 	kernel/core/percpu.c \
 	kernel/core/smp.c \
