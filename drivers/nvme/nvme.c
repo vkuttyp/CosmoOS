@@ -942,14 +942,14 @@ fail_queues:
             pci_msix_release(pdev, i + 1);
 fail_msix:
 fail_disable:
-    if (msix_enabled) {
+    if (msix_enabled)
         pci_msix_disable(pdev);
-        msix_enabled = false;
-    }
-    rc = controller_disable(c);
-    if (rc) {
+    /* The probe's own error is what the caller is told either way: the
+     * disable's result only decides whether the DMA may be freed. */
+    int drc = controller_disable(c);
+    if (drc) {
         kerror("nvme: %s: disable was not acknowledged (%d); retaining controller DMA after probe failure",
-               pdev->dev.name, rc);
+               pdev->dev.name, drc);
         return rc;
     }
 fail:
