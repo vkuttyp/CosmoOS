@@ -44,6 +44,7 @@ def restore_old(tree):
 #if CONFIG_SELFTEST
         g_stop_orphan = e;
 #endif
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         pdev->dev.drvdata = NULL;
         kwarn("e1000e: %s: retaining RX/TX DMA after disable was not acknowledged", pdev->dev.name);
         return;

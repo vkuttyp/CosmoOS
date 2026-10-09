@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Prove a cancelled USB request comes back only after a stop is acknowledged.
 
-Run once per architecture. --old reverse-applies the whole fix commit's
-source changes (xHCI cancel escalation and quarantine, the synchronous
+Run once per architecture. --old reverse-applies the whole fix commits'
+source changes (the repeated-cancel fix of PR #338's review first, then
+the original) (xHCI cancel escalation and quarantine, the synchronous
 bounce, the class drivers' -EIO handling) in a throwaway worktree and
 requires both proofs to fail: xhci-cancel-ack (the old cancel completed
 the request after a refused Stop Endpoint) and usb-sync-quarantine (the
@@ -18,7 +19,12 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIX_SUBJECT = "fix: return cancelled USB requests only after an acknowledged stop"
+# Newest first: each is reverse-applied whole, the later fix before the
+# fix it edits (review of PR #338 changed lines the first one added).
+FIX_SUBJECTS = [
+    "fix: keep a quarantined USB request on a repeated cancel",
+    "fix: return cancelled USB requests only after an acknowledged stop",
+]
 SOURCES = [
     "drivers/usb/xhci.c",
     "drivers/usb/usb.c",
@@ -38,20 +44,24 @@ EXPECTED_FAILURES = {
 }
 
 
-def fix_commit(tree_rev):
-    sha = subprocess.check_output(["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings",
-                                   f"--grep={FIX_SUBJECT}", tree_rev], text=True).strip()
-    if not sha:
-        raise RuntimeError(f"no commit '{FIX_SUBJECT}' reachable from {tree_rev}")
-    return sha
+def fix_commits(tree_rev):
+    shas = []
+    for subject in FIX_SUBJECTS:
+        sha = subprocess.check_output(["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings",
+                                       f"--grep={subject}", tree_rev], text=True).strip()
+        if not sha:
+            raise RuntimeError(f"no commit '{subject}' reachable from {tree_rev}")
+        shas.append(sha)
+    return shas
 
 
-def restore_old(tree, sha):
-    """The whole fix, reversed: never a hand-picked subset of its hunks."""
-    patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-    if not patch.strip():
-        raise RuntimeError(f"fix commit {sha} changes none of {SOURCES}")
-    subprocess.run(["git", "-C", str(tree), "apply", "-R", "--index"], input=patch, check=True)
+def restore_old(tree, shas):
+    """Each fix whole, reversed: never a hand-picked subset of its hunks."""
+    for sha in shas:
+        patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
+        if not patch.strip():
+            raise RuntimeError(f"fix commit {sha} changes none of {SOURCES}")
+        subprocess.run(["git", "-C", str(tree), "apply", "-R", "--index"], input=patch, check=True)
     xhci = (tree / "drivers/usb/xhci.c").read_text()
     if "td->quarantined" in xhci or "ep_stop_and_drain" not in xhci:
         raise RuntimeError("reverse-applied tree does not have the old cancel")
@@ -69,13 +79,13 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     if any(work.iterdir()):
         raise SystemExit(f"refusing to overwrite nonempty probe output {work}")
-    sha = fix_commit(args.tree) if args.old else None
+    shas = fix_commits(args.tree) if args.old else None
     tree = Path(tempfile.mkdtemp(prefix="worktree-", dir=work))
     tree.rmdir()
     subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), args.tree], check=True)
     try:
         if args.old:
-            restore_old(tree, sha)
+            restore_old(tree, shas)
         make = "gmake" if sys.platform == "darwin" else "make"
         command = [make, "-C", str(tree), f"ARCH={args.arch}", "QEMU_SMP=1"]
         build_log = work / "build.log"

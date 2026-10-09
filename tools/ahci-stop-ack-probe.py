@@ -18,6 +18,7 @@ BASELINE = "2661385c14c388190d8becfe95388f80c23995d3"
 DRIVER = "drivers/storage/ahci.c"
 REMOVE_RETAIN = """    if (retain_dma) {
         kerror("ahci%u: removal retained controller and port DMA after an unacknowledged stop", h->index);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         return;   /* keep the ABAR, slots, maps and DMA backing reachable or allocated */
     }
 """
