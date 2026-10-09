@@ -3468,12 +3468,21 @@ bool selftest_ahci_stop_ack(const char **reason)
     faultinject_stats(FI_AHCI_STOP_ACK, &st);
     faultinject_clear(FI_AHCI_STOP_ACK);
     dma_get_stats(&after);
-    bool bound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND;
+    /* The old HBA kept its command lists and tables because the ports did
+     * not acknowledge the stop: a new driver must not be probed on the
+     * function while the hardware may still use them (U14). */
+    bool refused = pci_test_rebind(pdev) != 0 && pdev->dev.state == DEV_UNBOUND && device_dma_retained(&pdev->dev);
+    /* The test's own release: QEMU's ports did stop -- the refusal was
+     * injected -- so the function may be probed again for the tests after. */
+    device_release_dma(&pdev->dev);
+    bool bound = pdev->dev.state == DEV_BOUND ||
+                 (pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND);
     uint64_t freed = after.frees - before.frees;
-    bool ok = removed == 0 && st.hits > 0 && freed == 0 && bound;
-    kinfo("AHCI-STOP-ACK: %s retry_hits=%llu retry_frees=%llu retry_rebound=%u persistent_hits=%llu dma_frees=%llu rebound=%u",
+    bool ok = removed == 0 && st.hits > 0 && freed == 0 && refused && bound;
+    kinfo("AHCI-STOP-ACK: %s retry_hits=%llu retry_frees=%llu retry_rebound=%u persistent_hits=%llu dma_frees=%llu "
+          "rebind_refused=%u rebound=%u",
           ok ? "PASS" : "FAIL", (unsigned long long)retry_st.hits, (unsigned long long)retry_freed, retry_rebound,
-          (unsigned long long)st.hits, (unsigned long long)freed, bound);
+          (unsigned long long)st.hits, (unsigned long long)freed, refused, bound);
     if (ok)
         kinfo("selftest: ahci-stop-ack: controller with unacknowledged port stops retained its DMA allocations");
     else
@@ -3657,6 +3666,7 @@ bool selftest_e1000e_stop_ack(const char **reason)
     const enum fi_kind kinds[2] = { FI_E1000E_RX_DISABLE_ACK, FI_E1000E_TX_DISABLE_ACK };
     unsigned hits[2] = { 0, 0 }, freed[2] = { 0, 0 };
     bool retained[2] = { false, false }, recovered[2] = { false, false }, rebound[2] = { false, false };
+    bool refused[2] = { false, false };
     for (unsigned i = 0; i < 2; i++) {
         unsigned before = ring_frees();
         faultinject_set(kinds[i], 1, 0, thread_current());
@@ -3667,14 +3677,23 @@ bool selftest_e1000e_stop_ack(const char **reason)
         hits[i] = (unsigned)st.hits;
         freed[i] = ring_frees() - before;
         retained[i] = has_orphan();
-        recovered[i] = recover();
-        rebound[i] = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
-                     pdev->dev.state == DEV_BOUND;
-        case_ok[i] = removed == 0 && hits[i] > 0 && freed[i] == 0 && retained[i] &&
-                     recovered[i] && rebound[i];
-        kinfo("E1000E-STOP-ACK: kind=%s %s hits=%u ring_frees=%u retained=%u recovered=%u rebound=%u",
+        /* While the old rings are kept, no driver is probed on the
+         * function: new rings on hardware that may still be writing into
+         * the old ones (U14). Recovery acknowledges the stop, reclaims
+         * them and lets the function bind again. A rebind that is not
+         * refused leaves the orphan alone: its quiesce would write into
+         * the new instance's registers. */
+        refused[i] = pci_test_rebind(pdev) != 0 && pdev->dev.state == DEV_UNBOUND &&
+                     device_dma_retained(&pdev->dev);
+        recovered[i] = refused[i] && recover();
+        rebound[i] = pdev->dev.state == DEV_BOUND ||
+                     (pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND);
+        case_ok[i] = removed == 0 && hits[i] > 0 && freed[i] == 0 && retained[i] && refused[i] &&
+                     recovered[i] && rebound[i] && !device_dma_retained(&pdev->dev);
+        kinfo("E1000E-STOP-ACK: kind=%s %s hits=%u ring_frees=%u retained=%u rebind_refused=%u recovered=%u "
+              "rebound=%u",
               faultinject_kind_name(kinds[i]), case_ok[i] ? "PASS" : "FAIL", hits[i], freed[i],
-              retained[i], recovered[i], rebound[i]);
+              retained[i], refused[i], recovered[i], rebound[i]);
     }
 
     bool ok = case_ok[0] && case_ok[1];
