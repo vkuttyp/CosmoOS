@@ -3777,3 +3777,126 @@ bool selftest_xhci_halt_ack(const char **reason)
     return true;
 #endif
 }
+
+/* U14: a cancelled request comes back only after the controller
+ * acknowledged a stop -- of the endpoint, the slot, or itself -- and
+ * stays with the HCD (-EIO) when none did. The sweep is the four
+ * outcomes, in escalation order, on xhci.c's synthetic controller. */
+bool selftest_xhci_cancel_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-CANCEL-ACK-SWEEP: PASS not-present");
+        return true;
+    }
+    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("xhci_test_cancel_ack", NULL);
+    if (run == NULL) {
+        *reason = "xhci-cancel-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+    /* Stop Endpoint (1), Disable Slot (2), HCH (4) refused. */
+    static const unsigned faults[4] = { 0, 1, 1 | 2, 1 | 2 | 4 };
+    bool pass[4];
+    bool ok = true;
+    for (unsigned i = 0; i < 4; i++) {
+        pass[i] = run(faults[i]);
+        ok = ok && pass[i];
+    }
+    kinfo("XHCI-CANCEL-ACK-SWEEP: %s stop=%u slot=%u halt=%u quarantine=%u", ok ? "PASS" : "FAIL", pass[0],
+          pass[1], pass[2], pass[3]);
+    if (!ok)
+        *reason = "xhci-cancel-ack: a cancelled request came back before a stop was acknowledged; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/*
+ * The synchronous shapes over a test HCD whose cancel answers -EIO: the
+ * request and its buffer then belong to the HCD for good (U10, U14), so
+ * the buffer it was given must not be the caller's. The test HCD records
+ * what it was handed and keeps it. Run against the old usb_sync_msg,
+ * which handed over the caller's buffer, its cancel completes the
+ * request instead of answering -EIO -- the old path would otherwise wait
+ * forever -- and the buffer check is what fails.
+ */
+static struct usb_request *g_sync_q_req;
+static void *g_sync_q_caller_buf;
+static void (*g_sync_q_complete)(struct usb_request *r, int status, uint32_t actual);   /* the module's */
+
+static int sync_q_submit(struct usb_hcd *hcd, struct usb_request *r)
+{
+    (void)hcd;
+    g_sync_q_req = r;
+    return 0;
+}
+
+static int sync_q_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
+{
+    (void)hcd;
+    if (r->buf == g_sync_q_caller_buf) {
+        g_sync_q_complete(r, status, 0);
+        return 0;
+    }
+    return -EIO;
+}
+
+bool selftest_usb_sync_quarantine(const char **reason)
+{
+#if CONFIG_DEBUG
+    typedef int (*control_fn)(struct usb_device *, uint8_t, uint8_t, uint16_t, uint16_t, void *, uint16_t,
+                              uint64_t);
+    control_fn control = (control_fn)module_symbol_lookup("usb_control_msg", NULL);
+    g_sync_q_complete =
+        (void (*)(struct usb_request *, int, uint32_t))module_symbol_lookup("usb_request_complete", NULL);
+    if (control == NULL || g_sync_q_complete == NULL) {
+        kinfo("USB-SYNC-QUARANTINE: PASS not-present");
+        return true;
+    }
+    static const struct usb_hcd_ops ops = { .submit = sync_q_submit, .cancel = sync_q_cancel };
+    static struct usb_hcd hcd;
+    static struct usb_device udev;
+    memset(&hcd, 0, sizeof(hcd));
+    memset(&udev, 0, sizeof(udev));
+    hcd.ops = &ops;
+    udev.hcd = &hcd;
+    uint8_t *buf = kzalloc(64);
+    if (buf == NULL) {
+        *reason = "usb-sync-quarantine: out of memory";
+        return false;
+    }
+    g_sync_q_req = NULL;
+    g_sync_q_caller_buf = buf;
+    int rc = control(&udev, USB_DIR_IN, 0, 0, 0, buf, 64, 10ull * 1000 * 1000);
+    struct usb_request *kept = g_sync_q_req;
+    bool handed_caller_buf = kept != NULL && kept->buf == buf;
+    /* The "device" writes into what it was given, after the caller was
+     * told -EIO: the caller's buffer must not change. */
+    if (kept != NULL && rc == -EIO && kept->buf != NULL)
+        memset(kept->buf, 0xa5, kept->len);
+    bool untouched = true;
+    for (unsigned i = 0; i < 64; i++)
+        untouched = untouched && buf[i] == 0;
+    bool ok = rc == -EIO && kept != NULL && !handed_caller_buf && untouched;
+    kinfo("USB-SYNC-QUARANTINE: %s rc=%d submitted=%u caller_buf_handed=%u caller_buf_untouched=%u",
+          ok ? "PASS" : "FAIL", rc, kept != NULL, handed_caller_buf, untouched);
+    g_sync_q_caller_buf = NULL;
+    kfree(buf);   /* safe either way: the test HCD never writes after this */
+    if (!ok)
+        *reason = "usb-sync-quarantine: a synchronous transfer handed the caller's buffer to the controller";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}

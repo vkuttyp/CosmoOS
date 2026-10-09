@@ -158,6 +158,15 @@ bool xhci_test_disable_ack(unsigned kind);
 bool xhci_test_recover_disable_ack(void);
 bool xhci_test_halt_ack(void);
 bool xhci_test_recover_halt_ack(void);
+static struct xhci g_cancel_test_x;
+static struct pci_device g_cancel_test_pdev;
+static struct usb_device g_cancel_test_udev;
+static uint64_t g_cancel_test_dcbaa[XHCI_MAX_SLOTS + 1];
+static uint32_t g_cancel_test_regs[64];
+#define XHCI_CANCEL_TEST_STOP 1u   /* Stop Endpoint is refused */
+#define XHCI_CANCEL_TEST_SLOT 2u   /* Disable Slot is refused */
+#define XHCI_CANCEL_TEST_HALT 4u   /* HCH never comes */
+bool xhci_test_cancel_ack(unsigned faults);
 #endif
 
 static uint32_t rd32(vaddr_t addr) { return *(volatile uint32_t *)addr; }
@@ -1423,6 +1432,160 @@ bool xhci_test_recover_halt_ack(void)
 #endif
 }
 EXPORT_SYMBOL(xhci_test_recover_halt_ack);
+
+/*
+ * xhci_cancel on a synthetic controller with one bulk-IN request in
+ * flight. `faults` says which acknowledgements are refused:
+ * XHCI_CANCEL_TEST_STOP (Stop Endpoint), _SLOT (Disable Slot), _HALT
+ * (HCH). The completion callback records what the controller had
+ * acknowledged when the request came back to its caller (U14): the
+ * slot still attached, and whether HCH was set. Only fields older than
+ * the cancel contract are read, so the same test runs against the old
+ * cancel (tools/xhci-cancel-ack-probe.py --old).
+ */
+struct xhci_cancel_seen {
+    unsigned calls;
+    int status;
+    unsigned slot;
+    bool hch;
+};
+
+static void xhci_cancel_test_done(struct usb_request *r)
+{
+    struct xhci_cancel_seen *seen = r->arg;
+    seen->calls++;
+    seen->status = r->status;
+    seen->slot = g_cancel_test_udev.slot;
+    seen->hch = (g_cancel_test_regs[XHCI_USBSTS / sizeof(uint32_t)] & USBSTS_HCH) != 0;
+}
+
+bool xhci_test_cancel_ack(unsigned faults)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct xhci *x = &g_cancel_test_x;
+    memset(x, 0, sizeof(*x));
+    memset(&g_cancel_test_pdev, 0, sizeof(g_cancel_test_pdev));
+    memset(&g_cancel_test_udev, 0, sizeof(g_cancel_test_udev));
+    memset(g_cancel_test_dcbaa, 0, sizeof(g_cancel_test_dcbaa));
+    memset(g_cancel_test_regs, 0, sizeof(g_cancel_test_regs));
+    g_cancel_test_pdev.dev.dma_mask = UINT64_MAX;
+    x->pdev = &g_cancel_test_pdev;
+    x->test_synthetic = true;
+    x->vector = -1;
+    x->dcbaa = g_cancel_test_dcbaa;
+    x->op = (vaddr_t)g_cancel_test_regs;
+    x->max_slots = 1;
+    x->hcd.priv = x;
+    spinlock_init(&x->lock, "xhci-test");
+    g_cancel_test_regs[XHCI_USBCMD / sizeof(uint32_t)] = USBCMD_RS;
+
+    const uint8_t ep = 0x81;
+    const unsigned dci = xhci_dci(ep);
+    struct xhci_dev *d = kzalloc(sizeof(*d));
+    void *buf = kzalloc(512);
+    if (d == NULL || buf == NULL) {
+        kfree(d);
+        kfree(buf);
+        return false;
+    }
+    d->ctx = dma_alloc(&g_cancel_test_pdev.dev, PAGE_SIZE, &d->ctx_dma, DMA_ZERO);
+    d->input = dma_alloc(&g_cancel_test_pdev.dev, PAGE_SIZE, &d->input_dma, DMA_ZERO);
+    d->ep[dci].ring = ring_alloc(x);
+    d->ep[dci].mps = 512;
+    if (d->ctx == NULL || d->input == NULL || d->ep[dci].ring == NULL) {
+        xhci_dev_free(x, d);
+        kfree(buf);
+        return false;
+    }
+    g_cancel_test_udev.hcd = &x->hcd;
+    g_cancel_test_udev.hcd_priv = d;
+    g_cancel_test_udev.slot = 1;
+    g_cancel_test_dcbaa[1] = d->ctx_dma;
+    x->slot_dev[1] = &g_cancel_test_udev;
+
+    struct xhci_cancel_seen seen = { 0 };
+    struct usb_request r;
+    memset(&r, 0, sizeof(r));
+    r.udev = &g_cancel_test_udev;
+    r.ep = ep;
+    r.buf = buf;
+    r.len = 512;
+    r.debug_no_doorbell = true;   /* in flight until cancelled: a device that never answers */
+    r.done = xhci_cancel_test_done;
+    r.arg = &seen;
+    int src = xhci_submit(&x->hcd, &r);
+
+    if (faults & XHCI_CANCEL_TEST_STOP)
+        faultinject_set(FI_XHCI_STOP_EP_ACK, 1, 0, thread_current());
+    if (faults & XHCI_CANCEL_TEST_SLOT)
+        faultinject_set(FI_XHCI_DISABLE_SLOT_ACK, 1, 0, thread_current());
+    if (faults & XHCI_CANCEL_TEST_HALT)
+        faultinject_set(FI_XHCI_HALT_ACK, 1, 0, thread_current());
+    int crc = src == 0 ? xhci_cancel(&x->hcd, &r, -ETIMEDOUT) : src;
+    faultinject_clear(FI_XHCI_STOP_EP_ACK);
+    faultinject_clear(FI_XHCI_DISABLE_SLOT_ACK);
+    faultinject_clear(FI_XHCI_HALT_ACK);
+
+    /* A late Transfer Event for the TD and a ring flush must not hand
+     * back a request the cancel kept. */
+    bool in_flight = r.hcd_priv != NULL;
+    unsigned calls_after_cancel = seen.calls;
+    if (in_flight) {
+        struct xhci_ring *ring = d->ep[dci].ring;
+        unsigned first = ((struct xhci_td *)r.hcd_priv)->first;
+        struct xhci_trb ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.ptr = ring->dma + (uint64_t)first * sizeof(struct xhci_trb);
+        ev.control = TRB_SLOT(1) | TRB_EP_ID(dci);
+        int st = 0;
+        arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+        struct usb_request *late = handle_transfer_event(x, &ev, &st);
+        spin_unlock_irqrestore(&x->lock, s);
+        if (late != NULL)
+            usb_request_complete(late, st, late->actual);
+        ring_flush(x, ring, NULL, 0, -ECANCELED);
+    }
+
+    bool ok;
+    const char *outcome;
+    if (!(faults & XHCI_CANCEL_TEST_STOP)) {
+        outcome = "stop-acked";
+        ok = crc == 0 && seen.calls == 1 && seen.status == -ETIMEDOUT && seen.slot == 1 && !in_flight;
+    } else if (!(faults & XHCI_CANCEL_TEST_SLOT)) {
+        outcome = "slot-disabled";
+        ok = crc == 0 && seen.calls == 1 && seen.status == -ETIMEDOUT && seen.slot == 0 && !in_flight &&
+             g_cancel_test_dcbaa[1] == 0;
+    } else if (!(faults & XHCI_CANCEL_TEST_HALT)) {
+        outcome = "halted";
+        ok = crc == 0 && seen.calls == 1 && seen.status == -ETIMEDOUT && seen.hch && !in_flight;
+    } else {
+        outcome = "quarantined";
+        ok = crc == -EIO && calls_after_cancel == 0 && seen.calls == 0 && in_flight;
+    }
+    kinfo("XHCI-CANCEL-ACK: outcome=%s %s submit=%d cancel=%d done=%u status=%d slot_at_done=%u hch_at_done=%u "
+          "in_flight=%u",
+          outcome, ok ? "PASS" : "FAIL", src, crc, seen.calls, seen.status, seen.slot, seen.hch, in_flight);
+
+    /* The synthetic controller has no hardware behind it: whatever the
+     * cancel kept is reclaimed here, by the test, not by the driver. */
+    if (r.hcd_priv != NULL) {
+        struct xhci_ring *ring = d->ep[dci].ring;
+        struct xhci_td *td = r.hcd_priv;
+        arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+        td_unmap(x, ring, td);
+        td_retire(ring, td);
+        r.hcd_priv = NULL;
+        spin_unlock_irqrestore(&x->lock, s);
+    }
+    xhci_dev_free(x, d);
+    kfree(buf);
+    return ok;
+#else
+    (void)faults;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(xhci_test_cancel_ack);
 #endif
 
 static int xhci_halt_and_reset(struct xhci *x)

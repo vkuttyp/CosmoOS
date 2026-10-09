@@ -1075,6 +1075,10 @@ def main():
         failures.append("missing successful xHCI Stop Endpoint/Disable Slot acknowledgement proof")
     if want_selftest and not any(re.search(r"XHCI-HALT-ACK-SWEEP: PASS", ln) for ln in lines):
         failures.append("missing successful xHCI halt acknowledgement proof")
+    if want_selftest and not any(re.search(r"XHCI-CANCEL-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI cancel acknowledgement proof")
+    if want_selftest and not any(re.search(r"USB-SYNC-QUARANTINE: PASS", ln) for ln in lines):
+        failures.append("missing successful synchronous USB quarantine proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 

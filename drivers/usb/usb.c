@@ -597,5 +597,8 @@ EXPORT_SYMBOL(usb_cancel);
 EXPORT_SYMBOL(usb_control_msg);
 EXPORT_SYMBOL(usb_bulk_msg);
 EXPORT_SYMBOL(usb_clear_halt);
+#if CONFIG_SELFTEST
+EXPORT_SYMBOL(usb_request_complete);   /* the kernel's usb-sync-quarantine test HCD completes through it */
+#endif
 EXPORT_SYMBOL(usb_hub_port_connected);
 EXPORT_SYMBOL(usb_hub_port_disconnected);
