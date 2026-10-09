@@ -1079,6 +1079,8 @@ def main():
         failures.append("missing successful xHCI cancel acknowledgement proof")
     if want_selftest and not any(re.search(r"USB-SYNC-QUARANTINE: PASS", ln) for ln in lines):
         failures.append("missing successful synchronous USB quarantine proof")
+    if want_selftest and not any(re.search(r"XHCI-CANCEL-RETIRED: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI retired-callback cancel proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 

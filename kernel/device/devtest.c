@@ -3828,6 +3828,130 @@ bool selftest_xhci_cancel_ack(const char **reason)
 }
 
 /*
+ * A request the controller has already retired, whose `done` is still
+ * running when the cancel arrives: usb_cancel may answer -ENOENT -- which
+ * lets the caller free the request -- only after that callback returned
+ * (U10). The callback runs from the controller's interrupt or its irqpoll
+ * worker, outside the controller's lock; it records its CPU, says it has
+ * started and spins 20 ms. A canceller pinned to another CPU cancels the
+ * moment the callback has started and records whether it had finished
+ * when the cancel returned. Unit 1's audit listed this as a suspicion
+ * (cancel racing a running callback); the test is what settles it.
+ */
+#define USB_DEVICE_DESC_LEN_FOR_TEST 18u   /* the device descriptor */
+
+struct cancel_retired {
+    struct usb_request r;
+    int (*cancel)(struct usb_request *r, int status);
+    unsigned entered, exited;
+    unsigned cb_cpu;
+    int rc;
+    unsigned exited_at_return;
+};
+
+static void cancel_retired_done(struct usb_request *r)
+{
+    struct cancel_retired *c = r->arg;
+    c->cb_cpu = arch_cpu_id();
+    __atomic_store_n(&c->entered, 1u, __ATOMIC_RELEASE);
+    uint64_t t0 = clock_now_ns();
+    while (clock_since_ns(t0) < 20ull * 1000000ull)
+        arch_cpu_relax();
+    __atomic_store_n(&c->exited, 1u, __ATOMIC_RELEASE);
+}
+
+static void cancel_retired_canceller(void *arg)
+{
+    struct cancel_retired *c = arg;
+    uint64_t t0 = clock_now_ns();
+    while (!__atomic_load_n(&c->entered, __ATOMIC_ACQUIRE) && clock_since_ns(t0) < 2000ull * 1000000ull)
+        arch_cpu_relax();
+    if (!__atomic_load_n(&c->entered, __ATOMIC_ACQUIRE)) {
+        c->rc = 1;   /* the transfer never completed: nothing to race */
+        thread_exit(0);
+    }
+    c->rc = c->cancel(&c->r, -ETIMEDOUT);
+    c->exited_at_return = __atomic_load_n(&c->exited, __ATOMIC_ACQUIRE);
+    thread_exit(0);
+}
+
+bool selftest_xhci_cancel_retired(const char **reason)
+{
+#if CONFIG_DEBUG
+    unsigned ncpu = cpu_count();
+    struct bus_type *bus = bus_find("usb");
+    if (ncpu < 2 || bus == NULL) {
+        kinfo("XHCI-CANCEL-RETIRED: PASS skipped (%u CPU(s), usb bus %s)", ncpu, bus ? "present" : "absent");
+        return true;
+    }
+    struct usb_enum_walk w = { 0, NULL, NULL, NULL };
+    device_for_each(bus, usb_enum_visit, &w);
+    if (w.hub)
+        device_put(&w.hub->dev);
+    if (w.keyboard)
+        device_put(&w.keyboard->dev);
+    if (w.storage == NULL) {
+        kinfo("XHCI-CANCEL-RETIRED: PASS skipped (no mass-storage device)");
+        return true;
+    }
+    struct usb_device *udev = w.storage;
+    int (*submit)(struct usb_request *) = (int (*)(struct usb_request *))module_symbol_lookup("usb_submit", NULL);
+    int (*cancel)(struct usb_request *, int) =
+        (int (*)(struct usb_request *, int))module_symbol_lookup("usb_cancel", NULL);
+    static struct cancel_retired c;
+    uint8_t *buf = kzalloc(USB_DEVICE_DESC_LEN_FOR_TEST);
+    bool ok = false, decided = false;
+    unsigned attempts = 0, canceller_cpu = 0;
+    for (unsigned k = 1; submit != NULL && cancel != NULL && buf != NULL && k <= ncpu && !decided; k++) {
+        canceller_cpu = k % ncpu;
+        attempts++;
+        memset(&c, 0, sizeof(c));
+        c.cancel = cancel;
+        c.r.udev = udev;
+        c.r.ep = 0;
+        c.r.setup.bmRequestType = USB_DIR_IN;
+        c.r.setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+        c.r.setup.wValue = USB_DT_DEVICE << 8;
+        c.r.setup.wLength = USB_DEVICE_DESC_LEN_FOR_TEST;
+        c.r.buf = buf;
+        c.r.len = USB_DEVICE_DESC_LEN_FOR_TEST;
+        c.r.done = cancel_retired_done;
+        c.r.arg = &c;
+        struct thread *t = thread_create_on(cancel_retired_canceller, &c, "usb-cancel", SCHED_PRIO_DEFAULT,
+                                            CPUMASK_OF(canceller_cpu));
+        if (t == NULL)
+            break;
+        int src = submit(&c.r);
+        if (src != 0)
+            __atomic_store_n(&c.entered, 0u, __ATOMIC_RELEASE);   /* the canceller times out */
+        thread_join(t);
+        /* The callback has finished before the request's memory is reused,
+         * whatever the cancel said. */
+        uint64_t t0 = clock_now_ns();
+        while (__atomic_load_n(&c.entered, __ATOMIC_ACQUIRE) && !__atomic_load_n(&c.exited, __ATOMIC_ACQUIRE) &&
+               clock_since_ns(t0) < 1000ull * 1000000ull)
+            thread_sleep_ms(1);
+        if (src != 0 || c.rc == 1)
+            break;   /* no completion to race: a failure below */
+        if (c.cb_cpu == canceller_cpu)
+            continue;   /* the callback ran on the canceller's CPU: no overlap, try another */
+        decided = true;
+        ok = c.rc == -ENOENT && c.exited_at_return == 1;
+    }
+    kinfo("XHCI-CANCEL-RETIRED: %s rc=%d exited_at_return=%u cb_cpu=%u canceller_cpu=%u attempts=%u",
+          ok ? "PASS" : "FAIL", c.rc, c.exited_at_return, c.cb_cpu, canceller_cpu, attempts);
+    kfree(buf);
+    device_put(&udev->dev);
+    if (!ok)
+        *reason = "xhci-cancel-retired: a cancel returned while the retired request's callback was running";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/*
  * The synchronous shapes over a test HCD whose cancel answers -EIO: the
  * request and its buffer then belong to the HCD for good (U10, U14), so
  * the buffer it was given must not be the caller's. The test HCD records
