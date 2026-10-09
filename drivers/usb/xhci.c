@@ -1006,8 +1006,10 @@ static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
                 return;
             }
         }
-        int cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_DISABLE_SLOT) | TRB_SLOT(slot), NULL);
-        (void)cmd_result(x, "disable slot", cc);
+        if (!xhci_disable_command_ack(x, "disable slot", TRB_TYPE(TRB_CMD_DISABLE_SLOT) | TRB_SLOT(slot), false)) {
+            xhci_retain_device_dma(x, udev, slot);
+            return;
+        }
     }
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);
     if (slot != 0) {
