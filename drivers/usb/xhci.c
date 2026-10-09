@@ -772,7 +772,10 @@ static int xhci_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
         return xhci_gone(x);
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);
     bool mine = r->hcd_priv != NULL && ep->ring->req[((struct xhci_td *)r->hcd_priv)->first] == r;
+    bool kept = mine && ((struct xhci_td *)r->hcd_priv)->quarantined;
     spin_unlock_irqrestore(&x->lock, s);
+    if (kept)
+        return -EIO;   /* an earlier cancel quarantined it: a halt since then does not hand it back (U14) */
     if (!mine)
         return xhci_gone(x);
     unsigned dci = xhci_dci(r->ep);
@@ -784,14 +787,14 @@ static int xhci_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
          * been retired already: then it is the ordinary -ENOENT. */
         s = spin_lock_irqsave(&x->lock);
         struct xhci_td *td = r->hcd_priv;
-        bool kept = td != NULL && ep->ring->req[td->first] == r;
-        if (kept) {
+        bool keep = td != NULL && ep->ring->req[td->first] == r;
+        if (keep) {
             td->quarantined = true;
             x->quarantined++;
         }
         uint64_t total = x->quarantined;
         spin_unlock_irqrestore(&x->lock, s);
-        if (!kept)
+        if (!keep)
             return xhci_gone(x);
         kerror("xhci%u: %s: ep 0x%02x: no stop acknowledged; request quarantined with its buffers (%llu so far)",
                x->hcd.index, udev->dev.name, r->ep, (unsigned long long)total);
