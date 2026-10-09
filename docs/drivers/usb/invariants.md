@@ -131,18 +131,23 @@ Check: by construction (the completion's only calls are
 leave, the child first, and both come back); the `QEMU_KBD=hub` shape
 runs the whole suite with a device one tier down.
 
-**U10. `usb_cancel` returning is permission to free.** Either answer
-means no callback for that request is running or will run: `0` because
-the endpoint was stopped and the ring flushed, `-ENOENT` because the
-request had already been retired *and* the controller's interrupt
-handler -- where completions are called, after its lock is dropped --
-has been waited for. Without the second half a driver that cancelled a
-request a moment after it completed would free the buffer under the
-callback still touching it.
+**U10. `usb_cancel` returning `0` or `-ENOENT` is permission to free;
+`-EIO` is the opposite.** Either of the first two answers means no
+callback for that request is running or will run: `0` because the
+endpoint, the slot or the controller acknowledged a stop and the ring
+was flushed, `-ENOENT` because the request had already been retired
+*and* the controller's interrupt handler -- where completions are
+called, after its lock is dropped -- has been waited for. Without the
+second half a driver that cancelled a request a moment after it
+completed would free the buffer under the callback still touching it.
+`-EIO` means nothing acknowledged a stop (U14): the request was not
+completed and never will be, and the request and every buffer it named
+must never be freed or reused.
 
 Check: review (`xhci_gone`); the shape is exercised by every
 `hid-unplug` and `usb-hub-unplug` teardown, where `remove` cancels and
-frees immediately afterwards.
+frees immediately afterwards. `-EIO`: `xhci-cancel-ack` (quarantine
+case) and `usb-sync-quarantine`.
 
 **U11. A transfer's buffer is memory the controller can reach.** Every
 buffer handed to `usb_control_msg`, `usb_bulk_msg` or `usb_submit` is
@@ -179,3 +184,31 @@ register fixture, requires the run state and HCH status to remain live,
 then clears the injection and verifies the retry halts the fixture.
 `tools/xhci-halt-ack-probe.py --old` must fail because the old removal
 path ignored the HCH wait result.
+
+**U14. No DMA memory is freed or returned while a device that has not
+acknowledged a stop may own it.** This is the rule behind U12 and U13,
+and it holds for every driver, not only this one (NVMe N-disable, AHCI
+port stop, e1000e E7 are the same rule). For a cancelled transfer it
+means: a request is completed -- and so returned to its caller, who may
+free its buffer -- and its TDs are unmapped only after the controller
+acknowledged that it can no longer reach them, by completing `Stop
+Endpoint` and `Set TR Dequeue Pointer`, or `Disable Slot`, or by
+reporting `USBSTS.HCH` after a halt. When none of the three comes, the
+controller is dead and the request is quarantined: never completed,
+never unmapped, ignored by late events and by ring flushes, counted in
+`xhci->quarantined`, and `usb_cancel` returns `-EIO` (U10). The caller's
+side of the rule is in U10; `usb_sync_msg` keeps it for the synchronous
+shapes by never letting the caller's buffer be the DMA buffer.
+
+Check: `xhci-cancel-ack` drives `xhci_cancel` on a synthetic controller
+with one request in flight through each outcome -- endpoint stop
+acknowledged; stop refused and `Disable Slot` acknowledged; both refused
+and halt acknowledged; all three refused -- and requires the request to
+complete (with the cancel's status) only after the acknowledging step,
+and in the last case to stay uncompleted and mapped with `-EIO`
+returned. `usb-sync-quarantine` runs `usb_control_msg` over a test HCD
+whose cancel answers `-EIO`, and requires the caller's buffer never to
+have been handed to the HCD. `tools/xhci-cancel-ack-probe.py --old`
+must fail both checks on x86-64 and AArch64: the old cancel completed
+the request after a refused stop, and the old synchronous path handed
+the caller's buffer to the controller.
