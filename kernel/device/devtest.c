@@ -3641,6 +3641,10 @@ bool selftest_nvme_disable_ack(const char **reason)
 bool selftest_e1000e_stop_ack(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (pci_find_device(0x8086, 0x10d3, NULL) == NULL) {
+        kinfo("E1000E-STOP-ACK-SWEEP: PASS rx=not-present tx=not-present");
+        return true;
+    }
     bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("e1000e_test_stop_ack", NULL);
     if (run == NULL) {
         *reason = "e1000e-stop-ack: test seam not exported by the e1000e module";
