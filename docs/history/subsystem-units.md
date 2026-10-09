@@ -2639,7 +2639,7 @@ See the [history index](README.md).
     branch CI and merge CI are pending.
   - Report: `docs/audit/2026-10-09-analyzer-gate-report.md`.
 
-- **Device lifecycle Unit 2: fault and interleaving sweep (2026-10-09; PR #PRNUM).**
+- **Device lifecycle Unit 2: fault and interleaving sweep (2026-10-09; PR #338).**
   - Proven, fixed, and probed on x86-64 and AArch64: NVMe submit across
     controller death (dead rechecked under the queue lock), virtio-rng
     repost after reset, and unacknowledged stops -- NVMe disable, AHCI

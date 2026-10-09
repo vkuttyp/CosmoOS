@@ -617,7 +617,7 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   probes pass on both architectures; the full local matrix passes. See the
   [report](audit/2026-10-08-vnet-remove-report.md) for the audit and CI checks.
 - [x] **Device lifecycle — Unit 2: fault/interleaving sweep.**
-  [PR #PRNUM](https://github.com/vkuttyp/CosmoOS/pull/PRNUM).
+  [PR #338](https://github.com/vkuttyp/CosmoOS/pull/338).
   Proven and fixed with a test and `--old` probe on both architectures:
   NVMe publication after controller death, virtio-rng repost after reset,
   and unacknowledged stops in NVMe, AHCI (port stop, COMRESET), e1000e
