@@ -142,6 +142,12 @@ static bool try_bind(struct device *dev, struct device_driver *drv)
 {
     if (!drv->bus->match(dev, drv))
         return false;
+    if (device_dma_retained(dev)) {
+        /* Claimed by nobody: the device stays unbound (U14). */
+        kwarn("device: %s: %s not probed: a previous driver retained DMA the device may still use", dev->name,
+              drv->name);
+        return true;
+    }
     /* The driver is named before probe so a bus thunk can find its typed
      * driver through dev->driver instead of re-matching (several drivers
      * may match one device). */

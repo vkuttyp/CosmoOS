@@ -492,10 +492,15 @@ static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
 
     /* Quiet, reset, quiet again: reset clears IMS, but a cause raised
      * during setup would reach a handler with no rings (design.md). */
-    hw_quiesce(e);
+    (void)hw_quiesce(e);   /* the reset below stops what this cannot */
     wr32(e, E1000_CTRL, rd32(e, E1000_CTRL) | E1000_CTRL_RST);
     thread_sleep_ms(10);
-    hw_quiesce(e);
+    if (!hw_quiesce(e)) {
+        /* Engines still running after a reset: rings programmed now could
+         * be raced by DMA nobody asked for (E7). */
+        kerror("e1000e: %s: RX/TX did not stop after reset", pdev->dev.name);
+        goto fail_unmap;
+    }
 
     uint32_t rah = rd32(e, E1000_RAH0);
     if (!(rah & E1000_RAH_AV)) {
@@ -613,6 +618,7 @@ static void e1000e_remove(struct pci_device *pdev)
 #if CONFIG_SELFTEST
         g_stop_orphan = e;
 #endif
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         pdev->dev.drvdata = NULL;
         kwarn("e1000e: %s: retaining RX/TX DMA after disable was not acknowledged", pdev->dev.name);
         return;
@@ -649,10 +655,12 @@ bool e1000e_test_recover_stop_ack(void)
     bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
     bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
     if (stopped && rx_off && tx_off) {
+        struct device *dev = &e->pdev->dev;
         rings_free(e);
         device_unmap_mmio(e->bar);
         g_stop_orphan = NULL;
         netif_put(&e->nif);
+        device_release_dma(dev);   /* the stop is acknowledged and the rings are gone */
     } else {
         cleaned = false;
     }

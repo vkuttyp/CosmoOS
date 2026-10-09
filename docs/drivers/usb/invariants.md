@@ -175,9 +175,11 @@ command.
 **U13. Controller DMA is freed only after HCH acknowledges halt.**
 `xhci_remove` clears `USBCMD.RS`, checks `USBSTS.HCH`, and retries once.
 If HCH remains clear, it retires the IRQ and deferred poll, leaves the
-BAR and every controller-visible allocation mapped, and keeps the PCI
-driver data pointer so a later probe cannot replace a controller that
-may still own DMA.
+BAR and every controller-visible allocation mapped, and marks the PCI
+function `dma_retained` (`device_retain_dma`), so no later probe can
+replace a controller that may still own DMA. (Until review of PR #338 it
+kept the driver data pointer instead; the device model clears that field
+after every `remove`, so the guard never fired.)
 
 Check: `xhci-halt-ack` forces both halt attempts to fail in the synthetic
 register fixture, requires the run state and HCH status to remain live,

@@ -1355,6 +1355,7 @@ fail_ports:
     synchronize_irq((unsigned)h->vector);
     if (retain_dma) {
         kerror("ahci%u: probe rollback retained controller and port DMA after an unacknowledged stop", h->index);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         return rc;   /* HBA may still own the command list, FIS page or command tables */
     }
     for (unsigned i = 0; i < h->nports; i++)
@@ -1388,6 +1389,8 @@ static void ahci_remove(struct pci_device *pdev)
         }
     }
     wr32(h->abar + AHCI_GHC, rd32(h->abar + AHCI_GHC) & ~GHC_IE);
+    /* CAP.NP is five bits: at most 32 ports, every one of them indexed here. */
+    _Static_assert(AHCI_MAX_PORTS >= 32u, "a port-stop slot for every port CAP.NP can report");
     bool stopped[AHCI_MAX_PORTS] = { false };
     bool retain_dma = false;
     for (unsigned i = 0; i < h->nports; i++) {
@@ -1413,6 +1416,7 @@ static void ahci_remove(struct pci_device *pdev)
     pdev->dev.drvdata = NULL;
     if (retain_dma) {
         kerror("ahci%u: removal retained controller and port DMA after an unacknowledged stop", h->index);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         return;   /* keep the ABAR, slots, maps and DMA backing reachable or allocated */
     }
     for (unsigned i = 0; i < h->nports; i++)

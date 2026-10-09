@@ -950,6 +950,7 @@ fail_disable:
     if (drc) {
         kerror("nvme: %s: disable was not acknowledged (%d); retaining controller DMA after probe failure",
                pdev->dev.name, drc);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         return rc;
     }
 fail:
@@ -983,6 +984,7 @@ static void nvme_remove(struct pci_device *pdev)
         if (vectors[i] >= 0)
             synchronize_irq((unsigned)vectors[i]);
     if (!nvme_remove_queues(c, stopped)) {
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
         pdev->dev.drvdata = NULL;
         return;
     }
