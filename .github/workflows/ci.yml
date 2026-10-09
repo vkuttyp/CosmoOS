@@ -12,6 +12,10 @@
 # hv self-check then disables the backend and the guest tests are
 # skipped, which the harness treats as a failure). The toolchain is
 # host-agnostic so the outputs match the ARM64 development environment.
+# The images are Docker's official Debian images pulled through Amazon ECR
+# Public's mirror of the Docker library: Docker Hub's unauthenticated pull
+# limit on the shared runner addresses refused every job's container on
+# main's merge of PR #340 three times (run 37991912859, "toomanyrequests").
 # Both targets build and boot on the same x86-64 runner: QEMU/TCG runs
 # the AArch64 `virt` machine with the qemu-efi-aarch64 firmware.
 
@@ -29,7 +33,7 @@ jobs:
   build-and-boot:
     name: build, boot, analyze (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-    container: debian:trixie
+    container: public.ecr.aws/docker/library/debian:trixie
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +199,7 @@ jobs:
   entropy:
     name: entropy boots (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: debian:trixie
+    container: public.ecr.aws/docker/library/debian:trixie
     strategy:
       fail-fast: false
       matrix:
@@ -231,7 +235,7 @@ jobs:
   litmus:
     name: memory-order litmus (herd7)
     runs-on: ubuntu-24.04
-    container: debian:sid
+    container: public.ecr.aws/docker/library/debian:sid
     timeout-minutes: 10
     steps:
       - name: Install herdtools7
