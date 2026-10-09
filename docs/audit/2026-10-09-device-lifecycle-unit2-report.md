@@ -118,6 +118,32 @@ main. The same run found a stale baseline entry (`nvme_submit`, Apple
 clang; the dead recheck rewrote that path) and two dead stores in
 `netif-remove-worker`'s teardown (`5b5f49ed`).
 
+## Review of PR #338 (Qodo, first round)
+
+Every finding was checked against the code before acting; nine of ten
+held. Each defect got a deterministic test failing without its fix and a
+probe whose `--old` reverses that fix commit (`tools/fixprobe.py`); all
+four pass old and fixed on x86-64 and AArch64 (`out/review-probes.txt`).
+
+| Finding | Verdict | Proof | Fix |
+|---|---|---|---|
+| A quarantined request cancelled again after a later acknowledged halt returned 0 | Proven | `xhci-cancel-ack` quarantine case cancels again after HCH: old `recancel=0`, fixed `recancel=-5` (`tools/xhci-recancel-probe.py`) | `xhci_cancel` answers `-EIO` for a quarantined TD before quiescing anything |
+| Drivers that retained DMA could be probed again (NVMe, AHCI, e1000e); xHCI's `drvdata` guard never fired because `unbind` clears `drvdata` after `remove` | Proven | `ahci-stop-ack`, `e1000e-stop-ack` rebind straight after the refused stop: old `rebind_refused=0` (and the old AHCI test required the rebind to succeed), fixed `rebind_refused=1` with the model's "not probed" line (`tools/dma-retained-probe.py`) | `struct device.dma_retained` (module ABI 9; maintainer's decision); `try_bind` refuses; all four drivers set it on every retained path; e1000e's recovery clears it |
+| e1000e probe ignored whether RX/TX stopped after `CTRL.RST` | By review | -- | Probe fails instead of programming rings under live DMA |
+| AHCI error snapshot survived a dead-port reset | Proven | `ahci-error-reset`: refused recovery stop, then a successful reset: old `pending_after_reset=1`, fixed `0` (`tools/ahci-error-reset-probe.py`) | The reset drops the pending error with the slots it fails |
+| A second NVMe `controller_die` read "not yet acknowledged" as "refused" | Proven | `nvme-die-concurrent` parks the first caller after an acknowledged disable: old `second=0`, fixed `second=1 second_answered_before_release=0` (`tools/nvme-die-concurrent-probe.py`) | Pending/acknowledged/refused state; later callers wait |
+| `stopped[AHCI_MAX_PORTS]` vs `CAP.NP` | Hardening | -- | `_Static_assert` |
+| virtio-rng invariant named a check that does not exist | Valid | -- | Names the `VRNG-RESET-REPOST` marker and the probe |
+| `PRNUM` placeholders | Already fixed (`9e385916`) | -- | -- |
+
+A correction to `c3be9dad`'s message: moving the AHCI stop fault point
+into `port_stop_cmd` did change one count. `disk_detach` stops the
+command engine too, so during `ahci-stop-ack`'s persistent removal the
+two disk ports' detach stops are now refused as well:
+`persistent_hits` went from 12 to 16 and those ports are marked dead at
+detach. A persistent refusal applying to every stop is the more faithful
+simulation; the test's assertions are unchanged and pass.
+
 ## Validation
 
 All at `3515d50c`, local, one QEMU at a time at default priority

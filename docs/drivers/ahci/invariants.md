@@ -82,9 +82,15 @@ unregisters the disk to refuse new submissions, and retains the HBA,
 port DMA, active mappings, and their bios; these resources are leaked
 rather than returned while the controller may still own them.
 
+The retained HBA also marks the function `device_retain_dma`, so no
+driver is probed on it while the old command lists may still be used
+(`docs/kernel/device/design.md`; until review of PR #338 the test
+required the immediate rebind to succeed).
+
 Check: `ahci-stop-ack` first injects one failure and verifies the retry
 followed by safe cleanup, then injects persistent failures and verifies
-that no DMA allocation is freed before the controller is rebound.
+that no DMA allocation is freed and that a rebind is refused until the
+test releases the function; `tools/dma-retained-probe.py --old`.
 
 **A9. A failed required COMRESET never restarts or reissues the port.**
 If task-file recovery or timeout restart needs a link reset and COMRESET
@@ -98,3 +104,12 @@ Check: `ahci-comreset-ack` injects a failed COMRESET in both
 `port_recover` and `port_restart`, checks each outstanding bio's status and
 that a third bio is rejected, then verifies an explicit successful reset
 restores reads.
+
+**A10. A reset that fails every slot leaves no error to recover.** A
+recovery whose command-engine stop is refused marks the port dead with
+the handler's snapshot (`error`, `err_slot`, `err_ci`) still set. The
+reset that revives the port fails every active slot, so it drops the
+snapshot under the port lock; replayed by the worker's next wake it
+would complete or reissue commands taken after the reset (review of
+PR #338). Check: `ahci-error-reset` (refused recovery stop, then reset;
+the snapshot must be gone) and `tools/ahci-error-reset-probe.py --old`.

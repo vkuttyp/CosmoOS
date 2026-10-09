@@ -198,7 +198,9 @@ Endpoint` and `Set TR Dequeue Pointer`, or `Disable Slot`, or by
 reporting `USBSTS.HCH` after a halt. When none of the three comes, the
 controller is dead and the request is quarantined: never completed,
 never unmapped, ignored by late events and by ring flushes, counted in
-`xhci->quarantined`, and `usb_cancel` returns `-EIO` (U10). The caller's
+`xhci->quarantined`, and `usb_cancel` returns `-EIO` (U10) -- again on
+every later cancel of it, even after a halt is acknowledged (review of
+PR #338; `tools/xhci-recancel-probe.py --old`). The caller's
 side of the rule is in U10; `usb_sync_msg` keeps it for the synchronous
 shapes by never letting the caller's buffer be the DMA buffer.
 

@@ -89,6 +89,16 @@ checks that the queue's SQ, CQ, PRP pages, active command, bio and data
 buffer mapping remain owned, then releases the synthetic fixture after
 the assertion.
 
+Retained memory also keeps the function from being probed again
+(`device_retain_dma`, `docs/kernel/device/design.md`). And the answer
+"was the disable acknowledged" is the first `controller_die` caller's:
+`disable_state` is pending until that caller has disabled and swept, and
+a second caller -- `nvme_remove` racing the timeout thread -- waits for
+it instead of reading pending as refused (review of PR #338). Check:
+`nvme-die-concurrent` parks the first caller between an acknowledged
+disable and its sweep and requires the second to report acknowledged;
+`tools/nvme-die-concurrent-probe.py --old`.
+
 ## Gaps (documented, not invariants)
 
 - One controller is tested (QEMU's); `mqes`, `dstrd`, `mdts` and the
