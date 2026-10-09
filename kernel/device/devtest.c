@@ -3495,7 +3495,9 @@ bool selftest_ahci_comreset_ack(const char **reason)
     }
     bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
         (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
-    if (recover == NULL || bd->ops->debug_presence == NULL) {
+    bool (*restart)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_restart", NULL);
+    if (recover == NULL || restart == NULL || bd->ops->debug_presence == NULL) {
         blkdev_put(bd);
         *reason = "ahci-comreset-ack: test seam or reset hook missing";
         return false;
@@ -3535,24 +3537,70 @@ bool selftest_ahci_comreset_ack(const char **reason)
     }
 
     faultinject_set(FI_AHCI_COMRESET_ACK, 1, 1, thread_current());
-    bool dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
-    struct fi_stats st;
-    faultinject_stats(FI_AHCI_COMRESET_ACK, &st);
+    bool recovery_dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
+    struct fi_stats recovery_st;
+    faultinject_stats(FI_AHCI_COMRESET_ACK, &recovery_st);
     faultinject_clear(FI_AHCI_COMRESET_ACK);
-    bool failed_outstanding = mk[0].done && mk[0].status == -EIO && mk[1].done && mk[1].status == -EIO;
-    int rejected = blk_submit(&bio[2]);
-    if (rejected != 0) {
-        mk[2].status = rejected;
+    bool recovery_failed = mk[0].done && mk[0].status == -EIO && mk[1].done && mk[1].status == -EIO;
+    int recovery_rejected = blk_submit(&bio[2]);
+    if (recovery_rejected != 0) {
+        mk[2].status = recovery_rejected;
         mk[2].done = true;
     }
-    int restored = bd->ops->debug_presence(bd, true);
+    int recovery_restore_rc = bd->ops->debug_presence(bd, true);
     for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done && mk[2].done); waited++)
         thread_sleep_ms(1);
-    bool readable = restored == 0 && blk_read(bd, 72, 8, buf[0]) == 0;
-    bool ok = st.hits == 1 && dead && failed_outstanding && rejected == -ENODEV && mk[2].status == -ENODEV &&
-              mk[0].done && mk[1].done && mk[2].done && readable;
-    kinfo("AHCI-COMRESET-ACK: %s hits=%llu dead=%u failed=%u rejected=%d restored=%d", ok ? "PASS" : "FAIL",
-          (unsigned long long)st.hits, dead, failed_outstanding, rejected, readable);
+    int recovery_read_rc = recovery_restore_rc == 0 ? blk_read(bd, 72, 8, buf[0]) : recovery_restore_rc;
+    bool recovery_ok = recovery_st.hits == 1 && recovery_dead && recovery_failed && recovery_rejected == -ENODEV &&
+                       mk[2].status == -ENODEV && mk[0].done && mk[1].done && mk[2].done &&
+                       recovery_restore_rc == 0 && recovery_read_rc == 0;
+
+    memset(mk, 0, sizeof(mk));
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 3; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 80 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());
+    submit0 = blk_submit(&bio[0]);
+    submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    if (submit0 != 0) {
+        mk[0].status = submit0;
+        mk[0].done = true;
+    }
+    if (submit1 != 0) {
+        mk[1].status = submit1;
+        mk[1].done = true;
+    }
+    faultinject_set(FI_AHCI_COMRESET_ACK, 1, 1, thread_current());
+    bool restart_dead = submit0 == 0 && submit1 == 0 && restart(bd, &bio[0], &bio[1]);
+    struct fi_stats restart_st;
+    faultinject_stats(FI_AHCI_COMRESET_ACK, &restart_st);
+    faultinject_clear(FI_AHCI_COMRESET_ACK);
+    bool restart_failed = mk[0].done && mk[0].status == -ETIMEDOUT && mk[1].done && mk[1].status == -EIO;
+    int restart_rejected = blk_submit(&bio[2]);
+    if (restart_rejected != 0) {
+        mk[2].status = restart_rejected;
+        mk[2].done = true;
+    }
+    int restart_restore_rc = bd->ops->debug_presence(bd, true);
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done && mk[2].done); waited++)
+        thread_sleep_ms(1);
+    int restart_read_rc = restart_restore_rc == 0 ? blk_read(bd, 112, 8, buf[0]) : restart_restore_rc;
+    bool restart_ok = restart_st.hits == 1 && restart_dead && restart_failed && restart_rejected == -ENODEV &&
+                      mk[2].status == -ENODEV && mk[0].done && mk[1].done && mk[2].done &&
+                      restart_restore_rc == 0 && restart_read_rc == 0;
+    bool ok = recovery_ok && restart_ok;
+    kinfo("AHCI-COMRESET-ACK: %s recovery_dead=%u recovery_failed=%u recovery_rejected=%d recovery_restore=%d/%d "
+          "restart_dead=%u restart_failed=%u restart_rejected=%d restart_restore=%d/%d",
+          ok ? "PASS" : "FAIL", recovery_dead, recovery_failed, recovery_rejected, recovery_restore_rc,
+          recovery_read_rc, restart_dead, restart_failed, restart_rejected, restart_restore_rc, restart_read_rc);
     for (unsigned i = 0; i < 3; i++)
         kfree(buf[i]);
     blkdev_put(bd);

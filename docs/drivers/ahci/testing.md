@@ -55,12 +55,14 @@ returns the same object and a read and a write work. The recovery an
 error that needs a link reset goes through.
 
 **`ahci-comreset-ack`** (debug builds; fault injection): two accepted
-withheld bios are sorted through the task-file recovery path, then the
-required COMRESET is made to fail. Both bios must complete `-EIO`, the
-port must reject a third bio, and an explicit successful reset must
-re-identify the same disk and restore reads. `tools/ahci-comreset-ack-probe.py
---old` restores the old reissue behavior in a throwaway worktree and
-requires this check to fail on both architectures.
+withheld bios are sent through both task-file recovery and timeout restart,
+with the required COMRESET made to fail in each path. Task-file recovery
+must fail both bios `-EIO`; timeout restart must fail its victim
+`-ETIMEDOUT` and the other bio `-EIO`. Each dead port must reject a third
+bio, then an explicit successful reset must re-identify the same disk and
+restore reads. `tools/ahci-comreset-ack-probe.py --old` restores both old
+restart/reissue behaviors in a throwaway worktree and requires this check
+to fail on both architectures.
 
 **`ahci-probe-rollback`** (debug builds; fault injection): after all
 implemented ports are live, the probe fails with a port-change bit

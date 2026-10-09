@@ -421,8 +421,10 @@ static void port_restart(struct ahci_port *p, struct bio *victim, int victim_sta
 #if CONFIG_SELFTEST
     reset |= p->test_force_comreset;
 #endif
-    if (reset)
-        (void)port_comreset(p);
+    if (reset && !port_comreset(p)) {
+        port_mark_dead(p, "COMRESET did not re-establish the link during restart");
+        return;
+    }
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
     p->recovering = false;
@@ -831,6 +833,7 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
      * keep this blkdev if the same disk answers (the recovery an error
      * that needs a COMRESET goes through). */
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    bool was_dead = p->dead;
     p->recovering = true;
     spin_unlock_irqrestore(&p->lock, f);
     if (!port_stop_cmd_retry(p)) {
@@ -854,8 +857,20 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
     probe.port = p;
     uint64_t capacity = 0;
     uint32_t sector = 0;
+    if (was_dead) {
+        /* The successful link reset is enough to try IDENTIFY again; if it
+         * fails, restore the dead state before returning to the caller. */
+        f = spin_lock_irqsave(&p->lock);
+        p->dead = false;
+        spin_unlock_irqrestore(&p->lock, f);
+    }
     rc = disk_identify(p, &probe, &capacity, &sector);
     if (rc) {
+        if (was_dead) {
+            kerror("ahci%u: port %u: IDENTIFY after acknowledged COMRESET failed (%d; PxCMD 0x%08x, PxTFD 0x%08x, PxCI 0x%08x, PxIS 0x%08x)",
+                   p->hba->index, p->index, rc, prd(p, PX_CMD), prd(p, PX_TFD), prd(p, PX_CI), prd(p, PX_IS));
+            port_mark_dead(p, "IDENTIFY failed while recovering a dead port");
+        }
         (void)disk_detach(p, -EIO);
         goto out;
     }
@@ -865,6 +880,11 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
         (void)disk_detach(p, -ENODEV);
         port_probe_locked(p);
         rc = -ENODEV;
+    } else {
+        /* A completed COMRESET and IDENTIFY have recovered the same device. */
+        f = spin_lock_irqsave(&p->lock);
+        p->dead = false;
+        spin_unlock_irqrestore(&p->lock, f);
     }
 out:
     mutex_unlock(&p->hotplug);
@@ -964,6 +984,9 @@ static void port_recover(struct ahci_port *p)
     if (failed) {
         slot_unmap(p, slot);
         p->active &= ~(1u << slot);
+#if CONFIG_FAULTINJECT
+        p->withheld &= ~(1u << slot);
+#endif
         p->completed++;
     }
     uint32_t reissue = p->active & ci;
@@ -984,8 +1007,11 @@ static void port_recover(struct ahci_port *p)
 #if CONFIG_SELFTEST
     reset |= p->test_force_comreset;
 #endif
-    if (reset)
-        (void)port_comreset(p);
+    if (reset && !port_comreset(p)) {
+        port_mark_dead(p, "COMRESET did not re-establish the link during error recovery");
+        slots_fail(p, NULL, 0, -EIO);
+        return;
+    }
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
     reissue &= p->active;   /* still ours */
@@ -1041,6 +1067,44 @@ bool ahci_test_comreset_recovery(struct blkdev *bd, struct bio *first, struct bi
 #endif
 }
 EXPORT_SYMBOL(ahci_test_comreset_recovery);
+
+/* Exercise the timeout restart caller with the same two withheld bios. The
+ * victim times out and the other accepted request fails with -EIO before
+ * the required COMRESET is attempted. */
+bool ahci_test_comreset_restart(struct blkdev *bd, struct bio *first, struct bio *second);
+bool ahci_test_comreset_restart(struct blkdev *bd, struct bio *first, struct bio *second)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (bd == NULL || first == NULL || second == NULL || first == second)
+        return false;
+    struct ahci_port *p = disk_of(bd)->port;
+    bool found_first = false, found_second = false;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < AHCI_MAX_SLOTS; i++) {
+        if (!(p->active & (1u << i)))
+            continue;
+        found_first |= p->slots[i].bio == first;
+        found_second |= p->slots[i].bio == second;
+    }
+    if (found_first && found_second)
+        p->test_force_comreset = true;
+    spin_unlock_irqrestore(&p->lock, f);
+    if (!found_first || !found_second)
+        return false;
+    port_restart(p, first, -ETIMEDOUT, -EIO);
+    f = spin_lock_irqsave(&p->lock);
+    p->test_force_comreset = false;
+    bool dead = p->dead;
+    spin_unlock_irqrestore(&p->lock, f);
+    return dead;
+#else
+    (void)bd;
+    (void)first;
+    (void)second;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_comreset_restart);
 #endif
 
 static void ahci_worker(void *arg)
