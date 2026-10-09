@@ -97,6 +97,7 @@ enum fi_kind {
     FI_AHCI_CI,       /* ahci: a slot filled, its PxCI bit never set */
     FI_NET_RX_DUP,    /* a received frame delivered a second time (link-layer retransmit, switch flood) */
     FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path; the handler leaves the admin queue to the issuer */
+    FI_NVME_DISABLE_ACK, /* nvme: CC.EN clear is not acknowledged by CSTS.RDY */
     FI_KIND_COUNT,
 };
 /* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests
@@ -123,6 +124,10 @@ Configuration: the kernel API (`faultinject_set`, `faultinject_clear`,
 `faultinject_stats`) for self-tests, and the boot parameter
 `opt/cosmo/faultinject` (fw_cfg), `kind:every[:budget]` entries separated
 by commas, applied before the self-tests run, for manual experiments.
+The `nvme-disable-ack` rule makes the disable wait report a timeout after
+`CC.EN` is cleared, exercising the driver's fail-closed ownership path.
+The `ahci-stop-ack` rule makes the port stop fail, exercising retry and
+DMA retention.
 `sysctl("debug.faultinject")` reports each kind's rule and counters. There
 is no write path through `sysctl`: the audit's phrase "behind a debug
 sysctl" is honoured for observation; making `sysctl` writable is a

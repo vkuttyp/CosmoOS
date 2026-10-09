@@ -3484,3 +3484,28 @@ bool selftest_ahci_stop_ack(const char **reason)
     return true;
 #endif
 }
+
+bool selftest_nvme_disable_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool (*run)(void) = (bool (*)(void))module_symbol_lookup("nvme_test_disable_ack", NULL);
+    if (run == NULL) {
+        *reason = "nvme-disable-ack: test seam not exported by the NVMe module";
+        return false;
+    }
+    faultinject_set(FI_NVME_DISABLE_ACK, 1, 0, thread_current());
+    bool retained = run();
+    struct fi_stats st;
+    faultinject_stats(FI_NVME_DISABLE_ACK, &st);
+    faultinject_clear(FI_NVME_DISABLE_ACK);
+    bool ok = retained && st.hits == 1;
+    kinfo("NVME-DISABLE-ACK: %s hits=%llu queue_dma_bio_retained=%u", ok ? "PASS" : "FAIL",
+          (unsigned long long)st.hits, retained);
+    if (!ok)
+        *reason = "nvme-disable-ack: unacknowledged disable reclaimed queue DMA; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}

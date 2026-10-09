@@ -113,6 +113,7 @@ struct nvme_ctrl {
     struct list_node namespaces;
     char model[41], serial[21];
     bool dead;
+    bool disable_ack;                       /* queues are reclaimable only after RDY fell */
 #if CONFIG_SELFTEST
     bool test_synthetic;
 #endif
@@ -121,7 +122,7 @@ struct nvme_ctrl {
 
 static unsigned g_next_index;
 
-static void controller_die(struct nvme_ctrl *c, const char *why);
+static bool controller_die(struct nvme_ctrl *c, const char *why);
 
 /* --- registers ------------------------------------------------------------- */
 
@@ -150,6 +151,16 @@ static int wait_ready(struct nvme_ctrl *c, bool ready)
         thread_sleep_ms(5);
     }
     return -ETIMEDOUT;
+}
+
+static int controller_disable(struct nvme_ctrl *c)
+{
+    wr32(c, NVME_REG_CC, rd32(c, NVME_REG_CC) & ~NVME_CC_EN);
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_NVME_DISABLE_ACK))
+        return -ETIMEDOUT;
+#endif
+    return wait_ready(c, false);
 }
 
 /* --- queues ------------------------------------------------------------------ */
@@ -564,16 +575,20 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
 }
 
 /* Disable the controller and fail everything in flight; it stays dead. */
-static void controller_die(struct nvme_ctrl *c, const char *why)
+static bool controller_die(struct nvme_ctrl *c, const char *why)
 {
     if (__atomic_exchange_n(&c->dead, true, __ATOMIC_ACQ_REL))
-        return;
+        return __atomic_load_n(&c->disable_ack, __ATOMIC_ACQUIRE);
 #if CONFIG_SELFTEST
     if (!c->test_synthetic)
 #endif
         kerror("nvme%u: %s; disabling the controller, every request fails from here", c->index, why);
-    wr32(c, NVME_REG_CC, rd32(c, NVME_REG_CC) & ~NVME_CC_EN);
-    wait_ready(c, false);
+    int rc = controller_disable(c);
+    if (rc) {
+        kerror("nvme%u: disable was not acknowledged (%d); retaining queue DMA and in-flight ownership", c->index,
+               rc);
+        return false;
+    }
     for (unsigned qi = 0; qi <= c->nr_ioq; qi++) {
         struct nvme_queue *q = qi == 0 ? &c->admin : c->ioq[qi - 1];
         for (uint16_t cid = 0; cid < q->depth; cid++) {
@@ -596,6 +611,8 @@ static void controller_die(struct nvme_ctrl *c, const char *why)
                 complete(&w->done);
         }
     }
+    __atomic_store_n(&c->disable_ack, true, __ATOMIC_RELEASE);
+    return true;
 }
 
 /* The block layer's timeout thread: abort the command, and reset when the
@@ -749,6 +766,18 @@ static void free_queues(struct nvme_ctrl *c)
     queue_free(c, &c->admin);
 }
 
+/* The caller has stopped new submits and synchronized the interrupt
+ * vectors. Queue memory is reclaimable only when RDY acknowledged disable. */
+static bool nvme_remove_queues(struct nvme_ctrl *c, bool stopped)
+{
+    if (!stopped) {
+        kerror("nvme%u: removal retained controller and queue DMA after unacknowledged disable", c->index);
+        return false;
+    }
+    free_queues(c);
+    return true;
+}
+
 static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
 {
     (void)id;
@@ -765,6 +794,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
     dma_set_mask(&pdev->dev, 64);
     c->bar = pci_map_bar(pdev, 0);
     int rc = -EIO;
+    bool msix_enabled = false;
     uint8_t *idbuf = NULL;
     dma_addr_t id_dma = 0;
     if (c->bar == 0) {
@@ -805,6 +835,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
     if (want_ioq > NVME_MAX_IOQ)
         want_ioq = NVME_MAX_IOQ;
     int granted = pci_msix_enable(pdev, 1 + want_ioq);
+    msix_enabled = granted > 0;
     if (granted < 2) {
         kerror("nvme: %s: MSI-X unavailable (%d)", pdev->dev.name, granted);
         rc = granted < 0 ? granted : -ENODEV;
@@ -910,10 +941,17 @@ fail_queues:
         if (c->ioq[i] && c->ioq[i]->vector >= 0)
             pci_msix_release(pdev, i + 1);
 fail_msix:
-    pci_msix_disable(pdev);
 fail_disable:
-    wr32(c, NVME_REG_CC, rd32(c, NVME_REG_CC) & ~NVME_CC_EN);
-    wait_ready(c, false);
+    if (msix_enabled) {
+        pci_msix_disable(pdev);
+        msix_enabled = false;
+    }
+    rc = controller_disable(c);
+    if (rc) {
+        kerror("nvme: %s: disable was not acknowledged (%d); retaining controller DMA after probe failure",
+               pdev->dev.name, rc);
+        return rc;
+    }
 fail:
     if (idbuf)
         dma_free(&pdev->dev, PAGE_SIZE, idbuf, id_dma);
@@ -932,7 +970,7 @@ static void nvme_remove(struct pci_device *pdev)
     struct nvme_ns *ns, *tmp;
     list_for_each_entry_safe(ns, tmp, &c->namespaces, link)
         blk_unregister(&ns->bd);   /* no submit is inside the driver after this */
-    controller_die(c, "device removed");
+    bool stopped = controller_die(c, "device removed");
     /* The vectors: released by pci_msix_disable; a handler still running
      * elsewhere finishes before the queues go (synchronize_irq). */
     int vectors[NVME_MAX_IOQ + 1];
@@ -944,7 +982,10 @@ static void nvme_remove(struct pci_device *pdev)
     for (unsigned i = 0; i < nv; i++)
         if (vectors[i] >= 0)
             synchronize_irq((unsigned)vectors[i]);
-    free_queues(c);
+    if (!nvme_remove_queues(c, stopped)) {
+        pdev->dev.drvdata = NULL;
+        return;
+    }
     list_for_each_entry_safe(ns, tmp, &c->namespaces, link) {
         list_remove(&ns->link);
         blkdev_put(&ns->bd);   /* the creator's reference; nvme_release frees when the holders are gone */
@@ -967,6 +1008,62 @@ static struct pci_driver nvme_driver = {
 };
 
 #if CONFIG_SELFTEST
+/* Exercise the same queue-reclaim decision used by nvme_remove without
+ * unbinding the boot namespace that the later shell snapshot test needs. */
+bool nvme_test_disable_ack(void);
+bool nvme_test_disable_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    static struct nvme_ctrl c;
+    static struct pci_device pdev;
+    static uint32_t regs[2048];
+    memset(&c, 0, sizeof(c));
+    memset(&pdev, 0, sizeof(pdev));
+    memset(regs, 0, sizeof(regs));
+    pdev.dev.dma_mask = UINT64_MAX;
+    c.pdev = &pdev;
+    c.bar = (vaddr_t)regs;
+    c.test_synthetic = true;
+    list_init(&c.namespaces);
+    if (queue_alloc(&c, &c.admin, 0, 2) != 0) {
+        queue_free(&c, &c.admin);
+        return false;
+    }
+    dma_addr_t data_dma = 0;
+    void *data = dma_alloc(&pdev.dev, PAGE_SIZE, &data_dma, DMA_ZERO);
+    if (data == NULL) {
+        queue_free(&c, &c.admin);
+        return false;
+    }
+    struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    struct nvme_cmd *cmd = &c.admin.cmds[0];
+    c.admin.free_head = cmd->next_free;
+    cmd->next_free = 0xffff;
+    cmd->bio = &bio;
+    cmd->seg_dma[0] = data_dma;
+    cmd->seg_len[0] = PAGE_SIZE;
+    cmd->nr_segs = 1;
+    cmd->dir = DMA_FROM_DEVICE;
+    c.admin.inflight = 1;
+
+    bool stopped = controller_die(&c, "self-test disable acknowledgement");
+    bool reclaimed = nvme_remove_queues(&c, stopped);
+    bool retained = c.admin.sq != NULL && c.admin.cq != NULL && c.admin.prp_pages != NULL &&
+                    c.admin.cmds != NULL && c.admin.cmds[0].bio == &bio && c.admin.cmds[0].nr_segs == 1 &&
+                    c.admin.inflight == 1;
+    bool ok = !stopped && !reclaimed && retained;
+    /* This fixture never gave the synthetic controller to hardware. Reclaim
+     * it after measuring the production guard so the self-test leaves no leak. */
+    dma_free(&pdev.dev, PAGE_SIZE, data, data_dma);
+    queue_free(&c, &c.admin);
+    return ok;
+#else
+    return false;
+#endif
+}
+EXPORT_SYMBOL(nvme_test_disable_ack);
+
 static unsigned g_submit_die_done;
 
 static void submit_die_done(struct bio *bio)

@@ -932,10 +932,11 @@ static const struct selftest tests[] = {
     { "elf-text-ro",     selftest_elf_text_ro },
     { "elf-data-private", selftest_elf_data_private },
     { "elf-txtbsy",      selftest_elf_txtbsy },
-    /* Last: this removes and rebinds the AHCI controller after all tests
-     * that rely on the original ahci0p1 name have finished. */
+    /* Last: device-stop tests remove and rebind controllers after all tests
+     * that rely on their original block-device names have finished. */
     { "ahci-stop-ack", selftest_ahci_stop_ack },
     { "ahci-probe-rollback", selftest_ahci_probe_rollback },
+    { "nvme-disable-ack", selftest_nvme_disable_ack },
 };
 
 /*

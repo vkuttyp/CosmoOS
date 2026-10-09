@@ -55,12 +55,12 @@ Check: review (the block layer's contract, `docs/kernel/device/api.md`,
 `ops->timeout`). Gap: QEMU's controller never times out; the abort and
 reset paths are exercised by review only.
 
-**M6. A dead controller refuses every submission and completes
-everything it held.** `controller_die` sets `dead` first (later
-`nvme_submit` calls return `-EIO`), disables the controller, and completes
-every slot's bio with `-ETIMEDOUT` and every waiter with `-EIO`. Check:
-review; the path runs at `nvme_remove` (module unload) where it is the
-normal shutdown. Gap: not driven under load.
+**M6. A dead controller refuses every submission.** `controller_die`
+sets `dead` first, so later `nvme_submit` calls return `-EIO`. It drains
+and completes slots only after `CSTS.RDY` acknowledges disable; if the
+acknowledgement fails, slots, mappings, queues and their bios remain
+allocated because the controller may still own them. Check: the NVMe
+disable-acknowledgement self-test and old-behavior probe.
 
 **M6a. A submission racing controller death is either refused before
 ownership transfers or completed exactly once.** The submitter checks
@@ -72,9 +72,22 @@ successful return without a callback is a failure.
 **M7. Bring-up follows the specification's order and every step is
 bounded.** Disable before programming AQA/ASQ/ACQ; `CC.EN` then `RDY`
 within `CAP.TO`; admin commands within 5 s; `CFS` is fatal. A failure at
-any step leaves the controller disabled and frees everything allocated.
-Check: every boot on both machines (the log line with queue count and
-depth); review of the failure labels in `nvme_probe`.
+any step frees resources only if disable is acknowledged; if not, the
+BAR and every DMA allocation potentially visible to the controller are
+retained. Check: every boot on both machines and review of the failure
+labels in `nvme_probe`.
+
+**M8. The controller's DMA memory is never freed before disable is
+acknowledged.** A failed `RDY`-clear wait makes the controller dead and
+refuses new I/O, but leaves queue memory and active mappings allocated;
+removal releases vectors and waits for handlers, then retains controller
+state if the device still has not acknowledged disable. Leaking is safer
+than returning memory the device may still access.
+
+Check: `nvme-disable-ack` injects a failed disable wait during removal,
+checks that the queue's SQ, CQ, PRP pages, active command, bio and data
+buffer mapping remain owned, then releases the synthetic fixture after
+the assertion.
 
 ## Gaps (documented, not invariants)
 

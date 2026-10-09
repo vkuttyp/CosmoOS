@@ -1067,6 +1067,8 @@ def main():
         failures.append("missing successful AHCI pending-interrupt rollback proof")
     if want_selftest and not any(re.search(r"AHCI-STOP-ACK: PASS", ln) for ln in lines):
         failures.append("missing successful AHCI stop-acknowledgement proof")
+    if want_selftest and not any(re.search(r"NVME-DISABLE-ACK: PASS", ln) for ln in lines):
+        failures.append("missing successful NVMe disable-acknowledgement proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 
