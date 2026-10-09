@@ -146,26 +146,28 @@ simulation; the test's assertions are unchanged and pass.
 
 ## Validation
 
-All at `3515d50c`, local, one QEMU at a time at default priority
-(`out/unit2-matrix/verdicts.txt`, every serial log beside it):
+All at `7a57b865` (after the review round), local, one QEMU at a time at
+default priority (`out/unit2-matrix/verdicts.txt`, every serial log beside
+it). The same matrix had passed at `3515d50c` before the review; branch CI
+passed at `a1ae9766` (run 37947601739).
 
 | Item | x86-64 | AArch64 |
 |---|---|---|
 | `make host-test` | PASS | PASS |
 | `make fuzz` | PASS | PASS |
 | `make analyze` | PASS (7 baselined, 0 unexpected, 0 stale) | PASS (7 baselined, 0 unexpected, 0 stale) |
-| debug `make test`, `QEMU_SMP=1` | PASS 141.2 s, harness 100/100 | PASS 133.0 s, harness 100/100 |
-| debug `make test`, `QEMU_SMP=2` | PASS 153.9 s, harness 100/100 | PASS 142.3 s, harness 100/100 |
-| debug `make test`, `QEMU_SMP=4` | PASS 153.2 s, harness 100/100 | PASS 156.3 s, harness 100/100 |
+| debug `make test`, `QEMU_SMP=1` | PASS 147.0 s, harness 100/100 | PASS 143.8 s, harness 100/100 |
+| debug `make test`, `QEMU_SMP=2` | PASS 144.3 s, harness 100/100 | PASS 141.9 s, harness 100/100 |
+| debug `make test`, `QEMU_SMP=4` | PASS 156.0 s, harness 100/100 | PASS 144.1 s, harness 100/100 |
 | `make test-smp2` | PASS | PASS |
 | `make test-chaos` | PASS | PASS |
 | `make test-harness-retry` | PASS | PASS |
 | `make BUILD=release test` | PASS | PASS |
 
-Release symbols (`llvm-nm`): neither release `xhci.ko` has an `xhci_test_*`
-or `g_cancel_test*` symbol (the debug module has seven) or the
-`__ksym_usb_request_complete` export; the release kernels have no cancel
-or sync-quarantine helper. Probes at `935ece18` or later, both
+Release symbols (`llvm-nm`): no test seam in any release `nvme.ko`,
+`ahci.ko`, `xhci.ko` or `e1000e.ko` on either architecture (the debug
+modules carry 14, 6, 23 and 6), no `__ksym_usb_request_complete` export,
+and no cancel or sync-quarantine helper in the release kernels. Probes at `935ece18` or later, both
 architectures, old and fixed: `xhci-cancel-ack`, `xhci-cancel-retired`
 (`QEMU_SMP=2`), `xhci-halt-ack`, `xhci-disable-ack` all PASS. The first
 fixed x86-64 `xhci-cancel-ack` run also hit `module-unload-busy` (the
