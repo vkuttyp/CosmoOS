@@ -22,6 +22,7 @@
 #include <arch/cpu.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
+#include <kernel/module.h>
 #include <kernel/netif.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
@@ -74,6 +75,11 @@ static bool g_steer = true;
 static void netif_dump_cpus(void);
 static netif_rx_hook_fn g_rx_hook;
 static void *g_rx_hook_arg;
+#if CONFIG_DEBUG
+static netif_test_worker_hook_fn g_test_input_hook;
+static netif_test_worker_hook_fn g_test_barrier_hook;
+static void *g_test_worker_hook_arg;
+#endif
 
 static void netif_release(struct kobject *obj)
 {
@@ -287,6 +293,11 @@ void netif_unregister(struct netif *nif)
     /* 4. Nothing of its left in any receive queue, and every worker has
      * finished any input_one it had started: a barrier through each. */
     unsigned dropped = rxq_purge(nif);
+#if CONFIG_DEBUG
+    netif_test_worker_hook_fn barrier_hook = __atomic_load_n(&g_test_barrier_hook, __ATOMIC_ACQUIRE);
+    if (barrier_hook != NULL)
+        barrier_hook(nif, __atomic_load_n(&g_test_worker_hook_arg, __ATOMIC_ACQUIRE));
+#endif
     net_workers_barrier();
 
     /* 5. Tables that name the interface. */
@@ -651,6 +662,22 @@ void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
     __atomic_store_n(&g_rx_hook, fn, __ATOMIC_RELEASE);
 }
 
+#if CONFIG_DEBUG
+void netif_test_worker_hooks_set(netif_test_worker_hook_fn input, netif_test_worker_hook_fn barrier, void *arg)
+{
+    if (input == NULL && barrier == NULL) {
+        __atomic_store_n(&g_test_input_hook, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_test_barrier_hook, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_test_worker_hook_arg, NULL, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_test_worker_hook_arg, arg, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_test_barrier_hook, barrier, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_input_hook, input, __ATOMIC_RELEASE);
+}
+EXPORT_SYMBOL(netif_test_worker_hooks_set);
+#endif
+
 #if CONFIG_SELFTEST
 /* The probe is one thread's sends on one interface: the benchmark's.
  * Anything else that transmits during the window -- an ARP retry on the
@@ -822,6 +849,11 @@ static void input_one(struct mbuf *m)
     quiesce_read_unlock();
     if (taken)
         return;
+#if CONFIG_DEBUG
+    netif_test_worker_hook_fn test_hook = __atomic_load_n(&g_test_input_hook, __ATOMIC_ACQUIRE);
+    if (test_hook != NULL)
+        test_hook(nif, __atomic_load_n(&g_test_worker_hook_arg, __ATOMIC_ACQUIRE));
+#endif
     if (nif->flags & NETIF_LOOPBACK) {
         /* No link layer: pkt.proto carries the EtherType. */
         if (m->pkt.proto == ETH_P_IP)

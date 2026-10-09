@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: a registration without a release, and one whose name fills all 8 bytes with no terminator, are both refused with `-EINVAL`; registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns), `net-census-wake-ref` (the runner's census waits out a worker's wake reference; see "A worker's wake reference is not a leftover" below) | `make test` |
+| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `netif-remove-worker`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: a registration without a release, and one whose name fills all 8 bytes with no terminator, are both refused with `-EINVAL`; registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns), `net-census-wake-ref` (the runner's census waits out a worker's wake reference; see "A worker's wake reference is not a leftover" below) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -1256,6 +1256,16 @@ wait the census returns at once with the count one high.
 `tools/census-wake-ref-probe.py --adversary` reproduces the CI failure on
 demand on any tree, by having the worker that woke `net-accept-race`'s
 listener sleep 30 ms before its put.
+
+**An active receive worker is part of interface removal.**
+`netif-remove-worker` queues a synthetic Ethernet frame, parks the selected
+worker in `input_one` just after its quiesce read section, and starts
+`netif_unregister` on another thread. A CONFIG_DEBUG barrier seam confirms
+unregister has passed the grace-period wait and queue purge; the test then
+requires unregister to remain blocked until the worker is released. This
+covers the gap between purging queued packets and finishing a packet that
+was already dequeued.
+
 A test that passes fewer checks on the forcing run than it was counted
 with never reaches its forcing point, and passes. As recorded:
 

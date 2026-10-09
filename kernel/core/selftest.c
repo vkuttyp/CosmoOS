@@ -792,6 +792,7 @@ static const struct selftest tests[] = {
     { "net-sockerr-locking", selftest_net_sockerr_locking },
     { "net-steer",       selftest_net_steer },
     { "net-rxhook-grace", selftest_net_rxhook_grace },
+    { "netif-remove-worker", selftest_netif_remove_worker },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
     { "blk-bench",       selftest_blk_bench },
