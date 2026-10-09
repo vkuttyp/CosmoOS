@@ -82,6 +82,6 @@ unregisters the disk to refuse new submissions, and retains the HBA,
 port DMA, active mappings, and their bios; these resources are leaked
 rather than returned while the controller may still own them.
 
-Check: `ahci-stop-ack` injects the first stop acknowledgement failure and
-checks the retry and cleanup; the permanent-failure retention branch is
-also checked by the driver's debug test seam.
+Check: `ahci-stop-ack` first injects one failure and verifies the retry
+followed by safe cleanup, then injects persistent failures and verifies
+that no DMA allocation is freed before the controller is rebound.

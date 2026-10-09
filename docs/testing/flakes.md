@@ -19,6 +19,20 @@ NVMe AArch64 boot and an earlier old-behavior boot passed `signal-stop`.
 This is outside Unit 2 and remains an out-of-scope correctness finding,
 not a load-sensitive classification or an assertion change.
 
+**Observed once, x86-64 `module-unload-busy` (2026-10-09):**
+`/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
+`waited >= 50000000ULL` failed at `kernel/module/modtest.c:720`; four
+following zombie tests failed because that first test left the fixture
+module as a zombie. The mechanism is the clock mismatch: this QEMU boot
+reports `clock_is_common() == false` (`boot-test.log` lines 909 and 920),
+so `module_unload` builds its 50 ms deadline from the quantized global tick
+counter in `kernel/timer/timer.c:232-233`, while the test measures elapsed
+time with `clock_since_ns()` from the per-CPU clock. If the call starts just
+before a tick, 50 tick increments can expire in less than 50 ms on that
+clock. This is a test-measurement contract issue outside Unit 2; neither the
+assertion nor timeout was changed. The observed run had 453 self-tests and
+the AHCI stop test itself passed (`AHCI-STOP-ACK: PASS hits=12 dma_frees=0`).
+
 **Observed once, host test `online-late` (2026-10-09):** the first
 `gmake host-test` overlapped two `gmake -j4 ... analyze` builds and failed
 `tests/host/test_quiesce.c:425-426` (`reads > 0`, `saw_new_cpu`). In this

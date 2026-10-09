@@ -33,9 +33,17 @@ EXPECTED_FAILURES = {
 def restore_old(tree):
     path = tree / DRIVER
     source = path.read_text()
-    if source.count(REMOVE_RETAIN) != 1:
+    start = source.index("static void ahci_remove(struct pci_device *pdev)")
+    end = source.index("static const struct pci_id ahci_ids[]", start)
+    remove = source[start:end]
+    if remove.count(REMOVE_RETAIN) != 1:
         raise RuntimeError("AHCI remove-retention anchor changed")
-    path.write_text(source.replace(REMOVE_RETAIN, "", 1))
+    remove = remove.replace(REMOVE_RETAIN, "", 1)
+    if remove.count("    bool retain_dma = false;\n") != 1 or remove.count("                retain_dma = true;\n") != 1:
+        raise RuntimeError("AHCI remove-retention state changed")
+    remove = remove.replace("    bool retain_dma = false;\n", "", 1)
+    remove = remove.replace("                retain_dma = true;\n", "", 1)
+    path.write_text(source[:start] + remove + source[end:])
 
 
 def verify_baseline():

@@ -3441,6 +3441,25 @@ bool selftest_ahci_stop_ack(const char **reason)
         *reason = "ahci-stop-ack: no bound AHCI controller";
         return false;
     }
+
+    /* One failed acknowledgement is retried; because the second attempt
+     * succeeds, it is safe to release the controller's DMA on this pass. */
+    struct dma_stats retry_before, retry_after;
+    dma_get_stats(&retry_before);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 1, thread_current());
+    int retry_removed = pci_test_remove(pdev);
+    struct fi_stats retry_st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &retry_st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    dma_get_stats(&retry_after);
+    uint64_t retry_freed = retry_after.frees - retry_before.frees;
+    bool retry_rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
+                         pdev->dev.state == DEV_BOUND;
+    if (retry_removed != 0 || retry_st.hits != 1 || retry_freed == 0 || !retry_rebound) {
+        *reason = "ahci-stop-ack: single failure was not retried and cleaned up safely";
+        return false;
+    }
+
     struct dma_stats before, after;
     dma_get_stats(&before);
     faultinject_set(FI_AHCI_STOP_ACK, 1, 0, thread_current());
@@ -3452,7 +3471,8 @@ bool selftest_ahci_stop_ack(const char **reason)
     bool bound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND;
     uint64_t freed = after.frees - before.frees;
     bool ok = removed == 0 && st.hits > 0 && freed == 0 && bound;
-    kinfo("AHCI-STOP-ACK: %s hits=%llu dma_frees=%llu rebound=%u", ok ? "PASS" : "FAIL",
+    kinfo("AHCI-STOP-ACK: %s retry_hits=%llu retry_frees=%llu retry_rebound=%u persistent_hits=%llu dma_frees=%llu rebound=%u",
+          ok ? "PASS" : "FAIL", (unsigned long long)retry_st.hits, (unsigned long long)retry_freed, retry_rebound,
           (unsigned long long)st.hits, (unsigned long long)freed, bound);
     if (ok)
         kinfo("selftest: ahci-stop-ack: controller with unacknowledged port stops retained its DMA allocations");

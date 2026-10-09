@@ -54,6 +54,23 @@ serial, capacity and sector size — keeps the same blkdev: `blk_find`
 returns the same object and a read and a write work. The recovery an
 error that needs a link reset goes through.
 
+**`ahci-probe-rollback`** (debug builds; fault injection): after all
+implemented ports are live, the probe fails with a port-change bit
+pending. The test requires `GHC.IE == 0`, zero handler calls, no disk and
+no active command before the vector is synchronized, then rebinds the
+controller successfully (`AHCI-ROLLBACK-PENDING`). This establishes that
+this rollback point precedes both interrupt dispatch and bio publication.
+
+**`ahci-stop-ack`** (debug builds; fault injection): first withhold one
+port-stop acknowledgement; the retry succeeds and the controller's DMA
+is then freed before a successful rebind. Next withhold every stop
+acknowledgement across remove; the test requires zero DMA frees and a
+successful rebind. The paired `tools/ahci-stop-ack-probe.py --old` runs
+on both architectures remove the retention branch in a throwaway
+worktree and require `dma_frees=12` plus exactly the expected self-test
+failure. This checks that a device which did not acknowledge stop never
+loses DMA memory while it may still own it.
+
 **`iommu`** (unchanged): it walks every blkdev with `debug_dma` and now
 provokes faults through `ahci0p0` and `ahci0p1` as well, each attributed
 to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).

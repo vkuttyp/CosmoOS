@@ -17,6 +17,7 @@ failure from an unreachable or unresolved suspicion.
 | NVMe submit across controller death | Proven | `selftest_submit_die_window` calls `controller_die` after the first dead check and before the queue lock. `tools/nvme-die-window-probe.py --old` on x86-64 and AArch64 reported `accepted=1 done=0 inflight=1`; each failed only the required proof marker, while all 451 self-tests and the 100-round network harness passed. With the fix, both architectures reported `accepted=0 done=0 inflight=0` and booted cleanly. | Added an acquire dead recheck under `q->lock`; rejects with `-EIO` and unmaps every segment before returning. |
 | virtio-rng completion after reset | Proven | `vrng_completed` runs after the synthetic reset boundary and reaches `vrng_post`. `tools/virtio-rng-repost-probe.py --old` on both architectures reported `posts_after_reset=1`; the sole harness failure was the required proof marker, with 451 self-tests and the network harness passing. Fixed x86-64 and AArch64 boots reported zero posts after reset. | `vrng_post` checks `stopping` while holding the lock that serializes `virtq_add` and `virtq_kick`; remove closes this gate before reset. |
 | AHCI probe rollback before IRQ synchronization | Refuted | The test fails probe after all ports start, issues COMRESET to latch status (`pending=0x3f`), and observes `GHC.IE=0`, `irqs=0`, no disk and no active command on x86-64 and AArch64. Both 452-test boots passed. | No ordering change: every reachable `fail_ports` path is before worker creation, `GHC.IE`, disk probing and bio publication; the pending event cannot dispatch the handler. |
+| AHCI port-stop acknowledgement on remove | Proven | `tools/ahci-stop-ack-probe.py --old` on x86-64 and AArch64 reports `hits=12 dma_frees=12 rebound=1`; each old run has exactly the required `ahci-stop-ack` failure, 100/100 network service, and no other self-test failure. Fixed-path self-tests assert that one failed stop retries and then frees safely, while persistent failures retain all DMA (`dma_frees=0`). The fixed AArch64 run passed all 453 tests; its marker was `retry_hits=1`, `retry_frees>0`, and `persistent_hits=12`. | Retry each port stop once. If the second acknowledgement also fails, remove masks and synchronizes IRQs, unregisters the disk, and retains controller, port DMA, outstanding mappings, and bios. |
 
 ## Out-of-scope validation finding
 
@@ -31,3 +32,12 @@ old-behavior run and the fixed AArch64 boot passed `signal-stop`. The first
 run is recorded in `docs/testing/flakes.md` and the deferred-work
 inventory; it remains an out-of-scope finding and is not changed in this
 unit.
+
+The first fixed x86-64 AHCI stop-ack boot also failed `module-unload-busy`
+at `kernel/module/modtest.c:720` (`waited >= 50000000ULL`), followed by
+four module-zombie checks. The unload deadline uses quantized global ticks
+when `clock_is_common()` is false, while the assertion measures elapsed
+time from a per-CPU clock. The mismatch explains how 50 ticks can expire
+before 50 ms on the assertion's clock. This is recorded in
+`docs/testing/flakes.md` and the deferred-work inventory; it is outside
+Unit 2 and remains unchanged.
