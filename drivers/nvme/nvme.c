@@ -515,6 +515,12 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
 #endif
 
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+    if (__atomic_load_n(&c->dead, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&q->lock, s);
+        for (unsigned k = 0; k < nsegs; k++)
+            dma_unmap(bd->dev, seg_dma[k], seg_len[k], dir);
+        return -EIO;
+    }
     uint16_t cid = slot_get(q);
     if (cid == 0xffff) {
         spin_unlock_irqrestore(&q->lock, s);
