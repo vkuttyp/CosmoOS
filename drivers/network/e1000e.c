@@ -71,6 +71,7 @@ struct e1000e {
 /* A failed-stop test may have to keep this instance alive until the
  * injection is cleared and the stop can be acknowledged. */
 static struct e1000e *g_stop_orphan;
+static unsigned g_rings_free_calls;
 bool e1000e_test_stop_ack(unsigned kind);
 #endif
 
@@ -382,6 +383,9 @@ static int rings_alloc(struct e1000e *e)
 
 static void rings_free(struct e1000e *e)
 {
+#if CONFIG_SELFTEST
+    __atomic_fetch_add(&g_rings_free_calls, 1u, __ATOMIC_RELAXED);
+#endif
     for (unsigned i = 0; i < E1000E_RING; i++) {
         struct mbuf *m = e->rx_bufs[i];
         if (m != NULL) {
@@ -631,15 +635,13 @@ bool e1000e_test_stop_ack(unsigned kind)
     if (kind != FI_E1000E_RX_DISABLE_ACK && kind != FI_E1000E_TX_DISABLE_ACK)
         return false;
 
-    struct dma_stats before, after;
-    dma_get_stats(&before);
+    unsigned frees_before = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED);
     faultinject_set((enum fi_kind)kind, 1, 0, thread_current());
     int removed = pci_test_remove(pdev);
     struct fi_stats fi;
     faultinject_stats((enum fi_kind)kind, &fi);
     faultinject_clear((enum fi_kind)kind);
-    dma_get_stats(&after);
-    uint64_t freed = after.frees - before.frees;
+    unsigned ring_frees = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED) - frees_before;
     bool retained = g_stop_orphan != NULL && g_stop_orphan->pdev == pdev;
     bool cleaned = false;
     if (retained) {
@@ -657,10 +659,10 @@ bool e1000e_test_stop_ack(unsigned kind)
     }
     bool rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
                    pdev->dev.state == DEV_BOUND;
-    bool ok = removed == 0 && fi.hits > 0 && retained && freed == 0 && cleaned && rebound;
-    kinfo("E1000E-STOP-ACK: kind=%s %s hits=%llu dma_frees=%llu retained=%u cleaned=%u rebound=%u",
+    bool ok = removed == 0 && fi.hits > 0 && retained && ring_frees == 0 && cleaned && rebound;
+    kinfo("E1000E-STOP-ACK: kind=%s %s hits=%llu ring_frees=%u retained=%u cleaned=%u rebound=%u",
           faultinject_kind_name((enum fi_kind)kind), ok ? "PASS" : "FAIL", (unsigned long long)fi.hits,
-          (unsigned long long)freed, retained, cleaned, rebound);
+          ring_frees, retained, cleaned, rebound);
     return ok;
 #else
     (void)kind;
