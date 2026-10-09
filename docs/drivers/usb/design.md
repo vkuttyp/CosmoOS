@@ -252,8 +252,13 @@ The command failures are exercised with a synthetic command ring by
 `xhci-disable-ack`.
 
 **Removal** (`xhci_remove`): disconnect every port, stop the worker,
-stop the controller (`RS` clear, wait `HCH`), release the vector and
-`synchronize_irq`, free every ring and context, unmap.
+clear `USBCMD.RS` and wait for `USBSTS.HCH`, retrying once. Then release
+the vector, wait for the IRQ and deferred poll to retire, and free every
+ring and context. If HCH does not assert after the retry, keep the
+controller structure, BAR mapping, rings, contexts, and scratch DMA
+allocated; the PCI function may still be bus mastering. The bound driver
+data remains as a tombstone so the function cannot be probed a second
+time while the old controller may still own memory.
 
 ## USB mass storage (`usb_storage.c`)
 

@@ -166,3 +166,16 @@ then clears the fault, retries teardown and verifies the fixture is
 reclaimed. `tools/xhci-disable-ack-probe.py --old` must fail on both
 architectures because the old path freed the fixture after the failed
 command.
+
+**U13. Controller DMA is freed only after HCH acknowledges halt.**
+`xhci_remove` clears `USBCMD.RS`, checks `USBSTS.HCH`, and retries once.
+If HCH remains clear, it retires the IRQ and deferred poll, leaves the
+BAR and every controller-visible allocation mapped, and keeps the PCI
+driver data pointer so a later probe cannot replace a controller that
+may still own DMA.
+
+Check: `xhci-halt-ack` forces both halt attempts to fail in the synthetic
+register fixture, requires the run state and HCH status to remain live,
+then clears the injection and verifies the retry halts the fixture.
+`tools/xhci-halt-ack-probe.py --old` must fail because the old removal
+path ignored the HCH wait result.

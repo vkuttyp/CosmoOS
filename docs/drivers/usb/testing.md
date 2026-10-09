@@ -73,6 +73,11 @@ rings across the failed command and reclaim them only after the injected
 failure is cleared. The old-behavior proof runs through
 `tools/xhci-disable-ack-probe.py --old` on x86-64 and AArch64.
 
+**`xhci-halt-ack`**: with `USBCMD.RS` set and `USBSTS.HCH` clear, inject
+both failed stop attempts, require the controller state to remain
+allocated, then clear the injection and verify HCH asserts. The paired
+old-behavior check is `tools/xhci-halt-ack-probe.py --old`.
+
 **`iommu`** (the existing test, extended): for every block device whose
 driver has `debug_dma` and whose DMA device has a domain — `nvme0n1`
 and `sda` — a one-block read into an unmapped address is provoked and

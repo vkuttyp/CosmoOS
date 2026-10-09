@@ -102,6 +102,7 @@ enum fi_kind {
     FI_E1000E_TX_DISABLE_ACK, /* e1000e: TCTL.EN remains set */
     FI_XHCI_STOP_EP_ACK, /* xHCI: Stop Endpoint does not acknowledge */
     FI_XHCI_DISABLE_SLOT_ACK, /* xHCI: Disable Slot does not acknowledge */
+    FI_XHCI_HALT_ACK, /* xHCI: USBCMD.RS clear does not set USBSTS.HCH */
     FI_KIND_COUNT,
 };
 /* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests
@@ -144,6 +145,8 @@ The `e1000e-rx-disable-ack` and `e1000e-tx-disable-ack` rules leave the
 selected engine's enable bit set when removal tries to stop it.
 The `xhci-stop-ep-ack` and `xhci-disable-slot-ack` rules make the named
 command completion fail in the synthetic xHCI teardown fixture.
+The `xhci-halt-ack` rule leaves `USBCMD.RS` set in the synthetic
+controller fixture, so the `USBSTS.HCH` acknowledgement does not arrive.
 `sysctl("debug.faultinject")` reports each kind's rule and counters. There
 is no write path through `sysctl`: the audit's phrase "behind a debug
 sysctl" is honoured for observation; making `sysctl` writable is a

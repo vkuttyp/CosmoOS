@@ -1073,6 +1073,8 @@ def main():
         failures.append("missing successful e1000e RX/TX disable-acknowledgement proof")
     if want_selftest and not any(re.search(r"XHCI-DISABLE-ACK-SWEEP: PASS", ln) for ln in lines):
         failures.append("missing successful xHCI Stop Endpoint/Disable Slot acknowledgement proof")
+    if want_selftest and not any(re.search(r"XHCI-HALT-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI halt acknowledgement proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 

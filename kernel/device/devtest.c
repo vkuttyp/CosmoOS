@@ -3738,3 +3738,42 @@ bool selftest_xhci_disable_ack(const char **reason)
     return true;
 #endif
 }
+
+bool selftest_xhci_halt_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-HALT-ACK-SWEEP: PASS not-present");
+        return true;
+    }
+    bool (*run)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_halt_ack", NULL);
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_recover_halt_ack", NULL);
+    if (run == NULL || recover == NULL) {
+        *reason = "xhci-halt-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+    faultinject_set(FI_XHCI_HALT_ACK, 1, 0, thread_current());
+    bool retained = run();
+    struct fi_stats st;
+    faultinject_stats(FI_XHCI_HALT_ACK, &st);
+    faultinject_clear(FI_XHCI_HALT_ACK);
+    bool recovered = recover();
+    bool ok = retained && st.hits >= 2 && recovered;
+    kinfo("XHCI-HALT-ACK-SWEEP: %s retained=%u hits=%llu recovered=%u", ok ? "PASS" : "FAIL",
+          retained, (unsigned long long)st.hits, recovered);
+    if (!ok)
+        *reason = "xhci-halt-ack: controller DMA was not retained after HCH failed to assert; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}

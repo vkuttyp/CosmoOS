@@ -152,8 +152,12 @@ static struct pci_device g_disable_test_pdev;
 static struct usb_device g_disable_test_udev;
 static struct xhci_dev *g_disable_test_d;
 static uint64_t g_disable_test_dcbaa[XHCI_MAX_SLOTS + 1];
+static struct xhci g_halt_test_x;
+static uint32_t g_halt_test_regs[64];
 bool xhci_test_disable_ack(unsigned kind);
 bool xhci_test_recover_disable_ack(void);
+bool xhci_test_halt_ack(void);
+bool xhci_test_recover_halt_ack(void);
 #endif
 
 static uint32_t rd32(vaddr_t addr) { return *(volatile uint32_t *)addr; }
@@ -1364,6 +1368,62 @@ static bool wait_bits(vaddr_t reg, uint32_t mask, uint32_t want, unsigned ms)
     }
     return (rd32(reg) & mask) == want;
 }
+
+/* The old removal path waited for HCH and discarded the result. Kept as a
+ * named operation so the self-test can make that ignored acknowledgement
+ * deterministic before the remove path is changed. */
+static bool xhci_halt_controller(struct xhci *x)
+{
+    uint32_t cmd = rd32(x->op + XHCI_USBCMD);
+    if (cmd & USBCMD_RS) {
+#if CONFIG_FAULTINJECT
+        if (!faultinject_should_fail(FI_XHCI_HALT_ACK)) {
+            wr32(x->op + XHCI_USBCMD, cmd & ~USBCMD_RS);
+#if CONFIG_SELFTEST
+            if (x->test_synthetic)
+                wr32(x->op + XHCI_USBSTS, rd32(x->op + XHCI_USBSTS) | USBSTS_HCH);
+#endif
+        }
+#else
+        wr32(x->op + XHCI_USBCMD, cmd & ~USBCMD_RS);
+#endif
+        (void)wait_bits(x->op + XHCI_USBSTS, USBSTS_HCH, USBSTS_HCH, 100);
+    }
+    return true;
+}
+
+#if CONFIG_SELFTEST
+bool xhci_test_halt_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    memset(&g_halt_test_x, 0, sizeof(g_halt_test_x));
+    memset(g_halt_test_regs, 0, sizeof(g_halt_test_regs));
+    g_halt_test_x.test_synthetic = true;
+    g_halt_test_x.op = (vaddr_t)g_halt_test_regs;
+    g_halt_test_regs[XHCI_USBCMD / sizeof(uint32_t)] = USBCMD_RS;
+    bool halted = xhci_halt_controller(&g_halt_test_x);
+    bool retained = !halted &&
+                    (g_halt_test_regs[XHCI_USBCMD / sizeof(uint32_t)] & USBCMD_RS) != 0 &&
+                    (g_halt_test_regs[XHCI_USBSTS / sizeof(uint32_t)] & USBSTS_HCH) == 0;
+    kinfo("XHCI-HALT-ACK: %s halted=%u retained=%u", retained ? "PASS" : "FAIL", halted, retained);
+    return retained;
+#else
+    return false;
+#endif
+}
+EXPORT_SYMBOL(xhci_test_halt_ack);
+
+bool xhci_test_recover_halt_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool halted = xhci_halt_controller(&g_halt_test_x);
+    return halted && (g_halt_test_regs[XHCI_USBSTS / sizeof(uint32_t)] & USBSTS_HCH) != 0;
+#else
+    return false;
+#endif
+}
+EXPORT_SYMBOL(xhci_test_recover_halt_ack);
+#endif
 
 static int xhci_halt_and_reset(struct xhci *x)
 {
