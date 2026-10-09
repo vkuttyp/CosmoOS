@@ -1043,6 +1043,7 @@ bool xhci_test_disable_ack(unsigned kind)
     g_disable_test_x.pdev = &g_disable_test_pdev;
     g_disable_test_x.test_synthetic = true;
     g_disable_test_x.dcbaa = g_disable_test_dcbaa;
+    g_disable_test_x.hcd.priv = &g_disable_test_x;
     spinlock_init(&g_disable_test_x.lock, "xhci-test");
 
     struct xhci_dev *d = kzalloc(sizeof(*d));
