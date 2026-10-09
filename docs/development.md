@@ -481,7 +481,9 @@ past its whole-boot budget: a loaded host, not a mode (report §7.3).
 
 `.github/workflows/ci.yml` runs on every push and pull request on the
 GitHub-hosted `ubuntu-24.04` (x86-64) runner, inside a `debian:trixie`
-container (QEMU 10, `libclang-rt-dev` for the sanitizers,
+container pulled from `public.ecr.aws/docker/library` (Docker's official
+image through ECR Public's mirror, which has no Docker Hub pull limit;
+2026-10-10) (QEMU 10, `libclang-rt-dev` for the sanitizers,
 `qemu-system-arm` and `qemu-efi-aarch64` for the AArch64 target), as a
 matrix over `arch: [x86_64, aarch64]`. Each job runs `check-tools`, a
 debug build with `test`, a release build with `test`, `host-test`,
