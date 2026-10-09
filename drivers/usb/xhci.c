@@ -1630,6 +1630,7 @@ bool xhci_test_cancel_ack(unsigned faults)
      * back a request the cancel kept. */
     bool in_flight = r.hcd_priv != NULL;
     unsigned calls_after_cancel = seen.calls;
+    int crc2 = 0;
     if (in_flight) {
         struct xhci_ring *ring = d->ep[dci].ring;
         unsigned first = ((struct xhci_td *)r.hcd_priv)->first;
@@ -1644,6 +1645,11 @@ bool xhci_test_cancel_ack(unsigned faults)
         if (late != NULL)
             usb_request_complete(late, st, late->actual);
         ring_flush(x, ring, NULL, 0, -ECANCELED);
+        /* The controller halts after all (HCH reads set), and the caller
+         * cancels again: the request stays the HCD's, since nothing
+         * acknowledged a stop while it could still write (U14). */
+        g_cancel_test_regs[XHCI_USBSTS / sizeof(uint32_t)] |= USBSTS_HCH;
+        crc2 = xhci_cancel(&x->hcd, &r, -ETIMEDOUT);
     }
 
     bool ok;
@@ -1660,11 +1666,12 @@ bool xhci_test_cancel_ack(unsigned faults)
         ok = crc == 0 && seen.calls == 1 && seen.status == -ETIMEDOUT && seen.hch && !in_flight;
     } else {
         outcome = "quarantined";
-        ok = crc == -EIO && calls_after_cancel == 0 && seen.calls == 0 && in_flight;
+        ok = crc == -EIO && calls_after_cancel == 0 && seen.calls == 0 && in_flight && crc2 == -EIO &&
+             r.hcd_priv != NULL;
     }
     kinfo("XHCI-CANCEL-ACK: outcome=%s %s submit=%d cancel=%d done=%u status=%d slot_at_done=%u hch_at_done=%u "
-          "in_flight=%u",
-          outcome, ok ? "PASS" : "FAIL", src, crc, seen.calls, seen.status, seen.slot, seen.hch, in_flight);
+          "in_flight=%u recancel=%d",
+          outcome, ok ? "PASS" : "FAIL", src, crc, seen.calls, seen.status, seen.slot, seen.hch, in_flight, crc2);
 
     /* The synthetic controller has no hardware behind it: whatever the
      * cancel kept is reclaimed here, by the test, not by the driver. */
