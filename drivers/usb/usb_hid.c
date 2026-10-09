@@ -274,12 +274,18 @@ static void hid_remove(struct usb_device *udev)
     arch_irq_state_t f = spin_lock_irqsave(&k->lock);
     __atomic_store_n(&k->stopping, true, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&k->lock, f);
-    (void)usb_cancel(&k->req, -ENODEV);
+    bool kept = usb_cancel(&k->req, -ENODEV) == -EIO;
 
     kinfo("usb-hid: %s removed (%llu reports, %llu keys, %llu dropped, %llu errors)", udev->dev.name,
           (unsigned long long)k->reports, (unsigned long long)k->keys, (unsigned long long)k->dropped,
           (unsigned long long)k->errors);
     udev->drvdata = NULL;
+    if (kept) {
+        /* The controller keeps the request inside `k` and its report
+         * buffer (U10): neither is freed. */
+        usb_note_quarantine(udev, "the report request", sizeof(*k) + k->req.len);
+        return;
+    }
     kfree(k->report);
     kfree(k);
 }

@@ -80,6 +80,9 @@ struct usb_hub {
     spinlock_t lock;                  /* changed, stopping */
     uint32_t changed;                 /* ports the last report named, 1-based bits */
     bool stopping;
+    bool released;                    /* `remove` is done with h->req: the worker may free h */
+    bool kept;                        /* the status request's cancel answered -EIO: `h` and its buffers are never
+                                       * freed (U10) */
     uint64_t reports, arrivals, departures, errors;
 };
 
@@ -217,6 +220,12 @@ static void hub_free(struct usb_hub *h)
     kinfo("usb-hub: %s removed (%llu reports, %llu arrival(s), %llu departure(s), %llu error(s))",
           udev->dev.name, (unsigned long long)h->reports, (unsigned long long)h->arrivals,
           (unsigned long long)h->departures, (unsigned long long)h->errors);
+    if (__atomic_load_n(&h->kept, __ATOMIC_ACQUIRE)) {
+        /* The controller keeps h->req and the status buffer, and the
+         * request names the device: nothing of it is released. */
+        usb_note_quarantine(udev, "the status request", sizeof(*h) + h->status_len);
+        return;
+    }
     kfree(h->status_buf);
     kfree(h->port_buf);
     kfree(h);
@@ -261,6 +270,10 @@ static void hub_worker(void *arg)
     /* The children were taken down by the core before the hub itself
      * (U9); this drops what the driver still held of them, and then the
      * hub's own state, which nobody else is waiting for. */
+    /* `stopping` is set before `remove` cancels the status request, so a
+     * worker already awake can get here while the cancel still uses
+     * h->req: h is freed only after `remove` let go of it. */
+    wait_event(&h->work, __atomic_load_n(&h->released, __ATOMIC_ACQUIRE));
     for (unsigned p = 1; p <= h->nr_ports; p++)
         child_gone(h, p);
     hub_free(h);
@@ -397,6 +410,7 @@ static int hub_probe(struct usb_device *udev, struct usb_interface *intf, const 
         kerror("usb-hub: %s: cannot watch for port changes (%d)", udev->dev.name, rc);
         arch_irq_state_t f = spin_lock_irqsave(&h->lock);
         __atomic_store_n(&h->stopping, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&h->released, true, __ATOMIC_RELEASE);   /* no request was ever in flight */
         spin_unlock_irqrestore(&h->lock, f);
         udev->drvdata = NULL;
         waitqueue_wake_all(&h->work);   /* the worker frees h and drops the reference */
@@ -430,8 +444,10 @@ static void hub_remove(struct usb_device *udev)
     arch_irq_state_t f = spin_lock_irqsave(&h->lock);
     __atomic_store_n(&h->stopping, true, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&h->lock, f);
-    (void)usb_cancel(&h->req, -ENODEV);
+    if (usb_cancel(&h->req, -ENODEV) == -EIO)
+        __atomic_store_n(&h->kept, true, __ATOMIC_RELEASE);
     udev->drvdata = NULL;
+    __atomic_store_n(&h->released, true, __ATOMIC_RELEASE);   /* after which the worker may free h */
     waitqueue_wake_all(&h->work);
 }
 

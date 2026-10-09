@@ -55,6 +55,7 @@ struct xhci_td {
     uint32_t moved;                /* what a short-packet or error event said was moved (valid with `cut`) */
     bool cut;                      /* the TD ended early: `moved` is the answer, not `total` */
     bool nomap;                    /* debug_dma: the address was never mapped, so it is never unmapped */
+    bool quarantined;              /* no stop was acknowledged: never completed, never unmapped (U14) */
 };
 
 struct xhci_ring {
@@ -125,7 +126,9 @@ struct xhci {
     int vector;
     bool msix;
     bool dead;
+    bool halted;                   /* HCH acknowledged a halt: the controller performs no DMA (U14) */
     uint64_t events, transfers, commands, errors;
+    uint64_t quarantined;          /* requests kept, with their buffers, because nothing acknowledged a stop */
 #if CONFIG_SELFTEST
     bool test_synthetic;
 #endif
@@ -480,8 +483,10 @@ static int xhci_submit(struct usb_hcd *hcd, struct usb_request *r)
     struct xhci *x = hcd_to_xhci(hcd);
     struct usb_device *udev = r->udev;
     struct xhci_ep *ep = xhci_ep_of(udev, r->ep);
-    if (ep == NULL || udev->slot == 0)
+    if (ep == NULL)
         return -EINVAL;
+    if (udev->slot == 0)
+        return -ENODEV;   /* a cancel disabled the slot (U14) */
     bool control = r->ep == 0;
     bool in = control ? (r->setup.bmRequestType & USB_DIR_IN) != 0 : (r->ep & USB_EP_DIR_IN) != 0;
     enum dma_dir dir = in ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
@@ -577,6 +582,7 @@ static int xhci_submit(struct usb_hcd *hcd, struct usb_request *r)
     td->moved = 0;
     td->cut = false;
     td->nomap = nomap;
+    td->quarantined = false;
     for (unsigned i = first, k = 0; k < n; k++, i = ring_next(i))
         ring->req[i] = r;
     r->hcd_priv = td;
@@ -615,6 +621,8 @@ static struct usb_request *handle_transfer_event(struct xhci *x, const struct xh
     struct usb_request *r = ring->req[idx];
     if (r == NULL)
         return NULL;   /* already retired: a cancel or an error took the TD */
+    if (((struct xhci_td *)r->hcd_priv)->quarantined)
+        return NULL;   /* the cancel kept it: it never comes back (U14) */
     if (cc == CC_STOPPED || cc == CC_STOPPED_LEN_INV || cc == CC_STOPPED_SHORT)
         return NULL;   /* Stop Endpoint's report; the cancel path completes the request */
     struct xhci_td *td = r->hcd_priv;
@@ -648,7 +656,8 @@ static struct usb_request *handle_transfer_event(struct xhci *x, const struct xh
 
 /* Every request on a ring, completed with `status` (the first with
  * `first_status`). Thread context, the endpoint stopped; runs the
- * callbacks after the lock is dropped. */
+ * callbacks after the lock is dropped. A quarantined request stays where
+ * it is (U14). */
 static void ring_flush(struct xhci *x, struct xhci_ring *ring, struct usb_request *victim, int victim_status,
                        int status)
 {
@@ -657,7 +666,7 @@ static void ring_flush(struct xhci *x, struct xhci_ring *ring, struct usb_reques
         struct usb_request *r = NULL;
         unsigned i = ring->deq;
         for (unsigned n = 0; n < XHCI_RING_LAST && r == NULL; n++, i = ring_next(i)) {
-            if (ring->req[i] != NULL)
+            if (ring->req[i] != NULL && !((struct xhci_td *)ring->req[i]->hcd_priv)->quarantined)
                 r = ring->req[i];
         }
         if (r == NULL) {
@@ -673,21 +682,68 @@ static void ring_flush(struct xhci *x, struct xhci_ring *ring, struct usb_reques
     }
 }
 
-/* Stop the endpoint and move its dequeue pointer to the enqueue point:
- * nothing on the ring runs afterwards. Thread context. */
-static int ep_stop_and_drain(struct xhci *x, struct usb_device *udev, unsigned dci)
+static bool xhci_disable_command_ack(struct xhci *x, const char *what, uint32_t control, bool context_ok);
+static bool xhci_halt_controller(struct xhci *x);
+
+/* What the controller acknowledged when a cancel asked it to let go of
+ * a ring, in escalation order (U14). */
+enum xhci_quiesced {
+    XQ_ENDPOINT,   /* Stop Endpoint and Set TR Dequeue: the device stays usable */
+    XQ_SLOT,       /* Disable Slot: no ring of the device is fetched again */
+    XQ_HALT,       /* HCH: the controller performs no DMA at all */
+    XQ_NONE,       /* nothing: the controller is dead and may still own the buffers */
+};
+
+/*
+ * Make the controller let go of endpoint `dci`'s ring, escalating while
+ * nothing acknowledges (docs/drivers/usb/design.md, "Cancel"). A
+ * controller already dead acknowledged nothing, so it starts at the
+ * halt; one already halted needs nothing. Thread context.
+ */
+static enum xhci_quiesced xhci_cancel_quiesce(struct xhci *x, struct usb_device *udev, unsigned dci)
 {
-    int cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_STOP_EP) | TRB_EP_ID(dci) | TRB_SLOT(udev->slot), NULL);
-    /* Context State means the endpoint was not running (halted, or already
-     * stopped): the drain below is still right. */
-    if (cc < 0 || (cc != CC_SUCCESS && cc != CC_CONTEXT_STATE))
-        return cmd_result(x, "stop endpoint", cc);
-    struct xhci_dev *d = udev->hcd_priv;
+    if (__atomic_load_n(&x->halted, __ATOMIC_ACQUIRE))
+        return XQ_HALT;
+    unsigned slot = udev->slot;
+    if (!x->dead && slot != 0) {
+        /* Context State: the endpoint was not running (halted, or already
+         * stopped), which is what the stop was for. */
+        if (xhci_disable_command_ack(x, "stop endpoint", TRB_TYPE(TRB_CMD_STOP_EP) | TRB_EP_ID(dci) | TRB_SLOT(slot),
+                                     true)) {
+            /* The dequeue pointer past every TD too: a stopped endpoint
+             * restarted by the next doorbell would otherwise fetch the TRBs
+             * the flush is about to unmap. */
+            struct xhci_dev *d = udev->hcd_priv;
+            arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+            uint64_t deq = ring_enqueue_ptr(d->ep[dci].ring);
+            spin_unlock_irqrestore(&x->lock, s);
+            int cc = xhci_cmd(x, deq, TRB_TYPE(TRB_CMD_SET_DEQ) | TRB_EP_ID(dci) | TRB_SLOT(slot), NULL);
+            if (cmd_result(x, "set dequeue pointer", cc) == 0)
+                return XQ_ENDPOINT;
+        }
+        if (!x->dead &&
+            xhci_disable_command_ack(x, "disable slot", TRB_TYPE(TRB_CMD_DISABLE_SLOT) | TRB_SLOT(slot), false)) {
+            arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+            x->dcbaa[slot] = 0;
+            x->slot_dev[slot] = NULL;
+            spin_unlock_irqrestore(&x->lock, s);
+            udev->slot = 0;   /* disable_device frees the contexts without another command */
+            kwarn("xhci%u: %s: endpoint %u did not stop; slot %u disabled", x->hcd.index, udev->dev.name, dci,
+                  slot);
+            return XQ_SLOT;
+        }
+    }
+    bool halted = xhci_halt_controller(x);
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);
-    uint64_t deq = ring_enqueue_ptr(d->ep[dci].ring);
+    x->dead = true;
+    x->hcd.dead = true;
+    if (halted)
+        __atomic_store_n(&x->halted, true, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&x->lock, s);
-    cc = xhci_cmd(x, deq, TRB_TYPE(TRB_CMD_SET_DEQ) | TRB_EP_ID(dci) | TRB_SLOT(udev->slot), NULL);
-    return cmd_result(x, "set dequeue pointer", cc);
+    if (halted)
+        kwarn("xhci%u: %s: neither endpoint %u nor slot %u stopped; controller halted", x->hcd.index,
+              udev->dev.name, dci, slot);
+    return halted ? XQ_HALT : XQ_NONE;
 }
 
 /*
@@ -719,13 +775,38 @@ static int xhci_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
     spin_unlock_irqrestore(&x->lock, s);
     if (!mine)
         return xhci_gone(x);
-    if (!x->dead) {
-        int rc = ep_stop_and_drain(x, udev, xhci_dci(r->ep));
-        if (rc && rc != -ETIMEDOUT)
-            kwarn("xhci%u: %s: cancel on ep 0x%02x: %d", x->hcd.index, udev->dev.name, r->ep, rc);
+    unsigned dci = xhci_dci(r->ep);
+    enum xhci_quiesced q = xhci_cancel_quiesce(x, udev, dci);
+    if (q == XQ_NONE) {
+        /* Nothing acknowledged: the controller may still write into the
+         * request's buffers, so it is never handed back (U14, U10). A
+         * completion that won the race before the controller died has
+         * been retired already: then it is the ordinary -ENOENT. */
+        s = spin_lock_irqsave(&x->lock);
+        struct xhci_td *td = r->hcd_priv;
+        bool kept = td != NULL && ep->ring->req[td->first] == r;
+        if (kept) {
+            td->quarantined = true;
+            x->quarantined++;
+        }
+        uint64_t total = x->quarantined;
+        spin_unlock_irqrestore(&x->lock, s);
+        if (!kept)
+            return xhci_gone(x);
+        kerror("xhci%u: %s: ep 0x%02x: no stop acknowledged; request quarantined with its buffers (%llu so far)",
+               x->hcd.index, udev->dev.name, r->ep, (unsigned long long)total);
+        return -EIO;
     }
-    /* The controller is stopped on this ring (or dead, which is the same
-     * for the ring's purposes): whatever is left is ours to complete. */
+    /* The controller acknowledged that it no longer reaches this ring --
+     * or, past a disabled slot, any ring of the device: whatever is left
+     * is ours to complete. */
+    if (q == XQ_SLOT) {
+        struct xhci_dev *d = udev->hcd_priv;
+        for (unsigned i = 1; i <= XHCI_MAX_DCI; i++) {
+            if (d->ep[i].ring != NULL && i != dci)
+                ring_flush(x, d->ep[i].ring, NULL, 0, -ENODEV);
+        }
+    }
     ring_flush(x, ep->ring, r, status, -ECANCELED);
     return 0;
 }
@@ -736,6 +817,8 @@ static int xhci_reset_endpoint(struct usb_hcd *hcd, struct usb_device *udev, uin
     struct xhci_ep *ep = xhci_ep_of(udev, ep_addr);
     if (ep == NULL)
         return -EINVAL;
+    if (udev->slot == 0)
+        return -ENODEV;   /* a cancel disabled the slot (U14) */
     unsigned dci = xhci_dci(ep_addr);
     int cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_RESET_EP) | TRB_EP_ID(dci) | TRB_SLOT(udev->slot), NULL);
     if (cc == CC_CONTEXT_STATE) {
@@ -997,6 +1080,20 @@ static void xhci_retain_device_dma(struct xhci *x, struct usb_device *udev, unsi
           udev->dev.name, slot);
 }
 
+/* Whether a cancel quarantined a request on one of `d`'s rings (U14). */
+static bool xhci_dev_has_quarantine(struct xhci *x, struct xhci_dev *d)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+    for (unsigned dci = 1; dci <= XHCI_MAX_DCI && !found; dci++) {
+        struct xhci_ring *ring = d->ep[dci].ring;
+        for (unsigned i = 0; ring != NULL && i < XHCI_RING_LAST && !found; i++)
+            found = ring->req[i] != NULL && ((struct xhci_td *)ring->req[i]->hcd_priv)->quarantined;
+    }
+    spin_unlock_irqrestore(&x->lock, s);
+    return found;
+}
+
 static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
 {
     struct xhci *x = hcd_to_xhci(hcd);
@@ -1004,13 +1101,22 @@ static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
     if (d == NULL)
         return;
     unsigned slot = udev->slot;
+    /* A halt acknowledged by HCH stopped every slot at once: nothing to
+     * command, and nothing of the device's is reachable (U14). */
+    bool halted = __atomic_load_n(&x->halted, __ATOMIC_ACQUIRE);
     /* Quiet every endpoint, then the slot: no event names this slot after
      * Disable Slot completes, so the rings are ours to empty. */
-    if (x->dead && slot != 0) {
+    if (x->dead && !halted && slot != 0) {
         xhci_retain_device_dma(x, udev, slot);
         return;
     }
-    if (slot != 0) {
+    if (xhci_dev_has_quarantine(x, d)) {
+        /* A cancel kept a request on one of these rings: the request and
+         * the ring it sits on are never handed back. */
+        xhci_retain_device_dma(x, udev, slot);
+        return;
+    }
+    if (slot != 0 && !halted) {
         for (unsigned dci = 1; dci <= XHCI_MAX_DCI; dci++) {
             if (d->ep[dci].ring != NULL && d->ep[dci].ring->used > 0 &&
                 !xhci_disable_command_ack(x, "stop endpoint", TRB_TYPE(TRB_CMD_STOP_EP) |

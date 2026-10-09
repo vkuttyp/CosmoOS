@@ -144,9 +144,28 @@ void usb_request_complete(struct usb_request *r, int status, uint32_t actual)
         r->done(r);
 }
 
+/*
+ * The synchronous shapes never hand the caller's buffer to the HCD: a
+ * cancel the controller does not acknowledge keeps the request and its
+ * buffer for good (-EIO, U10/U14), and a caller's buffer is the caller's
+ * to free. So the request, its completion and a bounce for the data live
+ * in one heap block that the HCD may keep.
+ */
 struct usb_sync {
     struct completion done;
+    struct usb_request r;
+    uint8_t bounce[];
 };
+
+static uint64_t g_quarantined, g_quarantined_bytes;
+
+void usb_note_quarantine(struct usb_device *udev, const char *what, size_t bytes)
+{
+    uint64_t n = __atomic_add_fetch(&g_quarantined, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_quarantined_bytes, (uint64_t)bytes, __ATOMIC_RELAXED);
+    kerror("usb: %s: %s kept by the controller with %zu byte(s); never freed (%llu so far)", udev->dev.name, what,
+           bytes, (unsigned long long)n);
+}
 
 static void usb_sync_done(struct usb_request *r)
 {
@@ -155,33 +174,56 @@ static void usb_sync_done(struct usb_request *r)
 }
 
 /*
- * Submit and wait, bounded. No timed wait exists on a completion, so
- * this polls it at a fine grain; on the deadline the request is
- * cancelled, which completes it (with `-ETIMEDOUT`) before returning
- * unless the controller completed it first -- either way the completion
- * is signalled and the stack frame it lives in is safe to leave.
+ * Submit `tmpl`'s transfer and wait, bounded; the outcome comes back in
+ * tmpl->actual and tmpl->status, and IN data in tmpl->buf. On the
+ * deadline the request is cancelled, which completes it (with
+ * `-ETIMEDOUT`) before returning unless the controller completed it
+ * first -- either way the completion is signalled and the block can go.
+ * A cancel that answers -EIO leaves the block to the HCD.
  */
-static int usb_sync_msg(struct usb_request *r, uint64_t timeout_ns)
+static int usb_sync_msg(struct usb_request *tmpl, uint64_t timeout_ns)
 {
-    struct usb_sync s;
-    completion_init(&s.done, "usb-sync");
-    r->done = usb_sync_done;
-    r->arg = &s;
-    int rc = usb_submit(r);
-    if (rc)
+    bool in = tmpl->ep == 0 ? (tmpl->setup.bmRequestType & USB_DIR_IN) != 0 : (tmpl->ep & USB_EP_DIR_IN) != 0;
+    size_t size = sizeof(struct usb_sync) + tmpl->len;
+    struct usb_sync *s = kmalloc(size, 0);
+    if (s == NULL)
+        return -ENOMEM;
+    completion_init(&s->done, "usb-sync");
+    s->r = *tmpl;
+    s->r.buf = tmpl->len ? s->bounce : NULL;
+    if (tmpl->len && !in)
+        memcpy(s->bounce, tmpl->buf, tmpl->len);
+    s->r.done = usb_sync_done;
+    s->r.arg = s;
+    int rc = usb_submit(&s->r);
+    if (rc) {
+        kfree(s);
         return rc;
-    /* The handshake comes with the wait, so a completed transfer's s is free
-     * to leave this frame. */
-    if (!wait_for_completion_timeout(&s.done, timeout_ns ? timeout_ns : USB_TIMEOUT_NS)) {
+    }
+    /* The handshake comes with the wait, so a completed transfer's block
+     * is free to go. */
+    if (!wait_for_completion_timeout(&s->done, timeout_ns ? timeout_ns : USB_TIMEOUT_NS)) {
         /* Cancel completes the request (with -ETIMEDOUT unless the controller
          * beat us to it), so wait_for_completion then returns with the
-         * handshake. */
-        if (usb_cancel(r, -ETIMEDOUT) == 0)
-            kwarn("usb: %s: %s transfer on ep 0x%02x timed out", r->udev->dev.name,
-                  r->ep == 0 ? "control" : "bulk", r->ep);
-        wait_for_completion(&s.done);
+         * handshake -- unless nothing acknowledged a stop. */
+        int crc = usb_cancel(&s->r, -ETIMEDOUT);
+        if (crc == -EIO) {
+            usb_note_quarantine(tmpl->udev, tmpl->ep == 0 ? "a control transfer" : "a bulk transfer", size);
+            tmpl->actual = 0;
+            tmpl->status = -EIO;
+            return -EIO;
+        }
+        if (crc == 0)
+            kwarn("usb: %s: %s transfer on ep 0x%02x timed out", tmpl->udev->dev.name,
+                  tmpl->ep == 0 ? "control" : "bulk", tmpl->ep);
+        wait_for_completion(&s->done);
     }
-    return r->status;
+    tmpl->actual = s->r.actual;
+    tmpl->status = s->r.status;
+    if (in && s->r.actual > 0)
+        memcpy(tmpl->buf, s->bounce, s->r.actual < tmpl->len ? s->r.actual : tmpl->len);
+    kfree(s);
+    return tmpl->status;
 }
 
 int usb_control_msg(struct usb_device *udev, uint8_t request_type, uint8_t request, uint16_t value,
@@ -597,6 +639,7 @@ EXPORT_SYMBOL(usb_cancel);
 EXPORT_SYMBOL(usb_control_msg);
 EXPORT_SYMBOL(usb_bulk_msg);
 EXPORT_SYMBOL(usb_clear_halt);
+EXPORT_SYMBOL(usb_note_quarantine);
 #if CONFIG_SELFTEST
 EXPORT_SYMBOL(usb_request_complete);   /* the kernel's usb-sync-quarantine test HCD completes through it */
 #endif
