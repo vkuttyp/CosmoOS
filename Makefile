@@ -30,7 +30,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: all kernel boot modules image run test test-entropy test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -111,6 +111,25 @@ else
 	$(Q)QEMU_GUARD=1 QEMU_CPU='qemu64,+nx,+svm,+npt,+smep,+smap,+umip' $(MAKE) --no-print-directory -C $(ROOT) \
 		ARCH=$(ARCH) BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-guard.log test
 endif
+
+# M1's acceptance boots (docs/kernel/security/design.md §6): the same
+# image without the virtio-rng, first on the default CPU model, which has
+# no random instruction either -- no entropy source at all: getrandom's
+# NONBLOCK is EAGAIN, INSECURE answers, an encrypted pool is refused and
+# the boot completes -- then on a model with the random instructions,
+# which must seed the pool from the CPU alone. The ordinary `test` boot
+# is the device-seeded configuration. The harness reads QEMU_RNG and
+# QEMU_HWRNG to know which lines to require.
+ifeq ($(ARCH),aarch64)
+HWRNG_CPU ?= neoverse-v1
+else
+HWRNG_CPU ?= qemu64,+nx,+svm,+npt,+rdrand,+rdseed
+endif
+test-entropy:
+	$(Q)QEMU_RNG=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		BOOT_LOG=$(OUT)/boot-test-noentropy.log test
+	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
+		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-cpurng.log test
 
 # The same boot test with two CPUs. Every other boot here uses the
 # default four, and a test that needs a third CPU without saying so passes

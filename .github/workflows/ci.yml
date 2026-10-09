@@ -96,6 +96,15 @@ jobs:
       - name: Boot test on a protection-capable CPU (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
 
+      # Milestone M1's acceptance (docs/roadmap-1.0.md): the image with no
+      # entropy source at all (no virtio-rng, a CPU model without RDSEED/
+      # RDRAND or RNDR) must stay unseeded -- getrandom NONBLOCK is EAGAIN,
+      # INSECURE answers, an encrypted pool is refused -- and still boot;
+      # then on a CPU with the random instructions it must seed from the
+      # CPU alone. The boots above are the device-seeded configuration.
+      - name: Boot tests without an entropy device (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-entropy
+
       # Every other boot uses four CPUs. Three self-tests needed a third
       # CPU without saying so and failed at two, unseen here
       # (docs/audit/2026-10-05-two-cpu-validation-report.md); this boot

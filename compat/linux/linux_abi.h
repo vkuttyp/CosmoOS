@@ -265,6 +265,11 @@ struct lx_winsize {
 #define LX_AT_SECURE 23
 #define LX_AT_RANDOM 25
 
+/* getrandom flags. */
+#define LX_GRND_NONBLOCK 0x1
+#define LX_GRND_RANDOM   0x2
+#define LX_GRND_INSECURE 0x4
+
 /* --- structures --- */
 
 #if defined(LX_ABI_X86_64)

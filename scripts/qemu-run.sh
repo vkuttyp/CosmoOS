@@ -9,6 +9,8 @@
 #   QEMU_CPU    CPU model (default qemu64,+nx,+svm,+npt: TCG emulates AMD-V with nested
 #               paging, which the virtualization tests need; use `host` with kvm/hvf)
 #   QEMU_EXTRA  extra QEMU arguments
+#   QEMU_RNG    0 leaves the virtio-rng out (make test-entropy's boots without
+#               a device source; docs/kernel/security/design.md §6)
 #   QEMU_WRAP   a command QEMU is run through, word-split (for example
 #               `taskpolicy -b` on macOS to pin the whole process to the
 #               efficiency cores; docs/development.md, "Benchmark runs")
@@ -33,6 +35,8 @@ if [ ! -f "$testdisk" ]; then
     dd if=/dev/zero of="$testdisk" bs=1048576 count=8 status=none 2>/dev/null \
         || dd if=/dev/zero of="$testdisk" bs=1048576 count=8 2>/dev/null
 fi
+rng_dev="-device virtio-rng-pci"
+[ "${QEMU_RNG:-1}" = "0" ] && rng_dev=""
 vcon=${QEMU_VCON:-$outdir/vcon.log}
 : > "$vcon"
 # Milestone 9: an NVMe controller with one 8 MiB namespace (the nvme
@@ -241,7 +245,7 @@ if [ "$arch" = aarch64 ]; then
         -device virtio-blk-pci,drive=boot \
         -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
         -device nvme,drive=nvme0,serial=cosmo-nvme0 \
-        -device virtio-rng-pci \
+        $rng_dev \
         -device virtio-serial-pci \
         -chardev file,id=vcon,path="$vcon" \
         -device virtconsole,chardev=vcon \
@@ -277,7 +281,7 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     -device virtio-blk-pci,drive=testdisk \
     -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
     -device nvme,drive=nvme0,serial=cosmo-nvme0 \
-    -device virtio-rng-pci \
+    $rng_dev \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \
     -device virtconsole,chardev=vcon \

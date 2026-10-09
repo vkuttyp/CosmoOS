@@ -2146,8 +2146,26 @@ int main(int argc, char **argv)
     }
 
     /* --- random, sockets --- */
+    /* getrandom's flags (docs/kernel/security/design.md §6). The boot
+     * harness requires the line naming which kind of pool this boot
+     * has: NONBLOCK asks without waiting, and only a seeded pool may be
+     * asked with the default flags, which would otherwise block. */
     unsigned char rnd[32] = { 0 };
-    CHECKV(sc3(LX_getrandom, rnd, 32, 0) == 32, 0);
+    long grnd = sc3(LX_getrandom, rnd, 32, 1 /* GRND_NONBLOCK */);
+    CHECKV(grnd == 32 || grnd == -11 /* EAGAIN */, grnd);
+    CHECKV(sc3(LX_getrandom, rnd, 32, 2 | 4 /* RANDOM|INSECURE */) == -22, 0);
+    CHECKV(sc3(LX_getrandom, rnd, 32, 8 /* undefined */) == -22, 0);
+    CHECKV(sc3(LX_getrandom, rnd, 32, 4 /* GRND_INSECURE */) == 32, 0);
+    CHECKV(sc3(LX_getrandom, rnd, 32, 4 | 1) == 32, 0);
+    if (grnd == 32) {
+        CHECKV(sc3(LX_getrandom, rnd, 32, 2 /* GRND_RANDOM */) == 32, 0);
+        CHECKV(sc3(LX_getrandom, rnd, 32, 0) == 32, 0);
+        lx_puts("lxtest: getrandom: seeded\n");
+    } else {
+        CHECKV(sc3(LX_getrandom, rnd, 32, 2 | 1) == -11, 0);
+        CHECKV(sc3(LX_getrandom, rnd, 0, 1) == -11, 0);
+        lx_puts("lxtest: getrandom: unseeded\n");
+    }
     int zero = 1;
     for (int i = 0; i < 32; i++)
         if (rnd[i])

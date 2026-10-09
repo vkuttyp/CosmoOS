@@ -91,6 +91,23 @@ void cfs_block_nonce(uint8_t nonce[CHACHA20_NONCE_SIZE])
     random_get_bytes(nonce, CHACHA20_NONCE_SIZE);
 }
 
+/*
+ * Key material, salts and block nonces come from a seeded pool only
+ * (docs/kernel/security/design.md §6, invariant S18). Wait a bounded
+ * time for seeding; refuse with -EAGAIN, before anything is written,
+ * when the pool is still unseeded. Loading a key passes through here
+ * too: a loaded key is what lets cfs_block_nonce draw.
+ */
+int cfs_need_seeded(const char *what)
+{
+    int rc = random_wait_ready(RANDOM_KEYGEN_WAIT_NS);
+    if (rc == 0)
+        return 0;
+    kwarn("cosmofs: cannot %s: the entropy pool is not seeded (waited %llu s)", what,
+          (unsigned long long)(RANDOM_KEYGEN_WAIT_NS / 1000000000ull));
+    return rc == -EINTR ? -EINTR : -EAGAIN;
+}
+
 /* --- the key block -------------------------------------------------------- */
 
 int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const uint8_t master[CHACHA20_KEY_SIZE],
@@ -146,10 +163,13 @@ int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_
 /* Read the key block and unwrap it. */
 int cfs_keys_load(struct cfs *fs, const void *user_key, size_t user_len)
 {
+    int rc = cfs_need_seeded("load a key");
+    if (rc)
+        return rc;
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    int rc = pool_read(fs->pool, fs->sb.key_root, block);
+    rc = pool_read(fs->pool, fs->sb.key_root, block);
     if (rc == 0 && !cfs_mhdr_ok(block, fs->sb.key_root, CFS_KIND_KEYS))
         rc = -EIO;
     if (rc == 0)

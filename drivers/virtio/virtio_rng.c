@@ -3,7 +3,7 @@
  * the kernel pool. Module `virtio_rng`, depends on `virtio`.
  *
  * One queue. A 64-byte device-writable buffer is posted; every
- * completion credits the bytes the device wrote and re-posts until a
+ * completion credits half the bits the device wrote and re-posts until a
  * per-boot budget is reached, so the pool is seeded without keeping the
  * device busy forever.
  */
@@ -66,7 +66,7 @@ static void vrng_completed(struct vrng *r, unsigned len)
     if (len > VRNG_BUF)
         len = VRNG_BUF;
     if (len > 0) {
-        random_add_entropy(r->buf, len, len * 8);
+        random_add_entropy(r->buf, len, len * 4);   /* half credit (docs/kernel/security/design.md §6) */
         r->collected += len;
     }
     if (r->collected < VRNG_BUDGET)

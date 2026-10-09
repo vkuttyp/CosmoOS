@@ -2184,8 +2184,25 @@ static int64_t lx_clock_nanosleep(struct syscall_args *a)
 
 static int64_t lx_sched_yield(struct syscall_args *a) { (void)a; sched_yield(); return 0; }
 
+/*
+ * Linux's semantics (docs/kernel/security/design.md §6): block until the
+ * pool is seeded, unless GRND_NONBLOCK (-EAGAIN) or GRND_INSECURE (never
+ * waits). GRND_RANDOM is the default. The wait comes before the length
+ * is looked at, as in Linux.
+ */
 static int64_t lx_getrandom(struct syscall_args *a)
 {
+    unsigned flags = (unsigned)a->a[2];
+    if ((flags & ~(unsigned)(LX_GRND_NONBLOCK | LX_GRND_RANDOM | LX_GRND_INSECURE)) != 0 ||
+        (flags & (LX_GRND_INSECURE | LX_GRND_RANDOM)) == (LX_GRND_INSECURE | LX_GRND_RANDOM))
+        return -EINVAL;
+    if (!(flags & LX_GRND_INSECURE) && !random_ready()) {
+        if (flags & LX_GRND_NONBLOCK)
+            return -EAGAIN;
+        int rc = random_wait_ready(RANDOM_WAIT_FOREVER);
+        if (rc)
+            return rc;
+    }
     size_t len = (size_t)a->a[1];
     if (len > 256 * 1024)
         len = 256 * 1024;
