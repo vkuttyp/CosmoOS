@@ -66,6 +66,7 @@ struct device {
     uint32_t iommu_sid;         /* its requester id (PCI: bus << 8 | slot << 3 | func) */
     enum device_state state;
     int probe_error;
+    bool dma_retained;          /* a driver kept DMA memory the device may still use: never probed again (U14) */
     struct list_node bus_link;
     /* Mandatory: runs when the last reference drops, after unregister;
      * frees the memory the device is embedded in. device_release_static
@@ -130,6 +131,17 @@ void device_unregister(struct device *dev);
  * them). Sleeps. -ENODEV if the device is not bound, -EOPNOTSUPP if its
  * driver has no reset, else the driver's result. */
 int device_reset(struct device *dev);
+
+/* A driver whose stop the device did not acknowledge keeps the DMA memory
+ * the device may still reach (docs/drivers/usb/invariants.md, U14). It
+ * calls device_retain_dma from its `remove` (or failed probe); from then
+ * on no driver is probed on the device, because a new driver would give
+ * the same hardware fresh rings while it may still write into the old
+ * ones. device_release_dma, once the memory is reclaimed after a stop
+ * that was acknowledged, lets it bind again. Any context. */
+void device_retain_dma(struct device *dev);
+void device_release_dma(struct device *dev);
+bool device_dma_retained(const struct device *dev);
 
 /* Register a driver and probe the bus's unbound devices. Sleeps.
  * Returns 0 even if no device matched. */

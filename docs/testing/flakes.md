@@ -6,6 +6,45 @@ long enough. The list exists so that when one of them fails, the reader
 knows within one line whether to re-run or to investigate. It is short
 on purpose, and the rule for joining it is at the end.
 
+**Observed once, AArch64 `signal-stop` (2026-10-09):** while running
+`tools/nvme-die-window-probe.py --arch aarch64 --old`, the harness also
+reported `signal-stop` check 9. In
+`out/nvme-die-window-probe/aarch64-old/boot.serial`, the child exited
+with status 7 before its parent exited with status 9. Check 9 sends
+`SIGCONT` and then requires `waitpid(..., WCONTINUED)` to report the
+continue; the child returns immediately after `SIGCONT`. In
+`kernel/process/process.c`, `child_event_locked` checks `EXITED` before
+`CONTINUED`, so a fast exit can hide an unreported continue. The fixed
+NVMe AArch64 boot and an earlier old-behavior boot passed `signal-stop`.
+This is outside Unit 2 and remains an out-of-scope correctness finding,
+not a load-sensitive classification or an assertion change.
+
+**Observed once, x86-64 `module-unload-busy` (2026-10-09):**
+`/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
+`waited >= 50000000ULL` failed at `kernel/module/modtest.c:720`; four
+following zombie tests failed because that first test left the fixture
+module as a zombie. The mechanism is the clock mismatch: this QEMU boot
+reports `clock_is_common() == false` (`boot-test.log` lines 909 and 920),
+so `module_unload` builds its 50 ms deadline from the quantized global tick
+counter in `kernel/timer/timer.c:232-233`, while the test measures elapsed
+time with `clock_since_ns()` from the per-CPU clock. If the call starts just
+before a tick, 50 tick increments can expire in less than 50 ms on that
+clock. This is a test-measurement contract issue outside Unit 2; neither the
+assertion nor timeout was changed. The observed run had 453 self-tests and
+the AHCI stop test itself passed (`AHCI-STOP-ACK: PASS hits=12 dma_frees=0`).
+**Second sighting, same day:** `out/xhci-cancel-ack-probe/x86_64-fixed-module-unload/boot.serial`
+line 656, x86-64 `QEMU_SMP=1`, the same check and the same four
+cascading zombie failures (5 of 462), with the clock again reported not
+common (lines 907, 916). Rechecked in the source: `module_unload` polls
+`clock_deadline_passed` (`kernel/module/module.c:634-635`), whose
+`deadline_now_ns` returns `g_global_ticks * TICK_NS` on a non-common
+clock -- the last tick, up to one `TICK_NS` behind -- while the test
+reads `clock_now_ns`/`clock_since_ns` (`kernel/module/modtest.c:716-720`).
+Every other test in that boot passed, the xHCI cancel proof included.
+Still outside Unit 2 and unchanged; a fix belongs to the test's
+measurement (take `waited` from the deadline clock) and is in the
+inventory.
+
 **Observed once, host test `online-late` (2026-10-09):** the first
 `gmake host-test` overlapped two `gmake -j4 ... analyze` builds and failed
 `tests/host/test_quiesce.c:425-426` (`reads > 0`, `saw_new_cpu`). In this
@@ -3585,3 +3624,55 @@ interval: the delayed ACK's 40 ms allowed to pass after the rule.
 racing the timer. Not related to the irq-budget change: the path is the
 test's own tap interface and a TCP timer, with no device interrupt.
 
+
+## `net-nicbench`'s eth1 gateway entry left incomplete by a reply the benchmark ate, 2026-10-09
+
+One failure, x86-64 at `QEMU_SMP=1`, on the device-lifecycle Unit 2 branch
+(`out/xhci-halt-ack-probe/x86_64-fixed-b2fb92ff/boot.serial`, line 6067):
+`net-nicbench: eth1: the gateway's ARP entry is still incomplete after
+1502 ms (+0 requests sent since the warm-up began, 8 pending dropped)`.
+The branch had added `e1000e-stop-ack`, which unbinds and rebinds the
+e1000e function (eth1) twice.
+
+**What the logs show.** In 56 of 56 local boots without that test, eth1's
+gateway entry was already `reachable (after 0 ms), +0 requests` at the
+warm-up -- `net-second-nic` resolves it and an entry lives 20 minutes. In
+8 of 8 boots with it, eth1 had to resolve the gateway inside the
+benchmark; in 5 the warm-up's own request did it at once, in 2 it took
+1146 and 1326 ms (+1 request, +8 dropped: an incomplete entry already
+there, completed by the age retry), and in 1 it failed (+0). The 3 slow
+or failed boots are exactly those where eth1's driver received 2,001
+frames for 2,000 requests.
+
+**Refuted: an inherited entry.** The rebound eth1 *is* allocated at the
+old one's address (`0xffff80000d37a050` three times in one boot), but
+unregister's flush removed the old entry and nothing recreated it: the
+ARP table at the start of eth1's phase held only eth0's entry (N25,
+"Address reuse"). **Refuted: another route.** Only `lo`, `eth0` and `eth1`
+were registered at the failure.
+
+**Mechanism** (15 instrumented boots, `ARPDBG` logging every eth1
+resolution, retry and learn, and every frame the hook passed on; boot 12
+reproduced the 1299 ms variant): during eth1's ARP phase the network
+worker sent a 40-byte TCP segment from 10.77.8.1:2222 to
+10.77.8.99:40001 -- the server side of the connection `net-hostinput`
+builds over its `hinu` tap and leaves behind. With `hinu` gone and eth0
+down the default route is eth1, so the segment resolved the gateway on
+eth1. The gateway's reply was taken by the benchmark's receive hook,
+which counts every reply from the gateway to us and cannot tell its own
+from the stack's; the entry stayed incomplete (`dump[arp-phase-end] ...
+state=1 tries=1 pending=1`) until the age retry, 1-2 s later. Retries
+are due no sooner than `ARP_RETRY_NS` after the last attempt and run
+from a 1 s timer, so the retry can land past the warm-up's 1.5 s bound:
+the failure. Without the rebind the cached entry made the segment's
+resolution unnecessary, which is why the shape needed both.
+
+**Fixed (test):** `nicbench_resolve_gateway` resolves the gateway on each
+interface before the ARP phase installs its hook, bounded over all three
+requests (4.5 s), so neither phase depends on an earlier test's
+resolution or on other traffic. No budget changed. The rebind's empty
+neighbour table is correct and stays. **Recorded, not fixed:**
+`net-hostinput` leaves a TCP connection that keeps transmitting after its
+test and its interface are gone (deferred-work inventory §8). This
+mechanism may also account for the unattributed `+0` sightings of
+2026-10-07 above; their logs predate the instrumentation and cannot show it.

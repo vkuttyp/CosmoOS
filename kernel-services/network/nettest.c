@@ -5,6 +5,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/completion.h>
 #include <kernel/faultinject.h>
 #include <kernel/fwcfg.h>
 #include <kernel/kmalloc.h>
@@ -5058,7 +5059,8 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     st->gw_wait_ns = clock_since_ns(t_gw);
     st->gw_before = arp_lookup(nif, nif->ip4.gateway, mac);
     if (!st->gw_before) {
-        /* A failure, since N25: the entry is this interface's own, the ARP
+        /* A failure, since N25: the entry is this interface's own, it was
+         * resolved before the ARP phase (nicbench_resolve_gateway), the
          * phase just proved 2,000 round trips on this link, and the wait
          * covers a retry -- so an entry still incomplete here is a lost
          * reply twice over or a defect, not another interface's state.
@@ -5184,11 +5186,48 @@ static uint64_t nicbench_cksum_ns(void)
     return (clock_since_ns(t0)) / NICBENCH_UDP;
 }
 
+/*
+ * The gateway resolved on this interface before the ARP phase installs
+ * its hook. The hook takes every reply from the gateway to us -- it cannot
+ * tell its own from the stack's -- so a resolution the stack starts
+ * during the phase (any off-link send: the default route is this
+ * interface once the other is down) has its reply eaten and its entry
+ * left incomplete until the next retry, which ARP_RETRY_NS spacing can
+ * put past the UDP warm-up's bound. Seen 2026-10-09: a segment from a
+ * connection net-hostinput left behind, on an eth1 the e1000e rebind had
+ * left with no cached entry (docs/testing/flakes.md). With the entry
+ * reachable first, the phase and the warm-up depend on neither. The bound
+ * covers the first request and both retries (ARP_MAX_TRIES).
+ */
+static bool nicbench_resolve_gateway(const char **reason, struct netif *nif)
+{
+    uint8_t mac[ETH_ALEN];
+    if (arp_lookup(nif, nif->ip4.gateway, mac))
+        return true;
+    struct socket *tx;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+    struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
+    static const uint8_t one[1] = { 0 };
+    (void)ksock_sendto(tx, one, sizeof(one), &to);
+    uint64_t t0 = clock_now_ns();
+    while (!arp_lookup(nif, nif->ip4.gateway, mac) && clock_since_ns(t0) < 4500ull * 1000000ull)
+        thread_sleep_ms(1);
+    bool resolved = arp_lookup(nif, nif->ip4.gateway, mac);
+    nt_ksock_put(tx);
+    kinfo("selftest: net-nicbench: %s: gateway %s before the benchmark (%llu ms)", nif->name,
+          resolved ? "resolved" : "NOT resolved", (unsigned long long)(clock_since_ns(t0) / 1000000));
+    if (!resolved)
+        *reason = "the gateway's ARP entry did not resolve within 4.5 s, three requests, on this interface";
+    return resolved;
+}
+
 static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
 {
     unsigned rt_s = 0;
     uint64_t ns_rt = 0;
     static struct nicbench_udp_stats st;   /* one at a time: the runner serialises tests */
+    if (!nicbench_resolve_gateway(reason, nif))
+        return false;
     if (!nicbench_arp(reason, nif, &rt_s, &ns_rt))
         return false;
     if (!nicbench_udp(reason, nif, &st))
@@ -5589,6 +5628,110 @@ bool selftest_net_rxhook_grace(const char **reason)
     CHECK(__atomic_load_n(&st.exited, __ATOMIC_ACQUIRE) == 1);
     netif_put(lo);
     return true;
+}
+
+/* Park a worker after its quiesce read section, then remove its interface.
+ * Reaching the explicit barrier seam proves unregister has passed the
+ * grace-period wait and queue purge; it must still wait for this input_one. */
+#if CONFIG_DEBUG
+struct netif_remove_worker_state {
+    struct fake_nif *fake;
+    struct completion input, release, at_barrier, removed;
+};
+
+static void netif_remove_worker_input(struct netif *nif, void *arg)
+{
+    struct netif_remove_worker_state *st = arg;
+    if (nif != &st->fake->nif)
+        return;
+    complete(&st->input);
+    wait_for_completion(&st->release);
+}
+
+static void netif_remove_worker_barrier(struct netif *nif, void *arg)
+{
+    struct netif_remove_worker_state *st = arg;
+    if (nif == &st->fake->nif)
+        complete(&st->at_barrier);
+}
+
+static void netif_remove_worker_main(void *arg)
+{
+    struct netif_remove_worker_state *st = arg;
+    netif_unregister(&st->fake->nif);
+    complete(&st->removed);
+}
+#endif
+
+bool selftest_netif_remove_worker(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    return true;
+#else
+    static struct fake_nif f;
+    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
+    static struct netif_remove_worker_state st;
+    memset(&f, 0, sizeof(f));
+    memset(&st, 0, sizeof(st));
+    st.fake = &f;
+    completion_init(&st.input, "netif-remove-input");
+    completion_init(&st.release, "netif-remove-release");
+    completion_init(&st.at_barrier, "netif-remove-barrier");
+    completion_init(&st.removed, "netif-remove-done");
+    strlcpy(f.nif.name, "rmworker0", sizeof(f.nif.name));
+    f.nif.mtu = 1500;
+    f.nif.ops = &ops;
+    f.nif.priv = &f;
+    f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
+    f.nif.ip4.addr = htonl(0x0a4b0001);
+    f.nif.ip4.mask = htonl(0xffffff00);
+
+    bool registered = netif_register(&f.nif) == 0;
+    if (!registered) {
+        *reason = "netif-remove-worker: could not register the synthetic interface";
+        return false;
+    }
+    netif_test_worker_hooks_set(netif_remove_worker_input, netif_remove_worker_barrier, &st);
+    struct mbuf *m = m_getcl();
+    if (m == NULL) {
+        *reason = "netif-remove-worker: could not allocate the synthetic frame";
+        goto cleanup;
+    }
+    m->data = m->buf + 64;
+    m->len = m->pkt.len = ETH_HLEN;
+    memset(m->data, 0, ETH_HLEN);   /* unknown EtherType: freed after the worker is released */
+    netif_rx_on(&f.nif, m, 0);
+
+    bool entered = wait_for_completion_timeout(&st.input, 2ull * 1000000000ull);
+    struct thread *remover = entered ? thread_create(netif_remove_worker_main, &st, "netif-remove", SCHED_PRIO_DEFAULT)
+                                     : NULL;
+    bool at_barrier = remover != NULL && wait_for_completion_timeout(&st.at_barrier, 2ull * 1000000000ull);
+    bool blocked = at_barrier && !completion_done(&st.removed);
+    complete(&st.release);
+    if (remover != NULL) {
+        wait_for_completion(&st.removed);
+        thread_join(remover);
+    } else if (registered) {
+        netif_unregister(&f.nif);
+    }
+    netif_test_worker_hooks_set(NULL, NULL, NULL);
+    netif_put(&f.nif);
+    bool ok = entered && at_barrier && blocked && f.releases == 1;
+    kinfo("NETIF-REMOVE-WORKER: %s entered=%u barrier=%u waited=%u release=%u", ok ? "PASS" : "FAIL", entered,
+          at_barrier, blocked, f.releases);
+    if (!ok)
+        *reason = "netif-remove-worker: unregister did not wait for active input_one; see the log";
+    return ok;
+
+cleanup:
+    complete(&st.release);
+    if (registered)
+        netif_unregister(&f.nif);
+    netif_test_worker_hooks_set(NULL, NULL, NULL);
+    netif_put(&f.nif);
+    return false;
+#endif
 }
 
 bool selftest_net_nicbench(const char **reason)

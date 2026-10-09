@@ -16,6 +16,7 @@
 #include <kernel/device.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/kmalloc.h>
@@ -66,8 +67,26 @@ struct e1000e {
     uint64_t resets;
 };
 
+#if CONFIG_SELFTEST
+/* A failed-stop test may have to keep this instance alive until the
+ * injection is cleared and the stop can be acknowledged. */
+static struct e1000e *g_stop_orphan;
+static unsigned g_rings_free_calls;
+unsigned e1000e_test_ring_frees(void);
+bool e1000e_test_has_orphan(void);
+bool e1000e_test_recover_stop_ack(void);
+#endif
+
 static uint32_t rd32(struct e1000e *e, unsigned off) { return *(volatile uint32_t *)(e->bar + off); }
-static void wr32(struct e1000e *e, unsigned off, uint32_t v) { *(volatile uint32_t *)(e->bar + off) = v; }
+static void wr32(struct e1000e *e, unsigned off, uint32_t v)
+{
+#if CONFIG_FAULTINJECT
+    if ((off == E1000_RCTL && faultinject_should_fail(FI_E1000E_RX_DISABLE_ACK)) ||
+        (off == E1000_TCTL && faultinject_should_fail(FI_E1000E_TX_DISABLE_ACK)))
+        return;
+#endif
+    *(volatile uint32_t *)(e->bar + off) = v;
+}
 
 /* The descriptor rings are coherent memory, but the compiler and the CPU
  * still need telling that a descriptor is complete before the tail is
@@ -366,6 +385,9 @@ static int rings_alloc(struct e1000e *e)
 
 static void rings_free(struct e1000e *e)
 {
+#if CONFIG_SELFTEST
+    __atomic_fetch_add(&g_rings_free_calls, 1u, __ATOMIC_RELAXED);
+#endif
     for (unsigned i = 0; i < E1000E_RING; i++) {
         struct mbuf *m = e->rx_bufs[i];
         if (m != NULL) {
@@ -419,12 +441,33 @@ static unsigned e1000e_tx_pending(struct netif *nif, unsigned *capacity)
 static const struct netif_ops e1000e_ops = { .transmit = e1000e_transmit, .release = e1000e_release,
                                              .tx_pending = e1000e_tx_pending };
 
-static void hw_quiesce(struct e1000e *e)
+static bool hw_stop_rx(struct e1000e *e)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        wr32(e, E1000_RCTL, 0);
+        if ((rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool hw_stop_tx(struct e1000e *e)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        wr32(e, E1000_TCTL, 0);
+        if ((rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool hw_quiesce(struct e1000e *e)
 {
     wr32(e, E1000_IMC, 0xffffffffu);
     (void)rd32(e, E1000_ICR);
-    wr32(e, E1000_RCTL, 0);
-    wr32(e, E1000_TCTL, 0);
+    bool rx_stopped = hw_stop_rx(e);
+    bool tx_stopped = hw_stop_tx(e);
+    return rx_stopped && tx_stopped;
 }
 
 static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
@@ -449,10 +492,15 @@ static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
 
     /* Quiet, reset, quiet again: reset clears IMS, but a cause raised
      * during setup would reach a handler with no rings (design.md). */
-    hw_quiesce(e);
+    (void)hw_quiesce(e);   /* the reset below stops what this cannot */
     wr32(e, E1000_CTRL, rd32(e, E1000_CTRL) | E1000_CTRL_RST);
     thread_sleep_ms(10);
-    hw_quiesce(e);
+    if (!hw_quiesce(e)) {
+        /* Engines still running after a reset: rings programmed now could
+         * be raced by DMA nobody asked for (E7). */
+        kerror("e1000e: %s: RX/TX did not stop after reset", pdev->dev.name);
+        goto fail_unmap;
+    }
 
     uint32_t rah = rd32(e, E1000_RAH0);
     if (!(rah & E1000_RAH_AV)) {
@@ -558,7 +606,7 @@ static void e1000e_remove(struct pci_device *pdev)
         return;
     netif_unregister(&e->nif);   /* no transmit or receive reaches the rings after this */
     timer_cancel_sync(&e->watchdog);
-    hw_quiesce(e);
+    bool stopped = hw_quiesce(e);
     int vector = e->vector;
     if (e->msix)
         pci_msix_disable(pdev);
@@ -566,11 +614,63 @@ static void e1000e_remove(struct pci_device *pdev)
         pci_msi_disable(pdev);
     if (vector >= 0)
         synchronize_irq((unsigned)vector);
+    if (!stopped) {
+#if CONFIG_SELFTEST
+        g_stop_orphan = e;
+#endif
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
+        pdev->dev.drvdata = NULL;
+        kwarn("e1000e: %s: retaining RX/TX DMA after disable was not acknowledged", pdev->dev.name);
+        return;
+    }
     rings_free(e);
     device_unmap_mmio(e->bar);
     pdev->dev.drvdata = NULL;
     netif_put(&e->nif);   /* the creator's reference; e1000e_release frees e when the holders are gone */
 }
+
+#if CONFIG_SELFTEST
+/* Called by the kernel's device self-test through debug-only module
+ * symbols. Unbind/rebind and fault-rule control stay in the kernel. */
+unsigned e1000e_test_ring_frees(void)
+{
+    return __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED);
+}
+EXPORT_SYMBOL(e1000e_test_ring_frees);
+
+bool e1000e_test_has_orphan(void)
+{
+    return g_stop_orphan != NULL;
+}
+EXPORT_SYMBOL(e1000e_test_has_orphan);
+
+bool e1000e_test_recover_stop_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (g_stop_orphan == NULL)
+        return true;
+    bool cleaned = true;
+    struct e1000e *e = g_stop_orphan;
+    bool stopped = hw_quiesce(e);
+    bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
+    bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
+    if (stopped && rx_off && tx_off) {
+        struct device *dev = &e->pdev->dev;
+        rings_free(e);
+        device_unmap_mmio(e->bar);
+        g_stop_orphan = NULL;
+        netif_put(&e->nif);
+        device_release_dma(dev);   /* the stop is acknowledged and the rings are gone */
+    } else {
+        cleaned = false;
+    }
+    return cleaned;
+#else
+    return false;
+#endif
+}
+EXPORT_SYMBOL(e1000e_test_recover_stop_ack);
+#endif
 
 static const struct pci_id e1000e_ids[] = {
     { E1000E_VENDOR, E1000E_82574L, 0, 0, 0 },

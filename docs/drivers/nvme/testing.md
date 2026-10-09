@@ -41,6 +41,18 @@ block layer only:
 Log: `selftest: nvme: 4 queue(s); 32 of 32 completions on the issuing
 CPU; cosmofs mounted and read back`.
 
+## Disable acknowledgement
+
+`nvme-disable-ack` (debug builds; fault injection) forces a synthetic
+controller's `RDY`-clear wait to time out. The same queue-reclaim guard
+used by `nvme_remove` must retain its SQ, CQ, PRP-list DMA, active command,
+bio and data-buffer mapping.
+The fixture is reclaimed after the assertion because it was never visible
+to hardware; the live `nvme0n1` stays registered for the shell snapshot
+test. `tools/nvme-disable-ack-probe.py --old` removes the guard in a
+throwaway worktree and requires this self-test to fail after queue
+reclamation.
+
 ## Related tests
 
 `blk-segments` and `blk-timeout` (`docs/kernel/device/testing.md`)

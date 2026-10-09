@@ -3382,3 +3382,839 @@ bool selftest_ahci_reset(const char **reason)
     }
     return true;
 }
+
+/*
+ * Fail the second AHCI probe after its ports are live and after a COMRESET
+ * leaves a port event pending. The controller-wide interrupt gate is still
+ * off and no disk/bio has been published, so the status cannot dispatch the
+ * handler while fail_ports releases the vector.
+ */
+bool selftest_ahci_probe_rollback(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct pci_device *pdev = NULL;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *candidate = pci_device_at(i);
+        if (candidate->class == 0x01 && candidate->subclass == 0x06 && candidate->prog_if == 0x01) {
+            pdev = candidate;
+            break;
+        }
+    }
+    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-probe-rollback: no bound AHCI controller";
+        return false;
+    }
+    bool ok = pci_test_remove(pdev) == 0;
+    if (ok) {
+        faultinject_set(FI_AHCI_PROBE_ROLLBACK, 1, 1, thread_current());
+        int injected = pci_test_rebind(pdev);
+        struct fi_stats st;
+        faultinject_stats(FI_AHCI_PROBE_ROLLBACK, &st);
+        faultinject_clear(FI_AHCI_PROBE_ROLLBACK);
+        ok = injected == 0 && st.hits == 1;
+    }
+    if (pdev->dev.state != DEV_BOUND)
+        ok = false;
+    if (ok)
+        kinfo("selftest: ahci-probe-rollback: failed after port start with a pending event and GHC.IE clear");
+    else
+        *reason = "ahci-probe-rollback: see AHCI-ROLLBACK-PENDING and faultinject stats";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_ahci_stop_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct pci_device *pdev = NULL;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *candidate = pci_device_at(i);
+        if (candidate->class == 0x01 && candidate->subclass == 0x06 && candidate->prog_if == 0x01) {
+            pdev = candidate;
+            break;
+        }
+    }
+    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-stop-ack: no bound AHCI controller";
+        return false;
+    }
+
+    /* One failed acknowledgement is retried; because the second attempt
+     * succeeds, it is safe to release the controller's DMA on this pass. */
+    struct dma_stats retry_before, retry_after;
+    dma_get_stats(&retry_before);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 1, thread_current());
+    int retry_removed = pci_test_remove(pdev);
+    struct fi_stats retry_st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &retry_st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    dma_get_stats(&retry_after);
+    uint64_t retry_freed = retry_after.frees - retry_before.frees;
+    bool retry_rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
+                         pdev->dev.state == DEV_BOUND;
+    if (retry_removed != 0 || retry_st.hits != 1 || retry_freed == 0 || !retry_rebound) {
+        *reason = "ahci-stop-ack: single failure was not retried and cleaned up safely";
+        return false;
+    }
+
+    struct dma_stats before, after;
+    dma_get_stats(&before);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 0, thread_current());
+    int removed = pci_test_remove(pdev);
+    struct fi_stats st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    dma_get_stats(&after);
+    /* The old HBA kept its command lists and tables because the ports did
+     * not acknowledge the stop: a new driver must not be probed on the
+     * function while the hardware may still use them (U14). */
+    bool refused = pci_test_rebind(pdev) != 0 && pdev->dev.state == DEV_UNBOUND && device_dma_retained(&pdev->dev);
+    /* The test's own release: QEMU's ports did stop -- the refusal was
+     * injected -- so the function may be probed again for the tests after. */
+    device_release_dma(&pdev->dev);
+    bool bound = pdev->dev.state == DEV_BOUND ||
+                 (pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND);
+    uint64_t freed = after.frees - before.frees;
+    bool ok = removed == 0 && st.hits > 0 && freed == 0 && refused && bound;
+    kinfo("AHCI-STOP-ACK: %s retry_hits=%llu retry_frees=%llu retry_rebound=%u persistent_hits=%llu dma_frees=%llu "
+          "rebind_refused=%u rebound=%u",
+          ok ? "PASS" : "FAIL", (unsigned long long)retry_st.hits, (unsigned long long)retry_freed, retry_rebound,
+          (unsigned long long)st.hits, (unsigned long long)freed, refused, bound);
+    if (ok)
+        kinfo("selftest: ahci-stop-ack: controller with unacknowledged port stops retained its DMA allocations");
+    else
+        *reason = "ahci-stop-ack: a failed stop freed DMA or did not rebind; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_ahci_comreset_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        *reason = "ahci-comreset-ack: no ahci0p1 disk";
+        return false;
+    }
+    bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
+    bool (*restart)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_restart", NULL);
+    if (recover == NULL || restart == NULL || bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        *reason = "ahci-comreset-ack: test seam or reset hook missing";
+        return false;
+    }
+    struct { volatile bool done; int status; } mk[3] = { 0 };
+    struct bio bio[3];
+    uint8_t *buf[3] = { kmalloc(4096, 0), kmalloc(4096, 0), kmalloc(4096, 0) };
+    bool allocated = buf[0] != NULL && buf[1] != NULL && buf[2] != NULL;
+    if (!allocated) {
+        for (unsigned i = 0; i < 3; i++)
+            kfree(buf[i]);
+        blkdev_put(bd);
+        *reason = "ahci-comreset-ack: could not allocate test buffers";
+        return false;
+    }
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 3; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 40 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());
+    int submit0 = blk_submit(&bio[0]);
+    int submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    if (submit0 != 0) {
+        mk[0].status = submit0;
+        mk[0].done = true;
+    }
+    if (submit1 != 0) {
+        mk[1].status = submit1;
+        mk[1].done = true;
+    }
+
+    faultinject_set(FI_AHCI_COMRESET_ACK, 1, 1, thread_current());
+    bool recovery_dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
+    struct fi_stats recovery_st;
+    faultinject_stats(FI_AHCI_COMRESET_ACK, &recovery_st);
+    faultinject_clear(FI_AHCI_COMRESET_ACK);
+    bool recovery_failed = mk[0].done && mk[0].status == -EIO && mk[1].done && mk[1].status == -EIO;
+    int recovery_rejected = blk_submit(&bio[2]);
+    if (recovery_rejected != 0) {
+        mk[2].status = recovery_rejected;
+        mk[2].done = true;
+    }
+    int recovery_restore_rc = bd->ops->debug_presence(bd, true);
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done && mk[2].done); waited++)
+        thread_sleep_ms(1);
+    int recovery_read_rc = recovery_restore_rc == 0 ? blk_read(bd, 72, 8, buf[0]) : recovery_restore_rc;
+    bool recovery_ok = recovery_st.hits == 1 && recovery_dead && recovery_failed && recovery_rejected == -ENODEV &&
+                       mk[2].status == -ENODEV && mk[0].done && mk[1].done && mk[2].done &&
+                       recovery_restore_rc == 0 && recovery_read_rc == 0;
+
+    memset(mk, 0, sizeof(mk));
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 3; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 80 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());
+    submit0 = blk_submit(&bio[0]);
+    submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    if (submit0 != 0) {
+        mk[0].status = submit0;
+        mk[0].done = true;
+    }
+    if (submit1 != 0) {
+        mk[1].status = submit1;
+        mk[1].done = true;
+    }
+    faultinject_set(FI_AHCI_COMRESET_ACK, 1, 1, thread_current());
+    bool restart_dead = submit0 == 0 && submit1 == 0 && restart(bd, &bio[0], &bio[1]);
+    struct fi_stats restart_st;
+    faultinject_stats(FI_AHCI_COMRESET_ACK, &restart_st);
+    faultinject_clear(FI_AHCI_COMRESET_ACK);
+    bool restart_failed = mk[0].done && mk[0].status == -ETIMEDOUT && mk[1].done && mk[1].status == -EIO;
+    int restart_rejected = blk_submit(&bio[2]);
+    if (restart_rejected != 0) {
+        mk[2].status = restart_rejected;
+        mk[2].done = true;
+    }
+    int restart_restore_rc = bd->ops->debug_presence(bd, true);
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done && mk[2].done); waited++)
+        thread_sleep_ms(1);
+    int restart_read_rc = restart_restore_rc == 0 ? blk_read(bd, 112, 8, buf[0]) : restart_restore_rc;
+    bool restart_ok = restart_st.hits == 1 && restart_dead && restart_failed && restart_rejected == -ENODEV &&
+                      mk[2].status == -ENODEV && mk[0].done && mk[1].done && mk[2].done &&
+                      restart_restore_rc == 0 && restart_read_rc == 0;
+    bool ok = recovery_ok && restart_ok;
+    kinfo("AHCI-COMRESET-ACK: %s recovery_dead=%u recovery_failed=%u recovery_rejected=%d recovery_restore=%d/%d "
+          "restart_dead=%u restart_failed=%u restart_rejected=%d restart_restore=%d/%d",
+          ok ? "PASS" : "FAIL", recovery_dead, recovery_failed, recovery_rejected, recovery_restore_rc,
+          recovery_read_rc, restart_dead, restart_failed, restart_rejected, restart_restore_rc, restart_read_rc);
+    for (unsigned i = 0; i < 3; i++)
+        kfree(buf[i]);
+    blkdev_put(bd);
+    if (!ok)
+        *reason = "ahci-comreset-ack: failed COMRESET did not fail closed; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/*
+ * A recovery whose command-engine stop is refused leaves the port dead
+ * with the handler's error snapshot (err_slot, err_ci) still pending. A
+ * later successful reset -- stop, every slot failed, COMRESET, IDENTIFY
+ * -- revives the port; the snapshot must not survive it, or the worker's
+ * next wake replays it against commands submitted after the reset
+ * (review of PR #338).
+ */
+bool selftest_ahci_error_reset(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        *reason = "ahci-error-reset: no ahci0p1 disk";
+        return false;
+    }
+    bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
+    bool (*pending)(struct blkdev *, bool) =
+        (bool (*)(struct blkdev *, bool))module_symbol_lookup("ahci_test_error_pending", NULL);
+    if (recover == NULL || pending == NULL || bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        *reason = "ahci-error-reset: test seam or reset hook missing";
+        return false;
+    }
+    struct { volatile bool done; int status; } mk[2] = { 0 };
+    struct bio bio[2];
+    uint8_t *buf[2] = { kmalloc(4096, 0), kmalloc(4096, 0) };
+    if (buf[0] == NULL || buf[1] == NULL) {
+        kfree(buf[0]);
+        kfree(buf[1]);
+        blkdev_put(bd);
+        *reason = "ahci-error-reset: could not allocate test buffers";
+        return false;
+    }
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 2; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 120 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());   /* both held: the snapshot names two live slots */
+    int submit0 = blk_submit(&bio[0]);
+    int submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 0, thread_current());
+    bool dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
+    struct fi_stats st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    bool before = pending(bd, false);   /* the refused recovery left it */
+    int restore_rc = bd->ops->debug_presence(bd, true);
+    bool after = pending(bd, true);     /* and clears it, so nothing replays it later */
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done); waited++)
+        thread_sleep_ms(1);
+    int read_rc = restore_rc == 0 ? blk_read(bd, 136, 8, buf[0]) : restore_rc;
+    bool ok = st.hits >= 2 && dead && before && !after && restore_rc == 0 && read_rc == 0 && mk[0].done &&
+              mk[1].done && mk[0].status == -EIO && mk[1].status == -EIO;
+    kinfo("AHCI-ERROR-RESET: %s stop_hits=%llu dead=%u pending_before=%u pending_after_reset=%u restore=%d read=%d "
+          "held=%d/%d",
+          ok ? "PASS" : "FAIL", (unsigned long long)st.hits, dead, before, after, restore_rc, read_rc, mk[0].status,
+          mk[1].status);
+    kfree(buf[0]);
+    kfree(buf[1]);
+    blkdev_put(bd);
+    if (!ok)
+        *reason = "ahci-error-reset: an error snapshot survived a successful reset; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+#if CONFIG_DEBUG
+struct nvme_die_race {
+    void *ctrl;
+    bool (*call)(void *ctrl);
+    struct completion parked, release, second_done;
+    bool first_result, second_result;
+};
+
+static void nvme_die_park(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    complete(&t->parked);
+    wait_for_completion(&t->release);
+}
+
+static void nvme_die_first(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    t->first_result = t->call(t->ctrl);
+    thread_exit(0);
+}
+
+static void nvme_die_second(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    t->second_result = t->call(t->ctrl);
+    complete(&t->second_done);
+    thread_exit(0);
+}
+#endif
+
+/*
+ * Two callers of the NVMe controller_die (remove racing the timeout
+ * thread): the second must not report the disable as refused while the
+ * first is still between an acknowledged disable and the end of its
+ * sweep -- nvme_remove would then keep the queues, skip the namespace
+ * puts and, since U14, mark the function unbindable for good (review of
+ * PR #338). The first caller parks at the seam; the second calls.
+ */
+bool selftest_nvme_die_concurrent(const char **reason)
+{
+#if CONFIG_DEBUG
+    void *(*setup)(void (*)(void *), void *) =
+        (void *(*)(void (*)(void *), void *))module_symbol_lookup("nvme_test_die_setup", NULL);
+    bool (*call)(void *) = (bool (*)(void *))module_symbol_lookup("nvme_test_die_call", NULL);
+    void (*teardown)(void *) = (void (*)(void *))module_symbol_lookup("nvme_test_die_teardown", NULL);
+    if (setup == NULL || call == NULL || teardown == NULL) {
+        kinfo("NVME-DIE-CONCURRENT: PASS not-present");
+        return true;
+    }
+    static struct nvme_die_race t;
+    memset(&t, 0, sizeof(t));
+    completion_init(&t.parked, "nvme-die-parked");
+    completion_init(&t.release, "nvme-die-release");
+    completion_init(&t.second_done, "nvme-die-second");
+    t.call = call;
+    t.ctrl = setup(nvme_die_park, &t);
+    if (t.ctrl == NULL) {
+        *reason = "nvme-die-concurrent: could not build the synthetic controller";
+        return false;
+    }
+    struct thread *first = thread_create(nvme_die_first, &t, "nvme-die-1", SCHED_PRIO_DEFAULT);
+    bool parked = first != NULL && wait_for_completion_timeout(&t.parked, 2000ull * 1000000ull);
+    struct thread *second = parked ? thread_create(nvme_die_second, &t, "nvme-die-2", SCHED_PRIO_DEFAULT) : NULL;
+    /* The second either answers at once (it read a flag the first has not
+     * written yet) or waits for the first: give it the time to answer. */
+    bool second_early = second != NULL && wait_for_completion_timeout(&t.second_done, 100ull * 1000000ull);
+    complete(&t.release);
+    if (first != NULL)
+        thread_join(first);
+    if (second != NULL)
+        thread_join(second);
+    teardown(t.ctrl);
+    bool ok = parked && second != NULL && t.first_result && t.second_result;
+    kinfo("NVME-DIE-CONCURRENT: %s parked=%u first=%u second=%u second_answered_before_release=%u",
+          ok ? "PASS" : "FAIL", parked, t.first_result, t.second_result, second_early);
+    if (!ok)
+        *reason = "nvme-die-concurrent: a second controller_die called an acknowledged disable refused";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_nvme_disable_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool (*run)(void) = (bool (*)(void))module_symbol_lookup("nvme_test_disable_ack", NULL);
+    if (run == NULL) {
+        *reason = "nvme-disable-ack: test seam not exported by the NVMe module";
+        return false;
+    }
+    faultinject_set(FI_NVME_DISABLE_ACK, 1, 0, thread_current());
+    bool retained = run();
+    struct fi_stats st;
+    faultinject_stats(FI_NVME_DISABLE_ACK, &st);
+    faultinject_clear(FI_NVME_DISABLE_ACK);
+    bool ok = retained && st.hits == 1;
+    kinfo("NVME-DISABLE-ACK: %s hits=%llu queue_dma_bio_retained=%u", ok ? "PASS" : "FAIL",
+          (unsigned long long)st.hits, retained);
+    if (!ok)
+        *reason = "nvme-disable-ack: unacknowledged disable reclaimed queue DMA; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_e1000e_stop_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (pci_find_device(0x8086, 0x10d3, NULL) == NULL) {
+        kinfo("E1000E-STOP-ACK-SWEEP: PASS rx=not-present tx=not-present");
+        return true;
+    }
+    unsigned (*ring_frees)(void) = (unsigned (*)(void))module_symbol_lookup("e1000e_test_ring_frees", NULL);
+    bool (*has_orphan)(void) = (bool (*)(void))module_symbol_lookup("e1000e_test_has_orphan", NULL);
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("e1000e_test_recover_stop_ack", NULL);
+    if (ring_frees == NULL || has_orphan == NULL || recover == NULL) {
+        *reason = "e1000e-stop-ack: test seam not exported by the e1000e module";
+        return false;
+    }
+    struct pci_device *pdev = pci_find_device(0x8086, 0x10d3, NULL);
+    bool case_ok[2] = { false, false };
+    const enum fi_kind kinds[2] = { FI_E1000E_RX_DISABLE_ACK, FI_E1000E_TX_DISABLE_ACK };
+    unsigned hits[2] = { 0, 0 }, freed[2] = { 0, 0 };
+    bool retained[2] = { false, false }, recovered[2] = { false, false }, rebound[2] = { false, false };
+    bool refused[2] = { false, false };
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned before = ring_frees();
+        faultinject_set(kinds[i], 1, 0, thread_current());
+        int removed = pci_test_remove(pdev);
+        struct fi_stats st;
+        faultinject_stats(kinds[i], &st);
+        faultinject_clear(kinds[i]);
+        hits[i] = (unsigned)st.hits;
+        freed[i] = ring_frees() - before;
+        retained[i] = has_orphan();
+        /* While the old rings are kept, no driver is probed on the
+         * function: new rings on hardware that may still be writing into
+         * the old ones (U14). Recovery acknowledges the stop, reclaims
+         * them and lets the function bind again. A rebind that is not
+         * refused leaves the orphan alone: its quiesce would write into
+         * the new instance's registers. */
+        refused[i] = pci_test_rebind(pdev) != 0 && pdev->dev.state == DEV_UNBOUND &&
+                     device_dma_retained(&pdev->dev);
+        recovered[i] = refused[i] && recover();
+        rebound[i] = pdev->dev.state == DEV_BOUND ||
+                     (pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND);
+        case_ok[i] = removed == 0 && hits[i] > 0 && freed[i] == 0 && retained[i] && refused[i] &&
+                     recovered[i] && rebound[i] && !device_dma_retained(&pdev->dev);
+        kinfo("E1000E-STOP-ACK: kind=%s %s hits=%u ring_frees=%u retained=%u rebind_refused=%u recovered=%u "
+              "rebound=%u",
+              faultinject_kind_name(kinds[i]), case_ok[i] ? "PASS" : "FAIL", hits[i], freed[i],
+              retained[i], refused[i], recovered[i], rebound[i]);
+    }
+
+    bool ok = case_ok[0] && case_ok[1];
+    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u tx=%u", ok ? "PASS" : "FAIL", case_ok[0], case_ok[1]);
+    if (!ok)
+        *reason = "e1000e-stop-ack: DMA was reclaimed before RX/TX stop acknowledgement; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_xhci_disable_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-DISABLE-ACK-SWEEP: PASS stop=not-present slot=not-present");
+        return true;
+    }
+    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("xhci_test_disable_ack", NULL);
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_recover_disable_ack", NULL);
+    if (run == NULL || recover == NULL) {
+        *reason = "xhci-disable-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+
+    faultinject_set(FI_XHCI_STOP_EP_ACK, 1, 0, thread_current());
+    bool stop_retained = run(FI_XHCI_STOP_EP_ACK);
+    struct fi_stats stop_st;
+    faultinject_stats(FI_XHCI_STOP_EP_ACK, &stop_st);
+    faultinject_clear(FI_XHCI_STOP_EP_ACK);
+    bool stop_recovered = recover();
+    bool stop = stop_retained && stop_st.hits >= 2 && stop_recovered;
+
+    faultinject_set(FI_XHCI_DISABLE_SLOT_ACK, 1, 0, thread_current());
+    bool slot_retained = run(FI_XHCI_DISABLE_SLOT_ACK);
+    struct fi_stats slot_st;
+    faultinject_stats(FI_XHCI_DISABLE_SLOT_ACK, &slot_st);
+    faultinject_clear(FI_XHCI_DISABLE_SLOT_ACK);
+    bool slot_recovered = recover();
+    bool slot = slot_retained && slot_st.hits >= 2 && slot_recovered;
+
+    bool ok = stop && slot;
+    kinfo("XHCI-DISABLE-ACK-SWEEP: %s stop=%u/%u hits=%llu slot=%u/%u hits=%llu", ok ? "PASS" : "FAIL",
+          stop_retained, stop_recovered, (unsigned long long)stop_st.hits, slot_retained, slot_recovered,
+          (unsigned long long)slot_st.hits);
+    if (!ok)
+        *reason = "xhci-disable-ack: reclaimed a context before a command acknowledged stop; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_xhci_halt_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-HALT-ACK-SWEEP: PASS not-present");
+        return true;
+    }
+    bool (*run)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_halt_ack", NULL);
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_recover_halt_ack", NULL);
+    if (run == NULL || recover == NULL) {
+        *reason = "xhci-halt-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+    faultinject_set(FI_XHCI_HALT_ACK, 1, 0, thread_current());
+    bool retained = run();
+    struct fi_stats st;
+    faultinject_stats(FI_XHCI_HALT_ACK, &st);
+    faultinject_clear(FI_XHCI_HALT_ACK);
+    bool recovered = recover();
+    bool ok = retained && st.hits >= 2 && recovered;
+    kinfo("XHCI-HALT-ACK-SWEEP: %s retained=%u hits=%llu recovered=%u", ok ? "PASS" : "FAIL",
+          retained, (unsigned long long)st.hits, recovered);
+    if (!ok)
+        *reason = "xhci-halt-ack: controller DMA was not retained after HCH failed to assert; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/* U14: a cancelled request comes back only after the controller
+ * acknowledged a stop -- of the endpoint, the slot, or itself -- and
+ * stays with the HCD (-EIO) when none did. The sweep is the four
+ * outcomes, in escalation order, on xhci.c's synthetic controller. */
+bool selftest_xhci_cancel_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-CANCEL-ACK-SWEEP: PASS not-present");
+        return true;
+    }
+    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("xhci_test_cancel_ack", NULL);
+    if (run == NULL) {
+        *reason = "xhci-cancel-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+    /* Stop Endpoint (1), Disable Slot (2), HCH (4) refused. */
+    static const unsigned faults[4] = { 0, 1, 1 | 2, 1 | 2 | 4 };
+    bool pass[4];
+    bool ok = true;
+    static const enum fi_kind kinds[3] = { FI_XHCI_STOP_EP_ACK, FI_XHCI_DISABLE_SLOT_ACK, FI_XHCI_HALT_ACK };
+    for (unsigned i = 0; i < 4; i++) {
+        for (unsigned k = 0; k < 3; k++)
+            if (faults[i] & (1u << k))
+                faultinject_set(kinds[k], 1, 0, thread_current());
+        pass[i] = run(faults[i]);
+        for (unsigned k = 0; k < 3; k++)
+            faultinject_clear(kinds[k]);
+        ok = ok && pass[i];
+    }
+    kinfo("XHCI-CANCEL-ACK-SWEEP: %s stop=%u slot=%u halt=%u quarantine=%u", ok ? "PASS" : "FAIL", pass[0],
+          pass[1], pass[2], pass[3]);
+    if (!ok)
+        *reason = "xhci-cancel-ack: a cancelled request came back before a stop was acknowledged; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/*
+ * A request the controller has already retired, whose `done` is still
+ * running when the cancel arrives: usb_cancel may answer -ENOENT -- which
+ * lets the caller free the request -- only after that callback returned
+ * (U10). The callback runs from the controller's interrupt or its irqpoll
+ * worker, outside the controller's lock; it records its CPU, says it has
+ * started and spins 20 ms. A canceller pinned to another CPU cancels the
+ * moment the callback has started and records whether it had finished
+ * when the cancel returned. Unit 1's audit listed this as a suspicion
+ * (cancel racing a running callback); the test is what settles it.
+ */
+#if CONFIG_DEBUG
+#define USB_DEVICE_DESC_LEN_FOR_TEST 18u   /* the device descriptor */
+
+struct cancel_retired {
+    struct usb_request r;
+    int (*cancel)(struct usb_request *r, int status);
+    unsigned entered, exited;
+    unsigned cb_cpu;
+    int rc;
+    unsigned exited_at_return;
+};
+
+static void cancel_retired_done(struct usb_request *r)
+{
+    struct cancel_retired *c = r->arg;
+    c->cb_cpu = arch_cpu_id();
+    __atomic_store_n(&c->entered, 1u, __ATOMIC_RELEASE);
+    uint64_t t0 = clock_now_ns();
+    while (clock_since_ns(t0) < 20ull * 1000000ull)
+        arch_cpu_relax();
+    __atomic_store_n(&c->exited, 1u, __ATOMIC_RELEASE);
+}
+
+static void cancel_retired_canceller(void *arg)
+{
+    struct cancel_retired *c = arg;
+    uint64_t t0 = clock_now_ns();
+    while (!__atomic_load_n(&c->entered, __ATOMIC_ACQUIRE) && clock_since_ns(t0) < 2000ull * 1000000ull)
+        arch_cpu_relax();
+    if (!__atomic_load_n(&c->entered, __ATOMIC_ACQUIRE)) {
+        c->rc = 1;   /* the transfer never completed: nothing to race */
+        thread_exit(0);
+    }
+    c->rc = c->cancel(&c->r, -ETIMEDOUT);
+    c->exited_at_return = __atomic_load_n(&c->exited, __ATOMIC_ACQUIRE);
+    thread_exit(0);
+}
+
+#endif
+
+bool selftest_xhci_cancel_retired(const char **reason)
+{
+#if CONFIG_DEBUG
+    unsigned ncpu = cpu_count();
+    struct bus_type *bus = bus_find("usb");
+    if (ncpu < 2 || bus == NULL) {
+        kinfo("XHCI-CANCEL-RETIRED: PASS skipped (%u CPU(s), usb bus %s)", ncpu, bus ? "present" : "absent");
+        return true;
+    }
+    struct usb_enum_walk w = { 0, NULL, NULL, NULL };
+    device_for_each(bus, usb_enum_visit, &w);
+    if (w.hub)
+        device_put(&w.hub->dev);
+    if (w.keyboard)
+        device_put(&w.keyboard->dev);
+    if (w.storage == NULL) {
+        kinfo("XHCI-CANCEL-RETIRED: PASS skipped (no mass-storage device)");
+        return true;
+    }
+    struct usb_device *udev = w.storage;
+    int (*submit)(struct usb_request *) = (int (*)(struct usb_request *))module_symbol_lookup("usb_submit", NULL);
+    int (*cancel)(struct usb_request *, int) =
+        (int (*)(struct usb_request *, int))module_symbol_lookup("usb_cancel", NULL);
+    static struct cancel_retired c;
+    uint8_t *buf = kzalloc(USB_DEVICE_DESC_LEN_FOR_TEST);
+    bool ok = false, decided = false;
+    unsigned attempts = 0, canceller_cpu = 0;
+    for (unsigned k = 1; submit != NULL && cancel != NULL && buf != NULL && k <= ncpu && !decided; k++) {
+        canceller_cpu = k % ncpu;
+        attempts++;
+        memset(&c, 0, sizeof(c));
+        c.cancel = cancel;
+        c.r.udev = udev;
+        c.r.ep = 0;
+        c.r.setup.bmRequestType = USB_DIR_IN;
+        c.r.setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+        c.r.setup.wValue = USB_DT_DEVICE << 8;
+        c.r.setup.wLength = USB_DEVICE_DESC_LEN_FOR_TEST;
+        c.r.buf = buf;
+        c.r.len = USB_DEVICE_DESC_LEN_FOR_TEST;
+        c.r.done = cancel_retired_done;
+        c.r.arg = &c;
+        struct thread *t = thread_create_on(cancel_retired_canceller, &c, "usb-cancel", SCHED_PRIO_DEFAULT,
+                                            CPUMASK_OF(canceller_cpu));
+        if (t == NULL)
+            break;
+        int src = submit(&c.r);
+        if (src != 0)
+            __atomic_store_n(&c.entered, 0u, __ATOMIC_RELEASE);   /* the canceller times out */
+        thread_join(t);
+        /* The callback has finished before the request's memory is reused,
+         * whatever the cancel said. */
+        uint64_t t0 = clock_now_ns();
+        while (__atomic_load_n(&c.entered, __ATOMIC_ACQUIRE) && !__atomic_load_n(&c.exited, __ATOMIC_ACQUIRE) &&
+               clock_since_ns(t0) < 1000ull * 1000000ull)
+            thread_sleep_ms(1);
+        if (src != 0 || c.rc == 1)
+            break;   /* no completion to race: a failure below */
+        if (c.cb_cpu == canceller_cpu)
+            continue;   /* the callback ran on the canceller's CPU: no overlap, try another */
+        decided = true;
+        ok = c.rc == -ENOENT && c.exited_at_return == 1;
+    }
+    kinfo("XHCI-CANCEL-RETIRED: %s rc=%d exited_at_return=%u cb_cpu=%u canceller_cpu=%u attempts=%u",
+          ok ? "PASS" : "FAIL", c.rc, c.exited_at_return, c.cb_cpu, canceller_cpu, attempts);
+    kfree(buf);
+    device_put(&udev->dev);
+    if (!ok)
+        *reason = "xhci-cancel-retired: a cancel returned while the retired request's callback was running";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+/*
+ * The synchronous shapes over a test HCD whose cancel answers -EIO: the
+ * request and its buffer then belong to the HCD for good (U10, U14), so
+ * the buffer it was given must not be the caller's. The test HCD records
+ * what it was handed and keeps it. Run against the old usb_sync_msg,
+ * which handed over the caller's buffer, its cancel completes the
+ * request instead of answering -EIO -- the old path would otherwise wait
+ * forever -- and the buffer check is what fails.
+ */
+#if CONFIG_DEBUG
+static struct usb_request *g_sync_q_req;
+static void *g_sync_q_caller_buf;
+static void (*g_sync_q_complete)(struct usb_request *r, int status, uint32_t actual);   /* the module's */
+
+static int sync_q_submit(struct usb_hcd *hcd, struct usb_request *r)
+{
+    (void)hcd;
+    g_sync_q_req = r;
+    return 0;
+}
+
+static int sync_q_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
+{
+    (void)hcd;
+    if (r->buf == g_sync_q_caller_buf) {
+        g_sync_q_complete(r, status, 0);
+        return 0;
+    }
+    return -EIO;
+}
+
+#endif
+
+bool selftest_usb_sync_quarantine(const char **reason)
+{
+#if CONFIG_DEBUG
+    typedef int (*control_fn)(struct usb_device *, uint8_t, uint8_t, uint16_t, uint16_t, void *, uint16_t,
+                              uint64_t);
+    control_fn control = (control_fn)module_symbol_lookup("usb_control_msg", NULL);
+    g_sync_q_complete =
+        (void (*)(struct usb_request *, int, uint32_t))module_symbol_lookup("usb_request_complete", NULL);
+    if (control == NULL || g_sync_q_complete == NULL) {
+        kinfo("USB-SYNC-QUARANTINE: PASS not-present");
+        return true;
+    }
+    static const struct usb_hcd_ops ops = { .submit = sync_q_submit, .cancel = sync_q_cancel };
+    static struct usb_hcd hcd;
+    static struct usb_device udev;
+    memset(&hcd, 0, sizeof(hcd));
+    memset(&udev, 0, sizeof(udev));
+    hcd.ops = &ops;
+    udev.hcd = &hcd;
+    uint8_t *buf = kzalloc(64);
+    if (buf == NULL) {
+        *reason = "usb-sync-quarantine: out of memory";
+        return false;
+    }
+    g_sync_q_req = NULL;
+    g_sync_q_caller_buf = buf;
+    int rc = control(&udev, USB_DIR_IN, 0, 0, 0, buf, 64, 10ull * 1000 * 1000);
+    struct usb_request *kept = g_sync_q_req;
+    bool handed_caller_buf = kept != NULL && kept->buf == buf;
+    /* The "device" writes into what it was given, after the caller was
+     * told -EIO: the caller's buffer must not change. */
+    if (kept != NULL && rc == -EIO && kept->buf != NULL)
+        memset(kept->buf, 0xa5, kept->len);
+    bool untouched = true;
+    for (unsigned i = 0; i < 64; i++)
+        untouched = untouched && buf[i] == 0;
+    bool ok = rc == -EIO && kept != NULL && !handed_caller_buf && untouched;
+    kinfo("USB-SYNC-QUARANTINE: %s rc=%d submitted=%u caller_buf_handed=%u caller_buf_untouched=%u",
+          ok ? "PASS" : "FAIL", rc, kept != NULL, handed_caller_buf, untouched);
+    g_sync_q_caller_buf = NULL;
+    kfree(buf);   /* safe either way: the test HCD never writes after this */
+    if (!ok)
+        *reason = "usb-sync-quarantine: a synchronous transfer handed the caller's buffer to the controller";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}

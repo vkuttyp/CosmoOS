@@ -67,11 +67,12 @@ modelling interfaces as children (`docs/drivers/usb/invariants.md`, U7).
 until `done(r)` runs — in interrupt context or, for events beyond the
 handler's budget, on the CPU's `irqpoll/N` worker; either way not
 allowed to block, the same rule as a bio's `done`. `usb_control_msg` and
-`usb_bulk_msg` are the synchronous shapes over it: a completion on the
-caller's stack and a bounded wait (`wait_for_completion_timeout`, which
-does the handshake -- S30). On timeout the request is cancelled, which
-completes it, and then `wait_for_completion` returns with the handshake
-before the stack frame goes.
+`usb_bulk_msg` are the synchronous shapes over it: a heap request with
+its own bounce buffer and completion, and a bounded wait
+(`wait_for_completion_timeout`, which does the handshake -- S30). On
+timeout the request is cancelled, which completes it, and then
+`wait_for_completion` returns with the handshake; a cancel that returns
+`-EIO` leaves the heap request and bounce to the HCD (see Cancel).
 
 ## The DMA rule
 
@@ -209,6 +210,45 @@ with `-ECANCELED` (the one that timed out with `-ETIMEDOUT`). Bulk-only
 transport has one exchange in flight per device, so this drops nothing
 a class driver was counting on.
 
+A request is completed, and its buffers unmapped, only after the
+controller has acknowledged that it can no longer reach them (U14).
+The cancel therefore escalates when an acknowledgement does not come:
+
+1. `Stop Endpoint` (retried once) and `Set TR Dequeue Pointer`. Both
+   completing is the endpoint's acknowledgement: the ring is flushed
+   and the device stays usable.
+2. Otherwise `Disable Slot` (retried once). Its completion means no
+   event names the slot and no ring of it is fetched: the slot is
+   detached (`DCBAA` entry and `slot_dev` cleared, `udev->slot = 0`),
+   every ring of the device is flushed, and later submits on it fail
+   with `-ENODEV`. The contexts and rings are freed by
+   `disable_device` as usual.
+3. Otherwise the controller is halted (`USBCMD.RS` cleared, `USBSTS.HCH`
+   awaited, retried once). A halted controller performs no DMA, so the
+   ring is flushed; the controller is dead from then on, and every later
+   cancel on it flushes at once.
+4. If HCH does not come either, the controller is dead and the request
+   is **quarantined**: its TDs stay on the ring and stay mapped, a late
+   Transfer Event for them is ignored, and `usb_cancel` returns `-EIO`
+   without completing it. The request and every buffer it named belong
+   to the HCD for the rest of the boot; the count is
+   `xhci->quarantined` and a log line names the device and endpoint.
+
+A controller already dead when the cancel starts (a command timed out,
+U6) has acknowledged nothing, so its cancel begins at step 3.
+
+`-EIO` changes what the caller may do: nothing the request points at
+may be freed or reused (U10). The class drivers keep it: usb-storage
+keeps the bio, its request and its CBW/CSW buffers (the bio is never
+completed, so its waiter is not told a lie about its pages); usb-hid
+and the hub keep the structure holding the request and its report
+buffer. Each counts the leak through `usb_note_quarantine`. The
+synchronous shapes cannot ask their callers to do this -- a caller's
+buffer is its own -- so `usb_sync_msg` runs every synchronous transfer
+on a heap request with a bounce buffer of its own, copying data in
+before submit and out after a completion; on `-EIO` it leaks the heap
+request and bounce, and the caller's buffer was never device-visible.
+
 **Halt recovery** (`usb_clear_halt`): `Reset Endpoint`, `Set TR
 Dequeue` past the halted TD (its request completed `-EPIPE` by the
 event that halted it; anything behind it `-ECANCELED`), then the class
@@ -243,9 +283,22 @@ probe holds the device model's lock, and registering the USB device
 needs it — which is why the worker exists at all, and why the wait is
 in the module's init and not in probe.
 
+**Device disable** (`xhci_disable_device`): stop each endpoint that still
+has queued TRBs, then issue Disable Slot. Each command gets one retry.
+If either still fails, the USB device is detached from software event
+routing but its DCBAA context, rings, and backing allocations remain
+valid; a controller that did not acknowledge a stop may still own them.
+The command failures are exercised with a synthetic command ring by
+`xhci-disable-ack`.
+
 **Removal** (`xhci_remove`): disconnect every port, stop the worker,
-stop the controller (`RS` clear, wait `HCH`), release the vector and
-`synchronize_irq`, free every ring and context, unmap.
+clear `USBCMD.RS` and wait for `USBSTS.HCH`, retrying once. Then release
+the vector, wait for the IRQ and deferred poll to retire, and free every
+ring and context. If HCH does not assert after the retry, keep the
+controller structure, BAR mapping, rings, contexts, and scratch DMA
+allocated; the PCI function may still be bus mastering. The bound driver
+data remains as a tombstone so the function cannot be probed a second
+time while the old controller may still own memory.
 
 ## USB mass storage (`usb_storage.c`)
 

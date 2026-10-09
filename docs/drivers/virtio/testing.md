@@ -13,6 +13,7 @@
 | Console sink registration | `virtio-console` self-test and the boot marker `virtio-console: virtioN: registered as a console sink` |
 | Network device: receive posting, transmit chains, header handling | Phase 8 `net-arp` (ARP through `eth0`) and `net-harness` (TCP and UDP echo with the host over QEMU user-mode networking); boot marker `virtio-net: virtioN is eth0` |
 | Network removal: completed and outstanding buffer ownership, map balance, RX accounting, reset-time callbacks | `vnet-remove-pending`, `vnet-remove-late`: debug synthetic transport over real queues, DMA and irq_poll; `tools/vnet-remove-probe.py --old --arch=<arch>` restores main's removal body in a throwaway worktree |
+| Persistent RNG callback after reset | `VRNG-RESET-REPOST`: `vrng_completed` reaches the real post gate after the stopping boundary; `tools/virtio-rng-repost-probe.py --old --arch=<arch>` restores the old gate in a throwaway worktree |
 | Module dependency handling | boot: the four drivers declare `deps = "virtio"` and load after it |
 | Split-ring logic against a hostile device | `tests/host/test_virtq.c` (`make host-test`, ASan/UBSan): the real `virtqueue.c` over a fake transport; the test acts as the peer and writes descriptor links that self-loop, form a two-element loop, point out of range or at a free descriptor; used elements with an id out of range, never posted, not a head, completed twice; lengths beyond the buffers; empty, oversized, full-table (boundary descriptor) and normal multi-descriptor chains; 500 rounds of out-of-order completions |
 

@@ -87,6 +87,8 @@ struct usbs {
     bool hang_csw;                      /* fault injection, decided at submit: the CSW read is queued but the
                                          * controller is never told -- a hang with a transfer in flight */
     bool recovering;                    /* usbs_timeout owns the slot: a cancelled transfer's callback must not free it */
+    bool quarantined;                   /* a cancel answered -EIO: the controller keeps the exchange's requests and
+                                         * buffers, so neither the bio nor this structure is ever released (U10) */
     uint64_t exchanges, failures, recoveries;
     char vendor[9], product[17], rev[5];
 };
@@ -451,8 +453,17 @@ static void usbs_timeout(struct blkdev *bd, struct bio *victim)
     spin_unlock_irqrestore(&s->lock, f);
     kwarn("usb-storage: %s: command timed out in phase %u; resetting (at %llu ms)", bd->name, phase,
           (unsigned long long)(clock_now_ns() / 1000000));
-    if (cur != NULL)
-        (void)usb_cancel(cur, -ETIMEDOUT);
+    if (cur != NULL && usb_cancel(cur, -ETIMEDOUT) == -EIO) {
+        /* The controller may still write into the bio's pages and the
+         * CBW/CSW: the bio is never completed and the slot never handed
+         * back (`recovering` stays set), so nothing reuses them. */
+        f = spin_lock_irqsave(&s->lock);
+        s->quarantined = true;
+        spin_unlock_irqrestore(&s->lock, f);
+        usb_note_quarantine(s->udev, "a mass-storage exchange",
+                            bio ? (size_t)bio->nsectors * s->bd.sector_size : 0);
+        return;
+    }
     kdebug("usb-storage: %s: transfer cancelled at %llu ms", bd->name, (unsigned long long)(clock_now_ns() / 1000000));
     int rrc = usbs_reset_recovery(s);
     kdebug("usb-storage: %s: reset recovery done (%d) at %llu ms", bd->name, rrc,
@@ -483,27 +494,34 @@ static int usbs_debug_dma(struct blkdev *bd, uint64_t addr)
     int rc = usb_bulk_msg(s->udev, s->ep_out, s->cbw, USBS_CBW_LEN, &got, USBS_SYNC_NS);
     if (rc)
         return rc;
-    struct usb_request r;
-    memset(&r, 0, sizeof(r));
-    r.udev = s->udev;
-    r.ep = s->ep_in;
-    r.len = bd->sector_size;
-    r.debug_dma = addr;
-    r.done = NULL;
-    rc = usb_submit(&r);
-    if (rc)
+    /* On the heap: a cancel answering -EIO keeps the request (U10). */
+    struct usb_request *r = kzalloc(sizeof(*r));
+    if (r == NULL)
+        return -ENOMEM;
+    r->udev = s->udev;
+    r->ep = s->ep_in;
+    r->len = bd->sector_size;
+    r->debug_dma = addr;
+    r->done = NULL;
+    rc = usb_submit(r);
+    if (rc) {
+        kfree(r);
         return rc;
+    }
     /* No callback: poll the status the HCD writes; the transfer either
      * completes (the device sent the block, the IOMMU dropped the write)
      * or is cancelled at the bound. */
     uint64_t deadline = clock_deadline_ns(USBS_SYNC_NS);
-    while (__atomic_load_n(&r.status, __ATOMIC_ACQUIRE) == -EINPROGRESS && !clock_deadline_passed(deadline))
+    while (__atomic_load_n(&r->status, __ATOMIC_ACQUIRE) == -EINPROGRESS && !clock_deadline_passed(deadline))
         thread_sleep_ns(250000);
-    if (__atomic_load_n(&r.status, __ATOMIC_ACQUIRE) == -EINPROGRESS)
-        (void)usb_cancel(&r, -ETIMEDOUT);
-    if (r.status == -EPIPE)
+    if (__atomic_load_n(&r->status, __ATOMIC_ACQUIRE) == -EINPROGRESS && usb_cancel(r, -ETIMEDOUT) == -EIO) {
+        usb_note_quarantine(s->udev, "a debug DMA transfer", sizeof(*r));
+        return -EIO;
+    }
+    if (r->status == -EPIPE)
         (void)usb_clear_halt(s->udev, s->ep_in);
-    int data_rc = r.status;
+    int data_rc = r->status;
+    kfree(r);
     rc = usb_bulk_msg(s->udev, s->ep_in, s->csw, USBS_CSW_LEN, &got, USBS_SYNC_NS);
     if (rc == -EPIPE) {
         (void)usb_clear_halt(s->udev, s->ep_in);
@@ -694,12 +712,27 @@ static void usbs_remove(struct usb_device *udev)
     struct bio *bio = s->bio;
     s->bio = NULL;
     spin_unlock_irqrestore(&s->lock, f);
-    if (cur != NULL)
-        (void)usb_cancel(cur, -ENODEV);
+    bool kept = cur != NULL && usb_cancel(cur, -ENODEV) == -EIO;
     f = spin_lock_irqsave(&s->lock);
-    s->cur = NULL;
-    s->phase = USBS_IDLE;
+    if (kept)
+        s->quarantined = true;
+    kept = s->quarantined;   /* or an earlier timeout's cancel kept the exchange */
+    if (!kept) {
+        s->cur = NULL;
+        s->phase = USBS_IDLE;
+    }
     spin_unlock_irqrestore(&s->lock, f);
+    if (kept) {
+        /* The controller keeps the requests and buffers inside `s` and
+         * the bio's pages: neither is released (U10). */
+        if (cur != NULL)
+            usb_note_quarantine(udev, "a mass-storage exchange",
+                                bio ? (size_t)bio->nsectors * s->bd.sector_size : 0);
+        kwarn("usb-storage: %s: %s removed with an exchange the controller kept; its memory is retained",
+              udev->dev.name, s->bd.name);
+        udev->drvdata = NULL;
+        return;
+    }
     if (bio != NULL)
         bio_complete(bio, -ENODEV);
     kinfo("usb-storage: %s: %s removed (%llu exchanges, %llu failures, %llu recoveries)", udev->dev.name, s->bd.name,

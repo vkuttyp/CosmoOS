@@ -2638,3 +2638,25 @@ See the [history index](README.md).
     local matrix passes, including crash and reproducibility checks;
     branch CI and merge CI are pending.
   - Report: `docs/audit/2026-10-09-analyzer-gate-report.md`.
+
+- **Device lifecycle Unit 2: fault and interleaving sweep (2026-10-09; PR #338).**
+  - Proven, fixed, and probed on x86-64 and AArch64: NVMe submit across
+    controller death (dead rechecked under the queue lock), virtio-rng
+    repost after reset, and unacknowledged stops -- NVMe disable, AHCI
+    port stop and COMRESET, e1000e RX/TX disable, xHCI Stop Endpoint,
+    Disable Slot and halt. Each fixed path keeps DMA until the device
+    acknowledges.
+  - xHCI cancel contract (U14): Stop Endpoint -> Disable Slot -> halt;
+    a request is returned only after an acknowledgement, else quarantined
+    and `usb_cancel` returns `-EIO` (U10). `usb_sync_msg` bounces through
+    an HCD-owned block; usb-storage, usb-hid and the hub keep request
+    memory and bios on `-EIO`. The hub worker waits for `remove` to
+    release its request.
+  - Refuted with deterministic tests: AHCI probe rollback IRQ ordering,
+    active network worker removal, xHCI cancel against a running callback.
+  - net-nicbench eth1 failure: not an inherited ARP entry (the rebound
+    netif reuses the address, but the flush ordering holds, N25); a
+    leftover net-hostinput connection resolved the gateway during the
+    ARP phase and the benchmark's hook ate the reply. The benchmark now
+    resolves the gateway first.
+  - Report: `docs/audit/2026-10-09-device-lifecycle-unit2-report.md`.

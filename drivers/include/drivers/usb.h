@@ -201,8 +201,15 @@ int usb_submit(struct usb_request *r);
  * every request on it completes (-ECANCELED, `r` itself with `status`)
  * before this returns. Thread context. 0, or -ENOENT if `r` had already
  * completed -- and in that case its `done` has finished too, so either
- * answer means the caller may free what the request pointed at. */
+ * answer means the caller may free what the request pointed at. -EIO:
+ * the controller acknowledged no stop of the endpoint, the slot or
+ * itself; `r` is not completed, never will be, and neither it nor any
+ * buffer it names may ever be freed or reused (U10, U14). */
 int usb_cancel(struct usb_request *r, int status);
+
+/* A class driver that got -EIO from usb_cancel: count and log what it
+ * leaves to the controller for the rest of the boot. */
+void usb_note_quarantine(struct usb_device *udev, const char *what, size_t bytes);
 
 /* Synchronous shapes, thread context, bounded by `timeout_ns` (0: the
  * default, USB_TIMEOUT_NS). usb_control_msg returns the bytes moved or a

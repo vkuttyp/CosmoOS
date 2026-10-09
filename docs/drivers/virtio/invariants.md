@@ -82,3 +82,9 @@ retains queue/record storage, stops device DMA, and serializes completion
 and recovery claims under the same lock; it must exclude new submission
 publication during its drain. Unit 1's reproduction and
 validation are recorded in `docs/audit/2026-10-08-vnet-remove-report.md`.
+For the persistent entropy buffer, the post-and-kick gate is closed before
+reset; a completion after that boundary cannot publish another descriptor.
+Check: the `VRNG-RESET-REPOST: PASS posts_after_reset=0` line virtio-rng's
+module init prints after a synthetic reset-time completion (a marker the
+boot harness requires), and `tools/virtio-rng-repost-probe.py --old`, which
+restores the old gate and must see `posts_after_reset=1`.

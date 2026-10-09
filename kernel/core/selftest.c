@@ -620,11 +620,19 @@ static const struct selftest tests[] = {
     { "usb-storage",     selftest_usb_storage },
     { "usb-storage-timeout", selftest_usb_storage_timeout },
     { "usb-unplug",      selftest_usb_unplug },
+    { "xhci-disable-ack", selftest_xhci_disable_ack },
+    { "xhci-halt-ack", selftest_xhci_halt_ack },
+    { "xhci-cancel-ack", selftest_xhci_cancel_ack },
+    { "usb-sync-quarantine", selftest_usb_sync_quarantine },
+    { "xhci-cancel-retired", selftest_xhci_cancel_retired },
     { "ahci-identify",   selftest_ahci_identify },
     { "ahci-io",         selftest_ahci_io },
     { "ahci-timeout",    selftest_ahci_timeout },
     { "ahci-unplug",     selftest_ahci_unplug },
     { "ahci-reset",      selftest_ahci_reset },
+    { "ahci-comreset-ack", selftest_ahci_comreset_ack },
+    { "ahci-error-reset", selftest_ahci_error_reset },
+    { "nvme-die-concurrent", selftest_nvme_die_concurrent },
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },
@@ -761,6 +769,7 @@ static const struct selftest tests[] = {
     { "net-output",      selftest_net_output },
     { "net-tcpverdict",  selftest_net_tcpverdict },
     { "net-second-nic",  selftest_net_second_nic },
+    { "e1000e-stop-ack", selftest_e1000e_stop_ack },
     { "net-lo-udp",      selftest_net_lo_udp },
     { "tcp-pcb-timer-free", selftest_tcp_pcb_timer_free },
     { "net-lo-tcp",      selftest_net_lo_tcp },
@@ -792,6 +801,7 @@ static const struct selftest tests[] = {
     { "net-sockerr-locking", selftest_net_sockerr_locking },
     { "net-steer",       selftest_net_steer },
     { "net-rxhook-grace", selftest_net_rxhook_grace },
+    { "netif-remove-worker", selftest_netif_remove_worker },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
     { "blk-bench",       selftest_blk_bench },
@@ -932,6 +942,11 @@ static const struct selftest tests[] = {
     { "elf-text-ro",     selftest_elf_text_ro },
     { "elf-data-private", selftest_elf_data_private },
     { "elf-txtbsy",      selftest_elf_txtbsy },
+    /* Last: device-stop tests remove and rebind controllers after all tests
+     * that rely on their original block-device names have finished. */
+    { "ahci-stop-ack", selftest_ahci_stop_ack },
+    { "ahci-probe-rollback", selftest_ahci_probe_rollback },
+    { "nvme-disable-ack", selftest_nvme_disable_ack },
 };
 
 /*

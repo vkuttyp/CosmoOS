@@ -496,6 +496,19 @@ returning 0), or the resolve answering `-EINPROGRESS` instead of
 `nd_input_na` never allocates, so a flush leaves it nothing to complete
 under either order.
 
+**Address reuse.** The key is the `struct netif *`, and a driver that is
+unbound and rebound can get its new interface at the old one's address
+(the e1000e stop-acknowledgement test did, three times in one boot,
+2026-10-09). The new interface would inherit an entry only if one outlived
+the old interface's flush; the ordering above rules that out, because
+`netif_unregister` step 1 clears `NETIF_UP` under `nif->lock` before step
+5 flushes, and every creator checks the flag under the table lock. The
+2026-10-09 investigation found no entry naming the old interface at any
+point after its flush (`docs/audit/2026-10-09-device-lifecycle-unit2-report.md`).
+A rebound interface therefore starts with no neighbours, which is correct
+and which a test that relied on an earlier test's resolution must not
+assume.
+
 **Checked by** `net-arp-per-interface` and `net-nd-per-interface`: two
 fake interfaces, one neighbour address, two MACs; each resolution sends
 its own request out of its own interface (the check that fails under the

@@ -263,7 +263,12 @@ bool selftest_fb_bench(const char **reason);
 bool selftest_hid_arm(const char **reason);       /* asks the harness to type */
 bool selftest_hid_keyboard(const char **reason);  /* reads back what it typed, at the end of the run */
 /* kernel/device/devtest.c: a hub unplugged with a device behind it. */
-bool selftest_usb_hub_unplug(const char **reason);       /* kernel/tty/ttytest.c */
+bool selftest_usb_hub_unplug(const char **reason);
+bool selftest_xhci_disable_ack(const char **reason);     /* failed Stop Endpoint / Disable Slot retains DMA */
+bool selftest_xhci_halt_ack(const char **reason);        /* failed HCH acknowledgement retains controller DMA */
+bool selftest_xhci_cancel_ack(const char **reason);      /* a cancel returns a request only after a stop is acknowledged */
+bool selftest_usb_sync_quarantine(const char **reason);  /* a synchronous transfer never hands the caller's buffer to the HCD */
+bool selftest_xhci_cancel_retired(const char **reason);   /* -ENOENT only after a retired request's callback returned */
 bool selftest_ipc_pipe(const char **reason);        /* kernel/ipc/pipetest.c */
 bool selftest_ipc_fifo(const char **reason);        /* kernel/ipc/fifotest.c */
 bool selftest_unix_stream(const char **reason);     /* kernel/ipc/unixtest.c */
@@ -411,6 +416,7 @@ bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);
 bool selftest_net_netif_flags(const char **reason);   /* one reading of an interface's flag word per packet (N26) */
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
+bool selftest_e1000e_stop_ack(const char **reason);  /* an unacknowledged RX/TX stop keeps DMA allocated */
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_sockerr_udp(const char **reason);
 bool selftest_net_sockerr_spoof(const char **reason);
@@ -445,6 +451,7 @@ bool selftest_net_icmp_limit(const char **reason);     /* ICMP rate limit, path 
 bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and readiness */
 bool selftest_net_steer(const char **reason);          /* unit 11: per-CPU receive queues and flow steering */
 bool selftest_net_rxhook_grace(const char **reason);   /* clearing the receive hook waits for a running one */
+bool selftest_netif_remove_worker(const char **reason); /* unregister's barrier waits for active input_one */
 bool selftest_net_csum_offload(const char **reason);   /* unit 11: the partial checksum form and M_CSUM_OK */
 bool selftest_net_bench(const char **reason);          /* unit 11: loopback throughput, steering off and on */
 bool selftest_net_nicbench(const char **reason);       /* traffic that leaves the machine, per interface */
@@ -468,6 +475,12 @@ bool selftest_ahci_io(const char **reason);       /* ahci0p0 through the block l
 bool selftest_ahci_timeout(const char **reason);  /* a command that never starts: the block layer's timeout, port restart */
 bool selftest_ahci_unplug(const char **reason);   /* the disk-gone path with a bio in flight; a new blkdev after */
 bool selftest_ahci_reset(const char **reason);    /* COMRESET with a command in flight; the same disk keeps serving */
+bool selftest_ahci_probe_rollback(const char **reason); /* live ports, pending status, failure before global IRQ enable */
+bool selftest_ahci_stop_ack(const char **reason); /* a failed stop must retain DMA allocations */
+bool selftest_ahci_comreset_ack(const char **reason);
+bool selftest_ahci_error_reset(const char **reason); /* a successful reset leaves no error snapshot to replay */
+bool selftest_nvme_die_concurrent(const char **reason); /* a second controller_die waits for the first's outcome */ /* failed COMRESET must fail the reissued bio and mark the port dead */
+bool selftest_nvme_disable_ack(const char **reason); /* a failed disable must retain NVMe DMA allocations */
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_module_zombie_swept(const char **reason);

@@ -168,10 +168,14 @@ add one.
 ## Teardown
 
 `remove`: `netif_unregister` first (no transmit or receive reaches the
-rings after it returns), `RCTL.EN` and `TCTL.EN` cleared, `IMC` all
-ones, the watchdog cancelled synchronously, the vector released and
-`synchronize_irq` waited on, then every mbuf the rings still hold is
-unmapped and freed, the rings freed, BAR0 unmapped, and the creator's
+rings after it returns), then clear `RCTL.EN` and `TCTL.EN` and read
+both back. A failed readback gets one retry. The watchdog is cancelled
+synchronously, the vector is released, and `synchronize_irq` is waited
+on before ring memory can be reclaimed. If either engine still reports
+enabled after the retry, removal keeps the rings, mappings, mbufs, and
+driver state allocated; a device that has not acknowledged a stop may
+still own them. On acknowledged stops, every remaining mbuf is unmapped
+and freed, the rings are freed, BAR0 unmapped, and the creator's
 `netif_put`. The `release` callback frees the driver structure when the
 last holder is gone, which may be after `remove` — a queued packet or a
 route lookup can outlive the device (`docs/kernel/quiesce/`).

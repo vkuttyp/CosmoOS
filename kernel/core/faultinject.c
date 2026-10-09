@@ -32,10 +32,19 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_DEMAND_COPY] = "demand-copy",
     [FI_USB_CSW] = "usb-csw",
     [FI_AHCI_CI] = "ahci-ci",
+    [FI_AHCI_PROBE_ROLLBACK] = "ahci-probe-rollback",
+    [FI_AHCI_STOP_ACK] = "ahci-stop-ack",
+    [FI_AHCI_COMRESET_ACK] = "ahci-comreset-ack",
     [FI_HV_SELFCHECK] = "hv-selfcheck",
     [FI_FILE_READPAGE] = "file-readpage",
     [FI_NET_RX_DUP] = "net-rx-dup",
     [FI_NVME_ADMIN_POLL] = "nvme-admin-poll",
+    [FI_NVME_DISABLE_ACK] = "nvme-disable-ack",
+    [FI_E1000E_RX_DISABLE_ACK] = "e1000e-rx-disable-ack",
+    [FI_E1000E_TX_DISABLE_ACK] = "e1000e-tx-disable-ack",
+    [FI_XHCI_STOP_EP_ACK] = "xhci-stop-ep-ack",
+    [FI_XHCI_DISABLE_SLOT_ACK] = "xhci-disable-slot-ack",
+    [FI_XHCI_HALT_ACK] = "xhci-halt-ack",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

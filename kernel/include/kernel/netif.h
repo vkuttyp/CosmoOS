@@ -125,6 +125,12 @@ bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out);   /* false: no su
  * and its `arg` may be freed. Thread context. */
 typedef bool (*netif_rx_hook_fn)(struct netif *nif, struct mbuf *m, void *arg);
 void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
+#if CONFIG_DEBUG
+/* Test seams around an active worker and the unregister worker barrier.
+ * Clear these only after the parked worker and unregister thread have joined. */
+typedef void (*netif_test_worker_hook_fn)(struct netif *nif, void *arg);
+void netif_test_worker_hooks_set(netif_test_worker_hook_fn input, netif_test_worker_hook_fn barrier, void *arg);
+#endif
 /* Stack -> driver: takes the packet. Thread context; -ENETUNREACH when
  * down, -ENODEV once unregistered. */
 int netif_transmit(struct netif *nif, struct mbuf *m);

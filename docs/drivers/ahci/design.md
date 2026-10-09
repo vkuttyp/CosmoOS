@@ -81,6 +81,14 @@ outlive `remove`, which has freed the port and controller by then.
    `PxTFD.STS.BSY|DRQ` to clear (1 s) before the first command.
 8. `GHC.IE`.
 
+`GHC.IE` is the controller-wide interrupt gate. The probe enables it only
+after every port is initialized and the worker exists; disk probing and
+blkdev publication follow it. The `fail_ports` path is therefore before any
+published bio and can be injected with a port status bit latched while the
+global gate remains clear. It releases and synchronizes the PCI vector before
+unmapping the controller. `ahci-probe-rollback` checks this ordering and
+requires that no handler ran and no port owns a disk or command.
+
 Detection and identification run in the PCI probe: registering a blkdev
 does not take the device model's lock, so nothing here needs the worker
 that USB enumeration needed. The boot's disks exist when probe returns.
@@ -160,6 +168,15 @@ and are completed now with success; those still set were never issued
 and are written to `PxCI` again once the port runs. (Reissuing every
 active slot would have run the completed ones twice and left their bios
 waiting — review, PR #53.)
+
+If the required COMRESET does not establish `DET_PRESENT`, neither recovery
+path restarts the command engine or writes saved `PxCI` bits back. Task-file
+recovery fails the not-yet-issued commands with `-EIO`; timeout restart has
+already failed its victim with `-ETIMEDOUT` and the other commands with
+`-EIO`. Both mark the port dead, so new submissions fail `-ENODEV`. An
+explicit reset can recover that state only after the same disk is identified
+again. The port's own DMA pages remain allocated until removal acknowledges
+both command-engine and FIS-receiver stop.
 
 A synchronous command (IDENTIFY, the tests' one-offs) waits, bounded,
 while the port is restarting: a slot taken during a restart would be

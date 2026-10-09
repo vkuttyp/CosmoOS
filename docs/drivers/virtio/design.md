@@ -240,6 +240,12 @@ new publication. Queue/table reclamation still requires interrupt and
 poll synchronization. The audit distinguishes that locked claim from
 the teardown walk that frees ownership storage.
 
+The entropy driver uses one persistent buffer. Its completion can repost
+that buffer, so remove closes the post-and-kick gate before resetting the
+device. A completion already past the gate may finish before remove closes
+it; one that reaches the gate afterwards leaves the queue unchanged.
+`virtq_free` still synchronizes the callback before the buffer is freed.
+
 The transport owns `struct vpci` (with the embedded `virtio_device`) from
 PCI probe to PCI remove. A device driver owns its `priv`, its queues
 (freed in `remove`) and its DMA pools. Virtqueue ring memory is one

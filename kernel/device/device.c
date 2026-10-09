@@ -142,6 +142,12 @@ static bool try_bind(struct device *dev, struct device_driver *drv)
 {
     if (!drv->bus->match(dev, drv))
         return false;
+    if (device_dma_retained(dev)) {
+        /* Claimed by nobody: the device stays unbound (U14). */
+        kwarn("device: %s: %s not probed: a previous driver retained DMA the device may still use", dev->name,
+              drv->name);
+        return true;
+    }
     /* The driver is named before probe so a bus thunk can find its typed
      * driver through dev->driver instead of re-matching (several drivers
      * may match one device). */
@@ -431,6 +437,25 @@ void device_dump(void)
 #include <kernel/module.h>
 EXPORT_SYMBOL(bus_register);
 EXPORT_SYMBOL(bus_find);
+void device_retain_dma(struct device *dev)
+{
+    __atomic_store_n(&dev->dma_retained, true, __ATOMIC_RELEASE);
+    kwarn("device: %s: DMA retained after an unacknowledged stop; the device will not be probed again", dev->name);
+}
+
+void device_release_dma(struct device *dev)
+{
+    __atomic_store_n(&dev->dma_retained, false, __ATOMIC_RELEASE);
+}
+
+bool device_dma_retained(const struct device *dev)
+{
+    return __atomic_load_n(&dev->dma_retained, __ATOMIC_ACQUIRE);
+}
+
+EXPORT_SYMBOL(device_retain_dma);
+EXPORT_SYMBOL(device_release_dma);
+EXPORT_SYMBOL(device_dma_retained);
 EXPORT_SYMBOL(device_setup);
 EXPORT_SYMBOL(device_release_static);
 EXPORT_SYMBOL(device_add_resource);

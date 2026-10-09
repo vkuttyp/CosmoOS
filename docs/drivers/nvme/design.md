@@ -95,6 +95,14 @@ granted fewer queues than there are CPUs; the lock stays because a
 thread may migrate between reading its CPU and taking the lock, and
 because the interrupt handler and a submitter share the slot table.
 
+Submission's dead-controller decision belongs under the queue lock that
+publishes a command slot. A reset may mark the controller dead and drain
+the slots while another thread maps a bio before taking that lock. A
+submission that reaches the lock afterward must release its mappings and
+return an error without publishing a command the disabled controller can
+never complete. A self-test uses a synthetic controller to force exactly
+that window without changing a live namespace.
+
 ## Data path
 
 A bio's segments (`bio_vec`, `docs/kernel/device/design.md`) become PRPs:
@@ -124,24 +132,33 @@ Abort Requested) the bio finishes with `-ETIMEDOUT` through the normal
 path. An admin command that times out in software leaves its slot
 orphaned until the controller's late answer frees it, for the same
 reason. If the abort itself does not complete within 5 s, or the
-controller reports `CSTS.CFS`, the driver *resets*: it clears `CC.EN`, waits for `RDY` to fall, completes
-every in-flight command on every queue with `-ETIMEDOUT`
-(the controller has forgotten them), marks the controller dead, and
-every later submission answers `-EIO`. A dead controller's namespaces
-stay registered until the module is removed, so a mounted filesystem
-sees errors, not a vanished device. Re-initialisation after a reset is
-future work; QEMU's controller does not time out, and the path is tested
-through the RAM device's stall mode at the block layer and by review here.
+controller reports `CSTS.CFS`, the driver *resets*: it clears `CC.EN` and
+waits for `RDY` to fall. Only after that acknowledgement does it complete
+in-flight commands on every queue with `-ETIMEDOUT` (the controller has
+forgotten them), unmap their buffers and release their slots. It then
+marks the controller dead, and every later submission answers `-EIO`.
+If `RDY` does not fall, the controller is still marked dead but its queue
+memory, active mappings and bios are retained; completing a bio could let
+its caller reuse a buffer while the device still writes to it. A dead
+controller's namespaces stay registered until the module is removed, so
+a mounted filesystem sees errors, not a vanished device.
+Re-initialisation after a reset is future work; QEMU's controller does
+not time out, and the path is tested through the RAM device's stall mode
+at the block layer and by review here.
 
 ## Removal
 
 `nvme_remove`: `blk_unregister` every namespace (no submit is inside the
-driver afterwards), disable the controller (in-flight commands are
-completed `-EIO`), release the MSI-X vectors with `interrupt_unregister_sync`
-semantics (`pci_msix_disable` after a grace period so a handler still
-running on another CPU finishes), free the queues, `blkdev_put` the
-namespaces (their memory goes when the last holder is gone,
-`docs/kernel/quiesce/design.md`), unmap BAR0, free the controller.
+driver afterwards), disable the controller, release the MSI-X vectors
+with `interrupt_unregister_sync` semantics (`pci_msix_disable` after a
+grace period so a handler still running on another CPU finishes), and
+wait for the queue polls. If disable was acknowledged, in-flight commands
+are completed `-ETIMEDOUT`, queues are freed, namespaces are put (their
+memory goes when the last holder is gone,
+`docs/kernel/quiesce/design.md`), BAR0 is unmapped, and the controller is
+freed. If the acknowledgement timed out, removal leaves all controller
+DMA and mappings allocated and clears only the PCI driver's private
+pointer; the controller may still own them.
 
 ## QEMU
 

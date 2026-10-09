@@ -54,6 +54,33 @@ serial, capacity and sector size — keeps the same blkdev: `blk_find`
 returns the same object and a read and a write work. The recovery an
 error that needs a link reset goes through.
 
+**`ahci-comreset-ack`** (debug builds; fault injection): two accepted
+withheld bios are sent through both task-file recovery and timeout restart,
+with the required COMRESET made to fail in each path. Task-file recovery
+must fail both bios `-EIO`; timeout restart must fail its victim
+`-ETIMEDOUT` and the other bio `-EIO`. Each dead port must reject a third
+bio, then an explicit successful reset must re-identify the same disk and
+restore reads. `tools/ahci-comreset-ack-probe.py --old` restores both old
+restart/reissue behaviors in a throwaway worktree and requires this check
+to fail on both architectures.
+
+**`ahci-probe-rollback`** (debug builds; fault injection): after all
+implemented ports are live, the probe fails with a port-change bit
+pending. The test requires `GHC.IE == 0`, zero handler calls, no disk and
+no active command before the vector is synchronized, then rebinds the
+controller successfully (`AHCI-ROLLBACK-PENDING`). This establishes that
+this rollback point precedes both interrupt dispatch and bio publication.
+
+**`ahci-stop-ack`** (debug builds; fault injection): first withhold one
+port-stop acknowledgement; the retry succeeds and the controller's DMA
+is then freed before a successful rebind. Next withhold every stop
+acknowledgement across remove; the test requires zero DMA frees and a
+successful rebind. The paired `tools/ahci-stop-ack-probe.py --old` runs
+on both architectures remove the retention branch in a throwaway
+worktree and require `dma_frees=12` plus exactly the expected self-test
+failure. This checks that a device which did not acknowledge stop never
+loses DMA memory while it may still own it.
+
 **`iommu`** (unchanged): it walks every blkdev with `debug_dma` and now
 provokes faults through `ahci0p0` and `ahci0p1` as well, each attributed
 to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).

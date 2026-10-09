@@ -269,7 +269,7 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] blk: nvme0n1: 16384 sectors of 512 bytes",
     r"^\[ INFO\] nvme0: .* 1 namespace\(s\) of \d+, \d+ I/O queue\(s\) of depth 32",
     r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
-    r"^\[ INFO\] hello: module init \(ABI v8, load 1\)",
+    r"^\[ INFO\] hello: module init \(ABI v9, load 1\)",
     r"^init: CosmoOS userland, pid \d+",
     r"^CosmoOS userland ready",
     r"^init: rc exited with status 0",
@@ -1056,6 +1056,35 @@ def main():
     want_selftest = args.expect_selftest == "yes" or (args.expect_selftest == "auto" and selftest_lines)
     if want_selftest and not any(ln.startswith("SELFTEST: PASS") for ln in selftest_lines):
         failures.append("no 'SELFTEST: PASS' line")
+    if want_selftest and not any(re.search(r"NVME-INTERLEAVE: PASS die=1 accepted=0 done=0 inflight=0", ln)
+                                 for ln in lines):
+        failures.append("missing successful NVMe submit/death interleaving proof")
+    if want_selftest and not any(re.search(r"VRNG-RESET-REPOST: PASS posts_after_reset=0", ln)
+                                 for ln in lines):
+        failures.append("missing successful virtio-rng reset/repost proof")
+    if want_selftest and not any(re.search(r"AHCI-ROLLBACK-PENDING: PASS", ln)
+                                 for ln in lines):
+        failures.append("missing successful AHCI pending-interrupt rollback proof")
+    if want_selftest and not any(re.search(r"AHCI-STOP-ACK: PASS", ln) for ln in lines):
+        failures.append("missing successful AHCI stop-acknowledgement proof")
+    if want_selftest and not any(re.search(r"NVME-DISABLE-ACK: PASS", ln) for ln in lines):
+        failures.append("missing successful NVMe disable-acknowledgement proof")
+    if want_selftest and not any(re.search(r"E1000E-STOP-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful e1000e RX/TX disable-acknowledgement proof")
+    if want_selftest and not any(re.search(r"XHCI-DISABLE-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI Stop Endpoint/Disable Slot acknowledgement proof")
+    if want_selftest and not any(re.search(r"XHCI-HALT-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI halt acknowledgement proof")
+    if want_selftest and not any(re.search(r"NVME-DIE-CONCURRENT: PASS", ln) for ln in lines):
+        failures.append("missing successful NVMe concurrent controller-death proof")
+    if want_selftest and not any(re.search(r"AHCI-ERROR-RESET: PASS", ln) for ln in lines):
+        failures.append("missing successful AHCI reset error-snapshot proof")
+    if want_selftest and not any(re.search(r"XHCI-CANCEL-ACK-SWEEP: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI cancel acknowledgement proof")
+    if want_selftest and not any(re.search(r"USB-SYNC-QUARANTINE: PASS", ln) for ln in lines):
+        failures.append("missing successful synchronous USB quarantine proof")
+    if want_selftest and not any(re.search(r"XHCI-CANCEL-RETIRED: PASS", ln) for ln in lines):
+        failures.append("missing successful xHCI retired-callback cancel proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 

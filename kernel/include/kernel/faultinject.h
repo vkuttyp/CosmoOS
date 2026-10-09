@@ -28,10 +28,19 @@ enum fi_kind {
     FI_DEMAND_COPY,   /* the frame of a kernel-mode demand-zero fault in a user copy (-EFAULT) */
     FI_USB_CSW,       /* usb_storage queues the CSW read without ringing the doorbell: a hang with a transfer in flight */
     FI_AHCI_CI,       /* ahci fills a slot and never sets its PxCI bit: a command that never starts */
+    FI_AHCI_PROBE_ROLLBACK, /* ahci fails after starting ports but before enabling global interrupts */
+    FI_AHCI_STOP_ACK, /* ahci simulates a port engine that does not acknowledge a stop */
+    FI_AHCI_COMRESET_ACK, /* ahci simulates a COMRESET that does not re-establish the link */
     FI_HV_SELFCHECK,  /* the hypervisor's boot self-check reports failure: the backend-disable path */
     FI_FILE_READPAGE, /* a page cache miss's readpage fails with -EIO: a mapped touch is SIGBUS */
     FI_NET_RX_DUP,    /* a received frame is delivered a second time (a link-layer retransmit, a switch flooding): the stack must stay idempotent -- TCP delivers the duplicated segment once, ARP keeps one entry */
     FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path -- the issuing thread drives the admin queue itself and the interrupt handler leaves that queue alone -- so the path runs under lockdep on a machine that has a vector */
+    FI_NVME_DISABLE_ACK, /* nvme: the controller fails to acknowledge CC.EN clear */
+    FI_E1000E_RX_DISABLE_ACK, /* e1000e: RCTL.EN remains set */
+    FI_E1000E_TX_DISABLE_ACK, /* e1000e: TCTL.EN remains set */
+    FI_XHCI_STOP_EP_ACK, /* xHCI: Stop Endpoint does not acknowledge */
+    FI_XHCI_DISABLE_SLOT_ACK, /* xHCI: Disable Slot does not acknowledge */
+    FI_XHCI_HALT_ACK, /* xHCI: USBCMD.RS clear does not set USBSTS.HCH */
     FI_KIND_COUNT,
 };
 

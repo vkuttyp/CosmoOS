@@ -410,6 +410,24 @@ to the driver that registered them; `blk_unregister` waits for no
 outstanding bios (the driver drains first; virtio_blk resets the device
 which completes everything with -EIO).
 
+**DMA a driver could not take back** (2026-10-09, review of PR #338). A
+driver whose stop the device did not acknowledge keeps the memory the
+device may still reach (`docs/drivers/usb/invariants.md`, U14) and marks
+the device with `device_retain_dma`. `struct device.dma_retained` is
+the model's record of it, because the driver's own pointer cannot be:
+`unbind` clears `drvdata` after every `remove`, which is what defeated
+the first version of xHCI's guard. While the flag is set `try_bind`
+probes no driver on the device -- a new driver would hand the same
+hardware fresh rings while it may still write into the old ones -- and
+logs why; the device stays `DEV_UNBOUND`. The flag is cleared
+(`device_release_dma`) only by code that reclaimed the memory after a
+stop that was acknowledged; in production nothing does, so the function
+stays unbound for the rest of the boot. Set by NVMe, AHCI, e1000e and
+xHCI on every retained path (remove and probe rollback). Checked by
+`ahci-stop-ack` and `e1000e-stop-ack` (the rebind straight after a
+refused stop must fail) and `tools/dma-retained-probe.py --old`. Adding
+the field moved the module ABI to 9.
+
 ## Concurrency
 
 - `g_device_lock`, `g_blk_lock`, `g_pci_lock`: mutexes for registries.

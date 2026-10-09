@@ -100,7 +100,11 @@ struct ahci_port {
     unsigned err_slot;                 /* PxCMD.CCS at that moment */
     uint32_t err_ci;                   /* PxCI at that moment: which commands the HBA still held */
     bool recovering;                   /* a restart is in progress: submit refuses (-EAGAIN) until the port runs again */
+    bool dead;                         /* a stop was not acknowledged; accepted DMA ownership is retained */
     bool change;                       /* PCS/PRCS: the worker re-reads the port */
+#if CONFIG_SELFTEST
+    bool test_force_comreset;           /* exercise a reset failure without relying on QEMU's PxTFD timing */
+#endif
 #if CONFIG_FAULTINJECT
     uint32_t withheld;                 /* tests: slots filled whose PxCI bit was never written */
 #endif
@@ -149,13 +153,16 @@ static bool wait_bits(vaddr_t reg, uint32_t mask, uint32_t want, unsigned ms)
  * (§10.4.2; the first version waited a second for exactly that). */
 static bool port_stop_cmd(struct ahci_port *p)
 {
+#if CONFIG_FAULTINJECT
+    /* Here rather than in port_stop, which calls this once per attempt:
+     * the recovery and reset paths stop command processing alone. */
+    if (faultinject_should_fail(FI_AHCI_STOP_ACK))
+        return false;
+#endif
     uint32_t cmd = prd(p, PX_CMD);
-    if (cmd & PXCMD_ST) {
+    if (cmd & PXCMD_ST)
         pwr(p, PX_CMD, cmd & ~PXCMD_ST);
-        if (!wait_bits(p->regs + PX_CMD, PXCMD_CR, 0, AHCI_STOP_MS))
-            return false;
-    }
-    return true;
+    return wait_bits(p->regs + PX_CMD, PXCMD_CR, 0, AHCI_STOP_MS);
 }
 
 /* Stop both command processing and FIS receive: for (re)programming the
@@ -167,10 +174,33 @@ static bool port_stop(struct ahci_port *p)
     uint32_t cmd = prd(p, PX_CMD);
     if (cmd & PXCMD_FRE) {
         pwr(p, PX_CMD, cmd & ~PXCMD_FRE);
-        if (!wait_bits(p->regs + PX_CMD, PXCMD_FR, 0, AHCI_STOP_MS))
-            return false;
     }
-    return true;
+    return wait_bits(p->regs + PX_CMD, PXCMD_FR, 0, AHCI_STOP_MS);
+}
+
+static bool port_stop_retry(struct ahci_port *p)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++)
+        if (port_stop(p))
+            return true;
+    return false;
+}
+
+static bool port_stop_cmd_retry(struct ahci_port *p)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++)
+        if (port_stop_cmd(p))
+            return true;
+    return false;
+}
+
+static void port_mark_dead(struct ahci_port *p, const char *why)
+{
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    p->dead = true;
+    p->recovering = false;
+    spin_unlock_irqrestore(&p->lock, f);
+    kerror("ahci%u: port %u: %s; retaining DMA ownership", p->hba->index, p->index, why);
 }
 
 static void port_start(struct ahci_port *p)
@@ -185,6 +215,12 @@ static void port_start(struct ahci_port *p)
  * with its signature; true when a device is present afterwards. */
 static bool port_comreset(struct ahci_port *p)
 {
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_AHCI_COMRESET_ACK)) {
+        p->resets++;
+        return false;
+    }
+#endif
     uint32_t sctl = prd(p, PX_SCTL);
     pwr(p, PX_SCTL, (sctl & ~PXSCTL_DET_MASK) | PXSCTL_DET_INIT);
     thread_sleep_ms(2);
@@ -377,11 +413,20 @@ static void port_restart(struct ahci_port *p, struct bio *victim, int victim_sta
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
     p->recovering = true;
     spin_unlock_irqrestore(&p->lock, f);
-    (void)port_stop_cmd(p);
+    if (!port_stop_cmd_retry(p)) {
+        port_mark_dead(p, "command engine did not acknowledge stop");
+        return;   /* keep the slots and mappings: the HBA may still own them */
+    }
     slots_fail(p, victim, victim_status, status);
     pwr(p, PX_SERR, 0xffffffffu);
-    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
-        (void)port_comreset(p);
+    bool reset = (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ)) != 0;
+#if CONFIG_SELFTEST
+    reset |= p->test_force_comreset;
+#endif
+    if (reset && !port_comreset(p)) {
+        port_mark_dead(p, "COMRESET did not re-establish the link during restart");
+        return;
+    }
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
     p->recovering = false;
@@ -414,13 +459,14 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
             return -EINVAL;
     }
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
-    int slot = p->recovering ? -1 : slot_alloc(p);
+    int slot = (p->recovering || p->dead) ? -1 : slot_alloc(p);
     if (slot < 0) {
         bool busy = p->recovering;
+        bool dead = p->dead;
         spin_unlock_irqrestore(&p->lock, f);
         if (len > 0 && raw_dma == 0)
             dma_unmap(&p->hba->pdev->dev, dma, len, write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-        return busy ? -EBUSY : -EAGAIN;
+        return dead ? -ENODEV : busy ? -EBUSY : -EAGAIN;
     }
     struct ahci_slot *s = &p->slots[slot];
     s->sync = &w;
@@ -571,23 +617,29 @@ static int disk_attach(struct ahci_port *p)
 /* The disk is gone (the port says so, or a test says so): stop the port,
  * fail everything it holds, unregister, drop the creator's reference. The
  * port is started again so a returning disk is seen. Thread context. */
-static void disk_detach(struct ahci_port *p, int status)
+static bool disk_detach(struct ahci_port *p, int status)
 {
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
     struct ahci_disk *d = p->disk;
     p->disk = NULL;
     spin_unlock_irqrestore(&p->lock, f);
     if (d == NULL)
-        return;
-    (void)port_stop_cmd(p);
-    slots_fail(p, NULL, 0, status);
-    pwr(p, PX_SERR, 0xffffffffu);
-    port_start(p);
+        return true;
+    bool stopped = port_stop_cmd_retry(p);
+    if (stopped) {
+        slots_fail(p, NULL, 0, status);
+        pwr(p, PX_SERR, 0xffffffffu);
+        if (!__atomic_load_n(&p->hba->stop, __ATOMIC_ACQUIRE))
+            port_start(p);
+    } else {
+        port_mark_dead(p, "command engine did not acknowledge detach stop");
+    }
     blk_unregister(&d->bd);   /* refuses new bios; waits for submits inside the driver */
     kinfo("ahci%u: port %u: %s removed (%llu issued, %llu completed, %llu errors, %llu resets)", p->hba->index,
           p->index, d->bd.name, (unsigned long long)p->issued, (unsigned long long)p->completed,
           (unsigned long long)p->errors, (unsigned long long)p->resets);
     blkdev_put(&d->bd);       /* the creator's; disk_release frees d when the holders are gone */
+    return stopped;
 }
 
 /* What is on the port now: a signature, or 0 for nothing usable. */
@@ -603,13 +655,15 @@ static uint32_t port_signature(struct ahci_port *p)
  * detach one that left. Thread context. */
 static void port_probe_locked(struct ahci_port *p)
 {
+    if (p->dead)
+        return;
     uint32_t sig = port_signature(p);
     bool have = p->disk != NULL;
     if (sig == SIG_SATA && !have) {
         (void)wait_bits(p->regs + PX_TFD, ATA_STS_BSY | ATA_STS_DRQ, 0, AHCI_RESET_MS);
         (void)disk_attach(p);
     } else if (sig != SIG_SATA && have) {
-        disk_detach(p, -ENODEV);
+        (void)disk_detach(p, -ENODEV);
     } else if (sig != 0 && sig != SIG_SATA && !have) {
         kinfo("ahci%u: port %u: %s (signature 0x%08x) is not driven", p->hba->index, p->index,
               sig == SIG_ATAPI ? "an ATAPI device" : sig == SIG_PMP ? "a port multiplier" : "an unknown device", sig);
@@ -666,7 +720,7 @@ static int ahci_submit(struct blkdev *bd, struct bio *bio)
     }
 
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
-    if (p->disk != d) {
+    if (p->disk != d || p->dead) {
         spin_unlock_irqrestore(&p->lock, f);
         for (unsigned k = 0; k < nsegs; k++)
             dma_unmap(bd->dev, seg_dma[k], seg_len[k], dir);
@@ -762,7 +816,8 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
             rc = -ENODEV;
             goto out;
         }
-        disk_detach(p, -ENODEV);
+        if (!disk_detach(p, -ENODEV))
+            rc = -EIO;
         goto out;
     }
     if (p->disk == NULL) {
@@ -780,17 +835,29 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
      * keep this blkdev if the same disk answers (the recovery an error
      * that needs a COMRESET goes through). */
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    bool was_dead = p->dead;
     p->recovering = true;
     spin_unlock_irqrestore(&p->lock, f);
-    (void)port_stop_cmd(p);
+    if (!port_stop_cmd_retry(p)) {
+        port_mark_dead(p, "command engine did not acknowledge reset stop");
+        rc = -EIO;
+        goto out;
+    }
     slots_fail(p, NULL, 0, -EIO);
+    /* Every slot the handler's snapshot named has just failed: a pending
+     * error (left by a recovery whose stop was refused) describes nothing
+     * now, and replayed by the worker it would apply to commands taken
+     * after this reset (review of PR #338). */
+    f = spin_lock_irqsave(&p->lock);
+    p->error = false;
+    spin_unlock_irqrestore(&p->lock, f);
     bool up = port_comreset(p);
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
     p->recovering = false;
     spin_unlock_irqrestore(&p->lock, f);
     if (!up || port_signature(p) != SIG_SATA) {
-        disk_detach(p, -ENODEV);
+        (void)disk_detach(p, -ENODEV);
         rc = -ENODEV;
         goto out;
     }
@@ -799,17 +866,34 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
     probe.port = p;
     uint64_t capacity = 0;
     uint32_t sector = 0;
+    if (was_dead) {
+        /* The successful link reset is enough to try IDENTIFY again; if it
+         * fails, restore the dead state before returning to the caller. */
+        f = spin_lock_irqsave(&p->lock);
+        p->dead = false;
+        spin_unlock_irqrestore(&p->lock, f);
+    }
     rc = disk_identify(p, &probe, &capacity, &sector);
     if (rc) {
-        disk_detach(p, -EIO);
+        if (was_dead) {
+            kerror("ahci%u: port %u: IDENTIFY after acknowledged COMRESET failed (%d; PxCMD 0x%08x, PxTFD 0x%08x, PxCI 0x%08x, PxIS 0x%08x)",
+                   p->hba->index, p->index, rc, prd(p, PX_CMD), prd(p, PX_TFD), prd(p, PX_CI), prd(p, PX_IS));
+            port_mark_dead(p, "IDENTIFY failed while recovering a dead port");
+        }
+        (void)disk_detach(p, -EIO);
         goto out;
     }
     if (strcmp(probe.serial, d->serial) != 0 || capacity != d->bd.capacity || sector != d->bd.sector_size) {
         kinfo("ahci%u: port %u: a different disk answered after the reset (%s)", p->hba->index, p->index,
               probe.serial);
-        disk_detach(p, -ENODEV);
+        (void)disk_detach(p, -ENODEV);
         port_probe_locked(p);
         rc = -ENODEV;
+    } else {
+        /* A completed COMRESET and IDENTIFY have recovered the same device. */
+        f = spin_lock_irqsave(&p->lock);
+        p->dead = false;
+        spin_unlock_irqrestore(&p->lock, f);
     }
 out:
     mutex_unlock(&p->hotplug);
@@ -884,7 +968,10 @@ static void port_recover(struct ahci_port *p)
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
     p->recovering = true;
     spin_unlock_irqrestore(&p->lock, f);
-    (void)port_stop_cmd(p);
+    if (!port_stop_cmd_retry(p)) {
+        port_mark_dead(p, "command engine did not acknowledge recovery stop");
+        return;
+    }
     f = spin_lock_irqsave(&p->lock);
     p->error = false;
     unsigned slot = p->err_slot;
@@ -906,6 +993,9 @@ static void port_recover(struct ahci_port *p)
     if (failed) {
         slot_unmap(p, slot);
         p->active &= ~(1u << slot);
+#if CONFIG_FAULTINJECT
+        p->withheld &= ~(1u << slot);
+#endif
         p->completed++;
     }
     uint32_t reissue = p->active & ci;
@@ -922,8 +1012,15 @@ static void port_recover(struct ahci_port *p)
         }
     }
     pwr(p, PX_SERR, 0xffffffffu);
-    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
-        (void)port_comreset(p);
+    bool reset = (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ)) != 0;
+#if CONFIG_SELFTEST
+    reset |= p->test_force_comreset;
+#endif
+    if (reset && !port_comreset(p)) {
+        port_mark_dead(p, "COMRESET did not re-establish the link during error recovery");
+        slots_fail(p, NULL, 0, -EIO);
+        return;
+    }
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
     reissue &= p->active;   /* still ours */
@@ -934,6 +1031,112 @@ static void port_recover(struct ahci_port *p)
     p->recovering = false;
     spin_unlock_irqrestore(&p->lock, f);
 }
+
+#if CONFIG_SELFTEST
+/* Test the task-file recovery caller with two accepted, withheld bios. The
+ * first is the command the HBA had started; the second is the command the
+ * recovery path would otherwise reissue after an unacknowledged COMRESET. */
+bool ahci_test_comreset_recovery(struct blkdev *bd, struct bio *first, struct bio *second);
+bool ahci_test_comreset_recovery(struct blkdev *bd, struct bio *first, struct bio *second)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (bd == NULL || first == NULL || second == NULL || first == second)
+        return false;
+    struct ahci_port *p = disk_of(bd)->port;
+    int first_slot = -1, second_slot = -1;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < AHCI_MAX_SLOTS; i++) {
+        if (!(p->active & (1u << i)))
+            continue;
+        if (p->slots[i].bio == first)
+            first_slot = (int)i;
+        if (p->slots[i].bio == second)
+            second_slot = (int)i;
+    }
+    if (first_slot >= 0 && second_slot >= 0 && first_slot != second_slot) {
+        p->error = true;
+        p->err_slot = (unsigned)first_slot;
+        p->err_ci = 1u << second_slot;
+        p->test_force_comreset = true;
+    }
+    spin_unlock_irqrestore(&p->lock, f);
+    if (first_slot < 0 || second_slot < 0 || first_slot == second_slot)
+        return false;
+    port_recover(p);
+    f = spin_lock_irqsave(&p->lock);
+    p->test_force_comreset = false;
+    bool dead = p->dead;
+    spin_unlock_irqrestore(&p->lock, f);
+    return dead;
+#else
+    (void)bd;
+    (void)first;
+    (void)second;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_comreset_recovery);
+
+/* Exercise the timeout restart caller with the same two withheld bios. The
+ * victim times out and the other accepted request fails with -EIO before
+ * the required COMRESET is attempted. */
+bool ahci_test_comreset_restart(struct blkdev *bd, struct bio *first, struct bio *second);
+bool ahci_test_comreset_restart(struct blkdev *bd, struct bio *first, struct bio *second)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (bd == NULL || first == NULL || second == NULL || first == second)
+        return false;
+    struct ahci_port *p = disk_of(bd)->port;
+    bool found_first = false, found_second = false;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < AHCI_MAX_SLOTS; i++) {
+        if (!(p->active & (1u << i)))
+            continue;
+        found_first |= p->slots[i].bio == first;
+        found_second |= p->slots[i].bio == second;
+    }
+    if (found_first && found_second)
+        p->test_force_comreset = true;
+    spin_unlock_irqrestore(&p->lock, f);
+    if (!found_first || !found_second)
+        return false;
+    port_restart(p, first, -ETIMEDOUT, -EIO);
+    f = spin_lock_irqsave(&p->lock);
+    p->test_force_comreset = false;
+    bool dead = p->dead;
+    spin_unlock_irqrestore(&p->lock, f);
+    return dead;
+#else
+    (void)bd;
+    (void)first;
+    (void)second;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_comreset_restart);
+
+/* Whether the port of `bd` still has an error the worker would recover
+ * (with the slot snapshot the handler took); `clear` drops it, so a test
+ * leaves no stale snapshot behind for a later wake to replay. */
+bool ahci_test_error_pending(struct blkdev *bd, bool clear);
+bool ahci_test_error_pending(struct blkdev *bd, bool clear)
+{
+#if CONFIG_DEBUG
+    struct ahci_port *p = disk_of(bd)->port;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    bool pending = p->error;
+    if (clear)
+        p->error = false;
+    spin_unlock_irqrestore(&p->lock, f);
+    return pending;
+#else
+    (void)bd;
+    (void)clear;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_error_pending);
+#endif
 
 static void ahci_worker(void *arg)
 {
@@ -992,7 +1195,7 @@ static void port_free(struct ahci_port *p)
 
 static int port_init(struct ahci_port *p)
 {
-    if (!port_stop(p)) {
+    if (!port_stop_retry(p)) {
         kerror("ahci%u: port %u: did not stop", p->hba->index, p->index);
         return -EIO;
     }
@@ -1037,6 +1240,9 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
 
     pci_enable_device(pdev, true);
     int rc = -EIO;
+    bool rollback_probe_test = false;
+    uint32_t rollback_pending = 0;
+    bool retain_dma = false;
     h->abar = pci_map_bar(pdev, 5);
     if (h->abar == 0) {
         kerror("ahci%u: %s: cannot map ABAR", h->index, pdev->dev.name);
@@ -1108,6 +1314,24 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
           h->version >> 8, h->version & 0xff, implemented, h->nports, h->nslots, h->s64 ? "64-bit DMA" : "32-bit DMA",
           h->sncq ? ", NCQ capable" : "");
 
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_AHCI_PROBE_ROLLBACK)) {
+        rollback_probe_test = true;
+        for (unsigned i = 0; i < h->nports; i++) {
+            struct ahci_port *p = &h->ports[i];
+            if (!p->implemented || PXSSTS_DET(prd(p, PX_SSTS)) != DET_PRESENT)
+                continue;
+            pwr(p, PX_IS, 0xffffffffu);
+            (void)port_comreset(p);
+            rollback_pending |= rd32(h->abar + AHCI_IS);
+            if (rollback_pending & (1u << i))
+                break;
+        }
+        rc = -EIO;
+        goto fail_ports;
+    }
+#endif
+
     char tname[16];
     ksnprintf(tname, sizeof(tname), "ahci/%u", h->index);
     h->worker = thread_create(ahci_worker, h, tname, SCHED_PRIO_DEFAULT);
@@ -1138,19 +1362,42 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
 fail_ports:
     for (unsigned i = 0; i < h->nports; i++) {
         if (h->ports[i].implemented) {
-            (void)port_stop(&h->ports[i]);
-            port_free(&h->ports[i]);
+            if (!port_stop_retry(&h->ports[i])) {
+                retain_dma = true;
+                port_mark_dead(&h->ports[i], "probe rollback stop was not acknowledged");
+            }
         }
+    }
+    if (rollback_probe_test) {
+        bool empty = true;
+        for (unsigned i = 0; i < h->nports; i++)
+            if (h->ports[i].disk != NULL || h->ports[i].active != 0)
+                empty = false;
+        uint32_t ghc = rd32(h->abar + AHCI_GHC);
+        bool ok = rollback_pending != 0 && !(ghc & GHC_IE) && h->irqs == 0 && empty;
+        kinfo("AHCI-ROLLBACK-PENDING: %s pending=0x%08x global_ie=%u irqs=%llu empty=%u",
+              ok ? "PASS" : "FAIL", rollback_pending, (ghc & GHC_IE) != 0,
+              (unsigned long long)h->irqs, empty);
     }
     if (h->msix)
         pci_msix_disable(pdev);
     else
         pci_msi_disable(pdev);
     synchronize_irq((unsigned)h->vector);
+    if (retain_dma) {
+        kerror("ahci%u: probe rollback retained controller and port DMA after an unacknowledged stop", h->index);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
+        return rc;   /* HBA may still own the command list, FIS page or command tables */
+    }
+    for (unsigned i = 0; i < h->nports; i++)
+        if (h->ports[i].implemented)
+            port_free(&h->ports[i]);
 fail_unmap:
     device_unmap_mmio(h->abar);
 fail_free:
     kfree(h);
+    if (rollback_probe_test)
+        return ahci_probe(pdev, id);   /* one-shot self-test recovery after the injected rollback */
     return rc;
 }
 
@@ -1173,10 +1420,18 @@ static void ahci_remove(struct pci_device *pdev)
         }
     }
     wr32(h->abar + AHCI_GHC, rd32(h->abar + AHCI_GHC) & ~GHC_IE);
+    /* CAP.NP is five bits: at most 32 ports, every one of them indexed here. */
+    _Static_assert(AHCI_MAX_PORTS >= 32u, "a port-stop slot for every port CAP.NP can report");
+    bool stopped[AHCI_MAX_PORTS] = { false };
+    bool retain_dma = false;
     for (unsigned i = 0; i < h->nports; i++) {
         if (h->ports[i].implemented) {
             pwr(&h->ports[i], PX_IE, 0);
-            (void)port_stop(&h->ports[i]);
+            stopped[i] = port_stop_retry(&h->ports[i]);
+            if (!stopped[i]) {
+                retain_dma = true;
+                port_mark_dead(&h->ports[i], "remove stop was not acknowledged");
+            }
         }
     }
     int vector = h->vector;
@@ -1187,10 +1442,18 @@ static void ahci_remove(struct pci_device *pdev)
     if (vector >= 0)
         synchronize_irq((unsigned)vector);
     for (unsigned i = 0; i < h->nports; i++)
+        if (stopped[i])
+            slots_fail(&h->ports[i], NULL, 0, -ENODEV);
+    pdev->dev.drvdata = NULL;
+    if (retain_dma) {
+        kerror("ahci%u: removal retained controller and port DMA after an unacknowledged stop", h->index);
+        device_retain_dma(&pdev->dev);   /* no later probe programs this function (U14) */
+        return;   /* keep the ABAR, slots, maps and DMA backing reachable or allocated */
+    }
+    for (unsigned i = 0; i < h->nports; i++)
         if (h->ports[i].implemented)
             port_free(&h->ports[i]);
     device_unmap_mmio(h->abar);
-    pdev->dev.drvdata = NULL;
     kinfo("ahci%u: removed (%llu interrupts)", h->index, (unsigned long long)h->irqs);
     kfree(h);
 }
