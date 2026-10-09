@@ -62,6 +62,13 @@ every slot's bio with `-ETIMEDOUT` and every waiter with `-EIO`. Check:
 review; the path runs at `nvme_remove` (module unload) where it is the
 normal shutdown. Gap: not driven under load.
 
+**M6a. A submission racing controller death is either refused before
+ownership transfers or completed exactly once.** The submitter checks
+`dead` again while holding the queue lock, after mapping and before taking
+a slot. A rejected bio owns no slot or DMA mapping. The fault/interleaving
+self-test forces controller death in that window on a synthetic queue; a
+successful return without a callback is a failure.
+
 **M7. Bring-up follows the specification's order and every step is
 bounded.** Disable before programming AQA/ASQ/ACQ; `CC.EN` then `RDY`
 within `CAP.TO`; admin commands within 5 s; `CFS` is fatal. A failure at

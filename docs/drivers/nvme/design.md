@@ -95,6 +95,14 @@ granted fewer queues than there are CPUs; the lock stays because a
 thread may migrate between reading its CPU and taking the lock, and
 because the interrupt handler and a submitter share the slot table.
 
+Submission's dead-controller decision belongs under the queue lock that
+publishes a command slot. A reset may mark the controller dead and drain
+the slots while another thread maps a bio before taking that lock. A
+submission that reaches the lock afterward must release its mappings and
+return an error without publishing a command the disabled controller can
+never complete. A self-test uses a synthetic controller to force exactly
+that window without changing a live namespace.
+
 ## Data path
 
 A bio's segments (`bio_vec`, `docs/kernel/device/design.md`) become PRPs:
