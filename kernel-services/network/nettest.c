@@ -5059,7 +5059,8 @@ static bool nicbench_udp(const char **reason, struct netif *nif, struct nicbench
     st->gw_wait_ns = clock_since_ns(t_gw);
     st->gw_before = arp_lookup(nif, nif->ip4.gateway, mac);
     if (!st->gw_before) {
-        /* A failure, since N25: the entry is this interface's own, the ARP
+        /* A failure, since N25: the entry is this interface's own, it was
+         * resolved before the ARP phase (nicbench_resolve_gateway), the
          * phase just proved 2,000 round trips on this link, and the wait
          * covers a retry -- so an entry still incomplete here is a lost
          * reply twice over or a defect, not another interface's state.
@@ -5185,11 +5186,48 @@ static uint64_t nicbench_cksum_ns(void)
     return (clock_since_ns(t0)) / NICBENCH_UDP;
 }
 
+/*
+ * The gateway resolved on this interface before the ARP phase installs
+ * its hook. The hook takes every reply from the gateway to us -- it cannot
+ * tell its own from the stack's -- so a resolution the stack starts
+ * during the phase (any off-link send: the default route is this
+ * interface once the other is down) has its reply eaten and its entry
+ * left incomplete until the next retry, which ARP_RETRY_NS spacing can
+ * put past the UDP warm-up's bound. Seen 2026-10-09: a segment from a
+ * connection net-hostinput left behind, on an eth1 the e1000e rebind had
+ * left with no cached entry (docs/testing/flakes.md). With the entry
+ * reachable first, the phase and the warm-up depend on neither. The bound
+ * covers the first request and both retries (ARP_MAX_TRIES).
+ */
+static bool nicbench_resolve_gateway(const char **reason, struct netif *nif)
+{
+    uint8_t mac[ETH_ALEN];
+    if (arp_lookup(nif, nif->ip4.gateway, mac))
+        return true;
+    struct socket *tx;
+    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+    struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
+    static const uint8_t one[1] = { 0 };
+    (void)ksock_sendto(tx, one, sizeof(one), &to);
+    uint64_t t0 = clock_now_ns();
+    while (!arp_lookup(nif, nif->ip4.gateway, mac) && clock_since_ns(t0) < 4500ull * 1000000ull)
+        thread_sleep_ms(1);
+    bool resolved = arp_lookup(nif, nif->ip4.gateway, mac);
+    nt_ksock_put(tx);
+    kinfo("selftest: net-nicbench: %s: gateway %s before the benchmark (%llu ms)", nif->name,
+          resolved ? "resolved" : "NOT resolved", (unsigned long long)(clock_since_ns(t0) / 1000000));
+    if (!resolved)
+        *reason = "the gateway's ARP entry did not resolve within 4.5 s, three requests, on this interface";
+    return resolved;
+}
+
 static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
 {
     unsigned rt_s = 0;
     uint64_t ns_rt = 0;
     static struct nicbench_udp_stats st;   /* one at a time: the runner serialises tests */
+    if (!nicbench_resolve_gateway(reason, nif))
+        return false;
     if (!nicbench_arp(reason, nif, &rt_s, &ns_rt))
         return false;
     if (!nicbench_udp(reason, nif, &st))
