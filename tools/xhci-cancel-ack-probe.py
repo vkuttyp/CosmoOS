@@ -53,7 +53,7 @@ def restore_old(tree, sha):
         raise RuntimeError(f"fix commit {sha} changes none of {SOURCES}")
     subprocess.run(["git", "-C", str(tree), "apply", "-R", "--index"], input=patch, check=True)
     xhci = (tree / "drivers/usb/xhci.c").read_text()
-    if "quarantined" in xhci or "ep_stop_and_drain" not in xhci:
+    if "td->quarantined" in xhci or "ep_stop_and_drain" not in xhci:
         raise RuntimeError("reverse-applied tree does not have the old cancel")
 
 

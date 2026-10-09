@@ -1541,7 +1541,8 @@ EXPORT_SYMBOL(xhci_test_recover_halt_ack);
 
 /*
  * xhci_cancel on a synthetic controller with one bulk-IN request in
- * flight. `faults` says which acknowledgements are refused:
+ * flight. `faults` says which acknowledgements the caller has armed to be
+ * refused:
  * XHCI_CANCEL_TEST_STOP (Stop Endpoint), _SLOT (Disable Slot), _HALT
  * (HCH). The completion callback records what the controller had
  * acknowledged when the request came back to its caller (U14): the
@@ -1621,16 +1622,9 @@ bool xhci_test_cancel_ack(unsigned faults)
     r.arg = &seen;
     int src = xhci_submit(&x->hcd, &r);
 
-    if (faults & XHCI_CANCEL_TEST_STOP)
-        faultinject_set(FI_XHCI_STOP_EP_ACK, 1, 0, thread_current());
-    if (faults & XHCI_CANCEL_TEST_SLOT)
-        faultinject_set(FI_XHCI_DISABLE_SLOT_ACK, 1, 0, thread_current());
-    if (faults & XHCI_CANCEL_TEST_HALT)
-        faultinject_set(FI_XHCI_HALT_ACK, 1, 0, thread_current());
+    /* The kernel's xhci-cancel-ack armed the refusals `faults` names
+     * (fault rules are set from the kernel; the module only asks). */
     int crc = src == 0 ? xhci_cancel(&x->hcd, &r, -ETIMEDOUT) : src;
-    faultinject_clear(FI_XHCI_STOP_EP_ACK);
-    faultinject_clear(FI_XHCI_DISABLE_SLOT_ACK);
-    faultinject_clear(FI_XHCI_HALT_ACK);
 
     /* A late Transfer Event for the TD and a ring flush must not hand
      * back a request the cancel kept. */

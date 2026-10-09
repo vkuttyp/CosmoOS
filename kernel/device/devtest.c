@@ -3806,8 +3806,14 @@ bool selftest_xhci_cancel_ack(const char **reason)
     static const unsigned faults[4] = { 0, 1, 1 | 2, 1 | 2 | 4 };
     bool pass[4];
     bool ok = true;
+    static const enum fi_kind kinds[3] = { FI_XHCI_STOP_EP_ACK, FI_XHCI_DISABLE_SLOT_ACK, FI_XHCI_HALT_ACK };
     for (unsigned i = 0; i < 4; i++) {
+        for (unsigned k = 0; k < 3; k++)
+            if (faults[i] & (1u << k))
+                faultinject_set(kinds[k], 1, 0, thread_current());
         pass[i] = run(faults[i]);
+        for (unsigned k = 0; k < 3; k++)
+            faultinject_clear(kinds[k]);
         ok = ok && pass[i];
     }
     kinfo("XHCI-CANCEL-ACK-SWEEP: %s stop=%u slot=%u halt=%u quarantine=%u", ok ? "PASS" : "FAIL", pass[0],
