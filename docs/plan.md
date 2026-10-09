@@ -1,5 +1,11 @@
 # Remaining milestone work
 
+> **1.0 roadmap.** Work is now driven by the
+> [1.0 roadmap](roadmap-1.0.md) and the scope rules in
+> [AGENTS.md](../AGENTS.md#scope-rules). Items below are taken only when
+> the current milestone's acceptance test needs them; the roadmap's
+> out-of-scope list stays here.
+
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.
 

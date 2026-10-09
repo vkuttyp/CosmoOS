@@ -12,6 +12,7 @@ wins and the document is wrong.
 | Path | Content |
 |---|---|
 | `development.md` | Setting up a development host, building, running, testing, CI |
+| `roadmap-1.0.md` | The 1.0 definition of done, its milestones M1-M6 and their acceptance tests |
 | `plan.md` | Remaining work grouped by area, with suggested next increments |
 | `history/` | What was built, phase by phase and unit by unit (formerly the README's Status section); indexed in [`history/README.md`](history/README.md) |
 | `testing/` | Cross-suite testing records: `flakes.md`, the history and tally of intermittent failures |
