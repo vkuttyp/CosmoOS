@@ -3,7 +3,6 @@
 
 import argparse
 from pathlib import Path
-import plistlib
 import subprocess
 import sys
 import tempfile
@@ -28,45 +27,28 @@ def main():
         revision = BASELINE if args.old else args.tree
         subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), revision], check=True)
         try:
-            if args.old:
-                main_c = tree / "kernel/core/main.c"
-                main_c.write_text(main_c.read_text() +
-                                  "\nint analyze_gate_probe(void) { int *p = 0; return *p; }\n")
-                output = tree / "out/analyze-gate-probe-old"
-                target_report = output / "kernel/core/main.analyzed"
+            main_c = tree / "kernel/core/main.c"
+            main_c.write_text(main_c.read_text() +
+                              "\nint analyze_gate_probe(void) { int *p = 0; return *p; }\n")
+            output = tree / "out/analyze-gate-probe"
+            log = out_dir / "analyze.log"
+            with log.open("w") as stream:
                 run = subprocess.run([
-                    make, "-C", str(tree), "ARCH=" + args.arch,
-                    "OUT=" + str(output), str(target_report),
-                ], text=True, capture_output=True)
-                observed = "Dereference of null pointer" in run.stdout + run.stderr
-                ok = run.returncode == 0 and observed and target_report.exists()
-                print((run.stdout + run.stderr).strip())
-                print(f"PROBE: {'PASS' if ok else 'FAIL'}: old {args.arch} analyzer emitted the diagnostic but returned success")
-                return 0 if ok else 1
-            report = tree / "out/analyze-gate-probe" / "diagnostic.analyzed"
-            report.parent.mkdir(parents=True, exist_ok=True)
-            source = report.with_suffix(".c")
-            source.write_text("int analyze_gate_probe(void) { int *p = 0; return *p; }\n")
-            target = "x86_64-unknown-none-elf" if args.arch == "x86_64" else "aarch64-unknown-none-elf"
-            analyzed = subprocess.run([
-                "clang", "--target=" + target, "--analyze", "-Xanalyzer",
-                "-analyzer-output=plist-multi-file", str(source), "-o", str(report),
-            ], text=True, capture_output=True)
-            if analyzed.returncode != 0:
-                print("PROBE: FAIL: compiler did not produce the deliberate diagnostic\n" + analyzed.stderr)
-                return 1
-            findings = plistlib.loads(report.read_bytes())["diagnostics"]
-            if len(findings) != 1 or findings[0]["check_name"] != "core.NullDereference":
-                print("PROBE: FAIL: expected one core.NullDereference diagnostic")
-                return 1
-            cmd = [make, "-C", str(tree), "ARCH=" + args.arch,
-                   "OUT=" + str(report.parent), "analysis-gate",
-                   "ANALYSIS_REPORTS=" + str(report)]
-            run = subprocess.run(cmd, text=True, capture_output=True)
-            expected = "Dereference of null pointer" in run.stderr
-            ok = run.returncode == 2 and expected and "static analysis: clean" not in run.stdout + run.stderr
-            print(run.stderr.strip())
-            print(f"PROBE: {'PASS' if ok else 'FAIL'}: {args.arch} unexpected diagnostic makes analysis-gate fail ({out_dir})")
+                    make, "-j4", "-C", str(tree), "ARCH=" + args.arch,
+                    "OUT=" + str(output), "analyze",
+                ], text=True, stdout=stream, stderr=subprocess.STDOUT)
+            result = log.read_text()
+            if args.old:
+                ok = (run.returncode == 0
+                      and "Dereference of null pointer" in result
+                      and "static analysis: clean" in result)
+            else:
+                ok = (run.returncode == 2
+                      and "main.c: analyze_gate_probe: Dereference of null pointer" in result
+                      and "static analysis: FAIL (1 unexpected diagnostics)" in result
+                      and "static analysis: clean" not in result)
+            mode = "old false success" if args.old else "new diagnostic rejection"
+            print(f"PROBE: {'PASS' if ok else 'FAIL'}: {args.arch} make analyze {mode} ({log})")
             return 0 if ok else 1
         finally:
             subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(tree)], check=True)
