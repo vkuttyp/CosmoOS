@@ -278,7 +278,7 @@ static unsigned member_wqs(struct kobject *obj, unsigned want, struct waitqueue 
 /* ep->lock held. Put the item's callback entries on its member's queues. */
 static void hook_item(struct epoll_item *it)
 {
-    struct waitqueue *wqs[2];
+    struct waitqueue *wqs[2] = { NULL, NULL };
     it->nhooks = member_wqs(it->obj, it->want, wqs);
     for (unsigned i = 0; i < it->nhooks; i++) {
         it->hook[i].it = it;

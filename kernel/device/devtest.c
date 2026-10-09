@@ -469,6 +469,114 @@ bool selftest_nvme_admin_poll(const char **reason)
 #endif
 }
 
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+static bool nvme_worker_fail;
+static uint8_t *nvme_worker_observed;
+static unsigned nvme_worker_releases;
+static uint64_t nvme_worker_fail_hits;
+#endif
+
+static void nvme_worker_fail_begin(uint8_t *buf)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    if (nvme_worker_fail && buf) {
+        nvme_worker_observed = buf;
+        faultinject_set(FI_KMALLOC, 1, 1, thread_current());
+    }
+#else
+    (void)buf;
+#endif
+}
+
+static void nvme_worker_fail_end(void)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    if (nvme_worker_fail) {
+        struct fi_stats st;
+        faultinject_stats(FI_KMALLOC, &st);
+        nvme_worker_fail_hits = st.hits;
+        faultinject_clear(FI_KMALLOC);
+    }
+#endif
+}
+
+static void nvme_worker_free(uint8_t *buf)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    if (nvme_worker_fail && buf && buf == nvme_worker_observed)
+        nvme_worker_releases++;
+#endif
+    kfree(buf);
+}
+
+static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started_out)
+{
+    bool ok = true;
+    struct nvme_worker workers[CONFIG_MAX_CPUS];
+    struct thread *threads[CONFIG_MAX_CPUS] = {NULL};
+    unsigned started = 0;
+    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c))
+            continue;
+        workers[c].bd = bd;
+        workers[c].cpu = c;
+        workers[c].rc = 0;
+        workers[c].buf = kmalloc(4096, 0);
+        nvme_worker_fail_begin(workers[c].buf);
+        threads[c] = workers[c].buf ? thread_create_on(nvme_cpu_worker, &workers[c], "nvme-cpu", SCHED_PRIO_DEFAULT,
+                                                       CPUMASK_OF(c))
+                                    : NULL;
+        nvme_worker_fail_end();
+        if (threads[c])
+            started++;
+        else
+            nvme_worker_free(workers[c].buf);
+    }
+    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c) || threads[c] == NULL)
+            continue;
+        thread_join(threads[c]);
+        ok = ok && workers[c].rc == 0;
+        nvme_worker_free(workers[c].buf);
+    }
+    *started_out = started;
+    return ok;
+}
+
+bool selftest_nvme_worker_cleanup(const char **reason)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("nvme0n1");
+    if (!bd) {
+        kinfo("selftest: nvme-worker-cleanup: no nvme0n1; skipping");
+        return true;
+    }
+    nvme_worker_fail = true;
+    nvme_worker_observed = NULL;
+    nvme_worker_releases = 0;
+    nvme_worker_fail_hits = 0;
+    unsigned started = 0;
+    bool rc = nvme_run_workers(bd, 1, &started);
+    nvme_worker_fail = false;
+    bool allocated = nvme_worker_observed != NULL;
+    bool released = nvme_worker_releases == 1;
+    if (allocated && !released)
+        kfree(nvme_worker_observed);   /* isolate the old-behavior proof from later tests */
+    nvme_worker_observed = NULL;
+    blkdev_put(bd);
+    kinfo("selftest: nvme-worker-cleanup: allocated=%u hits=%llu started=%u released=%u",
+          allocated, (unsigned long long)nvme_worker_fail_hits, started, released);
+    CHECK(rc && allocated && nvme_worker_fail_hits == 1 && started == 0);
+    if (!released) {
+        *reason = "worker cleanup: buffer retained after thread creation failed";
+        return false;
+    }
+#else
+    (void)reason;
+#endif
+    return true;
+}
+
 bool selftest_nvme(const char **reason)
 {
     struct blkdev *bd = blk_find("nvme0n1");
@@ -528,33 +636,10 @@ bool selftest_nvme(const char **reason)
         STEP(memcmp(flat, a, 2 * PAGE_SIZE) == 0 && memcmp(flat + 2 * PAGE_SIZE, b, 2 * PAGE_SIZE) == 0);
     }
 
-    /* Queue locality: reads issued from every CPU complete on that CPU
-     * when the controller granted one queue per CPU. */
+    /* Queue locality: reads from each CPU, with worker ownership kept until join. */
     uint64_t local0 = bd->completed_local, remote0 = bd->completed_remote;
-    unsigned ncpu = cpu_count();
-    struct nvme_worker workers[CONFIG_MAX_CPUS];
-    struct thread *threads[CONFIG_MAX_CPUS];
-    unsigned started = 0;
-    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
-        if (!cpu_online(c))
-            continue;
-        workers[c].bd = bd;
-        workers[c].cpu = c;
-        workers[c].rc = 0;
-        workers[c].buf = kmalloc(4096, 0);
-        threads[c] = workers[c].buf ? thread_create_on(nvme_cpu_worker, &workers[c], "nvme-cpu", SCHED_PRIO_DEFAULT,
-                                                       CPUMASK_OF(c))
-                                    : NULL;
-        if (threads[c])
-            started++;
-    }
-    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
-        if (!cpu_online(c) || threads[c] == NULL)
-            continue;
-        thread_join(threads[c]);
-        STEP(workers[c].rc == 0);
-        kfree(workers[c].buf);
-    }
+    unsigned ncpu = cpu_count(), started = 0;
+    STEP(nvme_run_workers(bd, ncpu, &started));
     uint64_t local = bd->completed_local - local0, remote = bd->completed_remote - remote0;
     STEP(local + remote == 8ull * started);
     if (bd->nr_queues >= ncpu)

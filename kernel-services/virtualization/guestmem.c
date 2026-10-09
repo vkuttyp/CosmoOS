@@ -142,6 +142,8 @@ static int copy(struct vm *vm, uint64_t gpa, uint8_t *rd, const uint8_t *wr, siz
 {
     if (len == 0)
         return 0;
+    if ((rd == NULL) == (wr == NULL))
+        return -EFAULT;
     if (gpa >= HV_GPA_LIMIT || len > HV_GPA_LIMIT - gpa)
         return -EFAULT;
     mutex_lock(&vm->lock);
@@ -156,7 +158,10 @@ static int copy(struct vm *vm, uint64_t gpa, uint8_t *rd, const uint8_t *wr, siz
     while (done < len) {
         struct page *pg;
         size_t off;
-        vm_mem_lookup(vm, gpa + done, &pg, &off);
+        if (!vm_mem_lookup(vm, gpa + done, &pg, &off)) {
+            mutex_unlock(&vm->lock);
+            return -EFAULT;
+        }
         size_t n = PAGE_SIZE - off;
         if (n > len - done)
             n = len - done;

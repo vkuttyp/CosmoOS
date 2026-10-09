@@ -117,6 +117,21 @@ the same reason.
 
 ## Error handling
 
+### Static analysis gate
+
+`make analyze` must compare every target translation unit's diagnostics
+with a reviewed baseline for ARCH. Analyze every source on each invocation
+so header, compiler and configuration changes cannot leave cached findings
+unchecked. Save structured Clang plist reports under OUT and validate their
+presence and format before comparing diagnostics. Baseline keys use the
+translation unit, checker, diagnostic file, function and message, never a
+line number. Count duplicate keys and require an explanation for every
+accepted entry. Select an exact compiler version within the architecture
+baseline; an unreviewed compiler fails before comparison. An unexpected
+diagnostic, stale baseline entry, or unusable
+report fails the gate;
+the success message includes the accepted count and zero unexpected findings.
+
 - Any compiler warning is an error.
 - `scripts/check-kernel-elf.sh` runs as part of the kernel link rule and
   fails the build if a PT_LOAD is writable and executable or PT_NOTE is

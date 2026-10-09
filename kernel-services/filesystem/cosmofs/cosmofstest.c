@@ -10,6 +10,8 @@
 #include <uapi/cosmo/fsctl.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
+#include <kernel/thread.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
@@ -343,18 +345,74 @@ static bool write_wide_file(const char *path, unsigned pages)
 
 #define ENG "/mnt/eng"
 
+/* Only the serial self-test runner arms these operation-boundary seams. */
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+static unsigned engine_fail_stage;
+static struct blkdev *engine_observed;
+static uint64_t engine_fail_hits;
+
+static void engine_fail_begin(unsigned stage, struct blkdev *bd)
+{
+    if (engine_fail_stage != stage)
+        return;
+    engine_observed = bd;
+    blkdev_get(bd);   /* inspection reference, independent of fixture ownership */
+    faultinject_set(stage == 1 ? FI_BLK_SUBMIT : FI_KMALLOC, 1, 1, thread_current());
+}
+
+static void engine_fail_end(unsigned stage)
+{
+    if (engine_fail_stage != stage)
+        return;
+    enum fi_kind kind = stage == 1 ? FI_BLK_SUBMIT : FI_KMALLOC;
+    struct fi_stats st;
+    faultinject_stats(kind, &st);
+    engine_fail_hits = st.hits;
+    faultinject_clear(kind);
+}
+#else
+static inline void engine_fail_begin(unsigned stage, struct blkdev *bd) { (void)stage; (void)bd; }
+static inline void engine_fail_end(unsigned stage) { (void)stage; }
+#endif
+
 static bool engine_mount(struct blkdev **bdp, uint64_t nblocks, const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);   /* a failed earlier test may have left one behind */
     struct blkdev *bd = ramblk_create(nblocks);
     CHECK(bd != NULL);
-    CHECK(cosmofs_format(bd) == 0);
+    bool created_dir = false;
+#define ENGINE_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
+    engine_fail_begin(1, bd);
+    int fmt = cosmofs_format(bd);
+    engine_fail_end(1);
+    ENGINE_CHECK(fmt == 0);
+    engine_fail_begin(2, bd);
     int mk = vfs_mkdir(NULL, ENG, 0755);
-    CHECK(mk == 0 || mk == -EEXIST);
-    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    engine_fail_end(2);
+    if (mk == 0)
+        created_dir = true;
+    ENGINE_CHECK(mk == 0 || mk == -EEXIST);
+    engine_fail_begin(3, bd);
+    int mrc = vfs_mount(ENG, "cosmofs", bd, 0);
+    engine_fail_end(3);
+    ENGINE_CHECK(mrc == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
     *bdp = bd;
+#undef ENGINE_CHECK
     return true;
+
+fail:
+#undef ENGINE_CHECK
+    if (created_dir)
+        (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
 }
 
 static bool engine_unmount(struct blkdev *bd, const char **reason)
@@ -362,6 +420,46 @@ static bool engine_unmount(struct blkdev *bd, const char **reason)
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
+    return true;
+}
+
+bool selftest_cosmofs_fixture_cleanup(const char **reason)
+{
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    bool ok = true;
+    for (unsigned stage = 1; stage <= 3; stage++) {
+        (void)vfs_rmdir(NULL, ENG);
+        engine_fail_stage = stage;
+        engine_observed = NULL;
+        engine_fail_hits = 0;
+        struct blkdev *published = NULL;
+        const char *why = NULL;
+        bool mounted = engine_mount(&published, 64, &why);
+        engine_fail_stage = 0;
+        struct blkdev *bd = engine_observed;
+        bool released = bd && bd->gone && __atomic_load_n(&bd->obj.refcount, __ATOMIC_RELAXED) == 1;
+        bool injected = !mounted && published == NULL && why != NULL && engine_fail_hits == 1;
+        kinfo("selftest: cosmofs-fixture-cleanup: stage=%u hits=%llu released=%u", stage,
+              (unsigned long long)engine_fail_hits, released);
+        /* Reclaim old-behavior leaks after observing them, so later tests remain independent. */
+        if (mounted)
+            (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+        if (bd) {
+            if (!bd->gone)
+                ramblk_destroy(bd);
+            blkdev_put(bd);
+        }
+        engine_observed = NULL;
+        (void)vfs_rmdir(NULL, ENG);
+        ok = ok && injected && released;
+    }
+    if (!ok) {
+        *reason = "fixture cleanup: registered RAM device retained after setup failure";
+        return false;
+    }
+#else
+    (void)reason;
+#endif
     return true;
 }
 
@@ -780,64 +878,90 @@ static uint32_t block_crc_test(const uint8_t *block)
 
 bool selftest_cosmofs_badmap(const char **reason)
 {
-    struct blkdev *bd;
+    struct blkdev *bd = NULL;
+    struct file *f = NULL;
+    struct spool *p = NULL;
+    uint8_t *page = NULL, *blk = NULL;
     if (!engine_mount(&bd, 512, reason))
         return false;
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
-    uint8_t *page = kmalloc(4096, 0);
-    CHECK(page != NULL);
+#define BADMAP_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    BADMAP_CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    page = kmalloc(4096, 0);
+    BADMAP_CHECK(page != NULL);
     memset(page, 0x11, 4096);
-    CHECK(file_pwrite(f, page, 4096, 0) == 4096);            /* run at lblk 0 */
+    BADMAP_CHECK(file_pwrite(f, page, 4096, 0) == 4096);    /* run at lblk 0 */
     memset(page, 0x22, 4096);
-    CHECK(file_pwrite(f, page, 4096, 5 * 4096) == 4096);     /* run at lblk 5, a hole between */
-    CHECK(file_sync(f) == 0);
+    BADMAP_CHECK(file_pwrite(f, page, 4096, 5 * 4096) == 4096); /* run at lblk 5, a hole between */
+    BADMAP_CHECK(file_sync(f) == 0);
     uint64_t ino = f->vn->ino;
     file_put(f);
+    f = NULL;
     cosmofs_test_discard_on_unmount(mount_of(ENG), true);   /* keep the slots as they are */
-    CHECK(vfs_umount(ENG) == 0);
+    BADMAP_CHECK(vfs_umount(ENG) == 0);
 
     /* Walk superblock -> IMAP1 -> IMAP0 -> INODES through the pool, swap
      * the two direct runs of the inode, re-seal the block. */
-    struct spool *p;
-    CHECK(pool_open(bd, &p) == 0);
-    uint8_t *blk = kmalloc(4096, 0);
-    CHECK(blk != NULL);
+    BADMAP_CHECK(pool_open(bd, &p) == 0);
+    blk = kmalloc(4096, 0);
+    BADMAP_CHECK(blk != NULL);
     uint64_t imap = 0, gen = 0;
     for (unsigned slot = 0; slot < 2; slot++) {
-        CHECK(pool_read(p, slot, blk) == 0);
+        BADMAP_CHECK(pool_read(p, slot, blk) == 0);
         const struct cfs_super *sb = (const struct cfs_super *)blk;
         if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > gen) {
             gen = sb->generation;
             imap = sb->imap_root;
         }
     }
-    CHECK(imap >= 2);
-    CHECK(pool_read(p, imap, blk) == 0);
+    BADMAP_CHECK(imap >= 2);
+    BADMAP_CHECK(pool_read(p, imap, blk) == 0);
     uint64_t l0 = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l1_index(ino)];
-    CHECK(pool_read(p, l0, blk) == 0);
+    BADMAP_CHECK(pool_read(p, l0, blk) == 0);
     uint64_t ib = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l0_index(ino)];
-    CHECK(pool_read(p, ib, blk) == 0);
+    BADMAP_CHECK(pool_read(p, ib, blk) == 0);
     struct cfs_inode *in = (struct cfs_inode *)(blk + CFS_MHDR_SIZE + cfs_inode_slot(ino) * CFS_INODE_SIZE);
-    CHECK(in->ino == ino && in->direct[0].count == 1 && in->direct[1].count == 1 && in->direct[1].lblk == 5);
+    BADMAP_CHECK(in->ino == ino && in->direct[0].count == 1 && in->direct[1].count == 1 && in->direct[1].lblk == 5);
     struct cfs_extent tmp = in->direct[0];
     in->direct[0] = in->direct[1];
     in->direct[1] = tmp;   /* unsorted: lblk 5 before lblk 0 */
     struct cfs_mhdr *h = (struct cfs_mhdr *)blk;
     h->crc = 0;
     h->crc = block_crc_test(blk);
-    CHECK(pool_write(p, ib, blk) == 0 && pool_flush(p) == 0);
+    BADMAP_CHECK(pool_write(p, ib, blk) == 0 && pool_flush(p) == 0);
     kfree(blk);
+    blk = NULL;
     pool_close(p);
+    p = NULL;
 
-    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
-    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDONLY, 0, &f) == 0);
-    CHECK(file_pread(f, page, 4096, 0) == -EIO);   /* not a hole of zeros */
-    CHECK(file_pread(f, page, 4096, 5 * 4096) == -EIO);
+    BADMAP_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    BADMAP_CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDONLY, 0, &f) == 0);
+    BADMAP_CHECK(file_pread(f, page, 4096, 0) == -EIO);   /* not a hole of zeros */
+    BADMAP_CHECK(file_pread(f, page, 4096, 5 * 4096) == -EIO);
     file_put(f);
+    f = NULL;
     kfree(page);
+    page = NULL;
     kinfo("selftest: cosmofs-badmap: an inode with unsorted direct runs is refused, not read as holes");
     return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    if (p)
+        pool_close(p);
+    kfree(blk);
+    kfree(page);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef BADMAP_CHECK
 }
 
 /* Snapshots: what the tree was, kept, while the live tree moves on
@@ -1072,64 +1196,75 @@ static bool rot_copy(struct blkdev *bd, uint64_t blk, uint8_t fill)
 bool selftest_cosmofs_mirror(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
-    struct blkdev *bd[2] = { ramblk_create(512), ramblk_create(512) };
-    CHECK(bd[0] != NULL && bd[1] != NULL);
-    CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct file *f = NULL;
+    struct spool *sp = NULL;
+    uint8_t *sblk = NULL;
+#define MIRROR_CHECK(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    bd[0] = ramblk_create(512);
+    bd[1] = ramblk_create(512);
+    MIRROR_CHECK(bd[0] != NULL && bd[1] != NULL);
+    MIRROR_CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
     int mk = vfs_mkdir(NULL, ENG, 0755);
-    CHECK(mk == 0 || mk == -EEXIST);
-    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    MIRROR_CHECK(mk == 0 || mk == -EEXIST);
+    MIRROR_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
 
     struct cosmofs_stats st;
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.members == 1 && st.devices == 2 && st.degraded == 0);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(st.members == 1 && st.devices == 2 && st.degraded == 0);
     /* One member's worth of space: a mirror costs capacity, not blocks. */
-    CHECK(st.total_blocks == 512);
+    MIRROR_CHECK(st.total_blocks == 512);
 
     static char data[4096];
     memset(data, 'm', sizeof(data));
-    CHECK(write_file(ENG "/mirrored", data, sizeof(data)));
-    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
-    CHECK(write_file(ENG "/dir/inner", "inner", 5));
-    CHECK(vfs_sync() == 0);
+    MIRROR_CHECK(write_file(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    MIRROR_CHECK(write_file(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(vfs_sync() == 0);
 
     /* Where the file's one data block lives. */
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    MIRROR_CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
     uint64_t ino = f->vn->ino;
     file_put(f);
+    f = NULL;
     uint64_t pblk = 0;
-    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &pblk) == 0);
-    CHECK(CFS_DVA_VDEV(pblk) == 0);
+    MIRROR_CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &pblk) == 0);
+    MIRROR_CHECK(CFS_DVA_VDEV(pblk) == 0);
 
     /* Rot the second copy of that data block; the read comes from copy 0
      * and notices nothing. Then rot the first: the read has to fall back
      * to the second, which by then holds what copy 0 had. */
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0xA5));
-    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0xA5));
+    MIRROR_CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
     uint64_t repairs0 = st.repairs;
 
     /* A scrub reads everything and puts the rotted copy right. */
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
-    CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
-    CHECK(sc.repaired >= 1);
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
+    MIRROR_CHECK(sc.repaired >= 1);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
 
     /* A second scrub finds nothing to do: the first one fixed it. */
     struct cosmofs_scrub_stats sc2;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
-    CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
+    MIRROR_CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
 
     /* Rot the second copy of a *metadata* block that no read will
      * choose -- the inode map's root, which is reached through copy 0
      * every time. Only a scrub that looks at every copy can see it. */
-    uint8_t *sblk = kmalloc(CFS_BLOCK, 0);
-    CHECK(sblk != NULL);
-    struct spool *sp;
-    CHECK(pool_open(bd[0], &sp) == 0);
-    CHECK(pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, sblk) == 0);
+    sblk = kmalloc(CFS_BLOCK, 0);
+    MIRROR_CHECK(sblk != NULL);
+    MIRROR_CHECK(pool_open(bd[0], &sp) == 0);
+    MIRROR_CHECK(pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, sblk) == 0);
     uint64_t imap_root = 0, sgen = 0;
     for (unsigned slot = 0; slot < 2; slot++) {
         if (pool_read(sp, slot, sblk) != 0)
@@ -1141,50 +1276,70 @@ bool selftest_cosmofs_mirror(const char **reason)
         }
     }
     pool_close(sp);
+    sp = NULL;
     kfree(sblk);
-    CHECK(imap_root != 0);
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
-    CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
+    sblk = NULL;
+    MIRROR_CHECK(imap_root != 0);
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
 
     /* Now rot copy 0 of the same block: the read falls back to copy 1
      * and repairs copy 0. */
-    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
-    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    MIRROR_CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
+    MIRROR_CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
     /* Both copies gone: that file is unreadable, and the rest of the
      * filesystem is not. */
-    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x11));
-    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0x22));
-    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    MIRROR_CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x11));
+    MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0x22));
+    MIRROR_CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
     static char got[4096];
-    CHECK(file_read(f, got, sizeof(got)) == -EIO);
+    MIRROR_CHECK(file_read(f, got, sizeof(got)) == -EIO);
     file_put(f);
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
+    f = NULL;
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
 
-    CHECK(vfs_umount(ENG) == 0);
+    MIRROR_CHECK(vfs_umount(ENG) == 0);
 
     /* A device that was detached while the pool went on being written
      * carries older contents that pass every checksum on it. It is
      * recognised by the generation and left out of the mirror: the pool
      * comes up degraded rather than quietly serving old blocks. */
-    CHECK(age_device(bd[1], 1));
-    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    MIRROR_CHECK(age_device(bd[1], 1));
+    MIRROR_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
-    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.devices == 1 && st.degraded == 1);
-    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    CHECK(vfs_umount(ENG) == 0);
+    MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    MIRROR_CHECK(st.devices == 1 && st.degraded == 1);
+    MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    MIRROR_CHECK(vfs_umount(ENG) == 0);
 
-    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    MIRROR_CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd[0]);
+    bd[0] = NULL;
     ramblk_destroy(bd[1]);
+    bd[1] = NULL;
     kinfo("selftest: cosmofs-mirror: two copies, %llu blocks scrubbed", (unsigned long long)sc.blocks_read);
     return true;
+
+cleanup:
+    if (f)
+        file_put(f);
+    if (sp)
+        pool_close(sp);
+    kfree(sblk);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    if (bd[0])
+        ramblk_destroy(bd[0]);
+    if (bd[1])
+        ramblk_destroy(bd[1]);
+    return false;
+#undef MIRROR_CHECK
 }
 
 /*
@@ -1244,12 +1399,23 @@ static bool read_matches_prefix(const char *path, const void *data, size_t len);
 
 bool selftest_cosmofs_compress(const char **reason)
 {
-    struct blkdev *bd;
+    struct blkdev *bd = NULL;
+    uint8_t *dense = NULL, *sparse_data = NULL, *back = NULL;
+    struct file *f = NULL;
     if (!engine_mount(&bd, 1024, reason))
         return false;
+#define COMPRESS_CHECK(cond)                                                  \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
     const size_t len = 32 * 4096;   /* four records */
-    uint8_t *dense = kmalloc(len, 0), *sparse_data = kmalloc(len, 0), *back = kmalloc(len, 0);
-    CHECK(dense != NULL && sparse_data != NULL && back != NULL);
+    dense = kmalloc(len, 0);
+    sparse_data = kmalloc(len, 0);
+    back = kmalloc(len, 0);
+    COMPRESS_CHECK(dense != NULL && sparse_data != NULL && back != NULL);
     /* Repetitive: what compression is for. */
     for (size_t i = 0; i < len; i++)
         sparse_data[i] = (uint8_t)(i % 61);
@@ -1261,13 +1427,13 @@ bool selftest_cosmofs_compress(const char **reason)
     }
 
     struct cosmofs_stats st0, st1, st2;
-    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
-    CHECK(write_file(ENG "/small", sparse_data, len));
-    CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
-    CHECK(write_file(ENG "/big", dense, len));
-    CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    COMPRESS_CHECK(write_file(ENG "/small", sparse_data, len));
+    COMPRESS_CHECK(vfs_sync() == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    COMPRESS_CHECK(write_file(ENG "/big", dense, len));
+    COMPRESS_CHECK(vfs_sync() == 0);
+    COMPRESS_CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
 
     uint64_t compressible = st0.free_blocks - st1.free_blocks;
     uint64_t incompressible = st1.free_blocks - st2.free_blocks;
@@ -1275,31 +1441,32 @@ bool selftest_cosmofs_compress(const char **reason)
      * other one cannot be, and is stored as it is. */
     kinfo("cosmofs-compress: %llu blocks compressible, %llu not", (unsigned long long)compressible,
           (unsigned long long)incompressible);
-    CHECK(compressible < 16 && incompressible >= 32);
-    CHECK(compressible * 3 < incompressible);
+    COMPRESS_CHECK(compressible < 16 && incompressible >= 32);
+    COMPRESS_CHECK(compressible * 3 < incompressible);
 
     /* Both read back exactly, through the records and around them. */
-    CHECK(read_matches(ENG "/small", sparse_data, len));
-    CHECK(read_matches(ENG "/big", dense, len));
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
+    COMPRESS_CHECK(read_matches(ENG "/big", dense, len));
 
     /* A page written inside a compressed record: the record is read,
      * rebuilt around the new page, and written again. */
-    struct file *f;
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
     memset(sparse_data + 3 * 4096, 0x5a, 4096);
-    CHECK(file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096);
-    CHECK(file_sync(f) == 0);
+    COMPRESS_CHECK(file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096);
+    COMPRESS_CHECK(file_sync(f) == 0);
     file_put(f);
-    CHECK(read_matches(ENG "/small", sparse_data, len));
+    f = NULL;
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
 
     /* A partial page inside a record, which reads the record to fill in
      * what the write does not cover. */
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
     memset(sparse_data + 9 * 4096 + 100, 0x33, 500);
-    CHECK(file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, 9 * 4096 + 100) == 500);
-    CHECK(file_sync(f) == 0);
+    COMPRESS_CHECK(file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, 9 * 4096 + 100) == 500);
+    COMPRESS_CHECK(file_sync(f) == 0);
     file_put(f);
-    CHECK(read_matches(ENG "/small", sparse_data, len));
+    f = NULL;
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
 
     /* Truncating into the middle of a record: what survives is rewritten
      * as ordinary blocks, and what is past the end must read as zeros
@@ -1307,27 +1474,43 @@ bool selftest_cosmofs_compress(const char **reason)
     int trc = vfs_truncate(NULL, ENG "/small", 10 * 4096 + 7);
     if (trc)
         kerror("compress: truncate returned %d", trc);
-    CHECK(trc == 0);
-    CHECK(read_matches_prefix(ENG "/small", sparse_data, 10 * 4096 + 7));
-    CHECK(vfs_truncate(NULL, ENG "/small", len) == 0);
-    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDONLY, 0, &f) == 0);
-    CHECK(file_read(f, back, len) == (int64_t)len);
+    COMPRESS_CHECK(trc == 0);
+    COMPRESS_CHECK(read_matches_prefix(ENG "/small", sparse_data, 10 * 4096 + 7));
+    COMPRESS_CHECK(vfs_truncate(NULL, ENG "/small", len) == 0);
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDONLY, 0, &f) == 0);
+    COMPRESS_CHECK(file_read(f, back, len) == (int64_t)len);
     file_put(f);
-    CHECK(memcmp(back, sparse_data, 10 * 4096 + 7) == 0);
+    f = NULL;
+    COMPRESS_CHECK(memcmp(back, sparse_data, 10 * 4096 + 7) == 0);
     for (size_t i = 10 * 4096 + 7; i < len; i++)
-        CHECK(back[i] == 0);
+        COMPRESS_CHECK(back[i] == 0);
 
     /* A scrub reads every record through the checksums of its physical
      * blocks. */
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    COMPRESS_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
     kfree(dense);
+    dense = NULL;
     kfree(sparse_data);
+    sparse_data = NULL;
     kfree(back);
+    back = NULL;
     kinfo("selftest: cosmofs-compress: %llu blocks for 32 compressible, %llu for 32 that are not",
           (unsigned long long)compressible, (unsigned long long)incompressible);
     return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    kfree(back);
+    kfree(sparse_data);
+    kfree(dense);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef COMPRESS_CHECK
 }
 
 /*
@@ -2924,15 +3107,27 @@ bool selftest_fsctl_check(const char **reason)
 {
     struct cosmofs_check_report direct;
     struct blkdev *bd = NULL;
-    CHECK(check_fixture(&bd, reason));
-    uint64_t id = mount_of(ENG)->id;
-    CHECK(id != 0);
-
     struct file *f = NULL;
-    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+    struct vnode *rv = NULL;
+    uint8_t *buf = NULL;
+    if (!check_fixture(&bd, reason)) {
+        check_teardown(bd);
+        return false;
+    }
+#define FSCTL_CHECK(cond)                                                     \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    uint64_t id = mount_of(ENG)->id;
+    FSCTL_CHECK(id != 0);
+
+    FSCTL_CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
     size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check);
-    uint8_t *buf = kmalloc(cap, KMEM_ZERO);
-    CHECK(buf != NULL);
+    buf = kmalloc(cap, KMEM_ZERO);
+    FSCTL_CHECK(buf != NULL);
     struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
     struct cosmo_fsctl_check *c = (struct cosmo_fsctl_check *)(buf + sizeof(*h));
 
@@ -2940,71 +3135,71 @@ bool selftest_fsctl_check(const char **reason)
                                .flags = 0, .mount_id = id };
 
     /* Clean, through the device, and the same numbers the pass reports. */
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK(h->kind == COSMO_FSCTL_CHECK && h->count == 1);
-    CHECK(h->bytes == sizeof(struct cosmo_fsctl_check));
-    CHECK(c->nclasses == COSMO_FSCTL_CLASSES);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
-    CHECK((c->flags & COSMO_FSCTL_R_PARTIAL) == 0);
-    CHECK(cosmofs_check(mount_of(ENG), &direct, 0) == 0);
-    CHECK(c->blocks_seen == direct.blocks_seen);
-    CHECK(c->counted_free == direct.counted_free);
-    CHECK(c->inodes_seen == direct.inodes_seen);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK(h->kind == COSMO_FSCTL_CHECK && h->count == 1);
+    FSCTL_CHECK(h->bytes == sizeof(struct cosmo_fsctl_check));
+    FSCTL_CHECK(c->nclasses == COSMO_FSCTL_CLASSES);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_PARTIAL) == 0);
+    FSCTL_CHECK(cosmofs_check(mount_of(ENG), &direct, 0) == 0);
+    FSCTL_CHECK(c->blocks_seen == direct.blocks_seen);
+    FSCTL_CHECK(c->counted_free == direct.counted_free);
+    FSCTL_CHECK(c->inodes_seen == direct.inodes_seen);
     uint64_t free_before = c->counted_free;
 
     /* A leak, found by number through the device. */
     uint64_t leaked = 0;
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) == 0);
-    CHECK(c->class[0].count == 1);                  /* index 0 is alloc_not_seen, and that is ABI */
-    CHECK(c->class[0].named == 1 && c->class[0].name[0] == leaked);
-    CHECK(c->counted_free == free_before - 1);
+    FSCTL_CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) == 0);
+    FSCTL_CHECK(c->class[0].count == 1);                  /* index 0 is alloc_not_seen, and that is ABI */
+    FSCTL_CHECK(c->class[0].named == 1 && c->class[0].name[0] == leaked);
+    FSCTL_CHECK(c->counted_free == free_before - 1);
     /* A finding is not an error: the write succeeded and said so. */
 
     /* And repaired through the device, which is the half that mutates. */
     cmd.flags = COSMO_FSCTL_F_REPAIR;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK(c->class[0].repaired == 1);
-    CHECK((c->flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK(c->class[0].repaired == 1);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
     cmd.flags = 0;
-    CHECK(vfs_sync() == 0);
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    CHECK(file_read(f, buf, cap) == (int64_t)cap);
-    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
-    CHECK(c->counted_free == free_before);
+    FSCTL_CHECK(vfs_sync() == 0);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    FSCTL_CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    FSCTL_CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    FSCTL_CHECK(c->counted_free == free_before);
 
     /* A scrub through the same channel, against the same name. */
     struct cosmo_fsctl scmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_SCRUB,
                                 .flags = 0, .mount_id = id };
     size_t scap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub);
-    CHECK(file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd));
-    CHECK(file_read(f, buf, scap) == (int64_t)scap);
+    FSCTL_CHECK(file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd));
+    FSCTL_CHECK(file_read(f, buf, scap) == (int64_t)scap);
     struct cosmo_fsctl_scrub *sc = (struct cosmo_fsctl_scrub *)(buf + sizeof(*h));
-    CHECK(h->kind == COSMO_FSCTL_SCRUB);
-    CHECK(sc->blocks_read > 0 && sc->unrecoverable == 0);
+    FSCTL_CHECK(h->kind == COSMO_FSCTL_SCRUB);
+    FSCTL_CHECK(sc->blocks_read > 0 && sc->unrecoverable == 0);
 
     /* The refusals. A ramfs has neither pass; a name nothing holds is
      * not a mount this namespace has. Both answer before any lock. */
     struct mount *rootm = NULL;
-    struct vnode *rv = NULL;
-    CHECK(vfs_lookup(NULL, "/tmp", &rv) == 0);
+    FSCTL_CHECK(vfs_lookup(NULL, "/tmp", &rv) == 0);
     rootm = rv->mnt;
     vnode_put(rv);
+    rv = NULL;
     cmd.mount_id = rootm->id;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EOPNOTSUPP);
-    CHECK(file_read(f, buf, cap) == 0);             /* a failed command leaves no result */
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EOPNOTSUPP);
+    FSCTL_CHECK(file_read(f, buf, cap) == 0);             /* a failed command leaves no result */
 
     cmd.mount_id = ~0ull;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -ENOENT);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -ENOENT);
     cmd.mount_id = id;
     cmd.version = COSMO_FSCTL_VERSION + 1;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
     cmd.version = COSMO_FSCTL_VERSION;
-    CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
 
     /*
      * Every bit of `flags` must mean something to the op it is sent
@@ -3013,21 +3208,34 @@ bool selftest_fsctl_check(const char **reason)
      * writer turns out to have been setting it.
      */
     cmd.flags = 1u << 31;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
     scmd.flags = COSMO_FSCTL_F_REPAIR;          /* CHECK-only, on a SCRUB */
-    CHECK(file_write(f, &scmd, sizeof(scmd)) == -EINVAL);
+    FSCTL_CHECK(file_write(f, &scmd, sizeof(scmd)) == -EINVAL);
     struct cosmo_fsctl lcmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_LIST,
                                 .flags = COSMO_FSCTL_F_REPAIR };
-    CHECK(file_write(f, &lcmd, sizeof(lcmd)) == -EINVAL);   /* LIST takes none */
+    FSCTL_CHECK(file_write(f, &lcmd, sizeof(lcmd)) == -EINVAL);   /* LIST takes none */
     cmd.flags = 0;
     scmd.flags = 0;
 
     kfree(buf);
+    buf = NULL;
     file_put(f);
+    f = NULL;
     check_teardown(bd);
+    bd = NULL;
     kinfo("selftest: fsctl-check: a leak found and repaired through /dev/fsctl against mount %llu",
           (unsigned long long)id);
     return true;
+
+cleanup:
+    if (rv)
+        vnode_put(rv);
+    if (f)
+        file_put(f);
+    kfree(buf);
+    check_teardown(bd);
+    return false;
+#undef FSCTL_CHECK
 }
 
 bool selftest_cosmofs_check_partial(const char **reason)

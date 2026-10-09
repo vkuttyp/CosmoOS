@@ -86,3 +86,14 @@ Sources are enumerated explicitly in `KERNEL_GENERIC_SRCS`,
 `KERNEL_ARCH_SRCS`, or `LOADER_SRCS`. There is no wildcard globbing, so a
 stray file cannot join the build unnoticed and a deleted file fails
 loudly.
+
+## B13. Static analysis cannot silently accept an unreviewed diagnostic
+
+`make analyze` checks structured reports from every enumerated source on
+every invocation. Any report outside the selected architecture's reviewed
+baseline fails, including an extra occurrence of an existing diagnostic.
+Missing or malformed reports and stale baseline entries fail. Every baseline entry has a reason and
+uses keys independent of source line numbers. Every report must name the
+same compiler version and that version must have a reviewed baseline for
+the selected architecture. A successful target reports
+the accepted count as well as zero unexpected diagnostics.

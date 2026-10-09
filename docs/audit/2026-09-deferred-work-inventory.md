@@ -877,3 +877,16 @@ Prove each concern with a deterministic interleaving or fault before fixing.
 | virtio-net probe failure injection and active worker wait | The synthetic peer proves held completions at reset and tracks every outstanding RX/map/chain segment. Add actual probe-allocation/registration faults and a callback held on another CPU to prove waiting, beyond deterministic reset-time delivery. |
 | virtio-net receive before interface registration | `vnet_probe` sets DRIVER_OK/posts RX before filling the interface operations/name/MTU and calling `netif_register`. `rx_common` admits any non-GONE interface; the failed-registration path has no RX-worker purge/barrier. Inject a frame before registration plus registration failure and establish whether an escaped `rcvif` outlives the private object. This ordering is unchanged in Unit 1; no such interleaving was reproduced. |
 | ~~virtio-net TX ownership lookup cost~~ | **ADDRESSED during PR #336 review:** a private free list supplies ownership records; the queue cookie points directly to the record. Submission, completion and failed-publication rollback take constant time without a transport API or mbuf layout change. The synthetic peer checks exhaustion, reverse-order completion and reuse. No throughput improvement is claimed without matched-LOCKDEP benchmarks. |
+
+## 9. Analyzer investigation follow-ups (2026-10-09)
+
+See [the analyzer report](2026-10-09-analyzer-gate-report.md). These two
+source-established self-test cleanup defects were discovered outside the
+current diagnostic list. The user authorized deterministic proofs and separate repairs in PR A
+on 2026-10-09. Results are recorded in that report as the probes run.
+
+| Finding | Evidence and work remaining |
+|---|---|
+| `cosmofstest.c:engine_mount` leaks a registered RAM device on setup failure | **Proven and fixed in `abc8bc63`.** On both architectures, `tools/cleanup-path-probe.py --old` failed at format, mkdir and mount injection with `released=0`; fixed mode reported `released=1` at all stages. The test checks `gone` and the creator-reference retirement while holding its own inspection reference. |
+| `devtest.c:selftest_nvme` leaks a worker buffer when thread creation fails | **Proven and fixed in `80fb43db`.** On both architectures, `--old` reported `allocated=1 hits=1 started=0 released=0`; fixed mode reported `released=1`. `thread_create_on` does not consume the entry argument on failure. |
+| Analyzer gate and Oct. 3 AArch64 count delta | **Gate implemented on the PR A branch.** Current full Clang 21.0.3 runs leave eight reasoned baseline entries per architecture (19/27 removed on x86-64; 20/28 on AArch64). The Oct. 3 source snapshot analyzed with today's compiler emits 28 AArch64 diagnostics, including the ten items in the reported increase; the old compiler identity and plist reports are unavailable, so the 19-to-28 count change cannot be attributed to source or toolchain. See the dated [analyzer report](2026-10-09-analyzer-gate-report.md), including the full historical list, current dispositions, and gate probe. |

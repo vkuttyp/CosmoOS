@@ -1207,7 +1207,6 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *h
      * reason, and the commit's dirty loop writes it.
      */
     unsigned at = 0;                         /* entries of pending_free written so far */
-    unsigned x = need;                       /* leftovers recorded, once the last block is written */
     for (unsigned i = 0; i < need; i++) {
         struct cfs_buf *b = buf_alloc(fs, blk[i]);
         if (b == NULL)
@@ -1242,6 +1241,7 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *h
         /* The reserved blocks nobody needed say so here, in the last
          * block, whose capacity `need` was chosen to leave room in. */
         if (i + 1 == need) {
+            unsigned x;
             for (x = need; x < n && k < CFS_FREELOG_PER_BLOCK; x++)
                 d->blk[k++] = blk[x];
             if (x < n) {
@@ -2146,8 +2146,24 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
      * a VFS symbol in this file that the fuzz harness has to link.
      */
     struct cfs_inode in;
-    if (ino != 0 && cfs_inode_read(fs, ino, &in) != 0)
+    if (ino == 0) {
+        /* Only these whole-filesystem faults are valid without a target
+         * inode. Every inode-targeted case must not inspect an absent slot. */
+        switch (kind) {
+        case COSMOFS_CORRUPT_LEAK:
+        case COSMOFS_CORRUPT_ORPHAN:
+        case COSMOFS_CORRUPT_DANGLING:
+        case COSMOFS_CORRUPT_DIRENT:
+        case COSMOFS_CORRUPT_COUNTER:
+        case COSMOFS_CORRUPT_SNAP_MEMBERS:
+            memset(&in, 0, sizeof(in));
+            break;
+        default:
+            return -EINVAL;
+        }
+    } else if (cfs_inode_read(fs, ino, &in) != 0) {
         return -ENOENT;
+    }
 
     mutex_lock(&fs->lock);
     int rc = 0;
@@ -2744,7 +2760,6 @@ static int load_root(struct cfs *fs, struct vnode **root)
         if (!fs->have_key)
             kwarn("cosmofs: encrypted and locked; metadata only until a key arrives");
     }
-    rc = 0;
     /* From the blocks that exist, not the linear span: that is rounded
      * up to whole bitmap chunks per member and is mostly padding on a
      * small device. */

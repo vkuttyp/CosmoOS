@@ -1,0 +1,160 @@
+{
+  "schema": 2,
+  "architecture": "aarch64",
+  "compilers": [
+    {
+      "version": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+      "diagnostics": [
+        {
+          "translation_unit": "drivers/nvme/nvme.c",
+          "checker": "core.uninitialized.Assign",
+          "file": "drivers/nvme/nvme.c",
+          "function": "nvme_submit",
+          "message": "Assigned value is uninitialized",
+          "count": 1,
+          "reason": "The block layer rejects zero-sector non-flush bios and the mapper emits at least one PRP for every valid data bio; the analyzer does not infer the segment-count contract across the mapper call."
+        },
+        {
+          "translation_unit": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "checker": "core.uninitialized.Branch",
+          "file": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "function": "selftest_cosmofs_mount_no_early_wb",
+          "message": "Branch condition evaluates to a garbage value",
+          "count": 1,
+          "reason": "The held array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
+        },
+        {
+          "translation_unit": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "checker": "core.uninitialized.Branch",
+          "file": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "function": "selftest_cosmofs_orphan_reserved",
+          "message": "Branch condition evaluates to a garbage value",
+          "count": 1,
+          "reason": "The fs_ array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
+        },
+        {
+          "translation_unit": "kernel-services/network/nettest.c",
+          "checker": "core.NullDereference",
+          "file": "kernel-services/network/nettest.c",
+          "function": "selftest_net_tcpverdict",
+          "message": "Access to field 'tcp' results in a dereference of a null pointer (loaded from field 's')",
+          "count": 1,
+          "reason": "The connection worker publishes s only after successful socket creation; this test waits for rc==0 and joins the worker before dereferencing the published socket. The analyzer does not model that synchronization."
+        },
+        {
+          "translation_unit": "kernel-services/network/tcp.c",
+          "checker": "core.NullDereference",
+          "file": "kernel-services/network/tcp.c",
+          "function": "port_in_use_locked",
+          "message": "Dereference of null pointer",
+          "count": 1,
+          "reason": "The list is circular with the sentinel as its head; list_for_each_entry checks the member address against the head before loading another entry, so the empty-list container pointer is never dereferenced."
+        },
+        {
+          "translation_unit": "kernel-services/virtualization/guestmem.c",
+          "checker": "unix.Malloc",
+          "file": "kernel/include/kernel/list.h",
+          "function": "list_pop_front",
+          "message": "Use of memory after it is freed",
+          "count": 1,
+          "reason": "The analyzer reports the inlined pop helper, but guestmem_release removes the node and advances the sentinel before freeing the detached region; no subsequent list operation touches it."
+        },
+        {
+          "translation_unit": "kernel/ipc/unix.c",
+          "checker": "unix.Malloc",
+          "file": "kernel/include/kernel/list.h",
+          "function": "list_pop_front",
+          "message": "Use of memory after it is freed",
+          "count": 1,
+          "reason": "The analyzer reports the inlined pop helper, but unix_release removes the node and advances the sentinel before freeing the detached object; no subsequent list operation touches it."
+        },
+        {
+          "translation_unit": "kernel/scheduler/sched.c",
+          "checker": "core.BitwiseShift",
+          "file": "kernel/scheduler/sched.c",
+          "function": "sched_migrate_from",
+          "message": "Left shift overflows the capacity of 'cpumask_t'",
+          "count": 1,
+          "reason": "The function rejects destinations at or above cpu_count(), and configuration caps cpu_count() at 64, so CPUMASK_OF(to) shifts by at most 63 in the supported cpumask_t."
+        }
+      ]
+    },
+    {
+      "version": "Debian clang version 19.1.7 (3+b1)",
+      "diagnostics": [
+        {
+          "translation_unit": "drivers/nvme/nvme.c",
+          "checker": "core.uninitialized.Assign",
+          "file": "drivers/nvme/nvme.c",
+          "function": "nvme_submit",
+          "message": "Assigned value is garbage or undefined",
+          "count": 1,
+          "reason": "The block layer rejects zero-sector non-flush bios and the mapper emits at least one PRP for every valid data bio; the analyzer does not infer the segment-count contract across the mapper call."
+        },
+        {
+          "translation_unit": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "checker": "core.uninitialized.Branch",
+          "file": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "function": "selftest_cosmofs_mount_no_early_wb",
+          "message": "Branch condition evaluates to a garbage value",
+          "count": 1,
+          "reason": "The held array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
+        },
+        {
+          "translation_unit": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "checker": "core.uninitialized.Branch",
+          "file": "kernel-services/filesystem/cosmofs/cosmofstest.c",
+          "function": "selftest_cosmofs_orphan_reserved",
+          "message": "Branch condition evaluates to a garbage value",
+          "count": 1,
+          "reason": "The fs_ array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
+        },
+        {
+          "translation_unit": "kernel-services/network/nettest.c",
+          "checker": "core.NullDereference",
+          "file": "kernel-services/network/nettest.c",
+          "function": "selftest_net_tcpverdict",
+          "message": "Access to field 'tcp' results in a dereference of a null pointer (loaded from field 's')",
+          "count": 1,
+          "reason": "The connection worker publishes s only after successful socket creation; this test waits for rc==0 and joins the worker before dereferencing the published socket. The analyzer does not model that synchronization."
+        },
+        {
+          "translation_unit": "kernel-services/network/tcp.c",
+          "checker": "core.NullDereference",
+          "file": "kernel-services/network/tcp.c",
+          "function": "port_in_use_locked",
+          "message": "Dereference of null pointer",
+          "count": 1,
+          "reason": "The list is circular with the sentinel as its head; list_for_each_entry checks the member address against the head before loading another entry, so the empty-list container pointer is never dereferenced."
+        },
+        {
+          "translation_unit": "kernel-services/virtualization/guestmem.c",
+          "checker": "unix.Malloc",
+          "file": "kernel/include/kernel/list.h",
+          "function": "list_pop_front",
+          "message": "Use of memory after it is freed",
+          "count": 1,
+          "reason": "The analyzer reports the inlined pop helper, but guestmem_release removes the node and advances the sentinel before freeing the detached region; no subsequent list operation touches it."
+        },
+        {
+          "translation_unit": "kernel/io/epoll.c",
+          "checker": "core.uninitialized.Assign",
+          "file": "kernel/io/epoll.c",
+          "function": "hook_item",
+          "message": "Assigned value is garbage or undefined",
+          "count": 1,
+          "reason": "Both waitqueue output slots are initialized to NULL before member_wqs; that routine writes every slot below its returned count. Clang 19 does not preserve this stack initialization through the call."
+        },
+        {
+          "translation_unit": "kernel/ipc/unix.c",
+          "checker": "unix.Malloc",
+          "file": "kernel/include/kernel/list.h",
+          "function": "list_pop_front",
+          "message": "Use of memory after it is freed",
+          "count": 1,
+          "reason": "The analyzer reports the inlined pop helper, but unix_release removes the node and advances the sentinel before freeing the detached object; no subsequent list operation touches it."
+        }
+      ]
+    }
+  ]
+}

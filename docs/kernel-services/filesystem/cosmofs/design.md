@@ -1042,6 +1042,19 @@ The other four `chain_cycle` sites (the deadlist, the imap and the
 directory-depth walkers) use different guards and stay untested; one
 test does not cover five walkers.
 
+The corruption hook accepts inode number zero only for whole-filesystem
+faults (`LEAK`, `ORPHAN`, `DANGLING`, `DIRENT`, `COUNTER` and
+`SNAP_MEMBERS`). Every inode-targeted case requires a readable nonzero
+inode before it examines or changes the inode record. This keeps invalid
+test input from reading an uninitialized record or writing a corruption
+that no checker can observe.
+
+The error paths in `selftest_cosmofs_badmap`, `selftest_cosmofs_mirror`,
+`selftest_cosmofs_compress` and `selftest_fsctl_check` release every file,
+pool, buffer and RAM device the test has acquired. Their checks keep the
+same predicates and failure conditions; once a resource is acquired, a
+failed check branches through that test's cleanup before returning.
+
 **Thirteen classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired
 with `COSMOFS_CHECK_REPAIR`. The three added with the extent and name
@@ -1332,3 +1345,13 @@ room for more.
   alive): the deadlists know, but nothing reports it.
 - Snapshots of a mount that is read-only, and nested `.snapshots`
   inside a snapshot: both refused.
+
+## Self-test fixture failure ownership
+
+`cosmofstest.c:engine_mount` owns the registered RAM device until setup
+succeeds and publishes it through the output pointer. Format, directory
+creation and mount failures must destroy that device; directory cleanup
+removes only a directory this attempt created. The debug fixture test
+keeps an independent reference to inspect registry and creator-reference
+retirement after each injected failure. Assertions keep their original
+conditions and failure reasons.

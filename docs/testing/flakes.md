@@ -6,6 +6,28 @@ long enough. The list exists so that when one of them fails, the reader
 knows within one line whether to re-run or to investigate. It is short
 on purpose, and the rule for joining it is at the end.
 
+**Observed once, host test `online-late` (2026-10-09):** the first
+`gmake host-test` overlapped two `gmake -j4 ... analyze` builds and failed
+`tests/host/test_quiesce.c:425-426` (`reads > 0`, `saw_new_cpu`). In this
+model, late workers wait for generation `300 * cpu`, while the updater can
+advance through generation 2000 and set `stop` without a startup barrier;
+if the host does not schedule those workers before then, they publish
+online after the last updater snapshot and perform no reads. This is a
+host-test scheduling assumption, not a kernel timing budget. After both
+analyzer builds exited, a standalone `gmake host-test` passed
+`online-late`; no assertion or budget was changed. The test's startup
+coordination remains a follow-up if it recurs.
+
+**Observed once, firmware handover in `test-harness-retry` (2026-10-09):**
+the first x86-64 QEMU process printed no `cosmoboot-uefi` banner during the
+30 s handover window, so `tests/boot/run_boot_test.py` killed it and
+performed its documented single retry. The second boot passed all 451
+self-tests; the injected network attempt 1 failed as intended and attempt 2
+served 100/100 rounds. The harness reported the early handover timeout and
+the network retry separately. The kernel did not run on the first process;
+the cause inside OVMF's device connection remains unassigned. Preserve this
+as a sighting if it recurs; the retry does not erase it.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --
