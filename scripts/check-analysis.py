@@ -28,23 +28,31 @@ def read_baseline(path, arch, compiler):
     if baseline["schema"] != 2 or baseline["architecture"] != arch:
         raise ValueError("baseline schema or architecture mismatch")
     variants = baseline["compilers"]
-    if not isinstance(variants, list):
-        raise ValueError("baseline compiler variants must be a list")
-    matches = [entry for entry in variants if entry["version"] == compiler]
-    if len(matches) != 1:
-        raise ValueError("no unique reviewed baseline for compiler: " + compiler)
-    counts = Counter()
-    for entry in matches[0]["diagnostics"]:
-        identity = key(entry)
-        if identity in counts:
-            raise ValueError("duplicate baseline key")
-        if not isinstance(entry["reason"], str) or not entry["reason"].strip():
-            raise ValueError("every baseline entry needs a reason")
-        count = entry["count"]
-        if type(count) is not int or count < 1:
-            raise ValueError("baseline count must be a positive integer")
-        counts[identity] = count
-    return counts
+    if not isinstance(variants, list) or not variants:
+        raise ValueError("baseline compiler variants must be a nonempty list")
+    selected = None
+    versions = set()
+    for variant in variants:
+        version = variant["version"]
+        if not isinstance(version, str) or not version or version in versions:
+            raise ValueError("baseline compiler versions must be unique nonempty strings")
+        versions.add(version)
+        counts = Counter()
+        for entry in variant["diagnostics"]:
+            identity = key(entry)
+            if identity in counts:
+                raise ValueError("duplicate baseline key")
+            if not isinstance(entry["reason"], str) or not entry["reason"].strip():
+                raise ValueError("every baseline entry needs a reason")
+            count = entry["count"]
+            if type(count) is not int or count < 1:
+                raise ValueError("baseline count must be a positive integer")
+            counts[identity] = count
+        if version == compiler:
+            selected = counts
+    if selected is None:
+        raise ValueError("no reviewed baseline for compiler: " + compiler)
+    return selected
 
 
 def read_reports(paths, root, out):

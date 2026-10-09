@@ -135,7 +135,7 @@ class GateTests(unittest.TestCase):
         report["clang_version"] = "new compiler"
         self.report.write_bytes(plistlib.dumps(report))
         self.assert_rejected(2)
-        self.assertIn("no unique reviewed baseline for compiler", self.run_gate().stderr)
+        self.assertIn("no reviewed baseline for compiler", self.run_gate().stderr)
 
     def test_reviewed_compiler_variant_passes(self):
         baseline = json.loads(self.baseline.read_text())
@@ -148,6 +148,22 @@ class GateTests(unittest.TestCase):
         self.report.write_bytes(plistlib.dumps(report))
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_duplicate_compiler_variant_fails(self):
+        baseline = json.loads(self.baseline.read_text())
+        baseline["compilers"].append(baseline["compilers"][0])
+        self.baseline.write_text(json.dumps(baseline))
+        self.assert_rejected(2)
+
+    def test_unselected_variant_still_requires_reason(self):
+        baseline = json.loads(self.baseline.read_text())
+        other = dict(self.entry)
+        other.pop("reason")
+        baseline["compilers"].append({
+            "version": "other compiler", "diagnostics": [other],
+        })
+        self.baseline.write_text(json.dumps(baseline))
+        self.assert_rejected(2)
 
     def test_missing_reason_fails(self):
         self.entry["reason"] = " "
