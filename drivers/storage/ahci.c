@@ -162,6 +162,10 @@ static bool port_stop_cmd(struct ahci_port *p)
  * port's memory and for teardown. */
 static bool port_stop(struct ahci_port *p)
 {
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_AHCI_STOP_ACK))
+        return false;
+#endif
     if (!port_stop_cmd(p))
         return false;
     uint32_t cmd = prd(p, PX_CMD);

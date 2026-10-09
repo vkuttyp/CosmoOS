@@ -29,6 +29,7 @@ enum fi_kind {
     FI_USB_CSW,       /* usb_storage queues the CSW read without ringing the doorbell: a hang with a transfer in flight */
     FI_AHCI_CI,       /* ahci fills a slot and never sets its PxCI bit: a command that never starts */
     FI_AHCI_PROBE_ROLLBACK, /* ahci fails after starting ports but before enabling global interrupts */
+    FI_AHCI_STOP_ACK, /* ahci simulates a port engine that does not acknowledge a stop */
     FI_HV_SELFCHECK,  /* the hypervisor's boot self-check reports failure: the backend-disable path */
     FI_FILE_READPAGE, /* a page cache miss's readpage fails with -EIO: a mapped touch is SIGBUS */
     FI_NET_RX_DUP,    /* a received frame is delivered a second time (a link-layer retransmit, a switch flooding): the stack must stay idempotent -- TCP delivers the duplicated segment once, ARP keeps one entry */

@@ -3392,12 +3392,18 @@ bool selftest_ahci_reset(const char **reason)
 bool selftest_ahci_probe_rollback(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
-    struct blkdev *bd = blk_find("ahci0p1");
-    if (bd == NULL) {
-        *reason = "ahci-probe-rollback: no ahci0p1 to rebind";
+    struct pci_device *pdev = NULL;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *candidate = pci_device_at(i);
+        if (candidate->class == 0x01 && candidate->subclass == 0x06 && candidate->prog_if == 0x01) {
+            pdev = candidate;
+            break;
+        }
+    }
+    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-probe-rollback: no bound AHCI controller";
         return false;
     }
-    struct pci_device *pdev = to_pci_device(bd->dev);
     bool ok = pci_test_remove(pdev) == 0;
     if (ok) {
         faultinject_set(FI_AHCI_PROBE_ROLLBACK, 1, 1, thread_current());
@@ -3409,11 +3415,49 @@ bool selftest_ahci_probe_rollback(const char **reason)
     }
     if (pdev->dev.state != DEV_BOUND)
         ok = false;
-    blkdev_put(bd);
     if (ok)
         kinfo("selftest: ahci-probe-rollback: failed after port start with a pending event and GHC.IE clear");
     else
         *reason = "ahci-probe-rollback: see AHCI-ROLLBACK-PENDING and faultinject stats";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_ahci_stop_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct pci_device *pdev = NULL;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *candidate = pci_device_at(i);
+        if (candidate->class == 0x01 && candidate->subclass == 0x06 && candidate->prog_if == 0x01) {
+            pdev = candidate;
+            break;
+        }
+    }
+    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-stop-ack: no bound AHCI controller";
+        return false;
+    }
+    struct dma_stats before, after;
+    dma_get_stats(&before);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 0, thread_current());
+    int removed = pci_test_remove(pdev);
+    struct fi_stats st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    dma_get_stats(&after);
+    bool bound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND;
+    uint64_t freed = after.frees - before.frees;
+    bool ok = removed == 0 && st.hits > 0 && freed == 0 && bound;
+    kinfo("AHCI-STOP-ACK: %s hits=%llu dma_frees=%llu rebound=%u", ok ? "PASS" : "FAIL",
+          (unsigned long long)st.hits, (unsigned long long)freed, bound);
+    if (ok)
+        kinfo("selftest: ahci-stop-ack: controller with unacknowledged port stops retained its DMA allocations");
+    else
+        *reason = "ahci-stop-ack: a failed stop freed DMA or did not rebind; see the log";
     return ok;
 #else
     (void)reason;
