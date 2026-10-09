@@ -73,6 +73,7 @@ struct e1000e {
 static struct e1000e *g_stop_orphan;
 static unsigned g_rings_free_calls;
 bool e1000e_test_stop_ack(unsigned kind);
+bool e1000e_test_recover_stop_ack(void);
 #endif
 
 static uint32_t rd32(struct e1000e *e, unsigned off) { return *(volatile uint32_t *)(e->bar + off); }
@@ -622,10 +623,9 @@ static void e1000e_remove(struct pci_device *pdev)
 }
 
 #if CONFIG_SELFTEST
-/* Called by the kernel's device self-test through the debug-only module
- * symbol table. On an old driver this observes rings_free after a failed
- * disable; on the fixed driver it reclaims the retained instance only
- * after the test clears the injected failure and the stop succeeds. */
+/* Called by the kernel's device self-test through debug-only module
+ * symbols. Fault rules are armed by the kernel test because the rule
+ * control functions are intentionally not part of the module ABI. */
 bool e1000e_test_stop_ack(unsigned kind)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
@@ -636,15 +636,28 @@ bool e1000e_test_stop_ack(unsigned kind)
         return false;
 
     unsigned frees_before = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED);
-    faultinject_set((enum fi_kind)kind, 1, 0, thread_current());
     int removed = pci_test_remove(pdev);
-    struct fi_stats fi;
-    faultinject_stats((enum fi_kind)kind, &fi);
-    faultinject_clear((enum fi_kind)kind);
     unsigned ring_frees = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED) - frees_before;
     bool retained = g_stop_orphan != NULL && g_stop_orphan->pdev == pdev;
-    bool cleaned = false;
-    if (retained) {
+    bool ok = removed == 0 && retained && ring_frees == 0;
+    kinfo("E1000E-STOP-ACK: kind=%u %s ring_frees=%u retained=%u", kind,
+          ok ? "PASS" : "FAIL", ring_frees, retained);
+    return ok;
+#else
+    (void)kind;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(e1000e_test_stop_ack);
+
+bool e1000e_test_recover_stop_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct pci_device *pdev = pci_find_device(E1000E_VENDOR, E1000E_82574L, NULL);
+    if (pdev == NULL)
+        return false;
+    bool cleaned = true;
+    if (g_stop_orphan != NULL) {
         struct e1000e *e = g_stop_orphan;
         bool stopped = hw_quiesce(e);
         bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
@@ -654,22 +667,18 @@ bool e1000e_test_stop_ack(unsigned kind)
             device_unmap_mmio(e->bar);
             g_stop_orphan = NULL;
             netif_put(&e->nif);
-            cleaned = true;
+        } else {
+            cleaned = false;
         }
     }
-    bool rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
+    bool rebound = cleaned && pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
                    pdev->dev.state == DEV_BOUND;
-    bool ok = removed == 0 && fi.hits > 0 && retained && ring_frees == 0 && cleaned && rebound;
-    kinfo("E1000E-STOP-ACK: kind=%s %s hits=%llu ring_frees=%u retained=%u cleaned=%u rebound=%u",
-          faultinject_kind_name((enum fi_kind)kind), ok ? "PASS" : "FAIL", (unsigned long long)fi.hits,
-          ring_frees, retained, cleaned, rebound);
-    return ok;
+    return rebound;
 #else
-    (void)kind;
     return false;
 #endif
 }
-EXPORT_SYMBOL(e1000e_test_stop_ack);
+EXPORT_SYMBOL(e1000e_test_recover_stop_ack);
 #endif
 
 static const struct pci_id e1000e_ids[] = {

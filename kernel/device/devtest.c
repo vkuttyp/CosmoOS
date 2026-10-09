@@ -3646,14 +3646,31 @@ bool selftest_e1000e_stop_ack(const char **reason)
         return true;
     }
     bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("e1000e_test_stop_ack", NULL);
-    if (run == NULL) {
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("e1000e_test_recover_stop_ack", NULL);
+    if (run == NULL || recover == NULL) {
         *reason = "e1000e-stop-ack: test seam not exported by the e1000e module";
         return false;
     }
-    bool rx = run(FI_E1000E_RX_DISABLE_ACK);
-    bool tx = run(FI_E1000E_TX_DISABLE_ACK);
+    faultinject_set(FI_E1000E_RX_DISABLE_ACK, 1, 0, thread_current());
+    bool rx_retained = run(FI_E1000E_RX_DISABLE_ACK);
+    struct fi_stats rx_st;
+    faultinject_stats(FI_E1000E_RX_DISABLE_ACK, &rx_st);
+    faultinject_clear(FI_E1000E_RX_DISABLE_ACK);
+    bool rx_recovered = recover();
+    bool rx = rx_retained && rx_st.hits > 0 && rx_recovered;
+
+    faultinject_set(FI_E1000E_TX_DISABLE_ACK, 1, 0, thread_current());
+    bool tx_retained = run(FI_E1000E_TX_DISABLE_ACK);
+    struct fi_stats tx_st;
+    faultinject_stats(FI_E1000E_TX_DISABLE_ACK, &tx_st);
+    faultinject_clear(FI_E1000E_TX_DISABLE_ACK);
+    bool tx_recovered = recover();
+    bool tx = tx_retained && tx_st.hits > 0 && tx_recovered;
+
     bool ok = rx && tx;
-    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u tx=%u", ok ? "PASS" : "FAIL", rx, tx);
+    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u/%u hits=%llu tx=%u/%u hits=%llu", ok ? "PASS" : "FAIL",
+          rx_retained, rx_recovered, (unsigned long long)rx_st.hits, tx_retained, tx_recovered,
+          (unsigned long long)tx_st.hits);
     if (!ok)
         *reason = "e1000e-stop-ack: DMA was reclaimed before RX/TX stop acknowledgement; see the log";
     return ok;
