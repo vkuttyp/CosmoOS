@@ -78,6 +78,29 @@ both failed stop attempts, require the controller state to remain
 allocated, then clear the injection and verify HCH asserts. The paired
 old-behavior check is `tools/xhci-halt-ack-probe.py --old`.
 
+**`xhci-cancel-ack`**: one bulk-IN request in flight on a synthetic
+controller, cancelled four times over with the kernel arming more refusals
+each time: none; Stop Endpoint refused; Stop Endpoint and Disable Slot
+refused; all three, HCH included, refused. The request must come back
+with the cancel's status only after the step that acknowledged (slot
+still attached; slot detached; HCH set), and in the last case not at all:
+`usb_cancel` answers `-EIO`, the TD stays in flight, and a late Transfer
+Event and a ring flush both leave it alone (U14).
+`tools/xhci-cancel-ack-probe.py --old` reverse-applies the fix commit.
+
+**`usb-sync-quarantine`**: `usb_control_msg` over a test HCD whose
+submit records the request and whose cancel answers `-EIO`. The caller's
+buffer must never be the one the HCD was given, and the "device" writing
+into what it kept must not change it (U10). Run by the same probe.
+
+**`xhci-cancel-retired`** (two CPUs or more; one CPU logs a skip): an
+asynchronous GET_DESCRIPTOR to the harness's disk whose `done` spins
+20 ms; a canceller pinned to another CPU cancels once the callback has
+started and must get `-ENOENT` only after the callback returned (U10).
+`tools/xhci-cancel-retired-probe.py --old` removes `xhci_gone`'s waits for
+the handler and the irqpoll worker and the test must fail, at
+`QEMU_SMP=2`.
+
 **`iommu`** (the existing test, extended): for every block device whose
 driver has `debug_dma` and whose DMA device has a domain — `nvme0n1`
 and `sda` — a one-block read into an unmapped address is provoked and

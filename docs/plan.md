@@ -616,11 +616,20 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   reset reclaim every buffer with zero posted RX. Two self-tests and old
   probes pass on both architectures; the full local matrix passes. See the
   [report](audit/2026-10-08-vnet-remove-report.md) for the audit and CI checks.
-- [ ] **Device lifecycle — fault/interleaving sweep.** Prove the source-audit
-  concerns in inventory §8: failed DMA-stop acknowledgements, late submission
-  publication, callback retirement and RX before interface registration.
-  Existing debug bind/unbind helpers can drive the tests. Each defect needs
-  its own deterministic test and old-behavior probe.
+- [x] **Device lifecycle — Unit 2: fault/interleaving sweep.**
+  [PR #PRNUM](https://github.com/vkuttyp/CosmoOS/pull/PRNUM).
+  Proven and fixed with a test and `--old` probe on both architectures:
+  NVMe publication after controller death, virtio-rng repost after reset,
+  and unacknowledged stops in NVMe, AHCI (port stop, COMRESET), e1000e
+  and xHCI (Stop Endpoint, Disable Slot, halt, and cancel, which now
+  escalates and quarantines with `usb_cancel` returning `-EIO`, U14).
+  Refuted with tests: AHCI rollback IRQ ordering, network worker removal,
+  xHCI cancel against a running callback. net-nicbench's eth1 failure
+  was the benchmark's hook eating a stack ARP reply, fixed in the test.
+  See the [report](audit/2026-10-09-device-lifecycle-unit2-report.md).
+- [ ] **Device lifecycle — remaining §8 items.** virtio-blk timeout versus
+  late submission, virtio-net probe faults and RX before registration,
+  USB storage recovery-state propagation (inventory §8).
 
 - [ ] **Implementation/validation — non-coherent DMA.** Audit device-written
   rings/buffers and submission synchronization in VirtIO, e1000e, AHCI and xHCI.
