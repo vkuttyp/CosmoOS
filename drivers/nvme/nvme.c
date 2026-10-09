@@ -116,6 +116,8 @@ struct nvme_ctrl {
     bool disable_ack;                       /* queues are reclaimable only after RDY fell */
 #if CONFIG_SELFTEST
     bool test_synthetic;
+    void (*test_die_park)(void *arg);      /* nvme-die-concurrent: the first controller_die, after disable */
+    void *test_die_arg;
 #endif
     struct mutex admin_lock;               /* one admin command at a time */
 };
@@ -589,6 +591,10 @@ static bool controller_die(struct nvme_ctrl *c, const char *why)
                rc);
         return false;
     }
+#if CONFIG_SELFTEST
+    if (c->test_die_park != NULL)   /* plain load: only the synthetic controller's fixture sets it */
+        c->test_die_park(c->test_die_arg);
+#endif
     for (unsigned qi = 0; qi <= c->nr_ioq; qi++) {
         struct nvme_queue *q = qi == 0 ? &c->admin : c->ioq[qi - 1];
         for (uint16_t cid = 0; cid < q->depth; cid++) {
@@ -1065,6 +1071,69 @@ bool nvme_test_disable_ack(void)
 #endif
 }
 EXPORT_SYMBOL(nvme_test_disable_ack);
+
+/*
+ * nvme-die-concurrent: two callers of controller_die on one synthetic
+ * controller whose disable is acknowledged. The kernel's test runs them on
+ * two threads and parks the first at `park` -- after the disable, before
+ * the sweep -- while the second calls; both must be told the disable was
+ * acknowledged (review of PR #338).
+ */
+void *nvme_test_die_setup(void (*park)(void *arg), void *arg);
+bool nvme_test_die_call(void *ctrl);
+void nvme_test_die_teardown(void *ctrl);
+void *nvme_test_die_setup(void (*park)(void *arg), void *arg)
+{
+#if CONFIG_DEBUG
+    static struct nvme_ctrl c;
+    static struct pci_device pdev;
+    static uint32_t regs[2048];   /* CSTS.RDY reads 0: every disable is acknowledged */
+    memset(&c, 0, sizeof(c));
+    memset(&pdev, 0, sizeof(pdev));
+    memset(regs, 0, sizeof(regs));
+    pdev.dev.dma_mask = UINT64_MAX;
+    c.pdev = &pdev;
+    c.bar = (vaddr_t)regs;
+    c.test_synthetic = true;
+    list_init(&c.namespaces);
+    if (queue_alloc(&c, &c.admin, 0, 2) != 0) {
+        queue_free(&c, &c.admin);
+        return NULL;
+    }
+    c.test_die_park = park;
+    c.test_die_arg = arg;
+    return &c;
+#else
+    (void)park;
+    (void)arg;
+    return NULL;
+#endif
+}
+EXPORT_SYMBOL(nvme_test_die_setup);
+
+bool nvme_test_die_call(void *ctrl)
+{
+#if CONFIG_DEBUG
+    struct nvme_ctrl *c = ctrl;
+    return controller_die(c, "self-test concurrent death");
+#else
+    (void)ctrl;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(nvme_test_die_call);
+
+void nvme_test_die_teardown(void *ctrl)
+{
+#if CONFIG_DEBUG
+    struct nvme_ctrl *c = ctrl;
+    c->test_die_park = NULL;
+    queue_free(c, &c->admin);
+#else
+    (void)ctrl;
+#endif
+}
+EXPORT_SYMBOL(nvme_test_die_teardown);
 
 static unsigned g_submit_die_done;
 

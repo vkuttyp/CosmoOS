@@ -3622,6 +3622,169 @@ bool selftest_ahci_comreset_ack(const char **reason)
 #endif
 }
 
+/*
+ * A recovery whose command-engine stop is refused leaves the port dead
+ * with the handler's error snapshot (err_slot, err_ci) still pending. A
+ * later successful reset -- stop, every slot failed, COMRESET, IDENTIFY
+ * -- revives the port; the snapshot must not survive it, or the worker's
+ * next wake replays it against commands submitted after the reset
+ * (review of PR #338).
+ */
+bool selftest_ahci_error_reset(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        *reason = "ahci-error-reset: no ahci0p1 disk";
+        return false;
+    }
+    bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
+    bool (*pending)(struct blkdev *, bool) =
+        (bool (*)(struct blkdev *, bool))module_symbol_lookup("ahci_test_error_pending", NULL);
+    if (recover == NULL || pending == NULL || bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        *reason = "ahci-error-reset: test seam or reset hook missing";
+        return false;
+    }
+    struct { volatile bool done; int status; } mk[2] = { 0 };
+    struct bio bio[2];
+    uint8_t *buf[2] = { kmalloc(4096, 0), kmalloc(4096, 0) };
+    if (buf[0] == NULL || buf[1] == NULL) {
+        kfree(buf[0]);
+        kfree(buf[1]);
+        blkdev_put(bd);
+        *reason = "ahci-error-reset: could not allocate test buffers";
+        return false;
+    }
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 2; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 120 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());   /* both held: the snapshot names two live slots */
+    int submit0 = blk_submit(&bio[0]);
+    int submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    faultinject_set(FI_AHCI_STOP_ACK, 1, 0, thread_current());
+    bool dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
+    struct fi_stats st;
+    faultinject_stats(FI_AHCI_STOP_ACK, &st);
+    faultinject_clear(FI_AHCI_STOP_ACK);
+    bool before = pending(bd, false);   /* the refused recovery left it */
+    int restore_rc = bd->ops->debug_presence(bd, true);
+    bool after = pending(bd, true);     /* and clears it, so nothing replays it later */
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done); waited++)
+        thread_sleep_ms(1);
+    int read_rc = restore_rc == 0 ? blk_read(bd, 136, 8, buf[0]) : restore_rc;
+    bool ok = st.hits >= 2 && dead && before && !after && restore_rc == 0 && read_rc == 0 && mk[0].done &&
+              mk[1].done && mk[0].status == -EIO && mk[1].status == -EIO;
+    kinfo("AHCI-ERROR-RESET: %s stop_hits=%llu dead=%u pending_before=%u pending_after_reset=%u restore=%d read=%d "
+          "held=%d/%d",
+          ok ? "PASS" : "FAIL", (unsigned long long)st.hits, dead, before, after, restore_rc, read_rc, mk[0].status,
+          mk[1].status);
+    kfree(buf[0]);
+    kfree(buf[1]);
+    blkdev_put(bd);
+    if (!ok)
+        *reason = "ahci-error-reset: an error snapshot survived a successful reset; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+#if CONFIG_DEBUG
+struct nvme_die_race {
+    void *ctrl;
+    bool (*call)(void *ctrl);
+    struct completion parked, release, second_done;
+    bool first_result, second_result;
+};
+
+static void nvme_die_park(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    complete(&t->parked);
+    wait_for_completion(&t->release);
+}
+
+static void nvme_die_first(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    t->first_result = t->call(t->ctrl);
+    thread_exit(0);
+}
+
+static void nvme_die_second(void *arg)
+{
+    struct nvme_die_race *t = arg;
+    t->second_result = t->call(t->ctrl);
+    complete(&t->second_done);
+    thread_exit(0);
+}
+#endif
+
+/*
+ * Two callers of the NVMe controller_die (remove racing the timeout
+ * thread): the second must not report the disable as refused while the
+ * first is still between an acknowledged disable and the end of its
+ * sweep -- nvme_remove would then keep the queues, skip the namespace
+ * puts and, since U14, mark the function unbindable for good (review of
+ * PR #338). The first caller parks at the seam; the second calls.
+ */
+bool selftest_nvme_die_concurrent(const char **reason)
+{
+#if CONFIG_DEBUG
+    void *(*setup)(void (*)(void *), void *) =
+        (void *(*)(void (*)(void *), void *))module_symbol_lookup("nvme_test_die_setup", NULL);
+    bool (*call)(void *) = (bool (*)(void *))module_symbol_lookup("nvme_test_die_call", NULL);
+    void (*teardown)(void *) = (void (*)(void *))module_symbol_lookup("nvme_test_die_teardown", NULL);
+    if (setup == NULL || call == NULL || teardown == NULL) {
+        kinfo("NVME-DIE-CONCURRENT: PASS not-present");
+        return true;
+    }
+    static struct nvme_die_race t;
+    memset(&t, 0, sizeof(t));
+    completion_init(&t.parked, "nvme-die-parked");
+    completion_init(&t.release, "nvme-die-release");
+    completion_init(&t.second_done, "nvme-die-second");
+    t.call = call;
+    t.ctrl = setup(nvme_die_park, &t);
+    if (t.ctrl == NULL) {
+        *reason = "nvme-die-concurrent: could not build the synthetic controller";
+        return false;
+    }
+    struct thread *first = thread_create(nvme_die_first, &t, "nvme-die-1", SCHED_PRIO_DEFAULT);
+    bool parked = first != NULL && wait_for_completion_timeout(&t.parked, 2000ull * 1000000ull);
+    struct thread *second = parked ? thread_create(nvme_die_second, &t, "nvme-die-2", SCHED_PRIO_DEFAULT) : NULL;
+    /* The second either answers at once (it read a flag the first has not
+     * written yet) or waits for the first: give it the time to answer. */
+    bool second_early = second != NULL && wait_for_completion_timeout(&t.second_done, 100ull * 1000000ull);
+    complete(&t.release);
+    if (first != NULL)
+        thread_join(first);
+    if (second != NULL)
+        thread_join(second);
+    teardown(t.ctrl);
+    bool ok = parked && second != NULL && t.first_result && t.second_result;
+    kinfo("NVME-DIE-CONCURRENT: %s parked=%u first=%u second=%u second_answered_before_release=%u",
+          ok ? "PASS" : "FAIL", parked, t.first_result, t.second_result, second_early);
+    if (!ok)
+        *reason = "nvme-die-concurrent: a second controller_die called an acknowledged disable refused";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
 bool selftest_nvme_disable_ack(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT

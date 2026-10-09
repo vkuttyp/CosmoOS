@@ -477,7 +477,9 @@ bool selftest_ahci_unplug(const char **reason);   /* the disk-gone path with a b
 bool selftest_ahci_reset(const char **reason);    /* COMRESET with a command in flight; the same disk keeps serving */
 bool selftest_ahci_probe_rollback(const char **reason); /* live ports, pending status, failure before global IRQ enable */
 bool selftest_ahci_stop_ack(const char **reason); /* a failed stop must retain DMA allocations */
-bool selftest_ahci_comreset_ack(const char **reason); /* failed COMRESET must fail the reissued bio and mark the port dead */
+bool selftest_ahci_comreset_ack(const char **reason);
+bool selftest_ahci_error_reset(const char **reason); /* a successful reset leaves no error snapshot to replay */
+bool selftest_nvme_die_concurrent(const char **reason); /* a second controller_die waits for the first's outcome */ /* failed COMRESET must fail the reissued bio and mark the port dead */
 bool selftest_nvme_disable_ack(const char **reason); /* a failed disable must retain NVMe DMA allocations */
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);

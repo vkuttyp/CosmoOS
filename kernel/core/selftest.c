@@ -631,6 +631,8 @@ static const struct selftest tests[] = {
     { "ahci-unplug",     selftest_ahci_unplug },
     { "ahci-reset",      selftest_ahci_reset },
     { "ahci-comreset-ack", selftest_ahci_comreset_ack },
+    { "ahci-error-reset", selftest_ahci_error_reset },
+    { "nvme-die-concurrent", selftest_nvme_die_concurrent },
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },

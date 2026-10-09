@@ -1075,6 +1075,10 @@ def main():
         failures.append("missing successful xHCI Stop Endpoint/Disable Slot acknowledgement proof")
     if want_selftest and not any(re.search(r"XHCI-HALT-ACK-SWEEP: PASS", ln) for ln in lines):
         failures.append("missing successful xHCI halt acknowledgement proof")
+    if want_selftest and not any(re.search(r"NVME-DIE-CONCURRENT: PASS", ln) for ln in lines):
+        failures.append("missing successful NVMe concurrent controller-death proof")
+    if want_selftest and not any(re.search(r"AHCI-ERROR-RESET: PASS", ln) for ln in lines):
+        failures.append("missing successful AHCI reset error-snapshot proof")
     if want_selftest and not any(re.search(r"XHCI-CANCEL-ACK-SWEEP: PASS", ln) for ln in lines):
         failures.append("missing successful xHCI cancel acknowledgement proof")
     if want_selftest and not any(re.search(r"USB-SYNC-QUARANTINE: PASS", ln) for ln in lines):

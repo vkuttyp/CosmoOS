@@ -153,6 +153,12 @@ static bool wait_bits(vaddr_t reg, uint32_t mask, uint32_t want, unsigned ms)
  * (§10.4.2; the first version waited a second for exactly that). */
 static bool port_stop_cmd(struct ahci_port *p)
 {
+#if CONFIG_FAULTINJECT
+    /* Here rather than in port_stop, which calls this once per attempt:
+     * the recovery and reset paths stop command processing alone. */
+    if (faultinject_should_fail(FI_AHCI_STOP_ACK))
+        return false;
+#endif
     uint32_t cmd = prd(p, PX_CMD);
     if (cmd & PXCMD_ST)
         pwr(p, PX_CMD, cmd & ~PXCMD_ST);
@@ -163,10 +169,6 @@ static bool port_stop_cmd(struct ahci_port *p)
  * port's memory and for teardown. */
 static bool port_stop(struct ahci_port *p)
 {
-#if CONFIG_FAULTINJECT
-    if (faultinject_should_fail(FI_AHCI_STOP_ACK))
-        return false;
-#endif
     if (!port_stop_cmd(p))
         return false;
     uint32_t cmd = prd(p, PX_CMD);
@@ -1105,6 +1107,28 @@ bool ahci_test_comreset_restart(struct blkdev *bd, struct bio *first, struct bio
 #endif
 }
 EXPORT_SYMBOL(ahci_test_comreset_restart);
+
+/* Whether the port of `bd` still has an error the worker would recover
+ * (with the slot snapshot the handler took); `clear` drops it, so a test
+ * leaves no stale snapshot behind for a later wake to replay. */
+bool ahci_test_error_pending(struct blkdev *bd, bool clear);
+bool ahci_test_error_pending(struct blkdev *bd, bool clear)
+{
+#if CONFIG_DEBUG
+    struct ahci_port *p = disk_of(bd)->port;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    bool pending = p->error;
+    if (clear)
+        p->error = false;
+    spin_unlock_irqrestore(&p->lock, f);
+    return pending;
+#else
+    (void)bd;
+    (void)clear;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_error_pending);
 #endif
 
 static void ahci_worker(void *arg)
