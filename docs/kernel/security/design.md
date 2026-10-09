@@ -516,9 +516,9 @@ says yes is a draw from a seeded pool.
 |---|---|---|---|
 | `getrandom` default and `GRND_RANDOM` (`lx_getrandom`) | must-be-seeded | blocks (killable); `GRND_NONBLOCK` returns `-EAGAIN` | Linux's contract: user space generates keys from it |
 | `getrandom(GRND_INSECURE)` | may-be-early | returns bytes | Linux's contract: never blocks, not for keys |
-| cosmofs master key (`format_at`) | must-be-seeded | waits up to 5 s, then `-EAGAIN` before anything is written | it is the key every file key derives from |
+| cosmofs master key (`cosmofs_format_encrypted` → `format_at`) | must-be-seeded | `cfs_need_seeded` waits up to 5 s, then `-EAGAIN` before anything is written | it is the key every file key derives from |
 | cosmofs key-block salt (`cfs_keys_write`, `cfs_keys_rotate`) | must-be-seeded | reached only from a seeded `format_at` or with a loaded key | a predictable salt lets an attacker precompute the passphrase search |
-| cosmofs block nonces (`cfs_block_nonce`) | must-be-seeded | a key is only loaded (`cfs_keys_load`) when seeded: waits up to 5 s, then `-EAGAIN` | a repeated ChaCha20 (key, nonce) pair gives away the xor of two plaintexts |
+| cosmofs block nonces (`cfs_block_nonce`) | must-be-seeded | a key is only loaded (`cfs_keys_load`) when seeded: waits up to 5 s, then `-EAGAIN`; a mount with the firmware key then stays locked (metadata only) | a repeated ChaCha20 (key, nonce) pair gives away the xor of two plaintexts |
 | `AT_RANDOM` (`process.c`, 16 bytes at exec) | must-be-seeded by purpose | exec does not wait (Linux semantics); the boot waits for seeding before the first user process | musl seeds its stack-protector canary and pointer guard from it |
 | cosmofs pool UUID (`format_at`) | may-be-early | drawn | an identity, not a secret: it needs only to differ |
 | TCP initial sequence numbers (`tcp.c`) | may-be-early | drawn | RFC 6528 unpredictability against off-path guessing; defence in depth, as in Linux |

@@ -311,7 +311,7 @@ unseeded, by the uncredited cycle counter. Seeded is set only by the
 first such reseed and never cleared. Check: review of `random.c` (the
 only writers of `g_key` are `reseed_locked`, `ratchet_locked` and the
 unseeded jitter mix); `random-seed` (unseeded boot: `random_ready()` is
-false and stays false across a credited self-test input of 255 bits).
+false and the credit is unchanged across an uncredited input).
 
 **S17. Only a successful source read is credited.** A hardware read
 that reports failure (`CF=0`; `NZCV.Z=1`) is neither mixed nor credited;
@@ -326,10 +326,12 @@ nothing may credit, stays unseeded to the end (`make test-entropy`).
 a successful `random_wait_ready()`; cosmofs draws a master key only
 after `random_wait_ready(RANDOM_KEYGEN_WAIT_NS)` returned 0, and loads a
 key (which is what lets it draw block nonces and salts) under the same
-condition. Check: `random-seed` (unseeded boot: encrypted format and
-key load are `-EAGAIN` after the bounded wait, the device is left
-unwritten), `lxtest` (`GRND_NONBLOCK` is `-EAGAIN` unseeded),
-`cosmofs-crypt` (seeded boots).
+condition. Check: `cosmofs-crypt` (unseeded boot: encrypted format is
+`-EAGAIN` after at least the bounded wait and the device's first 64 KiB
+stay zero; seeded boots: the full encryption test), `lxtest`
+(`GRND_NONBLOCK` is `-EAGAIN` unseeded), review of `cfs_keys_load` (the
+key-load gate has no unseeded test: no encrypted pool can be created in
+an unseeded boot).
 
 **S19. The boot does not start user space on an unseeded pool without
 saying so.** `random_boot_wait` runs after the boot modules load and

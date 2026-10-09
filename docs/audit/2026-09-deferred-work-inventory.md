@@ -320,8 +320,17 @@ no transport beyond `sysctl` and the self-tests that print them.
   and #DB on IST stacks);
   KASAN-like kernel sanitiser builds; a documented speculative-execution
   policy.
-- entropy: virtio-rng is the only source; no RDRAND/RDSEED/RNDR, no
-  jitter, a pool that never blocks or warns.
+- ~~entropy: virtio-rng is the only source; no RDRAND/RDSEED/RNDR, no
+  jitter, a pool that never blocks or warns.~~ Closed by roadmap M1
+  (2026-10-09, `docs/audit/2026-10-09-m1-randomness-report.md`).
+- entropy source health tests (SP 800-90B repetition count and adaptive
+  proportion) on RDSEED/RNDRRS and virtio-rng output: none (M1 residue).
+- TCP SYN-cookie secret is drawn once at `tcp_init`, before a
+  device-only pool can seed; rekeying it at seeding is not done (M1
+  residue, may-be-early by design.md §6).
+- no timing/jitter entropy source: a CPU without random instructions and
+  without virtio-rng never seeds (M1's no-entropy boot shows exactly
+  that).
 - module signature versioning and anti-rollback: any previously signed
   module loads forever (audit 10.2).
 
