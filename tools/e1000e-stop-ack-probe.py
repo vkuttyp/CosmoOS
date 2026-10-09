@@ -51,11 +51,16 @@ def restore_old(tree):
 '''
     if source.count(guard) != 1:
         raise RuntimeError("e1000e DMA-retention guard anchor changed")
-    source = source.replace(guard, "", 1)
-    if source.count("    bool stopped = hw_quiesce(e);\n") != 1:
+    remove_start = source.index("static void e1000e_remove(struct pci_device *pdev)")
+    remove_end = source.index("#if CONFIG_SELFTEST\n/* Called by the kernel's device self-test", remove_start)
+    remove = source[remove_start:remove_end]
+    if remove.count(guard) != 1:
+        raise RuntimeError("e1000e removal-retention anchor changed")
+    remove = remove.replace(guard, "", 1)
+    if remove.count("    bool stopped = hw_quiesce(e);\n") != 1:
         raise RuntimeError("e1000e stop acknowledgement call anchor changed")
-    source = source.replace("    bool stopped = hw_quiesce(e);\n", "    (void)hw_quiesce(e);\n", 1)
-    path.write_text(source)
+    remove = remove.replace("    bool stopped = hw_quiesce(e);\n", "    (void)hw_quiesce(e);\n", 1)
+    path.write_text(source[:remove_start] + remove + source[remove_end:])
 
 
 def verify_baseline():
