@@ -97,9 +97,11 @@ diagnostic file, function and message, with an individual reason and no
 line number. Full `gmake -j4 ARCH=x86_64 analyze` and
 `gmake -j4 ARCH=aarch64 analyze` pass with eight reviewed reports and zero
 unexpected reports. `tools/analyze-gate-probe.py --old` reproduces the
-old target's warning-plus-success on both architectures; fixed mode adds
-the same real Clang null-dereference report to the gate stage and requires
-the stage to fail on both.
+old target's warning-plus-success on both architectures. Fixed mode injects
+the same null dereference into `kernel/core/main.c` and runs the complete
+`make analyze` target; it fails on exactly that unexpected diagnostic on
+both. The four old/fixed full-target logs are under
+`out/analyze-gate-probe/<arch>/<mode>/analyze.log`.
 
 The separately committed diagnostic repairs are `88cba235` (initialize
 the scheduler test's thread slots), `c2d889e5` (close VFS result-test

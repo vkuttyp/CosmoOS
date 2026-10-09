@@ -29,7 +29,8 @@ def main():
         try:
             main_c = tree / "kernel/core/main.c"
             main_c.write_text(main_c.read_text() +
-                              "\nint analyze_gate_probe(void) { int *p = 0; return *p; }\n")
+                              "\nint analyze_gate_probe(void);\n"
+                              "int analyze_gate_probe(void) { int *p = 0; return *p; }\n")
             output = tree / "out/analyze-gate-probe"
             log = out_dir / "analyze.log"
             with log.open("w") as stream:
