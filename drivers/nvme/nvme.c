@@ -113,7 +113,7 @@ struct nvme_ctrl {
     struct list_node namespaces;
     char model[41], serial[21];
     bool dead;
-    bool disable_ack;                       /* queues are reclaimable only after RDY fell */
+    unsigned disable_state;                /* NVME_DISABLE_*: queues are reclaimable only after RDY fell */
 #if CONFIG_SELFTEST
     bool test_synthetic;
     void (*test_die_park)(void *arg);      /* nvme-die-concurrent: the first controller_die, after disable */
@@ -576,11 +576,22 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
     return 0;
 }
 
-/* Disable the controller and fail everything in flight; it stays dead. */
+#define NVME_DISABLE_PENDING 0u   /* the first controller_die has not finished */
+#define NVME_DISABLE_ACKED   1u   /* RDY fell and every slot was released */
+#define NVME_DISABLE_REFUSED 2u   /* RDY did not fall: the queues stay the controller's */
+
+/* Disable the controller and fail everything in flight; it stays dead.
+ * Every caller gets the first caller's answer: a later one (remove racing
+ * the timeout thread) waits for it rather than reading "not yet" as "no"
+ * (review of PR #338). Thread context. */
 static bool controller_die(struct nvme_ctrl *c, const char *why)
 {
-    if (__atomic_exchange_n(&c->dead, true, __ATOMIC_ACQ_REL))
-        return __atomic_load_n(&c->disable_ack, __ATOMIC_ACQUIRE);
+    if (__atomic_exchange_n(&c->dead, true, __ATOMIC_ACQ_REL)) {
+        unsigned state;
+        while ((state = __atomic_load_n(&c->disable_state, __ATOMIC_ACQUIRE)) == NVME_DISABLE_PENDING)
+            thread_sleep_ms(1);
+        return state == NVME_DISABLE_ACKED;
+    }
 #if CONFIG_SELFTEST
     if (!c->test_synthetic)
 #endif
@@ -589,6 +600,7 @@ static bool controller_die(struct nvme_ctrl *c, const char *why)
     if (rc) {
         kerror("nvme%u: disable was not acknowledged (%d); retaining queue DMA and in-flight ownership", c->index,
                rc);
+        __atomic_store_n(&c->disable_state, NVME_DISABLE_REFUSED, __ATOMIC_RELEASE);
         return false;
     }
 #if CONFIG_SELFTEST
@@ -617,7 +629,7 @@ static bool controller_die(struct nvme_ctrl *c, const char *why)
                 complete(&w->done);
         }
     }
-    __atomic_store_n(&c->disable_ack, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&c->disable_state, NVME_DISABLE_ACKED, __ATOMIC_RELEASE);
     return true;
 }
 
