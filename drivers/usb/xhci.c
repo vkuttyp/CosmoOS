@@ -1369,27 +1369,27 @@ static bool wait_bits(vaddr_t reg, uint32_t mask, uint32_t want, unsigned ms)
     return (rd32(reg) & mask) == want;
 }
 
-/* The old removal path waited for HCH and discarded the result. Kept as a
- * named operation so the self-test can make that ignored acknowledgement
- * deterministic before the remove path is changed. */
 static bool xhci_halt_controller(struct xhci *x)
 {
-    uint32_t cmd = rd32(x->op + XHCI_USBCMD);
-    if (cmd & USBCMD_RS) {
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        if (rd32(x->op + XHCI_USBSTS) & USBSTS_HCH)
+            return true;
+        uint32_t cmd = rd32(x->op + XHCI_USBCMD);
+        bool issue_stop = true;
 #if CONFIG_FAULTINJECT
-        if (!faultinject_should_fail(FI_XHCI_HALT_ACK)) {
-            wr32(x->op + XHCI_USBCMD, cmd & ~USBCMD_RS);
+        issue_stop = !faultinject_should_fail(FI_XHCI_HALT_ACK);
+#endif
+        if (issue_stop) {
+            wr32(x->op + XHCI_USBCMD, cmd & ~(USBCMD_RS | USBCMD_INTE));
 #if CONFIG_SELFTEST
             if (x->test_synthetic)
                 wr32(x->op + XHCI_USBSTS, rd32(x->op + XHCI_USBSTS) | USBSTS_HCH);
 #endif
         }
-#else
-        wr32(x->op + XHCI_USBCMD, cmd & ~USBCMD_RS);
-#endif
-        (void)wait_bits(x->op + XHCI_USBSTS, USBSTS_HCH, USBSTS_HCH, 100);
+        if (wait_bits(x->op + XHCI_USBSTS, USBSTS_HCH, USBSTS_HCH, 100))
+            return true;
     }
-    return true;
+    return false;
 }
 
 #if CONFIG_SELFTEST
@@ -1508,6 +1508,8 @@ static int xhci_alloc_tables(struct xhci *x)
 static int xhci_probe(struct pci_device *pdev, const struct pci_id *id)
 {
     (void)id;
+    if (pdev->dev.drvdata != NULL)
+        return -EBUSY;   /* a prior remove retained DMA after a failed halt */
     if (pdev->prog_if != 0x30) {
         /* UHCI (00), OHCI (10), EHCI (20): no driver, by §60's rule; the
          * model records DEV_FAILED and this line says why. */
@@ -1673,10 +1675,7 @@ static void xhci_remove(struct pci_device *pdev)
     thread_join(x->worker);   /* no scan runs while the ports are taken down */
     x->worker = NULL;
     usb_hcd_unregister(&x->hcd);
-    if (!x->dead) {
-        wr32(x->op + XHCI_USBCMD, rd32(x->op + XHCI_USBCMD) & ~(USBCMD_RS | USBCMD_INTE));
-        (void)wait_bits(x->op + XHCI_USBSTS, USBSTS_HCH, USBSTS_HCH, 100);
-    }
+    bool halted = xhci_halt_controller(x);
     int vector = x->vector;
     if (x->msix)
         pci_msix_disable(pdev);
@@ -1685,6 +1684,13 @@ static void xhci_remove(struct pci_device *pdev)
     if (vector >= 0)
         synchronize_irq((unsigned)vector);
     irq_poll_disable(&x->poll);   /* and the events it deferred, before the rings go */
+    if (!halted) {
+        x->dead = true;
+        x->hcd.dead = true;
+        pdev->dev.drvdata = x;   /* the probe guard keeps this DMA-owning function from rebinding */
+        kwarn("xhci%u: halt was not acknowledged; retaining controller DMA and BAR", x->hcd.index);
+        return;
+    }
     xhci_free_tables(x);
     device_unmap_mmio(x->bar);
     pdev->dev.drvdata = NULL;
