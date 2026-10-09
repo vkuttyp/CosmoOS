@@ -3485,6 +3485,86 @@ bool selftest_ahci_stop_ack(const char **reason)
 #endif
 }
 
+bool selftest_ahci_comreset_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        *reason = "ahci-comreset-ack: no ahci0p1 disk";
+        return false;
+    }
+    bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
+        (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
+    if (recover == NULL || bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        *reason = "ahci-comreset-ack: test seam or reset hook missing";
+        return false;
+    }
+    struct { volatile bool done; int status; } mk[3] = { 0 };
+    struct bio bio[3];
+    uint8_t *buf[3] = { kmalloc(4096, 0), kmalloc(4096, 0), kmalloc(4096, 0) };
+    bool allocated = buf[0] != NULL && buf[1] != NULL && buf[2] != NULL;
+    if (!allocated) {
+        for (unsigned i = 0; i < 3; i++)
+            kfree(buf[i]);
+        blkdev_put(bd);
+        *reason = "ahci-comreset-ack: could not allocate test buffers";
+        return false;
+    }
+    memset(bio, 0, sizeof(bio));
+    for (unsigned i = 0; i < 3; i++) {
+        bio[i].dev = bd;
+        bio[i].dir = BIO_READ;
+        bio[i].sector = 40 + 8 * i;
+        bio[i].nsectors = 8;
+        bio[i].buf = buf[i];
+        bio[i].done = selftest_nvme_mark_done;
+        bio[i].arg = &mk[i];
+    }
+    faultinject_set(FI_AHCI_CI, 1, 2, thread_current());
+    int submit0 = blk_submit(&bio[0]);
+    int submit1 = blk_submit(&bio[1]);
+    faultinject_clear(FI_AHCI_CI);
+    if (submit0 != 0) {
+        mk[0].status = submit0;
+        mk[0].done = true;
+    }
+    if (submit1 != 0) {
+        mk[1].status = submit1;
+        mk[1].done = true;
+    }
+
+    faultinject_set(FI_AHCI_COMRESET_ACK, 1, 1, thread_current());
+    bool dead = submit0 == 0 && submit1 == 0 && recover(bd, &bio[0], &bio[1]);
+    struct fi_stats st;
+    faultinject_stats(FI_AHCI_COMRESET_ACK, &st);
+    faultinject_clear(FI_AHCI_COMRESET_ACK);
+    bool failed_outstanding = mk[0].done && mk[0].status == -EIO && mk[1].done && mk[1].status == -EIO;
+    int rejected = blk_submit(&bio[2]);
+    if (rejected != 0) {
+        mk[2].status = rejected;
+        mk[2].done = true;
+    }
+    int restored = bd->ops->debug_presence(bd, true);
+    for (unsigned waited = 0; waited < 2000 && !(mk[0].done && mk[1].done && mk[2].done); waited++)
+        thread_sleep_ms(1);
+    bool readable = restored == 0 && blk_read(bd, 72, 8, buf[0]) == 0;
+    bool ok = st.hits == 1 && dead && failed_outstanding && rejected == -ENODEV && mk[2].status == -ENODEV &&
+              mk[0].done && mk[1].done && mk[2].done && readable;
+    kinfo("AHCI-COMRESET-ACK: %s hits=%llu dead=%u failed=%u rejected=%d restored=%d", ok ? "PASS" : "FAIL",
+          (unsigned long long)st.hits, dead, failed_outstanding, rejected, readable);
+    for (unsigned i = 0; i < 3; i++)
+        kfree(buf[i]);
+    blkdev_put(bd);
+    if (!ok)
+        *reason = "ahci-comreset-ack: failed COMRESET did not fail closed; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
 bool selftest_nvme_disable_ack(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT

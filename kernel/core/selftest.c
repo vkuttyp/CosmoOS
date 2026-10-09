@@ -625,6 +625,7 @@ static const struct selftest tests[] = {
     { "ahci-timeout",    selftest_ahci_timeout },
     { "ahci-unplug",     selftest_ahci_unplug },
     { "ahci-reset",      selftest_ahci_reset },
+    { "ahci-comreset-ack", selftest_ahci_comreset_ack },
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },

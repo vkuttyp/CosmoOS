@@ -34,6 +34,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_AHCI_CI] = "ahci-ci",
     [FI_AHCI_PROBE_ROLLBACK] = "ahci-probe-rollback",
     [FI_AHCI_STOP_ACK] = "ahci-stop-ack",
+    [FI_AHCI_COMRESET_ACK] = "ahci-comreset-ack",
     [FI_HV_SELFCHECK] = "hv-selfcheck",
     [FI_FILE_READPAGE] = "file-readpage",
     [FI_NET_RX_DUP] = "net-rx-dup",

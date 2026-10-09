@@ -102,6 +102,9 @@ struct ahci_port {
     bool recovering;                   /* a restart is in progress: submit refuses (-EAGAIN) until the port runs again */
     bool dead;                         /* a stop was not acknowledged; accepted DMA ownership is retained */
     bool change;                       /* PCS/PRCS: the worker re-reads the port */
+#if CONFIG_SELFTEST
+    bool test_force_comreset;           /* exercise a reset failure without relying on QEMU's PxTFD timing */
+#endif
 #if CONFIG_FAULTINJECT
     uint32_t withheld;                 /* tests: slots filled whose PxCI bit was never written */
 #endif
@@ -210,6 +213,12 @@ static void port_start(struct ahci_port *p)
  * with its signature; true when a device is present afterwards. */
 static bool port_comreset(struct ahci_port *p)
 {
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_AHCI_COMRESET_ACK)) {
+        p->resets++;
+        return false;
+    }
+#endif
     uint32_t sctl = prd(p, PX_SCTL);
     pwr(p, PX_SCTL, (sctl & ~PXSCTL_DET_MASK) | PXSCTL_DET_INIT);
     thread_sleep_ms(2);
@@ -408,7 +417,11 @@ static void port_restart(struct ahci_port *p, struct bio *victim, int victim_sta
     }
     slots_fail(p, victim, victim_status, status);
     pwr(p, PX_SERR, 0xffffffffu);
-    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
+    bool reset = (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ)) != 0;
+#if CONFIG_SELFTEST
+    reset |= p->test_force_comreset;
+#endif
+    if (reset)
         (void)port_comreset(p);
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
@@ -967,7 +980,11 @@ static void port_recover(struct ahci_port *p)
         }
     }
     pwr(p, PX_SERR, 0xffffffffu);
-    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
+    bool reset = (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ)) != 0;
+#if CONFIG_SELFTEST
+    reset |= p->test_force_comreset;
+#endif
+    if (reset)
         (void)port_comreset(p);
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
@@ -979,6 +996,52 @@ static void port_recover(struct ahci_port *p)
     p->recovering = false;
     spin_unlock_irqrestore(&p->lock, f);
 }
+
+#if CONFIG_SELFTEST
+/* Test the task-file recovery caller with two accepted, withheld bios. The
+ * first is the command the HBA had started; the second is the command the
+ * recovery path would otherwise reissue after an unacknowledged COMRESET. */
+bool ahci_test_comreset_recovery(struct blkdev *bd, struct bio *first, struct bio *second);
+bool ahci_test_comreset_recovery(struct blkdev *bd, struct bio *first, struct bio *second)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (bd == NULL || first == NULL || second == NULL || first == second)
+        return false;
+    struct ahci_port *p = disk_of(bd)->port;
+    int first_slot = -1, second_slot = -1;
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < AHCI_MAX_SLOTS; i++) {
+        if (!(p->active & (1u << i)))
+            continue;
+        if (p->slots[i].bio == first)
+            first_slot = (int)i;
+        if (p->slots[i].bio == second)
+            second_slot = (int)i;
+    }
+    if (first_slot >= 0 && second_slot >= 0 && first_slot != second_slot) {
+        p->error = true;
+        p->err_slot = (unsigned)first_slot;
+        p->err_ci = 1u << second_slot;
+        p->test_force_comreset = true;
+    }
+    spin_unlock_irqrestore(&p->lock, f);
+    if (first_slot < 0 || second_slot < 0 || first_slot == second_slot)
+        return false;
+    port_recover(p);
+    f = spin_lock_irqsave(&p->lock);
+    p->test_force_comreset = false;
+    bool dead = p->dead;
+    spin_unlock_irqrestore(&p->lock, f);
+    return dead;
+#else
+    (void)bd;
+    (void)first;
+    (void)second;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(ahci_test_comreset_recovery);
+#endif
 
 static void ahci_worker(void *arg)
 {

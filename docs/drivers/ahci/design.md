@@ -169,6 +169,14 @@ and are written to `PxCI` again once the port runs. (Reissuing every
 active slot would have run the completed ones twice and left their bios
 waiting — review, PR #53.)
 
+If the required COMRESET does not establish `DET_PRESENT`, the worker does
+not restart the command engine or write the saved `PxCI` bits back. It marks
+the port dead and fails the commands that had not yet been issued with
+`-EIO`; new submissions fail `-ENODEV`. An explicit reset can recover that
+state only after the same disk is identified again. The port's own DMA pages
+remain allocated until removal acknowledges both command-engine and FIS
+receiver stop.
+
 A synchronous command (IDENTIFY, the tests' one-offs) waits, bounded,
 while the port is restarting: a slot taken during a restart would be
 absent from the recovery's `PxCI` snapshot and sorted wrongly. The wait

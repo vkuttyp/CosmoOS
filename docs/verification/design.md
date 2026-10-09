@@ -128,6 +128,9 @@ The `nvme-disable-ack` rule makes the disable wait report a timeout after
 `CC.EN` is cleared, exercising the driver's fail-closed ownership path.
 The `ahci-stop-ack` rule makes the port stop fail, exercising retry and
 DMA retention.
+The `ahci-comreset-ack` rule makes a link reset report failure after the
+command engine has stopped, exercising the driver's fail-closed recovery
+path.
 `sysctl("debug.faultinject")` reports each kind's rule and counters. There
 is no write path through `sysctl`: the audit's phrase "behind a debug
 sysctl" is honoured for observation; making `sysctl` writable is a

@@ -85,3 +85,14 @@ rather than returned while the controller may still own them.
 Check: `ahci-stop-ack` first injects one failure and verifies the retry
 followed by safe cleanup, then injects persistent failures and verifies
 that no DMA allocation is freed before the controller is rebound.
+
+**A9. A failed required COMRESET never restarts or reissues the port.**
+If task-file recovery needs a link reset and the COMRESET does not establish
+`DET_PRESENT`, mark the port dead, fail every remaining active bio with
+`-EIO`, and reject new bios. Keep the port's FIS/command memory until the
+HBA acknowledges both engines stopped; a later explicit reset may clear
+the dead state only after the same disk is identified again.
+
+Check: `ahci-comreset-ack` injects one failed COMRESET with two active bios;
+both must complete `-EIO`, and a third bio must be rejected before a
+successful explicit reset restores reads.
