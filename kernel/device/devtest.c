@@ -3838,6 +3838,7 @@ bool selftest_xhci_cancel_ack(const char **reason)
  * when the cancel returned. Unit 1's audit listed this as a suspicion
  * (cancel racing a running callback); the test is what settles it.
  */
+#if CONFIG_DEBUG
 #define USB_DEVICE_DESC_LEN_FOR_TEST 18u   /* the device descriptor */
 
 struct cancel_retired {
@@ -3874,6 +3875,8 @@ static void cancel_retired_canceller(void *arg)
     c->exited_at_return = __atomic_load_n(&c->exited, __ATOMIC_ACQUIRE);
     thread_exit(0);
 }
+
+#endif
 
 bool selftest_xhci_cancel_retired(const char **reason)
 {
@@ -3960,6 +3963,7 @@ bool selftest_xhci_cancel_retired(const char **reason)
  * request instead of answering -EIO -- the old path would otherwise wait
  * forever -- and the buffer check is what fails.
  */
+#if CONFIG_DEBUG
 static struct usb_request *g_sync_q_req;
 static void *g_sync_q_caller_buf;
 static void (*g_sync_q_complete)(struct usb_request *r, int status, uint32_t actual);   /* the module's */
@@ -3980,6 +3984,8 @@ static int sync_q_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
     }
     return -EIO;
 }
+
+#endif
 
 bool selftest_usb_sync_quarantine(const char **reason)
 {
