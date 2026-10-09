@@ -1037,6 +1037,8 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
 
     pci_enable_device(pdev, true);
     int rc = -EIO;
+    bool rollback_probe_test = false;
+    uint32_t rollback_pending = 0;
     h->abar = pci_map_bar(pdev, 5);
     if (h->abar == 0) {
         kerror("ahci%u: %s: cannot map ABAR", h->index, pdev->dev.name);
@@ -1108,6 +1110,24 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
           h->version >> 8, h->version & 0xff, implemented, h->nports, h->nslots, h->s64 ? "64-bit DMA" : "32-bit DMA",
           h->sncq ? ", NCQ capable" : "");
 
+#if CONFIG_FAULTINJECT
+    if (faultinject_should_fail(FI_AHCI_PROBE_ROLLBACK)) {
+        rollback_probe_test = true;
+        for (unsigned i = 0; i < h->nports; i++) {
+            struct ahci_port *p = &h->ports[i];
+            if (!p->implemented || PXSSTS_DET(prd(p, PX_SSTS)) != DET_PRESENT)
+                continue;
+            pwr(p, PX_IS, 0xffffffffu);
+            (void)port_comreset(p);
+            rollback_pending |= rd32(h->abar + AHCI_IS);
+            if (rollback_pending & (1u << i))
+                break;
+        }
+        rc = -EIO;
+        goto fail_ports;
+    }
+#endif
+
     char tname[16];
     ksnprintf(tname, sizeof(tname), "ahci/%u", h->index);
     h->worker = thread_create(ahci_worker, h, tname, SCHED_PRIO_DEFAULT);
@@ -1142,6 +1162,17 @@ fail_ports:
             port_free(&h->ports[i]);
         }
     }
+    if (rollback_probe_test) {
+        bool empty = true;
+        for (unsigned i = 0; i < h->nports; i++)
+            if (h->ports[i].disk != NULL || h->ports[i].active != 0)
+                empty = false;
+        uint32_t ghc = rd32(h->abar + AHCI_GHC);
+        bool ok = rollback_pending != 0 && !(ghc & GHC_IE) && h->irqs == 0 && empty;
+        kinfo("AHCI-ROLLBACK-PENDING: %s pending=0x%08x global_ie=%u irqs=%llu empty=%u",
+              ok ? "PASS" : "FAIL", rollback_pending, (ghc & GHC_IE) != 0,
+              (unsigned long long)h->irqs, empty);
+    }
     if (h->msix)
         pci_msix_disable(pdev);
     else
@@ -1151,6 +1182,8 @@ fail_unmap:
     device_unmap_mmio(h->abar);
 fail_free:
     kfree(h);
+    if (rollback_probe_test)
+        return ahci_probe(pdev, id);   /* one-shot self-test recovery after the injected rollback */
     return rc;
 }
 

@@ -32,6 +32,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_DEMAND_COPY] = "demand-copy",
     [FI_USB_CSW] = "usb-csw",
     [FI_AHCI_CI] = "ahci-ci",
+    [FI_AHCI_PROBE_ROLLBACK] = "ahci-probe-rollback",
     [FI_HV_SELFCHECK] = "hv-selfcheck",
     [FI_FILE_READPAGE] = "file-readpage",
     [FI_NET_RX_DUP] = "net-rx-dup",

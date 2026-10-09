@@ -81,6 +81,14 @@ outlive `remove`, which has freed the port and controller by then.
    `PxTFD.STS.BSY|DRQ` to clear (1 s) before the first command.
 8. `GHC.IE`.
 
+`GHC.IE` is the controller-wide interrupt gate. The probe enables it only
+after every port is initialized and the worker exists; disk probing and
+blkdev publication follow it. The `fail_ports` path is therefore before any
+published bio and can be injected with a port status bit latched while the
+global gate remains clear. It releases and synchronizes the PCI vector before
+unmapping the controller. `ahci-probe-rollback` checks this ordering and
+requires that no handler ran and no port owns a disk or command.
+
 Detection and identification run in the PCI probe: registering a blkdev
 does not take the device model's lock, so nothing here needs the worker
 that USB enumeration needed. The boot's disks exist when probe returns.

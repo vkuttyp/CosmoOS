@@ -932,6 +932,9 @@ static const struct selftest tests[] = {
     { "elf-text-ro",     selftest_elf_text_ro },
     { "elf-data-private", selftest_elf_data_private },
     { "elf-txtbsy",      selftest_elf_txtbsy },
+    /* Last: this removes and rebinds the AHCI controller after all tests
+     * that rely on the original ahci0p1 name have finished. */
+    { "ahci-probe-rollback", selftest_ahci_probe_rollback },
 };
 
 /*

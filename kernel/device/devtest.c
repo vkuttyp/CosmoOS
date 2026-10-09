@@ -3382,3 +3382,41 @@ bool selftest_ahci_reset(const char **reason)
     }
     return true;
 }
+
+/*
+ * Fail the second AHCI probe after its ports are live and after a COMRESET
+ * leaves a port event pending. The controller-wide interrupt gate is still
+ * off and no disk/bio has been published, so the status cannot dispatch the
+ * handler while fail_ports releases the vector.
+ */
+bool selftest_ahci_probe_rollback(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        *reason = "ahci-probe-rollback: no ahci0p1 to rebind";
+        return false;
+    }
+    struct pci_device *pdev = to_pci_device(bd->dev);
+    bool ok = pci_test_remove(pdev) == 0;
+    if (ok) {
+        faultinject_set(FI_AHCI_PROBE_ROLLBACK, 1, 1, thread_current());
+        int injected = pci_test_rebind(pdev);
+        struct fi_stats st;
+        faultinject_stats(FI_AHCI_PROBE_ROLLBACK, &st);
+        faultinject_clear(FI_AHCI_PROBE_ROLLBACK);
+        ok = injected == 0 && st.hits == 1;
+    }
+    if (pdev->dev.state != DEV_BOUND)
+        ok = false;
+    blkdev_put(bd);
+    if (ok)
+        kinfo("selftest: ahci-probe-rollback: failed after port start with a pending event and GHC.IE clear");
+    else
+        *reason = "ahci-probe-rollback: see AHCI-ROLLBACK-PENDING and faultinject stats";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}

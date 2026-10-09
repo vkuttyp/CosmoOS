@@ -63,3 +63,25 @@ driver for it.
 
 Check: the `QEMU_SATA=cd` shape (an ATAPI device on port 1 is named in
 the log and no `ahci0p1` exists); the others by review.
+
+**A7. Probe rollback before `GHC.IE` cannot publish I/O or deliver the
+AHCI handler.** Port initialization may latch a local status bit, but the
+controller-wide gate stays clear until the worker exists; disks are probed
+and bios can be submitted only after that point. The rollback test injects
+a failure after ports are live, creates a pending port event, and verifies
+`GHC.IE == 0`, zero handler calls, no disk, and no active command before
+the vector is disabled and synchronized.
+
+Check: `ahci-probe-rollback` and the
+`AHCI-ROLLBACK-PENDING: PASS` boot marker.
+
+**A8. Port DMA and active bio mappings are released only after the HBA
+acknowledges both command-engine and FIS-receiver stop.** A failed stop is
+retried once. If it still fails, removal masks and synchronizes interrupts,
+unregisters the disk to refuse new submissions, and retains the HBA,
+port DMA, active mappings, and their bios; these resources are leaked
+rather than returned while the controller may still own them.
+
+Check: `ahci-stop-ack` injects the first stop acknowledgement failure and
+checks the retry and cleanup; the permanent-failure retention branch is
+also checked by the driver's debug test seam.
