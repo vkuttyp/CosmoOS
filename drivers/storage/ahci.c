@@ -844,6 +844,13 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
         goto out;
     }
     slots_fail(p, NULL, 0, -EIO);
+    /* Every slot the handler's snapshot named has just failed: a pending
+     * error (left by a recovery whose stop was refused) describes nothing
+     * now, and replayed by the worker it would apply to commands taken
+     * after this reset (review of PR #338). */
+    f = spin_lock_irqsave(&p->lock);
+    p->error = false;
+    spin_unlock_irqrestore(&p->lock, f);
     bool up = port_comreset(p);
     port_start(p);
     f = spin_lock_irqsave(&p->lock);
