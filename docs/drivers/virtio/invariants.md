@@ -82,3 +82,6 @@ retains queue/record storage, stops device DMA, and serializes completion
 and recovery claims under the same lock; it must exclude new submission
 publication during its drain. Unit 1's reproduction and
 validation are recorded in `docs/audit/2026-10-08-vnet-remove-report.md`.
+For the persistent entropy buffer, the post-and-kick gate is closed before
+reset; a completion after that boundary cannot publish another descriptor.
+Check: `virtio-rng-reset-repost`.

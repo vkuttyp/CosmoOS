@@ -1059,6 +1059,9 @@ def main():
     if want_selftest and not any(re.search(r"NVME-INTERLEAVE: PASS die=1 accepted=0 done=0 inflight=0", ln)
                                  for ln in lines):
         failures.append("missing successful NVMe submit/death interleaving proof")
+    if want_selftest and not any(re.search(r"VRNG-RESET-REPOST: PASS posts_after_reset=0", ln)
+                                 for ln in lines):
+        failures.append("missing successful virtio-rng reset/repost proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 

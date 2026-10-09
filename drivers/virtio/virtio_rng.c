@@ -13,6 +13,8 @@
 #include <kernel/log.h>
 #include <kernel/module.h>
 #include <kernel/random.h>
+#include <kernel/spinlock.h>
+#include <kernel/string.h>
 
 #include <drivers/virtio.h>
 
@@ -26,15 +28,45 @@ struct vrng {
     dma_addr_t buf_dma;
     unsigned collected;
     bool posted;
+    spinlock_t post_lock;
+    bool stopping;
+#if CONFIG_SELFTEST
+    bool test_synthetic;
+    bool test_reset;
+    unsigned test_posts_after_reset;
+#endif
 };
 
 static void vrng_post(struct vrng *r)
 {
+    arch_irq_state_t s = spin_lock_irqsave(&r->post_lock);
+#if CONFIG_SELFTEST
+    if (r->test_synthetic) {
+        if (r->test_reset)
+            r->test_posts_after_reset++;
+        r->posted = true;
+        spin_unlock_irqrestore(&r->post_lock, s);
+        return;
+    }
+#endif
     struct virtq_sg sg = { .addr = r->buf_dma, .len = VRNG_BUF };
     if (virtq_add(r->vq, &sg, 0, 1, r) == 0) {
         r->posted = true;
         virtq_kick(r->vq);
     }
+    spin_unlock_irqrestore(&r->post_lock, s);
+}
+
+static void vrng_completed(struct vrng *r, unsigned len)
+{
+    if (len > VRNG_BUF)
+        len = VRNG_BUF;
+    if (len > 0) {
+        random_add_entropy(r->buf, len, len * 8);
+        r->collected += len;
+    }
+    if (r->collected < VRNG_BUDGET)
+        vrng_post(r);
 }
 
 static unsigned vrng_done(struct virtqueue *vq, unsigned budget)
@@ -43,15 +75,10 @@ static unsigned vrng_done(struct virtqueue *vq, unsigned budget)
     uint32_t len;
     unsigned n = 0;
     for (; n < budget && virtq_pop(vq, &len) != NULL; n++) {
+        arch_irq_state_t s = spin_lock_irqsave(&r->post_lock);
         r->posted = false;
-        if (len > VRNG_BUF)
-            len = VRNG_BUF;
-        if (len > 0) {
-            random_add_entropy(r->buf, len, len * 8);
-            r->collected += len;
-        }
-        if (r->collected < VRNG_BUDGET)
-            vrng_post(r);
+        spin_unlock_irqrestore(&r->post_lock, s);
+        vrng_completed(r, len);
     }
     return n;
 }
@@ -63,6 +90,7 @@ static int vrng_probe(struct virtio_device *vdev)
         return -ENOMEM;
     r->vdev = vdev;
     vdev->priv = r;
+    spinlock_init(&r->post_lock, "virtio-rng-post");
 
     int rc = virtio_device_init(vdev, 0);
     if (rc)
@@ -81,6 +109,11 @@ static int vrng_probe(struct virtio_device *vdev)
     return 0;
 
 fail:
+    {
+        arch_irq_state_t s = spin_lock_irqsave(&r->post_lock);
+        r->stopping = true;
+        spin_unlock_irqrestore(&r->post_lock, s);
+    }
     virtio_device_reset(vdev);
     if (r->buf)
         dma_free(&vdev->dev, VRNG_BUF, r->buf, r->buf_dma);
@@ -92,6 +125,9 @@ fail:
 static void vrng_remove(struct virtio_device *vdev)
 {
     struct vrng *r = vdev->priv;
+    arch_irq_state_t s = spin_lock_irqsave(&r->post_lock);
+    r->stopping = true;
+    spin_unlock_irqrestore(&r->post_lock, s);
     virtio_device_reset(vdev);
     virtq_free(r->vq);
     dma_free(&vdev->dev, VRNG_BUF, r->buf, r->buf_dma);
@@ -111,6 +147,17 @@ static struct virtio_driver vrng_driver = {
 
 static int vrng_module_init(void)
 {
+#if CONFIG_SELFTEST
+    struct vrng test;
+    memset(&test, 0, sizeof(test));
+    spinlock_init(&test.post_lock, "virtio-rng-test");
+    test.stopping = true;
+    test.test_synthetic = true;
+    test.test_reset = true;
+    vrng_completed(&test, 0);
+    kinfo("VRNG-RESET-REPOST: %s posts_after_reset=%u",
+          test.test_posts_after_reset == 0 ? "PASS" : "FAIL", test.test_posts_after_reset);
+#endif
     return virtio_register_driver(&vrng_driver);
 }
 
