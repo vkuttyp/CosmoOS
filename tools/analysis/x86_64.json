@@ -74,15 +74,6 @@
       "version": "Debian clang version 19.1.7 (3+b1)",
       "diagnostics": [
         {
-          "translation_unit": "drivers/nvme/nvme.c",
-          "checker": "core.uninitialized.Assign",
-          "file": "drivers/nvme/nvme.c",
-          "function": "nvme_submit",
-          "message": "Assigned value is garbage or undefined",
-          "count": 1,
-          "reason": "The block layer rejects zero-sector non-flush bios and the mapper emits at least one PRP for every valid data bio; the analyzer does not infer the segment-count contract across the mapper call."
-        },
-        {
           "translation_unit": "kernel-services/filesystem/cosmofs/cosmofstest.c",
           "checker": "core.uninitialized.Branch",
           "file": "kernel-services/filesystem/cosmofs/cosmofstest.c",
