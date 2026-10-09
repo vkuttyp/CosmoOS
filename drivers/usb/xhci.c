@@ -956,6 +956,34 @@ static int xhci_configure(struct usb_hcd *hcd, struct usb_device *udev)
     return cmd_result(x, "configure endpoint", cc);
 }
 
+static bool xhci_disable_command_ack(struct xhci *x, const char *what, uint32_t control, bool context_ok)
+{
+    int cc = xhci_cmd(x, 0, control, NULL);
+    if (cc == CC_SUCCESS || (context_ok && cc == CC_CONTEXT_STATE))
+        return true;
+    (void)cmd_result(x, what, cc);
+    cc = xhci_cmd(x, 0, control, NULL);
+    if (cc == CC_SUCCESS || (context_ok && cc == CC_CONTEXT_STATE))
+        return true;
+    (void)cmd_result(x, what, cc);
+    return false;
+}
+
+/* No command acknowledged that the slot can no longer touch its contexts
+ * or rings. Detach software event routing, but keep the DCBAA context and
+ * every DMA allocation valid for as long as the HC may use them. */
+static void xhci_retain_device_dma(struct xhci *x, struct usb_device *udev, unsigned slot)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&x->lock);
+    if (slot != 0)
+        x->slot_dev[slot] = NULL;
+    spin_unlock_irqrestore(&x->lock, s);
+    udev->slot = 0;
+    udev->hcd_priv = NULL;
+    kwarn("xhci%u: %s: retaining slot %u DMA after stop was not acknowledged", x->hcd.index,
+          udev->dev.name, slot);
+}
+
 static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
 {
     struct xhci *x = hcd_to_xhci(hcd);
@@ -965,10 +993,18 @@ static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
     unsigned slot = udev->slot;
     /* Quiet every endpoint, then the slot: no event names this slot after
      * Disable Slot completes, so the rings are ours to empty. */
-    if (!x->dead && slot != 0) {
+    if (x->dead && slot != 0) {
+        xhci_retain_device_dma(x, udev, slot);
+        return;
+    }
+    if (slot != 0) {
         for (unsigned dci = 1; dci <= XHCI_MAX_DCI; dci++) {
-            if (d->ep[dci].ring != NULL && d->ep[dci].ring->used > 0)
-                (void)xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_STOP_EP) | TRB_EP_ID(dci) | TRB_SLOT(slot), NULL);
+            if (d->ep[dci].ring != NULL && d->ep[dci].ring->used > 0 &&
+                !xhci_disable_command_ack(x, "stop endpoint", TRB_TYPE(TRB_CMD_STOP_EP) |
+                                          TRB_EP_ID(dci) | TRB_SLOT(slot), true)) {
+                xhci_retain_device_dma(x, udev, slot);
+                return;
+            }
         }
         int cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_DISABLE_SLOT) | TRB_SLOT(slot), NULL);
         (void)cmd_result(x, "disable slot", cc);
