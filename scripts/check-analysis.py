@@ -43,6 +43,7 @@ def read_baseline(path, arch):
 
 def read_reports(paths, root, out):
     diagnostics = []
+    compilers = set()
     seen = set()
     for path in paths:
         tu = path.resolve().relative_to(out).with_suffix(".c").as_posix()
@@ -56,6 +57,7 @@ def read_reports(paths, root, out):
             raise ValueError("invalid report arrays: " + str(path))
         if not isinstance(report["clang_version"], str):
             raise ValueError("missing compiler identity: " + str(path))
+        compilers.add(report["clang_version"])
         for finding in findings:
             loc = finding["location"]
             index = loc["file"]
@@ -72,7 +74,7 @@ def read_reports(paths, root, out):
             }
             key(entry)
             diagnostics.append(entry)
-    return diagnostics
+    return diagnostics, sorted(compilers)
 
 
 def main():
@@ -86,9 +88,10 @@ def main():
     args = parser.parse_args()
     try:
         allowed = read_baseline(args.baseline, args.arch)
-        findings = read_reports(args.reports, args.root.resolve(), args.out.resolve())
+        findings, compilers = read_reports(args.reports, args.root.resolve(), args.out.resolve())
         args.inventory.write_text(json.dumps({
             "architecture": args.arch,
+            "compilers": compilers,
             "diagnostics": sorted(findings, key=key),
         }, indent=2) + "\n")
     except (OSError, ValueError, KeyError, TypeError, IndexError, plistlib.InvalidFileException) as error:
