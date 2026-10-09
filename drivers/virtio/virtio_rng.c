@@ -40,6 +40,10 @@ struct vrng {
 static void vrng_post(struct vrng *r)
 {
     arch_irq_state_t s = spin_lock_irqsave(&r->post_lock);
+    if (r->stopping) {
+        spin_unlock_irqrestore(&r->post_lock, s);
+        return;
+    }
 #if CONFIG_SELFTEST
     if (r->test_synthetic) {
         if (r->test_reset)
