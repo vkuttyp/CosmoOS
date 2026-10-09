@@ -96,15 +96,6 @@ jobs:
       - name: Boot test on a protection-capable CPU (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
 
-      # Milestone M1's acceptance (docs/roadmap-1.0.md): the image with no
-      # entropy source at all (no virtio-rng, a CPU model without RDSEED/
-      # RDRAND or RNDR) must stay unseeded -- getrandom NONBLOCK is EAGAIN,
-      # INSECURE answers, an encrypted pool is refused -- and still boot;
-      # then on a CPU with the random instructions it must seed from the
-      # CPU alone. The boots above are the device-seeded configuration.
-      - name: Boot tests without an entropy device (debug)
-        run: make ARCH=${{ matrix.arch }} BUILD=debug test-entropy
-
       # Every other boot uses four CPUs. Three self-tests needed a third
       # CPU without saying so and failed at two, unseen here
       # (docs/audit/2026-10-05-two-cpu-validation-report.md); this boot
@@ -191,6 +182,48 @@ jobs:
             out/${{ matrix.arch }}-debug/cosmoos.img
             out/${{ matrix.arch }}-release/kernel/kernel.elf
             out/${{ matrix.arch }}-release/boot/*.EFI
+
+  # Milestone M1's acceptance (docs/roadmap-1.0.md): the image with no
+  # entropy source at all (no virtio-rng, a CPU model without RDSEED/
+  # RDRAND or RNDR) must stay unseeded -- getrandom NONBLOCK is EAGAIN,
+  # INSECURE answers, an encrypted pool is refused -- and still boot; then
+  # on a CPU with the random instructions it must seed from the CPU alone.
+  # The build job's boots are the device-seeded configuration. A job of its
+  # own: the two boots (about 7 minutes) inside build-and-boot took the
+  # aarch64 job past its 40-minute limit (run 37984006846, every boot
+  # passed, cancelled in the panic-path step).
+  entropy:
+    name: entropy boots (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 30
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Install cross toolchain and test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug all
+
+      - name: Boot tests without an entropy device (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-entropy
 
   # The quiescence protocol's litmus tests against the C11 (RC11) model.
   # herdtools7 is packaged in Debian testing and sid but not trixie, so

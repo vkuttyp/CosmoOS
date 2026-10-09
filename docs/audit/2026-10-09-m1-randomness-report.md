@@ -69,7 +69,19 @@ run as a boot.
 | `test-entropy` | PASS (both boots) | PASS (both boots) |
 
 The network harness passes in every debug boot (it is part of the boot
-verdict). Branch and merge CI: recorded in the PR.
+verdict). A further ten local AArch64 `test-smp2` boots: nine passed, one
+failed `quiesce-kick-spinner` (flakes.md, 2026-10-09).
+
+## CI
+
+- PR #339's merge run 37981337663 failed AArch64 `test-smp2` with a hang
+  in `el2-guest-hvc` (docs-only merge; flakes.md entry); the failed job's
+  rerun passed.
+- This PR's first run (37984006846): every boot passed on both
+  architectures, including both entropy boots, but the AArch64 job
+  reached the workflow's 40-minute limit and was cancelled in the
+  panic-path step. The entropy boots moved to their own CI job
+  (`entropy`), rather than widening the limit.
 
 ## Recorded, not fixed (inventory §2.9)
 
