@@ -49,7 +49,8 @@ observability, security, portability, performance, optimization.
   crash-consistency replay. CI boots both architectures and runs the host
   tests and fuzzers.
 
-What remains open, and why, is in [`docs/plan.md`](docs/plan.md).
+The path to 1.0 is the [1.0 roadmap](docs/roadmap-1.0.md); what else
+remains open, and why, is in [`docs/plan.md`](docs/plan.md).
 
 ## Targets
 
@@ -104,6 +105,7 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 | [`docs/README.md`](docs/README.md) | Index of subsystem documentation and the per-subsystem convention |
 | [`docs/development.md`](docs/development.md) | Host setup, building, running, testing, CI |
 | [`docs/history/`](docs/history/README.md) | What was built, phase by phase and unit by unit |
+| [`docs/roadmap-1.0.md`](docs/roadmap-1.0.md) | The 1.0 definition of done and its milestones |
 | [`docs/plan.md`](docs/plan.md) | Remaining work, grouped by area |
 | [`docs/audit/`](docs/audit/README.md) | Architecture audits, the deferred-work inventory and per-unit reports |
 
@@ -113,5 +115,5 @@ The constitution's roadmap (Phases 0-13) and the post-roadmap audit's
 milestones are complete, followed by subsystem units chosen one at a
 time from the [deferred-work inventory](docs/audit/2026-09-deferred-work-inventory.md).
 The latest milestone is lock discipline and lockdep hardening
-(PRs #302-#308). Work proceeds one subsystem at a time, design documents
-first; [`docs/plan.md`](docs/plan.md) proposes the next increments.
+(PRs #302-#308). Work now proceeds milestone by milestone along the
+[1.0 roadmap](docs/roadmap-1.0.md), design documents first.
