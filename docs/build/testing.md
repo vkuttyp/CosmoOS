@@ -40,7 +40,10 @@ diagnostic exceeding `tools/analysis/<arch>.json`'s reviewed baseline, and
 any baseline entry not observed in the current run.
 Each baseline key includes checker, translation unit, file, function and
 message, with a reason and occurrence count; source line numbers are not
-keys. `$(OUT)/analysis-inventory.json` contains the complete current list.
+keys. The architecture baseline contains separate reviewed sets keyed by
+the exact compiler version, and an unknown version fails. The CI run uploads
+`$(OUT)/analysis-inventory.json`, including the compiler identity and the
+complete current list.
 Success reports the baselined count and zero unexpected diagnostics.
 
 ## Reproducibility

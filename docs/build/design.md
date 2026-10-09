@@ -126,7 +126,9 @@ unchecked. Save structured Clang plist reports under OUT and validate their
 presence and format before comparing diagnostics. Baseline keys use the
 translation unit, checker, diagnostic file, function and message, never a
 line number. Count duplicate keys and require an explanation for every
-accepted entry. An unexpected diagnostic, stale baseline entry, or unusable
+accepted entry. Select an exact compiler version within the architecture
+baseline; an unreviewed compiler fails before comparison. An unexpected
+diagnostic, stale baseline entry, or unusable
 report fails the gate;
 the success message includes the accepted count and zero unexpected findings.
 

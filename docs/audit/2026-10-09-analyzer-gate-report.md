@@ -92,9 +92,9 @@ is the same on both architectures:
 | both | `core.BitwiseShift` | `kernel/scheduler/sched.c` | `sched_migrate_from` | Left shift overflows the capacity of 'cpumask_t' | The function rejects `to >= cpu_count()`; the configured maximum is 64 CPUs, so the shift is at most 63. |
 
 The checked-in baselines are `tools/analysis/x86_64.json` and
-`tools/analysis/aarch64.json`; each key uses translation unit, checker,
-diagnostic file, function and message, with an individual reason and no
-line number. Full `gmake -j4 ARCH=x86_64 analyze` and
+`tools/analysis/aarch64.json`; each file has reviewed compiler-specific sets.
+Each key uses translation unit, checker, diagnostic file, function and
+message, with an individual reason and no line number. Full `gmake -j4 ARCH=x86_64 analyze` and
 `gmake -j4 ARCH=aarch64 analyze` pass with eight reviewed reports and zero
 unexpected reports. `tools/analyze-gate-probe.py --old` reproduces the
 old target's warning-plus-success on both architectures. Fixed mode injects
@@ -220,8 +220,23 @@ NVMe tests. Qodo also identified that a stale baseline entry could remain
 after its diagnostic disappeared. Commit `40f70272` makes missing baseline
 occurrences fail and adds a host test for that case. Full local analysis after
 this change passes with eight observed and zero stale entries per architecture.
-The CI compiler/version finding remains under investigation with the
-runner-produced analysis inventory retained as a CI artifact.
+The CI compiler/version finding was resolved using the runner-produced
+analysis inventories retained as CI artifacts.
+
+CI run `37881297811` established the exact Debian Clang identity:
+`Debian clang version 19.1.7 (3+b1)`. Its x86-64 and AArch64 analysis
+inventories each contain eight findings. Compared with Apple Clang 21,
+Clang 19 changes the NVMe PRP message to "Assigned value is garbage or
+undefined", retains the `hook_item` output warning despite both output
+slots being explicitly initialized, and does not report the scheduler
+shift warning. The `hook_item` Clang 19 entry is reasoned as an analyzer
+false positive: `wqs` starts as `{NULL, NULL}`, and `member_wqs` writes
+each slot below its returned count. Run `37881297811` failed at the
+previous unversioned gate with two unexpected message keys per architecture;
+the structured inventories were uploaded as
+`analysis-inventory-{x86_64,aarch64}` artifacts. The updated baselines
+select by exact `clang_version`, reject an unreviewed compiler, and reject
+both new diagnostics and stale baseline entries.
 
 ## Complete unchanged-main diagnostic inventory
 

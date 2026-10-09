@@ -54,7 +54,8 @@ class GateTests(unittest.TestCase):
 
     def write_baseline(self, entries, arch="x86_64"):
         self.baseline.write_text(json.dumps({
-            "schema": 1, "architecture": arch, "diagnostics": entries,
+            "schema": 2, "architecture": arch,
+            "compilers": [{"version": "fixture", "diagnostics": entries}],
         }))
 
     def run_gate(self):
@@ -127,6 +128,26 @@ class GateTests(unittest.TestCase):
     def test_wrong_architecture_fails(self):
         self.write_baseline([self.entry], "aarch64")
         self.assert_rejected(2)
+
+    def test_unreviewed_compiler_fails(self):
+        self.write_report([self.finding])
+        report = plistlib.loads(self.report.read_bytes())
+        report["clang_version"] = "new compiler"
+        self.report.write_bytes(plistlib.dumps(report))
+        self.assert_rejected(2)
+        self.assertIn("no unique reviewed baseline for compiler", self.run_gate().stderr)
+
+    def test_reviewed_compiler_variant_passes(self):
+        baseline = json.loads(self.baseline.read_text())
+        baseline["compilers"].append({
+            "version": "other compiler", "diagnostics": [self.entry],
+        })
+        self.baseline.write_text(json.dumps(baseline))
+        report = plistlib.loads(self.report.read_bytes())
+        report["clang_version"] = "other compiler"
+        self.report.write_bytes(plistlib.dumps(report))
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_missing_reason_fails(self):
         self.entry["reason"] = " "

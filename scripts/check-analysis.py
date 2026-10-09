@@ -23,12 +23,18 @@ def relative(path, root):
     return Path(path).resolve().relative_to(root).as_posix()
 
 
-def read_baseline(path, arch):
+def read_baseline(path, arch, compiler):
     baseline = json.loads(path.read_text())
-    if baseline["schema"] != 1 or baseline["architecture"] != arch:
+    if baseline["schema"] != 2 or baseline["architecture"] != arch:
         raise ValueError("baseline schema or architecture mismatch")
+    variants = baseline["compilers"]
+    if not isinstance(variants, list):
+        raise ValueError("baseline compiler variants must be a list")
+    matches = [entry for entry in variants if entry["version"] == compiler]
+    if len(matches) != 1:
+        raise ValueError("no unique reviewed baseline for compiler: " + compiler)
     counts = Counter()
-    for entry in baseline["diagnostics"]:
+    for entry in matches[0]["diagnostics"]:
         identity = key(entry)
         if identity in counts:
             raise ValueError("duplicate baseline key")
@@ -87,13 +93,15 @@ def main():
     parser.add_argument("reports", type=Path, nargs="+")
     args = parser.parse_args()
     try:
-        allowed = read_baseline(args.baseline, args.arch)
         findings, compilers = read_reports(args.reports, args.root.resolve(), args.out.resolve())
+        if len(compilers) != 1:
+            raise ValueError("reports must have exactly one compiler identity")
         args.inventory.write_text(json.dumps({
             "architecture": args.arch,
             "compilers": compilers,
             "diagnostics": sorted(findings, key=key),
         }, indent=2) + "\n")
+        allowed = read_baseline(args.baseline, args.arch, compilers[0])
     except (OSError, ValueError, KeyError, TypeError, IndexError, plistlib.InvalidFileException) as error:
         print("static analysis: invalid input: " + str(error), file=sys.stderr)
         return 2
