@@ -35,8 +35,9 @@ Runs `clang --analyze -Xanalyzer -analyzer-output=plist-multi-file` on every
 enumerated kernel, loader, module and package source with its compilation
 flags. Every invocation performs full analysis. Structured `*.analyzed`
 reports retain diagnostics in headers as well as the main source file.
-`scripts/check-analysis.py` rejects missing or malformed reports and any
-diagnostic exceeding `tools/analysis/<arch>.json`'s reviewed baseline.
+`scripts/check-analysis.py` rejects missing or malformed reports, any
+diagnostic exceeding `tools/analysis/<arch>.json`'s reviewed baseline, and
+any baseline entry not observed in the current run.
 Each baseline key includes checker, translation unit, file, function and
 message, with a reason and occurrence count; source line numbers are not
 keys. `$(OUT)/analysis-inventory.json` contains the complete current list.

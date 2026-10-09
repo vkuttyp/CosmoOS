@@ -104,9 +104,18 @@ def main():
         print(f"static analysis: FAIL ({sum(unexpected.values())} unexpected diagnostics)",
               file=sys.stderr)
         return 1
-    stale = sum((allowed - observed).values())
+    stale = allowed - observed
+    if stale:
+        for identity, count in sorted(stale.items()):
+            tu, checker, file, function, message = identity
+            print(f"{file}: {function}: {message} [{checker}] "
+                  f"(translation unit {tu}; {count} stale baseline occurrences)",
+                  file=sys.stderr)
+        print(f"static analysis: FAIL ({sum(stale.values())} stale baseline occurrences)",
+              file=sys.stderr)
+        return 1
     print(f"static analysis: clean ({len(findings)} baselined diagnostics, "
-          f"0 unexpected; {stale} baseline diagnostics not observed)")
+          "0 unexpected; 0 stale)")
     return 0
 
 

@@ -77,7 +77,13 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1 baselined diagnostics, 0 unexpected", result.stdout)
 
-    def test_empty_report_is_valid(self):
+    def test_stale_baseline_fails(self):
+        self.write_report([])
+        self.assert_rejected()
+        self.assertIn("stale baseline occurrences", self.run_gate().stderr)
+
+    def test_empty_report_with_empty_baseline_is_valid(self):
+        self.write_baseline([])
         self.write_report([])
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)

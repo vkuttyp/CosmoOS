@@ -92,6 +92,6 @@ loudly.
 `make analyze` checks structured reports from every enumerated source on
 every invocation. Any report outside the selected architecture's reviewed
 baseline fails, including an extra occurrence of an existing diagnostic.
-Missing or malformed reports fail. Every baseline entry has a reason and
+Missing or malformed reports and stale baseline entries fail. Every baseline entry has a reason and
 uses keys independent of source line numbers. A successful target reports
 the accepted count as well as zero unexpected diagnostics.
