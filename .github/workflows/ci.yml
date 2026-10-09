@@ -69,6 +69,17 @@ jobs:
       - name: Build (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug all
 
+      - name: Static analysis against reviewed architecture baseline
+        run: make ARCH=${{ matrix.arch }} analyze
+
+      - name: Upload analyzer inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: analysis-inventory-${{ matrix.arch }}
+          path: out/${{ matrix.arch }}-debug/analysis-inventory.json
+          if-no-files-found: ignore
+
       - name: Boot test (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test
 
@@ -124,17 +135,6 @@ jobs:
         # Host binaries, identical on either job: run them once.
         if: matrix.arch == 'x86_64'
         run: make ARCH=${{ matrix.arch }} fuzz FUZZ_RUNS=50000
-
-      - name: Static analysis against reviewed architecture baseline
-        run: make ARCH=${{ matrix.arch }} analyze
-
-      - name: Upload analyzer inventory
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: analysis-inventory-${{ matrix.arch }}
-          path: out/${{ matrix.arch }}-debug/analysis-inventory.json
-          if-no-files-found: ignore
 
       - name: Reproducible build check
         run: make ARCH=${{ matrix.arch }} reproducible

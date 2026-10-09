@@ -212,6 +212,17 @@ script invokes `make` internally, so it was run with a temporary PATH shim
 resolving `make` to GNU make 4.4.1 after the shell's BSD `make` failed the
 project's GNU make version check.
 
+## PR review follow-up
+
+Qodo identified that `selftest_nvme_worker_cleanup` failed debug boots without
+`nvme0n1`; commit `0ea9d3ff` gives it the same skip contract as the existing
+NVMe tests. Qodo also identified that a stale baseline entry could remain
+after its diagnostic disappeared. Commit `40f70272` makes missing baseline
+occurrences fail and adds a host test for that case. Full local analysis after
+this change passes with eight observed and zero stale entries per architecture.
+The CI compiler/version finding remains under investigation with the
+runner-produced analysis inventory retained as a CI artifact.
+
 ## Complete unchanged-main diagnostic inventory
 
 The x86-64 and AArch64 columns identify every diagnostic: 27 and 28,
