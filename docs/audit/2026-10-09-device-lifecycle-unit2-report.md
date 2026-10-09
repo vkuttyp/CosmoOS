@@ -18,7 +18,7 @@ failure from an unreachable or unresolved suspicion.
 | virtio-rng completion after reset | Proven | `vrng_completed` runs after the synthetic reset boundary and reaches `vrng_post`. `tools/virtio-rng-repost-probe.py --old` on both architectures reported `posts_after_reset=1`; the sole harness failure was the required proof marker, with 451 self-tests and the network harness passing. Fixed x86-64 and AArch64 boots reported zero posts after reset. | `vrng_post` checks `stopping` while holding the lock that serializes `virtq_add` and `virtq_kick`; remove closes this gate before reset. |
 | AHCI probe rollback before IRQ synchronization | Refuted | The test fails probe after all ports start, issues COMRESET to latch status (`pending=0x3f`), and observes `GHC.IE=0`, `irqs=0`, no disk and no active command on x86-64 and AArch64. Both 452-test boots passed. | No ordering change: every reachable `fail_ports` path is before worker creation, `GHC.IE`, disk probing and bio publication; the pending event cannot dispatch the handler. |
 | AHCI port-stop acknowledgement on remove | Proven | `tools/ahci-stop-ack-probe.py --old` on x86-64 and AArch64 reports `persistent_hits=12 dma_frees=12 rebound=1`; each old run has exactly the required `ahci-stop-ack` failure, 100/100 network service, and no other self-test failure. Fixed boots on both architectures pass all 453 tests; their marker reports `retry_hits=1 retry_frees=12 persistent_hits=12 dma_frees=0 rebound=1`. | Retry each port stop once. If the second acknowledgement also fails, remove masks and synchronizes IRQs, unregisters the disk, and retains controller, port DMA, outstanding mappings, and bios. |
-| NVMe disable acknowledgement on removal | Proven | Fixed `tools/nvme-disable-ack-probe.py` boots pass all 454 tests on x86-64 and AArch64 with `NVME-DISABLE-ACK: PASS hits=1 queue_dma_bio_retained=1`; the shell snapshot passes and the network harness serves 100/100 rounds on both. Paired `--old` worktrees report `queue_dma_bio_retained=0` and fail exactly this one of 454 self-tests on both architectures; their shell snapshots pass and their network harnesses still serve 100/100 rounds. | If `CSTS.RDY` does not clear, mark the controller dead and refuse new I/O. After vector synchronization, retain queue DMA, PRP pages, active mappings and bios; the probe rollback path also retains its allocations when disable is unacknowledged. |
+| NVMe disable acknowledgement on removal | Proven | Fixed `tools/nvme-disable-ack-probe.py` boots pass all 454 tests on x86-64 and AArch64 with `NVME-DISABLE-ACK: PASS hits=1 queue_dma_bio_retained=1`; the shell snapshot passes and the network harness serves 100/100 rounds on both. Paired `--old` worktrees report `queue_dma_bio_retained=0` and fail exactly this one of 454 self-tests on both architectures; their shell snapshots pass and their network harnesses still serve 100/100 rounds. | If `CSTS.RDY` does not clear, mark the controller dead and refuse new I/O. After vector synchronization, retain queue DMA, PRP pages, active mappings and bios; the probe rollback path also retains its allocations when disable is unacknowledged (by review: no test drives a probe failure after the controller is enabled). |
 | Network active-worker removal | Refuted | `netif-remove-worker` reported `entered=1 barrier=1 waited=1 release=1` on x86-64 and AArch64. In both 455-test boots unregister reached its barrier after grace-period synchronization and queue purge while the dequeued input worker remained parked, and returned only after release. The shell snapshots and network harnesses passed, with 100/100 rounds on both architectures. | Keep the existing per-worker barrier after purge; the deterministic test closes the test-coverage gap. |
 | AHCI COMRESET acknowledgement (restart and recovery) | Proven | `tools/ahci-comreset-ack-probe.py --old` on both architectures reported `recovery_dead=0 recovery_failed=0 recovery_rejected=0` (the reissued bio was accepted after a failed COMRESET); fixed boots on both report `recovery_dead=1 recovery_failed=1 recovery_rejected=-19 restart_dead=1 restart_rejected=-19`, 456 tests passing. | A COMRESET whose status never acknowledges fails closed: the port is marked dead and the reissued bio fails with `-ENODEV`. |
 | e1000e RX/TX disable acknowledgement | Proven | `tools/e1000e-stop-ack-probe.py --old` (x86-64, AArch64) reports `ring_frees=1 retained=0` for both kinds; fixed boots report `hits=2 ring_frees=0 retained=1 recovered=1 rebound=1` for RX and TX. | Each engine's disable is read back and retried once; on persistent failure the IRQ is retired but rings, mapped buffers, mbufs and the private state are kept (invariant E7). |
@@ -107,6 +107,47 @@ the trigger of the nicbench failure above. The test does not reset the
 connection it builds, and the runner's network census does not see it.
 Recorded in the deferred-work inventory; not changed in this unit.
 
+## Branch-introduced defect found by the analyzer gate
+
+The first matrix run's `make analyze` (after PR #337's gate) reported
+five dead stores to `rc` in `nvme_probe`: the Unit 2 rollback stored
+`controller_disable`'s result in `rc`, so an acknowledged disable made a
+failed probe return 0 after freeing the controller. The disable's result
+now only decides whether DMA may be freed (`e613edee`). It never reached
+main. The same run found a stale baseline entry (`nvme_submit`, Apple
+clang; the dead recheck rewrote that path) and two dead stores in
+`netif-remove-worker`'s teardown (`5b5f49ed`).
+
 ## Validation
 
-Pending: filled in from the final commit's runs.
+All at `3515d50c`, local, one QEMU at a time at default priority
+(`out/unit2-matrix/verdicts.txt`, every serial log beside it):
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test` | PASS | PASS |
+| `make fuzz` | PASS | PASS |
+| `make analyze` | PASS (7 baselined, 0 unexpected, 0 stale) | PASS (7 baselined, 0 unexpected, 0 stale) |
+| debug `make test`, `QEMU_SMP=1` | PASS 141.2 s, harness 100/100 | PASS 133.0 s, harness 100/100 |
+| debug `make test`, `QEMU_SMP=2` | PASS 153.9 s, harness 100/100 | PASS 142.3 s, harness 100/100 |
+| debug `make test`, `QEMU_SMP=4` | PASS 153.2 s, harness 100/100 | PASS 156.3 s, harness 100/100 |
+| `make test-smp2` | PASS | PASS |
+| `make test-chaos` | PASS | PASS |
+| `make test-harness-retry` | PASS | PASS |
+| `make BUILD=release test` | PASS | PASS |
+
+Release symbols (`llvm-nm`): neither release `xhci.ko` has an `xhci_test_*`
+or `g_cancel_test*` symbol (the debug module has seven) or the
+`__ksym_usb_request_complete` export; the release kernels have no cancel
+or sync-quarantine helper. Probes at `935ece18` or later, both
+architectures, old and fixed: `xhci-cancel-ack`, `xhci-cancel-retired`
+(`QEMU_SMP=2`), `xhci-halt-ack`, `xhci-disable-ack` all PASS. The first
+fixed x86-64 `xhci-cancel-ack` run also hit `module-unload-busy` (the
+recorded clock mismatch, `docs/testing/flakes.md`) and passed on rerun;
+the earlier probes (NVMe, AHCI, virtio-rng, e1000e) ran at their own
+commits on this branch. Of the code changed since, only `nvme_probe`'s
+rollback (`e613edee`) is in their drivers, and neither NVMe probe
+reaches it (they drive the submit window, `controller_die` and
+`nvme_remove_queues`); that fix rests on review and the analyzer, and a
+probe-failure injection after enable is recorded as a gap.
+Branch CI and merge CI: in the PR.
