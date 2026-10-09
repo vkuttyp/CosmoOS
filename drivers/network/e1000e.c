@@ -445,13 +445,23 @@ static bool hw_stop_rx(struct e1000e *e)
     return false;
 }
 
+static bool hw_stop_tx(struct e1000e *e)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        wr32(e, E1000_TCTL, 0);
+        if ((rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool hw_quiesce(struct e1000e *e)
 {
     wr32(e, E1000_IMC, 0xffffffffu);
     (void)rd32(e, E1000_ICR);
     bool rx_stopped = hw_stop_rx(e);
-    wr32(e, E1000_TCTL, 0);
-    return rx_stopped;
+    bool tx_stopped = hw_stop_tx(e);
+    return rx_stopped && tx_stopped;
 }
 
 static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
@@ -598,7 +608,7 @@ static void e1000e_remove(struct pci_device *pdev)
         g_stop_orphan = e;
 #endif
         pdev->dev.drvdata = NULL;
-        kwarn("e1000e: %s: retaining RX DMA after disable was not acknowledged", pdev->dev.name);
+        kwarn("e1000e: %s: retaining RX/TX DMA after disable was not acknowledged", pdev->dev.name);
         return;
     }
     rings_free(e);
