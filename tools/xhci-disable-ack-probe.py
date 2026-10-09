@@ -61,10 +61,13 @@ OLD_DISABLE = '''static void xhci_disable_device(struct usb_hcd *hcd, struct usb
 def restore_old(tree):
     path = tree / DRIVER
     source = path.read_text()
-    start = source.index("static bool xhci_disable_command_ack(")
+    # From the retain helper through xhci_disable_device: the old teardown
+    # had neither. xhci_disable_command_ack stays, since xhci_cancel's
+    # escalation (U14) uses it too.
+    start = source.index("/* No command acknowledged that the slot can no longer touch its contexts")
     end = source.index("#if CONFIG_SELFTEST\nbool xhci_test_disable_ack", start)
     section = source[start:end]
-    if section.count("static void xhci_disable_device(") != 1:
+    if section.count("static void xhci_disable_device(") != 1 or "static bool xhci_disable_command_ack(" in section:
         raise RuntimeError("xHCI disable-device implementation anchor changed")
     path.write_text(source[:start] + OLD_DISABLE + source[end:])
 

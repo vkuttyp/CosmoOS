@@ -22,6 +22,9 @@ EXPECTED_FAILURES = {
     "kernel reported failure via debug-exit",
     "no 'SELFTEST: PASS' line",
     "missing successful xHCI halt acknowledgement proof",
+    # An always-"halted" helper also defeats the cancel's last escalation
+    # step (U14): the quarantine case flushes instead.
+    "missing successful xHCI cancel acknowledgement proof",
 }
 
 
@@ -110,6 +113,8 @@ def main():
                 r"forbidden marker /SELFTEST: FAIL/: SELFTEST: FAIL \(\d+ of \d+\)", f)]
             proof = proof and rc != 0 and len(forbidden) == 1 and failures - set(forbidden) == EXPECTED_FAILURES
             proof = proof and re.search(r"SELFTEST: xhci-halt-ack\s+\.\.\. FAIL:", log) is not None
+            proof = proof and re.search(r"SELFTEST: xhci-cancel-ack\s+\.\.\. FAIL:", log) is not None
+            proof = proof and "XHCI-CANCEL-ACK: outcome=quarantined FAIL" in log
             proof = proof and re.search(r"SELFTEST: PASS \(\d+ tests\)", log, re.M) is None
         else:
             proof = proof and rc == 0 and not failures
