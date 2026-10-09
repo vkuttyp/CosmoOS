@@ -113,10 +113,15 @@ struct nvme_ctrl {
     struct list_node namespaces;
     char model[41], serial[21];
     bool dead;
+#if CONFIG_SELFTEST
+    bool test_synthetic;
+#endif
     struct mutex admin_lock;               /* one admin command at a time */
 };
 
 static unsigned g_next_index;
+
+static void controller_die(struct nvme_ctrl *c, const char *why);
 
 /* --- registers ------------------------------------------------------------- */
 
@@ -502,6 +507,13 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
         }
     }
 
+#if CONFIG_SELFTEST
+    /* The synthetic controller test forces death after the first check,
+     * before the lock which publishes a slot. Unarmed: one plain load. */
+    if (c->test_synthetic)
+        controller_die(c, "synthetic submit interleaving");
+#endif
+
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
     uint16_t cid = slot_get(q);
     if (cid == 0xffff) {
@@ -550,7 +562,10 @@ static void controller_die(struct nvme_ctrl *c, const char *why)
 {
     if (__atomic_exchange_n(&c->dead, true, __ATOMIC_ACQ_REL))
         return;
-    kerror("nvme%u: %s; disabling the controller, every request fails from here", c->index, why);
+#if CONFIG_SELFTEST
+    if (!c->test_synthetic)
+#endif
+        kerror("nvme%u: %s; disabling the controller, every request fails from here", c->index, why);
     wr32(c, NVME_REG_CC, rd32(c, NVME_REG_CC) & ~NVME_CC_EN);
     wait_ready(c, false);
     for (unsigned qi = 0; qi <= c->nr_ioq; qi++) {
@@ -945,8 +960,69 @@ static struct pci_driver nvme_driver = {
     .remove = nvme_remove,
 };
 
+#if CONFIG_SELFTEST
+static unsigned g_submit_die_done;
+
+static void submit_die_done(struct bio *bio)
+{
+    (void)bio;
+    g_submit_die_done++;
+}
+
+/* A fake controller keeps the real boot namespace usable after the test.
+ * The fault rule makes controller_die run at the exact submit window. */
+static void selftest_submit_die_window(void)
+{
+    static struct nvme_ctrl c;
+    static struct nvme_queue q;
+    static struct nvme_cmd cmd;
+    static struct nvme_sqe sq;
+    static struct nvme_ns ns;
+    static struct pci_device pdev;
+    static struct bio bio;
+    static uint32_t regs[64];
+    static uint32_t doorbell;
+    memset(&c, 0, sizeof(c));
+    memset(&q, 0, sizeof(q));
+    memset(&cmd, 0, sizeof(cmd));
+    memset(&sq, 0, sizeof(sq));
+    memset(&ns, 0, sizeof(ns));
+    memset(&pdev, 0, sizeof(pdev));
+    memset(&bio, 0, sizeof(bio));
+    memset(regs, 0, sizeof(regs));
+    doorbell = 0;
+    c.pdev = &pdev;
+    c.bar = (vaddr_t)regs;
+    c.ioq[0] = &q;
+    c.nr_ioq = 1;
+    c.test_synthetic = true;
+    q.ctrl = &c;
+    q.depth = 1;
+    q.cmds = &cmd;
+    q.sq = &sq;
+    q.sq_db = &doorbell;
+    spinlock_init(&q.lock, "nvme-test-queue");
+    cmd.next_free = 0xffff;
+    ns.ctrl = &c;
+    ns.bd.priv = &ns;
+    bio.dev = &ns.bd;
+    bio.dir = BIO_FLUSH;
+    bio.done = submit_die_done;
+    g_submit_die_done = 0;
+    int rc = nvme_submit(&ns.bd, &bio);
+    bool ok = c.dead &&
+              (rc != 0 || g_submit_die_done == 1) && q.inflight == 0;
+    kinfo("NVME-INTERLEAVE: %s die=%llu accepted=%u done=%u inflight=%u",
+          ok ? "PASS" : "FAIL", (unsigned long long)c.dead,
+          rc == 0, g_submit_die_done, q.inflight);
+}
+#endif
+
 static int nvme_module_init(void)
 {
+#if CONFIG_SELFTEST
+    selftest_submit_die_window();
+#endif
     return pci_register_driver(&nvme_driver);
 }
 
