@@ -2626,3 +2626,15 @@ See the [history index](README.md).
     is in the report. Unproven stop failures, late publication, callback
     retirement and pre-registration RX cases are in inventory §8.
   - Report: `docs/audit/2026-10-08-vnet-remove-report.md`.
+
+- **Static analyzer gate (2026-10-09; PR review pending).**
+  - Every analysis refreshes structured reports and rejects unexpected
+    diagnostics using stable keys and reasoned architecture baselines.
+    Original inventories: 27 x86-64 / 28 AArch64; eight remain on each.
+  - Separate fixes remove the proven or trivially removable findings.
+    Deterministic runtime probes additionally prove RAM fixture setup and
+    NVMe worker-start cleanup leaks, repaired in separate commits.
+  - Old/fixed gate and cleanup probes pass on both architectures. The full
+    local matrix passes, including crash and reproducibility checks;
+    branch CI and merge CI are pending.
+  - Report: `docs/audit/2026-10-09-analyzer-gate-report.md`.

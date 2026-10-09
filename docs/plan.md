@@ -546,6 +546,13 @@ Sources: inventory §2.8 and [diagnostics design](kernel/diagnostics/design.md).
 Sources: inventory §§2.10, 2.11 and 3,
 [verification testing](verification/testing.md), and [flake history](testing/flakes.md).
 
+- [x] **Implementation — enforce the static analyzer gate.** Every invocation
+  refreshes structured reports and rejects diagnostics outside reviewed,
+  architecture-specific baselines. On 2026-10-09, 19/27 x86-64 and 20/28
+  AArch64 diagnostics were removed, leaving eight reasoned entries each.
+  Old/fixed probes demonstrate the gate and the separate cleanup repairs;
+  the local validation matrix passes. Branch review and merge CI remain
+  pending. See the [report](audit/2026-10-09-analyzer-gate-report.md).
 - [ ] **Implementation — missing fuzz/property coverage.** Add network packet
   parser, PCI configuration, ACPI table and generated VFS-path fuzzing, plus
   property-based tests beyond the randomized lockdep graph oracles. Preserve the
