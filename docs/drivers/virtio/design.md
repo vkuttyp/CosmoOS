@@ -158,7 +158,8 @@ module init (`blk_test_driver_hooks_set`), since the kernel image
 cannot name a module's symbols.
 
 **virtio_rng** (`virtio_rng.c`): no features; one queue; a 64-byte DMA
-buffer posted device-writable. Each completion credits `len × 8` bits
+buffer posted device-writable. Each completion credits `len × 4` bits
+(half of what the device wrote; docs/kernel/security/design.md §6)
 via `random_add_entropy` and re-posts until 4096 bytes have been
 collected in this boot. Remove resets and frees.
 

@@ -6,6 +6,31 @@ long enough. The list exists so that when one of them fails, the reader
 knows within one line whether to re-run or to investigate. It is short
 on purpose, and the rule for joining it is at the end.
 
+**Observed once, AArch64 `el2-guest-hvc` hang (2026-10-09, main):** the
+merge of PR #339 (docs only; kernel as at PR #338, `8d16491d`), run
+37981337663, AArch64 `make test-smp2`: the hang watchdog fired 8003 ms
+after `hv: vm14 created`, the test after `el2-vcpu-run-tick`, and the boot
+timed out at 247 s. Symbolised against that run's `debug-elfs-aarch64`
+artifact: `kmain` on CPU 1 in `selftest_el2_guest_hvc`
+(`hvtest.c:3096`, the first `vcpu_run`) → `vcpu_run_bounded`
+(`vcpu.c:372`) → `el2_vcpu_run` (`hv_el2.c:1194`), all eight 250 µs
+samples at `arch_irq_restore_hw` (`irq.c:29`), the restore after
+`el2_run`; CPU 0 idle. The six-instruction guest never reached its HVC,
+and the thread spent nearly all its time with interrupts masked, which
+reads as entries that exit at once on a host interrupt. Not attributed:
+the vtimer-storm guard in `el2_vcpu_run` is the nearest known mechanism
+and was not shown to be involved. The failed job's rerun passed, as did
+ten local AArch64 `test-smp2` boots of the M1 branch on this test. Treat
+a second sighting as a regression to diagnose, not a flake.
+
+**Observed once, AArch64 `quiesce-kick-spinner` (2026-10-09, M1
+branch):** the tenth of ten local `make ARCH=aarch64 test-smp2` boots of
+`m1-randomness` (`872e0279` plus docs) failed `mid.straggler_ipis >
+before.straggler_ipis` at line 545 (43 ms), the line of the two earlier
+entries for this test below. The other nine boots passed. The branch adds
+no thread-creating self-test (`random-seed` creates none). Recorded, not
+attributed.
+
 **Observed once, AArch64 `signal-stop` (2026-10-09):** while running
 `tools/nvme-die-window-probe.py --arch aarch64 --old`, the harness also
 reported `signal-stop` check 9. In

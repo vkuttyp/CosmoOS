@@ -243,6 +243,13 @@ EL2 = ARCH == "aarch64" and os.environ.get("QEMU_EL2", "1") != "0"
 # kernel's guard on its access to user memory is live and must say so
 # (docs/kernel/security/design.md, "Hardening").
 GUARD = os.environ.get("QEMU_GUARD", "0") != "0"
+# Entropy (make test-entropy; docs/kernel/security/design.md §6): which
+# sources this boot has. QEMU_RNG=0 removes the virtio-rng; QEMU_HWRNG=1
+# says the CPU model has random instructions (RDSEED/RDRAND, RNDR). A boot
+# with neither has no source at all and must show the unseeded behaviour.
+RNG = os.environ.get("QEMU_RNG", "1") != "0"
+HWRNG = os.environ.get("QEMU_HWRNG", "0") != "0"
+SEEDED = RNG or HWRNG
 
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
@@ -287,6 +294,18 @@ if GUARD:
     else:
         REQUIRED_MARKERS += [r"^\[ INFO\] hardening: x86-64: nx smep smap umip$", r"^usertest: umip: enforced$"]
     REQUIRED_MARKERS += [r"^\[ INFO\] selftest: uaccess-guard: guard live"]
+# Entropy: the CPU source the boot reports is the one the configuration
+# has, and the pool is seeded by the source the configuration has.
+if HWRNG:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: cpu source: " + ("rndrrs rndr$" if ARCH == "aarch64" else "rdseed rdrand$")]
+else:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: cpu source: none$"]
+if HWRNG and not RNG:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited \(cpu [1-9]\d*, devices 0\)$"]
+elif RNG and not HWRNG:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited \(cpu 0, devices [1-9]\d*\)$"]
+elif not SEEDED:
+    REQUIRED_MARKERS += [r"^\[ WARN\] random: pool not seeded 5 s after the boot modules loaded: "]
 # The loader kept EL2 and the kernel can reach it.
 if EL2:
     REQUIRED_MARKERS += [
@@ -412,6 +431,8 @@ PKGTEST_MARKERS = [
 LINUXTEST_MARKERS = [
     r"^hello from linux abi$",
     r"^LINUXTEST: PASS$",
+    # getrandom's flags: which kind of pool lxtest found (design.md §6).
+    r"^lxtest: getrandom: " + ("seeded" if SEEDED else "unseeded") + "$",
     r"^lxinterp: ok$",
     r"^lxdyn: ok$",
     # lxsig (docs/compat/linux/testing.md): each mode dies by its signal.
@@ -514,6 +535,9 @@ FORBIDDEN_MARKERS = [
 # required INFO line and fails the run on its own.
 if GUARD:
     FORBIDDEN_MARKERS += [r"hardening: absent"]
+# A boot with a source never warns that it is unseeded; a boot without
+# one never claims to be seeded.
+FORBIDDEN_MARKERS += [r"random: pool not seeded" if SEEDED else r"random: pool seeded"]
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
 # complete and the failure exit code must be delivered.
@@ -1059,6 +1083,16 @@ def main():
     if want_selftest and not any(re.search(r"NVME-INTERLEAVE: PASS die=1 accepted=0 done=0 inflight=0", ln)
                                  for ln in lines):
         failures.append("missing successful NVMe submit/death interleaving proof")
+    # M1's acceptance at the pool and at cosmofs (design.md §6).
+    if want_selftest:
+        if SEEDED:
+            seed_lines = [r"selftest: random-seed: seeded: \d+ bits credited"]
+        else:
+            seed_lines = [r"selftest: random-seed: unseeded: \d+ bits credited, wait timed out",
+                          r"selftest: cosmofs-crypt: unseeded: encrypted format refused with -EAGAIN after \d+ ms, device untouched"]
+        for pat in seed_lines:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (entropy)")
     if want_selftest and not any(re.search(r"VRNG-RESET-REPOST: PASS posts_after_reset=0", ln)
                                  for ln in lines):
         failures.append("missing successful virtio-rng reset/repost proof")

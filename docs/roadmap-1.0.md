@@ -26,8 +26,10 @@ Entropy readiness; hardware sources (x86 `RDRAND`/`RDSEED`, AArch64
 `GRND_NONBLOCK` gives `-EAGAIN`; `GRND_INSECURE` never blocks); key
 generation refuses an unseeded pool.
 
-- [ ] **Acceptance:** a boot with no entropy source shows those
-  behaviours; a boot with a source works.
+- [x] **Acceptance:** a boot with no entropy source shows those
+  behaviours; a boot with a source works. Done 2026-10-09: `make
+  test-entropy` in CI on both architectures
+  ([report](audit/2026-10-09-m1-randomness-report.md)).
 
 ### M2 Persistent system
 

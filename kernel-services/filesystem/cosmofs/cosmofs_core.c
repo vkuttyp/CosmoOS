@@ -2025,9 +2025,12 @@ int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len)
 {
     if (key == NULL || len == 0)
         return -EINVAL;
+    int rc = cfs_need_seeded("create an encrypted pool");
+    if (rc)
+        return rc;
     g_format_key = key;
     g_format_key_len = len;
-    int rc = format_at(&bd, 1, 1, CFS_VERSION);
+    rc = format_at(&bd, 1, 1, CFS_VERSION);
     g_format_key = NULL;
     g_format_key_len = 0;
     return rc;
@@ -2754,7 +2757,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
             memset(key, 0, sizeof(key));
             if (rc == -EKEYREJECTED)
                 kerror("cosmofs: the key in opt/cosmo/fskey does not unwrap this filesystem");
-            else if (rc)
+            else if (rc && rc != -EAGAIN)   /* -EAGAIN: unseeded pool, mount locked (S18) */
                 return rc;
         }
         if (!fs->have_key)

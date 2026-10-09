@@ -634,6 +634,7 @@ static const struct selftest tests[] = {
     { "ahci-error-reset", selftest_ahci_error_reset },
     { "nvme-die-concurrent", selftest_nvme_die_concurrent },
     { "random",          selftest_random },
+    { "random-seed",     selftest_random_seed },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },
     { "crc32c",          selftest_crc32c },

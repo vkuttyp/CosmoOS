@@ -424,3 +424,164 @@ What the CPU is asked to enforce, and where it is proved
   from EL0 still panics (no deterministic trigger under TCG); no
   stack protector, KASLR or speculative-execution mitigation
   (`docs/audit/2026-09-deferred-work-inventory.md`).
+
+## 6. Randomness
+
+Milestone M1 of the [1.0 roadmap](../../roadmap-1.0.md). Until M1 the
+pool (`kernel/core/random.c`) was seeded from the clock and a stack
+address, counted credited bits in `random_entropy_bits()` and never
+consulted the count: `random_get_bytes` served a key, a `getrandom` and a
+TCP port from the same unseeded state, and inputs were hashed straight
+into the output state, so a caller watching outputs while entropy
+trickled in could guess each small addition (a "premature next").
+
+### The seeded state
+
+The pool is **seeded** once at least **256 credited bits** have been
+collected into the input pool and moved into the output key in one
+reseed. Seeded is sticky: nothing unseeds it. Credit comes only from
+these sources, each credited at a stated fraction of what it delivers,
+and only for a read that reported success:
+
+| Source | Where | Credit |
+|---|---|---|
+| x86-64 `RDSEED` (`CPUID.(7,0):EBX[18]`) | `kernel/arch/x86_64/rng.c` | 32 bits per successful 64-bit read (`CF=1`) |
+| x86-64 `RDRAND` (`CPUID.1:ECX[30]`) | same | 4 bits per successful 64-bit read (`CF=1`) |
+| AArch64 `RNDRRS` (`ID_AA64ISAR0_EL1.RNDR` ≥ 1) | `kernel/arch/aarch64/rng.c` | 32 bits per successful read (`NZCV` = `0000`) |
+| AArch64 `RNDR` (same field) | same | 4 bits per successful read (`NZCV` = `0000`) |
+| virtio-rng (`drivers/virtio/virtio_rng.c`) | `random_add_entropy` | 4 bits per byte the device wrote |
+
+The fractions are the conservative part. The reseeding sources
+(`RDSEED`, `RNDRRS`) are conditioned entropy and are credited half their
+width. The DRBG outputs (`RDRAND`, `RNDR`) are expansions of a seed the
+CPU reseeds on its own schedule, so one of them is credited a sixteenth.
+virtio-rng is the host's `/dev/urandom` across a device the guest cannot
+inspect; it is credited half. A failed hardware read (`CF=0`; `Z=1` on
+AArch64, which also returns 0) is retried up to ten times and is never
+credited or mixed. The clock, the stack address, the cycle counter and
+self-test input are mixed and never credited.
+
+`random_init` asks the CPU first. When `RDSEED`/`RNDRRS` work it takes 16
+reads (512 bits credited); otherwise it falls back to 128 DRBG reads; a
+boot on such a CPU is seeded before any driver loads. Without a CPU
+source the pool waits for virtio-rng, whose driver feeds 4096 bytes after
+it loads.
+
+### The construction
+
+SHA-512 is kept: the kernel already carries it for module signatures
+(`crypto.h`), it has no known weakness that matters at this use, and a
+second primitive would be a second thing to get right. The state is two
+64-byte values and a counter:
+
+- **The input pool** `pool`: every input is absorbed as
+  `pool = SHA-512(pool || input)`, and its credit is added to
+  `pool_bits` (capped at 512). Inputs never touch the output key
+  directly; that is what closes the premature-next window.
+- **The output key** `key` and a 64-bit `counter`: block *i* of a request
+  is `SHA-512(key || counter)`, the counter incrementing per block.
+- **Reseed:** `key = SHA-512(key || pool || "reseed")`, then
+  `pool = SHA-512(pool || "drained")`, `pool_bits = 0`. It happens when
+  `pool_bits` reaches 256: at once while unseeded (that reseed is the
+  transition to seeded), and after seeding at the first request at least
+  60 s after the previous reseed. Before that check a seeded pool draws a
+  fresh 256-bit CPU sample, when the CPU has a source, so a long-running
+  system keeps reseeding without a device.
+
+**Forward secrecy.** At the end of every request the key is ratcheted,
+`key = SHA-512(key || counter || "ratchet")`, under the same lock hold
+that produced the output, and the stack copies of blocks are wiped. A
+compromise of the state after a request reveals nothing about that
+request's output or any earlier one: recovering them needs a SHA-512
+preimage. A compromise is recovered from at the next reseed that brings
+256 bits the attacker did not see.
+
+**Before seeding** the key holds only the uncredited boot input (clock,
+cycle counter, a stack address) and each request additionally mixes the
+cycle counter into it. Such output is distinct between requests and
+boots in practice and is predictable in principle; it is served only to
+callers that declared they accept that (below).
+
+### Who may draw before seeding
+
+`random_get_bytes` itself never blocks and never fails, as before. The
+rule is in the callers: a caller is **must-be-seeded** when a predictable
+value would be a secret an attacker can recompute, and **may-be-early**
+when it is a hint against off-path guessing or a uniqueness tag. A
+must-be-seeded caller asks `random_ready()` or waits with
+`random_wait_ready()` first; seeded is sticky, so a draw after either
+says yes is a draw from a seeded pool.
+
+| Caller | Class | Behaviour while unseeded | Reason |
+|---|---|---|---|
+| `getrandom` default and `GRND_RANDOM` (`lx_getrandom`) | must-be-seeded | blocks (killable); `GRND_NONBLOCK` returns `-EAGAIN` | Linux's contract: user space generates keys from it |
+| `getrandom(GRND_INSECURE)` | may-be-early | returns bytes | Linux's contract: never blocks, not for keys |
+| cosmofs master key (`cosmofs_format_encrypted` → `format_at`) | must-be-seeded | `cfs_need_seeded` waits up to 5 s, then `-EAGAIN` before anything is written | it is the key every file key derives from |
+| cosmofs key-block salt (`cfs_keys_write`, `cfs_keys_rotate`) | must-be-seeded | reached only from a seeded `format_at` or with a loaded key | a predictable salt lets an attacker precompute the passphrase search |
+| cosmofs block nonces (`cfs_block_nonce`) | must-be-seeded | a key is only loaded (`cfs_keys_load`) when seeded: waits up to 5 s, then `-EAGAIN`; a mount with the firmware key then stays locked (metadata only) | a repeated ChaCha20 (key, nonce) pair gives away the xor of two plaintexts |
+| `AT_RANDOM` (`process.c`, 16 bytes at exec) | must-be-seeded by purpose | exec does not wait (Linux semantics); the boot waits for seeding before the first user process | musl seeds its stack-protector canary and pointer guard from it |
+| cosmofs pool UUID (`format_at`) | may-be-early | drawn | an identity, not a secret: it needs only to differ |
+| TCP initial sequence numbers (`tcp.c`) | may-be-early | drawn | RFC 6528 unpredictability against off-path guessing; defence in depth, as in Linux |
+| TCP SYN-cookie secret (`tcp_init`) | may-be-early | drawn at network start | drawn once before a device-only pool can seed; recorded in the inventory, not changed here |
+| ephemeral port starts (`tcp.c`, `udp.c`), tap port (`tapsvc.c`) | may-be-early | drawn | RFC 6056 port randomisation is a hint, not a secret |
+| self-tests (`devtest.c`) | test | drawn | |
+
+**`AT_RANDOM` and the boot wait.** Linux's `execve` never waits for
+entropy, and making it wait would change a system call's documented
+behaviour. Instead the boot waits: after the boot modules load, and
+before the self-tests and the first user process, `random_boot_wait()`
+waits up to **5 s** for the pool to seed. On every configuration with a
+source the pool is seeded by then, so every `AT_RANDOM` a user process
+sees is drawn from a seeded pool. When the wait expires the boot logs
+the `WARN` below and continues; user space then runs with `AT_RANDOM`
+from the unseeded pool, as Linux would, and the warning is the record.
+
+### Interfaces
+
+- `bool random_ready(void)`: the non-blocking query (an acquire load).
+- `int random_wait_ready(uint64_t timeout_ns)`: wait until seeded;
+  `RANDOM_WAIT_FOREVER` for no bound. 0, `-ETIMEDOUT`, or `-EINTR` when
+  the calling process has a deliverable signal or is being killed (the
+  killable waits of `wait.h`).
+- `RANDOM_KEYGEN_WAIT_NS` (5 s): the bound kernel key generation waits.
+- `void random_boot_wait(void)`: the boot's wait and its log line.
+
+None is exported to modules: no module generates keys, and the module
+ABI's entropy surface (`random_add_entropy`, `random_get_bytes`,
+`random_u64`, `random_entropy_bits`) keeps its meaning. The module ABI
+version does not change.
+
+### `getrandom`
+
+| Flags | Seeded | Unseeded |
+|---|---|---|
+| 0 or `GRND_RANDOM` | bytes | blocks until seeded; `-EINTR` on a signal |
+| `GRND_NONBLOCK` (with or without `GRND_RANDOM`) | bytes | `-EAGAIN` |
+| `GRND_INSECURE` (with or without `GRND_NONBLOCK`) | bytes | bytes |
+| `GRND_INSECURE` with `GRND_RANDOM`, or any bit outside the three | `-EINVAL` | `-EINVAL` |
+
+The wait comes before the length is looked at, as in Linux, so a
+zero-length blocking call is a readiness wait. Lengths above 256 KiB are
+still truncated to 256 KiB per call.
+
+### What the boot says
+
+- `random: cpu source: rdseed rdrand` (x86-64), `rndrrs rndr`
+  (AArch64), or `none`, at `INFO`, from `random_init`.
+- `random: pool seeded after N ms: B bits credited (cpu C, devices D)` at
+  `INFO`, once, from whichever input completed the reseed (the time is
+  since `random_init`).
+- `random: pool not seeded 5 s after the boot modules loaded: getrandom
+  blocks, GRND_NONBLOCK returns EAGAIN, encrypted pools cannot be
+  created` at `WARN`, once, from `random_boot_wait`.
+
+### Boot configurations that prove it
+
+The ordinary boots carry a virtio-rng on CPU models without a random
+instruction (`qemu64`, `cortex-a72`), so they are the device-seeded
+configuration; the harness requires the seeded line and forbids the
+`WARN`. `make test-entropy` adds two boots of the same image without the
+virtio-rng (`QEMU_RNG=0`): one on the default CPU model, which has no
+source at all and must show the unseeded behaviour and still complete,
+and one on a CPU model with the random instructions, which must seed
+from the CPU alone (testing.md).

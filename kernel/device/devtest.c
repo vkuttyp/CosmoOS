@@ -316,9 +316,9 @@ bool selftest_random(const char **reason)
     for (unsigned i = 0; i < sizeof(buf); i++)
         nonzero = nonzero || buf[i] != 0;
     CHECK(nonzero);
-    unsigned bits = random_entropy_bits();
-    random_add_entropy("selftest", 8, 8);
-    CHECK(random_entropy_bits() >= bits && random_entropy_bits() <= 512);
+    /* Self-test input is mixed and never credited (invariant S17). */
+    random_add_entropy("selftest", 8, 0);
+    CHECK(random_entropy_bits() <= 512);
 
     /* If QEMU attached a virtio-rng and its driver loaded, the pool must
      * have been fed by now. */
@@ -330,6 +330,38 @@ bool selftest_random(const char **reason)
     } else {
         kinfo("selftest: random: no virtio-rng present");
     }
+    return true;
+}
+
+/*
+ * M1's acceptance at the pool (docs/kernel/security/design.md §6): which
+ * kind of boot this is, said in one line the boot harness requires for
+ * the configuration it started (`make test-entropy`), and the behaviour
+ * that goes with it. Seeded: the wait returns at once and 256 bits were
+ * credited. Unseeded: the bounded wait times out after its bound, an
+ * uncredited input does not seed (S16), and random_get_bytes still
+ * serves the may-be-early callers.
+ */
+bool selftest_random_seed(const char **reason)
+{
+    if (random_ready()) {
+        CHECK(random_wait_ready(0) == 0);
+        CHECK(random_entropy_bits() >= 256);
+        kinfo("selftest: random-seed: seeded: %u bits credited", random_entropy_bits());
+        return true;
+    }
+    CHECK(random_entropy_bits() < 256);
+    const uint64_t bound = 20ull * 1000000ull;
+    uint64_t t0 = clock_now_ns();
+    CHECK(random_wait_ready(bound) == -ETIMEDOUT);
+    CHECK(clock_now_ns() - t0 >= bound);
+    unsigned bits = random_entropy_bits();
+    random_add_entropy("uncredited input", 16, 0);
+    CHECK(!random_ready() && random_entropy_bits() == bits);
+    uint64_t a = random_u64(), b = random_u64();
+    CHECK(a != b);
+    kinfo("selftest: random-seed: unseeded: %u bits credited, wait timed out after %llu ms",
+          random_entropy_bits(), (unsigned long long)((clock_now_ns() - t0) / 1000000ull));
     return true;
 }
 

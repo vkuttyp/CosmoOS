@@ -133,6 +133,14 @@ void random_get_bytes(void *buf, size_t len)
     memset(buf, 0, len);   /* deterministic: the fuzzer must reproduce */
 }
 
+/* Seeded at once: no key is ever loaded here (no firmware key), so the
+ * gate in cfs_need_seeded only has to let the call through. */
+int random_wait_ready(uint64_t timeout_ns)
+{
+    (void)timeout_ns;
+    return 0;
+}
+
 /* The fuzz image is never unlocked: there is no firmware here, so an
  * encrypted image mounts locked and every data read answers -ENOKEY,
  * which is one of the paths worth fuzzing. */

@@ -16,6 +16,7 @@
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/printf.h>
+#include <kernel/random.h>
 #include <kernel/selftest.h>
 #include <kernel/storage.h>
 #include <kernel/string.h>
@@ -1526,6 +1527,28 @@ bool selftest_cosmofs_crypt(const char **reason)
     struct blkdev *bd = ramblk_create(512);
     CHECK(bd != NULL);
     static const char key[] = "correct horse battery staple";
+    if (!random_ready()) {
+        /* The no-entropy boot (make test-entropy): no master key from an
+         * unseeded pool. The refusal comes after the bounded wait and
+         * before anything reaches the device (invariant S18). */
+        uint64_t t0 = clock_now_ns();
+        CHECK(cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == -EAGAIN);
+        uint64_t waited = clock_now_ns() - t0;
+        CHECK(waited >= RANDOM_KEYGEN_WAIT_NS);
+        /* The first 64 KiB: both superblock slots and the first blocks. */
+        uint32_t ns = 65536u / bd->sector_size;
+        uint8_t *sec = kmalloc(65536u, KMEM_ZERO);
+        CHECK(sec != NULL);
+        bool blank = blk_read(bd, 0, ns, sec) == 0;
+        for (unsigned i = 0; blank && i < 65536u; i++)
+            blank = sec[i] == 0;
+        kfree(sec);
+        CHECK(blank);
+        ramblk_destroy(bd);
+        kinfo("selftest: cosmofs-crypt: unseeded: encrypted format refused with -EAGAIN after %llu ms, device untouched",
+              (unsigned long long)(waited / 1000000ull));
+        return true;
+    }
     CHECK(cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0);
     int mk = vfs_mkdir(NULL, ENG, 0755);
     CHECK(mk == 0 || mk == -EEXIST);

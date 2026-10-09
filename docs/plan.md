@@ -521,8 +521,11 @@ Sources: inventory §§2.9 and 3 and [security design](kernel/security/design.md
   stack protection, broader interrupt-stack isolation and kernel sanitizer builds.
   x86-64 already uses IST stacks for double fault, NMI, machine check and
   debug; AArch64 takes EL1 exceptions on the current stack.
-- [ ] **Implementation — entropy sources.** Supplement virtio-rng with supported
-  CPU or other sources and define health, seeding and unavailable-entropy behavior.
+- [x] **Implementation — entropy sources.** Done by roadmap milestone M1
+  (2026-10-09, [report](audit/2026-10-09-m1-randomness-report.md)): RDSEED/RDRAND
+  and RNDRRS/RNDR alongside virtio-rng, a seeded state with Linux `getrandom`
+  semantics, and a no-entropy boot in CI. Source health tests (SP 800-90B
+  repetition and adaptive-proportion) remain open in the inventory §2.9.
 - [ ] **Implementation/validation — speculative-execution policy.** Document
   supported CPUs, threat assumptions and the mitigations that must be enabled/tested.
 - [ ] **Implementation — module anti-rollback.** Add signature versioning and

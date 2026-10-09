@@ -302,3 +302,41 @@ the ones it kept still work, and does the same for a vCPU handle without
 `REGS` and without `IRQ`. Confirmed against the bug: with the check
 removed from `shutdown`, a handle explicitly stripped of `SHUTDOWN`
 closes the connection and the assertion fails.
+
+**S16. No input reaches the output key except in a reseed of at least
+256 credited bits.** `random_add_entropy` and the CPU sources absorb
+into the input pool only; the output key changes by a reseed (which
+requires `pool_bits >= 256`), by the per-request ratchet and, while
+unseeded, by the uncredited cycle counter. Seeded is set only by the
+first such reseed and never cleared. Check: review of `random.c` (the
+only writers of `g_key` are `reseed_locked`, `ratchet_locked` and the
+unseeded jitter mix); `random-seed` (unseeded boot: `random_ready()` is
+false and the credit is unchanged across an uncredited input).
+
+**S17. Only a successful source read is credited.** A hardware read
+that reports failure (`CF=0`; `NZCV.Z=1`) is neither mixed nor credited;
+credit per source is the table in design.md §6, nothing else credits,
+and self-test input credits 0. Check: review of `arch_rng_seed64` /
+`arch_rng_random64` (each returns the instruction's own flag) and of
+every `random_add_entropy` call (`git grep`); the no-entropy boot, where
+nothing may credit, stays unseeded to the end (`make test-entropy`).
+
+**S18. A must-be-seeded caller never draws from an unseeded pool.**
+`getrandom` without `GRND_INSECURE` draws only after `random_ready()` or
+a successful `random_wait_ready()`; cosmofs draws a master key only
+after `random_wait_ready(RANDOM_KEYGEN_WAIT_NS)` returned 0, and loads a
+key (which is what lets it draw block nonces and salts) under the same
+condition. Check: `cosmofs-crypt` (unseeded boot: encrypted format is
+`-EAGAIN` after at least the bounded wait and the device's first 64 KiB
+stay zero; seeded boots: the full encryption test), `lxtest`
+(`GRND_NONBLOCK` is `-EAGAIN` unseeded), review of `cfs_keys_load` (the
+key-load gate has no unseeded test: no encrypted pool can be created in
+an unseeded boot).
+
+**S19. The boot does not start user space on an unseeded pool without
+saying so.** `random_boot_wait` runs after the boot modules load and
+before the self-tests and init; it returns when seeded or after 5 s, and
+in the second case logs the `WARN` once. Check: the boot harness
+requires `random: pool seeded` and forbids `random: pool not seeded` in
+every boot with a source, and requires the `WARN` in the no-entropy
+boot (`make test-entropy`).

@@ -200,7 +200,7 @@ without effect.
 returns the monotonic clock (there is no wall clock; recorded),
 `gettimeofday` and `time` likewise; `nanosleep` and `clock_nanosleep`
 (relative; `TIMER_ABSTIME` against the monotonic clock) → the killable
-sleep; `getrandom` → `random_get_bytes` (flags ignored); `uname` fills
+sleep; `getrandom` → `random_get_bytes` after waiting for a seeded pool, with Linux's `GRND_NONBLOCK`/`GRND_INSECURE`/`GRND_RANDOM` semantics (docs/kernel/security/design.md §6); `uname` fills
 `struct utsname` (six 65-byte fields: `Linux`, `cosmo`, `6.0.0-cosmo`,
 the build id, `x86_64`, `(none)`); `sysinfo` `-ENOSYS`.
 

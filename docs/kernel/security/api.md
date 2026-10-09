@@ -126,3 +126,52 @@ Capabilities, audit, sandboxing, namespaces: section 41 of the
 constitution, scheduled with the container work. The module loader's
 user-facing entry point (`sys_module_load`) waits for them, which is
 why there is none in Phase 5.
+
+## `kernel/include/kernel/random.h` (design.md §6)
+
+Unlike the functions above these take a spinlock (`random`), and the
+waits sleep. **ABI stability: internal**, except the four functions the
+module ABI exports (`random_add_entropy`, `random_get_bytes`,
+`random_u64`, `random_entropy_bits`), whose meaning M1 kept.
+
+### `void random_add_entropy(const void *buf, size_t len, unsigned bits)`
+
+Absorb `len` bytes into the input pool and credit `bits` (capped at 512).
+Credit only what a source delivered and reported valid (S17). The input
+never reaches the output key except through a reseed of at least 256
+credited bits (S16); the reseed that first does so seeds the pool, logs
+once and wakes the waiters. Any context.
+
+### `void random_get_bytes(void *buf, size_t len)`, `uint64_t random_u64(void)`
+
+Output; never blocks or fails, seeded or not. Ratchets the key after
+every request (forward secrecy) and, once seeded, reseeds from the pool
+(and a fresh CPU sample) at most every 60 s. Unseeded output is
+predictable in principle: only may-be-early callers (design.md §6) may
+use it without first asking `random_ready`. Any context.
+
+### `bool random_ready(void)`
+
+True once the pool is seeded; never false again. An acquire load: a draw
+after it returns true is a draw from the seeded state. Any context.
+
+### `int random_wait_ready(uint64_t timeout_ns)`
+
+Sleep until seeded. 0; `-ETIMEDOUT` after `timeout_ns`
+(`RANDOM_WAIT_FOREVER`: no bound); `-EINTR` when the calling process has
+a deliverable signal or is being killed. Returns at once when seeded.
+Thread context. `RANDOM_KEYGEN_WAIT_NS` (5 s) is the bound kernel key
+generation uses.
+
+### `void random_boot_wait(void)`
+
+The boot's wait, called once by `kernel_main` after the boot modules
+load: up to 5 s, then one `WARN` (S19).
+
+## `kernel/include/arch/rng.h`
+
+`arch_rng_init` probes the CPU (CPUID leaves 1 and 7; `ID_AA64ISAR0_EL1`);
+`arch_rng_has_seed`/`arch_rng_has_random` report RDSEED/RNDRRS and
+RDRAND/RNDR; `arch_rng_seed64`/`arch_rng_random64` make one attempt and
+return the instruction's own success flag (CF; NZCV = 0000), storing the
+value only on success. No locks; any context.

@@ -209,6 +209,11 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */
     int failed = (int)module_load_boot();
+    /* The drivers that feed the entropy pool have loaded: wait (5 s at
+     * most) for it to seed before the self-tests and the first user
+     * process, whose AT_RANDOM must come from a seeded pool
+     * (docs/kernel/security/design.md §6, invariant S19). */
+    random_boot_wait();
     faultinject_init();   /* opt/cosmo/faultinject, if the boot asked for injected faults */
 #if CONFIG_SELFTEST
     failed += selftest_run_all();

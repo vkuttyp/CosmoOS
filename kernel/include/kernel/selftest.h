@@ -292,6 +292,7 @@ bool selftest_device(const char **reason);
 bool selftest_pci(const char **reason);
 bool selftest_dma(const char **reason);
 bool selftest_random(const char **reason);
+bool selftest_random_seed(const char **reason);   /* seeded or not, and the behaviour that goes with it (M1) */
 bool selftest_blk(const char **reason);
 bool selftest_virtio_console(const char **reason);
 

@@ -99,7 +99,7 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
 | `AT_PAGESZ` (6) | 4096 |
 | `AT_BASE` (7) | the interpreter's load bias, 0 without one (milestone 10) |
 | `AT_ENTRY` (9) | `exe->entry` (the executable's, biased for a PIE; the process starts at the interpreter's) |
-| `AT_RANDOM` (25) | `random_addr`: 16 bytes from `random_get_bytes`, 16-byte aligned, placed below the strings |
+| `AT_RANDOM` (25) | `random_addr`: 16 bytes from `random_get_bytes`, 16-byte aligned, placed below the strings; exec does not wait for seeding, the boot does (`random_boot_wait`, security design §6) |
 | `AT_EXECFN` (31) | the path the executable was spawned by (milestone 10) |
 | `AT_PLATFORM` (15) | `"x86_64"` or `"aarch64"` (milestone 10) |
 | `AT_UID` (11), `AT_EUID` (12) | `p->cred.uid` |
@@ -246,7 +246,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 201 | `time` | wall-clock seconds | |
 | 35 | `nanosleep` | `thread_sleep_ns_killable` | a bad `tv_nsec` or negative fields `-EINVAL`; values beyond 2^62 ns clamp there ("never"); on `-EINTR` the remainder is written as 0 |
 | 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the named clock | clock ids `0..7` |
-| 318 | `getrandom` | `random_get_bytes` in 256-byte pieces | flags ignored; at most 256 KiB per call |
+| 318 | `getrandom` | waits for a seeded pool (`random_wait_ready`), then `random_get_bytes` in 256-byte pieces | Linux flags: blocks until seeded (`-EINTR` on a signal); `GRND_NONBLOCK` `-EAGAIN` while unseeded; `GRND_INSECURE` never waits; `GRND_RANDOM` is the default; `INSECURE|RANDOM` or an unknown bit `-EINVAL`; at most 256 KiB per call (docs/kernel/security/design.md §6) |
 | 63 | `uname` | `sysname "Linux"`, `nodename "cosmo"`, `release "6.0.0-cosmo"`, `version "<KERNEL_NAME> <KERNEL_VERSION> <COSMO_BUILD_ID>"`, `machine "x86_64"`, `domainname "(none)"` (six 65-byte fields, 390 bytes) | a presentation decision so libcs' version checks pass |
 | 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout, private)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val, private)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(space, uaddr, uaddr2, val, nr_requeue, cmp, val3, private)` (both return woken + requeued, as the Linux kernel does); `FUTEX_PRIVATE_FLAG` (128) honoured both ways since the shared-futex unit: set, the key is this process's with no lookup; clear, the word is classified by what it maps, so a word in a `MAP_SHARED` page is shared with every process mapping it (`docs/kernel/ipc/api.md`, I7) -- it used to be masked off and every futex was private | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
 

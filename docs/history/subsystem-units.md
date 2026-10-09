@@ -2660,3 +2660,22 @@ See the [history index](README.md).
     ARP phase and the benchmark's hook ate the reply. The benchmark now
     resolves the gateway first.
   - Report: `docs/audit/2026-10-09-device-lifecycle-unit2-report.md`.
+
+- **Roadmap M1: sound randomness (2026-10-09; PRs #339, #340).**
+  - PR #339 adopted the [1.0 roadmap](../roadmap-1.0.md) and the scope
+    rules in `AGENTS.md`.
+  - The pool separates an input pool from the output key; inputs reach
+    the key only through a reseed of at least 256 credited bits (S16),
+    the first of which seeds the pool. Per-request ratchet for forward
+    secrecy; reseed at most every 60 s after seeding.
+  - Sources behind `arch/rng.h`: RDSEED (32 bits per read), RDRAND (4),
+    RNDRRS (32), RNDR (4), each credited only on CF=1 / NZCV=0000 (S17);
+    virtio-rng credited 4 bits per byte.
+  - `random_ready`, `random_wait_ready`, `random_boot_wait` (up to 5 s
+    before the self-tests and init, one WARN); Linux `getrandom` flags;
+    cosmofs refuses an encrypted format or key load unseeded with
+    `-EAGAIN` after 5 s (S18). Every caller classified in
+    `docs/kernel/security/design.md` §6.
+  - `make test-entropy` (CI): no-entropy boot and CPU-only boot on both
+    architectures.
+  - Report: `docs/audit/2026-10-09-m1-randomness-report.md`.

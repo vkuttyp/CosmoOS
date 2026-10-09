@@ -307,6 +307,7 @@ int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const 
                    const void *user_key, size_t user_len);
 int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_len,
                     uint8_t master[CHACHA20_KEY_SIZE]);
+int cfs_need_seeded(const char *what);
 int cfs_keys_load(struct cfs *fs, const void *user_key, size_t user_len);
 int cfs_keys_rotate(struct cfs *fs, const void *new_key, size_t new_len);
 /* A superblock's own check: magic, a version this kernel reads, and the
