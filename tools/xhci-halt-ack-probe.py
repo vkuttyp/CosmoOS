@@ -54,7 +54,8 @@ OLD_HALT = '''static bool xhci_halt_controller(struct xhci *x)
 def restore_old(tree):
     path = tree / DRIVER
     source = path.read_text()
-    start = source.index("static bool xhci_halt_controller(struct xhci *x)")
+    # The definition, not the forward declaration xhci_cancel's escalation needs.
+    start = source.index("static bool xhci_halt_controller(struct xhci *x)\n{")
     end = source.index("#if CONFIG_SELFTEST\nbool xhci_test_halt_ack", start)
     if source[start:end].count("static bool xhci_halt_controller(") != 1:
         raise RuntimeError("xHCI halt helper anchor changed")
