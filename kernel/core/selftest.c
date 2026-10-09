@@ -762,6 +762,7 @@ static const struct selftest tests[] = {
     { "net-output",      selftest_net_output },
     { "net-tcpverdict",  selftest_net_tcpverdict },
     { "net-second-nic",  selftest_net_second_nic },
+    { "e1000e-stop-ack", selftest_e1000e_stop_ack },
     { "net-lo-udp",      selftest_net_lo_udp },
     { "tcp-pcb-timer-free", selftest_tcp_pcb_timer_free },
     { "net-lo-tcp",      selftest_net_lo_tcp },

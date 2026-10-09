@@ -98,6 +98,8 @@ enum fi_kind {
     FI_NET_RX_DUP,    /* a received frame delivered a second time (link-layer retransmit, switch flood) */
     FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path; the handler leaves the admin queue to the issuer */
     FI_NVME_DISABLE_ACK, /* nvme: CC.EN clear is not acknowledged by CSTS.RDY */
+    FI_E1000E_RX_DISABLE_ACK, /* e1000e: RCTL.EN remains set */
+    FI_E1000E_TX_DISABLE_ACK, /* e1000e: TCTL.EN remains set */
     FI_KIND_COUNT,
 };
 /* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests
@@ -120,6 +122,11 @@ context, so a receive-path rule fires only where the receive runs in a
 thread (loopback; a thread-deferred driver), not in a driver's own
 interrupt handler.
 
+The e1000e RX/TX disable rules skip writes to `RCTL` or `TCTL` in the
+calling thread, leaving the corresponding enable bit set for the driver's
+readback check. They are used by `e1000e-stop-ack` to check retention and
+recovery after an unacknowledged engine stop.
+
 Configuration: the kernel API (`faultinject_set`, `faultinject_clear`,
 `faultinject_stats`) for self-tests, and the boot parameter
 `opt/cosmo/faultinject` (fw_cfg), `kind:every[:budget]` entries separated
@@ -131,6 +138,8 @@ DMA retention.
 The `ahci-comreset-ack` rule makes a link reset report failure after the
 command engine has stopped, exercising the driver's fail-closed recovery
 path.
+The `e1000e-rx-disable-ack` and `e1000e-tx-disable-ack` rules leave the
+selected engine's enable bit set when removal tries to stop it.
 `sysctl("debug.faultinject")` reports each kind's rule and counters. There
 is no write path through `sysctl`: the audit's phrase "behind a debug
 sysctl" is honoured for observation; making `sysctl` writable is a

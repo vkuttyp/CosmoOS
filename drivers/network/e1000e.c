@@ -16,6 +16,7 @@
 #include <kernel/device.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/kmalloc.h>
@@ -66,8 +67,23 @@ struct e1000e {
     uint64_t resets;
 };
 
+#if CONFIG_SELFTEST
+/* A failed-stop test may have to keep this instance alive until the
+ * injection is cleared and the stop can be acknowledged. */
+static struct e1000e *g_stop_orphan;
+bool e1000e_test_stop_ack(unsigned kind);
+#endif
+
 static uint32_t rd32(struct e1000e *e, unsigned off) { return *(volatile uint32_t *)(e->bar + off); }
-static void wr32(struct e1000e *e, unsigned off, uint32_t v) { *(volatile uint32_t *)(e->bar + off) = v; }
+static void wr32(struct e1000e *e, unsigned off, uint32_t v)
+{
+#if CONFIG_FAULTINJECT
+    if ((off == E1000_RCTL && faultinject_should_fail(FI_E1000E_RX_DISABLE_ACK)) ||
+        (off == E1000_TCTL && faultinject_should_fail(FI_E1000E_TX_DISABLE_ACK)))
+        return;
+#endif
+    *(volatile uint32_t *)(e->bar + off) = v;
+}
 
 /* The descriptor rings are coherent memory, but the compiler and the CPU
  * still need telling that a descriptor is complete before the tail is
@@ -571,6 +587,58 @@ static void e1000e_remove(struct pci_device *pdev)
     pdev->dev.drvdata = NULL;
     netif_put(&e->nif);   /* the creator's reference; e1000e_release frees e when the holders are gone */
 }
+
+#if CONFIG_SELFTEST
+/* Called by the kernel's device self-test through the debug-only module
+ * symbol table. On an old driver this observes rings_free after a failed
+ * disable; on the fixed driver it reclaims the retained instance only
+ * after the test clears the injected failure and the stop succeeds. */
+bool e1000e_test_stop_ack(unsigned kind)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    struct pci_device *pdev = pci_find_device(E1000E_VENDOR, E1000E_82574L, NULL);
+    if (pdev == NULL || pdev->dev.state != DEV_BOUND)
+        return true;   /* this machine has no e1000e function */
+    if (kind != FI_E1000E_RX_DISABLE_ACK && kind != FI_E1000E_TX_DISABLE_ACK)
+        return false;
+
+    struct dma_stats before, after;
+    dma_get_stats(&before);
+    faultinject_set((enum fi_kind)kind, 1, 0, thread_current());
+    int removed = pci_test_remove(pdev);
+    struct fi_stats fi;
+    faultinject_stats((enum fi_kind)kind, &fi);
+    faultinject_clear((enum fi_kind)kind);
+    dma_get_stats(&after);
+    uint64_t freed = after.frees - before.frees;
+    bool retained = g_stop_orphan != NULL && g_stop_orphan->pdev == pdev;
+    bool cleaned = false;
+    if (retained) {
+        struct e1000e *e = g_stop_orphan;
+        bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
+        bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
+        if (rx_off && tx_off) {
+            rings_free(e);
+            device_unmap_mmio(e->bar);
+            g_stop_orphan = NULL;
+            netif_put(&e->nif);
+            cleaned = true;
+        }
+    }
+    bool rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
+                   pdev->dev.state == DEV_BOUND;
+    bool ok = removed == 0 && fi.hits > 0 && retained && freed == 0 && cleaned && rebound;
+    kinfo("E1000E-STOP-ACK: kind=%s %s hits=%llu dma_frees=%llu retained=%u cleaned=%u rebound=%u",
+          faultinject_kind_name((enum fi_kind)kind), ok ? "PASS" : "FAIL", (unsigned long long)fi.hits,
+          (unsigned long long)freed, retained, cleaned, rebound);
+    return ok;
+#else
+    (void)kind;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(e1000e_test_stop_ack);
+#endif
 
 static const struct pci_id e1000e_ids[] = {
     { E1000E_VENDOR, E1000E_82574L, 0, 0, 0 },

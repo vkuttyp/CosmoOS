@@ -36,6 +36,8 @@ enum fi_kind {
     FI_NET_RX_DUP,    /* a received frame is delivered a second time (a link-layer retransmit, a switch flooding): the stack must stay idempotent -- TCP delivers the duplicated segment once, ARP keeps one entry */
     FI_NVME_ADMIN_POLL, /* nvme: an admin command takes the no-vector path -- the issuing thread drives the admin queue itself and the interrupt handler leaves that queue alone -- so the path runs under lockdep on a machine that has a vector */
     FI_NVME_DISABLE_ACK, /* nvme: the controller fails to acknowledge CC.EN clear */
+    FI_E1000E_RX_DISABLE_ACK, /* e1000e: RCTL.EN remains set */
+    FI_E1000E_TX_DISABLE_ACK, /* e1000e: TCTL.EN remains set */
     FI_KIND_COUNT,
 };
 

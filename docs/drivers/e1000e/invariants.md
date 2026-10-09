@@ -47,3 +47,15 @@ on the other. Servicing an empty ring costs a register read.
 — that `netif` was not virtio-shaped — and it is stated here so that a
 future change which does need one is recognised as the finding it would
 be.
+
+**E7. Ring DMA is freed only after both engines acknowledge disable.**
+Removal clears `RCTL.EN` and `TCTL.EN`, reads each register back, and
+retries a failed acknowledgement once. If either engine remains enabled,
+the interrupt path is retired but the descriptor rings, mapped buffers,
+mbufs, and private state stay allocated. A device may continue accessing
+the memory until it acknowledges the stop.
+
+Check: `e1000e-stop-ack` injects a failed RX or TX disable write, requires
+the failed readback to retain DMA memory, then clears the injection,
+retries the stop, and rebinds the device. `tools/e1000e-stop-ack-probe.py
+--old` must fail this check with DMA frees on both architectures.

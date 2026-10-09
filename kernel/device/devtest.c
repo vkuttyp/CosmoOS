@@ -3637,3 +3637,24 @@ bool selftest_nvme_disable_ack(const char **reason)
     return true;
 #endif
 }
+
+bool selftest_e1000e_stop_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("e1000e_test_stop_ack", NULL);
+    if (run == NULL) {
+        *reason = "e1000e-stop-ack: test seam not exported by the e1000e module";
+        return false;
+    }
+    bool rx = run(FI_E1000E_RX_DISABLE_ACK);
+    bool tx = run(FI_E1000E_TX_DISABLE_ACK);
+    bool ok = rx && tx;
+    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u tx=%u", ok ? "PASS" : "FAIL", rx, tx);
+    if (!ok)
+        *reason = "e1000e-stop-ack: DMA was reclaimed before RX/TX stop acknowledgement; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
