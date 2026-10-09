@@ -38,6 +38,8 @@ enum fi_kind {
     FI_NVME_DISABLE_ACK, /* nvme: the controller fails to acknowledge CC.EN clear */
     FI_E1000E_RX_DISABLE_ACK, /* e1000e: RCTL.EN remains set */
     FI_E1000E_TX_DISABLE_ACK, /* e1000e: TCTL.EN remains set */
+    FI_XHCI_STOP_EP_ACK, /* xHCI: Stop Endpoint does not acknowledge */
+    FI_XHCI_DISABLE_SLOT_ACK, /* xHCI: Disable Slot does not acknowledge */
     FI_KIND_COUNT,
 };
 

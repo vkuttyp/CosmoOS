@@ -152,3 +152,17 @@ stack, which lives in the arena and has no direct-map address.
 Check: by review, and by what happens without it -- the hub's first
 version read port status into a stack buffer, `dma_map` refused it, and
 the hub found no devices behind it at all.
+
+**U12. A slot's DMA survives every unacknowledged endpoint or slot stop.**
+`xhci_disable_device` retries a failed Stop Endpoint or Disable Slot once.
+If the retry fails, it removes the software slot association and leaves
+the DCBAA context, endpoint rings, and backing memory allocated. The
+controller may still have the context cached or may still fetch from a
+ring whose stop it did not acknowledge.
+
+Check: `xhci-disable-ack` injects a persistent failure into each command
+in the synthetic teardown path, verifies the `xhci_dev` was retained,
+then clears the fault, retries teardown and verifies the fixture is
+reclaimed. `tools/xhci-disable-ack-probe.py --old` must fail on both
+architectures because the old path freed the fixture after the failed
+command.

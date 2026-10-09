@@ -243,6 +243,14 @@ probe holds the device model's lock, and registering the USB device
 needs it — which is why the worker exists at all, and why the wait is
 in the module's init and not in probe.
 
+**Device disable** (`xhci_disable_device`): stop each endpoint that still
+has queued TRBs, then issue Disable Slot. Each command gets one retry.
+If either still fails, the USB device is detached from software event
+routing but its DCBAA context, rings, and backing allocations remain
+valid; a controller that did not acknowledge a stop may still own them.
+The command failures are exercised with a synthetic command ring by
+`xhci-disable-ack`.
+
 **Removal** (`xhci_remove`): disconnect every port, stop the worker,
 stop the controller (`RS` clear, wait `HCH`), release the vector and
 `synchronize_irq`, free every ring and context, unmap.

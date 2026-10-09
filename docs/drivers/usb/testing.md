@@ -66,6 +66,13 @@ one device on the bus, `sda` back and readable, the same name on the
 same port. 641 ms on x86_64, most of it the port reset and the storage
 driver's readiness probe.
 
+**`xhci-disable-ack`**: inject a persistent Stop Endpoint failure, then
+a persistent Disable Slot failure, in the same teardown helper used by
+`xhci_disable_device`. Both paths must retain their device context and
+rings across the failed command and reclaim them only after the injected
+failure is cleared. The old-behavior proof runs through
+`tools/xhci-disable-ack-probe.py --old` on x86-64 and AArch64.
+
 **`iommu`** (the existing test, extended): for every block device whose
 driver has `debug_dma` and whose DMA device has a domain — `nvme0n1`
 and `sda` — a one-block read into an unmapped address is provoked and

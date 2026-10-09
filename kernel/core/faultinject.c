@@ -42,6 +42,8 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_NVME_DISABLE_ACK] = "nvme-disable-ack",
     [FI_E1000E_RX_DISABLE_ACK] = "e1000e-rx-disable-ack",
     [FI_E1000E_TX_DISABLE_ACK] = "e1000e-tx-disable-ack",
+    [FI_XHCI_STOP_EP_ACK] = "xhci-stop-ep-ack",
+    [FI_XHCI_DISABLE_SLOT_ACK] = "xhci-disable-slot-ack",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

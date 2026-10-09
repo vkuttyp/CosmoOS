@@ -620,6 +620,7 @@ static const struct selftest tests[] = {
     { "usb-storage",     selftest_usb_storage },
     { "usb-storage-timeout", selftest_usb_storage_timeout },
     { "usb-unplug",      selftest_usb_unplug },
+    { "xhci-disable-ack", selftest_xhci_disable_ack },
     { "ahci-identify",   selftest_ahci_identify },
     { "ahci-io",         selftest_ahci_io },
     { "ahci-timeout",    selftest_ahci_timeout },

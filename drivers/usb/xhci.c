@@ -16,6 +16,7 @@
 #include <kernel/device.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/irq.h>
 #include <kernel/irqpoll.h>
@@ -125,6 +126,9 @@ struct xhci {
     bool msix;
     bool dead;
     uint64_t events, transfers, commands, errors;
+#if CONFIG_SELFTEST
+    bool test_synthetic;
+#endif
 
     struct thread *worker;
     struct waitqueue wq;
@@ -141,6 +145,16 @@ struct xhci {
  * loads and before the self-tests run. */
 static LIST_HEAD(g_controllers);
 static struct mutex g_controllers_lock;
+#if CONFIG_SELFTEST
+static unsigned g_dev_free_calls;
+static struct xhci g_disable_test_x;
+static struct pci_device g_disable_test_pdev;
+static struct usb_device g_disable_test_udev;
+static struct xhci_dev *g_disable_test_d;
+static uint64_t g_disable_test_dcbaa[XHCI_MAX_SLOTS + 1];
+bool xhci_test_disable_ack(unsigned kind);
+bool xhci_test_recover_disable_ack(void);
+#endif
 
 static uint32_t rd32(vaddr_t addr) { return *(volatile uint32_t *)addr; }
 static void wr32(vaddr_t addr, uint32_t v) { *(volatile uint32_t *)addr = v; }
@@ -265,6 +279,17 @@ static int xhci_cmd(struct xhci *x, uint64_t ptr, uint32_t control, unsigned *sl
 {
     if (x->dead)
         return -EIO;
+#if CONFIG_SELFTEST && CONFIG_FAULTINJECT
+    if (x->test_synthetic) {
+        unsigned type = TRB_TYPE_OF(control);
+        if ((type == TRB_CMD_STOP_EP && faultinject_should_fail(FI_XHCI_STOP_EP_ACK)) ||
+            (type == TRB_CMD_DISABLE_SLOT && faultinject_should_fail(FI_XHCI_DISABLE_SLOT_ACK)))
+            return CC_USB_TRANSACTION;
+        if (slot_out)
+            *slot_out = 1;
+        return CC_SUCCESS;
+    }
+#endif
     mutex_lock(&x->cmd_lock);
     completion_init(&x->cmdw.done, "xhci-cmd");
     bool first_cycle;
@@ -729,6 +754,9 @@ static int xhci_reset_endpoint(struct usb_hcd *hcd, struct usb_device *udev, uin
 
 static void xhci_dev_free(struct xhci *x, struct xhci_dev *d)
 {
+#if CONFIG_SELFTEST
+    __atomic_fetch_add(&g_dev_free_calls, 1u, __ATOMIC_RELAXED);
+#endif
     for (unsigned dci = 1; dci <= XHCI_MAX_DCI; dci++)
         ring_free(x, d->ep[dci].ring);
     if (d->ctx)
@@ -961,6 +989,81 @@ static void xhci_disable_device(struct usb_hcd *hcd, struct usb_device *udev)
     udev->hcd_priv = NULL;
     xhci_dev_free(x, d);
 }
+
+#if CONFIG_SELFTEST
+bool xhci_test_disable_ack(unsigned kind)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (kind != FI_XHCI_STOP_EP_ACK && kind != FI_XHCI_DISABLE_SLOT_ACK)
+        return false;
+    memset(&g_disable_test_x, 0, sizeof(g_disable_test_x));
+    memset(&g_disable_test_pdev, 0, sizeof(g_disable_test_pdev));
+    memset(&g_disable_test_udev, 0, sizeof(g_disable_test_udev));
+    memset(g_disable_test_dcbaa, 0, sizeof(g_disable_test_dcbaa));
+    g_disable_test_d = NULL;
+    g_disable_test_pdev.dev.dma_mask = UINT64_MAX;
+    g_disable_test_x.pdev = &g_disable_test_pdev;
+    g_disable_test_x.test_synthetic = true;
+    g_disable_test_x.dcbaa = g_disable_test_dcbaa;
+    spinlock_init(&g_disable_test_x.lock, "xhci-test");
+
+    struct xhci_dev *d = kzalloc(sizeof(*d));
+    if (d == NULL)
+        return false;
+    d->ctx = dma_alloc(&g_disable_test_pdev.dev, PAGE_SIZE, &d->ctx_dma, DMA_ZERO);
+    d->input = dma_alloc(&g_disable_test_pdev.dev, PAGE_SIZE, &d->input_dma, DMA_ZERO);
+    d->ep[1].ring = ring_alloc(&g_disable_test_x);
+    if (d->ctx == NULL || d->input == NULL || d->ep[1].ring == NULL) {
+        xhci_dev_free(&g_disable_test_x, d);
+        return false;
+    }
+    d->ep[1].ring->used = 1;   /* the disable path must stop this endpoint before reclaiming it */
+    g_disable_test_udev.hcd = &g_disable_test_x.hcd;
+    g_disable_test_udev.hcd_priv = d;
+    g_disable_test_udev.slot = 1;
+    g_disable_test_dcbaa[1] = d->ctx_dma;
+    g_disable_test_x.slot_dev[1] = &g_disable_test_udev;
+    uint64_t context_dma = d->ctx_dma;
+    unsigned frees0 = __atomic_load_n(&g_dev_free_calls, __ATOMIC_RELAXED);
+
+    xhci_disable_device(&g_disable_test_x.hcd, &g_disable_test_udev);
+    unsigned frees = __atomic_load_n(&g_dev_free_calls, __ATOMIC_RELAXED) - frees0;
+    bool retained = frees == 0 && g_disable_test_udev.hcd_priv == NULL &&
+                    g_disable_test_udev.slot == 0 && g_disable_test_x.slot_dev[1] == NULL &&
+                    g_disable_test_dcbaa[1] == context_dma;
+    if (retained)
+        g_disable_test_d = d;
+    kinfo("XHCI-DISABLE-ACK: kind=%u %s dev_frees=%u retained=%u", kind,
+          retained ? "PASS" : "FAIL", frees, retained);
+    return retained;
+#else
+    (void)kind;
+    return false;
+#endif
+}
+EXPORT_SYMBOL(xhci_test_disable_ack);
+
+bool xhci_test_recover_disable_ack(void)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    if (g_disable_test_d == NULL)
+        return true;   /* the old path already freed the fixture; the probe still reports failure */
+    struct xhci_dev *d = g_disable_test_d;
+    g_disable_test_udev.slot = 1;
+    g_disable_test_udev.hcd_priv = d;
+    g_disable_test_dcbaa[1] = d->ctx_dma;
+    g_disable_test_x.slot_dev[1] = &g_disable_test_udev;
+    unsigned frees0 = __atomic_load_n(&g_dev_free_calls, __ATOMIC_RELAXED);
+    xhci_disable_device(&g_disable_test_x.hcd, &g_disable_test_udev);
+    g_disable_test_d = NULL;
+    return __atomic_load_n(&g_dev_free_calls, __ATOMIC_RELAXED) == frees0 + 1 &&
+           g_disable_test_udev.hcd_priv == NULL && g_disable_test_udev.slot == 0;
+#else
+    return false;
+#endif
+}
+EXPORT_SYMBOL(xhci_test_recover_disable_ack);
+#endif
 
 static int xhci_debug_port(struct usb_hcd *hcd, unsigned port, bool connected);   /* with the ports, below */
 
