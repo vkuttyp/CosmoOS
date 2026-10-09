@@ -435,12 +435,23 @@ static unsigned e1000e_tx_pending(struct netif *nif, unsigned *capacity)
 static const struct netif_ops e1000e_ops = { .transmit = e1000e_transmit, .release = e1000e_release,
                                              .tx_pending = e1000e_tx_pending };
 
-static void hw_quiesce(struct e1000e *e)
+static bool hw_stop_rx(struct e1000e *e)
+{
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        wr32(e, E1000_RCTL, 0);
+        if ((rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool hw_quiesce(struct e1000e *e)
 {
     wr32(e, E1000_IMC, 0xffffffffu);
     (void)rd32(e, E1000_ICR);
-    wr32(e, E1000_RCTL, 0);
+    bool rx_stopped = hw_stop_rx(e);
     wr32(e, E1000_TCTL, 0);
+    return rx_stopped;
 }
 
 static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
@@ -574,7 +585,7 @@ static void e1000e_remove(struct pci_device *pdev)
         return;
     netif_unregister(&e->nif);   /* no transmit or receive reaches the rings after this */
     timer_cancel_sync(&e->watchdog);
-    hw_quiesce(e);
+    bool stopped = hw_quiesce(e);
     int vector = e->vector;
     if (e->msix)
         pci_msix_disable(pdev);
@@ -582,6 +593,14 @@ static void e1000e_remove(struct pci_device *pdev)
         pci_msi_disable(pdev);
     if (vector >= 0)
         synchronize_irq((unsigned)vector);
+    if (!stopped) {
+#if CONFIG_SELFTEST
+        g_stop_orphan = e;
+#endif
+        pdev->dev.drvdata = NULL;
+        kwarn("e1000e: %s: retaining RX DMA after disable was not acknowledged", pdev->dev.name);
+        return;
+    }
     rings_free(e);
     device_unmap_mmio(e->bar);
     pdev->dev.drvdata = NULL;
@@ -615,9 +634,10 @@ bool e1000e_test_stop_ack(unsigned kind)
     bool cleaned = false;
     if (retained) {
         struct e1000e *e = g_stop_orphan;
+        bool stopped = hw_quiesce(e);
         bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
         bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
-        if (rx_off && tx_off) {
+        if (stopped && rx_off && tx_off) {
             rings_free(e);
             device_unmap_mmio(e->bar);
             g_stop_orphan = NULL;
