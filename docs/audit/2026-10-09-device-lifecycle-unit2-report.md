@@ -15,6 +15,7 @@ failure from an unreachable or unresolved suspicion.
 | Target | Verdict | Evidence | Action |
 |---|---|---|---|
 | NVMe submit across controller death | Proven | `selftest_submit_die_window` calls `controller_die` after the first dead check and before the queue lock. `tools/nvme-die-window-probe.py --old` on x86-64 and AArch64 reported `accepted=1 done=0 inflight=1`; each failed only the required proof marker, while all 451 self-tests and the 100-round network harness passed. With the fix, both architectures reported `accepted=0 done=0 inflight=0` and booted cleanly. | Added an acquire dead recheck under `q->lock`; rejects with `-EIO` and unmaps every segment before returning. |
+| virtio-rng completion after reset | Proven | `vrng_completed` runs after the synthetic reset boundary and reaches `vrng_post`. `tools/virtio-rng-repost-probe.py --old` on both architectures reported `posts_after_reset=1`; the sole harness failure was the required proof marker, with 451 self-tests and the network harness passing. Fixed x86-64 and AArch64 boots reported zero posts after reset. | `vrng_post` checks `stopping` while holding the lock that serializes `virtq_add` and `virtq_kick`; remove closes this gate before reset. |
 
 ## Out-of-scope validation finding
 

@@ -868,7 +868,7 @@ Prove each concern with a deterministic interleaving or fault before fixing.
 
 | Follow-up | Evidence and proof still needed |
 |---|---|
-| virtio-rng completion after reset | `vrng_remove` resets before queue poll disable; `vrng_done` can repost its persistent buffer. Lifetime is retained through teardown, so the net driver's allocation leak does not follow. Inject reset-time completion and establish an observable incorrect effect. |
+| ~~virtio-rng completion after reset~~ | **PROVEN AND FIXED (device-lifecycle Unit 2, 2026-10-09)**: `vrng_completed` after the reset boundary reposted once; `tools/virtio-rng-repost-probe.py --old` failed only the proof marker on x86-64 and AArch64. `vrng_post` now closes publication under `post_lock` before reset. See the [Unit 2 report](2026-10-09-device-lifecycle-unit2-report.md). |
 | Timeout versus late block submission | NVMe checks `c->dead` before mapping, not again under the queue lock; `controller_die` drains while tables/polls remain. Virtio-blk timeout also needs an accepted-submit/locked-drain interleaving check. Park a submit between its dead check and publication; prove whether block-layer gating already excludes it. |
 | Failed hardware stop acknowledgements | NVMe `controller_die` / rollback ignore `wait_ready(false)`; AHCI restart/recover/remove ignore stop/COMRESET failure; xHCI remove ignores halt wait failure. Inject failure while DMA ownership remains and verify no premature unmap/free. |
 | AHCI probe rollback before IRQ synchronization | `fail_ports` stops/frees port DMA before releasing/synchronizing the vector. Establish whether a handler can still reference that DMA at any reachable probe failure site; no active published bio was established in this audit. |
