@@ -5712,10 +5712,8 @@ bool selftest_netif_remove_worker(const char **reason)
     if (remover != NULL) {
         wait_for_completion(&st.removed);
         thread_join(remover);
-        registered = false;
     } else if (registered) {
         netif_unregister(&f.nif);
-        registered = false;
     }
     netif_test_worker_hooks_set(NULL, NULL, NULL);
     netif_put(&f.nif);
