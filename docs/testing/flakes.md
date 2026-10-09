@@ -6,6 +6,19 @@ long enough. The list exists so that when one of them fails, the reader
 knows within one line whether to re-run or to investigate. It is short
 on purpose, and the rule for joining it is at the end.
 
+**Observed once, AArch64 `signal-stop` (2026-10-09):** while running
+`tools/nvme-die-window-probe.py --arch aarch64 --old`, the harness also
+reported `signal-stop` check 9. In
+`out/nvme-die-window-probe/aarch64-old/boot.serial`, the child exited
+with status 7 before its parent exited with status 9. Check 9 sends
+`SIGCONT` and then requires `waitpid(..., WCONTINUED)` to report the
+continue; the child returns immediately after `SIGCONT`. In
+`kernel/process/process.c`, `child_event_locked` checks `EXITED` before
+`CONTINUED`, so a fast exit can hide an unreported continue. The fixed
+NVMe AArch64 boot and an earlier old-behavior boot passed `signal-stop`.
+This is outside Unit 2 and remains an out-of-scope correctness finding,
+not a load-sensitive classification or an assertion change.
+
 **Observed once, host test `online-late` (2026-10-09):** the first
 `gmake host-test` overlapped two `gmake -j4 ... analyze` builds and failed
 `tests/host/test_quiesce.c:425-426` (`reads > 0`, `saw_new_cpu`). In this
