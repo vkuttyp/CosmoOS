@@ -72,7 +72,8 @@ struct e1000e {
  * injection is cleared and the stop can be acknowledged. */
 static struct e1000e *g_stop_orphan;
 static unsigned g_rings_free_calls;
-bool e1000e_test_stop_ack(unsigned kind);
+unsigned e1000e_test_ring_frees(void);
+bool e1000e_test_has_orphan(void);
 bool e1000e_test_recover_stop_ack(void);
 #endif
 
@@ -624,56 +625,38 @@ static void e1000e_remove(struct pci_device *pdev)
 
 #if CONFIG_SELFTEST
 /* Called by the kernel's device self-test through debug-only module
- * symbols. Fault rules are armed by the kernel test because the rule
- * control functions are intentionally not part of the module ABI. */
-bool e1000e_test_stop_ack(unsigned kind)
+ * symbols. Unbind/rebind and fault-rule control stay in the kernel. */
+unsigned e1000e_test_ring_frees(void)
 {
-#if CONFIG_DEBUG && CONFIG_FAULTINJECT
-    struct pci_device *pdev = pci_find_device(E1000E_VENDOR, E1000E_82574L, NULL);
-    if (pdev == NULL || pdev->dev.state != DEV_BOUND)
-        return true;   /* this machine has no e1000e function */
-    if (kind != FI_E1000E_RX_DISABLE_ACK && kind != FI_E1000E_TX_DISABLE_ACK)
-        return false;
-
-    unsigned frees_before = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED);
-    int removed = pci_test_remove(pdev);
-    unsigned ring_frees = __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED) - frees_before;
-    bool retained = g_stop_orphan != NULL && g_stop_orphan->pdev == pdev;
-    bool ok = removed == 0 && retained && ring_frees == 0;
-    kinfo("E1000E-STOP-ACK: kind=%u %s ring_frees=%u retained=%u", kind,
-          ok ? "PASS" : "FAIL", ring_frees, retained);
-    return ok;
-#else
-    (void)kind;
-    return false;
-#endif
+    return __atomic_load_n(&g_rings_free_calls, __ATOMIC_RELAXED);
 }
-EXPORT_SYMBOL(e1000e_test_stop_ack);
+EXPORT_SYMBOL(e1000e_test_ring_frees);
+
+bool e1000e_test_has_orphan(void)
+{
+    return g_stop_orphan != NULL;
+}
+EXPORT_SYMBOL(e1000e_test_has_orphan);
 
 bool e1000e_test_recover_stop_ack(void)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
-    struct pci_device *pdev = pci_find_device(E1000E_VENDOR, E1000E_82574L, NULL);
-    if (pdev == NULL)
-        return false;
+    if (g_stop_orphan == NULL)
+        return true;
     bool cleaned = true;
-    if (g_stop_orphan != NULL) {
-        struct e1000e *e = g_stop_orphan;
-        bool stopped = hw_quiesce(e);
-        bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
-        bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
-        if (stopped && rx_off && tx_off) {
-            rings_free(e);
-            device_unmap_mmio(e->bar);
-            g_stop_orphan = NULL;
-            netif_put(&e->nif);
-        } else {
-            cleaned = false;
-        }
+    struct e1000e *e = g_stop_orphan;
+    bool stopped = hw_quiesce(e);
+    bool rx_off = (rd32(e, E1000_RCTL) & E1000_RCTL_EN) == 0;
+    bool tx_off = (rd32(e, E1000_TCTL) & E1000_TCTL_EN) == 0;
+    if (stopped && rx_off && tx_off) {
+        rings_free(e);
+        device_unmap_mmio(e->bar);
+        g_stop_orphan = NULL;
+        netif_put(&e->nif);
+    } else {
+        cleaned = false;
     }
-    bool rebound = cleaned && pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
-                   pdev->dev.state == DEV_BOUND;
-    return rebound;
+    return cleaned;
 #else
     return false;
 #endif

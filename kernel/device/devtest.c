@@ -3645,34 +3645,93 @@ bool selftest_e1000e_stop_ack(const char **reason)
         kinfo("E1000E-STOP-ACK-SWEEP: PASS rx=not-present tx=not-present");
         return true;
     }
-    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("e1000e_test_stop_ack", NULL);
+    unsigned (*ring_frees)(void) = (unsigned (*)(void))module_symbol_lookup("e1000e_test_ring_frees", NULL);
+    bool (*has_orphan)(void) = (bool (*)(void))module_symbol_lookup("e1000e_test_has_orphan", NULL);
     bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("e1000e_test_recover_stop_ack", NULL);
-    if (run == NULL || recover == NULL) {
+    if (ring_frees == NULL || has_orphan == NULL || recover == NULL) {
         *reason = "e1000e-stop-ack: test seam not exported by the e1000e module";
         return false;
     }
-    faultinject_set(FI_E1000E_RX_DISABLE_ACK, 1, 0, thread_current());
-    bool rx_retained = run(FI_E1000E_RX_DISABLE_ACK);
-    struct fi_stats rx_st;
-    faultinject_stats(FI_E1000E_RX_DISABLE_ACK, &rx_st);
-    faultinject_clear(FI_E1000E_RX_DISABLE_ACK);
-    bool rx_recovered = recover();
-    bool rx = rx_retained && rx_st.hits > 0 && rx_recovered;
+    struct pci_device *pdev = pci_find_device(0x8086, 0x10d3, NULL);
+    bool case_ok[2] = { false, false };
+    const enum fi_kind kinds[2] = { FI_E1000E_RX_DISABLE_ACK, FI_E1000E_TX_DISABLE_ACK };
+    unsigned hits[2] = { 0, 0 }, freed[2] = { 0, 0 };
+    bool retained[2] = { false, false }, recovered[2] = { false, false }, rebound[2] = { false, false };
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned before = ring_frees();
+        faultinject_set(kinds[i], 1, 0, thread_current());
+        int removed = pci_test_remove(pdev);
+        struct fi_stats st;
+        faultinject_stats(kinds[i], &st);
+        faultinject_clear(kinds[i]);
+        hits[i] = (unsigned)st.hits;
+        freed[i] = ring_frees() - before;
+        retained[i] = has_orphan();
+        recovered[i] = recover();
+        rebound[i] = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
+                     pdev->dev.state == DEV_BOUND;
+        case_ok[i] = removed == 0 && hits[i] > 0 && freed[i] == 0 && retained[i] &&
+                     recovered[i] && rebound[i];
+        kinfo("E1000E-STOP-ACK: kind=%s %s hits=%u ring_frees=%u retained=%u recovered=%u rebound=%u",
+              faultinject_kind_name(kinds[i]), case_ok[i] ? "PASS" : "FAIL", hits[i], freed[i],
+              retained[i], recovered[i], rebound[i]);
+    }
 
-    faultinject_set(FI_E1000E_TX_DISABLE_ACK, 1, 0, thread_current());
-    bool tx_retained = run(FI_E1000E_TX_DISABLE_ACK);
-    struct fi_stats tx_st;
-    faultinject_stats(FI_E1000E_TX_DISABLE_ACK, &tx_st);
-    faultinject_clear(FI_E1000E_TX_DISABLE_ACK);
-    bool tx_recovered = recover();
-    bool tx = tx_retained && tx_st.hits > 0 && tx_recovered;
-
-    bool ok = rx && tx;
-    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u/%u hits=%llu tx=%u/%u hits=%llu", ok ? "PASS" : "FAIL",
-          rx_retained, rx_recovered, (unsigned long long)rx_st.hits, tx_retained, tx_recovered,
-          (unsigned long long)tx_st.hits);
+    bool ok = case_ok[0] && case_ok[1];
+    kinfo("E1000E-STOP-ACK-SWEEP: %s rx=%u tx=%u", ok ? "PASS" : "FAIL", case_ok[0], case_ok[1]);
     if (!ok)
         *reason = "e1000e-stop-ack: DMA was reclaimed before RX/TX stop acknowledgement; see the log";
+    return ok;
+#else
+    (void)reason;
+    return true;
+#endif
+}
+
+bool selftest_xhci_disable_ack(const char **reason)
+{
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+    bool present = false;
+    for (unsigned i = 0; i < pci_device_count(); i++) {
+        struct pci_device *p = pci_device_at(i);
+        if (p->class == 0x0c && p->subclass == 0x03 && p->prog_if == 0x30) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) {
+        kinfo("XHCI-DISABLE-ACK-SWEEP: PASS stop=not-present slot=not-present");
+        return true;
+    }
+    bool (*run)(unsigned) = (bool (*)(unsigned))module_symbol_lookup("xhci_test_disable_ack", NULL);
+    bool (*recover)(void) = (bool (*)(void))module_symbol_lookup("xhci_test_recover_disable_ack", NULL);
+    if (run == NULL || recover == NULL) {
+        *reason = "xhci-disable-ack: test seam not exported by the xHCI module";
+        return false;
+    }
+
+    faultinject_set(FI_XHCI_STOP_EP_ACK, 1, 0, thread_current());
+    bool stop_retained = run(FI_XHCI_STOP_EP_ACK);
+    struct fi_stats stop_st;
+    faultinject_stats(FI_XHCI_STOP_EP_ACK, &stop_st);
+    faultinject_clear(FI_XHCI_STOP_EP_ACK);
+    bool stop_recovered = recover();
+    bool stop = stop_retained && stop_st.hits >= 2 && stop_recovered;
+
+    faultinject_set(FI_XHCI_DISABLE_SLOT_ACK, 1, 0, thread_current());
+    bool slot_retained = run(FI_XHCI_DISABLE_SLOT_ACK);
+    struct fi_stats slot_st;
+    faultinject_stats(FI_XHCI_DISABLE_SLOT_ACK, &slot_st);
+    faultinject_clear(FI_XHCI_DISABLE_SLOT_ACK);
+    bool slot_recovered = recover();
+    bool slot = slot_retained && slot_st.hits >= 2 && slot_recovered;
+
+    bool ok = stop && slot;
+    kinfo("XHCI-DISABLE-ACK-SWEEP: %s stop=%u/%u hits=%llu slot=%u/%u hits=%llu", ok ? "PASS" : "FAIL",
+          stop_retained, stop_recovered, (unsigned long long)stop_st.hits, slot_retained, slot_recovered,
+          (unsigned long long)slot_st.hits);
+    if (!ok)
+        *reason = "xhci-disable-ack: reclaimed a context before a command acknowledged stop; see the log";
     return ok;
 #else
     (void)reason;
