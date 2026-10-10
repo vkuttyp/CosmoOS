@@ -42,6 +42,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", default="x86_64")
+    ap.add_argument("--keep", action="store_true", help="leave the worktree for inspection")
     args = ap.parse_args()
     sha = git("log", "--format=%H", "--fixed-strings", f"--grep={FIX_SUBJECT}", "-1").strip()
     if not sha:
@@ -63,13 +64,17 @@ def main():
         print(f"lz4-stack-probe: {args.arch} {'old' if args.old else 'fixed'} ({sha[:8]}): {verdict[0]}")
         if args.old:
             m = re.search(r"unhandled exception \S+ \(#DF double fault\)|exception.*stack overflow", log)
-            pc = re.search(r"^\s*#0\s+(0x[0-9a-f]+)", log, re.M) or re.search(r"(?:RIP|PC|ELR)=([0-9a-f]{16})", log)
+            # The faulting PC is in the panic report, not in whatever
+            # earlier diagnostic printed a frame #0 (a lockup sample does).
+            at = log.find("KERNEL PANIC")
+            tail = log[at:at + 4000] if at >= 0 else ""
+            pc = re.search(r"(?:RIP|PC|ELR|pc)\s*[=:]\s*(?:0x)?([0-9a-f]{16})", tail)
             where = ""
             if pc:
-                addr = pc.group(1) if pc.group(1).startswith("0x") else "0x" + pc.group(1)
+                addr = "0x" + pc.group(1)
                 sym = shutil.which("llvm-symbolizer") or os.path.expanduser("~/.swiftly/bin/llvm-symbolizer")
                 where = subprocess.run([sym, f"--obj={os.path.join(wt, 'out', args.arch + '-debug', 'kernel', 'kernel.elf')}",
-                                        addr], capture_output=True, text=True).stdout.split("\n")[0]
+                                        "--inlining", addr], capture_output=True, text=True).stdout.strip().replace("\n", " | ")
             panic_line = re.search(r"^KERNEL PANIC: .*$", log, re.M)
             print(f"lz4-stack-probe: panic: {panic_line.group(0) if panic_line else 'none'}; at {where or '?'}")
             ok = panic_line is not None and "lz4_compress" in where and MARKER not in log
@@ -78,8 +83,11 @@ def main():
         print(f"lz4-stack-probe: expectation {'held' if ok else 'FAILED'}")
         return 0 if ok else 1
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, capture_output=True)
-        shutil.rmtree(tmp, ignore_errors=True)
+        if args.keep:
+            print(f"lz4-stack-probe: worktree kept at {wt}")
+        else:
+            subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, capture_output=True)
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
