@@ -9353,8 +9353,7 @@ bool selftest_net_tcp_sws(const char **reason)
      * the 200-byte sliver the partial acknowledgement opened. */
     CHECK(hin_next_data(u, 41003, &sg));
     if (sg.seq != iss + 1 + mss || sg.paylen != mss)
-        kwarn("net-tcp-sws: next data at +%u, %u bytes (mss %u, max window %u)", sg.seq - iss - 1, sg.paylen, mss,
-              a->tcp->max_sndwnd);
+        kwarn("net-tcp-sws: next data at +%u, %u bytes (mss %u)", sg.seq - iss - 1, sg.paylen, mss);
     CHECK(sg.seq == iss + 1 + mss);
     CHECK(sg.paylen == mss);
 
