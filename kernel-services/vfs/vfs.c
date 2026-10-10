@@ -1011,7 +1011,7 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
      * to be released. */
     mutex_lock(&g_mounts_lock);
     struct mount *r = g_root_mount;
-    if (m->root != v || m == r || m->parent != r || m->unmounting)
+    if (r == NULL || m->root != v || m == r || m->parent != r || m->mountpoint == NULL || m->unmounting)
         rc = -EINVAL;   /* not a mount root, the root already, or not on a directory of the root */
     struct mount *n;
     list_for_each_entry(n, &g_mounts, link) {
@@ -1024,6 +1024,7 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
             name = top_level_name(n);
             if (name && nmoves < SWITCH_MAX_MOVES && strlen(name) <= VFS_NAME_MAX) {
                 strlcpy(moves[nmoves].name, name, sizeof(moves[nmoves].name));
+                moves[nmoves].dir = NULL;   /* looked up in pass 2 */
                 moves[nmoves].mnt = n;
                 moves[nmoves].old_mp = n->mountpoint;
                 nmoves++;
@@ -1063,7 +1064,7 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
         unsigned now = 0;
         list_for_each_entry(n, &g_mounts, link)
             now++;
-        if (now != nr_mounts || g_root_mount != r || m->parent != r)
+        if (now != nr_mounts || g_root_mount != r || m->parent != r || m->mountpoint == NULL)
             rc = -EBUSY;
         for (unsigned i = 0; rc == 0 && i < nmoves; i++)
             if (moves[i].mnt->mountpoint != moves[i].old_mp || moves[i].mnt->unmounting)
