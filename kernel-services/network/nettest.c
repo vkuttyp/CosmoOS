@@ -9313,7 +9313,7 @@ bool selftest_net_tcp_sws(const char **reason)
     struct socket *ls = NULL;
     CHECK(hin_tcp_listener(&ls, 2232));
 
-    static uint8_t data[2000];   /* off the stack: the frame limit */
+    static uint8_t data[4000];   /* off the stack: the frame limit; more than two segments */
     uint8_t l4[160];
     uint16_t l4len;
     struct hin_seg sg;
@@ -9333,7 +9333,7 @@ bool selftest_net_tcp_sws(const char **reason)
     CHECK(a != NULL && a->tcp != NULL);
     ksock_set_nonblock(a, true);
     uint32_t mss = a->tcp->mss;
-    CHECK(mss > 200 && mss < sizeof(data));
+    CHECK(mss > 200 && 2 * mss < sizeof(data));
     l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1, TH_ACK, (uint16_t)mss, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
     hin_drain(u);
@@ -9352,6 +9352,9 @@ bool selftest_net_tcp_sws(const char **reason)
     /* (3) The next data is a full segment from where the first ended -- not
      * the 200-byte sliver the partial acknowledgement opened. */
     CHECK(hin_next_data(u, 41003, &sg));
+    if (sg.seq != iss + 1 + mss || sg.paylen != mss)
+        kwarn("net-tcp-sws: next data at +%u, %u bytes (mss %u, max window %u)", sg.seq - iss - 1, sg.paylen, mss,
+              a->tcp->max_sndwnd);
     CHECK(sg.seq == iss + 1 + mss);
     CHECK(sg.paylen == mss);
 
