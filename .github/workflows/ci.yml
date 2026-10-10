@@ -147,6 +147,7 @@ jobs:
       # boot starts, and while it runs (docs/testing/flakes.md, syscall-fuzz).
       - name: Diagnostic -- the machine before the panic path test
         run: |
+          apt-get install -y --no-install-recommends procps >/dev/null 2>&1 || true
           uptime; free -m; nproc
           ps -eo pid,ppid,pcpu,pmem,etime,stat,args --sort=-pcpu | head -25
 
