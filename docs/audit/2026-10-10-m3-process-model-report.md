@@ -101,3 +101,19 @@ before writing to the report pipe, and the parent, holding the pipe's write
 end itself, never saw EOF. Each side now closes the ends it does not use,
 and the rerun fails in 171 s with the child's status.
 
+### PR 2 validation (local, macOS host, QEMU, TCG)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 145.6 s | PASS 144.8 s |
+| debug `test-smp2` | PASS 144.7 s | PASS 159.3 s |
+| debug `test`, `QEMU_SMP=4` | PASS 154.7 s | PASS 144.8 s |
+| `test-chaos` | PASS 154.8 s | PASS 157.9 s |
+| `test-harness-retry` | PASS 162.9 s | PASS 146.7 s |
+| `BUILD=release test` | PASS 16.9 s | PASS 20.5 s |
+| `BUILD=release test-install` | PASS 23.0 s | PASS 37.0 s |
+| `test-crash` | PASS 148.6 s | PASS 136.4 s |
+
