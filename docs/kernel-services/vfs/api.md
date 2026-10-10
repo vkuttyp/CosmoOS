@@ -74,6 +74,18 @@ flags)`** Mount the root filesystem by name. Once, before any other
 mount; `-ENODEV` for an unregistered name, `-EBUSY` when there is a
 root already.
 
+**`bool vfs_bdev_mounted(const struct blkdev *bd)`** Whether `bd`, its
+disk or one of its partitions is a mount's device right now (a
+snapshot).
+
+**`int vfs_format(const char *fsname, struct blkdev *bd)`** An empty
+`fsname` filesystem through `fs_type.format`: `-ENODEV` unknown type,
+`-EOPNOTSUPP` no `format`, `-EBUSY` mounted.
+
+**`void blkctl_dev_init(void)`** Creates `/dev/blkctl` (after the ramfs
+root and `/dev` exist); the ABI is `uapi/cosmo/blkctl.h`, described in
+`design.md`, "The block-device channel".
+
 **`void bootfs_init(void)`** (`kernel/include/kernel/bootfs.h`,
 `kernel/core/bootfs.c`) Boot composition: registers ramfs, procfs and
 cosmofs, mounts the ramfs root, populates it from the boot archive,

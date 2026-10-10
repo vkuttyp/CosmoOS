@@ -229,6 +229,52 @@ jobs:
       - name: Boot tests without an entropy device (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-entropy
 
+  # Milestone M2's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,
+  # "test-install"): the live image installs itself on a blank disk with
+  # cosmo-install and the disk is checked on the host. Release builds:
+  # every boot here is seconds, not minutes. A job of its own, like the
+  # entropy boots, so build-and-boot keeps its time.
+  install:
+    name: install test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    container: public.ecr.aws/docker/library/debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 30
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Install cross toolchain and test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: Install, reboot, persist (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-install
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-install-${{ matrix.arch }}
+          path: out/${{ matrix.arch }}-release/test-install/*.log
+          if-no-files-found: ignore
+
   # The quiescence protocol's litmus tests against the C11 (RC11) model.
   # herdtools7 is packaged in Debian testing and sid but not trixie, so
   # this runs in its own small container rather than the build job's.

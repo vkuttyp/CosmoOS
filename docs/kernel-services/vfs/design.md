@@ -546,6 +546,33 @@ rather than a panic. The sysctls `kernel.cmdline`, `kernel.root` and
 `kernel.rootdev` are what init reads; `kernel.rootdev` resolves at the
 read.
 
+## The block-device channel (`/dev/blkctl`)
+
+Roadmap M2. What an installer needs from the kernel to put a system on a
+blank disk, and nothing that interprets what is written
+(`kernel-services/vfs/blkctl.c`, `uapi/cosmo/blkctl.h`). Like
+`/dev/fsctl`: 0600 and `cred_privileged` at open and at every write; a
+command is one `struct cosmo_blkctl` written whole (a WRITE is the struct
+and its data in the same write, at most `COSMO_BLKCTL_IO_MAX` = 32 KiB);
+the result is read back from the same open file, whole or not at all,
+and a failed command leaves none.
+
+| Op | Does | Result |
+|---|---|---|
+| `LIST` | every registered block device | header, then `struct cosmo_blkctl_dev` each: name, sectors, sector size, flags `PART`, `RDONLY`, `BOOT` (the partition whose GUID the loader reported), `MOUNTED`; for a partition its disk, entry number, start, unique and type GUIDs |
+| `READ` | `count` sectors at `sector` into kmalloc memory (DMA-able) | the bytes |
+| `WRITE` | `count` sectors at `sector`; `-EBUSY` while `vfs_bdev_mounted` | none |
+| `FLUSH` | `blk_flush` | none |
+| `RESCAN` | `blk_part_scan` (`-EBUSY` while a partition is in use) | `struct cosmo_blkctl_rescan` |
+| `FORMAT` | `vfs_format(fstype, device)`: `fs_type.format`, refused (`-EBUSY`) while mounted | none |
+
+It sits in the VFS rather than the block layer because two of its
+answers are about mounts (D8). `vfs_bdev_mounted` answers for the device,
+the disk it is a partition of, and its partitions; a cosmofs pool member
+other than a mount's named device is not seen (the installer does not
+make multi-device pools). cosmofs's `format` is `cosmofs_format`: a
+single-device, unencrypted pool.
+
 ## Per-open character devices
 
 A character device may keep state per open, not just per node: `chrdev_ops`

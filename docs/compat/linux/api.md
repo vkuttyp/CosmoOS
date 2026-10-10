@@ -110,9 +110,10 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
 | `AT_CLKTCK` (17) | 100 |
 | `AT_NULL` (0) | 0 |
 
-The native vector is unchanged (`AT_PAGESZ`, `AT_ENTRY`, `AT_NULL`);
-the 16 random bytes are placed for every process but only the Linux
-vector points at them. The initial frame spans two eagerly populated
+The native vector carries `COSMO_AT_PHDR`/`PHENT`/`PHNUM`, `COSMO_AT_PAGESZ`,
+`COSMO_AT_ENTRY` and, since roadmap M2, `COSMO_AT_RANDOM` (25, Linux's
+number) pointing at the same 16 random bytes the Linux vector names
+(the installer's GUIDs come from them). The initial frame spans two eagerly populated
 stack pages (`INITIAL_STACK_PAGES` 2) and up to 300 argument and
 environment strings (`INITIAL_STRINGS_MAX`).
 

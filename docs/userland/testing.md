@@ -179,6 +179,23 @@ command N`, `never sent`, `after 'cmd' missing /pattern/`).
 | release | PASS (no self-tests; `rc.test` absent; the interactive harness runs) |
 | `make test-crash`, `make host-test`, `make analyze`, `make reproducible` | PASS |
 
+## `make test-install` (`tests/boot/install_test.py`)
+
+Roadmap M2's acceptance. Release builds in CI (job `install`, both
+architectures); each boot is QEMU through `scripts/qemu-run.sh`, commands
+typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
+
+- **install**: the live image with a blank 256 MiB virtio disk; the disk
+  is found in `cosmo-install --list` by its size; `cosmo-install DEV`
+  must print the `installed on` line and exit 0; a second run without
+  `--force` exits 3 with the refusal; the new root is mounted and must
+  hold `/sbin/cosmo-install`, the `/etc/rc` line `svc boot`, and the
+  mountpoint directories. On the host: both GPT copies valid and equal,
+  two partitions of the ESP and CosmoOS-root types, partition 2's GUID
+  the one printed, partition 1 equal to the boot image's ESP in every
+  sector but the slot, and the slot exactly the marker line plus
+  `root=PARTUUID=<that GUID>` and NULs.
+
 ## Gaps and planned tests
 
 - No test of a redirected builtin (`pwd > file`), of `sh file args`

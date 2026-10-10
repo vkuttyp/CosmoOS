@@ -432,6 +432,45 @@ sockets to activate on), a syscall filter per service (it would need a
 name-to-number table in userland that nothing else wants yet), timers,
 and any readiness protocol.
 
+## The installer (`userland/system/cosmo-install.c`)
+
+Roadmap M2. Non-interactive; everything through `/dev/blkctl`
+(`docs/kernel-services/vfs/design.md`, "The block-device channel").
+
+1. List the devices. The source ESP is the partition flagged `BOOT` (the
+   one the loader was read from); without one there is nothing to copy
+   (exit 3). The target must be a whole disk, writable, not mounted, not
+   the boot disk, 512- or 4096-byte sectors, with room for the ESP and a
+   32 MiB root; one that already has a GPT header (either copy) needs
+   `--force`.
+2. Lay out the table with `gpt_build` (the kernel's own file, built for
+   user mode): partition 1 the ESP type at 1 MiB, exactly the boot ESP's
+   size; partition 2 the CosmoOS root type from the next MiB to the last
+   usable sector. GUIDs are version 4 from SHA-512 over the 16
+   `COSMO_AT_RANDOM` bytes and a counter. The table is parsed with
+   `gpt_parse` from memory before anything is written.
+3. Write the backup copy, then the primary (until the primary lands the
+   disk has no table the kernel accepts), flush, `RESCAN`: the two
+   partitions appear.
+4. Copy the boot ESP to partition 1 sector for sector, finding the
+   command-line slot on the way: exactly one 512-byte sector must begin
+   with the marker line, else the install fails. The installer builds
+   the marker at run time, because its own image is inside the boot
+   archive it scans. The slot becomes the marker line,
+   `root=PARTUUID=<partition 2>`, and NULs.
+5. `FORMAT` partition 2 as cosmofs, mount it at `/mnt/cosmo-install`,
+   create `/dev`, `/proc`, `/tmp` (01777), `/mnt`, `/var`, `/var/log`,
+   `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when present, `/usr`
+   and `/var/db` (files with their modes, directories, symbolic links;
+   device nodes, FIFOs and sockets are not copied). `/boot` stays empty:
+   the boot archive is on the ESP.
+6. `sync`, unmount, flush the disk, print the result.
+
+Any failure after the table was written unmounts what it mounted and
+wipes both copies of the table, so a failed install never leaves a disk
+that looks bootable. The installer writes no FAT: the ESP is the boot
+ESP's bytes and the one sector it rewrites is a file's whole contents.
+
 ## Security
 
 Programs are uid 0 like everything else so far. The shell passes only

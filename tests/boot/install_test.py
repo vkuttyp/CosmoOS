@@ -209,7 +209,10 @@ def stage_install(args, results):
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
         out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls /mnt/v/sbin && ls /mnt/v && "
-                    "cat /mnt/v/etc/rc && umount /mnt/v && echo look-ok")
+                    f"cat /mnt/v/etc/rc && cosmo-install --force {dev}; echo busy-status=$? && "
+                    "umount /mnt/v && echo look-ok")
+        need(out, r"^busy-status=3$", "an install over a mounted disk")
+        need(out, rf"^cosmo-install: {dev} is mounted$", "an install over a mounted disk")
         need(out, r"^look-ok$", "the installed root")
         need(out, r"^cosmo-install$", "the installed /sbin")
         need(out, r"^svc boot$", "the installed /etc/rc")
