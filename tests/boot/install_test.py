@@ -98,6 +98,13 @@ class Boot:
         out = self.text()[before:]
         return out
 
+    def status(self, cmd, tag):
+        """Run `cmd`, then report its exit status as `tag=N` on a line of
+        its own: this shell expands `$?` for a whole line before running
+        any of it, so `cmd; echo $?` would report the line before."""
+        out = self.run(cmd)
+        return out + self.run(f"echo {tag}=$?")
+
     def finish(self, cmd="exit"):
         """Type `cmd` (ending init), wait for QEMU to exit, return its code."""
         self.proc.stdin.write(cmd.encode() + b"\n")
@@ -199,18 +206,19 @@ def stage_install(args, results):
         m = need(out, rf"^(\S+)\s+-\s+{(TARGET_MIB << 20) // SS}\s+{SS}\s", "cosmo-install --list")
         dev = m.group(1)
         t0 = time.monotonic()
-        out = b.run(f"cosmo-install {dev}; echo install-status=$?")
+        out = b.status(f"cosmo-install {dev}", "install-status")
         install_s = time.monotonic() - t0
         need(out, r"^install-status=0$", "cosmo-install")
         m = need(out, rf"^cosmo-install: installed on {dev}: esp ({dev}p?1), root ({dev}p?2), "
                       r"root=PARTUUID=([0-9a-f-]{36})$", "cosmo-install")
         root_dev, partuuid = m.group(2), m.group(3)
-        out = b.run(f"cosmo-install {dev}; echo again-status=$?")
+        out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
         out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls /mnt/v/sbin && ls /mnt/v && "
-                    f"cat /mnt/v/etc/rc && cosmo-install --force {dev}; echo busy-status=$? && "
-                    "umount /mnt/v && echo look-ok")
+                    "cat /mnt/v/etc/rc")
+        out += b.status(f"cosmo-install --force {dev}", "busy-status")
+        out += b.run("umount /mnt/v && echo look-ok")
         need(out, r"^busy-status=3$", "an install over a mounted disk")
         need(out, rf"^cosmo-install: {dev} is mounted$", "an install over a mounted disk")
         need(out, r"^look-ok$", "the installed root")
@@ -237,7 +245,10 @@ def stage_install(args, results):
         raise Fail(f"target: partitions {parts}")
     if str(u2) != partuuid:
         raise Fail(f"target: partition 2 is {u2}, the installer said {partuuid}")
-    esp_live = esp_of(open(args.image, "rb").read())
+    # The ESP as the live disk holds it after its boot: x86 firmware with
+    # no variable store writes \NvVars into the ESP it booted from, before
+    # the installer ever runs, and the installer copies what is there.
+    esp_live = esp_of(open(image, "rb").read())
     esp_new = data[f1 * SS:(l1 + 1) * SS]
     if len(esp_new) != len(esp_live):
         raise Fail("target: partition 1 is not the size of the boot ESP")
