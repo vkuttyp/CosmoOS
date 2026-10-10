@@ -463,6 +463,7 @@ static const struct selftest tests[] = {
     { "user-vmm",        selftest_user_vmm },
     { "vm-teardown-absent", selftest_vm_teardown_absent },
     { "vm-replace",      selftest_vm_replace },
+    { "vm-fork",         selftest_vm_fork },
     { "rlimit",          selftest_rlimit },
     { "uaccess",         selftest_uaccess },
     { "uaccess-guard",   selftest_uaccess_guard },

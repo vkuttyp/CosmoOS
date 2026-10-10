@@ -159,6 +159,24 @@ void vm_set_user_hooks(const struct vm_user_hooks *hooks);
  * Returns 0 or -ENOMEM. */
 int vm_space_create_user(struct vm_space **out);
 
+/*
+ * Duplicate a user space for fork (roadmap M3; design.md, "fork";
+ * invariants M48-M50): the same regions, and every present page shared --
+ * private pages read-only in both spaces (the parent's PTEs lowered and
+ * shot down) so the first write of either side copies or takes back the
+ * frame; shared file pages as they are. The child's file mappings are
+ * records of their own on each vnode, with the parent's tags. Its limits
+ * are the parent's, and -ENOMEM when what it starts with exceeds them.
+ * Sleeps. -ENOMEM; on failure nothing is left of the child.
+ */
+int vm_space_fork(struct vm_space *src, struct vm_space **out);
+#if CONFIG_SELFTEST
+/* Self-tests: resolve a write fault at `va` in `space` the way the fault
+ * handler would for a present read-only page (-EFAULT when it is not a
+ * copy-on-write case). */
+int vm_test_write_fault(struct vm_space *space, vaddr_t va);
+#endif
+
 /* Tear down every region, free frames, free lower-half tables, free the
  * struct. Must not be the space active on the calling CPU. */
 void vm_space_destroy(struct vm_space *space);
@@ -443,6 +461,10 @@ struct vm_stats {
     uint64_t file_fault_retries;  /* the re-find found the world changed, or the page already present */
     uint64_t file_sigbus;         /* faults the file could not serve */
     uint64_t futex_shared_keys;   /* futex calls whose word was classified as a shared file word */
+    /* Copy-on-write after fork (roadmap M3; design.md, "fork"). Atomic. */
+    uint64_t forks;               /* address spaces duplicated by vm_space_fork */
+    uint64_t cow_copies;          /* a write to a shared anonymous frame copied it */
+    uint64_t cow_reuses;          /* a write found its frame no longer shared and took it back writable */
 };
 
 void vm_get_stats(struct vm_stats *out);
