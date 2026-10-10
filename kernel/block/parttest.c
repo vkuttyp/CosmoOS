@@ -88,19 +88,11 @@ static bool exists(const char *name)
     return b != NULL;
 }
 
-bool selftest_blk_gpt(const char **reason)
+/* Everything but the disk's removal; the caller owns the buffers and the
+ * disk, so an early return leaks nothing. */
+static bool gpt_body(struct blkdev *disk, uint8_t *head, uint8_t *tail, uint8_t *sec, const char *n1,
+                     const char *n2, const char *n3, const char **reason)
 {
-    struct blkdev *disk = ramblk_create(64);
-    CHECK(disk != NULL && disk->sector_size == SS && disk->capacity == DISK_SECTORS);
-    uint8_t *head = kmalloc((size_t)GPT_BUILD_HEAD_SECTORS(SS) * SS, KMEM_ZERO);
-    uint8_t *tail = kmalloc((size_t)GPT_BUILD_TAIL_SECTORS(SS) * SS, KMEM_ZERO);
-    uint8_t *sec = kmalloc(2 * SS, KMEM_ZERO);
-    CHECK(head != NULL && tail != NULL && sec != NULL);
-    char n1[BLKDEV_NAME_MAX], n2[BLKDEV_NAME_MAX], n3[BLKDEV_NAME_MAX];
-    ksnprintf(n1, sizeof(n1), "%s1", disk->name);
-    ksnprintf(n2, sizeof(n2), "%s2", disk->name);
-    ksnprintf(n3, sizeof(n3), "%s3", disk->name);
-
     /* A blank disk has no table, which is not an error. */
     unsigned n = 99;
     CHECK(blk_part_scan(disk, &n) == 0 && n == 0 && !exists(n1));
@@ -111,35 +103,40 @@ bool selftest_blk_gpt(const char **reason)
     CHECK(exists(n1) && !exists(n2) && exists(n3));
     struct blkdev *p1 = blk_find(n1);
     struct blkdev *p3 = blk_find(n3);
-    CHECK(p1 != NULL && p3 != NULL);
-    CHECK(p1->capacity == 60 && p3->capacity == 200 && blk_is_partition(p3) && !blk_is_partition(disk));
+    bool ok = p1 != NULL && p3 != NULL && p1->capacity == 60 && p3->capacity == 200 && blk_is_partition(p3) &&
+              !blk_is_partition(disk);
     struct blk_part_info info;
-    CHECK(blk_part_info(p3, &info) && info.index == 3 && info.start == 100 &&
-          strcmp(info.disk, disk->name) == 0 && memcmp(info.type, gpt_type_cosmo_root, 16) == 0);
-    struct blkdev *byid = blk_find_partuuid(info.uuid);
-    CHECK(byid == p3);
-    blkdev_put(byid);
+    ok = ok && blk_part_info(p3, &info) && info.index == 3 && info.start == 100 &&
+         strcmp(info.disk, disk->name) == 0 && memcmp(info.type, gpt_type_cosmo_root, 16) == 0;
+    struct blkdev *byid = ok ? blk_find_partuuid(info.uuid) : NULL;
+    ok = ok && byid == p3;
+    if (byid)
+        blkdev_put(byid);
 
     /* Bounds (D16): the last sector of p1 is its own; one past, or a
      * request that runs past, is refused before any translation. */
-    CHECK(blk_read(p1, 59, 1, sec) == 0);
-    CHECK(blk_read(p1, 60, 1, sec) == -EINVAL);
-    CHECK(blk_read(p1, 59, 2, sec) == -EINVAL);
-    CHECK(blk_read(p3, 200, 1, sec) == -EINVAL);
+    ok = ok && blk_read(p1, 59, 1, sec) == 0;
+    ok = ok && blk_read(p1, 60, 1, sec) == -EINVAL;
+    ok = ok && blk_read(p1, 59, 2, sec) == -EINVAL;
+    ok = ok && blk_read(p3, 200, 1, sec) == -EINVAL;
 
     /* Translation: p3's sector 0 is the disk's sector 100, and p1's last
      * write does not reach p3. */
-    memset(sec, 0x3C, SS);
-    CHECK(blk_write(p3, 0, 1, sec) == 0 && blk_flush(p3) == 0);
-    memset(sec, 0xC3, SS);
-    CHECK(blk_write(p1, 59, 1, sec) == 0);
-    CHECK(blk_read(disk, 99, 2, sec) == 0);
-    CHECK(sec[0] == 0xC3 && sec[SS - 1] == 0xC3 && sec[SS] == 0x3C && sec[2 * SS - 1] == 0x3C);
+    if (ok) {
+        memset(sec, 0x3C, SS);
+        ok = blk_write(p3, 0, 1, sec) == 0 && blk_flush(p3) == 0;
+        memset(sec, 0xC3, SS);
+        ok = ok && blk_write(p1, 59, 1, sec) == 0 && blk_read(disk, 99, 2, sec) == 0;
+        ok = ok && sec[0] == 0xC3 && sec[SS - 1] == 0xC3 && sec[SS] == 0x3C && sec[2 * SS - 1] == 0x3C;
+    }
 
     /* In use: a partition someone holds is not rescanned away. */
-    CHECK(blk_part_scan(disk, &n) == -EBUSY && exists(n1));
-    blkdev_put(p1);
-    blkdev_put(p3);
+    ok = ok && blk_part_scan(disk, &n) == -EBUSY && exists(n1);
+    if (p1)
+        blkdev_put(p1);
+    if (p3)
+        blkdev_put(p3);
+    CHECK(ok);
     CHECK(blk_part_scan(disk, &n) == 0 && n == 2);
 
     /* Damage, each case on a fresh good table; every refusal leaves the
@@ -164,13 +161,39 @@ bool selftest_blk_gpt(const char **reason)
     CHECK(write_table(disk, head, tail, 120) == 0);
     CHECK(blk_part_scan(disk, &n) == -EINVAL && n == 0 && !exists(n1));
 
-    /* Removing the disk removes its partitions. */
+    /* A good table again, for the removal the caller checks. */
     CHECK(write_table(disk, head, tail, 99) == 0);
     CHECK(blk_part_scan(disk, &n) == 0 && n == 2);
+    return true;
+}
+
+bool selftest_blk_gpt(const char **reason)
+{
+    struct blkdev *disk = ramblk_create(64);
+    CHECK(disk != NULL);
+    char n1[BLKDEV_NAME_MAX], n2[BLKDEV_NAME_MAX], n3[BLKDEV_NAME_MAX];
+    ksnprintf(n1, sizeof(n1), "%s1", disk->name);
+    ksnprintf(n2, sizeof(n2), "%s2", disk->name);
+    ksnprintf(n3, sizeof(n3), "%s3", disk->name);
+    uint8_t *head = kmalloc((size_t)GPT_BUILD_HEAD_SECTORS(SS) * SS, KMEM_ZERO);
+    uint8_t *tail = kmalloc((size_t)GPT_BUILD_TAIL_SECTORS(SS) * SS, KMEM_ZERO);
+    uint8_t *sec = kmalloc(2 * SS, KMEM_ZERO);   /* DMA-able: kmalloc, not the image's BSS */
+    bool ok;
+    if (head == NULL || tail == NULL || sec == NULL) {
+        *reason = "out of memory";
+        ok = false;
+    } else if (disk->sector_size != SS || disk->capacity != DISK_SECTORS) {
+        *reason = "the RAM disk is not 512 sectors of 512 bytes";
+        ok = false;
+    } else {
+        ok = gpt_body(disk, head, tail, sec, n1, n2, n3, reason);
+    }
     kfree(head);
     kfree(tail);
     kfree(sec);
+    /* Removing the disk removes its partitions (D17). */
     ramblk_destroy(disk);
+    CHECK(ok);
     CHECK(!exists(n1) && !exists(n3));
     kinfo("selftest: blk-gpt: 2 partitions by entry number, bounds and offset held, busy rescan refused, "
           "4 damaged copies and an overlap refused, partitions gone with their disk");
