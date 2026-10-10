@@ -163,3 +163,24 @@ mis-parsed script ran lxtest without a mode, which ran the whole test
 again inside the child. lxtest now treats any argument as a checking
 mode and exits 99 for an unknown one.
 
+### PR 3 validation (local, macOS host, QEMU, TCG)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 140.3 s | PASS 134.2 s |
+| debug `test-smp2` | PASS 144.3 s | PASS 142.9 s |
+| debug `test`, `QEMU_SMP=4` | PASS 144.9 s | PASS 158.9 s |
+| `test-chaos` | PASS 153.9 s | PASS 147.9 s |
+| `test-harness-retry` | PASS 152.7 s | PASS 152.8 s |
+| `BUILD=release test` | PASS 17.3 s | PASS 20.3 s |
+| `BUILD=release test-install` | PASS 23.2 s | PASS 36.8 s |
+| `test-crash` | PASS 130.7 s | PASS 130.8 s |
+
+The matrix ran on PR 3 over PR 2's head before PR 2's thread-pointer fix;
+PR 3 was then rebased onto it (the fix touches `lx_fork_common`,
+`lx_clone` and the arch user code, none of PR 3's files). PR 4's matrix
+runs over both.
+
