@@ -1128,6 +1128,13 @@ def main():
         failures.append("missing successful xHCI retired-callback cancel proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
+    # The cosmofs write-back from a system call (lz4's table off the
+    # kernel stack, roadmap M2): the check runs only when the scratch disk
+    # holds the kernel tests' cosmofs, which it always does in a debug
+    # boot, so its absence means it was skipped, not passed.
+    if want_selftest and not any(re.search(r"^usertest: cosmofs compressed a file committed from user mode$", ln)
+                                 for ln in lines):
+        failures.append("missing marker: usertest: cosmofs compressed a file committed from user mode")
 
     # The removal test skips itself in four configurations, and three of
     # them are visible from here: no disk, one CPU, or a build without

@@ -276,6 +276,35 @@ static void fs_selftest(void)
         CHECK(n == 21 && memcmp(buf, "hello from the kernel", 21) == 0);
         CHECK(cosmo_close((int)h) == 0);
         CHECK(cosmo_stat("/mnt/dir/nested.txt", &st) == 0 && st.type == COSMO_DT_REG);
+        /* A compressible file of several blocks, committed from this
+         * process: the write-back compresses it on this thread's kernel
+         * stack (record_write -> lz4_compress), which a self-test's
+         * kernel thread never did with a system call's depth beneath it.
+         * The compressor's table used to be 16 KiB of that stack. */
+        {
+            static char big[64 * 1024];
+            for (size_t i = 0; i < sizeof(big); i++)
+                big[i] = "cosmofs compresses this line\n"[i % 29];
+            h = cosmo_open("/mnt/compress.bin", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+            CHECK(h >= 3);
+            CHECK(cosmo_write((int)h, big, sizeof(big)) == (long)sizeof(big));
+            CHECK(cosmo_fsync((int)h) == 0);
+            CHECK(cosmo_close((int)h) == 0);
+            h = cosmo_open("/mnt/compress.bin", COSMO_O_RDONLY, 0);
+            CHECK(h >= 3);
+            static char back[64 * 1024];
+            long got = 0;
+            while (got < (long)sizeof(back)) {
+                long r = cosmo_read((int)h, back + got, sizeof(back) - (size_t)got);
+                if (r <= 0)
+                    break;
+                got += r;
+            }
+            CHECK(got == (long)sizeof(back) && memcmp(back, big, sizeof(big)) == 0);
+            CHECK(cosmo_close((int)h) == 0);
+            CHECK(cosmo_unlink("/mnt/compress.bin") == 0);
+            puts("usertest: cosmofs compressed a file committed from user mode");
+        }
         CHECK(cosmo_umount("/mnt") == 0);
         CHECK(cosmo_stat("/mnt/hello.txt", &st) == -COSMO_ENOENT);
         puts("usertest: cosmofs mounted and read from user mode");
