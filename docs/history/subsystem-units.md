@@ -2679,3 +2679,17 @@ See the [history index](README.md).
   - `make test-entropy` (CI): no-entropy boot and CPU-only boot on both
     architectures.
   - Report: `docs/audit/2026-10-09-m1-randomness-report.md`.
+
+- **Roadmap M2: persistent system (2026-10-10; PR 1 of 3).**
+  - GPT partitions as block devices (`kernel/block/gpt.c`, `part.c`):
+    both copies of the table must be valid and agree; partitions named by
+    entry number (`vda1`, `nvme0n1p1`), bios bounded by the partition's
+    capacity (D16), removed before their disk (D17).
+  - Boot protocol v7: `\cosmo\cmdline` and the GUID of the partition the
+    loader was read from. The boot image is a GPT disk with the ESP as
+    partition 1 and a one-sector command-line slot.
+  - Filesystem registration and the root mount moved from `vfs_init` to
+    boot composition (`kernel/core/bootfs.c`); `root=PARTUUID=` and
+    `root=<device>` resolved after the boot partition scan; sysctls
+    `kernel.cmdline`, `kernel.root`, `kernel.rootdev`.
+  - Report: `docs/audit/2026-10-10-m2-persistent-system-report.md`.
