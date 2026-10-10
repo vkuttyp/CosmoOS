@@ -300,7 +300,8 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
             *AT(sp + k) = (uint8_t)platform[k];
         platform_addr = sp;
     }
-    /* 16 random bytes for AT_RANDOM (Linux); harmless for native. */
+    /* 16 random bytes for AT_RANDOM: Linux's, and since roadmap M2 the
+     * native COSMO_AT_RANDOM too (the installer's GUIDs). */
     sp -= 16;
     sp &= ~0xFULL;
     uint64_t random_addr = sp;
@@ -346,6 +347,7 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
         w[k++] = COSMO_AT_PHNUM;  w[k++] = info->phnum;
         w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
         w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
+        w[k++] = COSMO_AT_RANDOM; w[k++] = random_addr;
         w[k++] = COSMO_AT_NULL;   w[k++] = 0;
     }
     words = k;

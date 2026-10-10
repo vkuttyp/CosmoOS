@@ -3194,6 +3194,9 @@ struct fs_type cosmofs_fs_type = {
      * only caller of either was a self-test. */
     .check = cosmofs_check,
     .scrub = cosmofs_scrub,
+    /* A single-device pool, unencrypted: what the installer makes
+     * through /dev/blkctl (roadmap M2). */
+    .format = cosmofs_format,
 };
 
 void cosmofs_init(void)

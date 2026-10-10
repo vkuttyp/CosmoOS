@@ -743,6 +743,11 @@ struct cosmo_dirent {
 #define COSMO_AT_PHNUM  5
 #define COSMO_AT_PAGESZ 6
 #define COSMO_AT_ENTRY  9
+/* The address of 16 bytes from the kernel's pool, drawn when the process
+ * started (Linux's number and meaning; roadmap M2). The pool is seeded
+ * before the first user process wherever the machine has a source
+ * (docs/kernel/security/design.md §6). */
+#define COSMO_AT_RANDOM 25
 
 
 /* --- virtualization (docs/kernel-services/virtualization/) --- */

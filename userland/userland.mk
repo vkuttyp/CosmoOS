@@ -8,7 +8,7 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -35,6 +35,8 @@ PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq
 PROG_DIR_hostname := system
 PROG_DIR_svc    := system
 PROG_DIR_fsctl  := system
+PROG_DIR_cosmo-install := system
+PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c
 
 # Test-only programs: built and archived under SELFTEST, so a release
 # image carries none of them.

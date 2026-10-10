@@ -158,6 +158,9 @@ struct fs_type {
      */
     int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
     int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
+    /* Optional: make an empty filesystem on `bdev`, which is not mounted
+     * (vfs_format checks). Reached from /dev/blkctl (roadmap M2). */
+    int (*format)(struct blkdev *bdev);
     struct list_node link;
 };
 
@@ -449,6 +452,18 @@ unsigned vfs_mount_count(void);
 
 /* Create /dev/fsctl. Called once at boot, after the ramfs has /dev. */
 void fsctl_dev_init(void);
+/* /dev/blkctl: the operator's channel to block devices (uapi/cosmo/blkctl.h). */
+void blkctl_dev_init(void);
+
+/* Whether `bd`, the disk it is a partition of, or a partition of it is
+ * the device of a mount right now. A snapshot: the caller decides on it
+ * without holding the mount table. Pool members other than a mount's
+ * named device are not seen. */
+bool vfs_bdev_mounted(const struct blkdev *bd);
+/* Make an empty `fsname` filesystem on `bd`: -ENODEV for an unknown
+ * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
+ * vfs_bdev_mounted. */
+int vfs_format(const char *fsname, struct blkdev *bd);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

@@ -135,6 +135,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/bootfs.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/fsctl.c \
+	kernel-services/vfs/blkctl.c \
 	kernel-services/vfs/mountns.c \
 	kernel-services/filesystem/procfs/procfs.c \
 	kernel-services/vfs/pagecache.c \

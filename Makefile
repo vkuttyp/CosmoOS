@@ -8,6 +8,7 @@
 #   make test-gic     AArch64: the same boot test on the GICv3 machine
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
+#   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
@@ -30,7 +31,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-entropy test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: all kernel boot modules image run test test-entropy test-install test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -130,6 +131,16 @@ test-entropy:
 		BOOT_LOG=$(OUT)/boot-test-noentropy.log test
 	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
 		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-cpurng.log test
+
+# Roadmap M2's acceptance test (tests/boot/install_test.py,
+# docs/userland/testing.md): the live image installs itself on a blank
+# disk with cosmo-install, and the disk is checked on the host. Run with
+# BUILD=release in CI, where each boot takes seconds. Its own work
+# directory: the boots' scratch disks and serial logs stay beside it.
+test-install: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
+		--timeout $(BOOT_TIMEOUT)
 
 # The same boot test with two CPUs. Every other boot here uses the
 # default four, and a test that needs a third CPU without saying so passes

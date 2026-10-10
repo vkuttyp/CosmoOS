@@ -21,6 +21,7 @@
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
+#include <kernel/part.h>
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
 
@@ -2618,6 +2619,46 @@ int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags)
     mutex_unlock(&g_mounts_lock);
     kinfo("vfs: root mounted (%s)", fsname);
     return 0;
+}
+
+static bool bdev_related(const struct blkdev *a, const struct blkdev *b)
+{
+    if (a == b)
+        return true;
+    struct blk_part_info pi;
+    if (blk_part_info(a, &pi) && strcmp(pi.disk, b->name) == 0)
+        return true;
+    return blk_part_info(b, &pi) && strcmp(pi.disk, a->name) == 0;
+}
+
+bool vfs_bdev_mounted(const struct blkdev *bd)
+{
+    bool found = false;
+    mutex_lock(&g_mounts_lock);
+    struct mount *mnt;
+    list_for_each_entry(mnt, &g_mounts, link) {
+        if (mnt->bdev != NULL && bdev_related(mnt->bdev, bd)) {
+            found = true;
+            break;
+        }
+    }
+    mutex_unlock(&g_mounts_lock);
+    return found;
+}
+
+int vfs_format(const char *fsname, struct blkdev *bd)
+{
+    struct fs_type *fs = vfs_find_fs(fsname);
+    if (fs == NULL)
+        return -ENODEV;
+    if (fs->format == NULL)
+        return -EOPNOTSUPP;
+    if (vfs_bdev_mounted(bd))
+        return -EBUSY;
+    int rc = fs->format(bd);
+    if (rc == 0)
+        kinfo("vfs: made an empty %s on %s", fsname, bd->name);
+    return rc;
 }
 
 /*
