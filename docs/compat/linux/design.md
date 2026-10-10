@@ -94,9 +94,11 @@ well-formed heap) leaves the break unchanged.
 Flags translate: `MAP_ANONYMOUS` (0x20) or a file (since the file-regions
 unit: "Dynamic executables" below); the type in the low four bits must
 be `MAP_PRIVATE` (2), `MAP_SHARED` (1) or `MAP_SHARED_VALIDATE` (3,
-shared), anonymous or not, else `-EINVAL` as Linux says (an anonymous
-mapping is private either way, there being no `fork` to share it with;
-a file mapping is copy-on-write or the file's own pages, respectively),
+shared), anonymous or not, else `-EINVAL` as Linux says (a shared
+anonymous mapping is an unnamed ramfs file of the mapping's size, as
+Linux's shmem, so a fork child shares it -- before M3 it was private,
+there being no `fork` to share it with; a file mapping is copy-on-write
+or the file's own pages, respectively),
 `MAP_FIXED` (0x10) forces the address (and
 unmaps what was there, as Linux does: `vm_user_unmap` then map),
 `MAP_NORESERVE`/`MAP_STACK`/`MAP_POPULATE` ignored. `PROT_*` bits equal
@@ -177,8 +179,8 @@ sessions; they were stubs answering the pid or 0 before that),
 `wait4(pid, status, options, rusage)` → `process_wait_child` with
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`
 (native `128 + sig`) → `sig`; a fault (native 139) → `SIGSEGV` (11);
-`rusage` is zeroed when given. `execve`, `fork`, `vfork`, `clone`,
-`clone3` → `-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
+`rusage` is zeroed when given. `fork`, `vfork` and a `clone` without
+`CLONE_THREAD`: "fork" below. `execve` and `clone3` → `-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
 (a libc tolerates these). `readlink`, `readlinkat`, `symlink` and
 `symlinkat` are implemented over `vfs_readlink`/`vfs_symlink` since the
 symlink unit, `lstat` is no longer an alias for `stat`, and
@@ -307,8 +309,8 @@ signal.
 swaps `tls` and `ctid`) is accepted only with `CLONE_VM | CLONE_THREAD |
 CLONE_SIGHAND` (musl's `pthread_create` set: plus `CLONE_FS`,
 `CLONE_FILES`, `CLONE_SYSVSEM`, `CLONE_SETTLS`, `CLONE_PARENT_SETTID`,
-`CLONE_CHILD_CLEARTID`, `CLONE_DETACHED`); anything else, `fork`,
-`vfork` and `clone3` are `-ENOSYS`. The child is `process_add_thread`
+`CLONE_CHILD_CLEARTID`, `CLONE_DETACHED`); without `CLONE_THREAD` it is a
+fork (below), and `clone3` is `-ENOSYS`. The child is `process_add_thread`
 with the caller's frame (result 0, `rsp`/`sp` = `stack`, `fs`/`tpidr_el0`
 = `tls`), `*ptid` and `*ctid` written as the flags ask, `clear_child_tid`
 recorded on the thread. `set_tid_address` stores it too and returns the
@@ -335,8 +337,32 @@ shorter set, `-ESRCH` for an unknown pid); `sched_setaffinity` accepts
 and ignores. `tkill(tid, sig)` finds the thread in the caller's process
 (or another process's main thread by pid). A clone with `CLONE_THREAD`
 but without `CLONE_SIGHAND` or `CLONE_VM`, or with a flag outside the
-set, is `-EINVAL`; without `CLONE_THREAD` (a fork) `-ENOSYS`. The
-child's FPU state is the reset state (a recorded deviation).
+set, is `-EINVAL`. A thread's FPU state is the reset state (a recorded
+deviation; a fork child's is its parent's).
+
+### fork, vfork and a fork-like clone (roadmap M3)
+
+`fork` (x86-64 only), `vfork` (x86-64 only) and `clone` without
+`CLONE_THREAD` meet in `lx_fork_common`, which calls `process_fork`
+(`docs/kernel/process/design.md`, "fork"). Accepted flags: `CLONE_VM`
+only together with `CLONE_VFORK` (the child borrows the space and the
+caller waits until it execs or exits; `CLONE_VM` alone across processes
+is `-EINVAL`), `CLONE_VFORK` alone (a fork whose caller waits the same
+way), `CLONE_SETTLS`, `CLONE_PARENT_SETTID` (the pid, in the caller's
+memory, after the child exists), `CLONE_CHILD_SETTID` (written in the
+child's memory before its first instruction), `CLONE_CHILD_CLEARTID`. Any
+other flag is `-EINVAL`, and so is an exit signal other than `SIGCHLD`
+(17): a child that exits sends its parent `SIGCHLD` and `wait4` reaps it
+without `__WCLONE`. `fork` is `clone(SIGCHLD)`; `vfork` is
+`clone(CLONE_VM|CLONE_VFORK|SIGCHLD)`. A new stack (`newsp`) is honoured
+as for a thread, which is how musl's `posix_spawn` runs its vfork child.
+
+The personality's fork hook (`linux_process_fork`) gives the child its
+own `struct linux_state`: the break where the parent's is, and a record
+per SysV shm attach with the attach's tag, each counted on its segment
+(`shm_attach_dup`), so the child's `shmdt` removes exactly its copy of
+the mapping and its exit detaches. A vfork child records none: the
+attaches belong to the space it borrows.
 
 **This door was wider than the native one** -- the one place the
 personality was a superset rather than a translation -- until the audit
@@ -454,9 +480,9 @@ implementation holds `lx_unknown` (filled in once, from
 DEBUG (`linux: pid N: unimplemented system call NR`), so porting work
 sees what a program wanted. A number at or above 512 never reaches the
 table: the dispatcher's bounds check returns `-ENOSYS` and logs
-`syscall: pid N unknown number NR (linux)`. Thirteen numbers the
-personality knows but refuses (`fork`, `execve`, `clone`, `readlink`,
-the rlimit calls, ...) are `lx_nosys`: `-ENOSYS` without the count.
+`syscall: pid N unknown number NR (linux)`. The numbers the personality
+knows but refuses -- `execve` (until M3 PR 3), `rseq`, `clone3` -- are
+`lx_nosys`: `-ENOSYS` without the count.
 
 ## Ownership, concurrency, memory
 

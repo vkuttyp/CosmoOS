@@ -115,6 +115,78 @@ static void linux_process_release(struct process *p)
     p->linux = NULL;
 }
 
+/*
+ * fork: the child's own Linux state. The break is where the parent's is
+ * (the heap was copied with the space). Every SysV shm attach is copied
+ * too: vm_space_fork gave the child each attach's mapping under the same
+ * tag, so a record with that tag lets the child's shmdt remove exactly
+ * it, and the segment counts the child as one more attach. A vfork child
+ * borrows the parent's space, attaches and all, and records none.
+ */
+static int linux_process_fork(struct process *parent, struct process *child)
+{
+    struct linux_state *pls = parent->linux;
+    struct linux_state *ls = kzalloc(sizeof(*ls));
+    if (ls == NULL)
+        return -ENOMEM;
+    spinlock_init(&ls->shm_lock, "lx-shm-attach");
+    ls->brk_start = pls->brk_start;
+    ls->brk = pls->brk;
+    child->linux = ls;   /* linux_process_release frees it, records and all, if the fork fails */
+    if (child->space == parent->space)
+        return 0;
+    /* Records are allocated outside the parent's lock; a list that grew
+     * meanwhile (another thread's shmat) sends the count round again. */
+    for (;;) {
+        unsigned n = 0;
+        arch_irq_state_t st = spin_lock_irqsave(&pls->shm_lock);
+        for (struct lx_shm_attach *a = pls->shm_attaches; a != NULL; a = a->next)
+            n++;
+        spin_unlock_irqrestore(&pls->shm_lock, st);
+        struct lx_shm_attach *pool = NULL;
+        for (unsigned i = 0; i < n; i++) {
+            struct lx_shm_attach *r = kmalloc(sizeof(*r), 0);
+            if (r == NULL) {
+                while (pool != NULL) {
+                    struct lx_shm_attach *next = pool->next;
+                    kfree(pool);
+                    pool = next;
+                }
+                return -ENOMEM;
+            }
+            r->next = pool;
+            pool = r;
+        }
+        st = spin_lock_irqsave(&pls->shm_lock);
+        unsigned m = 0;
+        for (struct lx_shm_attach *a = pls->shm_attaches; a != NULL; a = a->next)
+            m++;
+        if (m <= n) {
+            struct lx_shm_attach **tail = &ls->shm_attaches;   /* the parent's order */
+            for (struct lx_shm_attach *a = pls->shm_attaches; a != NULL; a = a->next) {
+                struct lx_shm_attach *r = pool;
+                pool = r->next;
+                r->next = NULL;
+                r->addr = a->addr;
+                r->size = a->size;
+                r->tag = a->tag;
+                r->seg = a->seg;
+                shm_attach_dup(a->seg);
+                *tail = r;
+                tail = &r->next;
+            }
+        }
+        spin_unlock_irqrestore(&pls->shm_lock, st);
+        while (pool != NULL) {
+            struct lx_shm_attach *next = pool->next;
+            kfree(pool);
+            pool = next;
+        }
+        if (m <= n)
+            return 0;
+    }
+}
+
 static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
@@ -1571,6 +1643,26 @@ static int64_t lx_mmap(struct syscall_args *a)
         if (shared && !writable)
             maxprot &= ~VM_PROT_WRITE;
     }
+    /*
+     * MAP_SHARED|MAP_ANONYMOUS: Linux's shmem, an unnamed file, so the
+     * pages stay shared with a fork child -- a private anonymous region
+     * would be copied on write (docs/compat/linux/design.md, "fork").
+     */
+    struct vnode *anon_vn = NULL;
+    if (shared && (flags & LX_MAP_ANONYMOUS)) {
+        int arc = ramfs_anon_reg(0600, &anon_vn);
+        if (arc == 0) {
+            arc = (int)vfs_ftruncate(anon_vn, len);
+            if (arc) {
+                vnode_put(anon_vn);
+                anon_vn = NULL;
+            }
+        }
+        if (arc)
+            return arc;
+        off = 0;
+    }
+    struct vnode *vn = f ? f->vn : anon_vn;
     unsigned fflags = shared ? VM_MAP_SHARED : 0;
     uint64_t base;
     int rc;
@@ -1589,8 +1681,8 @@ static int64_t lx_mmap(struct syscall_args *a)
          * operation now, which owns the range throughout
          * (docs/audit/next-subsystem-map-fixed.md), for a file too.
          */
-        rc = f ? vm_user_map_file(p->space, base, len, vprot, maxprot, fflags | VM_MAP_REPLACE, f->vn, off,
-                                  "mmap-file")
+        rc = vn ? vm_user_map_file(p->space, base, len, vprot, maxprot, fflags | VM_MAP_REPLACE, vn, off,
+                                   "mmap-file")
                : vm_user_map_anon_replace(p->space, base, len, vprot, 0, "mmap");
         goto out;
     }
@@ -1599,7 +1691,7 @@ static int64_t lx_mmap(struct syscall_args *a)
      * two holds did about half the time two threads placed at once. */
     uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
     for (;;) {
-        rc = f ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, fflags, f->vn, off, "mmap-file", &base)
+        rc = vn ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, fflags, vn, off, "mmap-file", &base)
                : vm_user_map_anon_free(p->space, from, len, vprot, 0, "mmap", &base);
         if (rc != -ENOMEM || from == USER_MMAP_BASE)
             break;
@@ -1608,6 +1700,8 @@ static int64_t lx_mmap(struct syscall_args *a)
 out:
     if (f)
         file_put(f);
+    if (anon_vn)
+        vnode_put(anon_vn);   /* the mapping holds its own reference */
     return rc ? rc : (int64_t)base;
 }
 
@@ -2629,6 +2723,61 @@ static int64_t lx_ppoll(struct syscall_args *a)
 
 /* --- threads: clone (the thread set only), sched_getaffinity ------------------- */
 
+/*
+ * fork, vfork, and clone without CLONE_THREAD (docs/compat/linux/design.md,
+ * "fork"): a new process through process_fork. CLONE_VM is accepted only
+ * with CLONE_VFORK -- the child borrows the space and the caller waits
+ * until it execs or exits; CLONE_VFORK alone is a fork whose caller
+ * waits the same way. The exit signal must be SIGCHLD.
+ */
+static int64_t lx_fork_common(struct syscall_args *a, uint64_t flags, unsigned exit_sig, uint64_t newsp, uint64_t ptid,
+                              uint64_t ctid, uint64_t tls)
+{
+    if (flags & ~LX_CLONE_FORK_ALLOWED)
+        return -EINVAL;
+    if ((flags & LX_CLONE_VM) && !(flags & LX_CLONE_VFORK))
+        return -EINVAL;   /* a second process on one space, running alongside: not built */
+    if (exit_sig != LX_CLONE_EXIT_SIGCHLD)
+        return -EINVAL;
+    if ((flags & LX_CLONE_PARENT_SETTID) && !user_range_ok(ptid, 4))
+        return -EFAULT;
+    if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) && !user_range_ok(ctid, 4))
+        return -EFAULT;
+    struct arch_user_regs regs;
+    arch_user_regs_from_syscall(a->frame, &regs);
+    arch_user_regs_set_result(&regs, 0);
+    if (newsp)
+        arch_user_regs_set_sp(&regs, (uintptr_t)newsp);
+    struct process_fork_args fa = {
+        .regs = &regs,
+        .tls = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : arch_get_tls_base(),
+        .set_child_tid = (flags & LX_CLONE_CHILD_SETTID) ? ctid : 0,
+        .clear_child_tid = (flags & LX_CLONE_CHILD_CLEARTID) ? ctid : 0,
+        .flags = (flags & LX_CLONE_VM) ? PROCESS_FORK_SHARE_SPACE : 0,
+    };
+    struct process *child;
+    int rc = process_fork(&fa, &child);
+    if (rc)
+        return rc;
+    uint32_t pid = child->pid;
+    if (flags & LX_CLONE_PARENT_SETTID)
+        (void)copy_to_user(ptid, &pid, sizeof(pid));   /* Linux ignores a fault here too */
+    if (flags & LX_CLONE_VFORK)
+        (void)process_vfork_wait(child);   /* -EINTR: this caller is being killed and leaves at its return */
+    process_put(child);
+    return pid;
+}
+
+#ifdef LX_fork
+static int64_t lx_fork(struct syscall_args *a) { return lx_fork_common(a, 0, LX_CLONE_EXIT_SIGCHLD, 0, 0, 0, 0); }
+#endif
+#ifdef LX_vfork
+static int64_t lx_vfork(struct syscall_args *a)
+{
+    return lx_fork_common(a, LX_CLONE_VM | LX_CLONE_VFORK, LX_CLONE_EXIT_SIGCHLD, 0, 0, 0, 0);
+}
+#endif
+
 static int64_t lx_clone(struct syscall_args *a)
 {
     uint64_t flags = a->a[0] & ~0xffull;   /* the low byte is the exit signal; CLONE_THREAD ignores it */
@@ -2639,7 +2788,7 @@ static int64_t lx_clone(struct syscall_args *a)
     uint64_t tls = a->a[3], ctid = a->a[4];   /* AArch64 swaps the last two */
 #endif
     if (!(flags & LX_CLONE_THREAD))
-        return -ENOSYS;   /* a fork-like clone: no address-space copy exists (docs/compat/linux/design.md) */
+        return lx_fork_common(a, flags, (unsigned)(a->a[0] & 0xff), newsp, ptid, ctid, tls);
     if ((flags & LX_CLONE_THREAD_REQUIRED) != LX_CLONE_THREAD_REQUIRED || (flags & ~LX_CLONE_THREAD_ALLOWED))
         return -EINVAL;   /* Linux: CLONE_THREAD needs CLONE_SIGHAND, which needs CLONE_VM */
     if ((flags & LX_CLONE_PARENT_SETTID) && !user_range_ok(ptid, 4))
@@ -2647,7 +2796,6 @@ static int64_t lx_clone(struct syscall_args *a)
     if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) && !user_range_ok(ctid, 4))
         return -EFAULT;
     struct process *p = process_current();
-    struct thread *cur = thread_current();
 
     /* The child is the caller at this instant: the same registers, the
      * result 0, its own stack and thread pointer. */
@@ -2656,7 +2804,7 @@ static int64_t lx_clone(struct syscall_args *a)
     arch_user_regs_set_result(&regs, 0);
     if (newsp)
         arch_user_regs_set_sp(&regs, (uintptr_t)newsp);
-    uintptr_t tls_base = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : cur->tls_base;
+    uintptr_t tls_base = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : arch_get_tls_base();
 
     struct thread *t;
     int rc = process_add_thread(p, &regs, tls_base, &t);
@@ -3472,10 +3620,10 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_socketpair] = lx_socketpair,
     [LX_clone] = lx_clone,
 #ifdef LX_fork
-    [LX_fork] = lx_nosys,
+    [LX_fork] = lx_fork,
 #endif
 #ifdef LX_vfork
-    [LX_vfork] = lx_nosys,
+    [LX_vfork] = lx_vfork,
 #endif
     [LX_execve] = lx_nosys,
     [LX_exit] = lx_exit,
@@ -3643,6 +3791,7 @@ const struct personality personality_linux = {
     .claims_elf = linux_claims_elf,
     .init = linux_process_init,
     .release = linux_process_release,
+    .fork = linux_process_fork,
     .platform = LINUX_PLATFORM,   /* AT_PLATFORM: the string Linux gives on this machine */
     .auxv = linux_auxv,
     .table = g_table,

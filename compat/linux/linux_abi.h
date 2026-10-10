@@ -133,6 +133,7 @@ struct lx_pollfd {
 #define LX_CLONE_FS 0x00000200ull
 #define LX_CLONE_FILES 0x00000400ull
 #define LX_CLONE_SIGHAND 0x00000800ull
+#define LX_CLONE_VFORK 0x00004000ull
 #define LX_CLONE_THREAD 0x00010000ull
 #define LX_CLONE_SYSVSEM 0x00040000ull
 #define LX_CLONE_SETTLS 0x00080000ull
@@ -147,6 +148,11 @@ struct lx_pollfd {
     (LX_CLONE_THREAD_REQUIRED | LX_CLONE_FS | LX_CLONE_FILES | LX_CLONE_SYSVSEM | LX_CLONE_SETTLS |         \
      LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID | LX_CLONE_CHILD_SETTID | LX_CLONE_DETACHED |         \
      LX_CLONE_UNTRACED)
+/* A fork-like clone (no CLONE_THREAD): CLONE_VM only with CLONE_VFORK. */
+#define LX_CLONE_FORK_ALLOWED                                                                                \
+    (LX_CLONE_VM | LX_CLONE_VFORK | LX_CLONE_SETTLS | LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID |       \
+     LX_CLONE_CHILD_SETTID)
+#define LX_CLONE_EXIT_SIGCHLD 17u   /* the only exit signal accepted: Linux's SIGCHLD, this kernel's too */
 
 /* --- wait4, signals --- */
 /* Terminal ioctls (asm-generic/ioctls.h) and the structure they carry.

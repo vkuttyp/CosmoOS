@@ -56,6 +56,11 @@ void shm_attached(struct shm_segment *seg);
  * and its backing if it was the last reference and the segment was removed). */
 void shm_detach(struct shm_segment *seg);
 
+/* fork: an attach the caller already holds is duplicated into a child --
+ * one more reference and one more live attach, the segment's id not
+ * consulted (it may have been removed). */
+void shm_attach_dup(struct shm_segment *seg);
+
 /* Return a reference taken by shm_lookup_ref without having attached (an attach
  * that failed after the lookup). */
 void shm_unref(struct shm_segment *seg);

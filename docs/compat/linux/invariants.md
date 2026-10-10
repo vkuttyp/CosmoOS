@@ -190,8 +190,8 @@ a Linux JIT cannot do the maintenance from EL0 here either.
 
 **L13. A thread is only ever created by `clone` with the thread set, and
 the process is exactly its threads.** `CLONE_VM|CLONE_THREAD|CLONE_SIGHAND`
-are required and only the pthread flags accepted (`-EINVAL` otherwise,
-`-ENOSYS` for a fork); the child shares the address space, handles,
+are required and only the pthread flags accepted (`-EINVAL` otherwise;
+without `CLONE_THREAD` it is a fork, L16); the child shares the address space, handles,
 actions and working directory by construction (there is one `struct
 process`); its tid is unique within the process and never the pid;
 `CHILD_SETTID`/`PARENT_SETTID` are written before the child runs and
@@ -237,14 +237,24 @@ to `#ifdef`s on the missing calls) on both machines and the harness
 requires the same markers on both. Gap: no automated diff against the
 kernel's `unistd.h` tables.
 
+**L16. A fork-like clone makes a process, never a second process on one
+space running beside the first.** `fork`, `vfork` and `clone` without
+`CLONE_THREAD` go to `process_fork`; `CLONE_VM` is accepted only with
+`CLONE_VFORK`, whose caller does not return until the child has exec'd or
+exited; the exit signal is `SIGCHLD`; a shared anonymous mapping is a file,
+so it stays shared across the fork. Check: `lxtest`'s fork section (and
+the refusals: `CLONE_VM` alone, exit signal 0, `CLONE_FS`, all
+`-EINVAL`).
+
 ## Gaps (documented, not invariants)
 
 - `wait4` does not wait for a process group: `pid` 0 or a negative
   pgid is `-ECHILD`. Process groups exist (the signals unit) and
   `kill(-pgid)` uses them, so this is a gap in `wait4` rather than in
   the kernel.
-- No `fork`, `execve`, `select`/`epoll`, shared
-  file mappings, real-time signal queues. (Job control arrived with the
+- No `execve` (M3 PR 3), real-time signal queues. (`fork` arrived with
+  roadmap M3, L16; `select`/`epoll` and shared file mappings with their
+  units.) (Job control arrived with the
   job-control unit, `wait4` included.)
 - ~~`dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
   unless the path is absolute~~ -- **resolved by the dirfd unit**

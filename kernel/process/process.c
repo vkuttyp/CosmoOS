@@ -76,7 +76,7 @@ static void process_release(struct kobject *obj)
 
     handle_table_destroy(&p->handles);
     if (p->space != NULL)
-        vm_space_destroy(p->space);
+        vm_space_put(p->space);
     if (p->cwd_locked)
         vnode_put(p->cwd_locked);
     if (p->root)
@@ -351,6 +351,14 @@ static void user_thread_main(void *arg)
         struct arch_user_regs regs = *self->init_regs;
         kfree(self->init_regs);
         self->init_regs = NULL;
+        if (self->set_child_tid != 0) {
+            /* Linux CLONE_CHILD_SETTID: in the child's own space, before
+             * its first instruction. A fault leaves the word unwritten,
+             * as Linux does. */
+            uint32_t tid = self->user_tid;
+            (void)copy_to_user(self->set_child_tid, &tid, sizeof(tid));
+            self->set_child_tid = 0;
+        }
         arch_user_enter_regs(&regs);
     }
     if (self->user_entry == 0)
@@ -399,6 +407,177 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
     return 0;
 }
 
+/* A zeroed process with its lists, queues and locks initialised: the
+ * part spawn and fork share before either decides anything. */
+static struct process *process_alloc(const char *name)
+{
+    struct process *p = kmem_cache_alloc(g_process_cache, KMEM_ZERO);
+    if (p == NULL)
+        return NULL;
+    kobject_init(&p->obj, &process_type);
+    strlcpy(p->name, name ? name : "?", sizeof(p->name));
+    list_init(&p->threads);
+    list_init(&p->all_link);
+    list_init(&p->children);
+    list_init(&p->sibling);
+    waitqueue_init(&p->child_wq, "children");
+    waitqueue_init(&p->stopped_wq, "stopped");
+    waitqueue_init(&p->signalfd_wqh, "signalfd");
+    waitqueue_init(&p->vfork_wq, "vfork");
+    handle_table_init(&p->handles);
+    spinlock_init(&p->lock, "process");
+    completion_init(&p->exited, "process-exit");
+    p->state = PROCESS_RUNNING;
+    p->parent_pid = 0;
+    return p;
+}
+
+/* Undo a process that was built but never published, or whose
+ * publication was withdrawn: everything process_release would drop. */
+static void process_unbuild(struct process *p)
+{
+    handle_table_destroy(&p->handles);
+    if (p->space)
+        vm_space_put(p->space);
+    if (p->cwd_locked)
+        vnode_put(p->cwd_locked);
+    if (p->root)
+        vnode_put(p->root);
+    /* After the directories: a cwd or root inside one of this
+     * namespace's mounts holds that mount, and the namespace's last
+     * reference unmounts what only it could see. */
+    if (p->mntns) {
+        mountns_put(p->mntns);
+        p->mntns = NULL;
+    }
+    if (p->utsns) {
+        utsns_put(p->utsns);
+        p->utsns = NULL;
+    }
+    if (p->pers != NULL && p->pers->release != NULL)
+        p->pers->release(p);
+    signal_process_release(p);
+    kfree(p->sig_shared_info);
+    kmem_cache_free(g_process_cache, p);
+}
+
+/*
+ * Register `p` in the process table: the COSMO_RLIMIT_NPROC admission,
+ * the pid, the group and the session. The admission is decided under
+ * the same lock that publishes the process, so two concurrent creations
+ * near the limit cannot both pass on a stale count: the child counts
+ * against its own real uid.
+ */
+static int process_publish(struct process *p, struct process *parent, const struct process_spawn_attr *attr)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    if (p->rlim.v[COSMO_RLIMIT_NPROC] != COSMO_RLIM_INFINITY) {
+        uint64_t same = 0;
+        struct process *q;
+        list_for_each_entry(q, &g_processes, all_link)
+            if (q->cred.ruid == p->cred.ruid)
+                same++;
+        if (same + 1 > p->rlim.v[COSMO_RLIMIT_NPROC]) {
+            spin_unlock_irqrestore(&g_process_table_lock, s);
+            return -EAGAIN;
+        }
+    }
+    p->pid = g_next_pid++;
+    /* The group and the session: a child joins its parent's, and a
+     * process with no parent -- init, and anything the kernel starts --
+     * begins a session and a group of its own, so that every process
+     * has both from its first instruction. Set here, under the table
+     * lock, because that is the lock these two fields live under. */
+    if (parent != NULL) {
+        p->pgid = parent->pgid;
+        p->sid = parent->sid;
+        /* A caller may place the child in a group of the caller's own
+         * session, or start one named by the child's pid. Anything else
+         * -- a group belonging to another session -- is refused here,
+         * the same rule setpgid applies, so that the child cannot be
+         * used to reach across a session boundary. */
+        if (attr != NULL && attr->set_pgid) {
+            pid_t want = attr->pgid == 0 ? p->pid : attr->pgid;
+            bool ok = want == p->pid;
+            if (!ok) {
+                struct process *q;
+                list_for_each_entry(q, &g_processes, all_link)
+                    if (q->pgid == want && q->sid == p->sid) {
+                        ok = true;
+                        break;
+                    }
+            }
+            if (!ok) {
+                spin_unlock_irqrestore(&g_process_table_lock, s);
+                return -EPERM;
+            }
+            p->pgid = want;
+        }
+    } else {
+        p->pgid = p->sid = p->pid;
+    }
+    list_push_back(&g_processes, &p->all_link);
+    g_process_count++;
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return 0;
+}
+
+static void process_unpublish(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    list_remove(&p->all_link);
+    g_process_count--;
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+}
+
+/*
+ * The first thread of a published process: a kernel thread that enters
+ * user mode on first run, holding a process reference, its Linux tid the
+ * pid. The process owns it on return; the caller sets where it enters
+ * and enqueues it.
+ */
+static int process_first_thread(struct process *p, struct thread **out)
+{
+    struct thread *t = thread_prepare(user_thread_main, NULL, p->name, SCHED_PRIO_DEFAULT, 0);
+    if (t == NULL)
+        return -ENOMEM;
+    /* A user thread owns vector/x87 register state from its first
+     * instruction (arch/fpu.h): allocated before it can run. */
+    int rc = arch_fpu_alloc(t);
+    if (rc == 0) {
+        t->sig_info = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
+        if (t->sig_info == NULL)
+            rc = -ENOMEM;
+    }
+    if (rc) {
+        t->state = THREAD_EXITED;   /* never ran: release both creation references */
+        thread_put(t);
+        thread_put(t);
+        return rc;
+    }
+    t->proc = p;
+    process_get(p);
+    t->user_tid = p->pid;   /* a first thread's id is the pid, in either personality */
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    list_push_back(&p->threads, &t->proc_link);
+    p->nr_threads = 1;
+    p->nr_live = 1;
+    p->main_thread = t;
+    spin_unlock_irqrestore(&p->lock, s);
+    thread_put(t); /* the creator's thread reference; the process owns it now */
+    *out = t;
+    return 0;
+}
+
+static void link_to_parent(struct process *p, struct process *parent)
+{
+    process_get(parent);
+    p->parent = parent;
+    arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
+    list_push_back(&parent->children, &p->sibling);
+    spin_unlock_irqrestore(&parent->lock, s);
+}
+
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
                             const char *const envp[], const struct process_spawn_attr *attr, struct process **out)
 {
@@ -441,23 +620,9 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         }
     }
 
-    struct process *p = kmem_cache_alloc(g_process_cache, KMEM_ZERO);
+    struct process *p = process_alloc(name);
     if (p == NULL)
         return -ENOMEM;
-    kobject_init(&p->obj, &process_type);
-    strlcpy(p->name, name ? name : "?", sizeof(p->name));
-    list_init(&p->threads);
-    list_init(&p->all_link);
-    list_init(&p->children);
-    list_init(&p->sibling);
-    waitqueue_init(&p->child_wq, "children");
-    waitqueue_init(&p->stopped_wq, "stopped");
-    waitqueue_init(&p->signalfd_wqh, "signalfd");
-    handle_table_init(&p->handles);
-    spinlock_init(&p->lock, "process");
-    completion_init(&p->exited, "process-exit");
-    p->state = PROCESS_RUNNING;
-    p->parent_pid = 0;
 
     struct process *parent = attr ? attr->parent : NULL;
     /* Personality: kernel-created processes are native; otherwise the
@@ -647,107 +812,19 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
     }
 
-    /* Register. The COSMO_RLIMIT_NPROC admission is decided under the
-     * same lock that publishes the process, so two concurrent spawns near
-     * the limit cannot both pass on a stale count: the child counts
-     * against its own real uid. */
-    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
-    if (p->rlim.v[COSMO_RLIMIT_NPROC] != COSMO_RLIM_INFINITY) {
-        uint64_t same = 0;
-        struct process *q;
-        list_for_each_entry(q, &g_processes, all_link)
-            if (q->cred.ruid == p->cred.ruid)
-                same++;
-        if (same + 1 > p->rlim.v[COSMO_RLIMIT_NPROC]) {
-            spin_unlock_irqrestore(&g_process_table_lock, s);
-            rc = -EAGAIN;
-            goto fail;
-        }
-    }
-    p->pid = g_next_pid++;
-    /* The group and the session: a child joins its parent's, and a
-     * process with no parent -- init, and anything the kernel starts --
-     * begins a session and a group of its own, so that every process
-     * has both from its first instruction. Set here, under the table
-     * lock, because that is the lock these two fields live under. */
-    if (parent != NULL) {
-        p->pgid = parent->pgid;
-        p->sid = parent->sid;
-        /* A caller may place the child in a group of the caller's own
-         * session, or start one named by the child's pid. Anything else
-         * -- a group belonging to another session -- is refused here,
-         * the same rule setpgid applies, so that the child cannot be
-         * used to reach across a session boundary. */
-        if (attr != NULL && attr->set_pgid) {
-            pid_t want = attr->pgid == 0 ? p->pid : attr->pgid;
-            bool ok = want == p->pid;
-            if (!ok) {
-                struct process *q;
-                list_for_each_entry(q, &g_processes, all_link)
-                    if (q->pgid == want && q->sid == p->sid) {
-                        ok = true;
-                        break;
-                    }
-            }
-            if (!ok) {
-                spin_unlock_irqrestore(&g_process_table_lock, s);
-                rc = -EPERM;
-                goto fail;
-            }
-            p->pgid = want;
-        }
-    } else {
-        p->pgid = p->sid = p->pid;
-    }
-    list_push_back(&g_processes, &p->all_link);
-    g_process_count++;
-    spin_unlock_irqrestore(&g_process_table_lock, s);
+    rc = process_publish(p, parent, attr);
+    if (rc)
+        goto fail;
 
-    /* Main thread: a kernel thread that enters user mode on first run.
-     * It holds a process reference; the table holds one; the creator
-     * gets the initial one from kobject_init. */
-    struct thread *t = thread_prepare(user_thread_main, NULL, p->name, SCHED_PRIO_DEFAULT, 0);
-    if (t == NULL) {
-        rc = -ENOMEM;
+    struct thread *t;
+    rc = process_first_thread(p, &t);
+    if (rc)
         goto fail_registered;
-    }
-    /* A user thread owns vector/x87 register state from its first
-     * instruction (arch/fpu.h): allocated before it can run. */
-    rc = arch_fpu_alloc(t);
-    if (rc) {
-        t->state = THREAD_EXITED;   /* never ran: release both creation references */
-        thread_put(t);
-        thread_put(t);
-        goto fail_registered;
-    }
-    t->sig_info = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
-    if (t->sig_info == NULL) {
-        t->state = THREAD_EXITED;
-        thread_put(t);
-        thread_put(t);
-        rc = -ENOMEM;
-        goto fail_registered;
-    }
-    t->proc = p;
-    process_get(p);
     t->user_entry = (uintptr_t)entry;   /* the interpreter's when there is one */
     t->user_sp = (uintptr_t)sp;
-    t->user_tid = p->pid;   /* a first thread's id is the pid, in either personality */
-    s = spin_lock_irqsave(&p->lock);
-    list_push_back(&p->threads, &t->proc_link);
-    p->nr_threads = 1;
-    p->nr_live = 1;
-    p->main_thread = t;
-    spin_unlock_irqrestore(&p->lock, s);
-    thread_put(t); /* the creator's thread reference; the process owns it now */
 
-    if (parent) {
-        process_get(parent);
-        p->parent = parent;
-        s = spin_lock_irqsave(&parent->lock);
-        list_push_back(&parent->children, &p->sibling);
-        spin_unlock_irqrestore(&parent->lock, s);
-    }
+    if (parent)
+        link_to_parent(p, parent);
 
     kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info.entry,
           info.nr_segments);
@@ -757,37 +834,153 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     return 0;
 
 fail_registered:
-    s = spin_lock_irqsave(&g_process_table_lock);
-    list_remove(&p->all_link);
-    g_process_count--;
-    spin_unlock_irqrestore(&g_process_table_lock, s);
+    process_unpublish(p);
 fail:
-    handle_table_destroy(&p->handles);
-    if (p->space)
-        vm_space_destroy(p->space);
-    if (p->cwd_locked)
-        vnode_put(p->cwd_locked);
-    if (p->root)
-        vnode_put(p->root);
-    /* After the directories: a cwd or root inside one of this
-     * namespace's mounts holds that mount, and the namespace's last
-     * reference unmounts what only it could see. */
-    if (p->mntns) {
-        mountns_put(p->mntns);
-        p->mntns = NULL;
-    }
-    if (p->utsns) {
-        utsns_put(p->utsns);
-        p->utsns = NULL;
-    }
-    if (p->pers != NULL && p->pers->release != NULL)
-        p->pers->release(p);
-    signal_process_release(p);
-    kfree(p->sig_shared_info);
-    kmem_cache_free(g_process_cache, p);
+    process_unbuild(p);
     return rc;
 }
 FRAME_EXEMPT_END(process_create_from_images)
+
+/* --- fork (docs/kernel/process/design.md, "fork") --- */
+
+/* Every handle of the parent at the same number with the same rights,
+ * through the normal install path, so each object counts the child's
+ * handle like any other (a pipe's writers, epoll's last close). */
+static int dup_handles(struct process *p, struct process *parent)
+{
+    for (int h = 0; h < HANDLE_TABLE_SIZE; h++) {
+        unsigned rights;
+        struct kobject *obj = handle_get(&parent->handles, h, &rights);
+        if (obj == NULL)
+            continue;
+        int rc = handle_install_at(&p->handles, h, obj, rights);
+        kobject_put(obj);
+        if (rc < 0)
+            return rc;
+    }
+    return 0;
+}
+
+/* The parent's identity and place: what a spawn takes from its parent
+ * when the request names nothing else, all of it. */
+static void fork_inherit(struct process *p, struct process *parent)
+{
+    p->pers = parent->pers;
+    p->parent_pid = parent->pid;
+    arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
+    p->cred = parent->cred;
+    p->rlim = parent->rlim;
+    p->domain = parent->domain;
+    p->root = parent->root;
+    if (p->root)
+        vnode_get(p->root);
+    p->mntns = mountns_get(parent->mntns);
+    p->utsns = utsns_get(parent->utsns);
+    p->cwd_locked = parent->cwd_locked;
+    if (p->cwd_locked)
+        vnode_get(p->cwd_locked);
+    strlcpy(p->cwd_path_locked, parent->cwd_path_locked, sizeof(p->cwd_path_locked));
+    spin_unlock_irqrestore(&parent->lock, s);
+    p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
+                                                                        : HANDLE_TABLE_SIZE;
+    p->log_tokens = LOG_BUCKET;
+    p->log_refill_ns = clock_now_ns();
+    inherit_syscall_mask(p, parent);
+    /* The image the space holds: the same program at the same place. */
+    p->image_end = parent->image_end;
+    p->interp_base = parent->interp_base;
+    p->exec_entry = parent->exec_entry;
+    strlcpy(p->exec_path, parent->exec_path, sizeof(p->exec_path));
+}
+
+int process_fork(const struct process_fork_args *a, struct process **out)
+{
+    struct process *parent = process_current();
+    struct thread *cur = thread_current();
+    KASSERT(parent != NULL && parent->pers->fork != NULL);
+    struct process *p = process_alloc(parent->name);
+    if (p == NULL)
+        return -ENOMEM;
+    fork_inherit(p, parent);
+
+    int rc = signal_process_init(p);
+    if (rc)
+        goto fail;
+    signal_process_fork(p, parent);   /* dispositions; nothing pending */
+    p->sig_shared_info = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
+    if (p->sig_shared_info == NULL) {
+        rc = -ENOMEM;
+        goto fail;
+    }
+
+    if (a->flags & PROCESS_FORK_SHARE_SPACE) {
+        vm_space_share(parent->space);   /* borrowed until exec or exit: process_vfork_release */
+        p->space = parent->space;
+    } else {
+        rc = vm_space_fork(parent->space, &p->space);
+        if (rc)
+            goto fail;
+    }
+    rc = parent->pers->fork(parent, p);
+    if (rc)
+        goto fail;
+    rc = dup_handles(p, parent);
+    if (rc)
+        goto fail;
+    struct arch_user_regs *regs = kmalloc(sizeof(*regs), 0);
+    if (regs == NULL) {
+        rc = -ENOMEM;
+        goto fail;
+    }
+    *regs = *a->regs;
+
+    rc = process_publish(p, parent, NULL);
+    if (rc) {
+        kfree(regs);
+        goto fail;
+    }
+    struct thread *t;
+    rc = process_first_thread(p, &t);
+    if (rc) {
+        kfree(regs);
+        process_unpublish(p);
+        goto fail;
+    }
+    /* The caller's thread at this instant: its registers (the result
+     * already 0), thread pointer, mask and alternate stack. */
+    t->init_regs = regs;
+    t->tls_base = a->tls;
+    t->sig_blocked = cur->sig_blocked;
+    t->altstack = cur->altstack;
+    t->set_child_tid = a->set_child_tid;
+    arch_fpu_inherit(t);
+    t->clear_child_tid = a->clear_child_tid;
+    link_to_parent(p, parent);
+
+    kdebug("process: pid %u '%s' forked from %u%s", p->pid, p->name, parent->pid,
+           (a->flags & PROCESS_FORK_SHARE_SPACE) ? " (space shared)" : "");
+    process_get(p); /* the table's reference */
+    sched_enqueue_new(t);
+    *out = p;
+    return 0;
+
+fail:
+    process_unbuild(p);
+    return rc;
+}
+
+int process_vfork_wait(struct process *child)
+{
+    return wait_event_killable(&child->vfork_wq, __atomic_load_n(&child->vfork_released, __ATOMIC_ACQUIRE));
+}
+
+void process_vfork_release(struct process *p)
+{
+    if (__atomic_load_n(&p->vfork_released, __ATOMIC_ACQUIRE))
+        return;
+    __atomic_store_n(&p->vfork_released, true, __ATOMIC_RELEASE);
+    waitqueue_wake_all(&p->vfork_wq);
+}
 
 /* --- exit --- */
 
@@ -1006,9 +1199,10 @@ void process_last_thread_gone(struct process *p)
      * thread_clear_tid accept NULL.
      */
     if (p->space != NULL) {
-        vm_space_destroy(p->space);
+        vm_space_put(p->space);
         p->space = NULL;
     }
+    process_vfork_release(p);   /* a vfork parent stops waiting once nothing runs on its space */
 #if CONFIG_DEBUG
     reap_hold_at(p, 1);   /* the space is gone and EXITED not yet published */
 #endif

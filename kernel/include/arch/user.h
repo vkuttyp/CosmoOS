@@ -18,6 +18,10 @@ void arch_user_enter(uintptr_t entry, uintptr_t sp) __noreturn;
 /* Set the calling user thread's thread-pointer base (x86-64: FS base) now
  * and for every later switch to it. */
 void arch_set_tls_base(uintptr_t base);
+/* The calling thread's thread pointer as user mode has it now. On AArch64
+ * a program writes TPIDR_EL0 itself, and the thread's tls_base catches up
+ * only at its next switch-out, so a fork reads the register (roadmap M3). */
+uintptr_t arch_get_tls_base(void);
 
 /*
  * The complete user register set (milestone 10: threads and signals).

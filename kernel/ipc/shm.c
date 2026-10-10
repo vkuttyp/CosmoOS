@@ -208,6 +208,15 @@ void shm_attached(struct shm_segment *seg)
     spin_unlock_irqrestore(&g_shm_lock, s);
 }
 
+void shm_attach_dup(struct shm_segment *seg)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_shm_lock);
+    KASSERT(seg->refs > 0);
+    seg->refs++;
+    seg->nattch++;
+    spin_unlock_irqrestore(&g_shm_lock, s);
+}
+
 void shm_detach(struct shm_segment *seg)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_shm_lock);

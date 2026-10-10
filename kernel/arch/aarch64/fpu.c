@@ -79,6 +79,17 @@ void arch_fpu_free(struct thread *t)
     kfree(st);
 }
 
+void arch_fpu_inherit(struct thread *t)
+{
+    struct thread *cur = thread_current();
+    if (cur->fpu == NULL || t->fpu == NULL)
+        return;
+    arch_irq_state_t s = arch_irq_save();
+    aarch64_fpu_area_save(&cur->fpu->area);   /* the live registers are the truth */
+    t->fpu->area = cur->fpu->area;
+    arch_irq_restore(s);
+}
+
 size_t arch_fpu_state_size(void)
 {
     return sizeof(struct aarch64_fpu_area);

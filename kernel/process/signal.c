@@ -59,6 +59,13 @@ int signal_process_init(struct process *p)
     return 0;
 }
 
+void signal_process_fork(struct process *child, struct process *parent)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
+    memcpy(child->sigactions, parent->sigactions, (size_t)SIG_MAX * sizeof(struct sigaction_k));
+    spin_unlock_irqrestore(&parent->lock, s);
+}
+
 void signal_process_release(struct process *p)
 {
     kfree(p->sigactions);

@@ -125,6 +125,11 @@ void arch_set_tls_base(uintptr_t base)
     wrmsr(0xC0000100u, base);   /* MSR_FS_BASE */
 }
 
+uintptr_t arch_get_tls_base(void)
+{
+    return thread_current()->tls_base;   /* only arch_prctl writes FS_BASE */
+}
+
 bool arch_trap_frame_is_user(const struct arch_trap_frame *frame)
 {
     return (frame->cs & 3) != 0;

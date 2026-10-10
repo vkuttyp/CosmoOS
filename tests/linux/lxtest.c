@@ -384,6 +384,225 @@ static int lx_join(int32_t *word)
     return -1;
 }
 
+/*
+ * --- fork, vfork, wait4 (roadmap M3, docs/compat/linux/testing.md) ---
+ * A fork child cannot use CHECK (its report would be a second lxtest's):
+ * it reports through its exit status, 0 or the number of the first check
+ * it failed, and the parent compares the status wait4 returns.
+ */
+#define CHILD_CHECK(c, n)                                                                                   \
+    do {                                                                                                    \
+        if (!(c))                                                                                           \
+            lx_exit(n);                                                                                     \
+    } while (0)
+
+static volatile long g_fork_word;
+static int32_t g_fork_ptid, g_fork_ctid;
+static volatile int g_vfork_stage;
+static char g_vfork_stack[16384] __attribute__((aligned(16)));
+
+/* clone with no new stack: a fork, returning twice like fork(). */
+static long fork_raw(unsigned long flags, int32_t *ptid, int32_t *ctid)
+{
+#if defined(__x86_64__)
+    return sc6(LX_clone, flags, 0, ptid, ctid, 0, 0);
+#else
+    return sc6(LX_clone, flags, 0, ptid, 0, ctid, 0);   /* AArch64: tls before ctid */
+#endif
+}
+
+/* A fork with a value in a callee-saved FP/SIMD register (AArch64's d8;
+ * xmm8 on x86-64) set just before the call and read just after it, in
+ * one asm block: the child must see the parent's value, not a reset. */
+static long fork_fp(unsigned long v, unsigned long *out)
+{
+    unsigned long o;
+#if defined(__x86_64__)
+    register long r10 __asm__("r10") = 0;
+    register long r8 __asm__("r8") = 0;
+    long ret;
+    __asm__ volatile("movq %[v], %%xmm8\n\tsyscall\n\tmovq %%xmm8, %[o]"
+                     : "=a"(ret), [o] "=r"(o)
+                     : "0"((long)LX_clone), "D"((long)LX_CLONE_EXIT_SIGCHLD), "S"(0L), "d"(0L), "r"(r10), "r"(r8),
+                       [v] "r"(v)
+                     : "rcx", "r11", "xmm8", "memory");
+#else
+    register long x8 __asm__("x8") = LX_clone;
+    register long x0 __asm__("x0") = LX_CLONE_EXIT_SIGCHLD;
+    register long x1 __asm__("x1") = 0;
+    register long x2 __asm__("x2") = 0;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = 0;
+    __asm__ volatile("fmov d8, %[v]\n\tsvc #0\n\tfmov %[o], d8"
+                     : "+r"(x0), [o] "=r"(o)
+                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), [v] "r"(v)
+                     : "v8", "memory");
+    long ret = x0;
+#endif
+    *out = o;
+    return ret;
+}
+
+static int vfork_child(void *arg)
+{
+    (void)arg;
+    g_vfork_stage = 1;
+    struct lx_timespec t = { 0, 20000000 };
+    sc2(LX_nanosleep, &t, 0);   /* the caller must still be waiting when this ends */
+    g_vfork_stage = 2;
+    return 3;
+}
+
+/* The thread pointer user mode sees now. */
+static unsigned long current_tp(void)
+{
+#if defined(__x86_64__)
+    unsigned long fs = 0;
+    sc2(LX_arch_prctl, LX_ARCH_GET_FS, &fs);
+    return fs;
+#else
+    return read_tpidr();
+#endif
+}
+
+#if !defined(__x86_64__)
+static uint64_t g_fork_tcb[4];
+#endif
+
+static void fork_tests(long pid)
+{
+    int32_t st;
+    int pfd[2], qfd[2];
+    CHECKV(sc2(LX_pipe2, pfd, 0) == 0 && sc2(LX_pipe2, qfd, 0) == 0, 0);
+    volatile unsigned *priv = (volatile unsigned *)sc6(LX_mmap, 0, 8192, LX_PROT_READ | LX_PROT_WRITE,
+                                                      LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+    volatile unsigned *shr = (volatile unsigned *)sc6(LX_mmap, 0, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                                                     LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+    CHECKV((long)priv > 0 && (long)shr > 0, (long)shr);
+    int sid = (int)sc3(LX_shmget, LX_IPC_PRIVATE, 4096, LX_IPC_CREAT | 0600);
+    CHECKV(sid >= 0, sid);
+    volatile unsigned *seg = (volatile unsigned *)sc3(LX_shmat, sid, 0, 0);
+    CHECKV((long)seg > 0, (long)seg);
+    priv[0] = 11;
+    priv[1024] = 12;   /* the second page */
+    shr[0] = 21;
+    seg[0] = 31;
+    g_fork_word = 1;
+    /* A pending signal the child must not inherit: 12, blocked and sent. */
+    uint64_t m12 = 1ull << 11, before = 0, pend = 0;
+    CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &m12, &before, 8) == 0, 0);
+    CHECKV(sc2(LX_kill, pid, 12) == 0, 0);
+    CHECKV(sc2(LX_rt_sigpending, &pend, 8) == 0 && (pend & m12), pend);
+
+    g_fork_ptid = g_fork_ctid = 0;
+#if !defined(__x86_64__)
+    /* Written without a system call, just before the fork: the kernel
+     * learns it only from the register (the thread has not switched out). */
+    unsigned long tp_saved = read_tpidr();
+    write_tpidr((unsigned long)(uintptr_t)g_fork_tcb);
+#endif
+    unsigned long tp_parent = current_tp();
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD | LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_SETTID, &g_fork_ptid,
+                      &g_fork_ctid);
+    if (c == 0) {
+        sc1(LX_close, pfd[0]);   /* each side keeps only the ends it uses, so a */
+        sc1(LX_close, qfd[1]);   /* side that fails early is an EOF, not a hang */
+        CHILD_CHECK(current_tp() == tp_parent, 12);   /* the caller's thread pointer */
+        long me = sc0(LX_getpid);
+        CHILD_CHECK(me != pid && sc0(LX_getppid) == pid && sc0(LX_gettid) == me, 2);
+        CHILD_CHECK(g_fork_ctid == me, 3);   /* CLONE_CHILD_SETTID, in the child's own copy */
+        CHILD_CHECK(g_fork_word == 1 && priv[0] == 11 && priv[1024] == 12 && shr[0] == 21 && seg[0] == 31, 4);
+        struct lx_sigaction o;
+        CHILD_CHECK(sc4(LX_rt_sigaction, 2, 0, &o, 8) == 0 && o.handler == 0x400000, 5);   /* dispositions */
+        uint64_t cm = 0, cp = ~0ull;
+        CHILD_CHECK(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, 0, &cm, 8) == 0 && cm == (before | m12), 6);   /* the mask */
+        CHILD_CHECK(sc2(LX_rt_sigpending, &cp, 8) == 0 && cp == 0, 7);   /* nothing pending */
+        g_fork_word = 2;
+        priv[0] = 13;   /* copied on write: the parent keeps 11 */
+        shr[0] = 22;    /* shared: the parent sees 22 */
+        seg[0] = 32;
+        CHILD_CHECK(sc3(LX_write, pfd[1], "c", 1) == 1, 8);   /* an inherited handle */
+        char b = 0;
+        CHILD_CHECK(sc3(LX_read, qfd[0], &b, 1) == 1 && b == 'p', 9);
+        CHILD_CHECK(priv[1024] == 12 && priv[0] == 13, 10);   /* the parent's write after the fork is not seen */
+        CHILD_CHECK(sc1(LX_shmdt, seg) == 0, 11);              /* the child's own attach record */
+        lx_exit(42);
+    }
+#if !defined(__x86_64__)
+    if (c > 0)
+        write_tpidr(tp_saved);
+#endif
+    CHECKV(c > 0 && c != pid, c);
+    sc1(LX_close, pfd[1]);
+    CHECKV(g_fork_ptid == c, g_fork_ptid);   /* CLONE_PARENT_SETTID */
+    CHECKV(g_fork_ctid == 0, g_fork_ctid);   /* the child's write landed in its copy */
+    struct lx_shmid_ds ds;
+    CHECKV(sc3(LX_shmctl, sid, LX_IPC_STAT, &ds) == 0 && ds.shm_nattch == 2, ds.shm_nattch);   /* the child's attach counts */
+    char b = 0;
+    CHECKV(sc3(LX_read, pfd[0], &b, 1) == 1 && b == 'c', b);
+    CHECKV(g_fork_word == 1 && priv[0] == 11, priv[0]);   /* private: copied */
+    CHECKV(shr[0] == 22 && seg[0] == 32, shr[0]);          /* shared: shared */
+    priv[1024] = 99;
+    CHECKV(sc3(LX_write, qfd[1], "p", 1) == 1, 0);
+    st = 0;
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == (42 << 8), st);
+    CHECKV(priv[1024] == 99, priv[1024]);
+    CHECKV(sc3(LX_shmctl, sid, LX_IPC_STAT, &ds) == 0 && ds.shm_nattch == 1, ds.shm_nattch);
+    CHECKV(sc1(LX_shmdt, seg) == 0 && sc3(LX_shmctl, sid, LX_IPC_RMID, 0) == 0, 0);
+    /* The parent's signal 12 is still pending: ignore it, unblock, restore. */
+    CHECKV(sc2(LX_rt_sigpending, &pend, 8) == 0 && (pend & m12), pend);
+    struct lx_sigaction ign = { .handler = 1 }, dfl = { .handler = 0 };
+    CHECKV(sc4(LX_rt_sigaction, 12, &ign, 0, 8) == 0, 0);
+    CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
+    CHECKV(sc4(LX_rt_sigaction, 12, &dfl, 0, 8) == 0, 0);
+    CHECKV(sc2(LX_munmap, priv, 8192) == 0 && sc2(LX_munmap, shr, 4096) == 0, 0);
+
+    /* WNOHANG while the child runs, then the reap. */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        char x = 0;
+        CHILD_CHECK(sc3(LX_read, qfd[0], &x, 1) == 1, 2);
+        lx_exit(0);
+    }
+    CHECKV(c > 0, c);
+    CHECKV(sc4(LX_wait4, c, &st, LX_WNOHANG, 0) == 0, 0);
+    CHECKV(sc3(LX_write, qfd[1], "g", 1) == 1, 0);
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+
+    /* The FP/SIMD registers come with the child. */
+    unsigned long fo = 0, fv = 0x400921fb54442d18ul;
+    c = fork_fp(fv, &fo);
+    if (c == 0)
+        lx_exit(fo == fv ? 0 : 2);
+    CHECKV(c > 0 && fo == fv, fo);
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+
+    /* vfork: the child runs on the caller's memory, and the caller does
+     * not return until the child is gone. */
+    g_vfork_stage = 0;
+    c = lx_clone(vfork_child, g_vfork_stack + sizeof(g_vfork_stack), 0,
+                 LX_CLONE_VM | LX_CLONE_VFORK | LX_CLONE_EXIT_SIGCHLD, 0, 0, 0);
+    CHECKV(c > 0, c);
+    CHECKV(g_vfork_stage == 2, g_vfork_stage);
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == (3 << 8), st);
+#ifdef LX_fork
+    c = sc0(LX_fork);
+    if (c == 0)
+        lx_exit(5);
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == (5 << 8), st);
+#endif
+
+    /* Refused: a second process running on this space, an exit signal
+     * other than SIGCHLD, and the sharing flags a process does not take. */
+    CHECKV(fork_raw(LX_CLONE_VM | LX_CLONE_EXIT_SIGCHLD, 0, 0) == -22, 0);
+    CHECKV(fork_raw(0, 0, 0) == -22, 0);
+    CHECKV(fork_raw(LX_CLONE_FS | LX_CLONE_EXIT_SIGCHLD, 0, 0) == -22, 0);
+    CHECKV(sc4(LX_wait4, -1, &st, 0, 0) == -10, 0);   /* every child reaped */
+    sc1(LX_close, pfd[0]);
+    sc1(LX_close, qfd[0]);
+    sc1(LX_close, qfd[1]);
+}
+
 int main(int argc, char **argv)
 {
     CHECKV(argc >= 1 && argv[0][0] != '\0', argc);
@@ -1712,9 +1931,7 @@ int main(int argc, char **argv)
     CHECKV(sc2(LX_kill, pid, 65) == -22, 0);
     CHECKV(sc2(LX_kill, pid, 17) == 0, 0);                      /* SIGCHLD: the default ignores it */
     CHECKV(sc1(LX_execve, "/bin/true") == -38, 0);             /* ENOSYS */
-#ifdef LX_fork
-    CHECKV(sc0(LX_fork) == -38, 0);
-#endif
+    fork_tests(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);
 
     /* A handler through kill: siginfo names the sender, the signal is
@@ -1830,7 +2047,6 @@ int main(int argc, char **argv)
     CHECKV(gone == -3, gone);                                             /* gone */
     CHECKV(lx_clone(t_basic, g_stacks[0] + sizeof(g_stacks[0]), 0, LX_CLONE_VM | LX_CLONE_THREAD, 0, 0, 0) == -22, 0);   /* no SIGHAND: EINVAL */
     CHECKV(lx_clone(t_basic, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, 0, &g_tidword[0], g_tcb) == -14, 0);   /* PARENT_SETTID to NULL */
-    CHECKV(sc6(LX_clone, 0x11, 0, 0, 0, 0, 0) == -38, 0);                /* a fork: ENOSYS */
     CHECKV(sc6(LX_clone, THREAD_FLAGS | 0x2000, 0, 0, 0, 0, 0) == -22, 0); /* CLONE_PTRACE: EINVAL */
     /* A signal to one thread interrupts its read (EINTR); with SA_RESTART
      * the read restarts and completes with the data written afterwards. */

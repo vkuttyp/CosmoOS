@@ -131,6 +131,10 @@ struct vm_space {
     uint64_t mapped_pages;   /* user: pages covered by regions (COSMO_RLIMIT_AS) */
     uint64_t limit_mapped_pages;   /* user: vm_user_map_anon refuses beyond this (-ENOMEM) */
     uint64_t limit_anon_pages;     /* user: a demand-zero fault at or beyond this is "no memory" */
+    /* User spaces: the processes using it (atomic). One, except while a
+     * vfork child borrows its parent's (docs/kernel/memory/design.md §8.4);
+     * the last vm_space_put tears it down. */
+    uint32_t users;
 };
 
 extern struct vm_space kernel_space;
@@ -184,6 +188,12 @@ void vm_space_destroy(struct vm_space *space);
  * populated stretches, never what was left absent (memtest's
  * vm-teardown-absent asserts it). */
 uint64_t vm_space_destroy_counted(struct vm_space *space);
+
+/* A user space shared by another process (CLONE_VM|CLONE_VFORK): one more
+ * user. vm_space_put drops one and destroys the space with the last,
+ * returning whether it did; a process releases its space only this way. */
+void vm_space_share(struct vm_space *space);
+bool vm_space_put(struct vm_space *space);
 
 /* Map an anonymous user region at exactly [base, base+size). `prot`
  * must not be W+X; VM_PROT_NONE reserves the range (every access faults).
