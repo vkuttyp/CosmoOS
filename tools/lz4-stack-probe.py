@@ -77,7 +77,18 @@ def main():
                                         "--inlining", addr], capture_output=True, text=True).stdout.strip().replace("\n", " | ")
             panic_line = re.search(r"^KERNEL PANIC: .*$", log, re.M)
             print(f"lz4-stack-probe: panic: {panic_line.group(0) if panic_line else 'none'}; at {where or '?'}")
-            ok = panic_line is not None and "lz4_compress" in where and MARKER not in log
+            # x86-64 has a double-fault stack: the overflow is reported
+            # as #DF with the PC in lz4_compress. AArch64 has none: the
+            # write that leaves the stack hits the guard page below it, an
+            # unmapped page-aligned address in the kernel arena, and the
+            # exception entry that would report the PC has no stack left
+            # either, so the report names the guard page, not the PC.
+            guard = re.search(r"page fault: kernel write at 0x(ffffc[0-9a-f]{8}000) \(not present\): no region", tail)
+            thread = re.search(r"thread: \d+ '([^']+)'", tail)
+            print(f"lz4-stack-probe: thread {thread.group(1) if thread else '?'}"
+                  + (f"; guard page 0x{guard.group(1)}" if guard else ""))
+            ok = (panic_line is not None and MARKER not in log and
+                  ("lz4_compress" in where or (args.arch == "aarch64" and guard is not None)))
         else:
             ok = run.returncode == 0 and MARKER in log
         print(f"lz4-stack-probe: expectation {'held' if ok else 'FAILED'}")
