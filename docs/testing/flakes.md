@@ -2480,6 +2480,20 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `irqpoll-boost` over its gap bound, 2026-10-10
+
+`SELFTEST: irqpoll-boost ... FAIL: check failed: gap_ms <= BOOST_GAP_MS
+at line 111 (302 ms)`, the test's own line: `cpu 1, a spinner above the
+default for 300 ms: 579 calls of the poll, longest gap 290 ms (bound
+100)`. x86-64 CI, PR #342's second run (38027019486, job 114139902627),
+the `test-smp2` boot; the same job's `test` and `test-guard` boots passed
+it, as did every local boot of the branch (twelve). 290 ms is the gap
+the list entry gives *without* the raise timer: in this run the worker
+was not raised before the 300 ms spinner ended. Not attributed: the
+branch's change (GPT partition devices at boot, the command line) is not
+on the irq-poll or scheduler path. First sighting; the failed job was
+rerun.
+
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
