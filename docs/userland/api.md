@@ -93,6 +93,7 @@ stage is skipped with status 1.
 | `mkdir` | `mkdir [-p] dirs...` | mode 0755 |
 | `mkfifo` | `mkfifo names...` | a named pipe, mode 0644 (the named-pipes unit) |
 | `rmdir` | `rmdir dirs...` | |
+| `sync` | `sync` | commits every filesystem (`SYS_sync`); a disk root keeps only what is committed (roadmap M2) |
 | `pwd` | `pwd` | `getcwd` |
 | `true`, `false` | | 0 and 1 |
 | `sleep` | `sleep seconds[.fraction]` | `nanosleep` |

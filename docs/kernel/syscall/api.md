@@ -360,6 +360,12 @@ Details per call:
   buffer when the result exceeds `count`.
 - **klog**: at most 32 KiB (`KLOG_RING_SIZE`); the ring holds every
   emitted line, oldest overwritten first; reading does not consume.
+- **switch_root** (`SYS_switch_root` 102, roadmap M2): `(const char
+  *path) -> 0`. Init alone (`-EPERM` otherwise, or unprivileged), while it
+  is the only process (`-EBUSY`), unconfined (`-EINVAL` with a
+  per-process root or another mount namespace): the mount at `path`
+  becomes the root (`docs/kernel-services/vfs/design.md`, "Switching the
+  root"); init's directory becomes `/`. libc: `cosmo_switch_root`.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
   `kernel.arch`, `kernel.hostname` (from the caller's uts namespace),
   `kernel.uptime_ns`, `kernel.nprocs`, `kernel.cmdline` (the boot

@@ -48,6 +48,20 @@ main(argc, argv):
       exit(st)                                             (single-shell bring-up policy)
 ```
 
+### The disk root
+
+Roadmap M2. Before `/etc/rc`, init reads `kernel.root` and
+`kernel.rootdev`. Without `root=` nothing happens: the live system. With
+it, init mounts `kernel.rootdev` as cosmofs at `/sysroot`, calls
+`cosmo_switch_root("/sysroot")` (retrying `-EBUSY` for up to a second, a
+process the kernel started may still be leaving), changes to `/`, mounts
+a fresh ramfs on `/tmp`, and prints `init: switched to the disk root DEV
+(root=SPEC)`. `/etc/rc` and the shell are then the installed system's.
+Every failure -- `root=` naming no device, a mount refused, the switch
+refused -- prints one line ending `staying on the live root`, undoes what
+it did, and the boot continues live. When the shell exits on a disk root,
+init calls `sync` and prints `init: disk root synced` before it returns.
+
 `init --selftest` grows checks for every new call (`proc_selftest` in
 `init.c`; the full list is in `testing.md`): pipes with `dup`/`dup2`,
 EOF and `EPIPE`; `spawn` of `echo` into a pipe and its status; `sh -c

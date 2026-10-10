@@ -225,6 +225,11 @@ static inline long cosmo_mount(const char *source, const char *target, const cha
 {
     return cosmo_syscall4(SYS_mount, source, target, fstype, flags);
 }
+/* Roadmap M2: init makes the mount at `path` the root (SYS_switch_root). */
+static inline long cosmo_switch_root(const char *path)
+{
+    return cosmo_syscall1(SYS_switch_root, (long)path);
+}
 static inline long cosmo_umount2(const char *target, unsigned flags)
 {
     return cosmo_syscall2(SYS_umount, target, flags);

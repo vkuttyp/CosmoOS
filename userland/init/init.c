@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5774,6 +5775,55 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
     return 0;
 }
 
+/*
+ * Roadmap M2 (docs/userland/design.md, "The disk root"): when the command
+ * line names a root (root=), mount it at /sysroot and make it the root of
+ * everything this init starts; /tmp is then a fresh ramfs. Any failure
+ * leaves the live root in place with a line saying why -- never a hang,
+ * never a half-switched system. True when the switch happened.
+ */
+static bool switch_to_disk_root(void)
+{
+    char spec[160], dev[32];
+    long n = sysctl_get("kernel.root", spec, sizeof(spec));
+    if (n <= 0 || n >= (long)sizeof(spec))
+        return false;   /* no root=: the live system */
+    n = sysctl_get("kernel.rootdev", dev, sizeof(dev));
+    if (n <= 0 || n >= (long)sizeof(dev)) {
+        printf("init: root=%s: no such device; staying on the live root\n", spec);
+        return false;
+    }
+    if (mkdir("/sysroot", 0755) < 0 && errno != EEXIST) {
+        printf("init: /sysroot: %s; staying on the live root\n", strerror(errno));
+        return false;
+    }
+    if (mount(dev, "/sysroot", "cosmofs", 0) < 0) {
+        printf("init: cannot mount %s (root=%s): %s; staying on the live root\n", dev, spec, strerror(errno));
+        rmdir("/sysroot");
+        return false;
+    }
+    /* The switch wants init alone; a process the kernel's own tests
+     * started may still be on its way out. Bounded: a second at most. */
+    long rc = -1;
+    for (int tries = 0; tries < 100; tries++) {
+        rc = cosmo_switch_root("/sysroot");
+        if (rc != -COSMO_EBUSY)
+            break;
+        usleep(10000);
+    }
+    if (rc < 0) {
+        printf("init: cannot switch to %s: %s; staying on the live root\n", dev, strerror((int)-rc));
+        umount("/sysroot");
+        rmdir("/sysroot");
+        return false;
+    }
+    chdir("/");
+    if (mount("none", "/tmp", "ramfs", 0) < 0)
+        printf("init: /tmp: %s (it stays on the disk)\n", strerror(errno));
+    printf("init: switched to the disk root %s (root=%s)\n", dev, spec);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--crash") == 0) {
@@ -5826,6 +5876,8 @@ int main(int argc, char **argv)
     fflush(stdout);
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
     setenv("HOME", "/", 1);
+    bool disk_root = switch_to_disk_root();
+    fflush(stdout);
     struct stat st;
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
@@ -5838,6 +5890,12 @@ int main(int argc, char **argv)
     if (status < 0)
         return 1;
     printf("init: shell exited with status %d\n", status);
+    /* The boot ends when init does, and a disk root keeps only what was
+     * committed: commit it (cosmofs commits at sync and unmount). */
+    if (disk_root) {
+        sync();
+        printf("init: disk root synced\n");
+    }
     fflush(stdout);
     return status;   /* single-shell bring-up policy: the boot ends here */
 }

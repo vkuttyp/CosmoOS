@@ -37,8 +37,10 @@ cosmofs as the root filesystem, an installer, init mounts the disk root;
 filesystem registration and root choice move out of `vfs_init` into boot
 composition.
 
-- [ ] **Acceptance:** install to a blank disk image, reboot from it, write
-  a file, reboot, read it.
+- [x] **Acceptance:** install to a blank disk image, reboot from it, write
+  a file, reboot, read it. Done 2026-10-10: `make test-install` in CI on
+  both architectures (PRs #342, #343, #344;
+  [report](audit/2026-10-10-m2-persistent-system-report.md)).
 
 ### M3 Real process model
 

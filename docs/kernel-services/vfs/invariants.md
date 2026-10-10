@@ -634,6 +634,21 @@ goes when the reference does; an index past the end is `-EFBIG`), the
 `SIGBUS`, not the old bytes; a write after `MS_SYNC` is written again),
 `vm-file-fault-hold`.
 
+**V37. The root changes only whole, and only under a lone init.**
+`SYS_switch_root` refuses anyone but the recorded init, privileged and
+unconfined, and refuses while `process_count() != 1`. `vfs_switch_root`
+decides everything before it changes anything: every mount that is not
+under the new root must be at the top level of the old one with a free
+directory of the same name in the new one, and the table must be as it
+was across the unlocked lookups; the commit after that cannot fail. The
+old root is released only if no vnode of it is referenced beyond the
+filesystem's own pins. **Checked by** `make test-install` (the installed
+boots log the switch with `/proc` and `/dev` moved and the old root
+released, `/dev/console` is there, a file written survives a power-off;
+the fallback boot shows a refused mount leaves the live root). Gap: the
+refusals (a nested mount on the old root, a second process) are not
+exercised by a test.
+
 **V36. Nothing writes raw sectors to a device that is mounted, or that
 shares a disk with a mounted one, through `/dev/blkctl`.** A WRITE and a
 FORMAT check `vfs_bdev_mounted` (the device, its disk, its partitions)

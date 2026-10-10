@@ -181,7 +181,8 @@ command N`, `never sent`, `after 'cmd' missing /pattern/`).
 
 ## `make test-install` (`tests/boot/install_test.py`)
 
-Roadmap M2's acceptance. Release builds in CI (job `install`, both
+Roadmap M2's acceptance: install to a blank disk image, reboot from it,
+write a file, reboot, read it. Release builds in CI (job `install`, both
 architectures); each boot is QEMU through `scripts/qemu-run.sh`, commands
 typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
 
@@ -195,6 +196,21 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   the one printed, partition 1 equal to the boot image's ESP in every
   sector but the slot, and the slot exactly the marker line plus
   `root=PARTUUID=<that GUID>` and NULs.
+
+- **reboot**: the installed disk alone (`QEMU_DISKS=boot`: no scratch
+  disk, no USB, the boot disk writable), the same release firmware. The
+  log must show `init: switched to the disk root DEV
+  (root=PARTUUID=<the GUID>)`, the kernel's `root switched to cosmofs`
+  with at least one mount moved, `the old root (ramfs) is released`, and
+  the installed `/etc/rc`'s `CosmoOS userland ready`; then
+  `echo NONCE > /persist.txt && sync` and `/dev/console` listed; on exit,
+  `init: disk root synced`.
+- **persist**: the same disk booted again: `cat /persist.txt` prints the
+  nonce.
+- **fallback**: a copy of the live image whose slot says `root=vda` (the
+  blank scratch disk on both machines): the kernel resolves it, init says
+  `cannot mount vda ... staying on the live root`, and the live shell
+  answers.
 
 ## Gaps and planned tests
 

@@ -460,6 +460,8 @@ pid_t process_current_sid(void);
 
 /* The system's init: orphans are reparented to it. Set once by kernel_main. */
 void process_set_init(struct process *p);
+/* Whether `p` is the process process_set_init recorded. */
+bool process_is_init(const struct process *p);
 
 static inline void process_get(struct process *p) { kobject_get(&p->obj); }
 static inline void process_put(struct process *p) { kobject_put(&p->obj); }

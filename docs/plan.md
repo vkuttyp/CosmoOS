@@ -5,6 +5,11 @@
 > [AGENTS.md](../AGENTS.md#scope-rules). Items below are taken only when
 > the current milestone's acceptance test needs them; the roadmap's
 > out-of-scope list stays here.
+>
+> M1 (sound randomness) done 2026-10-09; M2 (persistent system: GPT
+> partitions, boot command line, `cosmo-install`, a cosmofs root that init
+> switches to) done 2026-10-10
+> ([report](audit/2026-10-10-m2-persistent-system-report.md)). Next: M3.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.
