@@ -11,6 +11,10 @@
 #   QEMU_EXTRA  extra QEMU arguments
 #   QEMU_RNG    0 leaves the virtio-rng out (make test-entropy's boots without
 #               a device source; docs/kernel/security/design.md §6)
+#   QEMU_DISKS  boot: the boot disk alone, writable on both machines -- an
+#               installed system's boots (make test-install, roadmap M2);
+#               default: every scratch disk below, and on virt a read-only
+#               boot disk
 #   QEMU_WRAP   a command QEMU is run through, word-split (for example
 #               `taskpolicy -b` on macOS to pin the whole process to the
 #               efficiency cores; docs/development.md, "Benchmark runs")
@@ -30,8 +34,20 @@ firmware=$("$here/find-firmware.sh" "$arch")
 # console whose output lands in QEMU_VCON (default: vcon.log next to
 # the image) so the boot test can read it back.
 outdir=$(dirname "$image")
+# An installed system boots from its own disk and nothing else: no
+# scratch disks (and no USB, whose mass-storage device is one), and the
+# boot disk writable, since it is the root filesystem's disk.
+boot_ro=",readonly=on"
+if [ "${QEMU_DISKS:-all}" = boot ]; then
+    QEMU_NVMEDISK=0 QEMU_USB=0 QEMU_SATA=0 QEMU_RMDISK=0 QEMU_TESTDISK=0
+    boot_ro=""
+fi
 testdisk=${QEMU_TESTDISK:-$outdir/testdisk.img}
-if [ ! -f "$testdisk" ]; then
+test_devs=""
+if [ "$testdisk" != 0 ]; then
+    test_devs="-drive if=none,id=testdisk,format=raw,file=$testdisk -device virtio-blk-pci,drive=testdisk"
+fi
+if [ "$testdisk" != 0 ] && [ ! -f "$testdisk" ]; then
     dd if=/dev/zero of="$testdisk" bs=1048576 count=8 status=none 2>/dev/null \
         || dd if=/dev/zero of="$testdisk" bs=1048576 count=8 2>/dev/null
 fi
@@ -42,9 +58,13 @@ vcon=${QEMU_VCON:-$outdir/vcon.log}
 # Milestone 9: an NVMe controller with one 8 MiB namespace (the nvme
 # self-test writes to it; the harness gives it a fresh file per run).
 nvmedisk=${QEMU_NVMEDISK:-$outdir/nvme.img}
-if [ ! -f "$nvmedisk" ]; then
-    dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 status=none 2>/dev/null \
-        || dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 2>/dev/null
+nvme_devs=""
+if [ "$nvmedisk" != 0 ]; then
+    if [ ! -f "$nvmedisk" ]; then
+        dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 status=none 2>/dev/null \
+            || dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 2>/dev/null
+    fi
+    nvme_devs="-drive if=none,id=nvme0,format=raw,file=$nvmedisk -device nvme,drive=nvme0,serial=cosmo-nvme0"
 fi
 
 # Phase 8: QEMU user-mode networking on a virtio-net NIC. The harness
@@ -239,12 +259,10 @@ if [ "$arch" = aarch64 ]; then
         -smp "${QEMU_SMP:-4}" \
         -m "${QEMU_MEM:-256M}" \
         -drive if=pflash,format=raw,readonly=on,file="$padded" \
-        -drive if=none,id=testdisk,format=raw,file="$testdisk" \
-        -device virtio-blk-pci,drive=testdisk \
-        -drive if=none,id=boot,format=raw,readonly=on,file="$image" \
+        $test_devs \
+        -drive if=none,id=boot,format=raw${boot_ro},file="$image" \
         -device virtio-blk-pci,drive=boot \
-        -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
-        -device nvme,drive=nvme0,serial=cosmo-nvme0 \
+        $nvme_devs \
         $rng_dev \
         -device virtio-serial-pci \
         -chardev file,id=vcon,path="$vcon" \
@@ -277,10 +295,8 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     -m "${QEMU_MEM:-256M}" \
     -drive if=pflash,format=raw,readonly=on,file="$firmware" \
     -drive format=raw,file="$image" \
-    -drive if=none,id=testdisk,format=raw,file="$testdisk" \
-    -device virtio-blk-pci,drive=testdisk \
-    -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
-    -device nvme,drive=nvme0,serial=cosmo-nvme0 \
+    $test_devs \
+    $nvme_devs \
     $rng_dev \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \

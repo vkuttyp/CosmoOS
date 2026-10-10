@@ -86,6 +86,25 @@ snapshot).
 root and `/dev` exist); the ABI is `uapi/cosmo/blkctl.h`, described in
 `design.md`, "The block-device channel".
 
+**`int vfs_switch_root(struct vnode *start, const char *path, struct mount
+**old_out)`** The mount whose root `path` names becomes the root of every
+namespace; top-level mounts of the old root move to the same names in
+the new one (design.md, "Switching the root"). `-EINVAL` not a mount
+root / already the root / not mounted on a directory of the root,
+`-EBUSY` a mount elsewhere on the old root or something changed between
+the passes, `-ENOTDIR` (or a lookup error) when the new root lacks a
+directory for a mount that moves. On success `*old_out` is the old root,
+detached.
+
+**`int vfs_release_old_root(struct mount *old)`** Release a detached old
+root: `-EBUSY` (kept, logged) while any of its vnodes is referenced
+beyond the filesystem's own pins; else the filesystem's `unmount`
+result.
+
+**`int vfs_mount_internal(const char *fsname, struct mount **out)`** A
+filesystem instance attached nowhere and on no list (the anonymous-file
+ramfs). `-ENODEV` for an unknown name.
+
 **`void bootfs_init(void)`** (`kernel/include/kernel/bootfs.h`,
 `kernel/core/bootfs.c`) Boot composition: registers ramfs, procfs and
 cosmofs, mounts the ramfs root, populates it from the boot archive,

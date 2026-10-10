@@ -956,6 +956,213 @@ restore:
     return rc;
 }
 
+/* --- switching the root (roadmap M2) ------------------------------------------ */
+
+/* A mount attached at the top level of `root`'s filesystem: its one
+ * namespace reference names it "/<name>" in the initial namespace. The
+ * name, or NULL. */
+static const char *top_level_name(struct mount *n)
+{
+    struct mount_ns_ref *r;
+    const char *name = NULL;
+    unsigned refs = 0;
+    list_for_each_entry(r, &n->ns_refs, mnt_link) {
+        refs++;
+        if (r->ns == mountns_initial() && r->path[0] == '/' && r->path[1] != '\0' && strchr(r->path + 1, '/') == NULL)
+            name = r->path + 1;
+    }
+    return refs == 1 ? name : NULL;
+}
+
+static bool under_mount(const struct mount *n, const struct mount *top)
+{
+    for (const struct mount *m = n; m != NULL; m = m->parent)
+        if (m == top)
+            return true;
+    return false;
+}
+
+#define SWITCH_MAX_MOVES 16
+
+int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_out)
+{
+    struct vnode *v;
+    int rc = vfs_lookup(start, path, &v);
+    if (rc)
+        return rc;
+    struct mount *m = v->mnt;
+    struct {
+        struct mount *mnt;
+        struct vnode *dir;
+        struct vnode *old_mp;
+        char name[VFS_NAME_MAX + 1];
+    } *moves = kmalloc(SWITCH_MAX_MOVES * sizeof(*moves), KMEM_ZERO);
+    if (moves == NULL) {
+        vnode_put(v);
+        return -ENOMEM;
+    }
+    unsigned nmoves = 0, nr_mounts = 0;
+    struct vnode *m_old_mp = NULL;
+
+    /* Pass 1, under the table lock: what moves where, by name. Every
+     * other mount is under the new root (it comes along) or at the top
+     * level of the old root (it moves to the same name in the new one).
+     * Anything else would be left hanging off a filesystem that is about
+     * to be released. */
+    mutex_lock(&g_mounts_lock);
+    struct mount *r = g_root_mount;
+    if (m->root != v || m == r || m->parent != r || m->unmounting)
+        rc = -EINVAL;   /* not a mount root, the root already, or not on a directory of the root */
+    struct mount *n;
+    list_for_each_entry(n, &g_mounts, link) {
+        nr_mounts++;
+        if (rc || n == r || n == m || under_mount(n, m))
+            continue;
+        const char *name = NULL;
+        if (n->parent == r && !n->unmounting) {
+            mutex_lock(&n->mountpoint->lock);
+            name = top_level_name(n);
+            if (name && nmoves < SWITCH_MAX_MOVES && strlen(name) <= VFS_NAME_MAX) {
+                strlcpy(moves[nmoves].name, name, sizeof(moves[nmoves].name));
+                moves[nmoves].mnt = n;
+                moves[nmoves].old_mp = n->mountpoint;
+                nmoves++;
+            } else {
+                name = NULL;
+            }
+            mutex_unlock(&n->mountpoint->lock);
+        }
+        if (name == NULL) {
+            kwarn("vfs: switch root: a mount on the old root is not at its top level; unmount it first");
+            rc = -EBUSY;
+        }
+    }
+    mutex_unlock(&g_mounts_lock);
+
+    /* Pass 2, without it: the directories in the new root. A lookup is
+     * filesystem I/O, and the table lock is not held across that. */
+    for (unsigned i = 0; rc == 0 && i < nmoves; i++) {
+        struct vnode *d = NULL;
+        rc = vfs_lookup(v, moves[i].name, &d);
+        if (rc == 0 && (d->type != VNODE_DIR || d->mnt != m))
+            rc = -ENOTDIR;   /* not a directory, or covered already: the lookup crossed into another mount */
+        if (rc) {
+            kwarn("vfs: switch root: the new root has no free directory /%s for the mount there (%d)",
+                  moves[i].name, rc);
+            if (d)
+                vnode_put(d);
+        } else {
+            moves[i].dir = d;
+        }
+    }
+
+    /* Pass 3: nothing may have changed in between. The caller is the
+     * only process; this is the check that it really was. */
+    mutex_lock(&g_mounts_lock);
+    if (rc == 0) {
+        unsigned now = 0;
+        list_for_each_entry(n, &g_mounts, link)
+            now++;
+        if (now != nr_mounts || g_root_mount != r || m->parent != r)
+            rc = -EBUSY;
+        for (unsigned i = 0; rc == 0 && i < nmoves; i++)
+            if (moves[i].mnt->mountpoint != moves[i].old_mp || moves[i].mnt->unmounting)
+                rc = -EBUSY;
+    }
+    if (rc) {
+        mutex_unlock(&g_mounts_lock);
+        for (unsigned i = 0; i < nmoves; i++)
+            if (moves[i].dir)
+                vnode_put(moves[i].dir);
+        kfree(moves);
+        vnode_put(v);
+        return rc;
+    }
+
+    /* Commit: nothing below can fail. */
+    for (unsigned i = 0; i < nmoves; i++) {
+        struct mount *x = moves[i].mnt;
+        mutex_lock(&x->mountpoint->lock);
+        list_remove(&x->cover_link);
+        list_init(&x->cover_link);
+        mutex_unlock(&x->mountpoint->lock);
+        mutex_lock(&moves[i].dir->lock);
+        list_push_back(&moves[i].dir->covers, &x->cover_link);
+        x->mountpoint = moves[i].dir;   /* keeps the lookup's reference */
+        x->parent = m;
+        mutex_unlock(&moves[i].dir->lock);
+    }
+    /* The new root: off its mountpoint, and out of the namespaces' lists,
+     * because the root mount is visible in every namespace without one. */
+    m_old_mp = m->mountpoint;
+    mutex_lock(&m_old_mp->lock);
+    list_remove(&m->cover_link);
+    list_init(&m->cover_link);
+    struct mount_ns_ref *ref, *tmp;
+    list_for_each_entry_safe(ref, tmp, &m->ns_refs, mnt_link) {
+        list_remove(&ref->mnt_link);
+        list_remove(&ref->ns_link);
+        kfree(ref);
+    }
+    mutex_unlock(&m_old_mp->lock);
+    m->mountpoint = NULL;
+    m->parent = NULL;
+    g_root_mount = m;
+    /* The old root is reachable from nowhere now: no mountpoint, no
+     * namespace. It stays on g_mounts until vfs_release_old_root. */
+    r->unmounting = true;
+    mutex_unlock(&g_mounts_lock);
+
+    for (unsigned i = 0; i < nmoves; i++)
+        vnode_put(moves[i].old_mp);
+    kfree(moves);
+    vnode_put(m_old_mp);
+    vnode_put(v);
+    kinfo("vfs: root switched to %s on %s; %u mount(s) moved onto it", m->fs->name,
+          m->bdev ? m->bdev->name : "memory", nmoves);
+    *old_out = r;
+    return 0;
+}
+
+int vfs_release_old_root(struct mount *r)
+{
+    /* Busy if any vnode is referenced beyond what the filesystem itself
+     * holds, as in vfs_umount_at. A process still in the old tree keeps
+     * it, which is not an error: the memory stays until it leaves. */
+    arch_irq_state_t hs = spin_lock_irqsave(&r->lock);
+    unsigned busy = 0;
+    for (unsigned b = 0; b < VNODE_HASH; b++) {
+        struct vnode *vn;
+        list_for_each_entry(vn, &r->vnodes[b], hash_link) {
+            uint32_t own = ((vn->flags & VNODE_PINNED) ? 1u : 0u) + (vn == r->root ? 1u : 0u);
+            if (kobject_refcount(&vn->obj) > own)
+                busy++;
+        }
+    }
+    unsigned files = r->nr_vnodes;
+    spin_unlock_irqrestore(&r->lock, hs);
+    if (busy) {
+        kwarn("vfs: the old root is kept: %u of its vnodes are still referenced", busy);
+        return -EBUSY;
+    }
+    mutex_lock(&g_mounts_lock);
+    list_remove(&r->link);
+    g_nr_mounts--;
+    mutex_unlock(&g_mounts_lock);
+    mutex_lock(&r->sync_lock);
+    int urc = r->fs->unmount(r);
+    r->unmounted = true;
+    mutex_unlock(&r->sync_lock);
+    struct vnode *root_vn = r->root;
+    r->root = NULL;
+    vnode_put(root_vn);
+    if (r->bdev)
+        blkdev_put(r->bdev);
+    kinfo("vfs: the old root (%s) is released: %u vnodes", r->fs->name, files);
+    kobject_put(&r->obj);
+    return urc;
+}
+
 /*
  * Sync every mount without holding the mount list across a commit (a
  * cosmofs commit is block I/O; mount and unmount must not wait behind it).
@@ -2595,6 +2802,15 @@ void vfs_init(void)
     struct pmm_stats pst;
     pmm_get_stats(&pst);
     pagecache_set_limit(pst.total_pages / 4);
+}
+
+int vfs_mount_internal(const char *fsname, struct mount **out)
+{
+    KASSERT(g_initialized);
+    struct fs_type *fs = vfs_find_fs(fsname);
+    if (fs == NULL)
+        return -ENODEV;
+    return do_mount(fs, NULL, 0, out);
 }
 
 int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags)

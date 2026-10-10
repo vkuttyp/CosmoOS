@@ -36,7 +36,19 @@ void bootfs_init(void)
     int rc = vfs_mount_root("ramfs", NULL, 0);
     if (rc)
         panic("bootfs: cannot mount the root ramfs (%d)", rc);
+    /* Anonymous files (memfd, shm) on a ramfs of their own, attached
+     * nowhere: they must outlive the live root when init switches to a
+     * disk root. */
+    struct mount *anon;
+    rc = vfs_mount_internal("ramfs", &anon);
+    if (rc)
+        panic("bootfs: cannot make the anonymous-file ramfs (%d)", rc);
+    ramfs_set_anon_mount(anon);
     ramfs_populate_boot();
+    /* /dev is a ramfs of its own, so the device nodes the kernel makes
+     * there move with it onto a disk root (vfs_switch_root). */
+    if (vfs_mount("/dev", "ramfs", NULL, 0) != 0)
+        panic("bootfs: cannot mount /dev");
     /* /proc: facts about processes, addressable as files
      * (docs/kernel-services/filesystem/procfs/design.md). */
     if (vfs_mount("/proc", "procfs", NULL, 0) != 0)

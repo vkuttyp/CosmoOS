@@ -244,6 +244,25 @@ void vfs_init(void);                           /* the VFS's own state; no filesy
 /* Mount the root filesystem: once, at boot composition, before any other
  * mount. -ENODEV for an unregistered name, -EBUSY when there is a root. */
 int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags);
+/* A mount attached nowhere and on no list: a filesystem instance for the
+ * kernel's own use (the anonymous-file ramfs). Never unmounted. */
+int vfs_mount_internal(const char *fsname, struct mount **out);
+/*
+ * Make the mount whose root `path` names the root of every namespace
+ * (roadmap M2; docs/kernel-services/vfs/design.md, "Switching the root").
+ * It must be mounted on a directory of the current root. Every other
+ * mount on the old root sits at its top level ("/proc", "/dev") and moves
+ * to the same name in the new root, which must be a free directory; a
+ * mount anywhere else refuses the switch (-EBUSY) before anything
+ * changes. The caller -- init, alone -- is responsible for there being
+ * no other process. On success *old_out is the old root, detached and
+ * reachable from nowhere; the caller moves its own directory off it and
+ * then hands it to vfs_release_old_root.
+ */
+int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_out);
+/* Release a root vfs_switch_root detached: its contents go. -EBUSY,
+ * with the mount kept, while any of its vnodes is still referenced. */
+int vfs_release_old_root(struct mount *old);
 int vfs_register_fs(struct fs_type *fs);
 struct fs_type *vfs_find_fs(const char *name);
 struct vnode *vfs_root(void);                  /* referenced */
@@ -445,6 +464,9 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
  * the only one, to be consumed by vfs_open_vnode, so the file and its pages
  * are freed when the last fd and mapping drop. Size starts at zero. */
 int ramfs_anon_reg(uint32_t mode, struct vnode **out);
+/* The mount ramfs_anon_reg backs anonymous files on: boot composition's
+ * detached ramfs (kernel/core/bootfs.c). */
+void ramfs_set_anon_mount(struct mount *mnt);
 void *ramfs_chr_priv(const struct vnode *vn);
 
 /* Diagnostics. */

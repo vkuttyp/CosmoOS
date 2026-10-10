@@ -264,7 +264,7 @@ jobs:
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
 
-      - name: Install, reboot, persist (release)
+      - name: Install, reboot, persist, fallback (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release test-install
 
       - name: Upload the boots' serial logs (on failure)

@@ -4,6 +4,12 @@ write a file, reboot, read it (docs/userland/testing.md, "test-install").
 
     install_test.py --image cosmoos.img --workdir DIR [--stages install,...]
 
+Stages: `install`, then `reboot` (boot the installed disk alone -- no
+other disk attached -- check init switched to it, write /persist.txt,
+power off; boot it again and read the file back), then `fallback` (a
+live image whose command line names the blank scratch disk as root=:
+init says it cannot mount it and the live shell works).
+
 Stage `install`: boot the live image with a blank 256 MiB virtio disk
 attached, find that disk in `cosmo-install --list` by its size, install on
 it, check that a second install without --force is refused, mount the new
@@ -264,11 +270,84 @@ def stage_install(args, results):
     return {"target": target, "partuuid": partuuid}
 
 
+def stage_reboot(args, results, inst, nonce):
+    """Boot the installed disk alone, write a file, power off."""
+    b = Boot("reboot", inst["target"], args.workdir, {"QEMU_DISKS": "boot"}, args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        log = b.text()
+        m = need(log, rf"^init: switched to the disk root (\S+) \(root=PARTUUID={inst['partuuid']}\)$",
+                 "the installed boot")
+        need(log, r"^\[ INFO\] vfs: the old root \(ramfs\) is released: \d+ vnodes$", "the installed boot")
+        need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
+             "the installed boot")
+        need(log, r"^CosmoOS userland ready$", "the installed /etc/rc")
+        out = b.run(f"echo {nonce} > /persist.txt && sync && cat /persist.txt && ls /dev && echo write-ok")
+        need(out, r"^write-ok$", "writing /persist.txt")
+        need(out, rf"^{nonce}$", "writing /persist.txt")
+        need(out, r"^console$", "the installed system's /dev")
+        rc = b.finish()
+        need(b.text(), r"^init: disk root synced$", "the installed boot's power-off")
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"reboot boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"reboot: PASS in {b.elapsed():.1f}s (root {m.group(1)}, wrote /persist.txt)")
+
+
+def stage_persist(args, results, inst, nonce):
+    """Boot the installed disk again and read the file back."""
+    b = Boot("persist", inst["target"], args.workdir, {"QEMU_DISKS": "boot"}, args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        need(b.text(), r"^init: switched to the disk root \S+ ", "the second installed boot")
+        out = b.run("cat /persist.txt && echo read-ok")
+        need(out, r"^read-ok$", "reading /persist.txt")
+        need(out, rf"^{nonce}$", "reading /persist.txt")
+        rc = b.finish()
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"persist boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"persist: PASS in {b.elapsed():.1f}s (read back {nonce})")
+
+
+def stage_fallback(args, results):
+    """root= naming a disk with no cosmofs on it: a clear line, the live shell."""
+    work = os.path.join(args.workdir, "fallback")
+    os.makedirs(work, exist_ok=True)
+    image = os.path.join(work, "cosmoos.img")
+    data = bytearray(open(args.image, "rb").read())
+    at = [i for i in range(0, len(data), SS) if data[i:i + len(MARKER)] == MARKER]
+    if len(at) != 1:
+        raise Fail(f"fallback: the live image has {len(at)} command-line slots")
+    slot = MARKER + b"root=vda\n"   # the blank scratch disk: vda on both machines
+    data[at[0]:at[0] + SS] = slot + bytes(SS - len(slot))
+    open(image, "wb").write(data)
+    b = Boot("fallback", image, args.workdir, {}, args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        log = b.text()
+        need(log, r"^\[ INFO\] root: root=vda is vda; init mounts it and switches to it$", "the fallback boot")
+        need(log, r"^init: cannot mount vda \(root=vda\): .*; staying on the live root$", "the fallback boot")
+        out = b.run("ls /boot && echo live-ok")
+        need(out, r"^live-ok$", "the live shell after a failed root")
+        rc = b.finish()
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"fallback boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"fallback: PASS in {b.elapsed():.1f}s (root=vda unmountable: live shell)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--stages", default="install")
+    ap.add_argument("--stages", default="install,reboot,fallback")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
     shutil.rmtree(args.workdir, ignore_errors=True)
@@ -277,8 +356,13 @@ def main():
     t0 = time.monotonic()
     try:
         stages = args.stages.split(",")
-        if "install" in stages:
-            stage_install(args, results)
+        inst = stage_install(args, results)
+        nonce = f"m2-persisted-{os.getpid()}-{int(time.time())}"
+        if "reboot" in stages:
+            stage_reboot(args, results, inst, nonce)
+            stage_persist(args, results, inst, nonce)
+        if "fallback" in stages:
+            stage_fallback(args, results)
     except Fail as e:
         for r in results:
             print(f"test-install: {r}")

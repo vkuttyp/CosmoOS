@@ -533,8 +533,10 @@ made in `kernel/core/bootfs.c`, called from `kernel_main`:
 
 1. `vfs_init` -- the VFS alone.
 2. `bootfs_init` -- register ramfs, procfs, cosmofs; `vfs_mount_root
-   ("ramfs")`; `ramfs_populate_boot` (the boot archive as `/boot`,
-   `/bin`, `/sbin`, `/etc`); mount procfs on `/proc`.
+   ("ramfs")`; a detached ramfs for anonymous files; `ramfs_populate_boot`
+   (the boot archive as `/boot`, `/bin`, `/sbin`, `/etc`); a ramfs on
+   `/dev`; procfs on `/proc` (both move to a disk root, "Switching the
+   root").
 3. after the boot modules, `bootfs_disks_ready` -- partition scan of
    every disk, then `root=` resolved against what is registered.
 
@@ -545,6 +547,54 @@ root that cannot be mounted leaves a working live system and a message
 rather than a panic. The sysctls `kernel.cmdline`, `kernel.root` and
 `kernel.rootdev` are what init reads; `kernel.rootdev` resolves at the
 read.
+
+## Switching the root
+
+Roadmap M2, decision 4: every boot starts on the live ramfs root, and
+init switches to a disk root named by `root=`. Two things in boot
+composition make that possible without the VFS naming a filesystem:
+
+- **`/dev` is a ramfs mount of its own** (`bootfs_init`), so the device
+  nodes the kernel creates there (`/dev/console`, `/dev/tty`, `/dev/vmm`,
+  `/dev/net/tap`, `/dev/fsctl`, `/dev/blkctl`) are not in the tree that
+  is released; it moves like `/proc`.
+- **Anonymous files live on a detached ramfs** (`vfs_mount_internal`,
+  `ramfs_set_anon_mount`): a mount on no list and no mountpoint, so a
+  memfd or a SysV segment outlives the root it was created under. It used
+  to be "the first ramfs mounted", which was the root.
+
+`vfs_switch_root(start, path, &old)` makes the mount whose root `path`
+names (M) the root mount, in three passes:
+
+1. Under `g_mounts_lock`: M must be a mount root, not the root, mounted
+   on a directory of the current root (R), not being unmounted. Every
+   other mount must be under M (it comes along) or attached to R at its
+   top level, which is read from its one initial-namespace reference
+   (`/proc`, `/dev`); anything else is `-EBUSY` -- it would be left
+   hanging off the tree being released -- and nothing has changed.
+2. Without the lock (a lookup is filesystem I/O): each such name must be
+   a directory in M that nothing covers.
+3. Under the lock again: the mount count, the root and every mountpoint
+   are as pass 1 saw them, then the commit, which cannot fail: each top-
+   level mount moves to its directory in M (covers list, `mountpoint`,
+   `parent`); M leaves its mountpoint and drops its namespace references
+   (the root mount has none, V28); `g_root_mount = M`; R, reachable from
+   nowhere, is marked `unmounting`.
+
+The system call (`SYS_switch_root`) admits init alone, privileged,
+unconfined (no per-process root, the initial namespace), and only while
+it is the only process -- nothing else can hold a directory, an open file
+or a mapping in R, or be part-way through a walk in it. It switches,
+moves init's directory to `/`, then `vfs_release_old_root(R)`: the same
+reference scan as an unmount, and if nothing beyond the filesystem's own
+pins is held, R leaves the mount list and ramfs releases its tree (log:
+`vfs: the old root (ramfs) is released: N vnodes`); otherwise R is kept
+with a warning, which is memory, not an error.
+
+Init (`docs/userland/design.md`, "The disk root") mounts the device at
+`/sysroot`, switches, mounts a fresh ramfs on `/tmp` (decision 6), and
+syncs before it exits, because the boot ends with init and cosmofs
+commits only at sync and unmount.
 
 ## The block-device channel (`/dev/blkctl`)
 

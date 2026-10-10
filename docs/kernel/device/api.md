@@ -408,6 +408,7 @@ True if a sink of that name is registered. Diagnostics and self-tests.
 |---|---|---|
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img`, created as 8 MiB of zeros if missing | Backing file of the `virtio-blk-pci` scratch disk (`vda`). The boot test creates a fresh `boot-test.log.testdisk.img` every run |
 | `QEMU_RMDISK` | `<image dir>/rmdisk.img`, created as 4 MiB of zeros if missing | Backing file of the second `virtio-blk-pci`, the disk `virtio-remove-inflight` removes and re-probes (`vdb` on q35, `vdc` on `virt`). `0` leaves the device out of the machine and the test skips. The boot test creates a fresh `boot-test.log.rmdisk.img` every run |
+| `QEMU_DISKS` | all | `boot`: the boot disk alone, writable on both machines -- no scratch disk, NVMe, USB, SATA or removal disk; the installed system's boots in `make test-install` (roadmap M2). `QEMU_TESTDISK=0` and `QEMU_NVMEDISK=0` leave those two out individually |
 | `QEMU_VCON` | `<image dir>/vcon.log`, truncated on start | File the `virtconsole` port writes to. The boot test uses `boot-test.log.vcon` and requires the `boot complete` line in it |
 | `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`, `QEMU_PCAP` | empty | Phase 8 network knobs (port forwards, the fw_cfg harness parameter, a pcap of the NIC); see `docs/kernel-services/network/testing.md` |
 | `QEMU_IOMMU` | `1` | `0` leaves the IOMMU out of the machine (`-device intel-iommu` / `iommu=smmuv3`): the devices take the identity DMA path and the harness drops the two `iommu:` markers. See `docs/kernel/iommu/testing.md` |

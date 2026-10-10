@@ -987,6 +987,14 @@ void process_set_init(struct process *p)
     spin_unlock_irqrestore(&g_process_table_lock, s);
 }
 
+bool process_is_init(const struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    bool is = p != NULL && g_init == p;
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return is;
+}
+
 /* Table lock held: init if it is alive and not `except`. */
 static struct process *find_init_locked(struct process *except)
 {

@@ -7,7 +7,7 @@
 USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
-USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep
+USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep sync
 USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install
 
 PROG_DIR_sh     := shell
@@ -24,6 +24,7 @@ PROG_DIR_pwd    := coreutils
 PROG_DIR_true   := coreutils
 PROG_DIR_false  := coreutils
 PROG_DIR_sleep  := coreutils
+PROG_DIR_sync   := coreutils
 PROG_DIR_mount  := system
 PROG_DIR_umount := system
 PROG_DIR_ps     := system

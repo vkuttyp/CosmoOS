@@ -9,6 +9,7 @@
 #include <kernel/aio.h>
 #include <kernel/timerobj.h>
 #include <kernel/blk.h>
+#include <kernel/mountns.h>
 #include <kernel/bootfs.h>
 #include <kernel/bootinfo.h>
 #include <kernel/errno.h>
@@ -936,6 +937,43 @@ static int64_t sys_umount(struct syscall_args *a)
     if (cwd)
         vnode_put(cwd);
     return rc;
+}
+
+/*
+ * Roadmap M2: init, mounted a disk root at `path`, makes it the root
+ * (docs/kernel-services/vfs/design.md, "Switching the root"). Init alone,
+ * and only while it is the only process: nothing else may hold a
+ * directory, an open file or a mapping in the tree about to be released,
+ * and nothing else may be part-way through a path walk in it. Init's own
+ * directory moves to the new root; the old one is released if nothing
+ * holds it (a log line either way).
+ */
+static int64_t sys_switch_root(struct syscall_args *a)
+{
+    struct process *p = process_current();
+    if (!cred_privileged(cred_current()) || !process_is_init(p))
+        return -EPERM;
+    if (process_count() != 1)
+        return -EBUSY;
+    if (p->root != NULL || (p->mntns != NULL && p->mntns != mountns_initial()))
+        return -EINVAL;   /* a confined init has no global root to switch */
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    struct mount *old = NULL;
+    rc = vfs_switch_root(cwd, path, &old);
+    if (cwd)
+        vnode_put(cwd);
+    if (rc)
+        return rc;
+    rc = process_chdir("/");
+    if (rc)
+        kerror("switch root: init cannot move to the new root (%d); the old one is kept", rc);
+    else
+        (void)vfs_release_old_root(old);   /* -EBUSY keeps it, and says so */
+    return 0;
 }
 
 /* --- Phase 8: sockets ------------------------------------------------------- */
@@ -2504,6 +2542,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_getppid] = sys_getppid,
     [SYS_chdir] = sys_chdir,
     [SYS_getcwd] = sys_getcwd,
+    [SYS_switch_root] = sys_switch_root,
     [SYS_procinfo] = sys_procinfo,
     [SYS_syscall_filter] = sys_syscall_filter,
     [SYS_gethostname] = sys_gethostname,

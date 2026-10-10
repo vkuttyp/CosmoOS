@@ -38,11 +38,18 @@ struct ramfs_node {
     struct fifo *fifo;          /* named pipes: the ring's holder (kernel/ipc/fifo.c) */
 };
 
-/* The ramfs mount that backs anonymous files (memfd): the first ramfs mounted,
- * which is the system root at boot and is never unmounted. Chosen here rather
- * than from the caller's "/" so a memfd works regardless of the process's root
- * (a chroot, or a cosmofs root). */
+/* The ramfs mount that backs anonymous files (memfd, SysV shm): a mount of
+ * its own that boot composition makes and attaches nowhere
+ * (ramfs_set_anon_mount), so a memfd works regardless of the process's root
+ * (a chroot, or a cosmofs root) and survives the live root being released
+ * when init switches to a disk root (roadmap M2). It used to be the first
+ * ramfs mounted, which was the root. */
 static struct mount *g_anon_mnt;
+
+void ramfs_set_anon_mount(struct mount *mnt)
+{
+    g_anon_mnt = mnt;
+}
 
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
@@ -606,8 +613,6 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
      * through /tmp (docs/kernel/security/design.md §3). */
     mnt->flags |= MOUNT_CACHE_IS_STORE;
     mnt->cache_limit_pages = RAMFS_MAX_PAGES;
-    if (g_anon_mnt == NULL)
-        g_anon_mnt = mnt;   /* the first ramfs (the system root) backs anonymous files */
     struct vnode *root = ramfs_new(mnt, VNODE_DIR, 0755, NULL);
     if (root == NULL)
         return -ENOMEM;
