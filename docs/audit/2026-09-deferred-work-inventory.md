@@ -934,3 +934,12 @@ each; none is needed by M2's acceptance test.
   stays live and says so.
 - `SYS_switch_root`'s refusals (a mount below the old root's top level, a
   second process) are not exercised by a test (V37's gap).
+- Linux fork copies the SysV shm attach records after the space; an
+  `shmat`/`shmdt` by another thread between the two leaves the child a
+  record without its mapping or a mapping without its record (M3 PR 2).
+- `mremap` of a `MAP_SHARED|MAP_ANONYMOUS` mapping is `-EINVAL`: since M3
+  such a mapping is an unnamed file and `vm_user_remap` resizes anonymous
+  regions only.
+- A fork-like `clone` accepts only `SIGCHLD` as the exit signal (`__WCLONE`
+  and other exit signals are not built).
+

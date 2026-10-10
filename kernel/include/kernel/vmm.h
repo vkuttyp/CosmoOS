@@ -132,7 +132,7 @@ struct vm_space {
     uint64_t limit_mapped_pages;   /* user: vm_user_map_anon refuses beyond this (-ENOMEM) */
     uint64_t limit_anon_pages;     /* user: a demand-zero fault at or beyond this is "no memory" */
     /* User spaces: the processes using it (atomic). One, except while a
-     * vfork child borrows its parent's (docs/kernel/memory/design.md §8.5);
+     * vfork child borrows its parent's (docs/kernel/memory/design.md §8.4);
      * the last vm_space_put tears it down. */
     uint32_t users;
 };

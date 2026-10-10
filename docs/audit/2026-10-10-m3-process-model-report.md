@@ -67,3 +67,37 @@ error and the exemption pragma honoured.
 Every debug boot runs `vm-fork`, whose cross-CPU TLB check skips on one
 CPU (`QEMU_SMP=1`) and runs at 2 and 4.
 
+## PR 2 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| fork | `process_fork`: a copy of the caller (process design, "fork"; P35). Spawn and fork now share `process_alloc`, `process_publish` (NPROC, pid, group and session), `process_first_thread`, `link_to_parent` and `process_unbuild`. The child's one thread takes the caller's registers (result 0), thread pointer, mask, alternate stack and FP/SIMD registers (`arch_fpu_inherit`, new on both arches). | `kernel/process/process.c`, `kernel/include/kernel/process.h`, `kernel/arch/*/fpu.c`, `kernel/include/arch/fpu.h` |
+| Handles | every parent handle at the same number and rights, through `handle_install_at` | `kernel/process/process.c` |
+| Signals | dispositions copied (`signal_process_fork`); nothing pending | `kernel/process/signal.c` |
+| vfork | `vm_space.users`, `vm_space_share`/`vm_space_put` (memory §8.4, M51); processes release spaces only through `vm_space_put`. `process_vfork_wait` (killable) and `process_vfork_release`, run at the child's last thread. | `kernel/memory/vmm.c`, `kernel/process/process.c` |
+| Linux | `fork`, `vfork`, `clone` without `CLONE_THREAD` via `lx_fork_common` (Linux design, "fork"; L16): `CLONE_VM` only with `CLONE_VFORK`, exit signal `SIGCHLD`; `CHILD_SETTID` written in the child before its first instruction. The personality's fork hook copies the break and each SysV shm attach record (`shm_attach_dup`). `MAP_SHARED|MAP_ANONYMOUS` is an unnamed ramfs file, so it stays shared across a fork. | `compat/linux/syscalls.c`, `compat/linux/linux_abi.h`, `kernel/ipc/shm.c` |
+| Tests | `lxtest`'s fork section, both arches (`docs/compat/linux/testing.md`, "fork") | `tests/linux/lxtest.c` |
+
+`wait4` needed nothing: children were already reaped by `process_wait_child`.
+The musl program for fork moves to PR 4, where musl is built from source
+for both architectures; today's `hello_musl` uses the CI runner's
+`musl-gcc` and exists on x86-64 only.
+
+No module ABI bump: `struct process`, `struct thread` and `struct
+vm_space` gained fields, and no module reads them.
+
+### Each new check fails without what it checks (x86-64, one boot each)
+
+| Mutation | Result |
+|---|---|
+| `arch_fpu_inherit` not called | the child's `xmm8` is the reset value: exit 2, `wait4` status 512 |
+| `process_vfork_wait` returns at once | `g_vfork_stage == 2` fails (0): the caller ran before the child |
+| the shm attach records not copied | `shm_nattch == 2` fails (1); the child's `shmdt` fails (exit 11) |
+| `MAP_SHARED|MAP_ANONYMOUS` private as before | `shr[0] == 22` fails (21) |
+| dispositions not copied | the child's disposition check fails (exit 5) |
+
+The dispositions run first *hung* to the harness timeout: the child failed
+before writing to the report pipe, and the parent, holding the pipe's write
+end itself, never saw EOF. Each side now closes the ends it does not use,
+and the rerun fails in 171 s with the child's status.
+
