@@ -143,8 +143,17 @@ jobs:
       - name: Reproducible build check
         run: make ARCH=${{ matrix.arch }} reproducible
 
+      # TEMPORARY (M2 PR 1): what else runs on the machine when the crash
+      # boot starts, and while it runs (docs/testing/flakes.md, syscall-fuzz).
+      - name: Diagnostic -- the machine before the panic path test
+        run: |
+          uptime; free -m; nproc
+          ps -eo pid,ppid,pcpu,pmem,etime,stat,args --sort=-pcpu | head -25
+
       - name: Panic path test
-        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
+        run: |
+          ( for i in 1 2 3 4 5 6; do sleep 30; echo "== diag $i"; uptime; ps -eo pid,pcpu,etime,args --sort=-pcpu | head -8; done ) &
+          make ARCH=${{ matrix.arch }} BUILD=debug test-crash
 
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
