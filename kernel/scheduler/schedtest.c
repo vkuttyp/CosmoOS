@@ -811,6 +811,13 @@ bool selftest_irqrestore_bench(const char **reason)
         arch_irq_restore(s);   /* with need_resched clear: the predicate's two loads and a branch */
     }
     uint64_t dt = clock_since_ns(t0);
+#if CONFIG_DEBUG
+    /* Some CI boots run this loop 7x slower from the start of the boot
+     * (docs/testing/flakes.md, 2026-10-10): name the interrupt state. */
+    char irqs[200];
+    arch_test_irq_state(irqs, sizeof(irqs));
+    kinfo("selftest: irqrestore-bench: interrupt controller: %s", irqs);
+#endif
     kinfo("selftest: irqrestore-bench: %u save/restore pairs in %llu us, %llu ns a pair; restore-point preemptions so far on this CPU: %llu",
           N, (unsigned long long)(dt / 1000), (unsigned long long)(dt / N),
           (unsigned long long)preempt_point_count(raw_cpu_id()));   /* a statistic */

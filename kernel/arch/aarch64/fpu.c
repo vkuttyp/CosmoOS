@@ -274,3 +274,11 @@ bool arch_test_fpu_get(uint8_t out[16])
 }
 
 #endif /* CONFIG_SELFTEST */
+
+/* arch/testhooks.h: not read on this architecture yet. */
+void arch_test_irq_state(char *buf, unsigned n)
+{
+    if (n > 0)
+        strlcpy(buf, "n/a", n);
+}
+

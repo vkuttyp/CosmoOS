@@ -3839,6 +3839,34 @@ against `cosmofs-replay` 14.3-17.4 s and 110.7-126.7 s in every passing
 x86-64 boot of the same runs and of main's #345 and #346 merge runs. In
 the passing boots PR #347's times match main's (`cosmofs-replay`
 15.9-16.6 s against 16.4-17.4 s), and `net-bench` is never among the
-five slowest tests on either. So it appears in host slow stretches, as
-on 2026-10-08, not as a cost of the branch.
+five slowest tests on either.
+
+**Corrected: not the host, and more often on this branch.** A fifth boot
+failed the same way in run 38078343577 (the build job's first boot,
+`net-bench` 19.1 s, and the entropy job's second, 24.6 s). Main's #346
+merge run, rerun as a control at the same time (38072676670, attempt 2),
+passed every job: its eight x86-64 boots were uniformly slower on that
+runner -- compute included (`lockdep-graph-bench` 6.9-7.3 s) -- and none
+had this mode. Today that is 0 of about 20 main boots against 5 of about
+22 on PR #347. And the slow boots are not uniformly slow, which a host
+stretch would be: in the harness-retry boot of run 38075570263 against
+the same run's chaos boot, compute-bound tests read the same
+(`lockdep-graph-bench` 1.06x, `process-user` 1.07x, `syscall-fuzz`
+1.03x) while code that toggles interrupts or waits on devices is slow:
+`irqrestore-bench` 1567 ns a pair against 215-233 (6.8x; every slow
+boot 943-1655, every normal one 213-229), `net-bench` 5.8x, the cosmofs
+and block tests 1.6-2.2x. It is there from the eighth self-test (`pmm`
+228 ms against 45), before any code the branch adds runs; in the
+entropy job a normal boot and a slow one ran on the same runner.
+
+The 2026-10-06 entry's per-boot modes were about 1.3x and these are 7x.
+The shape -- code running with interrupts masked untouched, every
+interrupt enable expensive -- fits a CPU with an interrupt request it
+can never deliver, which QEMU re-examines at every `sti`/`popf`. The
+branch moves code (`.text` +9.6 KB; 160 functions newly cross a page,
+`tick_isr` among them) but not the interrupt path's own functions, so a
+layout effect on an early race is the working hypothesis, not a
+measurement. Debug builds now print the local APIC's in-service and
+request bitmaps, TPR and PPR in `irqrestore-bench`, so the next slow boot
+says whether a vector is stuck.
 
