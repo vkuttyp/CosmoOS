@@ -872,3 +872,90 @@ unit, keyed by `(vnode, file offset)` rather than by frame
 segments as file regions; eviction of mapped pages under pressure, with
 the page-level reverse map it needs; `mremap`; a user `PHYS` region for
 a device; `MAP_POPULATE`; `madvise` on file regions.
+
+## 8. fork: copy-on-write duplication (roadmap M3)
+
+`vm_space_fork(src, &dst)` (`kernel/memory/vmm.c`) makes a child space
+that maps what the parent maps, sharing frames until either side writes.
+It is the kernel primitive behind Linux `fork` and fork-like `clone`
+(M3 PR 2); native fork is not offered.
+
+### 8.1 What is shared, and how
+
+| Region | Child PTE | Parent PTE | Reference |
+|---|---|---|---|
+| ANON (demand-zero, populated) | the same frame, read-only | lowered to read-only where it allowed write | +1 per child PTE |
+| FILE private: a copy-on-write copy | the same frame, read-only | lowered likewise | +1 |
+| FILE private: a cache frame (read-only already) | the same frame, read-only | unchanged | +1 (PG_PAGECACHE: the cache's own + one per PTE) |
+| FILE shared (MAP_SHARED, SysV shm, memfd MAP_SHARED) | the same frame, the parent's protection | unchanged | +1 |
+| PHYS | not present in user spaces (asserted) | | |
+
+Nothing is copied at fork; the first write of either side to a shared
+private frame copies it, or takes it back writable when it is the last
+user (8.3). Accounting is the child's own: `anon_pages` and `file_pages`
+count the frames its PTEs hold, `mapped_pages` its regions; its limits are
+the parent's, and a child that would start over them is refused with
+`-ENOMEM` (fork never overcommits beyond the existing limits; a copy made
+later counts like any anonymous page).
+
+### 8.2 The two phases
+
+The parent's `replace_lock` is held throughout, so no replacement holds a
+claimed range (M45's QUIESCED regions cannot be met).
+
+- **Phase A, no space lock.** The parent's distinct mapping records are
+  snapshotted under its lock (copied, not pointed at: a record can go
+  while fork sleeps), and a child record is built for each and linked on
+  its vnode's `pc.mappings` -- before any child PTE can map one of its
+  pages, the rule `map_file` keeps, so truncate and write-back never miss a
+  child page. The child record keeps the parent's `tag` (a SysV shm attach
+  is the same attach in the child) and `text` (the `-ETXTBSY` interlock;
+  linking a text record takes `vn->lock` as `map_file` does).
+- **Phase B, both space locks.** The parent's lock, then the child's,
+  nested (`spin_lock_nested`, subclass 1; the only place two space locks
+  are held). Regions are copied in order; each present page is shared per
+  8.1, stepping over unpopulated stretches with `arch_mmu_absent_span`. A
+  FILE region whose record was not in the snapshot (mapped meanwhile)
+  restarts the whole fork.
+- **After.** Every parent range that had a PTE lowered is shot down on the
+  CPUs that may hold the space -- also on failure, because the PTEs are
+  lowered either way. Unused child records are unlinked; a failed child is
+  destroyed, which drops every reference its PTEs took.
+
+A concurrent truncate is safe without more locking: the child's record
+follows the parent's on the vnode list, so a truncate reaches the child
+after the parent and removes whatever phase B copied before the parent was
+truncated.
+
+### 8.3 The copy-on-write fault
+
+A write fault on a **present** page in an ANON region or a private FILE
+region whose protection allows the write, where the frame is anonymous
+(not PG_PAGECACHE), is `cow_write_locked`, under the space lock:
+
+- the PTE is writable already: another thread resolved it; return;
+- the frame's refcount is 1: this mapping is the last user; the PTE is
+  raised to the region's protection and shot down (a stale read-only entry
+  must not keep faulting);
+- otherwise: a new frame, the contents copied, the PTE replaced, shot down,
+  and the old frame's reference dropped after the lock.
+
+Deciding on the count is safe (M49): only a `vm_space_fork` of a space that
+maps the frame can raise it, and for this space that fork holds this lock;
+a fork of another space raises a count already above one, where the answer
+is the same. The arm runs only for a fault taken with interrupts enabled
+(every user fault; a kernel copy in an ordinary system call), because it
+shoots down; a kernel copy with them masked takes its fixup instead. A
+cache frame in a private region is the FILE arm's (replaced by a copy, as
+before). No frame for the copy is the anonymous rule: the process, not the
+kernel, runs out.
+
+`vm_user_protect` granting write keeps a shared anonymous frame read-only
+(M50), so `mprotect` after fork cannot open a frame the other side still
+maps; its first write copies it.
+
+### 8.4 What stays open
+
+The phase-B copy runs with interrupts off for the whole parent, which is a
+latency cost proportional to its populated pages (performance work on fork
+is outside M3).

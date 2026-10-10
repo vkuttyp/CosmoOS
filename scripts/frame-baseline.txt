@@ -1,0 +1,40 @@
+# scripts/frame-baseline.txt -- kernel and module functions whose stack frame
+# was over the 2048-byte guard (-Wframe-larger-than=2048) when it was added
+# (roadmap M3, 2026-10-10). Each is wrapped in FRAME_EXEMPT_BEGIN/END in its
+# source; scripts/check-frame-baseline.py fails the kernel link when the
+# wrapped set and this list differ. Remove a line when its function is fixed.
+# Columns: source file, function, largest frame measured (bytes, any of
+# x86-64/AArch64 debug/release).
+compat/linux/signal.c linux_signal_frame 5344
+compat/linux/signal.c lx_rt_sigreturn 5456
+compat/linux/syscalls.c do_open 3144
+compat/linux/syscalls.c lx_openat 3184
+compat/linux/syscalls.c lx_rename 2072
+compat/linux/syscalls.c lx_renameat 2120
+compat/linux/syscalls.c lx_symlinkat 2112
+compat/linux/syscalls.c symlink_common 2104
+drivers/nvme/nvme.c nvme_probe 4336
+drivers/nvme/nvme.c nvme_submit 2784
+kernel-services/filesystem/cosmofs/cosmofs_check.c cosmofs_check 2336
+kernel-services/filesystem/cosmofs/cosmofstest.c selftest_cosmofs_crash 8592
+kernel-services/filesystem/cosmofs/cosmofstest.c selftest_cosmofs_orphan_idempotent 2752
+kernel-services/network/nettest.c selftest_net_hostinput 2816
+kernel-services/network/nettest.c selftest_net_hoststate 2944
+kernel-services/network/nettest.c selftest_net_icmp_limit 3440
+kernel-services/network/nettest.c selftest_net_mbuf 6192
+kernel-services/network/nettest.c selftest_net_nonblock 4304
+kernel-services/network/nettest.c selftest_net_output 2272
+kernel-services/network/nettest.c udp_roundtrip 3072
+kernel-services/vfs/ramfs.c ramfs_populate_boot 2160
+kernel-services/virtualization/hvtest.c selftest_el2_virtq_device 4832
+kernel/core/quiescetest.c selftest_quiesce_stress 2192
+kernel/device/devtest.c nvme_run_workers 2192
+kernel/device/devtest.c selftest_nvme 2264  
+kernel/process/process.c process_chdir 2128
+kernel/process/process.c process_create_from_images 2616
+kernel/process/proctest.c selftest_linux_elf 2704
+kernel/process/spawn.c process_spawn 3616
+kernel/scheduler/smptest.c selftest_smp_parallel 2176
+kernel/syscall/native.c sys_open 3128
+kernel/syscall/native.c sys_rename 2072
+kernel/syscall/native.c sys_symlink 2096

@@ -52,6 +52,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/memory/slab.c \
 	kernel/memory/kmalloc.c \
 	kernel/memory/memtest.c \
+	kernel/memory/forktest.c \
 	kernel/timer/clocktest.c \
 	kernel/timer/timer.c \
 	kernel/scheduler/thread.c \
@@ -107,6 +108,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/process/proctest.c \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \
+	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \
 	kernel/security/sha512.c \
@@ -213,6 +215,7 @@ $(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LINKER_SCRIPT)
 	$(call log,LD,$@)
 	$(Q)$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_LINKER_SCRIPT) -Map=$(KERNEL_MAP) -o $@ $(KERNEL_OBJS)
 	$(Q)$(ROOT)/scripts/check-kernel-elf.sh $(OBJDUMP) $@
+	$(Q)$(PYTHON) $(ROOT)/scripts/check-frame-baseline.py $(ROOT)
 
 kernel: $(KERNEL_ELF)
 

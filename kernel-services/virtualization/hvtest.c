@@ -8,6 +8,7 @@
  * configuration, where SVM is present.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/bootarchive.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
@@ -2740,6 +2741,7 @@ static void vio_reg(struct vm *vm, struct vio_model *m, unsigned off, bool write
     }
 }
 
+FRAME_EXEMPT_BEGIN(selftest_el2_virtq_device)   /* scripts/frame-baseline.txt: 4832 bytes */
 bool selftest_el2_virtq_device(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2829,6 +2831,7 @@ bool selftest_el2_virtq_device(const char **reason)
           "then wrote one, flushed, and read back what it wrote");
     return true;
 }
+FRAME_EXEMPT_END(selftest_el2_virtq_device)
 
 /*
  * el2-virtq-net: a guest drives a virtio-mmio network device at the second

@@ -18,6 +18,7 @@
  * normal case and must never be reported.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/cosmofs.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -985,6 +986,7 @@ static bool report_clean(const struct cosmofs_check_report *r)
            !r->partial;
 }
 
+FRAME_EXEMPT_BEGIN(cosmofs_check)   /* scripts/frame-baseline.txt: 2336 bytes */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)
 {
     struct cfs *fs = cfs_of(mnt);
@@ -1122,4 +1124,5 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
               (unsigned long long)rep.unreadable.count);
     return rc;
 }
+FRAME_EXEMPT_END(cosmofs_check)
 

@@ -7,6 +7,7 @@
  * stays meaningful in both configurations.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/completion.h>
 #include <kernel/ipi.h>
 #include <kernel/log.h>
@@ -262,6 +263,7 @@ static void spin_observe(void *arg)
     }
 }
 
+FRAME_EXEMPT_BEGIN(selftest_smp_parallel)   /* scripts/frame-baseline.txt: 2176 bytes */
 bool selftest_smp_parallel(const char **reason)
 {
     unsigned before = thread_count();
@@ -311,6 +313,7 @@ bool selftest_smp_parallel(const char **reason)
     CHECK(threads_settle(before));
     return true;
 }
+FRAME_EXEMPT_END(selftest_smp_parallel)
 
 /* --- cross-CPU function call lands on the target --- */
 

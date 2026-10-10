@@ -10,6 +10,7 @@
  * fails everything in flight and leaves the controller dead.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/blk.h>
 #include <kernel/completion.h>
 #include <kernel/dma.h>
@@ -470,6 +471,7 @@ static struct nvme_queue *queue_for_this_cpu(struct nvme_ctrl *c)
     return c->ioq[raw_cpu_id() % c->nr_ioq];   /* a preference: every queue has its own lock, any CPU may use any */
 }
 
+FRAME_EXEMPT_BEGIN(nvme_submit)   /* scripts/frame-baseline.txt: 2784 bytes */
 static int nvme_submit(struct blkdev *bd, struct bio *bio)
 {
     struct nvme_ns *ns = bd->priv;
@@ -575,6 +577,7 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
     spin_unlock_irqrestore(&q->lock, s);
     return 0;
 }
+FRAME_EXEMPT_END(nvme_submit)
 
 #define NVME_DISABLE_PENDING 0u   /* the first controller_die has not finished */
 #define NVME_DISABLE_ACKED   1u   /* RDY fell and every slot was released */
@@ -796,6 +799,7 @@ static bool nvme_remove_queues(struct nvme_ctrl *c, bool stopped)
     return true;
 }
 
+FRAME_EXEMPT_BEGIN(nvme_probe)   /* scripts/frame-baseline.txt: 4336 bytes */
 static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
 {
     (void)id;
@@ -980,6 +984,7 @@ fail:
     kfree(c);
     return rc;
 }
+FRAME_EXEMPT_END(nvme_probe)
 
 static void nvme_remove(struct pci_device *pdev)
 {

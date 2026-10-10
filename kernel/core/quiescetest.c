@@ -10,6 +10,7 @@
  * is quiescent by construction and the waits return at once.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
 #include <kernel/kmalloc.h>
@@ -1479,6 +1480,7 @@ static bool selftest_quiesce_stress_pinned(const char **reason)
  * this thread's CPU that must outlive its sleeps (S25); a callback or a
  * spinner parked on that other CPU must never find this thread queued
  * behind it. */
+FRAME_EXEMPT_BEGIN(selftest_quiesce_stress)   /* scripts/frame-baseline.txt: 2192 bytes */
 bool selftest_quiesce_stress(const char **reason)
 {
     cpumask_t saved = thread_pin_self();
@@ -1486,6 +1488,7 @@ bool selftest_quiesce_stress(const char **reason)
     thread_set_affinity_self(saved);
     return r;
 }
+FRAME_EXEMPT_END(selftest_quiesce_stress)
 
 
 /*

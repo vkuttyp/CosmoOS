@@ -10,6 +10,7 @@
  * SA_RESTORER returns through on AArch64.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/errno.h>
 #include <kernel/futex.h>
 #include <kernel/log.h>
@@ -192,6 +193,7 @@ int64_t lx_rt_sigreturn(struct syscall_args *a)
 }
 
 #elif defined(ARCH_AARCH64)
+FRAME_EXEMPT_BEGIN(linux_signal_frame)   /* scripts/frame-baseline.txt: 5344 bytes (AArch64; the x86-64 frame is small) */
 int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, const struct signal_info *info,
                        uint64_t blocked_before)
 {
@@ -248,7 +250,9 @@ int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, 
     r->pc = act->handler;
     return 0;
 }
+FRAME_EXEMPT_END(linux_signal_frame)
 
+FRAME_EXEMPT_BEGIN(lx_rt_sigreturn)   /* scripts/frame-baseline.txt: 5456 bytes (AArch64; the x86-64 frame is small) */
 int64_t lx_rt_sigreturn(struct syscall_args *a)
 {
     struct thread *t = thread_current();
@@ -287,6 +291,7 @@ int64_t lx_rt_sigreturn(struct syscall_args *a)
     t->syscall_nr = SIGNAL_NO_RESTART;
     return (int64_t)r.x[0];
 }
+FRAME_EXEMPT_END(lx_rt_sigreturn)
 #endif
 
 /* --- the trampoline page and the exit hook ------------------------------------- */

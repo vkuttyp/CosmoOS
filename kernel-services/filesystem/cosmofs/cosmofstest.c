@@ -5,6 +5,7 @@
  * user-mode test: /hello.txt and /dir/nested.txt.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/blk.h>
 #include <kernel/cosmofs.h>
 #include <uapi/cosmo/fsctl.h>
@@ -227,6 +228,7 @@ bool selftest_cosmofs_ops(const char **reason)
     return true;
 }
 
+FRAME_EXEMPT_BEGIN(selftest_cosmofs_crash)   /* scripts/frame-baseline.txt: 8592 bytes */
 bool selftest_cosmofs_crash(const char **reason)
 {
     struct blkdev *bd = scratch();
@@ -291,6 +293,7 @@ bool selftest_cosmofs_crash(const char **reason)
     blkdev_put(bd);
     return true;
 }
+FRAME_EXEMPT_END(selftest_cosmofs_crash)
 
 /* --- the transaction engine (audit milestone 7), on RAM devices --------------- */
 
@@ -2663,6 +2666,7 @@ bool selftest_cosmofs_orphan_rename(const char **reason)
  * decrement, which is the only thing standing between this and a count
  * that drops twice.
  */
+FRAME_EXEMPT_BEGIN(selftest_cosmofs_orphan_idempotent)   /* scripts/frame-baseline.txt: 2752 bytes */
 bool selftest_cosmofs_orphan_idempotent(const char **reason)
 {
     struct blkdev *bd;
@@ -2708,6 +2712,7 @@ bool selftest_cosmofs_orphan_idempotent(const char **reason)
           (unsigned long long)second.inode_count);
     return engine_unmount(bd, reason);
 }
+FRAME_EXEMPT_END(selftest_cosmofs_orphan_idempotent)
 
 /*
  * The record's blocks are allocated in the bitmap the root publishes,

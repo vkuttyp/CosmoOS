@@ -179,3 +179,23 @@ side effect of `all`.
   unit-test harness.
 - **LTO and coverage**: both are flag-level additions on top of the
   existing structure.
+
+## Stack frames (roadmap M3)
+
+Kernel and module code is compiled with `-Wframe-larger-than=2048`
+(`KERNEL_FRAME_LIMIT`, `build/toolchain.mk`), an error under `-Werror`. A
+kernel stack is 16 KiB (`THREAD_STACK_SIZE`) and October 2026 found two
+overflows from large locals (`lz4_compress`'s table, the initial-stack
+builder's scratch). 2048 is an eighth of a stack and Linux's default for
+64-bit; measured over all four builds (x86-64 and AArch64, debug and
+release) when the guard arrived, about 135 functions were over 1 KiB and 33
+over 2 KiB, the largest 8.6 KiB (`selftest_cosmofs_crash`).
+
+The 33 are the baseline: each is wrapped in `FRAME_EXEMPT_BEGIN(fn)` /
+`FRAME_EXEMPT_END(fn)` (`kernel/include/kernel/compiler.h`, a diagnostic
+pragma) and listed with its measured frame in `scripts/frame-baseline.txt`.
+The kernel link runs `scripts/check-frame-baseline.py`, which fails when the
+wrapped set and the list differ, so an exemption is never added or left
+behind silently. A fix removes both. Where the two architectures differ
+(`compat/linux/signal.c`'s frame builders are large only on AArch64), only
+the large definition is wrapped.

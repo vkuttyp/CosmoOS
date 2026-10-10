@@ -4,6 +4,7 @@
  * the virtio console sink.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/blk.h>
 #include <kernel/console.h>
 #include <kernel/device.h>
@@ -541,6 +542,7 @@ static void nvme_worker_free(uint8_t *buf)
     kfree(buf);
 }
 
+FRAME_EXEMPT_BEGIN(nvme_run_workers)   /* scripts/frame-baseline.txt: 2192 bytes */
 static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started_out)
 {
     bool ok = true;
@@ -574,6 +576,7 @@ static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started
     *started_out = started;
     return ok;
 }
+FRAME_EXEMPT_END(nvme_run_workers)
 
 bool selftest_nvme_worker_cleanup(const char **reason)
 {
@@ -609,6 +612,7 @@ bool selftest_nvme_worker_cleanup(const char **reason)
     return true;
 }
 
+FRAME_EXEMPT_BEGIN(selftest_nvme)   /* scripts/frame-baseline.txt: 2264 bytes */
 bool selftest_nvme(const char **reason)
 {
     struct blkdev *bd = blk_find("nvme0n1");
@@ -720,6 +724,7 @@ bool selftest_nvme(const char **reason)
 #undef STEP
     return true;
 }
+FRAME_EXEMPT_END(selftest_nvme)
 
 void selftest_nvme_mark_done(struct bio *bio)
 {

@@ -862,6 +862,97 @@ static int file_fault(struct vm_space *space, vaddr_t va, unsigned fl, struct vn
     return 0;
 }
 
+/*
+ * A write to a present, read-only anonymous frame in a private region
+ * whose protection allows the write: a frame vm_space_fork left shared
+ * (roadmap M3; design.md, "fork"). Space lock held, `r` found under it.
+ *
+ * While another mapping holds the frame (refcount above one) the writer
+ * gets a copy; when this mapping is the last user it takes the frame back
+ * writable. The count is safe to decide on: only a vm_space_fork of a
+ * space that maps the frame can raise it, and for this space that fork
+ * holds this lock; a fork of another space mapping it raises a count that
+ * is already above one, where the answer -- copy -- is the same.
+ *
+ * Returns 0 when the write may proceed (copied, taken back, or already
+ * writable because another thread got here first), -ENOMEM when no frame
+ * could be had for the copy, -EAGAIN when the PTE is not this case (the
+ * caller goes on to the other arms). *put is the frame whose reference
+ * the caller drops after unlocking; *shoot asks for a shootdown of `va`.
+ */
+static int cow_write_locked(struct vm_space *space, const struct vm_region *r, vaddr_t va, struct page **put,
+                            bool *shoot)
+{
+    paddr_t pa;
+    vm_prot_t cur;
+    *put = NULL;
+    *shoot = false;
+    if (!arch_mmu_query(&space->mmu, va, &pa, &cur, NULL, NULL))
+        return -EAGAIN;   /* gone: the not-present arms decide */
+    struct page *pg = phys_to_page(pa);
+    if (pg->flags & PG_PAGECACHE)
+        return -EAGAIN;   /* a cache frame: the FILE arm replaces it with a copy */
+    if (cur & VM_PROT_WRITE)
+        return 0;         /* another thread resolved it */
+    if (__atomic_load_n(&pg->refcount, __ATOMIC_ACQUIRE) == 1) {
+        int prc = arch_mmu_protect(&space->mmu, va, PAGE_SIZE, r->prot);
+        KASSERT(prc == 0);
+        (void)prc;
+        *shoot = true;   /* a stale read-only translation must not keep faulting */
+        __atomic_fetch_add(&g_stats.cow_reuses, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    struct page *copy = pmm_alloc_page(0);
+    if (copy == NULL)
+        return -ENOMEM;
+    memcpy(page_to_virt(copy), page_to_virt(pg), PAGE_SIZE);
+    int urc = arch_mmu_unmap(&space->mmu, va, PAGE_SIZE);
+    KASSERT(urc == 0);
+    (void)urc;
+    int mrc = arch_mmu_map(&space->mmu, va, page_to_phys(copy), PAGE_SIZE, r->prot, r->cache, ARCH_MMU_MAP_USER);
+    if (mrc)
+        panic("cannot map %p in region '%s' (%d)", (void *)va, r->name, mrc);
+    /* anon_pages is unchanged: one anonymous frame replaced another. */
+    *put = pg;
+    *shoot = true;
+    __atomic_fetch_add(&g_stats.cow_copies, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+/* An anonymous frame another mapping also holds (fork). */
+static bool frame_shared_anon(const struct page *pg)
+{
+    return !(pg->flags & PG_PAGECACHE) && __atomic_load_n(&pg->refcount, __ATOMIC_ACQUIRE) > 1;
+}
+
+static bool cow_candidate(const struct vm_space *space, const struct vm_region *r, unsigned fl)
+{
+    return r != NULL && space->user && !(r->flags & VM_REGION_QUIESCED) && (fl & VM_FAULT_WRITE) &&
+           (fl & VM_FAULT_PRESENT) && !(fl & VM_FAULT_RESERVED) &&
+           (r->kind == VM_REGION_ANON || (r->kind == VM_REGION_FILE && !r->fmap->shared));
+}
+
+#if CONFIG_SELFTEST
+int vm_test_write_fault(struct vm_space *space, vaddr_t va)
+{
+    va = page_align_down(va);
+    struct page *put;
+    bool shoot;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, va);
+    int rc = -EFAULT;
+    if (cow_candidate(space, r, VM_FAULT_WRITE | VM_FAULT_PRESENT | VM_FAULT_USER) &&
+        access_allowed(r, VM_FAULT_WRITE | VM_FAULT_PRESENT | VM_FAULT_USER))
+        rc = cow_write_locked(space, r, va, &put, &shoot);
+    spin_unlock_irqrestore(&space->lock, s);
+    if (rc == 0 && shoot)
+        user_shootdown(space, va, PAGE_SIZE);
+    if (rc == 0 && put)
+        pmm_page_put(put);
+    return rc;
+}
+#endif
+
 static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
@@ -916,6 +1007,35 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
                 goto unserviced;
             sched_yield();
             return;
+        }
+
+        /* A write to a frame fork left shared (cow_write_locked). Only
+         * for a fault taken with interrupts enabled -- every user-mode
+         * fault, and a kernel copy in an ordinary system call: resolving
+         * it needs a shootdown, which needs them on. A kernel copy with
+         * them masked takes its fixup (-EFAULT) below rather than
+         * resolve a fault it cannot complete safely. */
+        if (cow_candidate(space, r, fl) && access_allowed(r, fl) && arch_trap_frame_irqs_enabled(frame)) {
+            struct page *put;
+            bool shoot;
+            int crc = cow_write_locked(space, r, page, &put, &shoot);
+            if (crc != -EAGAIN) {
+                spin_unlock_irqrestore(&space->lock, s);
+                if (crc == -ENOMEM) {
+                    oom = true;   /* the anonymous rule: the process runs out, not the kernel */
+                    goto unserviced;
+                }
+                if (shoot) {
+                    /* With interrupts on, as the interrupted context had
+                     * them (the FILE arm does the same). */
+                    arch_irq_enable();
+                    user_shootdown(space, page, PAGE_SIZE);
+                    arch_irq_disable();
+                }
+                if (put)
+                    pmm_page_put(put);
+                return;
+            }
         }
 
         /*
@@ -1356,6 +1476,265 @@ uint64_t vm_space_destroy_counted(struct vm_space *space)
     arch_mmu_context_destroy(&space->mmu);
     kmem_cache_free(g_space_cache, space);
     return queried;
+}
+
+/* --- fork (roadmap M3; design.md, "fork") --- */
+
+/* What fork remembers of one of the parent's file-mapping records, and
+ * the child's record built from it. Copied, not pointed at: the parent's
+ * record can go away while fork is between its two phases. */
+struct fork_fmap {
+    uint64_t tag;
+    struct vnode *vn;            /* referenced */
+    vaddr_t base;
+    size_t size;
+    uint64_t off;
+    bool shared, text;
+    vm_prot_t maxprot;
+    struct vm_file_map *child;   /* built in phase A; NULL until then */
+};
+
+/* Unlink and free a child record no child region ended up using. */
+static void fmap_free_unused(struct vm_file_map *m)
+{
+    KASSERT(m->regions == 0);
+    if (m->shared)
+        __atomic_fetch_sub(&m->space->shared_maps, 1u, __ATOMIC_ACQ_REL);
+    pagecache_lock(m->vn);
+    list_remove(&m->link);
+    pagecache_unlock(m->vn);
+    vnode_put(m->vn);
+    kfree(m);
+}
+
+/* Phase A's snapshot: the parent's distinct mapping records, under its
+ * lock. Returns how many there are, which is more than `cap` when the
+ * array must be bigger (nothing referenced then). */
+static unsigned fork_snapshot(struct vm_space *src, struct fork_fmap *out, unsigned cap)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&src->lock);
+    struct vm_region *r;
+    list_for_each_entry(r, &src->regions, link) {
+        if (r->kind != VM_REGION_FILE)
+            continue;
+        bool seen = false;
+        for (unsigned i = 0; i < n && i < cap; i++)
+            seen = seen || out[i].tag == r->fmap->tag;
+        if (seen)
+            continue;
+        if (n < cap) {
+            struct vm_file_map *m = r->fmap;
+            out[n] = (struct fork_fmap){ .tag = m->tag, .vn = m->vn, .base = m->base, .size = m->size,
+                                         .off = m->off, .shared = m->shared, .text = m->text,
+                                         .maxprot = m->maxprot, .child = NULL };
+        }
+        n++;
+    }
+    if (n <= cap)
+        for (unsigned i = 0; i < n; i++)
+            vnode_get(out[i].vn);
+    spin_unlock_irqrestore(&src->lock, s);
+    return n;
+}
+
+/*
+ * Copy one region's present pages into `dst` (both locks held). Private
+ * pages -- anonymous, copy-on-write copies and cache frames of a private
+ * file mapping -- are mapped read-only in both, the parent's PTE lowered
+ * where it allowed write (*shot set); shared file pages keep the parent's
+ * protection. Each child PTE holds its own reference on the frame.
+ */
+static int fork_copy_pages(struct vm_space *src, struct vm_space *dst, const struct vm_region *r, bool *shot)
+{
+    bool shared = r->kind == VM_REGION_FILE && r->fmap->shared;
+    vaddr_t end = r->base + r->size;
+    for (vaddr_t va = r->base; va < end;) {
+        size_t absent = arch_mmu_absent_span(&src->mmu, va);
+        if (absent > 0) {
+            va = absent >= end - va ? end : va + absent;
+            continue;
+        }
+        paddr_t pa;
+        vm_prot_t prot;
+        if (arch_mmu_query(&src->mmu, va, &pa, &prot, NULL, NULL)) {
+            struct page *pg = phys_to_page(pa);
+            KASSERT(pg != NULL);
+            vm_prot_t cprot = prot;
+            if (!shared && (prot & VM_PROT_WRITE)) {
+                int prc = arch_mmu_protect(&src->mmu, va, PAGE_SIZE, prot & ~VM_PROT_WRITE);
+                KASSERT(prc == 0);
+                (void)prc;
+                *shot = true;
+                cprot = prot & ~VM_PROT_WRITE;
+            }
+            pmm_page_get(pg);
+            int mrc = arch_mmu_map(&dst->mmu, va, pa, PAGE_SIZE, cprot, r->cache, ARCH_MMU_MAP_USER);
+            if (mrc) {
+                pmm_page_put(pg);   /* the parent still maps it: never the last reference */
+                return mrc;
+            }
+            if (pg->flags & PG_PAGECACHE)
+                dst->file_pages++;
+            else
+                dst->anon_pages++;
+        }
+        va += PAGE_SIZE;
+    }
+    return 0;
+}
+
+int vm_space_fork(struct vm_space *src, struct vm_space **out)
+{
+    KASSERT(src->user);
+    might_sleep();
+    struct vm_space *dst = NULL;
+    struct fork_fmap *maps = NULL;
+    unsigned nmaps = 0, cap = 8;
+    int rc;
+
+    /* No replacement may hold a claimed range while the regions are copied. */
+    mutex_lock(&src->replace_lock);
+retry:
+    /* Phase A: the parent's mapping records, and a child record for
+     * each, on its vnode's list before any child PTE can map one of its
+     * pages -- the rule map_file keeps, so a truncate or a write-back
+     * never misses a page the child holds. */
+    for (;;) {
+        maps = kmalloc(sizeof(*maps) * cap, KMEM_ZERO);
+        if (maps == NULL) {
+            rc = -ENOMEM;
+            goto out_unlock;
+        }
+        nmaps = fork_snapshot(src, maps, cap);
+        if (nmaps <= cap)
+            break;
+        kfree(maps);
+        cap = nmaps + 8;
+    }
+    rc = vm_space_create_user(&dst);
+    if (rc)
+        goto out_maps;
+    for (unsigned i = 0; i < nmaps; i++) {
+        struct vm_file_map *m = kzalloc(sizeof(*m));
+        if (m == NULL) {
+            rc = -ENOMEM;
+            goto out_maps;
+        }
+        vnode_get(maps[i].vn);
+        m->vn = maps[i].vn;
+        m->space = dst;
+        m->base = maps[i].base;
+        m->size = maps[i].size;
+        m->off = maps[i].off;
+        m->shared = maps[i].shared;
+        m->text = maps[i].text;
+        m->maxprot = maps[i].maxprot;
+        m->regions = 0;
+        m->tag = maps[i].tag;   /* the same attach: SysV shm finds the child's by the parent's tag */
+        if (m->shared)
+            __atomic_fetch_add(&dst->shared_maps, 1u, __ATOMIC_ACQ_REL);
+        /* Text keeps the -ETXTBSY interlock exact, as in map_file. */
+        if (m->text)
+            mutex_lock(&m->vn->lock);
+        pagecache_lock(m->vn);
+        list_push_back(&m->vn->pc.mappings, &m->link);
+        pagecache_unlock(m->vn);
+        if (m->text)
+            mutex_unlock(&m->vn->lock);
+        maps[i].child = m;
+    }
+
+    /* Phase B: the regions and their pages, under both space locks (the
+     * child's nested: a truncate may reach it through a record above). */
+    bool again = false;
+    struct { vaddr_t base; size_t size; } *shots = NULL;
+    unsigned nshots = 0;
+    {
+        unsigned nregions = vm_user_region_count(src) + 8;
+        shots = kmalloc(sizeof(*shots) * nregions, 0);
+        if (shots == NULL) {
+            rc = -ENOMEM;
+            goto out_maps;
+        }
+        arch_irq_state_t s = spin_lock_irqsave(&src->lock);
+        spin_lock_nested(&dst->lock, 1);
+        dst->limit_mapped_pages = src->limit_mapped_pages;
+        dst->limit_anon_pages = src->limit_anon_pages;
+        struct vm_region *r;
+        list_for_each_entry(r, &src->regions, link) {
+            KASSERT(!(r->flags & VM_REGION_QUIESCED));   /* replace_lock is held */
+            KASSERT(r->kind != VM_REGION_PHYS);          /* user spaces map no physical ranges */
+            struct vm_file_map *cm = NULL;
+            if (r->kind == VM_REGION_FILE) {
+                for (unsigned i = 0; i < nmaps && cm == NULL; i++)
+                    if (maps[i].tag == r->fmap->tag)
+                        cm = maps[i].child;
+                if (cm == NULL) {
+                    again = true;   /* mapped since the snapshot: start over */
+                    break;
+                }
+            }
+            struct vm_region *c = region_new(r->base, r->size, r->prot, r->cache, r->kind, r->flags, 0, r->name);
+            if (c == NULL || nshots >= nregions) {
+                if (c)
+                    kmem_cache_free(g_region_cache, c);
+                rc = c ? -EAGAIN : -ENOMEM;
+                again = rc == -EAGAIN;   /* regions were added since they were counted */
+                break;
+            }
+            if (cm) {
+                c->fmap = cm;
+                __atomic_fetch_add(&cm->regions, 1u, __ATOMIC_ACQ_REL);
+            }
+            list_push_back(&dst->regions, &c->link);   /* in order: the parent's list is sorted */
+            dst->mapped_pages += r->size / PAGE_SIZE;
+            bool shot = false;
+            rc = fork_copy_pages(src, dst, r, &shot);
+            if (shot) {
+                shots[nshots].base = r->base;
+                shots[nshots].size = r->size;
+                nshots++;
+            }
+            if (rc)
+                break;
+        }
+        if (rc == 0 && !again &&
+            (dst->mapped_pages > dst->limit_mapped_pages || dst->anon_pages > dst->limit_anon_pages))
+            rc = -ENOMEM;   /* the child's limits, inherited, refuse what it would start with */
+        spin_unlock(&dst->lock);
+        spin_unlock_irqrestore(&src->lock, s);
+    }
+    /* The parent's lowered PTEs, wherever they went read-only -- also on
+     * failure: they are lowered, and a stale writable translation on
+     * another CPU must not outlive that. */
+    for (unsigned i = 0; i < nshots; i++)
+        user_shootdown(src, shots[i].base, shots[i].size);
+    kfree(shots);
+    if (again)
+        rc = -EAGAIN;
+
+out_maps:
+    for (unsigned i = 0; i < nmaps; i++) {
+        vnode_put(maps[i].vn);   /* the snapshot's reference */
+        if (maps[i].child != NULL && maps[i].child->regions == 0)
+            fmap_free_unused(maps[i].child);
+    }
+    kfree(maps);
+    maps = NULL;
+    if (rc != 0 && dst != NULL) {
+        vm_space_destroy(dst);   /* releases every reference the copies took */
+        dst = NULL;
+    }
+    if (rc == -EAGAIN)
+        goto retry;   /* the snapshot is retaken from the start */
+out_unlock:
+    mutex_unlock(&src->replace_lock);
+    if (rc == 0) {
+        __atomic_fetch_add(&g_stats.forks, 1, __ATOMIC_RELAXED);
+        *out = dst;
+    }
+    return rc;
 }
 
 void vm_space_destroy(struct vm_space *space)
@@ -2489,9 +2868,29 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
         if (first == NULL)
             first = r;
         r->prot = prot;
-        if (r->fmap == NULL) {
+        if (r->fmap == NULL && !(prot & VM_PROT_WRITE)) {
             rc = arch_mmu_protect(&space->mmu, r->base, r->size, prot);
             KASSERT(rc == 0);   /* whole 4 KiB user pages only: nothing to split */
+            continue;
+        }
+        if (r->fmap == NULL) {
+            /* Granting write: a frame fork left shared stays read-only,
+             * and its first write copies it (cow_write_locked). Per
+             * page, stepping over what was never populated. */
+            for (vaddr_t p = r->base; p < r->base + r->size;) {
+                size_t absent = arch_mmu_absent_span(&space->mmu, p);
+                if (absent > 0) {
+                    p = absent >= r->base + r->size - p ? r->base + r->size : p + absent;
+                    continue;
+                }
+                paddr_t pa;
+                if (arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL)) {
+                    rc = arch_mmu_protect(&space->mmu, p, PAGE_SIZE,
+                                          frame_shared_anon(phys_to_page(pa)) ? (prot & ~VM_PROT_WRITE) : prot);
+                    KASSERT(rc == 0);
+                }
+                p += PAGE_SIZE;
+            }
             continue;
         }
         /*
@@ -2509,8 +2908,9 @@ int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_
             paddr_t pa;
             if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
                 continue;
-            bool cache_frame = (phys_to_page(pa)->flags & PG_PAGECACHE) != 0;
-            rc = arch_mmu_protect(&space->mmu, p, PAGE_SIZE, cache_frame ? (prot & ~VM_PROT_WRITE) : prot);
+            struct page *pg = phys_to_page(pa);
+            bool keep_ro = (pg->flags & PG_PAGECACHE) != 0 || frame_shared_anon(pg);   /* a cache frame, or a copy fork shares */
+            rc = arch_mmu_protect(&space->mmu, p, PAGE_SIZE, keep_ro ? (prot & ~VM_PROT_WRITE) : prot);
             KASSERT(rc == 0);
         }
     }

@@ -547,3 +547,38 @@ Each applied alone on x86-64, the debug suite booted, the file restored:
 
 The same table, with the panic lines quoted, is in
 `docs/audit/next-subsystem-file-regions.md`, "Bug-proofs, as run".
+
+## `vm-fork` (`kernel/memory/forktest.c`, roadmap M3)
+
+A space with four populated anonymous pages, a `MAP_SHARED` and a private
+mapping of a ramfs file, forked:
+
+- every anonymous page is the same frame in both, read-only in both, at
+  two references; the child's `anon_pages`, `file_pages` and
+  `mapped_pages` equal the parent's;
+- each file mapping has a child record of its own on the vnode (four
+  records where there were two), same tag, the child's `shared_maps` 1;
+- page 0: the child's write copies (new frame, contents carried, writable,
+  the old frame back at one reference), then the parent's write takes its
+  frame back without copying; page 1 the other order; isolation both ways;
+  a write that finds the PTE writable changes nothing; `cow_copies` and
+  `cow_reuses` rise;
+- `mprotect` read-only then read-write on a shared page leaves it read-only
+  at two references, and its write copies;
+- the parent destroyed first: the child keeps its frames at one reference,
+  its contents and its records; after both, no record is left on the vnode;
+- a parent already over its anonymous limit cannot fork (`-ENOMEM`);
+- **the TLB**: a thread on another CPU caches a writable translation of the
+  parent and keeps the space active (preemption off, interrupts on); after
+  the fork its write must fault. With the parent's shootdown removed the
+  test fails on x86-64 (`t.after == 1`, 2026-10-10), which is what makes it
+  a test there. On AArch64 it passes either way, for a reason that holds:
+  TLB invalidation is broadcast to the inner-shareable domain by the
+  hardware, so `arch_mmu_protect`'s own `tlbi vaae1is` already reached the
+  other CPU. A first version checked this CPU instead and passed without
+  the shootdown on both architectures, because the protect invalidates the
+  local entry itself. Not run on one CPU (said in the line).
+
+Write faults are resolved with `vm_test_write_fault` (the handler's own
+`cow_write_locked`): no process runs these spaces. Faults taken by real
+processes after a fork are M3 PR 2's tests.

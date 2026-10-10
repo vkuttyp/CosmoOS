@@ -523,3 +523,28 @@ shootdown per chunk (`user_range_teardown`). Checked by:
 `vm-teardown-absent` (the pages queried equal the pages populated). The
 invalidate itself is recorded, not counted: see `testing.md`, "The
 destroy-path invalidates have no test".
+
+**M48. A frame fork shares is read-only in every space that maps it
+privately.** `vm_space_fork` maps each private page read-only in the child
+and lowers the parent's PTE before either space can run with it, and shoots
+the parent's lowered ranges down on every CPU in its `tlb_cpus`. A write
+from either side therefore faults, and only `cow_write_locked` makes a
+private PTE writable again. **Checked by** `vm-fork` (both PTEs read-only
+at two references; a writable translation cached on another CPU before the
+fork faults after it -- with the shootdown removed the check fails on
+x86-64; on AArch64 it still passes, correctly, because `arch_mmu_protect`'s
+own `tlbi vaae1is` is broadcast to every CPU by the hardware, so the
+software shootdown is redundant there).
+
+**M49. A private write copies while another mapping holds the frame, and
+never copies the last user's.** `cow_write_locked` copies when the
+refcount is above one and raises the PTE when it is one; only a fork of a
+space mapping the frame raises the count, and fork holds that space's lock.
+**Checked by** `vm-fork` (each side copies when first, takes back when
+last; contents carried over; isolation both ways).
+
+**M50. A protection change never grants write on a frame fork still
+shares.** `vm_user_protect` raises write per page, keeping a shared
+anonymous frame (and, as before, a cache frame of a private mapping)
+read-only. **Checked by** `vm-fork` (mprotect read-only then read-write on
+a shared page leaves it read-only at two references; its write copies).

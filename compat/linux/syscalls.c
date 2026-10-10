@@ -8,6 +8,7 @@
  * native process, and nothing native depends on this file.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/spinlock.h>
@@ -76,7 +77,7 @@ struct linux_state {
 
 static const syscall_fn *linux_table_get(void);
 
-int linux_process_init(struct process *p, const struct elf_info *info)
+static int linux_process_init(struct process *p, const struct elf_info *info)
 {
     (void)linux_table_get();
     struct linux_state *ls = kzalloc(sizeof(*ls));
@@ -89,9 +90,11 @@ int linux_process_init(struct process *p, const struct elf_info *info)
     return linux_sigtramp_map(p);
 }
 
-void linux_process_release(struct process *p)
+static void linux_process_release(struct process *p)
 {
     struct linux_state *ls = p->linux;
+    if (ls == NULL)
+        return;   /* the build failed before linux_process_init ran */
     /* Detach any shm segments still attached: drop each one's live-attach count
      * and the attach's reference on its record (freeing the record and its
      * backing if it was the last and the segment was removed). The mappings
@@ -112,7 +115,7 @@ void linux_process_release(struct process *p)
     p->linux = NULL;
 }
 
-unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct linux_auxv_args *x, uint64_t *w,
+static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
     unsigned k = 0;
@@ -383,6 +386,7 @@ static int64_t rw_vec(struct syscall_args *a, bool write)
 static int64_t lx_readv(struct syscall_args *a) { return rw_vec(a, false); }
 static int64_t lx_writev(struct syscall_args *a) { return rw_vec(a, true); }
 
+FRAME_EXEMPT_BEGIN(do_open)   /* scripts/frame-baseline.txt: 3144 bytes */
 static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t mode)
 {
     char path[VFS_PATH_MAX];
@@ -431,6 +435,7 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     file_put(f);
     return h;
 }
+FRAME_EXEMPT_END(do_open)
 
 static __maybe_unused int64_t lx_open(struct syscall_args *a)
 {
@@ -440,10 +445,12 @@ static __maybe_unused int64_t lx_creat(struct syscall_args *a)
 {
     return do_open(LX_AT_FDCWD, a->a[0], LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, (uint32_t)a->a[1]);
 }
+FRAME_EXEMPT_BEGIN(lx_openat)   /* scripts/frame-baseline.txt: 3184 bytes */
 static int64_t lx_openat(struct syscall_args *a)
 {
     return do_open((int64_t)a->a[0], a->a[1], (unsigned)a->a[2], (uint32_t)a->a[3]);
 }
+FRAME_EXEMPT_END(lx_openat)
 
 static int64_t lx_close(struct syscall_args *a) { return handle_close(&process_current()->handles, (int)a->a[0]); }
 
@@ -540,6 +547,7 @@ static int64_t lx_readlinkat(struct syscall_args *a)
 
 /* The link is made relative to `dirfd`; its target is stored verbatim and
  * resolved when the link is followed, as Linux does. */
+FRAME_EXEMPT_BEGIN(symlink_common)   /* scripts/frame-baseline.txt: 2104 bytes */
 static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
 {
     char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
@@ -557,16 +565,19 @@ static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
     vnode_put(start);
     return rc;
 }
+FRAME_EXEMPT_END(symlink_common)
 
 static __maybe_unused int64_t lx_symlink(struct syscall_args *a)
 {
     return symlink_common(a->a[0], LX_AT_FDCWD, a->a[1]);
 }
 
+FRAME_EXEMPT_BEGIN(lx_symlinkat)   /* scripts/frame-baseline.txt: 2112 bytes */
 static int64_t lx_symlinkat(struct syscall_args *a)
 {
     return symlink_common(a->a[0], (int64_t)a->a[1], a->a[2]);
 }
+FRAME_EXEMPT_END(lx_symlinkat)
 
 static int64_t lx_fstat(struct syscall_args *a)
 {
@@ -1193,6 +1204,7 @@ static int64_t lx_faccessat(struct syscall_args *a)
     return rc;
 }
 
+FRAME_EXEMPT_BEGIN(lx_rename)   /* scripts/frame-baseline.txt: 2072 bytes */
 static __maybe_unused int64_t lx_rename(struct syscall_args *a)
 {
     char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
@@ -1207,7 +1219,9 @@ static __maybe_unused int64_t lx_rename(struct syscall_args *a)
     vnode_put(cwd);
     return rc;
 }
+FRAME_EXEMPT_END(lx_rename)
 
+FRAME_EXEMPT_BEGIN(lx_renameat)   /* scripts/frame-baseline.txt: 2120 bytes */
 static int64_t lx_renameat(struct syscall_args *a)
 {
     char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
@@ -1231,6 +1245,7 @@ static int64_t lx_renameat(struct syscall_args *a)
     vnode_put(nstart);
     return rc;
 }
+FRAME_EXEMPT_END(lx_renameat)
 
 static int64_t lx_chdir(struct syscall_args *a)
 {
@@ -3610,8 +3625,26 @@ static const syscall_fn *linux_table_get(void)
  * filter. */
 static const uint16_t linux_always_allowed[] = { LX_exit, LX_exit_group, LX_rt_sigreturn };
 
+/* Every ELF without the CosmoOS note: the fallback, asked after native. */
+static bool linux_claims_elf(const struct elf_info *info)
+{
+    (void)info;
+    return true;
+}
+
+#if defined(ARCH_X86_64)
+#define LINUX_PLATFORM "x86_64"
+#else
+#define LINUX_PLATFORM "aarch64"
+#endif
+
 const struct personality personality_linux = {
     .name = "linux",
+    .claims_elf = linux_claims_elf,
+    .init = linux_process_init,
+    .release = linux_process_release,
+    .platform = LINUX_PLATFORM,   /* AT_PLATFORM: the string Linux gives on this machine */
+    .auxv = linux_auxv,
     .table = g_table,
     .count = LX_NR_MAX,
     .always_allowed = linux_always_allowed,

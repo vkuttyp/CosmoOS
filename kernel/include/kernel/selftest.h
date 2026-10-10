@@ -30,6 +30,7 @@ bool selftest_asid_quiet(const char **reason);       /* the switch path performs
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
 bool selftest_vm_teardown_absent(const char **reason);   /* a dying space walks what was populated, not what was reserved */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
+bool selftest_vm_fork(const char **reason);    /* kernel/memory/forktest.c: copy-on-write duplication of a user space (M3) */
 bool selftest_vm_replace(const char **reason);
 bool selftest_vm_replace_race(const char **reason);  /* kernel/memory/memtest.c: replacements against each other */  /* kernel/memory/memtest.c: MAP_FIXED replacement */
 bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: address-space, memory and handle limits */

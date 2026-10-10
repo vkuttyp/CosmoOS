@@ -60,9 +60,13 @@ CLANG_RESOURCE_INC := $(shell $(CC) -print-resource-dir 2>/dev/null)/include
 COMMON_CFLAGS += -isystem $(CLANG_RESOURCE_INC)
 
 # --- kernel ---
+# -Wframe-larger-than: the kernel-stack guard (roadmap M3; compiler.h,
+# FRAME_EXEMPT_BEGIN; scripts/frame-baseline.txt). An error under -Werror.
+KERNEL_FRAME_LIMIT := 2048
 KERNEL_CFLAGS := \
 	--target=$(KERNEL_TARGET) \
 	$(COMMON_CFLAGS) \
+	-Wframe-larger-than=$(KERNEL_FRAME_LIMIT) \
 	$(KERNEL_ARCH_CFLAGS) \
 	-I$(ROOT)/kernel/include \
 	-I$(ROOT)/drivers/include \

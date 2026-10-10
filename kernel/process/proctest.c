@@ -3,6 +3,7 @@
  * validator, and processes running the boot module.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/bootarchive.h>
 #include <kernel/bootinfo.h>
 #include <kernel/elf.h>
@@ -1224,6 +1225,7 @@ static void make_note_elf(struct note_elf *e, uint32_t namesz, uint32_t descsz, 
 }
 
 /* Phase 11: the CosmoOS note marks native programs; a Linux test program lacks it. */
+FRAME_EXEMPT_BEGIN(selftest_linux_elf)   /* scripts/frame-baseline.txt: 2704 bytes */
 bool selftest_linux_elf(const char **reason)
 {
     struct note_elf ne;
@@ -1261,6 +1263,7 @@ bool selftest_linux_elf(const char **reason)
     }
     return true;
 }
+FRAME_EXEMPT_END(selftest_linux_elf)
 
 /*
  * A note on the children these tests run.

@@ -62,4 +62,19 @@
  */
 #define __page_local(n) __attribute__((noinline, aligned(n)))
 
+/*
+ * The kernel-stack guard (roadmap M3, docs/build/design.md, "Stack
+ * frames"): every kernel and module function is compiled with
+ * -Wframe-larger-than=2048, an error under -Werror, because a kernel
+ * stack is 16 KiB and two overflows from large locals (lz4_compress, the
+ * initial-stack builder) were found in one month. A function that was
+ * already larger when the guard arrived is wrapped in this pair and named
+ * in scripts/frame-baseline.txt; the link checks that the two lists are
+ * the same (scripts/check-frame-baseline.py), so an exemption is never
+ * added silently. The argument is the function's name, for that check.
+ */
+#define FRAME_EXEMPT_BEGIN(fn) \
+    _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wframe-larger-than\"")
+#define FRAME_EXEMPT_END(fn) _Pragma("clang diagnostic pop")
+
 #endif /* KERNEL_COMPILER_H */

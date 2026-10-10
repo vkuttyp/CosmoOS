@@ -1333,3 +1333,22 @@ few instructions where the free lands. The argument the fix rests on is
 the ordering: the swapper cannot drop the old reference until it holds
 the lock, and cannot hold the lock until a reader has taken its own
 reference or has not yet loaded the pointer.
+
+## Personalities (roadmap M3)
+
+A process runs under one `struct personality` (`kernel/include/kernel/process.h`):
+its system call table, its signal frame, and since M3 its lifecycle and
+initial stack, so `kernel/process/process.c` names no personality.
+
+| Hook | Called | Native | Linux |
+|---|---|---|---|
+| `claims_elf` | `personality_for_elf` (`kernel/syscall/personality.c`): the kernel's own processes are native; otherwise the first personality that claims the ELF | the CosmoOS note | every ELF (the fallback, asked second) |
+| `init` | process creation, after the image is loaded, before the stack | none | `linux_process_init`: `p->linux` |
+| `release` | process release, and the failure path of creation (so it must accept a process whose `init` never ran) | none | detach SysV shm attaches, free `p->linux` |
+| `platform` | the initial-stack builder pushes it when not NULL (AT_PLATFORM) | NULL | `x86_64` / `aarch64` |
+| `auxv` | the initial-stack builder, with the addresses it placed (`struct personality_auxv_args`) | PHDR/PHENT/PHNUM/PAGESZ/ENTRY/RANDOM | the Linux vector |
+| `fork` | M3 PR 2: the child's copy of the personality's state | | |
+| `exec` | M3 PR 3: the state reset for a new image | | |
+
+The only behaviour that moved: a native process's initial stack no longer
+carries the AT_PLATFORM string, which its vector never pointed at.

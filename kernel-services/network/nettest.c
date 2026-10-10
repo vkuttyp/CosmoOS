@@ -4,6 +4,7 @@
  * harness-driven echo services over the real interface.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/errno.h>
 #include <kernel/completion.h>
 #include <kernel/faultinject.h>
@@ -421,6 +422,7 @@ static struct netaddr v6loop(uint16_t port)
 
 /* --- mbufs ------------------------------------------------------------- */
 
+FRAME_EXEMPT_BEGIN(selftest_net_mbuf)   /* scripts/frame-baseline.txt: 6192 bytes */
 bool selftest_net_mbuf(const char **reason)
 {
     struct mbuf_stats s0, s1;
@@ -489,6 +491,7 @@ bool selftest_net_mbuf(const char **reason)
     CHECK(s1.mbufs_alive == s0.mbufs_alive && s1.clusters_alive == s0.clusters_alive);
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_mbuf)
 
 /* An mbuf enqueued while already on a queue is refused and the queue
  * stays whole: count and list agree, order is kept, nothing leaks. The
@@ -655,6 +658,7 @@ bool selftest_net_arp(const char **reason)
 
 /* --- UDP over loopback ------------------------------------------------------------ */
 
+FRAME_EXEMPT_BEGIN(udp_roundtrip)   /* scripts/frame-baseline.txt: 3072 bytes */
 static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct netaddr cli_addr)
 {
     struct socket *srv, *cli;
@@ -703,6 +707,7 @@ static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct n
     nt_ksock_put(srv);
     return true;
 }
+FRAME_EXEMPT_END(udp_roundtrip)
 
 bool selftest_net_lo_udp(const char **reason)
 {
@@ -3825,6 +3830,7 @@ static bool icmp_probe(uint16_t seq, bool *replied)
     return true;
 }
 
+FRAME_EXEMPT_BEGIN(selftest_net_icmp_limit)   /* scripts/frame-baseline.txt: 3440 bytes */
 bool selftest_net_icmp_limit(const char **reason)
 {
     struct ip_stats i0, i1;
@@ -4015,7 +4021,9 @@ bool selftest_net_icmp_limit(const char **reason)
           (unsigned long long)sent, (unsigned long long)limited);
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_icmp_limit)
 
+FRAME_EXEMPT_BEGIN(selftest_net_nonblock)   /* scripts/frame-baseline.txt: 4304 bytes */
 bool selftest_net_nonblock(const char **reason)
 {
     struct socket *ls, *c, *a;
@@ -4170,6 +4178,7 @@ bool selftest_net_nonblock(const char **reason)
     kinfo("selftest: net-nonblock: sockets, datagrams and pipe ends report readiness and never block");
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_nonblock)
 
 /* --- receive steering (unit 11) ------------------------------------------------
  *
@@ -8564,6 +8573,7 @@ static bool hin_tcp_listener(struct socket **out, uint16_t port)
     ((struct fw_rule){ .direction = (dir_), .proto = (proto_), .verdict = (verdict_), .dst_port = (port_), \
                        .src_ip = (sip_), .src_prefix = (sp_) })
 
+FRAME_EXEMPT_BEGIN(selftest_net_hostinput)   /* scripts/frame-baseline.txt: 2816 bytes */
 bool selftest_net_hostinput(const char **reason)
 {
     *reason = NULL;
@@ -9106,6 +9116,7 @@ bool selftest_net_hostinput(const char **reason)
           "the scopes held, and the control listing carried the host record with its source");
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_hostinput)
 
 /* --- the host's own flows (docs/audit/next-subsystem-host-state.md) ------- */
 
@@ -9355,6 +9366,7 @@ bool selftest_net_fin_acks_last_data(const char **reason)
     return true;
 }
 
+FRAME_EXEMPT_BEGIN(selftest_net_hoststate)   /* scripts/frame-baseline.txt: 2944 bytes */
 bool selftest_net_hoststate(const char **reason)
 {
     *reason = NULL;
@@ -9743,6 +9755,7 @@ bool selftest_net_hoststate(const char **reason)
           "the tuple, and the host's share held while the guests' pool stayed its own");
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_hoststate)
 
 /* --- the operator's flow listing (docs/audit/next-subsystem-net-flows.md) --- */
 
@@ -10087,6 +10100,7 @@ static void out_drain_file(struct file *f)
                        .dst_ip = (dip_), .dst_prefix = (dp_), .dst_port = (port_), \
                        .src_ip = (sip_), .src_prefix = (sp_), .scope = (scope_) })
 
+FRAME_EXEMPT_BEGIN(selftest_net_output)   /* scripts/frame-baseline.txt: 2272 bytes */
 bool selftest_net_output(const char **reason)
 {
     *reason = NULL;
@@ -10438,6 +10452,7 @@ bool selftest_net_output(const char **reason)
           "fifth policy with the rule's egress");
     return true;
 }
+FRAME_EXEMPT_END(selftest_net_output)
 /* --- the OUTPUT verdict, carried back into the connection ----------------- */
 
 bool selftest_net_tcpverdict(const char **reason)

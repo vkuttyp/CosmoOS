@@ -45,6 +45,16 @@ struct thread;
 struct arch_user_regs;
 struct sigaction_k;
 struct signal_info;
+struct elf_info;
+struct process;
+/* What the initial-stack builder has placed for the auxiliary vector. */
+struct personality_auxv_args {
+    uint64_t random_addr;    /* 16 random bytes on the stack */
+    uint64_t execfn_addr;    /* the path string on the stack */
+    uint64_t platform_addr;  /* the platform string on the stack, 0 when none */
+    uint64_t interp_base;    /* the interpreter's bias, 0 without one */
+};
+
 struct personality {
     const char *name;
     const syscall_fn *table;
@@ -58,6 +68,31 @@ struct personality {
     int (*signal_frame)(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
                         uint64_t blocked_before);   /* build a handler frame; NULL: handlers cannot run */
     void (*thread_exit)(struct thread *t);          /* a thread of this personality is leaving */
+
+    /*
+     * Roadmap M3: the lifecycle and initial-stack hooks, so the process
+     * code names no personality (docs/kernel/process/design.md,
+     * "Personalities"). All optional.
+     */
+    /* Selection (personality_for_elf): true when an ELF that is not the
+     * kernel's own creation is this personality's program. */
+    bool (*claims_elf)(const struct elf_info *info);
+    /* A process of this personality is being built from `info`: its
+     * private state. Undone by `release`, which must also accept a
+     * process whose `init` never ran. */
+    int (*init)(struct process *p, const struct elf_info *info);
+    void (*release)(struct process *p);
+    /* The AT_PLATFORM string pushed on the initial stack; NULL pushes none. */
+    const char *platform;
+    /* Lay out the auxiliary vector in `w` (at most `max` words, pairs,
+     * ending with the null pair): returns the words written. */
+    unsigned (*auxv)(struct process *p, const struct elf_info *exe, const struct personality_auxv_args *x,
+                     uint64_t *w, unsigned max);
+    /* fork: give `child` its copy of `parent`'s private state (M3 PR 2). */
+    int (*fork)(struct process *parent, struct process *child);
+    /* execve: `p` keeps its identity and takes a new image `info`; the
+     * personality's state is reset for it (M3 PR 3). */
+    int (*exec)(struct process *p, const struct elf_info *info);
 };
 
 struct vm_space;
@@ -475,18 +510,9 @@ void process_dump_all(void);
 extern const struct personality personality_native;
 extern const struct personality personality_linux;   /* compat/linux/syscalls.c */
 
-/* compat/linux hooks called by the process code. */
-struct elf_info;
-int linux_process_init(struct process *p, const struct elf_info *info);   /* allocate p->linux */
-void linux_process_release(struct process *p);
-/* Lay out the Linux auxiliary vector: returns words written into `w` (pairs). */
-struct linux_auxv_args {
-    uint64_t random_addr;    /* 16 bytes on the stack */
-    uint64_t execfn_addr;    /* the path string on the stack */
-    uint64_t platform_addr;  /* the machine string on the stack */
-    uint64_t interp_base;    /* AT_BASE: the interpreter's bias, 0 without one */
-};
-unsigned linux_auxv(struct process *p, const struct elf_info *exe, const struct linux_auxv_args *x, uint64_t *w,
-                    unsigned max);
+/* The personality that runs `info` (kernel/syscall/personality.c): the
+ * native one for a process the kernel creates, otherwise the first that
+ * claims the ELF -- native for the CosmoOS note, Linux for the rest. */
+const struct personality *personality_for_elf(const struct elf_info *info, bool kernel_created);
 
 #endif /* KERNEL_PROCESS_H */

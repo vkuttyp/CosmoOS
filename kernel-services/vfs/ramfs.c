@@ -6,6 +6,7 @@
  * writepage keeps the page resident). Inode numbers are per mount.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/bootarchive.h>
 #include <kernel/cred.h>
 #include <kernel/errno.h>
@@ -690,6 +691,7 @@ static void ensure_parents(const char *path)
     }
 }
 
+FRAME_EXEMPT_BEGIN(ramfs_populate_boot)   /* scripts/frame-baseline.txt: 2160 bytes */
 void ramfs_populate_boot(void)
 {
     static const struct {
@@ -735,3 +737,4 @@ void ramfs_populate_boot(void)
     }
     kinfo("ramfs: /boot holds %u file(s) from the boot archive", copied);
 }
+FRAME_EXEMPT_END(ramfs_populate_boot)
