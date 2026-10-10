@@ -2722,5 +2722,11 @@ See the [history index](README.md).
     300-byte segments, nothing lost; `net-tcp-sws`,
     `tools/tcp-sws-probe.py`. Report:
     `docs/audit/2026-10-11-tcp-sws-report.md`.
+
+  - PR 3: exec in place (`process_exec_images`, `process_execve`; P36) at
+    both doors (Linux `execve`, native `SYS_exec` 103), `#!` scripts,
+    close-on-exec handles (L17), personality switching on exec, vfork
+    released at exec; `image_build` shared with spawn; `lxtest`'s exec
+    section and usertest's native exec checks.
   - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
 

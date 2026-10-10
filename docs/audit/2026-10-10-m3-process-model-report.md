@@ -133,3 +133,33 @@ the child checks it: with the old read restored, the AArch64 child exits
 12 (`wait4` status 3072); with the fix both architectures pass (debug
 boots 155.2 s AArch64, 170.4 s x86-64).
 
+## PR 3 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| exec | `process_exec_images` (process design, "exec"; P36): `image_build`, now shared with spawn, makes the new space, images, stack and frame first; `exec_single_thread` ends the other threads (`exec_thread`, reaped before the space changes); then the point of no return: the old tid word, the space switch, `vm_space_put` of the old space, vfork release, close-on-exec, `signal_exec_reset`, the personality (`exec` hook, or release and init when it changes), thread pointer and FP/SIMD reset, the syscall frame rewritten to the new entry. | `kernel/process/process.c`, `kernel/process/signal.c`, `kernel/scheduler/thread.c`, `kernel/arch/*/fpu.c` |
+| Paths, scripts | `process_execve`: `#!` with one optional argument, four deep (`-ELOOP`), non-ELF non-script `-ENOEXEC` without a warning, the syscall-filter personality check as spawn; `exec_args_copy` (1024 strings, 32 KiB). The initial frame takes as many populated pages as it needs (up to 32, was a fixed 2), its scratch arrays sized by the counts. | `kernel/process/spawn.c`, `kernel/process/process.c` |
+| Close-on-exec | `HANDLE_FLAG_CLOEXEC` per slot; installs with flags in one hold; `handle_get_flags`/`handle_set_flags`; fork copies the flag. Linux: `O_CLOEXEC`, `pipe2`, `dup3`, `F_GETFD`/`F_SETFD`, `F_DUPFD_CLOEXEC`, `SOCK_CLOEXEC` (socket, accept4, socketpair), `MSG_CMSG_CLOEXEC`, eventfd, signalfd, timerfd, epoll, memfd (L17). | `kernel/object/handle.c`, `compat/linux/syscalls.c` |
+| Doors | Linux `execve`; native `SYS_exec` 103 and libc `cosmo_exec`; the Linux personality's `exec` hook | `compat/linux/syscalls.c`, `kernel/syscall/native.c`, `kernel/include/uapi/cosmo/syscall.h`, `libc/include/cosmo/syscall.h` |
+| Tests | `lxtest`'s exec section (both arches; `docs/compat/linux/testing.md`, "execve"), usertest's native exec checks (a native image, a Linux one) | `tests/linux/lxtest.c`, `userland/init/init.c` |
+
+`process_create_from_images` lost its frame-size exemption: with both
+ELF infos in `image_build`'s heap block it fits under 2 KiB, and
+`scripts/frame-baseline.txt` drops its line (32 entries).
+
+### Each new check fails without what it checks (x86-64, one boot each)
+
+| Mutation | Result |
+|---|---|
+| `handle_close_on_exec` not called | the new image finds fds 21 and 22 open: exit 5 |
+| `signal_exec_reset` not called | the caught signal keeps its handler: exit 6 |
+| no vfork release at exec | the exec'd image waits 3 s for the caller's byte that never comes: exit 3 |
+| the exec'ing thread keeps its own tid | `gettid != getpid` in the image an exec from a second thread started: exit 2 |
+| the `#!` line's argument dropped | the interpreter runs with an unknown mode: exit 99 |
+| native `SYS_exec` refuses | usertest: the `-ENOENT` and `-EACCES` checks fail (and the spawned exec reports 100 + `ENOSYS`) |
+
+The `#!` mutation first passed the check only by timing out: the
+mis-parsed script ran lxtest without a mode, which ran the whole test
+again inside the child. lxtest now treats any argument as a checking
+mode and exits 99 for an unknown one.
+
