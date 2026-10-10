@@ -3827,6 +3827,18 @@ two failures, both in `net-bench`:
 Unlike the 2026-10-08 sighting, the rest of the boot was normal
 (self-tests summed 131.8 s). PR #347 (exec, close-on-exec) changes no
 network code, and the same commit's AArch64 job and every other x86-64
-boot of the run passed. The failed job was rerun. Still the open
-follow-up the row names: a mechanism for the slow mode.
+boot of the run passed. Still the open follow-up the row names: a
+mechanism for the slow mode.
+
+**Twice more on the same PR.** The rerun (attempt 2 of run 38072717584)
+failed the two-CPU boot: `net-bench took 22142 ms`, both steers at 1
+MiB/s. Run 38075570263 (a documentation commit) failed the harness-retry
+boot: `net-bench took 16575 ms`. Every failing boot was slow as a whole:
+`cosmofs-replay` 22.3-27.1 s and self-tests summing 143.5-167.8 s,
+against `cosmofs-replay` 14.3-17.4 s and 110.7-126.7 s in every passing
+x86-64 boot of the same runs and of main's #345 and #346 merge runs. In
+the passing boots PR #347's times match main's (`cosmofs-replay`
+15.9-16.6 s against 16.4-17.4 s), and `net-bench` is never among the
+five slowest tests on either. So it appears in host slow stretches, as
+on 2026-10-08, not as a cost of the branch.
 
