@@ -73,7 +73,7 @@ static uint32_t pack(const struct bootinfo_framebuffer *fb, unsigned r, unsigned
  * test that logs much (docs/testing/flakes.md, syscall-fuzz, 2026-10-10).
  */
 #define FBCON_DRAW_ALIGN 256
-#define FBCON_DRAW __attribute__((noinline, aligned(FBCON_DRAW_ALIGN)))
+#define FBCON_DRAW __page_local(FBCON_DRAW_ALIGN)
 
 static inline void put_pixel(struct fbcon *c, uint32_t x, uint32_t y, uint32_t value)
 {

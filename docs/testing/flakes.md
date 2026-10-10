@@ -3044,7 +3044,16 @@ compiler placed it elsewhere, which is why local boots never showed it.
 **Fixed** in `kernel/core/fbcon.c`: the three drawing loops are functions
 aligned to 256 bytes and no larger (`FBCON_DRAW`), and
 `scripts/check-kernel-elf.sh` fails the link if any `fbcon_draw_`
-function spans a page. The budget was not changed.
+function spans a page. The budget was not changed. The same rule then caught a second
+loop: with the fbcon change the local compiler placed
+`lockdep-graph-bench`'s quadratic edge loop across `0x...13000`
+(8-10 s instead of 3.7 s; 21.8 s and the watchdog under `test-chaos`).
+That loop is now `page_local_graph_bench_edges` under `__page_local`
+(`kernel/include/kernel/compiler.h`), checked the same way. Both layouts
+were checked by booting builds from CI's own toolchain (Debian clang
+19.1.7 in a `debian:trixie` container, which reproduced CI's crash kernel
+layout to the byte at `fbcon_write`): debug, crash and chaos all within
+their usual times.
 
 ## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
 

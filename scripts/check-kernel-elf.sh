@@ -85,7 +85,7 @@ never_reaches optional schedule_pass arch_irq_restore arch_irq_restore_hw preemp
 never_reaches required arch_irq_write_hw preempt_point
 never_reaches optional arch_irq_restore_nopoint arch_irq_restore arch_irq_restore_hw preempt_point
 
-# fbcon's drawing loops are functions of their own, aligned and small
+# Hot loops (fbcon_draw_*, page_local_*; compiler.h __page_local) are functions of their own, aligned and small
 # enough that none spans a 4 KiB page: under QEMU's TCG a hot loop across a
 # page boundary runs an unchained translation block every iteration, and
 # one such placement made a CI-built kernel scroll eleven times slower
@@ -94,7 +94,7 @@ never_reaches optional arch_irq_restore_nopoint arch_irq_restore arch_irq_restor
     # Hex by hand: neither BSD awk nor mawk has strtonum. Only the low 32
     # bits of the address: the page boundaries are all in it.
     function hex(s,   i, v) { v = 0; s = tolower(s); for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return v }
-    $NF ~ /^fbcon_draw_/ && $(NF - 1) ~ /^[0-9a-f]+$/ {
+    ($NF ~ /^fbcon_draw_/ || $NF ~ /^page_local_/) && $(NF - 1) ~ /^[0-9a-f]+$/ {
         n++
         addr = $1; size = $(NF - 1)
         lo = hex(substr(addr, length(addr) - 7))
@@ -105,7 +105,7 @@ never_reaches optional arch_irq_restore_nopoint arch_irq_restore arch_irq_restor
         }
     }
     END {
-        if (n < 3) { print "check-kernel-elf: expected the three fbcon_draw_ functions, found " n; bad = 1 }
+        if (n < 3) { print "check-kernel-elf: expected at least the three fbcon_draw_ functions, found " n; bad = 1 }
         exit bad ? 1 : 0
     }
 '

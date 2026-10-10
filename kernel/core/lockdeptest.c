@@ -1706,6 +1706,20 @@ static uint16_t graph_bench_node(unsigned index, unsigned nodes)
     return nodes == LOCKDEP_MAX_NODES ? (uint16_t)index : lockdep_node(index, 0);
 }
 
+/* The seed's edge loop, quadratic in the node count and most of the
+ * benchmark's time: a function that cannot span a page (__page_local).
+ * Inlined into the test it landed across one in a local build and the
+ * benchmark took 8-10 s instead of 3.7, 21.8 s under the chaos migrator. */
+static __page_local(512) void page_local_graph_bench_edges(struct lockdep_graph *g, unsigned nodes, unsigned kind,
+                                                            bool dense)
+{
+    for (unsigned i = 0; i < nodes; i++)
+        for (unsigned j = i + 1; j < nodes; j++)
+            if ((dense || j == i + 1) &&
+                (kind == 1 || (i < nodes / 2) == (j < nodes / 2)))
+                lockdep_core_add_edge(g, graph_bench_node(i, nodes), graph_bench_node(j, nodes));
+}
+
 static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned kind, bool dense)
 {
     memset(g, 0, sizeof(*g));
@@ -1718,11 +1732,7 @@ static bool graph_bench_seed(struct lockdep_graph *g, unsigned nodes, unsigned k
     }
     /* Two disjoint components, or one for cycle rejection. Dense DAGs
      * contain every forward edge within each component. */
-    for (unsigned i = 0; i < nodes; i++)
-        for (unsigned j = i + 1; j < nodes; j++)
-            if ((dense || j == i + 1) &&
-                (kind == 1 || (i < nodes / 2) == (j < nodes / 2)))
-                lockdep_core_add_edge(g, graph_bench_node(i, nodes), graph_bench_node(j, nodes));
+    page_local_graph_bench_edges(g, nodes, kind, dense);
     unsigned expected = dense ? (kind == 1 ? nodes * (nodes - 1) / 2 :
                                  (nodes / 2) * (nodes / 2 - 1)) :
                                 nodes - (kind == 1 ? 1 : 2);
