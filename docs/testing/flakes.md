@@ -2980,6 +2980,18 @@ The spin-contention checks passed. The failed run is retained as
 assertions were not changed for this increment. This matches the earlier
 failure shape without establishing the cause of this particular slowdown.
 
+**Third sighting, 2026-10-10, x86-64 CI** (PR #342, run 38024287574,
+job 114131700933, the `test-crash` boot): `self-test syscall-fuzz took
+8311 ms (budget 8000 ms)`, every self-test passed. The same job's five
+other debug boots of the same commit ran `cosmofs-replay` in
+13.9-14.6 s and `process-user` in 5.0-5.2 s; this boot took 23.9 s and
+8.3 s, while the CPU-bound `lockdep-graph-bench` (4.4 s) and
+`net-hostinput` (3.9 s) were unchanged. The slowdown is in the
+disk- and process-heavy tests of one boot only. The PR's change (GPT
+partition devices, the command line) is on none of those paths beyond
+one extra partition device at boot, present in all six boots. Recorded,
+not attributed; the failed job was rerun.
+
 ## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
 
 PR #308's first x86 CI debug boot failed with a TLB shootdown acknowledged
