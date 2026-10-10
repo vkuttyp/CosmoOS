@@ -9276,6 +9276,93 @@ bool selftest_net_zero_window_probe(const char **reason)
 }
 
 /*
+ * --- net-tcp-sws ------------------------------------------------------------
+ *
+ * Sender silly-window avoidance (RFC 1122 4.2.3.4). The world has offered a
+ * large window, so half of it is far above a segment; it now offers one
+ * segment's worth and acknowledges 200 of the bytes in flight: the window's
+ * right edge moves by 200. A sender without the rule sends a 200-byte segment
+ * at once, and the next acknowledgement opens another sliver -- the stream
+ * net-bench saw at 1 MiB/s in 300-byte segments on slow CI boots
+ * (docs/testing/flakes.md, 2026-10-10). With it, the 200 bytes wait, and when
+ * the world acknowledges the rest a full segment goes out.
+ */
+static bool hin_next_data(struct tap *u, uint16_t wport, struct hin_seg *sg)
+{
+    for (unsigned i = 0; i < 16; i++) {
+        if (!hin_recv(u, IPPROTO_TCP, wport, sg, HIN_TRIES))
+            return false;
+        if (sg->paylen > 0)
+            return true;
+    }
+    return false;
+}
+
+bool selftest_net_tcp_sws(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x41, 0x00, 0x01 };
+    static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x41, 0x00, 0x63 };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 41, 1), w = IPV4_ADDR(10, 77, 41, 99);
+    struct tap *u = nt_tap_create("swsu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+    struct socket *ls = NULL;
+    CHECK(hin_tcp_listener(&ls, 2232));
+
+    uint8_t l4[160], data[2000];
+    uint16_t l4len;
+    struct hin_seg sg;
+    for (unsigned i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)i;
+    hin_drain(u);
+
+    /* The handshake with a large window; then the world offers one segment. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 41003, &sg, HIN_TRIES) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+          sg.ack == 9001);
+    uint32_t iss = sg.seq;
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a = hin_accept(ls);
+    CHECK(a != NULL && a->tcp != NULL);
+    ksock_set_nonblock(a, true);
+    uint32_t mss = a->tcp->mss;
+    CHECK(mss > 200 && mss < sizeof(data));
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1, TH_ACK, (uint16_t)mss, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    hin_drain(u);
+
+    /* (1) One full segment fills the window. */
+    CHECK(ksock_sendto(a, data, sizeof(data), NULL) == (int64_t)sizeof(data));
+    CHECK(hin_next_data(u, 41003, &sg) && sg.seq == iss + 1 && sg.paylen == mss);
+
+    /* (2) 200 of it acknowledged, the window still one segment: 200 bytes of
+     * room with the rest in flight. Then all of it acknowledged. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1 + 200, TH_ACK, (uint16_t)mss, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1 + mss, TH_ACK, (uint16_t)mss, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+
+    /* (3) The next data is a full segment from where the first ended -- not
+     * the 200-byte sliver the partial acknowledgement opened. */
+    CHECK(hin_next_data(u, 41003, &sg));
+    CHECK(sg.seq == iss + 1 + mss);
+    CHECK(sg.paylen == mss);
+
+    l4len = hin_mk_tcp(l4, w, u_ip, 41003, 2232, 9001, iss + 1 + 2 * mss, TH_RST | TH_ACK, 0, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    nt_ksock_put(a);
+    kinfo("selftest: net-tcp-sws: a 200-byte opening with a segment in flight waited, and a full %u-byte segment "
+          "followed the acknowledgement\n", mss);
+    return true;
+}
+
+/*
  * --- net-fin-acks-last-data ------------------------------------------------
  *
  * The world's FIN arrives while the host, having closed, still holds data it

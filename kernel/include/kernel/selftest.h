@@ -411,6 +411,7 @@ bool selftest_net_input(const char **reason);
 bool selftest_net_hostinput(const char **reason);
 bool selftest_net_zero_window_probe(const char **reason);
 bool selftest_net_fin_acks_last_data(const char **reason);
+bool selftest_net_tcp_sws(const char **reason);
 bool selftest_net_hoststate(const char **reason);
 bool selftest_net_output(const char **reason);
 bool selftest_net_tcpverdict(const char **reason);
