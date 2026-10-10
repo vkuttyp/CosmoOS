@@ -47,3 +47,23 @@ The guard was also built with CI's own compiler (Debian clang 19.1.7, the
 `debian:trixie` container): kernel and modules of the debug, release,
 crash, chaos and harness-break builds of both architectures, no frame-size
 error and the exemption pragma honoured.
+
+### PR 1 validation (local, macOS host, QEMU, TCG)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | first run: one new diagnostic, a dead store in `vm_space_fork`'s retry (`nmaps = 0` before a `goto` that recomputes it), removed; rerun clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 133.6 s | PASS 144.4 s |
+| debug `test-smp2` | PASS 149.8 s | PASS 143.1 s |
+| debug `test`, `QEMU_SMP=4` | PASS 151.0 s | PASS 145.9 s |
+| `test-chaos` | PASS 150.4 s | PASS 156.1 s |
+| `test-harness-retry` | PASS 154.8 s | PASS 153.6 s |
+| `BUILD=release test` | PASS 17.0 s | PASS 20.1 s |
+| `BUILD=release test-install` | PASS 22.8 s | PASS 37.0 s |
+| `test-crash` | PASS 132.3 s | PASS 127.5 s |
+
+Every debug boot runs `vm-fork`, whose cross-CPU TLB check skips on one
+CPU (`QEMU_SMP=1`) and runs at 2 and 4.
+

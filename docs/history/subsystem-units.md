@@ -2702,3 +2702,14 @@ See the [history index](README.md).
     anonymous files off the live root, init's disk root, `/bin/sync`,
     `make test-install` (install, reboot, persist, fallback) in CI.
     M2 ticked.
+
+- **Roadmap M3: real process model (2026-10-10; in progress).**
+  - PR 1: personality lifecycle and initial-stack hooks (`claims_elf`,
+    `init`, `release`, `platform`, `auxv`, `fork`, `exec`;
+    `kernel/syscall/personality.c`), so `process.c` names no personality;
+    `-Wframe-larger-than=2048` with 33 exemptions listed in
+    `scripts/frame-baseline.txt` and checked at the kernel link;
+    `vm_space_fork` and the copy-on-write fault (memory design §8,
+    M48-M50), proved by the `vm-fork` self-test.
+  - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
+
