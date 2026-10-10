@@ -101,6 +101,24 @@ compiler produced for one build, and the evidence for the old behaviour is
 those two CI binaries (`debug-elfs-x86_64` of run 38037450806); the fix
 removes the placement by construction and the link check holds it.
 
+After the fix (`e0869ad8`) moved code, the local compiler put
+`lockdep-graph-bench`'s quadratic edge loop across a page (8-10 s instead
+of 3.7 s; the local `test-chaos` boot failed its 20 s budget and the
+watchdog). The rule became `__page_local` in `compiler.h`, applied to that
+loop, and the link check covers `page_local_*` too (`02ccce52`). Because
+CI's compiler lays code out differently, every later tree was also built
+with CI's toolchain (Debian clang 19.1.7 in `debian:trixie`, which
+reproduced CI's crash kernel layout to the byte) and its debug, crash and
+chaos images booted here.
+
+PR 1 final validation (local, after `02ccce52`): host-test, fuzz,
+analyze pass on both architectures; x86-64 debug 131.4 s (SMP 1), 143.9 s
+(`test-smp2`), 149.7 s (SMP 4), chaos 142.7 s, retry 151.3 s, release
+16.7 s, crash 122.7 s; AArch64 130.9 s, 142.2 s, 151.8 s, chaos 155.5 s,
+retry 152.9 s, release 20.7 s, crash 129.8 s -- all PASS. CI-toolchain
+x86-64 builds: debug 142.5 s, crash 128.1 s, chaos 146.5 s, PASS. PR #342
+CI green on both architectures; merged as `765bd579`.
+
 Two further CI sightings on the branch were recorded, not attributed to
 it: `irqpoll-boost` over its gap bound (x86-64 `test-smp2`, first
 sighting) and, on PR #343, `net-neigh-down-race` step 2 (a candidate
@@ -169,3 +187,8 @@ between those two).
 
 Every debug boot now prints `usertest: cosmofs compressed a file
 committed from user mode`, which the harness requires.
+
+PR 2 after rebasing onto PR 1's final head (local): x86-64 debug `test`
+PASS 145.1 s, `test-crash` PASS 129.6 s, release `test-install` PASS
+7.9 s; AArch64 154.8 s, 130.8 s, 11.3 s. CI-toolchain x86-64 builds:
+debug 143.3 s, crash 127.9 s, chaos 141.1 s, PASS.
