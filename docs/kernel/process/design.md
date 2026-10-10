@@ -1347,8 +1347,44 @@ initial stack, so `kernel/process/process.c` names no personality.
 | `release` | process release, and the failure path of creation (so it must accept a process whose `init` never ran) | none | detach SysV shm attaches, free `p->linux` |
 | `platform` | the initial-stack builder pushes it when not NULL (AT_PLATFORM) | NULL | `x86_64` / `aarch64` |
 | `auxv` | the initial-stack builder, with the addresses it placed (`struct personality_auxv_args`) | PHDR/PHENT/PHNUM/PAGESZ/ENTRY/RANDOM | the Linux vector |
-| `fork` | M3 PR 2: the child's copy of the personality's state | | |
+| `fork` | `process_fork`, after the space is copied or borrowed, before the handles; fails the fork | none (no native fork) | `linux_process_fork`: the break, and a record per SysV shm attach with the attach's tag (none for a vfork child) |
 | `exec` | M3 PR 3: the state reset for a new image | | |
 
 The only behaviour that moved: a native process's initial stack no longer
 carries the AT_PLATFORM string, which its vector never pointed at.
+
+## fork (roadmap M3)
+
+`process_fork(args, &child)` (`kernel/process/process.c`) makes a process
+that is a copy of the caller's. Only a personality with a `fork` hook
+reaches it -- Linux `fork`, `vfork` and `clone` without `CLONE_THREAD`
+(`docs/compat/linux/design.md`, "fork") -- so there is no native fork, and
+native `spawn` is unchanged. It shares its steps with spawn:
+`process_alloc`, `process_publish` (the `COSMO_RLIMIT_NPROC` admission,
+the pid, the parent's group and session, under the table lock),
+`process_first_thread`, `link_to_parent`, and `process_unbuild` for a
+failure, which leaves nothing behind.
+
+| What | The child's |
+|---|---|
+| address space | `vm_space_fork`'s copy-on-write duplicate (`docs/kernel/memory/design.md` §8), or with `PROCESS_FORK_SHARE_SPACE` the parent's space itself, borrowed (§8.4) |
+| handles | every one of the parent's, at the same number with the same rights, through `handle_install_at` (so each object counts the new handle) |
+| credentials, limits, domain, root, cwd, mount and UTS namespaces, syscall filter | the parent's, read under its lock as spawn reads them |
+| signal dispositions | copied (`signal_process_fork`) |
+| pending signals, the process's and the thread's | none |
+| timers, itimers, `alarm` | none |
+| personality and its state | the parent's personality; its `fork` hook |
+| image (`image_end`, interpreter base, entry, `exec_path`) | the parent's, since the space holds the same program |
+| the one thread | the caller's registers with the result 0, its thread pointer, signal mask, alternate stack and FP/SIMD registers (`arch_fpu_inherit`); its Linux tid is the pid |
+
+A failure before publication -- no memory, the child over its limits
+(`-ENOMEM`), `COSMO_RLIMIT_NPROC` (`-EAGAIN`) -- leaves the caller as it
+was. The child is linked to its parent before its thread is enqueued,
+so `wait4` finds it from the moment the caller learns its pid.
+
+**vfork.** A vfork child borrows the parent's space, and the parent waits
+in `process_vfork_wait` (killable) on the child's `vfork_wq` until
+`process_vfork_release(child)`: when the child's last thread is gone
+(`process_last_thread_gone`, after its use of the space ends) and, from
+M3 PR 3, when it execs. A parent killed while it waits returns and exits;
+the child keeps the space through its own reference (memory M51).

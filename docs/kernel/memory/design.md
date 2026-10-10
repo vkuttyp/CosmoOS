@@ -878,7 +878,8 @@ a device; `MAP_POPULATE`; `madvise` on file regions.
 `vm_space_fork(src, &dst)` (`kernel/memory/vmm.c`) makes a child space
 that maps what the parent maps, sharing frames until either side writes.
 It is the kernel primitive behind Linux `fork` and fork-like `clone`
-(M3 PR 2); native fork is not offered.
+(`process_fork`, `docs/kernel/process/design.md`, "fork"); native fork is
+not offered.
 
 ### 8.1 What is shared, and how
 
@@ -954,7 +955,20 @@ kernel, runs out.
 (M50), so `mprotect` after fork cannot open a frame the other side still
 maps; its first write copies it.
 
-### 8.4 What stays open
+### 8.4 A borrowed space (vfork)
+
+`CLONE_VM|CLONE_VFORK` gives the child the parent's space itself, not a
+copy. `struct vm_space.users` counts the processes using a user space:
+one from `vm_space_create_user`, one more from `vm_space_share`, and
+`vm_space_put` drops one and destroys the space with the last (M51). A
+process gives its space back only through `vm_space_put` -- at its last
+thread's exit and in the failure path of its creation -- so a vfork
+child that outlives a parent killed while waiting keeps running on a
+space nobody tears down under it. Nothing else about the space changes:
+both processes' threads switch to the same tables, and its accounting
+and limits are charged once.
+
+### 8.5 What stays open
 
 The phase-B copy runs with interrupts off for the whole parent, which is a
 latency cost proportional to its populated pages (performance work on fork

@@ -30,6 +30,13 @@ parent's. Sleeps (takes `src->replace_lock`). `-ENOMEM` (memory, or the
 child would start over its limits); on failure nothing of the child is
 left. Statistics: `vm_stats.forks`, `cow_copies`, `cow_reuses`.
 
+### `void vm_space_share(struct vm_space *space)`, `bool vm_space_put(struct vm_space *space)`
+A user space's users (design.md §8.4, M51): `vm_space_share` adds one (a
+vfork child borrowing its parent's space); `vm_space_put` drops one and
+destroys the space with the last, returning whether it did. A process
+releases its space only with `vm_space_put`; `vm_space_destroy` stays for
+spaces with one owner and no process (self-tests).
+
 ### `int vm_test_write_fault(struct vm_space *space, vaddr_t va)` (CONFIG_SELFTEST)
 The fault handler's copy-on-write decision for a write at `va`, for tests
 whose space no process runs. `-EFAULT` when it is not that case.

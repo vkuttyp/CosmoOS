@@ -548,3 +548,11 @@ shares.** `vm_user_protect` raises write per page, keeping a shared
 anonymous frame (and, as before, a cache frame of a private mapping)
 read-only. **Checked by** `vm-fork` (mprotect read-only then read-write on
 a shared page leaves it read-only at two references; its write copies).
+
+**M51. A user space is destroyed by its last user, and only then.**
+`users` is 1 at creation, raised by `vm_space_share` (a vfork child) and
+lowered by `vm_space_put`, which tears the space down when it reaches 0;
+processes release their spaces only through it. **Checked by** `lxtest`'s
+vfork case (the child writes the parent's memory and exits; the parent
+returns to that memory and goes on to fork again) and by every boot, whose
+exits all pass through `vm_space_put`.

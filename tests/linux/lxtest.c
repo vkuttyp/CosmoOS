@@ -482,6 +482,8 @@ static void fork_tests(long pid)
     long c = fork_raw(LX_CLONE_EXIT_SIGCHLD | LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_SETTID, &g_fork_ptid,
                       &g_fork_ctid);
     if (c == 0) {
+        sc1(LX_close, pfd[0]);   /* each side keeps only the ends it uses, so a */
+        sc1(LX_close, qfd[1]);   /* side that fails early is an EOF, not a hang */
         long me = sc0(LX_getpid);
         CHILD_CHECK(me != pid && sc0(LX_getppid) == pid && sc0(LX_gettid) == me, 2);
         CHILD_CHECK(g_fork_ctid == me, 3);   /* CLONE_CHILD_SETTID, in the child's own copy */
@@ -503,6 +505,7 @@ static void fork_tests(long pid)
         lx_exit(42);
     }
     CHECKV(c > 0 && c != pid, c);
+    sc1(LX_close, pfd[1]);
     CHECKV(g_fork_ptid == c, g_fork_ptid);   /* CLONE_PARENT_SETTID */
     CHECKV(g_fork_ctid == 0, g_fork_ctid);   /* the child's write landed in its copy */
     struct lx_shmid_ds ds;
@@ -568,7 +571,6 @@ static void fork_tests(long pid)
     CHECKV(fork_raw(LX_CLONE_FS | LX_CLONE_EXIT_SIGCHLD, 0, 0) == -22, 0);
     CHECKV(sc4(LX_wait4, -1, &st, 0, 0) == -10, 0);   /* every child reaped */
     sc1(LX_close, pfd[0]);
-    sc1(LX_close, pfd[1]);
     sc1(LX_close, qfd[0]);
     sc1(LX_close, qfd[1]);
 }

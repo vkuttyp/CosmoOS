@@ -658,12 +658,25 @@ and before `EXITED`: the program must be writable there and the child
 not yet reapable), and `elf-txtbsy`, whose write after the child's exit
 is now the semantics rather than a race.
 
+**P35. A fork child starts as a copy of its caller and owns nothing of
+it.** Its space is a copy-on-write duplicate or, for vfork, the caller's
+own borrowed until the child execs or its last thread is gone -- and the
+vfork caller does not return before that (`process_vfork_release`); its
+handles are the caller's, installed anew; dispositions, mask, alternate
+stack and FP/SIMD registers are the caller's; nothing pending comes with
+it. *Checked by*: `lxtest`'s fork section (identity, the tid words,
+private memory copied both ways, shared anonymous and SysV shm memory
+shared, an inherited pipe, dispositions and mask inherited and a pending
+signal not, the FP register, vfork's shared memory and wait, wait4
+`WNOHANG`); mutation runs in `docs/audit/2026-10-10-m3-process-model-report.md`.
+
 ## Gaps (documented, not invariants)
 
 - **The cwd race is not proved by a test**, only by construction, and the
   seam that would prove it is named in `docs/audit/next-subsystem-cwd-ref.md`.
-- No `fork` or `exec` replacing the current image; `spawn` is the only
-  creation primitive; `clone` creates threads only.
+- ~~No `fork` or `exec` replacing the current image~~ -- `fork` exists
+  since roadmap M3 (**P35**), for the Linux personality only; native
+  creation is still `spawn` alone. `exec` replacing the image: M3 PR 3.
 - **One multi-threaded case remains unaimable**: a thread cloned
   *during* a stop, between the stop being posted and the last thread
   parking. It is handled -- the new thread inherits `sig_must_stop` --

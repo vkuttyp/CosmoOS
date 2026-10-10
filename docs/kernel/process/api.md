@@ -92,6 +92,21 @@ documented in `docs/kernel/syscall/api.md`.
 - Ends the calling thread only (the hook, `nr_live--`); when it was the
   last live thread the process exits with `status`. Linux `exit`.
 
+### `int process_fork(const struct process_fork_args *a, struct process **out)` (roadmap M3)
+A copy of the calling process (design.md, "fork"; P35), started, its one
+thread entering at `a->regs` (the caller fills them: its own, result 0) on
+`a->tls`, with `a->set_child_tid` written in the child's space before its
+first instruction and `a->clear_child_tid` recorded. `a->flags`
+`PROCESS_FORK_SHARE_SPACE` borrows the caller's space instead of copying
+it. Returns the child referenced (the caller puts it), or `-ENOMEM`,
+`-EAGAIN` (`COSMO_RLIMIT_NPROC`) with nothing created. The caller's
+personality must have a `fork` hook.
+
+### `int process_vfork_wait(struct process *child)`, `void process_vfork_release(struct process *p)` (roadmap M3)
+The vfork handshake: the caller waits, killably (`-EINTR`), until the
+child releases the borrowed space; the child's side runs at its last
+thread's exit and (M3 PR 3) at exec. Release is idempotent.
+
 ### `int process_add_thread(struct process *p, const struct arch_user_regs *regs, uintptr_t tls, struct thread **out)`, `void process_thread_start(struct thread *t)`, `void process_thread_abandon(struct thread *t)` (milestone 10)
 - Create a thread of `p` that enters user mode with the register set
   `regs` (`arch_user_enter_regs`) and the thread pointer `tls`, with the
