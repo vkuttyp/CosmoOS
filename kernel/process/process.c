@@ -2,6 +2,7 @@
  * process.c - Process lifecycle.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -433,6 +434,7 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     return process_create_from_images(&exe, NULL, name, argv, envp, attr, out);
 }
 
+FRAME_EXEMPT_BEGIN(process_create_from_images)   /* scripts/frame-baseline.txt: 2616 bytes */
 int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name,
                                const char *const argv[], const char *const envp[],
                                const struct process_spawn_attr *attr, struct process **out)
@@ -812,6 +814,7 @@ fail:
     kmem_cache_free(g_process_cache, p);
     return rc;
 }
+FRAME_EXEMPT_END(process_create_from_images)
 
 /* --- exit --- */
 
@@ -1360,6 +1363,7 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
 static int chdir_inner(struct process *cur, const char *path);
 
+FRAME_EXEMPT_BEGIN(process_chdir)   /* scripts/frame-baseline.txt: 2128 bytes */
 int process_chdir(const char *path)
 {
     struct process *cur = process_current();
@@ -1370,6 +1374,7 @@ int process_chdir(const char *path)
         vfs_cwd_hold_swapper_leave();   /* every failure after the enter, one place */
     return rc;
 }
+FRAME_EXEMPT_END(process_chdir)
 
 static int chdir_inner(struct process *cur, const char *path)
 {

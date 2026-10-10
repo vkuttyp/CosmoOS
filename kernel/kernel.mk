@@ -213,6 +213,7 @@ $(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LINKER_SCRIPT)
 	$(call log,LD,$@)
 	$(Q)$(LD) $(KERNEL_LDFLAGS) -T $(KERNEL_LINKER_SCRIPT) -Map=$(KERNEL_MAP) -o $@ $(KERNEL_OBJS)
 	$(Q)$(ROOT)/scripts/check-kernel-elf.sh $(OBJDUMP) $@
+	$(Q)$(PYTHON) $(ROOT)/scripts/check-frame-baseline.py $(ROOT)
 
 kernel: $(KERNEL_ELF)
 

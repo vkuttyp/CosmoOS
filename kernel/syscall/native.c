@@ -6,6 +6,7 @@
  * errno on failure. User memory is touched only through uaccess.h.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/aio.h>
 #include <kernel/timerobj.h>
 #include <kernel/blk.h>
@@ -621,6 +622,7 @@ static struct file *file_of(int h, unsigned rights)
     return f;
 }
 
+FRAME_EXEMPT_BEGIN(sys_open)   /* scripts/frame-baseline.txt: 3128 bytes */
 static int64_t sys_open(struct syscall_args *a)
 {
     unsigned flags = (unsigned)a->a[1];
@@ -663,9 +665,11 @@ static int64_t sys_open(struct syscall_args *a)
     file_put(f);   /* the table holds its own reference */
     return h;
 }
+FRAME_EXEMPT_END(sys_open)
 
 /* The three symbolic-link calls. readlink copies without a terminator,
  * as POSIX says and as the walk wants (docs/kernel-services/vfs/api.md). */
+FRAME_EXEMPT_BEGIN(sys_symlink)   /* scripts/frame-baseline.txt: 2096 bytes */
 static int64_t sys_symlink(struct syscall_args *a)
 {
     char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
@@ -680,6 +684,7 @@ static int64_t sys_symlink(struct syscall_args *a)
     vnode_put(cwd);
     return rc;
 }
+FRAME_EXEMPT_END(sys_symlink)
 
 static int64_t sys_readlink(struct syscall_args *a)
 {
@@ -829,6 +834,7 @@ static int64_t sys_rmdir(struct syscall_args *a)
     return rc;
 }
 
+FRAME_EXEMPT_BEGIN(sys_rename)   /* scripts/frame-baseline.txt: 2072 bytes */
 static int64_t sys_rename(struct syscall_args *a)
 {
     char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
@@ -843,6 +849,7 @@ static int64_t sys_rename(struct syscall_args *a)
     vnode_put(cwd);
     return rc;
 }
+FRAME_EXEMPT_END(sys_rename)
 
 static int64_t sys_getdents(struct syscall_args *a)
 {
