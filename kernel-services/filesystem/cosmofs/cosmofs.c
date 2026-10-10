@@ -1030,9 +1030,14 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
          * read for ever after. */
         size_t cap = (size_t)(n - 1) * CFS_BLOCK;
         uint8_t *packed = kmalloc(cap, KMEM_ZERO);
-        if (packed == NULL)
+        void *work = kmalloc(LZ4_WORK_BYTES, 0);   /* not the stack: see lz4.h */
+        if (packed == NULL || work == NULL) {
+            kfree(packed);
+            kfree(work);
             return -ENOMEM;
-        size_t clen = lz4_compress(data, (size_t)n * CFS_BLOCK, packed, cap);
+        }
+        size_t clen = lz4_compress(data, (size_t)n * CFS_BLOCK, packed, cap, work);
+        kfree(work);
         if (clen > 0) {
             uint32_t psize = (uint32_t)((clen + CFS_BLOCK - 1) / CFS_BLOCK);
             uint64_t start, got;

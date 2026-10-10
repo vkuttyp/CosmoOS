@@ -24,10 +24,16 @@ static inline size_t lz4_compress_bound(size_t len)
     return len + len / 255u + 16u;
 }
 
-/* Compress `slen` bytes into at most `dcap`. Returns the compressed
- * length, or 0 when it does not fit -- which is not an error: the caller
- * stores the block as it is. */
-size_t lz4_compress(const void *src, size_t slen, void *dst, size_t dcap);
+/* The compressor's match table, which the caller provides: 16 KiB is the
+ * whole of a kernel stack, and a write-back under a system call has a
+ * system call's depth beneath it (roadmap M2 found the overflow). */
+#define LZ4_WORK_BYTES (4096u * 4u)
+
+/* Compress `slen` bytes into at most `dcap`, using `work`
+ * (LZ4_WORK_BYTES, any alignment of 4). Returns the compressed length,
+ * or 0 when it does not fit -- which is not an error: the caller stores
+ * the block as it is. */
+size_t lz4_compress(const void *src, size_t slen, void *dst, size_t dcap, void *work);
 
 /* Decompress into at most `dcap` bytes. Returns the decompressed length,
  * or 0 for input that is malformed or would write past the end. Every

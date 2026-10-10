@@ -54,7 +54,7 @@ static uint8_t *emit_length(uint8_t *op, const uint8_t *oend, size_t len)
     return op;
 }
 
-size_t lz4_compress(const void *src, size_t slen, void *dst, size_t dcap)
+size_t lz4_compress(const void *src, size_t slen, void *dst, size_t dcap, void *work)
 {
     const uint8_t *ip = src, *anchor = ip;
     const uint8_t *iend = ip + slen;
@@ -62,10 +62,9 @@ size_t lz4_compress(const void *src, size_t slen, void *dst, size_t dcap)
     /* One entry per hash: the most recent position with those four
      * bytes. A chain would find longer matches; this is a filesystem's
      * inner loop, and one probe is the trade taken. */
-    static const size_t table_bytes = LZ4_HASH_SIZE * sizeof(uint32_t);
-    (void)table_bytes;
-    uint32_t table[LZ4_HASH_SIZE];
-    memset(table, 0, sizeof(table));
+    _Static_assert(LZ4_HASH_SIZE * sizeof(uint32_t) == LZ4_WORK_BYTES, "the work table is the hash table");
+    uint32_t *table = work;
+    memset(table, 0, LZ4_WORK_BYTES);
 
     if (slen < LZ4_MF_LIMIT + LZ4_MIN_MATCH)
         goto last_literals;   /* too short to hold a match at all */
