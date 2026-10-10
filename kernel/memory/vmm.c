@@ -1726,10 +1726,8 @@ out_maps:
         vm_space_destroy(dst);   /* releases every reference the copies took */
         dst = NULL;
     }
-    if (rc == -EAGAIN) {
-        nmaps = 0;
-        goto retry;
-    }
+    if (rc == -EAGAIN)
+        goto retry;   /* the snapshot is retaken from the start */
 out_unlock:
     mutex_unlock(&src->replace_lock);
     if (rc == 0) {
