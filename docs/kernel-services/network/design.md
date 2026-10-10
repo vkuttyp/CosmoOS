@@ -170,6 +170,7 @@ struct tcp_pcb {
     enum tcp_state state;
     struct netaddr local, remote;                   /* family-tagged addresses */
     /* send */  uint32_t iss, snd_una, snd_nxt, snd_wnd, snd_wl1, snd_wl2, snd_max; uint16_t mss;
+                uint32_t max_sndwnd;                /* the largest window the peer has offered (N29) */
     struct netbuf sndbuf;                           /* byte ring, TCP_SNDBUF 65536 */
     /* receive */ uint32_t rcv_nxt, rcv_wnd, irs; struct netbuf rcvbuf;   /* TCP_RCVBUF 65536 */
     /* congestion */ uint32_t cwnd, ssthresh; unsigned dupacks;
@@ -259,6 +260,20 @@ and sent by `batch_send` after unlock, and nothing is held across a
 copy to or from user memory (the socket layer copies into a kernel
 buffer first). The rules are in "Hardening and per-connection
 locking" below.
+
+
+**Silly-window avoidance (sender, RFC 1122 4.2.3.4).** `tcp_output_locked`
+sends a segment smaller than the MSS and smaller than what is queued only
+when nothing is in flight or it is at least half the largest window the
+peer has offered (`max_sndwnd`, kept by `set_snd_wnd`); otherwise it waits
+for the acknowledgement that is coming, which reopens the window. Without
+it, a receiver that fell behind opened its window a sliver at a time, every
+sliver went out as a segment of its own, and the small segments kept the
+receiver behind: on slow CI boots `net-bench`'s loopback stream ran at 1
+MiB/s in about 300-byte segments, nothing lost and nothing retransmitted
+(N29; `docs/audit/2026-10-11-tcp-sws-report.md`). The receiver's side of
+the rule -- not advertising a small increase -- is not built; the sender's
+is enough to stop the collapse.
 
 ### Sockets (`kernel/include/kernel/socket.h`)
 

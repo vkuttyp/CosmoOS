@@ -614,3 +614,14 @@ same order, read before and after the operation at the same clock. A
 forward delete or clear also leaves every masquerade entry exactly as it
 was. `net-pf-clear` and `net-dnat` (a reaped translation reaches the
 guest no more) cover the same rule in the boot.
+
+
+**N29. With data in flight, the sender sends no silly segment.** A
+segment shorter than the MSS and than the queued data goes out only when
+nothing is in flight or it is at least half of `max_sndwnd`, the largest
+window the peer has offered (RFC 1122 4.2.3.4). **Checked by**
+`net-tcp-sws`: a world that offered 64240 bytes then offers one segment,
+acknowledges 200 of the segment in flight and then all of it; the next data
+is a full segment from where the first ended. `tools/tcp-sws-probe.py --old`
+reverses the fix: a 200-byte segment goes out instead, on both
+architectures.

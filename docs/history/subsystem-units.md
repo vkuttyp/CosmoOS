@@ -2717,5 +2717,10 @@ See the [history index](README.md).
     handles, dispositions and mask inherited; SysV shm attach records
     copied; `MAP_SHARED|MAP_ANONYMOUS` backed by an unnamed file; `lxtest`'s
     fork section.
+  - PR 5: TCP sender silly-window avoidance (RFC 1122 4.2.3.4, N29):
+    `net-bench`'s 1 MiB/s mode on slow CI boots was the stream falling into
+    300-byte segments, nothing lost; `net-tcp-sws`,
+    `tools/tcp-sws-probe.py`. Report:
+    `docs/audit/2026-10-11-tcp-sws-report.md`.
   - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
 
