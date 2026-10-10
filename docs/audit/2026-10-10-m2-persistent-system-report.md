@@ -237,3 +237,22 @@ live.
 | persist (boot again, read it back) | PASS 4.6 s | PASS 8.1 s |
 | fallback (`root=vda`, a blank disk) | PASS 5.0 s: `cannot mount vda ... staying on the live root`, live shell | PASS 9.2 s |
 | whole test | PASS 23.1 s | PASS 37.2 s |
+
+### PR 3 validation (local)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | first run 3 unexpected in `vfs_switch_root` (a NULL root, a NULL mountpoint, the move table's `dir` not visibly initialised); stated explicitly, rerun clean | clean (with the fix) |
+| debug `test`, `QEMU_SMP=1` | PASS 135.6 s | PASS 143.6 s |
+| debug `test-smp2` | PASS 153.1 s | PASS 145.2 s |
+| debug `test`, `QEMU_SMP=4` | PASS 150.4 s; after the analyzer fix PASS 143.9 s | PASS 168.5 s |
+| `test-chaos` | PASS 149.1 s | PASS 143.7 s |
+| `test-harness-retry` | PASS 143.8 s | PASS 153.9 s |
+| `BUILD=release test` | PASS 17.8 s | PASS 20.3 s |
+| `BUILD=release test-install` (all four stages) | PASS 23.7 s (again after the fix: 23.7 s) | PASS 37.0 s |
+
+The analyzer fix landed while the AArch64 half of the matrix was running,
+so every AArch64 item ran with it; the x86-64 items that ran before it
+(analyze, a debug boot, test-install) were rerun after it.
