@@ -14,10 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* lz4_compress's match table (LZ4_WORK_BYTES), the caller's since roadmap M2. */
+static uint32_t g_lz4_work[LZ4_WORK_BYTES / 4];
+
 static int round_trip(const uint8_t *data, size_t len, const char *what)
 {
     uint8_t packed[8192], out[8192];
-    size_t n = lz4_compress(data, len, packed, sizeof(packed));
+    size_t n = lz4_compress(data, len, packed, sizeof(packed), g_lz4_work);
     if (n == 0) {
         printf("    %s: did not fit\n", what);
         return 0;
@@ -37,18 +40,18 @@ static void test_roundtrip(void)
     /* All one byte: the overlapping-match case, and the best case. */
     memset(buf, 'a', sizeof(buf));
     EXPECT(round_trip(buf, sizeof(buf), "constant"));
-    size_t n = lz4_compress(buf, sizeof(buf), buf + 0, 0);
+    size_t n = lz4_compress(buf, sizeof(buf), buf + 0, 0, g_lz4_work);
     EXPECT(n == 0);   /* no room at all */
     uint8_t packed[8192];
     memset(buf, 'a', sizeof(buf));
-    EXPECT(lz4_compress(buf, sizeof(buf), packed, sizeof(packed)) < 64);
+    EXPECT(lz4_compress(buf, sizeof(buf), packed, sizeof(packed), g_lz4_work) < 64);
 
     /* Text-like: repeated words with literals between them. */
     static const char words[] = "the quick brown fox jumps over the lazy dog; ";
     for (size_t i = 0; i < sizeof(buf); i++)
         buf[i] = (uint8_t)words[i % (sizeof(words) - 1)];
     EXPECT(round_trip(buf, sizeof(buf), "text"));
-    EXPECT(lz4_compress(buf, sizeof(buf), packed, sizeof(packed)) < sizeof(buf) / 2);
+    EXPECT(lz4_compress(buf, sizeof(buf), packed, sizeof(packed), g_lz4_work) < sizeof(buf) / 2);
 
     /* Incompressible: a counter through a multiplier. Compression may
      * fail to shrink it, but a round trip must still be exact. */
@@ -112,7 +115,7 @@ static void test_bounds(void)
     static uint8_t buf[1024], packed[2048], out[1024];
     for (size_t i = 0; i < sizeof(buf); i++)
         buf[i] = (uint8_t)(i / 7);
-    size_t n = lz4_compress(buf, sizeof(buf), packed, sizeof(packed));
+    size_t n = lz4_compress(buf, sizeof(buf), packed, sizeof(packed), g_lz4_work);
     EXPECT(n > 0 && n < sizeof(buf));
     EXPECT(lz4_decompress(packed, n, out, sizeof(out)) == sizeof(buf));
     EXPECT(memcmp(out, buf, sizeof(buf)) == 0);

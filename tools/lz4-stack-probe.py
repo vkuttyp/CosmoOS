@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+lz4-stack-probe.py -- does a cosmofs write-back under a system call still
+overflow the kernel stack in lz4_compress? (roadmap M2 report, "Two stack
+overflows on the installer's path")
+
+    python3 tools/lz4-stack-probe.py [--old] [--arch x86_64|aarch64]
+
+Builds HEAD in a throwaway worktree (git worktree add --detach) and runs
+the debug boot test there. With --old, the whole commit that moved the
+compressor's table off the stack is reverted first (`git show SHA |
+git apply -R`), and nothing else: the user-mode check that exposes the
+overflow stays (init's fs section writes 64 KiB of a repeated line to
+the scratch cosmofs and fsyncs it).
+
+Verdict, from the boot's own lines:
+  old   -- the boot must panic with a double fault whose PC symbolises to
+           lz4_compress, during the user-mode self-test;
+  fixed -- the boot must PASS and print
+           "usertest: cosmofs compressed a file committed from user mode".
+Exit 0 when the mode's expectation held, 1 when it did not.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIX_SUBJECT = "lz4: the compressor's table is the caller's, off the kernel stack"
+MARKER = "usertest: cosmofs compressed a file committed from user mode"
+
+
+def git(*args, cwd=ROOT, **kw):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True, **kw).stdout
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--old", action="store_true")
+    ap.add_argument("--arch", default="x86_64")
+    ap.add_argument("--keep", action="store_true", help="leave the worktree for inspection")
+    args = ap.parse_args()
+    sha = git("log", "--format=%H", "--fixed-strings", f"--grep={FIX_SUBJECT}", "-1").strip()
+    if not sha:
+        sys.exit("lz4-stack-probe: the fix commit is not in this history")
+    tmp = tempfile.mkdtemp(prefix="lz4-stack-probe-")
+    wt = os.path.join(tmp, "tree")
+    try:
+        git("worktree", "add", "--detach", wt, "HEAD")
+        if args.old:
+            patch = git("show", sha)
+            subprocess.run(["git", "apply", "-R"], cwd=wt, input=patch, text=True, check=True)
+            if "uint32_t table[LZ4_HASH_SIZE];" not in open(os.path.join(wt, "kernel/core/lz4.c")).read():
+                sys.exit("lz4-stack-probe: the revert did not restore the on-stack table")
+        make = shutil.which("gmake") or "make"
+        run = subprocess.run([make, f"ARCH={args.arch}", "test"], cwd=wt, capture_output=True, text=True)
+        log_path = os.path.join(wt, "out", f"{args.arch}-debug", "boot-test.log")
+        log = open(log_path, errors="replace").read().replace("\r", "") if os.path.exists(log_path) else ""
+        verdict = [l for l in run.stdout.splitlines() if l.startswith("boot-test: ")][-1:] or ["(no verdict)"]
+        print(f"lz4-stack-probe: {args.arch} {'old' if args.old else 'fixed'} ({sha[:8]}): {verdict[0]}")
+        if args.old:
+            m = re.search(r"unhandled exception \S+ \(#DF double fault\)|exception.*stack overflow", log)
+            # The faulting PC is in the panic report, not in whatever
+            # earlier diagnostic printed a frame #0 (a lockup sample does).
+            at = log.find("KERNEL PANIC")
+            tail = log[at:at + 4000] if at >= 0 else ""
+            pc = re.search(r"(?:RIP|PC|ELR|pc)\s*[=:]\s*(?:0x)?([0-9a-f]{16})", tail)
+            where = ""
+            if pc:
+                addr = "0x" + pc.group(1)
+                sym = shutil.which("llvm-symbolizer") or os.path.expanduser("~/.swiftly/bin/llvm-symbolizer")
+                where = subprocess.run([sym, f"--obj={os.path.join(wt, 'out', args.arch + '-debug', 'kernel', 'kernel.elf')}",
+                                        "--inlining", addr], capture_output=True, text=True).stdout.strip().replace("\n", " | ")
+            panic_line = re.search(r"^KERNEL PANIC: .*$", log, re.M)
+            print(f"lz4-stack-probe: panic: {panic_line.group(0) if panic_line else 'none'}; at {where or '?'}")
+            # x86-64 has a double-fault stack: the overflow is reported
+            # as #DF with the PC in lz4_compress. AArch64 has none: the
+            # write that leaves the stack hits the guard page below it, an
+            # unmapped page-aligned address in the kernel arena, and the
+            # exception entry that would report the PC has no stack left
+            # either, so the report names the guard page, not the PC.
+            guard = re.search(r"page fault: kernel write at 0x(ffffc[0-9a-f]{8}000) \(not present\): no region", tail)
+            thread = re.search(r"thread: \d+ '([^']+)'", tail)
+            print(f"lz4-stack-probe: thread {thread.group(1) if thread else '?'}"
+                  + (f"; guard page 0x{guard.group(1)}" if guard else ""))
+            ok = (panic_line is not None and MARKER not in log and
+                  ("lz4_compress" in where or (args.arch == "aarch64" and guard is not None)))
+        else:
+            ok = run.returncode == 0 and MARKER in log
+        print(f"lz4-stack-probe: expectation {'held' if ok else 'FAILED'}")
+        return 0 if ok else 1
+    finally:
+        if args.keep:
+            print(f"lz4-stack-probe: worktree kept at {wt}")
+        else:
+            subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=ROOT, capture_output=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

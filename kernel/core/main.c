@@ -194,6 +194,7 @@ void kernel_main(const struct cosmoboot_info *info)
     hv_init();
     tap_dev_init();   /* /dev/net/tap: the owner's bridge to the host stack */
     fsctl_dev_init(); /* /dev/fsctl: the operator's channel to a filesystem's passes */
+    blkctl_dev_init(); /* /dev/blkctl: the operator's channel to block devices (the installer) */
     arch_console_input_init();
 
     /* Bring up the other CPUs now that this one can take interrupts:

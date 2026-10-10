@@ -92,6 +92,16 @@ the network retry separately. The kernel did not run on the first process;
 the cause inside OVMF's device connection remains unassigned. Preserve this
 as a sighting if it recurs; the retry does not erase it.
 
+**Second sighting, 2026-10-10:** local x86-64 `test-smp2` on the M2
+installer branch (PR 2 matrix): the serial log holds only OVMF's
+screen-clear sequences, no `BdsDxe:` line and no `cosmoboot-uefi` banner,
+for the whole 240 s; the virtio console file holds the same sequences.
+`test` boots of the same image at one and four CPUs passed before and
+after it. The boot image is a GPT disk since PR #342; the first sighting
+was on the "superfloppy" image, so the disk layout is not what makes the
+firmware stop. Only `test-harness-retry` has the 30 s handover retry, so
+this boot timed out. Still unassigned; the boot was rerun.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --
@@ -2493,6 +2503,19 @@ was not raised before the 300 ms spinner ended. Not attributed: the
 branch's change (GPT partition devices at boot, the command line) is not
 on the irq-poll or scheduler path. First sighting; the failed job was
 rerun.
+
+## `net-neigh-down-race` step 2, 2026-10-10
+
+`SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
+-ENETUNREACH at line 2665 (24 ms)`, x86-64 CI, PR #343's first run
+(38030196565, job 114149328082), the `test-guard` boot; the same job's
+`test` boot passed it. Step 2 saw a resolve parked and then a return
+code other than `-ENETUNREACH`. Candidate mechanism, from the source: the
+park hook (`arp_test_park_before_lock`, `kernel-services/network/arp.c`)
+parks the first caller on *any* interface, so another thread's ARP work
+(eth0 is live in a debug boot) can take the park while the test's own
+resolve on `ndown0` runs before the down and returns `-EINPROGRESS`. Not
+confirmed by a run; outside M2 (inventory). First sighting.
 
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
 

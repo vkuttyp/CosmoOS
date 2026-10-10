@@ -633,3 +633,16 @@ goes when the reference does; an index past the end is `-EFBIG`), the
 `mmap` section of `init --selftest` (truncate under a mapping is
 `SIGBUS`, not the old bytes; a write after `MS_SYNC` is written again),
 `vm-file-fault-hold`.
+
+**V36. Nothing writes raw sectors to a device that is mounted, or that
+shares a disk with a mounted one, through `/dev/blkctl`.** A WRITE and a
+FORMAT check `vfs_bdev_mounted` (the device, its disk, its partitions)
+before the first sector; a RESCAN is refused while any partition is held
+(`blk_part_scan`, `-EBUSY`). The check is a snapshot taken without the
+mount table held across the write: an operator racing their own mount
+against their own write can still lose, which the privilege the channel
+demands puts on them. Pool members other than a mount's named device are
+not seen. **Checked by** `make test-install`: with the new root mounted,
+`cosmo-install --force` on its disk is refused because LIST flags the
+disk `MOUNTED` (the same `vfs_bdev_mounted` the WRITE consults). Gap: no
+test sends a WRITE to a mounted device on purpose.

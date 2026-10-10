@@ -101,7 +101,94 @@ compiler produced for one build, and the evidence for the old behaviour is
 those two CI binaries (`debug-elfs-x86_64` of run 38037450806); the fix
 removes the placement by construction and the link check holds it.
 
+After the fix (`e0869ad8`) moved code, the local compiler put
+`lockdep-graph-bench`'s quadratic edge loop across a page (8-10 s instead
+of 3.7 s; the local `test-chaos` boot failed its 20 s budget and the
+watchdog). The rule became `__page_local` in `compiler.h`, applied to that
+loop, and the link check covers `page_local_*` too (`02ccce52`). Because
+CI's compiler lays code out differently, every later tree was also built
+with CI's toolchain (Debian clang 19.1.7 in `debian:trixie`, which
+reproduced CI's crash kernel layout to the byte) and its debug, crash and
+chaos images booted here.
+
+PR 1 final validation (local, after `02ccce52`): host-test, fuzz,
+analyze pass on both architectures; x86-64 debug 131.4 s (SMP 1), 143.9 s
+(`test-smp2`), 149.7 s (SMP 4), chaos 142.7 s, retry 151.3 s, release
+16.7 s, crash 122.7 s; AArch64 130.9 s, 142.2 s, 151.8 s, chaos 155.5 s,
+retry 152.9 s, release 20.7 s, crash 129.8 s -- all PASS. CI-toolchain
+x86-64 builds: debug 142.5 s, crash 128.1 s, chaos 146.5 s, PASS. PR #342
+CI green on both architectures; merged as `765bd579`.
+
 Two further CI sightings on the branch were recorded, not attributed to
 it: `irqpoll-boost` over its gap bound (x86-64 `test-smp2`, first
 sighting) and, on PR #343, `net-neigh-down-race` step 2 (a candidate
 mechanism in the test's park hook; inventory).
+## PR 2 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| `/dev/blkctl` | LIST (partitions, the `BOOT` partition, `MOUNTED`), READ/WRITE of up to 32 KiB (a WRITE refused while the device, its disk or a partition of it is mounted, V36), FLUSH, RESCAN, FORMAT through a new `fs_type.format` (cosmofs: `cosmofs_format`); privileged at open and at every write; results read back whole | `kernel-services/vfs/blkctl.c`, `kernel/include/uapi/cosmo/blkctl.h`, `kernel-services/vfs/vfs.c` (`vfs_bdev_mounted`, `vfs_format`) |
+| Randomness for user space | native `COSMO_AT_RANDOM` (25) naming the 16 bytes already placed on every initial stack | `kernel/process/process.c`, `uapi/cosmo/syscall.h` |
+| Installer | `/sbin/cosmo-install` (design: `docs/userland/design.md`, "The installer"): GPT from `gpt_build`, checked with `gpt_parse`, backup then primary; the boot ESP copied with its one slot rewritten; cosmofs on partition 2 with `/bin`, `/sbin`, `/etc`, `/usr` and `/var/db` when present; refusal exit 3; failure wipes the table and unmounts | `userland/system/cosmo-install.c`, `install_gpt.c`, `install_sha512.c` |
+| Acceptance (stage 1) | `make test-install`: install from the live release image onto a blank 256 MiB disk, refusals (a table without `--force`, a mounted disk), the new root mounted and listed; on the host, both GPT copies, the ESP equal to the booted ESP but for the slot, the slot's `root=PARTUUID=`; CI job `install` | `tests/boot/install_test.py`, `Makefile`, `.github/workflows/ci.yml` |
+
+### Two stack overflows on the installer's path
+
+The installer's first runs double-faulted twice, each a 16 KiB array on a
+16 KiB kernel stack:
+
+1. **`format_at`** kept `struct cfs_member mem[255]` (64 bytes each) on
+   the stack. Only self-tests had formatted a cosmofs; a FORMAT from a
+   system call double-faulted (`format_at`, `cosmofs_core.c:1836`). The
+   path is new in this PR (no system call reached `cosmofs_format` on
+   main), so `make test-install` is its test. Fixed by allocating the
+   `n` members (`eb760d7d`).
+2. **`lz4_compress`** kept its 4096-entry match table (16 KiB) on the
+   stack. cosmofs compresses every multi-block record of a regular file
+   at write-back, so on main a user process that writes such a file to a
+   cosmofs mount and calls `fsync` or `sync` overflows the stack. A
+   defect on main: `init --selftest` now writes 64 KiB of a repeated line
+   to the scratch cosmofs and `fsync`s it, and the harness requires its
+   line in every debug boot. The table is now `LZ4_WORK_BYTES` the caller
+   provides; cosmofs allocates it per record (`5cdcb682`).
+   `tools/lz4-stack-probe.py --old` reverts that whole commit in a
+   throwaway worktree and boots debug:
+
+   | | x86-64 | AArch64 |
+   |---|---|---|
+   | `--old` | FAIL 108.9 s: `#DF double fault` in `init`, PC `lz4_compress` (`lz4.c:68`, the table's `memset`, RDX=0x4000) | FAIL 109.2 s: kernel write fault at `0xffffc000103f4000`, the guard page below `init`'s kernel stack, X2=0x4000 (the `memset`'s length); AArch64 has no separate fault stack, so the report is the guard page, taken in the exception entry |
+   | fixed | PASS 155.1 s | PASS 144.6 s |
+
+   The first version of the probe read the PC from the first `#0` frame
+   in the log, which on x86-64 was a lockup sample's, and reported the
+   expectation failed; it now reads the panic report.
+
+The shell expands `$?` for a whole line before running it (`cmd; echo
+$?` reports the line before); the harness types the status check as its
+own line. x86 firmware without a variable store writes `\NvVars` into
+the ESP it boots from, so the installed ESP is compared with the live
+disk's ESP after its boot, not with the built image (34 sectors differ
+between those two).
+
+### PR 2 validation (local)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 139.4 s | PASS 131.7 s |
+| debug `test-smp2` | first boot hung in OVMF before the loader (no `BdsDxe:` line, 240 s; flakes.md, second sighting of the firmware-handover stop); rerun PASS 143.5 s | PASS 155.6 s |
+| debug `test`, `QEMU_SMP=4` | PASS 150.4 s | PASS 142.8 s |
+| `test-chaos` | PASS 142.0 s | PASS 143.9 s |
+| `test-harness-retry` | PASS 143.8 s | PASS 144.9 s |
+| `BUILD=release test` | PASS 16.9 s | PASS 20.4 s |
+| `BUILD=release test-install` (install stage) | PASS 7.6 s (`cosmo-install` 1.8 s) | PASS 11.8 s (1.6 s) |
+
+Every debug boot now prints `usertest: cosmofs compressed a file
+committed from user mode`, which the harness requires.
+
+PR 2 after rebasing onto PR 1's final head (local): x86-64 debug `test`
+PASS 145.1 s, `test-crash` PASS 129.6 s, release `test-install` PASS
+7.9 s; AArch64 154.8 s, 130.8 s, 11.3 s. CI-toolchain x86-64 builds:
+debug 143.3 s, crash 127.9 s, chaos 141.1 s, PASS.

@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* lz4_compress's match table (LZ4_WORK_BYTES), the caller's since roadmap M2. */
+static uint32_t g_lz4_work[LZ4_WORK_BYTES / 4];
+
 #define OUT_MAX 65536u
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -42,7 +45,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint8_t *packed = malloc(bound ? bound : 1);
     uint8_t *back = malloc(blen ? blen : 1);
     FUZZ_ASSERT(packed != NULL && back != NULL);
-    size_t clen = lz4_compress(body, blen, packed, bound);
+    size_t clen = lz4_compress(body, blen, packed, bound, g_lz4_work);
     if (clen > 0) {
         FUZZ_ASSERT(clen <= bound);
         size_t m = lz4_decompress(packed, clen, back, blen);
