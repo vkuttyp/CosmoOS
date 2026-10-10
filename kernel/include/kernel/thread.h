@@ -136,6 +136,7 @@ struct thread {
     struct sigaltstack_k altstack;
     uint64_t syscall_nr, syscall_arg0;  /* the call in progress, for SA_RESTART */
     uint64_t clear_child_tid;           /* Linux: zeroed and futex-woken at exit */
+    uint64_t set_child_tid;             /* Linux fork: the tid is written here before the first user instruction */
     uint32_t user_tid;                  /* the id userland sees, in either personality: the pid for a
                                            process's first thread, 0x10000 + tid for the rest, so a
                                            thread id and a pid can never collide. Distinct from `tid`

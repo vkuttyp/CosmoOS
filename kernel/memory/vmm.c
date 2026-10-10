@@ -1218,6 +1218,7 @@ int vm_space_create_user(struct vm_space **out)
     space->arena_lo = 0;
     space->arena_hi = 0;
     space->user = true;
+    space->users = 1;
     space->tlb_cpus = 0;
     space->mapped_pages = 0;
     space->limit_mapped_pages = UINT64_MAX;
@@ -1740,6 +1741,25 @@ out_unlock:
 void vm_space_destroy(struct vm_space *space)
 {
     (void)vm_space_destroy_counted(space);
+}
+
+void vm_space_share(struct vm_space *space)
+{
+    KASSERT(space->user);
+    uint32_t was = __atomic_fetch_add(&space->users, 1, __ATOMIC_RELAXED);
+    KASSERT(was > 0);
+}
+
+bool vm_space_put(struct vm_space *space)
+{
+    /* Release: every access this user made happens before the teardown
+     * the last one runs (acquire on that side). */
+    uint32_t was = __atomic_fetch_sub(&space->users, 1, __ATOMIC_ACQ_REL);
+    KASSERT(was > 0);
+    if (was != 1)
+        return false;
+    vm_space_destroy(space);
+    return true;
 }
 
 static bool user_range_valid(uint64_t base, size_t size)

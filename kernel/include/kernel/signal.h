@@ -168,5 +168,7 @@ bool signal_raise_stop_self(int sig, const struct signal_info *info);
 /* Process-side setup and teardown (kernel/process/process.c). */
 int signal_process_init(struct process *p);
 void signal_process_release(struct process *p);
+/* fork: the child (signal_process_init done) takes the parent's dispositions. */
+void signal_process_fork(struct process *child, struct process *parent);
 
 #endif /* KERNEL_SIGNAL_H */

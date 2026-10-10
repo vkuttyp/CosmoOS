@@ -88,7 +88,9 @@ struct personality {
      * ending with the null pair): returns the words written. */
     unsigned (*auxv)(struct process *p, const struct elf_info *exe, const struct personality_auxv_args *x,
                      uint64_t *w, unsigned max);
-    /* fork: give `child` its copy of `parent`'s private state (M3 PR 2). */
+    /* fork: give `child` its copy of `parent`'s private state. A vfork
+     * child (child->space == parent->space) borrows the space, so state
+     * that describes the space's contents is copied, not duplicated. */
     int (*fork)(struct process *parent, struct process *child);
     /* execve: `p` keeps its identity and takes a new image `info`; the
      * personality's state is reset for it (M3 PR 3). */
@@ -214,6 +216,11 @@ struct process {
     struct thread *main_thread;        /* the first thread; its Linux tid is the pid */
     uint64_t interp_base, exec_entry;  /* dynamic executables: the interpreter's bias, the program's entry */
     char exec_path[128];               /* AT_EXECFN */
+    /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
+     * vfork_wq until the child stops borrowing its space -- it execs or
+     * its last thread is gone -- and process_vfork_release sets this. */
+    struct waitqueue vfork_wq;
+    bool vfork_released;
 };
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
@@ -416,6 +423,34 @@ void process_thread_exit(int status) __noreturn;
 int process_add_thread(struct process *p, const struct arch_user_regs *regs, uintptr_t tls, struct thread **out);
 void process_thread_start(struct thread *t);
 void process_thread_abandon(struct thread *t);
+
+/*
+ * fork (docs/kernel/process/design.md, "fork"): a new process that is a
+ * copy of the caller's -- its address space duplicated copy-on-write
+ * (vm_space_fork), or with PROCESS_FORK_SHARE_SPACE the same space
+ * borrowed; its handle table duplicated through the normal install path;
+ * credentials, limits, directories, namespaces, domain, syscall filter,
+ * signal dispositions and the caller's mask inherited; pending signals
+ * and timers not. Its one thread starts from `regs` (the caller's, with
+ * the result already set) on `tls`. Returns the started child,
+ * referenced, or -errno with nothing created. Only a personality with a
+ * fork hook reaches it: there is no native fork.
+ */
+#define PROCESS_FORK_SHARE_SPACE 1u
+struct process_fork_args {
+    const struct arch_user_regs *regs;
+    uintptr_t tls;
+    uint64_t set_child_tid;     /* nonzero: the child writes its tid here before its first instruction */
+    uint64_t clear_child_tid;   /* nonzero: zeroed and futex-woken when the child's thread exits */
+    unsigned flags;
+};
+int process_fork(const struct process_fork_args *a, struct process **out);
+
+/* vfork: wait (killable) until `child` no longer borrows the caller's
+ * space; 0, or -EINTR when the caller is being killed. */
+int process_vfork_wait(struct process *child);
+/* The child's side: it has exec'd or its last thread is gone. */
+void process_vfork_release(struct process *p);
 /* The thread of `p` with this Linux tid (pid for the main thread), or NULL. Not referenced. */
 struct thread *process_find_thread(struct process *p, uint32_t user_tid);
 

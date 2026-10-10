@@ -22,8 +22,8 @@
  * the arch layer allocates, restores and frees. A thread without state
  * (kernel threads, the idle threads) is never saved or restored and must
  * not execute such instructions. Architectures without a user
- * floating-point unit in use (AArch64 today: FP/SIMD is disabled at EL0)
- * implement these as no-ops that leave the pointer NULL.
+ * floating-point unit in use would implement these as no-ops that leave the pointer NULL (none does today:
+ * AArch64 enables FP/SIMD at EL0, kernel/arch/aarch64/fpu.c).
  */
 
 #ifndef ARCH_FPU_H
@@ -39,6 +39,12 @@ struct arch_fpu_state;
  * zero on x86-64). Called before the thread first runs user code; 0 or
  * -ENOMEM. Idempotent for a thread that already has state. */
 int arch_fpu_alloc(struct thread *t);
+
+/* fork: `t` (state allocated, never run) takes the calling thread's live
+ * registers, so a child continues with every FP/SIMD value its parent
+ * held at the call -- AArch64's d8-d15 are callee-saved across the
+ * fork() call. No-op when the caller has no state. */
+void arch_fpu_inherit(struct thread *t);
 
 /* Release the state (no-op when there is none). Only for a thread that
  * is not running, or for the calling thread itself. */
