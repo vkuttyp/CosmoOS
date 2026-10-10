@@ -221,7 +221,7 @@ def stage_install(args, results):
         out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
-        out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls /mnt/v/sbin && ls /mnt/v && "
+        out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
                     "cat /mnt/v/etc/rc")
         out += b.status(f"cosmo-install --force {dev}", "busy-status")
         out += b.run("umount /mnt/v && echo look-ok")
@@ -282,7 +282,14 @@ def stage_reboot(args, results, inst, nonce):
         need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
              "the installed boot")
         need(log, r"^CosmoOS userland ready$", "the installed /etc/rc")
-        out = b.run(f"echo {nonce} > /persist.txt && sync && cat /persist.txt && ls /dev && echo write-ok")
+        # Roadmap M3: the installed system's console -- and its /etc/rc --
+        # is BusyBox ash (/etc/console-shell), which the kernel names 'sh';
+        # the native shell would be 'cosmo-sh'.
+        rest = log[log.index("init: switched to the disk root"):]
+        need(rest, r"^\[ INFO\] process: pid \d+ 'sh' created", "the installed console shell (BusyBox ash)")
+        if re.search(r"process: pid \d+ 'cosmo-sh' created", rest):
+            raise Fail("the installed system started the native shell, not BusyBox ash")
+        out = b.run(f"echo {nonce} > /persist.txt && sync && cat /persist.txt && ls -1 /dev && echo write-ok")
         need(out, r"^write-ok$", "writing /persist.txt")
         need(out, rf"^{nonce}$", "writing /persist.txt")
         need(out, r"^console$", "the installed system's /dev")

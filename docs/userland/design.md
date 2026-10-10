@@ -28,6 +28,35 @@ bootstrap namespace policy of the archive (an initramfs-like
 convention), documented in `docs/kernel/module/` (the archive) and
 `docs/kernel-services/vfs/` (ramfs).
 
+## BusyBox (roadmap M3)
+
+The Linux userland is static musl BusyBox, built from source with the
+system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
+link per applet of `ports/busybox/applets` -- exactly the 48 of decision
+7, `/bin/sh` among them -- come from the boot archive
+(`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
+makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
+whose name an applet takes is installed as `/bin/cosmo-<name>`
+(`native_bin_name` in `userland/userland.mk`): the native shell is
+`/bin/cosmo-sh`, and `cosmo-echo`, `cosmo-cat`, `cosmo-ls`, `cosmo-cp`,
+`cosmo-mv`, `cosmo-rm`, `cosmo-mkdir`, `cosmo-rmdir`, `cosmo-pwd`,
+`cosmo-true`, `cosmo-false` and `cosmo-sleep` likewise; `mkfifo`, `sync`
+and the `/sbin` programs keep their names. init's self-tests and the
+native test scripts name the `cosmo-` programs, because what they test
+is the native side.
+
+**The console shell** is the path `/etc/console-shell` names, else
+`/bin/cosmo-sh` (`console_shell` in init). `cosmo-install` writes
+`/bin/sh` there, so an installed system's console -- and the shell that
+runs its `/etc/rc` -- is BusyBox ash, while the boot image keeps the
+native shell its interactive harness drives (job control is outside M3
+for ash: `ASH_JOB_CONTROL` is off). init gives the shell
+`PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/` and `PS1=cosmo$ `, so
+either shell shows the prompt the harnesses wait for. `/etc/rc` runs
+`/etc/rc.test` with `cosmo-sh`, and `rc.test` runs its inner shells as
+`cosmo-sh -c`: it is the native shell's test. Its commands (`cat`, `ls`,
+`cp`, ...) are BusyBox's now.
+
 ## init
 
 ```text

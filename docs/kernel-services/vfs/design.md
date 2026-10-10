@@ -823,6 +823,29 @@ the owner of the entry, the owner of the directory, or a privileged
 caller (`sticky_denies`). Moving a directory to another parent also
 needs write permission on the directory itself (its `..` changes).
 
+**Modes and times (roadmap M3).** `vfs_setattr(vn, what, mode, mtime)`
+changes a node's permission bits (`VFS_SET_MODE`) and modification time
+(`VFS_SET_MTIME`, or `VFS_SET_MTIME_NOW`); the change time becomes now.
+The owner or a privileged caller may do either; setting the time to now
+is also allowed to a caller who may write the node; a read-only mount
+is `-EROFS`. The fields change under `vn->lock`, and a filesystem that
+stores them takes them through the optional `setattr` vnode operation:
+cosmofs's is `inode_sync` (directories and files; a symbolic link's
+mode and time stay in the vnode, since `inode_sync` writes one of those
+two types), ramfs has none. There is no access time. File times are the
+VFS's clock, `clock_now_ns`, since boot -- not the wall clock (the
+inventory records it) -- so a time a caller sets explicitly and one the
+VFS stamps are on different bases.
+
+**`mkdir` of `.` or `..`** is `-EEXIST`, as Linux says (every other
+mutation of a dot name stays `-EINVAL`): BusyBox tar makes `./` for an
+archive that names it.
+
+**`/dev/null` and `/dev/zero`** (`kernel-services/vfs/memdev.c`, roadmap
+M3) are character devices on the ramfs `/dev`, made at boot after the
+terminal's: null reads end-of-file and swallows writes, zero reads zeros
+and swallows writes.
+
 ## Testing strategy
 
 Self-tests: `vfs-ramfs` (create, write, read, stat, mkdir, readdir,

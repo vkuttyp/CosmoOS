@@ -164,7 +164,9 @@ which the Linux `wait4` encodes as "terminated by signal `sig`".
 | `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` marks both close-on-exec; `dup3` takes `O_CLOEXEC` (any other flag `-EINVAL`); `dup` and `dup2` start without it |
 | `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` 0, `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
 | `getdents64` | native `getdents` records → `linux_dirent64` (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name`), through two kernel buffers; the native name starts at byte 12 of its record (`offsetof(struct cosmo_dirent, name)`, not `sizeof`, which is 16), `d_type` is mapped to Linux's `DT_*` values (`DT_REG` 8, `DT_DIR` 4, `DT_CHR` 2, `DT_FIFO` 1, `DT_SOCK` 12), each output record is the 19-byte header plus the NUL-terminated name padded to 8 bytes, and `d_off` is the offset of the next record in the buffer |
-| `mkdir`, `mkdirat`, `mknodat` (`S_IFIFO` only, the named-pipes unit; `S_IFSOCK` `-EINVAL`, the rest `-EPERM`), `rmdir`, `unlink`, `unlinkat` (`AT_REMOVEDIR`), `rename`, `renameat`, `chdir`, `getcwd`, `access`, `faccessat`, `fsync`, `fdatasync`, `sync`, `umask` | direct or trivial (`umask` returns 022; `access` is a `stat`) |
+| `mkdir`, `mkdirat`, `mknodat` (`S_IFIFO` only, the named-pipes unit; `S_IFSOCK` `-EINVAL`, the rest `-EPERM`), `rmdir`, `unlink`, `unlinkat` (`AT_REMOVEDIR`), `rename`, `renameat`, `chdir`, `getcwd`, `access`, `faccessat`, `fsync`, `fdatasync`, `sync`, `umask` | direct or trivial (`access` is a `stat`); `umask` sets the process's own mask and returns the old one, inherited by fork and spawn, applied by `open(O_CREAT)`, `mkdir` and `mknod` here (roadmap M3; it returned 022 before and nothing applied it); `mkdir` of `.` or `..` is `-EEXIST` (roadmap M3) |
+| `chmod` (x86-64), `fchmod`, `fchmodat`, `fchmodat2` (roadmap M3) | `vfs_setattr(VFS_SET_MODE)` on the node the path names from the directory descriptor (a symbolic link with `AT_SYMLINK_NOFOLLOW` is `-EOPNOTSUPP`, as Linux) or on the descriptor's file |
+| `utimensat` (roadmap M3) | the modification time, `times[1]`: no times or `UTIME_NOW` is now, `UTIME_OMIT` leaves it, a value sets it (the owner's); `times[0]`, the access time, is checked and not kept; a NULL path is the descriptor's own file (`futimens`); `AT_SYMLINK_NOFOLLOW` only |
 | `fcntl` | `F_GETFD`/`F_SETFD` read and replace the handle's close-on-exec flag (`FD_CLOEXEC`; 0 before roadmap M3), `F_GETFL` reconstructs the access mode and adds `O_NONBLOCK` when the object is non-blocking, `F_SETFL` sets or clears `O_NONBLOCK` on the object -- a FIFO's open file since the named-pipes unit, per open (other status flags dropped; objects that never block accept silently), `F_DUPFD` via `dup`, `F_DUPFD_CLOEXEC` the same with the flag set; others `-EINVAL` |
 | `ioctl` | `TCGETS`, `TCSETS`/`TCSETSW`/`TCSETSF` and `TIOCGWINSZ` on a terminal, translated through `lx_termios_*`; `-ENOTTY` for anything else. It answered `-ENOTTY` for every request until the terminal-modes unit, and the cost was not fidelity but correctness: a libc told the console is not a terminal fully buffers its output, so a hosted program's prompt did not appear until something flushed it. This is the only place in the tree where a call's argument type depends on another argument -- a property of Linux's ABI, which this personality imitates, not one the native ABI adopts |
 
@@ -203,9 +205,21 @@ without effect.
 returns the monotonic clock (there is no wall clock; recorded),
 `gettimeofday` and `time` likewise; `nanosleep` and `clock_nanosleep`
 (relative; `TIMER_ABSTIME` against the monotonic clock) → the killable
-sleep; `getrandom` → `random_get_bytes` after waiting for a seeded pool, with Linux's `GRND_NONBLOCK`/`GRND_INSECURE`/`GRND_RANDOM` semantics (docs/kernel/security/design.md §6); `uname` fills
+sleep, and an interrupted one writes the time it did not sleep into
+`rem` (roadmap M3: it wrote 0, and BusyBox `sleep`, which sleeps again
+for the remainder, ended early after `^Z` and `fg`); `getrandom` → `random_get_bytes` after waiting for a seeded pool, with Linux's `GRND_NONBLOCK`/`GRND_INSECURE`/`GRND_RANDOM` semantics (docs/kernel/security/design.md §6); `uname` fills
 `struct utsname` (six 65-byte fields: `Linux`, `cosmo`, `6.0.0-cosmo`,
 the build id, `x86_64`, `(none)`); `sysinfo` `-ENOSYS`.
+
+### Open flags on AArch64 (roadmap M3)
+
+arm64 numbers three open flags differently from x86-64 (Linux's
+`arch/arm64/include/uapi/asm/fcntl.h`): `O_DIRECTORY` 040000,
+`O_NOFOLLOW` 0100000, `O_LARGEFILE` 0400000 (x86-64: 0200000, 0400000,
+0100000). `linux_abi.h` used the x86 values on both, so musl's `opendir`
+on AArch64 passed a flag the door did not know and got `-EINVAL`; BusyBox
+`ls` and `find` found the first. `lxtest` opens a directory with Linux's
+literal number for the architecture.
 
 ### Sockets
 

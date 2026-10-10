@@ -1445,7 +1445,7 @@ static void env_pointer_survives_overwrite(void)
  *   3. the PATH search finding something.
  *   4. the PATH search exhausting every element.
  *
- * The first build of this case only ever spawned "/bin/true", so
+ * The first build of this case only ever spawned "/bin/cosmo-true", so
  * `strchr(file, '/')` succeeded every time and the whole PATH-search
  * half -- the loop that holds the snapshot across repeated
  * stat/spawn attempts, and the frees at 3 and 4 -- ran in no test at
@@ -1476,8 +1476,8 @@ static void *env_spawner(void *arg)
      */
     for (unsigned i = 0; i < 40; i++) {
         /* absolute hit, PATH hit, PATH miss, absolute MISS */
-        const char *file = (i % 4 == 0) ? "/bin/true"
-                         : (i % 4 == 1) ? "true"
+        const char *file = (i % 4 == 0) ? "/bin/cosmo-true"
+                         : (i % 4 == 1) ? "cosmo-true"
                          : (i % 4 == 2) ? "cosmo-no-such-program"
                                         : "/bin/cosmo-no-such-program";
         const char *const av[] = { file, NULL };

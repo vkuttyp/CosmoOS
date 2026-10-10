@@ -9,7 +9,10 @@
 > M1 (sound randomness) done 2026-10-09; M2 (persistent system: GPT
 > partitions, boot command line, `cosmo-install`, a cosmofs root that init
 > switches to) done 2026-10-10
-> ([report](audit/2026-10-10-m2-persistent-system-report.md)). Next: M3.
+> ([report](audit/2026-10-10-m2-persistent-system-report.md)); M3 (real
+> process model: fork, vfork, execve, BusyBox ash as the shell) done
+> 2026-10-10 ([report](audit/2026-10-10-m3-process-model-report.md)).
+> Next: M4.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

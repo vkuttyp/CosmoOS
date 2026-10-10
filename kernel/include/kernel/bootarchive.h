@@ -18,13 +18,16 @@
  * A service directory is inherently many small files, so this became
  * the cap on how many services can ship; at ~112 bytes an entry the
  * table is still under 15 KiB. */
-#define BOOTARCHIVE_MAX_ENTRIES 128
+#define BOOTARCHIVE_MAX_ENTRIES 256
 #define BOOTARCHIVE_NAME_MAX    100  /* ustar name field, NUL included */
 
 struct bootarchive_entry {
     char name[BOOTARCHIVE_NAME_MAX + 1];
     const void *data;   /* HHDM virtual */
     size_t size;
+    /* A symbolic link (ustar type 2, roadmap M3): its target, and no data
+     * (size 0). "" for a regular file. */
+    char link[BOOTARCHIVE_NAME_MAX + 1];
 };
 
 /* Parse the archive named by the boot info. No archive is not an error

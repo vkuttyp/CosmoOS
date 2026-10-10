@@ -123,8 +123,12 @@ void bootarchive_init(void)
             panic("bootarchive: bad size field (entry %s)", h->name);
         if (fsize > size - off - TAR_BLOCK)
             panic("bootarchive: entry %s runs past the archive end", h->name);
-        if (h->typeflag != '0' && h->typeflag != '\0')
-            panic("bootarchive: entry %s is not a regular file (type %c)", h->name, h->typeflag);
+        bool is_link = h->typeflag == '2';
+        if (h->typeflag != '0' && h->typeflag != '\0' && !is_link)
+            panic("bootarchive: entry %s is neither a regular file nor a symbolic link (type %c)", h->name,
+                  h->typeflag);
+        if (is_link && (fsize != 0 || h->linkname[0] == '\0' || memchr(h->linkname, '\0', sizeof(h->linkname)) == NULL))
+            panic("bootarchive: symbolic link %s malformed", h->name);
         if (h->name[0] == '\0' || h->name[0] == '/' || strstr(h->name, "..") != NULL)
             panic("bootarchive: entry name '%s' rejected", h->name);
         if (g_count == BOOTARCHIVE_MAX_ENTRIES)
@@ -138,6 +142,10 @@ void bootarchive_init(void)
         strlcpy(e->name, h->name, sizeof(e->name));
         e->data = block + TAR_BLOCK;
         e->size = (size_t)fsize;
+        if (is_link)
+            strlcpy(e->link, h->linkname, sizeof(e->link));
+        else
+            e->link[0] = '\0';
         kdebug("bootarchive: %-24s %zu bytes", e->name, e->size);
 
         off += TAR_BLOCK + ALIGN_UP((size_t)fsize, TAR_BLOCK);

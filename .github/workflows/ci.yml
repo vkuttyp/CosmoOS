@@ -54,7 +54,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
             qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
           qemu-system-x86_64 --version
           qemu-system-aarch64 --version
@@ -66,6 +66,14 @@ jobs:
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
 
       - name: Verify toolchain and that no signing secret is tracked
         run: make ARCH=${{ matrix.arch }} check-tools
@@ -212,7 +220,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
             qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
 
       - name: Check out
@@ -222,6 +230,14 @@ jobs:
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
 
       - name: Build (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug all
@@ -250,7 +266,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
             qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
 
       - name: Check out
@@ -260,6 +276,14 @@ jobs:
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -273,6 +297,59 @@ jobs:
         with:
           name: test-install-${{ matrix.arch }}
           path: out/${{ matrix.arch }}-release/test-install/*.log
+          if-no-files-found: ignore
+
+  # Milestone M3's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,
+  # "test-busybox"): BusyBox ash runs the scripted test of every applet and
+  # BusyBox's own testsuite for the named files. Release builds, a job of
+  # its own like the install test.
+  busybox:
+    name: busybox test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    container: public.ecr.aws/docker/library/debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 30
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Install cross toolchain and test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
+            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: BusyBox ash, the scripted test and the testsuite (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-busybox
+
+      - name: Upload the boot's serial log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-busybox-${{ matrix.arch }}
+          path: out/${{ matrix.arch }}-release/test-busybox/*.log
           if-no-files-found: ignore
 
   # The quiescence protocol's litmus tests against the C11 (RC11) model.

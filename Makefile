@@ -9,6 +9,7 @@
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
+#   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
@@ -31,12 +32,15 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-entropy test-install test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: all kernel boot modules image run test test-entropy test-install test-busybox test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
 include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/libc/libc.mk
+# BusyBox before userland: its applet list decides which native programs
+# move aside to cosmo-<name> (userland/userland.mk).
+include $(ROOT)/ports/busybox/busybox.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
 # The Linux ABI test programs and the virtualization guests both build
@@ -58,9 +62,9 @@ image: $(IMAGE)
 # order the kernel loads them (dependencies first). See
 # scripts/mkbootarchive.py and docs/kernel/module/.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 
@@ -91,6 +95,8 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # self-test passed (run 37653536848). The same 240 s on both.
 # The shell, network and key harnesses derive their deadlines from it.
 BOOT_TIMEOUT ?= 240
+# test-busybox: one boot that runs the scripted test and fifteen testsuite files.
+BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
@@ -137,6 +143,13 @@ test-entropy:
 # disk with cosmo-install, and the disk is checked on the host. Run with
 # BUILD=release in CI, where each boot takes seconds. Its own work
 # directory: the boots' scratch disks and serial logs stay beside it.
+# Roadmap M3's acceptance test: BusyBox ash runs the scripted test and the
+# testsuite subset (docs/userland/testing.md, "BusyBox"; CI: BUILD=release).
+test-busybox: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/busybox_test.py --image $(IMAGE) --workdir $(OUT)/test-busybox \
+		--timeout $(BUSYBOX_TIMEOUT)
+
 test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \

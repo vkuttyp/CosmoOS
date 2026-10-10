@@ -375,6 +375,19 @@ static int copy_vec(uint64_t uarr, const char **out, unsigned *n_out, struct exe
     return 0;
 }
 
+struct exec_args *exec_args_alloc(void)
+{
+    size_t size = (sizeof(struct exec_args) + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    vaddr_t va = vm_kernel_alloc(size, VM_KALLOC_POPULATE, VM_PROT_RW);
+    return va ? (struct exec_args *)va : NULL;
+}
+
+void exec_args_free(struct exec_args *ea)
+{
+    if (ea != NULL)
+        vm_kernel_free((vaddr_t)ea);
+}
+
 int exec_args_copy(struct exec_args *ea, uint64_t upath, uint64_t uargv, uint64_t uenvp)
 {
     ea->argc = ea->envc = 0;

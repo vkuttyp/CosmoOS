@@ -142,6 +142,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/procfs/procfs.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
+	kernel-services/vfs/memdev.c \
 	kernel-services/vfs/vfstest.c \
 	kernel-services/storage/pool.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \

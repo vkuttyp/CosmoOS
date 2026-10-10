@@ -15,12 +15,13 @@ a="$root/out/repro-a"
 b="$root/out/repro-b"
 rm -rf "$a" "$b"
 
-make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" all "$a/boot.tar" >/dev/null
-make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" all "$b/boot.tar" >/dev/null
+# BusyBox too, in each tree (BB_DIR: by default one per architecture).
+make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" BB_DIR="$a/busybox" all "$a/boot.tar" >/dev/null
+make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" BB_DIR="$b/busybox" all "$b/boot.tar" >/dev/null
 
 status=0
 case "$arch" in aarch64) loader=boot/BOOTAA64.EFI ;; *) loader=boot/BOOTX64.EFI ;; esac
-for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk; do
+for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf busybox/busybox busybox/testsuite.tgz libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk; do
     if cmp -s "$a/$f" "$b/$f"; then
         printf '  same     %s\n' "$f"
     else

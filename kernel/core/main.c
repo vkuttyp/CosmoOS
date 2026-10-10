@@ -182,6 +182,7 @@ void kernel_main(const struct cosmoboot_info *info)
      * ramfs root exists and after tty_init (docs/kernel/tty/design.md,
      * "The terminal as a file"). */
     tty_dev_init();
+    memdev_init();   /* /dev/null and /dev/zero */
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */

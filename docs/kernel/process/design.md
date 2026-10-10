@@ -1423,5 +1423,11 @@ point of no return:
 
 A failure of the personality's state after that point ends the process
 (`128 + SIGKILL`); nothing else can fail there. Credentials, limits,
-directories, namespaces, the domain, the syscall filter, the pid, the
-parent and the children are unchanged.
+directories, namespaces, the domain, the syscall filter, the umask, the
+pid, the parent and the children are unchanged.
+
+**The umask** (`struct process.umask`, roadmap M3) is 022 for a process
+the kernel starts and the parent's for a child of spawn or fork; the
+Linux door's `umask` sets it and its creating calls apply it. The native
+door neither reads nor applies it (native creation passes the mode it
+means).

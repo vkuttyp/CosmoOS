@@ -942,4 +942,15 @@ each; none is needed by M2's acceptance test.
   regions only.
 - A fork-like `clone` accepts only `SIGCHLD` as the exit signal (`__WCLONE`
   and other exit signals are not built).
+- File times are the VFS's clock since boot, not the wall clock: `touch -t`
+  sets a wall-clock time and a new file gets a boot-relative one (M3 PR 4).
+- No access time is kept; `utimensat` checks `times[0]` and ignores it.
+- The native door has no chmod, utimes or umask; the Linux door's umask is
+  not applied to native creation (M3 PR 4).
+- Linux `nanosleep` interrupted by a stop is restarted with its whole
+  duration, not the remainder (the core's restart re-executes the call).
+- BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
+  `tests/busybox/suite.sh` supplies a stand-in over `diff`.
+- ash job control (`ASH_JOB_CONTROL`) is off: an installed system's
+  console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.
 

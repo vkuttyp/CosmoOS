@@ -2703,7 +2703,7 @@ See the [history index](README.md).
     `make test-install` (install, reboot, persist, fallback) in CI.
     M2 ticked.
 
-- **Roadmap M3: real process model (2026-10-10; in progress).**
+- **Roadmap M3: real process model (2026-10-10).**
   - PR 1 (#345): personality lifecycle and initial-stack hooks (`claims_elf`,
     `init`, `release`, `platform`, `auxv`, `fork`, `exec`;
     `kernel/syscall/personality.c`), so `process.c` names no personality;
@@ -2727,5 +2727,15 @@ See the [history index](README.md).
     close-on-exec handles (L17), personality switching on exec, vfork
     released at exec; `image_build` shared with spawn; `lxtest`'s exec
     section and usertest's native exec checks.
+  - PR 4: static musl BusyBox 1.37.0 built from pinned sources (musl
+    1.2.5, compiler-rt 19.1.7 builtins) with the project's clang on both
+    architectures (`ports/busybox/`); `/bin/busybox` and 48 applet links
+    (symbolic-link entries in the boot archive), native programs that
+    collide renamed `cosmo-<name>`, the installed system's console BusyBox
+    ash (`/etc/console-shell`); `chmod`/`fchmodat`/`utimensat`,
+    `vfs_setattr`, a per-process umask, `/dev/null` and `/dev/zero`; fixed:
+    `nanosleep`'s remainder, `mkdir` of `.`, arm64 open-flag numbers, a
+    fork child's AArch64 thread pointer (PR 2); `make test-busybox` and CI
+    job `busybox`. M3 ticked.
   - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
 

@@ -959,13 +959,13 @@ static int64_t sys_umount(struct syscall_args *a)
 /* SYS_exec (roadmap M3): Linux execve's operation at the native door. */
 static int64_t sys_exec(struct syscall_args *a)
 {
-    struct exec_args *ea = kmalloc(sizeof(*ea), 0);
+    struct exec_args *ea = exec_args_alloc();
     if (ea == NULL)
         return -ENOMEM;
     int rc = exec_args_copy(ea, a->a[0], a->a[1], a->a[2]);
     if (rc == 0)
         rc = process_execve(ea, a->frame);
-    kfree(ea);
+    exec_args_free(ea);
     return rc;
 }
 

@@ -42,7 +42,7 @@ INTERRUPT_MAX_S = 3.0
 # (command, patterns the log must contain afterwards)
 COMMANDS = [
     ("echo interactive-ok", [r"^interactive-ok$"]),
-    ("ls /bin", [r"^sh$", r"^cat$"]),
+    ("ls -1 /bin", [r"^sh$", r"^cat$", r"^cosmo-sh$"]),
     ("ps", [r"^\s*\d+\s+0\s+0\s+R\s+1\s+\d+\s+\d+\s+init$", r"\s+ps$"]),
     ("echo $((", [r"^interactive-ok$"]),   # a harmless odd line: nothing crashes
     ("pwd", [r"^/$"]),
