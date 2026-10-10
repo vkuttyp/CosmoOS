@@ -156,7 +156,7 @@ ELF infos in `image_build`'s heap block it fits under 2 KiB, and
 | no vfork release at exec | the exec'd image waits 3 s for the caller's byte that never comes: exit 3 |
 | the exec'ing thread keeps its own tid | `gettid != getpid` in the image an exec from a second thread started: exit 2 |
 | the `#!` line's argument dropped | the interpreter runs with an unknown mode: exit 99 |
-| native `SYS_exec` refuses | usertest: the `-ENOENT` and `-EACCES` checks fail (and the spawned exec reports 100 + `ENOSYS`) |
+| native `SYS_exec` refuses | usertest: the `-ENOENT` and `-EACCES` checks fail, and the process-user self-test with them |
 
 The `#!` mutation first passed the check only by timing out: the
 mis-parsed script ran lxtest without a mode, which ran the whole test
