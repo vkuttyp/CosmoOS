@@ -244,6 +244,24 @@ typedef struct {
     void             *Unload;
 } EFI_LOADED_IMAGE_PROTOCOL;
 
+/* Device path protocol (UEFI 2.10 §10.2): a run of nodes, each a 4-byte
+ * header and its body, ended by type 0x7F. The loader reads only the
+ * hard-drive media node (type 4, subtype 1), which names a partition. */
+#define EFI_DEVICE_PATH_PROTOCOL_GUID \
+    { 0x09576e91, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+
+#define EFI_DP_TYPE_MEDIA      0x04
+#define EFI_DP_TYPE_END        0x7F
+#define EFI_DP_MEDIA_HARDDRIVE 0x01
+#define EFI_DP_HD_LENGTH       42u     /* the hard-drive node's whole length */
+#define EFI_DP_HD_MBR_GPT      0x02    /* MBRType: a GPT partition */
+#define EFI_DP_HD_SIG_GUID     0x02    /* SignatureType: Signature is the partition GUID */
+
+/* Byte offsets in the hard-drive node (the body is packed and unaligned). */
+#define EFI_DP_HD_SIGNATURE    24u
+#define EFI_DP_HD_MBRTYPE      40u
+#define EFI_DP_HD_SIGTYPE      41u
+
 /* Simple file system and file protocols. */
 #define EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID \
     { 0x0964e5b22, 0x6459, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }

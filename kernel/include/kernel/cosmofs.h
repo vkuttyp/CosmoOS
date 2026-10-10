@@ -13,7 +13,7 @@ struct fs_type;
 
 extern struct fs_type cosmofs_fs_type;
 
-/* Register with the VFS. Once, after vfs_init(). */
+/* Register with the VFS. Once, from boot composition (bootfs_init). */
 void cosmofs_init(void);
 
 /* Write a fresh filesystem (generation 1, empty root) over the device.

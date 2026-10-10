@@ -21,6 +21,7 @@
 /* Paths on the EFI system partition. */
 #define KERNEL_PATH L"\\cosmo\\kernel.elf"
 #define ARCHIVE_PATH L"\\cosmo\\boot.tar"
+#define CMDLINE_PATH L"\\cosmo\\cmdline"
 
 /* Everything the loader allocates stays below this so it is covered by the
  * bootstrap identity map and HHDM. */

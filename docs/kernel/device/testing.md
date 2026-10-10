@@ -154,6 +154,23 @@ nine segments against `max_segments` 8, and a stack buffer are each
 `timeout`, which completed the bio), and after the stall is lifted a read
 completes.
 
+### `blk-gpt`
+
+`kernel/block/parttest.c`: on a fresh 512-sector RAM disk, a blank disk
+scans to no partitions without error; a table from `gpt_build` with
+entries 1 and 3 registers `<disk>1` (60 sectors) and `<disk>3` (200) and
+no `<disk>2`; `blk_part_info` and `blk_find_partuuid` agree; sector 59 of
+`<disk>1` reads, 60 and a two-sector read from 59 are `-EINVAL`; a write
+to `<disk>3` sector 0 lands on disk sector 100 and one to `<disk>1`
+sector 59 on 99; a rescan while `<disk>1` is held is `-EBUSY`. Then four
+damaged copies (primary header, primary entries, backup header, backup
+entries), each on a fresh good table, and an overlap under valid CRCs:
+every one `-EINVAL` with no partitions left. Destroying the disk removes
+its partitions. Host side: `tests/host/test_gpt.c` (CRC check value,
+GUID text, 512- and 4096-byte sectors, every refusal by its reason, read
+failures, limits, the command-line parser); `fuzz_gpt` (accepted tables
+are safe to register).
+
 ### `nvme`
 
 `kernel/device/devtest.c`, on `nvme0n1` through the block layer only:

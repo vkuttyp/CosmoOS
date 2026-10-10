@@ -43,6 +43,7 @@ FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c $(FUZZ_C
 FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
 FUZZ_USB_DESC_SRCS := tests/fuzz/fuzz_usb_desc.c drivers/usb/usb_desc.c $(FUZZ_COMMON)
 FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c $(FUZZ_COMMON)
+FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c $(FUZZ_DRIVER)
 FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
@@ -70,8 +71,13 @@ FUZZ_DHCP_DNS_SRCS := tests/fuzz/fuzz_dhcp_dns.c tests/fuzz/shim_net.c kernel-se
 FUZZ_NET_FRAME_CORPUS := $(ROOT)/tests/fuzz/corpus/net_frame
 
 FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pkg $(FUZZ_OUT)/fuzz_linux \
-	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid \
+	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid $(FUZZ_OUT)/fuzz_gpt \
 	$(FUZZ_OUT)/fuzz_net_frame $(FUZZ_OUT)/fuzz_tcp_segments $(FUZZ_OUT)/fuzz_dhcp_dns $(FUZZ_OUT)/fuzz_net_config
+
+$(FUZZ_OUT)/fuzz_gpt: $(addprefix $(ROOT)/,$(FUZZ_GPT_SRCS))
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(addprefix $(ROOT)/,$(FUZZ_GPT_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
 $(FUZZ_OUT)/fuzz_fbvalid: $(addprefix $(ROOT)/,$(FUZZ_FBVALID_SRCS))
 	$(call log,FUZZCC,$@)

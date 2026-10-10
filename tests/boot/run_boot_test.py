@@ -284,6 +284,13 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^init: shell exited with status 0",
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
+    # Roadmap M2: the boot disk is a GPT disk; the loader was read from
+    # its partition 1, which the kernel registers as a block device, and
+    # without root= the live root stays (docs/boot/design.md).
+    r"^boot volume: a GPT partition$",
+    r"^\[ INFO\] part: \S+1: \S+ partition 1, sectors 2048-\d+, type esp, partuuid [0-9a-f-]{36}$",
+    r"^\[ INFO\] cmdline: #cosmo-cmdline v1 *$",
+    r"^\[ INFO\] root: no root= on the command line; the live root stays$",
 ]
 # The guard boot: every protection on, the guard proved live by the
 # self-test, UMIP proved from user mode (x86-64); the WARN that names an

@@ -362,7 +362,10 @@ Details per call:
   emitted line, oldest overwritten first; reading does not consume.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
   `kernel.arch`, `kernel.hostname` (from the caller's uts namespace),
-  `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
+  `kernel.uptime_ns`, `kernel.nprocs`, `kernel.cmdline` (the boot
+  command line), `kernel.root` (its `root=` value, `""` without one) and
+  `kernel.rootdev` (the block device that names now, `""` when none;
+  `docs/kernel-services/vfs/design.md`, "Boot composition"), `hw.ncpu`,
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
   `docs/kernel/security/design.md` §3), since the file-regions unit

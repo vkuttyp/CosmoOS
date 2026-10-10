@@ -38,6 +38,14 @@ void *bootinfo_phys_to_virt(uint64_t phys);
 
 const char *bootinfo_mem_type_name(uint32_t type);
 
+/* v7: the command line as the loader passed it ("" when there was none),
+ * a copy owned by the kernel. Parsed by kernel/core/cmdline.c. */
+const char *bootinfo_cmdline(void);
+
+/* v7: the GUID of the GPT partition the loader was read from, in on-disk
+ * byte order. False when the boot volume had no GPT partition. */
+bool bootinfo_boot_partuuid(uint8_t out[16]);
+
 /* True for types that are RAM (usable, reclaimable, kernel, boot data,
  * ACPI, firmware runtime), false for MMIO, reserved, bad, persistent. */
 bool bootinfo_mem_type_is_ram(uint32_t type);

@@ -24,10 +24,13 @@ EFI_BOOT_SERVICES *g_bs;
 EFI_HANDLE         g_image;
 
 /* Room for the memory map: 4 pages of entries after the header. Firmware
- * maps rarely exceed ~200 descriptors; this holds over 600 after merging. */
-#define BOOTINFO_PAGES 5
+ * maps rarely exceed ~200 descriptors; this holds over 600 after merging.
+ * One more page, the last, holds the command line (protocol v7). */
+#define BOOTINFO_MAP_PAGES 5
+#define BOOTINFO_PAGES (BOOTINFO_MAP_PAGES + 1)
 #define BOOTINFO_MAX_ENTRIES \
-    ((BOOTINFO_PAGES * PAGE_SIZE - sizeof(struct cosmoboot_info)) / sizeof(struct cosmoboot_mem_entry))
+    ((BOOTINFO_MAP_PAGES * PAGE_SIZE - sizeof(struct cosmoboot_info)) / sizeof(struct cosmoboot_mem_entry))
+_Static_assert(COSMOBOOT_CMDLINE_MAX + 1 <= PAGE_SIZE, "the command line must fit its page");
 
 #define HANDOFF_STACK_PAGES 4
 
@@ -95,6 +98,34 @@ out:
     file->Close(file);
     root->Close(root);
     return st;
+}
+
+/*
+ * The GPT partition the loader was read from: the hard-drive node of its
+ * device's path (UEFI 2.10 §10.3.5.1). False for a volume that has no
+ * partition table, or a partition table that is not GPT -- the kernel
+ * then knows no boot partition, which is not an error.
+ */
+static bool find_boot_partuuid(EFI_HANDLE device, uint8_t out[16])
+{
+    EFI_GUID dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+    void *path = NULL;
+    if (EFI_ERROR(g_bs->HandleProtocol(device, &dp_guid, &path)) || path == NULL)
+        return false;
+    const uint8_t *node = path;
+    /* A path is short; the bound only stops a malformed one walking off. */
+    for (unsigned i = 0; i < 64; i++) {
+        uint16_t len = (uint16_t)(node[2] | (node[3] << 8));
+        if (node[0] == EFI_DP_TYPE_END || len < 4)
+            return false;
+        if (node[0] == EFI_DP_TYPE_MEDIA && node[1] == EFI_DP_MEDIA_HARDDRIVE && len >= EFI_DP_HD_LENGTH &&
+            node[EFI_DP_HD_MBRTYPE] == EFI_DP_HD_MBR_GPT && node[EFI_DP_HD_SIGTYPE] == EFI_DP_HD_SIG_GUID) {
+            memcpy(out, node + EFI_DP_HD_SIGNATURE, 16);
+            return true;
+        }
+        node += len;
+    }
+    return false;
 }
 
 static uint64_t find_acpi_rsdp(void)
@@ -407,6 +438,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         lprintf("archive: %u bytes read\n", (unsigned)archive_size);
     }
 
+    /* --- command line (optional, protocol v7): \cosmo\cmdline up to its
+     * first NUL. The file may be longer than its text: the installer
+     * rewrites a fixed-size slot in place (docs/boot/design.md, "The
+     * command line"). Copied into the bootinfo area below. --- */
+    uint8_t *cmdline_file = NULL;
+    size_t cmdline_file_size = 0;
+    size_t cmdline_len = 0;
+    static CHAR16 cmdline_path[] = CMDLINE_PATH;
+    if (!EFI_ERROR(read_boot_file(cmdline_path, EfiLoaderData, NULL, &cmdline_file, &cmdline_file_size))) {
+        while (cmdline_len < cmdline_file_size && cmdline_file[cmdline_len] != 0)
+            cmdline_len++;
+        if (cmdline_len > COSMOBOOT_CMDLINE_MAX) {
+            lprintf("cmdline: %u bytes, truncated to %u\n", (unsigned)cmdline_len, (unsigned)COSMOBOOT_CMDLINE_MAX);
+            cmdline_len = COSMOBOOT_CMDLINE_MAX;
+        } else {
+            lprintf("cmdline: %u bytes\n", (unsigned)cmdline_len);
+        }
+    }
+    uint8_t boot_partuuid[16];
+    bool have_partuuid = find_boot_partuuid(self->DeviceHandle, boot_partuuid);
+    lputs(have_partuuid ? "boot volume: a GPT partition\n" : "boot volume: no GPT partition\n");
+
     struct elf_image img;
     status = elf_load(file, file_size, &img, &type_fallback);
     if (EFI_ERROR(status))
@@ -491,6 +544,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->firmware_system_table = (uint64_t)(uintptr_t)st;
     info->archive_phys = (uint64_t)(uintptr_t)archive;
     info->archive_size = archive_size;
+    if (cmdline_file != NULL) {
+        uint8_t *text = (uint8_t *)(uintptr_t)(info_phys + BOOTINFO_MAP_PAGES * PAGE_SIZE);
+        memcpy(text, cmdline_file, cmdline_len);
+        text[cmdline_len] = 0;
+        info->cmdline_phys = info_phys + BOOTINFO_MAP_PAGES * PAGE_SIZE;
+        info->cmdline_size = (uint32_t)cmdline_len;
+    }
+    if (have_partuuid) {
+        memcpy(info->boot_partuuid, boot_partuuid, sizeof(boot_partuuid));
+        info->boot_flags |= COSMOBOOT_BOOT_PARTUUID;
+    }
     find_framebuffer(info);
 
     if (type_fallback)

@@ -14,6 +14,7 @@
 #include <kernel/blk.h>
 #include <kernel/bootinfo.h>
 #include <kernel/fbcon.h>
+#include <kernel/bootfs.h>
 #include <kernel/cosmofs.h>
 #include <kernel/device.h>
 #include <kernel/iommu.h>
@@ -172,18 +173,15 @@ void kernel_main(const struct cosmoboot_info *info)
     blk_init();
     random_init();
 
-    /* The namespace: a ramfs root with the boot archive under /boot. */
+    /* The namespace: the VFS, then boot composition's choice of
+     * filesystems and root -- a ramfs root with the boot archive under
+     * /boot, and /proc (kernel/core/bootfs.c). */
     vfs_init();
-    cosmofs_init();
-    ramfs_populate_boot();
+    bootfs_init();
     /* The terminal as a file: /dev/console and /dev/tty. After the
      * ramfs root exists and after tty_init (docs/kernel/tty/design.md,
      * "The terminal as a file"). */
     tty_dev_init();
-    /* /proc: facts about processes, addressable as files
-     * (docs/kernel-services/filesystem/procfs/design.md). */
-    if (vfs_mount("/proc", "procfs", NULL, 0) != 0)
-        kwarn("vfs: cannot mount /proc");
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */
@@ -209,6 +207,9 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */
     int failed = (int)module_load_boot();
+    /* The disk drivers are in: partitions, then what root= names
+     * (kernel/core/bootfs.c). */
+    bootfs_disks_ready();
     /* The drivers that feed the entropy pool have loaded: wait (5 s at
      * most) for it to seed before the self-tests and the first user
      * process, whose AT_RANDOM must come from a seeded pool

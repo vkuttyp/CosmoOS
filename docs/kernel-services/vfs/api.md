@@ -64,9 +64,31 @@ walked before the last one), `VNODE_HASH` 64 (per-mount vnode buckets).
 
 ### Lifecycle
 
-**`void vfs_init(void)`** Registers ramfs and mounts it as `/`. Once,
-after `kmalloc_init` and `timer_init` (times), before `cosmofs_init`.
-Panics on failure.
+**`void vfs_init(void)`** The VFS's own state (the mount-table lock,
+the page-cache limit). Registers no filesystem and mounts no root: that
+is boot composition's (`bootfs_init`, below; roadmap M2). Once, after
+`kmalloc_init` and `timer_init`.
+
+**`int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned
+flags)`** Mount the root filesystem by name. Once, before any other
+mount; `-ENODEV` for an unregistered name, `-EBUSY` when there is a
+root already.
+
+**`void bootfs_init(void)`** (`kernel/include/kernel/bootfs.h`,
+`kernel/core/bootfs.c`) Boot composition: registers ramfs, procfs and
+cosmofs, mounts the ramfs root, populates it from the boot archive,
+mounts `/proc`. Panics when the root cannot be mounted.
+
+**`void bootfs_disks_ready(void)`** After `module_load_boot`: scans every
+disk for partitions (`blk_part_scan_all`), logs the command line, reads
+and resolves `root=` and logs the result (`root:`).
+
+**`const char *bootfs_root_spec(void)`**, **`int bootfs_root_device(char
+*out, size_t len)`** The `root=` value as written (`""` without one) and
+the device it names now: 0 with the name, `-ENOENT` without `root=`,
+`-ENODEV` when nothing registered matches, `-EINVAL` for a value that is
+neither `PARTUUID=<guid>` nor a device name. Behind the sysctls
+`kernel.root` and `kernel.rootdev`.
 
 **`int vfs_register_fs(struct fs_type *fs)`** Adds an immortal
 `fs_type`. `-EINVAL` (missing name/mount/unmount), `-EEXIST`.
