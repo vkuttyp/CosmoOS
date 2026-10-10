@@ -9313,7 +9313,8 @@ bool selftest_net_tcp_sws(const char **reason)
     struct socket *ls = NULL;
     CHECK(hin_tcp_listener(&ls, 2232));
 
-    uint8_t l4[160], data[2000];
+    static uint8_t data[2000];   /* off the stack: the frame limit */
+    uint8_t l4[160];
     uint16_t l4len;
     struct hin_seg sg;
     for (unsigned i = 0; i < sizeof(data); i++)
