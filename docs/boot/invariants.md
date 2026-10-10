@@ -120,3 +120,17 @@ the kernel would free the vectors EL2 is using. Check: the
 and gives it back) and the two boot markers the harness requires when
 `QEMU_EL2` is not 0; `QEMU_EL2=0` covers the other side. Gap: only QEMU
 firmware has been tried, and only with a stub of one page.
+
+## BT14. The command line is untrusted text of bounded size, and nothing else
+
+The loader passes `\cosmo\cmdline` up to its first NUL and at most
+`COSMOBOOT_CMDLINE_MAX` bytes, NUL terminated, inside the bootinfo pages;
+it adds and interprets nothing. The kernel panics in `bootinfo_init` on a
+size over the limit, a size without an address, a range outside the
+direct map or a missing NUL (a loader bug, BT2), and copies the text
+before anything parses it. Parsing never truncates a value: a `root=`
+that does not fit is refused rather than shortened into another device's
+name (`cmdline_find` returns -2). An unknown `boot_flags` bit is a panic.
+Check: `tests/host/test_gpt.c` (the parser), the boot log's `cmdline:`
+line on every boot, and `make test-install` (a real `root=`). Gap: no
+boot exercises the panics, which need a broken loader.

@@ -59,8 +59,11 @@
  *   5  + el2_stub_phys (AArch64 booted at EL2)
  *   6  + the framebuffer the firmware configured (fb_*), which spends the
  *      reserved words and grows the structure; `size` says how much the
- *      loader wrote and the ELF note pairs kernel and loader exactly */
-#define COSMOBOOT_VERSION 6
+ *      loader wrote and the ELF note pairs kernel and loader exactly
+ *   7  + the command line from \cosmo\cmdline (cmdline_phys/cmdline_size,
+ *      spending reserved2) and the GPT partition the loader was read
+ *      from (boot_partuuid); the structure grows */
+#define COSMOBOOT_VERSION 7
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -96,6 +99,12 @@
 #define COSMOBOOT_FIRMWARE_UEFI 1u
 
 #define COSMOBOOT_LOADER_NAME_MAX 32u
+
+/* v7: the longest command line the loader passes, excluding the NUL. */
+#define COSMOBOOT_CMDLINE_MAX 1023u
+
+/* v7 boot_flags. */
+#define COSMOBOOT_BOOT_PARTUUID 1u   /* boot_partuuid names a GPT partition */
 
 struct cosmoboot_mem_entry {
     uint64_t base;   /* physical address, page aligned */
@@ -179,8 +188,19 @@ struct cosmoboot_info {
     uint8_t  fb_blue_shift, fb_blue_bits;
     uint8_t  fb_pad[2];
 
-    /* Reserved for the command line in a later version. Must be zero. */
-    uint64_t reserved2;
+    /* v7: the command line, the text of \cosmo\cmdline on the boot
+     * volume up to its first NUL, NUL terminated, in memory of type
+     * COSMOBOOT_MEM_BOOTINFO. cmdline_size excludes the NUL and is at
+     * most COSMOBOOT_CMDLINE_MAX. Both zero when there is no such file.
+     * The kernel parses it (docs/boot/design.md, "The command line"). */
+    uint64_t cmdline_phys;
+    uint32_t cmdline_size;
+    uint32_t boot_flags;      /* COSMOBOOT_BOOT_* */
+    /* v7: the unique GUID of the GPT partition the loader itself was read
+     * from (UEFI: the hard-drive node of its device path), in on-disk
+     * byte order; valid when boot_flags has COSMOBOOT_BOOT_PARTUUID. A
+     * volume without a partition table (a "superfloppy") has none. */
+    uint8_t  boot_partuuid[16];
 };
 
 #endif /* __ASSEMBLER__ */

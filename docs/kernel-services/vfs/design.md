@@ -525,6 +525,27 @@ max); `open` installs the file with `HANDLE_RIGHT_READ`/`WRITE` from the
 access mode, so `read`/`write`/`close` need no change. `mount` names a
 block device (`vda`) and requires uid 0.
 
+## Boot composition
+
+Roadmap M2 moved two decisions out of the VFS (`vfs.c` names no
+filesystem): which filesystems exist, and which is the root. Both are
+made in `kernel/core/bootfs.c`, called from `kernel_main`:
+
+1. `vfs_init` -- the VFS alone.
+2. `bootfs_init` -- register ramfs, procfs, cosmofs; `vfs_mount_root
+   ("ramfs")`; `ramfs_populate_boot` (the boot archive as `/boot`,
+   `/bin`, `/sbin`, `/etc`); mount procfs on `/proc`.
+3. after the boot modules, `bootfs_disks_ready` -- partition scan of
+   every disk, then `root=` resolved against what is registered.
+
+The kernel always starts on the ramfs root: every boot is first a "live"
+boot. A disk root named by `root=` (`docs/boot/design.md`, "The command
+line") is mounted and switched to by init, never by the kernel, so a
+root that cannot be mounted leaves a working live system and a message
+rather than a panic. The sysctls `kernel.cmdline`, `kernel.root` and
+`kernel.rootdev` are what init reads; `kernel.rootdev` resolves at the
+read.
+
 ## Per-open character devices
 
 A character device may keep state per open, not just per node: `chrdev_ops`

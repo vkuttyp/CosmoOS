@@ -51,4 +51,15 @@
 #define MiB(n) ((uint64_t)(n) << 20)
 #define GiB(n) ((uint64_t)(n) << 30)
 
+/*
+ * A hot loop's own function, aligned to `n` bytes: kept no larger than `n`,
+ * it cannot span a 4 KiB page. Under QEMU's TCG a loop across a page runs an
+ * unchained translation block every iteration -- eleven times slower in the
+ * case that found it (kernel/core/fbcon.c) -- so a timed loop whose speed a
+ * budget depends on must not be left to where the linker happens to put it.
+ * Name such a function page_local_* (or fbcon_draw_*):
+ * scripts/check-kernel-elf.sh fails the link if one spans a page.
+ */
+#define __page_local(n) __attribute__((noinline, aligned(n)))
+
 #endif /* KERNEL_COMPILER_H */

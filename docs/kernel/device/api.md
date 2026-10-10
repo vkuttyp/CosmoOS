@@ -290,6 +290,49 @@ in the layer allocates bios.
 `completed_local`, `completed_remote`; `nr_queues` as the driver set
 it.
 
+## Partitions (`kernel/include/kernel/part.h`, `kernel/block/part.c`; `kernel/include/kernel/gpt.h`, `kernel/block/gpt.c`)
+
+None of these is exported: the module ABI is unchanged.
+
+### `int blk_part_scan(struct blkdev *disk, unsigned *nparts)`
+Re-read `disk`'s table and register its partitions, after removing the
+previous scan's. 0 (with `*nparts`, 0 for a disk with no table);
+`-EBUSY` (nothing changed) when one of the old partitions is in use;
+`-EINVAL` for a partition or a refused table (logged; the disk is left
+without partitions); `-EIO` when the disk cannot be read; `-ENOMEM`.
+Sleeps.
+
+### `void blk_part_scan_all(void)`
+Boot composition: `blk_part_scan` for every registered disk.
+
+### `void blk_part_remove(struct blkdev *disk)`
+Called by `blk_unregister` before it removes `disk`; never waits for
+forwarded bios (D17).
+
+### `bool blk_is_partition(const struct blkdev *bd)`, `bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out)`
+Whether `bd` is a partition; its disk's name, entry number, first
+sector, unique GUID and type GUID.
+
+### `struct blkdev *blk_find_partuuid(const uint8_t uuid[16])`
+The partition with that unique GUID (on-disk byte order), referenced, or
+NULL. Used to resolve `root=PARTUUID=`.
+
+### `enum gpt_result gpt_parse(uint32_t ss, uint64_t nsectors, gpt_read_fn read, void *ctx, void *scratch, struct gpt_table *out, const char **why)`
+`GPT_OK`, `GPT_NONE` (no protective MBR), `GPT_BAD` (`*why` names the
+check), `GPT_IO`. `scratch` is `GPT_SCRATCH_BYTES`. Pure: no allocation,
+no kernel calls.
+
+### `bool gpt_build(uint32_t ss, uint64_t nsectors, const uint8_t disk_guid[16], const struct gpt_build_part *parts, unsigned nparts, uint8_t *head, uint8_t *tail)`
+Lay out a table (128 entries of 128 bytes) into the head region (LBA 0
+on, `GPT_BUILD_HEAD_SECTORS`) and the tail region (the last
+`GPT_BUILD_TAIL_SECTORS`). Checks nothing about the parts. Used by the
+self-test, the host test, the fuzzer's seeds and the installer; the
+kernel never writes a table to a disk.
+
+### `gpt_crc32`, `gpt_guid_format`, `gpt_guid_parse`, `gpt_type_esp`, `gpt_type_cosmo_root`
+CRC-32 (IEEE); GUID text in the mixed-endian GPT byte order; the ESP
+type and the CosmoOS root type `c9b09224-e00d-418e-846a-9f1d9a61bfd5`.
+
 ## Entropy (`kernel/include/kernel/random.h`, `kernel/core/random.c`)
 
 A SHA-512 hash pool under a spinlock; any context, never blocks, never

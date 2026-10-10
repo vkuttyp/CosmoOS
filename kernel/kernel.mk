@@ -121,13 +121,18 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/dma.c \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
+	kernel/block/gpt.c \
+	kernel/block/part.c \
 	kernel/block/ramblk.c \
 	kernel/block/blktest.c \
+	kernel/block/parttest.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/lz4.c \
 	kernel/security/chacha20.c \
 	kernel/core/fwcfg.c \
+	kernel/core/cmdline.c \
+	kernel/core/bootfs.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/fsctl.c \
 	kernel-services/vfs/mountns.c \

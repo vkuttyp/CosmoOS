@@ -906,3 +906,16 @@ on 2026-10-09. Results are recorded in that report as the probes run.
 | `cosmofstest.c:engine_mount` leaks a registered RAM device on setup failure | **Proven and fixed in `abc8bc63`.** On both architectures, `tools/cleanup-path-probe.py --old` failed at format, mkdir and mount injection with `released=0`; fixed mode reported `released=1` at all stages. The test checks `gone` and the creator-reference retirement while holding its own inspection reference. |
 | `devtest.c:selftest_nvme` leaks a worker buffer when thread creation fails | **Proven and fixed in `80fb43db`.** On both architectures, `--old` reported `allocated=1 hits=1 started=0 released=0`; fixed mode reported `released=1`. `thread_create_on` does not consume the entry argument on failure. |
 | Analyzer gate and Oct. 3 AArch64 count delta | **Gate implemented on the PR A branch.** Current full Clang 21.0.3 runs leave eight reasoned baseline entries per architecture (19/27 removed on x86-64; 20/28 on AArch64). The Oct. 3 source snapshot analyzed with today's compiler emits 28 AArch64 diagnostics, including the ten items in the reported increase; the old compiler identity and plist reports are unavailable, so the 19-to-28 count change cannot be attributed to source or toolchain. See the dated [analyzer report](2026-10-09-analyzer-gate-report.md), including the full historical list, current dispositions, and gate probe. |
+
+## 10. Roadmap M2 follow-ups (2026-10-10)
+
+See the [M2 report](2026-10-10-m2-persistent-system-report.md). One line
+each; none is needed by M2's acceptance test.
+
+- GPT recovery from one valid copy: a disk whose primary or backup table
+  is damaged gets no partitions (refused whole, logged with the check).
+- Partition scans run at boot and on request only: a disk registered
+  later (a USB stick, a hot-plugged disk) has no partitions until a
+  `RESCAN`; no automatic scan on `blk_register`.
+- Removing a disk whose partitions have forwarded bios in flight (D17's
+  reaper thread) is not exercised by a test.

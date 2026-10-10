@@ -2579,33 +2579,45 @@ int vfs_symlink(struct vnode *start, const char *path, const char *target)
 
 /* --- init and diagnostics ---------------------------------------------------- */
 
-extern struct fs_type ramfs_fs_type;
-extern struct fs_type procfs_fs_type;
-
+/*
+ * The VFS itself and nothing else: which filesystems exist and which one
+ * is the root are boot composition's choice (kernel/core/bootfs.c), so
+ * this file names none of them (roadmap M2).
+ */
 void vfs_init(void)
 {
     KASSERT(!g_initialized);
     mutex_init(&g_mounts_lock, "mounts");
     g_initialized = true;
-    if (vfs_register_fs(&ramfs_fs_type))
-        panic("vfs: cannot register ramfs");
-    if (vfs_register_fs(&procfs_fs_type))
-        panic("vfs: cannot register procfs");
     /* The page cache may hold a quarter of RAM before clean pages are
      * reclaimed (docs/kernel/security/design.md §3). */
     struct pmm_stats pst;
     pmm_get_stats(&pst);
     pagecache_set_limit(pst.total_pages / 4);
+}
+
+int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags)
+{
+    KASSERT(g_initialized);
+    struct fs_type *fs = vfs_find_fs(fsname);
+    if (fs == NULL)
+        return -ENODEV;
+    mutex_lock(&g_mounts_lock);
+    bool have = g_root_mount != NULL;
+    mutex_unlock(&g_mounts_lock);
+    if (have)
+        return -EBUSY;   /* once; switching it later is another operation */
     struct mount *root;
-    int rc = do_mount(&ramfs_fs_type, NULL, 0, &root);
+    int rc = do_mount(fs, bdev, flags, &root);
     if (rc)
-        panic("vfs: cannot mount the root ramfs (%d)", rc);
+        return rc;
     mutex_lock(&g_mounts_lock);
     g_root_mount = root;
     list_push_back(&g_mounts, &root->link);
     g_nr_mounts = 1;
     mutex_unlock(&g_mounts_lock);
-    kinfo("vfs: root mounted (ramfs)");
+    kinfo("vfs: root mounted (%s)", fsname);
+    return 0;
 }
 
 /*

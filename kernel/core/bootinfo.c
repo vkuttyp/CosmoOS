@@ -17,6 +17,11 @@ static const struct cosmoboot_mem_entry *g_map;
 static uint32_t g_map_count;
 static struct bootinfo_framebuffer g_fb;
 static bool g_have_fb;
+/* v7: copied out of loader memory at bootinfo_init, so nothing later
+ * depends on how long the kernel keeps the bootinfo pages. */
+static char g_cmdline[COSMOBOOT_CMDLINE_MAX + 1];
+static uint8_t g_boot_partuuid[16];
+static bool g_have_boot_partuuid;
 
 void bootinfo_init(const struct cosmoboot_info *info)
 {
@@ -41,6 +46,32 @@ void bootinfo_init(const struct cosmoboot_info *info)
         panic("bootinfo: memory map at phys 0x%llx (%llu bytes) lies outside the direct map",
               (unsigned long long)info->mem_map_phys, (unsigned long long)map_bytes);
 
+    /* v7: the command line. Absent is both fields zero; present is a
+     * NUL-terminated text of at most COSMOBOOT_CMDLINE_MAX bytes inside
+     * the direct map. Anything else is a loader bug, not a choice. */
+    if (info->cmdline_size > COSMOBOOT_CMDLINE_MAX)
+        panic("bootinfo: command line of %u bytes (at most %u)", info->cmdline_size, COSMOBOOT_CMDLINE_MAX);
+    if (info->cmdline_phys == 0 && info->cmdline_size != 0)
+        panic("bootinfo: command line of %u bytes at phys 0", info->cmdline_size);
+    if (info->cmdline_phys != 0) {
+        if (info->cmdline_phys >= info->hhdm_size || info->cmdline_size + 1ull > info->hhdm_size - info->cmdline_phys)
+            panic("bootinfo: command line at phys 0x%llx lies outside the direct map",
+                  (unsigned long long)info->cmdline_phys);
+        const char *text = (const char *)(uintptr_t)(info->hhdm_base + info->cmdline_phys);
+        if (text[info->cmdline_size] != '\0')
+            panic("bootinfo: command line is not NUL terminated at its size (%u)", info->cmdline_size);
+        for (uint32_t i = 0; i < info->cmdline_size; i++)
+            g_cmdline[i] = text[i];
+        g_cmdline[info->cmdline_size] = '\0';
+    }
+    if (info->boot_flags & ~COSMOBOOT_BOOT_PARTUUID)
+        panic("bootinfo: unknown boot_flags 0x%x", info->boot_flags);
+    if (info->boot_flags & COSMOBOOT_BOOT_PARTUUID) {
+        for (unsigned i = 0; i < 16; i++)
+            g_boot_partuuid[i] = info->boot_partuuid[i];
+        g_have_boot_partuuid = true;
+    }
+
     g_info = info;
     g_map = (const struct cosmoboot_mem_entry *)(uintptr_t)(info->hhdm_base + info->mem_map_phys);
     g_map_count = info->mem_map_entries;
@@ -63,6 +94,20 @@ void bootinfo_init(const struct cosmoboot_info *info)
         if (e->base + e->length < e->base)
             panic("bootinfo: memory map entry %u overflows", i);
     }
+}
+
+const char *bootinfo_cmdline(void)
+{
+    return g_cmdline;
+}
+
+bool bootinfo_boot_partuuid(uint8_t out[16])
+{
+    if (!g_have_boot_partuuid)
+        return false;
+    for (unsigned i = 0; i < 16; i++)
+        out[i] = g_boot_partuuid[i];
+    return true;
 }
 
 const struct bootinfo_framebuffer *bootinfo_framebuffer(void)

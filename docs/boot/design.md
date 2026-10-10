@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 6). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 7). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 6 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer) |
+| `version` | `COSMOBOOT_VERSION` = 7 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -25,7 +25,8 @@ compiler.
 | `boot_pagetable_root_user` | (v4) the second bootstrap root for architectures with split roots: the TTBR0 identity table on AArch64, 0 on x86-64. The kernel does not read it today; its pages are `COSMOBOOT_MEM_BOOT_PAGETABLES` and go with the rest at takeover |
 | `el2_stub_phys` | (v5, AArch64) the page holding the EL2 stub the loader installed before dropping to EL1, in memory of type `COSMOBOOT_MEM_EL2_STUB` (never freed). 0 when firmware handed over at EL1, when the machine has no EL2, or when the page could not be reserved — the kernel then reports no EL2 and boots exactly as before (`docs/kernel/arch/aarch64/design.md`, "Exception level 2") |
 | `fb_phys`, `fb_size`, `fb_width`, `fb_height`, `fb_pitch`, `fb_bpp`, and three (shift, bits) pairs | (v6) the framebuffer the firmware had already configured when the loader ran: the Graphics Output Protocol's *current* mode, never one the loader set. All zero when there is none, which is not an error. The pixel format is three (shift, bits) pairs rather than an enumeration, so a bit-mask format is described exactly like the two common ones. The range is not RAM: it is `EfiMemoryMappedIO` on a PCI display and `EfiReservedMemoryType` for a `ramfb`, and either way the PMM never hands it out |
-| `reserved2` | zero; reserved for the command line under a version bump |
+| `cmdline_phys`, `cmdline_size` | (v7, spending `reserved2`) the text of `\cosmo\cmdline` up to its first NUL, NUL terminated, at most `COSMOBOOT_CMDLINE_MAX` (1023) bytes, in the last of the bootinfo pages (`COSMOBOOT_MEM_BOOTINFO`); both zero when the file is absent or empty. See "The command line" |
+| `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
@@ -43,6 +44,55 @@ desc = `uint32_t COSMOBOOT_VERSION`. `entry.S` emits it into
 PT_LOAD and the PT_NOTE. The loader refuses a kernel without the note or
 with a different version, so a protocol change can never produce a silent
 mis-boot.
+
+## The command line
+
+`\cosmo\cmdline` on the boot volume (protocol v7). Optional: without it
+the kernel boots exactly as before. The loader reads the file, keeps the
+bytes up to the first NUL (at most `COSMOBOOT_CMDLINE_MAX`, truncating
+with a line on the loader console), and copies them with a NUL into the
+sixth bootinfo page, which exists for this; it neither parses nor
+validates the text. The kernel's `bootinfo_init` checks the two fields
+(size within the limit, the range inside the direct map, the NUL where
+the size says) and copies the text into kernel memory (BT14).
+
+Syntax (`kernel/core/cmdline.c`): tokens separated by white space, each
+`key=value` or a bare `key`; `#` starts a comment to the end of the line;
+the first token with a key wins; unknown keys are ignored. The kernel
+logs the line once (`cmdline: ...`, line breaks shown as spaces) and
+user space reads it as the sysctl `kernel.cmdline`.
+
+Keys the kernel reads:
+
+| Key | Meaning |
+|---|---|
+| `root=PARTUUID=<guid>` | the root filesystem is on the GPT partition with that unique GUID (any case) |
+| `root=<device>` | the root filesystem is on the named block device (`vda2`); for development, since names depend on probe order |
+
+The kernel only resolves `root=` (after its partition scan, `root:` log
+line; sysctls `kernel.root` and `kernel.rootdev`); it always starts on
+the live ramfs root, and init mounts the named device and switches to it
+(`docs/kernel-services/vfs/design.md`, "Boot composition").
+
+**The slot.** `scripts/mkimage.sh` writes `\cosmo\cmdline` as one
+512-byte sector: the marker line `#cosmo-cmdline v1` (a comment to the
+parser) followed by NULs. The installer rewrites that sector in place --
+found by its marker, never through FAT -- with the marker line and the
+`root=` it chose, so it never needs a FAT writer (roadmap M2). The file
+keeps its length; the loader stops at the first NUL.
+
+## The boot disk
+
+`make image` builds a GPT disk (`scripts/mkgpt.py` around the FAT32 image
+`mkimage.sh` makes with mtools): protective MBR, 128 entries, partition 1
+the EFI System Partition from LBA 2048 for exactly the 64 MiB of the FAT
+image, backup table on the last sectors. Firmware boots it as it booted
+the "superfloppy" before; the GUIDs are derived from the FAT image's
+contents so the disk is a function of its inputs. The loader reports
+the partition it was read from (`boot_partuuid`), which is how the
+installer finds the ESP to copy (roadmap M2), and the kernel registers
+it as a block device like any other partition (`ahci0p0p1` on q35,
+`vdb1` on virt; `docs/kernel/device/design.md`, "Partitions").
 
 ## Entry state on x86-64
 

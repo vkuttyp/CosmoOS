@@ -20,6 +20,7 @@ Remaining work is grouped in [`docs/plan.md`](../plan.md).
 | [`2026-10-03-lockdep-report.md`](2026-10-03-lockdep-report.md) | Lockdep hardening report — 2026-10-03 |
 | [`2026-10-04-spin-contention-report.md`](2026-10-04-spin-contention-report.md) | Observed spin contention — 2026-10-04 |
 | [`2026-10-09-m1-randomness-report.md`](2026-10-09-m1-randomness-report.md) | Roadmap M1: sound randomness — 2026-10-09 |
+| [`2026-10-10-m2-persistent-system-report.md`](2026-10-10-m2-persistent-system-report.md) | Roadmap M2: persistent system — 2026-10-10 |
 | [`2026-10-07-delack-nagle-report.md`](2026-10-07-delack-nagle-report.md) | The delayed acknowledgement against a Nagle peer — 2026-10-07 |
 | [`2026-10-07-epoll-close-report.md`](2026-10-07-epoll-close-report.md) | epoll interest removal on the final close — 2026-10-07 |
 | [`2026-10-07-epoll-callback-report.md`](2026-10-07-epoll-callback-report.md) | epoll readiness by callback, and nesting — 2026-10-07 |

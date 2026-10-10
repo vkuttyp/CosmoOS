@@ -10,6 +10,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
+#include <kernel/part.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
@@ -43,6 +44,7 @@ static const struct kobject_type blkdev_type = {
 void blk_init(void)
 {
     mutex_init(&g_blk_lock, "blkdevs");
+    blk_part_init();
 }
 
 static bool name_taken(const char *name)
@@ -420,6 +422,8 @@ static bool blk_test_park(void)
 
 void blk_unregister(struct blkdev *bd)
 {
+    /* A disk's partitions go first: they forward to it (part.h). */
+    blk_part_remove(bd);
     mutex_lock(&g_blk_lock);
     list_remove(&bd->link);
     list_init(&bd->link);

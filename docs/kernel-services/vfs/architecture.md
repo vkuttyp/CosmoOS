@@ -105,7 +105,8 @@ committed root describes a completely valid state.
 
 | Interface | Header | Used by |
 |---|---|---|
-| `vfs_init`, `vfs_register_fs`, `vfs_mount`, `vfs_umount`, `vfs_root` | `kernel/vfs.h` | `kernel_main`, self-tests, `sys_mount` |
+| `vfs_init`, `vfs_mount_root`, `vfs_register_fs`, `vfs_mount`, `vfs_umount`, `vfs_root` | `kernel/vfs.h` | boot composition, self-tests, `sys_mount` |
+| `bootfs_init`, `bootfs_disks_ready`, `bootfs_root_spec`, `bootfs_root_device` | `kernel/bootfs.h` | `kernel_main`, `sysctl` |
 | `vfs_lookup`, `vfs_open`, `vfs_mkdir`, `vfs_unlink`, `vfs_rmdir`, `vfs_rename`, `vfs_stat`, `vfs_sync` | `kernel/vfs.h` | system calls, self-tests |
 | `file_read`, `file_write`, `file_seek`, `file_stat`, `file_readdir`, `file_put` | `kernel/vfs.h` | system calls, kernel users |
 | `vnode_get/put`, `vnode_lookup_cached`, `struct vnode_ops`, `struct fs_type` | `kernel/vfs.h` | filesystems |

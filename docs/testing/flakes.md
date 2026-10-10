@@ -2480,6 +2480,20 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `irqpoll-boost` over its gap bound, 2026-10-10
+
+`SELFTEST: irqpoll-boost ... FAIL: check failed: gap_ms <= BOOST_GAP_MS
+at line 111 (302 ms)`, the test's own line: `cpu 1, a spinner above the
+default for 300 ms: 579 calls of the poll, longest gap 290 ms (bound
+100)`. x86-64 CI, PR #342's second run (38027019486, job 114139902627),
+the `test-smp2` boot; the same job's `test` and `test-guard` boots passed
+it, as did every local boot of the branch (twelve). 290 ms is the gap
+the list entry gives *without* the raise timer: in this run the worker
+was not raised before the 300 ms spinner ended. Not attributed: the
+branch's change (GPT partition devices at boot, the command line) is not
+on the irq-poll or scheduler path. First sighting; the failed job was
+rerun.
+
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
@@ -2979,6 +2993,67 @@ The spin-contention checks passed. The failed run is retained as
 `out/spin-final-aarch64-off4{,-result}.log`; the test's budget and
 assertions were not changed for this increment. This matches the earlier
 failure shape without establishing the cause of this particular slowdown.
+
+**Third sighting, 2026-10-10, x86-64 CI** (PR #342, run 38024287574,
+job 114131700933, the `test-crash` boot): `self-test syscall-fuzz took
+8311 ms (budget 8000 ms)`, every self-test passed. The same job's five
+other debug boots of the same commit ran `cosmofs-replay` in
+13.9-14.6 s and `process-user` in 5.0-5.2 s; this boot took 23.9 s and
+8.3 s, while the CPU-bound `lockdep-graph-bench` (4.4 s) and
+`net-hostinput` (3.9 s) were unchanged. The slowdown is in the
+disk- and process-heavy tests of one boot only. The PR's change (GPT
+partition devices, the command line) is on none of those paths beyond
+one extra partition device at boot, present in all six boots. Recorded,
+not attributed; the failed job was rerun.
+
+**Fourth sighting, 2026-10-10, the same step** (PR #342 run 38027846221,
+job 114142393303): `syscall-fuzz` 8389 ms, `cosmofs-replay` 23663 ms,
+`process-user` 8658 ms, `lockdep-graph-bench` 4437 ms -- within 1 % of
+the third sighting's numbers on another runner, while the same job's
+five other debug boots matched main's. Main's own crash boots
+(seven runs) are either fast (`syscall-fuzz` ~3.1 s, `cosmofs-replay`
+~14.8 s) or uniformly slow (4.7 s, 23.4 s, with `lockdep-graph-bench`
+at 7.3 s); the branch's are neither shape. A local alternated A/B of
+`make test-crash` (main `88e18272` vs the branch, two boots each, x86-64,
+QEMU 11.1.1): `syscall-fuzz` 3116/3327 ms vs 3414/3317 ms,
+`cosmofs-replay` 16079/15886 ms vs 16693/16662 ms, `process-user`
+5897/5904 ms vs 6266/6226 ms -- the branch about 3-6 % slower in the
+heavier tests and no `syscall-fuzz` difference. Not reproduced off CI;
+not attributed.
+
+**Attributed, 2026-10-10.** Not the runner and not the step: in one CI
+job (run 38037450806) the crash image booted twice was slow both times
+(`cosmofs-replay` 34.0 s) and an ordinary debug boot right after it was
+not (22.2 s). The CI-built crash kernel and CI-built debug kernel (the
+job's `debug-elfs-x86_64` artifact), each with CI's signed modules in a
+local archive, booted *locally*: the crash kernel slow (`cosmofs-replay`
+39.8 s, `syscall-fuzz` 18.2 s), the debug kernel not (16.5 s, 3.4 s).
+Sampling every vCPU's RIP through QMP every 20 ms: during
+`cosmofs-replay` the crash kernel spent 16.1 % of its samples in fbcon's
+`put_pixel` against 1.6 %, and the hottest non-idle PC of the whole boot
+was `0xffffffff80001ffd` in `newline` (4,571 samples; the debug kernel's
+same code at `...1fad`, 179). fb-bench: a glyph 4.9 vs 5.0 us, a 12-row
+scroll 118.8 ms vs 10.9 ms. The scroll's per-pixel loop ran
+`...1fe4`-`...2028`, across the page boundary at `...2000`, with the
+`leaq` at `...1ffd` split between the pages; the two binaries' fbcon code
+is byte-identical and 64 bytes apart. A TCG loop across a page boundary
+runs an unchained translation block every iteration. Every test that logs
+much scrolls the framebuffer console, so they all slowed. The layout came
+from CI's compiler (Debian clang) on this branch's crash build; the local
+compiler placed it elsewhere, which is why local boots never showed it.
+**Fixed** in `kernel/core/fbcon.c`: the three drawing loops are functions
+aligned to 256 bytes and no larger (`FBCON_DRAW`), and
+`scripts/check-kernel-elf.sh` fails the link if any `fbcon_draw_`
+function spans a page. The budget was not changed. The same rule then caught a second
+loop: with the fbcon change the local compiler placed
+`lockdep-graph-bench`'s quadratic edge loop across `0x...13000`
+(8-10 s instead of 3.7 s; 21.8 s and the watchdog under `test-chaos`).
+That loop is now `page_local_graph_bench_edges` under `__page_local`
+(`kernel/include/kernel/compiler.h`), checked the same way. Both layouts
+were checked by booting builds from CI's own toolchain (Debian clang
+19.1.7 in a `debian:trixie` container, which reproduced CI's crash kernel
+layout to the byte at `fbcon_write`): debug, crash and chaos all within
+their usual times.
 
 ## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
 

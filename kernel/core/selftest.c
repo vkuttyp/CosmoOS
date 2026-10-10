@@ -592,6 +592,7 @@ static const struct selftest tests[] = {
     { "blk-segments",    selftest_blk_segments },
     { "blk-timeout",     selftest_blk_timeout },
     { "blk-timeout-skew", selftest_blk_timeout_skew },
+    { "blk-gpt",         selftest_blk_gpt },
     { "clock-since-saturates", selftest_clock_since_saturates },
     { "clock-cross-cpu", selftest_clock_cross_cpu },
     { "clock-scope-aarch64", selftest_clock_scope_aarch64 },

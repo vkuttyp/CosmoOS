@@ -237,7 +237,10 @@ struct file {
 
 /* --- lifecycle ---------------------------------------------------------- */
 
-void vfs_init(void);                           /* registers ramfs, mounts the root */
+void vfs_init(void);                           /* the VFS's own state; no filesystem, no root */
+/* Mount the root filesystem: once, at boot composition, before any other
+ * mount. -ENODEV for an unregistered name, -EBUSY when there is a root. */
+int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags);
 int vfs_register_fs(struct fs_type *fs);
 struct fs_type *vfs_find_fs(const char *name);
 struct vnode *vfs_root(void);                  /* referenced */

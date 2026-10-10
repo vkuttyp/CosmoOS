@@ -6,7 +6,12 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 5 (version 4 plus `el2_stub_phys` and
+**ABI stability: stable.** Version 7 adds the command line
+(`cmdline_phys`, `cmdline_size`, spending `reserved2`), `boot_flags`
+with `COSMOBOOT_BOOT_PARTUUID`, and `boot_partuuid[16]`, and grows the
+structure; `COSMOBOOT_CMDLINE_MAX` is 1023. A loader without a command
+line writes both cmdline fields 0; one not booted from a GPT partition
+leaves `boot_flags` 0. Version 6 added the framebuffer. Version 5 (version 4 plus `el2_stub_phys` and
 memory type `COSMOBOOT_MEM_EL2_STUB` = 14, taken from `reserved1`;
 version 4 added `boot_pagetable_root_user`). Version 3 (version 1 plus the boot archive
 fields `archive_phys`/`archive_size` and memory type
@@ -103,6 +108,17 @@ physical-to-virtual conversion until the VMM exists.
 
 Purpose: short name for logs; `"unknown"` for anything unrecognised.
 Never NULL.
+
+### `const char *bootinfo_cmdline(void)`
+
+(v7) The command line the loader passed, copied into kernel memory by
+`bootinfo_init`; `""` when there was none. Parsed by
+`cmdline_find`/`cmdline_get` (`kernel/include/kernel/cmdline.h`).
+
+### `bool bootinfo_boot_partuuid(uint8_t out[16])`
+
+(v7) The unique GUID of the GPT partition the loader was read from, in
+on-disk byte order; false when the boot volume had none.
 
 ## Loader internals (`boot/uefi/loader.h`)
 

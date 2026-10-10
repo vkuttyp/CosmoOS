@@ -9,6 +9,8 @@
 #include <kernel/aio.h>
 #include <kernel/timerobj.h>
 #include <kernel/blk.h>
+#include <kernel/bootfs.h>
+#include <kernel/bootinfo.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
 #include <kernel/hv.h>
@@ -2263,7 +2265,7 @@ static int64_t sys_sethostname(struct syscall_args *a)
 
 static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
-    "kernel.hostname",
+    "kernel.hostname", "kernel.cmdline", "kernel.root", "kernel.rootdev",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
     "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys", "vm.anon_fault_retries",
@@ -2295,6 +2297,20 @@ static int sysctl_value(const char *name, char *out, size_t n)
         char host[COSMO_HOST_NAME_MAX];
         utsns_gethostname(utsns_current(), host, sizeof(host));
         return ksnprintf(out, n, "%s", host);
+    }
+    /* The command line and what its root= names (kernel/core/bootfs.c):
+     * init reads these to decide whether to switch to a disk root.
+     * kernel.rootdev is resolved at the read, "" when root= names nothing
+     * registered (or there is no root=). */
+    if (strcmp(name, "kernel.cmdline") == 0)
+        return ksnprintf(out, n, "%s", bootinfo_cmdline());
+    if (strcmp(name, "kernel.root") == 0)
+        return ksnprintf(out, n, "%s", bootfs_root_spec());
+    if (strcmp(name, "kernel.rootdev") == 0) {
+        char dev[BLKDEV_NAME_MAX];
+        if (bootfs_root_device(dev, sizeof(dev)) != 0)
+            dev[0] = '\0';
+        return ksnprintf(out, n, "%s", dev);
     }
     if (strcmp(name, "kernel.nprocs") == 0)
         return ksnprintf(out, n, "%u", process_count());

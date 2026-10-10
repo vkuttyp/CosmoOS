@@ -212,6 +212,50 @@ registrant (`blk_register` takes a prefix and appends the next letter:
 `vda`, `vdb`). The registry is a list under a mutex; `blk_find` returns
 a referenced pointer.
 
+### Partitions (`kernel/include/kernel/part.h`, `kernel/include/kernel/gpt.h`)
+
+Roadmap M2. A disk's GUID Partition Table is read by `gpt_parse`
+(`kernel/block/gpt.c`), a parser with no kernel dependencies that reads
+through a callback, so the host tests, the fuzzer (`fuzz_gpt`) and the
+installer link the same file. A table is accepted only whole: a
+protective MBR (an `0xEE` record; without one the disk is "not GPT",
+which is not an error), a primary header at LBA 1 and a backup on the
+last sector, each with a valid CRC, a revision 1.x, a size of 92 bytes
+to one sector, `MyLBA` where it was read, an entry array on the disk
+outside the usable range; the backup pointing at the primary and agreeing
+on disk GUID, usable range, entry count, entry size and entry CRC; both
+entry arrays matching that CRC; and used entries (non-zero type) inside
+the usable range, not overlapping, with distinct non-zero unique GUIDs,
+at most `GPT_MAX_PARTS` (32). Entry size a power of two of at least 128,
+array at most 32 KiB, sectors of 512 or 4096 bytes. There is no recovery
+from one good copy: either copy damaged and the disk has no partitions
+(logged with the check that failed). Recovery is recorded in the
+inventory, not done; the installer writes both copies.
+
+`part.c` registers each used entry as a `struct blkdev` of its own,
+named after the disk and the entry's number (not its position among the
+used ones): `vda` → `vda1`, `nvme0n1` → `nvme0n1p1`, `ahci0p0` →
+`ahci0p0p1` ("p" when the disk's name ends in a digit). Its geometry is
+the disk's (sector size, `max_sectors`, `max_segments`, read-only, the
+`struct device` for DMA rules) with the partition's capacity; its
+`timeout_ns` is `UINT64_MAX`, because the disk times out the forwarded
+bio and a second clock would race it. Its driver forwards: `submit`
+allocates a bio for the disk at `start + sector` sharing the caller's
+buffers, and the forwarded bio's completion completes the original. The
+range check is the block layer's own `submit_checked` against the
+partition's capacity, made before any driver sees the bio, and the
+forwarding makes it again before it translates (D16).
+
+Scans happen at boot composition, once, for every disk registered by
+then (`blk_part_scan_all`, after `module_load_boot`, logging a `part:`
+line per partition) and on request (`blk_part_scan`; user space reaches it
+through the installer's channel). A rescan removes the previous
+partitions first and is refused with `-EBUSY` while any of them is in use
+(a reference beyond the registry's and the scan's: a mount, a
+`blk_find` holder). `blk_unregister` of a disk removes its partitions
+first (D17). A disk registered after boot -- a USB stick, a hot-plugged
+disk -- is not scanned until asked (inventory).
+
 ### Entropy (`kernel/include/kernel/random.h`)
 
 A single pool: `uint8_t state[64]`, a 64-bit counter, an estimate of

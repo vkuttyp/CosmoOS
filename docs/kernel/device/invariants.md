@@ -165,3 +165,24 @@ modules load, and the entropy pool before drivers can feed it.**
 `kernel_main`: `device_init` → `pci_init` → `blk_init` → `random_init`
 precede `module_load_boot`. Check: every boot; a driver registering
 before `device_init` would trip `KASSERT(g_initialized)`. Gap: none.
+
+**D16. A bio on a partition stays inside the partition.** The block
+layer checks `sector + nsectors <= capacity` against the partition's own
+capacity before the partition driver runs (`submit_checked`,
+`submit_flagged`), and `part_submit` checks again before it adds the
+partition's start; a flush carries no range. Check: `blk-gpt` (the last
+sector served, one past and a run past refused, a write to one partition
+not reaching its neighbour); `fuzz_gpt` (no accepted table has a
+partition outside the usable range or overlapping another). Gap: none.
+
+**D17. A disk's partitions go before the disk, and a partition outlives
+what it forwarded.** `blk_unregister` of a disk unregisters its
+partitions first; each forwarded bio is counted (`inflight`) until the
+original has completed, and the scan's reference is dropped only when
+the count is zero -- at once, or from a short-lived `blk-part-reap`
+thread, because the last completion may come from an interrupt and the
+release it would run may sleep. Removal never waits inside
+`blk_unregister`, where a driver may hold what it completes until the
+call returns. Check: `blk-gpt` (partitions gone with their RAM disk).
+Gap: removal with bios in flight is not exercised by a test.
+
