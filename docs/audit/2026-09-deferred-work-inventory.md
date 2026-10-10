@@ -919,3 +919,10 @@ each; none is needed by M2's acceptance test.
   `RESCAN`; no automatic scan on `blk_register`.
 - Removing a disk whose partitions have forwarded bios in flight (D17's
   reaper thread) is not exercised by a test.
+- `/dev/blkctl`'s mounted check sees a mount's named device, its disk and
+  its partitions, not the other members of a multi-device cosmofs pool.
+- An installed system's `/etc/pkg/repos.conf` still names `/boot/repo`,
+  which the installer does not copy: `pkg update` on an installed system
+  has no repository until one is configured.
+- The native shell expands `$?` for a whole line before running any of
+  it (`cmd; echo $?` reports the previous line); M3 replaces the shell.

@@ -105,3 +105,49 @@ Two further CI sightings on the branch were recorded, not attributed to
 it: `irqpoll-boost` over its gap bound (x86-64 `test-smp2`, first
 sighting) and, on PR #343, `net-neigh-down-race` step 2 (a candidate
 mechanism in the test's park hook; inventory).
+## PR 2 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| `/dev/blkctl` | LIST (partitions, the `BOOT` partition, `MOUNTED`), READ/WRITE of up to 32 KiB (a WRITE refused while the device, its disk or a partition of it is mounted, V36), FLUSH, RESCAN, FORMAT through a new `fs_type.format` (cosmofs: `cosmofs_format`); privileged at open and at every write; results read back whole | `kernel-services/vfs/blkctl.c`, `kernel/include/uapi/cosmo/blkctl.h`, `kernel-services/vfs/vfs.c` (`vfs_bdev_mounted`, `vfs_format`) |
+| Randomness for user space | native `COSMO_AT_RANDOM` (25) naming the 16 bytes already placed on every initial stack | `kernel/process/process.c`, `uapi/cosmo/syscall.h` |
+| Installer | `/sbin/cosmo-install` (design: `docs/userland/design.md`, "The installer"): GPT from `gpt_build`, checked with `gpt_parse`, backup then primary; the boot ESP copied with its one slot rewritten; cosmofs on partition 2 with `/bin`, `/sbin`, `/etc`, `/usr` and `/var/db` when present; refusal exit 3; failure wipes the table and unmounts | `userland/system/cosmo-install.c`, `install_gpt.c`, `install_sha512.c` |
+| Acceptance (stage 1) | `make test-install`: install from the live release image onto a blank 256 MiB disk, refusals (a table without `--force`, a mounted disk), the new root mounted and listed; on the host, both GPT copies, the ESP equal to the booted ESP but for the slot, the slot's `root=PARTUUID=`; CI job `install` | `tests/boot/install_test.py`, `Makefile`, `.github/workflows/ci.yml` |
+
+### Two stack overflows on the installer's path
+
+The installer's first runs double-faulted twice, each a 16 KiB array on a
+16 KiB kernel stack:
+
+1. **`format_at`** kept `struct cfs_member mem[255]` (64 bytes each) on
+   the stack. Only self-tests had formatted a cosmofs; a FORMAT from a
+   system call double-faulted (`format_at`, `cosmofs_core.c:1836`). The
+   path is new in this PR (no system call reached `cosmofs_format` on
+   main), so `make test-install` is its test. Fixed by allocating the
+   `n` members (`eb760d7d`).
+2. **`lz4_compress`** kept its 4096-entry match table (16 KiB) on the
+   stack. cosmofs compresses every multi-block record of a regular file
+   at write-back, so on main a user process that writes such a file to a
+   cosmofs mount and calls `fsync` or `sync` overflows the stack. A
+   defect on main: `init --selftest` now writes 64 KiB of a repeated line
+   to the scratch cosmofs and `fsync`s it, and the harness requires its
+   line in every debug boot. The table is now `LZ4_WORK_BYTES` the caller
+   provides; cosmofs allocates it per record (`5cdcb682`).
+   `tools/lz4-stack-probe.py --old` reverts that whole commit in a
+   throwaway worktree and boots debug:
+
+   | | x86-64 | AArch64 |
+   |---|---|---|
+   | `--old` | FAIL 108.9 s: `#DF double fault` in `init`, PC `lz4_compress` (`lz4.c:68`, the table's `memset`, RDX=0x4000) | FAIL 109.2 s: kernel write fault at `0xffffc000103f4000`, the guard page below `init`'s kernel stack, X2=0x4000 (the `memset`'s length); AArch64 has no separate fault stack, so the report is the guard page, taken in the exception entry |
+   | fixed | PASS 155.1 s | PASS 144.6 s |
+
+   The first version of the probe read the PC from the first `#0` frame
+   in the log, which on x86-64 was a lockup sample's, and reported the
+   expectation failed; it now reads the panic report.
+
+The shell expands `$?` for a whole line before running it (`cmd; echo
+$?` reports the line before); the harness types the status check as its
+own line. x86 firmware without a variable store writes `\NvVars` into
+the ESP it boots from, so the installed ESP is compared with the live
+disk's ESP after its boot, not with the built image (34 sectors differ
+between those two).
