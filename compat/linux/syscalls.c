@@ -77,7 +77,7 @@ struct linux_state {
 
 static const syscall_fn *linux_table_get(void);
 
-int linux_process_init(struct process *p, const struct elf_info *info)
+static int linux_process_init(struct process *p, const struct elf_info *info)
 {
     (void)linux_table_get();
     struct linux_state *ls = kzalloc(sizeof(*ls));
@@ -90,9 +90,11 @@ int linux_process_init(struct process *p, const struct elf_info *info)
     return linux_sigtramp_map(p);
 }
 
-void linux_process_release(struct process *p)
+static void linux_process_release(struct process *p)
 {
     struct linux_state *ls = p->linux;
+    if (ls == NULL)
+        return;   /* the build failed before linux_process_init ran */
     /* Detach any shm segments still attached: drop each one's live-attach count
      * and the attach's reference on its record (freeing the record and its
      * backing if it was the last and the segment was removed). The mappings
@@ -113,7 +115,7 @@ void linux_process_release(struct process *p)
     p->linux = NULL;
 }
 
-unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct linux_auxv_args *x, uint64_t *w,
+static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
     unsigned k = 0;
@@ -3623,8 +3625,26 @@ static const syscall_fn *linux_table_get(void)
  * filter. */
 static const uint16_t linux_always_allowed[] = { LX_exit, LX_exit_group, LX_rt_sigreturn };
 
+/* Every ELF without the CosmoOS note: the fallback, asked after native. */
+static bool linux_claims_elf(const struct elf_info *info)
+{
+    (void)info;
+    return true;
+}
+
+#if defined(ARCH_X86_64)
+#define LINUX_PLATFORM "x86_64"
+#else
+#define LINUX_PLATFORM "aarch64"
+#endif
+
 const struct personality personality_linux = {
     .name = "linux",
+    .claims_elf = linux_claims_elf,
+    .init = linux_process_init,
+    .release = linux_process_release,
+    .platform = LINUX_PLATFORM,   /* AT_PLATFORM: the string Linux gives on this machine */
+    .auxv = linux_auxv,
     .table = g_table,
     .count = LX_NR_MAX,
     .always_allowed = linux_always_allowed,

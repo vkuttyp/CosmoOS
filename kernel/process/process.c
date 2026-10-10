@@ -94,8 +94,8 @@ static void process_release(struct kobject *obj)
     }
     if (p->parent)
         process_put(p->parent);
-    if (p->linux)
-        linux_process_release(p);
+    if (p->pers != NULL && p->pers->release != NULL)
+        p->pers->release(p);
     signal_process_release(p);
     kfree(p->sig_shared_info);
 
@@ -221,12 +221,6 @@ void process_init(void)
 #define INITIAL_STACK_PAGES 2u
 #define INITIAL_STRINGS_MAX 300u
 
-#if defined(ARCH_X86_64)
-#define LINUX_PLATFORM "x86_64"
-#else
-#define LINUX_PLATFORM "aarch64"
-#endif
-
 /*
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
  * stack, writing through the direct map into the populated top pages.
@@ -247,8 +241,8 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
         strings += strlen(envp[envc]) + 1;
     if (argc + envc > INITIAL_STRINGS_MAX)
         return -EINVAL;
-    const char *platform = LINUX_PLATFORM;   /* AT_PLATFORM: the string Linux gives on this machine */
-    strings += strlen(execfn) + 1 + strlen(platform) + 1;
+    const char *platform = p->pers->platform;   /* AT_PLATFORM, when the personality has one */
+    strings += strlen(execfn) + 1 + (platform ? strlen(platform) + 1 : 0);
     const size_t span = INITIAL_STACK_PAGES * PAGE_SIZE;
     /* words: argc, argv[argc+1], envp[envc+1], auxv (up to 20 pairs) */
     size_t words = 1 + (argc + 1) + (envc + 1) + 40;
@@ -287,19 +281,22 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
             *AT(sp + k) = (uint8_t)str[k];
         str_addrs[i] = sp;
     }
-    /* AT_EXECFN and AT_PLATFORM strings (Linux); harmless for native. */
-    uint64_t execfn_addr, platform_addr;
+    /* The AT_EXECFN string, and AT_PLATFORM's for a personality that
+     * names its machine. */
+    uint64_t execfn_addr, platform_addr = 0;
     {
         size_t n = strlen(execfn) + 1;
         sp -= n;
         for (size_t k = 0; k < n; k++)
             *AT(sp + k) = (uint8_t)execfn[k];
         execfn_addr = sp;
-        n = strlen(platform) + 1;
-        sp -= n;
-        for (size_t k = 0; k < n; k++)
-            *AT(sp + k) = (uint8_t)platform[k];
-        platform_addr = sp;
+        if (platform) {
+            n = strlen(platform) + 1;
+            sp -= n;
+            for (size_t k = 0; k < n; k++)
+                *AT(sp + k) = (uint8_t)platform[k];
+            platform_addr = sp;
+        }
     }
     /* 16 random bytes for AT_RANDOM: Linux's, and since roadmap M2 the
      * native COSMO_AT_RANDOM too (the installer's GUIDs). */
@@ -323,34 +320,9 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
     for (unsigned i = 0; i < envc; i++)
         w[k++] = str_addrs[argc + i];
     w[k++] = 0;
-    if (p->pers == &personality_linux) {
-        struct linux_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
-                                     .platform_addr = platform_addr, .interp_base = interp_base };
-        k += linux_auxv(p, info, &x, w + k, 40);
-    } else {
-        /* The program header table, so a program can read its own headers
-         * -- which is how it finds its own PT_TLS, and why nothing in this
-         * kernel knows what thread-local storage is. The values are the
-         * ones the Linux door already passes as AT_PHDR/AT_PHENT; zero
-         * when the headers are not inside a mapped segment.
-         *
-         * Zero is "the headers are not readable", **not** "the program has
-         * no thread-local storage** -- and a reader must not collapse the
-         * two. libc refuses to start a program it cannot answer that
-         * question for (libc/src/tlsscan.c), because the other answer is a
-         * process whose `__thread` variables were never initialised and
-         * whose per-thread storage was sized as though it had none. Every
-         * native program links with the one userland/user.ld, which keeps
-         * the header table in the text segment, so this stays zero only
-         * for an image built some other way. */
-        w[k++] = COSMO_AT_PHDR;   w[k++] = info->phdr_vaddr;
-        w[k++] = COSMO_AT_PHENT;  w[k++] = info->phent;
-        w[k++] = COSMO_AT_PHNUM;  w[k++] = info->phnum;
-        w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
-        w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
-        w[k++] = COSMO_AT_RANDOM; w[k++] = random_addr;
-        w[k++] = COSMO_AT_NULL;   w[k++] = 0;
-    }
+    struct personality_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
+                                       .platform_addr = platform_addr, .interp_base = interp_base };
+    k += p->pers->auxv(p, info, &x, w + k, 40);
     words = k;
     sp &= ~0xFULL;
     if (((words * 8) & 0xF) != 0)
@@ -488,8 +460,9 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     p->parent_pid = 0;
 
     struct process *parent = attr ? attr->parent : NULL;
-    /* Personality: the CosmoOS note selects native; kernel-created processes are always native. */
-    p->pers = (info.cosmo_note || parent == NULL) ? &personality_native : &personality_linux;
+    /* Personality: kernel-created processes are native; otherwise the
+     * ELF decides (personality_for_elf: the CosmoOS note is native). */
+    p->pers = personality_for_elf(&info, parent == NULL);
     if (parent) {
         p->parent_pid = parent->pid;
         p->cred = parent->cred;
@@ -626,8 +599,8 @@ int process_create_from_images(const struct process_image *exe, const struct pro
             p->image_end = iinfo.hi;
     }
     strlcpy(p->exec_path, exe->path, sizeof(p->exec_path));
-    if (p->pers == &personality_linux) {
-        rc = linux_process_init(p, &info);
+    if (p->pers->init != NULL) {
+        rc = p->pers->init(p, &info);
         if (rc)
             goto fail;
     }
@@ -807,8 +780,8 @@ fail:
         utsns_put(p->utsns);
         p->utsns = NULL;
     }
-    if (p->linux)
-        linux_process_release(p);
+    if (p->pers != NULL && p->pers->release != NULL)
+        p->pers->release(p);
     signal_process_release(p);
     kfree(p->sig_shared_info);
     kmem_cache_free(g_process_cache, p);

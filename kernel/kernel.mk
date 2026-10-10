@@ -107,6 +107,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/process/proctest.c \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \
+	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \
 	kernel/security/sha512.c \
