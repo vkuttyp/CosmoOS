@@ -182,8 +182,17 @@ static bool fork_body(struct vm_space *src, struct vm_space *dst, struct vnode *
  * which is exactly the observation: a stale writable entry would have
  * let the byte through.
  */
-static bool fork_tlb(const char **reason)
+static bool fork_tlb(const char **reason, bool *skipped)
 {
+    *skipped = false;
+    if (arch_mmu_asid_bits() == 0) {
+        /* Without address-space tags every switch flushes this CPU's
+         * translations, so none survives the switch away and back for
+         * the check to observe: it would pass with the shootdown removed
+         * (it did, on x86-64 qemu64). It runs where tags keep them. */
+        *skipped = true;
+        return true;
+    }
     struct vm_space *src = NULL, *dst = NULL;
     const vaddr_t va = FT_ANON + 3 * PAGE_SIZE;
     CHECK(vm_space_create_user(&src) == 0);
@@ -268,11 +277,14 @@ bool selftest_vm_fork(const char **reason)
     vm_space_destroy(p2);
     CHECK(lrc == -ENOMEM && c2 == NULL);
 
-    if (!fork_tlb(reason))
+    bool tlb_skipped;
+    if (!fork_tlb(reason, &tlb_skipped))
         return false;
     kinfo("selftest: vm-fork: pages shared read-only at two references, a copy on either side's write and "
           "the last user's frame taken back, mprotect kept a shared frame read-only, child file records "
-          "of its own, this CPU's writable translation gone, limits refuse, parent-first teardown");
+          "of its own, limits refuse, parent-first teardown; %s",
+          tlb_skipped ? "no address-space tags: the TLB check needs them, not run"
+                      : "this CPU's writable translation gone after the fork");
     return true;
 }
 
