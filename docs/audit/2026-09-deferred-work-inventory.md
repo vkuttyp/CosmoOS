@@ -926,3 +926,6 @@ each; none is needed by M2's acceptance test.
   has no repository until one is configured.
 - The native shell expands `$?` for a whole line before running any of
   it (`cmd; echo $?` reports the previous line); M3 replaces the shell.
+- `net-neigh-down-race`'s ARP and ND park hooks park the first caller on
+  any interface; another interface's traffic can take the park (flakes.md,
+  2026-10-10). Filter the hook by the test's interface.

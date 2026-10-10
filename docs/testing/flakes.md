@@ -2503,6 +2503,18 @@ was not raised before the 300 ms spinner ended. Not attributed: the
 branch's change (GPT partition devices at boot, the command line) is not
 on the irq-poll or scheduler path. First sighting; the failed job was
 rerun.
+## `net-neigh-down-race` step 2, 2026-10-10
+
+`SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
+-ENETUNREACH at line 2665 (24 ms)`, x86-64 CI, PR #343's first run
+(38030196565, job 114149328082), the `test-guard` boot; the same job's
+`test` boot passed it. Step 2 saw a resolve parked and then a return
+code other than `-ENETUNREACH`. Candidate mechanism, from the source: the
+park hook (`arp_test_park_before_lock`, `kernel-services/network/arp.c`)
+parks the first caller on *any* interface, so another thread's ARP work
+(eth0 is live in a debug boot) can take the park while the test's own
+resolve on `ndown0` runs before the down and returns `-EINPROGRESS`. Not
+confirmed by a run; outside M2 (inventory). First sighting.
 
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
 
