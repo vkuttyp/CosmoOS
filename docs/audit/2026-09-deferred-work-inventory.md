@@ -929,3 +929,8 @@ each; none is needed by M2's acceptance test.
 - `net-neigh-down-race`'s ARP and ND park hooks park the first caller on
   any interface; another interface's traffic can take the park (flakes.md,
   2026-10-10). Filter the hook by the test's interface.
+- `root=` is resolved when init starts: a root disk that registers later
+  (USB storage, whose enumeration is asynchronous) is not waited for; init
+  stays live and says so.
+- `SYS_switch_root`'s refusals (a mount below the old root's top level, a
+  second process) are not exercised by a test (V37's gap).

@@ -192,3 +192,48 @@ PR 2 after rebasing onto PR 1's final head (local): x86-64 debug `test`
 PASS 145.1 s, `test-crash` PASS 129.6 s, release `test-install` PASS
 7.9 s; AArch64 154.8 s, 130.8 s, 11.3 s. CI-toolchain x86-64 builds:
 debug 143.3 s, crash 127.9 s, chaos 141.1 s, PASS.
+## PR 3 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| Switch root | `vfs_switch_root`: three passes (decide under the table lock; look up the target directories without it; re-validate and commit, which cannot fail); top-level mounts of the old root (`/proc`, `/dev`) move to the same names; the new root leaves its mountpoint and its namespace references; `vfs_release_old_root` releases the live ramfs when nothing references it (V37) | `kernel-services/vfs/vfs.c` |
+| System call | `SYS_switch_root` (102): init alone, privileged, unconfined, the only process; init's directory moves to `/` before the old root is released; libc `cosmo_switch_root` | `kernel/syscall/native.c`, `kernel/process/process.c` (`process_is_init`), `uapi/cosmo/syscall.h`, `libc/include/cosmo/syscall.h` |
+| Boot composition | `/dev` a ramfs mount of its own; anonymous files (memfd, shm) on a detached ramfs (`vfs_mount_internal`, `ramfs_set_anon_mount`) instead of the root | `kernel/core/bootfs.c`, `kernel-services/vfs/ramfs.c` |
+| init | `root=` → mount `kernel.rootdev` at `/sysroot`, switch, ramfs on `/tmp`; any failure says `staying on the live root` and the boot goes on live; `sync` before exiting on a disk root | `userland/init/init.c` |
+| Userland | `/bin/sync` (there was no way to commit from the shell) | `userland/coreutils/sync.c` |
+| Harness | `QEMU_DISKS=boot`: the installed disk alone, writable on both machines; `make test-install` stages reboot, persist, fallback; CI step renamed | `scripts/qemu-run.sh`, `tests/boot/install_test.py`, `.github/workflows/ci.yml` |
+
+## Disk layout and boot flow, as built
+
+```text
+installed disk (GPT, 512-byte sectors; 256 MiB in the test)
+  LBA 0            protective MBR
+  LBA 1..33        primary header + 128 entries
+  LBA 2048..       partition 1  EFI System (c12a7328-...), FAT32, a byte copy of the
+                   boot ESP: \EFI\BOOT\BOOT{X64,AA64}.EFI, \cosmo\kernel.elf,
+                   \cosmo\boot.tar, \cosmo\cmdline = "#cosmo-cmdline v1\nroot=PARTUUID=<p2>\n"
+  next MiB..last   partition 2  CosmoOS root (c9b09224-e00d-418e-846a-9f1d9a61bfd5),
+                   cosmofs: /bin /sbin /etc (/usr /var/db) /dev /proc /tmp /mnt /var /boot
+  last 33 sectors  backup entries + backup header
+```
+
+Boot: firmware → loader reads `\cosmo\cmdline` and its own partition's
+GUID (protocol v7) → kernel boots on the live ramfs root as always,
+scans partitions, resolves `root=PARTUUID=` to the partition (`vda2` on
+virt, `ahci0p0p2` on q35) → init mounts it at `/sysroot`,
+`switch_root("/sysroot")` (`/proc` and `/dev` move, the live ramfs is
+released), mounts a ramfs on `/tmp`, runs the installed `/etc/rc` and the
+shell → at the shell's exit init `sync`s. Without `root=` the boot is the
+live boot; with a `root=` that cannot be mounted, init says so and stays
+live.
+
+## Acceptance (`make BUILD=release test-install`, local, QEMU 11.1.1, TCG)
+
+| Stage | x86-64 | AArch64 |
+|---|---|---|
+| install (live image + blank 256 MiB disk; `cosmo-install`) | PASS 8.0 s (`cosmo-install` 1.8 s) | PASS 11.2 s (1.7 s) |
+| host check of the disk | GPT valid, ESP = booted ESP but the slot, slot names partition 2 | same |
+| reboot (installed disk alone), write `/persist.txt`, power off | PASS 5.0 s, root `ahci0p0p2` | PASS 8.5 s, root `vda2` |
+| persist (boot again, read it back) | PASS 4.6 s | PASS 8.1 s |
+| fallback (`root=vda`, a blank disk) | PASS 5.0 s: `cannot mount vda ... staying on the live root`, live shell | PASS 9.2 s |
+| whole test | PASS 23.1 s | PASS 37.2 s |

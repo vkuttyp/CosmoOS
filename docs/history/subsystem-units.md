@@ -2693,3 +2693,12 @@ See the [history index](README.md).
     `root=<device>` resolved after the boot partition scan; sysctls
     `kernel.cmdline`, `kernel.root`, `kernel.rootdev`.
   - Report: `docs/audit/2026-10-10-m2-persistent-system-report.md`.
+  - PR 2 (#343): `/dev/blkctl` (raw sectors, rescan, format), native
+    `COSMO_AT_RANDOM`, `/sbin/cosmo-install`; two 16 KiB on-stack arrays
+    removed (`format_at`'s members, `lz4_compress`'s table -- the latter
+    reachable on main from any `fsync` of a compressible file, proved by
+    `tools/lz4-stack-probe.py`).
+  - PR 3: `SYS_switch_root` and `vfs_switch_root` (V37), `/dev` and
+    anonymous files off the live root, init's disk root, `/bin/sync`,
+    `make test-install` (install, reboot, persist, fallback) in CI.
+    M2 ticked.
