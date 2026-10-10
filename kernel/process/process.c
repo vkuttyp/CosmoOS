@@ -2424,3 +2424,8 @@ void process_dump_all(void)
     }
     spin_unlock_irqrestore(&g_process_table_lock, s);
 }
+
+/* CI EXPERIMENT, NOT FOR MERGE: PR #347's .text growth (0x2590 bytes) as
+ * dead padding at process.o, to test whether the layout alone brings the
+ * slow x86-64 boots (docs/testing/flakes.md, 2026-10-10). */
+__asm__(".pushsection .text\n\t.skip 9616, 0xcc\n\t.popsection");
