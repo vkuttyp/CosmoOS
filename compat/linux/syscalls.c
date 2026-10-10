@@ -2750,7 +2750,7 @@ static int64_t lx_fork_common(struct syscall_args *a, uint64_t flags, unsigned e
         arch_user_regs_set_sp(&regs, (uintptr_t)newsp);
     struct process_fork_args fa = {
         .regs = &regs,
-        .tls = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : thread_current()->tls_base,
+        .tls = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : arch_get_tls_base(),
         .set_child_tid = (flags & LX_CLONE_CHILD_SETTID) ? ctid : 0,
         .clear_child_tid = (flags & LX_CLONE_CHILD_CLEARTID) ? ctid : 0,
         .flags = (flags & LX_CLONE_VM) ? PROCESS_FORK_SHARE_SPACE : 0,
@@ -2796,7 +2796,6 @@ static int64_t lx_clone(struct syscall_args *a)
     if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) && !user_range_ok(ctid, 4))
         return -EFAULT;
     struct process *p = process_current();
-    struct thread *cur = thread_current();
 
     /* The child is the caller at this instant: the same registers, the
      * result 0, its own stack and thread pointer. */
@@ -2805,7 +2804,7 @@ static int64_t lx_clone(struct syscall_args *a)
     arch_user_regs_set_result(&regs, 0);
     if (newsp)
         arch_user_regs_set_sp(&regs, (uintptr_t)newsp);
-    uintptr_t tls_base = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : cur->tls_base;
+    uintptr_t tls_base = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : arch_get_tls_base();
 
     struct thread *t;
     int rc = process_add_thread(p, &regs, tls_base, &t);

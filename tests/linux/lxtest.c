@@ -453,6 +453,22 @@ static int vfork_child(void *arg)
     return 3;
 }
 
+/* The thread pointer user mode sees now. */
+static unsigned long current_tp(void)
+{
+#if defined(__x86_64__)
+    unsigned long fs = 0;
+    sc2(LX_arch_prctl, LX_ARCH_GET_FS, &fs);
+    return fs;
+#else
+    return read_tpidr();
+#endif
+}
+
+#if !defined(__x86_64__)
+static uint64_t g_fork_tcb[4];
+#endif
+
 static void fork_tests(long pid)
 {
     int32_t st;
@@ -479,11 +495,19 @@ static void fork_tests(long pid)
     CHECKV(sc2(LX_rt_sigpending, &pend, 8) == 0 && (pend & m12), pend);
 
     g_fork_ptid = g_fork_ctid = 0;
+#if !defined(__x86_64__)
+    /* Written without a system call, just before the fork: the kernel
+     * learns it only from the register (the thread has not switched out). */
+    unsigned long tp_saved = read_tpidr();
+    write_tpidr((unsigned long)(uintptr_t)g_fork_tcb);
+#endif
+    unsigned long tp_parent = current_tp();
     long c = fork_raw(LX_CLONE_EXIT_SIGCHLD | LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_SETTID, &g_fork_ptid,
                       &g_fork_ctid);
     if (c == 0) {
         sc1(LX_close, pfd[0]);   /* each side keeps only the ends it uses, so a */
         sc1(LX_close, qfd[1]);   /* side that fails early is an EOF, not a hang */
+        CHILD_CHECK(current_tp() == tp_parent, 12);   /* the caller's thread pointer */
         long me = sc0(LX_getpid);
         CHILD_CHECK(me != pid && sc0(LX_getppid) == pid && sc0(LX_gettid) == me, 2);
         CHILD_CHECK(g_fork_ctid == me, 3);   /* CLONE_CHILD_SETTID, in the child's own copy */
@@ -504,6 +528,10 @@ static void fork_tests(long pid)
         CHILD_CHECK(sc1(LX_shmdt, seg) == 0, 11);              /* the child's own attach record */
         lx_exit(42);
     }
+#if !defined(__x86_64__)
+    if (c > 0)
+        write_tpidr(tp_saved);
+#endif
     CHECKV(c > 0 && c != pid, c);
     sc1(LX_close, pfd[1]);
     CHECKV(g_fork_ptid == c, g_fork_ptid);   /* CLONE_PARENT_SETTID */

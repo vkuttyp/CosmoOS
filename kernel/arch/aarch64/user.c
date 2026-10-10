@@ -52,6 +52,11 @@ void arch_set_tls_base(uintptr_t base)
     WRITE_SYSREG(tpidr_el0, base);
 }
 
+uintptr_t arch_get_tls_base(void)
+{
+    return (uintptr_t)READ_SYSREG(tpidr_el0);
+}
+
 bool arch_trap_frame_is_user(const struct arch_trap_frame *frame)
 {
     return (frame->spsr & (SPSR_M_MASK | SPSR_M_AARCH32)) == SPSR_M_EL0T;
