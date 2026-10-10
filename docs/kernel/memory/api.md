@@ -20,6 +20,20 @@ Common contracts, stated once:
   memory, unmapping something not owned) is a bug and panics with the
   offending address.
 
+## fork (roadmap M3)
+
+### `int vm_space_fork(struct vm_space *src, struct vm_space **out)`
+A child space that maps everything `src` maps, private pages shared
+copy-on-write and shared file pages shared (design.md §8). The child's file
+mappings are records of its own with the parent's tags; its limits are the
+parent's. Sleeps (takes `src->replace_lock`). `-ENOMEM` (memory, or the
+child would start over its limits); on failure nothing of the child is
+left. Statistics: `vm_stats.forks`, `cow_copies`, `cow_reuses`.
+
+### `int vm_test_write_fault(struct vm_space *space, vaddr_t va)` (CONFIG_SELFTEST)
+The fault handler's copy-on-write decision for a write at `va`, for tests
+whose space no process runs. `-EFAULT` when it is not that case.
+
 ## Kernel virtual layout (x86-64)
 
 | Range | Size | Use |
