@@ -18,7 +18,10 @@
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
+#include <kernel/sched.h>
+#include <kernel/smp.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
@@ -175,52 +178,75 @@ static bool fork_body(struct vm_space *src, struct vm_space *dst, struct vnode *
 }
 
 /*
- * The parent's lowered PTE must not survive in a TLB: this CPU caches a
- * writable translation of page 3 before the fork (a write through it),
- * and after the fork the same write must fault. A kernel thread has no
- * process, so the fault is unserviced and the copy takes its fixup --
- * which is exactly the observation: a stale writable entry would have
- * let the byte through.
+ * The parent's lowered PTE must not survive in another CPU's TLB. The
+ * local CPU proves nothing here: arch_mmu_protect invalidates its own
+ * entry, so only other CPUs depend on the shootdown -- a check on this
+ * CPU alone passed with the shootdown removed, on both architectures.
+ *
+ * So a helper thread on another CPU switches to the parent, writes page
+ * 3 (a writable translation is now cached there), and keeps the space
+ * active with preemption off and interrupts on -- the shootdown's IPI
+ * must be able to land, and no switch may flush for it. After the fork it
+ * writes again: a kernel thread has no process, so a write that faults
+ * is unserviced and takes its fixup, and a stale writable translation
+ * would have let the byte through.
  */
+struct tlb_probe {
+    struct vm_space *sp;
+    vaddr_t va;
+    uint32_t stage;          /* 1: translation cached; 2: forked; 3: done */
+    size_t before, after;
+};
+
+static void tlb_probe_thread(void *arg)
+{
+    struct tlb_probe *t = arg;
+    preempt_disable();
+    arch_irq_state_t s = arch_irq_save();
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    vm_space_switch(restore, t->sp);
+    arch_irq_restore(s);
+    t->before = user_write_byte(t->va, 0x11);
+    __atomic_store_n(&t->stage, 1u, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&t->stage, __ATOMIC_ACQUIRE) != 2u)
+        arch_cpu_relax();
+    t->after = user_write_byte(t->va, 0x22);
+    s = arch_irq_save();
+    vm_space_switch(t->sp, restore);
+    arch_irq_restore(s);
+    preempt_enable();
+    __atomic_store_n(&t->stage, 3u, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
 static bool fork_tlb(const char **reason, bool *skipped)
 {
     *skipped = false;
-    if (arch_mmu_asid_bits() == 0) {
-        /* Without address-space tags every switch flushes this CPU's
-         * translations, so none survives the switch away and back for
-         * the check to observe: it would pass with the shootdown removed
-         * (it did, on x86-64 qemu64). It runs where tags keep them. */
-        *skipped = true;
+    cpumask_t others = cpu_online_mask() & ~CPUMASK_OF(raw_cpu_id());
+    if (others == 0) {
+        *skipped = true;   /* one CPU: there is no other TLB to check */
         return true;
     }
     struct vm_space *src = NULL, *dst = NULL;
     const vaddr_t va = FT_ANON + 3 * PAGE_SIZE;
     CHECK(vm_space_create_user(&src) == 0);
     CHECK(vm_user_map_anon(src, FT_ANON, FT_PAGES * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "ft-tlb") == 0);
-
-    arch_irq_state_t s = arch_irq_save();
-    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
-    vm_space_switch(restore, src);
-    size_t before = user_write_byte(va, 0x11);
-    vm_space_switch(src, restore);
-    arch_irq_restore(s);
-
+    static struct tlb_probe t;
+    t = (struct tlb_probe){ .sp = src, .va = va };
+    struct thread *th = thread_create_on(tlb_probe_thread, &t, "fork-tlb", SCHED_PRIO_DEFAULT, others);
+    CHECK(th != NULL);
+    while (__atomic_load_n(&t.stage, __ATOMIC_ACQUIRE) != 1u)
+        sched_yield();
     int frc = vm_space_fork(src, &dst);
-
-    s = arch_irq_save();
-    restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
-    vm_space_switch(restore, src);
-    size_t after = user_write_byte(va, 0x22);
-    vm_space_switch(src, restore);
-    arch_irq_restore(s);
-
+    __atomic_store_n(&t.stage, 2u, __ATOMIC_RELEASE);
+    thread_join(th);
     uint8_t seen = byte_at(src, va);
     if (dst)
         vm_space_destroy(dst);
     vm_space_destroy(src);
     CHECK(frc == 0);
-    CHECK(before == 0);              /* writable before: the translation was cached */
-    CHECK(after == 1 && seen == 0x11);   /* read-only after, on this CPU too */
+    CHECK(t.before == 0);                  /* writable before: the translation was cached there */
+    CHECK(t.after == 1 && seen == 0x11);   /* read-only after, on that CPU too */
     return true;
 }
 
@@ -283,8 +309,8 @@ bool selftest_vm_fork(const char **reason)
     kinfo("selftest: vm-fork: pages shared read-only at two references, a copy on either side's write and "
           "the last user's frame taken back, mprotect kept a shared frame read-only, child file records "
           "of its own, limits refuse, parent-first teardown; %s",
-          tlb_skipped ? "no address-space tags: the TLB check needs them, not run"
-                      : "this CPU's writable translation gone after the fork");
+          tlb_skipped ? "one CPU: the other-CPU TLB check needs two, not run"
+                      : "another CPU's writable translation gone after the fork");
     return true;
 }
 
