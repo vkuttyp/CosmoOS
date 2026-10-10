@@ -256,3 +256,9 @@ live.
 The analyzer fix landed while the AArch64 half of the matrix was running,
 so every AArch64 item ran with it; the x86-64 items that ran before it
 (analyze, a debug boot, test-install) were rerun after it.
+
+PR 3 after rebasing onto PR 2's final head (local): x86-64 debug `test`
+PASS 142.0 s, `test-crash` PASS 122.9 s, release `test-install` PASS
+23.3 s (install 8.0, reboot 5.3, persist 4.6, fallback 5.0); AArch64
+144.5 s, 125.6 s, 36.4 s (11.1, 8.4, 8.1, 8.6). CI-toolchain x86-64
+builds: debug 152.6 s, crash 128.9 s, chaos 142.6 s, PASS.
