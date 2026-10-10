@@ -3807,3 +3807,26 @@ neighbour table is correct and stays. **Recorded, not fixed:**
 test and its interface are gone (deferred-work inventory §8). This
 mechanism may also account for the unattributed `+0` sightings of
 2026-10-07 above; their logs predate the instrumentation and cannot show it.
+
+## `net-bench`'s slow mode with the watchdog, PR #347's x86-64 guard boot, 2026-10-10
+
+**Run 38072717584, PR #347's x86-64 job, "Boot test on a
+protection-capable CPU (debug)":** `boot-test: FAIL after 152.5s` with
+two failures, both in `net-bench`:
+
+- `net-bench took 9818 ms (budget 8000 ms)`. Steer 0: `tcp 1 flow 2
+  MiB/s, 2 flows 2 MiB/s total, udp 7702 sends/s (10000 of 10000
+  delivered)`; steer 1: `tcp 1 flow 4 MiB/s, 2 flows 19 MiB/s total, udp
+  7753 sends/s`. Every assertion passed. This is the slow mode of the
+  `net-bench` row above.
+- `[WATCHDOG] no progress for 8002 ms`, printed between the two steers:
+  `netrx/0` running on CPU 0, ticking ("last tick 0 ms ago"), `kmain`
+  blocked on a completion, the other three CPUs idle. A slow benchmark,
+  not a hang: the test then finished.
+
+Unlike the 2026-10-08 sighting, the rest of the boot was normal
+(self-tests summed 131.8 s). PR #347 (exec, close-on-exec) changes no
+network code, and the same commit's AArch64 job and every other x86-64
+boot of the run passed. The failed job was rerun. Still the open
+follow-up the row names: a mechanism for the slow mode.
+
