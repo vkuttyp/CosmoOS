@@ -75,3 +75,33 @@ Probe convention: M2 is a new feature, proved by its acceptance test
 (`make test-install`, PRs 2 and 3); PR 1's own claims are proved by
 `blk-gpt` (every damaged copy refused by its own check, bounds and
 translation), the host test and the fuzzer.
+
+### PR 1 in CI: a translation block across a page
+
+PR #342's x86-64 job failed four runs in a row in the crash boot
+(`make test-crash`): `syscall-fuzz` 8.3-11.0 s against its 8 s budget, and
+twice the 180 s timeout, with every other boot of the same jobs normal.
+Ruled out in turn: the runner (an ordinary debug boot right after the
+crash boot in the same job ran at that runner's normal speed), the step's
+position, and other load on the machine (a sampler in the step: idle
+before, QEMU alone during). The CI-built crash kernel was slow on this
+machine too, the CI-built debug kernel was not. vCPU PC sampling over QMP
+put the difference in the framebuffer console: the scroll's per-pixel
+loop straddled the page boundary at `0xffffffff80002000` in that binary
+(same code, 64 bytes later than in the debug kernel), and a 12-row scroll
+cost 118.8 ms instead of 10.9 ms. QEMU's TCG cannot chain a translation
+block across a page, so the loop paid a lookup on every pixel. Fixed by
+layout rule, not by budget: fbcon's three drawing loops are 256-byte
+aligned functions of at most 256 bytes, and `check-kernel-elf.sh` fails
+the link if one spans a page (`e0869ad8`). Full account in flakes.md
+("syscall-fuzz", fourth sighting and attribution).
+
+There is no `--old` probe for it: the defect is a placement that only one
+compiler produced for one build, and the evidence for the old behaviour is
+those two CI binaries (`debug-elfs-x86_64` of run 38037450806); the fix
+removes the placement by construction and the link check holds it.
+
+Two further CI sightings on the branch were recorded, not attributed to
+it: `irqpoll-boost` over its gap bound (x86-64 `test-smp2`, first
+sighting) and, on PR #343, `net-neigh-down-race` step 2 (a candidate
+mechanism in the test's park hook; inventory).
