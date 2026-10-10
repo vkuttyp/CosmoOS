@@ -3006,6 +3006,21 @@ partition devices, the command line) is on none of those paths beyond
 one extra partition device at boot, present in all six boots. Recorded,
 not attributed; the failed job was rerun.
 
+**Fourth sighting, 2026-10-10, the same step** (PR #342 run 38027846221,
+job 114142393303): `syscall-fuzz` 8389 ms, `cosmofs-replay` 23663 ms,
+`process-user` 8658 ms, `lockdep-graph-bench` 4437 ms -- within 1 % of
+the third sighting's numbers on another runner, while the same job's
+five other debug boots matched main's. Main's own crash boots
+(seven runs) are either fast (`syscall-fuzz` ~3.1 s, `cosmofs-replay`
+~14.8 s) or uniformly slow (4.7 s, 23.4 s, with `lockdep-graph-bench`
+at 7.3 s); the branch's are neither shape. A local alternated A/B of
+`make test-crash` (main `88e18272` vs the branch, two boots each, x86-64,
+QEMU 11.1.1): `syscall-fuzz` 3116/3327 ms vs 3414/3317 ms,
+`cosmofs-replay` 16079/15886 ms vs 16693/16662 ms, `process-user`
+5897/5904 ms vs 6266/6226 ms -- the branch about 3-6 % slower in the
+heavier tests and no `syscall-fuzz` difference. Not reproduced off CI;
+not attributed.
+
 ## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
 
 PR #308's first x86 CI debug boot failed with a TLB shootdown acknowledged
