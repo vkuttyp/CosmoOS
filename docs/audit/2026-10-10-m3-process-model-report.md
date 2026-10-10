@@ -117,3 +117,19 @@ and the rerun fails in 171 s with the child's status.
 | `BUILD=release test-install` | PASS 23.0 s | PASS 37.0 s |
 | `test-crash` | PASS 148.6 s | PASS 136.4 s |
 
+### The thread pointer a fork child starts with (found by PR 4)
+
+BusyBox's ash on AArch64 forked children whose first thread-pointer access
+faulted at small negative addresses: the child started with TPIDR_EL0 0.
+`lx_fork_common` copied `thread->tls_base`, which on AArch64 is only the
+value saved at the thread's last switch-out -- a program writes TPIDR_EL0
+itself, without a system call, and musl does so at startup, so a program
+that forks before it is first switched out gives its child 0. Fork and a
+thread clone without `CLONE_SETTLS` now read `arch_get_tls_base()`, the
+register on AArch64 (x86-64's FS base changes only through `arch_prctl`,
+so `tls_base` stays the value there). `lxtest`'s fork test writes
+TPIDR_EL0 immediately before the fork, with no system call between, and
+the child checks it: with the old read restored, the AArch64 child exits
+12 (`wait4` status 3072); with the fix both architectures pass (debug
+boots 155.2 s AArch64, 170.4 s x86-64).
+
