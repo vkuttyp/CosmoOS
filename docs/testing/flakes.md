@@ -2503,6 +2503,7 @@ was not raised before the 300 ms spinner ended. Not attributed: the
 branch's change (GPT partition devices at boot, the command line) is not
 on the irq-poll or scheduler path. First sighting; the failed job was
 rerun.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
