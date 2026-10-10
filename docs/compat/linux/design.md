@@ -160,12 +160,12 @@ which the Linux `wait4` encodes as "terminated by signal `sig`".
 |---|---|
 | `read`, `write`, `pread64`, `pwrite64` | the native handle path (`file_read`/`file_pread` or the object's `read`/`write` for pipes, console, sockets); Linux and native share the handle table |
 | `readv`, `writev` | loop over up to 1024 iovecs (each validated), stop at the first short transfer |
-| `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC`, `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
-| `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` is dropped |
+| `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC` marks the handle close-on-exec (roadmap M3), `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
+| `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` marks both close-on-exec; `dup3` takes `O_CLOEXEC` (any other flag `-EINVAL`); `dup` and `dup2` start without it |
 | `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` 0, `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
 | `getdents64` | native `getdents` records → `linux_dirent64` (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name`), through two kernel buffers; the native name starts at byte 12 of its record (`offsetof(struct cosmo_dirent, name)`, not `sizeof`, which is 16), `d_type` is mapped to Linux's `DT_*` values (`DT_REG` 8, `DT_DIR` 4, `DT_CHR` 2, `DT_FIFO` 1, `DT_SOCK` 12), each output record is the 19-byte header plus the NUL-terminated name padded to 8 bytes, and `d_off` is the offset of the next record in the buffer |
 | `mkdir`, `mkdirat`, `mknodat` (`S_IFIFO` only, the named-pipes unit; `S_IFSOCK` `-EINVAL`, the rest `-EPERM`), `rmdir`, `unlink`, `unlinkat` (`AT_REMOVEDIR`), `rename`, `renameat`, `chdir`, `getcwd`, `access`, `faccessat`, `fsync`, `fdatasync`, `sync`, `umask` | direct or trivial (`umask` returns 022; `access` is a `stat`) |
-| `fcntl` | `F_GETFD`/`F_SETFD` 0, `F_GETFL` reconstructs the access mode and adds `O_NONBLOCK` when the object is non-blocking, `F_SETFL` sets or clears `O_NONBLOCK` on the object -- a FIFO's open file since the named-pipes unit, per open (other status flags dropped; objects that never block accept silently), `F_DUPFD`/`F_DUPFD_CLOEXEC` via `dup`; others `-EINVAL` |
+| `fcntl` | `F_GETFD`/`F_SETFD` read and replace the handle's close-on-exec flag (`FD_CLOEXEC`; 0 before roadmap M3), `F_GETFL` reconstructs the access mode and adds `O_NONBLOCK` when the object is non-blocking, `F_SETFL` sets or clears `O_NONBLOCK` on the object -- a FIFO's open file since the named-pipes unit, per open (other status flags dropped; objects that never block accept silently), `F_DUPFD` via `dup`, `F_DUPFD_CLOEXEC` the same with the flag set; others `-EINVAL` |
 | `ioctl` | `TCGETS`, `TCSETS`/`TCSETSW`/`TCSETSF` and `TIOCGWINSZ` on a terminal, translated through `lx_termios_*`; `-ENOTTY` for anything else. It answered `-ENOTTY` for every request until the terminal-modes unit, and the cost was not fidelity but correctness: a libc told the console is not a terminal fully buffers its output, so a hosted program's prompt did not appear until something flushed it. This is the only place in the tree where a call's argument type depends on another argument -- a property of Linux's ABI, which this personality imitates, not one the native ABI adopts |
 
 ### Processes and identity
@@ -180,7 +180,8 @@ sessions; they were stubs answering the pid or 0 before that),
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`
 (native `128 + sig`) → `sig`; a fault (native 139) → `SIGSEGV` (11);
 `rusage` is zeroed when given. `fork`, `vfork` and a `clone` without
-`CLONE_THREAD`: "fork" below. `execve` and `clone3` → `-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
+`CLONE_THREAD`: "fork" below; `execve`: "execve" below. `clone3` →
+`-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
 (a libc tolerates these). `readlink`, `readlinkat`, `symlink` and
 `symlinkat` are implemented over `vfs_readlink`/`vfs_symlink` since the
 symlink unit, `lstat` is no longer an alias for `stat`, and
@@ -209,8 +210,9 @@ the build id, `x86_64`, `(none)`); `sysinfo` `-ENOSYS`.
 ### Sockets
 
 `socket` (`AF_INET` 2, `AF_INET6` 10, `SOCK_STREAM` 1 | `SOCK_DGRAM` 2;
-`SOCK_NONBLOCK` makes the socket non-blocking, `SOCK_CLOEXEC` is
-dropped), `bind`, `connect` (`-EINPROGRESS`/`-EALREADY` on a
+`SOCK_NONBLOCK` makes the socket non-blocking, `SOCK_CLOEXEC` marks the
+handle close-on-exec, as `accept4`'s and `socketpair`'s do and
+`MSG_CMSG_CLOEXEC` does for handles received in a message), `bind`, `connect` (`-EINPROGRESS`/`-EALREADY` on a
 non-blocking socket), `listen`, `accept`, `accept4` (`SOCK_NONBLOCK` on
 the accepted socket; `-EAGAIN` from a non-blocking listener), `sendto`,
 `recvfrom` (`-EAGAIN` when a non-blocking socket would wait), `shutdown`,
@@ -364,6 +366,28 @@ per SysV shm attach with the attach's tag, each counted on its segment
 the mapping and its exit detaches. A vfork child records none: the
 attaches belong to the space it borrows.
 
+### execve (roadmap M3)
+
+`execve(path, argv, envp)` is `process_execve`
+(`docs/kernel/process/design.md`, "exec"), the operation the native door
+offers as `SYS_exec`. The path, argv and envp are copied in first (at
+most 1024 strings and 32 KiB, `-E2BIG`; a bad pointer `-EFAULT` -- Linux
+opens the file before copying the strings, so a bad argv with a missing
+file is `-ENOENT` there and `-EFAULT` here). A `#!` file runs its
+interpreter with at most one argument (the rest of the first line,
+trimmed), the script's path, then `argv[1..]`; four levels deep is
+`-ELOOP`; a file that is neither ELF nor a script is `-ENOEXEC`, which a
+shell takes as "run it yourself"; no execute permission `-EACCES`. Every
+failure leaves the caller as it was. After the point of no return the
+calling thread is the only one, its tid is the pid, its thread pointer
+0, its FP/SIMD state the reset state; handles marked close-on-exec are
+closed; caught signals return to `SIG_DFL`, ignored ones stay ignored,
+the mask and pending signals stay; the personality is the new image's
+(a native program may exec a Linux one and the reverse). The Linux
+personality's exec hook (`linux_process_exec`) detaches the old SysV shm
+attach records, starts a new break after the new image and maps the
+signal trampoline in the new space. A vfork parent is released here.
+
 **This door was wider than the native one** -- the one place the
 personality was a superset rather than a translation -- until the audit
 unit "native threads and a futex"
@@ -481,7 +505,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`), so porting work
 sees what a program wanted. A number at or above 512 never reaches the
 table: the dispatcher's bounds check returns `-ENOSYS` and logs
 `syscall: pid N unknown number NR (linux)`. The numbers the personality
-knows but refuses -- `execve` (until M3 PR 3), `rseq`, `clone3` -- are
+knows but refuses -- `rseq`, `clone3` -- are
 `lx_nosys`: `-ENOSYS` without the count.
 
 ## Ownership, concurrency, memory

@@ -760,6 +760,15 @@ static void exec_tests(long pid)
     }
     CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
 
+    /* Linux to native: the personality follows the image. */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        const char *const av[] = { "init", "--exec-done", "7", 0 };
+        sc3(LX_execve, "/boot/init", av, g_exec_env);
+        lx_exit(25);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == (7 << 8), st);
+
     /* vfork then exec: the caller runs again once the child has exec'd,
      * not when it exits -- the new image waits for the caller's byte. */
     int vp[2];
@@ -780,8 +789,8 @@ static void exec_tests(long pid)
 
 int main(int argc, char **argv)
 {
-    if (argc >= 2 && argv[1][0] == 'e' && argv[1][1] == 'x' && argv[1][2] == 'e' && argv[1][3] == 'c')
-        return exec_mode(argc, argv);
+    if (argc >= 2)
+        return exec_mode(argc, argv);   /* run by an exec of itself; rc.linux passes no argument */
     CHECKV(argc >= 1 && argv[0][0] != '\0', argc);
 
     /* --- identity, uname, time --- */

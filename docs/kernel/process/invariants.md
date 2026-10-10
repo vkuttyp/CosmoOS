@@ -670,13 +670,26 @@ shared, an inherited pipe, dispositions and mask inherited and a pending
 signal not, the FP register, vfork's shared memory and wait, wait4
 `WNOHANG`); mutation runs in `docs/audit/2026-10-10-m3-process-model-report.md`.
 
+**P36. An exec that fails leaves the caller as it was; one that passes
+the point of no return leaves nothing of the old image.** Everything
+that can fail is built in a new space first; then the other threads end
+and are reaped before the space changes, so nothing runs on or writes
+the old one; after it, the old space, close-on-exec handles, caught
+handlers, the alternate stack, the thread pointer and FP/SIMD state are
+gone, and a vfork parent runs again. *Checked by*: `lxtest`'s exec
+section (refusals with the caller intact; the new image's view of
+argv, envp, handles, signals, mask and tid; a script; an exec from a
+second thread; vfork released at exec) and the native exec checks in
+`usertest`'s processes section; mutation runs in
+`docs/audit/2026-10-10-m3-process-model-report.md`.
+
 ## Gaps (documented, not invariants)
 
 - **The cwd race is not proved by a test**, only by construction, and the
   seam that would prove it is named in `docs/audit/next-subsystem-cwd-ref.md`.
-- ~~No `fork` or `exec` replacing the current image~~ -- `fork` exists
-  since roadmap M3 (**P35**), for the Linux personality only; native
-  creation is still `spawn` alone. `exec` replacing the image: M3 PR 3.
+- ~~No `fork` or `exec` replacing the current image~~ -- both exist since
+  roadmap M3 (**P35**, **P36**): `fork` for the Linux personality only
+  (native creation is still `spawn` alone), `exec` at both doors.
 - **One multi-threaded case remains unaimable**: a thread cloned
   *during* a stop, between the stop being posted and the last thread
   parking. It is handled -- the new thread inherits `sig_must_stop` --

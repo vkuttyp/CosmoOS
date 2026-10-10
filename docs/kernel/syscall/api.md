@@ -366,6 +366,14 @@ Details per call:
   per-process root or another mount namespace): the mount at `path`
   becomes the root (`docs/kernel-services/vfs/design.md`, "Switching the
   root"); init's directory becomes `/`. libc: `cosmo_switch_root`.
+- **exec** (`SYS_exec` 103, roadmap M3): `(const char *path, char *const
+  argv[], char *const envp[])`, returns only an error. The caller's image
+  is replaced in place by `path`'s, run under the personality the new
+  image selects; the operation is Linux `execve`'s
+  (`docs/kernel/process/design.md`, "exec"): `#!` scripts, close-on-exec
+  handles closed, caught signals reset, the vfork parent released. At
+  most 1024 strings and 32 KiB in argv and envp together (`-E2BIG`).
+  libc: `cosmo_exec`.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
   `kernel.arch`, `kernel.hostname` (from the caller's uts namespace),
   `kernel.uptime_ns`, `kernel.nprocs`, `kernel.cmdline` (the boot

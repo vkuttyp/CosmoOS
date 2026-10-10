@@ -227,7 +227,7 @@ static inline long cosmo_mount(const char *source, const char *target, const cha
 }
 /* Roadmap M3: replace this process's image with `path` (SYS_exec); returns
  * only an error. "#!" scripts run their interpreter. */
-static inline long cosmo_exec(const char *path, char *const argv[], char *const envp[])
+static inline long cosmo_exec(const char *path, const char *const argv[], const char *const envp[])
 {
     return cosmo_syscall3(SYS_exec, (long)path, (long)argv, (long)envp);
 }
