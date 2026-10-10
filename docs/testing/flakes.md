@@ -3870,3 +3870,23 @@ measurement. Debug builds now print the local APIC's in-service and
 request bitmaps, TPR and PPR in `irqrestore-bench`, so the next slow boot
 says whether a vector is stuck.
 
+**What the next runs said.** The interrupt controller was clean in a slow
+boot (run 38082931708: 936 ns a pair, in-service and request bitmaps
+empty, TPR and PPR 0), so no vector is stuck. In run 38085149981 every
+boot's pair loop read 254-274 ns on every CPU (the per-CPU probe now in
+the benchmark), yet the two-CPU boot failed: `net-bench` 11.4 s with
+steer 0 at 1 MiB/s. **Every slow `net-bench` of the series is the TCP
+collapse** -- 1 MiB/s on the single flow, against 23-38 in normal boots
+-- with or without the 7x interrupt-path mode.
+
+**The control: layout alone.** Draft PR #348 is main plus 9616 bytes of
+dead padding in `kernel/process/process.c`'s text, PR #347's `.text`
+growth and none of its code. Its run 38087072382 failed the same way, in
+the harness-break boot: `net-bench took 14551 ms`, steer 0 `tcp 1 flow 1
+MiB/s, 2 flows 1 MiB/s`, the watchdog, with the pair loop at 291 ns. At
+the same time PR #347's rerun (38085149981, attempt 2) passed every job.
+So the collapse is main's code, and the layout PR #347 brings makes it
+more frequent on CI's x86-64 runners; the branch's code is not its cause.
+This is the `net-bench` row's open follow-up -- a mechanism for the TCP
+collapse -- and it now blocks: a main with this layout would go red.
+
