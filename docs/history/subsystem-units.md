@@ -2680,7 +2680,7 @@ See the [history index](README.md).
     architectures.
   - Report: `docs/audit/2026-10-09-m1-randomness-report.md`.
 
-- **Roadmap M2: persistent system (2026-10-10; PR 1 of 3).**
+- **Roadmap M2: persistent system (2026-10-10; PRs #342, #343, #344).**
   - GPT partitions as block devices (`kernel/block/gpt.c`, `part.c`):
     both copies of the table must be valid and agree; partitions named by
     entry number (`vda1`, `nvme0n1p1`), bios bounded by the partition's
@@ -2698,7 +2698,7 @@ See the [history index](README.md).
     removed (`format_at`'s members, `lz4_compress`'s table -- the latter
     reachable on main from any `fsync` of a compressible file, proved by
     `tools/lz4-stack-probe.py`).
-  - PR 3: `SYS_switch_root` and `vfs_switch_root` (V37), `/dev` and
+  - PR 3 (#344): `SYS_switch_root` and `vfs_switch_root` (V37), `/dev` and
     anonymous files off the live root, init's disk root, `/bin/sync`,
     `make test-install` (install, reboot, persist, fallback) in CI.
     M2 ticked.
