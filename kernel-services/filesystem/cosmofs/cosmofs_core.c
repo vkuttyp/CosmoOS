@@ -1848,19 +1848,27 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         return rc;
     }
 
-    struct cfs_member mem[CFS_MAX_MEMBERS];
-    memset(mem, 0, sizeof(mem[0]) * n);
+    /* On the heap: 255 members of 64 bytes are the whole of a 16 KiB
+     * kernel stack. A self-test's format never noticed; a format from a
+     * system call (/dev/blkctl, roadmap M2) double-faulted. */
+    struct cfs_member *mem = kmalloc(sizeof(*mem) * n, KMEM_ZERO);
+    if (mem == NULL) {
+        pool_close(pool);
+        return -ENOMEM;
+    }
     uint8_t uuid[16];
     random_get_bytes(uuid, sizeof(uuid));
     uint64_t total = 0, free_total = 0;
     for (unsigned v = 0; v < n; v++) {
         uint64_t nb = pool->m[v].nblocks;
         if (nb < CFS_MIN_BLOCKS || nb > CFS_MAX_BLOCKS) {
+            kfree(mem);
             pool_close(pool);
             return -EINVAL;
         }
         unsigned chunks = (unsigned)((nb + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
         if (chunks > CFS_PTRS_PER_BLOCK) {
+            kfree(mem);
             pool_close(pool);
             return -EINVAL;
         }
@@ -1886,6 +1894,7 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
 
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL) {
+        kfree(mem);
         pool_close(pool);
         return -ENOMEM;
     }
@@ -1998,6 +2007,7 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
             rc = super_write(&tmp, CFS_SUPER_A, BIO_PREFLUSH | BIO_FUA);
     }
     kfree(block);
+    kfree(mem);
     pool_close(pool);
     if (rc == 0)
         kinfo("cosmofs: formatted %s%s: %u member(s), %llu blocks, %llu free", bd[0]->name,
