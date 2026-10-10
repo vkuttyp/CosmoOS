@@ -90,6 +90,17 @@ void arch_fpu_inherit(struct thread *t)
     arch_irq_restore(s);
 }
 
+void arch_fpu_reset_current(void)
+{
+    struct thread *cur = thread_current();
+    if (cur->fpu == NULL)
+        return;
+    arch_irq_state_t s = arch_irq_save();
+    memset(&cur->fpu->area, 0, sizeof(cur->fpu->area));   /* registers, FPSR and FPCR zero, as arch_fpu_alloc */
+    aarch64_fpu_area_restore(&cur->fpu->area);
+    arch_irq_restore(s);
+}
+
 size_t arch_fpu_state_size(void)
 {
     return sizeof(struct aarch64_fpu_area);

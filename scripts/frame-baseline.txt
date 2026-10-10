@@ -31,7 +31,6 @@ kernel/core/quiescetest.c selftest_quiesce_stress 2192
 kernel/device/devtest.c nvme_run_workers 2192
 kernel/device/devtest.c selftest_nvme 2264  
 kernel/process/process.c process_chdir 2128
-kernel/process/process.c process_create_from_images 2616
 kernel/process/proctest.c selftest_linux_elf 2704
 kernel/process/spawn.c process_spawn 3616
 kernel/scheduler/smptest.c selftest_smp_parallel 2176

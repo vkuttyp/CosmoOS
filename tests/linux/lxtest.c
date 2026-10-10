@@ -603,8 +603,185 @@ static void fork_tests(long pid)
     sc1(LX_close, qfd[1]);
 }
 
+/*
+ * --- execve (roadmap M3, docs/compat/linux/testing.md) ---
+ * A forked child execs this program again in a checking mode
+ * (`lxtest exec-child` and friends, dispatched first thing in main): the
+ * new image reports through its exit status, 0 or the number of the first
+ * check it failed.
+ */
+#define LXTEST_PATH "/boot/tests/linux/lxtest"
+
+static long put_file(const char *path, const char *text, unsigned mode)
+{
+    long fd = sc4(LX_openat, LX_AT_FDCWD, path, LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, mode);
+    if (fd < 0)
+        return fd;
+    long n = sc3(LX_write, fd, text, lx_strlen(text));
+    sc1(LX_close, fd);
+    return n == (long)lx_strlen(text) ? 0 : -5;
+}
+
+/* The checking modes, in the image an exec started. */
+static int exec_mode(int argc, char **argv)
+{
+    char **envp = argv + argc + 1;
+    long pid = sc0(LX_getpid);
+    if (sc0(LX_gettid) != pid)
+        return 2;   /* the exec'ing thread is the process's first */
+    if (streq(argv[1], "exec-child")) {
+        if (argc != 2 || envp[0] == 0 || !streq(envp[0], "LXV=1") || envp[1] == 0 || !streq(envp[1], "X=two") ||
+            envp[2] != 0)
+            return 3;
+        if (sc2(LX_fcntl, 20, LX_F_GETFD) != 0)
+            return 4;   /* kept, and without the flag */
+        if (sc2(LX_fcntl, 21, LX_F_GETFD) != -9 || sc2(LX_fcntl, 22, LX_F_GETFD) != -9)
+            return 5;   /* O_CLOEXEC (dup3) and FD_CLOEXEC (fcntl): closed */
+        struct lx_sigaction o;
+        if (sc4(LX_rt_sigaction, 10, 0, &o, 8) != 0 || o.handler != 0)
+            return 6;   /* a caught signal is back to SIG_DFL */
+        if (sc4(LX_rt_sigaction, 12, 0, &o, 8) != 0 || o.handler != 1)
+            return 7;   /* an ignored one stays ignored */
+        uint64_t m = 0;
+        if (sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, 0, &m, 8) != 0 || (m & (1ull << 1)) == 0)
+            return 8;   /* the mask is kept */
+#if defined(__x86_64__)
+        unsigned long fs = 1;
+        if (sc2(LX_arch_prctl, LX_ARCH_GET_FS, &fs) != 0 || fs != 0)
+            return 9;   /* no thread pointer from the old image */
+#endif
+        if (sc3(LX_write, 20, "x", 1) != 1)
+            return 10;
+        return 0;
+    }
+    if (streq(argv[1], "exec-script")) {
+        /* "#! /boot/tests/linux/lxtest  exec-script " run as lx-script a1 */
+        if (argc != 4 || !streq(argv[0], LXTEST_PATH) || !streq(argv[2], "/tmp/lx-script") || !streq(argv[3], "a1"))
+            return 3;
+        return 0;
+    }
+    if (streq(argv[1], "exec-tid"))
+        return 0;   /* reached from a second thread: the tid check above is the test */
+    if (streq(argv[1], "exec-wait")) {
+        /* The vfork parent must be running already: it writes fd 23. */
+        struct lx_pollfd pf = { .fd = 23, .events = LX_POLLIN };
+        if (lx_poll_ms(&pf, 1, 3000) != 1)
+            return 3;
+        char b;
+        return sc3(LX_read, 23, &b, 1) == 1 ? 0 : 4;
+    }
+    return 99;
+}
+
+static const char *const g_exec_env[] = { "LXV=1", "X=two", 0 };
+
+static int exec_from_thread(void *arg)
+{
+    (void)arg;
+    const char *const av[] = { LXTEST_PATH, "exec-tid", 0 };
+    sc3(LX_execve, LXTEST_PATH, av, g_exec_env);
+    return 98;   /* only if the exec failed */
+}
+
+static int vfork_exec_child(void *arg)
+{
+    (void)arg;
+    const char *const av[] = { LXTEST_PATH, "exec-wait", 0 };
+    sc3(LX_execve, LXTEST_PATH, av, g_exec_env);
+    lx_exit(127);
+    return 127;
+}
+
+static void exec_tests(long pid)
+{
+    int32_t st;
+    const char *const none[] = { "x", 0 };
+    /* Failures leave the caller as it was. */
+    CHECKV(sc3(LX_execve, "/tmp/lx-none", none, g_exec_env) == -2, 0);   /* ENOENT */
+    CHECKV(put_file("/tmp/lx-noexec", "#!/bin/sh\n", 0644) == 0, 0);
+    CHECKV(sc3(LX_execve, "/tmp/lx-noexec", none, g_exec_env) == -13, 0);   /* EACCES: no x bit */
+    CHECKV(put_file("/tmp/lx-text", "just text\n", 0755) == 0, 0);
+    CHECKV(sc3(LX_execve, "/tmp/lx-text", none, g_exec_env) == -8, 0);   /* ENOEXEC: a shell's to run */
+    CHECKV(put_file("/tmp/lx-empty", "#!\n", 0755) == 0, 0);
+    CHECKV(sc3(LX_execve, "/tmp/lx-empty", none, g_exec_env) == -8, 0);
+    CHECKV(put_file("/tmp/lx-loop", "#!/tmp/lx-loop\n", 0755) == 0, 0);
+    CHECKV(sc3(LX_execve, "/tmp/lx-loop", none, g_exec_env) == -40, 0);   /* ELOOP: four interpreters deep */
+    CHECKV(sc0(LX_getpid) == pid, 0);
+
+    /* The image replaced: argv, envp, close-on-exec, dispositions, mask. */
+    int pfd[2], cl[2];
+    CHECKV(sc2(LX_pipe2, pfd, 0) == 0 && sc2(LX_pipe2, cl, LX_O_CLOEXEC) == 0, 0);
+    CHECKV(sc2(LX_fcntl, cl[0], LX_F_GETFD) == LX_FD_CLOEXEC, 0);   /* pipe2's O_CLOEXEC */
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        sc1(LX_close, pfd[0]);
+        CHILD_CHECK(sc3(LX_dup3, pfd[1], 20, 0) == 20, 20);
+        CHILD_CHECK(sc3(LX_dup3, pfd[1], 21, LX_O_CLOEXEC) == 21, 21);
+        CHILD_CHECK(sc3(LX_dup3, pfd[1], 22, 0) == 22 && sc3(LX_fcntl, 22, LX_F_SETFD, LX_FD_CLOEXEC) == 0, 22);
+        CHILD_CHECK(sc2(LX_fcntl, 22, LX_F_GETFD) == LX_FD_CLOEXEC, 23);
+        sc1(LX_close, pfd[1]);
+        struct lx_sigaction h = { .handler = (uint64_t)(uintptr_t)thread_handler, .flags = LX_SA_SIGINFO | LX_SA_RESTORER,
+                                  .restorer = (uint64_t)(uintptr_t)lx_restorer },
+                            ign = { .handler = 1 };
+        CHILD_CHECK(sc4(LX_rt_sigaction, 10, &h, 0, 8) == 0 && sc4(LX_rt_sigaction, 12, &ign, 0, 8) == 0, 24);
+        const char *const av[] = { LXTEST_PATH, "exec-child", 0 };
+        sc3(LX_execve, LXTEST_PATH, av, g_exec_env);
+        lx_exit(25);
+    }
+    CHECKV(c > 0, c);
+    sc1(LX_close, pfd[1]);
+    char b = 0;
+    CHECKV(sc3(LX_read, pfd[0], &b, 1) == 1 && b == 'x', b);   /* the new image wrote an inherited handle */
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+    sc1(LX_close, pfd[0]);
+    sc1(LX_close, cl[0]);
+    sc1(LX_close, cl[1]);
+
+    /* A script: the interpreter, its one argument, the script, the rest. */
+    CHECKV(put_file("/tmp/lx-script", "#! " LXTEST_PATH "  exec-script \nnot reached\n", 0755) == 0, 0);
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        const char *const av[] = { "lx-script", "a1", 0 };
+        sc3(LX_execve, "/tmp/lx-script", av, g_exec_env);
+        lx_exit(25);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+
+    /* From a second thread: the first ends, the exec'ing one takes the pid. */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        static int32_t ptid, ctid;   /* THREAD_FLAGS writes both words */
+        long t = lx_clone(exec_from_thread, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, &ptid, &ctid, g_tcb);
+        CHILD_CHECK(t > 0, 30);
+        for (;;) {   /* the first thread waits to be ended by the exec */
+            struct lx_timespec nap = { 1, 0 };
+            sc2(LX_nanosleep, &nap, 0);
+        }
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+
+    /* vfork then exec: the caller runs again once the child has exec'd,
+     * not when it exits -- the new image waits for the caller's byte. */
+    int vp[2];
+    CHECKV(sc2(LX_pipe2, vp, 0) == 0 && sc3(LX_dup3, vp[0], 23, 0) == 23, 0);
+    c = lx_clone(vfork_exec_child, g_vfork_stack + sizeof(g_vfork_stack), 0,
+                 LX_CLONE_VM | LX_CLONE_VFORK | LX_CLONE_EXIT_SIGCHLD, 0, 0, 0);
+    CHECKV(c > 0, c);
+    CHECKV(sc3(LX_write, vp[1], "v", 1) == 1, 0);
+    CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+    sc1(LX_close, 23);
+    sc1(LX_close, vp[0]);
+    sc1(LX_close, vp[1]);
+    for (const char *const *f = (const char *const[]){ "/tmp/lx-noexec", "/tmp/lx-text", "/tmp/lx-empty", "/tmp/lx-loop",
+                                                         "/tmp/lx-script", 0 };
+         *f; f++)
+        sc3(LX_unlinkat, LX_AT_FDCWD, *f, 0);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && argv[1][0] == 'e' && argv[1][1] == 'x' && argv[1][2] == 'e' && argv[1][3] == 'c')
+        return exec_mode(argc, argv);
     CHECKV(argc >= 1 && argv[0][0] != '\0', argc);
 
     /* --- identity, uname, time --- */
@@ -1930,8 +2107,8 @@ int main(int argc, char **argv)
     CHECKV(sc2(LX_kill, pid, 0) == 0, 0);                       /* existence probe */
     CHECKV(sc2(LX_kill, pid, 65) == -22, 0);
     CHECKV(sc2(LX_kill, pid, 17) == 0, 0);                      /* SIGCHLD: the default ignores it */
-    CHECKV(sc1(LX_execve, "/bin/true") == -38, 0);             /* ENOSYS */
     fork_tests(pid);
+    exec_tests(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);
 
     /* A handler through kill: siginfo names the sender, the signal is

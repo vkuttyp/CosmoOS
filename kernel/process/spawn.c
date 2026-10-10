@@ -11,11 +11,13 @@
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/uaccess.h>
 #include <kernel/utsns.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
@@ -331,3 +333,180 @@ out_cwd:
     return rc;
 }
 FRAME_EXEMPT_END(process_spawn)
+
+/* --- exec from a path (docs/kernel/process/design.md, "exec") ---------- */
+
+/* Append `s` (n bytes, not NUL-terminated) to the argument block. */
+static const char *exec_str(struct exec_args *ea, const char *s, size_t n)
+{
+    if (n + 1 > sizeof(ea->strings) - ea->used)
+        return NULL;
+    char *d = ea->strings + ea->used;
+    memcpy(d, s, n);
+    d[n] = '\0';
+    ea->used += n + 1;
+    return d;
+}
+
+static int copy_vec(uint64_t uarr, const char **out, unsigned *n_out, struct exec_args *ea)
+{
+    unsigned n = 0;
+    if (uarr != 0) {
+        for (;;) {
+            uint64_t uptr;
+            if (copy_from_user(&uptr, uarr + (uint64_t)n * 8, 8))
+                return -EFAULT;
+            if (uptr == 0)
+                break;
+            if (ea->argc + ea->envc + n >= EXEC_ARG_ENTRIES)
+                return -E2BIG;
+            size_t room = EXEC_ARG_MAX > ea->used ? EXEC_ARG_MAX - ea->used : 0;
+            if (room == 0)
+                return -E2BIG;
+            int len = strncpy_from_user(ea->strings + ea->used, uptr, room);
+            if (len < 0)
+                return len == -ENAMETOOLONG ? -E2BIG : len;
+            out[n++] = ea->strings + ea->used;
+            ea->used += (size_t)len + 1;
+        }
+    }
+    out[n] = NULL;
+    *n_out = n;
+    return 0;
+}
+
+int exec_args_copy(struct exec_args *ea, uint64_t upath, uint64_t uargv, uint64_t uenvp)
+{
+    ea->argc = ea->envc = 0;
+    ea->used = 0;
+    int len = strncpy_from_user(ea->path, upath, sizeof(ea->path));
+    if (len < 0)
+        return len;
+    if (len == 0)
+        return -ENOENT;
+    int rc = copy_vec(uargv, ea->argv, &ea->argc, ea);
+    if (rc)
+        return rc;
+    return copy_vec(uenvp, ea->envp, &ea->envc, ea);
+}
+
+/*
+ * A "#!" first line: the interpreter and at most one argument (the rest
+ * of the line, trimmed), Linux's rule, read from the first 256 bytes.
+ * argv becomes interpreter [argument] script argv[1..]. 1 when the image
+ * is a script (and `*interp` names the interpreter), 0 when it is not,
+ * -ENOEXEC for an empty interpreter, -E2BIG when the words do not fit.
+ */
+static int exec_script(struct exec_args *ea, const struct process_image *img, const char *script, const char **interp)
+{
+    const char *b = img->data;
+    if (img->size < 2 || b[0] != '#' || b[1] != '!')
+        return 0;
+    size_t end = img->size < 256 ? img->size : 256;
+    size_t i = 2;
+    while (i < end && (b[i] == ' ' || b[i] == '\t'))
+        i++;
+    size_t is = i;
+    while (i < end && b[i] != ' ' && b[i] != '\t' && b[i] != '\n')
+        i++;
+    size_t ie = i;
+    if (ie == is)
+        return -ENOEXEC;
+    while (i < end && (b[i] == ' ' || b[i] == '\t'))
+        i++;
+    size_t as = i;
+    while (i < end && b[i] != '\n')
+        i++;
+    size_t ae = i;
+    while (ae > as && (b[ae - 1] == ' ' || b[ae - 1] == '\t' || b[ae - 1] == '\r'))
+        ae--;
+    unsigned extra = ae > as ? 2 : 1;   /* the interpreter, its argument; the script replaces argv[0] */
+    if (ea->argc + ea->envc + extra >= EXEC_ARG_ENTRIES + 3)
+        return -E2BIG;
+    const char *iw = exec_str(ea, b + is, ie - is);
+    const char *aw = ae > as ? exec_str(ea, b + as, ae - as) : NULL;
+    const char *sw = exec_str(ea, script, strlen(script));
+    if (iw == NULL || (ae > as && aw == NULL) || sw == NULL)
+        return -E2BIG;
+    unsigned rest = ea->argc > 0 ? ea->argc - 1 : 0;
+    memmove(&ea->argv[extra + 1], &ea->argv[1], (size_t)rest * sizeof(ea->argv[0]));
+    ea->argv[0] = iw;
+    if (aw)
+        ea->argv[1] = aw;
+    ea->argv[extra] = sw;
+    ea->argc = extra + 1 + rest;
+    ea->argv[ea->argc] = NULL;
+    *interp = iw;
+    return 1;
+}
+
+#define EXEC_SCRIPT_DEPTH 4   /* Linux's BINPRM_MAX_RECURSION */
+
+int process_execve(struct exec_args *ea, void *syscall_frame)
+{
+    struct process *cur = process_current();
+    KASSERT(cur != NULL);
+    /* AT_EXECFN and the process name are the path the caller asked for,
+     * even when a script sends the load to its interpreter. */
+    char *execfn = ea->path;
+    const char *path = ea->path;
+    struct process_image exe = { 0 }, interp = { 0 };
+    int rc;
+    for (unsigned depth = 0;; depth++) {
+        exe = (struct process_image){ .path = path };
+        rc = read_executable(path, &exe);
+        if (rc)
+            return rc;
+        const char *next = NULL;
+        rc = exec_script(ea, &exe, path, &next);
+        if (rc <= 0)
+            break;
+        vm_kernel_free((vaddr_t)exe.data);
+        vnode_put(exe.vn);
+        if (depth + 1 >= EXEC_SCRIPT_DEPTH)
+            return -ELOOP;
+        path = next;
+    }
+    if (rc < 0)
+        goto out_exe;
+    /* Not ELF and not a script: -ENOEXEC quietly (a shell runs such a file
+     * itself), before the loader would warn about it. */
+    static const char magic[4] = { 0x7f, 'E', 'L', 'F' };
+    if (exe.size < 4 || memcmp(exe.data, magic, 4) != 0) {
+        rc = -ENOEXEC;
+        goto out_exe;
+    }
+    struct elf_info *peek = kmalloc(sizeof(*peek), 0);
+    if (peek == NULL) {
+        rc = -ENOMEM;
+        goto out_exe;
+    }
+    const char *why = NULL;
+    rc = elf_validate(exe.data, exe.size, USER_LO, USER_HI, peek, &why);
+    if (rc) {
+        kwarn("process: exec '%s' rejected: %s", basename_of(path), why ? why : "?");
+    } else if (process_filter_blocks_personality(cur, peek->cosmo_note)) {
+        /* As spawn: a filter is written in one personality's numbering. */
+        kwarn("process: exec '%s' rejected: a filtered %s process cannot become a %s program", basename_of(path),
+              cur->pers->name, peek->cosmo_note ? "native" : "Linux");
+        rc = -EPERM;
+    } else if (peek->has_interp) {
+        interp.path = peek->interp;
+        rc = read_executable(peek->interp, &interp);
+        if (rc)
+            kwarn("process: exec '%s': interpreter %s: %d", basename_of(path), peek->interp, rc);
+    }
+    if (rc == 0)
+        rc = process_exec_images(&exe, peek->has_interp ? &interp : NULL, basename_of(execfn), ea->argv, ea->envp,
+                                 execfn, syscall_frame);
+    kfree(peek);
+    if (interp.data)
+        vm_kernel_free((vaddr_t)interp.data);
+    if (interp.vn)
+        vnode_put(interp.vn);
+out_exe:
+    vm_kernel_free((vaddr_t)exe.data);
+    if (exe.vn)
+        vnode_put(exe.vn);
+    return rc;
+}

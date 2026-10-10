@@ -66,6 +66,16 @@ void signal_process_fork(struct process *child, struct process *parent)
     spin_unlock_irqrestore(&parent->lock, s);
 }
 
+void signal_exec_reset(struct process *p, struct thread *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < SIG_MAX; i++)
+        if (p->sigactions[i].handler != SIG_DFL && p->sigactions[i].handler != SIG_IGN)
+            memset(&p->sigactions[i], 0, sizeof(p->sigactions[i]));   /* the handler is in the old image */
+    spin_unlock_irqrestore(&p->lock, s);
+    memset(&t->altstack, 0, sizeof(t->altstack));   /* none, as a new thread starts */
+}
+
 void signal_process_release(struct process *p)
 {
     kfree(p->sigactions);
@@ -512,6 +522,10 @@ bool signal_pending(void)
         return false;
     if (__atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING)
         return true;
+    /* Another thread is exec'ing: this one must leave (signal_deliver). */
+    struct thread *ex = __atomic_load_n(&p->exec_thread, __ATOMIC_ACQUIRE);
+    if (ex != NULL && ex != t)
+        return true;
     /* A stop this thread has not parked for yet. Without this a sibling
      * woken by process_stop re-evaluates its wait, finds the shared
      * pending bit already taken by whichever thread dequeued the stop,
@@ -557,6 +571,13 @@ void signal_deliver(void *frame, bool is_syscall)
     for (;;) {
         if (__atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING)
             terminate(p, p->exit_status);
+        struct thread *ex = __atomic_load_n(&p->exec_thread, __ATOMIC_ACQUIRE);
+        if (ex != NULL && ex != t) {
+            /* Another thread is replacing the image: this one ends, and
+             * only this one (Linux de_thread). */
+            arch_irq_enable();
+            process_thread_exit(0);
+        }
         /*
          * Park here if the process is stopped. This is the only place a
          * thread stops, and it re-reads the process's own state rather

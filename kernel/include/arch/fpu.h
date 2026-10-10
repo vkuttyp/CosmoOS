@@ -46,6 +46,10 @@ int arch_fpu_alloc(struct thread *t);
  * fork() call. No-op when the caller has no state. */
 void arch_fpu_inherit(struct thread *t);
 
+/* exec: the calling thread's registers return to the reset values, live
+ * and saved. No-op when it has no state. */
+void arch_fpu_reset_current(void);
+
 /* Release the state (no-op when there is none). Only for a thread that
  * is not running, or for the calling thread itself. */
 void arch_fpu_free(struct thread *t);

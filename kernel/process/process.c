@@ -56,10 +56,10 @@ const struct rlimits rlimits_default = {
     },
 };
 
-static void apply_space_limits(struct process *p)
+static void apply_space_limits(struct vm_space *space, const struct rlimits *rlim)
 {
-    uint64_t as = p->rlim.v[COSMO_RLIMIT_AS], mem = p->rlim.v[COSMO_RLIMIT_MEM];
-    vm_space_set_limits(p->space, as == COSMO_RLIM_INFINITY ? UINT64_MAX : as / PAGE_SIZE,
+    uint64_t as = rlim->v[COSMO_RLIMIT_AS], mem = rlim->v[COSMO_RLIMIT_MEM];
+    vm_space_set_limits(space, as == COSMO_RLIM_INFINITY ? UINT64_MAX : as / PAGE_SIZE,
                         mem == COSMO_RLIM_INFINITY ? UINT64_MAX : mem / PAGE_SIZE);
 }
 static spinlock_t g_process_table_lock = SPINLOCK_INIT("process_table");
@@ -218,8 +218,8 @@ void process_init(void)
 
 /* --- initial user stack --- */
 
-#define INITIAL_STACK_PAGES 2u
-#define INITIAL_STRINGS_MAX 300u
+#define INITIAL_STACK_PAGES 2u       /* populated at least; more when the strings need them */
+#define INITIAL_STACK_PAGES_MAX 32u  /* 128 KiB: argv, envp and the vector, as Linux's ARG_MAX order */
 
 /*
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
@@ -229,9 +229,10 @@ void process_init(void)
  * success; returns -EINVAL for an invalid frame or -ENOMEM for scratch
  * allocation failure.
  */
-static int build_initial_stack(struct process *p, const struct elf_info *info, uint64_t stack_top,
-                                    const char *const argv[], const char *const envp[], const char *execfn,
-                                    uint64_t interp_base, uint64_t *sp_out)
+/* Bytes of the initial frame: the strings, the pointer arrays and the
+ * vector's 40 words, with the alignment slack; the counts on the side. */
+static size_t initial_stack_need(const struct personality *pers, const char *const argv[], const char *const envp[],
+                                 const char *execfn, unsigned *argc_out, unsigned *envc_out)
 {
     unsigned argc = 0, envc = 0;
     size_t strings = 0;
@@ -239,40 +240,56 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
         strings += strlen(argv[argc]) + 1;
     for (; envp && envp[envc]; envc++)
         strings += strlen(envp[envc]) + 1;
-    if (argc + envc > INITIAL_STRINGS_MAX)
-        return -EINVAL;
-    const char *platform = p->pers->platform;   /* AT_PLATFORM, when the personality has one */
-    strings += strlen(execfn) + 1 + (platform ? strlen(platform) + 1 : 0);
-    const size_t span = INITIAL_STACK_PAGES * PAGE_SIZE;
-    /* words: argc, argv[argc+1], envp[envc+1], auxv (up to 20 pairs) */
+    strings += strlen(execfn) + 1 + (pers->platform ? strlen(pers->platform) + 1 : 0);
     size_t words = 1 + (argc + 1) + (envc + 1) + 40;
-    size_t need = strings + 16 + words * 8 + 32;
-    if (need > span - 64)
-        return -EINVAL;
+    *argc_out = argc;
+    *envc_out = envc;
+    return strings + 16 + words * 8 + 32 + 64;
+}
+
+static unsigned initial_stack_pages(size_t need)
+{
+    size_t pages = (need + PAGE_SIZE - 1) / PAGE_SIZE;
+    return pages < INITIAL_STACK_PAGES ? INITIAL_STACK_PAGES : (unsigned)pages;
+}
+
+/*
+ * Lay out argc/argv/envp/auxv and the strings at the top of the user
+ * stack of `space`, writing through the direct map into its `pages`
+ * populated top pages. The personality `pers` supplies the vector (its
+ * auxv hook, reading `p`'s credentials) and AT_PLATFORM. Publishes the
+ * initial user stack pointer on success; returns -E2BIG when the frame
+ * does not fit, -ENOMEM for scratch allocation failure.
+ */
+static int build_initial_stack(struct process *p, const struct personality *pers, struct vm_space *space,
+                               const struct elf_info *info, uint64_t stack_top, const char *const argv[],
+                               const char *const envp[], const char *execfn, uint64_t interp_base, unsigned npages,
+                               uint64_t *sp_out)
+{
+    unsigned argc, envc;
+    size_t need = initial_stack_need(pers, argv, envp, execfn, &argc, &envc);
+    const size_t span = (size_t)npages * PAGE_SIZE;
+    if (npages > INITIAL_STACK_PAGES_MAX || need > span)
+        return -E2BIG;
+    const char *platform = pers->platform;   /* AT_PLATFORM, when the personality has one */
     uint64_t base_va = stack_top - span;
     /* The populated pages need not be contiguous in the direct map: every
      * byte is written through the page it lands in. */
-    uint8_t *pages[INITIAL_STACK_PAGES];
-    for (unsigned i = 0; i < INITIAL_STACK_PAGES; i++) {
+    uint8_t *pages[INITIAL_STACK_PAGES_MAX];
+    for (unsigned i = 0; i < npages; i++) {
         paddr_t pa;
-        if (!arch_mmu_query(&p->space->mmu, (vaddr_t)(base_va + i * PAGE_SIZE), &pa, NULL, NULL, NULL))
+        if (!arch_mmu_query(&space->mmu, (vaddr_t)(base_va + i * PAGE_SIZE), &pa, NULL, NULL, NULL))
             return -EINVAL;
         pages[i] = phys_to_virt(pa);
     }
 #define AT(va) (pages[((va) - base_va) / PAGE_SIZE] + (((va) - base_va) % PAGE_SIZE))
     /* Strings grow down from the top; a copy may straddle the page boundary. */
     uint64_t sp = stack_top;
-    /* Spawn already has several caller frames live. Keep these 5 KiB of
-     * scratch off the 16 KiB kernel stack so interrupt entry and its
-     * lockdep hooks still have room. Storage is private to this spawn. */
-    struct initial_stack_scratch {
-        uint64_t str_addrs[INITIAL_STRINGS_MAX];
-        uint64_t words[1 + INITIAL_STRINGS_MAX + 2 + 40];
-    };
-    struct initial_stack_scratch *scratch = kmalloc(sizeof(*scratch), 0);
-    if (scratch == NULL)
+    /* The string addresses and the word area, off the kernel stack: spawn
+     * and exec already have several caller frames live. */
+    uint64_t *str_addrs = kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + 40) * sizeof(uint64_t), 0);
+    if (str_addrs == NULL)
         return -ENOMEM;
-    uint64_t *str_addrs = scratch->str_addrs;
     for (unsigned i = 0; i < argc + envc; i++) {
         const char *str = i < argc ? argv[i] : envp[i - argc];
         size_t n = strlen(str) + 1;
@@ -311,7 +328,7 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
     }
     /* Word area, 16-byte aligned at the final rsp; built in the scratch
      * array then copied, since it may straddle the boundary too. */
-    uint64_t *w = scratch->words;
+    uint64_t *w = str_addrs + argc + envc + 1;
     unsigned k = 0;
     w[k++] = argc;
     for (unsigned i = 0; i < argc; i++)
@@ -322,8 +339,8 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
     w[k++] = 0;
     struct personality_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
                                        .platform_addr = platform_addr, .interp_base = interp_base };
-    k += p->pers->auxv(p, info, &x, w + k, 40);
-    words = k;
+    k += pers->auxv(p, info, &x, w + k, 40);
+    size_t words = k;
     sp &= ~0xFULL;
     if (((words * 8) & 0xF) != 0)
         sp -= 8;
@@ -335,9 +352,133 @@ static int build_initial_stack(struct process *p, const struct elf_info *info, u
             *AT(va + b) = (uint8_t)(w[i] >> (8 * b));
     }
 #undef AT
-    kfree(scratch);
+    kfree(str_addrs);
     *sp_out = sp;
     return 0;
+}
+
+/*
+ * --- an image in a new space (spawn and exec) ---
+ * The executable `exe` and its interpreter, validated and loaded into a
+ * new user space with the stack and the initial frame: everything that
+ * can fail, done before anything of a process changes. `p` supplies the
+ * limits and the credentials the vector reports; nothing of `p` is
+ * written. On failure nothing is left.
+ */
+struct image_build {
+    struct elf_info info, iinfo;   /* the executable's (the personality's init and auxv), the interpreter's */
+    const struct personality *pers;
+    struct vm_space *space;
+    uint64_t entry, sp, image_end, interp_base;
+};
+
+static int image_build(struct process *p, const struct process_image *exe, const struct process_image *interp,
+                       const char *name, bool kernel_created, const char *const argv[], const char *const envp[],
+                       const char *execfn, struct image_build *ib)
+{
+    struct elf_info *info = &ib->info, *iinfo = &ib->iinfo;
+    const char *why = NULL;
+    name = name ? name : "?";
+    int rc = elf_validate(exe->data, exe->size, USER_LO, USER_HI, info, &why);
+    if (rc) {
+        kwarn("process: '%s' rejected: %s", name, why ? why : "?");
+        return rc;
+    }
+    if (info->is_dyn) {
+        elf_rebase(info, USER_PIE_BASE);
+        if (info->hi > USER_HI || info->hi < info->lo) {
+            kwarn("process: '%s' rejected: PIE does not fit at its base", name);
+            return -ENOEXEC;
+        }
+    }
+    if (info->has_interp && interp == NULL) {
+        kwarn("process: '%s' rejected: needs the interpreter %s", name, info->interp);
+        return -ENOEXEC;
+    }
+    if (interp) {
+        rc = elf_validate(interp->data, interp->size, USER_LO, USER_HI, iinfo, &why);
+        if (rc) {
+            kwarn("process: '%s' rejected: interpreter %s: %s", name, interp->path, why ? why : "?");
+            return rc;
+        }
+        if (iinfo->has_interp) {
+            kwarn("process: '%s' rejected: interpreter %s names an interpreter itself", name, interp->path);
+            return -ENOEXEC;
+        }
+    }
+    /* Personality: kernel-created processes are native; otherwise the
+     * ELF decides (personality_for_elf: the CosmoOS note is native). */
+    ib->pers = personality_for_elf(info, kernel_created);
+    unsigned argc, envc;
+    unsigned npages = initial_stack_pages(initial_stack_need(ib->pers, argv, envp, execfn, &argc, &envc));
+    if (npages > INITIAL_STACK_PAGES_MAX)
+        return -E2BIG;
+
+    rc = vm_space_create_user(&ib->space);
+    if (rc)
+        return rc;
+    struct vm_space *space = ib->space;
+    apply_space_limits(space, &p->rlim);
+    ib->interp_base = 0;
+    rc = elf_load_into(space, exe->data, info, exe->vn);
+    if (rc) {
+        kwarn("process: '%s' load failed (%d)", name, rc);
+        goto fail;
+    }
+    ib->image_end = info->hi;
+    ib->entry = info->entry;
+    if (interp) {
+        /* The interpreter: an ET_DYN one at the first free range at or
+         * above USER_INTERP_BASE, an ET_EXEC one where it was linked. */
+        if (iinfo->is_dyn) {
+            uint64_t base = vm_user_find_free(space, USER_INTERP_BASE, (size_t)(iinfo->hi - iinfo->lo));
+            if (base == 0) {
+                rc = -ENOMEM;
+                goto fail;
+            }
+            elf_rebase(iinfo, base);
+            ib->interp_base = base;
+        }
+        rc = elf_load_into(space, interp->data, iinfo, interp->vn);
+        if (rc) {
+            kwarn("process: '%s' interpreter load failed (%d)", name, rc);
+            goto fail;
+        }
+        ib->entry = iinfo->entry;
+        if (iinfo->hi > ib->image_end)
+            ib->image_end = iinfo->hi;
+    }
+
+    /* Stack: lazily populated except the top pages, with a guard below. */
+    rc = vm_user_map_anon(space, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
+                          VM_REGION_GUARD_BELOW, "stack");
+    if (rc)
+        goto fail;
+    for (unsigned i = 1; i <= npages; i++) {
+        /* Populate the top pages so the initial frame can be written. */
+        struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
+        if (pg == NULL) {
+            rc = -ENOMEM;
+            goto fail;
+        }
+        rc = arch_mmu_map(&space->mmu, (vaddr_t)(USER_STACK_TOP - i * PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
+                          VM_PROT_RW, VM_CACHE_WB, ARCH_MMU_MAP_USER);
+        if (rc) {
+            pmm_free_page(pg);
+            goto fail;
+        }
+        space->anon_pages++;
+    }
+    rc = build_initial_stack(p, ib->pers, space, info, USER_STACK_TOP, argv, envp, execfn, ib->interp_base, npages,
+                             &ib->sp);
+    if (rc)
+        goto fail;
+    return 0;
+
+fail:
+    vm_space_destroy(space);   /* never active: no thread has run on it */
+    ib->space = NULL;
+    return rc;
 }
 
 /* --- user thread start --- */
@@ -424,6 +565,7 @@ static struct process *process_alloc(const char *name)
     waitqueue_init(&p->stopped_wq, "stopped");
     waitqueue_init(&p->signalfd_wqh, "signalfd");
     waitqueue_init(&p->vfork_wq, "vfork");
+    waitqueue_init(&p->exec_wq, "exec");
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");
@@ -585,49 +727,16 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     return process_create_from_images(&exe, NULL, name, argv, envp, attr, out);
 }
 
-FRAME_EXEMPT_BEGIN(process_create_from_images)   /* scripts/frame-baseline.txt: 2616 bytes */
 int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name,
                                const char *const argv[], const char *const envp[],
                                const struct process_spawn_attr *attr, struct process **out)
 {
-    struct elf_info info, iinfo;
-    const char *why = NULL;
-    int rc = elf_validate(exe->data, exe->size, USER_LO, USER_HI, &info, &why);
-    if (rc) {
-        kwarn("process: '%s' rejected: %s", name ? name : "?", why ? why : "?");
-        return rc;
-    }
-    if (info.is_dyn) {
-        elf_rebase(&info, USER_PIE_BASE);
-        if (info.hi > USER_HI || info.hi < info.lo) {
-            kwarn("process: '%s' rejected: PIE does not fit at its base", name ? name : "?");
-            return -ENOEXEC;
-        }
-    }
-    if (info.has_interp && interp == NULL) {
-        kwarn("process: '%s' rejected: needs the interpreter %s", name ? name : "?", info.interp);
-        return -ENOEXEC;
-    }
-    if (interp) {
-        rc = elf_validate(interp->data, interp->size, USER_LO, USER_HI, &iinfo, &why);
-        if (rc) {
-            kwarn("process: '%s' rejected: interpreter %s: %s", name ? name : "?", interp->path, why ? why : "?");
-            return rc;
-        }
-        if (iinfo.has_interp) {
-            kwarn("process: '%s' rejected: interpreter %s names an interpreter itself", name ? name : "?", interp->path);
-            return -ENOEXEC;
-        }
-    }
-
+    int rc;
     struct process *p = process_alloc(name);
     if (p == NULL)
         return -ENOMEM;
 
     struct process *parent = attr ? attr->parent : NULL;
-    /* Personality: kernel-created processes are native; otherwise the
-     * ELF decides (personality_for_elf: the CosmoOS note is native). */
-    p->pers = personality_for_elf(&info, parent == NULL);
     if (parent) {
         p->parent_pid = parent->pid;
         p->cred = parent->cred;
@@ -729,70 +838,27 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         goto fail;
     }
 
-    rc = vm_space_create_user(&p->space);
-    if (rc)
+    struct image_build *ib = kmalloc(sizeof(*ib), 0);
+    if (ib == NULL) {
+        rc = -ENOMEM;
         goto fail;
-    apply_space_limits(p);
-
-    rc = elf_load_into(p->space, exe->data, &info, exe->vn);
+    }
+    rc = image_build(p, exe, interp, name, parent == NULL, argv, envp, exe->path, ib);
     if (rc) {
-        kwarn("process: '%s' load failed (%d)", p->name, rc);
+        kfree(ib);
         goto fail;
     }
-    p->image_end = info.hi;
-    uint64_t entry = info.entry;
-    p->exec_entry = info.entry;
-    if (interp) {
-        /* The interpreter: an ET_DYN one at the first free range at or
-         * above USER_INTERP_BASE, an ET_EXEC one where it was linked. */
-        if (iinfo.is_dyn) {
-            uint64_t base = vm_user_find_free(p->space, USER_INTERP_BASE, (size_t)(iinfo.hi - iinfo.lo));
-            if (base == 0) {
-                rc = -ENOMEM;
-                goto fail;
-            }
-            elf_rebase(&iinfo, base);
-            p->interp_base = base;
-        }
-        rc = elf_load_into(p->space, interp->data, &iinfo, interp->vn);
-        if (rc) {
-            kwarn("process: '%s' interpreter load failed (%d)", p->name, rc);
-            goto fail;
-        }
-        entry = iinfo.entry;
-        if (iinfo.hi > p->image_end)
-            p->image_end = iinfo.hi;
-    }
+    p->pers = ib->pers;
+    p->space = ib->space;
+    p->image_end = ib->image_end;
+    p->exec_entry = ib->info.entry;
+    p->interp_base = ib->interp_base;
     strlcpy(p->exec_path, exe->path, sizeof(p->exec_path));
-    if (p->pers->init != NULL) {
-        rc = p->pers->init(p, &info);
-        if (rc)
-            goto fail;
-    }
-
-    /* Stack: lazily populated except the top pages, with a guard below. */
-    rc = vm_user_map_anon(p->space, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
-                          VM_REGION_GUARD_BELOW, "stack");
-    if (rc)
-        goto fail;
-    for (unsigned i = 1; i <= INITIAL_STACK_PAGES; i++) {
-        /* Populate the top pages so the initial frame can be written. */
-        struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
-        if (pg == NULL) {
-            rc = -ENOMEM;
-            goto fail;
-        }
-        rc = arch_mmu_map(&p->space->mmu, (vaddr_t)(USER_STACK_TOP - i * PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
-                          VM_PROT_RW, VM_CACHE_WB, ARCH_MMU_MAP_USER);
-        if (rc) {
-            pmm_free_page(pg);
-            goto fail;
-        }
-        p->space->anon_pages++;
-    }
-
-    uint64_t sp;
-    rc = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp, p->exec_path, p->interp_base, &sp);
+    uint64_t entry = ib->entry, sp = ib->sp, info_entry = ib->info.entry;
+    unsigned nr_segments = ib->info.nr_segments;
+    if (p->pers->init != NULL)
+        rc = p->pers->init(p, &ib->info);
+    kfree(ib);
     if (rc)
         goto fail;
 
@@ -826,8 +892,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     if (parent)
         link_to_parent(p, parent);
 
-    kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info.entry,
-          info.nr_segments);
+    kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info_entry, nr_segments);
     process_get(p); /* the table's reference */
     sched_enqueue_new(t);
     *out = p;
@@ -839,21 +904,20 @@ fail:
     process_unbuild(p);
     return rc;
 }
-FRAME_EXEMPT_END(process_create_from_images)
 
 /* --- fork (docs/kernel/process/design.md, "fork") --- */
 
-/* Every handle of the parent at the same number with the same rights,
- * through the normal install path, so each object counts the child's
+/* Every handle of the parent at the same number with the same rights and
+ * flags (close-on-exec), through the normal install path, so each object counts the child's
  * handle like any other (a pipe's writers, epoll's last close). */
 static int dup_handles(struct process *p, struct process *parent)
 {
     for (int h = 0; h < HANDLE_TABLE_SIZE; h++) {
-        unsigned rights;
-        struct kobject *obj = handle_get(&parent->handles, h, &rights);
+        unsigned rights, flags;
+        struct kobject *obj = handle_get_flags(&parent->handles, h, &rights, &flags);
         if (obj == NULL)
             continue;
-        int rc = handle_install_at(&p->handles, h, obj, rights);
+        int rc = handle_install_at_flags(&p->handles, h, obj, rights, flags);
         kobject_put(obj);
         if (rc < 0)
             return rc;
@@ -982,6 +1046,126 @@ void process_vfork_release(struct process *p)
     waitqueue_wake_all(&p->vfork_wq);
 }
 
+/* --- exec (docs/kernel/process/design.md, "exec") --- */
+
+static void thread_clear_tid(struct thread *t);   /* below, with the thread exits */
+
+static bool exec_alone_or_dying(struct process *p)
+{
+    return __atomic_load_n(&p->nr_threads, __ATOMIC_ACQUIRE) == 1 ||
+           __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 ||
+           __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING;
+}
+
+/*
+ * Every other thread of `p` ends (Linux de_thread): each sees exec_thread
+ * at its next return to user mode or killable wait and leaves alone, and
+ * this waits until the reaper has released them all -- so none is left to
+ * touch the old space (a CHILD_CLEARTID word, a fault) once it is gone.
+ * The wait is not interrupted by an ordinary signal, which stays pending
+ * for the new image; only the process's own death ends it (-EINTR). A
+ * second thread exec'ing at once is refused -EAGAIN and is itself ended.
+ */
+static int exec_single_thread(struct process *p, struct thread *self)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->exec_thread != NULL) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return -EAGAIN;
+    }
+    __atomic_store_n(&p->exec_thread, self, __ATOMIC_RELEASE);
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link)
+        if (t != self)
+            sched_wake(t);
+    spin_unlock_irqrestore(&p->lock, s);
+    wait_event(&p->exec_wq, exec_alone_or_dying(p));
+    if (__atomic_load_n(&p->nr_threads, __ATOMIC_ACQUIRE) == 1)
+        return 0;
+    s = spin_lock_irqsave(&p->lock);
+    __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&p->lock, s);
+    return -EINTR;
+}
+
+/* The personality's state for the new image: the same personality resets
+ * it (its exec hook), a different one replaces it (release, then init). */
+static int exec_personality(struct process *p, const struct personality *next, const struct elf_info *info)
+{
+    const struct personality *prev = p->pers;
+    if (prev == next && prev->exec != NULL)
+        return prev->exec(p, info);
+    if (prev->release != NULL)
+        prev->release(p);
+    p->pers = next;
+    return next->init != NULL ? next->init(p, info) : 0;
+}
+
+int process_exec_images(const struct process_image *exe, const struct process_image *interp, const char *name,
+                        const char *const argv[], const char *const envp[], const char *execfn, void *syscall_frame)
+{
+    struct process *p = process_current();
+    struct thread *self = thread_current();
+    KASSERT(p != NULL);
+    struct image_build *ib = kmalloc(sizeof(*ib), 0);
+    if (ib == NULL)
+        return -ENOMEM;
+    int rc = image_build(p, exe, interp, name, false, argv, envp, execfn, ib);
+    if (rc == 0) {
+        rc = exec_single_thread(p, self);
+        if (rc)
+            vm_space_destroy(ib->space);   /* never active */
+    }
+    if (rc) {
+        kfree(ib);
+        return rc;
+    }
+
+    /* --- the point of no return: only this thread is left --- */
+    /* The old image's CHILD_CLEARTID word is cleared and woken while that
+     * image is still mapped (Linux's mm_release at exec). */
+    thread_clear_tid(self);
+    struct vm_space *old = p->space;
+    arch_irq_state_t is = arch_irq_save();
+    __atomic_store_n(&p->space, ib->space, __ATOMIC_RELEASE);
+    vm_space_switch(this_cpu()->cur_space, ib->space);
+    this_cpu()->cur_space = ib->space;
+    arch_irq_restore(is);
+    vm_space_put(old);   /* a vfork parent's space only loses this user */
+    process_vfork_release(p);
+    handle_close_on_exec(&p->handles);
+    signal_exec_reset(p, self);
+    rc = exec_personality(p, ib->pers, &ib->info);
+
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    strlcpy(p->name, name ? name : "?", sizeof(p->name));
+    p->image_end = ib->image_end;
+    p->exec_entry = ib->info.entry;
+    p->interp_base = ib->interp_base;
+    strlcpy(p->exec_path, execfn, sizeof(p->exec_path));
+    p->main_thread = self;
+    self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
+    __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&p->lock, s);
+    self->set_child_tid = 0;
+    self->tls_base = 0;
+    arch_set_tls_base(0);
+    arch_fpu_reset_current();
+    struct arch_user_regs regs;
+    arch_user_regs_init_thread(&regs, (uintptr_t)ib->entry, 0, (uintptr_t)ib->sp);
+    arch_user_regs_set_sp(&regs, (uintptr_t)ib->sp);   /* the frame itself, not a call's: argc at sp */
+    arch_user_regs_to_syscall(syscall_frame, &regs);
+    kdebug("process: pid %u exec '%s', entry %p", p->pid, p->name, (void *)ib->entry);
+    kfree(ib);
+    if (rc) {
+        /* The new image is in place without its personality's state:
+         * nothing can run it. Linux ends the process the same way. */
+        kwarn("process: pid %u exec '%s': personality state failed (%d)", p->pid, p->name, rc);
+        process_exit(128 + SIGKILL);
+    }
+    return 0;
+}
+
 /* --- exit --- */
 
 /* p->lock held. The calling thread is leaving: run the personality's hook
@@ -1092,7 +1276,7 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
     process_get(p);
     t->user_tid = 0x10000u + t->tid;   /* past every pid, so the two spaces cannot collide */
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    if (p->state != PROCESS_RUNNING || p->nr_live >= PROCESS_MAX_THREADS) {
+    if (p->state != PROCESS_RUNNING || p->nr_live >= PROCESS_MAX_THREADS || p->exec_thread != NULL) {
         spin_unlock_irqrestore(&p->lock, s);
         process_put(p);
         t->proc = NULL;
@@ -1856,7 +2040,7 @@ int process_setrlimit(unsigned resource, uint64_t value)
         p->handles.limit = (unsigned)value;
     spin_unlock_irqrestore(&p->lock, s);
     if (resource == COSMO_RLIMIT_AS || resource == COSMO_RLIMIT_MEM)
-        apply_space_limits(p);
+        apply_space_limits(p->space, &p->rlim);
     return 0;
 }
 

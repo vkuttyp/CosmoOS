@@ -290,7 +290,10 @@ void thread_put(struct thread *t)
         arch_irq_state_t s = spin_lock_irqsave(&p->lock);
         list_remove(&t->proc_link);
         bool last = --p->nr_threads == 0;
+        bool exec_waits = p->exec_thread != NULL;
         spin_unlock_irqrestore(&p->lock, s);
+        if (exec_waits)
+            waitqueue_wake_all(&p->exec_wq);   /* an exec waits for its siblings to be gone */
         if (last)
             process_last_thread_gone(p);
 #if CONFIG_DEBUG

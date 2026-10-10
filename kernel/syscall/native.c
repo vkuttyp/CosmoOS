@@ -956,6 +956,19 @@ static int64_t sys_umount(struct syscall_args *a)
  * directory moves to the new root; the old one is released if nothing
  * holds it (a log line either way).
  */
+/* SYS_exec (roadmap M3): Linux execve's operation at the native door. */
+static int64_t sys_exec(struct syscall_args *a)
+{
+    struct exec_args *ea = kmalloc(sizeof(*ea), 0);
+    if (ea == NULL)
+        return -ENOMEM;
+    int rc = exec_args_copy(ea, a->a[0], a->a[1], a->a[2]);
+    if (rc == 0)
+        rc = process_execve(ea, a->frame);
+    kfree(ea);
+    return rc;
+}
+
 static int64_t sys_switch_root(struct syscall_args *a)
 {
     struct process *p = process_current();
@@ -2551,6 +2564,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_chdir] = sys_chdir,
     [SYS_getcwd] = sys_getcwd,
     [SYS_switch_root] = sys_switch_root,
+    [SYS_exec] = sys_exec,
     [SYS_procinfo] = sys_procinfo,
     [SYS_syscall_filter] = sys_syscall_filter,
     [SYS_gethostname] = sys_gethostname,
