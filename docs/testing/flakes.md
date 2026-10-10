@@ -102,6 +102,14 @@ was on the "superfloppy" image, so the disk layout is not what makes the
 firmware stop. Only `test-harness-retry` has the 30 s handover retry, so
 this boot timed out. Still unassigned; the boot was rerun.
 
+**Third sighting, 2026-10-11:** local x86-64 `BUILD=release test-install`
+on the TCP silly-window branch (M3 PR 5 matrix), the fallback stage's boot:
+`boot-fallback.log` holds only OVMF's screen-clear sequences, no `BdsDxe:`
+line and no loader banner, and the stage timed out waiting for its first
+prompt. The install, reboot and persist boots of the same run had passed;
+the rerun passed every stage (fallback 5.2 s). `install_test.py` has no
+handover retry either. Still unassigned.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --

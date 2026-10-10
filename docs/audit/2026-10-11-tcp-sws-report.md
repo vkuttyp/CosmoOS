@@ -47,6 +47,19 @@ next data must be a full segment from where the first ended.
 and 31 two flows on steer 0, against 24-29 and 12-15 in this tree's earlier
 boots.
 
-## Validation
+## Validation (local, macOS host, QEMU, TCG)
 
-In the PR description and below once run.
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 137.9 s | PASS 132.6 s |
+| debug `test-smp2` | PASS 156.5 s | PASS 149.3 s |
+| debug `test`, `QEMU_SMP=4` | PASS 153.6 s | PASS 159.1 s |
+| `test-chaos` | PASS 172.0 s | PASS 146.1 s |
+| `test-harness-retry` | PASS 169.3 s | PASS 154.7 s |
+| `BUILD=release test` | PASS 16.9 s | PASS 20.3 s |
+| `BUILD=release test-install` | first run: the fallback boot stopped in OVMF before the loader (flakes.md, the firmware hand-over, third sighting); rerun PASS 23.3 s | PASS 36.9 s |
+| `test-crash` | PASS 139.2 s | PASS 131.6 s |
+| `tools/tcp-sws-probe.py` | old and fixed PASS | old and fixed PASS |
