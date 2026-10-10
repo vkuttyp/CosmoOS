@@ -151,3 +151,21 @@ own line. x86 firmware without a variable store writes `\NvVars` into
 the ESP it boots from, so the installed ESP is compared with the live
 disk's ESP after its boot, not with the built image (34 sectors differ
 between those two).
+
+### PR 2 validation (local)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 139.4 s | PASS 131.7 s |
+| debug `test-smp2` | first boot hung in OVMF before the loader (no `BdsDxe:` line, 240 s; flakes.md, second sighting of the firmware-handover stop); rerun PASS 143.5 s | PASS 155.6 s |
+| debug `test`, `QEMU_SMP=4` | PASS 150.4 s | PASS 142.8 s |
+| `test-chaos` | PASS 142.0 s | PASS 143.9 s |
+| `test-harness-retry` | PASS 143.8 s | PASS 144.9 s |
+| `BUILD=release test` | PASS 16.9 s | PASS 20.4 s |
+| `BUILD=release test-install` (install stage) | PASS 7.6 s (`cosmo-install` 1.8 s) | PASS 11.8 s (1.6 s) |
+
+Every debug boot now prints `usertest: cosmofs compressed a file
+committed from user mode`, which the harness requires.

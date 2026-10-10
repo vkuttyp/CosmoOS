@@ -92,6 +92,16 @@ the network retry separately. The kernel did not run on the first process;
 the cause inside OVMF's device connection remains unassigned. Preserve this
 as a sighting if it recurs; the retry does not erase it.
 
+**Second sighting, 2026-10-10:** local x86-64 `test-smp2` on the M2
+installer branch (PR 2 matrix): the serial log holds only OVMF's
+screen-clear sequences, no `BdsDxe:` line and no `cosmoboot-uefi` banner,
+for the whole 240 s; the virtio console file holds the same sequences.
+`test` boots of the same image at one and four CPUs passed before and
+after it. The boot image is a GPT disk since PR #342; the first sighting
+was on the "superfloppy" image, so the disk layout is not what makes the
+firmware stop. Only `test-harness-retry` has the 30 s handover retry, so
+this boot timed out. Still unassigned; the boot was rerun.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --
