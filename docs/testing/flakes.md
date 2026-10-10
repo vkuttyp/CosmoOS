@@ -3021,6 +3021,31 @@ QEMU 11.1.1): `syscall-fuzz` 3116/3327 ms vs 3414/3317 ms,
 heavier tests and no `syscall-fuzz` difference. Not reproduced off CI;
 not attributed.
 
+**Attributed, 2026-10-10.** Not the runner and not the step: in one CI
+job (run 38037450806) the crash image booted twice was slow both times
+(`cosmofs-replay` 34.0 s) and an ordinary debug boot right after it was
+not (22.2 s). The CI-built crash kernel and CI-built debug kernel (the
+job's `debug-elfs-x86_64` artifact), each with CI's signed modules in a
+local archive, booted *locally*: the crash kernel slow (`cosmofs-replay`
+39.8 s, `syscall-fuzz` 18.2 s), the debug kernel not (16.5 s, 3.4 s).
+Sampling every vCPU's RIP through QMP every 20 ms: during
+`cosmofs-replay` the crash kernel spent 16.1 % of its samples in fbcon's
+`put_pixel` against 1.6 %, and the hottest non-idle PC of the whole boot
+was `0xffffffff80001ffd` in `newline` (4,571 samples; the debug kernel's
+same code at `...1fad`, 179). fb-bench: a glyph 4.9 vs 5.0 us, a 12-row
+scroll 118.8 ms vs 10.9 ms. The scroll's per-pixel loop ran
+`...1fe4`-`...2028`, across the page boundary at `...2000`, with the
+`leaq` at `...1ffd` split between the pages; the two binaries' fbcon code
+is byte-identical and 64 bytes apart. A TCG loop across a page boundary
+runs an unchained translation block every iteration. Every test that logs
+much scrolls the framebuffer console, so they all slowed. The layout came
+from CI's compiler (Debian clang) on this branch's crash build; the local
+compiler placed it elsewhere, which is why local boots never showed it.
+**Fixed** in `kernel/core/fbcon.c`: the three drawing loops are functions
+aligned to 256 bytes and no larger (`FBCON_DRAW`), and
+`scripts/check-kernel-elf.sh` fails the link if any `fbcon_draw_`
+function spans a page. The budget was not changed.
+
 ## Spin benchmark startup blocks a TLB acknowledgment, 2026-10-04
 
 PR #308's first x86 CI debug boot failed with a TLB shootdown acknowledged

@@ -62,6 +62,19 @@ static uint32_t pack(const struct bootinfo_framebuffer *fb, unsigned r, unsigned
            (channel(b, fb->blue_bits) << fb->blue_shift);
 }
 
+/*
+ * The drawing loops, each in a function of its own that cannot straddle a
+ * page boundary: aligned to FBCON_DRAW_ALIGN and no larger than it, which
+ * scripts/check-kernel-elf.sh checks on every link. Under QEMU's TCG a loop
+ * whose instructions span two pages runs through an unchained translation
+ * block every iteration: the CI-built crash kernel of the M2 branch had the
+ * pixel loop across 0x...2000 and scrolled 11 times slower (118.8 ms a
+ * scroll against 10.9 ms for the same code 64 bytes earlier), slowing every
+ * test that logs much (docs/testing/flakes.md, syscall-fuzz, 2026-10-10).
+ */
+#define FBCON_DRAW_ALIGN 256
+#define FBCON_DRAW __attribute__((noinline, aligned(FBCON_DRAW_ALIGN)))
+
 static inline void put_pixel(struct fbcon *c, uint32_t x, uint32_t y, uint32_t value)
 {
     volatile uint8_t *p = c->base + (size_t)y * c->pitch + (size_t)x * c->bytes_pp;
@@ -84,7 +97,7 @@ static inline void put_pixel(struct fbcon *c, uint32_t x, uint32_t y, uint32_t v
 }
 
 /* Fill whole cell rows [first, first + count) with the background. */
-static void clear_rows(struct fbcon *c, uint32_t first, uint32_t count)
+static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, uint32_t count)
 {
     uint32_t y0 = first * FONT_HEIGHT;
     uint32_t y1 = y0 + count * FONT_HEIGHT;
@@ -96,7 +109,7 @@ static void clear_rows(struct fbcon *c, uint32_t first, uint32_t count)
     }
 }
 
-static void draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch)
+static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch)
 {
     const uint8_t *glyph = font8x8[font_index(ch)];
     uint32_t x0 = col * FONT_WIDTH;
@@ -115,11 +128,11 @@ static void draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned cha
 /* Draw every cell from the text shadow. Writes only: reading an uncached
  * framebuffer costs several times what writing it does, so the screen is
  * never a source, only a destination. */
-static void repaint(struct fbcon *c)
+static FBCON_DRAW void fbcon_draw_repaint(struct fbcon *c)
 {
     for (uint32_t row = 0; row < c->rows; row++) {
         for (uint32_t col = 0; col < c->cols; col++)
-            draw_glyph(c, col, row, (unsigned char)c->text[row * c->cols + col]);
+            fbcon_draw_glyph(c, col, row, (unsigned char)c->text[row * c->cols + col]);
     }
     c->stats.repaints++;
 }
@@ -146,7 +159,7 @@ static void scroll(struct fbcon *c)
 
     memmove(c->text, c->text + (size_t)n * c->cols, keep);
     memset(c->text + keep, ' ', (size_t)n * c->cols);
-    repaint(c);
+    fbcon_draw_repaint(c);
     c->stats.scrolls++;
 }
 
@@ -190,7 +203,7 @@ static void putc(struct fbcon *c, char ch)
     if (c->cx >= c->cols)
         newline(c);
     c->text[c->cy * c->cols + c->cx] = (char)b;
-    draw_glyph(c, c->cx, c->cy, b);
+    fbcon_draw_glyph(c, c->cx, c->cy, b);
     c->cx++;
 }
 
@@ -304,7 +317,7 @@ void fbcon_init(void)
     c->scroll_rows = c->rows / 8 ? c->rows / 8 : 1;
 
     c->ready = true;
-    clear_rows(c, 0, c->rows);
+    fbcon_draw_clear_rows(c, 0, c->rows);
     replay_log(c);
     console_register(&c->sink);
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,

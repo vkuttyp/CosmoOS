@@ -143,25 +143,8 @@ jobs:
       - name: Reproducible build check
         run: make ARCH=${{ matrix.arch }} reproducible
 
-      # TEMPORARY (M2 PR 1): what else runs on the machine when the crash
-      # boot starts, and while it runs (docs/testing/flakes.md, syscall-fuzz).
-      - name: Diagnostic -- the machine before the panic path test
-        run: |
-          apt-get install -y --no-install-recommends procps >/dev/null 2>&1 || true
-          uptime; free -m; nproc
-          ps -eo pid,ppid,pcpu,pmem,etime,stat,args --sort=-pcpu | head -25
-
       - name: Panic path test
-        run: |
-          ( for i in $(seq 1 24); do sleep 30; echo "== diag $i"; uptime; ps -eo pid,pcpu,nlwp,etime,args --sort=-pcpu | head -3 | cut -c1-150; done ) &
-          rc=0; make ARCH=${{ matrix.arch }} BUILD=debug test-crash || rc=$?
-          echo "== TEMP: the same crash image booted again"
-          COSMO_ARCH=${{ matrix.arch }} QEMU_ARCH=${{ matrix.arch }} python3 tests/boot/run_boot_test.py --expect-panic fault \
-            --image out/${{ matrix.arch }}-debug-crash/cosmoos.img --log out/${{ matrix.arch }}-debug-crash/boot-test-crash2.log \
-            --kernel out/${{ matrix.arch }}-debug-crash/kernel/kernel.elf 2>&1 | grep -E "^boot-test|^  - " || true
-          echo "== TEMP: an ordinary debug boot after it"
-          make ARCH=${{ matrix.arch }} BUILD=debug BOOT_LOG=out/${{ matrix.arch }}-debug/boot-test-after.log test 2>&1 | grep -E "^boot-test|^  - " || true
-          exit $rc
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
 
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
