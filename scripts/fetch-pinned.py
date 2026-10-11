@@ -58,8 +58,13 @@ def main(argv):
         raise SystemExit(f"fetch-pinned: {want!r} is not a SHA-256 (usage: OUTPUT SHA256 URL...)")
     if os.path.exists(out) and digest(out) == want:
         return 0
-    attempts = int(os.environ.get("COSMO_FETCH_ATTEMPTS", "3"))
-    backoff = float(os.environ.get("COSMO_FETCH_BACKOFF", "2"))
+    try:
+        attempts = int(os.environ.get("COSMO_FETCH_ATTEMPTS", "3"))
+        backoff = float(os.environ.get("COSMO_FETCH_BACKOFF", "2"))
+    except ValueError as e:
+        raise SystemExit(f"fetch-pinned: COSMO_FETCH_ATTEMPTS / COSMO_FETCH_BACKOFF: {e}")
+    if not 1 <= attempts <= 20 or not 0 <= backoff <= 300:
+        raise SystemExit("fetch-pinned: COSMO_FETCH_ATTEMPTS must be 1-20 and COSMO_FETCH_BACKOFF 0-300 seconds")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     tmp = out + ".part"
     failures = []

@@ -33,7 +33,13 @@ FORCE = {
     "FEATURE_PREFER_APPLETS": "n",  # an applet is run through /bin like any program
     "SHA1_HWACCEL": "n",           # x86 SHA-NI only; one config serves both architectures
     "SHA256_HWACCEL": "n",
-    "FEATURE_LS_COLOR_IS_DEFAULT": "n",  # plain names on a terminal too; --color asks for colour
+    "FEATURE_LS_COLOR_IS_DEFAULT": "n",
+    # wget speaks http only (roadmap M4): BusyBox's own TLS checks no
+    # certificate, so an https fetch would be open to anyone on the path,
+    # and there is no openssl to hand it to.
+    "FEATURE_WGET_HTTPS": "n",
+    "FEATURE_WGET_OPENSSL": "n",
+    "TLS": "n",  # plain names on a terminal too; --color asks for colour
     # BusyBox's "const pointer to globals" trick (include/libbb.h) assumes
     # the compiler reloads a const pointer after an asm barrier; clang on
     # AArch64 does not, and every applet with a G struct read it as NULL

@@ -64,6 +64,11 @@ def main():
 
         r = run(out, "not-a-digest", "file://" + good)
         check(r.returncode != 0, "a malformed SHA-256 argument is refused")
+
+        env0 = dict(os.environ, COSMO_FETCH_ATTEMPTS="0", COSMO_FETCH_BACKOFF="0")
+        r = subprocess.run([sys.executable, SCRIPT, out, want, "file://" + good], capture_output=True, text=True,
+                           env=env0)
+        check(r.returncode != 0 and "COSMO_FETCH_ATTEMPTS" in r.stderr, "zero attempts is refused, not a silent no-op")
     print("PASS: fetch-pinned")
 
 
