@@ -380,6 +380,12 @@ int main(int argc, char **argv)
         session_child((int)s, sync[0], sync[1], ctl[1], go[0]);
     }
     sc1(LX_close, s);
+    /* Only the child writes ctl and uses sync, so its exit ends this side's
+     * read; go stays open here, or the child's read of it would end. */
+    sc1(LX_close, ctl[1]);
+    sc1(LX_close, sync[0]);
+    sc1(LX_close, sync[1]);
+    sc1(LX_close, go[0]);
     char cmd = 0;
     int st = 0;
     for (;;) {
