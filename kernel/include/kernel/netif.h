@@ -22,6 +22,7 @@
 #define NETIF_NODEFAULT (1u << 4)  /* never the machine's default interface (a tap: a point-to-point owner link) */
 #define NETIF_FORWARD  (1u << 5)  /* forward IPv4 datagrams arriving here that are not for the host (a tap, never the real NIC) */
 #define NETIF_MASQUERADE (1u << 6) /* masquerade flows forwarded from here: rewrite source to the egress address (a tap) */
+#define NETIF_AUTOCONF (1u << 7)   /* a NIC driver's interface: IPv4 from fw_cfg opt/cosmo/ipv4, else DHCP (kernel/net/dhcp.h) */
 
 /* nif->caps, set by the driver before netif_register (unit 11). */
 #define NETIF_CAP_TXCSUM (1u << 0)   /* finishes NET_CSUM_* transport checksums (virtio NEEDS_CSUM) */
@@ -88,6 +89,9 @@ struct netif *netif_find(const char *name);
  * order; returns how many there are (the self-test runner's census). */
 unsigned netif_names(char *buf, size_t n);
 struct netif *netif_default(void);            /* the non-loopback interface that is up, or NULL */
+/* The first such interface that has an IPv4 address: IPv4's default route
+ * (a NIC still without a lease does not hide a later one that has one). */
+struct netif *netif_default_ipv4(void);
 struct netif *netif_connected(uint32_t dst);  /* the up interface whose subnet holds dst, longest prefix; referenced or NULL */
 struct netif *netif_loopback(void);
 static inline void netif_get(struct netif *nif) { kobject_get(&nif->obj); }

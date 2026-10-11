@@ -32,8 +32,15 @@
  * Version 6 adds the flow section (docs/audit/next-subsystem-net-flows.md):
  * a third section after the filter section, read-only, listing every live
  * NAT and firewall flow with the shares and refusal counters that explain
- * why a guest's new flows are refused. No command changes. */
-#define COSMO_NETCTL_VERSION 6
+ * why a guest's new flows are refused. No command changes. Version 7 adds
+ * the lease section (roadmap M4): a fourth section after the flow section,
+ * read-only, listing the machine's own DHCP clients and their leases
+ * (address, mask, router, DNS servers, lease times), which netcfg turns into
+ * /etc/resolv.conf. No command changes. */
+#define COSMO_NETCTL_VERSION 7
+/* A lease section time that is finite but beyond what 32 bits of
+ * milliseconds hold (0xffffffff is an infinite lease). */
+#define COSMO_NETCTL_LEASE_MS_MAX 0xfffffffeu
 
 /* Opcodes. FORWARD_* are carried by struct cosmo_netctl; FILTER_* by struct
  * cosmo_netctl_filter. Every command is written whole, at its own struct's
@@ -256,6 +263,44 @@ struct cosmo_netctl_flow {
     uint32_t expires_ms;           /* from the read, rounded up: never 0 for a listed flow */
 };
 
+/*
+ * The lease section (version 7), after the flow section: a header, then
+ * `count` leases, one per interface whose address the kernel's DHCP client
+ * manages (an interface configured from fw_cfg has none). Each is copied
+ * under its client's lock at one `now`. A client that holds no lease
+ * (state INIT/SELECTING/REQUESTING) is listed with zero addresses and times.
+ */
+#define COSMO_NETCTL_DHCP_INIT       1
+#define COSMO_NETCTL_DHCP_SELECTING  2
+#define COSMO_NETCTL_DHCP_REQUESTING 3
+#define COSMO_NETCTL_DHCP_BOUND      4   /* the lease is held, before T1 */
+#define COSMO_NETCTL_DHCP_RENEWING   5   /* past T1: renewing with the server that granted it */
+#define COSMO_NETCTL_DHCP_REBINDING  6   /* past T2: asking any server */
+
+#define COSMO_NETCTL_MAX_LEASES 4         /* DHCP clients */
+#define COSMO_NETCTL_MAX_DNS    3         /* DNS servers kept per lease */
+
+struct cosmo_netctl_lease_list {
+    uint16_t version;              /* COSMO_NETCTL_VERSION */
+    uint16_t count;                /* struct cosmo_netctl_lease following */
+    uint32_t reserved;
+};
+
+struct cosmo_netctl_lease {
+    char     ifname[8];            /* NUL-terminated */
+    uint8_t  state;                /* COSMO_NETCTL_DHCP_* */
+    uint8_t  dns_count;            /* valid entries of dns[] */
+    uint16_t reserved;
+    uint32_t addr, mask, router;   /* network byte order; 0 without a lease */
+    uint32_t server;               /* network byte order: the server that granted it */
+    uint32_t dns[COSMO_NETCTL_MAX_DNS];   /* network byte order */
+    uint32_t lease_s, t1_s, t2_s;  /* as granted, seconds; 0xffffffff lease: infinite */
+    uint32_t remaining_ms;         /* to the lease's end from the read (0xffffffff: infinite;
+                                    * a finite time over 0xfffffffe ms reads 0xfffffffe,
+                                    * COSMO_NETCTL_LEASE_MS_MAX; likewise t1_ms, t2_ms) */
+    uint32_t t1_ms, t2_ms;         /* to T1 and T2 from the read, 0 once passed */
+};
+
 /* The snapshot's bounds, so a reader can size its buffer for every valid
  * configuration rather than guess (the kernel refuses a short buffer with
  * -EMSGSIZE and never returns a partial snapshot). These mirror the kernel's
@@ -272,6 +317,7 @@ struct cosmo_netctl_flow {
      sizeof(struct cosmo_netctl_filter_list) + COSMO_NETCTL_MAX_POLICIES * sizeof(struct cosmo_netctl_filter_guest) + \
      COSMO_NETCTL_MAX_POLICIES * COSMO_NETCTL_MAX_RULES_PER_GUEST * sizeof(struct cosmo_netctl_filter_rule) + \
      sizeof(struct cosmo_netctl_flow_list) + \
-     (COSMO_NETCTL_MAX_NAT_FLOWS + COSMO_NETCTL_MAX_FW_FLOWS) * sizeof(struct cosmo_netctl_flow))
+     (COSMO_NETCTL_MAX_NAT_FLOWS + COSMO_NETCTL_MAX_FW_FLOWS) * sizeof(struct cosmo_netctl_flow) + \
+     sizeof(struct cosmo_netctl_lease_list) + COSMO_NETCTL_MAX_LEASES * sizeof(struct cosmo_netctl_lease))
 
 #endif /* UAPI_COSMO_NETCTL_H */

@@ -253,6 +253,15 @@ flow's 200 ms retransmission timeout with no drop anywhere (twice in 16 CI
 boots), and a connection left by an earlier self-test still retransmitting
 at backoff 4-7 while `net-bench` runs.
 
+The DHCP client (roadmap M4, 2026-10-11) leaves out: the address-conflict
+check (ARP probe and DECLINE), INIT-REBOOT of a remembered lease, RELEASE at
+shutdown, classless static routes (option 121), and rewriting
+`/etc/resolv.conf` when a renewal changes the DNS servers (`netcfg` runs once
+per boot). An interface's IPv4 configuration is published field by field
+(the address last, withdrawn first; PR #351 review) and read by the packet
+paths with plain loads: a snapshot they read consistently is open. BusyBox
+`wget` is built without https: its TLS validates no certificate (M4).
+
 ### 2.6 Linux compatibility (constitution §40 phases 3-4; Prompt #2 §30)
 
 - `execve` is still `lx_nosys` (compat/linux/syscalls.c:3451) -- by the

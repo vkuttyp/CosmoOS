@@ -179,7 +179,12 @@ calls corrected, and a bank count larger than one frame reads — and
 `HCR_EL2.VSE` and checks execution continued (on `cortex-a76`, which has
 FEAT_RAS; the default `cortex-a72` does not, and the test logs the skip
 rather than passing quietly), and which on x86-64 asserts that vector 18
-has a handler at all.
+has a handler at all. The SError is asked of EL2, which answers only
+through the switch's vectors on a CPU something readied (S25): the test
+runs with interrupts off on one CPU, hands EL2 back to the stub there and
+readies it itself, so its result no longer depends on which CPU it runs
+on. Until 2026-10-11 it made the call bare and passed only where a guest
+had already run (`tools/async-inject-probe.py --old`; the M4 report).
 
 **Gap, and it is not small.** This kernel runs EL1 with `PSTATE.A` set
 from its first instruction (`entry.S`: `msr daifset, #0xF`; the only

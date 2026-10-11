@@ -304,6 +304,39 @@ static void fire_due(void)
     }
 }
 
+/* The DHCP client's (dhcp.c) boot wait and stop: deadlines on the target's
+ * clock, and a worker barrier that is the queued work run here and now --
+ * one thread, so nothing of the stack runs anywhere else. */
+uint64_t clock_deadline_ns(uint64_t budget_ns)
+{
+    return g_now + budget_ns;
+}
+
+bool clock_deadline_passed(uint64_t deadline)
+{
+    return g_now >= deadline;
+}
+
+void net_workers_barrier(void)
+{
+    fz_run_work();
+}
+
+/* dhcp_boot_wait sleeps between looks; it is never called here. */
+void thread_sleep_ns(uint64_t ns)
+{
+    (void)ns;
+    panic("fuzz: thread_sleep_ns");
+}
+
+/* As netif.c: the address, mask and gateway (the DHCP client's lease). */
+void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t gateway)
+{
+    nif->ip4.addr = addr;
+    nif->ip4.mask = mask;
+    nif->ip4.gateway = gateway;
+}
+
 void fz_clock_advance(uint64_t ns)
 {
     g_now += ns;
@@ -578,6 +611,18 @@ struct netif *netif_default(void)
     for (unsigned i = 0; i < g_nifs; i++) {
         struct netif *n = &g_ifs[i]->nif;
         if (!(n->flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) && (n->flags & NETIF_UP)) {
+            kobject_get(&n->obj);
+            return n;
+        }
+    }
+    return NULL;
+}
+
+struct netif *netif_default_ipv4(void)
+{
+    for (unsigned i = 0; i < g_nifs; i++) {
+        struct netif *n = &g_ifs[i]->nif;
+        if (!(n->flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) && (n->flags & NETIF_UP) && n->ip4.addr != 0) {
             kobject_get(&n->obj);
             return n;
         }

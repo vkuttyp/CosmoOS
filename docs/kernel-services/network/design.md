@@ -335,7 +335,8 @@ the file directory (`FW_CFG_FILE_DIR`, selector 0x19), find
 `opt/cosmo/<name>` and copy its bytes (`arch_fwcfg_read`, under a
 spinlock). `fwcfg_get_string` is the architecture-neutral wrapper.
 Every call probes; absent on real hardware (`-ENODEV`), which just
-means no parameters. Strings: `opt/cosmo/ipv4`, `opt/cosmo/nettest`
+means no parameters. Strings: `opt/cosmo/ipv4` (an override: without it
+the DHCP client configures the interface), `opt/cosmo/nettest`
 (`tcp=<hostport>` the guest connects back to).
 
 ## The harness protocol (`tests/boot/run_boot_test.py`, `nettest.py`)
@@ -748,7 +749,10 @@ up, non-loopback interface on whose subnet `dst` falls, chosen by *longest
 prefix* so overlapping masks resolve by specificity, not registration
 order. So a reply for the guest routes to the tap (the guest's `/24`), not
 the default NIC. Owned and loopback destinations, and anything with no
-connected route (which still falls to the default), are unchanged.
+connected route (which still falls to the default), are unchanged. The
+IPv4 default is `netif_default_ipv4`: the first up, routable interface
+that has an address, so a NIC whose DHCP client has no lease yet does not
+hide a later one that has (M4).
 
 **IP forwarding.** Where `ipv4_input` dropped a unicast datagram not for the
 host (`rx_not_for_us`), it now **forwards** it -- but only when the packet
@@ -1609,6 +1613,69 @@ they are refused, so a retransmission counts again), `out_aborted`,
 Named and deferred: a verdict for the *listener* of a refused SYN-ACK, if
 a use for it appears; per-interface chains; rate-limit and logging targets;
 IPv6 filtering; full TCP state tracking in the filter.
+
+## The DHCP client (`dhcp.c`; roadmap M4)
+
+Until M4 the machine's own interfaces took a static address: fw_cfg
+`opt/cosmo/ipv4`, or QEMU user networking's `10.0.2.15/24` hard-coded in
+`netif_autoconfig`. The client replaces the hard-coded default, as Linux's
+`ipconfig` does: a NIC driver marks its interface `NETIF_AUTOCONF`, and
+`netif_register` configures it from fw_cfg when the boot names an address
+(the override, unchanged) and otherwise starts a DHCP client on it.
+
+**The exchange (RFC 2131).** `INIT` sends a DISCOVER (`SELECTING`); the
+first OFFER of this `xid` with a server identifier is requested
+(`REQUESTING`: requested-address and server-identifier options); its ACK
+binds (`BOUND`): the interface gets the address, the mask (option 1, else
+the address's class mask) and the first router (option 3), and the client
+keeps up to three DNS servers (option 6). T1 and T2 are the server's
+(options 58/59) when `T1 < T2 < lease`, else 0.5 and 0.875 of the lease,
+all counted from the exchange's first message. At T1 the client renews:
+a REQUEST from the leased address to the server, unicast (its link
+address resolved by ARP), ciaddr set, no address or server option
+(`RENEWING`); at T2 it rebinds with the same REQUEST broadcast, still
+from the leased address (`REBINDING`; RFC 2131 4.4.5); at the lease's end it removes the address and starts over
+(N30). A NAK in any requesting state starts over, removing an address it
+held. DISCOVER and selecting-REQUEST retransmit at 2, 4, 8 ... 64 s
+(RFC 2131 suggests a 4 s start; half that costs less at boot);
+`REQUESTING` gives up after four and starts over; a renewal or rebind
+retransmits after half the time left to T2 or the lease's end, 60 s at
+least. An ACK that changes the address, mask or router, and the
+address's removal, flush the interface's ARP entries: a neighbour learned
+under the old configuration is not trusted under the new one. The messages carry a client identifier (type 1 and the MAC) and a
+parameter request list; the broadcast flag is clear, since the client
+takes a unicast reply too.
+
+**Where it runs.** Messages are built as frames, like the tap server's
+replies: before the ACK the source is `0.0.0.0` and the destination the
+limited broadcast, which IP routing cannot carry (no source address, and
+`255.255.255.255` would go to the default interface, not this one).
+Replies are claimed in `ipv4_input` right after the header checks and
+before the martian and address checks -- until the ACK the interface has
+no address for them to be addressed to -- and only UDP 67->68 on an
+interface that has a client. The state machine runs on the network
+workers: the input path, and the client's deferred work, queued by its
+timer (timers never send). The timer callback and the kicks queue that
+work under the client's lock and only while it is not stopping, so
+`dhcp_client_stop` -- `stopping` set under the lock, then the workers'
+barrier -- is the end of it, even for a callback still running on a CPU
+the timer was moved from. Each takes the client's spinlock, decides,
+records what to send in a `struct dhcp_tx`, and sends after unlocking, so
+no lock is held across a transmit.
+
+**Boot.** `dhcp_boot_wait` (after the boot modules and the entropy wait)
+waits at most 10 s for every client to be bound, so the self-tests and
+init start with the network configured; a client still unbound keeps
+trying in the background. A DISCOVER sent before the driver set the link
+up is lost; `netif_set_up(true)` kicks the client to send it again at
+once.
+
+**Out.** The lease reaches user space through the netctl snapshot's
+lease section (version 7) and `netcfg`, which writes `/etc/resolv.conf`
+for musl's resolver; there is no in-kernel resolver. Not done: the
+address-conflict check (ARP probe and DECLINE), INIT-REBOOT of a
+remembered lease, RELEASE at shutdown, classless static routes (option
+121), DHCPv6.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 
