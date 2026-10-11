@@ -2711,19 +2711,18 @@ See the [history index](README.md).
     `scripts/frame-baseline.txt` and checked at the kernel link;
     `vm_space_fork` and the copy-on-write fault (memory design §8,
     M48-M50), proved by the `vm-fork` self-test.
-  - PR 2: `process_fork` (P35) with spawn's steps shared; Linux `fork`,
+  - PR 2 (#346): `process_fork` (P35) with spawn's steps shared; Linux `fork`,
     `vfork` and fork-like `clone` (L16); vfork borrows a reference-counted
     space (`vm_space_share`/`vm_space_put`, M51); FP/SIMD registers,
     handles, dispositions and mask inherited; SysV shm attach records
     copied; `MAP_SHARED|MAP_ANONYMOUS` backed by an unnamed file; `lxtest`'s
     fork section.
-  - PR 5: TCP sender silly-window avoidance (RFC 1122 4.2.3.4, N29):
+  - PR 5 (#349): TCP sender silly-window avoidance (RFC 1122 4.2.3.4, N29):
     `net-bench`'s 1 MiB/s mode on slow CI boots was the stream falling into
     300-byte segments, nothing lost; `net-tcp-sws`,
     `tools/tcp-sws-probe.py`. Report:
     `docs/audit/2026-10-11-tcp-sws-report.md`.
-
-  - PR 3: exec in place (`process_exec_images`, `process_execve`; P36) at
+  - PR 3 (#347): exec in place (`process_exec_images`, `process_execve`; P36) at
     both doors (Linux `execve`, native `SYS_exec` 103), `#!` scripts,
     close-on-exec handles (L17), personality switching on exec, vfork
     released at exec; `image_build` shared with spawn; `lxtest`'s exec
