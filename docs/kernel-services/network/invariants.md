@@ -625,3 +625,14 @@ acknowledges 200 of the segment in flight and then all of it; the next data
 is a full segment from where the first ended. `tools/tcp-sws-probe.py --old`
 reverses the fix: a 200-byte segment goes out instead, on both
 architectures.
+
+**N30. An interface holds a DHCP address only while its lease does.**
+The client (`dhcp.c`) sets the interface's address, mask and router from
+an ACK and nowhere else, and clears all three when the lease ends
+(`end_at` passed in `RENEWING` or `REBINDING`) or a NAK refuses it; a
+renewal's or rebind's ACK extends the lease from the exchange's first
+message (RFC 2131 §4.4.1). A reply is taken only for the client's own
+exchange (`xid` and `chaddr`), with a valid UDP checksum, in a state that
+expects it. **Checked by** `net-dhcp-client`: the fixture's address is the
+ACK's after binding and after a renewal, `0.0.0.0` after the lease's end
+and after a NAK, and an OFFER for another `xid` changes nothing.

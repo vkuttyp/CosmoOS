@@ -6,6 +6,7 @@
  * ARP, IP, the transport -- over an interface whose driver is a reader and
  * a writer rather than a device.
  */
+#include <kernel/net/dhcp.h>
 #include <kernel/net/tap.h>
 
 #include <kernel/errno.h>
@@ -525,12 +526,45 @@ static int64_t tap_ctl_flows(uint8_t *p, size_t room)
     return rc;
 }
 
+/* The lease section (version 7): the kernel's DHCP clients, each copied
+ * under its own lock at one `now`. Returns the bytes written or -EMSGSIZE. */
+_Static_assert(COSMO_NETCTL_MAX_LEASES == DHCP_MAX_CLIENTS && COSMO_NETCTL_MAX_DNS == DHCP_MAX_DNS,
+               "the lease section's bounds are the client table's");
+_Static_assert(COSMO_NETCTL_DHCP_INIT == DHCP_S_INIT && COSMO_NETCTL_DHCP_SELECTING == DHCP_S_SELECTING &&
+               COSMO_NETCTL_DHCP_REQUESTING == DHCP_S_REQUESTING && COSMO_NETCTL_DHCP_BOUND == DHCP_S_BOUND &&
+               COSMO_NETCTL_DHCP_RENEWING == DHCP_S_RENEWING && COSMO_NETCTL_DHCP_REBINDING == DHCP_S_REBINDING,
+               "the UAPI's DHCP states are the client's");
+static int64_t tap_ctl_leases(uint8_t *p, size_t room)
+{
+    struct dhcp_lease_info l[DHCP_MAX_CLIENTS];
+    unsigned n = dhcp_lease_list(l, DHCP_MAX_CLIENTS);
+    size_t need = sizeof(struct cosmo_netctl_lease_list) + (size_t)n * sizeof(struct cosmo_netctl_lease);
+    if (room < need)
+        return -EMSGSIZE;
+    struct cosmo_netctl_lease_list h = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
+    memcpy(p, &h, sizeof(h));
+    uint8_t *q = p + sizeof(h);
+    for (unsigned i = 0; i < n; i++, q += sizeof(struct cosmo_netctl_lease)) {
+        struct cosmo_netctl_lease o = {
+            .state = l[i].state, .dns_count = l[i].ndns, .addr = l[i].addr, .mask = l[i].mask,
+            .router = l[i].router, .server = l[i].server, .lease_s = l[i].lease_s, .t1_s = l[i].t1_s,
+            .t2_s = l[i].t2_s, .remaining_ms = l[i].remaining_ms, .t1_ms = l[i].t1_ms, .t2_ms = l[i].t2_ms,
+        };
+        memcpy(o.ifname, l[i].ifname, sizeof(o.ifname));
+        memcpy(o.dns, l[i].dns, sizeof(o.dns));
+        memcpy(q, &o, sizeof(o));
+    }
+    return (int64_t)need;
+}
+
 /* One read returns the whole snapshot -- the port-forward list (a struct
  * cosmo_netctl_list header and its rules) followed by the filter section (a
  * struct cosmo_netctl_filter_list; the host record (guest_addr 0) and then
  * the attached guests' policies; then every rule in evaluation order, the
  * host's first), then the flow section (version 6: a struct
- * cosmo_netctl_flow_list and every live flow) -- or -EMSGSIZE if the buffer
+ * cosmo_netctl_flow_list and every live flow), then the lease section
+ * (version 7: a struct cosmo_netctl_lease_list and every DHCP client) --
+ * or -EMSGSIZE if the buffer
  * is too small. */
 static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 {
@@ -598,6 +632,11 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     memcpy(fh_at, &fh, sizeof(fh));
 
     int64_t rc = tap_ctl_flows(p, room);
+    if (rc < 0)
+        return rc;
+    p += rc;
+    room -= (size_t)rc;
+    rc = tap_ctl_leases(p, room);
     return rc < 0 ? rc : (int64_t)(p - (uint8_t *)buf) + rc;
 }
 

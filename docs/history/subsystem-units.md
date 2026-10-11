@@ -2739,3 +2739,17 @@ See the [history index](README.md).
     job `busybox`. M3 ticked.
   - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
 
+- **Roadmap M4: interactive and networked (2026-10-11).**
+  - PR 1: `scripts/fetch-pinned.py` takes an ordered URL list per archive
+    (upstream, then this repository's `pinned-sources` release), three
+    attempts each with backoff, an error naming every URL (a busybox.net DNS
+    failure had turned main red, run 38105614715). The kernel's DHCP client
+    (`kernel-services/network/dhcp.c`, N30): every NIC interface
+    (`NETIF_AUTOCONF`) without a fw_cfg address runs DISCOVER/OFFER/
+    REQUEST/ACK, renews at T1, rebinds at T2, loses the address at the
+    lease's end; the boot waits up to 10 s for the leases. netctl version 7
+    lists the leases; `netcfg` writes `/etc/resolv.conf` from them
+    (`/etc/rc`). BusyBox gains `wget`, `nslookup`, `stty`, `tty`.
+    `net-dhcp-client`, the client in `fuzz_dhcp_dns`, `make test-net-login`
+    (acceptance a-c) and CI job `net-login`.
+  - Report: `docs/audit/2026-10-11-m4-interactive-networked-report.md`.
