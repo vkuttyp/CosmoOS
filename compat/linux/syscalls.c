@@ -1742,7 +1742,9 @@ static int64_t lx_ioctl_tty(struct tty *t, struct file *f, unsigned req, uint64_
             tty_flush_output(t);
         return 0;
     }
-    case LX_TCSBRK:   /* tcdrain (arg 1) and a break: nothing is held back to drain, no line to break */
+    case LX_TCSBRK:   /* tcdrain (arg 1), and a break -- no line to break: wait, as TCSETSW does,
+                       * until the master has read a slave's output (the console holds none) */
+        return master ? 0 : tty_drain_output(t);
     case LX_TCXONC:   /* no flow control on this side */
         return 0;
     default:

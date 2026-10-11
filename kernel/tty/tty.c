@@ -333,6 +333,8 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
     if (t->sid == 0) {
         if (self->pid != sid)
             claim_rc = -EPERM;   /* only a session leader claims a terminal */
+        else if (t->hungup)
+            claim_rc = -EIO;     /* a hung-up slave is no one's terminal again, as in tty_claim_for */
         else
             t->sid = sid;   /* claimed and named in one step */
     } else if (t->sid != sid) {
