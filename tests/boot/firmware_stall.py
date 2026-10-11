@@ -31,14 +31,18 @@ class FirmwareStall(Exception):
 
 def handed_over(read_log, proc, deadline, clock=time.monotonic, sleep=time.sleep, poll_s=0.5):
     """True once `read_log()` holds the loader banner or `proc` has exited;
-    False if neither happened by `deadline` (a `clock()` value)."""
-    while clock() < deadline:
+    False if neither happened by `deadline` (a `clock()` value). The last
+    look is at the deadline itself, so a banner printed during the final
+    sleep still counts."""
+    while True:
         if proc.poll() is not None:
             return True   # it exited: whatever happened is in the log, not a stall
         if BANNER in read_log():
             return True
-        sleep(poll_s)
-    return False
+        now = clock()
+        if now >= deadline:
+            return False
+        sleep(min(poll_s, deadline - now))
 
 
 def launch_with_retry(launch, read_log, kill, on_retry, handover_s=HANDOVER_S, clock=time.monotonic,
@@ -46,7 +50,8 @@ def launch_with_retry(launch, read_log, kill, on_retry, handover_s=HANDOVER_S, c
     """Start a boot with `launch(attempt)` (attempt 0, then 1), watching
     `read_log(attempt)`; a stalled first attempt is killed (`kill(proc)`),
     reported (`on_retry()`), and started once more. Returns (proc, retried).
-    Raises FirmwareStall after a second stall, having killed it."""
+    Raises FirmwareStall after a second stall, having killed it. A caller
+    whose whole boot may take less than HANDOVER_S passes its own bound."""
     for attempt in (0, 1):
         proc = launch(attempt)
         if handed_over(lambda: read_log(attempt), proc, clock() + handover_s, clock=clock, sleep=sleep):

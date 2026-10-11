@@ -977,8 +977,10 @@ def main():
     logs = []
 
     def launch(attempt):
+        nonlocal start
         if logs:
             logs[-1].close()
+            start = time.monotonic()   # a retried boot is timed from its own launch
         logs.append(open(args.log, "wb"))
         return subprocess.Popen(
             [runner, args.image],
@@ -1001,13 +1003,12 @@ def main():
               f"{firmware_stall.HANDOVER_S:.0f}s (no loader banner); retrying the boot once")
 
     try:
-        proc, stall_retried = firmware_stall.launch_with_retry(launch, read_log, kill, on_retry)
+        proc, stall_retried = firmware_stall.launch_with_retry(
+            launch, read_log, kill, on_retry, handover_s=min(firmware_stall.HANDOVER_S, args.timeout))
     except firmware_stall.FirmwareStall as e:
         logs[-1].close()
         print(f"boot-test: FAIL: {e}")
         return 1
-    if stall_retried:
-        start = time.monotonic()
     log = logs[-1]
     with log:
         net_thread = None

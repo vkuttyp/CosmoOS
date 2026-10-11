@@ -126,7 +126,8 @@ the reboot stage's boot holds only OVMF's screen-clear sequences.
 shows neither the loader banner nor a QEMU exit within 30 s is killed and
 started once more, the result says "firmware stall, retried" (the install
 boots keep the first attempt's log as `boot-<name>-stall.log`), and a
-second stall fails. Any output of ours -- the banner, and so any kernel
+second stall fails. The bound is the boot's own timeout when that is
+shorter, and the last look is at the bound itself. Any output of ours -- the banner, and so any kernel
 output -- ends the watch, so no kernel defect is retried. Checked by
 `tests/boot/test_firmware_stall.py` (make host-test). The stall itself is
 still unassigned; the retry makes it visible instead of fatal.

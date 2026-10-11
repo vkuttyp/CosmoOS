@@ -10,7 +10,8 @@ A fake clock, fake QEMU processes and fake logs drive the rule:
 - nothing at all: killed, "firmware stall, retried" reported, launched
   again, and the second attempt's banner accepted (retried = True);
 - nothing at all twice: both killed and FirmwareStall raised;
-- the banner arriving only after the bound is too late: a stall.
+- the banner arriving only after the bound is too late: a stall;
+- the banner arriving during the last sleep before the bound is in time.
 """
 import os
 import sys
@@ -38,7 +39,7 @@ class Proc:
         return 0 if self.exit_at is not None and self.clock() >= self.exit_at else None
 
 
-def run(script, handover=30.0):
+def run(script, handover=30.0, poll=0.5):
     """`script`: per attempt, (banner_at or None, exit_at or None)."""
     clock = Clock()
     procs, retries = [], []
@@ -56,7 +57,7 @@ def run(script, handover=30.0):
 
     try:
         _, retried = fs.launch_with_retry(launch, read_log, kill, lambda: retries.append(1), handover_s=handover,
-                                          clock=clock, sleep=clock.sleep)
+                                          clock=clock, sleep=lambda s: clock.sleep(s))
         return ("ok", retried, len(procs), [p.killed for p in procs], len(retries))
     except fs.FirmwareStall:
         return ("stall", None, len(procs), [p.killed for p in procs], len(retries))
@@ -78,6 +79,9 @@ def main():
     check(run([(None, None), (None, None)]) == ("stall", None, 2, [True, True], 1),
           "two stalls: both killed, FirmwareStall raised")
     check(run([(45.0, None), (None, None)])[0] == "stall", "a banner after the bound is a stall")
+    check(run([(29.75, None), (1.0, None)]) == ("ok", False, 1, [False], 0),
+          "a banner during the last sleep before the bound is in time (a final look at the deadline)")
+    check(run([(None, None), (None, None)], handover=10.0)[0] == "stall", "a caller's shorter bound is used")
     print("PASS: firmware-stall")
 
 

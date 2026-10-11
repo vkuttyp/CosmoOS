@@ -385,6 +385,13 @@ Lines with a `[LEVEL]` prefix come from `klog()`; unprefixed lines are
 the loader writes through the firmware console, which OVMF mirrors to the
 serial port; afterwards it writes the UART directly.
 
+A boot whose log shows no loader banner (`cosmoboot-uefi`) and whose QEMU
+has not exited within 30 s is a firmware-handover stall: every harness
+boot kills it and starts it once more, says "firmware stall, retried", and
+fails on a second stall (`tests/boot/firmware_stall.py`;
+`docs/testing/flakes.md`, "firmware handover"). Once the banner is out,
+nothing is retried.
+
 A panic prints `KERNEL PANIC: <reason>`, the CPU, a register dump when a
 trap frame is available, and a frame-pointer stack trace. Resolve the
 addresses against `out/<arch>-<build>/kernel/kernel.map`, or with

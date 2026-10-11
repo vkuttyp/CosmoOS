@@ -68,14 +68,15 @@ class Boot:
         # (tests/boot/firmware_stall.py).
         def launch(attempt):
             if attempt:
-                os.replace(self.log_path, self.log_path.replace(".log", "-stall.log"))
+                os.replace(self.log_path, os.path.splitext(self.log_path)[0] + "-stall.log")
+            # Each attempt's reader appends to that attempt's own buffer.
             self.buf = bytearray()
             self.deadline = time.monotonic() + timeout
             self.t0 = time.monotonic()
             self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
             self.log = open(self.log_path, "wb")
-            self.reader = threading.Thread(target=self._read, args=(self.proc, self.log), daemon=True)
+            self.reader = threading.Thread(target=self._read, args=(self.proc, self.log, self.buf), daemon=True)
             self.reader.start()
             return self.proc
 
@@ -86,7 +87,9 @@ class Boot:
         def kill(proc):
             proc.kill()
             proc.wait()
-            self.reader.join(timeout=5)
+            # qemu-run.sh execs QEMU: its exit closes the pipe, so the
+            # reader ends; wait for it before the log closes.
+            self.reader.join()
             self.log.close()
 
         def on_retry():
@@ -94,17 +97,18 @@ class Boot:
                   f"{firmware_stall.HANDOVER_S:.0f}s)", flush=True)
 
         try:
-            _, self.stall_retried = firmware_stall.launch_with_retry(launch, read_log, kill, on_retry)
+            _, self.stall_retried = firmware_stall.launch_with_retry(
+                launch, read_log, kill, on_retry, handover_s=min(firmware_stall.HANDOVER_S, timeout))
         except firmware_stall.FirmwareStall as e:
             raise Fail(f"{name}: {e}")
 
-    def _read(self, proc, log):
+    def _read(self, proc, log, buf):
         while True:
             b = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
             if not b:
                 break
             with self.lock:
-                self.buf += b
+                buf += b
             log.write(b)
             log.flush()
 
