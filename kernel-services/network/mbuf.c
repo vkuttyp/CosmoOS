@@ -3,7 +3,7 @@
  */
 
 /* EXPERIMENT (do not merge): 2 KiB ahead of the network code, to move its layout by half a page. */
-__attribute__((used, noinline)) void exp_layout_pad(void)
+static __attribute__((used, noinline)) void exp_layout_pad(void)
 {
     __asm__ volatile(".space 2048, 0");
 }
