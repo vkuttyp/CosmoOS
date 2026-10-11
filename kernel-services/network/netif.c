@@ -16,6 +16,7 @@
 #include <kernel/fwcfg.h>
 #include <kernel/kmalloc.h>
 #include <kernel/net/cksum.h>
+#include <kernel/net/dhcp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/percpu.h>
@@ -121,13 +122,13 @@ static const char *parse_ipv4(const char *s, uint32_t *out)
     return s;
 }
 
-/* IPv4 configuration for a real interface: fw_cfg "opt/cosmo/ipv4" as
- * "addr/prefix,gateway", else the QEMU user-mode defaults. DHCP is a later
- * phase. */
+/* IPv4 configuration for a NIC driver's interface (NETIF_AUTOCONF): fw_cfg
+ * "opt/cosmo/ipv4" as "addr/prefix,gateway" -- the override a boot can name
+ * -- else the DHCP client (dhcp.c), which configures it when a server
+ * answers. A malformed override is ignored, and DHCP runs. */
 static void netif_autoconfig(struct netif *nif)
 {
     char cfg[64];
-    uint32_t addr = IPV4_ADDR(10, 0, 2, 15), gw = IPV4_ADDR(10, 0, 2, 2), mask = htonl(0xffffff00u);
     if (fwcfg_get_string("ipv4", cfg, sizeof(cfg))) {
         uint32_t a, g;
         const char *p = parse_ipv4(cfg, &a);
@@ -139,14 +140,13 @@ static void netif_autoconfig(struct netif *nif)
                 prefix = prefix * 10 + (unsigned)(*p++ - '0');
         }
         if (p && *p == ',' && parse_ipv4(p + 1, &g) && prefix <= 32) {
-            addr = a;
-            gw = g;
-            mask = prefix == 0 ? 0 : htonl(0xffffffffu << (32 - prefix));
-        } else {
-            kwarn("net: %s: ignoring malformed opt/cosmo/ipv4 '%s'", nif->name, cfg);
+            kinfo("net: %s: address from fw_cfg opt/cosmo/ipv4", nif->name);
+            netif_set_ipv4(nif, a, prefix == 0 ? 0 : htonl(0xffffffffu << (32 - prefix)), g);
+            return;
         }
+        kwarn("net: %s: ignoring malformed opt/cosmo/ipv4 '%s'", nif->name, cfg);
     }
-    netif_set_ipv4(nif, addr, mask, gw);
+    dhcp_client_start(nif);
 }
 
 int netif_register(struct netif *nif)
@@ -195,7 +195,7 @@ int netif_register(struct netif *nif)
     spin_unlock_irqrestore(&g_netif_lock, s);
     kinfo("net: %s registered (%02x:%02x:%02x:%02x:%02x:%02x, mtu %u)", nif->name, nif->mac[0], nif->mac[1],
           nif->mac[2], nif->mac[3], nif->mac[4], nif->mac[5], nif->mtu);
-    if (!(nif->flags & NETIF_LOOPBACK) && nif->ip4.addr == 0)
+    if ((nif->flags & NETIF_AUTOCONF) && !(nif->flags & NETIF_LOOPBACK) && nif->ip4.addr == 0)
         netif_autoconfig(nif);
     return 0;
 }
@@ -284,6 +284,10 @@ void netif_unregister(struct netif *nif)
     list_remove(&nif->link);
     list_init(&nif->link);
     spin_unlock_irqrestore(&g_netif_lock, s);
+
+    /* 2a. Its DHCP client, if it has one: no timer or work of the client
+     * runs after this, and the client's reference is put. */
+    dhcp_client_stop(nif);
 
     /* 3. A transmit or netif_rx that read the flags before step 1 runs in
      * a read-side section; after one grace period none is in flight, so
@@ -438,6 +442,11 @@ void netif_set_up(struct netif *nif, bool up)
          * table locks. */
         arp_flush(nif);
         nd_flush(nif);
+    } else {
+        /* A DHCP client started at registration may have sent its first
+         * DISCOVER before the link was up, and lost it: send it now rather
+         * than at the first retransmission. */
+        dhcp_client_kick(nif);
     }
 }
 

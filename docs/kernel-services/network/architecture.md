@@ -97,15 +97,19 @@ through handles.
   device configuration, interrupt-driven queues through the `virtio`
   module) and `lo`.
 - **Boot parameters**: a fw_cfg reader gives the kernel `opt/cosmo/*`
-  strings QEMU is started with: static IPv4 configuration and the test
-  harness's ports. Without them, `eth0` takes QEMU's default user-mode
-  address and the harness-driven tests skip.
+  strings QEMU is started with: an IPv4 override and the test
+  harness's ports. Without the override, `eth0` is configured by DHCP;
+  without the ports, the harness-driven tests skip.
+- **DHCP client** (`dhcp.c`, roadmap M4): DISCOVER/OFFER/REQUEST/ACK on
+  every driver interface with no fw_cfg address, renewal at T1, rebind
+  at T2, the address removed when the lease ends; the lease (with its DNS
+  servers) in the netctl snapshot for `netcfg`.
 
 ## Non-responsibilities
 
 - Zero-copy paths and user mappings of packet buffers (section 35: the
   ownership model comes first; copies happen at the socket boundary).
-- DHCP, DNS, routing beyond one default route, multicast, IGMP/MLD,
+- A DNS resolver (user space reads `/etc/resolv.conf`), routing beyond one default route, multicast, IGMP/MLD,
   IPv4 fragmentation and reassembly, IPv6 path MTU discovery, TCP
   options beyond MSS, SACK, ECN, `SO_*` socket options beyond what the
   tests need (keepalive is always on, with global parameters), Unix
