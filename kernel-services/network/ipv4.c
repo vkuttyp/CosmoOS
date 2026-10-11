@@ -6,6 +6,7 @@
 
 #include <kernel/errno.h>
 #include <kernel/log.h>
+#include <kernel/net/dhcp.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
@@ -729,6 +730,12 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * a runtime toggle of forwarding or masquerade takes effect between
      * packets, never between two checks of one. */
     unsigned flags = __atomic_load_n(&nif->flags, __ATOMIC_RELAXED);
+    /* A DHCP server's reply to this interface's client: before the address
+     * checks, since until the ACK the interface has no address for it to be
+     * addressed to, and the offer may be unicast to the address offered
+     * (RFC 2131 §4.1). Only UDP 67 -> 68 on an interface with a client. */
+    if (iph->proto == IPPROTO_UDP && !(flags & NETIF_LOOPBACK) && dhcp_client_input(nif, m, ihl))
+        return;
     /* Martians: loopback or our own addresses arriving from a real link. */
     if (!(flags & NETIF_LOOPBACK) &&
         ((ntohl(iph->src) >> 24) == 127 || netif_owns_ipv4(iph->src))) {
