@@ -48,3 +48,8 @@ uname
 id
 sha256sum
 which
+# Roadmap M4 (decision 5): networking and the terminal.
+wget
+nslookup
+stty
+tty

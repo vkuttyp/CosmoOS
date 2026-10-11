@@ -212,6 +212,26 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   `cannot mount vda ... staying on the live root`, and the live shell
   answers.
 
+## `make test-net-login` (`tests/boot/net_login_test.py`)
+
+Roadmap M4's acceptance. Release builds in CI (job `net-login`, both
+architectures). The live image is installed as `test-install`'s install
+stage does, then the installed disk is booted alone on QEMU user
+networking with no fw_cfg address, so the kernel's DHCP client configures
+`eth0`; the log must show `dhcp: eth0: bound to 10.0.2.15 ... first
+10.0.2.3`.
+
+- **a. DHCP**: `netcfg show` reports `eth0: bound 10.0.2.15/24 gateway
+  10.0.2.2 server 10.0.2.2 ... dns 10.0.2.3`, and `/etc/resolv.conf`
+  holds `nameserver 10.0.2.3`.
+- **b. By address**: the harness serves a fresh random 1 MiB file over
+  HTTP on the host's 127.0.0.1 (the guest's 10.0.2.2); `wget` fetches it
+  and the guest's `sha256sum` must equal the file's.
+- **c. By name**: `nslookup example.com` exits 0 with an `Address:` line,
+  and `wget -O - http://example.com/` returns a body containing `Example
+  Domain` -- up to three attempts, since this depends on the runner's
+  internet access through slirp's resolver (10.0.2.3, the host's).
+
 ## `make test-busybox` (`tests/boot/busybox_test.py`)
 
 Roadmap M3's acceptance: BusyBox ash is the shell. One boot of the image

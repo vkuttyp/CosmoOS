@@ -477,7 +477,7 @@ static int vnet_probe(struct virtio_device *vdev)
     v->nif.mtu = 1500;
     v->nif.ops = &vnet_ops;
     v->nif.priv = v;
-    v->nif.flags = 0;
+    v->nif.flags = NETIF_AUTOCONF;   /* fw_cfg opt/cosmo/ipv4 or DHCP at registration */
     v->nif.caps = (v->tx_csum ? NETIF_CAP_TXCSUM : 0) | (v->rx_csum ? NETIF_CAP_RXCSUM : 0);
     rc = netif_register(&v->nif);
     if (rc)
