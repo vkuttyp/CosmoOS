@@ -511,6 +511,14 @@ static const struct vnode_ops ramfs_chr_ops = {
     .evict = ramfs_evict,
 };
 
+const struct chrdev_ops *ramfs_chr_ops_of(const struct vnode *vn)
+{
+    if (vn->ops != &ramfs_chr_ops)
+        return NULL;
+    const struct ramfs_node *n = vn->fs_priv;
+    return n->chr;
+}
+
 void *ramfs_chr_priv(const struct vnode *vn)
 {
     const struct ramfs_node *n = vn->fs_priv;

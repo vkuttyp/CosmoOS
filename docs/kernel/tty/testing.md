@@ -150,7 +150,34 @@ the harness to send an escape sequence.
   (there is no interface to do so).
 - No fuzzing of `tty_input` with random bytes; the classifier is
   reviewed and the control-byte case is covered by one line.
-- Raw mode and pseudo-terminals arrive with their own tests.
+- Pseudo-terminals: `tty-pty` (the kernel side) and `lxpty` (the Linux
+  ABI, sessions and job control) below.
+
+## Pseudo-terminals and job control (`tty-pty`, `lxpty`; roadmap M4)
+
+`tty-pty` (`kernel/tty/ttytest.c`) is a pair's life from a kernel thread:
+`/dev/ptmx` opened, the slave refused while locked and opened once
+unlocked, a line written at the master read whole from the slave, the
+echo and the slave's own output read from the master with CR LF, the
+master's readiness with nothing queued; then the master's close: the
+slave's read 0, its write `-EIO`, its name gone, and the pair freed only
+at the slave's close (`pty_get_stats`).
+
+`lxpty` (`tests/linux/lxpty.c`, run by `rc.linux`) is the Linux door, in
+two parts. The first is the path musl's `posix_openpt`, `grantpt`,
+`unlockpt` and `ptsname` take (`O_NOCTTY`, `TIOCGPTN`, `TIOCGPTLCK`,
+`TIOCSPTLCK`), the default modes as `TCGETS` reports them, a line and its
+echo, raw mode by `TCSETSF`, the window size across the pair, `FIONREAD`,
+and the master's `-EIO` after the slave's last close. The second runs a
+session on the slave: a child calls `setsid` and `TIOCSCTTY`, starts jobs
+in groups of their own and moves the foreground with `TIOCSPGRP`, while
+the test, outside the session, types at the master: `^C` kills the
+foreground job with SIGINT; `^Z` stops it (`wait4` with `WUNTRACED`) and
+SIGCONT continues it (`WCONTINUED`); a background reader is stopped by
+SIGTTIN; with `TOSTOP` a background writer by SIGTTOU, and without it
+the write goes through; `TIOCSWINSZ` raises SIGWINCH on the foreground
+job; closing the master kills the session's leader with SIGHUP. Markers:
+`lxpty: pty ok`, `lxpty: jobs ok`, `lxpty: ok`.
 
 ## Input from a keyboard
 

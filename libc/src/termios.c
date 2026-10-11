@@ -15,7 +15,8 @@ int tcgetattr(int fd, struct termios *t)
         return (int)__syscall_ret(rc);
     memset(t, 0, sizeof(*t));
     t->c_iflag = k.modes & ICRNL;
-    t->c_lflag = k.modes & (ECHO | ICANON | ISIG);
+    t->c_oflag = k.modes & OPOST;
+    t->c_lflag = k.modes & (ECHO | ICANON | ISIG | TOSTOP);
     t->c_cc[VMIN] = k.vmin;
     t->c_cc[VTIME] = k.vtime;
     return 0;
@@ -26,7 +27,7 @@ int tcsetattr(int fd, int actions, const struct termios *t)
     (void)actions;   /* see termios.h: the three are alike here */
     struct cosmo_termios k;
     memset(&k, 0, sizeof(k));
-    k.modes = (t->c_iflag & ICRNL) | (t->c_lflag & (ECHO | ICANON | ISIG));
+    k.modes = (t->c_iflag & ICRNL) | (t->c_oflag & OPOST) | (t->c_lflag & (ECHO | ICANON | ISIG | TOSTOP));
     k.vmin = t->c_cc[VMIN];
     k.vtime = t->c_cc[VTIME];
     return (int)__syscall_ret(cosmo_tcsetattr(fd, &k));

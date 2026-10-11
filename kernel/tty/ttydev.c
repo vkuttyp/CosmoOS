@@ -22,7 +22,9 @@
 #include <kernel/console.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
+#include <kernel/printf.h>
 #include <kernel/process.h>
+#include <kernel/pty.h>
 #include <kernel/tty.h>
 #include <kernel/vfs.h>
 
@@ -68,20 +70,18 @@ static int dev_set_nonblock(struct vnode *vn, struct file *f, int on)
     return file_set_nonblock(f, on);
 }
 
-static int64_t console_dev_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+static int64_t console_dev_write(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn;
     (void)off;
-    console_write(buf, len);
-    return (int64_t)len;
+    return tty_write(tty_console(), buf, len, file_nonblocking(f));   /* TOSTOP's SIGTTOU, then the sinks */
 }
 
-/* The caller's controlling terminal, or NULL when its session has none. */
+/* The caller's controlling terminal, referenced, or NULL when its session
+ * has none: the console or a pty slave (tty_controlling). */
 static struct tty *controlling_tty(void)
 {
-    struct tty *t = tty_console();
-    pid_t sid = process_current_sid();
-    return (sid != 0 && tty_session_of(t) == sid) ? t : NULL;
+    return tty_controlling(process_current_sid());
 }
 
 static int64_t tty_dev_read(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
@@ -89,7 +89,11 @@ static int64_t tty_dev_read(struct vnode *vn, struct file *f, uint64_t off, void
     (void)vn;
     (void)off;
     struct tty *t = controlling_tty();
-    return t ? tty_read_nb(t, buf, len, file_nonblocking(f)) : -ENXIO;
+    if (t == NULL)
+        return -ENXIO;
+    int64_t rc = tty_read_nb(t, buf, len, file_nonblocking(f));
+    tty_put(t);
+    return rc;
 }
 
 /* No controlling terminal: a read would be -ENXIO, which to a poller is an
@@ -99,40 +103,73 @@ static unsigned tty_dev_ready(struct vnode *vn, struct file *f)
     (void)vn;
     (void)f;
     struct tty *t = controlling_tty();
-    return t ? tty_ready_of(t) : COSMO_IO_ERROR;
+    if (t == NULL)
+        return COSMO_IO_ERROR;
+    unsigned r = tty_ready_of(t);
+    tty_put(t);
+    return r;
 }
 
 static struct waitqueue *tty_dev_poll_wq(struct vnode *vn, struct file *f, unsigned events)
 {
     (void)vn;
-    (void)f;
     struct tty *t = controlling_tty();
-    return (t != NULL && (events & COSMO_IO_READABLE)) ? &t->readers : NULL;
+    if (t == NULL)
+        return NULL;
+    /* A waiter stays on the queue after this returns, so the queue must
+     * outlive it: the console's does, and a pty slave's does while this
+     * open file pins it (tty_dev_open). A terminal the session took after
+     * the open is not pinned here; its readiness is still answered, but
+     * there is no queue to sleep on. */
+    struct waitqueue *wq = NULL;
+    if ((events & COSMO_IO_READABLE) && (t == tty_console() || t == f->priv))
+        wq = &t->readers;
+    tty_put(t);
+    return wq;
 }
 
-static int64_t tty_dev_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+/* Pin the terminal the opener's session controls now, if any, for the
+ * life of the open (the poll queue above); the open succeeds either way
+ * -- a process without a terminal is told so by each call. */
+static int tty_dev_open(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    f->priv = controlling_tty();
+    return 0;
+}
+
+static void tty_dev_release(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    if (f->priv != NULL)
+        tty_put(f->priv);
+}
+
+static int64_t tty_dev_write(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn;
     (void)off;
-    if (controlling_tty() == NULL)
+    struct tty *t = controlling_tty();
+    if (t == NULL)
         return -ENXIO;
-    console_write(buf, len);
-    return (int64_t)len;
+    int64_t rc = tty_write(t, buf, len, file_nonblocking(f));
+    tty_put(t);
+    return rc;
 }
 
 static const struct chrdev_ops console_dev_ops = {
-    .read_file = console_dev_read, .write = console_dev_write,
+    .read_file = console_dev_read, .write_file = console_dev_write,
     .ready = console_dev_ready, .poll_wq = console_dev_poll_wq, .set_nonblock = dev_set_nonblock,
 };
 static const struct chrdev_ops tty_dev_ops = {
-    .read_file = tty_dev_read, .write = tty_dev_write,
+    .open = tty_dev_open, .release = tty_dev_release, .read_file = tty_dev_read, .write_file = tty_dev_write,
     .ready = tty_dev_ready, .poll_wq = tty_dev_poll_wq, .set_nonblock = dev_set_nonblock,
 };
 
-/* The tty behind one of these nodes, for the terminal system calls;
- * NULL when the vnode is some other character device. `/dev/tty`
- * resolves per caller, so a process with no controlling terminal is
- * told the node is not a terminal for it. */
+/* The tty behind one of these nodes, for the terminal system calls,
+ * referenced; NULL when the vnode is some other character device.
+ * `/dev/tty` resolves per caller, so a process with no controlling
+ * terminal is told the node is not a terminal for it. */
 struct tty *tty_of_vnode(const struct vnode *vn)
 {
     if (vn == g_console_vnode)
@@ -157,9 +194,30 @@ struct tty *tty_of_open(struct kobject *obj)
 {
     struct tty *t = tty_of_object(obj);
     if (t != NULL)
-        return t;
+        return t;   /* the console: static, its reference a no-op */
     struct file *f = file_from_kobject(obj);
-    return f != NULL ? tty_of_vnode(f->vn) : NULL;
+    if (f == NULL)
+        return NULL;
+    t = pty_tty_of_file(f);   /* a pty's master or slave */
+    return t != NULL ? t : tty_of_vnode(f->vn);
+}
+
+bool tty_name_of_open(struct kobject *obj, char *buf, size_t n)
+{
+    if (tty_of_object(obj) != NULL) {
+        ksnprintf(buf, n, "/dev/console");
+        return true;
+    }
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL)
+        return false;
+    if (pty_name_of_file(f, buf, n))
+        return true;
+    if (f->vn == g_console_vnode || f->vn == g_tty_vnode) {
+        ksnprintf(buf, n, f->vn == g_console_vnode ? "/dev/console" : "/dev/tty");
+        return true;
+    }
+    return false;
 }
 
 void tty_dev_init(void)
@@ -170,4 +228,5 @@ void tty_dev_init(void)
     rc = ramfs_mkchr("/dev/tty", 0666, &tty_dev_ops, NULL, &g_tty_vnode);
     if (rc)
         kwarn("tty: /dev/tty: %d", rc);
+    pty_init();   /* /dev/ptmx and the pts filesystem (roadmap M4) */
 }

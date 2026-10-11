@@ -154,6 +154,32 @@ that a read would have served. Check: `tty-pollraw`, which sets `VMIN`
 0 on an empty terminal and requires the readiness answer and the read
 to agree.
 
+**T17. A session controls at most one terminal, and a terminal at most
+one session.** Every way of taking a controlling terminal -- `TIOCSCTTY`,
+naming a foreground group on an unclaimed terminal, opening a slave
+without `O_NOCTTY`, `COSMO_SPAWN_SETSID` -- first asks the registry
+whether the session has one (`tty_controlling`) and refuses a second,
+and takes a terminal only when its `sid` is 0, under its lock. Check:
+`lxpty` (`TIOCSCTTY` on its own terminal again is 0, `TIOCGSID` names the
+session).
+
+**T18. A hung-up terminal answers at once.** After `tty_hangup` its
+reads return end of file once the queue is empty, its writes `-EIO`, its
+readiness is readable, and its session no longer controls it. A reader
+blocked at the hangup is woken. Check: `tty-pty` (read 0 and write `-EIO`
+after the master's close), `lxpty` (the session leader dies of SIGHUP).
+
+**T19. A pair outlives every holder and no more.** The master, each
+slave open and each `tty_get` hold one reference on the pair; the last
+`put` frees it and its number. Check: `tty-pty` (the pty stats' `freed`
+moves only at the slave's close, after the master's and the test's own
+reference are gone).
+
+**T20. A background write stops only when TOSTOP says so.** `tty_write`
+raises SIGTTOU on a writer in a background group of the controlling
+session when `TOSTOP` is set, and on nothing else. Check: `lxpty` (a
+background writer is stopped with TOSTOP and writes without it).
+
 ## Gaps (documented, not invariants)
 
 - **The raw *read* branch is not distinguishable by any test here.**
@@ -173,18 +199,22 @@ to agree.
   editor until the next key is pressed. That key is then handled as a
   keystroke rather than swallowed, so nothing is lost -- but the pause
   is real, and only `VTIME` removes it.
-- No output processing beyond the serial sink's `\n` to `\r\n`: no
-  `OPOST` to turn off, and the Linux translation reports it always on.
+- Output processing is `OPOST`'s newline to CR LF and nothing else (no
+  tab expansion, no `OCRNL`); on the console the serial sink does it
+  whatever the mode.
 - The control characters are fixed: `^C`, `^\`, `^Z`, `^U`, `^W` and
   backspace cannot be reassigned, so `c_cc` carries only `VMIN`/`VTIME`.
 - Line editing does not know the terminal's width: a line longer than
   the screen wraps in the terminal's own way and the shell's redraw does
   not account for it.
-- No `TOSTOP`: a background process writing to the terminal is not sent
-  `SIGTTOU` (Linux's default too). Reads are stopped and `tcsetpgrp`
-  from the background does raise it.
-- One tty; no pseudo-terminals. (`/dev/console` and `/dev/tty` exist
-  since the terminal-modes unit.)
+- A pty's input never blocks the master's writer: a full input ring (4
+  KiB) drops, as the console's does. Pasting more than that into a
+  canonical-mode slave faster than it is read loses the excess.
+- `TIOCSCTTY`'s steal (argument 1) is not offered; a terminal another
+  session controls is refused.
+- `/dev/tty` pins its terminal at open for its poll queue; a session
+  that takes a terminal after opening `/dev/tty` is answered by each call
+  but has no queue to sleep on through that open.
 - Only the UART feeds the tty; the virtio-console receive queue and a
   keyboard driver are future producers.
 - Output processing is the serial sink's `\n` to `\r\n` only.

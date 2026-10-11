@@ -29,6 +29,8 @@ int lx_open_flags(unsigned lx, unsigned *native)
         n |= COSMO_O_NOFOLLOW;
     if (lx & LX_O_NONBLOCK)
         n |= COSMO_O_NONBLOCK;   /* a FIFO's open rules, and the open's mode (the named-pipes unit) */
+    if (lx & LX_O_NOCTTY)
+        n |= COSMO_O_NOCTTY;     /* a session leader opening a terminal does not take it (roadmap M4) */
     /* Accepted and dropped: no effect on this kernel. */
     unsigned known = LX_O_ACCMODE | LX_O_CREAT | LX_O_EXCL | LX_O_TRUNC | LX_O_APPEND | LX_O_DIRECTORY | LX_O_CLOEXEC |
                      LX_O_NONBLOCK | LX_O_NOCTTY | LX_O_LARGEFILE | LX_O_NOFOLLOW;
@@ -129,10 +131,32 @@ void lx_termios_from_native(struct lx_termios *out, const struct cosmo_termios *
 {
     memset(out, 0, sizeof(*out));
     out->c_iflag = (in->modes & COSMO_TTY_ICRNL) ? LX_ICRNL : 0;
-    out->c_oflag = LX_OPOST;
+    /* OPOST|ONLCR: the newline goes out as CR LF -- by a pty's output
+     * processing, or by the console's serial sink, which does it whatever
+     * the mode says. Reporting it clear would make a libc translate too. */
+    out->c_oflag = (in->modes & COSMO_TTY_OPOST) ? (LX_OPOST | LX_ONLCR) : 0;
+    /* A terminal that says 8 bits, receiver on, 38400 baud: there is no
+     * line to describe, and zero would read as a hung-up modem (B0). */
+    out->c_cflag = LX_CS8 | LX_CREAD | LX_B38400;
     out->c_lflag = ((in->modes & COSMO_TTY_ISIG) ? LX_ISIG : 0) |
                    ((in->modes & COSMO_TTY_ICANON) ? LX_ICANON : 0) |
-                   ((in->modes & COSMO_TTY_ECHO) ? LX_ECHO : 0);
+                   ((in->modes & COSMO_TTY_ECHO) ? (LX_ECHO | LX_ECHOE | LX_ECHOK | LX_ECHOCTL | LX_ECHOKE) : 0) |
+                   ((in->modes & COSMO_TTY_TOSTOP) ? LX_TOSTOP : 0) | LX_IEXTEN;
+    /* The control characters this line discipline acts on, at Linux's
+     * defaults (they are fixed here: setting another is accepted and has
+     * no effect). */
+    out->c_cc[LX_VINTR] = 0x03;
+    out->c_cc[LX_VQUIT] = 0x1c;
+    out->c_cc[LX_VERASE] = 0x7f;
+    out->c_cc[LX_VKILL] = 0x15;
+    out->c_cc[LX_VEOF] = 0x04;
+    out->c_cc[LX_VSTART] = 0x11;
+    out->c_cc[LX_VSTOP] = 0x13;
+    out->c_cc[LX_VSUSP] = 0x1a;
+    out->c_cc[LX_VREPRINT] = 0x12;
+    out->c_cc[LX_VDISCARD] = 0x0f;
+    out->c_cc[LX_VWERASE] = 0x17;
+    out->c_cc[LX_VLNEXT] = 0x16;
     out->c_cc[LX_VMIN] = in->vmin;
     out->c_cc[LX_VTIME] = in->vtime;
 }
@@ -143,7 +167,9 @@ void lx_termios_to_native(struct cosmo_termios *out, const struct lx_termios *in
     out->modes = ((in->c_iflag & LX_ICRNL) ? COSMO_TTY_ICRNL : 0) |
                  ((in->c_lflag & LX_ISIG) ? COSMO_TTY_ISIG : 0) |
                  ((in->c_lflag & LX_ICANON) ? COSMO_TTY_ICANON : 0) |
-                 ((in->c_lflag & LX_ECHO) ? COSMO_TTY_ECHO : 0);
+                 ((in->c_lflag & LX_ECHO) ? COSMO_TTY_ECHO : 0) |
+                 ((in->c_lflag & LX_TOSTOP) ? COSMO_TTY_TOSTOP : 0) |
+                 ((in->c_oflag & LX_OPOST) && (in->c_oflag & LX_ONLCR) ? COSMO_TTY_OPOST : 0);
     out->vmin = in->c_cc[LX_VMIN];
     out->vtime = in->c_cc[LX_VTIME];
 }

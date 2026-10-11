@@ -330,6 +330,12 @@ struct cosmo_spawn {
  * rule setpgid enforces, applied where the child cannot yet ask for
  * itself. Unprivileged: a shell arranging its own jobs needs it. */
 #define COSMO_SPAWN_SETPGID (1u << 6)
+/* Roadmap M4: the child leads a new session (and a group, both named by
+ * its pid), and when its handle 0 is a terminal no session controls, that
+ * terminal becomes the session's controlling terminal with the child's
+ * group in the foreground -- what getty does for a login shell, before the
+ * child's first instruction. Exclusive with SETPGID. */
+#define COSMO_SPAWN_SETSID (1u << 7)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */
@@ -438,7 +444,10 @@ struct cosmo_siginfo {
 #define COSMO_TTY_ICRNL  (1u << 1)  /* carriage return arrives as newline */
 #define COSMO_TTY_ICANON (1u << 2)  /* line at a time, with erase and kill */
 #define COSMO_TTY_ISIG   (1u << 3)  /* ^C, ^\ and ^Z are signals, not bytes */
-#define COSMO_TTY_MODES  0xfu       /* every flag this kernel knows */
+/* Roadmap M4 (pseudo-terminals and job control). */
+#define COSMO_TTY_OPOST  (1u << 4)  /* output: a newline goes out as CR LF (a pty's; the serial sink does it for the console) */
+#define COSMO_TTY_TOSTOP (1u << 5)  /* a background group's write to its terminal stops it with SIGTTOU */
+#define COSMO_TTY_MODES  0x3fu      /* every flag this kernel knows */
 
 struct cosmo_termios {
     uint32_t modes;    /* COSMO_TTY_* */
@@ -585,6 +594,7 @@ struct cosmo_sockaddr {
 #define COSMO_O_NONBLOCK  0x0800   /* the open, and the file, do not wait (a FIFO's open rules; per open) */
 #define COSMO_O_DIRECTORY 0x10000
 #define COSMO_O_NOFOLLOW  0x20000  /* a symbolic link as the last component is ELOOP, not its target */
+#define COSMO_O_NOCTTY    0x40000  /* opening a terminal does not make it the session leader's controlling terminal */
 
 /* lseek() whence. */
 #define COSMO_SEEK_SET 0

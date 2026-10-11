@@ -451,6 +451,10 @@ LINUXTEST_MARKERS = [
     r"^lxsig group: 7$",
     r"^lxsig lastthread: 5$",
     r"^lxsig session: 0$",
+    # lxpty (roadmap M4): the pty path musl takes, then a session's job control.
+    r"^lxpty: pty ok$",
+    r"^lxpty: jobs ok$",
+    r"^lxpty: ok$",
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 # The musl event-loop program (tests/linux/epoll_musl.c): a closed fd leaves

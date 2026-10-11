@@ -15,6 +15,7 @@
 #include <kernel/console.h>
 #include <kernel/fbcon.h>
 #include <kernel/errno.h>
+#include <kernel/list.h>
 #include <kernel/process.h>
 #include <kernel/signal.h>
 #include <kernel/sched.h>
@@ -25,6 +26,61 @@
 #define TTY_EOF_MARK 0x04u
 
 static struct tty g_console_tty;
+
+/* Every terminal a session may control: the console and each live pty
+ * slave (docs/kernel/tty/design.md, "Many terminals"). Lock order:
+ * g_ttys_lock -> tty.lock. */
+static LIST_HEAD(g_ttys);
+static spinlock_t g_ttys_lock = SPINLOCK_INIT("ttys");
+
+void tty_register(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_ttys_lock);
+    list_push_back(&g_ttys, &t->link);
+    spin_unlock_irqrestore(&g_ttys_lock, s);
+}
+
+void tty_unregister(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_ttys_lock);
+    list_remove(&t->link);
+    list_init(&t->link);
+    spin_unlock_irqrestore(&g_ttys_lock, s);
+}
+
+void tty_get(struct tty *t)
+{
+    if (t->ops != NULL && t->ops->get != NULL)
+        t->ops->get(t);
+}
+
+void tty_put(struct tty *t)
+{
+    if (t->ops != NULL && t->ops->put != NULL)
+        t->ops->put(t);
+}
+
+/* A session controls at most one terminal: the one whose `sid` is its. */
+struct tty *tty_controlling(pid_t sid)
+{
+    if (sid == 0)
+        return NULL;
+    struct tty *found = NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&g_ttys_lock);
+    struct tty *t;
+    list_for_each_entry(t, &g_ttys, link) {
+        arch_irq_state_t ts = spin_lock_irqsave(&t->lock);
+        bool mine = t->sid == sid;
+        spin_unlock_irqrestore(&t->lock, ts);
+        if (mine) {
+            found = t;
+            tty_get(t);   /* under the registry lock: the terminal cannot be unregistered and freed first */
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_ttys_lock, s);
+    return found;
+}
 
 /* Every process of the group, one signal each. The kernel is the sender,
  * so no credential check applies: the person at the keyboard is already
@@ -59,13 +115,15 @@ void tty_setup(struct tty *t, const char *name)
     spinlock_init(&t->lock, "tty");
     waitqueue_init(&t->readers, "tty-readers");
     t->vmin = 1;   /* a non-canonical read blocks for one byte */
-    t->flags = TTY_ECHO | TTY_ICRNL | TTY_ICANON | TTY_ISIG;
+    t->flags = TTY_DEFAULT_MODES;
     t->name = name;
+    list_init(&t->link);
 }
 
 void tty_init(void)
 {
     tty_setup(&g_console_tty, "console");
+    tty_register(&g_console_tty);
 }
 
 struct tty *tty_console(void)
@@ -76,7 +134,11 @@ struct tty *tty_console(void)
 /* Lock held. */
 static void echo(struct tty *t, const char *s, size_t n)
 {
-    if (t->flags & TTY_ECHO)
+    if (!(t->flags & TTY_ECHO))
+        return;
+    if (t->ops != NULL && t->ops->echo != NULL)
+        t->ops->echo(t, s, n);
+    else
         console_write(s, n);
 }
 
@@ -248,6 +310,14 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
      * an empty group does anyway. */
     if (!process_group_in_session(pgid, sid))
         return -EPERM;
+    /* A session controls one terminal: a leader whose session has another
+     * may not claim this one by naming a group on it. */
+    struct tty *other = tty_controlling(sid);
+    if (other != NULL) {
+        tty_put(other);
+        if (other != t)
+            return -EPERM;
+    }
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     pid_t fg = t->fg_pgid;
     if (t->sid == 0) {
@@ -288,39 +358,140 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
     return 0;
 }
 
-void tty_session_exit(pid_t sid)
+/*
+ * The session `sid` lets go of `t` (its leader exited, gave the terminal
+ * up, or the far side hung up): the foreground group is told -- SIGHUP,
+ * and SIGCONT after it so that a stopped job hears the hangup -- and the
+ * terminal is free for the next session leader. `reset` also puts the
+ * modes back (a terminal a person types at again); `leader_too` signals
+ * the session's leader as well (a hangup: the leader is the shell the line
+ * dropped under).
+ */
+static void tty_release(struct tty *t, pid_t sid, bool reset, bool hangup, bool leader_too)
 {
-    struct tty *t = tty_console();
-    pid_t hangup = 0;
+    pid_t fg = 0;
     bool ended = false;
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
-    if (t->sid == sid) {
+    if (hangup)
+        t->hungup = true;
+    if (t->sid == sid && sid != 0) {
         ended = true;
-        hangup = t->fg_pgid;
+        fg = t->fg_pgid;
         t->sid = 0;
         t->fg_pgid = 0;
-        /*
-         * And the modes go back to a terminal a person can type at. A
-         * program that dies in raw mode has no shell left to restore
-         * anything -- the shell only restores what *it* set -- so
-         * without this the machine stays unusable until it is reset,
-         * which is the one failure of terminal modes that is worse than
-         * not having them.
-         */
-        t->flags = TTY_ECHO | TTY_ICRNL | TTY_ICANON | TTY_ISIG;
-        t->vmin = 1;
-        t->vtime = 0;
-        t->head = t->tail = t->used = t->lines = 0;
-        t->line_len = 0;
+        if (reset) {
+            /*
+             * And the modes go back to a terminal a person can type at. A
+             * program that dies in raw mode has no shell left to restore
+             * anything -- the shell only restores what *it* set -- so
+             * without this the machine stays unusable until it is reset,
+             * which is the one failure of terminal modes that is worse than
+             * not having them.
+             */
+            t->flags = TTY_DEFAULT_MODES;
+            t->vmin = 1;
+            t->vtime = 0;
+            t->head = t->tail = t->used = t->lines = 0;
+            t->line_len = 0;
+        }
     }
     spin_unlock_irqrestore(&t->lock, s);
-    if (hangup != 0)
-        tty_signal_group(t, hangup, SIGHUP);
+    if (fg != 0) {
+        tty_signal_group(t, fg, SIGHUP);
+        tty_signal_group(t, fg, SIGCONT);
+    }
+    if (ended && leader_too) {
+        struct process *leader = process_lookup(sid);
+        if (leader != NULL) {
+            if (leader->pgid != fg) {
+                struct signal_info info = { .sig = SIGHUP, .source = SIGSRC_KERNEL };
+                signal_send(leader, SIGHUP, &info);
+                info.sig = SIGCONT;
+                signal_send(leader, SIGCONT, &info);
+            }
+            process_put(leader);
+        }
+    }
     /* A poller of /dev/tty sleeps on `readers`; its answer just became
      * ERROR (no controlling terminal), so it is told -- whether or not a
-     * foreground group was there to hang up (the device-readiness unit). */
-    if (ended)
+     * foreground group was there to hang up (the device-readiness unit).
+     * A hung-up terminal's readers return end of file. */
+    if (ended || hangup)
         waitqueue_wake_all(&t->readers);
+}
+
+void tty_session_exit(pid_t sid)
+{
+    struct tty *t = tty_controlling(sid);
+    if (t == NULL)
+        return;
+    tty_release(t, sid, true, false, false);
+    tty_put(t);
+}
+
+void tty_hangup(struct tty *t)
+{
+    pid_t sid = tty_session_of(t);
+    tty_release(t, sid, false, true, true);
+}
+
+int tty_set_controlling(struct tty *t)
+{
+    struct process *self = process_current();
+    pid_t sid = 0, pgid = 0;
+    process_current_ids(&pgid, &sid);
+    if (self == NULL || self->pid != sid)
+        return -EPERM;   /* only a session leader takes a controlling terminal */
+    struct tty *other = tty_controlling(sid);
+    if (other != NULL) {
+        tty_put(other);
+        return other == t ? 0 : -EPERM;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    int rc = 0;
+    if (t->hungup)
+        rc = -EIO;
+    else if (t->sid != 0)
+        rc = -EPERM;   /* another session's; stealing it is not offered */
+    else {
+        t->sid = sid;
+        t->fg_pgid = pgid;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    return rc;
+}
+
+bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    bool ok = t->sid == 0 && !t->hungup;
+    if (ok) {
+        t->sid = sid;
+        t->fg_pgid = pgid;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    return ok;
+}
+
+int tty_disassociate(struct tty *t)
+{
+    struct process *self = process_current();
+    pid_t sid = process_current_sid();
+    if (tty_session_of(t) != sid || sid == 0)
+        return -ENOTTY;
+    if (self != NULL && self->pid == sid)
+        tty_release(t, sid, false, false, false);
+    return 0;
+}
+
+int tty_get_sid(struct tty *t, pid_t *out)
+{
+    pid_t sid = process_current_sid();
+    pid_t owner = tty_session_of(t);
+    if (owner == 0 || owner != sid)
+        return -ENOTTY;
+    *out = owner;
+    return 0;
 }
 
 void tty_get_termios(struct tty *t, struct cosmo_termios *out)
@@ -357,10 +528,52 @@ void tty_set_termios(struct tty *t, const struct cosmo_termios *in)
     spin_unlock_irqrestore(&t->lock, s);
 }
 
+void tty_flush_input(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    t->head = t->tail = t->used = t->lines = 0;
+    t->line_len = 0;
+    spin_unlock_irqrestore(&t->lock, s);
+}
+
+unsigned tty_queued(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    unsigned n = t->used;
+    if (t->flags & TTY_ICANON)
+        for (unsigned i = 0, at = t->head; i < t->used; i++, at = (at + 1) % TTY_INPUT_MAX)
+            if (t->ring[at] == TTY_EOF_MARK)
+                n--;
+    spin_unlock_irqrestore(&t->lock, s);
+    return n;
+}
+
+void tty_set_size(struct tty *t, const struct cosmo_ttysize *in)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    bool changed = !t->size_set || t->size.cols != in->cols || t->size.rows != in->rows;
+    t->size.cols = in->cols;
+    t->size.rows = in->rows;
+    t->size_set = true;
+    pid_t fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    /* A program drawing the whole screen redraws on SIGWINCH; one that
+     * set the same size again has nothing to redraw. */
+    if (changed && fg != 0)
+        tty_signal_group(t, fg, SIGWINCH);
+}
+
 void tty_get_size(struct tty *t, struct cosmo_ttysize *out)
 {
     memset(out, 0, sizeof(*out));
-    if (t != tty_console())
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    bool set = t->size_set;
+    if (set) {
+        out->cols = t->size.cols;
+        out->rows = t->size.rows;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    if (set || t != tty_console())
         return;
     /*
      * The framebuffer console knows its geometry; a serial line does
@@ -419,8 +632,8 @@ bool tty_has_line(struct tty *t)
  */
 bool tty_read_ready(struct tty *t)
 {
-    if (__atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0)
-        return true;
+    if (__atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0 || __atomic_load_n(&t->hungup, __ATOMIC_RELAXED))
+        return true;   /* a hung-up terminal answers at once: end of file */
     unsigned flags = __atomic_load_n(&t->flags, __ATOMIC_RELAXED);
     return !(flags & TTY_ICANON) && __atomic_load_n(&t->vmin, __ATOMIC_RELAXED) == 0;
 }
@@ -486,21 +699,22 @@ int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock)
          * modes belong to it like every other field of the terminal. */
         arch_irq_state_t ms = spin_lock_irqsave(&t->lock);
         bool poll_only = !(t->flags & TTY_ICANON) && t->vmin == 0 && t->lines == 0;
+        bool eof = t->hungup && t->lines == 0;   /* the far side is gone and nothing is left: end of file */
         spin_unlock_irqrestore(&t->lock, ms);
-        if (poll_only)
+        if (poll_only || eof)
             return 0;
         /* The `VMIN` 0 term is what lets a mode change release a reader
          * that is already here: the condition is re-checked under the
          * lock at the top of the loop, so a racy read of it costs at
          * most one extra turn. */
         int rc = wait_event_killable(&t->readers,
-                                     t->lines > 0 || (!(t->flags & TTY_ICANON) && t->vmin == 0));
+                                     t->lines > 0 || t->hungup || (!(t->flags & TTY_ICANON) && t->vmin == 0));
         if (rc)
             return rc;
         arch_irq_state_t s = spin_lock_irqsave(&t->lock);
         if (t->lines == 0) {
             spin_unlock_irqrestore(&t->lock, s);
-            continue;   /* another reader took the line */
+            continue;   /* another reader took the line, or a hangup: the top of the loop says which */
         }
         /* Non-canonical: `lines` counts bytes, so take what is there up
          * to the caller's buffer. There is no terminator to look for --
@@ -544,6 +758,49 @@ int64_t tty_read_nb(struct tty *t, void *buf, size_t len, bool nonblock)
         spin_unlock_irqrestore(&t->lock, s);
         return (int64_t)n;   /* 0 only for an empty ^D record: end of file */
     }
+}
+
+/*
+ * A background job writing to its terminal, with TOSTOP set, is stopped
+ * with SIGTTOU -- the write counterpart of the read rule, but optional,
+ * because most terminals let background output through. An orphaned
+ * group gets -EIO (nothing could continue it); a writer that ignores or
+ * blocks SIGTTOU writes, which is what POSIX says (unlike the read, where
+ * that case is -EIO).
+ */
+static int64_t tty_write_allowed(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    bool tostop = (t->flags & TTY_TOSTOP) != 0;
+    pid_t tty_sid = t->sid, fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    if (!tostop || tty_sid == 0 || fg == 0)
+        return 0;
+    pid_t sid = 0, pgid = 0;
+    process_current_ids(&pgid, &sid);
+    if (sid != tty_sid || pgid == fg)
+        return 0;
+    if (process_group_is_orphaned(pgid, sid))
+        return -EIO;
+    struct signal_info info = { .sig = SIGTTOU, .source = SIGSRC_KERNEL };
+    if (!signal_raise_stop_self(SIGTTOU, &info))
+        return 0;   /* ignored or blocked: the write goes ahead */
+    return -EINTR;   /* the stop happens at the return to user mode; the write restarts after SIGCONT */
+}
+
+int64_t tty_write(struct tty *t, const void *buf, size_t len, bool nonblock)
+{
+    if (len == 0)
+        return 0;
+    int64_t rc = tty_write_allowed(t);
+    if (rc != 0)
+        return rc;
+    if (__atomic_load_n(&t->hungup, __ATOMIC_ACQUIRE))
+        return -EIO;
+    if (t->ops != NULL && t->ops->write != NULL)
+        return t->ops->write(t, buf, len, nonblock);
+    console_write(buf, len);
+    return (int64_t)len;
 }
 
 void tty_get_stats(struct tty *t, struct tty_stats *out)

@@ -50,6 +50,12 @@ pid_t spawnve_mountns(const char *path, const char *const argv[], const char *co
  * is invisible outside. Privileged. */
 pid_t spawnve_utsns(const char *path, const char *const argv[], const char *const envp[],
                     const struct spawn_handle *h, size_t nh);
+/* spawnve with COSMO_SPAWN_SETSID: the child leads a new session, and
+ * the terminal on its handle 0, when no session controls it, becomes its
+ * controlling terminal with the child's group in the foreground -- a
+ * login shell's start (init's console shell; roadmap M4). */
+pid_t spawnve_session(const char *path, const char *const argv[], const char *const envp[],
+                      const struct spawn_handle *h, size_t nh);
 /* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
  * supplementary groups; unprivileged callers may name only ids they hold. */
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,

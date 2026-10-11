@@ -22,6 +22,10 @@ typedef unsigned tcflag_t;
 #define ISIG   COSMO_TTY_ISIG
 /* c_iflag */
 #define ICRNL  COSMO_TTY_ICRNL
+/* Roadmap M4: output processing (a pty turns a newline into CR LF) and
+ * the background-write stop. */
+#define OPOST  COSMO_TTY_OPOST
+#define TOSTOP COSMO_TTY_TOSTOP
 
 #define VMIN  0
 #define VTIME 1
@@ -29,7 +33,8 @@ typedef unsigned tcflag_t;
 
 struct termios {
     tcflag_t c_iflag;   /* ICRNL */
-    tcflag_t c_lflag;   /* ECHO, ICANON, ISIG */
+    tcflag_t c_oflag;   /* OPOST */
+    tcflag_t c_lflag;   /* ECHO, ICANON, ISIG, TOSTOP */
     unsigned char c_cc[NCCS];
 };
 

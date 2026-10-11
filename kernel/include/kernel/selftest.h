@@ -254,6 +254,7 @@ bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
 bool selftest_tty_ldisc(const char **reason);
 bool selftest_tty_devready(const char **reason);   /* the terminal's files report readiness (the device-readiness unit) */
+bool selftest_tty_pty(const char **reason);        /* /dev/ptmx and /dev/pts/N: a pair's life (roadmap M4) */
 
 /* kernel/core/fbtest.c: the framebuffer console, checked by reading the
  * pixels back, and what it costs. */

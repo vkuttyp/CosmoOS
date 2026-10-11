@@ -307,6 +307,85 @@ same hook lets pipe ends report `COSMO_DT_FIFO` and sockets
 `COSMO_DT_SOCK`, so `sys_fstat` works on files, the console, pipes and
 sockets.
 
+## Pseudo-terminals (`kernel/tty/pty.c`; roadmap M4)
+
+A pseudo-terminal is a terminal whose keyboard and screen are a program:
+an ssh server, a terminal multiplexer. Opening `/dev/ptmx` creates a
+**pair**. The open file is the **master**; the **slave** appears as
+`/dev/pts/N` on the pts filesystem -- a ramfs instance mounted at
+`/dev/pts` that holds the slaves and nothing else, created and removed
+by the pty code -- and is a `struct tty` exactly like the console's: the
+same line discipline, modes, sessions, job control and system calls.
+What differs is where its bytes come from and go:
+
+- **Input** is what the master writes: `tty_input(&pair->tty, ...)`,
+  thread context instead of an interrupt, the same editing, echo and
+  signal characters. Input never blocks: a full input ring drops, as the
+  console's does.
+- **Output** -- the slave's writes and the line discipline's echo -- goes
+  into the master's queue (`PTY_OUT_MAX`, 8 KiB), which the master reads.
+  The tty grew an `ops` pointer for this: `echo` (under `tty.lock`, never
+  blocks, drops when full), `write` (a program's write: blocks for room,
+  or `-EAGAIN` non-blocking), `get`/`put`. NULL ops is the console,
+  whose output is `console_write`.
+- **Output processing** is a mode now, `OPOST`: a newline goes out as CR
+  LF. A pty applies it; the console's serial sink always did, so the
+  console's bit is reported and changes nothing.
+
+The master's read returns what is queued, blocks when nothing is, and is
+`-EIO` once a slave has been opened and every slave open has closed --
+how an ssh server learns its session's terminal is gone. A new pair's
+slave is **locked** (`TIOCSPTLCK`) until the opener unlocks it, so
+nothing else can open the slave between the clone and the opener's own
+open (`grantpt`/`unlockpt`); a locked or orphaned slave's open is `-EIO`.
+
+**Closing the master hangs the slave up** (`tty_hangup`): the session
+that controls it lets go (`sid` and `fg_pgid` cleared), SIGHUP and then
+SIGCONT go to its foreground group and to its leader, the slave's reads
+return end of file once its queue is empty, its writes `-EIO`, and its
+name is removed so nothing opens it again. The pair is freed when the
+master, every slave open and every caller holding its terminal
+(`tty_get`) are gone: one kobject reference each.
+
+Lock order: `g_ttys_lock -> tty.lock -> pty.olock`. Echo runs under the
+line discipline's lock and queues into the master's; nothing takes them
+the other way.
+
+### Many terminals
+
+With more than one terminal, "which terminal does this session control"
+is a lookup: a registry of every terminal a session may control (the
+console, and each live slave) is walked for the one whose `sid` is the
+session's (`tty_controlling`). It answers `/dev/tty`, the release at a
+session leader's exit, and the rule that **a session controls at most
+one terminal**: claiming a second -- by `TIOCSCTTY`, by naming a
+foreground group on an unclaimed terminal, or by opening one -- is
+refused. Lookups return a referenced terminal, because a pty can be
+freed while a caller still holds it; `tty_of_open` is referenced for the
+same reason.
+
+**Becoming the controlling terminal.** Three ways, all for a session
+leader whose session has none and a terminal no session has:
+`TIOCSCTTY`; opening a slave without `O_NOCTTY` (what a program that
+calls `setsid` and then opens its terminal relies on); and
+`COSMO_SPAWN_SETSID`, a spawn whose child leads a new session and takes
+the terminal on its handle 0 before its first instruction -- what getty
+does for a login shell, and what init does for the console shell, so a
+shell with job control (BusyBox ash) finds the terminal its own when it
+asks `tcgetpgrp`. `TIOCNOTTY` from the leader gives the terminal up as
+an exit would.
+
+**SIGWINCH.** `TIOCSWINSZ` stores the size; a change raises SIGWINCH on
+the foreground group. Until a size is set, the console answers the
+framebuffer's geometry and a pty 0x0.
+
+**TOSTOP.** With `TOSTOP` set, a write from a background group of the
+controlling session stops it with SIGTTOU (`tty_write`), as a background
+read does with SIGTTIN; an orphaned group's write is `-EIO`, and a
+writer that blocks or ignores SIGTTOU writes (POSIX). Off by default, as
+on Linux. Every write to a terminal goes through `tty_write`: the
+console object, `/dev/console`, `/dev/tty`, a slave.
+
 ## Where the bytes come from
 
 `tty_input` has three callers now, and they are all the same shape: a

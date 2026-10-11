@@ -568,10 +568,13 @@ names (M) the root mount, in three passes:
 
 1. Under `g_mounts_lock`: M must be a mount root, not the root, mounted
    on a directory of the current root (R), not being unmounted. Every
-   other mount must be under M (it comes along) or attached to R at its
+   other mount must be under M (it comes along), attached to R at its
    top level, which is read from its one initial-namespace reference
-   (`/proc`, `/dev`); anything else is `-EBUSY` -- it would be left
-   hanging off the tree being released -- and nothing has changed.
+   (`/proc`, `/dev`), or nested in such a top-level mount -- `/dev/pts`
+   in `/dev` since roadmap M4 -- whose mountpoint is a directory of that
+   mount, so it moves with it unchanged; anything else is `-EBUSY` -- it
+   would be left hanging off the tree being released -- and nothing has
+   changed.
 2. Without the lock (a lookup is filesystem I/O): each such name must be
    a directory in M that nothing covers.
 3. Under the lock again: the mount count, the root and every mountpoint

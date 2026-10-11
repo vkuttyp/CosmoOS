@@ -143,7 +143,7 @@ FRAME_EXEMPT_BEGIN(process_spawn)   /* scripts/frame-baseline.txt: 3616 bytes */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  bool set_pgid, pid_t pgid, pid_t *pid_out)
+                  bool set_pgid, pid_t pgid, bool new_session, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -197,6 +197,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
 
         .set_pgid = set_pgid,
         .pgid = pgid,
+        .new_session = new_session,
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,

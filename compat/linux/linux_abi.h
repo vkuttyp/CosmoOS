@@ -173,11 +173,40 @@ struct lx_pollfd {
 #define LX_TCSETS     0x5402
 #define LX_TCSETSW    0x5403
 #define LX_TCSETSF    0x5404
+#define LX_TCSBRK     0x5409
+#define LX_TCXONC     0x540A
+#define LX_TCFLSH     0x540B
+#define LX_TIOCSCTTY  0x540E
+#define LX_TIOCGPGRP  0x540F
+#define LX_TIOCSPGRP  0x5410
+#define LX_TIOCOUTQ   0x5411
 #define LX_TIOCGWINSZ 0x5413
+#define LX_TIOCSWINSZ 0x5414
+#define LX_FIONREAD   0x541B
+#define LX_TIOCNOTTY  0x5422
+#define LX_TIOCGSID   0x5429
+#define LX_TIOCGPTN   0x80045430u   /* _IOR('T', 0x30, unsigned int) */
+#define LX_TIOCSPTLCK 0x40045431u   /* _IOW('T', 0x31, int) */
+#define LX_TIOCGPTLCK 0x80045439u   /* _IOR('T', 0x39, int) */
+#define LX_TCIFLUSH  0
+#define LX_TCOFLUSH  1
+#define LX_TCIOFLUSH 2
 
 #define LX_NCCS 19
-#define LX_VTIME 5
-#define LX_VMIN  6
+#define LX_VINTR    0
+#define LX_VQUIT    1
+#define LX_VERASE   2
+#define LX_VKILL    3
+#define LX_VEOF     4
+#define LX_VTIME    5
+#define LX_VMIN     6
+#define LX_VSTART   8
+#define LX_VSTOP    9
+#define LX_VSUSP    10
+#define LX_VREPRINT 12
+#define LX_VDISCARD 13
+#define LX_VWERASE  14
+#define LX_VLNEXT   15
 
 struct lx_termios {
     uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
@@ -194,7 +223,17 @@ struct lx_winsize {
 #define LX_ISIG   0000001   /* c_lflag */
 #define LX_ICANON 0000002
 #define LX_ECHO   0000010
+#define LX_ECHOE  0000020
+#define LX_ECHOK  0000040
+#define LX_TOSTOP 0000400
+#define LX_ECHOCTL 0001000
+#define LX_ECHOKE 0004000
+#define LX_IEXTEN 0100000
 #define LX_OPOST  0000001   /* c_oflag */
+#define LX_ONLCR  0000004
+#define LX_B38400 0000017   /* c_cflag */
+#define LX_CS8    0000060
+#define LX_CREAD  0000200
 
 #define LX_WNOHANG 1
 #define LX_WUNTRACED 2

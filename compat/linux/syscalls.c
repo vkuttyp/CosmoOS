@@ -35,6 +35,7 @@
 #include <kernel/unix.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
+#include <kernel/pty.h>
 #include <kernel/tty.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
@@ -1604,11 +1605,13 @@ static int64_t lx_fcntl(struct syscall_args *a)
 }
 
 /*
- * `ioctl`, for the three requests a terminal needs and nothing else.
- * Until this unit every request answered -ENOTTY, and the cost was not
- * fidelity but correctness: a libc told the console is not a terminal
- * fully buffers its output, so a hosted program's prompt does not
- * appear until something flushes it.
+ * `ioctl`, for what a terminal needs and nothing else.
+ * Until the terminal-modes unit every request answered -ENOTTY, and the
+ * cost was not fidelity but correctness: a libc told the console is not a
+ * terminal fully buffers its output, so a hosted program's prompt does not
+ * appear until something flushes it. Roadmap M4 adds what a shell's job
+ * control, a pty's opener (musl's posix_openpt, grantpt, unlockpt and
+ * ptsname) and an ssh server ask of a terminal.
  *
  * The native ABI has typed calls for these (docs/kernel/tty/design.md,
  * "Modes"); this is the translation layer, and it is the only place in
@@ -1616,32 +1619,29 @@ static int64_t lx_fcntl(struct syscall_args *a)
  * That is a property of Linux's ABI, which this personality exists to
  * imitate, not one the tree adopts.
  */
-static int64_t lx_ioctl(struct syscall_args *a)
+static int64_t lx_ioctl_tty(struct tty *t, struct file *f, unsigned req, uint64_t arg)
 {
-    unsigned req = (unsigned)a->a[1];
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
-    if (obj == NULL)
-        return -EBADF;
-    struct tty *t = tty_of_open(obj);   /* the console object, or an open /dev/tty */
-    kobject_put(obj);
-    if (t == NULL)
-        return -ENOTTY;
     switch (req) {
     case LX_TCGETS: {
         struct cosmo_termios k;
         tty_get_termios(t, &k);
         struct lx_termios lt;
         lx_termios_from_native(&lt, &k);
-        return copy_to_user(a->a[2], &lt, sizeof(lt)) ? -EFAULT : 0;
+        return copy_to_user(arg, &lt, sizeof(lt)) ? -EFAULT : 0;
     }
     case LX_TCSETS:
     case LX_TCSETSW:
     case LX_TCSETSF: {
+        /* SETSW waits for output to drain: a pty's queue is the master's to
+         * read and the console's sink is synchronous, so there is nothing
+         * to wait for. SETSF also discards unread input. */
         struct lx_termios lt;
-        if (copy_from_user(&lt, a->a[2], sizeof(lt)))
+        if (copy_from_user(&lt, arg, sizeof(lt)))
             return -EFAULT;
         struct cosmo_termios k;
         lx_termios_to_native(&k, &lt);
+        if (req == LX_TCSETSF)
+            tty_flush_input(t);
         tty_set_termios(t, &k);
         return 0;
     }
@@ -1649,11 +1649,102 @@ static int64_t lx_ioctl(struct syscall_args *a)
         struct cosmo_ttysize sz;
         tty_get_size(t, &sz);
         struct lx_winsize w = { .ws_row = sz.rows, .ws_col = sz.cols };
-        return copy_to_user(a->a[2], &w, sizeof(w)) ? -EFAULT : 0;
+        return copy_to_user(arg, &w, sizeof(w)) ? -EFAULT : 0;
     }
+    case LX_TIOCSWINSZ: {
+        struct lx_winsize w;
+        if (copy_from_user(&w, arg, sizeof(w)))
+            return -EFAULT;
+        struct cosmo_ttysize sz = { .cols = w.ws_col, .rows = w.ws_row };
+        tty_set_size(t, &sz);
+        return 0;
+    }
+    case LX_TIOCSCTTY:
+        return tty_set_controlling(t);   /* arg 1 (steal, privileged) is not offered: -EPERM as any other */
+    case LX_TIOCNOTTY:
+        return tty_disassociate(t);
+    case LX_TIOCGPGRP: {
+        pid_t pgid = 0;
+        int rc = tty_get_pgrp(t, &pgid);
+        if (rc)
+            return rc;
+        int32_t v = (int32_t)pgid;
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_TIOCSPGRP: {
+        int32_t v;
+        if (copy_from_user(&v, arg, sizeof(v)))
+            return -EFAULT;
+        if (v <= 0)
+            return -EINVAL;
+        return tty_set_pgrp(t, (pid_t)v);
+    }
+    case LX_TIOCGSID: {
+        pid_t sid = 0;
+        int rc = tty_get_sid(t, &sid);
+        if (rc)
+            return rc;
+        int32_t v = (int32_t)sid;
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_TIOCGPTN: {
+        unsigned n = 0;
+        int rc = f != NULL ? pty_get_index(f, &n) : -ENOTTY;
+        if (rc)
+            return rc;
+        uint32_t v = n;
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_TIOCSPTLCK: {
+        int32_t v;
+        if (copy_from_user(&v, arg, sizeof(v)))
+            return -EFAULT;
+        return f != NULL ? pty_set_lock(f, v != 0) : -ENOTTY;
+    }
+    case LX_TIOCGPTLCK: {
+        bool locked = false;
+        int rc = f != NULL ? pty_get_lock(f, &locked) : -ENOTTY;
+        if (rc)
+            return rc;
+        int32_t v = locked ? 1 : 0;
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_FIONREAD: {
+        /* A master counts its queue; a terminal what its reader would get. */
+        uint32_t v = f != NULL && pty_get_index(f, &(unsigned){ 0 }) == 0 ? pty_master_queued(f) : tty_queued(t);
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_TIOCOUTQ: {
+        uint32_t v = 0;   /* output is never held back on this side */
+        return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
+    }
+    case LX_TCFLSH:
+        if (arg != LX_TCIFLUSH && arg != LX_TCOFLUSH && arg != LX_TCIOFLUSH)
+            return -EINVAL;
+        if (arg != LX_TCOFLUSH)
+            tty_flush_input(t);
+        return 0;
+    case LX_TCSBRK:   /* tcdrain (arg 1) and a break: nothing is held back to drain, no line to break */
+    case LX_TCXONC:   /* no flow control on this side */
+        return 0;
     default:
         return -ENOTTY;
     }
+}
+
+static int64_t lx_ioctl(struct syscall_args *a)
+{
+    unsigned req = (unsigned)a->a[1];
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
+        return -EBADF;
+    struct tty *t = tty_of_open(obj);   /* the console object, an open /dev/tty, a pty's master or slave */
+    struct file *f = file_from_kobject(obj);
+    int64_t rc = t != NULL ? lx_ioctl_tty(t, f, req, a->a[2]) : -ENOTTY;
+    if (t != NULL)
+        tty_put(t);
+    kobject_put(obj);
+    return rc;
 }
 
 static int64_t lx_sync(struct syscall_args *a) { (void)a; return vfs_sync(); }

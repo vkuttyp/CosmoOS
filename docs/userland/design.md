@@ -49,8 +49,13 @@ is the native side.
 `/bin/cosmo-sh` (`console_shell` in init). `cosmo-install` writes
 `/bin/sh` there, so an installed system's console -- and the shell that
 runs its `/etc/rc` -- is BusyBox ash, while the boot image keeps the
-native shell its interactive harness drives (job control is outside M3
-for ash: `ASH_JOB_CONTROL` is off). init gives the shell
+native shell its interactive harness drives. init starts the console
+shell -- not `/etc/rc` -- with `spawnve_session` (`COSMO_SPAWN_SETSID`):
+it leads a session whose controlling terminal is the console, its group
+in the foreground, so ash's job control (`ASH_JOB_CONTROL`, on since
+roadmap M4: `jobs`, `fg`, `bg`, `^Z`) finds the terminal its own; `/etc/rc`
+runs without, so what it starts in the background does not hear the
+console hang up when rc exits. init gives the shell
 `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/` and `PS1=cosmo$ `, so
 either shell shows the prompt the harnesses wait for. `/etc/rc` runs
 `/etc/rc.test` with `cosmo-sh`, and `rc.test` runs its inner shells as

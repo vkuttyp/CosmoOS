@@ -489,6 +489,9 @@ int ramfs_anon_reg(uint32_t mode, struct vnode **out);
  * detached ramfs (kernel/core/bootfs.c). */
 void ramfs_set_anon_mount(struct mount *mnt);
 void *ramfs_chr_priv(const struct vnode *vn);
+/* A ramfs character node's operations, NULL for any other vnode: which
+ * device an open file is (the pty slaves, kernel/tty/pty.c). */
+const struct chrdev_ops *ramfs_chr_ops_of(const struct vnode *vn);
 
 /* Diagnostics. */
 unsigned vfs_mount_count(void);
