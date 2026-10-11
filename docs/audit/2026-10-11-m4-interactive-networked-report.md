@@ -146,3 +146,55 @@ After the trap-async-inject fix (AArch64 only, so re-run there): debug
 `test` PASS 144.3 s; `test-guard` (cortex-a76) PASS 144.8 s and
 `test-entropy` PASS 156.5 s / 146.4 s, both RAS boots running the test from
 a cold CPU (`trap-async-inject ... ok`); the probe as above.
+
+## PR 2 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| Pseudo-terminals | `/dev/ptmx` clones a pair; the slave is `/dev/pts/N` on the pts filesystem (a ramfs instance mounted at `/dev/pts`, created and removed by the pty code). The slave is a `struct tty` with the console's line discipline: its input is what the master writes (`tty_input`), its output and echo go into the master's 8 KiB queue, with `OPOST` turning a newline into CR LF. A new slave is locked until `TIOCSPTLCK 0`. Closing the master hangs the slave up (`tty_hangup`: SIGHUP and SIGCONT to the session's foreground group and its leader, reads end of file, writes `-EIO`) and removes its name; the master's read is `-EIO` once a slave was opened and every open of it has closed. A pair lives while its master, a slave open or a `tty_get` holds it. | `kernel/tty/pty.c`, `kernel/include/kernel/pty.h` |
+| Many terminals | `struct tty` gains output ops (`echo`, `write`, `get`, `put`), a window size, a hung-up flag and a registry; `tty_controlling(sid)` finds a session's terminal, so `/dev/tty`, the release at a leader's exit and the one-terminal-per-session rule (T17) work for every terminal. Lookups are referenced. | `kernel/tty/tty.c`, `ttydev.c`, `tty.h` |
+| Controlling terminals | `TIOCSCTTY` (`tty_set_controlling`), opening a slave without `O_NOCTTY` (`COSMO_O_NOCTTY` new), `TIOCNOTTY`, `TIOCGSID`; `COSMO_SPAWN_SETSID` (`spawnve_session`): the child leads a new session and takes the terminal on its handle 0 before its first instruction -- init starts the console shell so, which gives BusyBox ash job control on the console. | `tty.c`, `process.c`, `spawn.c`, `native.c`, `libc`, `init.c` |
+| Job control | `TOSTOP` and `OPOST` are modes; `tty_write` (every write to a terminal: the console object, `/dev/console`, `/dev/tty`, a slave) stops a background writer with SIGTTOU when `TOSTOP` is set (T20); `TIOCSWINSZ` raises SIGWINCH on the foreground group. SIGTTIN, stop and continue, and `wait4`'s `WUNTRACED`/`WCONTINUED` were already there and are exercised. ash's `ASH_JOB_CONTROL` is on. | `tty.c`, `ports/busybox` |
+| Linux ABI | `ioctl`: `TCSETS*` (SETSF flushes), `TIOCSWINSZ`, `TIOCSCTTY`, `TIOCNOTTY`, `TIOC[GS]PGRP`, `TIOCGSID`, `TIOCGPTN`, `TIOC[GS]PTLCK`, `FIONREAD`, `TIOCOUTQ`, `TCFLSH`, `TCSBRK`, `TCXONC`; termios carries `ONLCR`, `TOSTOP`, `c_cflag` (CS8, CREAD, B38400) and Linux's default control characters; `O_NOCTTY` reaches the VFS. | `compat/linux` |
+| `/proc/<pid>/fd` | One link per open handle: a terminal by its path, a directory by its path, else `file:[ino]` or `<kind>:[address]`; the process's own user and the privileged only. musl's `ttyname` reads it, so `tty` names `/dev/pts/N`. | `procfs.c` |
+| switch_root | A mount nested in a top-level mount of the old root (`/dev/pts` in `/dev`) moves with it; it was refused (`-EBUSY`), which the installed boot met first. | `vfs.c` |
+| Tests | `tty-pty` (a pair's life from the kernel side); `lxpty` (musl's pty path, `/proc/self/fd` naming the slave with the same inode, then a session: ^C, ^Z with `WUNTRACED`, SIGCONT with `WCONTINUED`, SIGTTIN, TOSTOP's SIGTTOU and its absence, SIGWINCH, the hangup's SIGHUP); `test-net-login`'s console stage (ash: `&`, `jobs`, `kill %1`, ^Z, `bg`; `/proc/self/fd/0`). | `ttytest.c`, `tests/linux/lxpty.c`, `tests/boot/net_login_test.py` |
+
+Design: `docs/kernel/tty/design.md`, "Pseudo-terminals" and "Many
+terminals"; invariants T17-T20; `docs/compat/linux/design.md`, `ioctl`;
+`docs/kernel/process/api.md` (`COSMO_SPAWN_SETSID`); procfs api;
+`docs/kernel-services/vfs/design.md`, "Switching the root";
+`docs/userland/design.md` (the console shell).
+
+### lxpty can fail, and fails at the check it names
+
+A new feature is proven by its acceptance test, not a probe, but the
+job-control checks were mutation-tested once to see that they are not
+vacuous: with `tty_write_allowed` returning 0 (TOSTOP ignored) the aarch64
+debug boot fails with `lxpty: FAIL the session child ended early, status
+13568` -- exit 53, the TOSTOP-stop check. The first version of that run
+hung instead of failing (the parent held its own copy of the child's
+control pipe, so it never saw the child exit); the parent now closes it.
+
+### Console job control and `tty` (local, release, test-net-login)
+
+| | x86-64 | AArch64 |
+|---|---|---|
+| ash on the console: `sleep 100 &`, `jobs` Running, `kill %1`; `sleep 30`, ^Z Stopped, `bg` Running | PASS | PASS |
+| `readlink /proc/self/fd/0` | `/dev/console` | `/dev/console` |
+
+### PR 2 validation (local, macOS host, QEMU TCG; one sequential run)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| host-test | pass | pass |
+| analyze | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 133.6s | PASS 143.3s |
+| debug `test`, `QEMU_SMP=2` | PASS 151.0s | PASS 141.3s |
+| debug `test`, `QEMU_SMP=4` | PASS 144.0s | PASS 148.0s |
+| `test-smp2` | PASS 180.0s | PASS 153.5s |
+| `test-chaos` | PASS 153.9s | PASS 149.6s |
+| `test-harness-retry` | PASS 143.9s | PASS 166.5s |
+| release build and `test` | PASS 17.7s | PASS 20.8s |
+| `test-net-login` (release; console job control) | PASS 16.3s | PASS 23.2s |
+| `fuzz` | pass (host binaries, one run) | -- |
