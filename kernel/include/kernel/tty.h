@@ -3,9 +3,11 @@
  *
  * A tty collects bytes from a device in interrupt context, edits them
  * into lines (canonical mode: erase, kill, EOF, CR to NL, echo) and hands
- * complete lines to readers in thread context. There is one console tty,
- * fed by the serial receive interrupt and read through the console
- * kobject (handle 0 of every process that inherited it).
+ * complete lines to readers in thread context. The console tty is fed by
+ * the serial receive interrupt and read through the console kobject
+ * (handle 0 of every process that inherited it); since roadmap M4 each
+ * pseudo-terminal's slave is a tty too (kernel/tty/pty.c), fed by writes
+ * to its master and writing into the master's queue.
  */
 
 #ifndef KERNEL_TTY_H
@@ -26,6 +28,32 @@
 #define TTY_ICRNL  COSMO_TTY_ICRNL
 #define TTY_ICANON COSMO_TTY_ICANON
 #define TTY_ISIG   COSMO_TTY_ISIG
+#define TTY_OPOST  COSMO_TTY_OPOST
+#define TTY_TOSTOP COSMO_TTY_TOSTOP
+/* The modes a terminal starts with and goes back to when its session ends. */
+#define TTY_DEFAULT_MODES (TTY_ECHO | TTY_ICRNL | TTY_ICANON | TTY_ISIG | TTY_OPOST)
+
+struct tty;
+/*
+ * Where a terminal's output goes: the console's sinks, or a pty master's
+ * queue. `echo` runs with tty->lock held, possibly in interrupt context,
+ * and must not block (a full queue drops); `write` runs in thread context
+ * for a program's write and may block, honouring `nonblock`. `get`/`put`
+ * keep a dynamic terminal alive while a caller holds it. NULL ops: the
+ * console.
+ */
+struct tty_ops {
+    void (*echo)(struct tty *t, const char *s, size_t n);
+    int64_t (*write)(struct tty *t, const void *buf, size_t len, bool nonblock);
+    void (*get)(struct tty *t);
+    void (*put)(struct tty *t);
+    /* The output not yet taken by the far side (a pty: what the master has
+     * not read), dropping it, and waiting for it to go. NULL: nothing is
+     * held (the console's sinks are synchronous). */
+    unsigned (*out_queued)(struct tty *t);
+    void (*flush_out)(struct tty *t);
+    int (*drain)(struct tty *t);
+};
 
 struct tty_stats {
     uint64_t rx_bytes, lines_in, lines_read, dropped_lines, dropped_bytes, eofs;
@@ -51,10 +79,28 @@ struct tty {
      * read yet. `vtime` is carried and not honoured (see the uapi). */
     uint8_t vmin, vtime;
     const char *name;
+    /* Roadmap M4. */
+    const struct tty_ops *ops;     /* NULL: the console */
+    void *priv;                    /* the ops' own (a pty's pair) */
+    struct cosmo_ttysize size;     /* TIOCSWINSZ; under `lock` */
+    bool size_set;                 /* `size` was set: the console otherwise asks the framebuffer */
+    bool hungup;                   /* the far side is gone: reads return 0, writes -EIO; under `lock` */
+    struct list_node link;         /* the registry (tty_register), for the controlling-terminal lookup */
 };
 
 /* Set up a tty (echo and CR->NL on). */
 void tty_setup(struct tty *t, const char *name);
+/* Add a terminal to / remove it from the registry: a terminal a session
+ * may control must be findable from the session (tty_controlling). The
+ * console is registered by tty_init. Any context but interrupt. */
+void tty_register(struct tty *t);
+void tty_unregister(struct tty *t);
+/* A reference for a caller that keeps the pointer past the lookup that
+ * found it (no-ops for the console). */
+void tty_get(struct tty *t);
+void tty_put(struct tty *t);
+/* The terminal session `sid` controls, referenced, or NULL. */
+struct tty *tty_controlling(pid_t sid);
 
 /* One-time: the console tty. */
 void tty_init(void);
@@ -77,6 +123,11 @@ bool tty_has_line(struct tty *t);
  * or `VMIN` 0 promises an answer without it. What poll readiness and
  * the non-blocking path ask, so that both agree with `tty_read`. */
 bool tty_read_ready(struct tty *t);
+/* A program's write to the terminal (thread context): with TOSTOP set, a
+ * background group of the controlling session is stopped with SIGTTOU
+ * first (or refused -EIO when orphaned); then the bytes go out through
+ * the ops (a pty may block for room). -EIO once hung up. */
+int64_t tty_write(struct tty *t, const void *buf, size_t len, bool nonblock);
 
 void tty_get_stats(struct tty *t, struct tty_stats *out);
 
@@ -89,6 +140,21 @@ void tty_set_termios(struct tty *t, const struct cosmo_termios *in);
 /* The terminal's size in characters, 0x0 when it does not know (the
  * serial console; the framebuffer console knows its own). */
 void tty_get_size(struct tty *t, struct cosmo_ttysize *out);
+/* TCFLSH / TCSETSF: drop queued input and the line under edit. */
+void tty_flush_input(struct tty *t);
+/* The output side (tty_ops): TIOCOUTQ, TCFLSH's output half, TCSETSW's wait. */
+unsigned tty_out_queued(struct tty *t);
+void tty_flush_output(struct tty *t);
+int tty_drain_output(struct tty *t);
+/* FIONREAD: the bytes queued for readers (a canonical line's terminator
+ * counted, an EOF mark not). */
+unsigned tty_queued(struct tty *t);
+/* TIOCSWINSZ: a change raises SIGWINCH on the foreground group. */
+void tty_set_size(struct tty *t, const struct cosmo_ttysize *in);
+/* The far side has gone (a pty's master closed): SIGHUP and SIGCONT to
+ * the controlling session's foreground group and its leader, the session
+ * lets go of the terminal, readers see end of file and writers -EIO. */
+void tty_hangup(struct tty *t);
 
 /*
  * The controlling terminal (docs/kernel/tty/design.md).
@@ -111,6 +177,22 @@ pid_t tty_session_of(struct tty *t);
  * the system calls make; 0 when the terminal has none. */
 pid_t tty_foreground_pgrp(struct tty *t);
 int tty_get_pgrp(struct tty *t, pid_t *out);
+/* TIOCSCTTY: the caller, a session leader whose session controls no
+ * terminal, takes `t` as its controlling terminal with its own group in
+ * the foreground. -EPERM when it does not lead a session, its session has
+ * a terminal, or another session controls `t`. */
+int tty_set_controlling(struct tty *t);
+/* The same on behalf of a just-created process (COSMO_SPAWN_SETSID), and
+ * only when `t` is nobody's: false otherwise, which is not an error. */
+bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid);
+/* TIOCNOTTY: a session leader gives its terminal up (SIGHUP and SIGCONT to
+ * the foreground group, as at its exit); any other member of the session
+ * may ask and nothing changes, since control is the session's. -ENOTTY
+ * when `t` is not the caller's controlling terminal. */
+int tty_disassociate(struct tty *t);
+/* TIOCGSID: the session controlling `t`, for a caller in that session;
+ * -ENOTTY otherwise. */
+int tty_get_sid(struct tty *t, pid_t *out);
 /* The tty behind a kobject, or NULL when the object is not a terminal. */
 struct kobject;
 struct tty *tty_of_object(struct kobject *obj);
@@ -119,10 +201,15 @@ struct tty *tty_of_object(struct kobject *obj);
  * none), anything else is not a terminal (kernel/tty/ttydev.c). */
 struct vnode;
 struct tty *tty_of_vnode(const struct vnode *vn);
-/* The tty behind whatever a handle holds -- the console object or an
- * open file on one of the terminal nodes -- or NULL. Every system call
- * that resolves a handle to a terminal goes through this. */
+/* The tty behind whatever a handle holds -- the console object, an open
+ * file on one of the terminal nodes, a pty's master or slave -- or NULL.
+ * Every system call that resolves a handle to a terminal goes through
+ * this. Referenced: tty_put when done. */
 struct tty *tty_of_open(struct kobject *obj);
+/* The path a terminal handle was opened by, for /proc/<pid>/fd: the
+ * console object and /dev/console "/dev/console", /dev/tty "/dev/tty", a
+ * pty master "/dev/ptmx", a slave "/dev/pts/N". False for anything else. */
+bool tty_name_of_open(struct kobject *obj, char *buf, size_t n);
 /* One-time: register /dev/console and /dev/tty. After the VFS. */
 void tty_dev_init(void);
 

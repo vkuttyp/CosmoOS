@@ -21,6 +21,8 @@ echo "lxsig group: $?"
 echo "lxsig lastthread: $?"
 /boot/tests/linux/lxsig session
 echo "lxsig session: $?"
+# Pseudo-terminals, sessions and job control (roadmap M4; lxpty.c).
+/boot/tests/linux/lxpty || exit 1
 # The musl programs, where the build had musl-gcc (both or neither): an
 # inner shell skips the section when the first is absent and fails it when
 # either program fails, the same shape rc.test uses to run this script.

@@ -266,6 +266,9 @@ struct process_spawn_attr {
      * is where the group fields live. */
     bool set_pgid;
     pid_t pgid;
+    /* COSMO_SPAWN_SETSID (roadmap M4): the child leads a session of its
+     * own, and takes the terminal behind its handle 0 when that is nobody's. */
+    bool new_session;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -312,7 +315,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  bool set_pgid, pid_t pgid, pid_t *pid_out);
+                  bool set_pgid, pid_t pgid, bool new_session, pid_t *pid_out);
 
 /* A domain identifier nobody has had. Monotonic and never reused, so a
  * live domain's identity cannot be handed to a second set of processes;

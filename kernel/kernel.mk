@@ -70,6 +70,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/hidtest.c \
 	kernel/tty/tty.c \
 	kernel/tty/ttydev.c \
+	kernel/tty/pty.c \
 	kernel/tty/ttytest.c \
 	kernel/ipc/pipe.c \
 	kernel/ipc/pipetest.c \

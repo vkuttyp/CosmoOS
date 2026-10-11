@@ -294,3 +294,75 @@ out:
     if (t) file_put(t);
     return ok;
 }
+
+/*
+ * tty-pty (roadmap M4): a pair's whole life from the kernel side. Open
+ * /dev/ptmx, find the slave by its number, open it once unlocked; a line
+ * the master writes is the slave's to read, and the echo and the slave's
+ * output reach the master with CR LF; closing the master hangs the slave
+ * up -- its read is end of file, its write -EIO -- and removes its name;
+ * the slave's close frees the pair (the pty stats count it). The
+ * sessions, signals and the Linux ioctls are lxpty's (tests/linux).
+ */
+#include <kernel/printf.h>
+#include <kernel/pty.h>
+
+#define PCHECK(cond)                                                                         \
+    do {                                                                                     \
+        if (!(cond)) {                                                                       \
+            *reason = "tty-pty: " #cond;                                                     \
+            return false;                                                                    \
+        }                                                                                    \
+    } while (0)
+
+bool selftest_tty_pty(const char **reason)
+{
+    struct pty_stats st0, st1;
+    pty_get_stats(&st0);
+    struct file *m = NULL, *s = NULL;
+    PCHECK(vfs_open(NULL, "/dev/ptmx", COSMO_O_RDWR | COSMO_O_NOCTTY, 0, &m) == 0 && m != NULL);
+    unsigned n = 999;
+    PCHECK(pty_get_index(m, &n) == 0 && n < PTY_MAX);
+    char path[32];
+    ksnprintf(path, sizeof(path), "/dev/pts/%u", n);
+    PCHECK(vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_NOCTTY, 0, &s) == -EIO);   /* locked */
+    PCHECK(pty_set_lock(m, false) == 0);
+    PCHECK(vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_NOCTTY, 0, &s) == 0 && s != NULL);
+    PCHECK(pty_get_index(s, &n) == -ENOTTY);   /* a slave is not a master */
+    struct tty *t = pty_tty_of_file(s);
+    PCHECK(t != NULL);
+    struct tty *tm = pty_tty_of_file(m);
+    PCHECK(tm == t);   /* both ends name the one terminal */
+    tty_put(tm);
+    char buf[32];
+    PCHECK(file_write(m, "ab\n", 3) == 3);
+    PCHECK(file_read(s, buf, sizeof(buf)) == 3 && memcmp(buf, "ab\n", 3) == 0);
+    PCHECK(file_read(m, buf, sizeof(buf)) == 4 && memcmp(buf, "ab\r\n", 4) == 0);   /* the echo */
+    PCHECK(file_write(s, "x\n", 2) == 2);
+    PCHECK(file_read(m, buf, sizeof(buf)) == 3 && memcmp(buf, "x\r\n", 3) == 0);
+    PCHECK(kobject_ready(&m->obj) == COSMO_IO_WRITABLE);   /* nothing queued: not readable */
+    /* The hangup: the master goes. */
+    file_put(m);
+    m = NULL;
+    PCHECK(file_read(s, buf, sizeof(buf)) == 0);     /* end of file */
+    PCHECK(file_write(s, "y", 1) == -EIO);
+    struct vnode *gone = NULL;
+    PCHECK(vfs_lookup(NULL, path, &gone) == -ENOENT);
+    pty_get_stats(&st1);
+    PCHECK(st1.freed == st0.freed);   /* the slave and `t` still hold it */
+    tty_put(t);
+    file_put(s);
+    s = NULL;
+    pty_get_stats(&st1);
+    PCHECK(st1.opened == st0.opened + 1 && st1.freed == st0.freed + 1);
+    /* The number is free again: the next pair is made under the same name
+     * (its node was removed by the kernel, whoever closed the master). */
+    unsigned n2 = 999;
+    PCHECK(vfs_open(NULL, "/dev/ptmx", COSMO_O_RDWR | COSMO_O_NOCTTY, 0, &m) == 0 && m != NULL);
+    PCHECK(pty_get_index(m, &n2) == 0 && n2 == n);
+    file_put(m);
+    m = NULL;
+    kinfo("selftest: tty-pty: /dev/pts/%u: line in, CR LF echo and output, hangup to EOF/EIO, name removed, pair freed",
+          n);
+    return true;
+}

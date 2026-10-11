@@ -262,6 +262,11 @@ per boot). An interface's IPv4 configuration is published field by field
 paths with plain loads: a snapshot they read consistently is open. BusyBox
 `wget` is built without https: its TLS validates no certificate (M4).
 
+A read whose copy to user memory faults loses what the object took from
+its source, except for signalfd (`kobject_io_type.read_undo`): pipes, the
+console and, since M4, a pty master's output queue (`ptmx_read`). An
+undo for a file-backed object would need a vnode-level hook (#352 review).
+
 ### 2.6 Linux compatibility (constitution §40 phases 3-4; Prompt #2 §30)
 
 - `execve` is still `lx_nosys` (compat/linux/syscalls.c:3451) -- by the

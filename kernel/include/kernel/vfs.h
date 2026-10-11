@@ -489,6 +489,18 @@ int ramfs_anon_reg(uint32_t mode, struct vnode **out);
  * detached ramfs (kernel/core/bootfs.c). */
 void ramfs_set_anon_mount(struct mount *mnt);
 void *ramfs_chr_priv(const struct vnode *vn);
+/* A ramfs character node's operations, NULL for any other vnode: which
+ * device an open file is (the pty slaves, kernel/tty/pty.c). */
+const struct chrdev_ops *ramfs_chr_ops_of(const struct vnode *vn);
+/* The kernel's own character nodes in a ramfs directory it holds (the pty
+ * slaves in /dev/pts): made and removed by name in that directory, with no
+ * path walk and no caller credentials, so the closing process -- whoever,
+ * wherever confined -- cannot leave one behind. */
+int ramfs_mkchr_at(struct vnode *dir, const char *name, uint32_t mode, const struct chrdev_ops *ops, void *priv,
+                   struct vnode **out);
+int ramfs_unlink_chr_at(struct vnode *dir, const char *name, struct vnode *victim);
+/* Replace a character node's private pointer (NULL: its device is gone). */
+void ramfs_chr_set_priv(struct vnode *vn, void *priv);
 
 /* Diagnostics. */
 unsigned vfs_mount_count(void);

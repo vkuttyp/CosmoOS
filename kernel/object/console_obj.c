@@ -22,8 +22,7 @@ static int64_t console_obj_read(struct kobject *obj, void *buf, size_t len)
 static int64_t console_obj_write(struct kobject *obj, const void *buf, size_t len)
 {
     (void)obj;
-    console_write((const char *)buf, len);
-    return (int64_t)len;
+    return tty_write(tty_console(), buf, len, false);   /* TOSTOP's SIGTTOU (roadmap M4), then the sinks */
 }
 
 static int console_obj_stat(struct kobject *obj, struct cosmo_stat *st)

@@ -11,7 +11,9 @@ off one.
 | --- | --- | --- |
 | `/proc` | dir | `.`, `..`, `self`, and one directory per visible pid |
 | `/proc/self` | symbolic link | to the reading process's directory: `readlink` answers its pid, relative |
-| `/proc/<pid>` | dir | `.`, `..` (which a walk can take: `/proc`), `status`, `limits` |
+| `/proc/<pid>` | dir | `.`, `..` (which a walk can take: `/proc`), `status`, `limits`, `fd` |
+| `/proc/<pid>/fd` | dir, 0500 | one symbolic link per open handle, named by its number (roadmap M4) |
+| `/proc/<pid>/fd/<n>` | symbolic link | what the handle is: a terminal by its path (`/dev/console`, `/dev/tty`, `/dev/ptmx`, `/dev/pts/N`), a directory by the path it was opened by, else `file:[ino]` or `<kind>:[address]` |
 | `/proc/<pid>/status` | file, 0444 | `key: value` lines, below |
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
 
@@ -19,6 +21,11 @@ off one.
 `exited`), `uid`, `gid`, `domain`, `threads`, `syscalls`, `cpu_ns`.
 `limits` names `as`, `mem`, `nofile`, `nproc` and `vmem`, with
 `unlimited` for `COSMO_RLIM_INFINITY`.
+
+`fd` and its links answer only the process's own user and the
+privileged (`ENOENT` to anyone else, as for a pid the caller may not
+see): which files a process holds is its own business. musl's `ttyname`
+reads them, so `tty` names a pty slave.
 
 A pid the caller may not see does not exist: `lookup` and `readdir` both
 apply `process_visible_to_current`, the same rule `procinfo` uses, and a

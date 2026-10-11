@@ -19,6 +19,9 @@ configures it:
      `wget -O - http://example.com/` returns a body with "Example Domain"
      -- up to three attempts, since this needs the runner's internet.
 
+And on the same boot, job control in ash on the console (PR 2 of M4):
+`&`, `jobs`, `kill %1`, `^Z` and `bg`.
+
 Exit 0 PASS, 1 FAIL.
 """
 
@@ -53,6 +56,43 @@ def start_http(directory):
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
+
+
+def console_jobs(b, results):
+    """Job control in BusyBox ash on the console (roadmap M4, decision 4):
+    init started it as a session leader with the console its controlling
+    terminal, so `&`, `jobs`, `kill %1`, `^Z`, `bg` and `fg` work."""
+    b.run("sleep 100 &")
+    out = b.run("jobs")
+    need(out, r"^\[1\]\+\s+Running\s+sleep 100$", "jobs after sleep 100 &")
+    b.run("kill %1")
+    out = b.run("wait; echo waited")
+    need(out, r"^waited$", "wait after kill %1")
+    out = b.run("jobs; echo jobs-listed")
+    if re.search(r"Running\s+sleep 100", out):
+        raise Fail(f"the killed job is still running: {out!r}")
+    # ^Z: a foreground job stopped from the keyboard, then resumed in the background.
+    before = len(b.text())
+    b.proc.stdin.write(b"sleep 30\n")
+    b.proc.stdin.flush()
+    time.sleep(1.0)                      # ash has made sleep the foreground group
+    b.proc.stdin.write(b"\x1a")
+    b.proc.stdin.flush()
+    b.wait_prompt("^Z")
+    out = b.text()[before:]
+    need(out, r"\[1\]\+\s+Stopped\s+sleep 30", "^Z on a foreground job")
+    out = b.run("jobs")
+    need(out, r"^\[1\]\+\s+Stopped\s+sleep 30$", "jobs after ^Z")
+    b.run("bg")
+    out = b.run("jobs")
+    need(out, r"^\[1\]\+\s+Running\s+sleep 30$", "jobs after bg")
+    b.run("kill %1")
+    out = b.run("wait; echo waited2")
+    need(out, r"^waited2$", "wait after the resumed job's kill")
+    out = b.run("readlink /proc/self/fd/0")
+    need(out, r"^/dev/console$", "/proc/self/fd/0 on the console")
+    results.append("console: ash job control -- &, jobs, kill %1, ^Z (Stopped), bg (Running); "
+                   "/proc/self/fd/0 is /dev/console")
 
 
 def stage_net(args, results, inst):
@@ -111,6 +151,8 @@ def stage_net(args, results, inst):
             time.sleep(2)
         else:
             raise Fail(f"by name: three attempts failed; the last said:\n{last}")
+
+        console_jobs(b, results)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:

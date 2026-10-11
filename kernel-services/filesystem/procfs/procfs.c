@@ -15,6 +15,8 @@
 
 #include <kernel/cred.h>
 #include <kernel/errno.h>
+#include <kernel/handle.h>
+#include <kernel/tty.h>
 #include <kernel/kmalloc.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
@@ -28,10 +30,14 @@
  * the filesystem holds no table that could disagree with the process
  * table.
  */
-enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3, PROC_SELF = 4 };
+enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3, PROC_SELF = 4,
+                 PROC_FD_DIR = 5, PROC_FD_LINK = 6 };
 
+/* An fd link carries its handle number above the pid as well. */
 #define PROC_INO(pid, kind) (((uint64_t)(pid) << 8) | (uint64_t)(kind))
-#define PROC_INO_PID(ino)   ((pid_t)((ino) >> 8))
+#define PROC_INO_FD(pid, fd) (PROC_INO(pid, PROC_FD_LINK) | ((uint64_t)(fd) << 40))
+#define PROC_INO_PID(ino)   ((pid_t)(((ino) >> 8) & 0xffffffffu))
+#define PROC_INO_FDNUM(ino) ((int)((ino) >> 40))
 #define PROC_INO_KIND(ino)  ((enum proc_kind)((ino) & 0xff))
 #define PROC_ROOT_INO       PROC_INO(0, PROC_ROOT)
 #define PROC_SELF_INO       PROC_INO(0, PROC_SELF)
@@ -41,6 +47,9 @@ enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS =
 #define PROC_TEXT_MAX 1024
 
 static const struct vnode_ops proc_root_ops;
+static const struct vnode_ops proc_fd_dir_ops;
+static const struct vnode_ops proc_fd_link_ops;
+static int proc_pid_dir(struct mount *mnt, pid_t pid, struct vnode **out);
 static const struct vnode_ops proc_pid_dir_ops;
 static const struct vnode_ops proc_file_ops;
 
@@ -206,6 +215,156 @@ static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct v
 
 /* --- a process's directory -------------------------------------------------- */
 
+/* --- a process's open handles: /proc/<pid>/fd (roadmap M4) ------------------
+ *
+ * One symbolic link per open handle, named by its number, whose target
+ * says what it is: a terminal by the path it is reached at -- which is
+ * what musl's ttyname reads, and `tty` prints -- a directory by the path
+ * it was opened by, anything else by its kind and inode as Linux writes
+ * them ("pipe:[ino]"). Readable by the process's own user and the
+ * privileged: which files a process has open is its business (P1 decides
+ * whether it is visible at all).
+ */
+static struct process *proc_get_own(pid_t pid)
+{
+    struct process *p = proc_get_visible(pid);
+    if (p == NULL)
+        return NULL;
+    struct process *me = process_current();
+    if (me != NULL && me != p && me->cred.euid != p->cred.euid && !cred_privileged(&me->cred)) {
+        process_put(p);
+        return NULL;
+    }
+    return p;
+}
+
+/* The link's target for handle `fd` of `p`, or -ENOENT when it is closed. */
+static int fd_target(struct process *p, int fd, char *buf, size_t n)
+{
+    unsigned rights;
+    struct kobject *obj = handle_get(&p->handles, fd, &rights);
+    if (obj == NULL)
+        return -ENOENT;
+    int len;
+    char tmp[64];
+    if (tty_name_of_open(obj, tmp, sizeof(tmp))) {
+        len = ksnprintf(buf, n, "%s", tmp);
+    } else {
+        struct file *f = file_from_kobject(obj);
+        if (f != NULL && f->dir_path != NULL)
+            len = ksnprintf(buf, n, "%s", f->dir_path);
+        else if (f != NULL)
+            len = ksnprintf(buf, n, "file:[%llu]", (unsigned long long)(f->vn ? f->vn->ino : 0));
+        else   /* the kind alone: an address would map the kernel heap for whoever reads it */
+            len = ksnprintf(buf, n, "anon_inode:[%s]", obj->type && obj->type->name ? obj->type->name : "object");
+    }
+    kobject_put(obj);
+    return len < 0 ? 0 : ((size_t)len >= n ? (int)n - 1 : len);
+}
+
+static int proc_fd_readlink(struct vnode *vn, char *buf, size_t len)
+{
+    struct process *p = proc_get_own(PROC_INO_PID(vn->ino));
+    if (p == NULL)
+        return -ENOENT;
+    char tmp[VFS_PATH_MAX];
+    int n = fd_target(p, PROC_INO_FDNUM(vn->ino), tmp, sizeof(tmp));
+    process_put(p);
+    if (n < 0)
+        return n;
+    if ((size_t)n > len)
+        n = (int)len;
+    memcpy(buf, tmp, (size_t)n);
+    return n;
+}
+
+static const struct vnode_ops proc_fd_link_ops = {
+    .readlink = proc_fd_readlink,
+};
+
+static int proc_fd_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
+{
+    pid_t pid = PROC_INO_PID(dir->ino);
+    if (len == 2 && name[0] == '.' && name[1] == '.')
+        return proc_pid_dir(dir->mnt, pid, out);
+    int fd = 0;
+    if (len == 0 || len > 3 || (len > 1 && name[0] == '0'))
+        return -ENOENT;
+    for (size_t i = 0; i < len; i++) {
+        if (name[i] < '0' || name[i] > '9')
+            return -ENOENT;
+        fd = fd * 10 + (name[i] - '0');
+    }
+    if (fd >= HANDLE_TABLE_SIZE)
+        return -ENOENT;
+    struct process *p = proc_get_own(pid);
+    if (p == NULL)
+        return -ENOENT;
+    char tmp[VFS_PATH_MAX];
+    int n = fd_target(p, fd, tmp, sizeof(tmp));
+    process_put(p);
+    if (n < 0)
+        return n;
+    struct vnode *vn = proc_vnode(dir->mnt, PROC_INO_FD(pid, fd), VNODE_LNK, 0777, &proc_fd_link_ops);
+    if (vn == NULL)
+        return -ENOMEM;
+    vn->size = (uint64_t)n;
+    *out = vn;
+    return 0;
+}
+
+static int proc_fd_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
+{
+    pid_t pid = PROC_INO_PID(dir->ino);
+    while (*pos < 2) {
+        int rc = *pos == 0 ? cb(arg, ".", 1, dir->ino, VNODE_DIR) : cb(arg, "..", 2, PROC_INO(pid, PROC_PID_DIR), VNODE_DIR);
+        if (rc)
+            return rc;
+        (*pos)++;
+    }
+    struct process *p = proc_get_own(pid);
+    if (p == NULL)
+        return 0;
+    int rc = 0;
+    for (int fd = (int)(*pos - 2); fd < HANDLE_TABLE_SIZE; fd++) {
+        unsigned rights;
+        struct kobject *obj = handle_get(&p->handles, fd, &rights);
+        if (obj != NULL) {
+            kobject_put(obj);
+            char name[8];
+            int n = ksnprintf(name, sizeof(name), "%d", fd);
+            rc = cb(arg, name, (size_t)n, PROC_INO_FD(pid, fd), VNODE_LNK);
+            if (rc)
+                break;
+        }
+        *pos = (uint64_t)fd + 3;
+    }
+    process_put(p);
+    return rc;
+}
+
+static const struct vnode_ops proc_fd_dir_ops = {
+    .lookup = proc_fd_lookup,
+    .readdir = proc_fd_readdir,
+};
+
+static int proc_fd_dir(struct mount *mnt, pid_t pid, struct vnode **out)
+{
+    struct process *p = proc_get_own(pid);
+    if (p == NULL)
+        return -ENOENT;
+    uint32_t uid = p->cred.euid, gid = p->cred.egid;
+    process_put(p);
+    struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_FD_DIR), VNODE_DIR, 0500, &proc_fd_dir_ops);
+    if (vn == NULL)
+        return -ENOMEM;
+    /* The process's own, so its user may search it (0500). */
+    vn->uid = uid;
+    vn->gid = gid;
+    *out = vn;
+    return 0;
+}
+
 static int proc_pid_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     pid_t pid = PROC_INO_PID(dir->ino);
@@ -221,6 +380,8 @@ static int proc_pid_lookup(struct vnode *dir, const char *name, size_t len, stru
         return proc_file(dir->mnt, pid, PROC_STATUS, out);
     if (len == 6 && memcmp(name, "limits", 6) == 0)
         return proc_file(dir->mnt, pid, PROC_LIMITS, out);
+    if (len == 2 && memcmp(name, "fd", 2) == 0)
+        return proc_fd_dir(dir->mnt, pid, out);
     return -ENOENT;   /* a file appears here only when somebody adds one (P2) */
 }
 
@@ -230,7 +391,7 @@ static int proc_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, 
     static const struct {
         const char *name;
         enum proc_kind kind;
-    } files[] = { { "status", PROC_STATUS }, { "limits", PROC_LIMITS } };
+    } files[] = { { "status", PROC_STATUS }, { "limits", PROC_LIMITS }, { "fd", PROC_FD_DIR } };
 
     while (*pos < 2 + sizeof(files) / sizeof(files[0])) {
         uint64_t i = *pos;
@@ -241,7 +402,7 @@ static int proc_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, 
             rc = cb(arg, "..", 2, PROC_ROOT_INO, VNODE_DIR);
         else
             rc = cb(arg, files[i - 2].name, strlen(files[i - 2].name), PROC_INO(pid, files[i - 2].kind),
-                    VNODE_REG);
+                    files[i - 2].kind == PROC_FD_DIR ? VNODE_DIR : VNODE_REG);
         if (rc)
             return rc;
         (*pos)++;

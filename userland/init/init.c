@@ -5561,9 +5561,14 @@ static void console_shell(char *out, size_t n)
 
 static const char *const g_shell_env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "PS1=cosmo$ ", NULL };
 
-static int run_and_wait(const char *what, const char *path, const char *const argv[])
+/* `session`: the console shell leads a session whose controlling terminal
+ * is the console, with its group in the foreground (COSMO_SPAWN_SETSID),
+ * so a shell with job control -- BusyBox ash -- finds the terminal its own
+ * from the start (roadmap M4). /etc/rc does not: what it starts in the
+ * background must not hear the console hang up when rc exits. */
+static int run_and_wait(const char *what, const char *path, const char *const argv[], bool session)
 {
-    pid_t pid = spawnve(path, argv, g_shell_env, NULL, 0);
+    pid_t pid = session ? spawnve_session(path, argv, g_shell_env, NULL, 0) : spawnve(path, argv, g_shell_env, NULL, 0);
     if (pid < 0) {
         fprintf(stderr, "init: cannot start %s: %s\n", what, strerror(errno));
         return -1;
@@ -5937,12 +5942,12 @@ int main(int argc, char **argv)
     console_shell(shell, sizeof(shell));
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
-        int status = run_and_wait("/etc/rc", shell, rc_argv);
+        int status = run_and_wait("/etc/rc", shell, rc_argv, false);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
     }
     const char *sh_argv[] = { "sh", NULL };
-    int status = run_and_wait("the shell", shell, sh_argv);
+    int status = run_and_wait("the shell", shell, sh_argv, true);
     if (status < 0)
         return 1;
     printf("init: shell exited with status %d\n", status);

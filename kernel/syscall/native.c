@@ -628,7 +628,7 @@ static int64_t sys_open(struct syscall_args *a)
 {
     unsigned flags = (unsigned)a->a[1];
     if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND |
-                  COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW | COSMO_O_NONBLOCK))
+                  COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW | COSMO_O_NONBLOCK | COSMO_O_NOCTTY))
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
@@ -1473,9 +1473,11 @@ static int64_t sys_spawn(struct syscall_args *a)
         return -EFAULT;
     if ((req.flags &
          ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
-           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID)) ||
+           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID | COSMO_SPAWN_SETSID)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
+    if ((req.flags & COSMO_SPAWN_SETSID) && (req.flags & COSMO_SPAWN_SETPGID))
+        return -EINVAL;   /* a new session names its own group */
     if ((req.flags & (COSMO_SPAWN_SETROOT | COSMO_SPAWN_SETPGID)) &&
         copy_from_user(&req, a->a[0], (req.flags & COSMO_SPAWN_SETPGID) ? sizeof(req) : COSMO_SPAWN_SIZE_V2))
         return -EFAULT;
@@ -1551,7 +1553,8 @@ static int64_t sys_spawn(struct syscall_args *a)
                        rootp, (req.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
                        (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0, (req.flags & COSMO_SPAWN_NEWUTSNS) != 0,
                        (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL,
-                       (req.flags & COSMO_SPAWN_SETPGID) != 0, (pid_t)req.pgid, &pid);
+                       (req.flags & COSMO_SPAWN_SETPGID) != 0, (pid_t)req.pgid,
+                       (req.flags & COSMO_SPAWN_SETSID) != 0, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;
@@ -1733,7 +1736,7 @@ static struct tty *tty_of_handle(int h, int *err)
         *err = -EBADF;
         return NULL;
     }
-    struct tty *t = tty_of_open(obj);
+    struct tty *t = tty_of_open(obj);   /* referenced: the caller puts it */
     kobject_put(obj);
     if (t == NULL)
         *err = -ENOTTY;
@@ -1748,6 +1751,7 @@ static int64_t sys_tcgetpgrp(struct syscall_args *a)
         return err;
     pid_t pgid = 0;
     int rc = tty_get_pgrp(t, &pgid);
+    tty_put(t);
     return rc ? rc : (int64_t)pgid;
 }
 
@@ -1759,6 +1763,7 @@ static int64_t sys_tcgetattr(struct syscall_args *a)
         return err;
     struct cosmo_termios tio;
     tty_get_termios(t, &tio);
+    tty_put(t);
     return copy_to_user(a->a[1], &tio, sizeof(tio)) ? -EFAULT : 0;
 }
 
@@ -1769,15 +1774,18 @@ static int64_t sys_tcsetattr(struct syscall_args *a)
     if (t == NULL)
         return err;
     struct cosmo_termios tio;
+    int rc = 0;
     if (copy_from_user(&tio, a->a[1], sizeof(tio)))
-        return -EFAULT;
+        rc = -EFAULT;
     /* A mode this kernel does not have is a program asking for
      * behaviour it will not get, which is worth refusing rather than
      * silently dropping. */
-    if ((tio.modes & ~(uint32_t)COSMO_TTY_MODES) || tio.reserved != 0)
-        return -EINVAL;
-    tty_set_termios(t, &tio);
-    return 0;
+    else if ((tio.modes & ~(uint32_t)COSMO_TTY_MODES) || tio.reserved != 0)
+        rc = -EINVAL;
+    else
+        tty_set_termios(t, &tio);
+    tty_put(t);
+    return rc;
 }
 
 static int64_t sys_ttysize(struct syscall_args *a)
@@ -1788,6 +1796,7 @@ static int64_t sys_ttysize(struct syscall_args *a)
         return err;
     struct cosmo_ttysize sz;
     tty_get_size(t, &sz);
+    tty_put(t);
     return copy_to_user(a->a[1], &sz, sizeof(sz)) ? -EFAULT : 0;
 }
 
@@ -1798,9 +1807,9 @@ static int64_t sys_tcsetpgrp(struct syscall_args *a)
     if (t == NULL)
         return err;
     int pgid = (int)a->a[1];
-    if (pgid <= 0)
-        return -EINVAL;
-    return tty_set_pgrp(t, (pid_t)pgid);
+    int rc = pgid <= 0 ? -EINVAL : tty_set_pgrp(t, (pid_t)pgid);
+    tty_put(t);
+    return rc;
 }
 
 /* --- credentials (Prompt #3, 3.6) ------------------------------------------- */

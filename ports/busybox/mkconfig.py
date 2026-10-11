@@ -22,7 +22,7 @@ WGET NSLOOKUP STTY TTY""".split())   # the last line: roadmap M4 (decision 5)
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary
-    "ASH_JOB_CONTROL": "n",        # job control and PTYs are outside M3
+    "ASH_JOB_CONTROL": "y",        # roadmap M4 (decision 4): jobs, fg, bg, ^Z on the console and on a pty
     "SH_IS_ASH": "y",
     "SH_IS_HUSH": "n",
     "SH_IS_NONE": "n",

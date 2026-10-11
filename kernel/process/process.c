@@ -639,7 +639,9 @@ static int process_publish(struct process *p, struct process *parent, const stru
          * -- a group belonging to another session -- is refused here,
          * the same rule setpgid applies, so that the child cannot be
          * used to reach across a session boundary. */
-        if (attr != NULL && attr->set_pgid) {
+        if (attr != NULL && attr->new_session) {
+            p->pgid = p->sid = p->pid;   /* COSMO_SPAWN_SETSID: a session and a group of its own */
+        } else if (attr != NULL && attr->set_pgid) {
             pid_t want = attr->pgid == 0 ? p->pid : attr->pgid;
             bool ok = want == p->pid;
             if (!ok) {
@@ -893,6 +895,23 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 
     if (parent)
         link_to_parent(p, parent);
+
+    /* COSMO_SPAWN_SETSID: the new session takes the terminal behind its
+     * handle 0 when that is nobody's, with its group in the foreground --
+     * before its first instruction, so the shell it is asks tcgetpgrp and
+     * finds itself there (getty's job; roadmap M4). */
+    if (attr && attr->new_session) {
+        unsigned rights;
+        struct kobject *in = handle_get(&p->handles, COSMO_STDIN, &rights);
+        if (in != NULL) {
+            struct tty *tt = tty_of_open(in);
+            kobject_put(in);
+            if (tt != NULL) {
+                (void)tty_claim_for(tt, p->sid, p->pgid);
+                tty_put(tt);
+            }
+        }
+    }
 
     kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info_entry, nr_segments);
     process_get(p); /* the table's reference */

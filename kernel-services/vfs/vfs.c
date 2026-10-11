@@ -982,6 +982,15 @@ static bool under_mount(const struct mount *n, const struct mount *top)
     return false;
 }
 
+/* The mount at the top level of `r` that `n` is under, or NULL. */
+static const struct mount *top_level_ancestor(const struct mount *n, const struct mount *r)
+{
+    for (const struct mount *a = n; a != NULL; a = a->parent)
+        if (a->parent == r)
+            return a;
+    return NULL;
+}
+
 #define SWITCH_MAX_MOVES 16
 
 int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_out)
@@ -1005,8 +1014,10 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
     struct vnode *m_old_mp = NULL;
 
     /* Pass 1, under the table lock: what moves where, by name. Every
-     * other mount is under the new root (it comes along) or at the top
-     * level of the old root (it moves to the same name in the new one).
+     * other mount is under the new root (it comes along), at the top
+     * level of the old root (it moves to the same name in the new one),
+     * or under such a mount -- /dev/pts under /dev (roadmap M4) -- whose
+     * mountpoint is a directory of that mount, so it comes along with it.
      * Anything else would be left hanging off a filesystem that is about
      * to be released. */
     mutex_lock(&g_mounts_lock);
@@ -1018,6 +1029,9 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
         nr_mounts++;
         if (rc || n == r || n == m || under_mount(n, m))
             continue;
+        const struct mount *top = n->parent != r ? top_level_ancestor(n, r) : NULL;
+        if (top != NULL && top != m && !top->unmounting)
+            continue;   /* nested in a top-level mount: moves with it, which its own turn checks */
         const char *name = NULL;
         if (n->parent == r && !n->unmounting) {
             mutex_lock(&n->mountpoint->lock);

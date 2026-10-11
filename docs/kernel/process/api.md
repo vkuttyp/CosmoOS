@@ -227,6 +227,12 @@ process groups"). `pid` 0 means the caller in each of these.
   (`COSMO_SPAWN_SETPGID`): the child is placed in the group before its
   first instruction, under the same session rules; `pgid` 0 starts a
   group named by the child's own pid.
+- `bool new_session` (`COSMO_SPAWN_SETSID`, roadmap M4; exclusive with
+  `SETPGID`): the child leads a new session and group named by its pid,
+  and when its handle 0 is a terminal no session controls, that terminal
+  becomes the session's controlling terminal with the child's group in
+  the foreground (`tty_claim_for`), before its first instruction. init
+  starts the console shell so (`spawnve_session`).
 
 ### `kernel/signal.h` (milestone 10)
 The signal core, `kernel/process/signal.c`; `docs/kernel/process/design.md`

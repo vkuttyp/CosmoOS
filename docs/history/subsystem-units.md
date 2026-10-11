@@ -2772,4 +2772,13 @@ See the [history index](README.md).
     (`/etc/rc`). BusyBox gains `wget`, `nslookup`, `stty`, `tty`.
     `net-dhcp-client`, the client in `fuzz_dhcp_dns`, `make test-net-login`
     (acceptance a-c) and CI job `net-login`.
+  - PR 2: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N` on a ramfs at
+    `/dev/pts`; the slave a `struct tty` with the console's line
+    discipline; hangup on the master's close), a terminal registry (one
+    controlling terminal per session, T17), `TIOCSCTTY`/`TIOCNOTTY`/
+    `TIOCGSID`/`TIOCSWINSZ` (SIGWINCH)/`TIOCGPTN`/`TIOCSPTLCK` and the rest
+    of what musl and a shell ask, `OPOST` and `TOSTOP` (SIGTTOU, T20),
+    `COSMO_SPAWN_SETSID` for init's console shell (ash job control on the
+    console), `/proc/<pid>/fd`, switch_root carrying nested mounts;
+    `tty-pty`, `lxpty`, test-net-login's console stage.
   - Report: `docs/audit/2026-10-11-m4-interactive-networked-report.md`.

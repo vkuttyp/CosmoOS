@@ -89,7 +89,8 @@ root and `/dev` exist); the ABI is `uapi/cosmo/blkctl.h`, described in
 **`int vfs_switch_root(struct vnode *start, const char *path, struct mount
 **old_out)`** The mount whose root `path` names becomes the root of every
 namespace; top-level mounts of the old root move to the same names in
-the new one (design.md, "Switching the root"). `-EINVAL` not a mount
+the new one, and mounts nested in them come along (design.md,
+"Switching the root"). `-EINVAL` not a mount
 root / already the root / not mounted on a directory of the root,
 `-EBUSY` a mount elsewhere on the old root or something changed between
 the passes, `-ENOTDIR` (or a lookup error) when the new root lacks a
