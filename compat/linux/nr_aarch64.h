@@ -134,5 +134,10 @@
 #define LX_rt_sigpending 136
 #define LX_rt_sigsuspend 133
 #define LX_tkill 130
+/* Modes and times (roadmap M3: BusyBox chmod and touch). */
+#define LX_fchmod 52
+#define LX_fchmodat 53
+#define LX_utimensat 88
+#define LX_fchmodat2 452
 
 #endif /* COMPAT_LINUX_NR_AARCH64_H */

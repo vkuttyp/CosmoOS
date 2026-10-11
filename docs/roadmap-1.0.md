@@ -48,9 +48,10 @@ Linux `fork` (copy-on-write address space), `vfork`, `execve`; native
 exec; close-on-exec; personality lifecycle and initial-stack hooks so
 `process.c` no longer calls `linux_*` directly.
 
-- [ ] **Acceptance:** static musl BusyBox `ash` is the shell; a fixed list
+- [x] **Acceptance:** static musl BusyBox `ash` is the shell; a fixed list
   of about 40 applets passes a scripted test; a subset of BusyBox's own
-  testsuite passes.
+  testsuite passes. (`make test-busybox`, CI job `busybox`, both
+  architectures; [report](audit/2026-10-10-m3-process-model-report.md).)
 
 ### M4 Interactive and networked
 

@@ -70,8 +70,12 @@ $(foreach p,$(USER_PROGRAMS),$(eval $(call prog_link_rule,$(p))))
 INIT_ELF  := $(call prog_elf,init)
 USER_ELFS := $(foreach p,$(USER_PROGRAMS),$(call prog_elf,$(p)))
 
+# A native program whose name a BusyBox applet takes (roadmap M3) is
+# installed as /bin/cosmo-<name>: /bin/sh is BusyBox ash, the native
+# shell /bin/cosmo-sh (docs/userland/design.md, "BusyBox").
+native_bin_name = $(if $(filter $(1),$(BUSYBOX_APPLETS)),cosmo-$(1),$(1))
 USER_ARCHIVE_ENTRIES := \
-	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(p)=$(call prog_elf,$(p))) \
+	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(call native_bin_name,$(p))=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
 	etc/rc=$(ROOT)/userland/etc/rc \
 	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \

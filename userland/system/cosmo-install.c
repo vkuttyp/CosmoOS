@@ -267,6 +267,16 @@ static int populate(void)
         if (copy_tree(trees[i], t) < 0)
             return -1;
     }
+    /* The installed system's console shell is BusyBox ash (roadmap M3;
+     * init reads this file, docs/userland/design.md, "BusyBox"). */
+    int fd = open(MNT "/etc/console-shell", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "/bin/sh\n", 8) != 8) {
+        fprintf(stderr, "cosmo-install: %s/etc/console-shell: %s\n", MNT, strerror(errno));
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    close(fd);
     return 0;
 }
 

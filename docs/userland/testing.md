@@ -212,6 +212,67 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   `cannot mount vda ... staying on the live root`, and the live shell
   answers.
 
+## `make test-busybox` (`tests/boot/busybox_test.py`)
+
+Roadmap M3's acceptance: BusyBox ash is the shell. One boot of the image
+(release builds in CI, job `busybox`, both architectures); at the
+console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
+
+- **`ash.sh`, the scripted test**: 72 checks, each `BBTEST: ok NAME` or
+  `BBTEST: FAIL NAME: want [..] got [..]`, ending `BBTEST: PASS`. The
+  shell's features: a pipeline, `>`/`>>`/`<`, `2>` and `2>&1`, command
+  substitution nested and with backquotes, a subshell's variables, `$?`
+  after `false`, `true` and `sh -c 'exit 7'`, a background job and
+  `wait` (its status, and a backgrounded subshell's output), a `#!`
+  script with an argument, a command not found (127) and a file without
+  execute permission (126), arithmetic, `for`, `case`, a function. Every
+  applet of `ports/busybox/applets` at least once (`echo`, `printf`,
+  `test`, `[`, `true`, `false` and `pwd` as `/bin/<name>`, since ash has
+  them built in): `mkdir -p`, `rmdir`, `cp`, `mv`, `rm`, `cat`, `ln -s`,
+  `readlink`, `readlink -f`, `chmod` read back by `stat -c %a`, `touch`
+  (create, and `-t` read back by `date -r`), `ls`, `env`, `sleep` (at
+  least a second by `date +%s`), `date -u -d @0`, `seq`, `head`, `tail`,
+  `wc`, `sort` and `sort -n`, `uniq`, `cut`, `tr`, `grep -c`, `sed`,
+  `awk` (integers and `%.2f`), `find -type f`, `xargs -n 1`, `tar` and
+  `tar -z`, `gzip`, `gunzip`, `diff` (both statuses), `basename`,
+  `dirname`, `expr`, `tee`, `stat -c %s`, `uname -s` (Linux), `id -u`,
+  `sha256sum` of `abc`, `which ls`.
+- **`suite.sh`, BusyBox's testsuite**: the files decision 8 names -- cut,
+  sed, grep, tr, sort, uniq, head, tail, expr, seq, basename, dirname, wc,
+  xargs, tar -- each through runtest, from a copy of the testsuite (a
+  reproducible `testsuite.tgz` of BusyBox's own directory) under `/tmp`
+  with the binary and `.config` beside it. testing.sh compares with
+  `cmp`, which is not an M3 applet; `suite.sh` puts a two-line stand-in on
+  runtest's PATH that answers with cmp's status through `diff`. Every
+  case must PASS, be SKIPPED or UNTESTED by runtest itself (a feature
+  the configuration leaves out), or be one of the exclusions below; each
+  file must pass at least one case.
+
+| File | Case | Why it is excluded |
+|---|---|---|
+| sed | sed embedded NUL | fails the same way under Linux (arm64 container, this binary and testsuite): this build's behaviour, not the kernel's |
+| sed | sed NUL in command | the same |
+| sed | sed nonexistent label | the same |
+| tail | tail: -c +N with largish N | needs `dd`, not an M3 applet |
+| xargs | xargs-works | needs `md5sum`, not an M3 applet |
+| tar | tar_with_link_with_size | needs `bunzip2`, not an M3 applet |
+| tar | tar_with_prefix_fields | needs `bunzip2` |
+| tar | tar Two zeroed blocks is a ('truncated') empty tarball | needs `dd` |
+| tar | tar Twenty zeroed blocks is an empty tarball | needs `dd` |
+| tar | tar extract tgz | needs `dd` |
+| tar | tar Symlink attack: create symlink and then write through it | needs `uudecode`, not an M3 applet |
+| tar | tar hardlinks and repeated files | makes a hard link; hard links are outside M3 |
+| tar | tar hardlinks mode | makes a hard link |
+| tar | tar symlinks mode | makes a hard link (`ln` without `-s`) in its setup |
+| tar | tar --overwrite | makes a hard link |
+| tar | tar Symlinks and hardlinks coexist | makes a hard link |
+
+`--verbose` runs runtest with `-v`, so the log holds each failing
+case's commands and diff.
+
+The installed system's console is ash too: `make test-install`'s reboot
+and persist stages type their commands at it (`/etc/console-shell`).
+
 ## Gaps and planned tests
 
 - No test of a redirected builtin (`pwd > file`), of `sh file args`

@@ -227,6 +227,10 @@ struct process {
      * as each is released. */
     struct thread *exec_thread;
     struct waitqueue exec_wq;
+    /* The file-creation mask (roadmap M3): 022 for a process the kernel
+     * starts, a parent's for a child of spawn or fork; the Linux door
+     * applies it when it creates (atomic). */
+    uint32_t umask;
 };
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
@@ -467,10 +471,13 @@ int process_fork(const struct process_fork_args *a, struct process **out);
 int process_exec_images(const struct process_image *exe, const struct process_image *interp, const char *name,
                         const char *const argv[], const char *const envp[], const char *execfn, void *syscall_frame);
 
-/* The argument block both doors copy in (exec.c): bounded like Linux's
- * ARG_MAX order, and the room "#!" needs to prepend two words. */
-#define EXEC_ARG_MAX     (32u << 10)
-#define EXEC_ARG_ENTRIES 1024u
+/* The argument block both doors copy in (spawn.c): bounded like Linux's
+ * ARG_MAX order -- musl's sysconf says 128 KiB and BusyBox xargs builds
+ * lines of up to 30 KiB of short words -- with the room "#!" needs to
+ * prepend two words. exec_args_alloc and exec_args_free, not the stack:
+ * it is about 200 KiB. */
+#define EXEC_ARG_MAX     (64u << 10)
+#define EXEC_ARG_ENTRIES 8192u
 struct exec_args {
     char path[1024];   /* VFS_PATH_MAX */
     const char *argv[EXEC_ARG_ENTRIES + 4];
@@ -482,6 +489,8 @@ struct exec_args {
 /* Copy a path and NULL-terminated argv and envp from user memory;
  * -E2BIG past the bounds, -EFAULT, -ENAMETOOLONG. */
 int exec_args_copy(struct exec_args *ea, uint64_t upath, uint64_t uargv, uint64_t uenvp);
+struct exec_args *exec_args_alloc(void);
+void exec_args_free(struct exec_args *ea);
 /* execve: resolve ea->path from the caller's directory -- "#!" scripts
  * to their interpreters, at most 4 deep (-ELOOP), and an ELF's PT_INTERP
  * -- and process_exec_images. Returns only an error, or 0 having

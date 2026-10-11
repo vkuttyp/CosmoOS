@@ -58,7 +58,7 @@ static void fs_selftest(void)
     CHECK(cosmo_stat("/boot", &st) == 0 && st.type == COSMO_DT_DIR);
     CHECK(cosmo_stat("/nope", &st) == -COSMO_ENOENT);
     CHECK(cosmo_stat("/boot/init/x", &st) == -COSMO_ENOTDIR);
-    CHECK(cosmo_stat("/bin/sh", &st) == 0 && st.type == COSMO_DT_REG && (st.mode & 0111));
+    CHECK(cosmo_stat("/bin/cosmo-sh", &st) == 0 && st.type == COSMO_DT_REG && (st.mode & 0111));
     CHECK(cosmo_stat("/etc/rc", &st) == 0 && st.type == COSMO_DT_REG);
 
     /* A flag bit the kernel does not define is -EINVAL on every native
@@ -126,7 +126,7 @@ static void fs_selftest(void)
         CHECK(pipe(lsp) == 0);
         struct spawn_handle lsmap[] = { { .child = 1, .parent = lsp[1] }, { .child = 2, .parent = 2 } };
         const char *ls_argv[] = { "ls", "-l", "/tmp/lnk", NULL };
-        pid_t lspid = spawnve("/bin/ls", ls_argv, NULL, lsmap, 2);
+        pid_t lspid = spawnve("/bin/cosmo-ls", ls_argv, NULL, lsmap, 2);
         CHECK(lspid > 1);
         CHECK(close(lsp[1]) == 0);
         char lsout[128] = { 0 };
@@ -715,7 +715,7 @@ static void proc_selftest(void)
     CHECK(pipe(p) == 0);
     struct spawn_handle map[] = { { .child = 1, .parent = p[1] }, { .child = 2, .parent = 2 } };
     const char *echo_argv[] = { "echo", "spawned", "child", NULL };
-    pid_t pid = spawnvp("echo", echo_argv, map, 2);
+    pid_t pid = spawnvp("cosmo-echo", echo_argv, map, 2);
     CHECK(pid > 1);
     CHECK(close(p[1]) == 0);
     ssize_t n = read(p[0], buf, sizeof(buf));
@@ -730,7 +730,7 @@ static void proc_selftest(void)
     const char *sh_argv[] = { "sh", "-c", "cd /tmp && pwd && exit 7", NULL };
     CHECK(pipe(p) == 0);
     map[0].parent = p[1];
-    pid = spawnvp("sh", sh_argv, map, 2);
+    pid = spawnvp("cosmo-sh", sh_argv, map, 2);
     CHECK(pid > 1);
     close(p[1]);
     n = read(p[0], buf, sizeof(buf));
@@ -744,7 +744,7 @@ static void proc_selftest(void)
     struct spawn_handle in_map[] = { { .child = 0, .parent = p[0] }, { .child = 1, .parent = 1 },
                                      { .child = 2, .parent = 2 } };
     const char *cat_argv[] = { "cat", NULL };
-    pid = spawnvp("cat", cat_argv, in_map, 3);
+    pid = spawnvp("cosmo-cat", cat_argv, in_map, 3);
     CHECK(pid > 1);
     close(p[0]);
     CHECK(waitpid(pid, &status, WNOHANG) == 0);          /* still running */
@@ -770,9 +770,9 @@ static void proc_selftest(void)
     /* Hostile spawn requests. */
     const char *true_argv[] = { "true", NULL };
     struct spawn_handle bad_parent[] = { { .child = 0, .parent = 63 } };
-    CHECK(spawnve("/bin/true", true_argv, NULL, bad_parent, 1) < 0 && errno == EBADF);
+    CHECK(spawnve("/bin/cosmo-true", true_argv, NULL, bad_parent, 1) < 0 && errno == EBADF);
     struct spawn_handle dup_child[] = { { .child = 0, .parent = 0 }, { .child = 0, .parent = 1 } };
-    CHECK(spawnve("/bin/true", true_argv, NULL, dup_child, 2) < 0 && errno == EINVAL);
+    CHECK(spawnve("/bin/cosmo-true", true_argv, NULL, dup_child, 2) < 0 && errno == EINVAL);
     CHECK(spawnve("/etc/rc", true_argv, NULL, NULL, 0) < 0 && errno == EACCES);   /* not executable */
     CHECK(spawnve("/bin", true_argv, NULL, NULL, 0) < 0 && errno == EACCES);      /* a directory */
     CHECK(spawnve("/bin/nothere", true_argv, NULL, NULL, 0) < 0 && errno == ENOENT);
@@ -800,7 +800,7 @@ static void proc_selftest(void)
      * relative path from there would reach outside -- the confinement
      * bypassed by doing nothing at all. */
     const char *jail_argv[] = { "sh", "-c", "pwd && cd .. && pwd > /made.txt", NULL };
-    pid_t jpid = spawnve_in("/bin/sh", jail_argv, NULL, jmap, 2, "/tmp/jail");
+    pid_t jpid = spawnve_in("/bin/cosmo-sh", jail_argv, NULL, jmap, 2, "/tmp/jail");
     CHECK(jpid > 1);
     CHECK(close(jp[1]) == 0);
     ssize_t jn = read(jp[0], buf, sizeof(buf));
@@ -837,7 +837,7 @@ static void proc_selftest(void)
     CHECK(symlink("/etc/inside", "/tmp/jail/inward") == 0);
 
     const char *slarg[] = { "sh", "-c", "pwd > /inward; pwd > /escape", NULL };
-    pid_t slpid = spawnve_in("/bin/sh", slarg, NULL, NULL, 0, "/tmp/jail");
+    pid_t slpid = spawnve_in("/bin/cosmo-sh", slarg, NULL, NULL, 0, "/tmp/jail");
     CHECK(slpid > 1);
     int slstatus = -1;
     CHECK(waitpid(slpid, &slstatus, 0) == slpid);
@@ -872,7 +872,7 @@ static void proc_selftest(void)
      * directory that exists only outside the jail. Confined, there is
      * no /etc and the cd fails; escaped, it succeeds. */
     const char *mount_argv[] = { "sh", "-c", "cd .. && cd .. && pwd && cd etc", NULL };
-    pid_t mpid = spawnve_in("/bin/sh", mount_argv, NULL, mmap_, 2, "/tmp/mjail");
+    pid_t mpid = spawnve_in("/bin/cosmo-sh", mount_argv, NULL, mmap_, 2, "/tmp/mjail");
     CHECK(mpid > 1);
     CHECK(close(mp[1]) == 0);
     ssize_t mn = read(mp[0], buf, sizeof(buf));
@@ -888,7 +888,7 @@ static void proc_selftest(void)
      * either: ../../etc is the same directory as /etc from a root, and
      * neither exists in there. */
     const char *rel_argv[] = { "sh", "-c", "cd ../../etc", NULL };
-    pid_t rpid = spawnve_in("/bin/sh", rel_argv, NULL, NULL, 0, "/tmp/jail");
+    pid_t rpid = spawnve_in("/bin/cosmo-sh", rel_argv, NULL, NULL, 0, "/tmp/jail");
     CHECK(rpid > 1);
     int rstatus = 0;
     CHECK(waitpid(rpid, &rstatus, 0) == rpid && rstatus != 0);
@@ -898,7 +898,7 @@ static void proc_selftest(void)
      * inside the root, and spawn resolves paths in the caller's. */
     static const char *const true_only[] = { "sh", "-c", "exit 0", NULL };
     struct cosmo_spawn both = {
-        .path = "/bin/sh",
+        .path = "/bin/cosmo-sh",
         .argv = true_only,
         .envp = NULL,
         .cwd = "/tmp",
@@ -910,7 +910,7 @@ static void proc_selftest(void)
     /* Nothing outside the root is nameable: /etc exists here and not
      * there, so the shell's cd fails and it exits nonzero. */
     const char *escape_argv[] = { "sh", "-c", "cd /etc", NULL };
-    pid_t epid = spawnve_in("/bin/sh", escape_argv, NULL, NULL, 0, "/tmp/jail");
+    pid_t epid = spawnve_in("/bin/cosmo-sh", escape_argv, NULL, NULL, 0, "/tmp/jail");
     CHECK(epid > 1);
     int estatus = 0;
     CHECK(waitpid(epid, &estatus, 0) == epid && estatus != 0);
@@ -927,7 +927,7 @@ static void proc_selftest(void)
                                    { .child = 1, .parent = dp[1] },
                                    { .child = 2, .parent = 2 } };
     const char *ps_argv[] = { "sh", "-c", "ps", NULL };
-    pid_t dpid = spawnve_domain("/bin/sh", ps_argv, NULL, dmap, 3);
+    pid_t dpid = spawnve_domain("/bin/cosmo-sh", ps_argv, NULL, dmap, 3);
     CHECK(dpid > 1);
     CHECK(close(dp[1]) == 0);
     static char psout[2048];
@@ -951,13 +951,13 @@ static void proc_selftest(void)
     /* And /proc obeys the domain too, since it asks the same question:
      * pid 1 certainly exists and must not be readable from in here. */
     const char *dproc_argv[] = { "sh", "-c", "cat /proc/1/status", NULL };
-    pid_t dpp = spawnve_domain("/bin/sh", dproc_argv, NULL, NULL, 0);
+    pid_t dpp = spawnve_domain("/bin/cosmo-sh", dproc_argv, NULL, NULL, 0);
     CHECK(dpp > 1);
     int dpstatus = 0;
     CHECK(waitpid(dpp, &dpstatus, 0) == dpp && dpstatus != 0);
 
     const char *kill_argv[] = { "sh", "-c", "kill 1", NULL };
-    pid_t kpid = spawnve_domain("/bin/sh", kill_argv, NULL, NULL, 0);
+    pid_t kpid = spawnve_domain("/bin/cosmo-sh", kill_argv, NULL, NULL, 0);
     CHECK(kpid > 1);
     int kstatus = 0;
     CHECK(waitpid(kpid, &kstatus, 0) == kpid && kstatus != 0);
@@ -983,7 +983,7 @@ static void proc_selftest(void)
                                    { .child = 1, .parent = np[1] },
                                    { .child = 2, .parent = 2 } };
     const char *ns_argv[] = { "sh", "-c", "mount none /tmp/nsm ramfs && ls /tmp/nsm", NULL };
-    pid_t npid = spawnve_mountns("/bin/sh", ns_argv, NULL, nmap, 3);
+    pid_t npid = spawnve_mountns("/bin/cosmo-sh", ns_argv, NULL, nmap, 3);
     CHECK(npid > 1);
     CHECK(close(np[1]) == 0);
     ssize_t nn = read(np[0], buf, sizeof(buf) - 1);
@@ -1014,7 +1014,7 @@ static void proc_selftest(void)
                                    { .child = 1, .parent = rp[1] },
                                    { .child = 2, .parent = 2 } };
     const char *w_argv[] = { "sh", "-c", "cat > /dev/null && ls /tmp/nsm", NULL };
-    pid_t wpid = spawnve_mountns("/bin/sh", w_argv, NULL, wmap, 3);
+    pid_t wpid = spawnve_mountns("/bin/cosmo-sh", w_argv, NULL, wmap, 3);
     CHECK(wpid > 1);
     CHECK(close(sp[0]) == 0 && close(rp[1]) == 0);
     CHECK(cosmo_mount("none", "/tmp/nsm", "ramfs", 0) == 0);
@@ -1046,7 +1046,7 @@ static void proc_selftest(void)
                                    { .child = 1, .parent = hp[1] },
                                    { .child = 2, .parent = 2 } };
     const char *h_argv[] = { "sh", "-c", "hostname inside && hostname", NULL };
-    pid_t hpid = spawnve_utsns("/bin/sh", h_argv, NULL, hmap, 3);
+    pid_t hpid = spawnve_utsns("/bin/cosmo-sh", h_argv, NULL, hmap, 3);
     CHECK(hpid > 1);
     CHECK(close(hp[1]) == 0);
     ssize_t hn = read(hp[0], buf, sizeof(buf) - 1);
@@ -1071,7 +1071,7 @@ static void proc_selftest(void)
                                    { .child = 1, .parent = sp2[1] },
                                    { .child = 2, .parent = 2 } };
     const char *s_argv[] = { "sh", "-c", "hostname", NULL };
-    pid_t spid = spawnve("/bin/sh", s_argv, NULL, smap, 3);
+    pid_t spid = spawnve("/bin/cosmo-sh", s_argv, NULL, smap, 3);
     CHECK(spid > 1);
     CHECK(close(sp2[1]) == 0);
     ssize_t sn = read(sp2[0], buf, sizeof(buf) - 1);
@@ -1126,7 +1126,7 @@ static void proc_selftest(void)
     CHECK(dup(ro) < 0 && errno == EPERM);
     /* And no TRANSFER, so it cannot be handed to a child. */
     struct spawn_handle no_transfer[] = { { .child = 3, .parent = ro } };
-    CHECK(spawnve("/bin/true", true_argv, NULL, no_transfer, 1) < 0 && errno == EPERM);
+    CHECK(spawnve("/bin/cosmo-true", true_argv, NULL, no_transfer, 1) < 0 && errno == EPERM);
     /* Nor administered: making it non-blocking is a MANAGE operation. */
     CHECK(cosmo_setnonblock(ro, 1) == -EPERM);
 
@@ -1139,7 +1139,7 @@ static void proc_selftest(void)
     CHECK(share2 >= 0);
     CHECK(write(share2, "x", 1) < 0 && errno == EBADF);   /* the copy of a copy is no wider */
     struct spawn_handle give[] = { { .child = 3, .parent = share } };
-    pid_t gp = spawnve("/bin/true", true_argv, NULL, give, 1);
+    pid_t gp = spawnve("/bin/cosmo-true", true_argv, NULL, give, 1);
     CHECK(gp > 0);
     int gst = 0;
     CHECK(waitpid(gp, &gst, 0) == gp);
@@ -1154,7 +1154,7 @@ static void proc_selftest(void)
         int parent;
     } legacy[] = { { 0, 0 }, { 1, 1 }, { 2, 2 } };
     struct cosmo_spawn old_req = {
-        .path = "/bin/true",
+        .path = "/bin/cosmo-true",
         .argv = true_argv,
         .envp = NULL,
         .handles = (const struct cosmo_spawn_handle *)legacy,
@@ -1176,7 +1176,7 @@ static void proc_selftest(void)
     close(rw);
     CHECK(unlink("/tmp/rights.txt") == 0);
     const char *no_argv[] = { NULL };
-    CHECK(spawnve("/bin/true", no_argv, NULL, NULL, 0) < 0 && errno == EINVAL);
+    CHECK(spawnve("/bin/cosmo-true", no_argv, NULL, NULL, 0) < 0 && errno == EINVAL);
     CHECK(waitpid(-1, &status, 0) < 0 && errno == ECHILD);
 
     /* Working directory. */
@@ -3454,8 +3454,8 @@ static int unpriv_test(void)
     /* And a mount namespace of its own, which decides what filesystems
      * a whole subtree of processes sees. */
     static const char *const t_argv[] = { "true", NULL };
-    UCHECK(spawnve_mountns("/bin/true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
-    UCHECK(spawnve_utsns("/bin/true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
+    UCHECK(spawnve_mountns("/bin/cosmo-true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
+    UCHECK(spawnve_utsns("/bin/cosmo-true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
     /* Reading the name is fine; renaming the machine is not. */
     char uh[HOST_NAME_MAX];
     UCHECK(gethostname(uh, sizeof(uh)) >= 0);
@@ -3542,7 +3542,7 @@ static int unpriv_test(void)
     UCHECK(mkdir("/tmp/unprivdir", 0700) == 0 && rmdir("/tmp/unprivdir") == 0);
     UCHECK(unlink("/tmp/unpriv.txt") == 0);
     const char *true_argv[] = { "true", NULL };
-    pid_t t = spawnvp("true", true_argv, NULL, 0);
+    pid_t t = spawnvp("cosmo-true", true_argv, NULL, 0);
     int status = -1;
     UCHECK(t > 0 && waitpid(t, &status, 0) == t && status == 0);
     return g_unpriv_failures;
@@ -3903,7 +3903,7 @@ static void proc_fs_selftest(void)
     /* P3: a process that has gone is ESRCH, not stale text. The child
      * exits and is reaped before the read. */
     const char *t_argv[] = { "true", NULL };
-    pid_t dead = spawnve("/bin/true", t_argv, NULL, NULL, 0);
+    pid_t dead = spawnve("/bin/cosmo-true", t_argv, NULL, NULL, 0);
     CHECK(dead > 0);
     int dstatus = -1;
     CHECK(waitpid(dead, &dstatus, 0) == dead);
@@ -5534,9 +5534,36 @@ static void selftest(void)
     fflush(stdout);
 }
 
-static int run_and_wait(const char *what, const char *const argv[])
+/*
+ * The console shell (roadmap M3, docs/userland/design.md, "BusyBox"): the
+ * path /etc/console-shell names, else the native shell. cosmo-install
+ * writes /bin/sh there, so an installed system's console is BusyBox ash
+ * while the boot image keeps the native shell its harness drives. /etc/rc
+ * runs in the same shell. The environment gives both shells the native
+ * shell's prompt, which is what the harnesses wait for.
+ */
+static void console_shell(char *out, size_t n)
 {
-    pid_t pid = spawnvp(argv[0], argv, NULL, 0);
+    snprintf(out, n, "/bin/cosmo-sh");
+    int fd = open("/etc/console-shell", O_RDONLY);
+    if (fd < 0)
+        return;
+    char buf[128];
+    ssize_t r = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (r <= 0)
+        return;
+    buf[r] = '\0';
+    buf[strcspn(buf, "\n")] = '\0';
+    if (buf[0] == '/')
+        snprintf(out, n, "%s", buf);
+}
+
+static const char *const g_shell_env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "PS1=cosmo$ ", NULL };
+
+static int run_and_wait(const char *what, const char *path, const char *const argv[])
+{
+    pid_t pid = spawnve(path, argv, g_shell_env, NULL, 0);
     if (pid < 0) {
         fprintf(stderr, "init: cannot start %s: %s\n", what, strerror(errno));
         return -1;
@@ -5906,14 +5933,16 @@ int main(int argc, char **argv)
     bool disk_root = switch_to_disk_root();
     fflush(stdout);
     struct stat st;
+    char shell[128];
+    console_shell(shell, sizeof(shell));
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
-        int status = run_and_wait("/etc/rc", rc_argv);
+        int status = run_and_wait("/etc/rc", shell, rc_argv);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
     }
     const char *sh_argv[] = { "sh", NULL };
-    int status = run_and_wait("the shell", sh_argv);
+    int status = run_and_wait("the shell", shell, sh_argv);
     if (status < 0)
         return 1;
     printf("init: shell exited with status %d\n", status);

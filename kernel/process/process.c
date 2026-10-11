@@ -219,7 +219,7 @@ void process_init(void)
 /* --- initial user stack --- */
 
 #define INITIAL_STACK_PAGES 2u       /* populated at least; more when the strings need them */
-#define INITIAL_STACK_PAGES_MAX 32u  /* 128 KiB: argv, envp and the vector, as Linux's ARG_MAX order */
+#define INITIAL_STACK_PAGES_MAX 40u  /* 160 KiB: exec's 64 KiB of strings, their pointers and the vector */
 
 /*
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
@@ -571,6 +571,7 @@ static struct process *process_alloc(const char *name)
     completion_init(&p->exited, "process-exit");
     p->state = PROCESS_RUNNING;
     p->parent_pid = 0;
+    p->umask = 022;
     return p;
 }
 
@@ -741,6 +742,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         p->parent_pid = parent->pid;
         p->cred = parent->cred;
         p->rlim = parent->rlim;
+        p->umask = __atomic_load_n(&parent->umask, __ATOMIC_RELAXED);
     } else {
         p->rlim = rlimits_default;
     }
@@ -931,6 +933,7 @@ static void fork_inherit(struct process *p, struct process *parent)
 {
     p->pers = parent->pers;
     p->parent_pid = parent->pid;
+    p->umask = __atomic_load_n(&parent->umask, __ATOMIC_RELAXED);
     arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
     p->cred = parent->cred;
     p->rlim = parent->rlim;

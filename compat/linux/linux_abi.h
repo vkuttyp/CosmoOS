@@ -39,14 +39,26 @@
 #define LX_O_TRUNC 01000
 #define LX_O_APPEND 02000
 #define LX_O_NONBLOCK 04000
+/* Three flags arm64 numbers differently from x86-64 (Linux's
+ * arch/arm64/include/uapi/asm/fcntl.h): with the x86 values, musl's
+ * opendir on AArch64 asked for an unknown flag and got -EINVAL (roadmap
+ * M3, BusyBox ls). */
+#if defined(__aarch64__)
+#define LX_O_DIRECTORY 040000
+#define LX_O_NOFOLLOW 0100000
+#define LX_O_LARGEFILE 0400000
+#else
 #define LX_O_DIRECTORY 0200000
 #define LX_O_NOFOLLOW 0400000
-#define LX_O_CLOEXEC 02000000
 #define LX_O_LARGEFILE 0100000
+#endif
+#define LX_O_CLOEXEC 02000000
 #define LX_AT_FDCWD (-100)
 #define LX_AT_REMOVEDIR 0x200
 #define LX_AT_EMPTY_PATH 0x1000
 #define LX_AT_SYMLINK_NOFOLLOW 0x100
+#define LX_UTIME_NOW  ((1l << 30) - 1l)   /* utimensat: a tv_nsec meaning "now" */
+#define LX_UTIME_OMIT ((1l << 30) - 2l)   /* ... and "leave it" */
 
 /* --- file types in st_mode --- */
 #define LX_S_IFMT 0170000

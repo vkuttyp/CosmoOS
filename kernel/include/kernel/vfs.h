@@ -108,6 +108,10 @@ struct vnode_ops {
     int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
     int (*sync)(struct vnode *vn);
     void (*evict)(struct vnode *vn);
+    /* Optional (roadmap M3): vfs_setattr changed the vnode's mode or
+     * times, under vn->lock; a filesystem that stores them takes the new
+     * values. Without it the change lives in the vnode (ramfs). */
+    int (*setattr)(struct vnode *vn);
 };
 
 #define VNODE_PINNED (1u << 0)   /* the filesystem holds a reference while linked */
@@ -337,6 +341,20 @@ uint64_t vfs_now_ns(void);
 #define VFS_MAY_READ  4u
 int vfs_permission(const struct vnode *vn, unsigned mask);
 
+/*
+ * chmod and utimensat (roadmap M3): set `vn`'s permission bits
+ * (VFS_SET_MODE, `mode & 07777`) and/or its modification time
+ * (VFS_SET_MTIME to `mtime_ns`, VFS_SET_MTIME_NOW to the clock). The
+ * owner or a privileged caller may do either; setting the time to now is
+ * also allowed to a caller who may write the node, as POSIX says. The
+ * change time becomes now. -EPERM (-EACCES for "now") otherwise, -EROFS
+ * on a read-only mount, or the filesystem's error from storing them.
+ */
+#define VFS_SET_MODE      1u
+#define VFS_SET_MTIME     2u
+#define VFS_SET_MTIME_NOW 4u
+int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_ns);
+
 /* Resolve `path` (absolute, or relative to `start` when not NULL) to a
  * referenced vnode. Follows mounts, and symbolic links -- including one
  * named by the last component. An absolute target restarts at the
@@ -458,6 +476,9 @@ struct chrdev_ops {
     int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
 };
 int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
+/* /dev/null and /dev/zero (kernel-services/vfs/memdev.c), once the ramfs
+ * root exists. */
+void memdev_init(void);
 
 /* Create an anonymous (unlinked) regular ramfs file -- the backing for a
  * Linux memfd. It has no directory entry: the single reference *out carries is

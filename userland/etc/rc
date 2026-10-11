@@ -4,5 +4,5 @@ echo "CosmoOS userland ready"
 # and `svc status` says what is running (docs/userland/design.md).
 svc boot
 # The shell test script exists only in self-test builds (SELFTEST=1).
-ls /etc/rc.test 2> /tmp/.rc.probe && sh /etc/rc.test
+ls /etc/rc.test 2> /tmp/.rc.probe && cosmo-sh /etc/rc.test
 rm /tmp/.rc.probe

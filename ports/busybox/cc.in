@@ -1,0 +1,18 @@
+#!/bin/sh
+# The C compiler BusyBox is built with (ports/busybox/README.md): the
+# project's clang for @TARGET@ against the musl sysroot. A link is static,
+# with musl's start files around the objects in their required order and
+# the compiler-rt builtins after libc, and the image at 4 MiB: lld's
+# default 2 MiB is below the kernel's user window (USER_LO). Generated
+# from ports/busybox/cc.in. Paths under the build directory are written
+# as busybox/..., so two builds in two directories make the same binary.
+link=1
+for a in "$@"; do
+    case "$a" in -c|-S|-E|-M|-MM) link=0 ;; esac
+done
+if [ "$link" = 1 ]; then
+    exec @CC@ --target=@TARGET@ -nostdinc -isystem @SYSROOT@/include -isystem @RESOURCE@ -ffile-prefix-map=@BBDIR@=busybox \
+        -fuse-ld=lld -static -Wl,--image-base=0x400000 \
+        -nostdlib @SYSROOT@/lib/crt1.o @SYSROOT@/lib/crti.o "$@" -L@SYSROOT@/lib -lc @BUILTINS@ @SYSROOT@/lib/crtn.o
+fi
+exec @CC@ --target=@TARGET@ -nostdinc -isystem @SYSROOT@/include -isystem @RESOURCE@ -ffile-prefix-map=@BBDIR@=busybox "$@"

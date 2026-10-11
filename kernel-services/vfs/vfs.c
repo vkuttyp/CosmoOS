@@ -1259,6 +1259,30 @@ int vfs_permission(const struct vnode *vn, unsigned mask)
     return (bits & mask) == mask ? 0 : -EACCES;
 }
 
+int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_ns)
+{
+    const struct credentials *c = cred_current();
+    bool owner = cred_privileged(c) || c->euid == vn->uid;
+    if ((what & (VFS_SET_MODE | VFS_SET_MTIME)) && !owner)
+        return -EPERM;
+    if ((what & VFS_SET_MTIME_NOW) && !owner && vfs_permission(vn, VFS_MAY_WRITE) != 0)
+        return -EACCES;
+    if (vn->mnt != NULL && (vn->mnt->flags & MOUNT_RDONLY))
+        return -EROFS;
+    mutex_lock(&vn->lock);
+    uint64_t now = vfs_now_ns();
+    if (what & VFS_SET_MODE)
+        vn->mode = mode & 07777u;
+    if (what & VFS_SET_MTIME)
+        vn->mtime_ns = mtime_ns;
+    if (what & VFS_SET_MTIME_NOW)
+        vn->mtime_ns = now;
+    vn->ctime_ns = now;
+    int rc = vn->ops->setattr != NULL ? vn->ops->setattr(vn) : 0;
+    mutex_unlock(&vn->lock);
+    return rc;
+}
+
 /* Search permission on a directory being entered; consumes `dir` on failure. */
 static int may_search(struct vnode *dir)
 {
@@ -2394,8 +2418,12 @@ int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode)
 {
     struct vnode *parent;
     char last[VFS_NAME_MAX + 1];
-    size_t len;
+    size_t len = 0;
     int rc = parent_for_mutation(start, path, last, &parent, &len);
+    /* "." and ".." exist already: mkdir says so, as Linux does (BusyBox
+     * tar makes "./" for every archive that names it). */
+    if (rc == -EINVAL && len > 0 && dot_name(last, len))
+        return -EEXIST;
     if (rc)
         return rc;
     mutex_lock(&parent->lock);

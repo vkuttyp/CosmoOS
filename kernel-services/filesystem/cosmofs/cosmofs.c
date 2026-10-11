@@ -2023,6 +2023,20 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     return rc;
 }
 
+/* The VFS `setattr` operation (chmod, utimensat): the vnode's new mode and
+ * times go into the inode, as a write's new size does. Directories and
+ * files only: inode_sync writes one of those two types. */
+static int cfs_vnode_setattr(struct vnode *vn)
+{
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL)
+        return 0;
+    mutex_lock(&fs->lock);
+    int rc = inode_sync(fs, vn);
+    mutex_unlock(&fs->lock);
+    return rc;
+}
+
 /* The VFS `sync` operation (file_sync after the page cache wrote the
  * file's pages): the inode goes through, then the open transaction is
  * committed, which is what durability means here (design.md, "fsync
@@ -2092,6 +2106,7 @@ static const struct vnode_ops cfs_dir_ops = {
     .readdir = cfs_readdir,
     .sync = cfs_vnode_sync,
     .evict = cfs_evict,
+    .setattr = cfs_vnode_setattr,
 };
 
 static const struct vnode_ops cfs_file_ops = {
@@ -2101,6 +2116,7 @@ static const struct vnode_ops cfs_file_ops = {
     .truncate = cfs_truncate,
     .sync = cfs_vnode_sync,
     .evict = cfs_evict,
+    .setattr = cfs_vnode_setattr,
 };
 
 /* A link is never a page: its target is read from its block directly,

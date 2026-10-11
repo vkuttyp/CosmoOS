@@ -729,12 +729,12 @@ void ramfs_populate_boot(void)
                 mode = 0755;   /* test programs and fixtures run from the shell */
         }
         ensure_parents(path);
-        int rc = write_file(path, e->data, e->size, mode);
+        int rc = e->link[0] != '\0' ? vfs_symlink(NULL, path, e->link) : write_file(path, e->data, e->size, mode);
         if (rc)
             kwarn("ramfs: cannot populate %s (%d)", path, rc);
         else
             copied++;
     }
-    kinfo("ramfs: /boot holds %u file(s) from the boot archive", copied);
+    kinfo("ramfs: /boot holds %u file(s) and link(s) from the boot archive", copied);
 }
 FRAME_EXEMPT_END(ramfs_populate_boot)

@@ -75,6 +75,12 @@ struct linux_state {
 
 /* --- process hooks (kernel/process/process.c) --------------------------------- */
 
+/* The calling process's file-creation mask (lx_umask). */
+static uint32_t lx_umask_get(void)
+{
+    return __atomic_load_n(&process_current()->umask, __ATOMIC_RELAXED);
+}
+
 static const syscall_fn *linux_table_get(void);
 
 static int linux_process_init(struct process *p, const struct elf_info *info)
@@ -492,7 +498,7 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
      * (P31, P32); a relative path from a base with no name gives it
      * none, and fchdir then refuses it. */
     char name[VFS_PATH_MAX];
-    rc = vfs_open_named(start, base, path, flags, mode & 07777u, &f, name, sizeof(name));
+    rc = vfs_open_named(start, base, path, flags, mode & 07777u & ~lx_umask_get(), &f, name, sizeof(name));
     vnode_put(start);
     if (rc)
         return rc;
@@ -1171,7 +1177,7 @@ static int64_t path_call(struct syscall_args *a, unsigned which, uint64_t upath)
      * leak the reference the walk is holding. */
     struct vnode *cwd = process_cwd_get();
     switch (which) {
-    case 0: rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u); break;
+    case 0: rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u & ~lx_umask_get()); break;
     case 1: rc = vfs_rmdir(cwd, path); break;
     case 2: rc = vfs_unlink(cwd, path); break;
     case 3: {
@@ -1200,7 +1206,7 @@ static int64_t lx_mkdirat(struct syscall_args *a)
     rc = at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
-    rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u);
+    rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u & ~lx_umask_get());
     vnode_put(start);
     return rc;
 }
@@ -1225,7 +1231,7 @@ static int64_t do_mknod(int64_t dirfd, const char *path, uint32_t mode)
     if (rc)
         return rc;
     struct vnode *vn;
-    rc = vfs_mknod(start, path, mode & 07777u, VNODE_FIFO, &vn);
+    rc = vfs_mknod(start, path, mode & 07777u & ~lx_umask_get(), VNODE_FIFO, &vn);
     vnode_put(start);
     if (rc == 0)
         vnode_put(vn);
@@ -1250,6 +1256,110 @@ static __maybe_unused int64_t lx_mknod(struct syscall_args *a)
     if (rc)
         return rc;
     return do_mknod(LX_AT_FDCWD, path, (uint32_t)a->a[1]);
+}
+
+/* --- modes and times (roadmap M3; BusyBox chmod and touch) ------------------- */
+
+/* The node a path names from a directory descriptor, following a final
+ * symbolic link unless `nofollow`. */
+static int lookup_at(int64_t dirfd, uint64_t upath, bool nofollow, struct vnode **out)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(upath, path);
+    if (rc)
+        return rc;
+    struct vnode *start;
+    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
+    if (rc)
+        return rc;
+    rc = nofollow ? vfs_lookup_nofollow(start, path, out) : vfs_lookup(start, path, out);
+    vnode_put(start);
+    return rc;
+}
+
+static int64_t do_fchmodat(int64_t dirfd, uint64_t upath, uint32_t mode, unsigned flags)
+{
+    if (flags & ~(unsigned)LX_AT_SYMLINK_NOFOLLOW)
+        return -EINVAL;
+    struct vnode *vn;
+    int rc = lookup_at(dirfd, upath, (flags & LX_AT_SYMLINK_NOFOLLOW) != 0, &vn);
+    if (rc)
+        return rc;
+    /* A link's own mode means nothing: Linux refuses the change. */
+    rc = vn->type == VNODE_LNK ? -EOPNOTSUPP : vfs_setattr(vn, VFS_SET_MODE, mode, 0);
+    vnode_put(vn);
+    return rc;
+}
+
+#ifdef LX_chmod
+static int64_t lx_chmod(struct syscall_args *a) { return do_fchmodat(LX_AT_FDCWD, a->a[0], (uint32_t)a->a[1], 0); }
+#endif
+static int64_t lx_fchmodat(struct syscall_args *a)
+{
+    return do_fchmodat((int64_t)a->a[0], a->a[1], (uint32_t)a->a[2], 0);
+}
+static int64_t lx_fchmodat2(struct syscall_args *a)
+{
+    return do_fchmodat((int64_t)a->a[0], a->a[1], (uint32_t)a->a[2], (unsigned)a->a[3]);
+}
+
+static int64_t lx_fchmod(struct syscall_args *a)
+{
+    struct file *f = file_of((int)a->a[0], 0);
+    if (f == NULL)
+        return -EBADF;
+    int rc = vfs_setattr(f->vn, VFS_SET_MODE, (uint32_t)a->a[1], 0);
+    file_put(f);
+    return rc;
+}
+
+/*
+ * utimensat(dirfd, path, times[2], flags): the modification time, times[1]
+ * (the access time is not kept: times[0] is checked and ignored).
+ * No times, or UTIME_NOW, is "now"; UTIME_OMIT leaves it. A NULL path
+ * is the descriptor's own file (futimens).
+ */
+static int64_t lx_utimensat(struct syscall_args *a)
+{
+    unsigned flags = (unsigned)a->a[3];
+    if (flags & ~(unsigned)LX_AT_SYMLINK_NOFOLLOW)
+        return -EINVAL;
+    unsigned what = VFS_SET_MTIME_NOW;
+    uint64_t mtime = 0;
+    if (a->a[2]) {
+        struct lx_timespec ts[2];
+        if (copy_from_user(ts, a->a[2], sizeof(ts)))
+            return -EFAULT;
+        for (int i = 0; i < 2; i++)
+            if (ts[i].tv_nsec != LX_UTIME_NOW && ts[i].tv_nsec != LX_UTIME_OMIT &&
+                (ts[i].tv_nsec < 0 || ts[i].tv_nsec >= 1000000000L || ts[i].tv_sec < 0))
+                return -EINVAL;
+        if (ts[0].tv_nsec == LX_UTIME_OMIT && ts[1].tv_nsec == LX_UTIME_OMIT)
+            return 0;
+        if (ts[1].tv_nsec == LX_UTIME_OMIT) {
+            what = 0;   /* the change time only */
+        } else if (ts[1].tv_nsec != LX_UTIME_NOW) {
+            what = VFS_SET_MTIME;
+            mtime = (uint64_t)ts[1].tv_sec * 1000000000ull + (uint64_t)ts[1].tv_nsec;
+        }
+    }
+    struct vnode *vn;
+    int rc;
+    if (a->a[1] == 0) {
+        struct file *f = file_of((int)a->a[0], 0);
+        if (f == NULL)
+            return -EBADF;
+        vn = f->vn;
+        vnode_get(vn);
+        file_put(f);
+    } else {
+        rc = lookup_at((int64_t)a->a[0], a->a[1], (flags & LX_AT_SYMLINK_NOFOLLOW) != 0, &vn);
+        if (rc)
+            return rc;
+    }
+    rc = vfs_setattr(vn, what, 0, mtime);
+    vnode_put(vn);
+    return rc;
 }
 
 static int64_t lx_unlinkat(struct syscall_args *a)
@@ -1556,7 +1666,13 @@ static int64_t lx_fsync(struct syscall_args *a)
     file_put(f);
     return rc;
 }
-static int64_t lx_umask(struct syscall_args *a) { (void)a; return 022; }
+/* umask (roadmap M3): the process's own, inherited by fork and spawn
+ * (struct process.umask); it was a constant 022 that nothing applied. */
+static int64_t lx_umask(struct syscall_args *a)
+{
+    struct process *p = process_current();
+    return (int64_t)__atomic_exchange_n(&p->umask, (uint32_t)a->a[0] & 0777u, __ATOMIC_RELAXED);
+}
 
 /* --- memory --------------------------------------------------------------------- */
 
@@ -2271,16 +2387,28 @@ static int64_t lx_sysinfo(struct syscall_args *a)
     return copy_to_user(a->a[0], &si, sizeof(si)) ? -EFAULT : 0;
 }
 
+/* An interrupted sleep reports what it did not sleep: a libc's sleep()
+ * and BusyBox's sleep go round again with exactly that (Linux's `rem`).
+ * It was written as 0, so a sleep a stop or a handler interrupted ended
+ * early (roadmap M3, found by BusyBox sleep under ^Z and fg). */
+static int sleep_reporting_rest(uint64_t ns, uint64_t urem)
+{
+    uint64_t start = clock_now_ns();
+    int rc = thread_sleep_ns_killable(ns);
+    if (rc && urem) {
+        uint64_t slept = clock_now_ns() - start;
+        put_timespec(urem, slept < ns ? ns - slept : 0);
+    }
+    return rc;
+}
+
 static int64_t lx_nanosleep(struct syscall_args *a)
 {
     uint64_t ns;
     int rc = ns_from_timespec(a->a[0], &ns);
     if (rc)
         return rc;
-    rc = thread_sleep_ns_killable(ns);
-    if (rc && a->a[1])
-        put_timespec(a->a[1], 0);
-    return rc;
+    return sleep_reporting_rest(ns, a->a[1]);
 }
 
 static int64_t lx_clock_nanosleep(struct syscall_args *a)
@@ -2296,10 +2424,7 @@ static int64_t lx_clock_nanosleep(struct syscall_args *a)
         uint64_t now = clock_read(clk);
         ns = ns > now ? ns - now : 0;
     }
-    rc = thread_sleep_ns_killable(ns);
-    if (rc && a->a[3] && !(flags & LX_TIMER_ABSTIME))
-        put_timespec(a->a[3], 0);
-    return rc;
+    return sleep_reporting_rest(ns, (flags & LX_TIMER_ABSTIME) ? 0 : a->a[3]);
 }
 
 static int64_t lx_sched_yield(struct syscall_args *a) { (void)a; sched_yield(); return 0; }
@@ -2783,13 +2908,13 @@ static int64_t lx_fork_common(struct syscall_args *a, uint64_t flags, unsigned e
  * place, through the same operation as the native SYS_exec. */
 static int64_t lx_execve(struct syscall_args *a)
 {
-    struct exec_args *ea = kmalloc(sizeof(*ea), 0);
+    struct exec_args *ea = exec_args_alloc();
     if (ea == NULL)
         return -ENOMEM;
     int rc = exec_args_copy(ea, a->a[0], a->a[1], a->a[2]);
     if (rc == 0)
         rc = process_execve(ea, a->frame);
-    kfree(ea);
+    exec_args_free(ea);
     return rc;
 }
 
@@ -3759,6 +3884,13 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_epoll_wait] = lx_epoll_wait,
 #endif
     [LX_unlinkat] = lx_unlinkat,
+#ifdef LX_chmod
+    [LX_chmod] = lx_chmod,
+#endif
+    [LX_fchmod] = lx_fchmod,
+    [LX_fchmodat] = lx_fchmodat,
+    [LX_fchmodat2] = lx_fchmodat2,
+    [LX_utimensat] = lx_utimensat,
     [LX_renameat] = lx_renameat,
     [LX_readlinkat] = lx_readlinkat,
 #ifdef LX_symlink

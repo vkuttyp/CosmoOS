@@ -14,6 +14,7 @@ the owner's and were not reopened; this report records how each was built.
 | 2 | Linux `fork`, fork-like `clone`, `CLONE_VM|CLONE_VFORK`, `wait4` for children, handle-table duplication. |
 | 3 | `execve` (Linux) and `SYS_exec` (native), close-on-exec, `#!`, personality switching on exec, vfork release. |
 | 4 | The BusyBox port, the image layout, `make test-busybox` and its CI job; M3 ticked. |
+| 5 | Added on the way: TCP sender silly-window avoidance (#349, merged before PR 3), the defect behind `net-bench`'s 1 MiB/s mode that PR 3's layout made frequent on CI ([report](2026-10-11-tcp-sws-report.md)). |
 
 ## PR 1 (as built)
 
@@ -183,4 +184,83 @@ The matrix ran on PR 3 over PR 2's head before PR 2's thread-pointer fix;
 PR 3 was then rebased onto it (the fix touches `lx_fork_common`,
 `lx_clone` and the arch user code, none of PR 3's files). PR 4's matrix
 runs over both.
+
+## PR 4 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| Port | BusyBox 1.37.0, musl 1.2.5 and compiler-rt 19.1.7's builtins, each pinned by SHA-256 and fetched once (`scripts/fetch-pinned.py`, `.cache/ports`); musl and the builtins built with the project's clang, BusyBox with the checked-in `busybox.config` through a wrapper that links static with musl's start files and the image at 4 MiB. Built per architecture in `out/busybox-<arch>`, shared by the build variants; reproducible (`make reproducible` compares it). | `ports/busybox/` |
+| Image | `/bin/busybox` and the 48 applet links (ustar symbolic-link entries: `mkbootarchive.py` `NAME@TARGET`, `bootarchive.c`, `ramfs_populate_boot`; the archive holds up to 256 entries); colliding native programs as `/bin/cosmo-<name>`; init's console shell from `/etc/console-shell`, which `cosmo-install` sets to `/bin/sh`; `/etc/rc.test` keeps testing the native shell. | `scripts/mkbootarchive.py`, `kernel/core/bootarchive.c`, `kernel-services/vfs/ramfs.c`, `userland/` |
+| Kernel | `vfs_setattr` and the `setattr` vnode operation (cosmofs: `inode_sync`); Linux `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `utimensat`; a per-process umask (decision 2's inheritance list), applied by the Linux door; `/dev/null`, `/dev/zero`; exec's argument block raised to 8192 strings and 64 KiB (BusyBox xargs), the initial frame to 160 KiB. | `kernel-services/vfs/`, `compat/linux/`, `kernel/process/` |
+| Acceptance | `make test-busybox` (`tests/boot/busybox_test.py`): `tests/busybox/ash.sh` (72 checks) and `tests/busybox/suite.sh` (the fifteen testsuite files); CI job `busybox`. | `tests/` , `Makefile`, `.github/workflows/ci.yml` |
+
+### Found on the way, each blocking the acceptance test
+
+| Defect | Seen as | Fix | Check | Without the fix |
+|---|---|---|---|---|
+| a fork child's thread pointer on AArch64 was the value saved at the parent's last switch-out | ash's children faulting at small negative addresses | PR 2's `arch_get_tls_base` (PR 2 report) | lxtest fork | AArch64 child exits 12 |
+| an interrupted `nanosleep` wrote 0 into `rem` | BusyBox `sleep` ending at once after `^Z` and `fg` in the interactive harness | the unslept time | lxtest: 5 s sleep interrupted at 200 ms leaves 3-5 s | the `rem` check fails |
+| `mkdir` of `.` was `-EINVAL` | `tar: can't create directory './'` | `-EEXIST`, as Linux | lxtest `mkdir /tmp/.` and `/tmp/./` | both checks fail |
+| arm64's `O_DIRECTORY`, `O_NOFOLLOW`, `O_LARGEFILE` had x86 numbers | `ls: can't open '.': Invalid argument` on AArch64 only | arm64's numbers | lxtest opens a directory by Linux's literal number | AArch64: both checks fail (the directory open and the file's `-ENOTDIR`) |
+| no umask applied | a file created 0666 by the shell (testsuite: tar into a read-only dir) | the process's umask, inherited | lxtest: 0666 with umask 027 is 0640; a fork child's is 027 | the file is 0666 (`st_mode` 33206) |
+
+Each "without" column is a mutation run with the old code restored (one
+debug boot; AArch64 for the two AArch64-only rows, x86-64 for the rest).
+These are recorded as mutation runs rather than `tools/*-probe.py`
+probes: the checks are lxtest lines that fail on main's behaviour, and
+the milestone's PR budget went to the acceptance test.
+
+Two BusyBox build matters, not kernel defects: lld places a static
+executable at 2 MiB, below `USER_LO` (`--image-base=0x400000`), and
+BusyBox's const-pointer-to-globals trick does not survive clang on
+AArch64 (`-DBB_GLOBAL_CONST=`, the switch `libbb.h` names for such
+toolchains; `awk`, `diff`, `ls` and `find` faulted at address 4, on Linux
+in an arm64 container too).
+
+### Acceptance (local, macOS host, QEMU, TCG; `BUILD=release`)
+
+| | x86-64 | AArch64 |
+|---|---|---|
+| scripted test (`ash.sh`) | PASS, 72 checks | PASS, 72 checks |
+| cut | 28 pass | 28 pass |
+| sed | 93 pass, 3 excluded | 93 pass, 3 excluded |
+| grep | 44 pass, 7 skipped by runtest | the same |
+| tr | 10 pass | 10 pass |
+| sort | 25 pass | 25 pass |
+| uniq | 14 pass | 14 pass |
+| head | 3 pass | 3 pass |
+| tail | 3 pass, 1 excluded | the same |
+| expr | 2 pass | 2 pass |
+| seq | 25 pass | 25 pass |
+| basename | 2 pass | 2 pass |
+| dirname | 7 pass | 7 pass |
+| wc | 5 pass | 5 pass |
+| xargs | 11 pass, 1 excluded | the same |
+| tar | 19 pass, 11 excluded, 3 skipped by runtest | the same |
+| whole boot | PASS in 29.9 s | PASS in 37.7 s |
+
+The exclusions and their reasons are in `docs/userland/testing.md`,
+"make test-busybox": three sed cases fail identically under Linux with
+this binary (an arm64 container), five tar cases make hard links, eight
+need an applet outside the M3 list (`dd`, `md5sum`, `bunzip2`,
+`uudecode`). Skipped and untested cases are runtest's own verdicts for
+features the configuration leaves out.
+
+### PR 4 validation (local, macOS host, QEMU, TCG)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | pass | pass |
+| `fuzz` | pass | pass |
+| `analyze` | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 140.6 s | PASS 143.2 s |
+| debug `test-smp2` | PASS 155.7 s | PASS 153.2 s |
+| debug `test`, `QEMU_SMP=4` | PASS 144.6 s | PASS 154.8 s |
+| `test-chaos` | PASS 152.9 s | PASS 146.7 s |
+| `test-harness-retry` | PASS 152.0 s | PASS 154.3 s |
+| `BUILD=release test` | PASS 17.9 s | PASS 21.1 s |
+| `BUILD=release test-install` | PASS 22.4 s | PASS 36.4 s |
+| `BUILD=release test-busybox` | PASS 29.0 s | PASS 40.3 s |
+| `test-crash` | PASS 123.8 s | PASS 132.5 s |
+| `make reproducible` (x86-64, debug) | yes: BusyBox, its testsuite and the boot archive identical across two trees | -- |
 

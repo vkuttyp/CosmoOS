@@ -692,8 +692,89 @@ static int vfork_exec_child(void *arg)
     return 127;
 }
 
+/* Linux's own numbers for O_DIRECTORY on this architecture, written out
+ * rather than taken from linux_abi.h, which the kernel shares. */
+#if defined(__x86_64__)
+#define LINUX_O_DIRECTORY 0200000
+#else
+#define LINUX_O_DIRECTORY 040000
+#endif
+
+/*
+ * --- what BusyBox needed (roadmap M3 PR 4) ---
+ * An interrupted nanosleep reports the time it did not sleep; mkdir of
+ * "." is EEXIST; the umask is the process's own and creation applies it;
+ * chmod and utimensat change a file's mode and modification time.
+ */
+static volatile int g_usr1_seen;
+static void usr1_handler(int sig) { (void)sig; g_usr1_seen = 1; }
+
+static void busybox_needs(long pid)
+{
+    struct lx_sigaction h = { .handler = (uint64_t)(uintptr_t)usr1_handler, .flags = LX_SA_RESTORER,
+                              .restorer = (uint64_t)(uintptr_t)lx_restorer }, old;
+    CHECKV(sc4(LX_rt_sigaction, 10, &h, &old, 8) == 0, 0);
+    uint64_t m10 = 1ull << 9, prev = 0;
+    CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_UNBLOCK, &m10, &prev, 8) == 0, 0);
+    g_usr1_seen = 0;
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        struct lx_timespec t = { 0, 200000000 };
+        sc2(LX_nanosleep, &t, 0);
+        sc2(LX_kill, pid, 10);
+        lx_exit(0);
+    }
+    struct lx_timespec want = { 5, 0 }, rem = { 0, 0 };
+    long r = sc2(LX_nanosleep, &want, &rem);
+    CHECKV(r == -4 && g_usr1_seen, r);                                  /* EINTR, after the handler */
+    CHECKV(rem.tv_sec >= 3 && rem.tv_sec <= 5, rem.tv_sec);             /* about 4.8 s were left, not 0 */
+    int32_t st = -1;
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c, st);
+    CHECKV(sc4(LX_rt_sigaction, 10, &old, 0, 8) == 0 && sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &prev, 0, 8) == 0, 0);
+
+    CHECKV(sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/.", 0755) == -17, 0);    /* EEXIST, not EINVAL */
+    CHECKV(sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/./", 0755) == -17, 0);
+
+    long um = sc1(LX_umask, 027);
+    CHECKV(um == 022, um);
+    CHECKV(sc1(LX_umask, 027) == 027, 0);
+    long fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lx-umask", LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, 0666);
+    CHECKV(fd >= 0, fd);
+    sc1(LX_close, fd);
+    struct lx_stat sb;
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && (sb.st_mode & 0777) == 0640, sb.st_mode);
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0)
+        lx_exit((int)sc1(LX_umask, 0));                                 /* the child's, inherited */
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == (027 << 8), st);
+    CHECKV(sc1(LX_umask, 022) == 027, 0);
+
+    CHECKV(sc4(LX_fchmodat, LX_AT_FDCWD, "/tmp/lx-umask", 0604, 0) == 0, 0);
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && (sb.st_mode & 07777) == 0604, sb.st_mode);
+    struct lx_timespec tv[2] = { { 0, LX_UTIME_OMIT }, { 1577934240, 5 } };   /* 2020-01-02 03:04:00 */
+    CHECKV(sc4(LX_utimensat, LX_AT_FDCWD, "/tmp/lx-umask", tv, 0) == 0, 0);
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && sb.st_mtime == 1577934240, sb.st_mtime);
+    /* "Now" is the VFS's clock, the one a new file is stamped with (since
+     * boot: file times are not the wall clock yet; the inventory says so). */
+    fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lx-later", LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, 0644);
+    sc1(LX_close, fd);
+    struct lx_stat later;
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-later", &later, 0) == 0, 0);
+    CHECKV(sc4(LX_utimensat, LX_AT_FDCWD, "/tmp/lx-umask", 0, 0) == 0, 0);   /* now */
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && sb.st_mtime != 1577934240 &&
+           sb.st_mtime >= later.st_mtime, sb.st_mtime);
+    sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-later", 0);
+    tv[1].tv_nsec = 1000000000L;
+    CHECKV(sc4(LX_utimensat, LX_AT_FDCWD, "/tmp/lx-umask", tv, 0) == -22, 0);   /* EINVAL */
+    sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-umask", 0);
+}
+
 static void exec_tests(long pid)
 {
+    long dfd = sc4(LX_openat, LX_AT_FDCWD, "/tmp", LINUX_O_DIRECTORY, 0);
+    CHECKV(dfd >= 0, dfd);   /* opendir's flags */
+    sc1(LX_close, dfd);
+    CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/boot/tests/linux/lxtest", LINUX_O_DIRECTORY, 0) == -20, 0);   /* ENOTDIR */
     int32_t st;
     const char *const none[] = { "x", 0 };
     /* Failures leave the caller as it was. */
@@ -1936,7 +2017,7 @@ int main(int argc, char **argv)
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxcn", LX_AT_REMOVEDIR) == 0, 0);
     }
     CHECKV(sc1(LX_chdir, "/") == 0, 0);
-    CHECKV(sc0(LX_umask) == 022, 0);
+    CHECKV(sc1(LX_umask, 022) == 022, 0);   /* sets what it reads: the umask is real since M3 */
 
     /* --- file-backed mmap (milestone 10): a private snapshot --- */
     long mfd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmap", LX_O_RDWR | LX_O_CREAT | LX_O_TRUNC, 0644);
@@ -2118,6 +2199,7 @@ int main(int argc, char **argv)
     CHECKV(sc2(LX_kill, pid, 17) == 0, 0);                      /* SIGCHLD: the default ignores it */
     fork_tests(pid);
     exec_tests(pid);
+    busybox_needs(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);
 
     /* A handler through kill: siginfo names the sender, the signal is
