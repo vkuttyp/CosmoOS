@@ -2571,7 +2571,10 @@ its value before the test 200 ms after its partner's join. First
 sighting. `thread_count` counts every thread, so a thread created or
 exited anywhere in that window fails it as surely as the partner's slow
 reap; the log could not say which: `threads_settle` (schedtest.c) now
-prints the count it saw and dumps the thread list when it gives up. Not
+prints the count it saw and dumps the thread list when it gives up. A
+count above the expected names the newcomer in the dump; a count below
+cannot say which thread went -- if a next sighting is that, a baseline of
+the thread identities taken before the test is the next step. Not
 attributed; the failed job was rerun.
 
 ## `irqpoll-boost` over its gap bound, 2026-10-10
