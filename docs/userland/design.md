@@ -320,6 +320,15 @@ first buffer was too small. `kill` accepts `-9`, `-KILL`, `-s KILL`.
 `dmesg` writes the `klog` buffer. `sysctl -a` lists `sysctl.names` then
 each value as `name = value`.
 
+## ssh (roadmap M4)
+
+The installed system's ssh server is dropbear (`ports/dropbear/README.md`),
+a service `cosmo-install` writes (`/etc/svc/dropbear`): its host key is made
+at the system's first boot and kept; logins are root's, by public key alone
+(`/root/.ssh/authorized_keys`), into BusyBox ash -- on a pseudo-terminal
+with job control when the client asks for one. The live image runs no ssh
+server.
+
 ## netcfg (`userland/system/netcfg.c`; roadmap M4)
 
 DNS for user space without a resolver in the kernel. The kernel's DHCP
