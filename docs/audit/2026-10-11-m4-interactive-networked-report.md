@@ -198,3 +198,30 @@ control pipe, so it never saw the child exit); the parent now closes it.
 | release build and `test` | PASS 17.7s | PASS 20.8s |
 | `test-net-login` (release; console job control) | PASS 16.3s | PASS 23.2s |
 | `fuzz` | pass (host binaries, one run) | -- |
+
+## PR 3 (as built)
+
+| Area | Change | Files |
+|---|---|---|
+| dropbear | 2026.94 (`dropbear-2026.94.tar.bz2`, SHA-256 `e098034a843699200c8c977a991fff73159735bf795d5f72ef672c41a6b1ae81`, upstream's published sum; second URL the `pinned-sources` release copy) built against the BusyBox port's musl sysroot: static, stripped, no zlib, no syslog, no login records. `localoptions.h`: public-key authentication only (password authentication compiled out), Ed25519 host keys, no forwarding, no X11, no sftp, no MOTD. `fetch-pinned.py` sends its own User-Agent (upstream answers Python's default with 403). | `ports/dropbear/`, `scripts/fetch-pinned.py` |
+| The service | `/etc/dropbear/start`: make the host key with `dropbearkey -t ed25519` at the first boot of the installed system (`getrandom` blocks until the pool is seeded, M1), keep it, `exec dropbear -F -p 22 -r <key>`. `cosmo-install` writes `/etc/passwd` (`root:*:0:0:root:/root:/bin/sh`), `/etc/group`, `/root/.ssh/authorized_keys` (0600 in 0700) and `/etc/svc/dropbear` (`restart always`). The live image starts no ssh server. | `ports/dropbear/start`, `userland/system/cosmo-install.c` |
+| Tests | `test-net-login` d: the harness's key in `authorized_keys`, ssh port forwarded by QEMU, `ssh root@... 'uname -a; echo ok'`, then `ssh -tt` in a host pty sized 37x101: `tty`, `stty size`, `sleep 100 &`, `jobs`, `kill %1`, `wait`; e: reboot the installed disk and log in again with `StrictHostKeyChecking=yes` against the first boot's `known_hosts`. CI: `openssh-client`, the ports cache keyed on `dropbear.mk`. | `tests/boot/net_login_test.py`, `Makefile`, `.github/workflows/ci.yml` |
+
+Built binaries (release, both stripped and statically linked):
+
+| | x86-64 | AArch64 |
+|---|---|---|
+| `dropbear` | 407,024 bytes | 359,496 bytes |
+| `dropbearkey` | 195,856 bytes | 184,752 bytes |
+
+### Acceptance a-e (local, macOS host, QEMU TCG, release `test-net-login`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| a. DHCP | `eth0 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3`, lease 86400 s; `resolv.conf` names 10.0.2.3 | the same |
+| b. by address | 1 MiB in 0.2 s, SHA-256 matches | 1 MiB in 0.2 s, SHA-256 matches |
+| c. by name | `nslookup example.com` -> 104.20.23.154; `Example Domain`, attempt 1 | the same, attempt 1 |
+| d. ssh | key login as root, `Linux cosmo 6.0.0-cosmo CosmoOS 0.0.1 ... x86_64`, `ok`; `ssh -tt`: `/dev/pts/0`, `stty size` 37 101, `sleep 100 &` / `jobs` / `kill %1` / `wait` | the same, `aarch64` |
+| e. reboot | host key kept (`StrictHostKeyChecking=yes` passed), 5.2 s | the same, 8.3 s |
+| whole test | PASS in 49.3 s | PASS in 58.1 s |
+

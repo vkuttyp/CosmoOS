@@ -2781,4 +2781,12 @@ See the [history index](README.md).
     `COSMO_SPAWN_SETSID` for init's console shell (ash job control on the
     console), `/proc/<pid>/fd`, switch_root carrying nested mounts;
     `tty-pty`, `lxpty`, test-net-login's console stage.
+  - PR 3: static dropbear 2026.94 from pinned source on both architectures
+    (`ports/dropbear/`: public-key login only, password authentication
+    compiled out, no login records, Ed25519 host key made at the installed
+    system's first boot from the seeded pool and kept); `cosmo-install`
+    writes `/etc/passwd`, `/etc/group`, `/root/.ssh/authorized_keys` and the
+    `dropbear` service; `test-net-login` gains acceptance d (ssh key login,
+    `ssh -tt` with a pty, window size and job control) and e (the host key
+    survives a reboot). M4 ticked.
   - Report: `docs/audit/2026-10-11-m4-interactive-networked-report.md`.
