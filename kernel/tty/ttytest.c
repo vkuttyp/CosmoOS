@@ -355,6 +355,13 @@ bool selftest_tty_pty(const char **reason)
     s = NULL;
     pty_get_stats(&st1);
     PCHECK(st1.opened == st0.opened + 1 && st1.freed == st0.freed + 1);
+    /* The number is free again: the next pair is made under the same name
+     * (its node was removed by the kernel, whoever closed the master). */
+    unsigned n2 = 999;
+    PCHECK(vfs_open(NULL, "/dev/ptmx", COSMO_O_RDWR | COSMO_O_NOCTTY, 0, &m) == 0 && m != NULL);
+    PCHECK(pty_get_index(m, &n2) == 0 && n2 == n);
+    file_put(m);
+    m = NULL;
     kinfo("selftest: tty-pty: /dev/pts/%u: line in, CR LF echo and output, hangup to EOF/EIO, name removed, pair freed",
           n);
     return true;

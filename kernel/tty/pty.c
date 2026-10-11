@@ -51,9 +51,14 @@ struct pty {
     struct vnode *node;            /* /dev/pts/N, until the master closes */
 };
 
+/* The index table, and every slave node's pointer to its pair: a slave's
+ * open takes its reference under this lock, and the master's close clears
+ * the node's pointer under it, so an open after (or racing) the close sees
+ * NULL rather than a pair being freed. Order: g_pty_lock -> pty.olock. */
 static spinlock_t g_pty_lock = SPINLOCK_INIT("pty-index");
 static bool g_pty_used[PTY_MAX];
 static struct vnode *g_ptmx_vnode;
+static struct vnode *g_pts_dir;   /* the pts filesystem's root: slaves are made and removed here, by name */
 static struct pty_stats g_stats;
 
 static void pty_release_obj(struct kobject *obj)
@@ -132,7 +137,10 @@ static int64_t pty_write(struct tty *t, const void *buf, size_t len, bool nonblo
             return done > 0 ? (int64_t)done : -EIO;
         if (io_nonblocking(nonblock))
             return done > 0 ? (int64_t)done : -EAGAIN;
-        int rc = wait_event_killable(&p->owriters, p->oused + 2 <= PTY_OUT_MAX || !p->master_open);
+        /* Room for the next byte as it will go out: two slots for a
+         * newline under OPOST, one for anything else. */
+        unsigned need = (b[done] == '\n' && opost) ? 2u : 1u;
+        int rc = wait_event_killable(&p->owriters, p->oused + need <= PTY_OUT_MAX || !p->master_open);
         if (rc)
             return done > 0 ? (int64_t)done : rc;
     }
@@ -141,27 +149,64 @@ static int64_t pty_write(struct tty *t, const void *buf, size_t len, bool nonblo
 static void pty_tty_get(struct tty *t) { kobject_get(&((struct pty *)t->priv)->obj); }
 static void pty_tty_put(struct tty *t) { kobject_put(&((struct pty *)t->priv)->obj); }
 
+/* The slave's output side, for TIOCOUTQ, TCFLSH and TCSETSW. */
+static unsigned pty_out_queued(struct tty *t)
+{
+    struct pty *p = t->priv;
+    arch_irq_state_t s = spin_lock_irqsave(&p->olock);
+    unsigned n = p->oused;
+    spin_unlock_irqrestore(&p->olock, s);
+    return n;
+}
+
+static void pty_flush_out(struct tty *t)
+{
+    struct pty *p = t->priv;
+    arch_irq_state_t s = spin_lock_irqsave(&p->olock);
+    p->ohead = p->otail = p->oused = 0;
+    spin_unlock_irqrestore(&p->olock, s);
+    waitqueue_wake_all(&p->owriters);
+    waitqueue_wake_all(&p->tty.readers);   /* a combined poll sleeps there (pts_poll_wq) */
+}
+
+/* Until the master has read everything the slave wrote, or is gone. */
+static int pty_drain(struct tty *t)
+{
+    struct pty *p = t->priv;
+    return wait_event_killable(&p->owriters, p->oused == 0 || !p->master_open);
+}
+
 static const struct tty_ops pty_tty_ops = {
     .echo = pty_echo, .write = pty_write, .get = pty_tty_get, .put = pty_tty_put,
+    .out_queued = pty_out_queued, .flush_out = pty_flush_out, .drain = pty_drain,
 };
 
 /* --- the slave: /dev/pts/N --------------------------------------------------- */
 
 static int pts_open(struct vnode *vn, struct file *f)
 {
+    /* The reference is taken under g_pty_lock, which the master's close
+     * holds to clear the node's pointer: the pair cannot be freed between
+     * finding it and holding it. */
+    arch_irq_state_t gs = spin_lock_irqsave(&g_pty_lock);
     struct pty *p = ramfs_chr_priv(vn);
-    arch_irq_state_t s = spin_lock_irqsave(&p->olock);
     int rc = 0;
-    if (!p->master_open || p->locked)
-        rc = -EIO;   /* Linux's answer for a pair whose master is gone or still locked */
-    else {
-        p->slave_opens++;
-        p->slave_ever = true;
+    if (p == NULL) {
+        rc = -EIO;   /* the master has closed */
+    } else {
+        arch_irq_state_t s = spin_lock_irqsave(&p->olock);
+        if (!p->master_open || p->locked) {
+            rc = -EIO;   /* Linux's answer for a pair whose master is gone or still locked */
+        } else {
+            p->slave_opens++;
+            p->slave_ever = true;
+            kobject_get(&p->obj);
+        }
+        spin_unlock_irqrestore(&p->olock, s);
     }
-    spin_unlock_irqrestore(&p->olock, s);
+    spin_unlock_irqrestore(&g_pty_lock, gs);
     if (rc)
         return rc;
-    kobject_get(&p->obj);
     f->priv = p;
     /* A session leader whose session has no terminal takes the one it
      * opens, unless it says O_NOCTTY: what getty, and every program that
@@ -214,6 +259,8 @@ static struct waitqueue *pts_poll_wq(struct vnode *vn, struct file *f, unsigned 
 {
     (void)vn;
     struct pty *p = f->priv;
+    /* One queue per poll: readers', which the master's read also wakes when
+     * it frees room, so a poll for both directions hears either. */
     if (events & COSMO_IO_READABLE)
         return &p->tty.readers;
     if (events & COSMO_IO_WRITABLE)
@@ -267,11 +314,11 @@ static int ptmx_open(struct vnode *vn, struct file *f)
     waitqueue_init(&p->owriters, "pty-writers");
     p->master_open = true;
     p->locked = true;   /* until unlockpt (TIOCSPTLCK 0), as on Linux */
-    char path[32];
-    ksnprintf(path, sizeof(path), "/dev/pts/%u", index);
-    int rc = ramfs_mkchr(path, 0620, &pts_ops, p, &p->node);
+    char name[12];
+    ksnprintf(name, sizeof(name), "%u", index);
+    int rc = g_pts_dir ? ramfs_mkchr_at(g_pts_dir, name, 0620, &pts_ops, p, &p->node) : -ENODEV;
     if (rc) {
-        kwarn("pty: cannot create %s (%d)", path, rc);
+        kwarn("pty: cannot create /dev/pts/%s (%d)", name, rc);
         kobject_put(&p->obj);
         return rc;
     }
@@ -285,21 +332,25 @@ static void ptmx_release(struct vnode *vn, struct file *f)
 {
     (void)vn;
     struct pty *p = f->priv;
+    arch_irq_state_t gs = spin_lock_irqsave(&g_pty_lock);
     arch_irq_state_t s = spin_lock_irqsave(&p->olock);
     p->master_open = false;
     spin_unlock_irqrestore(&p->olock, s);
+    ramfs_chr_set_priv(p->node, NULL);   /* no open from here on reaches this pair */
+    spin_unlock_irqrestore(&g_pty_lock, gs);
     /* The slave's session hears the line drop; its readers see end of
-     * file, its writers -EIO, and the name goes so nothing opens it again. */
+     * file, its writers -EIO, and the name goes -- removed by the kernel in
+     * the pts directory it holds, whoever closed the master and wherever it
+     * is confined, so the number is free again. */
     tty_hangup(&p->tty);
     tty_unregister(&p->tty);
     waitqueue_wake_all(&p->owriters);
-    char path[32];
-    ksnprintf(path, sizeof(path), "/dev/pts/%u", p->index);
-    int rc = vfs_unlink(NULL, path);
+    char name[12];
+    ksnprintf(name, sizeof(name), "%u", p->index);
+    int rc = ramfs_unlink_chr_at(g_pts_dir, name, p->node);
     if (rc)
-        kwarn("pty: cannot remove %s (%d)", path, rc);
-    if (p->node)
-        vnode_put(p->node);
+        kwarn("pty: cannot remove /dev/pts/%s (%d)", name, rc);
+    vnode_put(p->node);
     p->node = NULL;
     kobject_put(&p->obj);
 }
@@ -324,6 +375,7 @@ static int64_t ptmx_read(struct vnode *vn, struct file *f, uint64_t off, void *b
         spin_unlock_irqrestore(&p->olock, s);
         if (n > 0) {
             waitqueue_wake_all(&p->owriters);
+            waitqueue_wake_all(&p->tty.readers);   /* a combined poll of the slave sleeps there */
             return (int64_t)n;
         }
         if (closed)
@@ -469,6 +521,11 @@ void pty_init(void)
     rc = vfs_mount("/dev/pts", "ramfs", NULL, 0);   /* the pts filesystem: holds the slaves and nothing else */
     if (rc)
         kwarn("pty: cannot mount /dev/pts (%d)", rc);
+    rc = vfs_lookup(NULL, "/dev/pts", &g_pts_dir);   /* held for good: the root of the pts mount */
+    if (rc) {
+        kwarn("pty: /dev/pts: %d", rc);
+        g_pts_dir = NULL;
+    }
     rc = ramfs_mkchr("/dev/ptmx", 0666, &ptmx_ops, NULL, &g_ptmx_vnode);
     if (rc)
         kwarn("pty: /dev/ptmx: %d", rc);

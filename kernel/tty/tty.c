@@ -32,6 +32,11 @@ static struct tty g_console_tty;
  * g_ttys_lock -> tty.lock. */
 static LIST_HEAD(g_ttys);
 static spinlock_t g_ttys_lock = SPINLOCK_INIT("ttys");
+/* Taking a controlling terminal is one step across the registry: "does the
+ * session have one" and "this one is the session's" under one lock, or two
+ * claims racing in one session could each find none (T17). Order:
+ * g_claim_lock -> g_ttys_lock -> tty.lock. */
+static spinlock_t g_claim_lock = SPINLOCK_INIT("tty-claim");
 
 void tty_register(struct tty *t)
 {
@@ -311,26 +316,32 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
     if (!process_group_in_session(pgid, sid))
         return -EPERM;
     /* A session controls one terminal: a leader whose session has another
-     * may not claim this one by naming a group on it. */
+     * may not claim this one by naming a group on it. The check and the
+     * claim below are one step under g_claim_lock. */
+    arch_irq_state_t cl = spin_lock_irqsave(&g_claim_lock);
     struct tty *other = tty_controlling(sid);
     if (other != NULL) {
         tty_put(other);
-        if (other != t)
+        if (other != t) {
+            spin_unlock_irqrestore(&g_claim_lock, cl);
             return -EPERM;
+        }
     }
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     pid_t fg = t->fg_pgid;
+    int claim_rc = 0;
     if (t->sid == 0) {
-        if (self->pid != sid) {
-            spin_unlock_irqrestore(&t->lock, s);
-            return -EPERM;   /* only a session leader claims a terminal */
-        }
-        t->sid = sid;   /* claimed and named in one step */
+        if (self->pid != sid)
+            claim_rc = -EPERM;   /* only a session leader claims a terminal */
+        else
+            t->sid = sid;   /* claimed and named in one step */
     } else if (t->sid != sid) {
-        spin_unlock_irqrestore(&t->lock, s);
-        return -EPERM;
+        claim_rc = -EPERM;
     }
     spin_unlock_irqrestore(&t->lock, s);
+    spin_unlock_irqrestore(&g_claim_lock, cl);
+    if (claim_rc)
+        return claim_rc;
     /*
      * Changing the foreground group from a background process is a
      * SIGTTOU, unless the caller ignores or blocks it -- which every
@@ -442,8 +453,10 @@ int tty_set_controlling(struct tty *t)
     process_current_ids(&pgid, &sid);
     if (self == NULL || self->pid != sid)
         return -EPERM;   /* only a session leader takes a controlling terminal */
+    arch_irq_state_t cl = spin_lock_irqsave(&g_claim_lock);   /* the check and the claim: one step (T17) */
     struct tty *other = tty_controlling(sid);
     if (other != NULL) {
+        spin_unlock_irqrestore(&g_claim_lock, cl);
         tty_put(other);
         return other == t ? 0 : -EPERM;
     }
@@ -458,11 +471,13 @@ int tty_set_controlling(struct tty *t)
         t->fg_pgid = pgid;
     }
     spin_unlock_irqrestore(&t->lock, s);
+    spin_unlock_irqrestore(&g_claim_lock, cl);
     return rc;
 }
 
 bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid)
 {
+    arch_irq_state_t cl = spin_lock_irqsave(&g_claim_lock);
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     bool ok = t->sid == 0 && !t->hungup;
     if (ok) {
@@ -470,6 +485,7 @@ bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid)
         t->fg_pgid = pgid;
     }
     spin_unlock_irqrestore(&t->lock, s);
+    spin_unlock_irqrestore(&g_claim_lock, cl);
     return ok;
 }
 
@@ -534,6 +550,22 @@ void tty_flush_input(struct tty *t)
     t->head = t->tail = t->used = t->lines = 0;
     t->line_len = 0;
     spin_unlock_irqrestore(&t->lock, s);
+}
+
+unsigned tty_out_queued(struct tty *t)
+{
+    return t->ops != NULL && t->ops->out_queued != NULL ? t->ops->out_queued(t) : 0;
+}
+
+void tty_flush_output(struct tty *t)
+{
+    if (t->ops != NULL && t->ops->flush_out != NULL)
+        t->ops->flush_out(t);
+}
+
+int tty_drain_output(struct tty *t)
+{
+    return t->ops != NULL && t->ops->drain != NULL ? t->ops->drain(t) : 0;
 }
 
 unsigned tty_queued(struct tty *t)

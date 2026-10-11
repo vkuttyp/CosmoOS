@@ -1621,6 +1621,10 @@ static int64_t lx_fcntl(struct syscall_args *a)
  */
 static int64_t lx_ioctl_tty(struct tty *t, struct file *f, unsigned req, uint64_t arg)
 {
+    /* A pty's master sees the pair from the other end: its input is the
+     * slave's output and its output the slave's input. */
+    unsigned idx;
+    bool master = f != NULL && pty_get_index(f, &idx) == 0;
     switch (req) {
     case LX_TCGETS: {
         struct cosmo_termios k;
@@ -1632,14 +1636,19 @@ static int64_t lx_ioctl_tty(struct tty *t, struct file *f, unsigned req, uint64_
     case LX_TCSETS:
     case LX_TCSETSW:
     case LX_TCSETSF: {
-        /* SETSW waits for output to drain: a pty's queue is the master's to
-         * read and the console's sink is synchronous, so there is nothing
-         * to wait for. SETSF also discards unread input. */
+        /* SETSW and SETSF first wait for the output written so far to go
+         * (a slave's: until the master has read it; the console's sinks
+         * hold nothing); SETSF then discards unread input. */
         struct lx_termios lt;
         if (copy_from_user(&lt, arg, sizeof(lt)))
             return -EFAULT;
         struct cosmo_termios k;
         lx_termios_to_native(&k, &lt);
+        if (req != LX_TCSETS && !master) {
+            int rc = tty_drain_output(t);
+            if (rc)
+                return rc;
+        }
         if (req == LX_TCSETSF)
             tty_flush_input(t);
         tty_set_termios(t, &k);
@@ -1710,20 +1719,29 @@ static int64_t lx_ioctl_tty(struct tty *t, struct file *f, unsigned req, uint64_
         return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
     }
     case LX_FIONREAD: {
-        /* A master counts its queue; a terminal what its reader would get. */
-        uint32_t v = f != NULL && pty_get_index(f, &(unsigned){ 0 }) == 0 ? pty_master_queued(f) : tty_queued(t);
+        /* What this end's read would get: a master the slave's output, a
+         * terminal its queued input. */
+        uint32_t v = master ? tty_out_queued(t) : tty_queued(t);
         return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
     }
     case LX_TIOCOUTQ: {
-        uint32_t v = 0;   /* output is never held back on this side */
+        /* What this end wrote that the other has not taken: a slave's
+         * output not yet read by the master; a master's writes not yet read
+         * from the slave; the console holds nothing. */
+        uint32_t v = master ? tty_queued(t) : tty_out_queued(t);
         return copy_to_user(arg, &v, sizeof(v)) ? -EFAULT : 0;
     }
-    case LX_TCFLSH:
+    case LX_TCFLSH: {
         if (arg != LX_TCIFLUSH && arg != LX_TCOFLUSH && arg != LX_TCIOFLUSH)
             return -EINVAL;
-        if (arg != LX_TCOFLUSH)
+        bool in = arg != LX_TCOFLUSH, out = arg != LX_TCIFLUSH;
+        /* "Input" and "output" are this end's: swapped on a master. */
+        if (master ? out : in)
             tty_flush_input(t);
+        if (master ? in : out)
+            tty_flush_output(t);
         return 0;
+    }
     case LX_TCSBRK:   /* tcdrain (arg 1) and a break: nothing is held back to drain, no line to break */
     case LX_TCXONC:   /* no flow control on this side */
         return 0;

@@ -255,9 +255,8 @@ static int fd_target(struct process *p, int fd, char *buf, size_t n)
             len = ksnprintf(buf, n, "%s", f->dir_path);
         else if (f != NULL)
             len = ksnprintf(buf, n, "file:[%llu]", (unsigned long long)(f->vn ? f->vn->ino : 0));
-        else
-            len = ksnprintf(buf, n, "%s:[%p]", obj->type && obj->type->name ? obj->type->name : "object",
-                            (void *)obj);
+        else   /* the kind alone: an address would map the kernel heap for whoever reads it */
+            len = ksnprintf(buf, n, "anon_inode:[%s]", obj->type && obj->type->name ? obj->type->name : "object");
     }
     kobject_put(obj);
     return len < 0 ? 0 : ((size_t)len >= n ? (int)n - 1 : len);
@@ -354,10 +353,14 @@ static int proc_fd_dir(struct mount *mnt, pid_t pid, struct vnode **out)
     struct process *p = proc_get_own(pid);
     if (p == NULL)
         return -ENOENT;
+    uint32_t uid = p->cred.euid, gid = p->cred.egid;
     process_put(p);
     struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_FD_DIR), VNODE_DIR, 0500, &proc_fd_dir_ops);
     if (vn == NULL)
         return -ENOMEM;
+    /* The process's own, so its user may search it (0500). */
+    vn->uid = uid;
+    vn->gid = gid;
     *out = vn;
     return 0;
 }

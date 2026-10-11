@@ -331,6 +331,17 @@ int main(int argc, char **argv)
     CHECK(sc3(LX_write, s, "a\nb", 3) == 3, 0);
     r = read_master((int)m, b, 4);
     CHECK(r == 4 && memeq(b, "a\r\nb", 4), r);
+    /* The output queue, from both ends: the slave's unread output is its
+     * TIOCOUTQ and the master's FIONREAD, and the slave's TCOFLUSH drops
+     * it (the master's TCIFLUSH names the same queue). */
+    CHECK(sc3(LX_write, s, "abc", 3) == 3, 0);
+    uint32_t q = 0;
+    CHECK(sc3(LX_ioctl, s, LX_TIOCOUTQ, &q) == 0 && q == 3, q);
+    CHECK(sc3(LX_ioctl, m, LX_FIONREAD, &q) == 0 && q == 3, q);
+    CHECK(sc3(LX_ioctl, s, LX_TCFLSH, LX_TCOFLUSH) == 0, 0);
+    CHECK(sc3(LX_ioctl, m, LX_FIONREAD, &q) == 0 && q == 0, q);
+    CHECK(sc3(LX_write, s, "d", 1) == 1 && sc3(LX_ioctl, m, LX_TCFLSH, LX_TCIFLUSH) == 0, 0);
+    CHECK(sc3(LX_ioctl, s, LX_TIOCOUTQ, &q) == 0 && q == 0, q);
     /* Raw: bytes as typed, no echo, no line. */
     CHECK(sc3(LX_ioctl, s, LX_TCGETS, &tio) == 0, 0);
     struct lx_termios raw = tio;
@@ -340,7 +351,7 @@ int main(int argc, char **argv)
     CHECK(sc3(LX_write, m, "xyz", 3) == 3, 0);
     r = sc3(LX_read, s, b, sizeof(b));
     CHECK(r >= 1 && b[0] == 'x', r);
-    uint32_t q = 7;
+    q = 7;
     CHECK(sc3(LX_ioctl, m, LX_FIONREAD, &q) == 0 && q == 0, q);   /* nothing echoed */
     CHECK(sc3(LX_ioctl, s, LX_TCSETS, &tio) == 0, 0);
     /* The window size, set on either side, read on the other. */

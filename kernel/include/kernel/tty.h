@@ -47,6 +47,12 @@ struct tty_ops {
     int64_t (*write)(struct tty *t, const void *buf, size_t len, bool nonblock);
     void (*get)(struct tty *t);
     void (*put)(struct tty *t);
+    /* The output not yet taken by the far side (a pty: what the master has
+     * not read), dropping it, and waiting for it to go. NULL: nothing is
+     * held (the console's sinks are synchronous). */
+    unsigned (*out_queued)(struct tty *t);
+    void (*flush_out)(struct tty *t);
+    int (*drain)(struct tty *t);
 };
 
 struct tty_stats {
@@ -136,6 +142,10 @@ void tty_set_termios(struct tty *t, const struct cosmo_termios *in);
 void tty_get_size(struct tty *t, struct cosmo_ttysize *out);
 /* TCFLSH / TCSETSF: drop queued input and the line under edit. */
 void tty_flush_input(struct tty *t);
+/* The output side (tty_ops): TIOCOUTQ, TCFLSH's output half, TCSETSW's wait. */
+unsigned tty_out_queued(struct tty *t);
+void tty_flush_output(struct tty *t);
+int tty_drain_output(struct tty *t);
 /* FIONREAD: the bytes queued for readers (a canonical line's terminator
  * counted, an EOF mark not). */
 unsigned tty_queued(struct tty *t);

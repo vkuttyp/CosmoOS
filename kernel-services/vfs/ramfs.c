@@ -552,11 +552,23 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
         vnode_put(dir);
         return -ENOTDIR;
     }
-    const char *name = slash + 1;
+    rc = ramfs_mkchr_at(dir, slash + 1, mode, ops, priv, out);
+    vnode_put(dir);
+    return rc;
+}
+
+/* The node `name` in `dir`, a ramfs directory the caller holds a reference
+ * on: no path, no credentials -- the kernel's own (the pty slaves). */
+int ramfs_mkchr_at(struct vnode *dir, const char *name, uint32_t mode, const struct chrdev_ops *ops, void *priv,
+                   struct vnode **out)
+{
+    if (dir->type != VNODE_DIR || dir->ops != &ramfs_dir_ops || name[0] == '\0' || strlen(name) > VFS_NAME_MAX ||
+        strchr(name, '/') != NULL)
+        return -EINVAL;
     size_t nl = strlen(name);
     mutex_lock(&dir->lock);
     struct vnode *vn = NULL;
-    rc = ramfs_create_common(dir, name, nl, mode, VNODE_CHR, &vn);
+    int rc = ramfs_create_common(dir, name, nl, mode, VNODE_CHR, &vn);
     if (rc == 0) {
         struct ramfs_node *n = vn->fs_priv;
         n->chr = ops;
@@ -580,7 +592,6 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
          */
     }
     mutex_unlock(&dir->lock);
-    vnode_put(dir);
     if (rc)
         return rc;
     if (out)
@@ -588,6 +599,30 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
     else
         vnode_put(vn);
     return 0;
+}
+
+
+/* Remove `victim`, a character node `name` of `dir`, whatever the calling
+ * process may or may not do there: the kernel's own teardown of a node it
+ * made (ramfs_mkchr_at). */
+int ramfs_unlink_chr_at(struct vnode *dir, const char *name, struct vnode *victim)
+{
+    if (dir->ops != &ramfs_dir_ops || victim->ops != &ramfs_chr_ops)
+        return -EINVAL;
+    mutex_lock(&dir->lock);
+    mutex_lock_nested(&victim->lock, VNODE_NESTED_CHILD);
+    int rc = ramfs_unlink(dir, name, strlen(name), victim);
+    if (rc == 0)
+        victim->flags |= VNODE_DEAD;
+    mutex_unlock(&victim->lock);
+    mutex_unlock(&dir->lock);
+    return rc;
+}
+
+void ramfs_chr_set_priv(struct vnode *vn, void *priv)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    __atomic_store_n(&n->chr_priv, priv, __ATOMIC_RELEASE);
 }
 
 int ramfs_anon_reg(uint32_t mode, struct vnode **out)

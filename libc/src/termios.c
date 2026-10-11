@@ -36,6 +36,7 @@ int tcsetattr(int fd, int actions, const struct termios *t)
 void cfmakeraw(struct termios *t)
 {
     t->c_iflag &= ~(tcflag_t)ICRNL;
+    t->c_oflag &= ~(tcflag_t)OPOST;
     t->c_lflag &= ~(tcflag_t)(ECHO | ICANON | ISIG);
     t->c_cc[VMIN] = 1;
     t->c_cc[VTIME] = 0;
