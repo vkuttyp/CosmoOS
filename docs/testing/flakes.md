@@ -110,6 +110,28 @@ prompt. The install, reboot and persist boots of the same run had passed;
 the rerun passed every stage (fallback 5.2 s). `install_test.py` has no
 handover retry either. Still unassigned.
 
+**Fourth sighting, 2026-10-11:** local x86-64 `BUILD=release
+test-net-login` (M4's DHCP branch, PR #351's matrix), the install stage's
+live boot: only OVMF's screen-clear sequences for 240 s; the release
+`test` boot just before passed, and three reruns passed.
+
+**Fifth sighting, 2026-10-11:** CI, x86-64 `BUILD=release test-install` on
+experiment PR #359 (a layout-padding branch that changes no boot code):
+the reboot stage's boot holds only OVMF's screen-clear sequences.
+
+**The retry, everywhere (2026-10-11).** The rule moved into
+`tests/boot/firmware_stall.py` and every harness boot uses it --
+`run_boot_test.py` (which had its own copy) and `install_test.Boot`
+(test-install, test-busybox, test-net-login, which had none): a boot that
+shows neither the loader banner nor a QEMU exit within 30 s is killed and
+started once more, the result says "firmware stall, retried" (the install
+boots keep the first attempt's log as `boot-<name>-stall.log`), and a
+second stall fails. The bound is the boot's own timeout when that is
+shorter, and the last look is at the bound itself. Any output of ours -- the banner, and so any kernel
+output -- ends the watch, so no kernel defect is retried. Checked by
+`tests/boot/test_firmware_stall.py` (make host-test). The stall itself is
+still unassigned; the retry makes it visible instead of fatal.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --

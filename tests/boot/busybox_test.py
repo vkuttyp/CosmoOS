@@ -87,8 +87,10 @@ def main():
     shutil.copyfile(args.image, image)
     t0 = time.monotonic()
     lines = []
-    b = Boot("busybox", image, args.workdir, {}, args.timeout)
+    b = None
     try:
+        # Inside the try: a second firmware stall is a Fail from Boot().
+        b = Boot("busybox", image, args.workdir, {}, args.timeout)
         b.wait_prompt("the first prompt")
         out = b.run("/bin/sh /boot/tests/busybox/ash.sh")
         script = [ln for ln in out.splitlines() if ln.startswith("BBTEST: ")]
@@ -126,13 +128,15 @@ def main():
         if rc != EXIT_SUCCESS:
             raise Fail(f"QEMU exit code {rc}, expected {EXIT_SUCCESS}")
     except Fail as e:
-        b.kill()
+        if b is not None:
+            b.kill()
         for ln in lines:
             print(f"test-busybox: {ln}")
         print(f"test-busybox: FAIL: {e} (log in {args.workdir})")
         return 1
     except Exception:
-        b.kill()
+        if b is not None:
+            b.kill()
         raise
     for ln in lines:
         print(f"test-busybox: {ln}")

@@ -2739,3 +2739,10 @@ See the [history index](README.md).
     job `busybox`. M3 ticked.
   - Report: `docs/audit/2026-10-10-m3-process-model-report.md`.
 
+- **Boot harness: firmware-stall retry (2026-10-11; PR #364).** A blocker
+  for M4: `tests/boot/firmware_stall.py` gives every harness boot
+  (`run_boot_test.py`, `install_test.Boot`) one retry when OVMF shows no
+  loader banner within 30 s, reported as "firmware stall, retried"; a
+  second stall fails, and any output of ours ends the watch.
+  `tests/boot/test_firmware_stall.py`. Report:
+  `docs/audit/2026-10-11-firmware-stall-retry-report.md`.

@@ -199,6 +199,8 @@ host-test: $(HOST_TESTS)
 	$(Q)for t in $(HOST_TESTS); do echo "== $$t"; ASAN_OPTIONS=detect_leaks=0 $$t || exit 1; done
 	@echo "== $(ROOT)/tests/host/test_analysis_gate.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_analysis_gate.py
+	@echo "== $(ROOT)/tests/boot/test_firmware_stall.py"
+	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_firmware_stall.py
 	@echo "== $(ROOT)/tests/boot/test_nettest_deadline.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_nettest_deadline.py
 	@echo "== $(ROOT)/tests/boot/test_usertest_sections.py"
