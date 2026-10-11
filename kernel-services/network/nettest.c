@@ -4631,6 +4631,51 @@ static void bench_client_main(void *arg)
     thread_exit(0);
 }
 
+/* What one net-bench round lost time to (the owner's net-bench question,
+ * 2026-10-11): TCP's retransmission timeouts and their backoff, fast
+ * retransmits, the time senders waited on a retransmission timer, each
+ * netrx worker's receive-queue drops and loopback's own drops, and the
+ * round's wall time. Taken before and after each round. */
+#define BENCH_CPUS 8u
+struct bench_snap {
+    struct tcp_stats t;
+    uint64_t cpu_drop[BENCH_CPUS];
+    uint64_t lo_drop;
+    uint64_t at_ns;
+};
+
+static void bench_snap(struct bench_snap *s)
+{
+    tcp_get_stats(&s->t);
+    for (unsigned c = 0; c < BENCH_CPUS; c++) {
+        struct net_cpu_stats cs;
+        s->cpu_drop[c] = netif_cpu_stats(c, &cs) ? cs.rx_dropped : 0;
+    }
+    struct netif *lo = netif_loopback();
+    s->lo_drop = lo ? lo->stats.rx_dropped + lo->stats.tx_dropped : 0;
+    if (lo)
+        netif_put(lo);
+    s->at_ns = clock_now_ns();
+}
+
+static void bench_report(const char *what, const struct bench_snap *a, const struct bench_snap *b)
+{
+    char drops[8 * 24];
+    size_t off = 0;
+    drops[0] = '\0';
+    for (unsigned c = 0; c < BENCH_CPUS && c < cpu_count(); c++)
+        off += (size_t)ksnprintf(drops + off, sizeof(drops) - off, "%s%llu", c ? "," : "",
+                                 (unsigned long long)(b->cpu_drop[c] - a->cpu_drop[c]));
+    kinfo("net-bench: %s: %llu ms; rto fires %llu (max backoff %llu), fast retransmits %llu, retransmits %llu, "
+          "rto wait %llu ms; netrx drops [%s], loopback drops %llu",
+          what, (unsigned long long)((b->at_ns - a->at_ns) / 1000000),
+          (unsigned long long)(b->t.rto_fires - a->t.rto_fires), (unsigned long long)b->t.rto_backoff_max,
+          (unsigned long long)(b->t.fast_retransmits - a->t.fast_retransmits),
+          (unsigned long long)(b->t.retransmits - a->t.retransmits),
+          (unsigned long long)((b->t.rto_wait_ns - a->t.rto_wait_ns) / 1000000), drops,
+          (unsigned long long)(b->lo_drop - a->lo_drop));
+}
+
 /* `flows` concurrent transfers of BENCH_TCP_BYTES each; returns MiB/s in total, 0 on failure. */
 static unsigned bench_tcp(unsigned flows, uint16_t port)
 {
@@ -4645,6 +4690,11 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
         ts[i] = thread_create(bench_sink_main, &sinks[i], "bench-sink", SCHED_PRIO_DEFAULT);
     }
     thread_sleep_ms(20);
+    struct bench_snap sa, sb;
+#if CONFIG_SELFTEST
+    tcp_test_reset_rto_backoff_max();
+#endif
+    bench_snap(&sa);
     struct tcp_stats tb;
     tcp_get_stats(&tb);
     uint64_t qb = 0;
@@ -4669,6 +4719,12 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
         total += sinks[i].bytes;
     }
     uint64_t dt = clock_since_ns(t0);
+    bench_snap(&sb);
+    {
+        char what[24];
+        ksnprintf(what, sizeof(what), "tcp %u flow(s)", flows);
+        bench_report(what, &sa, &sb);
+    }
     /* What a slow run lost (docs/testing/flakes.md, 2026-10-10: some CI
      * boots run one flow at 1 MiB/s): the TCP counters and the receive
      * queues' drops over this run. */
@@ -4733,6 +4789,8 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     struct bench_udp_rx r = { .s = rx };
     struct thread *t = thread_create(bench_udp_rx_main, &r, "bench-udp", SCHED_PRIO_DEFAULT);
     uint8_t payload[64] = { 0 };
+    struct bench_snap sa, sb;
+    bench_snap(&sa);
     uint64_t t0 = clock_now_ns();
     uint32_t sent = 0;
     for (unsigned i = 0; i < BENCH_UDP_SENDS; i++) {
@@ -4744,6 +4802,8 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     uint64_t dt = clock_since_ns(t0);
     for (unsigned i = 0; i < 50 && r.got < sent; i++)
         thread_sleep_ms(2);
+    bench_snap(&sb);
+    bench_report("udp", &sa, &sb);
     *delivered = r.got;
     r.stop = true;
     ksock_set_nonblock(rx, true);   /* the receiver's blocked recv returns */
