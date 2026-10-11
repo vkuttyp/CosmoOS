@@ -21,8 +21,14 @@ struct tap;
 #define TAPSVC_GUEST_HOST   15u        /* the guest is <subnet>.15, the host <subnet>.1 */
 #define TAPSVC_LEASE_SECS   3600u
 
-/* DHCP message types (RFC 2132 option 53), shared with the self-test and the client. */
-#include <kernel/net/dhcp.h>
+/* DHCP message types (RFC 2132 option 53), shared with the self-test. */
+#define DHCP_DISCOVER 1
+#define DHCP_OFFER    2
+#define DHCP_REQUEST  3
+#define DHCP_DECLINE  4
+#define DHCP_ACK      5
+#define DHCP_NAK      6
+#define DHCP_RELEASE  7
 
 struct tapsvc;
 /* Start a service instance for this tap (its DHCP binding and DNS proxy);

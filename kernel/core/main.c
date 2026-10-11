@@ -9,7 +9,6 @@
  * works, and stop cleanly with a verdict.
  */
 
-#include <kernel/net/dhcp.h>
 #include <kernel/acpi.h>
 #include <kernel/bootarchive.h>
 #include <kernel/blk.h>
@@ -218,10 +217,6 @@ void kernel_main(const struct cosmoboot_info *info)
      * process, whose AT_RANDOM must come from a seeded pool
      * (docs/kernel/security/design.md §6, invariant S19). */
     random_boot_wait();
-    /* The NICs have registered: wait (10 s at most) for their DHCP leases,
-     * as Linux's ipconfig does, so the self-tests and init start with the
-     * network configured (kernel/include/kernel/net/dhcp.h). */
-    dhcp_boot_wait();
     faultinject_init();   /* opt/cosmo/faultinject, if the boot asked for injected faults */
 #if CONFIG_SELFTEST
     failed += selftest_run_all();

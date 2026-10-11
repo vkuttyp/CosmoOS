@@ -10,7 +10,6 @@
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
-#   make test-net-login roadmap M4: DHCP, wget by address and by name on the installed system (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
@@ -33,7 +32,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-entropy test-install test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: all kernel boot modules image run test test-entropy test-install test-busybox test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -154,15 +153,6 @@ test-busybox: $(IMAGE)
 test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
-		--timeout $(BOOT_TIMEOUT)
-
-# Roadmap M4's acceptance test (tests/boot/net_login_test.py,
-# docs/userland/testing.md, "test-net-login"): the installed system on QEMU
-# user networking with no fw_cfg address -- DHCP, wget by address and by
-# name. CI: BUILD=release, a job of its own.
-test-net-login: $(IMAGE)
-	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
-		$(PYTHON) $(ROOT)/tests/boot/net_login_test.py --image $(IMAGE) --workdir $(OUT)/test-net-login \
 		--timeout $(BOOT_TIMEOUT)
 
 # The same boot test with two CPUs. Every other boot here uses the
