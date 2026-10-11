@@ -618,6 +618,18 @@ struct netif *netif_default(void)
     return NULL;
 }
 
+struct netif *netif_default_ipv4(void)
+{
+    for (unsigned i = 0; i < g_nifs; i++) {
+        struct netif *n = &g_ifs[i]->nif;
+        if (!(n->flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) && (n->flags & NETIF_UP) && n->ip4.addr != 0) {
+            kobject_get(&n->obj);
+            return n;
+        }
+    }
+    return NULL;
+}
+
 struct netif *netif_connected(uint32_t dst)
 {
     struct netif *best = NULL;

@@ -15,7 +15,8 @@ symbolic link per applet of `applets` (docs/userland/design.md,
 (`.cache/ports` by default; CI caches it) and refuses a file whose digest
 is not the pinned one. That is the only network access of the build. Each
 archive has two URLs, tried in order with three attempts each and
-backoff: the upstream one, then the copy in this repository's
+backoff (a read that stalls for 60 s ends the attempt, so every URL's
+attempts end inside a CI job): the upstream one, then the copy in this repository's
 [`pinned-sources`](https://github.com/vkuttyp/CosmoOS/releases/tag/pinned-sources)
 release (the same bytes; the digest is checked whichever URL served them).
 The fetch fails only when every URL has failed, and its error names each

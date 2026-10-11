@@ -749,7 +749,10 @@ up, non-loopback interface on whose subnet `dst` falls, chosen by *longest
 prefix* so overlapping masks resolve by specificity, not registration
 order. So a reply for the guest routes to the tap (the guest's `/24`), not
 the default NIC. Owned and loopback destinations, and anything with no
-connected route (which still falls to the default), are unchanged.
+connected route (which still falls to the default), are unchanged. The
+IPv4 default is `netif_default_ipv4`: the first up, routable interface
+that has an address, so a NIC whose DHCP client has no lease yet does not
+hide a later one that has (M4).
 
 **IP forwarding.** Where `ipv4_input` dropped a unicast datagram not for the
 host (`rx_not_for_us`), it now **forwards** it -- but only when the packet
@@ -1630,14 +1633,16 @@ keeps up to three DNS servers (option 6). T1 and T2 are the server's
 all counted from the exchange's first message. At T1 the client renews:
 a REQUEST from the leased address to the server, unicast (its link
 address resolved by ARP), ciaddr set, no address or server option
-(`RENEWING`); at T2 it rebinds with the same REQUEST broadcast
-(`REBINDING`); at the lease's end it removes the address and starts over
+(`RENEWING`); at T2 it rebinds with the same REQUEST broadcast, still
+from the leased address (`REBINDING`; RFC 2131 4.4.5); at the lease's end it removes the address and starts over
 (N30). A NAK in any requesting state starts over, removing an address it
 held. DISCOVER and selecting-REQUEST retransmit at 2, 4, 8 ... 64 s
 (RFC 2131 suggests a 4 s start; half that costs less at boot);
 `REQUESTING` gives up after four and starts over; a renewal or rebind
 retransmits after half the time left to T2 or the lease's end, 60 s at
-least. The messages carry a client identifier (type 1 and the MAC) and a
+least. An ACK that changes the address, mask or router, and the
+address's removal, flush the interface's ARP entries: a neighbour learned
+under the old configuration is not trusted under the new one. The messages carry a client identifier (type 1 and the MAC) and a
 parameter request list; the broadcast flag is clear, since the client
 takes a unicast reply too.
 
@@ -1650,7 +1655,11 @@ before the martian and address checks -- until the ACK the interface has
 no address for them to be addressed to -- and only UDP 67->68 on an
 interface that has a client. The state machine runs on the network
 workers: the input path, and the client's deferred work, queued by its
-timer (timers never send). Each takes the client's spinlock, decides,
+timer (timers never send). The timer callback and the kicks queue that
+work under the client's lock and only while it is not stopping, so
+`dhcp_client_stop` -- `stopping` set under the lock, then the workers'
+barrier -- is the end of it, even for a callback still running on a CPU
+the timer was moved from. Each takes the client's spinlock, decides,
 records what to send in a `struct dhcp_tx`, and sends after unlocking, so
 no lock is held across a transmit.
 

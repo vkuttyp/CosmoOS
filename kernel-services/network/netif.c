@@ -367,6 +367,22 @@ struct netif *netif_default(void)
     return found;
 }
 
+struct netif *netif_default_ipv4(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    struct netif *n, *found = NULL;
+    list_for_each_entry(n, &g_netifs, link) {
+        if (!(n->flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) && (n->flags & NETIF_UP) &&
+            __atomic_load_n(&n->ip4.addr, __ATOMIC_ACQUIRE) != 0) {
+            found = n;
+            kobject_get(&n->obj);
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_netif_lock, s);
+    return found;
+}
+
 struct netif *netif_loopback(void)
 {
     return netif_find("lo");

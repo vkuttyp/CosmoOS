@@ -166,7 +166,9 @@ static void dhcp_send(struct netif *nif, const struct dhcp_tx *tx)
         *o++ = OPT_PAD;
     uint32_t dhlen = (uint32_t)(o - dh);
 
-    uint32_t src = tx->unicast ? tx->ciaddr : 0;
+    /* A client holding an address sends from it, broadcast (REBINDING) or
+     * not (RFC 2131 4.4.5); 0.0.0.0 only before it has one. */
+    uint32_t src = tx->ciaddr;
     uint32_t dst = tx->unicast ? tx->server : INADDR_BROADCAST_N;
     uint32_t udplen = (uint32_t)sizeof(struct udp_hdr) + dhlen;
     uint32_t iplen = (uint32_t)sizeof(struct ipv4_hdr) + udplen;
@@ -255,6 +257,7 @@ static void lose_lease(struct dhcp_client *c)
     c->ndns = 0;
     c->lease_s = c->t1_s = c->t2_s = 0;
     netif_set_ipv4(c->nif, 0, 0, 0);
+    arp_flush(c->nif);
 }
 
 /* Restart from INIT: a fresh exchange and its DISCOVER now. */
@@ -363,7 +366,16 @@ static void dhcp_work(void *arg)
 static void dhcp_timer(struct timer *t, void *arg)
 {
     (void)t;
-    net_work_queue(&((struct dhcp_client *)arg)->work);
+    /* Under the client's lock, and only while it is live: a callback still
+     * running on the CPU the timer was armed on before arm() moved it can
+     * outlast stop's timer_cancel_sync, but it cannot queue the work once
+     * stop has set `stopping` -- so the barrier is the last of the work.
+     * Callbacks run with the timer queue's lock dropped (timer.c). */
+    struct dhcp_client *c = arg;
+    arch_irq_state_t s = spin_lock_irqsave(&c->lock);
+    if (c->in_use && !c->stopping)
+        net_work_queue(&c->work);
+    spin_unlock_irqrestore(&c->lock, s);
 }
 
 /* --- receiving --------------------------------------------------------------------- */
@@ -441,8 +453,10 @@ static bool bind_lease(struct dhcp_client *c, const uint8_t *dh, const uint8_t *
     c->state = DHCP_S_BOUND;
     c->tries = 0;
     (void)now;
-    if (changed)
+    if (changed) {
         netif_set_ipv4(c->nif, yi, mask, router);
+        arp_flush(c->nif);   /* neighbours learned under the old address or router */
+    }
     return true;
 }
 
@@ -649,9 +663,10 @@ void dhcp_client_stop(struct netif *nif)
     arch_irq_state_t s = spin_lock_irqsave(&c->lock);
     c->stopping = true;
     spin_unlock_irqrestore(&c->lock, s);
-    /* The timer may queue the work once more and the work may be queued
-     * already; it sees `stopping` and neither sends nor re-arms. After the
-     * barrier nothing of the client runs anywhere. */
+    /* From here nothing queues the work: the timer callback and the kicks
+     * queue it under the lock and only while not `stopping`. Work queued
+     * before runs, sees `stopping` and neither sends nor re-arms; after
+     * the barrier nothing of the client runs anywhere. */
     timer_cancel_sync(&c->timer);
     net_workers_barrier();
     timer_cancel_sync(&c->timer);
@@ -670,12 +685,14 @@ void dhcp_client_kick(struct netif *nif)
     struct dhcp_client *c = lock_client(nif, &s);
     if (c == NULL)
         return;
-    bool waiting = c->state == DHCP_S_SELECTING || c->state == DHCP_S_REQUESTING;
-    if (waiting)
+    /* Queued under the lock lock_client found the client live under:
+     * stop sets `stopping` under it before its barrier, so no kick queues
+     * the work after the barrier (or into a reused slot). */
+    if (c->state == DHCP_S_SELECTING || c->state == DHCP_S_REQUESTING) {
         c->next_ns = clock_now_ns();
-    spin_unlock_irqrestore(&c->lock, s);
-    if (waiting)
         net_work_queue(&c->work);
+    }
+    spin_unlock_irqrestore(&c->lock, s);
 }
 
 unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)
@@ -706,8 +723,10 @@ unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)
             o->lease_s = c->lease_s;
             o->t1_s = c->t1_s;
             o->t2_s = c->t2_s;
+/* 0xffffffff is an infinite lease; a finite time beyond 49.7 days
+ * saturates one below it (COSMO_NETCTL_LEASE_MS_MAX). */
 #define MS_TO(at) ((at) == UINT64_MAX ? UINT32_MAX : (at) <= now ? 0u \
-                   : ((at) - now) / 1000000u > UINT32_MAX ? UINT32_MAX : (uint32_t)(((at) - now) / 1000000u))
+                   : ((at) - now) / 1000000u >= UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)(((at) - now) / 1000000u))
             o->remaining_ms = MS_TO(c->end_at);
             o->t1_ms = MS_TO(c->t1_at);
             o->t2_ms = MS_TO(c->t2_at);
@@ -773,8 +792,8 @@ int dhcp_test_fire(struct netif *nif, enum dhcp_test_event ev)
         c->t1_at = now;
     if (ev == DHCP_TEST_RETX)
         c->next_ns = now;
+    net_work_queue(&c->work);   /* under the lock, as dhcp_client_kick */
     spin_unlock_irqrestore(&c->lock, s);
-    net_work_queue(&c->work);
     return 0;
 }
 

@@ -229,6 +229,8 @@ reference; `ops->release` runs when the last holder is gone. Sleeps.
 **`struct netif *netif_find(const char *name)`**, **`netif_default(void)`**,
 **`netif_loopback(void)`** Referenced pointer (drop with `netif_put`) or
 NULL: by name; the first non-loopback interface that is up; `lo`.
+**`netif_default_ipv4(void)`** is the first such interface that also has
+an IPv4 address (`ipv4_route`'s default).
 `netif_get`/`netif_put` are inline kobject wrappers. `ipv4_route` and
 `ipv6_route` return the same kind of pointer and their callers put it
 after the transmit.

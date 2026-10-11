@@ -38,6 +38,9 @@
  * (address, mask, router, DNS servers, lease times), which netcfg turns into
  * /etc/resolv.conf. No command changes. */
 #define COSMO_NETCTL_VERSION 7
+/* A lease section time that is finite but beyond what 32 bits of
+ * milliseconds hold (0xffffffff is an infinite lease). */
+#define COSMO_NETCTL_LEASE_MS_MAX 0xfffffffeu
 
 /* Opcodes. FORWARD_* are carried by struct cosmo_netctl; FILTER_* by struct
  * cosmo_netctl_filter. Every command is written whole, at its own struct's
@@ -292,7 +295,9 @@ struct cosmo_netctl_lease {
     uint32_t server;               /* network byte order: the server that granted it */
     uint32_t dns[COSMO_NETCTL_MAX_DNS];   /* network byte order */
     uint32_t lease_s, t1_s, t2_s;  /* as granted, seconds; 0xffffffff lease: infinite */
-    uint32_t remaining_ms;         /* to the lease's end from the read (0xffffffff: infinite) */
+    uint32_t remaining_ms;         /* to the lease's end from the read (0xffffffff: infinite;
+                                    * a finite time over 0xfffffffe ms reads 0xfffffffe,
+                                    * COSMO_NETCTL_LEASE_MS_MAX; likewise t1_ms, t2_ms) */
     uint32_t t1_ms, t2_ms;         /* to T1 and T2 from the read, 0 once passed */
 };
 

@@ -89,6 +89,9 @@ struct netif *netif_find(const char *name);
  * order; returns how many there are (the self-test runner's census). */
 unsigned netif_names(char *buf, size_t n);
 struct netif *netif_default(void);            /* the non-loopback interface that is up, or NULL */
+/* The first such interface that has an IPv4 address: IPv4's default route
+ * (a NIC still without a lease does not hide a later one that has one). */
+struct netif *netif_default_ipv4(void);
 struct netif *netif_connected(uint32_t dst);  /* the up interface whose subnet holds dst, longest prefix; referenced or NULL */
 struct netif *netif_loopback(void);
 static inline void netif_get(struct netif *nif) { kobject_get(&nif->obj); }

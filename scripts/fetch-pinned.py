@@ -25,6 +25,9 @@ import time
 import urllib.request
 
 
+STALL_S = 60
+
+
 def digest(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -36,7 +39,10 @@ def digest(path):
 def fetch_once(url, tmp, want):
     """Download url into tmp; None on success, else the reason it failed."""
     try:
-        with urllib.request.urlopen(url, timeout=300) as r, open(tmp, "wb") as f:
+        # The timeout is per blocking read, not the whole download: a slow
+        # transfer that keeps moving finishes, a stalled one gives up in a
+        # minute, so every URL's attempts end well inside a CI job.
+        with urllib.request.urlopen(url, timeout=STALL_S) as r, open(tmp, "wb") as f:
             while True:
                 chunk = r.read(1 << 20)
                 if not chunk:

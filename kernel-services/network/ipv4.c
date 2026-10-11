@@ -147,14 +147,7 @@ struct netif *ipv4_route(uint32_t dst)
     struct netif *nif = netif_connected(dst);   /* a connected subnet (longest prefix) first */
     if (nif != NULL)
         return nif;
-    nif = netif_default();
-    if (nif == NULL)
-        return NULL;
-    if (nif->ip4.addr == 0) {
-        netif_put(nif);
-        return NULL;
-    }
-    return nif;
+    return netif_default_ipv4();
 }
 
 uint32_t ipv4_source_for(uint32_t dst)
