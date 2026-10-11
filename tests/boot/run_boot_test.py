@@ -965,46 +965,50 @@ def main():
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
 
-    # The firmware occasionally never hands over on this host: QEMU runs,
-    # OVMF clears the screen and then sits in device connection forever,
-    # with no loader banner and no kernel output at all (measured at about
-    # 6 % of x86_64 boots on TCG, the same with and without the USB and SATA
-    # test devices). That is a host-side stall the kernel never saw, so a
-    # boot that shows *nothing* of ours within FIRMWARE_HANDOVER_S is killed
-    # and started once more; any boot that printed the loader banner is
-    # never retried, so a kernel that hangs still fails.
-    FIRMWARE_HANDOVER_S = 30.0
+    # The firmware occasionally never hands over: QEMU runs, OVMF clears the
+    # screen and then sits forever, with no loader banner and no kernel
+    # output at all. A boot that shows nothing of ours within the handover
+    # bound is killed and started once more; one that printed the banner is
+    # never retried, so a kernel that hangs still fails; a second stall
+    # fails (tests/boot/firmware_stall.py).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import firmware_stall
 
-    def launch(log):
+    logs = []
+
+    def launch(attempt):
+        if logs:
+            logs[-1].close()
+        logs.append(open(args.log, "wb"))
         return subprocess.Popen(
             [runner, args.image],
             stdin=subprocess.PIPE if shelltest is not None else subprocess.DEVNULL,
-            stdout=log,
+            stdout=logs[-1],
             stderr=subprocess.STDOUT,
             env=env,
         )
 
-    def handed_over(path, proc, deadline):
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                return True   # it exited: whatever happened is in the log, not a stall
-            with open(path, "rb") as f:
-                if b"cosmoboot-uefi" in f.read():
-                    return True
-            time.sleep(0.5)
-        return False
+    def read_log(attempt):
+        with open(args.log, "rb") as f:
+            return f.read()
 
-    log = open(args.log, "wb")
-    proc = launch(log)
-    if not handed_over(args.log, proc, time.monotonic() + FIRMWARE_HANDOVER_S):
-        proc.kill()
-        proc.wait()
-        log.close()
-        print(f"boot-test: the firmware did not hand over within {FIRMWARE_HANDOVER_S:.0f}s (no loader banner); "
-              "retrying the boot once")
+    def kill(p):
+        p.kill()
+        p.wait()
+
+    def on_retry():
+        print(f"boot-test: {firmware_stall.RETRIED_NOTE}: the firmware did not hand over within "
+              f"{firmware_stall.HANDOVER_S:.0f}s (no loader banner); retrying the boot once")
+
+    try:
+        proc, stall_retried = firmware_stall.launch_with_retry(launch, read_log, kill, on_retry)
+    except firmware_stall.FirmwareStall as e:
+        logs[-1].close()
+        print(f"boot-test: FAIL: {e}")
+        return 1
+    if stall_retried:
         start = time.monotonic()
-        log = open(args.log, "wb")
-        proc = launch(log)
+    log = logs[-1]
     with log:
         net_thread = None
         if nettest is not None:
@@ -1236,7 +1240,7 @@ def main():
     table = symbolize(lines, args.kernel, args.symbolizer, modules) if (failures or args.expect_panic) else []
 
     if failures:
-        print(f"boot-test: FAIL after {elapsed:.1f}s")
+        print(f"boot-test: FAIL after {elapsed:.1f}s" + (f" ({firmware_stall.RETRIED_NOTE})" if stall_retried else ""))
         for f in failures:
             print(f"  - {f}")
         print("---- serial log ----")
@@ -1258,7 +1262,7 @@ def main():
               f"of {recovered.group(2)} -- a sighting of the QEMU reset "
               f"(docs/testing/flakes.md); record it")
 
-    print(f"boot-test: PASS in {elapsed:.1f}s (log: {args.log})")
+    print(f"boot-test: PASS in {elapsed:.1f}s (log: {args.log})" + (f" ({firmware_stall.RETRIED_NOTE})" if stall_retried else ""))
     print_symbols(table)
     return 0
 

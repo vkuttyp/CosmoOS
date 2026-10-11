@@ -35,6 +35,9 @@ import time
 import uuid
 import zlib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import firmware_stall  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROMPT = b"\ncosmo$ "
 TARGET_MIB = 256
@@ -55,28 +58,55 @@ class Boot:
     def __init__(self, name, image, workdir, env_extra, timeout):
         self.name = name
         self.log_path = os.path.join(workdir, f"boot-{name}.log")
-        self.buf = bytearray()
         self.lock = threading.Lock()
-        self.deadline = time.monotonic() + timeout
+        self.prompts_seen = 0
         env = dict(os.environ)
         env.update(env_extra)
-        self.t0 = time.monotonic()
-        self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-        self.log = open(self.log_path, "wb")
-        self.reader = threading.Thread(target=self._read, daemon=True)
-        self.reader.start()
-        self.prompts_seen = 0
 
-    def _read(self):
+        # A boot whose firmware never hands over is killed and started once
+        # more; the first attempt's log is kept beside the second
+        # (tests/boot/firmware_stall.py).
+        def launch(attempt):
+            if attempt:
+                os.replace(self.log_path, self.log_path.replace(".log", "-stall.log"))
+            self.buf = bytearray()
+            self.deadline = time.monotonic() + timeout
+            self.t0 = time.monotonic()
+            self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+            self.log = open(self.log_path, "wb")
+            self.reader = threading.Thread(target=self._read, args=(self.proc, self.log), daemon=True)
+            self.reader.start()
+            return self.proc
+
+        def read_log(attempt):
+            with self.lock:
+                return bytes(self.buf)
+
+        def kill(proc):
+            proc.kill()
+            proc.wait()
+            self.reader.join(timeout=5)
+            self.log.close()
+
+        def on_retry():
+            print(f"{name}: {firmware_stall.RETRIED_NOTE} (no loader banner within "
+                  f"{firmware_stall.HANDOVER_S:.0f}s)", flush=True)
+
+        try:
+            _, self.stall_retried = firmware_stall.launch_with_retry(launch, read_log, kill, on_retry)
+        except firmware_stall.FirmwareStall as e:
+            raise Fail(f"{name}: {e}")
+
+    def _read(self, proc, log):
         while True:
-            b = self.proc.stdout.read1(4096) if hasattr(self.proc.stdout, "read1") else self.proc.stdout.read(1)
+            b = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
             if not b:
                 break
             with self.lock:
                 self.buf += b
-            self.log.write(b)
-            self.log.flush()
+            log.write(b)
+            log.flush()
 
     def text(self):
         with self.lock:
